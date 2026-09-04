@@ -1,4 +1,4 @@
-import { Archive, Eye, Flame, TriangleAlert } from "lucide-react";
+import { Archive, CircleDashed, Eye, Flame, TriangleAlert } from "lucide-react";
 import type { TriageLevel } from "@/types/api";
 import { cn } from "@/lib/cn";
 
@@ -19,6 +19,12 @@ export const LEVEL_META: Record<
     icon: Archive,
     fg: "text-level-archive",
     bg: "bg-level-archive-bg",
+  },
+  unclassified: {
+    label: "טרם סווג",
+    icon: CircleDashed,
+    fg: "text-level-unclassified",
+    bg: "bg-level-unclassified-bg",
   },
 };
 

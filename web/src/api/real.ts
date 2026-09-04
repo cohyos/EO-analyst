@@ -90,7 +90,11 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     trl: r.trl ?? null,
     geography: r.geography ?? null,
     score: num(r.score),
-    level: (r.level ?? "yellow") as TriageLevel,
+    // Real data (2026-09-04 QA against the live backend): most items in a
+    // fresh DB have level=null (not yet classified). Defaulting that to
+    // "yellow" silently mislabeled ~98% of the feed — surface it as its own
+    // "unclassified" level instead so the UI shows a "טרם סווג" chip.
+    level: (r.level ?? "unclassified") as TriageLevel,
     triage_reason: r.triage_reason ?? null,
     summary_he: r.summary_he ?? null,
     so_what_he: r.so_what_he ?? null,

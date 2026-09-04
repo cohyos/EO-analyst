@@ -31,6 +31,8 @@
   --level-yellow-bg: #363015;
   --level-archive: #8492a6;
   --level-archive-bg: #232a30;
+  --level-unclassified: #6b7d81;
+  --level-unclassified-bg: #1a2226;
 
   --ok: #4caf6e;
   --warn: #e0b23c;
@@ -64,6 +66,8 @@
   --level-yellow-bg: #f7f1d2;
   --level-archive: #5b6b78;
   --level-archive-bg: #e6eaed;
+  --level-unclassified: #7c8b8f;
+  --level-unclassified-bg: #e7ebec;
 
   --ok: #1f8a4c;
   --warn: #a4780f;

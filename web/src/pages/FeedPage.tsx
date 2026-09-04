@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ItemCard, TriageLevel } from "@/types/api";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ItemCard, ItemsResponse, TriageLevel } from "@/types/api";
 import { api } from "@/api";
 import { FeedFilters, type FeedFiltersState } from "@/components/feed/FeedFilters";
 import { FeedRow } from "@/components/feed/FeedRow";
@@ -11,6 +11,7 @@ import { useVirtualList } from "@/hooks/useVirtualList";
 import { useUiStore } from "@/store/uiStore";
 
 const ROW_HEIGHT = 64;
+const PAGE_SIZE = 100;
 
 const LEVEL_BY_DIGIT: Record<string, TriageLevel> = {
   "1": "red",
@@ -39,20 +40,34 @@ export function FeedPage() {
   const setChatOpen = useUiStore((s) => s.setChatOpen);
   const queryClient = useQueryClient();
 
-  const { data, isLoading, isError, refetch } = useQuery({
+  const {
+    data,
+    isLoading,
+    isError,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ["items", filters],
-    queryFn: () =>
+    queryFn: ({ pageParam }) =>
       api.getItems({
         level: filters.levels.length ? filters.levels : undefined,
         domain: filters.domain || undefined,
         q: filters.q || undefined,
         sort: filters.sort,
-        page: 1,
-        page_size: 100,
+        page: pageParam,
+        page_size: PAGE_SIZE,
       }),
+    initialPageParam: 1,
+    getNextPageParam: (lastPage: ItemsResponse, allPages: ItemsResponse[]) => {
+      const fetched = allPages.reduce((n, p) => n + p.items.length, 0);
+      return fetched < lastPage.total ? allPages.length + 1 : undefined;
+    },
   });
 
-  const items = useMemo(() => data?.items ?? [], [data]);
+  const items = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
+  const total = data?.pages[0]?.total ?? items.length;
 
   useEffect(() => {
     const openParam = searchParams.get("open");
@@ -83,7 +98,13 @@ export function FeedPage() {
 
       if (e.key === "j" || e.key === "J" || e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex((i) => Math.min(items.length - 1, i + 1));
+        setSelectedIndex((i) => {
+          const next = Math.min(items.length - 1, i + 1);
+          if (next >= items.length - 3 && hasNextPage && !isFetchingNextPage) {
+            fetchNextPage();
+          }
+          return next;
+        });
         return;
       }
       if (e.key === "k" || e.key === "K" || e.key === "ArrowUp") {
@@ -118,10 +139,25 @@ export function FeedPage() {
         setChatOpen(true);
         return;
       }
+      if (e.key === "o" || e.key === "O") {
+        e.preventDefault();
+        if (selected.url) window.open(selected.url, "_blank", "noopener,noreferrer");
+        return;
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [items, selectedIndex, feedback, investigate, addToChatContext, setChatOpen]);
+  }, [
+    items,
+    selectedIndex,
+    feedback,
+    investigate,
+    addToChatContext,
+    setChatOpen,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+  ]);
 
   const { containerRef, totalHeight, visibleItems, scrollToIndex } = useVirtualList<ItemCard>({
     items,
@@ -152,7 +188,8 @@ export function FeedPage() {
       <div className="flex min-w-0 flex-1 flex-col">
         <FeedFilters value={filters} onChange={setFilters} />
         <div className="border-b border-border bg-bg-raised px-3 py-1.5 text-xs text-fg-dim">
-          {data ? `${data.total ?? items.length} פריטים` : "…"} · ניווט: J/K · דרג: 1-4 · X ארכיון · Enter פרטים · I חקור · A הוסף להקשר
+          {data ? `מציג ${items.length} מתוך ${total}` : "…"} · ניווט: J/K · דרג: 1-4 · X ארכיון ·
+          Enter פרטים · I חקור · A הוסף להקשר · O פתח מקור
         </div>
 
         {isLoading && <LoadingState label="טוען פיד…" />}
@@ -168,6 +205,16 @@ export function FeedPage() {
             aria-label="פיד Triage"
             className="relative flex-1 overflow-y-auto"
             data-testid="feed-list"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              if (
+                hasNextPage &&
+                !isFetchingNextPage &&
+                el.scrollTop + el.clientHeight >= el.scrollHeight - 400
+              ) {
+                fetchNextPage();
+              }
+            }}
           >
             <div style={{ height: totalHeight, position: "relative" }}>
               {visibleItems.map(({ item, index, top }) => (
@@ -181,6 +228,18 @@ export function FeedPage() {
                 />
               ))}
             </div>
+            {hasNextPage && (
+              <div className="flex justify-center border-t border-border py-3">
+                <button
+                  type="button"
+                  onClick={() => fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                  className="rounded-md border border-border-strong px-3 py-1.5 text-xs text-fg-dim hover:bg-bg-sunken disabled:opacity-50"
+                >
+                  {isFetchingNextPage ? "טוען…" : `טען עוד (${total - items.length} נותרו)`}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

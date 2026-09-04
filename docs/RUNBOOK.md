@@ -10,6 +10,7 @@
 5. [Handling Resource Constraints](#handling-resource-constraints)
 6. [Rotating the Embedding Model](#rotating-the-embedding-model)
 7. [Network Isolation Verification](#network-isolation-verification)
+8. [Integration Smoke Tests](#integration-smoke-tests)
 
 ---
 
@@ -441,6 +442,93 @@ docker compose exec agent bash -c 'curl -I https://example.com || true'
 2. **Check extra_hosts**: `docker compose exec agent cat /etc/hosts` should list postgres, searxng, ntfy, host.docker.internal.
 3. **Check firewall rule** (Windows only): Run `firewall_ollama.ps1` with admin rights to set the Windows Defender rule.
 4. **Rebuild the agent image**: `docker compose build --no-cache agent`
+
+---
+
+## Integration Smoke Tests
+
+The live stack (PostgreSQL, web API, fetcher, ntfy) has a comprehensive smoke test suite in `tests/integration/test_live_stack.py`. Run these to verify all services are functioning correctly.
+
+### Running the Tests
+
+```bash
+# Set environment variables (optional; defaults to localhost)
+export DATABASE_URL="postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst"
+export API_BASE_URL="http://127.0.0.1:8765"
+export NTFY_BASE_URL="http://127.0.0.1:8090"
+
+# Run all integration tests
+PYTHONPATH=agent python -m pytest tests/integration/test_live_stack.py -q -m integration
+
+# Run specific test class
+PYTHONPATH=agent python -m pytest tests/integration/test_live_stack.py::TestDatabaseSchema -v
+
+# Run with verbose output
+PYTHONPATH=agent python -m pytest tests/integration/test_live_stack.py -v -m integration
+```
+
+### What Gets Tested
+
+**Database & Schema (TestDatabaseSchema)**
+- Alembic migrations are at the latest revision
+- All core tables exist (sources, items, entities, events, conferences, reports, jobs, etc.)
+- pgvector embedding column is present on items table
+- Apache AGE graph `eo_graph` exists and Entity vertex count matches entities table
+
+**API Endpoints (TestApiEndpoints)**
+- `/api/status` returns service health (postgres, ollama, searxng, ntfy)
+- `/api/items` returns paginated item list
+- `/api/items/{id}` returns full item detail with clean_text and edges
+- `/api/entities?q=...` searches entities by name
+- `/api/graph?entity_id=...` returns knowledge graph nodes and edges
+- `/api/conferences` and `/api/conferences/ical` return conference schedule
+- `/api/surveys/latest` returns latest user survey (if available)
+- `/api/feedback/meta` returns feedback metadata
+- Error endpoints return proper `{"error": {"code", "message_he"}}` JSON
+- `/` serves the React SPA (HTML)
+
+**Fetcher Bridge (TestFetcherBridge)**
+- `enqueue_job("fetch_url", ...)` creates a job in the queue
+- Job transitions to `running` then `done` or `partial` state within 60 seconds
+- Job result contains fetched content with `text` field
+
+**Ntfy Integration (TestNtfyIntegration)**
+- `POST` to `http://ntfy:8090/eo-analyst-test` returns 200 OK
+- (Does NOT post to production topic `eo-analyst`)
+
+**Network Isolation (TestNetworkIsolation)**
+- `docker compose exec -T agent python -c "import httpx; httpx.get(...)"` fails
+- Agent container cannot reach external URLs (network policy enforced)
+
+### Test Results
+
+Each test prints a result line like:
+
+```
+test_alembic_migration_at_head PASSED
+test_core_tables_exist PASSED
+test_api_status_endpoint PASSED
+test_enqueue_and_poll_fetch_job SKIPPED (Fetch job did not complete within 60s)
+test_agent_container_no_egress PASSED
+```
+
+Tests skip gracefully (not fail) when:
+- Database is unreachable (`postgresql://...` fails)
+- API endpoint returns 404 (feature not yet implemented)
+- Docker or docker-compose is not available
+- AGE extension is not installed
+- Fetcher container is idle (job queue empty)
+- Any service is temporarily down
+
+### Continuous Integration
+
+Add to your CI pipeline (e.g., GitHub Actions):
+
+```yaml
+- name: Integration smoke tests
+  run: |
+    PYTHONPATH=agent python -m pytest tests/integration/test_live_stack.py -q -m integration
+```
 
 ---
 

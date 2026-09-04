@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { StatusStrip } from "./StatusStrip";
 import type { StatusSocketState } from "@/hooks/useStatusSocket";
 import type { StatusResponse } from "@/types/api";
@@ -8,14 +8,23 @@ const baseStatus: StatusResponse = {
   at: "2026-09-04T10:00:00+03:00",
   services: { postgres: true, ollama: true, searxng: true, ntfy: false },
   gate: {
-    vram_used_mb: 6144,
-    vram_total_mb: 12288,
-    gpu_util_pct: 55,
-    gpu_temp_c: 62,
-    ram_used_mb: 28_160,
-    ram_total_mb: 64_000,
+    gpu: {
+      available: true,
+      vram_used_mb: 6144,
+      vram_total_mb: 12288,
+      vram_free_mb: 6144,
+      util_pct: 55,
+      temp_c: 62,
+    },
+    ram: { free_mb: 64_000 - 28_160, total_mb: 64_000 },
     disk_free_gb: 200,
-    loaded_model: "qwen2.5:14b-instruct",
+    loaded_models: [
+      { name: "qwen2.5:14b-instruct", size_mb: 8900, size_vram_mb: 8900, cpu_offload: false },
+    ],
+    batch_window: false,
+    recent_decisions: [
+      { at: "2026-09-04T09:59:00+03:00", decision: "proceed", model: "qwen2.5:14b-instruct", reason: "vram ok" },
+    ],
   },
   pipeline: {
     current_job: null,

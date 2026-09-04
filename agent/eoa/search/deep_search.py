@@ -33,7 +33,7 @@ log = structlog.get_logger(__name__)
 
 def _role() -> str:
     """Model role for the investigation: `investigator` if configured (ADR-001), else `resident`."""
-    return "investigator" if settings().has_model("investigator") else _role()
+    return "investigator" if settings().has_model("investigator") else "resident"
 
 
 ROUND_HINTS = {

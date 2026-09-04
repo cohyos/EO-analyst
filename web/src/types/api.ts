@@ -1,7 +1,10 @@
 // Types mirroring docs/API.md exactly. Keep field names identical to the
 // backend contract (snake_case) so the API layer needs no translation.
 
-export type TriageLevel = "red" | "orange" | "yellow" | "archive";
+// "unclassified" is a client-side-only pseudo-level for items whose
+// `level` column is still null (not yet triaged by the pipeline) — the
+// backend never accepts it as a filter value in `GET /api/items?level=`.
+export type TriageLevel = "red" | "orange" | "yellow" | "archive" | "unclassified";
 
 export type SecurityStatus = "clean" | "quarantined" | "flagged" | string;
 

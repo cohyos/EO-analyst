@@ -42,6 +42,8 @@ export default {
           "yellow-bg": "var(--level-yellow-bg)",
           archive: "var(--level-archive)",
           "archive-bg": "var(--level-archive-bg)",
+          unclassified: "var(--level-unclassified)",
+          "unclassified-bg": "var(--level-unclassified-bg)",
         },
         ok: "var(--ok)",
         warn: "var(--warn)",
