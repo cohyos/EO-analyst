@@ -12,3 +12,6 @@ for i in $(seq 1 12); do
   [ "${left:-1}" -eq 0 ] && break
   sleep 600
 done
+
+# after catch-up: golden-set evals (ADR-001 validation)
+PYTHONIOENCODING=utf-8 python evals/run_evals.py --set-name classify_triage --role resident > output/logs/evals_run.log 2>&1
