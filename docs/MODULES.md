@@ -741,18 +741,15 @@ python-docx + lxml. Hebrew RTL correctness is the point of this file:
   `dedup_of IS NULL`, ordered by `score DESC`, capped at
   `config.triage.daily_report_max_items`; if fewer than 3 rows come back the
   same query is re-run additionally allowing `yellow`. Each row gets a
-  stable 1-based `n`. **Known gap, out of this module's file scope to fix:**
-  `items` has no `key_facts`/`uncertainty_he` columns in
-  `db/migrations/versions/0001_core.py` (only `summary_he`/`so_what_he` are
-  persisted), and `eoa.memory.relational._ITEM_UPDATABLE_FIELDS` doesn't
-  allow-list `key_facts`/`uncertainty_he` either — so `eoa.pipeline.analyze`'s
-  `persist_analysis()` call to `update_item_fields(..., key_facts=...,
-  uncertainty_he=...)` will raise `ValueError` at runtime today.
-  `collect_items` degrades gracefully (`key_facts` defaults to `[]` per
-  row, read from whatever `SELECT *`-shaped dict comes back rather than
-  naming the column), and the report prompt/QA both work correctly with an
-  empty `key_facts` list — but the report never actually sees analyst key
-  facts until the schema gap is closed upstream.
+  stable 1-based `n`. **Schema closure:** `items` table now has `key_facts
+  TEXT[]`, `uncertainty_he TEXT`, and `source_name TEXT` columns added via
+  migration `db/migrations/versions/0002_analysis_fields.py` (run post-0001).
+  `eoa.memory.relational._ITEM_UPDATABLE_FIELDS` includes all three fields,
+  so `eoa.pipeline.analyze.persist_analysis()` can now correctly persist key
+  facts and uncertainty from the LLM. A database trigger
+  `trg_items_source_name` on `items` BEFORE INSERT auto-populates
+  `source_name` from the linked `sources.name` when not explicitly provided,
+  so data-layer code never needs to copy that field twice.
 - `collect_events` / `collect_deep_search` / `collect_open_clarifications` —
   `events` in the period (joined to `items`/`sources` for a display source
   name); `jobs` rows with `kind='deep_search'`, `state IN ('done',

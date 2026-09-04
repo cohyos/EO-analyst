@@ -140,6 +140,8 @@ services:
     restart: unless-stopped
     command: python -m eoa.fetch.service
     environment:
+      EOA_ROLE: fetcher
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       TZ: ${TZ:-Asia/Jerusalem}
       POSTGRES_USER: ${POSTGRES_USER:-eoa}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
@@ -147,6 +149,9 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       SEARXNG_URL: http://searxng:8080
+    volumes:
+      - ./config:/app/config:ro
+      - ./output:/app/output
     networks:
       - egress
       - internal
@@ -165,6 +170,7 @@ services:
     restart: unless-stopped
     command: python -m eoa.orchestrator.main
     environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       TZ: ${TZ:-Asia/Jerusalem}
       POSTGRES_USER: ${POSTGRES_USER:-eoa}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
@@ -219,6 +225,10 @@ services:
     restart: unless-stopped
     command: uvicorn eoa.api.app:app --host 0.0.0.0 --port 8765
     environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+      SEARXNG_URL: http://searxng:8080
+      EOA_ROLE: web
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       TZ: ${TZ:-Asia/Jerusalem}
       POSTGRES_USER: ${POSTGRES_USER:-eoa}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
@@ -227,6 +237,18 @@ services:
       POSTGRES_PORT: "5432"
     ports:
       - "127.0.0.1:8765:8765"
+    volumes:
+      - ./config:/app/config:ro
+      - ./output:/app/output
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - internal
       - hostlink

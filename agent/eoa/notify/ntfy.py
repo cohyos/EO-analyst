@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,7 +27,7 @@ class Sent:
 
 def _targets() -> list[tuple[str, str]]:
     n = settings().notify
-    t = [(n.url.rstrip("/"), n.topic)]
+    t = [(os.environ.get("NTFY_URL", n.url).rstrip("/"), n.topic)]
     if n.public_fallback_url and n.public_fallback_topic:
         t.append((n.public_fallback_url.rstrip("/"), n.public_fallback_topic))
     return t

@@ -41,7 +41,7 @@ resources:
   vram_total_mb: 12227
   vram_safety_margin_mb: 1200
   min_free_vram_mb: { resident: 9500, light: 6000, embed: 1500 }
-  min_free_ram_mb: 8000
+  min_free_ram_mb: 2500       # host has 64 GB but the user runs multi-GB data jobs by day; night has headroom
   min_free_disk_gb: 20
   warn_free_disk_gb: 40
   gpu_temp_pause_c: 83

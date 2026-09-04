@@ -145,6 +145,8 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
     ]
     items.sort(key=lambda it: order.get(it.get("level") or "archive", 3))
     for it in items:
+        if it.get("level") is None:
+            continue  # not triaged yet — leave for the next pass, do not mark
         if order.get(it.get("level") or "archive", 3) > order[min_level]:
             mark_stage(it["id"], STAGE)
             continue

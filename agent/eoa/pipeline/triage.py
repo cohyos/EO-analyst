@@ -122,10 +122,12 @@ def run_triage(limit: int = 300, role: str = "resident") -> TriageStats:
     """Triage all classified, in-scope items."""
     stats = TriageStats()
     for it in get_items_for_stage(STAGE, limit):
+        if it.get("domain") is None:
+            continue  # not classified yet — leave for the next pass, do not mark
         if (
             it.get("security_status") == "quarantined"
             or it.get("dedup_of")
-            or it.get("domain") in (None, "out_of_scope")
+            or it.get("domain") == "out_of_scope"
         ):
             mark_stage(it["id"], STAGE)
             continue
