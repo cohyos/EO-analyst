@@ -1,0 +1,129 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+
+  /* Petrol / cold-slate neutrals, dark default (חדר מצב) */
+  --bg: #0b1113;
+  --bg-raised: #121a1d;
+  --bg-sunken: #070b0c;
+  --border: #1f2b2f;
+  --border-strong: #2c3d42;
+  --fg: #e6edee;
+  --fg-muted: #9fb0b4;
+  --fg-dim: #6b7d81;
+
+  --accent: #17909f;
+  --accent-fg: #eafcff;
+  --accent-muted: #0e5c68;
+
+  --hot: #d97a3f;
+  --hot-fg: #fff3ea;
+  --hot-muted: #c4561b;
+
+  --level-red: #ef5b5b;
+  --level-red-bg: #3a1414;
+  --level-orange: #e08a3c;
+  --level-orange-bg: #3a2510;
+  --level-yellow: #d8c44d;
+  --level-yellow-bg: #363015;
+  --level-archive: #8492a6;
+  --level-archive-bg: #232a30;
+
+  --ok: #4caf6e;
+  --warn: #e0b23c;
+  --danger: #e0524f;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6f7;
+  --bg-raised: #ffffff;
+  --bg-sunken: #e7ebec;
+  --border: #d8dfe1;
+  --border-strong: #c2ccd0;
+  --fg: #131a1c;
+  --fg-muted: #4b5c60;
+  --fg-dim: #7c8b8f;
+
+  --accent: #0e5c68;
+  --accent-fg: #ffffff;
+  --accent-muted: #d7ebee;
+
+  --hot: #c4561b;
+  --hot-fg: #ffffff;
+  --hot-muted: #f5e0d1;
+
+  --level-red: #c62e2e;
+  --level-red-bg: #fbe4e4;
+  --level-orange: #b5661a;
+  --level-orange-bg: #fbe9d8;
+  --level-yellow: #8a7a10;
+  --level-yellow-bg: #f7f1d2;
+  --level-archive: #5b6b78;
+  --level-archive-bg: #e6eaed;
+
+  --ok: #1f8a4c;
+  --warn: #a4780f;
+  --danger: #b23532;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-feature-settings: "tnum" 1;
+}
+
+.font-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+bdi {
+  unicode-bidi: isolate;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.no-scrollbar-x {
+  overflow-x: auto;
+  max-width: 100%;
+}

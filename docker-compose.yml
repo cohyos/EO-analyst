@@ -81,6 +81,7 @@ services:
     networks:
       internal:
         ipv4_address: 172.28.0.10
+      hostlink: {}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eoa} -d ${POSTGRES_DB:-eoanalyst}"]
       interval: 10s
@@ -126,6 +127,7 @@ services:
     networks:
       internal:
         ipv4_address: 172.28.0.12
+      hostlink: {}
 
   fetcher:
     build:
@@ -217,6 +219,7 @@ services:
       - "127.0.0.1:8765:8765"
     networks:
       - internal
+      - hostlink
     depends_on:
       postgres:
         condition: service_healthy

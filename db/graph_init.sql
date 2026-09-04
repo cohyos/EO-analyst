@@ -65,7 +65,7 @@ SELECT eo_graph_ensure();
 -- string properties (name/kind/country), and %s substitutes the *trusted*
 -- integer NEW.id (a Postgres-generated bigint, never user-controlled text)
 -- without adding quotes, so entity_id is stored as a Cypher number.
-CREATE OR REPLACE FUNCTION eo_entities_sync_vertex() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION eo_entities_sync_vertex() RETURNS trigger AS $fn$
 DECLARE
     q text;
 BEGIN
@@ -83,7 +83,7 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$fn$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_entities_sync_vertex ON entities;
 CREATE TRIGGER trg_entities_sync_vertex

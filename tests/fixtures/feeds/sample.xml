@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>EO-Analyst Test Feed</title>
+    <link>https://example.com/</link>
+    <description>Fixture feed for tests/unit/test_rss.py</description>
+    <language>en-us</language>
+    <atom:link href="https://example.com/feed" rel="self" type="application/rss+xml" />
+
+    <item>
+      <title>New IR Targeting Pod Enters Service</title>
+      <link>https://example.com/news/ir-targeting-pod</link>
+      <guid isPermaLink="true">https://example.com/news/ir-targeting-pod</guid>
+      <pubDate>Mon, 01 Sep 2026 08:00:00 GMT</pubDate>
+      <description>An electro-optical targeting pod completed integration testing this week.</description>
+    </item>
+
+    <item>
+      <title>Counter-UAS Radar-EO Fusion Trial</title>
+      <link>https://example.com/news/counter-uas-fusion</link>
+      <guid isPermaLink="true">https://example.com/news/counter-uas-fusion</guid>
+      <pubDate>Wed, 27 Aug 2026 12:30:00 GMT</pubDate>
+      <description>A multi-sensor counter-UAS trial combined radar cueing with EO/IR tracking.</description>
+    </item>
+
+    <item>
+      <title>Older Item Outside the Lookback Window</title>
+      <link>https://example.com/news/older-item</link>
+      <guid isPermaLink="true">https://example.com/news/older-item</guid>
+      <pubDate>Thu, 01 Jan 2026 00:00:00 GMT</pubDate>
+      <description>This item is old enough that a since_days=3 filter should drop it.</description>
+    </item>
+
+    <item>
+      <title>Item With No Publish Date</title>
+      <link>https://example.com/news/undated-item</link>
+      <guid isPermaLink="true">https://example.com/news/undated-item</guid>
+      <description>No pubDate at all; should be kept rather than dropped by date filtering.</description>
+    </item>
+  </channel>
+</rss>
