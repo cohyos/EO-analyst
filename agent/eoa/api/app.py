@@ -58,10 +58,13 @@ class _SPAStaticFiles(StaticFiles):
     """Serves `web/dist`; falls back to `index.html` for any unmatched, non-API path."""
 
     async def get_response(self, path: str, scope: dict[str, Any]) -> Any:
+        req_path = str(scope.get("path", ""))
+        if req_path.startswith(("/api", "/ws")) or path.lstrip("/").startswith(("api/", "ws/")):
+            raise StarletteHTTPException(status_code=404, detail="not found")
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code == 404 and not path.startswith(("api/", "ws/")):
+            if exc.status_code == 404:
                 return await super().get_response("index.html", scope)
             raise
 
