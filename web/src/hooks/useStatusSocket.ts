@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { StatusResponse, StatusWsMessage } from "@/types/api";
 import { USE_MOCKS } from "@/api";
 import { mockStatus } from "@/mocks/data/misc";

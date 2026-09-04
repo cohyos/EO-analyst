@@ -1,6 +1,5 @@
 import type {
   AskCitation,
-  Clarification,
   Conference,
   EntityDetail,
   EventRow,

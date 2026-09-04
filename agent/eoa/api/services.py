@@ -192,9 +192,8 @@ def _item_card(row: dict[str, Any]) -> dict[str, Any]:
         "tags": row.get("tags") or [],
         "security_status": row.get("security_status"),
         "dedup_of": row.get("dedup_of"),
-        # Not modeled on `items` yet -- populated once analyze/report emit
-        # structured per-item facts. Honest empty default, never fabricated.
-        "key_facts": [],
+        "key_facts": row.get("key_facts") or [],
+        "uncertainty_he": row.get("uncertainty_he"),
     }
 
 

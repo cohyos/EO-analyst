@@ -177,9 +177,10 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
 
 
 async def _ingest() -> Any:
-    from eoa.fetch.service import run_ingest
+    """Ingest through the fetcher container when running as the isolated agent, else in-process."""
+    from eoa.fetch.remote import run_ingest_remote
 
-    return await run_ingest()
+    return run_ingest_remote()
 
 
 def run_deep_searches(rs: RunState) -> dict[str, Any]:

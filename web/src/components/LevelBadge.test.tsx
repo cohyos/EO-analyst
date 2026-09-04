@@ -30,6 +30,6 @@ describe("LevelBadge", () => {
 
   it("supports a compact size variant", () => {
     render(<LevelBadge level="orange" size="sm" />);
-    expect(screen.getByText("חשוב").closest("span")?.className).toMatch(/text-xs/);
+    expect(screen.getByText("חשוב").closest("[data-level]")?.className).toMatch(/text-xs/);
   });
 });

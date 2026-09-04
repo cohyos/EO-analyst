@@ -39,6 +39,7 @@ class ItemCard(BaseModel):
     security_status: str | None = None
     dedup_of: int | None = None
     key_facts: list[str] = []
+    uncertainty_he: str | None = None
 
 
 class ItemDetail(ItemCard):

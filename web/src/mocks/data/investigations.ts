@@ -70,6 +70,7 @@ export const mockInvestigations: InvestigationDetail[] = [
         { n: 2, item_id: 5, title: "Company PR — מפרט הפוד החדש", url: "https://example-source.test/articles/2005" },
         { n: 3, item_id: 9, title: "פטנט חדש של Elbit Systems בתחום פודי כיוון", url: "https://example-source.test/articles/2009" },
       ],
+      outcome: "found",
     },
   },
   {

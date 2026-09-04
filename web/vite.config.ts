@@ -24,6 +24,18 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          cytoscape: ["cytoscape"],
+          recharts: ["recharts"],
+          "react-vendor": ["react", "react-dom", "react-router-dom"],
+          "query-vendor": ["@tanstack/react-query"],
+        },
+      },
+    },
+  },
   test: {
     globals: true,
     environment: "jsdom",

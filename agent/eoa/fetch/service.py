@@ -299,16 +299,20 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
 
 
 def _run_forever() -> None:
+    """Fetcher container entrypoint: serve `ingest`/`fetch_url` jobs from the queue, plus a periodic
+    daytime RSS poll (the nightly ingest is requested by the agent as a job)."""
     from eoa.config import settings
+    from eoa.fetch.remote import serve_fetch_jobs
 
     log.info("fetch.service_start")
-    asyncio.run(run_ingest())
-
-    interval_minutes = settings().schedule.daytime_rss_poll_minutes
+    interval_s = settings().schedule.daytime_rss_poll_minutes * 60
     while True:
-        time.sleep(interval_minutes * 60)
+        serve_fetch_jobs(stop_after=interval_s)
         log.info("fetch.service_poll_tick")
-        asyncio.run(run_ingest())
+        try:
+            asyncio.run(run_ingest())
+        except Exception as exc:
+            log.error("fetch.poll_failed", error=str(exc)[:200])
 
 
 if __name__ == "__main__":

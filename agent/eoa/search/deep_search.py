@@ -14,7 +14,6 @@ Everything tried is logged to ``investigation_log``; a not-found result is repor
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -158,19 +157,19 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
     budget.pages += 1
     inv.read_urls.append(url)
     try:
-        from eoa.fetch.html import fetch_page
-        from eoa.fetch.sanitize import extract_clean_text
+        from eoa.fetch.remote import fetch_remote
         from eoa.security.guard import screen
 
-        page = asyncio.run(fetch_page(url))
-        clean = extract_clean_text(page.html, url)
+        page = fetch_remote(url)
+        text = page.get("text") or ""
+        title = page.get("title") or ""
         verdict = screen(
-            clean.text,
-            clean.title or "",
+            text,
+            title,
             item_id=f"inv-{inv.job_id}",
-            sanitizer_flags=clean.suspicious,
-            hidden_text_ratio=clean.hidden_text_ratio,
-            encoded_blobs=len(clean.encoded_blobs),
+            sanitizer_flags=list(page.get("suspicious") or []),
+            hidden_text_ratio=float(page.get("hidden_text_ratio") or 0.0),
+            encoded_blobs=int(page.get("encoded_blobs") or 0),
             use_l2=False,
         )
         if verdict.verdict != "clean":
@@ -186,14 +185,23 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
                 notes=f"security {verdict.verdict}: {verdict.kind}",
             )
             return json.dumps({"url": url, "error": f"page quarantined by security gate ({verdict.kind})"})
-        summary = _summarise_page(inv, clean.text, url)
-        _log(inv, round_no, clean.lang, None, engine="fetch", results_n=0, pages_read=1, outcome="partial")
+        summary = _summarise_page(inv, text, url)
+        _log(
+            inv,
+            round_no,
+            page.get("lang"),
+            None,
+            engine="fetch",
+            results_n=0,
+            pages_read=1,
+            outcome="partial",
+        )
         return json.dumps(
             {
                 "url": url,
-                "title": clean.title,
-                "published": str(clean.published_at or ""),
-                "lang": clean.lang,
+                "title": title,
+                "published": str(page.get("published_at") or ""),
+                "lang": page.get("lang"),
                 "summary": summary,
             },
             ensure_ascii=False,

@@ -1,5 +1,4 @@
 import type {
-  AskCitation,
   AskRequest,
   AskSseEvent,
   Clarification,

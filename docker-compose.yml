@@ -172,12 +172,20 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       OLLAMA_URL: http://host.docker.internal:11434
+      EOA_ROLE: agent
       NTFY_URL: http://ntfy:80
       NTFY_TOPIC: ${NTFY_TOPIC:-eo-analyst}
       SEARXNG_URL: http://searxng:8080
     volumes:
       - ./config:/app/config:ro
       - ./output:/app/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - internal
       - hostlink

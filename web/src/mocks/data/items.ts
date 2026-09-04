@@ -86,8 +86,6 @@ const TITLE_TEMPLATES: Array<(e: string, d: string) => string> = [
   (e, d) => `עדכון רגולציה משפיע על ייצוא ${d} מטעם ${e}`,
 ];
 
-const LEVELS: TriageLevel[] = ["red", "orange", "yellow", "archive"];
-
 function pick<T>(arr: T[], i: number): T {
   return arr[i % arr.length];
 }

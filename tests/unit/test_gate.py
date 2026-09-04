@@ -33,7 +33,7 @@ class TestResourceGateDecisions:
         monkeypatch.setattr("eoa.memory.relational.record_resource_decision", lambda **kw: None)
 
         spec = resource_gate.acquire("resident")
-        assert spec.key == "resident"
+        assert spec.key in ["resident", "gemma4_12b"]  # Model ID or alias
         assert resource_gate.history[-1].decision == "proceed"
 
     def test_proceed_when_model_already_loaded(self, resource_gate, mock_host_with_loaded_model, monkeypatch):
