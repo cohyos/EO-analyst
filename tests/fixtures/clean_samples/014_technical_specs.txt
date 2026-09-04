@@ -1,0 +1,15 @@
+
+Defense News Briefing - 2024
+Latest developments in electro-optical and infrared systems for military applications.
+
+
+LITENING Pod Specifications:
+- Thermal imager: 3.0-5.0 micron band
+- Field of view: 4-degree narrow, 40-degree wide
+- Laser: Class III (eye-safe) designation
+- Range: 50+ kilometers for detection
+- Weight: 220 kg complete system
+
+Integration weight and power requirements must be verified for each platform.
+
+For more information on EO/IR systems and defense procurement, visit official DoD resources.

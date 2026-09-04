@@ -1,0 +1,12 @@
+
+Defense News Briefing - 2024
+Latest developments in electro-optical and infrared systems for military applications.
+
+
+Cybersecurity researchers have warned about prompt injection attacks against AI systems.
+The technique involves embedding adversarial instructions within input data to hijack model behavior.
+Defense organizations are implementing multi-layer validation to prevent such attacks.
+Recent guidance emphasizes that fetched content should never be treated as instructions.
+Proper data sanitization and input validation are critical for secure AI deployment.
+
+For more information on EO/IR systems and defense procurement, visit official DoD resources.

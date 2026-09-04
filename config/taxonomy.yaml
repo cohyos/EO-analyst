@@ -1,0 +1,83 @@
+# Hierarchical taxonomy (user-editable). Keys are stable ids; labels are Hebrew with English term.
+domains:
+  airborne_pods:
+    label: "פודים ומטע\"דים אוויריים (Airborne Pods & Payloads)"
+    sub:
+      targeting_pods: "פודי כיוון (Targeting Pods)"
+      isr_pods: "פודי מודיעין וסיור (ISR/Recce Pods)"
+      uav_gimbals: "מטע\"דים ג'ימבליים לכטב\"מים ומסוקים (EO/IR Gimbals)"
+      small_gimbals: "מטע\"דים זעירים (Micro-Gimbals)"
+      eo_warfare: "לוחמה אלקטרו-אופטית (DIRCM, Laser Dazzlers)"
+      strategic_isr: "מטע\"די ISR אסטרטגיים (WAMI, Hyperspectral, SAR+EO fusion)"
+  land_surveillance:
+    label: "מטע\"די תצפית ומעקב יבשתיים (Land EO/IR Surveillance)"
+    sub:
+      border_towers: "תצפית גבולות ומגדלים (Border & Long-Range Surveillance)"
+      mobile_portable: "מערכות תצפית ניידות ונישאות (Mobile/Portable Observation)"
+      vehicle_sights: "מטע\"די רק\"ם ורכב (Commander/Gunner Sights, Situational Awareness)"
+      night_vision: "ראיית לילה אישית (Fused/Digital Night Vision)"
+      site_security: "אבטחת מתקנים משולבת EO/מכ\"ם (Perimeter Security)"
+  naval_surveillance:
+    label: "מטע\"די תצפית ימיים (Naval & Coastal EO/IR)"
+    sub:
+      naval_directors: "מערכות EO/IR לספינות (Naval EO Directors, Fire Control)"
+      coastal: "תצפית חופית ונמלים (Coastal Surveillance)"
+      optronic_masts: "תורני צוללות אופטרוניים (Optronic Masts)"
+      usv_payloads: "מטע\"דים לכלי שיט בלתי מאוישים (USV Payloads)"
+  air_defense:
+    label: "הגנה אווירית ויירוט (Air Defense & Interceptors)"
+    sub:
+      iir_seekers: "ראשי ביות אלקטרואופטיים (IIR Seekers)"
+      eo_trackers: "עוקבים אלקטרואופטיים במערכות יירוט (EO Trackers)"
+      sensor_fusion: "שילוב EO/מכ\"ם (Sensor Fusion)"
+      hel: "לייזר בעוצמה גבוהה (High-Energy Laser, HEL)"
+  c_uas:
+    label: "נגד כטב\"מים (C-UAS)"
+    sub:
+      detect_track: "גילוי-סיווג-עקיבה EO/IR (Detect/Classify/Track)"
+      multi_sensor: "שילוב RF/מכ\"ם/אקוסטיקה (Multi-Sensor C-UAS)"
+      effectors: "שיבוש והשמדה (Soft/Hard Kill)"
+      convoy_site: "הגנת שיירות ואתרים (Convoy & Site Protection)"
+      fpv_swarms: "נגד FPV ונחילים (Counter-FPV / Swarms)"
+  computer_vision:
+    label: "בינה חזותית (Computer Vision / AI)"
+    sub:
+      atr: "זיהוי מטרות אוטומטי (ATR/ATD)"
+      edge_ai: "Edge AI על גבי מטע\"ד"
+      gps_denied_nav: "ניווט חזותי ב-GPS-Denied"
+      realtime_video: "עיבוד וידאו בזמן אמת"
+      multimodal_isr: "מודלים מולטימודליים לניתוח ISR"
+      sim2real: "למידה מסימולציה (Sim2Real, Synthetic Data)"
+  secondary:
+    label: "תחומים משיקים (Secondary)"
+    sub:
+      detectors_fpa: "גלאים ומישורי מוקד (SWIR/MWIR/LWIR, Uncooled, Event Cameras)"
+      computational_optics: "אופטיקה חישובית, Gimbal Stabilization, On-Chip"
+      defense_ai_infra: "תשתיות AI ביטחוניות (MLOps, Datasets)"
+
+dimensions:
+  technology:
+    label: "טכנולוגי"
+    tags: [sensor, algorithm, maturity_trl, patent]
+  operational:
+    label: "מבצעי-תפיסתי"
+    tags: [conops, lessons_learned, doctrine_rfi_rfp]
+  business:
+    label: "עסקי"
+    tags: [contract_award, m_and_a, partnership, pricing, new_entrant, export_regulation]
+
+report_kinds: [verified_report, company_pr, rumor_speculation, academic, tender, patent, regulatory]
+
+trl_scale:
+  academic: "פרסום אקדמי (TRL 1-3)"
+  demo: "הדגמה (TRL 4-5)"
+  prototype: "אב-טיפוס (TRL 6-7)"
+  operational: "מבצעי (TRL 8-9)"
+
+geographies: [US, EU, UK, IL, TR, KR, JP, IN, CN, RU, UA, ME, other]
+
+triage_levels:
+  red: { emoji: "🔴", label: "קריטי", action: "התראה מיידית + חקירת עומק" }
+  orange: { emoji: "🟠", label: "חשוב", action: "דוח יומי" }
+  yellow: { emoji: "🟡", label: "רקע", action: "דוח שבועי" }
+  archive: { emoji: "⚪", label: "ארכיון", action: "ללא" }

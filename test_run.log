@@ -1,0 +1,46 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.4, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\cohyo\AppData\Local\Programs\Python\Python314\python.exe
+cachedir: .pytest_cache
+hypothesis profile 'default'
+Using --randomly-seed=1417162089
+rootdir: C:\Users\cohyo\Documents\EO-analyst
+configfile: pyproject.toml
+plugins: anyio-4.13.0, hypothesis-6.152.4, asyncio-1.3.0, cov-7.1.0, httpx-0.36.2, randomly-4.1.0, xdist-3.8.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 23 items
+
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[tool_hijack] PASSED [  4%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_title_and_body_scan PASSED [  8%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_excerpt_truncation PASSED [ 13%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[rss_injection] PASSED [ 17%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[subtle_persuasion] PASSED [ 21%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[prompt_leak] PASSED [ 26%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[direct_ignore] PASSED [ 30%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[multilingual] PASSED [ 34%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[fake_system] PASSED [ 39%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_empty_input PASSED [ 43%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_weighted_scoring PASSED [ 47%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_multilingual_detection PASSED [ 52%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[markdown_json] PASSED [ 56%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_heuristic_result_structure PASSED [ 60%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[exfil_request] PASSED [ 65%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_case_insensitivity PASSED [ 69%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_clean_false_positive_rate FAILED [ 73%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_threshold_at_05 PASSED [ 78%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[ai_addressed] PASSED [ 82%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_legitimate_content_passes PASSED [ 86%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_injection_detection_coverage PASSED [ 91%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_hit_structure PASSED [ 95%]
+tests/security/test_heuristics.py::TestHeuristicDetection::test_vector_coverage[role_change] PASSED [100%]
+
+================================== FAILURES ===================================
+____________ TestHeuristicDetection.test_clean_false_positive_rate ____________
+tests\security\test_heuristics.py:148: in test_clean_false_positive_rate
+    assert false_positives <= 2, (
+E   AssertionError: False positive rate 3/20 exceeds threshold. Maximum 2 clean samples should be flagged.
+E   assert 3 <= 2
+---------------------------- Captured stdout call -----------------------------
+\n=== Clean Sample Results ===\n  \u2713 001_normal_targeting_pod.txt             score=0.00 hits=0\n  \u2717 002_counter_uas_systems.txt              score=0.80 hits=1\n       - prompt_leak_reveal\n  \u2713 003_naval_eo_director.txt                score=0.00 hits=0\n  \u2713 004_border_surveillance.txt              score=0.00 hits=0\n  \u2713 005_ir_seeker_tech.txt                   score=0.00 hits=0\n  \u2713 006_article_quoting_ai.txt               score=0.00 hits=0\n  \u2713 007_cybersec_prompt_injection.txt        score=0.00 hits=0\n  \u2713 008_hebrew_normal.txt                    score=0.00 hits=0\n  \u2713 009_base64_ids_legitimate.txt            score=0.00 hits=0\n  \u2713 010_markdown_code_blocks.txt             score=0.00 hits=0\n  \u2717 011_ignore_normal_context.txt            score=0.75 hits=2\n       - multilingual_fr\n       - multilingual_de\n  \u2713 012_russian_normal.txt                   score=0.00 hits=0\n  \u2713 013_complex_fusion.txt                   score=0.00 hits=0\n  \u2713 014_technical_specs.txt                  score=0.00 hits=0\n  \u2717 015_budget_analysis.txt                  score=0.80 hits=1\n       - prompt_leak_reveal\n  \u2713 016_contractor_announcement.txt          score=0.00 hits=0\n  \u2713 017_academic_abstract.txt                score=0.00 hits=0\n  \u2713 018_press_release.txt                    score=0.00 hits=0\n  \u2713 019_chinese_normal.txt                   score=0.00 hits=0\nFalse positives: 3/20\n
+=========================== short test summary info ===========================
+FAILED tests/security/test_heuristics.py::TestHeuristicDetection::test_clean_false_positive_rate
+======================== 1 failed, 22 passed in 0.69s =========================

@@ -1,0 +1,17 @@
+.omc/
+.env
+output/
+*.docx
+!report/templates/*.docx
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+node_modules/
+web/dist/
+evals/results/
+models/
+*.gguf
+pgdata/

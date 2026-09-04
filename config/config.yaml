@@ -1,0 +1,114 @@
+# EO-Analyst main configuration. All times are Asia/Jerusalem unless stated.
+timezone: Asia/Jerusalem
+
+schedule:
+  night_window: { start: "01:00", end: "06:00" }   # batch window (hard deadline at end)
+  pre_flight_at: "23:30"                            # backup, health checks, disk/thermal, model warm-up
+  daytime_rss_poll_minutes: 120                     # light polling during the day (no heavy LLM)
+  weekly_run: { weekday: "sat", start: "01:00" }    # weekly report, conferences, patents (phase C)
+  monthly_run: { day: 1 }
+  deadline_grace_minutes: 5
+
+stages:            # per-stage time budgets in minutes (scheduler trims later stages if late)
+  ingest: 25
+  embed_dedup: 10
+  classify: 30
+  triage: 15
+  deep_search: 100
+  analyze: 45
+  report: 30
+  export_backup: 10
+
+deep_search:
+  trigger_levels: [red]
+  max_per_night: 4
+  max_queries: 15
+  max_pages: 30
+  per_investigation_timeout_min: 25
+  langs_primary: [he, en]
+  langs_secondary: [ru, zh, fr, de]        # used from persistence round 3 onward
+  confidence_stop: 0.8
+
+triage:
+  levels: { red: 8, orange: 6, yellow: 4 }  # min score per level; below yellow = archive
+  daily_report_max_items: 10
+
+dedup:
+  cosine_threshold: 0.92
+  lookback_days: 7
+
+resources:
+  vram_total_mb: 12227
+  vram_safety_margin_mb: 1200
+  min_free_vram_mb: { resident: 9500, light: 6000, embed: 1500 }
+  min_free_ram_mb: 8000
+  min_free_disk_gb: 20
+  warn_free_disk_gb: 40
+  gpu_temp_pause_c: 83
+  gpu_temp_stop_c: 88
+  queue_backoff_seconds: [5, 10, 30, 60]
+  queue_timeout_min: 20
+  min_loaded_seconds: 300
+  polite_mode:
+    external_gpu_util_threshold: 25
+    enabled_outside_night_window: true
+
+ollama:
+  url: http://127.0.0.1:11434
+  keep_alive: "30m"
+  num_ctx: { classify: 4096, triage: 4096, summarize: 8192, react: 16384, report: 32768, embed: 512 }
+  options: { temperature: 0.2, top_p: 0.9 }
+
+models:              # roles -> keys in models.yaml (decided by bake-off, ADR-001)
+  resident: gemma4_12b
+  light: gemma4_e4b
+  hebrew_editor: null          # set to dictalm3_12b if bake-off approves
+  heavy_investigator: null     # set to gpt_oss_20b if bake-off approves
+  embed: e5_large
+  guard_l1: prompt_injection_deberta
+  guard_l2: granite_guardian_2b
+
+searxng:
+  url: http://searxng:8080
+  engines: [duckduckgo, bing, brave, startpage, wikipedia, arxiv, google_scholar]
+  rate_limit_per_minute: 20
+
+fetch:
+  timeout_seconds: 20
+  max_bytes: 2_000_000
+  user_agent: "eo-analyst/0.1 (+local OSINT research; contact: none)"
+  respect_robots: true
+
+security:
+  quarantine_on_flag: true
+  blocklist_after_incidents: 2
+  hidden_text_min_ratio: 0.15
+  max_base64_blob_chars: 200
+
+report:
+  language: he
+  formats: [docx, md, html]
+  output_dir: output/reports
+  template: agent/eoa/report/templates/daily_rtl.docx
+  citation_style: numbered      # [n] mapped to items.url
+  require_citations: true       # QA blocks uncited claims
+
+notify:
+  url: http://ntfy:80
+  topic: eo-analyst
+  public_fallback_url: https://ntfy.sh
+  public_fallback_topic: dissertation_editor_ysf
+  send_report_link: true
+  send_red_alerts: true
+  send_security_alerts: true
+  clarification_timeout_min: 5
+
+retention:
+  raw_text_days: 90
+  logs_days: 30
+  backups_keep: 30
+
+api:
+  host: 127.0.0.1
+  port: 8765
+  status_push_seconds: 2
