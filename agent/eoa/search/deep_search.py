@@ -35,6 +35,7 @@ def _role() -> str:
     """Model role for the investigation: `investigator` if configured (ADR-001), else `resident`."""
     return "investigator" if settings().has_model("investigator") else _role()
 
+
 ROUND_HINTS = {
     1: "Round 1 — direct: ask the question plainly in Hebrew and English.",
     2: "Round 2 — reformulate: synonyms, alternative program/system names, acronyms, contract or solicitation numbers, "
@@ -241,7 +242,7 @@ def _summarise_page(inv: Investigation, text: str, url: str) -> str:
         [{"role": "system", "content": DATA_GUARD_SYSTEM}, {"role": "user", "content": prompt}],
         task="summarize",
         think=False,
-        options={"temperature": 0.1},
+        options={"temperature": 0.1, "num_predict": 600},
     )
     return res.content.strip()[:2500]
 
@@ -422,9 +423,18 @@ def _act(
                     "content": "התקציב מוצה. סכם עכשיו עם finish (found/partial/not_found), בלי להמציא.",
                 }
             )
-        res = chat(
-            _role(), transcript, task="react", tools=TOOLS, think=False, options={"temperature": 0.2}
-        )
+        try:
+            res = chat(
+                _role(),
+                transcript,
+                task="react",
+                tools=TOOLS,
+                think=False,
+                options={"temperature": 0.2, "num_predict": 1200},
+            )
+        except Exception as exc:  # timeout / transport error: end this round, keep what we have
+            log.warning("react_step_failed", error=str(exc)[:160])
+            return inv.result is not None
         transcript.append(
             {"role": "assistant", "content": res.content, "tool_calls": res.tool_calls}
             if res.tool_calls
