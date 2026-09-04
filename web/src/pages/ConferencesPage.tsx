@@ -168,7 +168,12 @@ export function ConferencesPage() {
                           <ExternalLink size={12} aria-hidden="true" />
                         </a>
                       ) : (
-                        <bdi>{c.name}</bdi>
+                        <span className="inline-flex items-center gap-1.5">
+                          <bdi>{c.name}</bdi>
+                          <span className="rounded-full bg-bg-sunken px-1.5 py-0.5 text-xs text-fg-dim">
+                            אין קישור
+                          </span>
+                        </span>
                       )}
                     </td>
                     <td className="p-2 text-fg-muted">{c.location ?? "—"}</td>

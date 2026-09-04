@@ -32,11 +32,11 @@ export function FeedRow({
   const displayTitle = item.title || "(ללא כותרת)";
   return (
     <div
-      role="row"
+      role="listitem"
       data-testid={`feed-row-${item.id}`}
       data-selected={selected}
       tabIndex={-1}
-      aria-selected={selected}
+      aria-current={selected ? "true" : undefined}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData(

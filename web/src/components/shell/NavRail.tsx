@@ -15,6 +15,7 @@ export function NavRail() {
             key={item.to}
             to={item.to}
             end={item.end}
+            aria-label={item.label}
             className={({ isActive }) =>
               cn(
                 "flex items-center gap-3 rounded-md px-2.5 py-2.5 text-sm transition-colors md:px-3",

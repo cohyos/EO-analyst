@@ -232,6 +232,24 @@ test.describe("Feed screen (/feed)", () => {
     await expect(page).toHaveURL(/\/feed/); // stays on the feed, unlike Enter
   });
 
+  test("keyboard: Space opens the inline quick-preview panel for the selected row (without navigating away)", async ({
+    page,
+  }) => {
+    // Mirrors the double-click gesture above: Space is the "quick look" key
+    // (stays on /feed, opens FeedDetailPanel via setOpenItemId), Enter is
+    // the "open full page" key (navigates to /items/:id — see the dedicated
+    // Enter test above). Confirmed against FeedPage.tsx's onKeyDown, which
+    // has an explicit `e.key === " " || e.key === "Spacebar"` branch.
+    await page.goto("/feed");
+    const firstRow = page.locator('[data-testid^="feed-row-"]').first();
+    await expect(firstRow).toBeVisible({ timeout: 20_000 });
+    await expect(firstRow).toHaveAttribute("data-selected", "true");
+
+    await page.keyboard.press(" ");
+    await expect(page.locator('[data-testid="feed-detail-panel"]')).toBeVisible({ timeout: 10_000 });
+    await expect(page).toHaveURL(/\/feed/);
+  });
+
   test("keyboard: 1-4 re-rates the selected row via POST /api/items/{id}/feedback", async ({ page }) => {
     await page.goto("/feed");
     const firstRow = page.locator('[data-testid^="feed-row-"]').first();

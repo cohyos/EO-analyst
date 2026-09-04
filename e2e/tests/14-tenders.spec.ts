@@ -85,14 +85,19 @@ test.describe("Tenders screen (/tenders)", () => {
     const hasRows = (await rows.count()) > 0;
     test.skip(!hasRows, "No tenders to expand");
 
+    // Click the leading chevron cell, not the row's default (center)
+    // point — every tender in this environment has a source URL, so the
+    // title cell holds an <a target="_blank" onClick={stopPropagation}>
+    // (TenderTable.tsx) that would swallow a row-centered click and never
+    // reach the <tr>'s onClick toggle.
     const firstRow = rows.first();
     await expect(firstRow).toHaveAttribute("aria-expanded", "false");
-    await firstRow.click();
+    await firstRow.locator("td").first().click();
     await expect(firstRow).toHaveAttribute("aria-expanded", "true");
     // the detail row is the sibling <tr> immediately after
     const detailRow = firstRow.locator("xpath=following-sibling::tr[1]");
     await expect(detailRow).toBeVisible();
-    await firstRow.click();
+    await firstRow.locator("td").first().click();
     await expect(firstRow).toHaveAttribute("aria-expanded", "false");
   });
 

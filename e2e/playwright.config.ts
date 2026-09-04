@@ -12,7 +12,12 @@ import { defineConfig, devices } from "@playwright/test";
  * intended signal ("start the app first"), not something this config
  * should paper over.
  */
-const BASE_URL = process.env.EOA_BASE_URL ?? "http://127.0.0.1:8765";
+// Precedence: PW_BASE_URL / BASE_URL (generic Playwright-style overrides,
+// used to point this suite at a locally-running `npm run preview`/`npm run
+// dev` build instead of the live container) win over the suite's own
+// EOA_BASE_URL, which wins over the default.
+const BASE_URL =
+  process.env.PW_BASE_URL ?? process.env.BASE_URL ?? process.env.EOA_BASE_URL ?? "http://127.0.0.1:8765";
 
 export default defineConfig({
   testDir: "./tests",

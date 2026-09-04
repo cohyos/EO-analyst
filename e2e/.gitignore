@@ -3,3 +3,4 @@ report/
 test-results/
 QA_FINDINGS.md
 playwright-report/
+*.log

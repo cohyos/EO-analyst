@@ -24,6 +24,23 @@ export default defineConfig({
       },
     },
   },
+  // `vite preview` does NOT inherit `server.proxy` (Vite treats dev-server
+  // and preview-server config as separate) — without this block `npm run
+  // preview` would 404 every /api call. Mirrored 1:1 with `server.proxy` so
+  // e2e QA against the production build hits the same real backend as `dev`.
+  preview: {
+    port: 4173,
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8765",
+        changeOrigin: true,
+      },
+      "/ws": {
+        target: "ws://127.0.0.1:8765",
+        ws: true,
+      },
+    },
+  },
   build: {
     rollupOptions: {
       output: {

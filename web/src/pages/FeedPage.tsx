@@ -129,6 +129,14 @@ export function FeedPage() {
         navigate(`/items/${selected.id}`);
         return;
       }
+      if (e.key === " " || e.key === "Spacebar") {
+        // Quick preview (like the double-click gesture on a row): opens the
+        // inline FeedDetailPanel for the selected row without navigating
+        // away from the feed. Enter is reserved for the full /items/:id page.
+        e.preventDefault();
+        setOpenItemId(selected.id);
+        return;
+      }
       if (e.key === "i" || e.key === "I") {
         e.preventDefault();
         investigate.mutate(selected.id);
@@ -159,6 +167,7 @@ export function FeedPage() {
     isFetchingNextPage,
     fetchNextPage,
     navigate,
+    setOpenItemId,
   ]);
 
   const { containerRef, totalHeight, visibleItems, scrollToIndex } = useVirtualList<ItemCard>({
@@ -191,7 +200,7 @@ export function FeedPage() {
         <FeedFilters value={filters} onChange={setFilters} />
         <div className="border-b border-border bg-bg-raised px-3 py-1.5 text-xs text-fg-dim">
           {data ? `מציג ${items.length} מתוך ${total}` : "…"} · ניווט: J/K · דרג: 1-4 · X ארכיון ·
-          Enter פרטים · I חקור · A הוסף להקשר · O פתח מקור
+          Enter פרטים · Space תצוגה מהירה · I חקור · A הוסף להקשר · O פתח מקור
         </div>
 
         {isLoading && <LoadingState label="טוען פיד…" />}
@@ -203,8 +212,6 @@ export function FeedPage() {
         {!isLoading && !isError && items.length > 0 && (
           <div
             ref={containerRef}
-            role="grid"
-            aria-label="פיד Triage"
             className="relative flex-1 overflow-y-auto"
             data-testid="feed-list"
             onScroll={(e) => {
@@ -218,7 +225,11 @@ export function FeedPage() {
               }
             }}
           >
-            <div style={{ height: totalHeight, position: "relative" }}>
+            {/* role="list" lives on this inner wrapper (not the scroll
+                container above) so its only children are the FeedRow
+                listitems — the "טען עוד" button below is a sibling, not a
+                list child, which axe's aria-required-children rule forbids. */}
+            <div role="list" aria-label="פיד Triage" style={{ height: totalHeight, position: "relative" }}>
               {visibleItems.map(({ item, index, top }) => (
                 <FeedRow
                   key={item.id}

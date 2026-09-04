@@ -157,6 +157,16 @@ describe("FeedPage keyboard behavior", () => {
     expect(screen.queryByTestId("items-page-stub")).not.toBeInTheDocument();
   });
 
+  it("opens the inline quick-preview panel on Space, without navigating (same as double-click)", async () => {
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    fireEvent.keyDown(window, { key: " " });
+    await waitFor(() => expect(getItem).toHaveBeenCalledWith(1));
+    expect(await screen.findByTestId("feed-detail-panel")).toBeInTheDocument();
+    expect(screen.queryByTestId("items-page-stub")).not.toBeInTheDocument();
+  });
+
   it("triggers a deep-search investigation with 'i'", async () => {
     renderFeedPage();
     await screen.findByTestId("feed-row-1");

@@ -62,6 +62,7 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
         type="button"
         onClick={() => runNow.mutate()}
         disabled={runNow.isPending}
+        aria-label={runNow.isPending ? "מריץ ריצה כעת" : justRan ? "הריצה הופעלה בהצלחה" : "הרץ עכשיו"}
         className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60 sm:px-3"
       >
         <Play size={14} aria-hidden="true" />

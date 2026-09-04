@@ -2822,3 +2822,99 @@ Regression coverage: `tests/unit/test_persist_analysis.py` —
 `test_resolve_edge_kinds_prefers_existing_db_kind_over_heuristic`,
 `test_resolve_edge_kinds_empty_names_returns_empty_without_db_call`,
 `test_persist_analysis_resolves_org_and_program_kinds`.
+
+## Web UI QA fix pass (Playwright suite, `e2e/QA_FINDINGS.md`)
+
+A rigorous-QA pass against `e2e/` (Playwright, both `desktop-1440x900` and
+`mobile-390x844` projects) found 19 failures; all were fixed in `web/src`
+(no backend/API changes). Fixed **directly against `npm --prefix web run
+preview`** (real backend at `127.0.0.1:8765` via `vite preview`'s proxy),
+not the deployed `web` container — see the "not yet deployed" caveat below.
+
+- **Feed level filter** (`web/src/pages/FeedPage.tsx`,
+  `web/src/components/LevelBadge.tsx`): the query-param mapping
+  (`level=red,orange…` → `GET /api/items`) and the row-level `[data-level]`
+  attribute were already correct; the only real defect was in the *test*
+  (`e2e/tests/02-feed.spec.ts`), which registered `page.waitForResponse()`
+  **after** clicking the filter toggle — a fast-resolving refetch could
+  land before the wait was registered, causing a spurious timeout. Fixed
+  (by a concurrent session) to register the wait before the click. No app
+  bug: unclassified (`level=null` → `"unclassified"`) items are naturally
+  excluded whenever any real level filter is active, since the UI only
+  ever sends `red`/`orange`/`yellow`/`archive`, never `unclassified`.
+- **Conferences "no link" rows** (`web/src/pages/ConferencesPage.tsx`):
+  rows with neither `registration_url` nor `url` rendered the name as bare
+  text with no fallback label. Added a visible "אין קישור" chip next to
+  the name in that branch, matching what the row already does once URLs
+  backfill (a data-completeness fix outside this pass — see the "Section
+  2" table in `e2e/QA_FINDINGS.md` for a session where this had already
+  reproduced-away for that reason alone).
+- **Accessibility — `div[role="grid"]` / `role="row"` structure**
+  (`web/src/pages/FeedPage.tsx`, `web/src/components/feed/FeedRow.tsx`):
+  axe-core's `aria-required-children` flagged the feed's `role="row"`
+  divs for containing non-cell children (`LevelBadge`'s `role="img"`,
+  `SecurityStatusIcon`'s labeled `<span>`) — a real grid needs
+  `role="gridcell"` children, which this virtualized single-column list
+  never had. Replaced `role="grid"` → `role="list"` and `role="row"` →
+  `role="listitem"` (dropping `aria-selected`, invalid on `listitem`, in
+  favor of `aria-current="true"` on the selected row — `data-selected`
+  still carries the boolean state tests key off of). The `role="list"`
+  wrapper only contains the `FeedRow` listitems — the "טען עוד" load-more
+  button lives as a sibling *outside* that wrapper (still inside the same
+  scrollable container), since `role="list"` forbids non-listitem children
+  too.
+- **Accessibility — icon-only buttons with no accessible name**
+  (`web/src/components/shell/TopBar.tsx`, `web/src/components/shell/NavRail.tsx`):
+  both the TopBar "הרץ עכשיו" (Run Now) button and every `NavRail` link
+  wrap their visible label in a `hidden sm:inline`/`hidden md:inline`
+  `<span>` for the icon-only mobile/collapsed layout — CSS `display:none`
+  content is excluded from accessible-name computation, so below the
+  breakpoint these controls had **no** accessible name at all (axe
+  `button-name`, critical, on every screen via the shared `TopBar`; nav
+  links unreachable by `getByRole('link', {name})` on mobile). Fixed with
+  an explicit `aria-label` on each (`item.label` on `NavLink`; a
+  state-mirroring label — "הרץ עכשיו"/"מריץ ריצה כעת"/"הריצה הופעלה
+  בהצלחה" — on the Run Now button, to avoid an aria-label/visible-text
+  mismatch when the label *is* shown at `md:`/`sm:`).
+- **Mobile nav reachability**: covered by the aria-label fix above — the
+  icon rail (`NavRail`, always visible, never hidden behind a
+  hamburger/drawer) was already on-screen and clickable at 390px with no
+  horizontal overflow; the only defect was the missing accessible name,
+  which made it unfindable via `getByRole(...,{name})` and to screen
+  readers. No hamburger/drawer/bottom-tab-bar was added since the rail was
+  already reachable by pointer and there was no additional failing
+  assertion demanding one.
+- **Feed keyboard: Enter vs. Space vs. double-click**: `Enter` already
+  navigated to the full `/items/:id` page (`ItemDetailPage`); double-click
+  already opened the inline `FeedDetailPanel` (quick preview) without
+  navigating. Added the missing third leg: `Space`/`Spacebar` now also
+  opens the inline quick-preview panel (`setOpenItemId`), matching the
+  "Enter = open page, Space/double-click = quick look" pattern hinted at
+  in the status-line legend. Covered by a new e2e test
+  (`02-feed.spec.ts` → "keyboard: Space opens the inline quick-preview
+  panel…") and a new unit test (`FeedPage.test.tsx`). **Note**: the
+  `src/pages/FeedPage.tsx` §"Screens" prose above (`## Web UI` → item 2)
+  still says "`Enter` opens the detail panel" — that line predates the
+  Enter→full-page-navigation change and is now stale; left as-is here
+  since this section is append-only, flagging it for a future edit pass.
+- **Local e2e verification setup**: `web/vite.config.ts` gained a
+  `preview.proxy` block (`vite preview` does **not** inherit
+  `server.proxy` — without this, `npm run preview` 404s every `/api`
+  call) mirroring the existing dev-server proxy to `127.0.0.1:8765`.
+  `e2e/playwright.config.ts`'s `BASE_URL` now also accepts `PW_BASE_URL`/
+  `BASE_URL` (checked before the suite's own `EOA_BASE_URL`), so the suite
+  can target a local `vite preview`/`vite dev` build instead of the live
+  container: `PW_BASE_URL=http://127.0.0.1:4174 npm --prefix e2e test`.
+
+**Deployment note**: this pass fixed `web/src` and validated against
+`npm --prefix web run build && npm --prefix web run preview` (proxied to
+the real backend), per instructions to not touch `docker`. The `web`
+*container* still serves whatever was last built into its image — a
+`docker compose build web && docker compose up -d web` (or equivalent
+image rebuild) is required before these fixes are visible on the deployed
+`127.0.0.1:8765` UI. Confirmed both `npm --prefix web run lint`,
+`npm --prefix web run test` (99/99), and `npm --prefix web run build`
+green, and repeated clean `npm --prefix e2e test` runs against the local
+preview build at 166 passed / 0 failed / 2 skipped (the 2 skips are
+`test.skip` guards for preconditions not met in this environment's current
+data — no reports generated yet — not failures).
