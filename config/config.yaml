@@ -12,6 +12,7 @@ schedule:
 stages:            # per-stage time budgets in minutes (scheduler trims later stages if late)
   ingest: 25
   embed_dedup: 10
+  dedup_xlang: 3
   classify: 30
   triage: 15
   deep_search: 100

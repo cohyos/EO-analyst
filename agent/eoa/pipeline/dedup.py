@@ -57,3 +57,43 @@ def run_dedup(limit: int = 500, batch_size: int = 16) -> DedupStats:
                 stats.failed += 1
     log.info("dedup_done", **stats.__dict__)
     return stats
+
+
+def link_cross_language(lookback_days: int | None = None) -> int:
+    """Second-pass dedup after classification: the same story in different languages rarely clears the cosine
+    threshold, so link items that share ≥ 2 entities, the same domain and a publication date within ±1 day but
+    have different languages. The earlier item becomes the canonical one. Returns the number of links made."""
+    from eoa.db import connection
+
+    days = lookback_days or settings().dedup.lookback_days
+    linked = 0
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id AS a_id, b.id AS b_id
+            FROM items a
+            JOIN items b
+              ON b.id > a.id
+             AND b.lang IS DISTINCT FROM a.lang
+             AND b.domain = a.domain
+             AND a.domain NOT IN ('out_of_scope', 'secondary')
+             AND abs(extract(epoch FROM (coalesce(b.published_at, b.fetched_at) - coalesce(a.published_at, a.fetched_at)))) <= 86400 * 1.5
+             AND cardinality(ARRAY(SELECT unnest(a.entities_mentioned) INTERSECT SELECT unnest(b.entities_mentioned))) >= 2
+            WHERE a.dedup_of IS NULL AND b.dedup_of IS NULL
+              AND a.security_status = 'clean' AND b.security_status = 'clean'
+              AND a.fetched_at > now() - make_interval(days => %s)
+            ORDER BY a.id
+            """,
+            (days,),
+        ).fetchall()
+        seen: set[int] = set()
+        for r in rows:
+            if r["b_id"] in seen:
+                continue
+            conn.execute(
+                "UPDATE items SET dedup_of = %s WHERE id = %s AND dedup_of IS NULL", (r["a_id"], r["b_id"])
+            )
+            seen.add(r["b_id"])
+            linked += 1
+    log.info("dedup_cross_language", linked=linked)
+    return linked

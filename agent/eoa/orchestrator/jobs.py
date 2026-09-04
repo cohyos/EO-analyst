@@ -156,6 +156,15 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
         )
         _run_stage(
             rs,
+            "dedup_xlang",
+            lambda: {
+                "linked": __import__(
+                    "eoa.pipeline.dedup", fromlist=["link_cross_language"]
+                ).link_cross_language()
+            },
+        )
+        _run_stage(
+            rs,
             "triage",
             lambda: __import__("eoa.pipeline.triage", fromlist=["run_triage"]).run_triage(role=role),
         )
