@@ -27,7 +27,7 @@ class AskRequest(BaseModel):
 
 
 def _sse(event: dict) -> str:
-    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/ask")
