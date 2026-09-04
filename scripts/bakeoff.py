@@ -188,6 +188,7 @@ def task_classify(client, model, num_ctx):
     for snippet in SNIPPETS:
         payload = {
             "model": model,
+            "stream": False,
             "messages": [
                 {"role": "system", "content": "You are a defense-OSINT analyst. Analyze the following article snippet and output JSON matching the schema."},
                 {"role": "user", "content": snippet["text"]}
@@ -250,6 +251,7 @@ def task_summarize_he(client, model, num_ctx):
         )
         payload = {
             "model": model,
+            "stream": False,
             "messages": [{"role": "user", "content": prompt}],
             "options": {"temperature": 0.1, "num_ctx": num_ctx}
         }
@@ -307,6 +309,7 @@ def run_react_scenario(client, model, num_ctx, query, is_found):
         turns += 1
         payload = {
             "model": model,
+            "stream": False,
             "messages": messages,
             "tools": TOOLS_SCHEMA,
             "options": {"temperature": 0.1, "num_ctx": num_ctx}
@@ -389,6 +392,7 @@ def task_hebrew_edit(client, model, num_ctx):
     )
     payload = {
         "model": model,
+            "stream": False,
         "messages": [{"role": "user", "content": prompt}],
         "options": {"temperature": 0.1, "num_ctx": num_ctx}
     }
@@ -468,7 +472,8 @@ def main():
         
         try:
             logging.info(f"Unloading model {model}")
-            client.post("http://127.0.0.1:11434/api/generate", json={"model": model, "keep_alive": args.keep_alive}, timeout=10)
+            client.post("http://127.0.0.1:11434/api/generate", json={"model": model,
+            "stream": False, "keep_alive": args.keep_alive}, timeout=10)
         except Exception as e:
             logging.warning(f"Failed to unload {model}: {e}")
 

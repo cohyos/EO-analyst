@@ -7,30 +7,43 @@ Working end-to-end analyst: first real nightly run at 01:00 on 2026-09-05 produc
 notifications; then the full web UI (hybrid ops console + analyst chat); then the second night with deep search.
 
 ## Decisions taken (see docs/adr/)
-- 12 GB VRAM reality → single resident model architecture; bake-off decides the model (ADR-001, pending).
+- 12 GB VRAM reality → single resident model architecture; bake-off decides the model (ADR-001, running).
 - Western-origin models only; Chinese models removed from Ollama 2026-09-04.
-- Ollama: native Windows service, containers reach it via host.docker.internal (measure in P0.4; ADR-002).
-- ntfy self-hosted in compose (port 127.0.0.1:8090), reachable from phone via Tailscale; public ntfy.sh topic
-  `dissertation_editor_ysf` remains the fallback and the user-consult channel (5-minute timeout).
+- Ollama: native Windows service; user-scope env vars set (OLLAMA_HOST=0.0.0.0:11434, NO_CLOUD, MAX_LOADED=1,
+  KV q8_0, flash attention, GPU_OVERHEAD 1.2 GB, KEEP_ALIVE 30m) — take effect after Ollama restart.
+- ntfy self-hosted in compose (127.0.0.1:8090), Tailscale for phone; public topic `dissertation_editor_ysf` = fallback
+  and user-consult channel (5-minute timeout).
 - Deep search: max 4 investigations per night (config `deep_search.max_per_night`).
+- Embeddings: `multilingual-e5-large-instruct` does NOT exist in the Ollama library. Candidates pulled:
+  embeddinggemma (768-d), snowflake-arctic-embed2 (1024-d), nomic-embed-text-v2-moe. Decide by a Hebrew↔English
+  similarity test; schema currently vector(1024) (change with a migration if a 768-d model wins).
+- Codex CLI: installed + logged in, but the Claude Code permission classifier blocks its Windows sandbox setup and the
+  bypass flag; user must run scripts/host/codex_sandbox_setup.ps1 once. Until then Codex = read-only reviews.
+  agy (Gemini) writes only inside its own scratch workspace; use `agy -p ... > file` generation pattern.
+
+## Host state
+- Windows scheduled task "EO-Analyst Wake" daily 00:55 (WakeToRun) registered (user scope).
+- `.wslconfig` written (36 GB / 16 CPU / 8 GB swap) — applies after `wsl --shutdown` (not done yet: Docker running).
+- Docker: postgres (PG17 + AGE 1.7 + pgvector 0.8.6), searxng, ntfy up. Ports 127.0.0.1:5433 / :8090.
+- DB: migrations 0001+0002 applied; graph init OK; 40 entities + 11 conferences seeded; 40 Entity vertices.
+- First ingest (host-run): 220 items from 40 sources (210 en / 10 he). Sources blocked by robots/Cloudflare are logged.
 
 ## Progress
-- [x] Plan v2 written, approved (תוכנית_פיתוח_מפורטת_v2.md)
-- [x] Host survey; Chinese models removed; disk 227 GB free; .wslconfig written
-- [x] Repo skeleton: pyproject, config/*.yaml, docs/CONVENTIONS.md
-- [x] Core: eoa.config, eoa.errors, eoa.db, eoa.resources.gpu, eoa.resources.gate, eoa.llm.ollama_client, eoa.llm.prompts
-- [ ] P0.2 models: pulling gemma4:26b, e5, embeddinggemma, granite3-guardian, ministral-3 (background)
-- [ ] P0.3 bake-off (scripts/bakeoff.py via Codex → run → ADR-001)
-- [ ] P1.1 docker infra (agent infra-docker)
-- [ ] P1.2/1.3 schema + memory layer (agent db-schema)
-- [ ] P2.1 fetch + sources.yaml (agent fetch-module)
-- [ ] P2.2 security: heuristics + fixtures (agent security-fixtures); L1 classifier + L2 LLM (lead)
-- [ ] P2.3 embed/dedup; P2.4 classify/triage; P3.4 analyze; P3.5 report docx; P3.6 notify; P1.6 scheduler
-- [ ] P3.1/3.2/3.3 SearXNG + deep search ReAct + multilingual
-- [ ] P4 web UI (FastAPI + React)
-- [ ] First nightly run
+- [x] Plan v2, approvals, host survey, disk cleanup
+- [x] Repo skeleton, config, conventions, API contract (docs/API.md)
+- [x] Core: config, errors, db, resources (gpu, gate), llm client + prompts + schemas
+- [x] Docker infra + DB schema + memory layer (relational/graph/vector) + seed
+- [x] Fetch layer + 40 sources; security heuristics (83 injection fixtures, 95.6% detect, 0% FP) + guard (L1/L2)
+- [x] Pipeline: dedup, classify, triage, analyze; deep search ReAct + SearXNG client; orchestrator + CLI; ntfy
+- [ ] Bake-off running (evals/results/bakeoff_run.log) → ADR-001 → set config.models
+- [ ] Embedding model decision → run dedup → classify → triage → analyze on the 220 items (first real pass)
+- [ ] Report layer (agent report-docx, running) → first docx
+- [ ] Web API (agent api-backend, running) + React UI (agent web-ui, running)
+- [ ] Unit tests for core (agent), integration smoke, isolation verification
+- [ ] Containerize agent/fetcher/web; start orchestrator for tonight's 01:00 run
+- [ ] First nightly run 2026-09-05 01:00
 
 ## Open issues / notes
-- No admin rights in the session: Windows Firewall rule for ollama.exe is prepared as scripts/host/firewall_ollama.ps1
-  (user runs it elevated once). OLLAMA_HOST must be 0.0.0.0 for containers to reach it; see ADR-002 for the tradeoff.
-- RAM free was only ~25 GB of 64 during the day (user workload); night runs assume ≥ 40 GB free.
+- No admin rights: Windows Firewall rule for ollama.exe not created (scripts/host/firewall_ollama.ps1 to be written).
+- RAM free ~25 GB of 64 during the day (user workload).
+- Python 3.14 on host: psycopg_pool prints a harmless finalization warning at exit (fix: atexit close_pool).

@@ -11,7 +11,9 @@ router = APIRouter(tags=["entities"])
 
 
 @router.get("/entities")
-def list_entities(q: str | None = None, kind: str | None = None, limit: int = Query(50, ge=1, le=500)) -> list[dict]:
+def list_entities(
+    q: str | None = None, kind: str | None = None, limit: int = Query(50, ge=1, le=500)
+) -> list[dict]:
     return services.list_entities(q=q, kind=kind, limit=limit)
 
 

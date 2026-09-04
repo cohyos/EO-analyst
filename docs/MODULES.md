@@ -522,3 +522,110 @@ alone, Hebrew RTL text preserved end-to-end plus `detect_lang()` heuristics,
 and `text_hash()` stability across whitespace-only differences. Passes today
 via `PYTHONPATH=agent python -m pytest tests/unit -q` (40/40 across the
 whole suite, no DB or network required).
+
+## Web API
+
+Implements `docs/API.md` exactly. Files: `agent/eoa/api/app.py` (FastAPI app
+factory), `agent/eoa/api/routes/*.py` (one router module per resource),
+`agent/eoa/api/services.py` (all DB access and cross-module adapters),
+`agent/eoa/api/schemas.py` (documented pydantic response models),
+`agent/eoa/api/errors.py` (`APIError` + factory helpers), `agent/eoa/api/__main__.py`
+(`python -m eoa.api`).
+
+### `app.py`
+
+`create_app()` builds the FastAPI app and a module-level `app` is exported
+for `uvicorn eoa.api.app:app`. CORS allows `http://localhost:5173` (Vite
+dev; same-origin needs no CORS entry). A `lifespan` context opens
+`eoa.db.get_pool()` on startup and calls `eoa.db.close_pool()` on shutdown.
+Four exception handlers normalize every non-2xx response to
+`{"error": {"code", "message_he", "detail"}}`: the app's own `APIError`
+(routes `raise not_found(...)` / `bad_request(...)` / `not_implemented(...)`
+from `errors.py`), Starlette's `HTTPException` (framework 404s etc., code
+derived from the status via a small map), `RequestValidationError`
+(pydantic/query validation failures -> `code="validation_error"`,
+`detail=exc.errors()`), and a catch-all `Exception` handler
+(`code="internal_error"`, logged via `structlog`). If `web/dist` exists, a
+custom `_SPAStaticFiles` (subclassing Starlette's `StaticFiles`) is mounted
+at `/` after every API router: any 404 for a path *not* starting with
+`api/` or `ws/` falls back to `index.html` (client-side routing); a 404
+under `api/`/`ws/` propagates as a normal 404 instead of being swallowed
+into the SPA shell.
+
+### `services.py`
+
+Every route handler calls into this module — never `eoa.db` directly —
+via small helpers (`_fetchone`/`_fetchall`/`_execute`) over
+`eoa.db.connection()`, always with parameterised SQL (never string-formatted
+user input). Grouped by resource: status/pipeline (`services_status()` pings
+Postgres/Ollama/SearXNG/ntfy — the latter two via a 2s-timeout HEAD-then-GET
+probe — plus `pipeline_status()` reading `jobs`/`run_log` and
+`eoa.resources.gate.gate()`), items (`list_items` with level/domain/since/q
+filters + paging, `get_item`, `item_feedback` writing `triage_feedback` and
+updating `items.level` via `eoa.memory.relational.update_item_fields`,
+`investigate_item` enqueuing a `deep_search` job at `priority=0`), entities
++ graph (`list_entities`/`get_entity` join `items.entities_mentioned` by
+name since entities have no item FK; `build_graph` and the three
+`GET /api/graph/query` named queries call straight into
+`eoa.memory.graph`), reports + `morning()` (reads report YAML/HTML off
+disk relative to `REPO_ROOT`, aggregates a best-effort `night_summary` from
+the latest `daily_run` job's `result` payload or, if absent, from real
+`items`/`jobs`/`run_log` counts in that job's time window — never invented
+numbers), investigations, `ask_retrieve`/`ask_build_messages` (RAG
+retrieval + prompt assembly for `/api/ask`), conferences (true stub, see
+below), clarifications, surveys, lessons, jobs/`run`, and settings
+(YAML read/validate/atomic-write).
+
+**Adapters for concurrently-developed, not-yet-implemented modules** (per
+the task brief): `_deep_search_answer()` optionally imports
+`eoa.search.deep_search.load_answer(job_id)`; if that module/function
+doesn't exist yet it falls back to the job's own `result` column, then to
+`{"error": {"code": "not_implemented", ...}}` — never a fabricated
+investigation outcome. `list_conferences()` / `conferences_ical()` are
+honest stubs (`[]` / an empty `VCALENDAR`) per `docs/API.md`'s explicit
+"phase C, stub returns [] for now", even though the `conferences` table
+already exists in the schema — the ingestion pipeline that would populate
+it isn't built yet.
+
+**Known limitations, called out in code comments rather than hidden:**
+`GET /api/items/{id}`'s `edges` is always `[]` — `eoa.memory.graph`'s
+public API (`neighbors()`) returns vertices, not edge properties, so there
+is no way to look up "edges evidenced by this item_id" without adding
+Cypher outside `graph.py` (out of this module's file scope). `build_graph()`
+similarly cannot recover a real `item_id`/`evidence` per edge from
+`neighbors()`, so those two fields are `null` on every `/api/graph` edge —
+the `src`/`dst`/`label` are real, evidence attribution is not yet exposed.
+`ItemCard.key_facts` is always `[]`: nothing in the `items` schema models
+per-item structured facts yet.
+
+### `routes/ask.py` and `ollama_client.chat_stream()`
+
+`POST /api/ask` retrieves up to 8 items nearest the question's embedding
+(`ollama_client.embed` + `eoa.memory.vector.nearest`) plus any explicit
+`context_item_ids`/`context_entity_ids`, numbers them `[n]`, wraps each
+through `ollama_client.wrap_data` (so retrieved text is DATA, never
+instructions, per `docs/CONVENTIONS.md` rule 3), and builds a Hebrew RAG
+system prompt from the existing `system_analyst` template
+(`eoa.llm.prompts.render("system_analyst", data_guard=DATA_GUARD_SYSTEM)`)
+plus a citation instruction. The response streams over SSE
+(`text/event-stream`): a `citations` event first, then a `token` event per
+content delta from the new `ollama_client.chat_stream()` generator
+(`role="resident"`, `interactive=True`), then `done` (or an `error` event on
+failure — the stream never just dies). `chat_stream()` was added at the end
+of `agent/eoa/llm/ollama_client.py` without touching any existing function,
+mirroring `chat()`'s gate-acquire/payload shape but with `stream: true` and
+yielding `message.content` deltas from the newline-delimited response.
+
+### Tests
+
+`tests/unit/test_api_smoke.py` — `fastapi.testclient.TestClient` against
+`create_app()`, with `eoa.db.get_pool`/`close_pool` monkeypatched (no
+Postgres) and `eoa.api.services` functions monkeypatched per-test with
+fixtures (no DB queries, no Ollama). Covers `/api/status`, `/api/items`,
+`/api/items/{id}/feedback` (success, 404, and a 400 for an invalid
+`user_level`), `/api/morning`, `GET /api/settings/taxonomy`, and the
+`{"error": {...}}` shape for a 404 on an unmapped route, a 404 on an
+unknown settings name, and a 422 from FastAPI's own query validation.
+Passes today via `PYTHONPATH=agent python -m pytest tests/unit -q`
+(48/48 across the whole suite, no DB/GPU/Ollama required) and is clean
+under `ruff check` / `ruff format --check`.

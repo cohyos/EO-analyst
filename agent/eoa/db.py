@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
@@ -54,3 +55,6 @@ def close_pool() -> None:
     if get_pool.cache_info().currsize:
         get_pool().close()
         get_pool.cache_clear()
+
+
+atexit.register(close_pool)

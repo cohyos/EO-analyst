@@ -230,3 +230,58 @@ def _strip_fences(text: str) -> str:
         if t.endswith("```"):
             t = t[:-3]
     return t.strip()
+
+
+def chat_stream(
+    role: str,
+    messages: list[dict[str, Any]],
+    *,
+    task: str = "summarize",
+    options: dict[str, Any] | None = None,
+    think: bool | None = None,
+    interactive: bool = False,
+    keep_alive: str | None = None,
+) -> Iterable[str]:
+    """Stream a chat completion through the gate, yielding content deltas as they arrive.
+
+    Unlike ``chat()``, this issues the request with ``stream: true`` and yields
+    each non-empty ``message.content`` delta as Ollama sends it (newline-delimited
+    JSON). Used by the ``/api/ask`` SSE endpoint. Tool calls and ``format`` schema
+    constraints are not supported here, mirroring Ollama's own streaming contract.
+    """
+    spec = gate().acquire(role, interactive=interactive)
+    assert spec.ollama, f"{spec.key} is not an Ollama model"
+    s = settings()
+    payload: dict[str, Any] = {
+        "model": spec.ollama,
+        "messages": messages,
+        "stream": True,
+        "keep_alive": keep_alive or s.ollama.keep_alive,
+        "options": {**s.ollama.options, "num_ctx": _num_ctx(task, spec), **(options or {})},
+    }
+    if think is not None:
+        payload["think"] = think
+
+    t0 = time.monotonic()
+    eval_tokens = 0
+    with _client() as c, c.stream("POST", "/api/chat", json=payload) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            data = json.loads(line)
+            msg = data.get("message", {})
+            content = msg.get("content", "")
+            if content:
+                yield content
+            if data.get("done"):
+                eval_tokens = data.get("eval_count", eval_tokens)
+                break
+    log.info(
+        "llm_chat_stream",
+        role=role,
+        model=spec.ollama,
+        task=task,
+        tokens=eval_tokens,
+        ms=int((time.monotonic() - t0) * 1000),
+    )

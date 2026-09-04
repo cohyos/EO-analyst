@@ -123,7 +123,7 @@ class Investigation:
     stop_requested: bool = False
 
 
-class StopRequested(Exception):  # noqa: N818
+class StopRequested(Exception):
     pass
 
 

@@ -46,7 +46,9 @@ async def ws_investigation(ws: WebSocket, job_id: int) -> None:
     last_log_id = await run_in_threadpool(services.latest_investigation_log_id, job_id)
     try:
         while True:
-            new_logs, last_log_id = await run_in_threadpool(services.investigation_log_since, job_id, last_log_id)
+            new_logs, last_log_id = await run_in_threadpool(
+                services.investigation_log_since, job_id, last_log_id
+            )
             for row in new_logs:
                 await ws.send_json(row)
             await asyncio.sleep(settings().api.status_push_seconds)

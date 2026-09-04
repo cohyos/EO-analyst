@@ -37,12 +37,6 @@ BODY_SIZE_PT = 11
 
 TITLE_TEXT = "דוח יומי — אלקטרואופטיקה ובינה חזותית ביטחונית"
 
-_LEVEL_LABELS_HE = {
-    "red": "🔴 קריטי",
-    "orange": "🟠 חשוב",
-    "yellow": "🟡 רקע",
-    "archive": "⚪ ארכיון",
-}
 _EVENT_KIND_LABELS_HE = {
     "contract_award": "זכייה בחוזה",
     "m_and_a": "מיזוג/רכישה",
@@ -131,7 +125,7 @@ def hebrew_date_str(d: dt.date) -> str:
     return f"יום {weekday}, {d.day} ב{month} {d.year}"
 
 
-def _fmt_date(value: Any) -> str:
+def fmt_date(value: Any) -> str:
     if value is None:
         return "—"
     if isinstance(value, dt.datetime):
@@ -141,7 +135,7 @@ def _fmt_date(value: Any) -> str:
     return str(value)[:10] or "—"
 
 
-def _fmt_amount(ev: dict) -> str:
+def fmt_amount(ev: dict) -> str:
     amount = ev.get("amount_usd")
     if amount is None:
         return "—"
@@ -202,21 +196,20 @@ def split_runs(text: str) -> list[tuple[str, str]]:
 
 
 def split_runs_with_citations(text: str) -> list[tuple[str, str]]:
-    """Like :func:`split_runs`, but further splits 'other' runs so a ``[n]`` token is its own run
-    tagged 'cite' (rendered as a superscript later)."""
+    """Like :func:`split_runs`, but first carves out every ``[n]`` token as its own run tagged
+    'cite' (rendered as a superscript later), then runs the Hebrew/Latin classification on what's
+    left. Citation tokens are extracted from the raw text *before* he/other classification so a
+    bracket never gets absorbed into a neighbouring Hebrew run (punctuation otherwise inherits the
+    class of whatever run it falls in)."""
     tokens: list[tuple[str, str]] = []
-    for cls, chunk in split_runs(text):
-        if cls != "other":
-            tokens.append((cls, chunk))
-            continue
-        pos = 0
-        for m in _CITATION_RE.finditer(chunk):
-            if m.start() > pos:
-                tokens.append(("other", chunk[pos : m.start()]))
-            tokens.append(("cite", chunk[m.start() : m.end()]))
-            pos = m.end()
-        if pos < len(chunk):
-            tokens.append(("other", chunk[pos:]))
+    pos = 0
+    for m in _CITATION_RE.finditer(text):
+        if m.start() > pos:
+            tokens.extend(split_runs(text[pos : m.start()]))
+        tokens.append(("cite", m.group(0)))
+        pos = m.end()
+    if pos < len(text):
+        tokens.extend(split_runs(text[pos:]))
     return tokens
 
 
@@ -433,11 +426,11 @@ def _add_events_table(doc: DocxDocument, events: list[dict]) -> None:
         _fill_cell(cell, text, bold=True)
     for ev in events:
         row = table.add_row().cells
-        _fill_cell(row[0], _fmt_date(ev.get("date")))
+        _fill_cell(row[0], fmt_date(ev.get("date")))
         _fill_cell(row[1], _EVENT_KIND_LABELS_HE.get(ev.get("kind"), ev.get("kind") or "—"))
         _fill_cell(row[2], ", ".join(ev.get("parties") or []) or "—")
         _fill_cell(row[3], ev.get("customer") or ev.get("program") or "—")
-        _fill_cell(row[4], _fmt_amount(ev))
+        _fill_cell(row[4], fmt_amount(ev))
         source_cell_p = row[5].paragraphs[0]
         _paragraph_rtl_right(source_cell_p)
         n = ev.get("n")
@@ -461,7 +454,7 @@ def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
         _fill_cell(row[0], str(it.get("n", "")))
         _fill_cell(row[1], it.get("title") or "—")
         _fill_cell(row[2], it.get("source_name") or "—")
-        _fill_cell(row[3], _fmt_date(it.get("published_at")))
+        _fill_cell(row[3], fmt_date(it.get("published_at")))
         url = it.get("url") or ""
         link_p = row[4].paragraphs[0]
         _paragraph_rtl_right(link_p)
@@ -640,11 +633,11 @@ def render_markdown(
             n = ev.get("n")
             src = f"[{n}]" if n is not None else (ev.get("source_name") or "—")
             lines.append(
-                f"| {_fmt_date(ev.get('date'))} "
+                f"| {fmt_date(ev.get('date'))} "
                 f"| {_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—')} "
                 f"| {', '.join(ev.get('parties') or []) or '—'} "
                 f"| {ev.get('customer') or ev.get('program') or '—'} "
-                f"| {_fmt_amount(ev)} | {src} |"
+                f"| {fmt_amount(ev)} | {src} |"
             )
         lines.append("")
 
@@ -671,7 +664,7 @@ def render_markdown(
         url = it.get("url") or ""
         lines.append(
             f"| {it.get('n')} | {it.get('title') or '—'} | {it.get('source_name') or '—'} "
-            f"| {_fmt_date(it.get('published_at'))} | [{url}]({url}) |"
+            f"| {fmt_date(it.get('published_at'))} | [{url}]({url}) |"
         )
     return "\n".join(lines) + "\n"
 
@@ -731,11 +724,11 @@ def render_html(
             )
             parts.append(
                 "<tr>"
-                f"<td>{html.escape(_fmt_date(ev.get('date')))}</td>"
+                f"<td>{html.escape(fmt_date(ev.get('date')))}</td>"
                 f"<td>{html.escape(_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—'))}</td>"
                 f"<td>{html.escape(', '.join(ev.get('parties') or []) or '—')}</td>"
                 f"<td>{html.escape(ev.get('customer') or ev.get('program') or '—')}</td>"
-                f"<td>{html.escape(_fmt_amount(ev))}</td>"
+                f"<td>{html.escape(fmt_amount(ev))}</td>"
                 f"<td>{src}</td>"
                 "</tr>"
             )
@@ -776,7 +769,7 @@ def render_html(
             f"<td>{it.get('n')}</td>"
             f"<td>{html.escape(it.get('title') or '—')}</td>"
             f"<td>{html.escape(it.get('source_name') or '—')}</td>"
-            f"<td>{html.escape(_fmt_date(it.get('published_at')))}</td>"
+            f"<td>{html.escape(fmt_date(it.get('published_at')))}</td>"
             f"<td>{link}</td>"
             "</tr>"
         )

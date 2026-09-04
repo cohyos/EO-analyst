@@ -1,0 +1,251 @@
+"""Shared pytest fixtures for all tests."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from eoa.config import ModelSpec, ModelsRegistry, Settings, settings
+from eoa.resources.gpu import GpuStatus, HostStatus, LoadedModel
+
+
+@pytest.fixture
+def minimal_settings() -> Settings:
+    """A minimal Settings object for tests that don't use the real config files."""
+    return Settings(
+        timezone="Asia/Jerusalem",
+        schedule=MagicMock(),
+        registry=ModelsRegistry(
+            allowed_origins=["US", "EU", "IL"],
+            allowed_formats=["gguf"],
+            models={
+                "resident": ModelSpec(
+                    key="resident",
+                    ollama="gemma4:12b",
+                    vendor="Google",
+                    origin="US",
+                    license="Apache-2.0",
+                    est_vram_mb=8200,
+                ),
+                "light": ModelSpec(
+                    key="light",
+                    ollama="gemma4:e4b",
+                    vendor="Google",
+                    origin="US",
+                    license="Apache-2.0",
+                    est_vram_mb=5500,
+                ),
+                "embed": ModelSpec(
+                    key="embed",
+                    ollama="multilingual-e5-large",
+                    vendor="Microsoft",
+                    origin="US",
+                    license="MIT",
+                    dim=1024,
+                    est_vram_mb=1300,
+                ),
+                "guard_l1": ModelSpec(
+                    key="guard_l1",
+                    ollama="prompt_injection_deberta",
+                    vendor="Microsoft",
+                    origin="US",
+                    license="MIT",
+                    runtime="onnx",
+                    est_vram_mb=0,
+                ),
+                "disallowed": ModelSpec(
+                    key="disallowed",
+                    ollama="qwen:7b",
+                    vendor="Alibaba",
+                    origin="CN",  # Not allowed
+                    license="MIT",
+                    est_vram_mb=5000,
+                ),
+            },
+        ),
+        models={
+            "resident": "resident",
+            "light": "light",
+            "embed": "embed",
+            "guard_l1": "guard_l1",
+        },
+        triage=MagicMock(levels={"red": 8, "orange": 6, "yellow": 4}),
+        deep_search=MagicMock(
+            max_queries=15,
+            max_pages=30,
+            per_investigation_timeout_min=25,
+            langs_primary=["he", "en"],
+            langs_secondary=["ru", "zh", "fr", "de"],
+            confidence_stop=0.8,
+        ),
+        resources=MagicMock(
+            vram_total_mb=12227,
+            vram_safety_margin_mb=1200,
+            min_free_vram_mb={"resident": 9500, "light": 6000, "embed": 1500},
+            min_free_disk_gb=20,
+            gpu_temp_pause_c=83,
+            gpu_temp_stop_c=88,
+            queue_backoff_seconds=[5, 10, 30, 60],
+            queue_timeout_min=20,
+            min_loaded_seconds=300,
+            polite_mode=MagicMock(
+                external_gpu_util_threshold=25,
+                enabled_outside_night_window=True,
+            ),
+        ),
+        watchlist={"companies": [], "programs": []},
+    )
+
+
+@pytest.fixture
+def mock_host_status() -> HostStatus:
+    """A default HostStatus with sufficient resources."""
+    return HostStatus(
+        at=datetime.now(tz=UTC),
+        gpu=GpuStatus(
+            vram_total_mb=12227,
+            vram_used_mb=2000,
+            util_pct=10,
+            temp_c=50,
+            available=True,
+        ),
+        ram_free_mb=32000,
+        ram_total_mb=64000,
+        disk_free_gb=100,
+        loaded_models=[],
+    )
+
+
+@pytest.fixture
+def mock_host_status_low_vram() -> HostStatus:
+    """HostStatus with limited VRAM."""
+    return HostStatus(
+        at=datetime.now(tz=UTC),
+        gpu=GpuStatus(
+            vram_total_mb=12227,
+            vram_used_mb=10000,  # Only 2GB free
+            util_pct=50,
+            temp_c=75,
+            available=True,
+        ),
+        ram_free_mb=8500,
+        ram_total_mb=64000,
+        disk_free_gb=100,
+        loaded_models=[],
+    )
+
+
+@pytest.fixture
+def mock_host_status_hot_gpu() -> HostStatus:
+    """HostStatus with high GPU temperature."""
+    return HostStatus(
+        at=datetime.now(tz=UTC),
+        gpu=GpuStatus(
+            vram_total_mb=12227,
+            vram_used_mb=2000,
+            util_pct=80,
+            temp_c=90,  # Above stop threshold of 88
+            available=True,
+        ),
+        ram_free_mb=32000,
+        ram_total_mb=64000,
+        disk_free_gb=100,
+        loaded_models=[],
+    )
+
+
+@pytest.fixture
+def mock_host_status_low_disk() -> HostStatus:
+    """HostStatus with low disk space."""
+    return HostStatus(
+        at=datetime.now(tz=UTC),
+        gpu=GpuStatus(
+            vram_total_mb=12227,
+            vram_used_mb=2000,
+            util_pct=10,
+            temp_c=50,
+            available=True,
+        ),
+        ram_free_mb=32000,
+        ram_total_mb=64000,
+        disk_free_gb=15,  # Below 20 GB minimum
+        loaded_models=[],
+    )
+
+
+@pytest.fixture
+def mock_host_status_no_gpu() -> HostStatus:
+    """HostStatus with no GPU available."""
+    return HostStatus(
+        at=datetime.now(tz=UTC),
+        gpu=GpuStatus(
+            vram_total_mb=0,
+            vram_used_mb=0,
+            util_pct=0,
+            temp_c=0,
+            available=False,
+            error="No NVIDIA GPU detected",
+        ),
+        ram_free_mb=32000,
+        ram_total_mb=64000,
+        disk_free_gb=100,
+        loaded_models=[],
+    )
+
+
+@pytest.fixture
+def mock_host_with_loaded_model() -> HostStatus:
+    """HostStatus with a model already loaded."""
+    return HostStatus(
+        at=datetime.now(tz=UTC),
+        gpu=GpuStatus(
+            vram_total_mb=12227,
+            vram_used_mb=8500,  # Model is loaded
+            util_pct=40,
+            temp_c=65,
+            available=True,
+        ),
+        ram_free_mb=32000,
+        ram_total_mb=64000,
+        disk_free_gb=100,
+        loaded_models=[
+            LoadedModel(
+                name="gemma4:12b",
+                size_mb=8200,
+                size_vram_mb=8200,
+            ),
+        ],
+    )
+
+
+@pytest.fixture(autouse=True)
+def clear_settings_cache():
+    """Clear the settings cache before and after each test."""
+    settings.cache_clear()
+    yield
+    settings.cache_clear()
+
+
+@pytest.fixture
+def mock_database(monkeypatch):
+    """Mock the database module to prevent connection attempts."""
+
+    class MockConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, *args, **kwargs):
+            return MagicMock(fetchone=MagicMock(return_value=None))
+
+    def mock_connection():
+        return MockConnection()
+
+    monkeypatch.setattr("eoa.db.connection", mock_connection)
+    return mock_connection

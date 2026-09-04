@@ -127,3 +127,48 @@ bdi {
   overflow-x: auto;
   max-width: 100%;
 }
+
+.eo-citation {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1rem;
+  height: 1rem;
+  margin: 0 0.125rem;
+  padding: 0 0.25rem;
+  border-radius: 0.25rem;
+  background: var(--accent-muted);
+  color: var(--accent-fg);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.625rem;
+  font-weight: 600;
+  vertical-align: super;
+  text-decoration: none;
+}
+.eo-citation:hover {
+  background: var(--accent);
+}
+
+.report-body h2 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+.report-body h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.375rem;
+}
+.report-body p {
+  line-height: 1.7;
+  margin-bottom: 0.75rem;
+}
+.report-body ul {
+  list-style: disc;
+  padding-inline-start: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+.report-body li {
+  margin-bottom: 0.25rem;
+}

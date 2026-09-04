@@ -60,7 +60,7 @@ def split_sentences(text: str) -> list[str]:
         if not part:
             continue
         buf = f"{buf}{part}" if buf else part
-        stripped = buf.rstrip()
+        stripped = buf.strip()
         if not stripped:
             continue
         # Don't split on a decimal point (e.g. "3.5 מיליון").
@@ -69,8 +69,11 @@ def split_sentences(text: str) -> list[str]:
             window = stripped[-3:]
             if _DECIMAL_RE.search(window):
                 boundary_is_decimal = True
-        # Don't split right after a known abbreviation.
-        ends_with_abbrev = any(stripped.endswith(abbr) for abbr in _ABBREVIATIONS)
+        # Don't split right after a known abbreviation (the abbreviation itself never carries the
+        # boundary punctuation, e.g. 'ארה"ב' immediately followed by a sentence-ending period).
+        ends_with_abbrev = stripped[-1] in ".?!:" and any(
+            stripped[:-1].rstrip().endswith(abbr) for abbr in _ABBREVIATIONS
+        )
         if boundary_is_decimal or ends_with_abbrev:
             continue
         sentences.append(stripped)
