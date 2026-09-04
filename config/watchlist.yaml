@@ -54,6 +54,6 @@ conferences_seed:
   - { name: "SOF Week", month: 5, city: Tampa, relevance: 4 }
   - { name: Xponential, month: 5, city: US, relevance: 4 }
   - { name: "SPIE Defense + Commercial Sensing", month: 4, city: US, relevance: 5 }
-  - { name: "ISDEF", month: 6, city: "Tel Aviv", cadence: biennial, relevance: 4 }
+  - { name: "ISDEF", month: 6, city: "Tel Aviv", cadence: biennial_odd, relevance: 4 }
   - { name: "Euronaval", month: 11, city: Paris, cadence: biennial_even, relevance: 4 }
   - { name: "IDEX / NAVDEX", month: 2, city: "Abu Dhabi", cadence: biennial_odd, relevance: 4 }
