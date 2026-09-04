@@ -458,6 +458,18 @@ def _act(
             elif name == "read":
                 out = _tool_read(inv, budget, str(args.get("url", "")), round_no)
             elif name == "finish":
+                if (
+                    str(args.get("outcome")) in {"found", "partial"}
+                    and float(args.get("confidence") or 0) >= 0.6
+                    and not inv.read_urls
+                    and budget.pages < budget.max_pages
+                ):
+                    # rigor rule (FR-4.4): a confident answer must rest on at least one page actually read
+                    out = json.dumps(
+                        {"error": "read at least one source page (read) before finishing with found/partial"}
+                    )
+                    transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
+                    continue
                 try:
                     inv.result = InvestigationOut.model_validate(
                         {
