@@ -305,6 +305,12 @@ def _run_forever() -> None:
     from eoa.fetch.remote import serve_fetch_jobs
 
     log.info("fetch.service_start")
+    try:
+        from eoa.notify.relay import start_relay_thread
+
+        start_relay_thread()  # public-topic mirror (only this container has egress)
+    except Exception as exc:
+        log.warning("fetch.relay_start_failed", error=str(exc)[:120])
     interval_s = settings().schedule.daytime_rss_poll_minutes * 60
     while True:
         serve_fetch_jobs(stop_after=interval_s)

@@ -28,12 +28,11 @@
     ./scripts/verify_isolation.ps1
 #>
 
-[CmdletBinding()]
 param(
     [string]$Service = "agent"
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $failures = 0
 
 function Test-Case {
@@ -48,21 +47,26 @@ function Test-Case {
     Write-Host "== $Name ==" -ForegroundColor Cyan
     Write-Host "  expecting: $Expectation"
 
-    docker compose exec -T $Service python -c $PyCode
+    # Run the command and capture exit code
+    & docker compose exec -T $Service python -c $PyCode
     $exitCode = $LASTEXITCODE
 
     if ($Expectation -eq "ExpectFail") {
         if ($exitCode -ne 0) {
             Write-Host "  PASS (call failed as expected, exit $exitCode)" -ForegroundColor Green
-        } else {
-            Write-Host "  FAIL (call SUCCEEDED — internet egress is not blocked!)" -ForegroundColor Red
+        }
+        else {
+            Write-Host "  FAIL (call SUCCEEDED - internet egress is not blocked!)" -ForegroundColor Red
             $script:failures++
         }
-    } else {
+    }
+    else {
         if ($exitCode -eq 0) {
             Write-Host "  PASS (call succeeded as expected)" -ForegroundColor Green
-        } else {
-            Write-Host "  FAIL (call failed, exit $exitCode — check Ollama is running on the host at :11434, and that docker compose up has started `$Service`)" -ForegroundColor Red
+        }
+        else {
+            $msg = "  FAIL (call failed, exit $exitCode - check Ollama is running on the host at :11434, and that docker compose up has started $Service)"
+            Write-Host $msg -ForegroundColor Red
             $script:failures++
         }
     }
@@ -84,7 +88,8 @@ Write-Host ""
 if ($failures -eq 0) {
     Write-Host "All isolation checks passed." -ForegroundColor Green
     exit 0
-} else {
+}
+else {
     Write-Host "$failures isolation check(s) FAILED. See docker-compose.yml's network isolation note and docs/MODULES.md." -ForegroundColor Red
     exit 1
 }
