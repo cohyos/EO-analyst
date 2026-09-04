@@ -26,7 +26,7 @@ export function AppShell() {
           <TopBar nightWindow={statusState.status?.pipeline.night_window ?? false} />
           <main className="min-h-0 flex-1 overflow-y-auto bg-bg">
             <ErrorBoundary key={location.pathname}>
-              <Outlet />
+              <Outlet context={statusState} />
             </ErrorBoundary>
           </main>
         </div>

@@ -24,6 +24,19 @@ log = structlog.get_logger(__name__)
 STAGE = "analyze"
 MAX_CHARS = 12000
 
+_ORG_KEYWORDS = (
+    "air force",
+    "army",
+    "navy",
+    "ministry",
+    "department",
+    "command",
+    "agency",
+    "nato",
+    "dod",
+)
+_PROGRAM_KEYWORDS = ("program", "project", "programme")
+
 
 @dataclass
 class AnalyzeStats:
@@ -89,6 +102,47 @@ def _parse_date(s: str | None) -> date | None:
         return None
 
 
+def _heuristic_kind(name: str) -> str:
+    """Guess an entity `kind` from its name when no better information exists.
+
+    Military/government bodies (Air Force, Ministry, NATO, ...) -> "org";
+    named programs/projects -> "program"; everything else defaults to
+    "company", the historical (and often wrong) default this replaces.
+    """
+    lname = name.lower()
+    if any(kw in lname for kw in _ORG_KEYWORDS):
+        return "org"
+    if any(kw in lname for kw in _PROGRAM_KEYWORDS):
+        return "program"
+    return "company"
+
+
+def _resolve_edge_kinds(names: list[str]) -> dict[str, str]:
+    """Resolve a `name -> kind` map for every edge endpoint about to be upserted.
+
+    Priority: (1) the kind already on record in `entities` -- typically set
+    correctly by `classify.persist_classification` from the LLM's
+    `EntityMention.kind` -- so a later, cruder guess here never overwrites a
+    better-informed one; (2) a keyword heuristic; (3) "company" as the last
+    resort. Never raises: a DB lookup failure just falls back to (2)/(3) for
+    every name, same as before this function existed.
+    """
+    if not names:
+        return {}
+    existing: dict[str, str] = {}
+    try:
+        from eoa.db import connection
+
+        with connection() as conn:
+            rows = conn.execute(
+                "SELECT name, kind FROM entities WHERE name = ANY(%s)", (names,)
+            ).fetchall()
+        existing = {r["name"]: r["kind"] for r in rows if r.get("kind")}
+    except Exception as exc:
+        log.debug("edge_kind_lookup_failed", error=str(exc)[:120])
+    return {name: existing.get(name) or _heuristic_kind(name) for name in names}
+
+
 def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     """Write summary/so-what/events/edges. Returns (events_written, edges_written)."""
     update_item_fields(
@@ -122,11 +176,15 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
         try:
             from eoa.memory.graph import add_edge, merge_entity
 
+            names = sorted({e.src for e in out.edges} | {e.dst for e in out.edges})
+            kind_by_name = _resolve_edge_kinds(names)
             for e in out.edges:
-                src_id = upsert_entity(name=e.src, kind="company", first_seen_item=item["id"])
-                dst_id = upsert_entity(name=e.dst, kind="company", first_seen_item=item["id"])
-                merge_entity(src_id, e.src, "company", None)
-                merge_entity(dst_id, e.dst, "company", None)
+                src_kind = kind_by_name.get(e.src, "company")
+                dst_kind = kind_by_name.get(e.dst, "company")
+                src_id = upsert_entity(name=e.src, kind=src_kind, first_seen_item=item["id"])
+                dst_id = upsert_entity(name=e.dst, kind=dst_kind, first_seen_item=item["id"])
+                merge_entity(src_id, e.src, src_kind, None)
+                merge_entity(dst_id, e.dst, dst_kind, None)
                 add_edge(src_id, dst_id, e.label, item["id"], {"evidence": e.evidence_he[:300]})
                 n_edges += 1
         except Exception as exc:

@@ -40,6 +40,8 @@ EDGE_LABELS = {
 
 _AGTYPE_SUFFIX_RE = re.compile(r"::(vertex|edge|path)\s*$")
 
+_SAFE_PROP_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def _parse_agtype(raw: Any) -> Any:
     """Parse one agtype text value from a `cypher()` result column.
@@ -124,21 +126,38 @@ def add_edge(
     item_id: int | None,
     props: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Merge a `label`-typed edge `src -> dst`, stamped with the evidencing `item_id`."""
+    """Merge a `label`-typed edge `src -> dst`, stamped with the evidencing `item_id`.
+
+    Apache AGE 1.7 rejects ``SET r += $props`` (and even ``SET r = $props``)
+    with ``SET clause expects a map`` when ``$props`` is a *parameterized*
+    map -- despite the parameter genuinely being a map at runtime (``keys()``
+    resolves it fine). AGE's SET clause only recognizes a literal map
+    expression in the query text, not a runtime map value arriving through
+    ``$param``. The workaround, verified against the live DB: SET each
+    property individually through its own scalar parameter (``r.item_id =
+    $p0, r.evidence = $p1, ...``) instead of merging a map in one shot.
+    """
     _require_edge_label(label)
     edge_props = dict(props or {})
     edge_props["item_id"] = item_id
+
+    params: dict[str, Any] = {"src": src_entity_id, "dst": dst_entity_id}
+    set_clauses: list[str] = []
+    for i, (key, value) in enumerate(edge_props.items()):
+        if not _SAFE_PROP_KEY_RE.match(key):
+            raise ValueError(f"unsafe edge property key: {key!r}")
+        pname = f"p{i}"
+        params[pname] = value
+        set_clauses.append(f"r.{key} = ${pname}")
+    set_clause = f"SET {', '.join(set_clauses)}" if set_clauses else ""
+
     cypher_body = f"""
         MATCH (a:Entity {{entity_id: $src}}), (b:Entity {{entity_id: $dst}})
         MERGE (a)-[r:{label}]->(b)
-        SET r += $props
+        {set_clause}
         RETURN r
     """
-    rows = _run_cypher(
-        cypher_body,
-        {"src": src_entity_id, "dst": dst_entity_id, "props": edge_props},
-        "r agtype",
-    )
+    rows = _run_cypher(cypher_body, params, "r agtype")
     log.info("graph.edge_added", src=src_entity_id, dst=dst_entity_id, label=label, item_id=item_id)
     return _parse_agtype(rows[0]["r"]) if rows else {}
 

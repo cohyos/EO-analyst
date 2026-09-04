@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { Download } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
-import { linkifyReportCitations } from "@/lib/reportHtml";
+import { ReportBody } from "@/components/reports/ReportBody";
 import { formatDate, formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 
@@ -42,16 +42,11 @@ export function ReportsPage() {
     enabled: !!selectedId,
   });
 
+  // Heading ids (for the TOC) are added to the raw server HTML; citation
+  // `[n]` markers are linkified separately, inside <ReportBody>, so this
+  // effect never double-wraps an already-linkified `[n]` token.
   const processed = useMemo(
-    () =>
-      detailQuery.data
-        ? addHeadingIds(
-            linkifyReportCitations(
-              detailQuery.data.html ?? "",
-              detailQuery.data.items_included ?? [],
-            ),
-          )
-        : null,
+    () => (detailQuery.data ? addHeadingIds(detailQuery.data.html ?? "") : null),
     [detailQuery.data],
   );
 
@@ -124,12 +119,16 @@ export function ReportsPage() {
                     <Download size={13} aria-hidden="true" />
                     md
                   </a>
+                  <a
+                    href={api.getReportFileUrl(detailQuery.data.id, "html")}
+                    className="flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-xs hover:bg-bg-sunken"
+                  >
+                    <Download size={13} aria-hidden="true" />
+                    html
+                  </a>
                 </div>
               </div>
-              <div
-                className="report-body text-sm"
-                dangerouslySetInnerHTML={{ __html: processed.html }}
-              />
+              <ReportBody html={processed.html} itemsIncluded={detailQuery.data.items_included ?? []} />
             </article>
             {processed.toc.length > 0 && (
               <nav aria-label="תוכן עניינים" className="hidden w-48 shrink-0 lg:block">

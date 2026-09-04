@@ -6,12 +6,16 @@ import type { MorningResponse } from "@/types/api";
 
 const getMorning = vi.fn();
 const postClarificationAnswer = vi.fn();
+const getTenders = vi.fn();
+const getTenderForecasts = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
     getMorning: (...args: unknown[]) => getMorning(...args),
     postClarificationAnswer: (...args: unknown[]) => postClarificationAnswer(...args),
     getReportFileUrl: (id: number, fmt: string) => `/api/reports/${id}/file?fmt=${fmt}`,
+    getTenders: (...args: unknown[]) => getTenders(...args),
+    getTenderForecasts: (...args: unknown[]) => getTenderForecasts(...args),
   },
   USE_MOCKS: false,
 }));
@@ -34,6 +38,13 @@ function renderMorningPage() {
 beforeEach(() => {
   getMorning.mockReset();
   postClarificationAnswer.mockReset();
+  getTenders.mockReset();
+  getTenderForecasts.mockReset();
+  // Most tests below don't care about the tenders tile -- default it to an
+  // empty, non-hanging response so `MorningPage`'s unconditional tenders
+  // queries never leave those tests waiting on unresolved promises.
+  getTenders.mockResolvedValue([]);
+  getTenderForecasts.mockResolvedValue([]);
 });
 
 describe("MorningPage against an empty/partial backend", () => {
@@ -111,5 +122,38 @@ describe("MorningPage against an empty/partial backend", () => {
 
     expect(await screen.findByText("כותרת בדיקה")).toBeInTheDocument();
     expect(screen.getByText("שאלה פתוחה?")).toBeInTheDocument();
+  });
+});
+
+describe("MorningPage tenders tile", () => {
+  it("counts only open tenders due within 30 days and forecasts created in the last week", async () => {
+    getMorning.mockResolvedValue({
+      report: null,
+      headlines: [],
+      open_points: [],
+      night_summary: null,
+    });
+
+    const now = Date.now();
+    const inDays = (n: number) => new Date(now + n * 86_400_000).toISOString().slice(0, 10);
+    const hoursAgo = (n: number) => new Date(now - n * 60 * 60 * 1000).toISOString();
+
+    getTenders.mockResolvedValue([
+      { id: 1, deadline: inDays(5), status: "open" }, // within 30 days -> counted
+      { id: 2, deadline: inDays(45), status: "open" }, // beyond 30 days -> not counted
+      { id: 3, deadline: null, status: "open" }, // no deadline -> not counted
+    ]);
+    getTenderForecasts.mockResolvedValue([
+      { id: 10, created_at: hoursAgo(2) }, // within the last week -> counted
+      { id: 11, created_at: hoursAgo(24 * 20) }, // 20 days ago -> not counted
+    ]);
+
+    renderMorningPage();
+
+    expect(await screen.findByText("1")).toBeInTheDocument();
+    expect(
+      screen.getByText("מכרזים פתוחים ב-30 הימים הקרובים · 1 תחזיות חדשות השבוע"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("מכרזים ו-RFI/RFP")).toBeInTheDocument();
   });
 });

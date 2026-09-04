@@ -16,6 +16,6 @@ export function linkifyReportCitations(
     const n = Number(nStr);
     const itemId = items[n - 1];
     if (!itemId) return match;
-    return `<a class="eo-citation" href="/feed?open=${itemId}" title="פתח פריט מקור ${n}">${match}</a>`;
+    return `<a class="eo-citation" data-item-id="${itemId}" href="/feed?open=${itemId}" title="פתח פריט מקור ${n}">${match}</a>`;
   });
 }

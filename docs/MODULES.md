@@ -1279,6 +1279,114 @@ issue rather than universal; a handful of NER-extracted "entities"
 are clearly source names or the item's own title rather than a real
 company/program/person (e.g. "Breaking Defense" listed as an entity).
 
+### Tenders screen + Morning deferred items pass (2026-09-04)
+
+Implements the `docs/API.md` "Tenders / RFI / RFP" section (5.2) in the UI,
+plus two deferred items from the previous pass. `web/` only — no backend
+files touched.
+
+**Delivered:**
+- **New `/tenders` screen** (`pages/TendersPage.tsx`, nav rail entry "מכרזים
+  והזדמנויות" with a gavel icon, `components/tenders/*`), two tabs synced to
+  a `?tab=open|forecast` URL param:
+  - **מכרזים פתוחים**: a filterable table (`TenderFilters.tsx` — status,
+    country derived from the loaded rows, free-text search, all client-side
+    since `GET /api/tenders` is capped at ≤500 rows) over `TenderTable.tsx`:
+    deadline chip (red/urgent under 14 days, shows "עברו N ימים" once past
+    due — `lib/tenders.ts` `daysLeft()`, a pure UTC-calendar-day diff so it's
+    immune to the deadline's bare-`DATE` string vs. the viewer's
+    time-of-day), outbound title link (↗, `target=_blank`), agency + a
+    regional-indicator flag emoji for `country` (`lib/countryFlag.ts`), 1-5
+    relevance dots, matched-term chips, and a status chip. Row click expands
+    `summary_he` + entity chips + `cpv_naics` + a link to `/items/:id` when
+    `item_id` is set.
+  - **תחזית מכרזים**: cards sorted by `likelihood` descending
+    (`ForecastList.tsx`) — platform → `payload_need`, buyer-country flag, a
+    likelihood meter banded high/mid/low at 0.66/0.33 (reusing the
+    `--level-red/orange/archive` tokens so it reads consistently with
+    `LevelBadge`), `window_from`–`window_to`, candidate-vendor chips, and
+    `rationale_he` with every `[item N]` token (the exact format
+    `agent/eoa/llm/schemas/tenders.py` `TenderForecastOut` prompts the LLM
+    to emit) turned into a link straight to `/items/N` — no extra fetch
+    needed since N already is the item id, unlike the report body's `[n]`
+    citation-index convention. A static Hebrew banner explains the
+    deterministic-rules + LLM-rationale split. Both tabs get a dedicated
+    Hebrew empty state.
+- **Morning page tile**: `TendersTile` in `MorningPage.tsx` — count of open
+  tenders with `daysLeft(deadline) <= 30` plus forecasts created in the last
+  7 days, linking to `/tenders`.
+- **Deferred (a) — night-run replay timeline + live strip**: `AppShell.tsx`
+  now passes its single `useStatusSocket()` result down via
+  `<Outlet context={...}>` (React Router `useOutletContext`) instead of
+  keeping it local to `StatusStrip`/`TopBar`, so `MorningPage` can read
+  `pipeline` without opening a second WS connection (and safely renders
+  neither section when there's no such ancestor, e.g. a unit test).
+  `lib/pipelineTimeline.ts` `buildStageTimeline()` orders `last_run.stages`
+  by the canonical `agent/eoa/orchestrator/jobs.py` `STAGE_ORDER`, appending
+  any unrecognized key sorted by its own `last_at`; the API has no per-stage
+  start time, so each stage's `start` is approximated as the previous
+  stage's `last_at` (first stage: the run's own `started_at`) — documented
+  as an approximation in both the code and the UI's own helper text, not
+  presented as a real measurement. `PipelineReplayTimeline.tsx` renders a
+  colored segment bar (color by `last_event`: done/skipped/error/running)
+  plus a legend with an events-count + `last_at` tooltip per stage.
+  `NowRunningStrip.tsx` shows a pulsing "מה קורה עכשיו" strip with
+  `pipeline.stage` and `timeAgo(current_job.updated_at)` as the heartbeat
+  age (the `jobs` table has no dedicated heartbeat column; `updated_at` is
+  what `eoa.memory.relational.heartbeat()` bumps) whenever
+  `pipeline.current_job` is set.
+- **Deferred (b) — report-viewer citation hover chips + html download**:
+  `lib/reportHtml.ts` `linkifyReportCitations()` now also stamps
+  `data-item-id` on each `[n]` anchor. New `components/reports/ReportBody.tsx`
+  wraps the (still `dangerouslySetInnerHTML`-rendered) report body with a
+  mouseover/mouseout delegate that resolves the hovered citation's item via
+  `GET /api/items/{id}` (`react-query`-cached per id) and floats a tooltip
+  with its title/`source_name`/date — replacing the old static
+  `title="פתח פריט מקור n"` attribute-only hover. Used by both
+  `ReportsPage.tsx` and `MorningPage.tsx`'s report section, which both also
+  gained an "html" download button (`getReportFileUrl(id, "html")`) next to
+  the existing docx/md ones. (`ReportsPage.tsx`'s heading-id/TOC pass now
+  runs on the raw server HTML *before* `ReportBody` linkifies citations —
+  running both on the same string would have nested a second `<a
+  class="eo-citation">` inside the first for every `[n]`.)
+- **Types/normalizers/mocks**: `TenderCard`/`ForecastCard`/`TenderStatus` in
+  `types/api.ts` (field-for-field against `_tender_card`/`_forecast_card` in
+  `agent/eoa/api/services.py` and the `tenders`/`tender_forecasts` DDL in
+  `db/migrations/versions/0004_tenders.py` — `sources` is a plain `TEXT[]`
+  of URLs, not a structured citation object like `AskCitation`), `getTenders`/
+  `getTenderForecasts` added to `ApiClient` + `real.ts` + `mockApi.ts`.
+  `mocks/data/tenders.ts` ships 12 tenders / 2 forecasts (matching the live
+  DB's row counts at the time of writing) spanning all four `TenderStatus`
+  values and both likelihood bands, so `VITE_USE_MOCKS=true` renders a
+  representative `/tenders` screen end-to-end (visually verified via the
+  Playwright/Chrome preview: table, filters, row expand, forecast sort,
+  `[item N]` links, and the Morning tile/timeline/citation-hover chip all
+  checked against live mock data).
+
+**Backend gap found, not fixed (out of scope — `web/` only)**: the running
+`web` container/process at `127.0.0.1:8765` returns
+`{"error":{"code":"not_found",...}}` (Starlette's generic 404 handler, not
+the app's own `not_found()` factory) for both `GET /api/tenders` and
+`GET /api/tenders/forecasts`, even though `agent/eoa/api/routes/tenders.py`
+exists, is registered in `app.py` (`app.include_router(tenders.router,
+prefix="/api")`), and `services.list_tenders`/`list_tender_forecasts` are
+implemented — i.e. the code is correct but the live process predates that
+router being wired in. Needs a restart of the `web` service to pick up the
+current code; not something fixable from `web/`.
+
+**Tests** (`vitest run`, all green): `lib/tenders.test.ts` (`daysLeft`
+UTC-day arithmetic incl. overdue/today/unparseable, `likelihoodBand`
+thresholds), `lib/pipelineTimeline.test.ts` (`buildStageTimeline` canonical
+ordering vs. object insertion order, start-approximation chaining, unknown
+stage-key fallback + sort, `stageEventColor` mapping), `pages/TendersPage.test.tsx`
+(both tabs against fixtures, empty states, outbound link attrs, urgent vs.
+non-urgent deadline chip styling, no-deadline em-dash, row expand/collapse,
+status filter, forecast sort-by-likelihood, `[item N]` → `/items/N` link
+parsing, tab switching), and an extended `pages/MorningPage.test.tsx` (new
+`getTenders`/`getTenderForecasts` mocks so the tile's queries never hang the
+existing tests; one new test asserting the tile counts only tenders with
+`deadline <= 30 days` and forecasts `created_at` within the last week).
+
 ## Orchestrator
 
 Files: `agent/eoa/orchestrator/main.py`, `agent/eoa/orchestrator/jobs.py`.
@@ -2499,3 +2607,144 @@ per-source `notes`). `load_tender_sources()`/`load_platform_payloads()` are also
 the real `config/tenders.yaml`/`platform_payloads.yaml` files (not just fixtures), so a config typo
 that breaks pydantic validation fails the unit suite. Passes via
 `PYTHONPATH=agent python -m pytest tests/unit/test_tenders_scan.py tests/unit/test_tenders_forecast.py tests/unit/test_tenders_report_section.py -q`.
+
+## `WS /ws/status` robustness fix (socket closing immediately after accept)
+
+**Root cause**: `WebSocket.send_json` (starlette) calls plain `json.dumps` with no `default=`. Two of
+`_status_payload()`'s inputs could carry raw `datetime.datetime` values straight from a psycopg
+`dict_row` (`pipeline_status()`'s `current_job` — a `jobs` row, `TIMESTAMPTZ` columns like
+`started_at`/`finished_at` — and `run_log_since()`'s `run_log` rows, `heartbeat_at`/`created_at`).
+`json.dumps` raised `TypeError` on the first such value, and — since `ws_status()`'s `try/except`
+only caught `WebSocketDisconnect` — that exception was uncaught and fatal to the whole handler,
+killing the socket right after `accept()` with no frame ever sent. In practice this fired reliably
+whenever any `jobs` row was ever in state `'running'` (including a stale one left over from a
+crashed run), which is why it reproduced on every connection against the live DB. A second,
+independent issue: `gate().status()` was called inline on the event loop (it shells out to
+`nvidia-smi`, and on Windows to a `powershell` subprocess for RAM, plus an HTTP call to Ollama) —
+real blocking I/O that, unlike the DB calls beside it, was not wrapped in `run_in_threadpool`.
+
+**Fix** (`agent/eoa/api/routes/status.py`, `agent/eoa/api/services.py`):
+- `services._json_safe_row(row)` recursively coerces `datetime`/`date`/`Decimal` DB values to
+  JSON-native types (isoformat strings / floats); applied to `pipeline_status()`'s `current_job` and
+  each row from `run_log_since()`.
+- `status.py` sends every frame through `_dumps()` (`json.dumps(..., default=str)`) instead of
+  `WebSocket.send_json`, as a second line of defense for anything not covered by the point above.
+- `gate().status()` is now called via `run_in_threadpool`, matching `services_status()`/
+  `pipeline_status()`.
+- The first status frame is sent immediately after `accept()`, before `latest_run_log_id()` (or
+  anything else) can block or fail.
+- Each tick of the push loop is wrapped in its own `try/except Exception` (catching
+  `WebSocketDisconnect` separately, to end the handler cleanly): a single bad tick (DB hiccup,
+  telemetry error, an unexpected non-serialisable value) is logged
+  (`ws_status.tick_failed`/`ws_status.first_frame_failed`/`ws_status.init_failed`) and skipped —
+  the socket stays open and keeps pushing on the next tick.
+
+Regression coverage: `tests/unit/test_ws_status.py` (FastAPI `TestClient.websocket_connect`, all
+DB/gate/services calls monkeypatched) — asserts at least two frames arrive and parse as JSON with
+`services`/`gate`/`pipeline` keys; asserts the socket survives a `current_job` still carrying a raw
+`datetime` (defense-in-depth); asserts the socket survives one tick's `pipeline_status()` raising
+outright and keeps delivering later frames.
+
+## Mojibake / encoding fix (`eoa.fetch.html._decode`, `eoa.fetch.sanitize`)
+
+**Root cause**: `_decode` only ever consulted the HTTP `Content-Type` charset (via
+`httpx.Response.charset_encoding`), defaulting to UTF-8 (with `errors="replace"`) whenever that was
+absent — never the page's own `<meta charset>`/XML declaration. Pages serving Hebrew content as
+windows-1255 with no (or a wrong) HTTP charset were decoded as UTF-8, producing replacement
+characters or "×¢×‘×¨×™×ª"/"â€™"-style mojibake in `items.clean_text`/`title`.
+
+**Fix**:
+- `eoa/eoa/fetch/html.py::_decode` now tries, in order: the HTTP `Content-Type` charset -> an
+  in-document declaration sniffed from the first 4KB (`<meta charset>`, the `http-equiv`
+  `Content-Type` form, or an XML declaration, via `_sniff_declared_encoding`) -> `charset_normalizer`'s
+  statistical guess (`_detect_with_charset_normalizer`) -> UTF-8 with `errors="replace"` as a last
+  resort. A claimed *permissive* single-byte encoding (latin-1/cp1252 — `_PERMISSIVE_ENCODING_NAMES`)
+  decodes any byte sequence without ever raising, so on its own it is not proof of correctness (real
+  UTF-8 content mislabelled that way is exactly the mojibake bug); such a claim is corroborated
+  against `charset_normalizer` before being trusted. `charset-normalizer` was added to
+  `pyproject.toml`'s `dependencies` (it was already present transitively).
+- `eoa/eoa/fetch/sanitize.py` gained a mojibake *repair* pass (`_repair_mojibake`), run on both
+  `title` and `body` right after extraction (before invisible-Unicode stripping/homoglyph mapping):
+  uses `ftfy.fix_text` if `ftfy` is installed (it is not currently a project dependency), else a
+  heuristic — re-interpret the text as bytes under `cp1252` then `latin-1` and re-decode as UTF-8
+  (repeating once more to catch double-encoding), keeping a candidate only when it strictly improves
+  `_mojibake_score` (Hebrew/Latin letter count, penalised for `U+FFFD` replacement characters and for
+  `_MOJIBAKE_MARKER_RE` hits — the "â€.../Ã." fingerprint that catches mojibake which doesn't change
+  the letter count at all, e.g. a lone mis-decoded smart quote in otherwise-ASCII text). Genuinely
+  correct text has no improving round-trip (non-Latin-1 characters simply fail to `.encode()` under
+  these codecs) and is returned unchanged.
+- `scripts/repair_mojibake.py`: one-off scan of `items.clean_text`/`title` against the live DB,
+  applying the same repair heuristic and updating only rows that actually changed; prints how many
+  rows of each column were repaired. Run with the same `DATABASE_URL` as the app:
+  `PYTHONPATH=agent DATABASE_URL=... python scripts/repair_mojibake.py`.
+
+Tests: `tests/unit/test_html_fetch.py` gained fixtures for a windows-1255 Hebrew page with `<meta
+charset>` (no HTTP charset), a windows-1255 page declared only via an XML declaration, a UTF-8 page
+whose HTTP header wrongly claims latin-1, and (for `_repair_mojibake`) a single mis-decoded Hebrew
+snippet, a double-encoded Hebrew snippet, a cp1252-mis-decoded smart quote, and correct
+ASCII/Hebrew text left untouched.
+
+### `agent/eoa/memory/graph.py: add_edge` — AGE 1.7 "SET clause expects a map" fix
+
+**Bug**: `add_edge` failed against the live DB (Apache AGE 1.7 on PG17) with
+`SET clause expects a map — LINE 6: SET r += $props`. Reproduced directly
+against the live DB via `docker compose exec -T postgres psql`: `$props`
+genuinely *is* a map at runtime (`keys($props)` resolves it fine, and
+`RETURN $props` prints the expected JSON), but AGE's `SET` clause only
+recognizes a literal map expression written in the query text — a runtime
+map value arriving through a `$param` is rejected by both `SET r += $props`
+and `SET r = $props`, even though the parameter passing itself (the
+`cypher('graph', $$...$$, $1)` third-argument convention with an
+`%s::agtype`-cast JSON blob) is correct and unrelated to the failure.
+
+**Fix**: `add_edge` no longer merges a map in one shot. It builds the `SET`
+clause dynamically, one scalar parameter per property
+(`SET r.item_id = $p0, r.evidence = $p1, ...`), verified working against the
+live DB. Each property key is checked against `_SAFE_PROP_KEY_RE`
+(`^[A-Za-z_][A-Za-z0-9_]*$`) before being embedded in the query text (keys
+can't be parameterized by Cypher either), raising `ValueError` on anything
+unsafe — same defensive posture as the existing edge-label allow-list.
+`edges_of()` needed no changes: it already reads `item_id`/`evidence` off
+the edge's `properties` map, which is populated identically either way.
+
+Regression coverage: `tests/unit/test_graph_edges.py::TestAddEdgeCypher`
+(Cypher-string/params construction, no DB) and
+`TestAddEdgeLiveDB::test_add_edge_then_read_back_via_edges_of`
+(`@pytest.mark.integration`; creates one edge between two existing live-DB
+entities tagged with a marker `item_id`, reads it back via `edges_of()`,
+then deletes only that edge in a `finally` block — skips gracefully if the
+stack isn't reachable).
+
+### `agent/eoa/pipeline/analyze.py: persist_analysis` — edge-endpoint kind resolution
+
+**Bug**: every edge endpoint from `AnalyzeOut.edges` was upserted with
+`kind="company"` unconditionally, producing wrong entities in the live DB —
+e.g. `"Air Force"` stored with `kind="company"` (confirmed live: `SELECT
+name, kind FROM entities WHERE name = 'Air Force'`).
+
+**Fix**: `_resolve_edge_kinds(names)` looks up each edge endpoint's kind in
+`entities` (populated correctly by `classify.persist_classification` from
+`EntityMention.kind` when the item went through classify first) and only
+falls back to `_heuristic_kind(name)` — a keyword match on Air
+Force/Army/Navy/Ministry/Department/Command/Agency/NATO/DoD → `"org"`,
+Program/Project/Programme → `"program"`, else `"company"` — for names with
+no existing row. An entity that already has a recorded kind keeps it
+regardless of what the heuristic would have guessed (never overwrite a
+better-informed kind with a worse one); the DB lookup is best-effort (any
+exception, including no DB available, degrades to the heuristic for every
+name, same as this function not existing). `persist_analysis` calls this
+once per item for all edge endpoints together, then passes the resolved
+kind to both `upsert_entity` and `merge_entity` per endpoint instead of the
+old hardcoded `"company"`.
+
+This does *not* retroactively fix already-bad rows (e.g. the existing
+`"Air Force"` / `kind="company"` row is left as-is per the "never overwrite
+existing kind" rule) — only new upserts benefit; a historical backfill is a
+separate, out-of-scope migration.
+
+Regression coverage: `tests/unit/test_persist_analysis.py` —
+`test_heuristic_kind_org_program_company`,
+`test_resolve_edge_kinds_falls_back_to_heuristic_when_db_unavailable`,
+`test_resolve_edge_kinds_prefers_existing_db_kind_over_heuristic`,
+`test_resolve_edge_kinds_empty_names_returns_empty_without_db_call`,
+`test_persist_analysis_resolves_org_and_program_kinds`.

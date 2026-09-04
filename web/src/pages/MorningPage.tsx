@@ -1,10 +1,12 @@
+import { useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useOutletContext } from "react-router-dom";
 import {
   AlertOctagon,
   Clock,
   Download,
   FileWarning,
+  Gavel,
   Inbox,
   Search,
   TriangleAlert,
@@ -14,8 +16,51 @@ import { ZERO_NIGHT_SUMMARY } from "@/api/normalize";
 import { StatTile } from "@/components/StatTile";
 import { LevelBadge } from "@/components/LevelBadge";
 import { LoadingState, ErrorState, EmptyState } from "@/components/states";
-import { linkifyReportCitations } from "@/lib/reportHtml";
+import { ReportBody } from "@/components/reports/ReportBody";
+import { NowRunningStrip } from "@/components/morning/NowRunningStrip";
+import { PipelineReplayTimeline } from "@/components/morning/PipelineReplayTimeline";
 import { formatDateTime } from "@/lib/time";
+import { DEADLINE_SOON_DAYS, daysLeft } from "@/lib/tenders";
+import type { StatusSocketState } from "@/hooks/useStatusSocket";
+
+const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function TendersTile() {
+  const tendersQuery = useQuery({
+    queryKey: ["tenders", "open"],
+    queryFn: () => api.getTenders({ status: "open" }),
+  });
+  const forecastsQuery = useQuery({
+    queryKey: ["tender-forecasts"],
+    queryFn: () => api.getTenderForecasts(),
+  });
+
+  const openSoonCount = (tendersQuery.data ?? []).filter((t) => {
+    const days = daysLeft(t.deadline);
+    return days != null && days <= DEADLINE_SOON_DAYS;
+  }).length;
+
+  const newForecastsCount = (forecastsQuery.data ?? []).filter((f) => {
+    const created = new Date(f.created_at).getTime();
+    return !Number.isNaN(created) && Date.now() - created <= ONE_WEEK_MS;
+  }).length;
+
+  return (
+    <Link
+      to="/tenders"
+      className="flex flex-col gap-1 rounded-lg border border-border bg-bg-raised p-3 shadow-panel hover:border-border-strong"
+    >
+      <div className="flex items-center gap-2 text-xs text-fg-dim">
+        <Gavel size={14} aria-hidden="true" />
+        <span>מכרזים ו-RFI/RFP</span>
+      </div>
+      <p className="font-mono font-tabular text-2xl font-semibold text-fg">{openSoonCount}</p>
+      <p className="text-xs text-fg-dim">
+        מכרזים פתוחים ב-{DEADLINE_SOON_DAYS} הימים הקרובים · {newForecastsCount} תחזיות חדשות השבוע
+      </p>
+    </Link>
+  );
+}
 
 export function MorningPage() {
   const { data, isLoading, isError, refetch } = useQuery({
@@ -23,6 +68,12 @@ export function MorningPage() {
     queryFn: () => api.getMorning(),
   });
   const queryClient = useQueryClient();
+  // Provided by AppShell via <Outlet context={...}> (a single shared
+  // WS /ws/status connection) -- undefined when this page renders without
+  // that ancestor (e.g. a unit test rendering <MorningPage /> directly), in
+  // which case the pipeline replay/"now running" sections simply don't render.
+  const statusState = useOutletContext<StatusSocketState | undefined>();
+  const pipeline = useMemo(() => statusState?.status?.pipeline ?? null, [statusState]);
 
   const answerClarification = useMutation({
     mutationFn: ({ id, answer }: { id: number; answer: string }) =>
@@ -41,6 +92,13 @@ export function MorningPage() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-6">
+      {pipeline && <NowRunningStrip pipeline={pipeline} />}
+      {pipeline?.last_run && <PipelineReplayTimeline lastRun={pipeline.last_run} />}
+
+      <section aria-label="מכרזים ו-RFI/RFP" className="grid grid-cols-1 sm:grid-cols-2">
+        <TendersTile />
+      </section>
+
       <section aria-label="תקציר הלילה" className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatTile label="פריטים שנקלטו" value={night_summary.items_ingested} icon={<Inbox size={14} />} />
         <StatTile
@@ -77,19 +135,27 @@ export function MorningPage() {
         <section className="rounded-lg border border-border bg-bg-raised p-4 shadow-panel">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-fg-dim">תקציר מנהלים — {formatDateTime(report.created_at)}</h2>
-            <a
-              href={api.getReportFileUrl(report.id, "docx")}
-              className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90"
-            >
-              <Download size={14} aria-hidden="true" />
-              פתח דוח docx
-            </a>
+            <div className="flex items-center gap-2">
+              <a
+                href={api.getReportFileUrl(report.id, "docx")}
+                className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90"
+              >
+                <Download size={14} aria-hidden="true" />
+                docx
+              </a>
+              <a
+                href={api.getReportFileUrl(report.id, "html")}
+                className="flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-sm text-fg-dim hover:bg-bg-sunken"
+              >
+                <Download size={14} aria-hidden="true" />
+                html
+              </a>
+            </div>
           </div>
-          <div
+          <ReportBody
+            html={report.html ?? ""}
+            itemsIncluded={report.items_included ?? []}
             className="report-body text-sm text-fg"
-            dangerouslySetInnerHTML={{
-              __html: linkifyReportCitations(report.html ?? "", report.items_included ?? []),
-            }}
           />
         </section>
       ) : (

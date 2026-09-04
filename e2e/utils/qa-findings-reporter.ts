@@ -132,7 +132,9 @@ export default class QaFindingsReporter implements Reporter {
   }
 
   private oneLine(s: string): string {
-    return s.replace(/\s+/g, " ").trim().slice(0, 500);
+    // eslint-disable-next-line no-control-regex
+    const noAnsi = s.replace(/\x1b\[[0-9;]*m/g, "");
+    return noAnsi.replace(/\s+/g, " ").trim().slice(0, 600);
   }
 
   private count(all: (Finding | FailureFinding)[], key: "fromFailure"): number {

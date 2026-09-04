@@ -48,6 +48,85 @@ def _edge(edge_id: int, label: str, item_id: int | None = None, evidence: str | 
 
 
 # --------------------------------------------------------------------------
+# add_edge: Cypher string construction (regression -- AGE 1.7 rejects
+# `SET r += $props` / `SET r = $props` with a parameterized map: "SET
+# clause expects a map". The fix SETs each property individually through
+# its own scalar parameter instead of merging a map in one shot.)
+# --------------------------------------------------------------------------
+
+
+class TestAddEdgeCypher:
+    def test_no_map_merge_syntax_in_generated_cypher(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict = {}
+
+        def fake_run_cypher(cypher_body, params, out_columns):
+            captured.update(cypher_body=cypher_body, params=params, out_columns=out_columns)
+            return []
+
+        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
+        graph.add_edge(1, 2, "PARTNER_OF", 42, {"evidence": "some evidence"})
+
+        cypher_body = captured["cypher_body"]
+        # The buggy forms must never reappear.
+        assert "+= $props" not in cypher_body
+        assert "= $props" not in cypher_body
+        # Each property is set individually through its own scalar param.
+        assert "r.item_id = $p" in cypher_body
+        assert "r.evidence = $p" in cypher_body
+
+    def test_params_are_flat_scalars_not_a_nested_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict = {}
+
+        def fake_run_cypher(cypher_body, params, out_columns):
+            captured["params"] = params
+            return []
+
+        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
+        graph.add_edge(1, 2, "SUPPLIER_OF", 7, {"evidence": "ev"})
+
+        params = captured["params"]
+        assert params["src"] == 1
+        assert params["dst"] == 2
+        # No nested "props" dict anywhere in the params -- every value is a
+        # flat scalar so AGE receives a genuine agtype scalar per param.
+        assert "props" not in params
+        assert set(params.values()) >= {1, 2, 7, "ev"}
+        for value in params.values():
+            assert not isinstance(value, dict)
+
+    def test_item_id_and_evidence_round_trip_via_edges_of_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The generated SET clause still stamps item_id/evidence, so `edges_of()`
+        (which reads those two property names) keeps working unchanged."""
+        captured: dict = {}
+
+        def fake_run_cypher(cypher_body, params, out_columns):
+            captured.update(cypher_body=cypher_body, params=params)
+            return [{"r": _edge(1, "SUPPLIER_OF", item_id=params["p1"], evidence=params["p0"])}]
+
+        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
+        result = graph.add_edge(1, 2, "SUPPLIER_OF", 99, {"evidence": "proof"})
+
+        assert result["properties"]["item_id"] == 99
+        assert result["properties"]["evidence"] == "proof"
+
+    def test_unsafe_property_key_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fail(*a, **k):
+            raise AssertionError("_run_cypher should not be called for an unsafe key")
+
+        monkeypatch.setattr(graph, "_run_cypher", fail)
+        with pytest.raises(ValueError, match="unsafe edge property key"):
+            graph.add_edge(1, 2, "PARTNER_OF", 1, {"evidence; DROP TABLE entities;--": "x"})
+
+    def test_unknown_edge_label_raises_before_querying(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fail(*a, **k):
+            raise AssertionError("_run_cypher should not be called for an invalid label")
+
+        monkeypatch.setattr(graph, "_run_cypher", fail)
+        with pytest.raises(ValueError, match="unknown edge label"):
+            graph.add_edge(1, 2, "NOT_A_LABEL", 1)
+
+
+# --------------------------------------------------------------------------
 # edges_of: Cypher string construction
 # --------------------------------------------------------------------------
 
@@ -204,3 +283,66 @@ class TestEdgeStats:
 
         stats = graph.edge_stats()
         assert "NOT_A_REAL_LABEL" not in stats
+
+
+# --------------------------------------------------------------------------
+# add_edge: live-DB regression for the "SET clause expects a map" bug.
+# Requires the docker-compose stack (`docker compose up postgres`) with
+# `db/graph_init.sql` applied. Skips gracefully when unreachable; always
+# cleans up the one edge it creates, identified by a marker `item_id` no
+# real pipeline would ever use, so it never touches anyone else's data.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestAddEdgeLiveDB:
+    _MARKER_ITEM_ID = -987654321
+
+    def test_add_edge_then_read_back_via_edges_of(self) -> None:
+        pytest.importorskip("psycopg")
+        try:
+            from eoa.db import connection
+
+            with connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT id FROM entities ORDER BY id LIMIT 2")
+                rows = cur.fetchall()
+        except Exception as exc:
+            pytest.skip(f"live DB unreachable: {exc}")
+
+        if len(rows) < 2:
+            pytest.skip("need at least 2 existing entities in the live DB for this test")
+
+        src_id, dst_id = rows[0]["id"], rows[1]["id"]
+
+        try:
+            created = graph.add_edge(
+                src_id,
+                dst_id,
+                "DERIVED_FROM",
+                self._MARKER_ITEM_ID,
+                {"evidence": "integration test edge -- safe to ignore/delete"},
+            )
+            assert created.get("properties", {}).get("item_id") == self._MARKER_ITEM_ID
+            assert (
+                created.get("properties", {}).get("evidence")
+                == "integration test edge -- safe to ignore/delete"
+            )
+
+            edges = graph.edges_of(src_id, label="DERIVED_FROM")
+            match = [e for e in edges if e.item_id == self._MARKER_ITEM_ID]
+            assert match, "edge just created via add_edge() was not found by edges_of()"
+            assert match[0].src_entity_id == src_id
+            assert match[0].dst_entity_id == dst_id
+            assert match[0].evidence == "integration test edge -- safe to ignore/delete"
+        finally:
+            # Clean up: delete only the edge(s) carrying our marker item_id,
+            # never a blanket delete that could touch real data.
+            graph._run_cypher(
+                """
+                MATCH (a:Entity {entity_id: $src})-[r:DERIVED_FROM]->(b:Entity {entity_id: $dst})
+                WHERE r.item_id = $marker
+                DELETE r
+                """,
+                {"src": src_id, "dst": dst_id, "marker": self._MARKER_ITEM_ID},
+                "r agtype",
+            )

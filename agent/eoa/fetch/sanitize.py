@@ -138,19 +138,29 @@ def text_hash(text: str) -> str:
 _MOJIBAKE_INTERMEDIATE_ENCODINGS = ("cp1252", "latin-1")
 _REPLACEMENT_CHAR = "�"  # U+FFFD, left behind by a genuinely lossy decode
 
+# "â€" and "Ã" followed by another Latin-1-Supplement character are near-unique
+# fingerprints of UTF-8 bytes mis-decoded as cp1252/latin-1 -- e.g. a UTF-8
+# right single quote (bytes 0xE2 0x80 0x99) mis-decoded that way reads as
+# "â€™", and a UTF-8-encoded accented Latin letter reads as "Ã<something>".
+# Legitimate text essentially never contains these sequences, so counting
+# them (unlike a plain letter tally) also catches mojibake that doesn't
+# change the Hebrew/Latin *letter* count at all -- an all-ASCII sentence
+# whose only casualty was a smart quote or dash.
+_MOJIBAKE_MARKER_RE = re.compile("(?:â€|Ã[-ÿ])")
 
-def _mojibake_score(text: str) -> tuple[int, int]:
-    """`(good, bad)` used to judge whether a repair candidate is an improvement.
 
-    `good` counts Hebrew and Latin letters (the alphabets this project's content actually uses);
-    `bad` counts `U+FFFD` replacement characters. Mojibake itself is typically punctuation-range
-    symbols (×, ¢, â, €, ...) that are neither, so a successful repair reliably raises `good` without
-    raising `bad`.
+def _mojibake_score(text: str) -> int:
+    """Single comparable score used to judge whether a repair candidate is an improvement.
+
+    Rewards Hebrew and Latin letters (the alphabets this project's content actually uses); penalizes
+    `U+FFFD` replacement characters (a genuinely lossy decode) and `_MOJIBAKE_MARKER_RE` hits (the
+    "â€.../Ã." double-encoding fingerprint) heavily enough that eliminating either always outweighs a
+    tie or small loss in letter count.
     """
     low, high = _HEBREW_CODEPOINT_RANGE
     good = sum(1 for c in text if (low <= ord(c) <= high) or (c.isascii() and c.isalpha()))
-    bad = text.count(_REPLACEMENT_CHAR)
-    return good, bad
+    bad = text.count(_REPLACEMENT_CHAR) + len(_MOJIBAKE_MARKER_RE.findall(text))
+    return good - 5 * bad
 
 
 def _repair_mojibake(text: str) -> str:
@@ -174,7 +184,7 @@ def _repair_mojibake(text: str) -> str:
         pass
 
     best = text
-    best_good, best_bad = _mojibake_score(best)
+    best_score = _mojibake_score(best)
     for encoding in _MOJIBAKE_INTERMEDIATE_ENCODINGS:
         candidate = text
         for _ in range(2):  # once for single mis-decoding, twice for double-encoding
@@ -182,9 +192,9 @@ def _repair_mojibake(text: str) -> str:
                 candidate = candidate.encode(encoding).decode("utf-8")
             except (UnicodeDecodeError, UnicodeEncodeError):
                 break
-            good, bad = _mojibake_score(candidate)
-            if good > best_good and bad <= best_bad:
-                best, best_good, best_bad = candidate, good, bad
+            score = _mojibake_score(candidate)
+            if score > best_score:
+                best, best_score = candidate, score
     return best
 
 
@@ -541,11 +551,12 @@ def extract_clean_text(html: str, url: str) -> CleanText:
     document outright if the root itself is hidden (computing
     `hidden_text_ratio` along the way) -> extract article text+title+date
     via trafilatura, falling back to readability-lxml, falling back to a
-    bare lxml `text_content()` -> strip invisible/bidi-control Unicode from
-    BOTH title and body (never deleted: display text) -> build a separate
-    confusable-mapped `detect_text` detection copy (title+body) -> strip
-    oversized base64/hex blobs from the body -> normalize whitespace ->
-    detect language.
+    bare lxml `text_content()` -> repair UTF-8-mis-decoded-as-latin-1/cp1252
+    mojibake in both title and body (`_repair_mojibake`) -> strip
+    invisible/bidi-control Unicode from BOTH title and body (never deleted:
+    display text) -> build a separate confusable-mapped `detect_text`
+    detection copy (title+body) -> strip oversized base64/hex blobs from the
+    body -> normalize whitespace -> detect language.
     """
     suspicious: list[str] = []
 

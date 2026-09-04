@@ -28,7 +28,41 @@ if "eoa.db" not in sys.modules:
 
 from eoa.llm.schemas.analysis import AnalyzeOut, EdgeOut, EventOut
 from eoa.memory.relational import _ITEM_UPDATABLE_FIELDS, update_item_fields
-from eoa.pipeline.analyze import persist_analysis
+from eoa.pipeline.analyze import _heuristic_kind, _resolve_edge_kinds, persist_analysis
+
+
+class _FakeCursor:
+    """Minimal stand-in for a psycopg cursor's `conn.execute(...)` result."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[dict]:
+        return self._rows
+
+
+class _FakeConnection:
+    """Minimal stand-in for `eoa.db.connection()`'s context-managed connection.
+
+    Records the query it was asked to run and always answers with the rows
+    given at construction time, regardless of the actual WHERE-clause names
+    -- enough to test that `_resolve_edge_kinds` uses whatever `entities`
+    already has on record instead of the heuristic.
+    """
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self.executed: tuple | None = None
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def execute(self, query: str, params: tuple | None = None) -> _FakeCursor:
+        self.executed = (query, params)
+        return _FakeCursor(self._rows)
 
 
 class RecordingStub:
@@ -285,8 +319,117 @@ def test_persist_analysis_creates_edges(monkeypatch: pytest.MonkeyPatch) -> None
 
     # add_edge should be called once
     assert len(add_edge_stub.calls) == 1
-    args, kwargs = add_edge_stub.calls[0]
+    args, _kwargs = add_edge_stub.calls[0]
     assert args == (1, 2, "PARTNER_OF", 300, {"evidence": "הם שותפים בפרויקט משותף"})
+
+
+def test_heuristic_kind_org_program_company() -> None:
+    """`_heuristic_kind` -- the fallback used when an entity is genuinely new.
+
+    Regression for the bug where every edge endpoint (e.g. "Air Force")
+    was upserted with kind="company" regardless of what it actually was.
+    """
+    assert _heuristic_kind("US Air Force") == "org"
+    assert _heuristic_kind("Israeli Air Force Command") == "org"
+    assert _heuristic_kind("Ministry of Defense") == "org"
+    assert _heuristic_kind("NATO") == "org"
+    assert _heuristic_kind("Department of the Navy") == "org"
+    assert _heuristic_kind("Collaborative Combat Aircraft Program") == "program"
+    assert _heuristic_kind("Falcon Project") == "program"
+    assert _heuristic_kind("Elbit Systems") == "company"
+    assert _heuristic_kind("RTX") == "company"
+
+
+def test_resolve_edge_kinds_falls_back_to_heuristic_when_db_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No `entities` row on record (or DB unreachable) -> heuristic decides."""
+    monkeypatch.setattr("eoa.db.connection", lambda: (_ for _ in ()).throw(RuntimeError("no db")))
+
+    kinds = _resolve_edge_kinds(["Aeropolis Air Force", "Blue Horizon Program", "Acme Corp"])
+
+    assert kinds == {
+        "Aeropolis Air Force": "org",
+        "Blue Horizon Program": "program",
+        "Acme Corp": "company",
+    }
+
+
+def test_resolve_edge_kinds_prefers_existing_db_kind_over_heuristic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entity already on record keeps its recorded kind, even when the
+    heuristic would have guessed something else -- the "never overwrite a
+    better guess with a worse one" rule."""
+    fake_conn = _FakeConnection([{"name": "Aeropolis Air Force", "kind": "system"}])
+    monkeypatch.setattr("eoa.db.connection", lambda: fake_conn)
+
+    kinds = _resolve_edge_kinds(["Aeropolis Air Force", "New Startup Inc"])
+
+    # "system" (already on record) wins over the "org" heuristic guess.
+    assert kinds["Aeropolis Air Force"] == "system"
+    # Names with no existing row still fall back to the heuristic.
+    assert kinds["New Startup Inc"] == "company"
+
+
+def test_resolve_edge_kinds_empty_names_returns_empty_without_db_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail() -> None:
+        raise AssertionError("connection() should not be called for an empty name list")
+
+    monkeypatch.setattr("eoa.db.connection", fail)
+    assert _resolve_edge_kinds([]) == {}
+
+
+def test_persist_analysis_resolves_org_and_program_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: an edge naming a military body and a program gets the
+    right `kind` on both `upsert_entity` and `merge_entity`, not the old
+    hardcoded "company" for everything."""
+    upsert_entity_stub = RecordingStub()
+    merge_entity_stub = RecordingStub()
+    add_edge_stub = RecordingStub()
+
+    monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", RecordingStub())
+    monkeypatch.setattr("eoa.pipeline.analyze.insert_event", RecordingStub())
+    monkeypatch.setattr("eoa.pipeline.analyze.upsert_entity", upsert_entity_stub)
+    # No entities on record for these fictional names -> heuristic decides.
+    monkeypatch.setattr("eoa.db.connection", lambda: (_ for _ in ()).throw(RuntimeError("no db")))
+
+    fake_graph = types.ModuleType("eoa.memory.graph")
+    fake_graph.merge_entity = merge_entity_stub  # type: ignore[attr-defined]
+    fake_graph.add_edge = add_edge_stub  # type: ignore[attr-defined]
+    sys.modules["eoa.memory.graph"] = fake_graph
+
+    out = AnalyzeOut(
+        summary_he="תקציר",
+        so_what_he="השלכות",
+        key_facts=[],
+        events=[],
+        edges=[
+            EdgeOut(
+                src="Aeropolis Air Force",
+                dst="Blue Horizon Program",
+                label="BIDS_AGAINST",
+                evidence_he="חיל האוויר מתמודד על פרויקט",
+            ),
+        ],
+    )
+
+    item = {"id": 600, "title": "Test", "url": "https://example.com"}
+
+    _n_events, n_edges = persist_analysis(item, out)
+
+    assert n_edges == 1
+    _, kwargs_src = upsert_entity_stub.calls[0]
+    assert kwargs_src["name"] == "Aeropolis Air Force"
+    assert kwargs_src["kind"] == "org"
+    _, kwargs_dst = upsert_entity_stub.calls[1]
+    assert kwargs_dst["name"] == "Blue Horizon Program"
+    assert kwargs_dst["kind"] == "program"
+
+    assert merge_entity_stub.calls[0][0] == (1, "Aeropolis Air Force", "org", None)
+    assert merge_entity_stub.calls[1][0] == (2, "Blue Horizon Program", "program", None)
 
 
 def test_persist_analysis_truncates_evidence(monkeypatch: pytest.MonkeyPatch) -> None:

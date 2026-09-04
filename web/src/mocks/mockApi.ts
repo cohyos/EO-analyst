@@ -3,6 +3,7 @@ import type {
   Conference,
   EntityDetail,
   EventRow,
+  ForecastCard,
   GraphResponse,
   InvestigationSummary,
   ItemCard,
@@ -16,13 +17,15 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TenderCard,
   TriageLevel,
 } from "@/types/api";
-import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery } from "@/api/types";
+import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery, TendersQuery } from "@/api/types";
 import { mockEntities } from "./data/entities";
 import { findMockItem, mockItems } from "./data/items";
 import { findMockInvestigation, mockInvestigations } from "./data/investigations";
 import { mockReport } from "./data/reports";
+import { mockForecasts, mockTenders } from "./data/tenders";
 import {
   mockClarifications,
   mockGraph,
@@ -252,6 +255,25 @@ export const mockApi: ApiClient = {
 
   getConferences: async (_from?: string, _to?: string): Promise<Conference[]> => delay([]),
   getConferencesIcalUrl: () => "/api/conferences/ical",
+
+  getTenders: async (query: TendersQuery): Promise<TenderCard[]> => {
+    let filtered = mockTenders.slice();
+    if (query.status) filtered = filtered.filter((t) => t.status === query.status);
+    if (query.country) filtered = filtered.filter((t) => t.country === query.country);
+    if (query.q) {
+      const q = query.q.toLowerCase();
+      filtered = filtered.filter(
+        (t) =>
+          (t.title ?? "").toLowerCase().includes(q) ||
+          (t.summary_he ?? "").toLowerCase().includes(q) ||
+          (t.agency ?? "").toLowerCase().includes(q) ||
+          t.matched_terms.some((m) => m.toLowerCase().includes(q)),
+      );
+    }
+    return delay(filtered.slice(0, query.limit ?? 100));
+  },
+  getTenderForecasts: async (limit = 100): Promise<ForecastCard[]> =>
+    delay(mockForecasts.slice(0, limit)),
 
   getClarifications: async (open = true) =>
     delay(clarifications.filter((c) => (open ? c.answer === null : true))),
