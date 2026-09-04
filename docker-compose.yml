@@ -1,0 +1,253 @@
+# docker-compose.yml — EO-Analyst local stack.
+#
+# Networks
+# --------
+# egress    : plain bridge, has internet access. Only `searxng` and `fetcher`
+#             are attached — the two components allowed to talk to the open
+#             internet (per docs/CONVENTIONS.md rule 13).
+# internal  : internal: true bridge (172.28.0.0/24) — NOT routable to the
+#             internet at all. postgres/searxng/ntfy get static IPs on it so
+#             they are reachable without DNS (see `agent`, below). Everything
+#             except the browser-facing dev ports lives here.
+# hostlink  : plain bridge, attached ONLY to `agent`, with no published ports
+#             and no other service attached. It exists solely so
+#             `host.docker.internal` (-> the Windows host's Ollama at
+#             :11434) is reachable at all — see the isolation note below.
+#
+# `agent` isolation — what is and isn't guaranteed
+# -------------------------------------------------
+# `agent` must reach the *host's* Ollama (http://host.docker.internal:11434)
+# while never reaching the public internet. On Docker Desktop these two
+# requirements are in direct tension:
+#   - An `internal: true` network blocks ALL routing out of the bridge,
+#     including the special host-gateway path `host.docker.internal` needs.
+#   - Any additional NON-internal bridge that restores that host-gateway path
+#     is, on Docker Desktop, NAT'd to the real internet too — Docker's bridge
+#     driver does not support "route to the gateway only, block everything
+#     else" without host-level iptables/firewall rules, which are not
+#     available to configure declaratively from docker-compose.yml (and
+#     Windows has no native iptables at all).
+#
+# So `agent` is attached to `internal` + `hostlink`, and the actual isolation
+# implemented is at the DNS layer, not the network layer:
+#   - `dns: [0.0.0.0]` replaces agent's resolver with an address that can
+#     never answer, so ANY hostname lookup (example.com, api.anything.com,
+#     ...) fails outright. This is what scripts/verify_isolation.* checks.
+#   - `extra_hosts` gives agent static, DNS-free entries for the only hosts
+#     it is allowed to reach: postgres/searxng/ntfy (their static `internal`
+#     IPs below) and host.docker.internal (via the `host-gateway` magic
+#     value, routed through `hostlink`).
+# What this does NOT guarantee: a component that connects to a hardcoded IP
+# literal (bypassing DNS entirely) can still reach the internet through the
+# `hostlink` bridge's NAT path — Docker Desktop offers no compose-level way
+# to prevent that. Hard network-layer blocking would need a Windows Defender
+# Firewall / WSL2 iptables rule scoped to the `hostlink` bridge subnet,
+# applied outside of docker-compose. See docs/MODULES.md for more detail and
+# scripts/verify_isolation.ps1 / .sh for the runnable check.
+
+networks:
+  egress:
+    driver: bridge
+  internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+  hostlink:
+    driver: bridge
+
+volumes:
+  pgdata:
+  ntfy-cache:
+
+services:
+  postgres:
+    build:
+      context: ./docker/postgres-age
+    image: eo-analyst/postgres-age:local
+    container_name: eoa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eoa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-eoanalyst}
+      TZ: ${TZ:-Asia/Jerusalem}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Local-dev-only access from the Windows host; not exposed beyond loopback.
+      - "127.0.0.1:5433:5432"
+    networks:
+      internal:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eoa} -d ${POSTGRES_DB:-eoanalyst}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: 6g
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: eoa-searxng
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Jerusalem}
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env (e.g. `openssl rand -hex 32`)}
+    volumes:
+      - ./config/searxng:/etc/searxng
+    networks:
+      egress: {}
+      internal:
+        ipv4_address: 172.28.0.11
+    # No host ports: only reachable from other containers (fetcher/agent) on
+    # the `internal` network, per the infra spec.
+    mem_limit: 1g
+
+  ntfy:
+    image: binwiederhier/ntfy
+    container_name: eoa-ntfy
+    restart: unless-stopped
+    command: serve
+    environment:
+      TZ: ${TZ:-Asia/Jerusalem}
+      NTFY_BASE_URL: http://localhost:8090
+      NTFY_BEHIND_PROXY: "false"
+      NTFY_CACHE_FILE: /var/cache/ntfy/cache.db
+      NTFY_ATTACHMENT_CACHE_DIR: /var/cache/ntfy/attachments
+    volumes:
+      - ntfy-cache:/var/cache/ntfy
+    ports:
+      # Local dev now; also reachable over Tailscale later (see docs/MODULES.md).
+      - "127.0.0.1:8090:80"
+    networks:
+      internal:
+        ipv4_address: 172.28.0.12
+
+  fetcher:
+    build:
+      context: .
+      dockerfile: docker/fetcher/Dockerfile
+    image: eo-analyst/fetcher:local
+    container_name: eoa-fetcher
+    restart: unless-stopped
+    command: python -m eoa.fetch.service
+    environment:
+      TZ: ${TZ:-Asia/Jerusalem}
+      POSTGRES_USER: ${POSTGRES_USER:-eoa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-eoanalyst}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      SEARXNG_URL: http://searxng:8080
+    networks:
+      - egress
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: 2
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/agent/Dockerfile
+    image: eo-analyst/agent:local
+    container_name: eoa-agent
+    restart: unless-stopped
+    command: python -m eoa.orchestrator.main
+    environment:
+      TZ: ${TZ:-Asia/Jerusalem}
+      POSTGRES_USER: ${POSTGRES_USER:-eoa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-eoanalyst}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      OLLAMA_URL: http://host.docker.internal:11434
+      NTFY_URL: http://ntfy:80
+      NTFY_TOPIC: ${NTFY_TOPIC:-eo-analyst}
+      SEARXNG_URL: http://searxng:8080
+    volumes:
+      - ./config:/app/config:ro
+      - ./output:/app/output
+    networks:
+      - internal
+      - hostlink
+    # DNS-layer isolation — see the top-of-file note. 0.0.0.0 can never
+    # answer a query, so any hostname lookup (arbitrary internet domains
+    # included) fails closed.
+    dns:
+      - 0.0.0.0
+    extra_hosts:
+      # host-gateway resolves to the Docker Desktop host (Windows), routed
+      # through the `hostlink` network — this is how host Ollama is reached.
+      - "host.docker.internal:host-gateway"
+      # Static IPs (matching the `internal` network's ipam block above) so
+      # agent can still reach these by name with DNS disabled.
+      - "postgres:172.28.0.10"
+      - "searxng:172.28.0.11"
+      - "ntfy:172.28.0.12"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 20g
+    cpus: 8
+    pids_limit: 512
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+    image: eo-analyst/web:local
+    container_name: eoa-web
+    restart: unless-stopped
+    command: uvicorn eoa.api.app:app --host 0.0.0.0 --port 8765
+    environment:
+      TZ: ${TZ:-Asia/Jerusalem}
+      POSTGRES_USER: ${POSTGRES_USER:-eoa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-eoanalyst}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    ports:
+      - "127.0.0.1:8765:8765"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Optional local GPU-backed Ollama, run instead of the host install with:
+  #   docker compose --profile container-ollama up ollama
+  # Not started by a plain `docker compose up` (no profile == not selected).
+  ollama:
+    image: ollama/ollama
+    container_name: eoa-ollama
+    profiles: ["container-ollama"]
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Jerusalem}
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_GPU_OVERHEAD: "1258291200"
+      OLLAMA_KEEP_ALIVE: 30m
+    volumes:
+      - type: bind
+        source: C:/Users/cohyo/.ollama/models
+        target: /root/.ollama/models
+    networks:
+      - internal
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -129,29 +129,29 @@ class _PatternSet:
         # Multilingual instruction-override keywords
         # Note: Only trigger on actual non-English text, not English words containing similar sequences
         self.multilingual_ignore = {
-            'he': re.compile(
+            "he": re.compile(
                 r"זנח|התעלם|שכח|עקוף",
                 re.IGNORECASE | re.UNICODE,
             ),
-            'ru': re.compile(
+            "ru": re.compile(
                 r"игнор|игнораций|обход|отключ",
                 re.IGNORECASE | re.UNICODE,
             ),
-            'zh': re.compile(
+            "zh": re.compile(
                 r"忽略|忽视|绕过|禁用",
                 re.UNICODE,
             ),
             # More specific French: require accent marks or full words like "ignorez", "contournez"
-            'fr': re.compile(
+            "fr": re.compile(
                 r"contourner|désactiv|ignorez|contournez",
                 re.IGNORECASE | re.UNICODE,
             ),
             # More specific German: require umlaut or full words like "ignorieren", "umgehen"
-            'de': re.compile(
+            "de": re.compile(
                 r"ignorieren|umgeh|deaktiv|deaktivieren",
                 re.IGNORECASE | re.UNICODE,
             ),
-            'ar': re.compile(
+            "ar": re.compile(
                 r"تجاهل|تخطي|تعطيل|حظر",
                 re.UNICODE,
             ),

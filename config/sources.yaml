@@ -1,0 +1,547 @@
+# EO-Analyst source registry.
+# Loaded by eoa.fetch.sources_loader into pydantic models and upserted into the `sources` DB table.
+#
+# Fields:
+#   id            stable slug, used as the DB natural key
+#   name          human-readable publication/company name
+#   url           feed URL (kind: rss) or listing page URL to scrape (kind: html)
+#   kind          rss | html
+#   lang          en | he (primary language of the content)
+#   reliability   1-5 (5 = highest-trust primary/official reporting, 1 = unverified/PR-only)
+#   tags          taxonomy domain ids (config/taxonomy.yaml -> domains.<id>); broad outlets carry several
+#   schedule      daily | weekly (poll cadence; actual timing driven by config.yaml schedule.*)
+#   notes         free text: scope, caveats, known blockers
+#   verified      true only if this exact URL was fetched during authoring and returned a parseable
+#                 feed (rss) or a real, non-JS-shell HTML page with a confirmed article-link pattern (html)
+#   verified_at   UTC date of the verification check above
+#   list_selector / link_selector  CSS hints for kind: html sources only (used by fetch/html.py + a
+#                 future scraper; sanitize/extract still runs on the linked article page)
+#
+# Verification method: curl with a desktop Chrome UA, checking HTTP status + content-type + a raw
+# body sample, done 2026-09-04. Sources behind Cloudflare/Akamai/Incapsula bot-challenges or that
+# render their article list client-side via JS returned no usable static markup; these are marked
+# verified: false and kept in the registry as html placeholders (fetch/service.py will skip or
+# warn on repeated failures rather than block other sources).
+
+sources:
+  # ---------------------------------------------------------------- Tier-1 defense trade press (RSS)
+  - id: defense_news
+    name: "Defense News"
+    url: "https://www.defensenews.com/arc/outboundfeeds/rss/"
+    kind: rss
+    lang: en
+    reliability: 5
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense]
+    schedule: daily
+    notes: "Flagship Sightline/Gannett defense trade daily; broad program & contract coverage."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: breaking_defense
+    name: "Breaking Defense"
+    url: "https://breakingdefense.com/feed/"
+    kind: rss
+    lang: en
+    reliability: 4
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas]
+    schedule: daily
+    notes: "Policy + program news, strong Pentagon/Hill sourcing."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: c4isrnet
+    name: "C4ISRNET"
+    url: "https://www.c4isrnet.com/arc/outboundfeeds/rss/"
+    kind: rss
+    lang: en
+    reliability: 5
+    tags: [airborne_pods, land_surveillance, c_uas, computer_vision]
+    schedule: daily
+    notes: "Sightline/Gannett title focused on C4ISR, sensors, AI/autonomy."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: defense_one
+    name: "Defense One"
+    url: "https://www.defenseone.com/rss/all/"
+    kind: rss
+    lang: en
+    reliability: 4
+    tags: [air_defense, land_surveillance, computer_vision]
+    schedule: daily
+    notes: "Policy/tech-forward defense outlet (GovExec network)."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: aviation_week_defense
+    name: "Aviation Week (Defense/AWN)"
+    url: "https://aviationweek.com/rss.xml"
+    kind: rss
+    lang: en
+    reliability: 5
+    tags: [airborne_pods, air_defense]
+    schedule: daily
+    notes: "Site-wide AWN feed (commercial+defense mixed); classify/filter downstream for defense EO/IR relevance. A section-scoped 'awn-rss' feed also exists (aviationweek.com/awn-rss/feed) if narrower coverage is preferred later."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: the_war_zone
+    name: "The War Zone (TWZ)"
+    url: "https://www.twz.com/feed"
+    kind: rss
+    lang: en
+    reliability: 4
+    tags: [airborne_pods, air_defense, c_uas, naval_surveillance]
+    schedule: daily
+    notes: "Deep-dive open-source military tech reporting; frequently first on EO/IR pod and C-UAS sightings."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: shephard_media
+    name: "Shephard Media"
+    url: "https://www.shephardmedia.com/news/feed/"
+    kind: rss
+    lang: en
+    reliability: 4
+    tags: [airborne_pods, land_surveillance, naval_surveillance]
+    schedule: daily
+    notes: "Feed lives under /news/feed/ (bare /feed/ 404s). Land/sea/air platform trade coverage."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: janes_news
+    name: "Janes (public defence news)"
+    url: "https://www.janes.com/defence-news"
+    kind: html
+    lang: en
+    reliability: 5
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense]
+    schedule: daily
+    notes: "No public RSS (both /feeds/news and /feeds/defence-news 404). Free-tier 'defence-news' listing page is server-rendered and confirmed to carry real article links; paywalled analysis excluded."
+    verified: true
+    verified_at: "2026-09-04"
+    list_selector: "a.redesign-general-card"
+    link_selector: "self"
+
+  - id: naval_news
+    name: "Naval News"
+    url: "https://www.navalnews.com/feed/"
+    kind: rss
+    lang: en
+    reliability: 4
+    tags: [naval_surveillance]
+    schedule: daily
+    notes: "Naval EO/IR directors, optronic masts, USV payloads."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: army_technology
+    name: "Army Technology"
+    url: "https://www.army-technology.com/feed/"
+    kind: rss
+    lang: en
+    reliability: 3
+    tags: [land_surveillance, air_defense]
+    schedule: daily
+    notes: "GlobalData trade title; heavy on press-release rewrites, cross-check claims."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: naval_technology
+    name: "Naval Technology"
+    url: "https://www.naval-technology.com/feed/"
+    kind: rss
+    lang: en
+    reliability: 3
+    tags: [naval_surveillance]
+    schedule: daily
+    notes: "GlobalData trade title; same caveats as Army Technology."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: airforce_technology
+    name: "Airforce Technology"
+    url: "https://www.airforce-technology.com/feed/"
+    kind: rss
+    lang: en
+    reliability: 3
+    tags: [airborne_pods, air_defense]
+    schedule: daily
+    notes: "GlobalData trade title; same caveats as Army Technology."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: edr_magazine
+    name: "European Defence Review / EDR Online"
+    url: "https://www.edrmagazine.eu/feed"
+    kind: rss
+    lang: en
+    reliability: 3
+    tags: [airborne_pods, land_surveillance, air_defense]
+    schedule: weekly
+    notes: "EDR Online (edrmagazine.eu) is the digital edition of European Defence Review; one publication, one feed. The bare domain guess european-defence-review.com does not resolve/connect."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: defense_update
+    name: "Defense Update"
+    url: "https://defense-update.com/"
+    kind: html
+    lang: en
+    reliability: 3
+    tags: [airborne_pods, land_surveillance, air_defense]
+    schedule: daily
+    notes: "Both / and /feed are behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx; needs a browser-rendering fetch path later. Kept as placeholder."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "article.post"
+    link_selector: "h2.entry-title a"
+
+  - id: israel_defense_en
+    name: "Israel Defense (English)"
+    url: "https://www.israeldefense.co.il/en/rss.xml"
+    kind: rss
+    lang: en
+    reliability: 3
+    tags: [land_surveillance, air_defense, c_uas]
+    schedule: daily
+    notes: "Israeli defense-industry trade press, English edition."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: israel_defense_he
+    name: "Israel Defense (Hebrew)"
+    url: "https://www.israeldefense.co.il/rss.xml"
+    kind: rss
+    lang: he
+    reliability: 3
+    tags: [land_surveillance, air_defense, c_uas]
+    schedule: daily
+    notes: "Hebrew edition of the same outlet as israel_defense_en; distinct article set, not a translation feed."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: globes_defense
+    name: "Globes - Aerospace & Defense (English)"
+    url: "https://en.globes.co.il/en/aerospacedefense.tag"
+    kind: html
+    lang: en
+    reliability: 4
+    tags: [land_surveillance, air_defense, naval_surveillance]
+    schedule: daily
+    notes: "Globes' legacy rssfeeder.asmx webservice endpoint returns a 500/InvalidOperationException for this tag id; the tag-listing page itself is server-rendered with real article links, used instead. Hebrew edition (globes.co.il) not separately verified."
+    verified: true
+    verified_at: "2026-09-04"
+    list_selector: "a[href*='/en/article-']"
+    link_selector: "self"
+
+  - id: calcalist_tech
+    name: "Calcalist Tech (Hebrew)"
+    url: "https://www.calcalist.co.il/internet/"
+    kind: html
+    lang: he
+    reliability: 3
+    tags: [land_surveillance, computer_vision]
+    schedule: daily
+    notes: "Both the legacy GeneralRSS XML endpoint and the tech section page return 403 Access Denied to curl (Akamai bot protection). Kept as placeholder; needs browser-rendering fetch or an allow-listed UA."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.article_marker"
+    link_selector: "a"
+
+  - id: dod_contracts
+    name: "DoD Contracts (defense.gov)"
+    url: "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&max=10"
+    kind: rss
+    lang: en
+    reliability: 5
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas]
+    schedule: daily
+    notes: "Official DoD daily contract-award announcements RSS. Primary source for business/contract_award dimension tagging downstream."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: dvids
+    name: "DVIDS (Defense Visual Information Distribution Service)"
+    url: "https://www.dvidshub.net/rss/news/"
+    kind: rss
+    lang: en
+    reliability: 4
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense]
+    schedule: daily
+    notes: "Optional per spec. Official US DoD news/imagery syndication; useful for exercise/deployment ConOps mentions of EO/IR systems."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: arxiv_cv_eo_ir_atr
+    name: "arXiv cs.CV - infrared/thermal/ATR"
+    url: "http://export.arxiv.org/api/query?search_query=cat:cs.CV+AND+%28abs:infrared+OR+abs:thermal+OR+abs:%22target+recognition%22+OR+abs:%22automatic+target+recognition%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50"
+    kind: rss
+    lang: en
+    reliability: 5
+    tags: [computer_vision, secondary]
+    schedule: daily
+    notes: "arXiv API query feed (Atom); cs.CV papers matching infrared/thermal/target-recognition abstract keywords. Academic (TRL 1-3); classify accordingly."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: arxiv_cv_cuas
+    name: "arXiv - counter-UAS / drone detection"
+    url: "http://export.arxiv.org/api/query?search_query=abs:%22counter-UAS%22+OR+abs:%22counter-uas%22+OR+abs:%22drone+detection%22+OR+abs:%22UAV+detection%22&sortBy=submittedDate&sortOrder=descending&max_results=50"
+    kind: rss
+    lang: en
+    reliability: 5
+    tags: [c_uas, computer_vision]
+    schedule: daily
+    notes: "arXiv API query feed (Atom); not restricted to cs.CV since C-UAS papers span cs.RO/eess.SP too."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: arxiv_cv_gps_denied_sim2real
+    name: "arXiv - GPS-denied nav / sim2real"
+    url: "http://export.arxiv.org/api/query?search_query=cat:cs.CV+AND+%28abs:%22GPS-denied%22+OR+abs:%22visual+odometry%22+OR+abs:%22sim-to-real%22+OR+abs:%22synthetic+data%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50"
+    kind: rss
+    lang: en
+    reliability: 5
+    tags: [computer_vision]
+    schedule: daily
+    notes: "arXiv API query feed (Atom); covers gps_denied_nav and sim2real taxonomy subdomains."
+    verified: true
+    verified_at: "2026-09-04"
+
+  - id: spie_news
+    name: "SPIE News"
+    url: "https://spie.org/news"
+    kind: html
+    lang: en
+    reliability: 4
+    tags: [secondary, computer_vision]
+    schedule: weekly
+    notes: "No working RSS found (/news/rss and /news/rss.xml both resolve to the JS app shell, not a feed). The listing page itself is also client-rendered (no-js shell in static fetch), so scraping needs a JS-capable fetch later."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.news-item"
+    link_selector: "a"
+
+  - id: intelligent_aerospace
+    name: "Intelligent Aerospace"
+    url: "https://www.intelligent-aerospace.com/"
+    kind: html
+    lang: en
+    reliability: 3
+    tags: [airborne_pods, computer_vision]
+    schedule: daily
+    notes: "Endeavor Business Media title; /rss/all.xml returns the homepage (not a feed). Homepage HTML includes 'teaser-text' article blocks but no confirmed stable href pattern was extracted; treat selector as best-effort."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.teaser-text"
+    link_selector: "a"
+
+  - id: military_aerospace_electronics
+    name: "Military & Aerospace Electronics"
+    url: "https://www.militaryaerospace.com/"
+    kind: html
+    lang: en
+    reliability: 3
+    tags: [airborne_pods, computer_vision, secondary]
+    schedule: daily
+    notes: "Endeavor Business Media title, sister to Intelligent Aerospace; /rss.xml and /rss/all.xml both 404. Homepage loads (200) but no stable article-link pattern was confirmed in a static fetch."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.teaser-text"
+    link_selector: "a"
+
+  - id: unmanned_systems_technology
+    name: "Unmanned Systems Technology"
+    url: "https://www.unmannedsystemstechnology.com/"
+    kind: html
+    lang: en
+    reliability: 3
+    tags: [c_uas, airborne_pods]
+    schedule: daily
+    notes: "/feed/ is behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx. Kept as placeholder pending a browser-rendering fetch path."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "article.post"
+    link_selector: "h2 a"
+
+  - id: dronexl
+    name: "DroneXL"
+    url: "https://dronexl.co/feed/"
+    kind: rss
+    lang: en
+    reliability: 3
+    tags: [c_uas]
+    schedule: daily
+    notes: "Consumer/commercial-drone trade press; useful for counter-FPV/swarm and detect-track EO/IR mentions from the target side."
+    verified: true
+    verified_at: "2026-09-04"
+
+  # ---------------------------------------------------------------------------- Company press pages
+  - id: elbit_press
+    name: "Elbit Systems - News"
+    url: "https://www.elbitsystems.com/news"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas]
+    schedule: weekly
+    notes: "Company PR (report_kinds: company_pr). Drupal site; confirmed real /news/<slug> article links inside the 'view-news' block."
+    verified: true
+    verified_at: "2026-09-04"
+    list_selector: "div.view-news div.teaser"
+    link_selector: "a"
+
+  - id: rafael_press
+    name: "Rafael Advanced Defense Systems - News"
+    url: "https://www.rafael.co.il/news/"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, air_defense, c_uas]
+    schedule: weekly
+    notes: "Company PR. Site returns an odd HTTP 247 status with a ~500-byte JS-redirect shell to curl for both /feed/ and /news/; needs a browser-rendering fetch path. Kept as placeholder."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.news-item"
+    link_selector: "a"
+
+  - id: iai_press
+    name: "Israel Aerospace Industries (IAI) - Press Releases"
+    url: "https://www.iai.co.il/media/press-releases"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, naval_surveillance, air_defense, c_uas]
+    schedule: weekly
+    notes: "Company PR. Page returns 200 but article list renders client-side (no static href pattern found); needs a browser-rendering fetch path."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.press-release-item"
+    link_selector: "a"
+
+  - id: teledyne_flir_press
+    name: "Teledyne FLIR - Newsroom"
+    url: "https://www.teledyneflir.com/newsroom/"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, c_uas, secondary]
+    schedule: weekly
+    notes: "Company PR. Confirmed server-rendered 'teaser-block' article cards linking to /news-center/press-releases/<slug>/."
+    verified: true
+    verified_at: "2026-09-04"
+    list_selector: "div.teaser-block"
+    link_selector: "a.teaser-block__cta"
+
+  - id: hensoldt_press
+    name: "Hensoldt - News"
+    url: "https://www.hensoldt.net/news"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense, c_uas]
+    schedule: weekly
+    notes: "Company PR. Confirmed real /news/<slug> article links; page is unusually heavy (~10 MB, likely inline media) so fetch/html.py max_bytes truncation will apply."
+    verified: true
+    verified_at: "2026-09-04"
+    list_selector: "a[href^='/news/']"
+    link_selector: "self"
+
+  - id: safran_press
+    name: "Safran - Pressroom"
+    url: "https://www.safran-group.com/pressroom"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, secondary]
+    schedule: weekly
+    notes: "Company PR. rss.xml 403s; the pressroom listing page is server-rendered with confirmed real /pressroom/<slug> article links."
+    verified: true
+    verified_at: "2026-09-04"
+    list_selector: "a[href^='/pressroom/']"
+    link_selector: "self"
+
+  - id: thales_press
+    name: "Thales Group - Press Releases"
+    url: "https://www.thalesgroup.com/en/press-release-list"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense, c_uas]
+    schedule: weekly
+    notes: "Company PR. Site is behind Incapsula/rss.xml also blocked; the press-release-list page returns 200 but only a ~1KB JS-app shell to a static fetch. Needs a browser-rendering fetch path."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.press-release-item"
+    link_selector: "a"
+
+  - id: leonardo_press
+    name: "Leonardo - Media Hub Press Releases"
+    url: "https://www.leonardo.com/en/media-hub/press-releases"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense]
+    schedule: weekly
+    notes: "Company PR. /en/rss 200s but is HTML not a feed; the media-hub listing page is server-rendered with confirmed real /en/press-release-detail/... article links."
+    verified: true
+    verified_at: "2026-09-04"
+    list_selector: "a[href*='/en/press-release-detail/']"
+    link_selector: "self"
+
+  - id: rheinmetall_press
+    name: "Rheinmetall - News Watch"
+    url: "https://www.rheinmetall.com/en/media/news-watch"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [land_surveillance, air_defense, c_uas]
+    schedule: weekly
+    notes: "Company PR. /en/rss 404s; the news-watch listing page returns 200 but renders its article list client-side (no static href pattern found). Needs a browser-rendering fetch path."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.news-watch-item"
+    link_selector: "a"
+
+  - id: saab_press
+    name: "Saab - Newsroom Press Releases"
+    url: "https://www.saab.com/newsroom/press-releases"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [naval_surveillance, air_defense, land_surveillance]
+    schedule: weekly
+    notes: "Company PR. /rss 404s; the newsroom listing page returns 200 but only sub-nav links were found statically, article cards render client-side. Needs a browser-rendering fetch path."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.press-release-card"
+    link_selector: "a"
+
+  - id: anduril_press
+    name: "Anduril - News"
+    url: "https://www.anduril.com/news"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [c_uas, air_defense, computer_vision]
+    schedule: weekly
+    notes: "Company PR/blog. rss.xml 404s; the news listing page returns 200 but renders its article list client-side (no static href pattern found). Needs a browser-rendering fetch path."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "a[href^='/news/']"
+    link_selector: "self"
+
+  - id: controp_press
+    name: "Controp - News"
+    url: "https://www.controp.com/news/"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance]
+    schedule: weekly
+    notes: "Company PR. Site is behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx, including the homepage. Kept as placeholder pending a browser-rendering fetch path."
+    verified: false
+    verified_at: "2026-09-04"
+    list_selector: "div.news-item"
+    link_selector: "a"

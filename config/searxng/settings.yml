@@ -1,0 +1,56 @@
+# config/searxng/settings.yml
+#
+# Minimal SearXNG configuration for EO-Analyst's internal search backend.
+# Consumed by the `searxng` service in docker-compose.yml
+# (searxng/searxng:latest, mounted read-write at /etc/searxng).
+#
+# secret_key below is a PLACEHOLDER ONLY — SearXNG's own settings loader
+# overwrites `server.secret_key` at process start from the `SEARXNG_SECRET`
+# environment variable (see searxng upstream settings.yml: "Is overwritten
+# by ${SEARXNG_SECRET}"). Set a real random value in .env
+# (e.g. `SEARXNG_SECRET=$(openssl rand -hex 32)`) — never edit this file with
+# a real secret.
+
+use_default_settings:
+  engines:
+    # Only these engines are enabled; every other default-settings engine is
+    # disabled. See config.yaml -> searxng.engines for the source of truth
+    # this list mirrors (kept as literal engine names SearXNG expects).
+    keep_only:
+      - duckduckgo
+      - bing
+      - brave
+      - startpage
+      - wikipedia
+      - arxiv
+      - google scholar
+      - github
+
+general:
+  debug: false
+  instance_name: "eo-analyst-searxng"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+server:
+  # Placeholder — overwritten at runtime by ${SEARXNG_SECRET}. Do not put a
+  # real secret here; it would be committed to git.
+  secret_key: "CHANGE_ME_SEARXNG_SECRET_PLACEHOLDER"
+  limiter: false
+  image_proxy: false
+  # Overwritten at runtime by ${SEARXNG_BASE_URL} (set to
+  # http://searxng:8080/ in docker-compose.yml, per the fetcher/agent
+  # reaching it by its internal-network service name).
+  base_url: "http://searxng:8080/"
+
+# No valkey/redis service is run in this stack (limiter is disabled, so the
+# bot-detection backend that would use it is not needed). `false` disables
+# the valkey client entirely instead of trying to reach localhost:6379.
+valkey:
+  url: false

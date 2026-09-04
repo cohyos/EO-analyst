@@ -1,0 +1,34 @@
+# config/searxng/limiter.toml
+#
+# Minimal bot-detection/limiter config for SearXNG. `server.limiter` is set
+# to `false` in settings.yml for this internal, non-public instance, so this
+# file is inert by default — kept present (and correct) so the limiter can be
+# flipped on later without also needing to author this file from scratch.
+#
+# trusted_proxies / pass_ip include the docker-compose `internal` network's
+# subnet (172.28.0.0/24, see docker-compose.yml) so that, if the limiter is
+# ever enabled, requests from the fetcher/agent containers are never treated
+# as bot traffic.
+
+[botdetection]
+ipv4_prefix = 32
+ipv6_prefix = 48
+
+trusted_proxies = [
+  '127.0.0.0/8',
+  '::1',
+  '172.28.0.0/24',
+]
+
+[botdetection.ip_limit]
+filter_link_local = false
+link_token = false
+
+[botdetection.ip_lists]
+block_ip = []
+
+pass_ip = [
+  '172.28.0.0/24',
+]
+
+pass_searxng_org = false
