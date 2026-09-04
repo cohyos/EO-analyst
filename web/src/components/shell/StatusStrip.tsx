@@ -1,4 +1,4 @@
-import { WifiOff } from "lucide-react";
+import { ChevronUp, WifiOff } from "lucide-react";
 import type { StatusSocketState } from "@/hooks/useStatusSocket";
 import { cn } from "@/lib/cn";
 

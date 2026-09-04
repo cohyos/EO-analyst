@@ -90,7 +90,12 @@ def chat(
         "messages": messages,
         "stream": False,
         "keep_alive": keep_alive or s.ollama.keep_alive,
-        "options": {**s.ollama.options, "num_ctx": _num_ctx(task, spec), **(options or {})},
+        "options": {
+            **s.ollama.options,
+            "num_ctx": _num_ctx(task, spec),
+            "num_predict": s.ollama.num_predict.get(task, 2000),
+            **(options or {}),
+        },
     }
     if tools:
         payload["tools"] = tools

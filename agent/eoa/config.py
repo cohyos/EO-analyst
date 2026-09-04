@@ -83,6 +83,7 @@ class OllamaCfg(BaseModel):
     url: str = "http://127.0.0.1:11434"
     keep_alive: str = "30m"
     num_ctx: dict[str, int] = {}
+    num_predict: dict[str, int] = {}
     options: dict[str, Any] = {}
 
 

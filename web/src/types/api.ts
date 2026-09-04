@@ -291,15 +291,65 @@ export interface Job {
   progress?: string | null;
 }
 
-export interface ResourceGateStatus {
-  vram_used_mb: number;
+export interface ResourceGateGpu {
+  available: boolean;
   vram_total_mb: number;
-  gpu_util_pct: number;
-  gpu_temp_c: number;
-  ram_used_mb: number;
-  ram_total_mb: number;
+  vram_used_mb: number;
+  vram_free_mb: number;
+  util_pct: number;
+  temp_c: number;
+}
+
+export interface ResourceGateRam {
+  free_mb: number;
+  total_mb: number;
+}
+
+export interface LoadedModel {
+  name: string;
+  size_mb: number;
+  size_vram_mb: number;
+  cpu_offload: boolean;
+}
+
+// Mirrors eoa.resources.gate.Decision (agent/eoa/resources/gate.py)
+export type GateDecisionKind =
+  | "proceed"
+  | "queued"
+  | "deferred"
+  | "swap"
+  | "throttled"
+  | "thermal_pause";
+
+export interface GateDecision {
+  at: string;
+  decision: GateDecisionKind;
+  model: string;
+  reason: string;
+}
+
+// Mirrors ResourceGate.status() (agent/eoa/resources/gate.py) exactly —
+// nested gpu/ram, plural loaded_models, recent_decisions history.
+export interface ResourceGateStatus {
+  gpu: ResourceGateGpu;
+  ram: ResourceGateRam;
   disk_free_gb: number;
-  loaded_model: string | null;
+  loaded_models: LoadedModel[];
+  batch_window: boolean;
+  recent_decisions: GateDecision[];
+}
+
+export interface PipelineStageInfo {
+  events: number;
+  last_event: string | null;
+  last_at: string | null;
+}
+
+export interface PipelineLastRun {
+  started_at: string | null;
+  finished_at: string | null;
+  state: JobState;
+  stages: Record<string, PipelineStageInfo>;
 }
 
 export interface PipelineStatus {
@@ -308,12 +358,7 @@ export interface PipelineStatus {
   stage: string | null;
   night_window: boolean;
   next_run_at: string | null;
-  last_run: {
-    started_at: string;
-    finished_at: string | null;
-    state: JobState;
-    stages: Record<string, string>;
-  } | null;
+  last_run: PipelineLastRun | null;
 }
 
 export interface StatusResponse {
