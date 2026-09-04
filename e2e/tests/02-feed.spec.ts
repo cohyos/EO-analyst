@@ -140,14 +140,19 @@ test.describe("Feed screen (/feed)", () => {
     await redToggle.click();
     await expect(redToggle).toHaveAttribute("aria-pressed", "true");
 
-    // wait for the list to refetch with the filter applied
-    await page.waitForTimeout(500);
-    const rows = page.locator('[data-testid^="feed-row-"]');
-    const n = await rows.count();
-    if (n > 0) {
-      for (let i = 0; i < n; i++) {
-        await expect(rows.nth(i).locator('[data-level]')).toHaveAttribute("data-level", "red");
-      }
+    // Wait for the refetch to actually land, then re-read the row list fresh
+    // right before asserting each level — the feed is virtualized, so a
+    // count captured too early (mid-refetch) can go stale by the time we
+    // reach a later index.
+    await page.waitForResponse(
+      (r) => r.url().includes("/api/items") && r.url().includes("level=red") && r.ok(),
+    );
+    await page.waitForTimeout(300);
+
+    const levelBadges = page.locator('[data-testid^="feed-row-"] [data-level]');
+    const n = await levelBadges.count();
+    for (let i = 0; i < n; i++) {
+      await expect(levelBadges.nth(i)).toHaveAttribute("data-level", "red");
     }
   });
 

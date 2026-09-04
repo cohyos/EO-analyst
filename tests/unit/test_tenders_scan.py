@@ -37,8 +37,15 @@ from eoa.tenders.scan import (
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "tenders"
 
-DOMAIN_KEYWORDS = ["electro-optical", "infrared", "targeting pod", "thermal imaging", "counter-uas"]
-PROCUREMENT_SIGNALS = ["tender", "RFP", "RFI", "sources sought", "request for information"]
+DOMAIN_KEYWORDS = [
+    "electro-optical",
+    "infrared",
+    "targeting pod",
+    "thermal imaging",
+    "counter-uas",
+    "surveillance camera",
+]
+PROCUREMENT_SIGNALS = ["tender", "RFP", "RFI", "sources sought", "request for information", "מכרז"]
 
 
 def _ted_source() -> TenderSource:
@@ -219,8 +226,15 @@ class TestParseSearchHitsDenylist:
         from eoa.search.searxng_client import SearchHit
 
         hits = [
-            SearchHit(url="https://en.wikipedia.org/wiki/Infrared", title="Infrared", snippet="What is infrared"),
-            SearchHit(url="https://sam.gov/opp/1", title="RFI electro-optical", snippet="sources sought"),
+            SearchHit(
+                url="https://en.wikipedia.org/wiki/Infrared",
+                title="Infrared",
+                snippet="What is infrared",
+                engine="google",
+            ),
+            SearchHit(
+                url="https://sam.gov/opp/1", title="RFI electro-optical", snippet="sources sought", engine="google"
+            ),
         ]
         notices = _parse_search_hits(hits, _search_source(), ["wikipedia.org"])
         assert len(notices) == 1
@@ -431,19 +445,23 @@ class TestScanTendersGateAndDedup:
         assert stats.inserted == 0
 
 
-class TestScanTendersLlmRelevanceGate:
-    def _one_notice_setup(self, notice: NoticeRaw, src: TenderSource):
-        return (
-            patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]),
-            patch("eoa.tenders.scan._tender_exists", return_value=False),
-            patch("eoa.tenders.scan._transition_closed", return_value=0),
-        )
+def _common_patches(notice: NoticeRaw) -> ExitStack:
+    """A single combined context manager for the three DB stubs every LLM-relevance-gate test
+    needs (avoids the parenthesized-`with` star-unpacking trick, which is not valid syntax when
+    mixed with `as` clauses -- see CPython's PEG grammar for `with_stmt`)."""
+    stack = ExitStack()
+    stack.enter_context(patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]))
+    stack.enter_context(patch("eoa.tenders.scan._tender_exists", return_value=False))
+    stack.enter_context(patch("eoa.tenders.scan._transition_closed", return_value=0))
+    return stack
 
+
+class TestScanTendersLlmRelevanceGate:
     def test_relevance_le_2_rejected_not_stored(self):
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", return_value=_extract(relevant=False, relevance=1)),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
         ):
@@ -457,7 +475,7 @@ class TestScanTendersLlmRelevanceGate:
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch(
                 "eoa.tenders.scan._llm_classify",
                 return_value=_extract(relevant=True, relevance=RELEVANCE_REJECT_MAX),
@@ -472,7 +490,7 @@ class TestScanTendersLlmRelevanceGate:
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch(
                 "eoa.tenders.scan._llm_classify",
                 return_value=_extract(relevant=True, relevance=RELEVANCE_UNKNOWN),
@@ -491,7 +509,7 @@ class TestScanTendersLlmRelevanceGate:
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", return_value=_extract(relevant=True, relevance=4)),
             patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
@@ -506,13 +524,13 @@ class TestScanTendersLlmRelevanceGate:
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", side_effect=ResourceUnavailable("no vram")),
             patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
         mock_insert.assert_called_once()
-        args, kwargs = mock_insert.call_args
+        _, kwargs = mock_insert.call_args
         assert "relevance" not in kwargs  # deterministic path -- no LLM kwargs passed at all
         assert stats.llm_deferred == 1
         assert stats.inserted == 1
@@ -522,7 +540,7 @@ class TestScanTendersLlmRelevanceGate:
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", side_effect=LLMOutputError("bad json")),
             patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
@@ -535,7 +553,7 @@ class TestScanTendersLlmRelevanceGate:
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", side_effect=UnicodeEncodeError("cp1252", "x", 0, 1, "boom")),
             patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
@@ -548,7 +566,7 @@ class TestScanTendersLlmRelevanceGate:
         src = _ted_source()
         notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
         with (
-            *self._one_notice_setup(notice, src),
+            _common_patches(notice),
             patch(
                 "eoa.tenders.scan._llm_classify",
                 return_value=_extract(relevant=True, relevance=5, matched_terms=["FLIR", "gimbal"]),

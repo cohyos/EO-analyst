@@ -54,14 +54,36 @@ def _normalize_title(text: str | None) -> str | None:
     return cleaned if cleaned else None
 
 
+def _extract_title_from_html_text(html_like_text: str) -> str | None:
+    """Try to extract title from raw_text if it still contains HTML tags."""
+    import re
+
+    # Try og:title first
+    og_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html_like_text, re.IGNORECASE)
+    if og_match:
+        return og_match.group(1)
+
+    og_match = re.search(r"<meta\s+property='og:title'\s+content='([^']+)'", html_like_text, re.IGNORECASE)
+    if og_match:
+        return og_match.group(1)
+
+    # Try <title> tag
+    title_match = re.search(r"<title\s*>([^<]+)<\s*/\s*title\s*>", html_like_text, re.IGNORECASE)
+    if title_match:
+        return title_match.group(1)
+
+    return None
+
+
 def _choose_title_from_item(raw_text: str | None, clean_text: str | None, url: str) -> str:
     """Reconstruct title from raw/clean text and URL (no HTML available in DB).
 
     Fallback chain (no HTML since we're repairing from DB):
     1. First line of clean_text (≤ 120 chars)
-    2. First line of raw_text (≤ 120 chars)
-    3. URL path segment
-    4. "Untitled"
+    2. HTML extraction from raw_text (og:title or <title> tag if present)
+    3. First line of raw_text (≤ 120 chars)
+    4. URL path segment
+    5. "Untitled"
     """
     # Try clean_text first
     if clean_text:
@@ -70,7 +92,15 @@ def _choose_title_from_item(raw_text: str | None, clean_text: str | None, url: s
             if normalized:
                 return normalized[:120]
 
-    # Fall back to raw_text
+    # Try HTML extraction from raw_text (which may still contain HTML)
+    if raw_text:
+        html_title = _extract_title_from_html_text(raw_text)
+        if html_title:
+            normalized = _normalize_title(html_title)
+            if normalized:
+                return normalized[:120]
+
+    # Fall back to first line of raw_text
     if raw_text:
         for line in raw_text.split("\n"):
             normalized = _normalize_title(line)
@@ -117,10 +147,11 @@ def run_repair() -> tuple[int, int, int]:
             log.info("repair.empty_titles_found", count=total_empty)
 
             for row in rows:
-                item_id = row[0]
-                url = row[1]
-                raw_text = row[2]
-                clean_text = row[3]
+                # psycopg3 returns dict_row, access by column name not index
+                item_id = row["id"]
+                url = row["url"]
+                raw_text = row["raw_text"]
+                clean_text = row["clean_text"]
 
                 try:
                     new_title = _choose_title_from_item(raw_text, clean_text, url)
