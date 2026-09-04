@@ -26,7 +26,7 @@ function Sparkline({
   dataKey: keyof ResourceSample;
   unit: string;
   color: string;
-  domain?: [number, number];
+  domain?: [number | string, number | string];
   formatValue?: (v: number) => string;
 }) {
   const latest = data.length > 0 ? data[data.length - 1][dataKey] : undefined;

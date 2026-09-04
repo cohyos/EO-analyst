@@ -1,7 +1,8 @@
 import { ExternalLink } from "lucide-react";
-import type { ItemCard } from "@/types/api";
+import type { ItemCard, TriageLevel } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { SecurityStatusIcon } from "./SecurityStatusIcon";
+import { ExplainScorePopover } from "./ExplainScorePopover";
 import { domainLabel } from "@/lib/taxonomy";
 import { timeAgo } from "@/lib/time";
 import { cn } from "@/lib/cn";
@@ -11,12 +12,16 @@ export function FeedRow({
   selected,
   onSelect,
   onOpen,
+  onRate,
+  isRating,
   style,
 }: {
   item: ItemCard;
   selected: boolean;
   onSelect: () => void;
   onOpen: () => void;
+  onRate: (level: TriageLevel) => void;
+  isRating?: boolean;
   style?: React.CSSProperties;
 }) {
   const hasUrl = Boolean(item.url);
@@ -27,6 +32,14 @@ export function FeedRow({
       data-selected={selected}
       tabIndex={-1}
       aria-selected={selected}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(
+          "application/x-eo-context",
+          JSON.stringify({ kind: "item", id: item.id, label: item.title }),
+        );
+        e.dataTransfer.effectAllowed = "copy";
+      }}
       onClick={onSelect}
       onDoubleClick={onOpen}
       style={style}
@@ -40,6 +53,7 @@ export function FeedRow({
       <span className="w-10 shrink-0 text-end font-mono font-tabular text-fg-muted">
         {item.score}
       </span>
+      <ExplainScorePopover item={item} onRate={onRate} isRating={isRating} size="sm" />
       <div className="min-w-0 flex-1">
         <a
           href={hasUrl ? item.url : undefined}

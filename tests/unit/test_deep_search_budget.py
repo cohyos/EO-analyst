@@ -214,7 +214,7 @@ class TestActToolCalls:
         assert result is True
         # Only the URL that was read or in hits_seen should be kept
         assert "https://example.com/1" in inv.result.sources
-        assert "https://example.com/2" in inv.result.sources  # In hits_seen
+        assert "https://example.com/2" not in inv.result.sources  # seen but never read: excluded
         assert "https://example.com/3" not in inv.result.sources  # Not in either
 
 

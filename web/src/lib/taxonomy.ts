@@ -16,3 +16,9 @@ export const DOMAIN_OPTIONS: Array<{ id: string; label: string }> = [
 export function domainLabel(id: string | null | undefined): string {
   return DOMAIN_OPTIONS.find((d) => d.id === id)?.label ?? id ?? "—";
 }
+
+// Mirrors config/config.yaml `triage.levels` (min score per level; below
+// `yellow` = archive). Same "backend remains the source of truth" caveat as
+// DOMAIN_OPTIONS above — this is a display-only mirror for the explain-score
+// popover, not re-derived logic.
+export const LEVEL_THRESHOLDS = { red: 8, orange: 6, yellow: 4 } as const;

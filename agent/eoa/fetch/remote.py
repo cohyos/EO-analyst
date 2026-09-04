@@ -8,9 +8,12 @@ and waits for the fetcher to complete them (jobs table = the only channel). When
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
+import socket
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -52,8 +55,36 @@ def run_ingest_remote(since_days: int = 3, timeout_s: float = 25 * 60) -> dict[s
     return _wait_job(job_id, timeout_s, poll_s=5)
 
 
+def assert_public_http_url(url: str) -> None:
+    """SSRF guard: only http/https, no credentials, standard ports, and a public IP after DNS resolution."""
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise FetchError(f"refusing non-http(s) url: {url[:120]}")
+    if parts.username or parts.password:
+        raise FetchError("refusing url with embedded credentials")
+    if parts.port not in (None, 80, 443, 8080, 8443):
+        raise FetchError(f"refusing unusual port {parts.port}")
+    host = parts.hostname
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise FetchError(f"dns failure for {host}: {exc}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise FetchError(f"refusing non-public address for {host}: {ip}")
+
+
 def fetch_remote(url: str, timeout_s: float = 90) -> dict[str, Any]:
     """Fetch + sanitize one URL. Returns dict(text,title,lang,published_at,hidden_text_ratio,encoded_blobs,suspicious)."""
+    assert_public_http_url(url)
     if role() != "agent":
         return _fetch_local(url)
     from eoa.memory.relational import enqueue_job
@@ -66,7 +97,10 @@ def _fetch_local(url: str) -> dict[str, Any]:
     from eoa.fetch.html import fetch_page
     from eoa.fetch.sanitize import extract_clean_text
 
+    assert_public_http_url(url)
     page = asyncio.run(fetch_page(url))
+    if page.final_url and page.final_url != url:
+        assert_public_http_url(page.final_url)  # redirects are re-validated
     clean = extract_clean_text(page.html, url)
     return {
         "url": url,
