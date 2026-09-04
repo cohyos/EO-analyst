@@ -93,49 +93,116 @@ def _l1_pipeline() -> Any:
         if spec is None or not spec.hf:
             _L1_FAILED = True
             return None
+        # In the `agent` role, never let this fall through to a network
+        # fetch: `local_files_only=True` makes `transformers` raise instead
+        # of reaching out to the HF hub, regardless of `HF_HUB_OFFLINE`
+        # (finding #24 in output/reviews/codex_security_review.md).
+        agent_role = os.environ.get("EOA_ROLE") == "agent"
         try:
             from transformers import pipeline  # type: ignore[import-not-found]
 
             _L1_PIPE = pipeline(
-                "text-classification", model=spec.hf, truncation=True, max_length=512, device=-1
+                "text-classification",
+                model=spec.hf,
+                truncation=True,
+                max_length=512,
+                device=-1,
+                local_files_only=agent_role,
             )
-            log.info("guard_l1_loaded", model=spec.hf)
+            log.info("guard_l1_loaded", model=spec.hf, local_files_only=agent_role)
         except Exception as exc:
-            log.warning("guard_l1_unavailable", error=str(exc)[:200])
+            log.warning("guard_l1_unavailable", error=str(exc)[:200], agent_role=agent_role)
             _L1_FAILED = True
     return _L1_PIPE
 
 
-def _l1_injection_label(pipe: Any) -> str:
-    """Resolve the output label name that means "injection" for the loaded model.
+_INJECTION_LABEL_MARKERS = ("INJECTION", "JAILBREAK", "UNSAFE")
 
-    Prefers the model's own ``config.id2label`` (robust to a checkpoint using
-    ``INJECTION``/``SAFE`` vs. the generic ``LABEL_0``/``LABEL_1``); falls back to
-    the common conventions if the config can't be introspected.
+_L1_WINDOW_CHARS = 1800
+_L1_WINDOW_STEP = 1500
+_L1_MAX_WINDOWS = 40
+
+
+def _l1_injection_label(pipe: Any) -> str | None:
+    """Resolve the output label name that means "injection" for the *loaded model's own* ``id2label``.
+
+    Never guesses a generic ``LABEL_1``/``LABEL_0`` convention: a checkpoint
+    with the reverse mapping would silently invert every score and mark
+    attacks safe (finding #22 in output/reviews/codex_security_review.md).
+    If the label can't be resolved from the model's own config, the
+    classifier is treated as unavailable (``None``) rather than guessed.
     """
     try:
         id2label = pipe.model.config.id2label
-        for name in id2label.values():
-            if "inject" in str(name).upper():
-                return str(name).upper()
-    except Exception:
-        pass
-    return "INJECTION"
+    except Exception as exc:
+        log.error("guard_l1_id2label_unavailable", error=str(exc)[:200])
+        return None
+    candidates = [str(name) for name in id2label.values()]
+    for name in candidates:
+        upper = name.upper()
+        if any(marker in upper for marker in _INJECTION_LABEL_MARKERS):
+            return name
+    log.error("guard_l1_injection_label_unresolvable", labels=candidates)
+    return None
+
+
+def _l1_windows(text: str) -> list[str]:
+    """Bounded windows spanning the ENTIRE text, including the tail.
+
+    Previously only the first 30,000 characters were scanned, so an
+    obfuscated payload placed later in a long document never reached the
+    classifier (finding #24). To keep worst-case latency bounded on a very
+    long document, at most `_L1_MAX_WINDOWS` windows are kept, sampled
+    evenly across the full span -- rather than truncating -- so coverage
+    stays spread out and the final window (the tail) is always included.
+    """
+    if not text:
+        return [text]
+    length = len(text)
+    if length <= _L1_WINDOW_CHARS:
+        return [text]
+
+    last_start = length - _L1_WINDOW_CHARS
+    starts = list(range(0, last_start + 1, _L1_WINDOW_STEP))
+    if not starts or starts[-1] != last_start:
+        starts.append(last_start)
+
+    if len(starts) > _L1_MAX_WINDOWS:
+        idxs = sorted({round(i * (len(starts) - 1) / (_L1_MAX_WINDOWS - 1)) for i in range(_L1_MAX_WINDOWS)})
+        starts = [starts[i] for i in idxs]
+
+    return [text[s : s + _L1_WINDOW_CHARS] for s in starts]
+
+
+def _l1_call_all_scores(pipe: Any, chunks: list[str]) -> list[Any]:
+    """Request every class probability per chunk (finding #22: previously only the top label came back)."""
+    try:
+        return pipe(chunks, batch_size=8, top_k=None)
+    except TypeError:
+        # Older `transformers` pipeline versions use `return_all_scores`
+        # instead of `top_k=None` for the same "all classes" behavior.
+        return pipe(chunks, batch_size=8, return_all_scores=True)
 
 
 def _l1_score(text: str) -> float | None:
-    """Max injection probability over 512-token windows; None if the classifier is unavailable."""
+    """Max injection-class probability over bounded windows spanning the whole text; None if unavailable."""
     pipe = _l1_pipeline()
     if pipe is None:
         return None
     injection_label = _l1_injection_label(pipe)
-    chunks = [text[i : i + 1800] for i in range(0, min(len(text), 30_000), 1500)] or [text]
+    if injection_label is None:
+        return None
+
+    chunks = _l1_windows(text)
+    raw = _l1_call_all_scores(pipe, chunks)
+
     best = 0.0
-    for out in pipe(chunks, batch_size=8):
-        label = str(out.get("label", "")).upper()
-        p = float(out.get("score", 0.0))
-        is_injection = label == injection_label or label in {"INJECTION", "LABEL_1"}
-        best = max(best, p if is_injection else 1.0 - p)
+    for per_chunk_scores in raw:
+        scores = per_chunk_scores if isinstance(per_chunk_scores, list) else [per_chunk_scores]
+        for entry in scores:
+            if str(entry.get("label")) == injection_label:
+                best = max(best, float(entry.get("score", 0.0)))
+                break
     return best
 
 
@@ -169,13 +236,23 @@ def screen(
     text: str,
     title: str = "",
     *,
+    detect_text: str = "",
     item_id: int | str = 0,
     sanitizer_flags: list[str] | None = None,
     hidden_text_ratio: float = 0.0,
     encoded_blobs: int = 0,
     use_l2: bool = True,
 ) -> ScreenResult:
-    """Run the full gate on one piece of fetched content."""
+    """Run the full gate on one piece of fetched content.
+
+    ``detect_text`` is the optional confusable-mapped/zero-width-stripped
+    detection copy `eoa.fetch.sanitize.extract_clean_text` builds alongside
+    the readable ``text`` (``CleanText.detect_text``): a homoglyph swap
+    (e.g. Cyrillic 'а' for Latin 'a') that would let an instruction evade
+    the regex heuristics on the display text is normalized back to plain
+    Latin here. Heuristics are run on both and the higher-scoring result is
+    kept (finding #21 in output/reviews/codex_security_review.md).
+    """
     sec = settings().security
     flags = list(sanitizer_flags or [])
     if hidden_text_ratio >= sec.hidden_text_min_ratio:
@@ -184,6 +261,10 @@ def screen(
         flags.append(f"encoded_blobs={encoded_blobs}")
 
     heur = scan_heuristics(text, title)
+    if detect_text and detect_text != text:
+        heur_detect = scan_heuristics(detect_text, title)
+        if heur_detect.score > heur.score:
+            heur = heur_detect
     l1 = _l1_score(f"{title}\n{text}") if text else None
 
     suspicious = heur.score >= 0.5 or (l1 is not None and l1 >= 0.8) or bool(flags)
@@ -244,6 +325,7 @@ def screen_and_record(item: dict[str, Any], **kw: Any) -> ScreenResult:
     """Screen an ``items`` row, persist security_log + item status, return the result."""
     from eoa.memory.relational import log_security, update_item_fields
 
+    kw.setdefault("detect_text", item.get("detect_text") or "")
     res = screen(item.get("clean_text") or "", item.get("title") or "", item_id=item["id"], **kw)
     if res.verdict != "clean":
         log_security(

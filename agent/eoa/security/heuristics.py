@@ -173,86 +173,99 @@ class _PatternSet:
             re.IGNORECASE | re.UNICODE,
         )
 
-    def find_hits(self, text: str) -> list[tuple[str, float]]:
+    def find_hits(self, text: str) -> list[tuple[str, float, re.Pattern[str]]]:
         """
         Scan text for all patterns.
-        Returns list of (pattern_id, weight) tuples.
+
+        Returns a list of ``(pattern_id, weight, pattern)`` tuples -- the
+        pattern is the actual compiled regex that matched, so callers can
+        build an excerpt from the right match instead of guessing (finding
+        #23 in ``output/reviews/codex_security_review.md``: excerpts used to
+        come from whichever pattern happened to match first in attribute
+        iteration order, not the one that produced the hit).
         """
-        hits = []
+        hits: list[tuple[str, float, re.Pattern[str]]] = []
+
+        def add(pattern_id: str, weight: float, pattern: re.Pattern[str]) -> None:
+            hits.append((pattern_id, weight, pattern))
 
         # Instruction override
         if self.ignore_previous.search(text):
-            hits.append(("instruction_override_ignore", 0.9))
+            add("instruction_override_ignore", 0.9, self.ignore_previous)
         if self.disregard.search(text):
-            hits.append(("instruction_override_disregard", 0.8))
+            add("instruction_override_disregard", 0.8, self.disregard)
         if self.override_system.search(text):
-            hits.append(("instruction_override_bypass", 0.85))
+            add("instruction_override_bypass", 0.85, self.override_system)
 
         # Role-change
         if self.you_are_now.search(text):
-            hits.append(("role_change_you_are", 0.85))
+            add("role_change_you_are", 0.85, self.you_are_now)
         if self.act_as.search(text):
-            hits.append(("role_change_act_as", 0.8))
+            add("role_change_act_as", 0.8, self.act_as)
 
         # AI/LLM addressed
         if self.ai_addressed.search(text):
-            hits.append(("ai_addressed", 0.75))
+            add("ai_addressed", 0.75, self.ai_addressed)
         if self.ai_instruction.search(text):
-            hits.append(("ai_instruction", 0.8))
+            add("ai_instruction", 0.8, self.ai_instruction)
 
         # Fake system messages
         if self.fake_system_bracket.search(text):
-            hits.append(("fake_system_bracket", 0.8))
+            add("fake_system_bracket", 0.8, self.fake_system_bracket)
         if self.fake_system_angle.search(text):
-            hits.append(("fake_system_angle", 0.85))
+            add("fake_system_angle", 0.85, self.fake_system_angle)
         if self.fake_system_hash.search(text):
-            hits.append(("fake_system_hash", 0.75))
+            add("fake_system_hash", 0.75, self.fake_system_hash)
 
         # Tool hijack
         if self.notify_tool.search(text):
-            hits.append(("tool_notify", 0.9))
+            add("tool_notify", 0.9, self.notify_tool)
         if self.tool_actions.search(text):
-            hits.append(("tool_actions", 0.8))
+            add("tool_actions", 0.8, self.tool_actions)
         if self.shell_commands.search(text):
-            hits.append(("shell_commands", 0.85))
+            add("shell_commands", 0.85, self.shell_commands)
 
         # Exfiltration
         if self.send_to_url.search(text):
-            hits.append(("exfil_url", 0.9))
+            add("exfil_url", 0.9, self.send_to_url)
         if self.exfil_placeholder.search(text):
-            hits.append(("exfil_placeholder", 0.85))
+            add("exfil_placeholder", 0.85, self.exfil_placeholder)
 
         # Base64
         if self.base64_decode.search(text):
-            hits.append(("base64_decode_request", 0.8))
+            add("base64_decode_request", 0.8, self.base64_decode)
         if self.base64_blob.search(text):
-            hits.append(("base64_blob", 0.7))
+            add("base64_blob", 0.7, self.base64_blob)
 
         # Chat tokens
         if self.chat_tokens.search(text):
-            hits.append(("chat_template_token", 0.75))
+            add("chat_template_token", 0.75, self.chat_tokens)
 
         # Prompt leak
         if self.repeat_prompt.search(text):
-            hits.append(("prompt_leak_repeat", 0.85))
+            add("prompt_leak_repeat", 0.85, self.repeat_prompt)
         if self.reveal_instructions.search(text):
-            hits.append(("prompt_leak_reveal", 0.8))
+            add("prompt_leak_reveal", 0.8, self.reveal_instructions)
 
         # Multilingual
         for lang, pattern in self.multilingual_ignore.items():
             if pattern.search(text):
-                hits.append((f"multilingual_{lang}", 0.75))
+                add(f"multilingual_{lang}", 0.75, pattern)
 
         # Imperative second-person (count density)
         imperative_matches = self.imperative_you.findall(text)
         if len(imperative_matches) >= 3:
-            hits.append(("imperative_density_high", min(0.75, 0.3 + len(imperative_matches) * 0.1)))
+            add(
+                "imperative_density_high",
+                min(0.75, 0.3 + len(imperative_matches) * 0.1),
+                self.imperative_you,
+            )
 
         # Subtle persuasion
         if self.compliance_pressure.search(text):
-            hits.append(("subtle_compliance", 0.65))
+            add("subtle_compliance", 0.65, self.compliance_pressure)
         if self.rating_manipulation.search(text):
-            hits.append(("subtle_rating", 0.7))
+            add("subtle_rating", 0.7, self.rating_manipulation)
 
         return hits
 
@@ -275,6 +288,25 @@ def _extract_excerpt(text: str, pattern: re.Pattern, max_len: int = 160) -> str:
     if len(excerpt) > max_len:
         excerpt = excerpt[:max_len] + "..."
     return excerpt
+
+
+def _combine_scores(weights: list[float]) -> float:
+    """Monotonic noisy-OR combination of hit weights: ``1 - prod(1 - w)``.
+
+    Replaces the previous plain average (finding #23): under averaging,
+    piling on extra low-weight hits could pull a strong hit's score back
+    *down* below the 0.5 quarantine threshold -- e.g. one 0.9 hit plus ten
+    0.1 hits used to average to ~0.27, well under threshold, even though
+    the 0.9 signal alone already warranted action. Noisy-OR is monotonic
+    in every weight: adding any additional hit can only raise (or, at
+    weight 0, leave unchanged) the combined score, never lower it.
+    """
+    if not weights:
+        return 0.0
+    survival = 1.0
+    for w in weights:
+        survival *= 1.0 - min(max(w, 0.0), 1.0)
+    return min(1.0, 1.0 - survival)
 
 
 def scan_heuristics(text: str, title: str = "") -> HeuristicResult:
@@ -311,34 +343,19 @@ def scan_heuristics(text: str, title: str = "") -> HeuristicResult:
 
     hits_raw = _PATTERNS.find_hits(combined_text)
 
-    # Build Hit objects with excerpts
+    # Build Hit objects with excerpts, each taken from the regex that
+    # actually produced that hit (see `find_hits`'s docstring / finding #23).
     hits: list[Hit] = []
     seen_patterns = set()
 
-    for pattern_id, weight in hits_raw:
+    for pattern_id, weight, pattern_obj in hits_raw:
         if pattern_id in seen_patterns:
             continue
         seen_patterns.add(pattern_id)
 
-        # Find the corresponding pattern object
-        pattern_obj = None
-        for attr_name in dir(_PATTERNS):
-            attr = getattr(_PATTERNS, attr_name)
-            if isinstance(attr, re.Pattern) and attr.search(combined_text):
-                pattern_obj = attr
-                break
-
-        excerpt = ""
-        if pattern_obj:
-            excerpt = _extract_excerpt(combined_text, pattern_obj)
-
+        excerpt = _extract_excerpt(combined_text, pattern_obj)
         hits.append(Hit(pattern_id=pattern_id, excerpt=excerpt, weight=weight))
 
-    # Calculate weighted score
-    if hits:
-        score = sum(h.weight for h in hits) / len(hits)
-        score = min(1.0, score)  # Cap at 1.0
-    else:
-        score = 0.0
+    score = _combine_scores([h.weight for h in hits])
 
     return HeuristicResult(score=score, hits=hits, flagged=score >= 0.5)

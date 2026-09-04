@@ -1,20 +1,58 @@
+import { useState } from "react";
 import { MessageSquareText, PanelRightClose, X } from "lucide-react";
 import { useAskChat } from "@/hooks/useAskChat";
 import { ChatThread } from "@/components/ask/ChatThread";
-import { useUiStore } from "@/store/uiStore";
+import { useUiStore, type ChatContextItem } from "@/store/uiStore";
+import { cn } from "@/lib/cn";
+
+function parseDropPayload(dt: DataTransfer): ChatContextItem | null {
+  try {
+    const raw = dt.getData("application/x-eo-context");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ChatContextItem>;
+    if ((parsed.kind !== "item" && parsed.kind !== "entity") || typeof parsed.id !== "number") {
+      return null;
+    }
+    return { kind: parsed.kind, id: parsed.id, label: String(parsed.label ?? "") };
+  } catch {
+    return null;
+  }
+}
 
 export function ChatPanel() {
   const chatOpen = useUiStore((s) => s.chatOpen);
   const setChatOpen = useUiStore((s) => s.setChatOpen);
+  const addToChatContext = useUiStore((s) => s.addToChatContext);
   const chat = useAskChat();
+  const [dragOver, setDragOver] = useState(false);
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const entry = parseDropPayload(e.dataTransfer);
+    if (entry) {
+      addToChatContext(entry);
+      setChatOpen(true);
+    }
+  }
 
   if (!chatOpen) {
     return (
       <button
         type="button"
         onClick={() => setChatOpen(true)}
-        className="fixed bottom-14 start-4 z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90"
-        aria-label="פתח את פאנל שאל את האנליסט"
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        data-testid="chat-panel-fab-dropzone"
+        className={cn(
+          "fixed bottom-14 start-4 z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90",
+          dragOver && "ring-2 ring-accent-fg ring-offset-2 ring-offset-bg",
+        )}
+        aria-label="פתח את פאנל שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"
       >
         <MessageSquareText size={16} aria-hidden="true" />
         שאל את האנליסט
@@ -24,8 +62,18 @@ export function ChatPanel() {
 
   return (
     <aside
-      className="flex w-96 shrink-0 flex-col border-r border-border bg-bg-raised"
-      aria-label="שאל את האנליסט"
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={handleDrop}
+      data-testid="chat-panel-dropzone"
+      className={cn(
+        "flex w-96 shrink-0 flex-col border-r border-border bg-bg-raised",
+        dragOver && "outline outline-2 -outline-offset-2 outline-accent",
+      )}
+      aria-label="שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"
     >
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
         <MessageSquareText size={16} className="text-accent" aria-hidden="true" />

@@ -45,6 +45,14 @@ export function EntitiesListPage() {
           {data.map((e) => (
             <li
               key={e.id}
+              draggable
+              onDragStart={(ev) => {
+                ev.dataTransfer.setData(
+                  "application/x-eo-context",
+                  JSON.stringify({ kind: "entity", id: e.id, label: e.name }),
+                );
+                ev.dataTransfer.effectAllowed = "copy";
+              }}
               className="flex items-center gap-3 rounded-lg border border-border bg-bg-raised p-3 shadow-panel"
             >
               <Link to={`/entities/${e.id}`} className="min-w-0 flex-1">

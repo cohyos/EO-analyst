@@ -224,6 +224,8 @@ export function FeedPage() {
                   selected={index === selectedIndex}
                   onSelect={() => setSelectedIndex(index)}
                   onOpen={() => setOpenItemId(item.id)}
+                  onRate={(level) => feedback.mutate({ id: item.id, level })}
+                  isRating={feedback.isPending}
                   style={{ top }}
                 />
               ))}

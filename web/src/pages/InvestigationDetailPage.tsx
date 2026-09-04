@@ -1,6 +1,7 @@
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Square } from "lucide-react";
+import { Pause, Square } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { CitationText } from "@/components/CitationText";
@@ -30,10 +31,22 @@ export function InvestigationDetailPage() {
     mutationFn: () => api.postItemInvestigate(data?.item_id ?? 0, { question: data?.question ?? null }),
   });
 
+  const allLog = [...(data?.log ?? []), ...liveLines];
+
+  // Auto-scroll the log to the newest line as it grows, unless the analyst
+  // is hovering over it (reading a past entry) — resumes once the pointer
+  // leaves.
+  const logRef = useRef<HTMLOListElement>(null);
+  const [paused, setPaused] = useState(false);
+  useEffect(() => {
+    if (paused) return;
+    const el = logRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [allLog.length, paused]);
+
   if (isLoading) return <LoadingState label="טוען חקירה…" />;
   if (isError || !data) return <ErrorState onRetry={() => refetch()} message="החקירה לא נמצאה" />;
-
-  const allLog = [...(data.log ?? []), ...liveLines];
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
@@ -61,11 +74,28 @@ export function InvestigationDetailPage() {
       </header>
 
       <section aria-label="לוג חקירה חי">
-        <h3 className="mb-2 text-sm font-semibold text-fg-dim">לוג חקירה</h3>
+        <div className="mb-2 flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-fg-dim">לוג חקירה</h3>
+          {isRunning && paused && (
+            <span
+              className="flex items-center gap-1 rounded bg-warn/15 px-1.5 py-0.5 text-xs text-warn"
+              data-testid="log-paused-indicator"
+            >
+              <Pause size={11} aria-hidden="true" />
+              גלילה מושהית (ריחוף עכבר)
+            </span>
+          )}
+        </div>
         {allLog.length === 0 ? (
           <EmptyState title="אין עדיין רשומות לוג" />
         ) : (
-          <ol className="space-y-2 font-mono text-xs">
+          <ol
+            ref={logRef}
+            onMouseEnter={() => setPaused(true)}
+            onMouseLeave={() => setPaused(false)}
+            data-testid="investigation-log"
+            className="max-h-[28rem] space-y-2 overflow-y-auto scroll-smooth font-mono text-xs"
+          >
             {allLog.map((line, i) => (
               <li key={i} className="rounded-md border border-border bg-bg-raised p-2">
                 <div className="flex flex-wrap items-center gap-2 text-fg-dim">

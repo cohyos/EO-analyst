@@ -67,7 +67,22 @@ _OFFSCREEN_STYLE_RE = re.compile(
 _BASE64_RE = re.compile(r"(?:[A-Za-z0-9+/]{4}){10,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
 _HEX_BLOB_RE = re.compile(r"(?:[0-9a-fA-F]{2}[ \t]?){20,}")
 
-_STRIP_TAGS = ("script", "style", "noscript", "iframe")
+_STRIP_TAGS = (
+    "script",
+    "style",
+    "noscript",
+    "iframe",
+    # Non-content containers (finding #20): none of these hold real,
+    # human-readable page text, but a hidden instruction can be smuggled
+    # inside one (an off-screen <svg><text>, an unrendered <template>, a
+    # <canvas> fallback body, an <object>/<embed> alt payload).
+    "template",
+    "svg",
+    "object",
+    "embed",
+    "canvas",
+    "math",
+)
 
 
 class CleanText(BaseModel):
@@ -75,6 +90,7 @@ class CleanText(BaseModel):
 
     text: str
     title: str | None = None
+    detect_text: str = ""
     lang: str | None = None
     published_at: datetime | None = None
     hidden_text_ratio: float = 0.0
@@ -197,6 +213,17 @@ def _strip_dom(html_str: str) -> tuple[str, float, bool]:
             continue
         for attr in [a for a in el.attrib if a.lower().startswith("on")]:
             del el.attrib[attr]
+
+    # A hidden (or non-content-tag) root has no parent to remove it from,
+    # so the walk()+remove() pass below can never drop it -- its text would
+    # otherwise remain fully extractable despite being invisible/inert to a
+    # human reader (finding #20). Treat the whole document as maximally
+    # hidden and return an empty body instead.
+    if not isinstance(tree.tag, str) or tree.tag in _STRIP_TAGS or _is_hidden_element(tree):
+        root_text_len = len((tree.text_content() or "").strip())
+        if root_text_len:
+            log.info("fetch.hidden_root_document", root_tag=tree.tag, text_len=root_text_len)
+        return "", (1.0 if root_text_len else 0.0), root_text_len > 0
 
     hidden_len = 0
     visible_len = 0
