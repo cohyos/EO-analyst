@@ -1577,3 +1577,185 @@ rule 10): `verify_conference`'s and `discover_new`'s end-to-end search/fetch/LLM
 `monthly_scan`'s DB-backed candidate selection — their pure helpers (query construction, URL
 ranking, field-confidence gating logic) are covered directly instead.
 once the image is built.
+
+## Graph edge provenance (`eoa.memory.graph.edges_of` / `edge_stats`)
+
+`eoa.memory.graph.neighbors()` returns only the neighboring `Entity`
+vertices reached by a Cypher match — not the edge itself — so callers had
+no way to recover the `item_id`/`evidence` `add_edge()` stamps onto every
+edge on creation. Two additive functions close that gap:
+
+- **`edges_of(entity_id, label=None, depth=1) -> list[EdgeRow]`** — walks
+  every relationship along each matched path (`MATCH p = (a:Entity
+  {entity_id: $eid})-[...*1..depth]-(b:Entity)`, `UNWIND relationships(p)`)
+  and resolves each one back to its real `startNode`/`endNode` (not
+  necessarily the direction it was traversed in, since the match itself is
+  undirected). `EdgeRow` is a dataclass: `src_entity_id`, `src_name`,
+  `dst_entity_id`, `dst_name`, `label`, `item_id`, `evidence`,
+  `created_at` (the last is `None` today — nothing stamps it, and this
+  module never invents data). Two private helpers, `_vertex_fields()` /
+  `_edge_fields()`, extract fields from a parsed vertex/edge tolerant of
+  both the real AGE agtype shape (`{"properties": {...}}`) and an
+  already-flattened dict, since other modules in this codebase have
+  historically assumed the latter.
+- **`edge_stats() -> dict[str, int]`** — count of edges per `EDGE_LABELS`
+  label (`MATCH ()-[r]->() RETURN label(r), count(r)`), defaulting every
+  label to `0` so the result is always a complete map.
+
+`neighbors()` itself is unchanged — both new functions are purely
+additive.
+
+### Wired into
+
+- **`eoa.api.services.build_graph()`** (`GET /api/graph`) now calls
+  `graph.edges_of()` per label instead of `graph.neighbors()`, so each
+  returned edge carries its real `item_id`/`evidence` instead of `None`.
+  Nodes discovered only through an edge (not the center entity) get a name
+  but no `kind`/`country` — `edges_of()` doesn't fetch those, and
+  inventing them would violate "never invent" (`docs/CONVENTIONS.md` rule
+  5).
+- **`eoa.api.services._item_edges()` / `get_item()`** (`GET
+  /api/items/{id}`) — new helper: resolves the item's `entities_mentioned`
+  names to `entities.id`, walks `edges_of()` for each, and filters down to
+  edges whose `item_id` equals the requested item. Replaces the previous
+  always-empty `card["edges"] = []` stub.
+- **`eoa.export.obsidian._entity_neighbor_lines()`** — neighbor discovery
+  still goes through `neighbors()` (one call per label, unchanged
+  signature elsewhere), but the "קשרים" (relationships) section now
+  layers real provenance on top via `edges_of()`, matched by `(label,
+  other entity id)`, so the מקור (source) line links the real evidencing
+  item instead of the old "לא זמין דרך neighbors()" placeholder. If the
+  provenance lookup itself fails (e.g. graph backend unavailable), each
+  line still renders with an explicit "not available" placeholder rather
+  than an invented source.
+
+### Tests
+
+`tests/unit/test_graph_edges.py` — no DB/AGE: `_run_cypher` is
+monkeypatched with a fake returning agtype-shaped raw strings (same
+fixtures style as `tests/unit/test_agtype_parse.py`). Covers Cypher-string
+construction (no label / with label+depth / unknown-label
+`ValueError` raised before any query), and agtype parsing (single edge →
+`EdgeRow`, two edges in both directions, missing `item_id`/`evidence` →
+`None`, an unparseable vertex row is skipped rather than raising, and
+tolerance for an already-flattened vertex/edge dict) for `edges_of()`; and
+`edge_stats()`'s Cypher construction, its all-labels-default-to-zero
+baseline, per-label counting, and ignoring an unrecognized label in the
+result set. Passes via `PYTHONPATH=agent python -m pytest
+tests/unit/test_graph_edges.py -q`.
+
+## Feedback loop (`eoa.feedback`) — FR-3.3 / FR-11
+
+Package `agent/eoa/feedback/`: turns user feedback (`triage_feedback`,
+survey answers) into `lessons` rows and a weekly transparency summary.
+
+### `calibration.py` — FR-3.3 triage self-calibration
+
+`calibrate(days=30) -> CalibrationSummary`: reads `triage_feedback` from
+the last `days` days joined to `items.domain` and `sources.kind`
+("source_kind"), computes the mean ordinal delta (`user_level -
+agent_level`, via `LEVEL_ORDER = {"archive": 0, "yellow": 1, "orange": 2,
+"red": 3}`) per domain and per source_kind, and flags a systematic bias
+wherever `|mean delta| >= 0.5` (`BIAS_THRESHOLD`) with at least 3
+(`MIN_SAMPLES`) feedback rows backing it. Each bias becomes a Hebrew
+`lessons(kind='calibration')` row (e.g. "בתחום c_uas המשתמש מוריד דירוג
+בממוצע ב-1 רמה — היה שמרני יותר"), deduplicated by a stable `source_ref`
+(`calib:domain:<domain>` / `calib:source_kind:<kind>`): re-running
+`calibrate()` updates the text in place if the bias changed, leaves it
+alone if not, and deactivates (never deletes) any previously-flagged bias
+that no longer holds. `eoa.pipeline.triage._lessons_text()` is the reader
+side of this loop — already reads `lessons(kind='calibration')`
+most-recent-first, capped at 12 (verified, not changed, by
+`tests/unit/test_feedback_triage_lessons.py`).
+
+### `surveys.py` — FR-11 rotating survey + answer ingestion
+
+`QUESTION_BANK` — 12 Hebrew questions (8 choice/scale, 4 open, ~FR-11.1's
+70/30 split); relevant closed questions carry a `signal` tag (`"clarity"`
+on q6, `"frequency"` on q7) consumed by `_ingest_closed_answer()`.
+`rotating_subset(seed, k=6)` deterministically picks `k` consecutive
+(wrapping) questions starting at `seed % len(QUESTION_BANK)`.
+`create_for_report(report_id)` returns the existing survey for that report
+(seeding the rotation off `report_id` so the same report always gets the
+same 6 questions) or creates one. `ingest_answers(survey_id, answers)`
+persists the answers and derives lessons: a low clarity score or an
+"too frequent/infrequent" frequency answer → `lessons(kind='style')`; an
+open answer is run through `parse_free_text()` — a recognized watchlist
+request writes both a `lessons(kind='watchlist')` row AND a
+`clarifications(kind='watchlist_proposal')` row proposing the change
+(never edits `config/watchlist.yaml` directly, per FR-10 — that stays a
+human decision); a shorter/longer request → `style`; an explicit "לא
+רלוונטי: X" → `decision`; anything the heuristic can't structure is still
+preserved as a `decision` lesson rather than silently dropped.
+`parse_free_text(text)` heuristically recognizes: "יותר קצר"/"יותר ארוך"
+(shorter/longer), "להוסיף מעקב אחרי X" (watchlist addition), "לא רלוונטי:
+Y" (explicit irrelevance) — returns only the fields it actually
+recognized, never a guess.
+
+`eoa.api.services.latest_survey()` / `submit_survey_answers()` are now
+thin passthroughs to `create_for_report()` / `ingest_answers()` (the
+inline `SURVEY_QUESTION_BANK`/`_rotating_subset` previously in
+`services.py` were removed in favor of this module).
+
+### `meta.py` — FR-11.4 weekly transparency summary
+
+`weekly_meta_summary(period_days=7) -> MetaSummary`: reads `lessons`
+created in the period, groups by `kind` (Hebrew labels: כיול דירוג חשיבות
+/ עדכון רשימת מעקב / התאמת סגנון-אורך דוחות / הכרעות משתמש / סיכומי
+מטא), and renders a templated (no LLM) Hebrew paragraph — up to 5 lines
+per kind plus an "ועוד N לקחים נוספים" overflow note. Calibration deltas
+are included implicitly: `calibration.py` already writes them as
+`lessons(kind='calibration')` rows whose text spells out the bias in
+Hebrew, so this module doesn't re-query `triage_feedback` to describe them
+again. `post_weekly_meta(period_days=7)` builds the summary and pushes it
+via `eoa.notify.ntfy.status()`.
+
+### API — `POST /api/feedback/calibrate`, `GET /api/feedback/meta`
+
+New `agent/eoa/api/routes/feedback.py`, registered in `app.py`
+(`app.include_router(feedback.router, prefix="/api")`): `POST
+/api/feedback/calibrate` runs `calibrate()` and returns its summary as
+JSON; `GET /api/feedback/meta?period_days=7` runs `weekly_meta_summary()`
+and returns `{"period_days", "lesson_count", "by_kind", "text_he"}`.
+
+### Tests
+
+No DB/LLM in any of these — every DB-touching function is monkeypatched at
+its own module level (mirroring `tests/unit/test_obsidian_export.py`'s
+stubbing style):
+
+- `tests/unit/test_feedback_calibration.py` — pure grouping (`_group_deltas`:
+  domain/source_kind grouping, unmapped-level rows skipped, rows without a
+  domain/source_kind still counted), bias-threshold detection
+  (`_detect_biases`: below `MIN_SAMPLES` / below `BIAS_THRESHOLD` not
+  flagged, negative/positive bias flagged, the `>=` threshold boundary is
+  inclusive), Hebrew `_bias_text()` wording (the exact spec example, a
+  positive-delta domain bias, a source_kind bias), and `calibrate()`
+  end-to-end (creates a new lesson, updates one whose text changed,
+  no-ops when the text is identical — true dedupe, deactivates a stale
+  bias that no longer holds, and the empty-feedback no-error case).
+- `tests/unit/test_feedback_surveys.py` — question bank shape (12
+  questions, ~70/30 split, unique ids), `rotating_subset()` determinism
+  (same seed → same subset, default/custom `k`, wraps around the bank,
+  different seeds can differ), `parse_free_text()` (shorter/longer,
+  watchlist addition, not-relevant, empty/unrecognized text, multiple
+  signals in one text), `create_for_report()` (returns existing without
+  creating, creates when none exists), and `ingest_answers()` (low
+  clarity score → style lesson, high score → none, frequency too
+  high/fits, open watchlist request → lesson + proposal, open
+  not-relevant → decision lesson, unrecognized open text preserved as a
+  decision lesson, blank open answer ignored, unknown question id
+  ignored).
+- `tests/unit/test_feedback_meta.py` — no-lessons placeholder message,
+  grouping by kind with Hebrew labels, the per-kind line cap plus overflow
+  note, `period_days` propagation, and `post_weekly_meta()` posting via
+  `ntfy.status()`.
+- `tests/unit/test_feedback_triage_lessons.py` — verifies
+  `eoa.pipeline.triage._lessons_text()`'s existing contract that
+  `feedback.calibration` relies on: calibration lessons are included,
+  capped at 12, in the order `get_lessons()` hands them back (most recent
+  first), the empty-lessons placeholder, and that `get_lessons()` is
+  called with `"calibration"`.
+
+All pass via `PYTHONPATH=agent python -m pytest tests/unit -q` (402/402)
+and are clean under `ruff check` / `ruff format --check`.

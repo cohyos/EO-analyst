@@ -72,9 +72,9 @@ __all__ = [
     "build_monthly",
     "collect_month_items",
     "draft_monthly",
+    "full_horizon_table",
     "players_map",
     "top_events_by_amount",
-    "full_horizon_table",
     "watchlist_changes",
 ]
 
