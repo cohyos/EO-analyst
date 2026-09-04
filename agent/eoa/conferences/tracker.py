@@ -246,13 +246,11 @@ def merge_duplicates(rows: list[dict[str, Any]] | None = None) -> dict[str, Any]
     for group in _find_duplicate_groups(rows):
         keep, dups = group[0], group[1:]
         for dup in dups:
+            # Compute the merge *before* touching anything, but apply it (in particular a rename
+            # onto `dup`'s own name) only *after* `dup` is gone -- otherwise adopting `dup`'s name
+            # while `dup` still owns it trips the `conferences.name` UNIQUE constraint.
             updates = _merged_fields(keep, dup)
-            if updates:
-                set_clauses = ", ".join(f"{k} = %({k})s" for k in updates)
-                _execute(
-                    f"UPDATE conferences SET {set_clauses} WHERE id = %(id)s", {**updates, "id": keep["id"]}
-                )
-                keep.update(updates)
+
             _execute(
                 "DELETE FROM conference_reminders d USING conference_reminders k "
                 "WHERE d.conf_id = %(dup_id)s AND k.conf_id = %(keep_id)s AND d.kind = k.kind",
@@ -264,6 +262,13 @@ def merge_duplicates(rows: list[dict[str, Any]] | None = None) -> dict[str, Any]
             )
             _execute("DELETE FROM conferences WHERE id = %(dup_id)s", {"dup_id": dup["id"]})
             rows_deleted += 1
+
+            if updates:
+                set_clauses = ", ".join(f"{k} = %({k})s" for k in updates)
+                _execute(
+                    f"UPDATE conferences SET {set_clauses} WHERE id = %(id)s", {**updates, "id": keep["id"]}
+                )
+                keep.update(updates)
         groups_merged += 1
 
     if rows_deleted:
@@ -404,8 +409,7 @@ def roll_horizon(months: int = 24) -> dict[str, Any]:
             start_date = dt.date(year, month, 15)
             end_date = start_date + dt.timedelta(days=3)
             rationale = (
-                f"מועד משוער לפי מחזוריות היסטורית (חודש {month}, {cadence}); "
-                "יאומת בסריקה החודשית (FR-12.3)."
+                f"מועד משוער לפי מחזוריות היסטורית (חודש {month}, {cadence}); יאומת בסריקה החודשית (FR-12.3)."
             )
             canonical_name = f"{name} {year}"
 
