@@ -275,6 +275,51 @@ export interface Conference {
   changes: Record<string, ConferenceFieldChange>;
 }
 
+// Mirrors the `tenders` table CHECK constraint (db/migrations/versions/0004_tenders.py).
+export type TenderStatus = "open" | "closed" | "awarded" | "unknown";
+
+// Mirrors `_tender_card` (agent/eoa/api/services.py) / docs/API.md section 5.2.
+export interface TenderCard {
+  id: number;
+  source: string | null;
+  external_ref: string | null;
+  title: string | null;
+  agency: string | null;
+  country: string | null;
+  published_at: string | null;
+  deadline: string | null;
+  url: string | null;
+  cpv_naics: string[];
+  summary_he: string | null;
+  relevance: number | null;
+  matched_terms: string[];
+  entities: string[];
+  status: TenderStatus;
+  item_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// Mirrors `_forecast_card` (agent/eoa/api/services.py) / docs/API.md section 5.2.
+// `sources` is a plain TEXT[] of URLs (db/migrations/versions/0004_tenders.py) —
+// not a structured citation object like AskCitation/InvestigationSource.
+export interface ForecastCard {
+  id: number;
+  platform: string;
+  buyer_country: string | null;
+  trigger_event_id: number | null;
+  trigger_item_id: number | null;
+  payload_need: string;
+  candidate_vendors: string[];
+  likelihood: number | null;
+  window_from: string | null;
+  window_to: string | null;
+  rationale_he: string | null;
+  sources: string[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Clarification {
   id: number;
   kind: string;

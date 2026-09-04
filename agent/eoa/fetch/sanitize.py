@@ -126,6 +126,69 @@ def text_hash(text: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# mojibake repair (runs on extracted text, right after extraction)
+# --------------------------------------------------------------------------
+
+# Single-byte encodings a mis-decoding upstream commonly went through --
+# i.e. the *wrong* codec that was applied to what were really UTF-8 bytes,
+# producing garbled text like "×¢×‘×¨×™×ª" (Hebrew mis-decoded as
+# latin-1) or "â€™" (a smart quote mis-decoded as cp1252/windows-1252).
+# Tried in this order (cp1252 first: it's the more common real-world
+# culprit and is a strict superset of latin-1's printable range).
+_MOJIBAKE_INTERMEDIATE_ENCODINGS = ("cp1252", "latin-1")
+_REPLACEMENT_CHAR = "�"  # U+FFFD, left behind by a genuinely lossy decode
+
+
+def _mojibake_score(text: str) -> tuple[int, int]:
+    """`(good, bad)` used to judge whether a repair candidate is an improvement.
+
+    `good` counts Hebrew and Latin letters (the alphabets this project's content actually uses);
+    `bad` counts `U+FFFD` replacement characters. Mojibake itself is typically punctuation-range
+    symbols (×, ¢, â, €, ...) that are neither, so a successful repair reliably raises `good` without
+    raising `bad`.
+    """
+    low, high = _HEBREW_CODEPOINT_RANGE
+    good = sum(1 for c in text if (low <= ord(c) <= high) or (c.isascii() and c.isalpha()))
+    bad = text.count(_REPLACEMENT_CHAR)
+    return good, bad
+
+
+def _repair_mojibake(text: str) -> str:
+    """Undo UTF-8-decoded-as-a-wrong-single-byte-encoding mojibake, once or twice (double-encoding).
+
+    Uses `ftfy` if it is installed (not currently a project dependency); otherwise falls back to a
+    small heuristic: re-interpret the text as bytes under each of `_MOJIBAKE_INTERMEDIATE_ENCODINGS`
+    and re-decode as UTF-8 -- repeating once more to catch double-encoding -- keeping a candidate only
+    when it strictly improves `_mojibake_score` over the current best. Genuinely correct text has no
+    such improving round-trip (real Hebrew/non-Latin-1 characters simply fail to `.encode()` under
+    these codecs) and is returned unchanged.
+    """
+    if not text:
+        return text
+
+    try:
+        import ftfy
+
+        return ftfy.fix_text(text)
+    except ImportError:
+        pass
+
+    best = text
+    best_good, best_bad = _mojibake_score(best)
+    for encoding in _MOJIBAKE_INTERMEDIATE_ENCODINGS:
+        candidate = text
+        for _ in range(2):  # once for single mis-decoding, twice for double-encoding
+            try:
+                candidate = candidate.encode(encoding).decode("utf-8")
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                break
+            good, bad = _mojibake_score(candidate)
+            if good > best_good and bad <= best_bad:
+                best, best_good, best_bad = candidate, good, bad
+    return best
+
+
+# --------------------------------------------------------------------------
 # language detection
 # --------------------------------------------------------------------------
 
@@ -502,6 +565,16 @@ def extract_clean_text(html: str, url: str) -> CleanText:
 
     body_text = body_text or ""
     title_text = title.strip() if isinstance(title, str) else (title or "")
+
+    # Repair UTF-8-mis-decoded-as-latin-1/cp1252 mojibake before anything
+    # else touches the text: `eoa.fetch.html._decode` already prefers the
+    # right codec whenever it has a signal to go on, but a page with no
+    # HTTP charset, no declared charset, and content `charset_normalizer`
+    # itself gets wrong still reaches here garbled -- and language
+    # detection / homoglyph mapping below would otherwise run on the
+    # garbled text instead of the real one.
+    body_text = _repair_mojibake(body_text)
+    title_text = _repair_mojibake(title_text) if title_text else title_text
 
     # Invisible/bidi-control/tag-character Unicode is never legitimately
     # visible, so stripping it can't corrupt real content -- apply it to

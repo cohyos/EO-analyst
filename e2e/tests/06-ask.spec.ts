@@ -48,6 +48,6 @@ test.describe("Ask the analyst (/ask)", () => {
 
   test("empty state renders explanatory Hebrew text before any question is sent", async ({ page }) => {
     await page.goto("/ask");
-    await expect(page.getByText("שאל את האנליסט")).toBeVisible();
+    await expect(page.getByRole("main").getByText("שאל את האנליסט")).toBeVisible();
   });
 });

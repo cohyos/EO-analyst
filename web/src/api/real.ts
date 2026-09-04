@@ -5,6 +5,7 @@ import type {
   Conference,
   EntityDetail,
   EntitySummary,
+  ForecastCard,
   GraphResponse,
   InvestigationDetail,
   InvestigationSummary,
@@ -20,9 +21,10 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TenderCard,
   TriageLevel,
 } from "@/types/api";
-import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery } from "./types";
+import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery, TendersQuery } from "./types";
 import {
   arr,
   bool,
@@ -245,6 +247,50 @@ function normalizeConference(raw: Partial<Conference> | null | undefined): Confe
   };
 }
 
+function normalizeTenderCard(raw: Partial<TenderCard> | null | undefined): TenderCard {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    source: r.source ?? null,
+    external_ref: r.external_ref ?? null,
+    title: r.title ?? null,
+    agency: r.agency ?? null,
+    country: r.country ?? null,
+    published_at: r.published_at ?? null,
+    deadline: r.deadline ?? null,
+    url: r.url ?? null,
+    cpv_naics: arr(r.cpv_naics),
+    summary_he: r.summary_he ?? null,
+    relevance: r.relevance ?? null,
+    matched_terms: arr(r.matched_terms),
+    entities: arr(r.entities),
+    status: (r.status ?? "unknown") as TenderCard["status"],
+    item_id: r.item_id ?? null,
+    created_at: str(r.created_at),
+    updated_at: str(r.updated_at),
+  };
+}
+
+function normalizeForecastCard(raw: Partial<ForecastCard> | null | undefined): ForecastCard {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    platform: str(r.platform),
+    buyer_country: r.buyer_country ?? null,
+    trigger_event_id: r.trigger_event_id ?? null,
+    trigger_item_id: r.trigger_item_id ?? null,
+    payload_need: str(r.payload_need),
+    candidate_vendors: arr(r.candidate_vendors),
+    likelihood: r.likelihood ?? null,
+    window_from: r.window_from ?? null,
+    window_to: r.window_to ?? null,
+    rationale_he: r.rationale_he ?? null,
+    sources: arr(r.sources),
+    created_at: str(r.created_at),
+    updated_at: str(r.updated_at),
+  };
+}
+
 function normalizeClarification(raw: Partial<Clarification> | null | undefined): Clarification {
   const r = raw ?? {};
   return {
@@ -429,6 +475,22 @@ export const realApi: ApiClient = {
       normalizeConference,
     ),
   getConferencesIcalUrl: () => "/api/conferences/ical",
+
+  getTenders: async (query: TendersQuery) =>
+    arr(
+      await request<Partial<TenderCard>[] | null>(
+        `/api/tenders${qs({
+          status: query.status,
+          country: query.country,
+          q: query.q,
+          limit: query.limit,
+        })}`,
+      ),
+    ).map(normalizeTenderCard),
+  getTenderForecasts: async (limit = 100) =>
+    arr(
+      await request<Partial<ForecastCard>[] | null>(`/api/tenders/forecasts${qs({ limit })}`),
+    ).map(normalizeForecastCard),
 
   getClarifications: async (open = true) =>
     arr(

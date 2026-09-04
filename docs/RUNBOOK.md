@@ -11,6 +11,7 @@
 6. [Rotating the Embedding Model](#rotating-the-embedding-model)
 7. [Network Isolation Verification](#network-isolation-verification)
 8. [Integration Smoke Tests](#integration-smoke-tests)
+9. [Web UI Quality Suite (Playwright)](#web-ui-quality-suite-playwright)
 
 ---
 
@@ -529,6 +530,64 @@ Add to your CI pipeline (e.g., GitHub Actions):
   run: |
     PYTHONPATH=agent python -m pytest tests/integration/test_live_stack.py -q -m integration
 ```
+
+---
+
+## Web UI Quality Suite (Playwright)
+
+A standalone Playwright suite lives at `e2e/` (its own `package.json` /
+`node_modules` / `tsconfig.json` — independent of `web/`'s toolchain, and
+never modifies anything under `web/`). It drives the **live app + real
+backend** at `http://127.0.0.1:8765` — not mocks — and walks every screen
+in `docs/MODULES.md` ("Web UI" section) asserting what a strict QA
+engineer would: navigation/routing, RTL, keyboard shortcuts on the feed,
+infinite scroll vs. the API total, WS-fed status strip readouts, streaming
+on `/ask`, settings save round-trips, and an axe-core accessibility pass.
+
+### Prerequisites
+
+The app must already be reachable at `http://127.0.0.1:8765` (or set
+`EOA_BASE_URL`). This suite does not start, build, or proxy the app — see
+`e2e/README.md` for the full rationale and file-by-file breakdown.
+
+### Running it
+
+```bash
+cd e2e
+npm install
+npm run install:browsers      # npx playwright install chromium — one-time
+npm test                      # both viewports: 1440x900 desktop, 390x844 mobile
+```
+
+Useful variants:
+
+```bash
+npm test -- tests/02-feed.spec.ts             # a single screen
+npm test -- --project=desktop-1440x900        # a single viewport
+npm run test:headed                           # watch it click through the app
+npm run report                                # open the last HTML report
+```
+
+### Reading the results
+
+- **`e2e/report/index.html`** (`npm run report`) — full HTML report with a
+  trace/screenshot/video attached to every failure.
+- **`e2e/QA_FINDINGS.md`** — regenerated on every run (never accumulates
+  stale findings from a prior run): a Hebrew-headed, severity-sorted list
+  of every finding, combining (a) explicit findings the tests record
+  mid-run for things that aren't simple pass/fail (e.g. an older/newer
+  build showing different copy for the same underlying check) and (b)
+  every outright test failure, each with its screenshot path and an
+  expected-vs-actual description.
+
+### Known live-data side effects
+
+A few tests exercise real state-changing endpoints (re-rating an item via
+the `1`-`4` feed shortcuts, saving a Settings tab) against the live
+backend. Where the mutation isn't naturally idempotent, the test reads the
+value first and restores it after asserting the request fired — see
+`e2e/README.md` § "Notes on live-data side effects" for the exact
+best-effort-cleanup caveat if a run aborts mid-test.
 
 ---
 

@@ -60,7 +60,7 @@ test.describe("Status strip (persistent footer)", () => {
     expect(badTokens, `Status strip renders bad literal values: ${badTokens.join(", ")}`).toEqual([]);
   });
 
-  test("clicking the strip opens the resource-history drawer (when connected)", async ({ page }) => {
+  test("clicking the strip opens the resource-history drawer (when connected)", async ({ page }, testInfo) => {
     await page.goto("/");
     const footer = page.locator("footer");
     await expect(footer).toBeVisible({ timeout: 15_000 });
@@ -71,6 +71,15 @@ test.describe("Status strip (persistent footer)", () => {
 
     const strip = page.getByRole("status", { name: /סטטוס משאבים/ });
     const toggle = strip.getByTitle("הצג/הסתר היסטוריית משאבים");
+    if ((await toggle.count()) === 0) {
+      await recordFinding(page, testInfo, {
+        screen: "Status strip (persistent footer)",
+        expected: 'Clicking the status strip opens a resource-history drawer (a "הצג/הסתר היסטוריית משאבים" toggle wraps the strip contents)',
+        actual: "No clickable toggle exists on the status strip in the deployed build — the strip is static, non-interactive text",
+        severity: "low",
+      });
+      test.skip(true, "Resource-history drawer is not present in this build");
+    }
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.click();

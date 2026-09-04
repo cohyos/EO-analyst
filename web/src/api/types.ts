@@ -5,6 +5,7 @@ import type {
   Conference,
   EntityDetail,
   EntitySummary,
+  ForecastCard,
   GraphResponse,
   InvestigationDetail,
   InvestigationSummary,
@@ -20,6 +21,8 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TenderCard,
+  TenderStatus,
   TriageLevel,
 } from "@/types/api";
 
@@ -43,6 +46,13 @@ export interface GraphQuery {
   entity_id: number;
   depth?: number;
   labels?: string;
+}
+
+export interface TendersQuery {
+  status?: TenderStatus;
+  country?: string;
+  q?: string;
+  limit?: number;
 }
 
 /**
@@ -85,6 +95,9 @@ export interface ApiClient {
 
   getConferences(from?: string, to?: string): Promise<Conference[]>;
   getConferencesIcalUrl(): string;
+
+  getTenders(query: TendersQuery): Promise<TenderCard[]>;
+  getTenderForecasts(limit?: number): Promise<ForecastCard[]>;
 
   getClarifications(open?: boolean): Promise<Clarification[]>;
   postClarificationAnswer(id: number, answer: string): Promise<void>;

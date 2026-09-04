@@ -59,7 +59,7 @@ ollama:
   url: http://127.0.0.1:11434
   keep_alive: "30m"
   num_ctx: { classify: 4096, triage: 4096, summarize: 8192, react: 16384, report: 32768, embed: 512 }
-  num_predict: { classify: 700, triage: 400, summarize: 1200, react: 1200, report: 6000 }   # runaway-generation caps
+  num_predict: { classify: 700, triage: 400, summarize: 2200, react: 1200, report: 6000 }   # runaway caps; analyze needs ~1100 tokens
   options: { temperature: 0.2, top_p: 0.9 }
 
 models:              # roles -> keys in models.yaml (decided by bake-off, ADR-001)

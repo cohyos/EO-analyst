@@ -7,6 +7,8 @@ matching `docs/CONVENTIONS.md` rule 13 (`fetcher`/`egress` network only).
 
 from __future__ import annotations
 
+import codecs
+import re
 import time
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlsplit
@@ -76,12 +78,114 @@ def _is_retryable_status(status_code: int) -> bool:
     return status_code >= 500 or status_code == 429
 
 
-def _decode(content: bytes, response: httpx.Response) -> str:
-    encoding = response.charset_encoding or "utf-8"
+# Only the first few KB are ever scanned: a charset declaration only counts
+# (per browsers and the HTML5 spec) if it appears near the top of the
+# document, and limiting the scan keeps this cheap on multi-MB pages.
+_SNIFF_WINDOW_BYTES = 4096
+
+_META_CHARSET_RE = re.compile(rb'<meta[^>]+charset\s*=\s*["\']?\s*([a-zA-Z0-9_\-:.]+)', re.IGNORECASE)
+_META_HTTP_EQUIV_RE = re.compile(
+    rb'<meta[^>]+http-equiv\s*=\s*["\']?content-type["\']?[^>]*content\s*=\s*'
+    rb'["\'][^"\'>]*charset\s*=\s*([a-zA-Z0-9_\-:.]+)',
+    re.IGNORECASE,
+)
+_XML_DECL_RE = re.compile(rb'<\?xml[^>]+encoding\s*=\s*["\']([a-zA-Z0-9_\-:.]+)', re.IGNORECASE)
+
+# Single-byte encodings that decode *any* byte sequence without ever raising
+# -- a successful decode with one of these is not, by itself, evidence the
+# encoding is correct (unlike e.g. UTF-8 or windows-1255, which reject
+# invalid byte sequences). A bare claim of one of these -- from the HTTP
+# header or an in-page declaration -- is corroborated against
+# `charset_normalizer` before being trusted (see `_decode`).
+_PERMISSIVE_ENCODING_NAMES = {"iso8859-1", "cp1252"}
+
+
+def _sniff_declared_encoding(content: bytes) -> str | None:
+    """Find an encoding the document declares about itself: `<meta charset>`, the older
+    `<meta http-equiv="Content-Type" content="...charset=...">` form, or an XML declaration.
+
+    This is what `httpx.Response.charset_encoding` does *not* do -- it only ever looks at the HTTP
+    `Content-Type` header -- so a page whose header is absent/wrong but whose HTML correctly declares
+    its own charset (a common shape for legacy CMSs serving windows-1255 Hebrew content) was
+    previously decoded with the wrong (default UTF-8) codec.
+    """
+    head = content[:_SNIFF_WINDOW_BYTES]
+    for pattern in (_META_CHARSET_RE, _META_HTTP_EQUIV_RE, _XML_DECL_RE):
+        match = pattern.search(head)
+        if match:
+            try:
+                return match.group(1).decode("ascii").strip()
+            except UnicodeDecodeError:
+                continue
+    return None
+
+
+def _canonical_encoding_name(encoding: str) -> str | None:
     try:
-        return content.decode(encoding, errors="replace")
-    except (LookupError, TypeError):
-        return content.decode("utf-8", errors="replace")
+        return codecs.lookup(encoding).name
+    except LookupError:
+        return None
+
+
+def _try_decode(content: bytes, encoding: str) -> str | None:
+    try:
+        return content.decode(encoding)
+    except (LookupError, UnicodeDecodeError, TypeError):
+        return None
+
+
+def _detect_with_charset_normalizer(content: bytes) -> str | None:
+    """Best-effort statistical charset guess, used both as a fallback decoder and to corroborate a
+    permissive single-byte encoding claim (see `_PERMISSIVE_ENCODING_NAMES`)."""
+    try:
+        from charset_normalizer import from_bytes
+    except ImportError:  # pragma: no cover - charset_normalizer is a hard dependency in pyproject.toml
+        return None
+    try:
+        best = from_bytes(bytes(content)).best()
+    except Exception as exc:
+        log.debug("fetch.charset_normalizer_failed", error=repr(exc))
+        return None
+    return str(best) if best is not None else None
+
+
+def _decode(content: bytes, response: httpx.Response) -> str:
+    """Decode fetched bytes to text.
+
+    Priority: the HTTP `Content-Type` charset -> an in-document declaration (`<meta charset>` /
+    `http-equiv` / XML declaration) -> `charset_normalizer`'s statistical guess -> UTF-8 with lossy
+    `errors="replace"` as a last resort.
+
+    A claimed *permissive* single-byte encoding (latin-1/cp1252 -- see
+    `_PERMISSIVE_ENCODING_NAMES`) never raises regardless of the actual bytes, so on its own it is
+    not proof of correctness: real UTF-8 content mislabelled that way (the direct cause of
+    "×¢×‘×¨×™×ª"/"â€™"-style mojibake reaching the DB) would otherwise be decoded "successfully" into
+    garbage. Such a claim is corroborated against `charset_normalizer` before being trusted; any
+    other encoding (UTF-8, windows-1255, ...) rejects invalid byte sequences on its own, so a
+    successful decode there is trusted directly.
+    """
+    candidates = [response.charset_encoding, _sniff_declared_encoding(content)]
+
+    for encoding in candidates:
+        if not encoding:
+            continue
+        decoded = _try_decode(content, encoding)
+        if decoded is None:
+            continue
+        canonical = _canonical_encoding_name(encoding)
+        if canonical in _PERMISSIVE_ENCODING_NAMES:
+            detected = _detect_with_charset_normalizer(content)
+            if detected and _canonical_encoding_name(detected) != canonical:
+                continue  # unconfirmed permissive-encoding claim -- keep looking
+        return decoded
+
+    detected = _detect_with_charset_normalizer(content)
+    if detected:
+        decoded = _try_decode(content, detected)
+        if decoded is not None:
+            return decoded
+
+    return content.decode("utf-8", errors="replace")
 
 
 @retry(

@@ -16,6 +16,7 @@ list) -- never fabricated data.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import hashlib
 import tempfile
 from pathlib import Path
@@ -64,6 +65,30 @@ def _execute(query: str, params: Any = None) -> None:
 # --------------------------------------------------------------------------
 
 
+def _json_safe_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Coerce a raw DB row's `datetime`/`Decimal` values to JSON-native types.
+
+    `db.connection()` uses psycopg's `dict_row` factory, which returns
+    native `datetime.datetime`/`decimal.Decimal` objects for
+    `timestamptz`/`numeric` columns. Those rows are pushed straight over
+    `WS /ws/status` (`pipeline_status()`'s `current_job`, `run_log_since()`'s
+    rows); `WebSocket.send_json` calls plain `json.dumps` with no
+    `default=`, so an unconverted value there raises `TypeError` and kills
+    the socket outright (see `agent/eoa/api/routes/status.py`).
+    """
+    if row is None:
+        return None
+    out: dict[str, Any] = {}
+    for key, value in row.items():
+        if isinstance(value, dt.datetime | dt.date):
+            out[key] = value.isoformat()
+        elif isinstance(value, decimal.Decimal):
+            out[key] = float(value)
+        else:
+            out[key] = value
+    return out
+
+
 def _http_reachable(url: str, timeout: float = 2.0) -> bool:
     try:
         r = httpx.head(url, timeout=timeout)
@@ -97,7 +122,7 @@ def latest_run_log_id() -> int:
 def run_log_since(last_id: int) -> tuple[list[dict[str, Any]], int]:
     rows = _fetchall("SELECT * FROM run_log WHERE id > %s ORDER BY id ASC LIMIT 200", (last_id,))
     new_last = rows[-1]["id"] if rows else last_id
-    return rows, new_last
+    return [row for row in (_json_safe_row(r) for r in rows) if row is not None], new_last
 
 
 def _next_night_window_start() -> dt.datetime:
@@ -155,7 +180,7 @@ def pipeline_status() -> dict[str, Any]:
         )
         stage = row["stage"] if row else None
     return {
-        "current_job": current_job,
+        "current_job": _json_safe_row(current_job),
         "queue_depth": queue_depth,
         "stage": stage,
         "night_window": gate().is_batch_window(),
