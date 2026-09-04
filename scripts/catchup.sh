@@ -15,3 +15,6 @@ done
 
 # after catch-up: golden-set evals (ADR-001 validation)
 PYTHONIOENCODING=utf-8 python evals/run_evals.py --set-name classify_triage --role resident > output/logs/evals_run.log 2>&1
+
+# first real daily report from the catch-up results
+python -m eoa.cli run report > output/logs/first_report.log 2>&1
