@@ -33,7 +33,9 @@ class EntityMention(BaseModel):
 class ClassifyOut(BaseModel):
     """Stage: classify (light/resident model)."""
 
-    domain: Domain
+    domain: Domain = Field(
+        description="out_of_scope for platform-only content with no EO/IR/CV payload substance"
+    )
     subdomain: str = Field(description="taxonomy sub-key or empty")
     dimensions: list[Dimension] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list, max_length=8)
@@ -70,7 +72,9 @@ class TriageOut(BaseModel):
     level: Level
     novelty: int = Field(ge=1, le=5, description="1=old news, 5=first-of-its-kind")
     magnitude: int = Field(ge=1, le=5, description="1=minor, 5=market-moving")
-    core_relevance: int = Field(ge=1, le=5)
+    core_relevance: int = Field(
+        ge=1, le=5, description="5 only if the item's main subject is an EO/IR/CV system/program on watchlist"
+    )
     reason_he: str = Field(max_length=400, description="נימוק קצר בעברית, עד 2 משפטים")
     needs_deep_search: bool = False
     deep_search_question: str = Field(

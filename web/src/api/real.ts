@@ -23,7 +23,15 @@ import type {
   TriageLevel,
 } from "@/types/api";
 import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery } from "./types";
-import { arr, bool, idStr, normalizeNightSummary, num, str } from "./normalize";
+import {
+  arr,
+  bool,
+  idStr,
+  normalizeInvestigationLogLine,
+  normalizeNightSummary,
+  num,
+  str,
+} from "./normalize";
 
 class ApiError extends Error {
   code: string;
@@ -170,7 +178,7 @@ function normalizeInvestigationDetail(
   const r = raw ?? {};
   return {
     ...normalizeInvestigationSummary(r),
-    log: arr(r.log),
+    log: arr(r.log).map(normalizeInvestigationLogLine),
     answer: r.answer
       ? {
           answer_he: str(r.answer.answer_he),

@@ -1,0 +1,20 @@
+{
+  "name": "אנליסט EO",
+  "short_name": "אנליסט EO",
+  "description": "חדר מצב + עמית — סוכן אנליסט אלקטרואופטיקה",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b1113",
+  "theme_color": "#0b1113",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

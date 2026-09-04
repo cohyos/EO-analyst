@@ -70,7 +70,7 @@ export function ChatPanel() {
       onDrop={handleDrop}
       data-testid="chat-panel-dropzone"
       className={cn(
-        "flex w-96 shrink-0 flex-col border-r border-border bg-bg-raised",
+        "fixed inset-0 z-40 flex w-full shrink-0 flex-col border-border bg-bg-raised sm:static sm:inset-auto sm:z-auto sm:w-96 sm:border-r",
         dragOver && "outline outline-2 -outline-offset-2 outline-accent",
       )}
       aria-label="שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"

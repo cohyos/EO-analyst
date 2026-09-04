@@ -1146,6 +1146,139 @@ backend or `VITE_USE_MOCKS`.
   plan is a product/pilot activity, not a coding task, and is out of
   scope for this pass.
 
+### Advanced-HMI pass (2026-09-04) — features + real-API QA log
+
+Verified against the live backend at `127.0.0.1:8765` (real DB, ~252
+items) via `npm run dev` + the proxy, plus direct `curl`/websocket
+probes of the backend for shapes this session's UI didn't already
+exercise.
+
+**Delivered:**
+- **Resource panel history**: click the status strip to open a
+  collapsible drawer — Recharts sparklines (VRAM used, GPU util, GPU
+  temp, RAM free) over the last 30 min from a localStorage-persisted
+  ring buffer (`hooks/useResourceHistory.ts`, fed by every `/ws/status`
+  push), the gate's `recent_decisions` list, and loaded-model chips
+  with a CPU-offload warning badge (`components/shell/ResourceHistoryDrawer.tsx`).
+- **Investigation live log**: auto-scrolls to the newest line, pauses
+  on mouse-hover (with a visible "גלילה מושהית" indicator), resumes on
+  mouse-leave (`pages/InvestigationDetailPage.tsx`). WS subscription
+  and the stop button were already wired from an earlier pass.
+- **Explain-score popover** (`components/feed/ExplainScorePopover.tsx`):
+  a "?" button on every feed row (and in the item detail page) opens a
+  fixed-positioned popover with `triage_reason`, the config-mirrored
+  level thresholds (`lib/taxonomy.ts` `LEVEL_THRESHOLDS`, from
+  `config/config.yaml` `triage.levels`), and one-click re-rate buttons.
+- **Drag-and-drop into chat context**: feed rows and entity list rows
+  are `draggable` with the same `application/x-eo-context` payload the
+  existing "הוסף להקשר" button already used; `ChatPanel` (both its
+  open and collapsed-FAB states) is now a drop target with drag-over
+  visual feedback.
+- **New `/items/:id` page** (`pages/ItemDetailPage.tsx`): full item
+  view — external-link title, source/date/lang/domain/score, the
+  explain popover, `summary_he`/`so_what_he` with an explicit "טרם
+  סוכם — יופק בריצה הלילית" state instead of a blank area, key facts,
+  `uncertainty_he`, entity chips resolved to `/entities/:id` via a
+  name→id lookup over `GET /api/entities`, graph edges (src/dst
+  resolved to entity names) with evidence, per-item investigations
+  linking to `/investigations/:job_id`, and a collapsible full-text
+  section. `Enter` on a feed row now navigates here; double-click still
+  opens the old inline quick-preview panel.
+- **Conferences page**: name links out to `registration_url`/`url`
+  (↗ icon) when present, a per-row "הוסף ליומן" button generates a
+  client-side `.ics` (`lib/ics.ts` — no per-conference `/ical` endpoint
+  exists server-side, only the full-horizon one), and a click-to-expand
+  details row shows `registration_opens`/`early_bird_deadline`/
+  `cfp_deadline`/`cost_range`/`entry_conditions`/`status`/
+  `last_verified_at` and the `changes` diff vs. the previous monthly
+  snapshot.
+- Mobile responsiveness: `TopBar` and `ChatPanel` now collapse
+  sensibly below the `sm` breakpoint (icon-only buttons, full-screen
+  chat overlay instead of a fixed 384px sidebar) — a 375px viewport was
+  overflowing horizontally (NavRail pushed off-screen) before this;
+  Morning/Feed/Inbox/entity pages checked at 375px afterward.
+
+**Real-API mismatches found and fixed** (frontend was silently wrong
+against the live backend; all fixed in `web/src/types/api.ts` +
+`web/src/api/{real,normalize}.ts` unless noted):
+1. `ResourceGateStatus`/`PipelineStatus.last_run` were a flat, invented
+   shape (`vram_used_mb`, `loaded_model: string`, `stages: Record<string,string>`)
+   — the real `/api/status` `gate` is nested (`gate.gpu{...}`,
+   `gate.ram{...}`), `loaded_models` is a plural array of
+   `{name,size_mb,size_vram_mb,cpu_offload}`, and `recent_decisions` +
+   `batch_window` didn't exist in the type at all. `last_run.stages` is
+   `{stage: {events,last_event,last_at}}`, not `Record<string,string>`.
+2. Every `job_id` returned by the backend (`/api/investigations*`,
+   `/api/items/{id}/investigate`, `/api/run`) is a Postgres integer,
+   not a string — the old `str()` coercion (`typeof !== "string"` →
+   `""` fallback) silently turned every investigation link into
+   `/investigations/` and collided every list-row's React key. Fixed
+   with a new `idStr()` helper in `api/normalize.ts`.
+3. `investigation_log` rows (`GET /api/investigations/{id}`'s `log`
+   array **and** every `WS /ws/investigations/{id}` push, both a bare
+   `SELECT *`) use the real table's column names — `results_n`, not
+   `results`; `created_at`, not `at` — so every log line's result count
+   and timestamp rendered blank/"—". Fixed with
+   `normalizeInvestigationLogLine()`, applied in both the REST client
+   and `hooks/useInvestigationSocket.ts`.
+4. `Job` (`GET /api/jobs`) was invented (`scope`, `mode`, `progress`,
+   `id: string`) — the real `jobs` row has no such columns (`id` is an
+   int; `kind` + `payload` instead of `scope`/`mode`; no `progress`).
+   `SettingsPage`'s jobs table rendered `"undefined · undefined"` for
+   every row's second column. `JobState` was also wrong: the DB CHECK
+   constraint is `queued|running|done|failed|deferred|partial`, not
+   `queued|running|done|error|cancelled` (cancelling a queued job sets
+   `state='failed', error='cancelled_by_user'`).
+5. `EntitySummary.focus` (`GET /api/entities`) is an array of domain
+   ids, not a string — rendering it directly concatenated the ids with
+   no separator (e.g. "air_defensec_uasnaval_surveillance") on both
+   `EntitiesListPage` and `EntityDetailPage`. Fixed to map through
+   `domainLabel()` and join with " · ".
+6. `ItemCard` was missing `uncertainty_he` (present on every real
+   `_item_card` row) and `Conference` was missing the full FR-12 field
+   set (`organizer`, `registration_url`, `cost_range`,
+   `entry_conditions`, `status`, `changes`, etc.) that the real
+   `conference_card` builder already returns additively alongside the
+   legacy fields the old type covered.
+7. `TriageLevel` had no representation for `level = null` (unclassified)
+   — the live DB is ~98% unclassified items (247/252), and defaulting
+   null to `"yellow"` silently mislabeled almost the entire feed. Added
+   a genuine `"unclassified"` level with its own "טרם סווג" chip
+   (`--level-unclassified` color token).
+8. `FeedPage` fetched a single fixed page (`page=1, page_size=100`) —
+   with 252 real items this silently hid the other 152. Switched to
+   TanStack `useInfiniteQuery`, added a "מציג X מתוך Y" counter, a
+   "טען עוד" button, and scroll/keyboard-driven auto-fetch.
+9. A handful of live items have an empty `title` (an upstream
+   fetch/parse gap, e.g. some Globes RSS entries also carry
+   `published_at: null`) — rows/pages used to render an invisible,
+   confusing blank clickable link; now show "(ללא כותרת)".
+10. Feed row title/open-source links now handle `item.url === ""`
+    without producing a dead `href=""` link.
+
+**Backend defect found, not fixed (out of scope — `web/` only)**:
+`WS /ws/status` closes the connection immediately after accept on
+every attempt (`ConnectionClosedError: no close frame received or
+sent`, reproduced 3/3 via a direct Python websocket client against
+`127.0.0.1:8765`, independent of the Vite proxy). `GET /api/status`
+(same `_status_payload()` body) and `WS /ws/investigations/{id}` both
+work correctly, so the bug is specific to the `/ws/status` route
+(`agent/eoa/api/routes/status.py`). The frontend's existing
+disconnected-state UI + exponential-backoff reconnect
+(`hooks/useStatusSocket.ts`) was verified to activate correctly under
+this real failure — the resource-history drawer could not be
+demonstrated with a live-updating chart in this session as a result,
+though it was verified functionally via `VITE_USE_MOCKS=true` and unit
+tests on the ring-buffer reducer.
+
+**Also encountered, not fixed (backend data quality, out of scope)**:
+some ingested item titles/summaries contain UTF-8 mojibake (e.g. a
+right single quote stored as the 3-codepoint sequence `â€™` instead of
+`'`) — inconsistent across items, so it's a source/ingestion-path
+issue rather than universal; a handful of NER-extracted "entities"
+are clearly source names or the item's own title rather than a real
+company/program/person (e.g. "Breaking Defense" listed as an entity).
+
 ## Orchestrator
 
 Files: `agent/eoa/orchestrator/main.py`, `agent/eoa/orchestrator/jobs.py`.
@@ -2238,3 +2371,131 @@ now asserted *absent* from `triage.md`, confirming the arithmetic formula is
 actually gone, not just supplemented by a table). No Ollama/DB/network in any
 of these — pure template-text and `render()` assertions. Passes via
 `PYTHONPATH=agent python -m pytest tests/unit/test_prompts.py -q`.
+
+## Tenders / RFI / RFP tracking + forecasting (section 5.2 / FR-5.2)
+
+Files: `agent/eoa/tenders/scan.py`, `forecast.py`, `report_section.py`,
+`platform_payloads.yaml`; `agent/eoa/llm/schemas/tenders.py`,
+`agent/eoa/llm/prompts/tender_extract.md` / `tender_forecast.md`;
+`db/migrations/versions/0004_tenders.py` (`tenders`, `tender_forecasts`);
+`agent/eoa/fetch/remote.py: fetch_raw_remote`/`_fetch_raw_local` (raw-JSON bridge, additive to
+`fetch_remote`); tender-related functions in `agent/eoa/api/services.py` +
+`agent/eoa/api/routes/tenders.py`; `config/tenders.yaml` (source registry).
+
+Two independent stages, both wired into `orchestrator/jobs.py` as one additive `"tenders"` stage
+inside `run_daily` (right after `analyze`, budget `config.yaml: stages.tenders` = 15 min) via the
+private `_run_tenders(role)` helper, and separately exposed as the standalone `tender_scan` job
+kind (`HANDLERS["tender_scan"] = run_tender_scan`) for on-demand runs. The daily report picks up
+both via `eoa.report.daily.build_daily`'s small additive block (`eoa.tenders.report_section`) that
+feeds `eoa.report.docx_builder`'s pre-existing `extra_sections`/`tables` hooks (the same ones the
+weekly/monthly reports use) — this never touches `DailyReportDraft` or the citation QA gate, so a
+failure in the tenders section can never break report generation (wrapped in its own try/except).
+
+### `agent/eoa/tenders/scan.py`
+
+- `TenderSource` (pydantic) — one `config/tenders.yaml` entry: `id`, `kind`
+  (`api_json`/`rss`/`html`/`search`), `country`, `url`/`method`/`query_template`/`query_params`
+  (api_json), `queries`/`engine_lang` (search), `keywords`, `parse_hints`, `verified`/`verified_at`/`notes`.
+  `load_tender_sources(path=None)` loads+validates `config/tenders.yaml`.
+- `NoticeRaw` — one parsed notice before keyword filtering/persistence (`source_id`, `external_ref`,
+  `title`, `summary`, `agency`, `country`, `published_at`, `deadline`, `url`, `status_hint`, `raw`).
+  Source-specific parsers: `_parse_ted_notices` (TED v3 `{"notices":[{"ND","TI":{lang:title},"PD","links"}]}`),
+  `_parse_contracts_finder` (UK Contracts Finder OCDS `{"releases":[{"ocid","tender":{...},"buyer":{...},"tag"}]}`,
+  extracts the notice UUID out of the release `id` for the notice URL), `_parse_search_hits` (generic,
+  any `kind: search` source via `eoa.search.searxng_client.search`), `_parse_rss_notices` (reuses
+  `eoa.fetch.rss.parse_feed`).
+- `scan_tenders(since_days=3, role="resident", llm_budget_s=900)` → `TenderStats` (`sources_scanned`,
+  `sources_failed`, `notices_fetched`, `matched`, `inserted`, `duplicates`, `llm_enriched`,
+  `llm_deferred`, `llm_failed`, `closed_transitioned`). Per source: `kind: html` entries and
+  unverified `kind: api_json` entries are skipped outright (both are documented dead-ends in
+  `config/tenders.yaml`, covered instead by a sibling `kind: search` source that runs through the
+  already-verified, keyless SearXNG client rather than the target site's own bot-protection);
+  `api_json` sources rotate up to 5 configured keywords (`MAX_KEYWORDS_PER_API_SOURCE`, deduped by
+  `external_ref` across keywords) and are additionally date-windowed (`_within_window`) since TED's
+  full-text search returns its entire archive back to ~2016 otherwise; `search`/`rss` hit dates are
+  too unreliable to filter on age. Every notice is re-filtered client-side against `src.keywords`
+  (`_matches_keywords`, casefold substring) regardless of any server-side keyword param (unreliable
+  on every source that has one). New matches are deduped by the globally-unique
+  `external_ref = "<source_id>:<notice id>"` (`_tender_exists`), then `_insert_tender_and_item`
+  inserts the `items` row first (`report_kind="tender"`, `clean_text` = title+summary, so the normal
+  classify/triage/analyze pipeline picks it up on the next `classify` stage run) and the `tenders`
+  row second (`item_id` FK, deterministic `relevance` = keyword-hit count 1-10, `status` from
+  `_initial_status`: an explicit award/cancel tag wins, else a past `deadline` → `closed`, else
+  `open`). A single source failing (network, parse error, ...) is caught and counted
+  (`sources_failed`), never stops the others. LLM enrichment (`_llm_enrich`,
+  `chat_structured("resident", TenderExtract, ...)`, DATA-wrapped, prompt `tender_extract.md`) is
+  best-effort and wall-clock-budget-capped (`llm_budget_s`, default 15 min matching the
+  `"tenders"` stage budget): overwrites the deterministic relevance/summary/matched_terms/entities
+  only on success with `confidence >= 0.4`; `ResourceUnavailable`/`LLMOutputError`/any other
+  exception all degrade to "row stays at its deterministic baseline", never a crash or a fabricated
+  fact. `_transition_closed()` (always runs, even with zero sources) flips any `status='open'` row
+  whose `deadline` has passed.
+
+### `agent/eoa/tenders/forecast.py`
+
+- `platform_payloads.yaml` — hand-authored knowledge table (config, not code, per
+  `docs/CONVENTIONS.md` rule 6): platform category (fighter jet, attack helicopter, MALE UAV, small
+  UAS, OPV/corvette/frigate, submarine, APC/IFV, border project, C-UAS program, air-defense
+  interceptor) → `match` substrings, Hebrew category/payload-need labels, `typical_vendors`, and
+  `lag_months` (`min`/`max`). `load_platform_payloads()` / `PlatformSpec.matches(text)`.
+- `forecast_tenders(role="resident", lookback_days=90)` → `ForecastStats` (`candidates`,
+  `upserted`, `llm_used`, `llm_deferred`, `llm_failed`). Deterministic pipeline: recent
+  `contract_award`/`deployment`/`launch` `events` (joined to their triggering item's text +
+  `geography`) are matched against every `PlatformSpec` (`_build_candidates`, grouped by
+  `(platform_key, buyer_country)` so multiple corroborating events within the lookback window
+  become one candidate, matching the DB's `unique(platform, buyer_country, payload_need)`).
+  `compute_likelihood` rubric (0-1): `0.30` base once any triggering event exists, `+0.10` per
+  extra corroborating event capped at `+0.30`, `+0.20` if an explicit RFI/RFP/"sources
+  sought"/Hebrew בקשת-מידע/קול-קורא/מכרז mention is found in the trigger text (`_RFI_RE`), `+0.15`
+  if a prior related `tenders` row already exists for that buyer/payload
+  (`_has_prior_history`), floor `0.05`, cap `1.0`. `_window` derives `window_from`/`window_to` from
+  `today + platform.lag_months`. **The LLM is used only for the Hebrew `rationale_he` text**
+  (`_llm_rationale`, `chat_structured("resident", TenderForecastOut, ...)`, prompt
+  `tender_forecast.md`, must cite trigger items as `[item N]`) — every other field is computed
+  without it and is upserted regardless of whether the LLM call succeeds;
+  `ResourceUnavailable`/`LLMOutputError`/any other exception all fall back to
+  `_fallback_rationale` (a deterministic, still-cited sentence) rather than skipping the row or
+  crashing the run. `_upsert_forecast` writes `tender_forecasts`
+  (`ON CONFLICT (platform, buyer_country, payload_need) DO UPDATE`).
+
+### `agent/eoa/tenders/report_section.py`
+
+- `collect_tenders(period_start=None, period_end=None, open_limit=15)` → `{"open_tenders":
+  [...], "new_forecasts": [...]}` (open tenders soonest-deadline-first; forecasts
+  updated within the period, most-likely-first — or the 15 most likely overall with no period).
+- `tenders_extra_section(data)` → one `extra_sections` entry (title `"מכרזים, RFI/RFP ותחזית"`,
+  deterministic Hebrew prose, `position="after_outlook"` so it always renders as a standalone
+  appendix-style section after the LLM-drafted body/outlook, never mixed into QA-gated text).
+- `tenders_table(data)` → one `tables` entry (open-tenders board: title/agency/country/deadline/
+  status/url) or `None` when there is nothing open to show.
+
+### API (`agent/eoa/api/routes/tenders.py` + `services.py`)
+
+- `GET /api/tenders?status=&country=&q=&limit=100` → `list[TenderCard]`.
+- `GET /api/tenders/forecasts?limit=100` → `list[ForecastCard]`.
+  Shapes documented in `docs/API.md`.
+
+### `agent/eoa/fetch/remote.py: fetch_raw_remote` (additive bridge)
+
+`fetch_remote` sanitizes/extracts clean text (HTML pages meant for an LLM); tender API sources need
+the raw JSON body instead. `fetch_raw_remote(url, method="GET", json_body=None)` →
+`{"url","status","json","text"}`, routed through the same `fetch_url` job
+(`payload={"url","raw": true,"method","json_body"}`) when `EOA_ROLE=agent`, in-process
+(`_fetch_raw_local`, plain `httpx`) otherwise — mirrors `fetch_remote`'s own agent/host split
+exactly. `serve_fetch_jobs` gained one additive `elif p.get("raw")` branch dispatching to
+`_fetch_raw_local`; the `ingest` and plain (non-raw) `fetch_url` branches are untouched. Still
+subject to the same SSRF guard (`assert_public_http_url`) as every other fetch path; still DATA,
+not instructions, once its output reaches an LLM (callers must still `wrap_data` it themselves —
+this bridge only changes *what* is fetched, not the DATA-guard contract).
+
+### Tests
+
+`tests/unit/test_tenders_scan.py`, `test_tenders_forecast.py`, `test_tenders_report_section.py` —
+pure logic/parsing, no DB/LLM/network (DB- and LLM-touching functions monkeypatched at module
+level, mirroring `test_conferences.py`'s style). Fixtures: `tests/fixtures/tenders/ted_sample.json`,
+`contracts_finder_sample.json` (hand-authored, shaped exactly like the real TED v3 / UK Contracts
+Finder OCDS API responses verified live via curl on 2026-09-04 — see `config/tenders.yaml`'s
+per-source `notes`). `load_tender_sources()`/`load_platform_payloads()` are also exercised against
+the real `config/tenders.yaml`/`platform_payloads.yaml` files (not just fixtures), so a config typo
+that breaks pydantic validation fails the unit suite. Passes via
+`PYTHONPATH=agent python -m pytest tests/unit/test_tenders_scan.py tests/unit/test_tenders_forecast.py tests/unit/test_tenders_report_section.py -q`.

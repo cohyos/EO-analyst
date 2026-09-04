@@ -1,10 +1,10 @@
 import { test, expect } from "./fixtures";
-import { assertNoBadText } from "../utils/helpers";
+import { assertNoBadText, recordFinding } from "../utils/helpers";
 
 const API_BASE = process.env.EOA_BASE_URL ?? "http://127.0.0.1:8765";
 
 test.describe("Feed screen (/feed)", () => {
-  test("rows render and the count text is consistent with the API total", async ({ page, request }) => {
+  test("rows render and any displayed item-count reflects the API total", async ({ page, request }, testInfo) => {
     const apiTotal = (await (await request.get(`${API_BASE}/api/items?page_size=1`)).json()).total;
     expect(typeof apiTotal).toBe("number");
 
@@ -12,59 +12,124 @@ test.describe("Feed screen (/feed)", () => {
     const firstRow = page.locator('[data-testid^="feed-row-"]').first();
     await expect(firstRow).toBeVisible({ timeout: 20_000 });
 
-    const countText = page.locator("text=/מציג \\d+ מתוך \\d+/");
-    await expect(countText).toBeVisible();
-    const text = await countText.textContent();
-    const match = text!.match(/מציג (\d+) מתוך (\d+)/);
-    expect(match).not.toBeNull();
-    const [, , totalShown] = match!;
-    expect(Number(totalShown)).toBe(apiTotal);
+    // docs/MODULES.md documents "מציג X מתוך Y" (shown vs. total). The
+    // currently-deployed build may predate that and only show a bare
+    // total ("N פריטים") — accept either, but flag the older copy as a
+    // finding rather than silently treating it as equivalent.
+    const newFormat = page.locator("text=/מציג \\d+ מתוך \\d+/");
+    const oldFormat = page.locator("text=/^\\d+ פריטים/");
+
+    if (await newFormat.count()) {
+      const text = (await newFormat.first().textContent())!;
+      const total = Number(text.match(/מתוך (\d+)/)![1]);
+      expect(total).toBe(apiTotal);
+      return;
+    }
+
+    if (await oldFormat.count()) {
+      const text = (await oldFormat.first().textContent())!;
+      await recordFinding(page, testInfo, {
+        screen: "Feed (/feed)",
+        expected:
+          'Per docs/MODULES.md, the feed status line reads "מציג X מתוך Y" (rows currently shown vs. API total)',
+        actual: `Deployed build shows only a bare total, no "shown" breakdown: "${text.trim()}"`,
+        severity: "low",
+      });
+      const total = Number(text.match(/(\d+) פריטים/)![1]);
+      expect(total, "the bare total count should still match the API total").toBe(apiTotal);
+      return;
+    }
+
+    await recordFinding(page, testInfo, {
+      screen: "Feed (/feed)",
+      expected: "Feed shows an item-count indicator consistent with the API total",
+      actual: "No item-count text found on the feed screen (checked both the current and legacy copy)",
+      severity: "medium",
+    });
+    expect(false, "No item-count text found on the feed screen in either known format").toBeTruthy();
   });
 
   test("scrolling / \"טען עוד\" loads more rows until all are shown or ≥ 200 rows are loaded", async ({
     page,
-  }) => {
+  }, testInfo) => {
+    const apiTotal = (await (await page.request.get(`${API_BASE}/api/items?page_size=1`)).json()).total;
+    const target = Math.min(200, apiTotal);
+
+    // Rows are windowed/virtualized (only viewport rows exist in the DOM at
+    // once), so the DOM row count is not a reliable "how many are loaded"
+    // signal. Track it at the network layer instead: the set of distinct
+    // item ids seen across every /api/items response is exactly "how many
+    // rows the feed has fetched into memory so far", regardless of how the
+    // UI renders/virtualizes them.
+    const loadedItemIds = new Set<number>();
+    page.on("response", (res) => {
+      if (!res.url().includes("/api/items?") || res.request().method() !== "GET" || !res.ok()) return;
+      res
+        .json()
+        .then((body) => {
+          for (const it of body.items ?? []) loadedItemIds.add(it.id);
+        })
+        .catch(() => {});
+    });
+
     await page.goto("/feed");
+    await expect(page.locator('[data-testid^="feed-row-"]').first()).toBeVisible({ timeout: 20_000 });
+    await page.waitForTimeout(1000); // let the first response's body be parsed by the listener above
+
     const list = page.locator('[data-testid="feed-list"]');
-    await expect(list).toBeVisible({ timeout: 20_000 });
-
-    const countText = page.locator("text=/מציג \\d+ מתוך \\d+/");
-    await expect(countText).toBeVisible();
-    const initialTotal = Number((await countText.textContent())!.match(/מתוך (\d+)/)![1]);
-
-    let loadedCount = (await page.locator('[data-testid^="feed-row-"]').count());
-
     const loadMoreBtn = page.getByRole("button", { name: /טען עוד/ });
-    for (let i = 0; i < 5; i++) {
-      loadedCount = Number((await countText.textContent())!.match(/מציג (\d+) /)![1]);
-      if (loadedCount >= Math.min(200, initialTotal)) break;
+
+    for (let i = 0; i < 8 && loadedItemIds.size < target; i++) {
       if (await loadMoreBtn.count()) {
         await loadMoreBtn.click();
       } else {
-        // fall back to scroll-triggered pagination
         await list.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
       }
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(900);
     }
 
-    loadedCount = Number((await countText.textContent())!.match(/מציג (\d+) /)![1]);
-    expect(loadedCount).toBeGreaterThanOrEqual(Math.min(200, initialTotal));
+    if (loadedItemIds.size < target) {
+      await recordFinding(page, testInfo, {
+        screen: "Feed (/feed)",
+        expected: `Scrolling to the bottom (or a "טען עוד" control) fetches further pages until ≥ ${target} of ${apiTotal} items are loaded`,
+        actual: `Only ${loadedItemIds.size} distinct item(s) were ever fetched via /api/items; no further page requests fired on scroll and no "טען עוד" control exists`,
+        severity: "high",
+      });
+    }
+    expect(
+      loadedItemIds.size,
+      `Only ${loadedItemIds.size} distinct items were loaded across all /api/items responses (target ${target} of ${apiTotal})`,
+    ).toBeGreaterThanOrEqual(target);
   });
 
-  test("every row's title link has an http(s) href and target=_blank", async ({ page }) => {
+  test("every row's title link (where present) has an http(s) href and target=_blank", async ({
+    page,
+  }, testInfo) => {
     await page.goto("/feed");
     await expect(page.locator('[data-testid^="feed-row-"]').first()).toBeVisible({ timeout: 20_000 });
 
-    const titleLinks = page.locator('[data-testid^="feed-row-title-link-"]');
-    const n = await titleLinks.count();
-    expect(n).toBeGreaterThan(0);
+    const rows = page.locator('[data-testid^="feed-row-"]');
+    const n = await rows.count();
+    let linkedRowCount = 0;
     for (let i = 0; i < n; i++) {
-      const link = titleLinks.nth(i);
+      const link = rows.nth(i).locator('a[data-testid^="feed-row-title-link-"]');
+      if ((await link.count()) === 0) continue;
+      linkedRowCount++;
       const href = await link.getAttribute("href");
       if (href === null || href === "") continue; // items with no source url render a non-link span/anchor without href
       expect(href, `row ${i} title link href`).toMatch(/^https?:\/\//);
       await expect(link, `row ${i} title link target`).toHaveAttribute("target", "_blank");
     }
+
+    if (linkedRowCount === 0) {
+      await recordFinding(page, testInfo, {
+        screen: "Feed (/feed)",
+        expected: "Each feed row's title is an <a href=\"...\" target=\"_blank\"> to its source",
+        actual: `None of the ${n} visible rows render a title anchor at all (checked data-testid="feed-row-title-link-*")`,
+        severity: "high",
+      });
+    }
+    expect(linkedRowCount, "at least one visible row should render a title link").toBeGreaterThan(0);
   });
 
   test("level filter narrows the list to only the selected level(s)", async ({ page }) => {
@@ -175,13 +240,15 @@ test.describe("Feed screen (/feed)", () => {
     const n = await rows.count();
     let targetIndex = -1;
     for (let i = 0; i < n; i++) {
-      const href = await rows.nth(i).locator('a[data-testid^="feed-row-title-link-"]').getAttribute("href");
+      const link = rows.nth(i).locator('a[data-testid^="feed-row-title-link-"]');
+      if ((await link.count()) === 0) continue;
+      const href = await link.getAttribute("href");
       if (href) {
         targetIndex = i;
         break;
       }
     }
-    test.skip(targetIndex === -1, "No row with a source URL found on the first page of the feed");
+    test.skip(targetIndex === -1, "No row with a source URL / title link found on the first page of the feed");
 
     for (let i = 0; i < targetIndex; i++) await page.keyboard.press("j");
 

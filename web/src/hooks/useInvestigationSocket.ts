@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { InvestigationLogLine } from "@/types/api";
 import { USE_MOCKS } from "@/api";
+import { normalizeInvestigationLogLine } from "@/api/normalize";
 
 export function useInvestigationSocket(jobId: string | undefined, isRunning: boolean) {
   const [liveLines, setLiveLines] = useState<InvestigationLogLine[]>([]);
@@ -37,8 +38,11 @@ export function useInvestigationSocket(jobId: string | undefined, isRunning: boo
     ws.onclose = () => setConnected(false);
     ws.onmessage = (evt) => {
       try {
-        const line = JSON.parse(evt.data) as InvestigationLogLine;
-        setLiveLines((prev) => [...prev, line]);
+        // Raw `investigation_log` row (real column names: results_n,
+        // created_at — see normalizeInvestigationLogLine) — never assume
+        // the wire shape already matches the view model.
+        const raw = JSON.parse(evt.data) as Parameters<typeof normalizeInvestigationLogLine>[0];
+        setLiveLines((prev) => [...prev, normalizeInvestigationLogLine(raw)]);
       } catch {
         // ignore malformed frame
       }

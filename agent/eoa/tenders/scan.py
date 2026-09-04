@@ -275,7 +275,11 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
     if not src.url:
         return []
     if src.query_template:
-        body = json.loads(src.query_template.format(keyword=keyword))
+        # NOT str.format(): query_template is a JSON literal ('{"query":"...","fields":[...]}') --
+        # its own braces would be misparsed as format fields. Substitute the placeholder directly,
+        # JSON-string-escaping the keyword first so it can't break the surrounding JSON syntax.
+        escaped_keyword = json.dumps(keyword)[1:-1]
+        body = json.loads(src.query_template.replace("{keyword}", escaped_keyword))
         resp = fetch_raw_remote(src.url, method=src.method or "POST", json_body=body)
     else:
         params = {k: v.format(keyword=keyword) for k, v in (src.query_params or {}).items()}
@@ -557,6 +561,11 @@ def scan_tenders(
                 stats.llm_deferred += 1
             except LLMOutputError as exc:
                 log.warning("tender_llm_enrich_failed", tender_id=tender_id, error=str(exc)[:200])
+                stats.llm_failed += 1
+            except Exception as exc:
+                # Never let one tender's LLM enrichment call take down the whole scan (docs/
+                # CONVENTIONS.md rule 9). The deterministic tenders/items rows are already inserted.
+                log.warning("tender_llm_enrich_unexpected_error", tender_id=tender_id, error=str(exc)[:200])
                 stats.llm_failed += 1
 
     stats.closed_transitioned = _transition_closed()

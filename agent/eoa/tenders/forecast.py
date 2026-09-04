@@ -351,6 +351,15 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
             log.warning("tender_forecast_llm_failed", platform=cand.platform_key, error=str(exc)[:200])
             rationale_he = _fallback_rationale(cand)
             stats.llm_failed += 1
+        except Exception as exc:
+            # Never let one candidate's LLM call (schema retry, logging, transport, ...) take down
+            # the whole forecast run -- docs/CONVENTIONS.md rule 9 ("a failing item never stops the
+            # stage"). The deterministic likelihood/window/vendors are already computed either way.
+            log.warning(
+                "tender_forecast_llm_unexpected_error", platform=cand.platform_key, error=str(exc)[:200]
+            )
+            rationale_he = _fallback_rationale(cand)
+            stats.llm_failed += 1
 
         _upsert_forecast(cand, likelihood, window, rationale_he)
         stats.upserted += 1

@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { assertNoBadText } from "../utils/helpers";
+import { assertNoBadText, recordFinding } from "../utils/helpers";
 
 const TABS = ["config", "sources", "watchlist", "taxonomy", "models"];
 

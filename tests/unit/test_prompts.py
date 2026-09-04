@@ -141,12 +141,50 @@ def test_classify_forbids_currency_math_and_caps_relevance_note() -> None:
     assert "בחר רק את התחום הדומיננטי" in raw  # dominant-domain tie-break rule
 
 
+def test_classify_routes_platform_only_content_out_of_scope() -> None:
+    """Platform news with no EO/IR/CV payload substance must not be classified into a core
+    domain (regression for the 2026-09 triage-inflation report: F-15EX basing, Reaper
+    replacement, CCA op-ed, etc. reaching red/score=10 with no electro-optical content)."""
+    raw = load("classify")
+    assert 'כלל פלטפורמה מול מטע"ד' in raw
+    assert "בלי תוכן אלקטרו-אופטי/אינפרה-אדום/בינה חזותית ממשי" in raw
+    assert "`out_of_scope`" in raw
+    assert "`secondary`" in raw  # generic sensor mention, no technical detail
+    assert "op-ed" in raw
+    assert "rumor_speculation" in raw
+
+
 def test_triage_uses_lookup_table_not_formula() -> None:
     raw = load("triage")
     assert "round(" not in raw  # the arithmetic formula must be gone
     assert "טבלה" in raw
     assert "בחר תמיד ברמה הנמוכה" in raw  # "if unsure between two levels choose the lower"
     assert "עד 2 משפטים" in raw  # reason_he cap
+
+
+def test_triage_caps_platform_only_and_opinion_pieces() -> None:
+    """Regression for the same triage-inflation report: core_relevance must require the item's
+    *own* main subject to be an EO/IR/CV system, and op-eds/features must be capped low on
+    magnitude/novelty, so platform-only and opinion pieces can no longer land on score=10/red."""
+    raw = load("triage")
+    assert "כאשר הנושא המרכזי של הפריט עצמו הוא מערכת/תוכנית EO/IR/CV" in raw
+    assert "core_relevance` ≤ 2" in raw
+    assert "op-ed" in raw
+    assert "magnitude` ≤ 2" in raw
+    assert "novelty` ≤ 2" in raw
+    assert "נדיר" in raw  # 9-10 must be rare
+    assert "לא red" in raw or "orange, לא red" in raw  # "when in doubt, orange"
+
+
+def test_triage_has_one_worked_example_per_level() -> None:
+    raw = load("triage")
+    assert "(red)" in raw
+    assert "(orange)" in raw
+    assert "(archive)" in raw
+    # each worked example states its component scores and the resulting score/level
+    assert "score=10 → red" in raw
+    assert "score=5 → orange" in raw
+    assert "score=1 → archive" in raw
 
 
 def test_analyze_separates_fact_and_assessment_modes() -> None:

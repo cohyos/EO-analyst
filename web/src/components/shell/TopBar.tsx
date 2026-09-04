@@ -1,6 +1,6 @@
 import { useLocation } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Command, Moon, Play, Sun } from "lucide-react";
+import { Command, Moon, Play, Search, Sun } from "lucide-react";
 import { useState } from "react";
 import { pageTitleFor } from "./nav";
 import { useUiStore } from "@/store/uiStore";
@@ -27,31 +27,33 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
   });
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-bg-raised px-4">
-      <h1 className="truncate text-base font-semibold">{title}</h1>
+    <header className="flex h-14 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-bg-raised px-2 sm:gap-3 sm:px-4">
+      <h1 className="min-w-0 shrink truncate text-base font-semibold">{title}</h1>
 
       <span
         className={cn(
-          "rounded-full px-2 py-0.5 text-xs font-medium",
+          "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
           nightWindow
             ? "bg-accent-muted text-accent-fg"
             : "bg-bg-sunken text-fg-dim",
         )}
         title={nightWindow ? "בתוך חלון הלילה הפעיל" : "מחוץ לחלון הלילה"}
       >
-        {nightWindow ? "🌙 חלון לילה פעיל" : "☀️ מחוץ לחלון לילה"}
+        <span aria-hidden="true">{nightWindow ? "🌙" : "☀️"}</span>
+        <span className="hidden sm:inline"> {nightWindow ? "חלון לילה פעיל" : "מחוץ לחלון לילה"}</span>
       </span>
 
-      <div className="flex-1" />
+      <div className="min-w-0 flex-1" />
 
       <button
         type="button"
         onClick={() => setCommandPaletteOpen(true)}
-        className="flex items-center gap-2 rounded-md border border-border-strong px-3 py-1.5 text-sm text-fg-muted hover:bg-bg-sunken"
+        className="flex shrink-0 items-center gap-2 rounded-md border border-border-strong p-1.5 text-sm text-fg-muted hover:bg-bg-sunken sm:px-3 sm:py-1.5"
         aria-label="חיפוש גלובלי"
       >
-        <span>חיפוש</span>
-        <span className="flex items-center gap-0.5 rounded border border-border-strong bg-bg px-1 font-mono text-xs">
+        <Search size={16} aria-hidden="true" className="sm:hidden" />
+        <span className="hidden sm:inline">חיפוש</span>
+        <span className="hidden items-center gap-0.5 rounded border border-border-strong bg-bg px-1 font-mono text-xs sm:flex">
           <Command size={11} aria-hidden="true" />K
         </span>
       </button>
@@ -60,16 +62,18 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
         type="button"
         onClick={() => runNow.mutate()}
         disabled={runNow.isPending}
-        className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60"
+        className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60 sm:px-3"
       >
         <Play size={14} aria-hidden="true" />
-        {runNow.isPending ? "מריץ…" : justRan ? "הופעל ✓" : "הרץ עכשיו"}
+        <span className="hidden sm:inline">
+          {runNow.isPending ? "מריץ…" : justRan ? "הופעל ✓" : "הרץ עכשיו"}
+        </span>
       </button>
 
       <button
         type="button"
         onClick={toggleTheme}
-        className="rounded-md border border-border-strong p-2 text-fg-muted hover:bg-bg-sunken"
+        className="shrink-0 rounded-md border border-border-strong p-2 text-fg-muted hover:bg-bg-sunken"
         aria-label={theme === "dark" ? "עבור לערכת נושא בהירה" : "עבור לערכת נושא כהה"}
       >
         {theme === "dark" ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}

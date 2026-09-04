@@ -9,6 +9,7 @@
 // data into the shapes web/src/types/api.ts promises the rest of the app.
 import type {
   GateDecision,
+  InvestigationLogLine,
   LoadedModel,
   NightSummary,
   PipelineLastRun,
@@ -195,5 +196,30 @@ export function normalizeStatus(
     },
     gate: normalizeGate(raw?.gate),
     pipeline: normalizePipeline(raw?.pipeline),
+  };
+}
+
+/**
+ * `investigation_log` rows on the wire — both in `GET /api/investigations/{job_id}`'s
+ * `log` array (agent/eoa/api/services.py:702, a bare `SELECT *`) and every
+ * `WS /ws/investigations/{job_id}` push (routes/investigations.py:52-53,
+ * which sends the raw row dict) — use the real table's column names
+ * (db/migrations/versions/0001_core.py:426-440): `results_n`, not `results`;
+ * `created_at`, not `at`. Rendering the raw row directly (as both call sites
+ * used to) silently dropped the results count and the timestamp on every
+ * log line. This is the single place both call sites normalize into the
+ * frontend's clean `InvestigationLogLine` view model.
+ */
+export function normalizeInvestigationLogLine(
+  raw: (Partial<InvestigationLogLine> & { results_n?: number; created_at?: string }) | null | undefined,
+): InvestigationLogLine {
+  const r = raw ?? {};
+  return {
+    round: num(r.round),
+    lang: str(r.lang),
+    query: str(r.query),
+    results: num(r.results ?? r.results_n),
+    outcome: str(r.outcome),
+    at: str(r.at ?? r.created_at),
   };
 }
