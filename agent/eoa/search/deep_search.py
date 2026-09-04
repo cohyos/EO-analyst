@@ -30,6 +30,11 @@ from eoa.search.searxng_client import SearchHit, search
 
 log = structlog.get_logger(__name__)
 
+
+def _role() -> str:
+    """Model role for the investigation: `investigator` if configured (ADR-001), else `resident`."""
+    return "investigator" if settings().has_model("investigator") else _role()
+
 ROUND_HINTS = {
     1: "Round 1 — direct: ask the question plainly in Hebrew and English.",
     2: "Round 2 — reformulate: synonyms, alternative program/system names, acronyms, contract or solicitation numbers, "
@@ -230,7 +235,7 @@ def _summarise_page(inv: Investigation, text: str, url: str) -> str:
         + wrap_data(text[:14000], f"inv-{inv.job_id}", url)
     )
     res = chat(
-        "resident",
+        _role(),
         [{"role": "system", "content": DATA_GUARD_SYSTEM}, {"role": "user", "content": prompt}],
         task="summarize",
         think=False,
@@ -301,7 +306,7 @@ def plan_queries(question: str, round_no: int, langs: list[str], context_he: str
     )
     try:
         plan = chat_structured(
-            "resident",
+            _role(),
             QueryPlan,
             [
                 {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
@@ -416,7 +421,7 @@ def _act(
                 }
             )
         res = chat(
-            "resident", transcript, task="react", tools=TOOLS, think=False, options={"temperature": 0.2}
+            _role(), transcript, task="react", tools=TOOLS, think=False, options={"temperature": 0.2}
         )
         transcript.append(
             {"role": "assistant", "content": res.content, "tool_calls": res.tool_calls}

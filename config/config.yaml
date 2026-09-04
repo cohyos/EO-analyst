@@ -60,10 +60,11 @@ ollama:
   options: { temperature: 0.2, top_p: 0.9 }
 
 models:              # roles -> keys in models.yaml (decided by bake-off, ADR-001)
-  resident: gemma4_12b
+  resident: dictalm3_12b       # ADR-001: Hebrew prose + JSON stages
+  investigator: gemma4_12b     # ADR-001: deep-search ReAct (tool calling)
   light: gemma4_e4b
-  hebrew_editor: null          # set to dictalm3_12b if bake-off approves
-  heavy_investigator: null     # set to gpt_oss_20b if bake-off approves
+  hebrew_editor: null
+  heavy_investigator: null
   embed: arctic_embed2
   guard_l1: prompt_injection_deberta
   guard_l2: granite_guardian_2b

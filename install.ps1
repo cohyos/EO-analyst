@@ -218,7 +218,7 @@ if (-not (Test-Path $graphInit)) {
     Write-Error "db/graph_init.sql not found"
 }
 
-& docker compose exec -T postgres psql -U eoa -d eoanalyst -f - <  $graphInit
+Get-Content $graphInit | & docker compose exec -T postgres psql -U eoa -d eoanalyst
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Graph initialization failed"
 }
@@ -326,7 +326,8 @@ foreach ($key in $ollamaEnv.Keys) {
         [Environment]::SetEnvironmentVariable($key, $val, "User")
         Write-Verbose "Set $key=$val (user-scope)"
     } catch {
-        Write-Warning "Failed to set $key: $_"
+        $err = $_
+        Write-Warning "Failed to set $key : $err"
     }
 }
 

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from eoa.notify.ntfy import _match, _fmt_action
+from eoa.notify.ntfy import _fmt_action, _match
 
 
 class TestMatch:

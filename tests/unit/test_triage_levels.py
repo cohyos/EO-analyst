@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from eoa.pipeline.triage import level_for, _watchlist_hits
 from eoa.config import settings
+from eoa.pipeline.triage import _watchlist_hits, level_for
 
 
 class TestLevelFor:

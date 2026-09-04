@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import json
 import time
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from eoa.search.deep_search import Budget, Investigation, _act
-from eoa.llm.schemas.analysis import InvestigationOut
 
 
 class TestBudget:
@@ -154,12 +151,14 @@ class TestActToolCalls:
             {
                 "function": {
                     "name": "finish",
-                    "arguments": json.dumps({
-                        "outcome": "found",
-                        "answer_he": "התשובה",
-                        "confidence": 0.9,
-                        "sources": ["https://example.com"],
-                    }),
+                    "arguments": json.dumps(
+                        {
+                            "outcome": "found",
+                            "answer_he": "התשובה",
+                            "confidence": 0.9,
+                            "sources": ["https://example.com"],
+                        }
+                    ),
                 }
             }
         ]
@@ -192,16 +191,18 @@ class TestActToolCalls:
             {
                 "function": {
                     "name": "finish",
-                    "arguments": json.dumps({
-                        "outcome": "partial",
-                        "answer_he": "חלקי",
-                        "confidence": 0.6,
-                        "sources": [
-                            "https://example.com/1",
-                            "https://example.com/2",
-                            "https://example.com/3",  # Never even seen
-                        ],
-                    }),
+                    "arguments": json.dumps(
+                        {
+                            "outcome": "partial",
+                            "answer_he": "חלקי",
+                            "confidence": 0.6,
+                            "sources": [
+                                "https://example.com/1",
+                                "https://example.com/2",
+                                "https://example.com/3",  # Never even seen
+                            ],
+                        }
+                    ),
                 }
             }
         ]
