@@ -124,6 +124,7 @@ class NotifyCfg(BaseModel):
     send_red_alerts: bool = True
     send_security_alerts: bool = True
     clarification_timeout_min: int = 5
+    mirror_to_public: bool = False
 
 
 class RetentionCfg(BaseModel):

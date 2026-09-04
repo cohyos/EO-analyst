@@ -103,6 +103,7 @@ notify:
   send_red_alerts: true
   send_security_alerts: true
   clarification_timeout_min: 5
+  mirror_to_public: true        # until the phone subscribes to the self-hosted server (Tailscale http://100.70.157.25:8090/eo-analyst)
 
 retention:
   raw_text_days: 90
