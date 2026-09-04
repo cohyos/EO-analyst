@@ -77,6 +77,15 @@ models:
     est_vram_mb: 9500
     ctx_max: 131072
     capabilities: [tools, vision]
+  arctic_embed2:
+    ollama: "snowflake-arctic-embed2"
+    vendor: Snowflake
+    origin: US
+    license: Apache-2.0
+    role_hint: embed
+    dim: 1024
+    est_vram_mb: 1300
+    note: chosen 2026-09-04 by he<->en similarity test (margin 0.25 vs embeddinggemma 0.20)
   e5_large:
     ollama: multilingual-e5-large-instruct
     vendor: Microsoft

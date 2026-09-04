@@ -158,16 +158,15 @@ def test_add_mixed_paragraph_splits_runs_with_rtl_flags():
     for run in paragraph.runs:
         rpr = run._element.find(qn("w:rPr"))
         assert rpr is not None
-        has_rtl = rpr.find(qn("w:rtl")) is not None
         rfonts = rpr.find(qn("w:rFonts"))
         assert rfonts is not None
         cs_font = rfonts.get(qn("w:cs"))
         if any(db._char_class(ch) == "he" for ch in run.text):
-            assert has_rtl
+            assert run.font.rtl is True
             assert cs_font == db.HEBREW_FONT
             saw_hebrew_rtl = True
         else:
-            assert not has_rtl
+            assert not run.font.rtl
             saw_other_ltr = True
     assert saw_hebrew_rtl
     assert saw_other_ltr

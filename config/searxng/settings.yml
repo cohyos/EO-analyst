@@ -17,13 +17,23 @@ use_default_settings:
     # disabled. See config.yaml -> searxng.engines for the source of truth
     # this list mirrors (kept as literal engine names SearXNG expects).
     keep_only:
-      - duckduckgo
+      - google
+      - google news
       - bing
+      - bing news
+      - duckduckgo
       - brave
       - startpage
+      - qwant
+      - mojeek
+      - yahoo
+      - yandex
+      - baidu
       - wikipedia
+      - wikidata
       - arxiv
       - google scholar
+      - semantic scholar
       - github
 
 general:

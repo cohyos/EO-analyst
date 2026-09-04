@@ -198,6 +198,10 @@ class Settings(BaseModel):
         return os.environ.get("OLLAMA_URL", self.ollama.url)
 
     @property
+    def searxng_url(self) -> str:
+        return os.environ.get("SEARXNG_URL", self.searxng.url)
+
+    @property
     def embed_dim(self) -> int:
         spec = self.model("embed")
         if spec.dim is None:

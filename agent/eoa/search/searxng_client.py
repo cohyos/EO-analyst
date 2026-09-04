@@ -96,7 +96,7 @@ def search(
         params["engines"] = ",".join(engines or s.engines)
     try:
         r = httpx.get(
-            f"{s.url.rstrip('/')}/search",
+            f"{settings().searxng_url.rstrip('/')}/search",
             params=params,
             timeout=25,
             headers={"Accept": "application/json", "User-Agent": settings().fetch.user_agent},
@@ -132,6 +132,6 @@ def search(
 def ping() -> bool:
     """True if SearXNG answers its healthz endpoint."""
     try:
-        return httpx.get(f"{settings().searxng.url.rstrip('/')}/healthz", timeout=3).status_code == 200
+        return httpx.get(f"{settings().searxng_url.rstrip('/')}/healthz", timeout=3).status_code == 200
     except Exception:
         return False

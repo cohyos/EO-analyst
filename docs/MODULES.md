@@ -629,3 +629,196 @@ unknown settings name, and a 422 from FastAPI's own query validation.
 Passes today via `PYTHONPATH=agent python -m pytest tests/unit -q`
 (48/48 across the whole suite, no DB/GPU/Ollama required) and is clean
 under `ruff check` / `ruff format --check`.
+
+## Report layer
+
+Files: `agent/eoa/report/daily.py`, `agent/eoa/report/docx_builder.py`,
+`agent/eoa/report/qa_citations.py`, `agent/eoa/llm/prompts/report_daily.md`,
+`tests/unit/test_report_qa.py`, `tests/unit/test_docx_builder.py`.
+
+Produces the daily report (`output/reports/daily_YYYY-MM-DD.{docx,md,html}`)
+from analyzed `items`: a numbered-citation Hebrew RTL Word document plus
+Markdown and HTML siblings, gated by a citation QA pass that blocks
+uncited factual claims per `docs/CONVENTIONS.md` rule 4.
+
+### `agent/eoa/report/qa_citations.py`
+
+`check(draft: DailyReportDraft, items) -> QAResult` (`passed`, `errors:
+list[str]`, `uncited_sentences`, `bad_refs`). Splits `exec_summary_he` and
+every section's `prose_he` into sentences (`split_sentences`, on `. ? ! :`
+followed by whitespace/EOS), skipping a decimal point mid-number and a
+period immediately after a small allow-list of Hebrew abbreviations
+(ד"ר, ארה"ב, צה"ל, ...) — checked by testing whether the text before the
+trailing punctuation ends with the bare abbreviation, since Hebrew
+abbreviations carry their own gershayim/geresh and never end with a
+literal period themselves. `is_factual(sentence)` flags a sentence as
+needing a citation if it contains a digit, a currency sign, a capitalized
+Latin token (entity), a Hebrew or English month name, or one of a small set
+of announcement verbs (זכתה, חתמה, רכשה, ...). Every factual sentence must
+carry at least one `[n]`; every `[n]` anywhere (including a non-factual
+sentence) must resolve to an `n` present in `items`. `outlook_he` is exempt
+from the citation requirement (it's the analyst's own forward-looking
+judgement) but must open with an explicit assessment marker (להערכתנו /
+נראה ש / ייתכן); out-of-range refs inside it are still flagged.
+`QAResult.errors` are precise Hebrew messages, reused verbatim as the
+corrective-retry prompt in `daily.py`.
+
+### `agent/eoa/report/docx_builder.py`
+
+python-docx + lxml. Hebrew RTL correctness is the point of this file:
+
+- `_configure_document_defaults(doc)` sets `w:bidi` + right `w:jc` on both
+  `docDefaults/w:pPrDefault` and the `Normal`/`Heading 1`/`Heading 2`/
+  `Title`/`Subtitle` styles, and `w:rtl` + `w:rFonts[w:cs]="David"` (with
+  `w:ascii`/`w:hAnsi`="Arial") on `docDefaults/w:rPrDefault` and those same
+  styles — David only ever applies to Hebrew (complex-script) glyphs, Arial
+  to Latin ones, which is the standard OOXML pattern for a bilingual
+  document (there is no docx primitive for a literal "fallback font chain"
+  within one run).
+- `add_mixed_paragraph(container, text, style=None, *, size_pt=11)` is the
+  core primitive: `split_runs(text)` walks the string character by character
+  classifying each as Hebrew (u0590-u05FF, uFB1D-uFB4F) or other (Latin
+  letter/digit); punctuation/whitespace inherit whatever run they fall in
+  rather than forcing a break, so a trailing space stays attached to the
+  preceding Hebrew word instead of becoming its own fragment.
+  `split_runs_with_citations` first carves every `[n]` token out of the raw
+  text (before he/other classification) into its own "cite" run — doing
+  this after classification was tried first and is wrong: a bracket has no
+  letter/digit class of its own, so it silently inherits the class of
+  whichever run precedes it, and a `[` immediately after Hebrew text ends
+  up trapped inside the Hebrew run instead of opening the citation token
+  (caught by `tests/unit/test_docx_builder.py`, which failed on exactly
+  this before the fix). Each `he` run gets `run.font.rtl = True` and
+  `w:rFonts[w:cs]="David"`; each `other`/`cite` run stays `rtl=False`/Arial;
+  `cite` runs are additionally superscripted at `size_pt - 2`. `container`
+  can be the `Document` or a table cell — both expose `.add_paragraph`.
+- `add_hyperlink(paragraph, url, text, *, hebrew=False)` — relationship-based
+  (`part.relate_to(..., RELATIONSHIP_TYPE.HYPERLINK, is_external=True)`),
+  styled with the built-in `Hyperlink` character style rather than manual
+  color/underline elements.
+- `_set_table_rtl(table)` appends `w:bidiVisual` to `tblPr` (both the
+  business-events table and the sources appendix use it).
+- `_ensure_bidi(ppr)` / `_flag_update_fields(doc)` insert `w:bidi` /
+  `w:updateFields` at a schema-valid position via python-docx's
+  `insert_element_before(elm, *tagnames)` (inserts before whichever of the
+  given sibling tags is present, appends otherwise) — needed because
+  `CT_PPr`/`CT_Settings` have a strict child-element sequence and neither
+  `w:bidi` nor `w:updateFields` has a high-level python-docx property.
+  `_flag_update_fields` is what makes Word refresh the TOC field
+  (`_add_toc_field`, a `w:fldSimple` with instr `TOC \o "1-2"`) and the
+  footer PAGE field (`_add_footer_page_number`) the moment the document
+  opens, instead of showing stale/placeholder field text.
+- `build_docx(draft, items, events, *, period_end, deep_search=None,
+  open_clarifications=None, generated_at=None, qa=None) -> Document`:
+  title block (`TITLE_TEXT`, `hebrew_date_str(period_end)`, a generated-by
+  line, and a bold QA-failure warning paragraph when `qa.passed` is
+  `False`) -> page break -> TOC field -> page break -> "תקציר מנהלים" ->
+  one "Heading 1" per `draft.sections` entry -> "טבלת אירועים עסקיים"
+  (תאריך | סוג | צדדים | לקוח/תוכנית | סכום | מקור[n], only if `events`) ->
+  "חקירות עומק" (only if `deep_search`) -> "נקודות פתוחות"
+  (`draft.open_points_he` + any DB `open_clarifications`) -> "מבט קדימה" ->
+  "נספח מקורות" (n, title, source, date, URL as a clickable hyperlink — one
+  per item). `save_docx(doc, path)` creates parent dirs and saves;
+  `validate_docx(path)` re-opens the zip, rejects duplicate part names,
+  parses every `.xml`/`.rels` part with lxml (well-formedness only, not
+  full OOXML schema validation), and re-opens with `docx.Document(...)` to
+  confirm python-docx itself accepts it.
+- `render_markdown(...)` / `render_html(...)` mirror the same section order
+  as plain GFM tables and a standalone `<div dir="rtl" lang="he">` page
+  respectively; the HTML renderer turns every `[n]` in prose into an
+  `<a href="#src-n">` anchor pointing at the matching appendix row
+  (`id="src-n"`) and HTML-escapes all model-generated text before
+  citation-linking it.
+- Level emoji/labels come from `config/taxonomy.yaml`'s `triage_levels`
+  (via `daily.py`'s `_level_label`, not hardcoded in `docx_builder.py`),
+  per "config, not code".
+
+### `agent/eoa/report/daily.py`
+
+- `collect_items(period_start=None, period_end=None, max_items=None)` —
+  `items` with `level` in (red, orange) in the period (`published_at`
+  falling back to `fetched_at`/`created_at`), `security_status='clean'`,
+  `dedup_of IS NULL`, ordered by `score DESC`, capped at
+  `config.triage.daily_report_max_items`; if fewer than 3 rows come back the
+  same query is re-run additionally allowing `yellow`. Each row gets a
+  stable 1-based `n`. **Known gap, out of this module's file scope to fix:**
+  `items` has no `key_facts`/`uncertainty_he` columns in
+  `db/migrations/versions/0001_core.py` (only `summary_he`/`so_what_he` are
+  persisted), and `eoa.memory.relational._ITEM_UPDATABLE_FIELDS` doesn't
+  allow-list `key_facts`/`uncertainty_he` either — so `eoa.pipeline.analyze`'s
+  `persist_analysis()` call to `update_item_fields(..., key_facts=...,
+  uncertainty_he=...)` will raise `ValueError` at runtime today.
+  `collect_items` degrades gracefully (`key_facts` defaults to `[]` per
+  row, read from whatever `SELECT *`-shaped dict comes back rather than
+  naming the column), and the report prompt/QA both work correctly with an
+  empty `key_facts` list — but the report never actually sees analyst key
+  facts until the schema gap is closed upstream.
+- `collect_events` / `collect_deep_search` / `collect_open_clarifications` —
+  `events` in the period (joined to `items`/`sources` for a display source
+  name); `jobs` rows with `kind='deep_search'`, `state IN ('done',
+  'partial')`, `finished_at` in the period, left-joined to the triggering
+  item via `payload->>'item_id'` and shaped from `jobs.result` (an
+  `InvestigationOut`-like payload — degrades to empty fields since no
+  deep-search execution module writes `jobs.result` yet); `clarifications`
+  rows with `answered_at IS NULL`.
+- `draft_report(items) -> DailyReportDraft` — zero items short-circuits to a
+  fixed "no new items" draft with no LLM call; otherwise renders
+  `llm/prompts/report_daily.md` (items grouped by taxonomy domain order via
+  `_group_by_domain`/`_format_items_block`, each item block showing
+  n/title/source/date/level/summary_he/so_what_he/key_facts), wraps that
+  block with `wrap_data(...)` per the DATA-guard convention, and calls
+  `chat_structured("resident", DailyReportDraft, ..., task="report")`
+  (`config.ollama.num_ctx.report = 32768`).
+- `build_daily(period_start=None, period_end=None) -> ReportPaths(docx, md,
+  html, report_id, qa)`: collect -> draft -> `qa_citations.check` -> on
+  failure, one corrective retry (feeding `qa.errors` back to the model) ->
+  re-check -> if still failing, `_strip_uncited` removes exactly the
+  sentences `qa` flagged (and any section that becomes empty), and the
+  final `QAResult` is forced `passed=False` carrying the original
+  (pre-strip) errors so `qa_report` shows what was actually wrong ->
+  `_extend_citation_registry` builds the numbered list used for rendering
+  (the LLM-facing `items` list extended with any event whose source item
+  wasn't already numbered, so the business table's מקור[n] and the sources
+  appendix stay consistent without affecting the citation-range QA, which
+  always validates against the original `items`) -> `build_docx` +
+  `save_docx` + `validate_docx`, `render_markdown`, `render_html` written
+  to `output/reports/daily_<period_end>.{docx,md,html}`
+  (`config.report.output_dir`, resolved against `eoa.config.REPO_ROOT` if
+  relative) -> one `reports` row inserted (`kind='daily'`,
+  `items_included`, `qa_passed`, `qa_report` JSONB with
+  `errors`/`uncited_sentences`/`bad_refs`). All "now" reads go through
+  `zoneinfo.ZoneInfo("Asia/Jerusalem")` per `docs/CONVENTIONS.md` rule 7; DB
+  `date` columns/params stay naive `datetime.date` (no tz component,
+  matching `events.date`/`reports.period_*` as `DATE` columns).
+
+### Tests
+
+`tests/unit/test_report_qa.py` — sentence splitting (boundaries, decimal
+guard, abbreviation guard, empty input), `is_factual` per rule, and
+`check()` (cited passes, uncited factual fails, out-of-range ref fails,
+section prose checked, outlook exempt-but-needs-marker, multi-citation
+sentences). `tests/unit/test_docx_builder.py` — `split_runs`/
+`split_runs_with_citations` in isolation, `add_mixed_paragraph` (RTL flags
+per run, bidi+right-aligned paragraph, superscript citations),
+`add_hyperlink`, then a full `build_docx()` from a 3-item/1-event fixture
+reopened with python-docx: document defaults carry `w:bidi`/`w:rtl`,
+expected headings exist, hyperlink count equals item count, both tables
+are `bidiVisual`, TOC/PAGE fields and `w:updateFields` are present, a
+failing `QAResult` renders a visible warning paragraph; `validate_docx`
+round-trips a saved file and separately rejects a hand-corrupted duplicate
+zip part / truncated XML part. `render_markdown`/`render_html` are checked
+for citation numbers, the sources appendix, `dir="rtl"`, `#src-n` anchors,
+and HTML-escaping of model text. No DB and no Ollama in any of these —
+`daily.py`'s DB- and `chat_structured`-calling functions
+(`collect_*`/`draft_report`/`build_daily`) are exercised only through
+`docx_builder`/`qa_citations`, which take plain dicts/`DailyReportDraft` in,
+not through the DB-touching collectors themselves (would need
+`respx`/DB mocking, out of scope for this pass). 54/54 pass via
+`PYTHONPATH=agent python -m pytest tests/unit/test_report_qa.py
+tests/unit/test_docx_builder.py -q`; both new source files and both new
+test files are clean under `ruff check` / `ruff format --check`.
+
+A sample report built from the same 3-item/1-event fixture used in the
+docx test is saved at `output/reports/sample_daily.docx` (generated and
+`validate_docx`-checked directly against `docx_builder`, not through
+`build_daily`, since that needs a live DB).

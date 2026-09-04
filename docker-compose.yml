@@ -100,6 +100,8 @@ services:
       SEARXNG_SECRET: ${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env (e.g. `openssl rand -hex 32`)}
     volumes:
       - ./config/searxng:/etc/searxng
+    ports:
+      - "127.0.0.1:8088:8080"   # dev-only host access; comment out for hardened deployments
     networks:
       egress: {}
       internal:

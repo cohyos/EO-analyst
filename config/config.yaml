@@ -64,13 +64,13 @@ models:              # roles -> keys in models.yaml (decided by bake-off, ADR-00
   light: gemma4_e4b
   hebrew_editor: null          # set to dictalm3_12b if bake-off approves
   heavy_investigator: null     # set to gpt_oss_20b if bake-off approves
-  embed: e5_large
+  embed: arctic_embed2
   guard_l1: prompt_injection_deberta
   guard_l2: granite_guardian_2b
 
 searxng:
   url: http://searxng:8080
-  engines: [duckduckgo, bing, brave, startpage, wikipedia, arxiv, google_scholar]
+  engines: []   # empty = let SearXNG use all enabled engines (config/searxng/settings.yml)
   rate_limit_per_minute: 20
 
 fetch:

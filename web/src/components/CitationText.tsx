@@ -1,6 +1,13 @@
 import { useState } from "react";
-import type { AskCitation } from "@/types/api";
 import { cn } from "@/lib/cn";
+
+/** Structural shape shared by AskCitation and InvestigationSource. */
+export interface CitationLike {
+  n: number;
+  item_id: number | null;
+  title: string;
+  url: string;
+}
 
 /**
  * Renders assistant text containing `[n]` markers, turning each into a
@@ -12,7 +19,7 @@ export function CitationText({
   onOpenItem,
 }: {
   text: string;
-  citations: AskCitation[];
+  citations: CitationLike[];
   onOpenItem?: (itemId: number) => void;
 }) {
   const byN = new Map(citations.map((c) => [c.n, c]));
@@ -40,7 +47,7 @@ function CitationChip({
   onOpenItem,
 }: {
   n: number;
-  citation: AskCitation;
+  citation: CitationLike;
   onOpenItem?: (itemId: number) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -57,7 +64,9 @@ function CitationChip({
         onMouseLeave={() => setOpen(false)}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
-        onClick={() => onOpenItem?.(citation.item_id)}
+        onClick={() => {
+          if (citation.item_id != null) onOpenItem?.(citation.item_id);
+        }}
         aria-describedby={`citation-${n}-tip`}
       >
         {n}

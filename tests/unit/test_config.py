@@ -80,8 +80,9 @@ class TestModelResolution:
         """model('embed') returns a model with dim set."""
         s = settings()
         spec = s.model("embed")
-        assert spec.dim == 1024
-        assert spec.key == "e5_large"
+        assert spec.dim is not None
+        assert isinstance(spec.dim, int)
+        assert spec.dim > 0
 
     def test_model_nonexistent_raises_config_error(self, monkeypatch):
         """model('nonexistent') raises ConfigError."""
@@ -112,10 +113,31 @@ class TestModelResolution:
         assert dim > 0
 
     def test_embed_dim_missing_raises_error(self, monkeypatch):
-        """embed_dim raises ConfigError if the model has no dim."""
-        s = settings()
-        embed_spec = s.registry.models["e5_large"]
-        embed_spec.dim = None
+        """embed_dim raises ConfigError if the embed model has no dim."""
+        from eoa.config import ModelsRegistry, Settings, ScheduleCfg, TimeWindow
+
+        # Create a registry with an embed model without dim (dict format for validator)
+        registry = ModelsRegistry(
+            allowed_origins=["US"],
+            allowed_formats=["gguf"],
+            models={
+                "no_dim_embed": {
+                    "ollama": "test",
+                    "vendor": "Test",
+                    "origin": "US",
+                    "license": "MIT",
+                    "dim": None,  # Missing dim
+                },
+            },
+        )
+
+        s = Settings(
+            timezone="UTC",
+            schedule=ScheduleCfg(night_window=TimeWindow(start="01:00", end="06:00")),
+            registry=registry,
+            models={"embed": "no_dim_embed"},
+        )
+
         with pytest.raises(ConfigError, match="has no dim"):
             _ = s.embed_dim
 

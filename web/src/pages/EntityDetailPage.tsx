@@ -106,7 +106,7 @@ export function EntityDetailPage() {
           {entity.timeline.length === 0 ? (
             <EmptyState title="אין אירועים בציר הזמן" />
           ) : (
-            <ol className="space-y-2 border-e-2 border-border ps-4">
+            <ol className="space-y-2 border-r-2 border-border ps-4">
               {entity.timeline.map((t) => (
                 <li key={`${t.kind}-${t.id}`} className="relative">
                   <span className="absolute -end-[1.15rem] top-1.5 h-2 w-2 rounded-full bg-accent" />
