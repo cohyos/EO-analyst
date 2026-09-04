@@ -535,7 +535,9 @@ def _night_summary() -> dict[str, Any] | None:
         "ORDER BY finished_at DESC NULLS LAST LIMIT 1"
     )
     if job is None:
-        return None
+        # No completed nightly run yet: return an explicit all-zero summary (never null) so the UI renders.
+        return {"items_ingested": 0, "classified": 0, "red": 0, "orange": 0, "deep_searches": 0,
+                "duration_min": None, "errors": 0, "state": "none"}
     result = job.get("result") or {}
     started, finished = job.get("started_at"), job.get("finished_at")
     duration_min = round((finished - started).total_seconds() / 60, 1) if started and finished else None
