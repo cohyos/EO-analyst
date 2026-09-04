@@ -82,7 +82,7 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     title: str(r.title),
     url: str(r.url),
     source_name: str(r.source_name),
-    published_at: r.published_at ?? null,
+    published_at: str(r.published_at),
     lang: str(r.lang),
     domain: str(r.domain),
     subdomain: r.subdomain ?? null,

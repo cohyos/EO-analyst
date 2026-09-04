@@ -1222,3 +1222,139 @@ Typer-based command-line interface. Entry point: `eo` (mapped to `eoa.cli:app` i
 - `eo orchestrate` — start the background scheduler (runs nightly + on-demand).
 
 Every command binds `job_id`, `stage`, and other context to structlog before logging.
+
+## Obsidian export (FR-6.5)
+
+Files: `agent/eoa/export/__init__.py`, `agent/eoa/export/obsidian.py`,
+`tests/unit/test_obsidian_export.py`. Config: `config.export.obsidian`
+(`eoa.config.ObsidianExportCfg`, appended to `Settings.export: ExportCfg`).
+
+Turns the relational/graph memory into a plain-Markdown [Obsidian](https://obsidian.md)
+vault so an analyst can browse entities, items, reports, and daily digests as
+linked notes without any dedicated UI. Entry point:
+`eoa.export.obsidian.export_vault(since_days: int | None = None) -> ExportStats`.
+
+### Config
+
+```yaml
+export:
+  obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }
+```
+
+`enabled` gates the whole export (a `False` run is a documented no-op —
+`export_vault()` returns a zero-count `ExportStats` and writes nothing).
+`vault_dir` is resolved against `eoa.config.REPO_ROOT` when relative, same
+convention as `config.report.output_dir` in `report/daily.py`. `entities` /
+`items` / `reports` toggle each section independently. `min_level` is one of
+`red/orange/yellow/archive` (`obsidian.LEVEL_ORDER`); `_levels_at_or_above()`
+resolves it to "this level and everything more severe" (e.g. `yellow` →
+`[red, orange, yellow]`), since the schema's `items.level` CHECK constraint
+orders severity red > orange > yellow > archive, not alphabetically.
+
+### Vault layout
+
+- **`Entities/<Name>.md`** — one note per `entities` row, filename = the
+  entity's own `name` (already unique in the schema, so no id suffix is
+  needed). YAML frontmatter: `kind`, `country`, `aliases`, `focus`, `tags`
+  (`["entity", kind]`). Body:
+  - **"ציר זמן"** — `eoa.memory.graph.entity_timeline(entity_id)` (events)
+    merged with items whose `entities_mentioned` array names the entity
+    (queried directly here as plain parameterized SQL — not Cypher, so it
+    doesn't need to live in `eoa.memory.graph`, matching the precedent set by
+    `eoa.fetch.service`'s ad hoc `sources.fail_count` update), de-duplicated
+    on `(item_id, text)`, sorted newest first. Each line:
+    `- YYYY-MM-DD — [[Items/<id> <slug>]] — summary_he`.
+  - **"קשרים"** — one `eoa.memory.graph.neighbors(entity_id, label=L)` call
+    per label in `eoa.memory.graph.EDGE_LABELS` (that function has no
+    "all labels" mode), rendered `- [[Entities/<Other>]] — LABEL (מקור: ...)`.
+    **Known limitation, called out in `_entity_neighbor_lines`'s docstring
+    and in the rendered מקור text itself rather than hidden:**
+    `neighbors()` returns only the neighboring `Entity` vertex, never the
+    edge itself, so the evidencing `item_id` cannot be resolved through the
+    public graph API — the same gap `docs/MODULES.md`'s Web API section
+    documents for `services.build_graph()`'s edges (`item_id`/`evidence`
+    always `null`). Fixing this would mean issuing Cypher outside
+    `eoa/memory/graph.py`, which `docs/CONVENTIONS.md` explicitly forbids
+    ("the ONLY module allowed to issue Cypher"), so the מקור parenthetical
+    is rendered as unresolved rather than invented, per rule 5.
+  - **"מקורות"** — every item id referenced above, deduplicated.
+- **`Items/<id> <slug>.md`** — one note per exported item, filename
+  `<id> <slug(title)>` (the id keeps filenames collision-free even when two
+  titles produce the same slug). Frontmatter: `url`, `source`
+  (`source_name`), `published_at`, `domain`, `level`, `score`, `entities`
+  (`entities_mentioned`). Body: `summary_he`, then optional
+  "למה זה חשוב" (`so_what_he`), "עובדות מפתח" (`key_facts` bullet list),
+  "אי-ודאות" (`uncertainty_he`), "ישויות" (wikilinks to each mentioned
+  entity) — each section omitted entirely when the underlying field is
+  empty, never rendered as an empty heading.
+- **`Reports/<kind>_<date>.md`** — one note per `reports` row (`kind`,
+  `period_start`, `period_end` in frontmatter). Body is `reports.path_md`'s
+  file content verbatim if that path exists on disk (resolved against
+  `REPO_ROOT`), else a placeholder sentence — never fabricated — plus a
+  `**Word:** \`<path_docx>\`` pointer (a plain path reference, not a
+  wikilink/embed, since the docx lives outside the vault).
+- **`Daily/<date>.md`** — a MOC (map of content) per calendar date, listing
+  that date's `red`/`orange` items only, **independent of `min_level`** (a
+  dedicated `_list_items(["red", "orange"], since_days)` query, not filtered
+  through the `min_level`-gated item set) — per the FR-6.5 spec's explicit
+  "red/orange items" requirement. Each line:
+  `- <emoji> <label> [[Items/<id> <slug>]]` (level emoji/label from
+  `config.taxonomy.triage_levels`, same convention as `report/daily.py`'s
+  `_level_label`).
+- **`_index.md`** — counts of entities/items/reports/daily notes written and
+  the run's `min_level`/`since_days`/timestamp. Deliberately plain text, not
+  wikilinks to folder names — Obsidian only resolves `[[Name]]` to an actual
+  note, and no `Entities.md`/`Items.md` folder-note exists.
+
+### Idempotency / atomicity
+
+Every file is written by `_atomic_write()`: `tempfile.mkstemp()` in the same
+directory, write, `os.replace()` into place (single filesystem-level
+rename, so a reader never observes a partial file), with the temp file
+removed on any exception. Re-running `export_vault()` overwrites the same
+deterministic filenames — nothing under `vault_dir` is ever deleted, so
+notes a user adds by hand in Obsidian (or any file outside this module's own
+naming scheme) survive re-export. Backlinks are never computed or stored by
+this module: every cross-reference is a plain `[[wikilink]]`, and Obsidian
+derives backlinks/the graph view itself from those on open.
+
+### `slugify(name, *, max_len=80)`
+
+Windows-safe filename fragment: strips `` /\:*?"<>| ``, collapses
+whitespace, trims trailing dots/spaces (illegal at the end of a Windows
+filename), truncates to `max_len`, and prefixes an underscore onto the
+reserved DOS device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`9`,
+`LPT1`-`9`, case-insensitive) since those are illegal as a Windows filename
+even with an extension. Hebrew and other non-ASCII Unicode pass through
+untouched — Windows/NTFS has no restriction on the script used, only on the
+specific ASCII punctuation set above.
+
+### Tests
+
+`tests/unit/test_obsidian_export.py` (30 tests, no DB/AGE — every DB- or
+graph-touching function is monkeypatched at the `eoa.export.obsidian` module
+level, mirroring `tests/unit/test_persist_analysis.py`'s stubbing style):
+`slugify` (ASCII, Hebrew preserved, unsafe-char stripping, whitespace
+collapse, trailing dot/space trim, empty/None input, max-length truncation,
+reserved Windows device names case-insensitive, a non-reserved name
+containing "CON" as a substring left untouched), `_atomic_write` (content
+written, parent dirs created, overwrite is idempotent, no leftover temp
+file, Hebrew content round-trips), `_levels_at_or_above` (each `min_level`
+value, `ConfigError` on an unknown level), `render_item_md` (a full item —
+every optional section present and correctly formatted — and a minimal item
+where every optional section is correctly omitted), an entity page built
+from 2 events + 1 neighbor (`_entity_timeline_lines` newest-first ordering
+and dedup, `_entity_neighbor_lines` per-label rendering, then the full
+`render_entity_md` output asserting frontmatter/headings/wikilinks, plus a
+no-events/no-neighbors case rendering the three placeholder sentences),
+`render_report_md` (missing `path_md` file → placeholder + docx pointer;
+existing `path_md` file → its content copied in, via a `REPO_ROOT`
+monkeypatch onto `tmp_path`), `render_daily_md`, and `export_vault()`'s
+documented `enabled=False` no-op short-circuit (zero-count `ExportStats`,
+vault directory never created). Passes today via
+`PYTHONPATH=agent python -m pytest tests/unit/test_obsidian_export.py -q`
+(30/30) and is clean under `ruff check` / `ruff format --check`.
+
+`PYTHONPATH=agent python -c "from eoa.config import settings; print(settings().export.obsidian)"`
+confirms the config wiring: `enabled=True vault_dir='output/obsidian'
+entities=True items=True reports=True min_level='yellow'`.

@@ -6,13 +6,12 @@ import type { MorningResponse } from "@/types/api";
 
 const getMorning = vi.fn();
 const postClarificationAnswer = vi.fn();
-const getReportFileUrl = vi.fn(() => "/api/reports/1/file?fmt=docx");
 
 vi.mock("@/api", () => ({
   api: {
     getMorning: (...args: unknown[]) => getMorning(...args),
     postClarificationAnswer: (...args: unknown[]) => postClarificationAnswer(...args),
-    getReportFileUrl: (...args: unknown[]) => getReportFileUrl(...args),
+    getReportFileUrl: (id: number, fmt: string) => `/api/reports/${id}/file?fmt=${fmt}`,
   },
   USE_MOCKS: false,
 }));
