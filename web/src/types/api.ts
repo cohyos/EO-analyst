@@ -30,6 +30,10 @@ export interface ItemCard {
   security_status: SecurityStatus;
   dedup_of: number | null;
   key_facts: string[];
+  // Present on `_item_card` (agent/eoa/api/services.py:197) — the "explain
+  // the gaps" complement to `key_facts`, missing from the original
+  // docs/API.md ItemCard field list.
+  uncertainty_he: string | null;
 }
 
 export interface ItemDetail extends ItemCard {
@@ -233,6 +237,14 @@ export interface MorningResponse {
   night_summary: NightSummary;
 }
 
+// Mirrors eoa.conferences.tracker.conference_card (agent/eoa/conferences/tracker.py):
+// the "legacy" fields (location/starts_at/ends_at/url/relevance_he) plus the
+// full FR-12 field set additively — both are always present on a real response.
+export interface ConferenceFieldChange {
+  from: unknown;
+  to: unknown;
+}
+
 export interface Conference {
   id: number;
   name: string;
@@ -241,6 +253,23 @@ export interface Conference {
   ends_at: string;
   url: string | null;
   relevance_he: string | null;
+  organizer: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  city: string | null;
+  venue: string | null;
+  cadence: string | null;
+  relevance: number | null;
+  rationale: string | null;
+  registration_opens: string | null;
+  early_bird_deadline: string | null;
+  cfp_deadline: string | null;
+  cost_range: string | null;
+  registration_url: string | null;
+  entry_conditions: string | null;
+  status: string | null;
+  last_verified_at: string | null;
+  changes: Record<string, ConferenceFieldChange>;
 }
 
 export interface Clarification {
@@ -276,22 +305,31 @@ export interface Lesson {
   created_at: string;
 }
 
-export type JobState =
-  | "queued"
-  | "running"
-  | "done"
-  | "error"
-  | "cancelled";
+// Mirrors the `jobs` table CHECK constraint (db/migrations/versions/0001_core.py:270)
+// exactly. Real API check, 2026-09-04: `GET /api/jobs` never returns "error"
+// or "cancelled" — cancelling a queued job sets state="failed" with
+// error="cancelled_by_user" (agent/eoa/api/services.py:cancel_job).
+export type JobState = "queued" | "running" | "done" | "failed" | "deferred" | "partial";
 
+// Mirrors the real `jobs` row shape returned by `GET /api/jobs` /
+// `GET /api/jobs/{id}/cancel` exactly (real API check, 2026-09-04) — the
+// row has no `scope`/`mode`/`progress` columns; `mode` (for daily_run jobs)
+// lives inside `payload`, and `scope` doesn't exist at all (only `kind`,
+// e.g. "daily_run", set from the scope by `enqueue_run`).
 export interface Job {
-  id: string;
-  scope: string;
-  mode: "eco" | "full";
+  id: number;
+  kind: string;
+  payload: Record<string, unknown> | null;
   state: JobState;
-  created_at: string;
+  priority: number;
+  attempts: number;
+  not_before: string | null;
   started_at: string | null;
   finished_at: string | null;
-  progress?: string | null;
+  error: string | null;
+  result: unknown;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ResourceGateGpu {

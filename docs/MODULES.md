@@ -1962,3 +1962,143 @@ stubbing style):
 
 All pass via `PYTHONPATH=agent python -m pytest tests/unit -q` (402/402)
 and are clean under `ruff check` / `ruff format --check`.
+
+## Job leases, deep-search resource-failure handling, gate hardening (codex review #5,#10,#11,#12,#14,#15,#16,#27,#28,#29,#30)
+
+Follow-ups from `output/reviews/codex_security_review.md`, scoped to
+`agent/eoa/orchestrator/jobs.py`, `agent/eoa/resources/gate.py`,
+`agent/eoa/memory/relational.py`, `agent/eoa/orchestrator/main.py`
+(`pre_flight()` only), and migration `db/migrations/versions/0004_job_leases.py`.
+
+### Synchronous ingest (#5)
+
+`eoa.orchestrator.jobs._ingest()` is now a plain sync function (was
+`async def ... asyncio.run(_ingest())` nested inside another
+`asyncio.run()` inside `run_ingest_remote()`, which raised "asyncio.run()
+cannot be called from a running event loop" on the host). `run_daily`'s
+`ingest` stage and `HANDLERS["ingest"]` both call `_ingest()` directly.
+
+### Job leases (#15)
+
+Migration `0004` adds `jobs.worker_id TEXT` and `jobs.lease_expires_at
+TIMESTAMPTZ` (+ `ix_jobs_state_lease_expires_at`).
+`eoa.memory.relational.claim_next_job(kinds, worker_id, *,
+lease_seconds=900)` now also picks up `deferred` jobs whose `not_before`
+has passed (not just `queued`), and stamps `worker_id` +
+`lease_expires_at` at claim time. `heartbeat(..., lease_seconds=900)`
+extends the lease on every call while the job is still `running`.
+`finish_job(..., not_before=None, worker_id=None)` only updates a row
+still in `running`/`deferred`/`queued` (a row already reaped or finished
+by someone else is left alone) and logs a warning
+(`job.finish_worker_mismatch`) if the caller's `worker_id` differs from
+the lease holder — best-effort, not a hard lock. New
+`reap_stale_jobs(max_age_hours=6)` marks `running` jobs whose lease has
+expired (or, for legacy rows with no lease, whose `started_at` predates
+`max_age_hours`) as `failed(error='stale lease')`, returning the count
+reaped; it is called at `Worker.run()` start and in
+`eoa.orchestrator.main.pre_flight()`.
+
+### Deep-search resource failures (#10)
+
+`run_deep_searches()` now catches `ResourceUnavailable` from
+`investigate()` separately from other exceptions: it calls
+`finish_job(job_id, "deferred", error=..., not_before=now()+30min)` and
+re-raises, so `_run_stage` marks the `deep_search` stage `deferred`
+instead of the loop silently recording a fabricated `not_found`. A
+resource failure is retried after a 30-minute cooldown via
+`claim_next_job`'s new deferred-pickup behavior above.
+
+### Role-aware worker kinds (#14)
+
+`eoa.orchestrator.jobs._default_kinds()`: when `EOA_ROLE=agent`, the
+default `Worker` kind list excludes `ingest` (fetcher-owned, since only
+the `fetcher` container has egress). Host/dev workers (default) get all
+`HANDLERS` kinds, including `ingest` (in-process). An explicit `kinds=`
+argument to `Worker(...)` still overrides the default either way.
+
+### Terminal run status (#16)
+
+`run_daily()` computes `rs.stats["status"]` (`done` / `partial` /
+`failed`) from the mandatory `report` stage outcome plus whether any
+stage recorded `error`/`deferred`/`skipped`/`partial`. `Worker.run()`
+uses a handler result's `status` field (when it is one of
+`done`/`partial`/`failed`) as the job's terminal state instead of always
+writing `done`. `_notify()` sends `ntfy.failure("report", ...)` instead
+of a "report ready" push when no `docx` path was produced, and returns
+`{"report_missing": True}`.
+
+### Gate hardening (#11, #12, #27, #28)
+
+- `ResourceGate.acquire()` is now serialised: it takes `self._lock` and
+  delegates to `_acquire_locked()` (the previous unlocked body) — the GPU
+  is a single resource and two concurrent admissions could otherwise both
+  pass the VRAM check and oversubscribe it.
+- `_eligible_for_unload(host, keep)` replaces the ad-hoc reclaim-math in
+  `_reclaimable_vram`: a model is eligible once `min_loaded_seconds` has
+  elapsed *or* the gate has never seen it loaded (i.e. someone else
+  loaded it — treated as eligible, not as "just loaded"). `_unload_others`
+  now unloads only this eligible set. After unloading, `acquire()`
+  re-snapshots VRAM and only proceeds down the `swap` path if VRAM is
+  actually now sufficient; otherwise it falls through to the normal
+  queue-with-backoff path.
+- The CPU-runtime path (`spec.runtime != "ollama" or need == 0`) now
+  applies the same `min_free_ram_mb` floor as the Ollama path, queuing
+  with backoff (never raising immediately) until the deadline. Polite
+  mode's "only we are loaded" check now uses `host.ollama_vram_mb == 0`
+  instead of `not host.loaded_models` (a model can be `loaded_models`-listed
+  with 0 VRAM in edge cases; VRAM is what actually matters for GPU
+  contention).
+- Thermal pause no longer sleeps a fixed 120s: it naps in `<= 30s`
+  increments (`max(1, min(30, deadline - now))`) and re-checks the
+  temperature each time, so it can react to both cooldown and the
+  timeout deadline promptly.
+
+### Backup: safe identifiers + restorable format (#29, #30)
+
+`_pg_dump()`'s in-agent-container path (`EOA_ROLE=agent`, no `docker`
+CLI) now builds the table identifier with `psycopg.sql.Identifier(...)`
+(was raw f-string interpolation into `COPY {t} ...`) and writes a
+psql-restorable script: a `-- restore with: psql ... -f <this file>`
+header, then per table `\copy <ident> FROM STDIN WITH (FORMAT csv,
+HEADER)` followed by the CSV rows and a terminating `\.` line — actually
+restorable with `psql -f`, not just a raw CSV dump with comments. The
+host path (`docker compose exec postgres pg_dump`) is unchanged.
+
+### Future work (#13, partial)
+
+Propagating an absolute `deadline_monotonic` into
+`eoa.search.deep_search.investigate()` (and further into its blocking
+Ollama/HTTP calls) is **not done** — `deep_search.py` is out of scope for
+this change (owned by another workstream) and threading a real deadline
+through its ReAct loop, per-call Ollama timeouts, and fetch timeouts is
+not a trivial addition. `run_deep_searches()` still enforces its own
+budget at the *job* level (stops claiming new deep-search jobs once
+`rs.time_left_min()` is under the per-investigation timeout), so a
+single long investigation can still run past the nominal per-job budget
+before that check is retested on the *next* job. Tracked as follow-up
+work, not fixed here.
+
+### Tests
+
+- `tests/unit/test_gate.py` — extended: lock serialisation with two
+  threads racing `acquire()`/`_acquire_locked` semantics, eligible-unload
+  logic (`_eligible_for_unload`: unseen model eligible, freshly-loaded
+  model not eligible, aged model eligible, `keep` excluded), thermal
+  pause sleeping in bounded (`<= 30s`) increments, and CPU-runtime-path
+  RAM queuing (queues with backoff below `min_free_ram_mb`, proceeds once
+  RAM recovers, raises `ResourceUnavailable` only after the deadline).
+- `tests/unit/test_jobs_status.py` — `run_daily()` terminal status
+  computation (`done` when report ok and no stage problem; `partial` when
+  report ok but another stage errored/deferred/skipped; `failed` when the
+  report stage itself is missing/errored), `_notify()`'s failure path
+  when no `docx`.
+- `tests/unit/test_jobs_worker.py` — `_default_kinds()` excludes
+  `ingest` under `EOA_ROLE=agent` and includes it otherwise; `Worker`
+  picks the terminal state up from a handler's `status` field.
+- `tests/unit/test_jobs_leases.py` — `reap_stale_jobs` SQL shape via a
+  mocked connection/cursor, `finish_job`'s `not_before` parameter is
+  passed through to the query params.
+
+Run via `PYTHONPATH=agent python -m pytest tests/unit -q`; `ruff check`
+clean. Migration `0004` applied to the live local DB with
+`PYTHONPATH=agent python -m alembic upgrade head`.

@@ -153,6 +153,7 @@ function buildItem(i: number): ItemCard {
       `גיאוגרפיה: ${geography}; סוג פרסום: ${reportKind}`,
       `מקור: ${source}, פורסם ${publishedAt.toLocaleDateString("he-IL")}`,
     ],
+    uncertainty_he: i % 5 === 0 ? "המקור לא מציין את היקף ההתקשרות הכספי." : null,
   };
 }
 

@@ -101,22 +101,36 @@ class ResourceGate:
     def is_batch_window(self) -> bool:
         return self.force_night_mode or self._in_night_window()
 
-    def _reclaimable_vram(self, host: telemetry.HostStatus, keep: str) -> int:
-        """VRAM held by other Ollama models that have exceeded the minimum loaded time."""
+    def _eligible_for_unload(self, host: telemetry.HostStatus, keep: str) -> list[telemetry.LoadedModel]:
+        """Other Ollama models that have exceeded the minimum loaded time. A model the gate has never
+        seen (loaded by someone else, e.g. before this process started, or by another gate instance)
+        counts as eligible too — we have no evidence it was just loaded, so waiting for it would be
+        an unbounded (and wrong) assumption."""
         min_loaded = settings().resources.min_loaded_seconds
         now = time.monotonic()
-        total = 0
+        out = []
         for m in host.loaded_models:
             if m.name == keep:
                 continue
-            since = self._loaded_since.get(m.name, now - min_loaded - 1)
-            if now - since >= min_loaded:
-                total += m.size_vram_mb
-        return total
+            since = self._loaded_since.get(m.name)
+            if since is None or now - since >= min_loaded:
+                out.append(m)
+        return out
+
+    def _reclaimable_vram(self, host: telemetry.HostStatus, keep: str) -> int:
+        """VRAM held by other Ollama models that may be unloaded now."""
+        return sum(m.size_vram_mb for m in self._eligible_for_unload(host, keep))
 
     # ------------------------------------------------------------------ main API
     def acquire(self, role: str, *, interactive: bool = False, est_vram_mb: int | None = None) -> ModelSpec:
-        """Block until the model for ``role`` may be used; return its spec. Raises ResourceUnavailable."""
+        """Block until the model for ``role`` may be used; return its spec. Raises ResourceUnavailable.
+
+        Serialised with ``self._lock``: the GPU is a single resource and two concurrent admissions
+        could otherwise both pass the VRAM check and then oversubscribe it."""
+        with self._lock:
+            return self._acquire_locked(role, interactive=interactive, est_vram_mb=est_vram_mb)
+
+    def _acquire_locked(self, role: str, *, interactive: bool, est_vram_mb: int | None) -> ModelSpec:
         s = settings()
         spec = s.model(role)
         need = est_vram_mb or spec.est_vram_mb
@@ -128,11 +142,42 @@ class ResourceGate:
         model_name = spec.ollama or spec.hf or spec.key
 
         if spec.runtime != "ollama" or need == 0:
-            # CPU-side models (guard classifiers, embeddings on CPU) only need RAM/disk sanity.
-            host = telemetry.snapshot(s.ollama_url)
-            self._check_hard_stops(host, model_name)
-            self._record(self._decision("proceed", model_name, host, 0, "cpu-runtime"))
-            return spec
+            # CPU-side models (guard classifiers, embeddings on CPU) only need RAM/disk sanity, but
+            # transient RAM pressure still queues with backoff instead of failing outright.
+            while True:
+                host = telemetry.snapshot(s.ollama_url)
+                self._check_hard_stops(host, model_name)
+                if host.ram_total_mb and host.ram_free_mb < rc.min_free_ram_mb:
+                    if time.monotonic() > deadline:
+                        self._record(
+                            self._decision(
+                                "deferred",
+                                model_name,
+                                host,
+                                waited_ms,
+                                f"ram {host.ram_free_mb}MB too low; timeout",
+                            )
+                        )
+                        raise ResourceUnavailable(
+                            f"RAM free {host.ram_free_mb} MB < {rc.min_free_ram_mb} MB "
+                            f"after {waited_ms // 1000}s"
+                        )
+                    delay = backoffs[min(attempt, len(backoffs) - 1)]
+                    self._record(
+                        self._decision(
+                            "queued",
+                            model_name,
+                            host,
+                            waited_ms,
+                            f"ram {host.ram_free_mb}MB too low; retry in {delay}s",
+                        )
+                    )
+                    self._sleep(delay)
+                    waited_ms += delay * 1000
+                    attempt += 1
+                    continue
+                self._record(self._decision("proceed", model_name, host, waited_ms, "cpu-runtime"))
+                return spec
 
         while True:
             host = telemetry.snapshot(s.ollama_url)
@@ -151,8 +196,11 @@ class ResourceGate:
                 )
                 if time.monotonic() > deadline:
                     raise ResourceUnavailable(f"thermal pause exceeded timeout for {model_name}")
-                self._sleep(120)
-                waited_ms += 120_000
+                # short bounded naps (<= 30s) so we re-check the temperature often rather than
+                # committing to a fixed 120s sleep past the deadline or past a quick cool-down
+                pause = max(1, min(30, int(deadline - time.monotonic())))
+                self._sleep(pause)
+                waited_ms += pause * 1000
                 continue
 
             # polite mode: someone else is using the GPU during the day
@@ -162,7 +210,7 @@ class ResourceGate:
                 and not self.is_batch_window()
                 and host.gpu.available
                 and host.gpu.util_pct > rc.polite_mode.external_gpu_util_threshold
-                and not host.loaded_models  # if only we are loaded, the util is probably ours
+                and host.ollama_vram_mb == 0  # if only we are loaded, the util is probably ours
             ):
                 self._record(
                     self._decision(
@@ -232,13 +280,27 @@ class ResourceGate:
                 return spec
             if free + reclaim >= required:
                 self._unload_others(host, keep=model_name)
-                self._loaded_since[model_name] = time.monotonic()
+                # re-snapshot: an unload can fail silently (Ollama call error) or free less than its
+                # reported size, so only proceed once VRAM is actually available.
+                host = telemetry.snapshot(s.ollama_url)
+                free = host.gpu.vram_free_mb
+                if free >= required:
+                    self._loaded_since[model_name] = time.monotonic()
+                    self._record(
+                        self._decision(
+                            "swap", model_name, host, waited_ms, f"reclaim {reclaim}MB from other models"
+                        )
+                    )
+                    return spec
                 self._record(
                     self._decision(
-                        "swap", model_name, host, waited_ms, f"reclaim {reclaim}MB from other models"
+                        "queued",
+                        model_name,
+                        host,
+                        waited_ms,
+                        f"unload freed less than expected; free {free}MB < {required}MB",
                     )
                 )
-                return spec
 
             # queue with backoff
             if time.monotonic() > deadline:
@@ -275,15 +337,16 @@ class ResourceGate:
             raise ResourceUnavailable(f"GPU temperature {host.gpu.temp_c}C >= stop threshold")
 
     def _unload_others(self, host: telemetry.HostStatus, keep: str) -> None:
+        """Unload only the models eligible per ``_eligible_for_unload`` — never a freshly loaded one
+        that has not met the minimum-loaded-time policy."""
         from eoa.llm.ollama_client import unload_model
 
-        for m in host.loaded_models:
-            if m.name != keep:
-                try:
-                    unload_model(m.name)
-                    self._loaded_since.pop(m.name, None)
-                except Exception as exc:
-                    log.warning("unload_failed", model=m.name, error=str(exc))
+        for m in self._eligible_for_unload(host, keep):
+            try:
+                unload_model(m.name)
+                self._loaded_since.pop(m.name, None)
+            except Exception as exc:
+                log.warning("unload_failed", model=m.name, error=str(exc))
 
     @staticmethod
     def _decision(

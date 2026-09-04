@@ -23,7 +23,7 @@ import type {
   TriageLevel,
 } from "@/types/api";
 import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery } from "./types";
-import { arr, bool, normalizeNightSummary, num, str } from "./normalize";
+import { arr, bool, idStr, normalizeNightSummary, num, str } from "./normalize";
 
 class ApiError extends Error {
   code: string;
@@ -103,6 +103,7 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     security_status: r.security_status ?? "clean",
     dedup_of: r.dedup_of ?? null,
     key_facts: arr(r.key_facts),
+    uncertainty_he: r.uncertainty_he ?? null,
   };
 }
 
@@ -150,7 +151,7 @@ function normalizeInvestigationSummary(
 ): InvestigationSummary {
   const r = raw ?? {};
   return {
-    job_id: str(r.job_id),
+    job_id: idStr(r.job_id),
     item_id: r.item_id ?? null,
     question: str(r.question),
     state: r.state ?? "not_found",
@@ -216,6 +217,23 @@ function normalizeConference(raw: Partial<Conference> | null | undefined): Confe
     ends_at: str(r.ends_at),
     url: r.url ?? null,
     relevance_he: r.relevance_he ?? null,
+    organizer: r.organizer ?? null,
+    start_date: r.start_date ?? null,
+    end_date: r.end_date ?? null,
+    city: r.city ?? null,
+    venue: r.venue ?? null,
+    cadence: r.cadence ?? null,
+    relevance: r.relevance ?? null,
+    rationale: r.rationale ?? null,
+    registration_opens: r.registration_opens ?? null,
+    early_bird_deadline: r.early_bird_deadline ?? null,
+    cfp_deadline: r.cfp_deadline ?? null,
+    cost_range: r.cost_range ?? null,
+    registration_url: r.registration_url ?? null,
+    entry_conditions: r.entry_conditions ?? null,
+    status: r.status ?? null,
+    last_verified_at: r.last_verified_at ?? null,
+    changes: r.changes ?? {},
   };
 }
 
@@ -257,14 +275,19 @@ function normalizeLesson(raw: Partial<Lesson> | null | undefined): Lesson {
 function normalizeJob(raw: Partial<Job> | null | undefined): Job {
   const r = raw ?? {};
   return {
-    id: str(r.id),
-    scope: str(r.scope),
-    mode: (r.mode ?? "eco") as Job["mode"],
+    id: num(r.id),
+    kind: str(r.kind),
+    payload: (r.payload as Record<string, unknown> | null | undefined) ?? null,
     state: (r.state ?? "queued") as Job["state"],
-    created_at: str(r.created_at),
+    priority: num(r.priority),
+    attempts: num(r.attempts),
+    not_before: r.not_before ?? null,
     started_at: r.started_at ?? null,
     finished_at: r.finished_at ?? null,
-    progress: r.progress ?? null,
+    error: r.error ?? null,
+    result: r.result ?? null,
+    created_at: str(r.created_at),
+    updated_at: str(r.updated_at),
   };
 }
 
@@ -304,11 +327,11 @@ export const realApi: ApiClient = {
       }),
     ),
   postItemInvestigate: async (id, body) => {
-    const data = await request<{ job_id?: string }>(`/api/items/${id}/investigate`, {
+    const data = await request<{ job_id?: string | number }>(`/api/items/${id}/investigate`, {
       method: "POST",
       body: JSON.stringify(body),
     });
-    return { job_id: str(data?.job_id) };
+    return { job_id: idStr(data?.job_id) };
   },
 
   getEntities: async (query: EntitiesQuery) => {
@@ -433,13 +456,15 @@ export const realApi: ApiClient = {
       normalizeJob,
     ),
   postRun: async (scope, mode) => {
-    const data = await request<{ job_id?: string }>("/api/run", {
+    const data = await request<{ job_id?: string | number }>("/api/run", {
       method: "POST",
       body: JSON.stringify({ scope, mode }),
     });
-    return { job_id: str(data?.job_id) };
+    return { job_id: idStr(data?.job_id) };
   },
   postJobCancel: (id) => request<void>(`/api/jobs/${id}/cancel`, { method: "POST" }),
+  // (`id` is a `jobs.id` integer on the wire — the template literal above
+  // coerces either the numeric or string form the caller passes.)
 
   getReports: async (kind, limit = 30) =>
     arr(

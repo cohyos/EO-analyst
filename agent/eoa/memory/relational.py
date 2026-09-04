@@ -394,13 +394,23 @@ def enqueue_job(
     return job_id
 
 
-def claim_next_job(kinds: Sequence[str] | None = None) -> dict[str, Any] | None:
-    """Atomically claim the next eligible queued job (`FOR UPDATE SKIP LOCKED`) and mark it running."""
+def claim_next_job(
+    kinds: Sequence[str] | None = None,
+    worker_id: str | None = None,
+    *,
+    lease_seconds: int = 900,
+) -> dict[str, Any] | None:
+    """Atomically claim the next eligible job (`FOR UPDATE SKIP LOCKED`) and mark it running.
+
+    Eligible jobs are `queued`, or `deferred` whose `not_before` has passed (a resource-failure
+    retry, see `finish_job`). Sets `worker_id` and a `lease_expires_at` `lease_seconds` in the
+    future so a crashed worker's job can be detected and reaped by `reap_stale_jobs` instead of
+    sitting `running` forever."""
     where_kind = "AND kind = ANY(%(kinds)s)" if kinds else ""
     query = f"""
         WITH next_job AS (
             SELECT id FROM jobs
-            WHERE state = 'queued'
+            WHERE state IN ('queued', 'deferred')
               AND (not_before IS NULL OR not_before <= now())
               {where_kind}
             ORDER BY priority ASC, created_at ASC
@@ -408,19 +418,21 @@ def claim_next_job(kinds: Sequence[str] | None = None) -> dict[str, Any] | None:
             LIMIT 1
         )
         UPDATE jobs
-        SET state = 'running', started_at = now(), attempts = jobs.attempts + 1
+        SET state = 'running', started_at = now(), attempts = jobs.attempts + 1,
+            worker_id = %(worker_id)s,
+            lease_expires_at = now() + (%(lease_seconds)s || ' seconds')::interval
         FROM next_job
         WHERE jobs.id = next_job.id
         RETURNING jobs.*
     """
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = {"worker_id": worker_id, "lease_seconds": lease_seconds}
     if kinds:
         params["kinds"] = list(kinds)
     with connection() as conn, conn.cursor() as cur:
         cur.execute(query, params)
         row = cur.fetchone()
     if row:
-        log.info("job.claimed", job_id=row["id"], kind=row["kind"])
+        log.info("job.claimed", job_id=row["id"], kind=row["kind"], worker_id=worker_id)
     return row
 
 
@@ -430,26 +442,51 @@ def finish_job(
     *,
     result: dict[str, Any] | None = None,
     error: str | None = None,
+    not_before: dt.datetime | None = None,
+    worker_id: str | None = None,
 ) -> None:
-    """Mark a job finished with a terminal `state`, optional `result` payload and/or `error`."""
+    """Mark a job finished with a terminal `state` (`done`/`failed`/`partial`) or requeue it
+    (`deferred`/`queued`, optionally with `not_before` for a delayed retry).
+
+    Only updates a row currently `running`, `deferred`, or `queued` — a job already reaped as
+    `failed(error='stale lease')` by `reap_stale_jobs`, or otherwise finished by someone else,
+    is left alone so a late-arriving result from a stale worker cannot clobber it. If `worker_id`
+    is given and differs from the lease holder recorded by `claim_next_job`, this is logged as a
+    warning (the write still proceeds — this is a best-effort ownership check, not a hard lock)."""
     query = """
         UPDATE jobs
-        SET state = %(state)s, finished_at = now(), result = %(result)s, error = %(error)s
-        WHERE id = %(job_id)s
+        SET state = %(state)s, finished_at = now(), result = %(result)s, error = %(error)s,
+            not_before = COALESCE(%(not_before)s, not_before)
+        WHERE id = %(job_id)s AND state IN ('running', 'deferred', 'queued')
+        RETURNING worker_id AS prior_worker_id
     """
     params = {
         "state": state,
         "result": Json(result) if result is not None else None,
         "error": error,
+        "not_before": not_before,
         "job_id": job_id,
     }
     with connection() as conn, conn.cursor() as cur:
         cur.execute(query, params)
+        row = cur.fetchone()
+    if row is None:
+        log.warning("job.finish_no_matching_row", job_id=job_id, state=state)
+    elif worker_id is not None and row["prior_worker_id"] not in (None, worker_id):
+        log.warning(
+            "job.finish_worker_mismatch",
+            job_id=job_id,
+            lease_worker_id=row["prior_worker_id"],
+            finishing_worker_id=worker_id,
+        )
     log.info("job.finished", job_id=job_id, state=state, error=error)
 
 
-def heartbeat(job_id: int, stage: str, event: str, detail: dict[str, Any] | None = None) -> None:
-    """Record a heartbeat/progress row in run_log for `job_id`."""
+def heartbeat(
+    job_id: int, stage: str, event: str, detail: dict[str, Any] | None = None, *, lease_seconds: int = 900
+) -> None:
+    """Record a heartbeat/progress row in run_log for `job_id`, and extend that job's lease so a
+    long-running stage is not mistaken for a crashed worker by `reap_stale_jobs`."""
     query = """
         INSERT INTO run_log (job_id, stage, event, detail, heartbeat_at)
         VALUES (%(job_id)s, %(stage)s, %(event)s, %(detail)s, now())
@@ -462,7 +499,39 @@ def heartbeat(job_id: int, stage: str, event: str, detail: dict[str, Any] | None
     }
     with connection() as conn, conn.cursor() as cur:
         cur.execute(query, params)
+        cur.execute(
+            "UPDATE jobs SET lease_expires_at = now() + (%(lease_seconds)s || ' seconds')::interval "
+            "WHERE id = %(job_id)s AND state = 'running'",
+            {"job_id": job_id, "lease_seconds": lease_seconds},
+        )
     log.debug("job.heartbeat", job_id=job_id, stage=stage, event=event)
+
+
+def reap_stale_jobs(max_age_hours: int = 6) -> int:
+    """Mark `running` jobs whose lease has expired as `failed(error='stale lease')`, returning the
+    number reaped. A row with no lease (pre-migration data, or a claim made without `worker_id`
+    wiring) falls back to `started_at` older than `max_age_hours`. Call at Worker start and in
+    `pre_flight()` so a crashed process's job does not block retries or a reaper-requeue race
+    forever."""
+    query = """
+        UPDATE jobs
+        SET state = 'failed', finished_at = now(), error = 'stale lease'
+        WHERE state = 'running'
+          AND (
+              (lease_expires_at IS NOT NULL AND lease_expires_at < now())
+              OR (
+                  lease_expires_at IS NULL AND started_at IS NOT NULL
+                  AND started_at < now() - (%(max_age_hours)s || ' hours')::interval
+              )
+          )
+        RETURNING id
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, {"max_age_hours": max_age_hours})
+        rows = cur.fetchall()
+    if rows:
+        log.warning("jobs.reaped_stale", count=len(rows), job_ids=[r["id"] for r in rows])
+    return len(rows)
 
 
 # --------------------------------------------------------------------------

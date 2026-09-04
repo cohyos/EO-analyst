@@ -1,0 +1,276 @@
+# EO-Analyst tender / RFI / RFP source registry (FR-5.2 / section 5.2 of the spec).
+#
+# Loaded by eoa.tenders.scan.load_tender_sources() into validated pydantic models.
+# Every source was checked with curl on 2026-09-04 (see `verified` / `verified_at` / `notes` per
+# entry). Sources whose own API/page is not reliably reachable/parseable (bot-protected, JS-shell,
+# DNS failure, deprecated key) are marked `verified: false` and are NOT skipped -- they still
+# appear here for documentation/coordination purposes, but `eoa.tenders.scan` only actually polls
+# `kind: api_json` sources directly (verified: true) plus every `kind: search` source (these run
+# through the already-verified, keyless SearXNG metasearch client, so they don't depend on the
+# target site's own bot-protection). `kind: html`/`kind: rss` entries with `verified: false` are
+# kept as documentation of "known dead ends" (per FR-1.3: a failing source never blocks the
+# pipeline) with a `notes` explaining why.
+#
+# Keywords are the shared EO/IR relevance vocabulary (section 2 of the spec) used by
+# eoa.tenders.scan for client-side keyword filtering -- every source's server-side "keyword"
+# param (when it has one) is unreliable/best-effort, so this filter is always re-applied locally.
+
+keywords: &kw
+  - electro-optical
+  - electro-optic
+  - EO/IR
+  - infrared
+  - thermal imaging
+  - targeting pod
+  - gimbal
+  - laser rangefinder
+  - laser designator
+  - seeker
+  - counter-UAS
+  - counter-drone
+  - surveillance camera
+  - night vision
+  - hyperspectral
+  - optronic
+  - electro-optics
+  - IRST
+  - FLIR
+  - imaging sensor
+
+sources:
+  # ---------------------------------------------------------------- TED (EU) -- api_json, verified working
+  - id: ted_eu
+    name: "TED (Tenders Electronic Daily) -- EU"
+    kind: api_json
+    country: EU
+    url: "https://api.ted.europa.eu/v3/notices/search"
+    method: POST
+    # TED v3 "expert query" syntax: `FT ~ "<term>"` is a full-text search operator. One request
+    # per keyword (rotated by eoa.tenders.scan, capped) -- the API has no native OR-of-phrases
+    # syntax that stayed inside the 400-safe subset we could verify.
+    query_template: '{"query":"FT ~ \"{keyword}\"","fields":["ND","TI","PD","publication-number","links"],"limit":20}'
+    keywords: *kw
+    parse_hints:
+      format: json
+      notice_path: notices
+      id_field: ND
+      title_field: "TI.eng"
+      title_fallback_any_lang: true
+      date_field: PD
+      url_field: "links.htmlDirect.ENG"
+    verified: true
+    verified_at: "2026-09-04"
+    notes: >
+      Verified via curl POST with body {"query":"FT ~ \"electro-optical\"","fields":["ND","TI","PD"],"limit":2} ->
+      HTTP 200, real notices (TI is a per-language dict, "eng" present on most EU-wide notices).
+      A bare/undelimited query string returns HTTP 400 QUERY_SYNTAX_ERROR -- the FT operator with
+      quoted phrase is required. No API key needed.
+
+  # ---------------------------------------------------------- UK Contracts Finder -- api_json, verified working
+  - id: uk_contracts_finder
+    name: "UK Contracts Finder (OCDS)"
+    kind: api_json
+    country: UK
+    url: "https://www.contractsfinder.service.gov.uk/Published/Notices/OCDS/Search"
+    method: GET
+    query_params: { keyword: "{keyword}" }
+    keywords: *kw
+    parse_hints:
+      format: json
+      notice_path: releases
+      id_field: ocid
+      title_field: "tender.title"
+      summary_field: "tender.description"
+      agency_field: "buyer.name"
+      deadline_field: "tender.tenderPeriod.endDate"
+      status_tag_field: tag
+      # No direct notice-URL field in the OCDS payload; the release id is
+      # "<uuid>-<internal-int>" -- eoa.tenders.scan extracts the leading UUID and builds
+      # https://www.contractsfinder.service.gov.uk/Notice/<uuid>.
+      url_pattern: "https://www.contractsfinder.service.gov.uk/Notice/{uuid}"
+    verified: true
+    verified_at: "2026-09-04"
+    notes: >
+      Verified via curl GET ?keyword=electro-optical -> HTTP 200, real OCDS JSON (100 releases
+      returned). The server-side `keyword` filter is not reliable (unrelated releases came back
+      first) -- client-side keyword re-filtering in eoa.tenders.scan is mandatory. No API key needed.
+
+  # ---------------------------------------------------------------- SAM.gov (US) -- documented, currently dead
+  - id: sam_gov_api
+    name: "SAM.gov Opportunities API v2 (US)"
+    kind: api_json
+    country: US
+    url: "https://api.sam.gov/opportunities/v2/search"
+    method: GET
+    query_params: { api_key: DEMO_KEY, keyword: "{keyword}", limit: "25" }
+    keywords: *kw
+    parse_hints: { format: json, notice_path: opportunitiesData }
+    verified: false
+    verified_at: "2026-09-04"
+    notes: >
+      curl GET with api_key=DEMO_KEY (SAM.gov's documented public demo key) -> HTTP 404 for both
+      /opportunities/v2/search and /prod/opportunities/v2/search. The v2 DEMO_KEY path appears to
+      have been retired/moved behind a real per-user key since this doc's endpoint was written.
+      Not polled directly by eoa.tenders.scan; covered instead by `sam_gov_search` below.
+
+  - id: sam_gov_search
+    name: "SAM.gov opportunities -- SearXNG fallback"
+    kind: search
+    country: US
+    engine_lang: en
+    queries:
+      - "site:sam.gov opportunity electro-optical"
+      - "site:sam.gov opportunity infrared targeting pod"
+      - "site:sam.gov opportunity counter-UAS sources sought"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: "Runs through the already-verified SearXNG client (eoa.search.searxng_client); does not depend on sam.gov's own API/bot-protection."
+
+  # ---------------------------------------------------------------- Israeli MoD -- documented, JS-shell
+  - id: il_mod
+    name: "אתר מכרזים -- משרד הביטחון (mod.gov.il)"
+    kind: html
+    country: IL
+    url: "https://www.mod.gov.il"
+    keywords: *kw
+    verified: false
+    verified_at: "2026-09-04"
+    notes: >
+      curl https://www.mod.gov.il -> HTTP 200 but a client-hydrated Next.js shell (no static
+      tender listing markup); https://online.mod.gov.il fails DNS resolution entirely. Not
+      scraped directly; covered instead by `il_mod_search` below.
+
+  - id: il_mod_search
+    name: "מכרזי משרד הביטחון -- SearXNG fallback"
+    kind: search
+    country: IL
+    engine_lang: he
+    queries:
+      - "מכרז משרד הביטחון אלקטרו-אופטי"
+      - "מכרז משרד הביטחון מטען אלקטרו אופטי כטבמ"
+      - "בקשת מידע קול קורא מערכת אלקטרו אופטית ביטחון"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: "SearXNG fallback (he-IL engines); does not depend on mod.gov.il directly."
+
+  # ---------------------------------------------------------------- NATO NSPA / NCIA -- documented, bot-blocked
+  - id: nato_nspa
+    name: "NATO Support and Procurement Agency (NSPA)"
+    kind: html
+    country: NATO
+    url: "https://www.nspa.nato.int"
+    keywords: *kw
+    verified: false
+    verified_at: "2026-09-04"
+    notes: "curl -> HTTP 403 Cloudflare challenge (\"Just a moment...\"). Not scraped directly; covered by `nato_search` below."
+
+  - id: nato_ncia
+    name: "NATO Communications and Information Agency (NCIA) -- business"
+    kind: html
+    country: NATO
+    url: "https://www.ncia.nato.int/business/"
+    keywords: *kw
+    verified: false
+    verified_at: "2026-09-04"
+    notes: "curl -> HTTP 403 Cloudflare challenge. Not scraped directly; covered by `nato_search` below."
+
+  - id: nato_search
+    name: "NATO NSPA/NCIA procurement -- SearXNG fallback"
+    kind: search
+    country: NATO
+    engine_lang: en
+    queries:
+      - "site:nspa.nato.int business opportunity electro-optical"
+      - "site:ncia.nato.int business opportunity counter-UAS"
+      - "NATO NSPA request for information EO/IR sensor"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: "SearXNG fallback; does not depend on nspa.nato.int/ncia.nato.int's own Cloudflare gate."
+
+  # ---------------------------------------------------------------- Canada -- CanadaBuys
+  - id: canada_buys
+    name: "CanadaBuys tender opportunities"
+    kind: html
+    country: CA
+    url: "https://canadabuys.canada.ca/en/tender-opportunities"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: >
+      curl -> HTTP 200, real Drupal-rendered HTML page (facet search). Listing is
+      client-hydrated/paginated via Drupal facets, so a static-HTML row scraper would be fragile;
+      eoa.tenders.scan does not attempt to parse this page's listing rows -- `canada_buys_search`
+      below is the actual ingestion path. (A bulk open-data CSV also exists at
+      canadabuys.canada.ca/opendata/pub/openTenderNotice-ouvertAvisAppelOffres.csv, verified
+      reachable at ~7MB/day -- out of scope for a since_days=3 incremental scan.)
+
+  - id: canada_buys_search
+    name: "CanadaBuys -- SearXNG fallback"
+    kind: search
+    country: CA
+    engine_lang: en
+    queries:
+      - "site:canadabuys.canada.ca electro-optical"
+      - "site:canadabuys.canada.ca infrared surveillance"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: "SearXNG fallback."
+
+  # ---------------------------------------------------------------- Australia -- AusTender
+  - id: austender
+    name: "AusTender"
+    kind: rss
+    country: AU
+    url: "https://www.tenders.gov.au/atm/rss?Keyword=electro-optical"
+    keywords: *kw
+    verified: false
+    verified_at: "2026-09-04"
+    notes: "curl -> HTTP 403 (Akamai \"Request blocked\") on both the RSS endpoint and the main site. Not polled directly; covered by `austender_search` below."
+
+  - id: austender_search
+    name: "AusTender -- SearXNG fallback"
+    kind: search
+    country: AU
+    engine_lang: en
+    queries:
+      - "site:tenders.gov.au electro-optical"
+      - "site:tenders.gov.au counter-UAS OR infrared"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: "SearXNG fallback; does not depend on tenders.gov.au's own Akamai gate."
+
+  # ---------------------------------------------------------------- generic RFI/RFP news (multilingual)
+  - id: rfi_rfp_news
+    name: "RFI/RFP defense news -- SearXNG (general)"
+    kind: search
+    country: other
+    engine_lang: en
+    queries:
+      - "request for information electro-optical defense"
+      - "RFP targeting pod"
+      - "sources sought infrared sensor"
+      - "request for proposal counter-UAS EO/IR"
+      - "RFI naval EO director laser rangefinder"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: "General multilingual RFI/RFP sweep via SearXNG; not tied to a single procurement portal."
+
+  - id: rfi_rfp_news_he
+    name: "RFI/RFP הודעות ביטחוניות -- SearXNG (עברית)"
+    kind: search
+    country: IL
+    engine_lang: he
+    queries:
+      - "מכרז משרד הביטחון אלקטרו-אופטי"
+      - "בקשת מידע מערכת אלקטרו אופטית צבאית"
+      - "מכרז מטען אלקטרו אופטי כטבמ צהל"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-04"
+    notes: "Duplicates some of il_mod_search's queries deliberately (broader defense-press hits, not just mod.gov.il)."

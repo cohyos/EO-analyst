@@ -26,6 +26,7 @@ function makeItem(over: Partial<ItemCard> = {}): ItemCard {
     security_status: "clean",
     dedup_of: null,
     key_facts: [],
+    uncertainty_he: null,
     ...over,
   };
 }

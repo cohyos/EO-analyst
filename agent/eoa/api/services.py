@@ -16,9 +16,10 @@ list) -- never fabricated data.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import structlog
@@ -960,7 +961,15 @@ def cancel_job(job_id: int) -> dict[str, Any] | None:
 # settings
 # --------------------------------------------------------------------------
 
-SETTINGS_FILES = {
+# The only five settings files the API will ever read or write. `name` is
+# validated against exactly these literal values -- never interpolated,
+# joined, or otherwise used to build a filesystem path -- closing off the
+# path-segment tricks (e.g. a Windows backslash inside a URL path segment)
+# a fully free-form `name: str` would invite (finding #18 in
+# output/reviews/codex_security_review.md).
+SettingsName = Literal["config", "sources", "watchlist", "taxonomy", "models"]
+
+SETTINGS_FILES: dict[SettingsName, str] = {
     "config": "config.yaml",
     "sources": "sources.yaml",
     "watchlist": "watchlist.yaml",
@@ -968,12 +977,85 @@ SETTINGS_FILES = {
     "models": "models.yaml",
 }
 
+# Fixed absolute paths, resolved once from CONFIG_DIR -- `_settings_path` is
+# a plain dict lookup keyed by the literal `name`, never a join.
+_SETTINGS_PATHS: dict[str, Path] = {name: CONFIG_DIR / fname for name, fname in SETTINGS_FILES.items()}
+
+MAX_SETTINGS_BYTES = 256 * 1024  # request-size cap (finding #19)
+_MAX_YAML_NODES = 20_000
+_MAX_YAML_DEPTH = 12
+
+
+class SettingsConflict(Exception):
+    """The caller's `If-Match`/`revision` precondition didn't match the file on disk (-> HTTP 409)."""
+
+    def __init__(self, current_revision: str | None) -> None:
+        self.current_revision = current_revision
+        super().__init__("settings file changed since it was last read")
+
+
+class _YamlLimitError(ValueError):
+    """A parsed YAML document exceeds the node-count or nesting-depth budget (finding #19)."""
+
+
+def _settings_path(name: str) -> Path:
+    path = _SETTINGS_PATHS.get(name)
+    if path is None:
+        raise KeyError(name)
+    return path
+
 
 def read_settings_yaml(name: str) -> str:
-    fname = SETTINGS_FILES.get(name)
-    if fname is None:
-        raise KeyError(name)
-    return (CONFIG_DIR / fname).read_text(encoding="utf-8")
+    return _settings_path(name).read_text(encoding="utf-8")
+
+
+def settings_revision(name: str) -> str:
+    """sha256 hex digest of the current on-disk bytes for settings `name`.
+
+    Returned by `GET /api/settings/{name}` as `revision` and accepted back
+    by `PUT` (via the `If-Match` header or the body's `revision` field) as
+    an optimistic-concurrency precondition -- a `PUT` whose `revision`
+    doesn't match the file's current bytes is rejected with 409 instead of
+    silently clobbering a concurrent edit (finding #19).
+    """
+    return hashlib.sha256(_settings_path(name).read_bytes()).hexdigest()
+
+
+def _count_yaml_nodes(obj: Any, depth: int, seen: set[int], counter: list[int]) -> None:
+    """Recursively count nodes, raising `_YamlLimitError` past the node/depth budget.
+
+    Cycle-safe: `seen` tracks object ids already fully counted, so a
+    self-referential or repeatedly-aliased YAML anchor is counted once (its
+    re-encounters return immediately) rather than recursing forever or
+    blowing up the count -- `yaml.safe_load` never executes code, but an
+    alias-heavy or self-referential document can still be an effective
+    memory/CPU bomb without this guard.
+    """
+    if depth > _MAX_YAML_DEPTH:
+        raise _YamlLimitError(f"עומק ה-YAML חורג מהמותר (מקסימום {_MAX_YAML_DEPTH})")
+    counter[0] += 1
+    if counter[0] > _MAX_YAML_NODES:
+        raise _YamlLimitError(f"מספר הצמתים ב-YAML חורג מהמותר (מקסימום {_MAX_YAML_NODES})")
+
+    if isinstance(obj, dict):
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        for k, v in obj.items():
+            _count_yaml_nodes(k, depth + 1, seen, counter)
+            _count_yaml_nodes(v, depth + 1, seen, counter)
+    elif isinstance(obj, list):
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        for item in obj:
+            _count_yaml_nodes(item, depth + 1, seen, counter)
+
+
+def _check_yaml_limits(parsed: Any) -> None:
+    _count_yaml_nodes(parsed, 0, set(), [0])
 
 
 def _validate_settings_payload(name: str, parsed: Any) -> list[str]:
@@ -1007,23 +1089,47 @@ def _validate_settings_payload(name: str, parsed: Any) -> list[str]:
     return []
 
 
-def write_settings_yaml(name: str, yaml_text: str) -> list[str]:
-    """Validate `yaml_text` for settings `name`; write atomically on success. Returns validation errors (empty on success)."""
-    fname = SETTINGS_FILES.get(name)
-    if fname is None:
-        raise KeyError(name)
+def write_settings_yaml(name: str, yaml_text: str, *, expected_revision: str | None = None) -> list[str]:
+    """Validate `yaml_text` for settings `name`; write atomically on success.
+
+    Order: resolve the fixed path for `name` (`KeyError` for an unknown
+    name -- never a filesystem path built from `name`) -> enforce the
+    `MAX_SETTINGS_BYTES` request-size cap -> if `expected_revision` was
+    supplied, compare it against the current file's sha256 and raise
+    `SettingsConflict` on a mismatch -> `yaml.safe_load` -> node-count/depth
+    limits (`_check_yaml_limits`) -> full typed validation
+    (`_validate_settings_payload`) -> atomic write-then-replace.
+
+    Returns validation errors as a list of Hebrew messages (empty on
+    success). Raises `KeyError` for an unknown `name` and `SettingsConflict`
+    for a revision mismatch -- both translated to HTTP errors by the route.
+    """
+    path = _settings_path(name)
+
+    raw_bytes = yaml_text.encode("utf-8")
+    if len(raw_bytes) > MAX_SETTINGS_BYTES:
+        return [f"קובץ ההגדרות חורג מהגודל המרבי המותר ({MAX_SETTINGS_BYTES // 1024} KB)"]
+
+    if expected_revision is not None:
+        current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+        if current != expected_revision:
+            raise SettingsConflict(current)
 
     try:
         parsed = yaml.safe_load(yaml_text)
     except yaml.YAMLError as exc:
         return [f"YAML לא תקין: {exc}"]
 
+    try:
+        _check_yaml_limits(parsed)
+    except _YamlLimitError as exc:
+        return [str(exc)]
+
     errors = _validate_settings_payload(name, parsed)
     if errors:
         return errors
 
-    path = CONFIG_DIR / fname
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{fname}.", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
         with open(fd, "w", encoding="utf-8") as fh:

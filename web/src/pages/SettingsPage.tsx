@@ -19,8 +19,9 @@ const JOB_STATE_LABEL: Record<string, string> = {
   queued: "בתור",
   running: "רץ",
   done: "הושלם",
-  error: "שגיאה",
-  cancelled: "בוטל",
+  failed: "נכשל",
+  deferred: "נדחה",
+  partial: "חלקי",
 };
 
 export function SettingsPage() {
@@ -63,7 +64,7 @@ export function SettingsPage() {
   });
 
   const cancelJob = useMutation({
-    mutationFn: (id: string) => api.postJobCancel(id),
+    mutationFn: (id: number) => api.postJobCancel(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
   });
 
@@ -180,9 +181,17 @@ export function SettingsPage() {
                   <tr key={j.id} className="border-t border-border hover:bg-bg-sunken">
                     <td className="p-2 font-mono text-xs">{j.id}</td>
                     <td className="p-2">
-                      {j.scope} · {j.mode}
+                      <bdi>{j.kind}</bdi>
+                      {typeof j.payload?.mode === "string" && ` · ${j.payload.mode}`}
                     </td>
-                    <td className="p-2">{JOB_STATE_LABEL[j.state] ?? j.state}</td>
+                    <td className="p-2">
+                      {JOB_STATE_LABEL[j.state] ?? j.state}
+                      {j.state === "failed" && j.error && (
+                        <span className="ms-1 text-xs text-fg-dim" title={j.error}>
+                          ({j.error})
+                        </span>
+                      )}
+                    </td>
                     <td className="p-2 font-mono text-xs">{formatDateTime(j.created_at)}</td>
                     <td className="p-2">
                       {(j.state === "queued" || j.state === "running") && (

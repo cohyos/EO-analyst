@@ -96,7 +96,7 @@ export interface ApiClient {
 
   getJobs(state?: string, limit?: number): Promise<Job[]>;
   postRun(scope: string, mode: "eco" | "full"): Promise<{ job_id: string }>;
-  postJobCancel(id: string): Promise<void>;
+  postJobCancel(id: number): Promise<void>;
 
   getReports(kind?: string, limit?: number): Promise<ReportSummary[]>;
   getReport(id: number): Promise<ReportDetail>;

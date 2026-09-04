@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/shell/AppShell";
 import { MorningPage } from "@/pages/MorningPage";
 import { FeedPage } from "@/pages/FeedPage";
+import { ItemDetailPage } from "@/pages/ItemDetailPage";
 import { EntitiesListPage } from "@/pages/EntitiesListPage";
 import { EntityDetailPage } from "@/pages/EntityDetailPage";
 import { InvestigationsListPage } from "@/pages/InvestigationsListPage";
@@ -32,6 +33,7 @@ export default function App() {
           <Route element={<AppShell />}>
             <Route index element={<MorningPage />} />
             <Route path="feed" element={<FeedPage />} />
+            <Route path="items/:id" element={<ItemDetailPage />} />
             <Route path="entities" element={<EntitiesListPage />} />
             <Route path="entities/:id" element={<EntityDetailPage />} />
             <Route path="investigations" element={<InvestigationsListPage />} />

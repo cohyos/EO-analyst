@@ -287,23 +287,31 @@ export const mockApi: ApiClient = {
         .slice(0, limit),
     ),
   postRun: async (scope, mode) => {
-    const id = `job-${Math.floor(Math.random() * 9000) + 4000}`;
+    const id = Math.floor(Math.random() * 9000) + 4000;
     const job: Job = {
       id,
-      scope,
-      mode,
+      kind: scope === "daily" ? "daily_run" : scope === "weekly" ? "weekly_run" : scope,
+      payload: { mode },
       state: "queued" as JobState,
-      created_at: new Date().toISOString(),
+      priority: 5,
+      attempts: 0,
+      not_before: null,
       started_at: null,
       finished_at: null,
-      progress: null,
+      error: null,
+      result: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
     jobs.unshift(job);
-    return delay({ job_id: id }, 300);
+    return delay({ job_id: String(id) }, 300);
   },
   postJobCancel: async (id) => {
     const job = jobs.find((j) => j.id === id);
-    if (job) job.state = "cancelled" as JobState;
+    if (job) {
+      job.state = "failed" as JobState;
+      job.error = "cancelled_by_user";
+    }
     return delay(undefined);
   },
 

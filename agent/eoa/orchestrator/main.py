@@ -44,10 +44,16 @@ def pre_flight() -> dict:
     """23:30 checks: services, disk/thermal, warm-up of the resident model, backup. Sends a status ping."""
     from eoa import db
     from eoa.llm import ollama_client
+    from eoa.memory.relational import reap_stale_jobs
     from eoa.resources.gate import gate
     from eoa.search.searxng_client import ping as searx_ping
 
     st = gate().status()
+    try:
+        reaped = reap_stale_jobs()
+    except Exception as exc:
+        log.warning("pre_flight_reap_failed", error=str(exc)[:160])
+        reaped = 0
     checks = {
         "postgres": db.ping(),
         "ollama": ollama_client.ping(),
@@ -55,6 +61,7 @@ def pre_flight() -> dict:
         "disk_free_gb": st["disk_free_gb"],
         "gpu_temp": st["gpu"]["temp_c"],
         "vram_free_mb": st["gpu"]["vram_free_mb"],
+        "reaped_stale_jobs": reaped,
     }
     problems = [k for k in ("postgres", "ollama") if not checks[k]]
     if checks["disk_free_gb"] < settings().resources.warn_free_disk_gb:

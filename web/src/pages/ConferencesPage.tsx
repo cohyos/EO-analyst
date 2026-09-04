@@ -1,14 +1,103 @@
+import { Fragment, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, Download } from "lucide-react";
+import { CalendarClock, CalendarPlus, ChevronDown, Download, ExternalLink } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { formatDate } from "@/lib/time";
+import { downloadConferenceIcs } from "@/lib/ics";
+import { cn } from "@/lib/cn";
+import type { Conference } from "@/types/api";
+
+const STATUS_LABEL: Record<string, string> = {
+  confirmed: "מאושר",
+  estimated: "משוער",
+  cancelled: "בוטל",
+};
+
+const FIELD_LABEL: Record<string, string> = {
+  start_date: "תאריך התחלה",
+  end_date: "תאריך סיום",
+  registration_url: "קישור הרשמה",
+  registration_opens: "פתיחת הרשמה",
+  early_bird_deadline: "מועד early bird",
+  cfp_deadline: "מועד CFP",
+  cost_range: "טווח עלות",
+  status: "סטטוס",
+  venue: "מקום",
+  city: "עיר",
+};
+
+function ConferenceDetailRow({ c }: { c: Conference }) {
+  const changeEntries = Object.entries(c.changes ?? {});
+  return (
+    <tr className="border-t border-border bg-bg-sunken/60">
+      <td colSpan={6} className="p-3 text-xs">
+        <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2 lg:grid-cols-3">
+          <div>
+            <span className="text-fg-dim">פתיחת הרשמה: </span>
+            <span className="font-mono">{formatDate(c.registration_opens) || "—"}</span>
+          </div>
+          <div>
+            <span className="text-fg-dim">Early bird: </span>
+            <span className="font-mono">{formatDate(c.early_bird_deadline) || "—"}</span>
+          </div>
+          <div>
+            <span className="text-fg-dim">מועד CFP: </span>
+            <span className="font-mono">{formatDate(c.cfp_deadline) || "—"}</span>
+          </div>
+          <div>
+            <span className="text-fg-dim">טווח עלות: </span>
+            <bdi>{c.cost_range ?? "—"}</bdi>
+          </div>
+          <div>
+            <span className="text-fg-dim">סטטוס: </span>
+            <bdi>{c.status ? (STATUS_LABEL[c.status] ?? c.status) : "—"}</bdi>
+          </div>
+          <div>
+            <span className="text-fg-dim">אומת לאחרונה: </span>
+            <span className="font-mono">{formatDate(c.last_verified_at) || "—"}</span>
+          </div>
+        </div>
+
+        {c.entry_conditions && (
+          <p className="mt-2">
+            <span className="text-fg-dim">תנאי כניסה: </span>
+            <bdi dir="auto">{c.entry_conditions}</bdi>
+          </p>
+        )}
+        {c.rationale && (
+          <p className="mt-2">
+            <span className="text-fg-dim">נימוק: </span>
+            <bdi dir="auto">{c.rationale}</bdi>
+          </p>
+        )}
+
+        {changeEntries.length > 0 && (
+          <div className="mt-2">
+            <p className="mb-1 font-semibold text-fg-dim">שינויים מהסריקה הקודמת</p>
+            <ul className="space-y-0.5">
+              {changeEntries.map(([field, ch]) => (
+                <li key={field}>
+                  <span className="text-fg-dim">{FIELD_LABEL[field] ?? field}: </span>
+                  <span className="text-danger line-through">{String(ch.from ?? "—")}</span>
+                  {" → "}
+                  <span className="text-ok">{String(ch.to ?? "—")}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
 
 export function ConferencesPage() {
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["conferences"],
     queryFn: () => api.getConferences(),
   });
+  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   if (isLoading) return <LoadingState label="טוען לוח כנסים…" />;
   if (isError) return <ErrorState onRetry={() => refetch()} />;
@@ -17,8 +106,8 @@ export function ConferencesPage() {
     return (
       <EmptyState
         icon={<CalendarClock size={26} aria-hidden="true" />}
-        title="לוח הכנסים יופעל בשלב ג'"
-        description="תצוגת ציר הזמן והייצוא ל-iCal יהיו זמינים כשמודול הכנסים יושק."
+        title="אין כנסים קרובים"
+        description="לוח הכנסים מתעדכן בסריקה החודשית (FR-12); אין כרגע רשומות בטווח."
       />
     );
   }
@@ -31,34 +120,82 @@ export function ConferencesPage() {
           className="flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-sm text-fg-muted hover:bg-bg-sunken"
         >
           <Download size={14} aria-hidden="true" />
-          ייצוא iCal
+          ייצוא iCal (כל הכנסים)
         </a>
       </div>
       <div className="overflow-x-auto rounded-lg border border-border">
-        <table className="w-full min-w-[640px] text-sm">
+        <table className="w-full min-w-[720px] text-sm">
           <thead className="bg-bg-raised text-xs text-fg-dim">
             <tr>
+              <th className="p-2 text-start"></th>
               <th className="p-2 text-start">שם</th>
               <th className="p-2 text-start">מיקום</th>
               <th className="p-2 text-start">מתחיל</th>
               <th className="p-2 text-start">מסתיים</th>
               <th className="p-2 text-start">רלוונטיות</th>
+              <th className="p-2 text-start">פעולות</th>
             </tr>
           </thead>
           <tbody>
-            {data.map((c) => (
-              <tr key={c.id} className="border-t border-border hover:bg-bg-sunken">
-                <td className="p-2">
-                  <bdi>{c.name}</bdi>
-                </td>
-                <td className="p-2 text-fg-muted">{c.location ?? "—"}</td>
-                <td className="p-2 font-mono">{formatDate(c.starts_at)}</td>
-                <td className="p-2 font-mono">{formatDate(c.ends_at)}</td>
-                <td className="p-2 text-fg-muted">
-                  <bdi>{c.relevance_he ?? "—"}</bdi>
-                </td>
-              </tr>
-            ))}
+            {data.map((c) => {
+              const outUrl = c.registration_url || c.url;
+              const expanded = expandedId === c.id;
+              return (
+                <Fragment key={c.id}>
+                  <tr
+                    onClick={() => setExpandedId(expanded ? null : c.id)}
+                    className="cursor-pointer border-t border-border hover:bg-bg-sunken"
+                    aria-expanded={expanded}
+                  >
+                    <td className="p-2 text-fg-dim">
+                      <ChevronDown
+                        size={14}
+                        className={cn("transition-transform", expanded && "rotate-180")}
+                        aria-hidden="true"
+                      />
+                    </td>
+                    <td className="p-2">
+                      {outUrl ? (
+                        <a
+                          href={outUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="inline-flex items-center gap-1 text-fg hover:text-accent hover:underline"
+                          title="פתח קישור הרשמה/מקור בכרטיסייה חדשה"
+                        >
+                          <bdi>{c.name}</bdi>
+                          <ExternalLink size={12} aria-hidden="true" />
+                        </a>
+                      ) : (
+                        <bdi>{c.name}</bdi>
+                      )}
+                    </td>
+                    <td className="p-2 text-fg-muted">{c.location ?? "—"}</td>
+                    <td className="p-2 font-mono">{formatDate(c.starts_at)}</td>
+                    <td className="p-2 font-mono">{formatDate(c.ends_at)}</td>
+                    <td className="p-2 text-fg-muted">
+                      <bdi>{c.relevance_he ?? "—"}</bdi>
+                    </td>
+                    <td className="p-2">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          downloadConferenceIcs(c);
+                        }}
+                        className="flex items-center gap-1 rounded-md border border-border-strong px-2 py-1 text-xs text-fg-dim hover:bg-bg-sunken hover:text-fg"
+                        title="הוסף ליומן (ICS)"
+                      >
+                        <CalendarPlus size={12} aria-hidden="true" />
+                        הוסף ליומן
+                      </button>
+                    </td>
+                  </tr>
+                  {expanded && <ConferenceDetailRow c={c} />}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>

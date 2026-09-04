@@ -32,6 +32,7 @@ export const NAV_ITEMS: NavItem[] = [
 
 export function pageTitleFor(pathname: string): string {
   if (pathname === "/") return "הבוקר";
+  if (pathname.startsWith("/items")) return "פרטי פריט";
   if (pathname.startsWith("/feed")) return "פיד Triage";
   if (pathname.startsWith("/entities")) return "ישויות וגרף";
   if (pathname.startsWith("/investigations")) return "חקירות עומק";

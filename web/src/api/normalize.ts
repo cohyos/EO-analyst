@@ -26,6 +26,23 @@ export function str(value: string | null | undefined, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+/**
+ * Coerces an id that the backend may return as either a string or a number
+ * into a string. `jobs.id` (and therefore every `job_id` field — investigation
+ * summaries/detail, `POST /api/items/{id}/investigate`, `POST /api/run`) is a
+ * plain Postgres integer on the wire (real API check, 2026-09-04: `GET
+ * /api/investigations` returns `"job_id": 10`, not `"10"`) even though
+ * `docs/API.md`/`types/api.ts` model it as `string`. Plain `str()` would
+ * silently turn every one of those into `""` (its `typeof !== "string"`
+ * fallback), which breaks `/investigations/${job_id}` links and React list
+ * keys throughout the Investigations UI.
+ */
+export function idStr(value: string | number | null | undefined, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && !Number.isNaN(value)) return String(value);
+  return fallback;
+}
+
 export function num(value: number | null | undefined, fallback = 0): number {
   return typeof value === "number" && !Number.isNaN(value) ? value : fallback;
 }

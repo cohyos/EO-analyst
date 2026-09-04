@@ -41,10 +41,24 @@ class ClassifyOut(BaseModel):
     trl: Trl = "unknown"
     geography: Geography = "other"
     entities: list[EntityMention] = Field(default_factory=list, max_length=12)
-    amounts_usd: list[float] = Field(default_factory=list, description="monetary amounts mentioned, USD")
-    dates: list[str] = Field(default_factory=list, description="ISO dates mentioned")
+    amounts_usd: list[float] = Field(
+        default_factory=list,
+        description=(
+            "USD amounts only, filled in ONLY when the source states USD explicitly. Never "
+            "compute a currency conversion; leave empty for non-USD amounts (put the original "
+            "amount+currency verbatim in relevance_note instead)."
+        ),
+    )
+    dates: list[str] = Field(default_factory=list, description="ISO dates (YYYY-MM-DD) explicitly stated; empty if none")
     one_line_he: str = Field(description="משפט אחד בעברית: מה קרה")
-    relevance_note: str = Field(default="", description="why in/out of scope, short English")
+    relevance_note: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "up to 15 words, English: short reason the item is in/out of scope, OR (when a "
+            "non-USD amount was found) the original amount+currency verbatim"
+        ),
+    )
 
 
 class TriageOut(BaseModel):
@@ -55,7 +69,7 @@ class TriageOut(BaseModel):
     novelty: int = Field(ge=1, le=5, description="1=old news, 5=first-of-its-kind")
     magnitude: int = Field(ge=1, le=5, description="1=minor, 5=market-moving")
     core_relevance: int = Field(ge=1, le=5)
-    reason_he: str = Field(description="נימוק קצר בעברית, עד 2 משפטים")
+    reason_he: str = Field(max_length=400, description="נימוק קצר בעברית, עד 2 משפטים")
     needs_deep_search: bool = False
     deep_search_question: str = Field(
         default="", description="What exactly should the investigation establish"

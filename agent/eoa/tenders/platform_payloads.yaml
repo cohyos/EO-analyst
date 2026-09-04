@@ -1,0 +1,121 @@
+# Platform -> typical EO/IR payload need -> candidate vendor knowledge table (section 5.2 / FR-5.2).
+#
+# Used by eoa.tenders.forecast to turn a recent platform-related event (contract_award,
+# deployment, launch -- see db/migrations 0001 events.kind) into a tender-likelihood forecast:
+# "this platform typically needs this EO/IR payload, from roughly these vendors, within this many
+# months of the triggering event." Authored from general, publicly-known program patterns (not
+# from any single source) -- kept in config, not code, per docs/CONVENTIONS.md rule 6.
+#
+# Fields:
+#   key             stable id
+#   match           substrings (case-insensitive) looked for in the triggering event/item text to
+#                    recognise this platform category
+#   category_he     Hebrew label for the platform category (used in report prose)
+#   payload_need_he Hebrew description of the typical EO/IR payload need
+#   payload_domain  config/taxonomy.yaml domains.*.sub id this payload need maps to (documentation
+#                    only; not enforced by a DB constraint)
+#   typical_vendors canonical names matching config/watchlist.yaml companies.name where possible
+#   lag_months      {min, max} -- typical months between the triggering platform event and an
+#                    associated EO/IR payload tender/RFI appearing
+
+platforms:
+  - key: fighter_jet
+    match: ["F-16", "F-35", "Eurofighter", "Typhoon", "Rafale", "Gripen", "F-15", "fighter jet", "fighter aircraft"]
+    category_he: "מטוס קרב"
+    payload_need_he: "פוד כיוון (Targeting Pod)"
+    payload_domain: targeting_pods
+    typical_vendors: ["Lockheed Martin", "Northrop Grumman", RTX, Rafael, Thales, Elbit, Leonardo]
+    lag_months: { min: 6, max: 24 }
+
+  - key: attack_helicopter
+    match: ["Apache", "AH-64", "attack helicopter", "Tiger helicopter", "combat helicopter"]
+    category_he: "מסוק קרב"
+    payload_need_he: "מטע\"ד ג'ימבלי EO/IR לכיוון ותצפית"
+    payload_domain: uav_gimbals
+    typical_vendors: [Lockheed Martin, RTX, Rafael, Safran, Elbit]
+    lag_months: { min: 6, max: 24 }
+
+  - key: male_uav
+    match:
+      [
+        "MALE UAV",
+        "MALE drone",
+        Reaper,
+        "MQ-9",
+        Heron,
+        Hermes,
+        Bayraktar,
+        "TB2",
+        "medium-altitude long-endurance",
+        "unmanned aerial vehicle",
+      ]
+    category_he: "כטב\"ם MALE"
+    payload_need_he: "מטע\"ד ג'ימבלי EO/IR + מסמן לייזר"
+    payload_domain: uav_gimbals
+    typical_vendors: [L3Harris, Elbit, IAI, Controp, Safran, Aselsan, "Teledyne FLIR"]
+    lag_months: { min: 3, max: 18 }
+
+  - key: small_uas
+    match: ["small UAS", "loitering munition", "FPV drone", "quadcopter drone", "tactical drone"]
+    category_he: "כטב\"ם טקטי/זעיר"
+    payload_need_he: "מטע\"ד זעיר (Micro-Gimbal)"
+    payload_domain: small_gimbals
+    typical_vendors: [Xtend, Anduril, "Shield AI", Controp]
+    lag_months: { min: 2, max: 12 }
+
+  - key: opv_corvette
+    match: ["OPV", "offshore patrol vessel", corvette, frigate, "patrol vessel", "naval vessel"]
+    category_he: "ספינת סיור/קורבט/פריגטה"
+    payload_need_he: "מערכת EO/IR ימית לבקרת אש ותצפית (Naval EO Director)"
+    payload_domain: naval_directors
+    typical_vendors: [L3Harris, Thales, Leonardo, Rafael, Terma, Safran, Hensoldt]
+    lag_months: { min: 6, max: 30 }
+
+  - key: submarine
+    match: [submarine, "attack submarine", "diesel-electric submarine"]
+    category_he: "צוללת"
+    payload_need_he: "תורן אופטרוני (Optronic Mast)"
+    payload_domain: optronic_masts
+    typical_vendors: [Safran, Thales, Hensoldt, Leonardo]
+    lag_months: { min: 12, max: 36 }
+
+  - key: apc_ifv
+    match:
+      [
+        APC,
+        IFV,
+        "armored personnel carrier",
+        "infantry fighting vehicle",
+        "armored vehicle",
+        "main battle tank",
+        tank,
+      ]
+    category_he: "רק\"ם (APC/IFV/טנק)"
+    payload_need_he: "מטע\"ד מפקד/תותחן (Commander/Gunner Sights)"
+    payload_domain: vehicle_sights
+    typical_vendors: [Elbit, Rafael, Hensoldt, Safran, "Leonardo DRS", Aselsan]
+    lag_months: { min: 6, max: 24 }
+
+  - key: border_project
+    match: ["border fence", "border wall", "border security project", "border surveillance"]
+    category_he: "פרויקט הגנת גבול"
+    payload_need_he: "מגדלי תצפית EO/IR לטווח ארוך (Border Towers)"
+    payload_domain: border_towers
+    typical_vendors: [Elbit, Controp, "Teledyne FLIR", IAI]
+    lag_months: { min: 6, max: 24 }
+
+  - key: c_uas_program
+    match: ["counter-UAS", "counter-drone", "counter UAS", "C-UAS", "anti-drone", "drone defense"]
+    category_he: "תוכנית נגד כטב\"ם (C-UAS)"
+    payload_need_he: "עוקבים EO/IR לגילוי-סיווג-עקיבה ואפקטורים"
+    payload_domain: detect_track
+    typical_vendors: [Anduril, Epirus, Fortem, Rafael, "D-Fend", "Smart Shooter", BlueHalo]
+    lag_months: { min: 3, max: 12 }
+
+  - key: air_defense_interceptor
+    match: ["air defense system", "interceptor missile", "missile defense", "surface-to-air"]
+    category_he: "מערכת הגנה אווירית/יירוט"
+    payload_need_he: "ראש ביות/עוקב אלקטרואופטי (IIR Seeker / EO Tracker)"
+    payload_domain: iir_seekers
+    typical_vendors: [RTX, Rafael, MBDA, Rheinmetall, Saab, Diehl]
+    lag_months: { min: 6, max: 30 }

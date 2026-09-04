@@ -115,6 +115,59 @@ def _fetch_local(url: str) -> dict[str, Any]:
     }
 
 
+def fetch_raw_remote(
+    url: str,
+    *,
+    method: str = "GET",
+    json_body: dict[str, Any] | None = None,
+    timeout_s: float = 60,
+) -> dict[str, Any]:
+    """Fetch one URL and return its raw (unsanitized) body -- for structured JSON APIs (tender
+    portals, etc.) where HTML sanitization/text extraction (:func:`fetch_remote`) would destroy
+    the payload. Never used for arbitrary HTML: callers still must not feed the returned text to
+    an LLM without going through ``eoa.llm.ollama_client.wrap_data`` first, same as any other
+    fetched content (FR-9 -- this bridge does not change the DATA-not-instructions rule).
+
+    Returns ``{"url", "status", "json" (parsed body or None), "text" (raw body when not JSON)}``.
+    Routes through the fetcher container (``fetch_url`` job, payload ``{"url", "raw": true, ...}``)
+    when running as the isolated ``agent`` role, exactly like :func:`fetch_remote`; runs in-process
+    otherwise (host dev, tests, or the fetcher's own ``serve_fetch_jobs`` loop).
+    """
+    assert_public_http_url(url)
+    if role() != "agent":
+        return _fetch_raw_local(url, method=method, json_body=json_body, timeout_s=timeout_s)
+    from eoa.memory.relational import enqueue_job
+
+    job_id = enqueue_job(
+        "fetch_url",
+        {"url": url, "raw": True, "method": method, "json_body": json_body},
+        priority=0,
+    )
+    return _wait_job(job_id, timeout_s)
+
+
+def _fetch_raw_local(
+    url: str, *, method: str = "GET", json_body: dict[str, Any] | None = None, timeout_s: float = 60
+) -> dict[str, Any]:
+    import httpx
+
+    from eoa.config import settings
+
+    assert_public_http_url(url)
+    headers = {"Accept": "application/json", "User-Agent": settings().fetch.user_agent}
+    with httpx.Client(timeout=timeout_s) as client:
+        if (method or "GET").upper() == "POST":
+            r = client.post(url, json=json_body, headers=headers)
+        else:
+            r = client.get(url, headers=headers)
+    r.raise_for_status()
+    try:
+        data: Any = r.json()
+    except ValueError:
+        data = None
+    return {"url": url, "status": r.status_code, "json": data, "text": None if data is not None else r.text}
+
+
 def serve_fetch_jobs(poll_s: float = 2.0, stop_after: float | None = None) -> None:
     """Fetcher-side loop: execute ``ingest`` and ``fetch_url`` jobs from the queue."""
     from eoa.memory.relational import claim_next_job, finish_job
@@ -141,6 +194,16 @@ def serve_fetch_jobs(poll_s: float = 2.0, stop_after: float | None = None) -> No
                     job["id"],
                     "done",
                     result={k: v for k, v in vars(stats).items() if isinstance(v, int | float | str | bool)},
+                )
+            elif p.get("raw"):
+                finish_job(
+                    job["id"],
+                    "done",
+                    result=_fetch_raw_local(
+                        str(p.get("url", "")),
+                        method=str(p.get("method") or "GET"),
+                        json_body=p.get("json_body"),
+                    ),
                 )
             else:
                 finish_job(job["id"], "done", result=_fetch_local(str(p.get("url", ""))))

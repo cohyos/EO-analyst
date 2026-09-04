@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { InvestigationDetail, InvestigationLogLine } from "@/types/api";
@@ -74,9 +74,13 @@ beforeEach(() => {
 });
 
 describe("InvestigationDetailPage live log auto-scroll", () => {
-  it("auto-scrolls the log container to the bottom as new lines arrive", async () => {
+  it("sets scrollTop to scrollHeight on mount and again as new lines arrive (not paused)", async () => {
     const { rerender } = renderPage();
     const log = await screen.findByTestId("investigation-log");
+    // jsdom never lays out real pixel sizes, so scrollHeight defaults to 0
+    // and the mount-time effect harmlessly sets scrollTop to 0. Force a
+    // non-zero scrollHeight and re-trigger the effect (allLog.length change)
+    // to prove the effect actually assigns scrollTop := scrollHeight.
     Object.defineProperty(log, "scrollHeight", { value: 400, configurable: true });
 
     useInvestigationSocketMock.mockReturnValue({ liveLines: [makeLine(2)], connected: true });
@@ -94,9 +98,7 @@ describe("InvestigationDetailPage live log auto-scroll", () => {
     // second log line (from the mocked live socket) to actually render.
     await screen.findByText("שאילתה 2");
     const log2 = screen.getByTestId("investigation-log");
-    Object.defineProperty(log2, "scrollHeight", { value: 800, configurable: true });
-    fireEvent.scroll(log2);
-    expect(log2.scrollTop === 800 || log2.scrollTop === 0).toBe(true); // jsdom layout is a no-op either way
+    expect(log2.scrollTop).toBe(log2.scrollHeight);
   });
 
   it("shows a paused indicator while the mouse hovers the log, and hides it on mouse-leave", async () => {
@@ -131,6 +133,6 @@ describe("InvestigationDetailPage live log auto-scroll", () => {
     renderPage();
     await screen.findByTestId("investigation-log");
     fireEvent.click(screen.getByText("עצור"));
-    expect(postInvestigationStop).toHaveBeenCalledWith("10");
+    await waitFor(() => expect(postInvestigationStop).toHaveBeenCalledWith("10"));
   });
 });

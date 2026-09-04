@@ -156,15 +156,17 @@ def test_settings_taxonomy_get(client: TestClient, monkeypatch: pytest.MonkeyPat
     from eoa.api import services
 
     fake_yaml = "domains:\n  airborne_pods:\n    label: test\n"
+    fake_revision = "deadbeef" * 8
     monkeypatch.setattr(
         services,
         "read_settings_yaml",
         lambda name: fake_yaml if name == "taxonomy" else "",
     )
+    monkeypatch.setattr(services, "settings_revision", lambda name: fake_revision)
 
     r = client.get("/api/settings/taxonomy")
     assert r.status_code == 200
-    assert r.json() == {"yaml": fake_yaml}
+    assert r.json() == {"yaml": fake_yaml, "revision": fake_revision}
 
 
 def test_settings_unknown_name_error_shape(client: TestClient) -> None:

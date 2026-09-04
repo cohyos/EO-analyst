@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ItemCard, ItemsResponse, TriageLevel } from "@/types/api";
 import { api } from "@/api";
@@ -27,6 +27,7 @@ function isTypingTarget(el: Element | null): boolean {
 }
 
 export function FeedPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [filters, setFilters] = useState<FeedFiltersState>({
     levels: [],

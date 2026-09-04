@@ -4,7 +4,8 @@ monthly_run) with deadline budgeting, heartbeats, carry-over and a circuit break
 
 from __future__ import annotations
 
-import asyncio
+import os
+import socket
 import threading
 import time
 import traceback
@@ -18,10 +19,16 @@ import structlog
 
 from eoa.config import settings
 from eoa.errors import DeadlineExceeded, ResourceUnavailable
-from eoa.memory.relational import claim_next_job, enqueue_job, finish_job, heartbeat
+from eoa.memory.relational import claim_next_job, enqueue_job, finish_job, heartbeat, reap_stale_jobs
 from eoa.notify import ntfy
 
 log = structlog.get_logger(__name__)
+
+
+def _worker_id() -> str:
+    """A stable-enough identifier for this process, used as the job lease owner."""
+    return f"{socket.gethostname()}:{os.getpid()}"
+
 
 STAGE_ORDER = [
     "ingest",
@@ -145,7 +152,7 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
     role = "light" if rs.mode == "eco" and settings().has_model("light") else "resident"
     log.info("daily_run_start", job_id=job["id"], night=is_night, mode=rs.mode, role=role)
     try:
-        _run_stage(rs, "ingest", lambda: asyncio.run(_ingest()))
+        _run_stage(rs, "ingest", _ingest)
         _run_stage(
             rs, "embed_dedup", lambda: __import__("eoa.pipeline.dedup", fromlist=["run_dedup"]).run_dedup()
         )
@@ -181,12 +188,31 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
     finally:
         gate().force_night_mode = False
     rs.stats["total_minutes"] = round((time.monotonic() - rs.started) / 60, 1)
+    rs.stats["status"] = _compute_run_status(rs.stats)
     log.info("daily_run_done", job_id=job["id"], stats=rs.stats)
     return rs.stats
 
 
-async def _ingest() -> Any:
-    """Ingest through the fetcher container when running as the isolated agent, else in-process."""
+def _compute_run_status(stats: dict[str, Any]) -> str:
+    """Terminal `done`/`partial`/`failed` status from a `run_daily` stats dict's per-stage outcomes.
+
+    `done` requires the mandatory `report` stage to have actually produced a report (no
+    `error`/`deferred`/`skipped` marker on it) *and* no other stage recorded a problem
+    (`error`/`deferred`/`skipped`/`partial`). If the report itself is missing or failed, the whole
+    run is `failed` regardless of anything else; otherwise a problem elsewhere is `partial`."""
+    report_ok = isinstance(stats.get("report"), dict) and not {"error", "deferred", "skipped"} & set(
+        stats["report"]
+    )
+    any_problem = any(
+        isinstance(v, dict) and ({"error", "deferred", "skipped", "partial"} & set(v)) for v in stats.values()
+    )
+    return "done" if report_ok and not any_problem else ("partial" if report_ok else "failed")
+
+
+def _ingest() -> Any:
+    """Ingest through the fetcher container when running as the isolated agent, else in-process
+    (synchronous: ``run_ingest_remote`` already manages its own event loop internally, so calling
+    it from inside another ``asyncio.run()`` would raise)."""
     from eoa.fetch.remote import run_ingest_remote
 
     return run_ingest_remote()
@@ -204,7 +230,7 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
         if left is not None and left < per_min + settings().stages.get("report", 30) + 10:
             log.warning("deep_search_stop_time", left_min=round(left))
             break
-        job = claim_next_job(["deep_search"])
+        job = claim_next_job(["deep_search"], worker_id=_worker_id())
         if not job:
             break
         p = job.get("payload") or {}
@@ -219,6 +245,17 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
             outcomes.append(inv.outcome)
             if p.get("level") == "red" and inv.result and inv.result.outcome != "not_found":
                 _red_alert_for(p.get("item_id"), inv.result.answer_he)
+        except ResourceUnavailable as exc:
+            # could not search at all (GPU/RAM) — keep the job for a later retry instead of
+            # recording a fabricated not_found; retry after a cooldown rather than immediately
+            finish_job(
+                job["id"],
+                "deferred",
+                error=str(exc)[:300],
+                not_before=datetime.now(tz=UTC) + timedelta(minutes=30),
+            )
+            outcomes.append("deferred")
+            raise
         except Exception as exc:
             finish_job(job["id"], "failed", error=str(exc)[:400])
             outcomes.append("failed")
@@ -311,7 +348,6 @@ def _pg_dump() -> dict[str, Any]:
     """Nightly backup. Host: `docker compose exec postgres pg_dump`. Inside the agent container (no docker CLI):
     per-table `COPY ... TO STDOUT` into a gzip-compressed SQL-ish archive that psql can restore with its copy meta-command."""
     import gzip
-    import os
     import subprocess
     from pathlib import Path
 
@@ -321,6 +357,8 @@ def _pg_dump() -> dict[str, Any]:
     keep = settings().retention.backups_keep
     try:
         if os.environ.get("EOA_ROLE") == "agent":
+            from psycopg import sql
+
             from eoa.db import connection
 
             name = out_dir / f"eoanalyst_{stamp}.copy.gz"
@@ -331,15 +369,21 @@ def _pg_dump() -> dict[str, Any]:
                         "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY 1"
                     ).fetchall()
                 ]
+                fh.write(
+                    "-- EO-Analyst logical backup; restore with: psql -d <db> -f <this file> "
+                    "(after applying migrations up to the same revision)\n"
+                )
                 for t in tables:
-                    fh.write(f"-- TABLE {t}\n")
+                    ident = sql.Identifier(t).as_string(conn)
+                    fh.write(f"\\copy {ident} FROM STDIN WITH (FORMAT csv, HEADER)\n")
                     with (
                         conn.cursor() as cur,
-                        cur.copy(f"COPY {t} TO STDOUT WITH (FORMAT csv, HEADER)") as cp,
+                        cur.copy(sql.SQL("COPY {} TO STDOUT WITH (FORMAT csv, HEADER)").format(sql.Identifier(t)))
+                        as cp,
                     ):
                         for chunk in cp:
                             fh.write(bytes(chunk).decode("utf-8"))
-                    fh.write("\n-- END TABLE\n")
+                    fh.write("\\.\n")
         else:
             name = out_dir / f"eoanalyst_{stamp}.sql.gz"
             with gzip.open(name, "wb") as fh:
@@ -382,7 +426,10 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
             headlines = [f"{'🔴' if r['level'] == 'red' else '🟠'} {r['title'][:90]}" for r in rows]
     except Exception:
         pass
-    docx = getattr(paths, "docx", None) or "(לא הופק)"
+    docx = getattr(paths, "docx", None)
+    if not docx:
+        ntfy.failure("report", "הדוח היומי לא הופק הלילה — ראה run_log")
+        return {"headlines": len(headlines), "report_missing": True}
     ntfy.report_ready("יומי", str(docx), headlines, ui_url=f"http://127.0.0.1:{settings().api.port}/")
     return {"headlines": len(headlines)}
 
@@ -396,7 +443,7 @@ def run_conference_scan(job: dict[str, Any]) -> dict[str, Any]:
 
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "daily_run": run_daily,
-    "ingest": lambda job: _as_dict(asyncio.run(_ingest())),
+    "ingest": lambda job: _as_dict(_ingest()),
     "report": lambda job: _as_dict(_build_report()),
     "deep_search": run_deep_search_job,
     "weekly_run": run_weekly,
@@ -406,21 +453,37 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
 
 
 # ----------------------------------------------------------------------------- worker loop
+def _default_kinds() -> list[str]:
+    """Role-aware default job kinds: the isolated ``agent`` worker never claims ``ingest`` — that
+    is fetcher-owned (the fetcher container is the one with egress network access). Host/dev
+    workers may claim everything, including ``ingest`` (in-process ingest, see ``_ingest``)."""
+    if os.environ.get("EOA_ROLE") == "agent":
+        return [k for k in HANDLERS if k != "ingest"]
+    return list(HANDLERS)
+
+
 class Worker(threading.Thread):
     """Polls the jobs table and runs one job at a time (GPU is a single resource)."""
 
     def __init__(self, kinds: list[str] | None = None, poll_seconds: int = 10) -> None:
         super().__init__(daemon=True, name="eoa-worker")
-        self.kinds = kinds or list(HANDLERS)
+        self.kinds = kinds or _default_kinds()
         self.poll = poll_seconds
         self.stop_event = threading.Event()
         self.current: dict[str, Any] | None = None
+        self.worker_id = _worker_id()
 
     def run(self) -> None:
-        log.info("worker_start", kinds=self.kinds)
+        try:
+            reaped = reap_stale_jobs()
+            if reaped:
+                log.warning("worker_reaped_stale_jobs", count=reaped)
+        except Exception as exc:
+            log.error("reap_stale_jobs_failed", error=str(exc)[:200])
+        log.info("worker_start", kinds=self.kinds, worker_id=self.worker_id)
         while not self.stop_event.is_set():
             try:
-                job = claim_next_job(self.kinds)
+                job = claim_next_job(self.kinds, worker_id=self.worker_id)
             except Exception as exc:
                 log.error("claim_failed", error=str(exc)[:200])
                 job = None
@@ -431,13 +494,17 @@ class Worker(threading.Thread):
             handler = HANDLERS.get(job["kind"])
             try:
                 if handler is None:
-                    finish_job(job["id"], "failed", error=f"no handler for {job['kind']}")
+                    finish_job(
+                        job["id"], "failed", error=f"no handler for {job['kind']}", worker_id=self.worker_id
+                    )
                     continue
                 result = handler(job)
-                finish_job(job["id"], "done", result=result if isinstance(result, dict) else _as_dict(result))
+                res = result if isinstance(result, dict) else _as_dict(result)
+                state = res.get("status") if res.get("status") in {"done", "partial", "failed"} else "done"
+                finish_job(job["id"], state, result=res, worker_id=self.worker_id)
             except Exception as exc:
                 log.error("job_failed", job_id=job["id"], kind=job["kind"], error=str(exc)[:300])
-                finish_job(job["id"], "failed", error=f"{exc}"[:400])
+                finish_job(job["id"], "failed", error=f"{exc}"[:400], worker_id=self.worker_id)
             finally:
                 self.current = None
 

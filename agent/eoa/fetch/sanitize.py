@@ -36,7 +36,6 @@ _BIDI_CONTROL_CODEPOINTS = tuple(range(0x202A, 0x202F)) + tuple(
     range(0x2066, 0x206A)
 )  # embeds/overrides/isolates
 _TAG_CODEPOINT_RANGE = (0xE0000, 0xE007F)  # Unicode "tag" characters (steganography vector)
-_CYRILLIC_CODEPOINT_RANGE = (0x0400, 0x04FF)
 
 
 def _char_class(*codepoints: int) -> str:
@@ -50,9 +49,6 @@ def _range_class(low: int, high: int) -> str:
 _ZERO_WIDTH_RE = re.compile(_char_class(*_ZERO_WIDTH_CODEPOINTS))
 _BIDI_CONTROL_RE = re.compile(_char_class(*_BIDI_CONTROL_CODEPOINTS))
 _TAG_CHARS_RE = re.compile(_range_class(*_TAG_CODEPOINT_RANGE))
-_CYRILLIC_RE = re.compile(_range_class(*_CYRILLIC_CODEPOINT_RANGE))
-_LATIN_RE = re.compile("[A-Za-z]")
-_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 _HIDDEN_STYLE_RE = re.compile(
     r"(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:\.0*)?(?:px|em|%)?\b"
@@ -293,28 +289,64 @@ def _strip_invisible_unicode(text: str) -> tuple[str, list[str]]:
     return cleaned, flags
 
 
-def _strip_homoglyph_runs(text: str) -> tuple[str, list[str]]:
-    """Strip a minority-script contamination inside otherwise-Latin words (e.g. Cyrillic 'a' spoofing Latin 'a').
+# Cyrillic/Greek code points that are visually identical (or
+# near-identical) to a Latin letter -- the classic homoglyph-substitution
+# alphabet, e.g. Cyrillic 'а' (U+0430) spoofing Latin 'a'. Not exhaustive:
+# covers the characters commonly used in phishing/evasion, drawn from
+# Unicode's confusables.txt for the Cyrillic block. Used ONLY to build a
+# detection copy -- never to alter what a human reads (finding #21).
+_CONFUSABLES: dict[int, str] = {
+    0x0430: "a",
+    0x0410: "A",
+    0x0435: "e",
+    0x0415: "E",
+    0x043E: "o",
+    0x041E: "O",
+    0x0440: "p",
+    0x0420: "P",
+    0x0441: "c",
+    0x0421: "C",
+    0x0443: "y",
+    0x0423: "Y",
+    0x0445: "x",
+    0x0425: "X",
+    0x0432: "b",
+    0x043D: "h",
+    0x0442: "t",
+    0x043A: "k",
+    0x043C: "m",
+    0x0405: "S",
+    0x0408: "J",
+    0x0406: "I",
+    0x0456: "i",
+    0x04CF: "l",
+    0x0455: "s",
+    0x0458: "j",
+}
+_CONFUSABLES_RE = re.compile("[" + "".join(re.escape(chr(cp)) for cp in _CONFUSABLES) + "]")
 
-    Conservative on purpose: only touches tokens that mix Latin with a small
-    number of Cyrillic code points (a classic homoglyph-substitution
-    pattern), never touches Hebrew/CJK/Arabic text.
+
+def _map_confusables(text: str) -> tuple[str, bool]:
+    """Replace homoglyphs with their Latin look-alike -- never deletes.
+
+    Returns ``(mapped_text, changed)``. Used only to build the *detection*
+    copy (`CleanText.detect_text`); the caller's own readable text is never
+    passed through this. Fixes finding #21: the previous implementation
+    *deleted* minority-script characters from the text a human/report
+    actually reads (turning "іgnore" into "gnore"), which both corrupted
+    legitimate mixed-script names and, since the leftover "gnore" no longer
+    matched the "ignore" heuristic pattern, made evasion easier rather than
+    harder.
     """
-    flagged = False
+    changed = False
 
     def repl(match: re.Match[str]) -> str:
-        nonlocal flagged
-        word = match.group(0)
-        if not _LATIN_RE.search(word):
-            return word
-        cyrillic_hits = _CYRILLIC_RE.findall(word)
-        if cyrillic_hits and len(cyrillic_hits) <= max(1, len(word) // 3):
-            flagged = True
-            return _CYRILLIC_RE.sub("", word)
-        return word
+        nonlocal changed
+        changed = True
+        return _CONFUSABLES[ord(match.group(0))]
 
-    cleaned = _WORD_RE.sub(repl, text)
-    return cleaned, (["mixed_script_homoglyphs"] if flagged else [])
+    mapped = _CONFUSABLES_RE.sub(repl, text) if text else text
+    return mapped, changed
 
 
 # --------------------------------------------------------------------------
@@ -441,12 +473,16 @@ def _max_base64_blob_chars() -> int:
 def extract_clean_text(html: str, url: str) -> CleanText:
     """Turn raw article HTML into sanitized, provenance-safe text.
 
-    Pipeline: strip script/style/iframe/noscript/comments/on*-attrs and
-    CSS-hidden subtrees (computing `hidden_text_ratio` along the way) ->
-    extract article text+title+date via trafilatura, falling back to
-    readability-lxml, falling back to a bare lxml `text_content()` -> strip
-    invisible/bidi-control Unicode and homoglyph runs -> strip oversized
-    base64/hex blobs -> normalize whitespace -> detect language.
+    Pipeline: strip script/style/iframe/noscript/non-content-container tags,
+    comments/on*-attrs, and CSS-hidden subtrees -- returning an empty
+    document outright if the root itself is hidden (computing
+    `hidden_text_ratio` along the way) -> extract article text+title+date
+    via trafilatura, falling back to readability-lxml, falling back to a
+    bare lxml `text_content()` -> strip invisible/bidi-control Unicode from
+    BOTH title and body (never deleted: display text) -> build a separate
+    confusable-mapped `detect_text` detection copy (title+body) -> strip
+    oversized base64/hex blobs from the body -> normalize whitespace ->
+    detect language.
     """
     suspicious: list[str] = []
 
@@ -465,23 +501,44 @@ def extract_clean_text(html: str, url: str) -> CleanText:
         title = title or fallback_title
 
     body_text = body_text or ""
+    title_text = title.strip() if isinstance(title, str) else (title or "")
 
-    body_text, unicode_flags = _strip_invisible_unicode(body_text)
-    suspicious.extend(unicode_flags)
+    # Invisible/bidi-control/tag-character Unicode is never legitimately
+    # visible, so stripping it can't corrupt real content -- apply it to
+    # BOTH title and body (finding #21: previously this only ran on the
+    # body, so the same attack smuggled via the <title> reached the DB
+    # `title` column untouched).
+    body_text, body_unicode_flags = _strip_invisible_unicode(body_text)
+    suspicious.extend(body_unicode_flags)
+    if title_text:
+        title_text, title_unicode_flags = _strip_invisible_unicode(title_text)
+        suspicious.extend(title_unicode_flags)
 
-    body_text, homoglyph_flags = _strip_homoglyph_runs(body_text)
-    suspicious.extend(homoglyph_flags)
+    # Homoglyph substitution is no longer *deleted* from the readable text
+    # (see `_map_confusables`'s docstring for why that was actively
+    # counterproductive). Instead build a separate confusable-mapped
+    # detection copy that heuristics/guard additionally scan
+    # (`eoa.security.guard.screen`'s `detect_text` param) without ever
+    # touching what a human or the report ultimately reads.
+    detect_body, body_had_confusables = _map_confusables(body_text)
+    detect_title, title_had_confusables = _map_confusables(title_text)
+    if body_had_confusables or title_had_confusables:
+        suspicious.append("mixed_script_homoglyphs")
+    detect_text = f"{detect_title}\n{detect_body}" if detect_title else detect_body
 
     max_blob_chars = _max_base64_blob_chars()
     body_text, blobs = _extract_encoded_blobs(body_text, max_blob_chars)
 
     body_text = _normalize_whitespace(body_text)
+    title_text = _normalize_whitespace(title_text) if title_text else title_text
+    detect_text = _normalize_whitespace(detect_text)
 
     lang = detect_lang(body_text) if body_text else None
 
     return CleanText(
         text=body_text,
-        title=title.strip() if isinstance(title, str) else title,
+        title=title_text or None,
+        detect_text=detect_text,
         lang=lang,
         published_at=published_at,
         hidden_text_ratio=hidden_ratio,
