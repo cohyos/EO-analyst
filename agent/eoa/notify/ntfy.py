@@ -55,14 +55,22 @@ def send(
         url = f"{base}/{topic}"
         last_url = url
         try:
-            r = httpx.post(url, content=body.encode("utf-8"), headers={**headers, "Content-Type": "text/plain; charset=utf-8"},
-                           timeout=10)
+            r = httpx.post(
+                url,
+                content=body.encode("utf-8"),
+                headers={**headers, "Content-Type": "text/plain; charset=utf-8"},
+                timeout=10,
+            )
             if r.status_code < 300:
-                mid = r.json().get("id") if r.headers.get("content-type", "").startswith("application/json") else None
+                mid = (
+                    r.json().get("id")
+                    if r.headers.get("content-type", "").startswith("application/json")
+                    else None
+                )
                 log.info("ntfy_sent", url=url, title=title[:60])
                 return Sent(True, mid, url)
             log.warning("ntfy_http_error", url=url, status=r.status_code)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("ntfy_failed", url=url, error=str(exc)[:120])
     return Sent(False, None, last_url)
 
@@ -78,16 +86,25 @@ def _fmt_action(a: dict[str, Any]) -> str:
 # ------------------------------------------------------------------ typed helpers
 def report_ready(kind: str, path_docx: str, headlines: list[str], ui_url: str | None = None) -> Sent:
     body = "\n".join(f"• {h}" for h in headlines[:3]) or "אין כותרות בולטות."
-    return send(f"דוח {kind} מוכן", f"{body}\n\nקובץ: {path_docx}", priority="default", tags=["page_facing_up"],
-                click=ui_url)
+    return send(
+        f"דוח {kind} מוכן",
+        f"{body}\n\nקובץ: {path_docx}",
+        priority="default",
+        tags=["page_facing_up"],
+        click=ui_url,
+    )
 
 
 def red_alert(title: str, summary_he: str, url: str) -> Sent:
-    return send(f"🔴 {title[:70]}", f"{summary_he}\n{url}", priority="high", tags=["rotating_light"], click=url)
+    return send(
+        f"🔴 {title[:70]}", f"{summary_he}\n{url}", priority="high", tags=["rotating_light"], click=url
+    )
 
 
 def security_alert(source: str, kind: str, excerpt: str) -> Sent:
-    return send("⚠️ הזרקה זוהתה", f"מקור: {source}\nסוג: {kind}\n{excerpt[:200]}", priority="high", tags=["shield"])
+    return send(
+        "⚠️ הזרקה זוהתה", f"מקור: {source}\nסוג: {kind}\n{excerpt[:200]}", priority="high", tags=["shield"]
+    )
 
 
 def failure(stage: str, error: str) -> Sent:
@@ -99,7 +116,9 @@ def status(text: str, priority: str = "low") -> Sent:
 
 
 # ------------------------------------------------------------------ clarification gate (FR-10)
-def ask_user(question: str, options: list[str], *, timeout_min: int | None = None, kind: str = "clarification") -> str | None:
+def ask_user(
+    question: str, options: list[str], *, timeout_min: int | None = None, kind: str = "clarification"
+) -> str | None:
     """Ask a closed question on the channel and poll for a reply that starts with an option (or its number).
 
     Returns the chosen option, or None on timeout (caller proceeds with its default and marks ⚠️ הנחת עבודה).
@@ -110,8 +129,12 @@ def ask_user(question: str, options: list[str], *, timeout_min: int | None = Non
     numbered = "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
     since = int(time.time())
     asked_at = datetime.now(tz=UTC)
-    send(f"❓ {question[:80]}", f"{question}\n{numbered}\n(ענה במספר או בטקסט; ברירת מחדל בעוד {timeout_min} דק': {options[0]})",
-         priority="high", tags=["question"])
+    send(
+        f"❓ {question[:80]}",
+        f"{question}\n{numbered}\n(ענה במספר או בטקסט; ברירת מחדל בעוד {timeout_min} דק': {options[0]})",
+        priority="high",
+        tags=["question"],
+    )
     cid = _persist_question(kind, question, options, asked_at, timeout_min)
 
     deadline = time.time() + timeout_min * 60
@@ -132,7 +155,7 @@ def ask_user(question: str, options: list[str], *, timeout_min: int | None = Non
                     answer = _match(msg.get("message", ""), options)
                     if answer:
                         break
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.debug("ntfy_poll_failed", error=str(exc)[:100])
             if answer:
                 break
@@ -154,7 +177,9 @@ def _match(text: str, options: list[str]) -> str | None:
     return None
 
 
-def _persist_question(kind: str, q: str, options: list[str], asked_at: datetime, timeout_min: int) -> int | None:
+def _persist_question(
+    kind: str, q: str, options: list[str], asked_at: datetime, timeout_min: int
+) -> int | None:
     try:
         from eoa.db import connection
 
@@ -162,10 +187,17 @@ def _persist_question(kind: str, q: str, options: list[str], asked_at: datetime,
             row = conn.execute(
                 "INSERT INTO clarifications(kind, question, options, asked_at, timeout_at) "
                 "VALUES (%s,%s,%s::jsonb,%s, %s + make_interval(mins => %s)) RETURNING id",
-                (kind, q, __import__("json").dumps(options, ensure_ascii=False), asked_at, asked_at, timeout_min),
+                (
+                    kind,
+                    q,
+                    __import__("json").dumps(options, ensure_ascii=False),
+                    asked_at,
+                    asked_at,
+                    timeout_min,
+                ),
             ).fetchone()
             return int(row["id"]) if row else None
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -176,7 +208,10 @@ def _persist_answer(cid: int | None, answer: str | None) -> None:
         from eoa.db import connection
 
         with connection() as conn:
-            conn.execute("UPDATE clarifications SET answer=%s, answered_at=CASE WHEN %s IS NULL THEN NULL ELSE now() END, "
-                         "assumed=%s WHERE id=%s", (answer, answer, answer is None, cid))
-    except Exception:  # noqa: BLE001
+            conn.execute(
+                "UPDATE clarifications SET answer=%s, answered_at=CASE WHEN %s IS NULL THEN NULL ELSE now() END, "
+                "assumed=%s WHERE id=%s",
+                (answer, answer, answer is None, cid),
+            )
+    except Exception:
         pass

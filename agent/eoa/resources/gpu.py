@@ -68,20 +68,24 @@ class HostStatus:
 def read_gpu() -> GpuStatus:
     """Query nvidia-smi once. Returns available=False if it fails (CPU-only fallback)."""
     try:
-        out = subprocess.run(
-            [
-                NVIDIA_SMI,
-                "--query-gpu=memory.total,memory.used,utilization.gpu,temperature.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        ).stdout.strip().splitlines()[0]
+        out = (
+            subprocess.run(
+                [
+                    NVIDIA_SMI,
+                    "--query-gpu=memory.total,memory.used,utilization.gpu,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+            .stdout.strip()
+            .splitlines()[0]
+        )
         total, used, util, temp = (int(float(x)) for x in out.split(","))
         return GpuStatus(total, used, util, temp)
-    except Exception as exc:  # noqa: BLE001 - any failure means "no GPU telemetry"
+    except Exception as exc:
         log.warning("nvidia_smi_failed", error=str(exc))
         return GpuStatus(0, 0, 0, 0, available=False, error=str(exc))
 
@@ -98,19 +102,26 @@ def read_ram() -> tuple[int, int]:
     if os.name == "nt":
         try:
             out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "(Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize | "
-                 "ForEach-Object { \"$($_.FreePhysicalMemory) $($_.TotalVisibleMemorySize)\" })"],
-                capture_output=True, text=True, timeout=10, check=True,
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize | "
+                    'ForEach-Object { "$($_.FreePhysicalMemory) $($_.TotalVisibleMemorySize)" })',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
             ).stdout.split()
             return int(out[0]) // 1024, int(out[1]) // 1024
-        except Exception:  # noqa: BLE001
+        except Exception:
             return 0, 0
     try:
         meminfo = Path("/proc/meminfo").read_text().splitlines()
         vals = {ln.split(":")[0]: int(ln.split()[1]) for ln in meminfo if ":" in ln}
         return vals.get("MemAvailable", 0) // 1024, vals.get("MemTotal", 0) // 1024
-    except Exception:  # noqa: BLE001
+    except Exception:
         return 0, 0
 
 
@@ -136,7 +147,7 @@ def read_ollama_ps(ollama_url: str, timeout: float = 3.0) -> list[LoadedModel]:
                 )
             )
         return models
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("ollama_ps_failed", error=str(exc))
         return []
 

@@ -1,0 +1,785 @@
+"""Render :class:`DailyReportDraft` (+ items/events/deep-search/open-points) to docx/md/html.
+
+Hebrew RTL correctness is the whole point of the docx path: document defaults, every paragraph and
+every table are flagged right-to-left (``w:bidi`` / ``w:bidiVisual``), while Latin terms, numbers and
+URLs embedded in Hebrew prose stay in their own left-to-right runs so Word's bidi algorithm renders
+them correctly instead of mirroring them. ``[n]`` citation markers are rendered as small superscript
+runs; the appendix ("נספח מקורות") repeats every numbered item with a clickable hyperlink.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import html
+import re
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import docx
+from docx.document import Document as DocxDocument
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.opc.constants import RELATIONSHIP_TYPE
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt
+from docx.text.run import Run
+from lxml import etree
+
+from eoa.llm.schemas.analysis import DailyReportDraft
+from eoa.report.qa_citations import QAResult
+
+# -- constants -----------------------------------------------------------------
+
+HEBREW_FONT = "David"
+HEBREW_FONT_FALLBACK = "Arial"
+BODY_SIZE_PT = 11
+
+TITLE_TEXT = "דוח יומי — אלקטרואופטיקה ובינה חזותית ביטחונית"
+
+_LEVEL_LABELS_HE = {
+    "red": "🔴 קריטי",
+    "orange": "🟠 חשוב",
+    "yellow": "🟡 רקע",
+    "archive": "⚪ ארכיון",
+}
+_EVENT_KIND_LABELS_HE = {
+    "contract_award": "זכייה בחוזה",
+    "m_and_a": "מיזוג/רכישה",
+    "partnership": "שותפות",
+    "investment": "השקעה",
+    "launch": "השקה",
+    "test": "ניסוי",
+    "deployment": "פריסה",
+    "regulation": "רגולציה",
+    "other": "אחר",
+}
+_OUTCOME_LABELS_HE = {
+    "found": "נמצא",
+    "partial": "חלקי",
+    "not_found": "לא נמצא",
+    "stopped_budget": "הופסק (תקציב)",
+    "stopped_timeout": "הופסק (זמן)",
+}
+
+_HE_WEEKDAYS = ("שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון")  # Monday=0 .. Sunday=6
+_HE_MONTHS = (
+    "ינואר",
+    "פברואר",
+    "מרץ",
+    "אפריל",
+    "מאי",
+    "יוני",
+    "יולי",
+    "אוגוסט",
+    "ספטמבר",
+    "אוקטובר",
+    "נובמבר",
+    "דצמבר",
+)
+
+_HEBREW_RANGES = ((0x0590, 0x05FF), (0xFB1D, 0xFB4F))
+_CITATION_RE = re.compile(r"\[(\d+)\]")
+
+# CT_PPr / CT_Settings child tags that follow w:bidi / w:updateFields in the OOXML schema, used with
+# ``insert_element_before`` so the elements we inject land in a schema-valid position regardless of
+# what optional siblings a given paragraph/style/settings part already has.
+_PPR_TAGS_AFTER_BIDI = (
+    "w:adjustRightInd",
+    "w:snapToGrid",
+    "w:spacing",
+    "w:ind",
+    "w:contextualSpacing",
+    "w:mirrorIndents",
+    "w:suppressOverlap",
+    "w:jc",
+    "w:textDirection",
+    "w:textAlignment",
+    "w:textboxTightWrap",
+    "w:outlineLvl",
+    "w:divId",
+    "w:cnfStyle",
+    "w:rPr",
+    "w:sectPr",
+    "w:pPrChange",
+)
+_SETTINGS_TAGS_AFTER_UPDATE_FIELDS = (
+    "w:defaultTabStop",
+    "w:characterSpacingControl",
+    "w:savePreviewPicture",
+    "w:compat",
+    "w:rsids",
+    "w:mathPr",
+    "w:themeFontLang",
+    "w:clrSchemeMapping",
+    "w:doNotAutoCompressPictures",
+    "w:shapeDefaults",
+    "w:decimalSymbol",
+    "w:listSeparator",
+    "w:docId",
+    "w:defaultImageDpi",
+)
+
+
+# -- Hebrew date formatting ------------------------------------------------------
+
+
+def hebrew_date_str(d: dt.date) -> str:
+    """Format a Gregorian date as a Hebrew-language string, e.g. 'יום חמישי, 4 בספטמבר 2026'."""
+    weekday = _HE_WEEKDAYS[d.weekday()]
+    month = _HE_MONTHS[d.month - 1]
+    return f"יום {weekday}, {d.day} ב{month} {d.year}"
+
+
+def _fmt_date(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, dt.datetime):
+        return value.date().isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    return str(value)[:10] or "—"
+
+
+def _fmt_amount(ev: dict) -> str:
+    amount = ev.get("amount_usd")
+    if amount is None:
+        return "—"
+    currency = ev.get("currency") or "USD"
+    try:
+        return f"{float(amount):,.0f} {currency}"
+    except (TypeError, ValueError):
+        return f"{amount} {currency}"
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    parts = [p.strip() for p in (text or "").split("\n\n")]
+    return [p for p in parts if p] or [""]
+
+
+# -- Hebrew/Latin run segmentation ------------------------------------------------
+
+
+def _char_class(ch: str) -> str | None:
+    """'he' for a Hebrew-script character, 'other' for a Latin letter/digit, None otherwise."""
+    cp = ord(ch)
+    for lo, hi in _HEBREW_RANGES:
+        if lo <= cp <= hi:
+            return "he"
+    if ch.isalpha() or ch.isdigit():
+        return "other"
+    return None
+
+
+def split_runs(text: str) -> list[tuple[str, str]]:
+    """Split ``text`` into ``(cls, chunk)`` pairs, ``cls`` in {'he', 'other'}.
+
+    Whitespace/punctuation characters inherit the class of the run they fall in (so a space between
+    two Hebrew words does not itself force a run break); a class change happens only when a Hebrew
+    letter follows non-Hebrew content or vice versa.
+    """
+    if not text:
+        return []
+    default = "other"
+    for ch in text:
+        c = _char_class(ch)
+        if c:
+            default = c
+            break
+    runs: list[tuple[str, str]] = []
+    buf: list[str] = []
+    cur = default
+    for ch in text:
+        c = _char_class(ch) or cur
+        if c != cur and buf:
+            runs.append((cur, "".join(buf)))
+            buf = []
+        cur = c
+        buf.append(ch)
+    if buf:
+        runs.append((cur, "".join(buf)))
+    return runs
+
+
+def split_runs_with_citations(text: str) -> list[tuple[str, str]]:
+    """Like :func:`split_runs`, but further splits 'other' runs so a ``[n]`` token is its own run
+    tagged 'cite' (rendered as a superscript later)."""
+    tokens: list[tuple[str, str]] = []
+    for cls, chunk in split_runs(text):
+        if cls != "other":
+            tokens.append((cls, chunk))
+            continue
+        pos = 0
+        for m in _CITATION_RE.finditer(chunk):
+            if m.start() > pos:
+                tokens.append(("other", chunk[pos : m.start()]))
+            tokens.append(("cite", chunk[m.start() : m.end()]))
+            pos = m.end()
+        if pos < len(chunk):
+            tokens.append(("other", chunk[pos:]))
+    return tokens
+
+
+# -- low-level OOXML helpers ------------------------------------------------------
+
+
+def _ensure_bidi(ppr) -> None:
+    if ppr.find(qn("w:bidi")) is not None:
+        return
+    bidi = OxmlElement("w:bidi")
+    ppr.insert_element_before(bidi, *_PPR_TAGS_AFTER_BIDI)
+
+
+def _paragraph_rtl_right(paragraph) -> None:
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _ensure_bidi(paragraph._p.get_or_add_pPr())
+
+
+def _style_run(run: Run, *, hebrew: bool, size_pt: float | None = None) -> None:
+    if size_pt is not None:
+        run.font.size = Pt(size_pt)
+    run.font.rtl = hebrew
+    rfonts = run._element.get_or_add_rPr().get_or_add_rFonts()
+    if hebrew:
+        rfonts.set(qn("w:ascii"), HEBREW_FONT_FALLBACK)
+        rfonts.set(qn("w:hAnsi"), HEBREW_FONT_FALLBACK)
+        rfonts.set(qn("w:cs"), HEBREW_FONT)
+    else:
+        rfonts.set(qn("w:ascii"), HEBREW_FONT_FALLBACK)
+        rfonts.set(qn("w:hAnsi"), HEBREW_FONT_FALLBACK)
+        rfonts.set(qn("w:cs"), HEBREW_FONT_FALLBACK)
+
+
+def _emit_mixed_runs(paragraph, text: str, *, size_pt: float | None = BODY_SIZE_PT) -> None:
+    for cls, chunk in split_runs_with_citations(text):
+        if not chunk:
+            continue
+        run = paragraph.add_run(chunk)
+        if cls == "cite":
+            run.font.superscript = True
+            _style_run(run, hebrew=False, size_pt=(size_pt - 2) if size_pt else 9)
+        else:
+            _style_run(run, hebrew=(cls == "he"), size_pt=size_pt)
+
+
+def add_mixed_paragraph(
+    container, text: str, style: str | None = None, *, size_pt: float | None = BODY_SIZE_PT
+):
+    """Add a paragraph to ``container`` (a Document or a table cell) with Hebrew/Latin runs split
+    so English tokens, numbers and URLs keep left-to-right reading inside the RTL paragraph.
+
+    Citation markers (``[n]``) are rendered as superscript, non-Hebrew runs.
+    """
+    paragraph = container.add_paragraph(style=style) if style else container.add_paragraph()
+    _paragraph_rtl_right(paragraph)
+    _emit_mixed_runs(paragraph, text, size_pt=size_pt)
+    return paragraph
+
+
+def _fill_cell(cell, text: str, *, bold: bool = False, size_pt: float = 10) -> None:
+    paragraph = cell.paragraphs[0]
+    _paragraph_rtl_right(paragraph)
+    _emit_mixed_runs(paragraph, text, size_pt=size_pt)
+    if bold:
+        for run in paragraph.runs:
+            run.font.bold = True
+
+
+def add_hyperlink(paragraph, url: str, text: str, *, hebrew: bool = False) -> Run:
+    """Add a clickable, relationship-based hyperlink run to ``paragraph``; returns the run."""
+    part = paragraph.part
+    r_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+    run_elm = OxmlElement("w:r")
+    rpr = OxmlElement("w:rPr")
+    rstyle = OxmlElement("w:rStyle")
+    rstyle.set(qn("w:val"), "Hyperlink")
+    rpr.append(rstyle)
+    run_elm.append(rpr)
+    t = OxmlElement("w:t")
+    t.set(qn("xml:space"), "preserve")
+    t.text = text
+    run_elm.append(t)
+    hyperlink.append(run_elm)
+    paragraph._p.append(hyperlink)
+    run = Run(run_elm, paragraph)
+    _style_run(run, hebrew=hebrew, size_pt=10)
+    return run
+
+
+def _set_table_rtl(table) -> None:
+    tbl_pr = table._tbl.tblPr
+    if tbl_pr.find(qn("w:bidiVisual")) is None:
+        tbl_pr.append(OxmlElement("w:bidiVisual"))
+
+
+# -- document-level defaults ------------------------------------------------------
+
+
+def _configure_document_defaults(doc: DocxDocument) -> None:
+    """RTL paragraphs by default (docDefaults + Normal/Heading styles), Hebrew font 'David'
+    (fallback 'Arial'), 11pt body."""
+    styles_elm = doc.styles.element
+    doc_defaults = styles_elm.find(qn("w:docDefaults"))
+    if doc_defaults is None:
+        doc_defaults = OxmlElement("w:docDefaults")
+        styles_elm.insert(0, doc_defaults)
+
+    rpr_default = doc_defaults.find(qn("w:rPrDefault"))
+    if rpr_default is None:
+        rpr_default = OxmlElement("w:rPrDefault")
+        doc_defaults.append(rpr_default)
+    rpr = rpr_default.find(qn("w:rPr"))
+    if rpr is None:
+        rpr = OxmlElement("w:rPr")
+        rpr_default.append(rpr)
+    rfonts = rpr.find(qn("w:rFonts"))
+    if rfonts is None:
+        rfonts = OxmlElement("w:rFonts")
+        rpr.insert(0, rfonts)
+    rfonts.set(qn("w:ascii"), HEBREW_FONT_FALLBACK)
+    rfonts.set(qn("w:hAnsi"), HEBREW_FONT_FALLBACK)
+    rfonts.set(qn("w:cs"), HEBREW_FONT)
+    if rpr.find(qn("w:rtl")) is None:
+        rpr.append(OxmlElement("w:rtl"))
+
+    ppr_default = doc_defaults.find(qn("w:pPrDefault"))
+    if ppr_default is None:
+        ppr_default = OxmlElement("w:pPrDefault")
+        doc_defaults.append(ppr_default)
+    ppr = ppr_default.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = OxmlElement("w:pPr")
+        ppr_default.append(ppr)
+    _ensure_bidi(ppr)
+    jc = ppr.find(qn("w:jc"))
+    if jc is None:
+        jc = OxmlElement("w:jc")
+        ppr.append(jc)
+    jc.set(qn("w:val"), "right")
+
+    normal = doc.styles["Normal"]
+    normal.font.name = HEBREW_FONT_FALLBACK
+    normal.font.size = Pt(BODY_SIZE_PT)
+    normal.font.rtl = True
+    normal.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:cs"), HEBREW_FONT)
+    normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _ensure_bidi(normal.element.get_or_add_pPr())
+
+    for style_name, size in (("Heading 1", 16), ("Heading 2", 13), ("Title", 22), ("Subtitle", 14)):
+        try:
+            style = doc.styles[style_name]
+        except KeyError:
+            continue
+        style.font.name = HEBREW_FONT_FALLBACK
+        style.font.size = Pt(size)
+        style.font.rtl = True
+        style.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:cs"), HEBREW_FONT)
+        style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        _ensure_bidi(style.element.get_or_add_pPr())
+
+
+def _flag_update_fields(doc: DocxDocument) -> None:
+    """Flag the document so Word refreshes TOC/PAGE fields the moment it is opened."""
+    settings_elm = doc.settings.element
+    if settings_elm.find(qn("w:updateFields")) is not None:
+        return
+    el = OxmlElement("w:updateFields")
+    el.set(qn("w:val"), "true")
+    settings_elm.insert_element_before(el, *_SETTINGS_TAGS_AFTER_UPDATE_FIELDS)
+
+
+def _add_toc_field(doc: DocxDocument) -> None:
+    add_mixed_paragraph(doc, "תוכן עניינים", style="Heading 1")
+    paragraph = doc.add_paragraph()
+    _paragraph_rtl_right(paragraph)
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), 'TOC \\o "1-2" \\h \\z \\u')
+    inner_r = OxmlElement("w:r")
+    inner_t = OxmlElement("w:t")
+    inner_t.text = "יש לעדכן שדות (F9) להצגת תוכן העניינים."
+    inner_r.append(inner_t)
+    fld.append(inner_r)
+    paragraph._p.append(fld)
+
+
+def _add_footer_page_number(doc: DocxDocument) -> None:
+    section = doc.sections[0]
+    footer = section.footer
+    paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    paragraph.text = ""
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _ensure_bidi(paragraph._p.get_or_add_pPr())
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), "PAGE")
+    inner_r = OxmlElement("w:r")
+    inner_t = OxmlElement("w:t")
+    inner_t.text = "1"
+    inner_r.append(inner_t)
+    fld.append(inner_r)
+    paragraph._p.append(fld)
+
+
+# -- section builders ---------------------------------------------------------------
+
+
+def _add_events_table(doc: DocxDocument, events: list[dict]) -> None:
+    headers = ["תאריך", "סוג", "צדדים", "לקוח/תוכנית", "סכום", "מקור"]
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    _set_table_rtl(table)
+    for cell, text in zip(table.rows[0].cells, headers, strict=True):
+        _fill_cell(cell, text, bold=True)
+    for ev in events:
+        row = table.add_row().cells
+        _fill_cell(row[0], _fmt_date(ev.get("date")))
+        _fill_cell(row[1], _EVENT_KIND_LABELS_HE.get(ev.get("kind"), ev.get("kind") or "—"))
+        _fill_cell(row[2], ", ".join(ev.get("parties") or []) or "—")
+        _fill_cell(row[3], ev.get("customer") or ev.get("program") or "—")
+        _fill_cell(row[4], _fmt_amount(ev))
+        source_cell_p = row[5].paragraphs[0]
+        _paragraph_rtl_right(source_cell_p)
+        n = ev.get("n")
+        if n is not None:
+            run = source_cell_p.add_run(f"[{n}]")
+            run.font.superscript = True
+            _style_run(run, hebrew=False, size_pt=9)
+        else:
+            _emit_mixed_runs(source_cell_p, ev.get("source_name") or "—", size_pt=9)
+
+
+def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
+    headers = ["#", "כותרת", "מקור", "תאריך", "קישור"]
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    _set_table_rtl(table)
+    for cell, text in zip(table.rows[0].cells, headers, strict=True):
+        _fill_cell(cell, text, bold=True)
+    for it in sorted(items, key=lambda x: x.get("n") or 0):
+        row = table.add_row().cells
+        _fill_cell(row[0], str(it.get("n", "")))
+        _fill_cell(row[1], it.get("title") or "—")
+        _fill_cell(row[2], it.get("source_name") or "—")
+        _fill_cell(row[3], _fmt_date(it.get("published_at")))
+        url = it.get("url") or ""
+        link_p = row[4].paragraphs[0]
+        _paragraph_rtl_right(link_p)
+        if url:
+            add_hyperlink(link_p, url, url)
+        else:
+            _emit_mixed_runs(link_p, "—", size_pt=10)
+
+
+def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None:
+    for entry in deep_search:
+        heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
+        add_mixed_paragraph(doc, heading, style="Heading 2")
+        outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
+        confidence = entry.get("confidence")
+        conf_str = f"{confidence:.0%}" if isinstance(confidence, int | float) else "—"
+        add_mixed_paragraph(doc, f"תוצאה: {outcome} | רמת ביטחון: {conf_str}", size_pt=10)
+        if entry.get("answer_he"):
+            add_mixed_paragraph(doc, entry["answer_he"], size_pt=BODY_SIZE_PT)
+        if entry.get("contradictions_he"):
+            add_mixed_paragraph(doc, f"סתירות/אי-ודאות: {entry['contradictions_he']}", size_pt=10)
+
+
+# -- public entry points --------------------------------------------------------
+
+
+def build_docx(
+    draft: DailyReportDraft,
+    items: list[dict],
+    events: list[dict],
+    *,
+    period_end: dt.date,
+    deep_search: list[dict] | None = None,
+    open_clarifications: list[dict] | None = None,
+    generated_at: dt.datetime | None = None,
+    qa: QAResult | None = None,
+) -> DocxDocument:
+    """Build the full daily-report ``Document`` in memory (caller saves it)."""
+    deep_search = deep_search or []
+    open_clarifications = open_clarifications or []
+    generated_at = generated_at or dt.datetime.now(dt.UTC)
+
+    doc = docx.Document()
+    _configure_document_defaults(doc)
+    _add_footer_page_number(doc)
+
+    add_mixed_paragraph(doc, TITLE_TEXT, style="Title")
+    add_mixed_paragraph(doc, hebrew_date_str(period_end), style="Subtitle")
+    add_mixed_paragraph(
+        doc,
+        f"נוצר אוטומטית על ידי EO-Analyst — {generated_at.strftime('%Y-%m-%d %H:%M')} UTC",
+        size_pt=9,
+    )
+    if qa is not None and not qa.passed:
+        warn = add_mixed_paragraph(
+            doc,
+            "אזהרה: הדוח לא עבר את בדיקת האזכורים במלואה — חלק מהמשפטים הוסרו אוטומטית, "
+            "או שהדוח מסומן כלא-מאומת במלואו. יש לעיין ב-qa_report.",
+            size_pt=10,
+        )
+        for run in warn.runs:
+            run.font.bold = True
+    doc.add_page_break()
+
+    _add_toc_field(doc)
+    doc.add_page_break()
+
+    add_mixed_paragraph(doc, "תקציר מנהלים", style="Heading 1")
+    add_mixed_paragraph(doc, draft.exec_summary_he or "אין תקציר לתקופה זו.")
+
+    for section in draft.sections:
+        add_mixed_paragraph(doc, section.title_he, style="Heading 1")
+        for para in _split_paragraphs(section.prose_he):
+            add_mixed_paragraph(doc, para)
+
+    if events:
+        add_mixed_paragraph(doc, "טבלת אירועים עסקיים", style="Heading 1")
+        _add_events_table(doc, events)
+
+    if deep_search:
+        add_mixed_paragraph(doc, "חקירות עומק", style="Heading 1")
+        _add_deep_search_section(doc, deep_search)
+
+    open_points = list(draft.open_points_he or [])
+    open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
+    if open_points:
+        add_mixed_paragraph(doc, "נקודות פתוחות", style="Heading 1")
+        for point in open_points:
+            add_mixed_paragraph(doc, point, style="List Bullet")
+
+    if draft.outlook_he:
+        add_mixed_paragraph(doc, "מבט קדימה", style="Heading 1")
+        add_mixed_paragraph(doc, draft.outlook_he)
+
+    add_mixed_paragraph(doc, "נספח מקורות", style="Heading 1")
+    _add_sources_appendix(doc, items)
+
+    _flag_update_fields(doc)
+    return doc
+
+
+def save_docx(doc: DocxDocument, path: str | Path) -> Path:
+    """Save ``doc`` to ``path``, creating parent directories, and return the resolved path."""
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out))
+    return out
+
+
+def validate_docx(path: str | Path) -> None:
+    """Re-open ``path`` and sanity-check it: no duplicate ZIP parts, every XML part well-formed,
+    and python-docx itself can parse the document. Raises ``ValueError`` on any problem."""
+    p = Path(path)
+    with zipfile.ZipFile(p) as zf:
+        names = zf.namelist()
+        seen: set[str] = set()
+        dupes = set()
+        for name in names:
+            if name in seen:
+                dupes.add(name)
+            seen.add(name)
+        if dupes:
+            raise ValueError(f"docx has duplicate zip parts: {sorted(dupes)}")
+        for name in names:
+            if name.endswith(".xml") or name.endswith(".rels"):
+                data = zf.read(name)
+                try:
+                    etree.fromstring(data)
+                except etree.XMLSyntaxError as exc:
+                    raise ValueError(f"malformed XML in {name}: {exc}") from exc
+    docx.Document(str(p))  # raises if python-docx itself can't parse it
+
+
+# -- markdown / html renderers -----------------------------------------------------
+
+
+def _qa_warning_line(qa: QAResult | None) -> str | None:
+    if qa is not None and not qa.passed:
+        return "אזהרה: הדוח לא עבר את בדיקת האזכורים במלואה; חלק מהמשפטים הוסרו או שהדוח מסומן כלא-מאומת."
+    return None
+
+
+def render_markdown(
+    draft: DailyReportDraft,
+    items: list[dict],
+    events: list[dict],
+    *,
+    period_end: dt.date | None = None,
+    deep_search: list[dict] | None = None,
+    open_clarifications: list[dict] | None = None,
+    qa: QAResult | None = None,
+) -> str:
+    """Render the daily report as GitHub-flavoured Markdown."""
+    deep_search = deep_search or []
+    open_clarifications = open_clarifications or []
+    lines = [f"# {TITLE_TEXT}", ""]
+    if period_end is not None:
+        lines += [f"**תאריך:** {hebrew_date_str(period_end)}", ""]
+    warning = _qa_warning_line(qa)
+    if warning:
+        lines += [f"> **{warning}**", ""]
+
+    lines += ["## תקציר מנהלים", "", draft.exec_summary_he or "אין תקציר לתקופה זו.", ""]
+
+    for section in draft.sections:
+        lines += [f"## {section.title_he}", "", section.prose_he, ""]
+
+    if events:
+        lines += [
+            "## טבלת אירועים עסקיים",
+            "",
+            "| תאריך | סוג | צדדים | לקוח/תוכנית | סכום | מקור |",
+            "|---|---|---|---|---|---|",
+        ]
+        for ev in events:
+            n = ev.get("n")
+            src = f"[{n}]" if n is not None else (ev.get("source_name") or "—")
+            lines.append(
+                f"| {_fmt_date(ev.get('date'))} "
+                f"| {_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—')} "
+                f"| {', '.join(ev.get('parties') or []) or '—'} "
+                f"| {ev.get('customer') or ev.get('program') or '—'} "
+                f"| {_fmt_amount(ev)} | {src} |"
+            )
+        lines.append("")
+
+    if deep_search:
+        lines += ["## חקירות עומק", ""]
+        for entry in deep_search:
+            heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
+            outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
+            lines.append(f"- **{heading}** — {outcome}: {entry.get('answer_he', '')}")
+        lines.append("")
+
+    open_points = list(draft.open_points_he or [])
+    open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
+    if open_points:
+        lines += ["## נקודות פתוחות", ""]
+        lines += [f"- {p}" for p in open_points]
+        lines.append("")
+
+    if draft.outlook_he:
+        lines += ["## מבט קדימה", "", draft.outlook_he, ""]
+
+    lines += ["## נספח מקורות", "", "| # | כותרת | מקור | תאריך | קישור |", "|---|---|---|---|---|"]
+    for it in sorted(items, key=lambda x: x.get("n") or 0):
+        url = it.get("url") or ""
+        lines.append(
+            f"| {it.get('n')} | {it.get('title') or '—'} | {it.get('source_name') or '—'} "
+            f"| {_fmt_date(it.get('published_at'))} | [{url}]({url}) |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_html(
+    draft: DailyReportDraft,
+    items: list[dict],
+    events: list[dict],
+    *,
+    period_end: dt.date | None = None,
+    deep_search: list[dict] | None = None,
+    open_clarifications: list[dict] | None = None,
+    qa: QAResult | None = None,
+) -> str:
+    """Render the daily report as a standalone RTL HTML document."""
+    deep_search = deep_search or []
+    open_clarifications = open_clarifications or []
+    item_by_n = {it.get("n"): it for it in items}
+
+    def cite_links(text: str) -> str:
+        escaped = html.escape(text or "")
+
+        def repl(m: re.Match[str]) -> str:
+            n = int(m.group(1))
+            target = "#src-" + str(n) if n in item_by_n else "#"
+            return f'<a href="{target}" class="cite">[{n}]</a>'
+
+        return _CITATION_RE.sub(repl, escaped)
+
+    parts = ['<div dir="rtl" lang="he">', f"<h1>{html.escape(TITLE_TEXT)}</h1>"]
+    if period_end is not None:
+        parts.append(f'<p class="date">{html.escape(hebrew_date_str(period_end))}</p>')
+    warning = _qa_warning_line(qa)
+    if warning:
+        parts.append(f'<p class="qa-warning"><strong>{html.escape(warning)}</strong></p>')
+
+    parts.append("<h2>תקציר מנהלים</h2>")
+    parts.append(f"<p>{cite_links(draft.exec_summary_he or 'אין תקציר לתקופה זו.')}</p>")
+
+    for section in draft.sections:
+        parts.append(f"<h2>{html.escape(section.title_he)}</h2>")
+        for para in _split_paragraphs(section.prose_he):
+            parts.append(f"<p>{cite_links(para)}</p>")
+
+    if events:
+        parts.append("<h2>טבלת אירועים עסקיים</h2>")
+        parts.append(
+            "<table><thead><tr><th>תאריך</th><th>סוג</th><th>צדדים</th>"
+            "<th>לקוח/תוכנית</th><th>סכום</th><th>מקור</th></tr></thead><tbody>"
+        )
+        for ev in events:
+            n = ev.get("n")
+            src = (
+                f'<a href="#src-{n}" class="cite">[{n}]</a>'
+                if n is not None
+                else html.escape(ev.get("source_name") or "—")
+            )
+            parts.append(
+                "<tr>"
+                f"<td>{html.escape(_fmt_date(ev.get('date')))}</td>"
+                f"<td>{html.escape(_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—'))}</td>"
+                f"<td>{html.escape(', '.join(ev.get('parties') or []) or '—')}</td>"
+                f"<td>{html.escape(ev.get('customer') or ev.get('program') or '—')}</td>"
+                f"<td>{html.escape(_fmt_amount(ev))}</td>"
+                f"<td>{src}</td>"
+                "</tr>"
+            )
+        parts.append("</tbody></table>")
+
+    if deep_search:
+        parts.append("<h2>חקירות עומק</h2><ul>")
+        for entry in deep_search:
+            heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
+            outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
+            parts.append(
+                f"<li><strong>{html.escape(heading)}</strong> — {html.escape(outcome)}: "
+                f"{html.escape(entry.get('answer_he', ''))}</li>"
+            )
+        parts.append("</ul>")
+
+    open_points = list(draft.open_points_he or [])
+    open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
+    if open_points:
+        parts.append("<h2>נקודות פתוחות</h2><ul>")
+        parts += [f"<li>{html.escape(p)}</li>" for p in open_points]
+        parts.append("</ul>")
+
+    if draft.outlook_he:
+        parts.append("<h2>מבט קדימה</h2>")
+        parts.append(f"<p>{html.escape(draft.outlook_he)}</p>")
+
+    parts.append("<h2>נספח מקורות</h2>")
+    parts.append(
+        "<table><thead><tr><th>#</th><th>כותרת</th><th>מקור</th><th>תאריך</th>"
+        "<th>קישור</th></tr></thead><tbody>"
+    )
+    for it in sorted(items, key=lambda x: x.get("n") or 0):
+        url = it.get("url") or ""
+        link = f'<a href="{html.escape(url)}">{html.escape(url)}</a>' if url else "—"
+        parts.append(
+            f'<tr id="src-{it.get("n")}">'
+            f"<td>{it.get('n')}</td>"
+            f"<td>{html.escape(it.get('title') or '—')}</td>"
+            f"<td>{html.escape(it.get('source_name') or '—')}</td>"
+            f"<td>{html.escape(_fmt_date(it.get('published_at')))}</td>"
+            f"<td>{link}</td>"
+            "</tr>"
+        )
+    parts.append("</tbody></table>")
+    parts.append("</div>")
+    return "\n".join(parts)

@@ -51,10 +51,16 @@ def classify_item(item: dict, *, role: str = "resident", interactive: bool = Fal
         lang=item.get("lang") or "?",
         data=wrap_data((item.get("clean_text") or "")[:MAX_CHARS], item["id"], item.get("url") or ""),
     )
-    return chat_structured(role, ClassifyOut, [
-        {"role": "system", "content": _system()},
-        {"role": "user", "content": prompt},
-    ], task="classify", interactive=interactive)
+    return chat_structured(
+        role,
+        ClassifyOut,
+        [
+            {"role": "system", "content": _system()},
+            {"role": "user", "content": prompt},
+        ],
+        task="classify",
+        interactive=interactive,
+    )
 
 
 def persist_classification(item_id: int, out: ClassifyOut) -> None:
@@ -64,7 +70,7 @@ def persist_classification(item_id: int, out: ClassifyOut) -> None:
         try:
             upsert_entity(name=ent.name, kind=ent.kind, first_seen_item=item_id)
             names.append(ent.name)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("entity_upsert_failed", name=ent.name, error=str(exc)[:120])
     update_item_fields(
         item_id,
@@ -102,7 +108,7 @@ def run_classify(limit: int = 300, role: str = "resident") -> ClassifyStats:
         except LLMOutputError as exc:
             log.error("classify_bad_output", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("classify_failed", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1
     log.info("classify_done", **stats.__dict__)

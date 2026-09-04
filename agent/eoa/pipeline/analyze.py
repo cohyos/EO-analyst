@@ -11,7 +11,13 @@ from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import AnalyzeOut
-from eoa.memory.relational import get_items_for_stage, insert_event, mark_stage, update_item_fields, upsert_entity
+from eoa.memory.relational import (
+    get_items_for_stage,
+    insert_event,
+    mark_stage,
+    update_item_fields,
+    upsert_entity,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -45,7 +51,7 @@ def _context_for(item: dict) -> str:
         if not rows:
             return "אין."
         return "\n".join(f"- [item {r['id']}] {r['title']}: {r['summary_he']}" for r in rows)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("context_unavailable", error=str(exc)[:120])
         return "אין."
 
@@ -61,10 +67,17 @@ def analyze_item(item: dict, *, role: str = "resident", interactive: bool = Fals
         published_at=item.get("published_at") or "לא ידוע",
         data=wrap_data((item.get("clean_text") or "")[:MAX_CHARS], item["id"], item.get("url") or ""),
     )
-    return chat_structured(role, AnalyzeOut, [
-        {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
-        {"role": "user", "content": prompt},
-    ], task="summarize", interactive=interactive, options={"temperature": 0.3})
+    return chat_structured(
+        role,
+        AnalyzeOut,
+        [
+            {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
+            {"role": "user", "content": prompt},
+        ],
+        task="summarize",
+        interactive=interactive,
+        options={"temperature": 0.3},
+    )
 
 
 def _parse_date(s: str | None) -> date | None:
@@ -78,16 +91,31 @@ def _parse_date(s: str | None) -> date | None:
 
 def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     """Write summary/so-what/events/edges. Returns (events_written, edges_written)."""
-    update_item_fields(item["id"], summary_he=out.summary_he, so_what_he=out.so_what_he,
-                       key_facts=list(out.key_facts), uncertainty_he=out.uncertainty_he or None)
+    update_item_fields(
+        item["id"],
+        summary_he=out.summary_he,
+        so_what_he=out.so_what_he,
+        key_facts=list(out.key_facts),
+        uncertainty_he=out.uncertainty_he or None,
+    )
     n_events = 0
     for ev in out.events:
         try:
-            insert_event(item_id=item["id"], kind=ev.kind, title=ev.title, date=_parse_date(ev.date),
-                         amount_usd=ev.amount_usd, currency=ev.currency, parties=ev.parties, customer=ev.customer,
-                         program=ev.program, summary_he=ev.summary_he, confidence=ev.confidence)
+            insert_event(
+                item_id=item["id"],
+                kind=ev.kind,
+                title=ev.title,
+                date=_parse_date(ev.date),
+                amount_usd=ev.amount_usd,
+                currency=ev.currency,
+                parties=ev.parties,
+                customer=ev.customer,
+                program=ev.program,
+                summary_he=ev.summary_he,
+                confidence=ev.confidence,
+            )
             n_events += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("event_insert_failed", item_id=item["id"], error=str(exc)[:160])
     n_edges = 0
     if out.edges:
@@ -101,7 +129,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 merge_entity(dst_id, e.dst, "company", None)
                 add_edge(src_id, dst_id, e.label, item["id"], {"evidence": e.evidence_he[:300]})
                 n_edges += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("edge_write_failed", item_id=item["id"], error=str(exc)[:160])
     return n_events, n_edges
 
@@ -110,8 +138,11 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
     """Analyze triaged items at or above ``min_level`` (red > orange > yellow)."""
     order = {"red": 0, "orange": 1, "yellow": 2, "archive": 3}
     stats = AnalyzeStats()
-    items = [it for it in get_items_for_stage(STAGE, limit)
-             if it.get("security_status") != "quarantined" and not it.get("dedup_of")]
+    items = [
+        it
+        for it in get_items_for_stage(STAGE, limit)
+        if it.get("security_status") != "quarantined" and not it.get("dedup_of")
+    ]
     items.sort(key=lambda it: order.get(it.get("level") or "archive", 3))
     for it in items:
         if order.get(it.get("level") or "archive", 3) > order[min_level]:
@@ -130,7 +161,7 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
         except LLMOutputError as exc:
             log.error("analyze_bad_output", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("analyze_failed", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1
     log.info("analyze_done", **stats.__dict__)

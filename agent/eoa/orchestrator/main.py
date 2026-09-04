@@ -1,0 +1,152 @@
+"""Scheduler entrypoint: night-window daily run, pre-flight, daytime RSS polling, weekly/monthly jobs,
+plus the job worker. ``python -m eoa.orchestrator.main``.
+"""
+
+from __future__ import annotations
+
+import logging
+import signal
+import sys
+import threading
+import time
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
+import structlog
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from eoa.config import settings
+from eoa.memory.relational import enqueue_job
+from eoa.notify import ntfy
+from eoa.orchestrator.jobs import Worker, enqueue_daily
+
+log = structlog.get_logger(__name__)
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """JSON logs to stdout (containers) — human-readable when a TTY is attached."""
+    logging.basicConfig(level=level, stream=sys.stdout, format="%(message)s")
+    renderer = structlog.dev.ConsoleRenderer() if sys.stdout.isatty() else structlog.processors.JSONRenderer()
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            renderer,
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelName(level)),
+        logger_factory=structlog.PrintLoggerFactory(),
+    )
+
+
+def pre_flight() -> dict:
+    """23:30 checks: services, disk/thermal, warm-up of the resident model, backup. Sends a status ping."""
+    from eoa import db
+    from eoa.llm import ollama_client
+    from eoa.resources.gate import gate
+    from eoa.search.searxng_client import ping as searx_ping
+
+    st = gate().status()
+    checks = {
+        "postgres": db.ping(),
+        "ollama": ollama_client.ping(),
+        "searxng": searx_ping(),
+        "disk_free_gb": st["disk_free_gb"],
+        "gpu_temp": st["gpu"]["temp_c"],
+        "vram_free_mb": st["gpu"]["vram_free_mb"],
+    }
+    problems = [k for k in ("postgres", "ollama") if not checks[k]]
+    if checks["disk_free_gb"] < settings().resources.warn_free_disk_gb:
+        problems.append(f"disk {checks['disk_free_gb']} GB")
+    try:
+        ollama_client.warm_up("resident")
+        checks["warm_up"] = True
+    except Exception as exc:
+        checks["warm_up"] = False
+        problems.append(f"warm-up: {str(exc)[:80]}")
+    log.info("pre_flight", **checks)
+    if problems:
+        ntfy.status("pre-flight: בעיות — " + "; ".join(problems), priority="high")
+    return checks
+
+
+def _cron(tz: ZoneInfo, hhmm: str, **extra: str) -> CronTrigger:
+    h, m = hhmm.split(":")
+    return CronTrigger(hour=int(h), minute=int(m), timezone=tz, **extra)
+
+
+def build_scheduler() -> BackgroundScheduler:
+    s = settings()
+    tz = ZoneInfo(s.timezone)
+    sched = BackgroundScheduler(timezone=tz)
+    sched.add_job(
+        lambda: enqueue_daily("full", priority=2),
+        _cron(tz, s.schedule.night_window.start),
+        id="daily",
+        name="daily run",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+    sched.add_job(
+        pre_flight,
+        _cron(tz, s.schedule.pre_flight_at),
+        id="pre_flight",
+        misfire_grace_time=1800,
+        coalesce=True,
+    )
+    sched.add_job(
+        lambda: enqueue_job("ingest", {"mode": "poll"}, priority=6),
+        CronTrigger(minute=0, hour=f"*/{max(s.schedule.daytime_rss_poll_minutes // 60, 1)}", timezone=tz),
+        id="daytime_poll",
+        coalesce=True,
+    )
+    wk = s.schedule.weekly_run
+    sched.add_job(
+        lambda: enqueue_job("weekly_run", {"mode": "full"}, priority=2),
+        _cron(tz, wk.get("start", "01:00"), day_of_week=wk.get("weekday", "sat")),
+        id="weekly",
+        coalesce=True,
+    )
+    return sched
+
+
+def wake_guard() -> None:
+    """Log the clock at 00:55 so run_log shows whether the machine was awake before the window."""
+    log.info("wake_guard", now=datetime.now(tz=UTC).isoformat())
+
+
+def main() -> None:
+    configure_logging()
+    s = settings()
+    worker = Worker()
+    worker.start()
+    sched = build_scheduler()
+    sched.add_job(wake_guard, _cron(ZoneInfo(s.timezone), "00:55"), id="wake_guard")
+    sched.start()
+    log.info(
+        "orchestrator_started",
+        night=f"{s.schedule.night_window.start}-{s.schedule.night_window.end}",
+        tz=s.timezone,
+    )
+    ntfy.status("orchestrator up — ממתין לחלון הלילה", priority="min")
+
+    stop = threading.Event()
+
+    def _sig(*_: object) -> None:
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _sig)
+        except ValueError:
+            pass
+    while not stop.is_set():
+        time.sleep(1)
+    sched.shutdown(wait=False)
+    worker.stop()
+    log.info("orchestrator_stopped")
+
+
+if __name__ == "__main__":
+    main()

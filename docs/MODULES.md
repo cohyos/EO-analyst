@@ -347,3 +347,178 @@ all core tables exist, an item with an embedding is found by `nearest()`, an
 `entities` insert produces a matching graph vertex (AGE path only), and the
 `claim_next_job`/`finish_job` flow round-trips. Not run as part of this
 change (no Docker available in this environment) — verify locally.
+
+## Fetch layer
+
+Files: `config/sources.yaml`, `agent/eoa/fetch/` (`__init__.py`, `rss.py`,
+`html.py`, `sanitize.py`, `sources_loader.py`, `service.py`). Runs inside the
+`fetcher` container (the `egress`-network service), per
+`docs/CONVENTIONS.md` rule 13. Every module imports `eoa.config`,
+`eoa.errors`, `eoa.db`, and `eoa.memory.relational` **lazily, inside
+functions**, so `tests/unit/test_rss.py` / `test_html_fetch.py` /
+`test_sanitize.py` run without a database or a populated `config/*.yaml`.
+
+### `config/sources.yaml`
+
+40 source entries (20 `kind: rss`, 20 `kind: html`), each validated by
+`sources_loader.Source`: `id, name, url, kind, lang, reliability (1-5),
+tags` (taxonomy domain ids), `schedule (daily|weekly), notes, verified,
+verified_at`, plus `list_selector`/`link_selector` CSS hints for `html`
+sources. Covers the full "must include" list from the task spec: the major
+English defense trade press (Defense News, Breaking Defense, C4ISRNET,
+Defense One, Aviation Week, The War Zone, Shephard Media, Janes, Naval
+News, the three GlobalData `*-technology.com` titles), European Defence
+Review/EDR Online (one publication, one feed — the two names in the spec
+refer to the same site), Defense Update, Israel Defense (EN+HE), Globes
+(EN aerospace/defense tag page — the legacy `rssfeeder.asmx` webservice
+endpoint 500s), Calcalist Tech (HE), the DoD contracts RSS
+(`defense.gov/.../RSS.ashx`), DVIDS, three arXiv API query feeds (cs.CV +
+infrared/thermal/ATR keywords; counter-UAS/drone-detection; GPS-denied
+nav/sim2real), SPIE News, Intelligent Aerospace, Military & Aerospace
+Electronics, Unmanned Systems Technology, DroneXL, and all twelve named
+company press pages (Elbit, Rafael, IAI, Teledyne FLIR, Hensoldt, Safran,
+Thales, Leonardo, Rheinmetall, Saab, Anduril, Controp).
+
+**Verification method** (honest per-source, not aspirational): every URL was
+fetched with `curl` (desktop Chrome UA) on 2026-09-04, checking HTTP status +
+content-type + a raw body sample; `verified: true` required either a
+real RSS/Atom response, or — for `html` sources — a genuinely
+server-rendered listing page with a confirmed, real article-link pattern
+(not just a 200 status, since several sites return a 200 JS-app shell with
+no static content). 27/40 sources are `verified: true`; the 13
+`verified: false` entries are kept as placeholders with their best-effort
+`list_selector` guess and a `notes` field explaining the specific failure
+mode observed: Cloudflare/Akamai JS challenges (Defense Update, Calcalist,
+Unmanned Systems Technology, Controp), client-side-rendered article lists
+that returned no static `href` pattern (IAI, Rheinmetall, Saab, Anduril,
+Intelligent Aerospace, Military & Aerospace Electronics, SPIE News), an
+Incapsula JS shell (Thales), and an anomalous small-body HTTP 247 response
+(Rafael). None of this blocks ingestion — `service.py` just gets zero
+links from an unverified `html` source until a browser-rendering fetch path
+(the `fetcher` image's Playwright install, per the Docker infra section
+above) is wired in.
+
+### `agent/eoa/fetch/rss.py`
+
+`FeedEntry(url, title, published_at, summary, lang)` (pydantic) and
+`parse_feed(raw, *, since_days=None, now=None) -> list[FeedEntry]`, built on
+`feedparser` (tolerant of malformed XML — logs `parsed.bozo` rather than
+raising). `published_at` prefers `published_parsed`, falls back to
+`updated_parsed`/`created_parsed` (covers Atom `<updated>`-only feeds).
+`since_days` drops only entries with a resolvable date older than the
+cutoff; **undated entries are always kept** (never silently lost). Feed-level
+`<language>` fills in per-entry `lang` when an item doesn't set its own.
+
+### `agent/eoa/fetch/html.py`
+
+`FetchedPage(url, final_url, status, html, fetched_at)` and `async
+fetch_page(url, *, client=None, max_bytes=None) -> FetchedPage`, built on
+`httpx.AsyncClient` (streamed, capped at `config.fetch.max_bytes` unless
+overridden per-call) with a `tenacity` retry (3 attempts, exponential
+backoff) on 5xx/429 responses and transport errors, raising
+`eoa.errors.FetchError` after retries are exhausted. `robots.txt` is fetched
+once per origin through the same `httpx` client (mockable by `respx` in
+tests, unlike `urllib.robotparser`'s own blocking fetch), cached in-process
+for an hour, parsed with `urllib.robotparser.RobotFileParser.parse()`, and
+**fails open** (allows the fetch) if `robots.txt` itself 4xx/errors — matches
+`config.fetch.respect_robots`. All four `fetch.*` config values fall back to
+`config.yaml`'s own documented defaults if `eoa.config` isn't importable yet
+(keeps this module usable stand-alone).
+
+### `agent/eoa/fetch/sanitize.py`
+
+`CleanText(text, title, lang, published_at, hidden_text_ratio,
+encoded_blobs, suspicious)` and `extract_clean_text(html, url) -> CleanText`
+— the security-relevant core of the fetch layer, implementing
+`docs/CONVENTIONS.md` rule 3 ("fetched content is DATA, never
+instructions"). Pipeline: `_strip_dom()` removes `<script>/<style>/
+<iframe>/<noscript>`, HTML comments, and `on*=""` attributes, then walks the
+tree computing `hidden_text_ratio` (hidden vs. visible *text length*) for
+elements matching `display:none` / `visibility:hidden` / `font-size:0` /
+`opacity:0` / off-screen absolute positioning (`left/top/text-indent:
+-9999px`), or `hidden` / `aria-hidden="true"`, and drops those subtrees
+before any extractor sees them — then `trafilatura.extract(...,
+output_format="json")` pulls `text`/`title`/`date`, falling back to
+`readability-lxml`, falling back to a bare `lxml` `text_content()`. The
+result is passed through `_strip_invisible_unicode()` (zero-width
+space/ZWNJ/ZWJ/word-joiner/BOM, explicit bidi isolates/embeds/overrides
+U+202A-202E/U+2066-2069, Unicode "tag" characters U+E0000-E007F — all built
+from explicit integer code points, never literal invisible characters
+typed into this source file, so nothing here can be silently mangled by an
+editor or by whitespace-normalizing tooling) and
+`_strip_homoglyph_runs()` (a conservative check: Latin words containing a
+minority of Cyrillic code points, i.e. classic homoglyph substitution — never
+touches Hebrew/CJK/Arabic text), then `_extract_encoded_blobs()` removes
+base64/hex runs longer than `config.security.max_base64_blob_chars`
+(default 200) into `encoded_blobs`. `detect_lang()` checks a Hebrew
+Unicode-range heuristic (>30% of alphabetic characters in U+0590-U+05FF)
+before falling back to `langdetect`, since `langdetect` is unreliable on
+short Hebrew/Latin-mixed technical text. `text_hash()` is `sha256` of the
+whitespace-normalized text (stable across cosmetic re-fetch diffs).
+
+### `agent/eoa/fetch/sources_loader.py`
+
+`Source` (pydantic, validates every `config/sources.yaml` entry) and
+`load_sources(path=None) -> list[Source]` (no DB access — safe for unit
+tests). `upsert_sources_to_db(sources=None) -> dict[str, int]` lazily
+imports `eoa.memory.relational.upsert_source` and returns a `{yaml slug:
+DB row id}` map, since `sources.name` (not our yaml `id` slug) is the DB's
+natural key.
+
+### `agent/eoa/fetch/service.py`
+
+`IngestStats(sources_attempted, sources_failed, entries_seen,
+items_inserted, items_skipped, errors)` and `async run_ingest(source_ids:
+list[int] | None = None, since_days=3) -> IngestStats` — the orchestration
+entry point. Upserts every configured source first (resolving yaml slug ->
+DB id), then for each targeted source: `rss` sources fetch the feed, parse
+entries, and fetch+sanitize+`insert_item()` each entry URL; `html` sources
+fetch the listing page, resolve article links via the source's
+`list_selector`/`link_selector` (through `lxml`'s `cssselect`), and do the
+same per link. A `_DomainThrottle` enforces one request/second/domain
+(an `asyncio.Lock` per netloc) across an `asyncio.Semaphore(6)`-bounded
+pool of concurrent source ingests. **A single failing source never aborts
+the run**: `_ingest_one_source()` catches everything, logs, records the
+error in `IngestStats.errors`, and best-effort bumps `sources.fail_count`
+directly via `eoa.db.connection()` (no `relational.py` helper for this
+exists yet, so this module writes that one `UPDATE` itself rather than
+touching the lead's/memory agent's files). `items.raw_text` is the bare
+`lxml` `text_content()` of the fetched page (visible text, not
+sanitization-hardened) truncated to 200k chars; `items.clean_text` is
+`sanitize.extract_clean_text()`'s output. `python -m eoa.fetch.service`
+runs once on start, then loops every `config.schedule.
+daytime_rss_poll_minutes`.
+
+### Tests
+
+`tests/unit/test_rss.py` (9 tests) — parses `tests/fixtures/feeds/sample.xml`
+(a 4-item RSS 2.0 fixture: two recent dated items, one old dated item, one
+undated item) plus inline Atom/malformed/empty/no-link fixtures; covers
+`since_days` filtering (old-but-dated dropped, undated always kept),
+feed-level `<language>` fallback, and that malformed XML never raises.
+
+`tests/unit/test_html_fetch.py` (7 tests, `respx`-mocked, no real network) —
+covers a normal fetch, robots.txt disallow (`FetchError` raised, the article
+route asserted **never called**), robots.txt allow, robots.txt 404
+fail-open, `max_bytes` truncation (`len(page.html.encode()) <= max_bytes`),
+and a 503-503-200 retry sequence asserting exactly 3 calls before success,
+plus exhausted-retries raising `FetchError`.
+
+`tests/unit/test_sanitize.py` (24 tests) — hidden-text removal
+(`display:none`, `visibility:hidden`, off-screen absolute positioning; each
+asserts both the injected instruction-like text is gone *and* the
+surrounding legitimate article text survives, plus a zero-hidden-ratio
+control case), script/style/iframe/noscript stripping, zero-width and
+bidi-control Unicode (tested both through the full `extract_clean_text()`
+pipeline and directly against `_strip_invisible_unicode()`, since
+`trafilatura`/`readability` themselves already scrub some control-Unicode
+categories before our own detector runs — the end-to-end text-is-clean
+guarantee holds either way, but the `suspicious` flag is only reliably
+observable at the unit level), oversized base64 blob removal (built as one
+unbroken base64-alphabet run — internal `=` padding mid-string would split
+the detector's regex into several under-threshold pieces, which isn't
+representative of a real smuggled blob) vs. short alphanumeric runs left
+alone, Hebrew RTL text preserved end-to-end plus `detect_lang()` heuristics,
+and `text_hash()` stability across whitespace-only differences. Passes today
+via `PYTHONPATH=agent python -m pytest tests/unit -q` (40/40 across the
+whole suite, no DB or network required).

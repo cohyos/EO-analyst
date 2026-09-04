@@ -21,14 +21,31 @@ from eoa.llm.schemas.analysis import DailyReportDraft
 # Hebrew abbreviations that contain a period/gershayim but must not be treated as sentence
 # boundaries. Matched case-sensitively against the text immediately before the break point.
 _ABBREVIATIONS = (
-    'ד"ר', 'עו"ד', 'רו"ח', 'ח"כ', 'אלוף', 'סא"ל', 'רס"ן', 'סרן',
-    'ארה"ב', 'בריה"מ', 'צה"ל', 'משה"ב', 'וכו\'', 'תואר', 'ע"י', 'ע"פ', 'א"א', 'י"ג', 'י"ד',
+    'ד"ר',
+    'עו"ד',
+    'רו"ח',
+    'ח"כ',
+    "אלוף",
+    'סא"ל',
+    'רס"ן',
+    "סרן",
+    'ארה"ב',
+    'בריה"מ',
+    'צה"ל',
+    'משה"ב',
+    "וכו'",
+    "תואר",
+    'ע"י',
+    'ע"פ',
+    'א"א',
+    'י"ג',
+    'י"ד',
 )
 
 # A sentence boundary is `.`, `?`, `!`, or `:` immediately followed by whitespace/newline/EOS —
 # but never a bare decimal point (digit.digit) and never right after one of the abbreviations above.
-_BOUNDARY_RE = re.compile(r'(?<=[.?!:])(?=\s|$)')
-_DECIMAL_RE = re.compile(r'\d\.\d')
+_BOUNDARY_RE = re.compile(r"(?<=[.?!:])(?=\s|$)")
+_DECIMAL_RE = re.compile(r"\d\.\d")
 
 
 def split_sentences(text: str) -> list[str]:
@@ -70,13 +87,42 @@ _DIGIT_RE = re.compile(r"\d")
 _CURRENCY_RE = re.compile(r"[$€₪£]|USD|ILS|EUR|GBP")
 _LATIN_CAPITALIZED_RE = re.compile(r"\b[A-Z][A-Za-z0-9.&\-]{1,}\b")
 _MONTH_NAMES = (
-    "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר",
-    "נובמבר", "דצמבר",
-    "January", "February", "March", "April", "May", "June", "July", "August", "September",
-    "October", "November", "December",
+    "ינואר",
+    "פברואר",
+    "מרץ",
+    "אפריל",
+    "מאי",
+    "יוני",
+    "יולי",
+    "אוגוסט",
+    "ספטמבר",
+    "אוקטובר",
+    "נובמבר",
+    "דצמבר",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 )
 _FACTUAL_VERBS = (
-    "זכתה", "חתמה", "רכשה", "הודיעה", "השיקה", "נבחרה", "קיבלה", "סיפקה", "נחתם", "הוענק",
+    "זכתה",
+    "חתמה",
+    "רכשה",
+    "הודיעה",
+    "השיקה",
+    "נבחרה",
+    "קיבלה",
+    "סיפקה",
+    "נחתם",
+    "הוענק",
 )
 
 _ASSESSMENT_MARKERS = ("להערכתנו", "נראה ש", "ייתכן")
@@ -120,17 +166,18 @@ def _valid_range(items: list[dict]) -> set[int]:
     return valid
 
 
-def _check_prose(label: str, text: str, valid_ns: set[int], errors: list[str],
-                  uncited: list[str], bad_refs: set[int]) -> None:
+def _check_prose(
+    label: str, text: str, valid_ns: set[int], errors: list[str], uncited: list[str], bad_refs: set[int]
+) -> None:
     for sentence in split_sentences(text):
         refs = citations_in(sentence)
         for n in refs:
             if n not in valid_ns:
                 bad_refs.add(n)
-                errors.append(f"ב{label}: ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה — \"{sentence}\"")
+                errors.append(f'ב{label}: ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה — "{sentence}"')
         if is_factual(sentence) and not refs:
             uncited.append(sentence)
-            errors.append(f"ב{label}: משפט עובדתי ללא הפניה [n] — \"{sentence}\"")
+            errors.append(f'ב{label}: משפט עובדתי ללא הפניה [n] — "{sentence}"')
 
 
 def check(draft: DailyReportDraft, items: list[dict]) -> QAResult:
@@ -148,8 +195,7 @@ def check(draft: DailyReportDraft, items: list[dict]) -> QAResult:
     if outlook:
         if not any(outlook.startswith(marker) for marker in _ASSESSMENT_MARKERS):
             errors.append(
-                "במבט קדימה: חובה לפתוח במילת הערכה מפורשת (להערכתנו / נראה ש / ייתכן) — "
-                f'"{outlook}"'
+                f'במבט קדימה: חובה לפתוח במילת הערכה מפורשת (להערכתנו / נראה ש / ייתכן) — "{outlook}"'
             )
         # Outlook is exempt from the citation requirement, but out-of-range refs are still an error.
         for n in citations_in(outlook):

@@ -59,7 +59,9 @@ class ChatResult:
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=settings().ollama_url.rstrip("/"), timeout=httpx.Timeout(600.0, connect=10.0))
+    return httpx.Client(
+        base_url=settings().ollama_url.rstrip("/"), timeout=httpx.Timeout(600.0, connect=10.0)
+    )
 
 
 def _num_ctx(task: str, spec: ModelSpec) -> int:
@@ -113,8 +115,16 @@ def chat(
         model=spec.ollama,
         raw=data,
     )
-    log.info("llm_chat", role=role, model=spec.ollama, task=task, tokens=res.eval_tokens,
-             tok_s=res.tokens_per_s, ms=res.duration_ms, tool_calls=len(res.tool_calls))
+    log.info(
+        "llm_chat",
+        role=role,
+        model=spec.ollama,
+        task=task,
+        tokens=res.eval_tokens,
+        tok_s=res.tokens_per_s,
+        ms=res.duration_ms,
+        tool_calls=len(res.tool_calls),
+    )
     return res
 
 
@@ -132,15 +142,28 @@ def chat_structured(
     last_err: Exception | None = None
     msgs = list(messages)
     for attempt in range(2):
-        res = chat(role, msgs, task=task, format_schema=json_schema, interactive=interactive,
-                   options={"temperature": 0.1, **(options or {})}, think=False)
+        res = chat(
+            role,
+            msgs,
+            task=task,
+            format_schema=json_schema,
+            interactive=interactive,
+            options={"temperature": 0.1, **(options or {})},
+            think=False,
+        )
         try:
             return schema.model_validate_json(_strip_fences(res.content))
         except (ValidationError, json.JSONDecodeError) as exc:
             last_err = exc
             log.warning("llm_schema_invalid", attempt=attempt, error=str(exc)[:300])
-            msgs = [*messages, {"role": "assistant", "content": res.content},
-                    {"role": "user", "content": f"הפלט לא תקין לפי הסכמה: {str(exc)[:500]}. החזר JSON תקין בלבד."}]
+            msgs = [
+                *messages,
+                {"role": "assistant", "content": res.content},
+                {
+                    "role": "user",
+                    "content": f"הפלט לא תקין לפי הסכמה: {str(exc)[:500]}. החזר JSON תקין בלבד.",
+                },
+            ]
     raise LLMOutputError(f"schema validation failed for {schema.__name__}: {last_err}")
 
 
@@ -153,9 +176,15 @@ def embed(texts: Iterable[str], *, role: str = "embed", interactive: bool = Fals
     if not batch:
         return []
     with _client() as c:
-        r = c.post("/api/embed", json={"model": spec.ollama, "input": batch,
-                                       "keep_alive": s.ollama.keep_alive,
-                                       "options": {"num_ctx": _num_ctx("embed", spec)}})
+        r = c.post(
+            "/api/embed",
+            json={
+                "model": spec.ollama,
+                "input": batch,
+                "keep_alive": s.ollama.keep_alive,
+                "options": {"num_ctx": _num_ctx("embed", spec)},
+            },
+        )
         r.raise_for_status()
         vecs = r.json().get("embeddings", [])
     if len(vecs) != len(batch):
@@ -190,7 +219,7 @@ def ping() -> bool:
     try:
         with _client() as c:
             return c.get("/api/version", timeout=3).status_code == 200
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 

@@ -60,16 +60,29 @@ class ResourceGate:
     # ------------------------------------------------------------------ helpers
     def _record(self, d: GateDecision) -> None:
         self.history.append(d)
-        log.info("gate_decision", decision=d.decision, model=d.model, reason=d.reason,
-                 vram_free_mb=d.vram_free_mb, gpu_util=d.gpu_util, gpu_temp=d.gpu_temp, wait_ms=d.wait_ms)
+        log.info(
+            "gate_decision",
+            decision=d.decision,
+            model=d.model,
+            reason=d.reason,
+            vram_free_mb=d.vram_free_mb,
+            gpu_util=d.gpu_util,
+            gpu_temp=d.gpu_temp,
+            wait_ms=d.wait_ms,
+        )
         try:  # best-effort persistence; never fail a call because logging failed
             from eoa.memory.relational import record_resource_decision
 
             record_resource_decision(
-                decision=d.decision, model=d.model, vram_free_mb=d.vram_free_mb, gpu_util=d.gpu_util,
-                gpu_temp=d.gpu_temp, ram_free_mb=d.ram_free_mb, wait_ms=d.wait_ms,
+                decision=d.decision,
+                model=d.model,
+                vram_free_mb=d.vram_free_mb,
+                gpu_util=d.gpu_util,
+                gpu_temp=d.gpu_temp,
+                ram_free_mb=d.ram_free_mb,
+                wait_ms=d.wait_ms,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     @staticmethod
@@ -127,8 +140,15 @@ class ResourceGate:
 
             # thermal pause (bounded by the same deadline)
             if host.gpu.available and host.gpu.temp_c >= rc.gpu_temp_pause_c:
-                self._record(self._decision("thermal_pause", model_name, host, waited_ms,
-                                            f"gpu {host.gpu.temp_c}C >= {rc.gpu_temp_pause_c}C"))
+                self._record(
+                    self._decision(
+                        "thermal_pause",
+                        model_name,
+                        host,
+                        waited_ms,
+                        f"gpu {host.gpu.temp_c}C >= {rc.gpu_temp_pause_c}C",
+                    )
+                )
                 if time.monotonic() > deadline:
                     raise ResourceUnavailable(f"thermal pause exceeded timeout for {model_name}")
                 self._sleep(120)
@@ -144,9 +164,18 @@ class ResourceGate:
                 and host.gpu.util_pct > rc.polite_mode.external_gpu_util_threshold
                 and not host.loaded_models  # if only we are loaded, the util is probably ours
             ):
-                self._record(self._decision("deferred", model_name, host, waited_ms,
-                                            f"polite: external gpu util {host.gpu.util_pct}%"))
-                raise ResourceUnavailable("polite mode: GPU busy with external work; deferred to night window")
+                self._record(
+                    self._decision(
+                        "deferred",
+                        model_name,
+                        host,
+                        waited_ms,
+                        f"polite: external gpu util {host.gpu.util_pct}%",
+                    )
+                )
+                raise ResourceUnavailable(
+                    "polite mode: GPU busy with external work; deferred to night window"
+                )
 
             # already loaded -> go
             if any(m.name == model_name for m in host.loaded_models):
@@ -155,7 +184,11 @@ class ResourceGate:
                 return spec
 
             if not host.gpu.available:
-                self._record(self._decision("proceed", model_name, host, waited_ms, "no gpu telemetry; trusting ollama"))
+                self._record(
+                    self._decision(
+                        "proceed", model_name, host, waited_ms, "no gpu telemetry; trusting ollama"
+                    )
+                )
                 return spec
 
             free = host.gpu.vram_free_mb
@@ -163,23 +196,38 @@ class ResourceGate:
             required = need + rc.vram_safety_margin_mb
             if free >= required:
                 self._loaded_since[model_name] = time.monotonic()
-                self._record(self._decision("proceed", model_name, host, waited_ms, f"free {free}MB >= {required}MB"))
+                self._record(
+                    self._decision("proceed", model_name, host, waited_ms, f"free {free}MB >= {required}MB")
+                )
                 return spec
             if free + reclaim >= required:
                 self._unload_others(host, keep=model_name)
                 self._loaded_since[model_name] = time.monotonic()
-                self._record(self._decision("swap", model_name, host, waited_ms,
-                                            f"reclaim {reclaim}MB from other models"))
+                self._record(
+                    self._decision(
+                        "swap", model_name, host, waited_ms, f"reclaim {reclaim}MB from other models"
+                    )
+                )
                 return spec
 
             # queue with backoff
             if time.monotonic() > deadline:
-                self._record(self._decision("deferred", model_name, host, waited_ms,
-                                            f"queue timeout; free {free}MB < {required}MB"))
+                self._record(
+                    self._decision(
+                        "deferred",
+                        model_name,
+                        host,
+                        waited_ms,
+                        f"queue timeout; free {free}MB < {required}MB",
+                    )
+                )
                 raise ResourceUnavailable(f"VRAM unavailable for {model_name} after {waited_ms // 1000}s")
             delay = backoffs[min(attempt, len(backoffs) - 1)]
-            self._record(self._decision("queued", model_name, host, waited_ms,
-                                        f"free {free}MB < {required}MB; retry in {delay}s"))
+            self._record(
+                self._decision(
+                    "queued", model_name, host, waited_ms, f"free {free}MB < {required}MB; retry in {delay}s"
+                )
+            )
             self._sleep(delay)
             waited_ms += delay * 1000
             attempt += 1
@@ -188,7 +236,9 @@ class ResourceGate:
     def _check_hard_stops(self, host: telemetry.HostStatus, model_name: str) -> None:
         rc = settings().resources
         if host.disk_free_gb < rc.min_free_disk_gb:
-            self._record(self._decision("deferred", model_name, host, 0, f"disk {host.disk_free_gb:.1f}GB too low"))
+            self._record(
+                self._decision("deferred", model_name, host, 0, f"disk {host.disk_free_gb:.1f}GB too low")
+            )
             raise ResourceUnavailable(f"disk free {host.disk_free_gb:.1f} GB < {rc.min_free_disk_gb} GB")
         if host.gpu.available and host.gpu.temp_c >= rc.gpu_temp_stop_c:
             self._record(self._decision("deferred", model_name, host, 0, f"gpu {host.gpu.temp_c}C stop"))
@@ -205,14 +255,22 @@ class ResourceGate:
                 try:
                     unload_model(m.name)
                     self._loaded_since.pop(m.name, None)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.warning("unload_failed", model=m.name, error=str(exc))
 
     @staticmethod
-    def _decision(decision: Decision, model: str, host: telemetry.HostStatus, wait_ms: int, reason: str) -> GateDecision:
+    def _decision(
+        decision: Decision, model: str, host: telemetry.HostStatus, wait_ms: int, reason: str
+    ) -> GateDecision:
         return GateDecision(
-            decision=decision, model=model, vram_free_mb=host.gpu.vram_free_mb, gpu_util=host.gpu.util_pct,
-            gpu_temp=host.gpu.temp_c, ram_free_mb=host.ram_free_mb, wait_ms=wait_ms, reason=reason,
+            decision=decision,
+            model=model,
+            vram_free_mb=host.gpu.vram_free_mb,
+            gpu_util=host.gpu.util_pct,
+            gpu_temp=host.gpu.temp_c,
+            ram_free_mb=host.ram_free_mb,
+            wait_ms=wait_ms,
+            reason=reason,
             at=datetime.now(tz=UTC),
         )
 
@@ -233,7 +291,12 @@ class ResourceGate:
             "ram": {"free_mb": host.ram_free_mb, "total_mb": host.ram_total_mb},
             "disk_free_gb": round(host.disk_free_gb, 1),
             "loaded_models": [
-                {"name": m.name, "size_mb": m.size_mb, "size_vram_mb": m.size_vram_mb, "cpu_offload": m.partially_on_cpu}
+                {
+                    "name": m.name,
+                    "size_mb": m.size_mb,
+                    "size_vram_mb": m.size_vram_mb,
+                    "cpu_offload": m.partially_on_cpu,
+                }
                 for m in host.loaded_models
             ],
             "batch_window": self.is_batch_window(),
