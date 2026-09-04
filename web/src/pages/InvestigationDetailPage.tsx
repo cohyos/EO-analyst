@@ -33,7 +33,7 @@ export function InvestigationDetailPage() {
   if (isLoading) return <LoadingState label="טוען חקירה…" />;
   if (isError || !data) return <ErrorState onRetry={() => refetch()} message="החקירה לא נמצאה" />;
 
-  const allLog = [...data.log, ...liveLines];
+  const allLog = [...(data.log ?? []), ...liveLines];
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
@@ -90,7 +90,10 @@ export function InvestigationDetailPage() {
         <section aria-label="תשובה סופית" className="rounded-lg border border-border bg-bg-raised p-4">
           <h3 className="mb-2 text-sm font-semibold text-fg-dim">תשובה</h3>
           <bdi className="block text-sm leading-relaxed" dir="auto">
-            <CitationText text={data.answer.answer_he} citations={data.answer.sources} />
+            <CitationText
+              text={data.answer.answer_he ?? ""}
+              citations={data.answer.sources ?? []}
+            />
           </bdi>
         </section>
       )}

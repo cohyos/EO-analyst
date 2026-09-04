@@ -38,7 +38,7 @@ export function EntityGraph({
     const cy = cytoscape({
       container: containerRef.current,
       elements: [
-        ...graph.nodes.map((n) => ({
+        ...(graph.nodes ?? []).map((n) => ({
           data: {
             id: String(n.id),
             label: n.name,
@@ -46,7 +46,7 @@ export function EntityGraph({
             focus: n.id === focusEntityId,
           },
         })),
-        ...graph.edges.map((e, i) => ({
+        ...(graph.edges ?? []).map((e, i) => ({
           data: {
             id: `e${i}`,
             source: String(e.src),

@@ -71,7 +71,8 @@ models:              # roles -> keys in models.yaml (decided by bake-off, ADR-00
 
 searxng:
   url: http://searxng:8080
-  engines: []   # empty = let SearXNG use all enabled engines (config/searxng/settings.yml)
+  engines: [google, bing, "bing news", "google news"]   # verified 2026-09-04; ddg/brave/startpage get CAPTCHA-suspended
+  engines_by_lang: { zh: [baidu, google], ru: [yandex, google], he: [google, "google news", bing] }
   rate_limit_per_minute: 20
 
 fetch:

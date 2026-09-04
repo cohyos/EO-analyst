@@ -10,6 +10,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { api } from "@/api";
+import { ZERO_NIGHT_SUMMARY } from "@/api/normalize";
 import { StatTile } from "@/components/StatTile";
 import { LevelBadge } from "@/components/LevelBadge";
 import { LoadingState, ErrorState, EmptyState } from "@/components/states";
@@ -33,7 +34,10 @@ export function MorningPage() {
   if (isError) return <ErrorState onRetry={() => refetch()} />;
   if (!data) return null;
 
-  const { report, headlines, open_points, night_summary } = data;
+  const report = data.report ?? null;
+  const headlines = data.headlines ?? [];
+  const open_points = data.open_points ?? [];
+  const night_summary = data.night_summary ?? ZERO_NIGHT_SUMMARY;
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-6">
@@ -84,32 +88,36 @@ export function MorningPage() {
           <div
             className="report-body text-sm text-fg"
             dangerouslySetInnerHTML={{
-              __html: linkifyReportCitations(report.html, report.items_included),
+              __html: linkifyReportCitations(report.html ?? "", report.items_included ?? []),
             }}
           />
         </section>
       ) : (
-        <EmptyState title="עדיין אין דוח בוקר" description="הריצה הלילית טרם הושלמה." />
+        <EmptyState title="אין ריצה לילית עדיין" description="הריצה הלילית טרם הושלמה." />
       )}
 
       <section aria-label="כותרות עיקריות">
         <h2 className="mb-2 text-sm font-semibold text-fg-dim">3 כותרות</h2>
-        <ul className="space-y-2">
-          {headlines.map((h) => (
-            <li key={h.item_id}>
-              <Link
-                to={`/feed?open=${h.item_id}`}
-                className="flex items-center gap-3 rounded-lg border border-border bg-bg-raised p-3 hover:border-border-strong"
-              >
-                <LevelBadge level={h.level} size="sm" />
-                <div className="min-w-0 flex-1">
-                  <bdi className="block truncate font-medium">{h.title}</bdi>
-                  <bdi className="block truncate text-sm text-fg-muted">{h.summary_he}</bdi>
-                </div>
-              </Link>
-            </li>
-          ))}
-        </ul>
+        {headlines.length === 0 ? (
+          <EmptyState title="אין פריטים" description="לא נמצאו כותרות מהריצה האחרונה." />
+        ) : (
+          <ul className="space-y-2">
+            {headlines.map((h) => (
+              <li key={h.item_id}>
+                <Link
+                  to={`/feed?open=${h.item_id}`}
+                  className="flex items-center gap-3 rounded-lg border border-border bg-bg-raised p-3 hover:border-border-strong"
+                >
+                  <LevelBadge level={h.level ?? "yellow"} size="sm" />
+                  <div className="min-w-0 flex-1">
+                    <bdi className="block truncate font-medium">{h.title}</bdi>
+                    <bdi className="block truncate text-sm text-fg-muted">{h.summary_he}</bdi>
+                  </div>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section aria-label="מה דורש הכרעה">

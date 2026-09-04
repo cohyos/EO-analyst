@@ -137,6 +137,8 @@ def _tool_search(inv: Investigation, budget: Budget, query: str, lang: str, roun
         return json.dumps({"error": "query budget exhausted"})
     budget.queries += 1
     resp = search(query, lang, max_results=8)
+    if not resp.hits and '"' in query:  # over-quoted queries return nothing; retry unquoted once
+        resp = search(query.replace('"', ""), lang, max_results=8)
     for h in resp.hits:
         inv.hits_seen.setdefault(h.url, h)
     _log(

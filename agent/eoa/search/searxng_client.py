@@ -92,8 +92,9 @@ def search(
     }
     if time_range:
         params["time_range"] = time_range
-    if engines or s.engines:
-        params["engines"] = ",".join(engines or s.engines)
+    chosen = engines or s.engines_by_lang.get(lang) or s.engines
+    if chosen:
+        params["engines"] = ",".join(chosen)
     try:
         r = httpx.get(
             f"{settings().searxng_url.rstrip('/')}/search",

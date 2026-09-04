@@ -41,6 +41,9 @@ export function EntityDetailPage() {
     return <ErrorState onRetry={() => entityQuery.refetch()} message="הישות לא נמצאה" />;
 
   const entity = entityQuery.data;
+  const aliases = entity.aliases ?? [];
+  const timeline = entity.timeline ?? [];
+  const neighbors = entity.neighbors ?? [];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-4 md:p-6">
@@ -55,9 +58,9 @@ export function EntityDetailPage() {
             </span>
           </div>
           {entity.focus && <bdi className="block text-sm text-fg-muted">{entity.focus}</bdi>}
-          {entity.aliases.length > 0 && (
+          {aliases.length > 0 && (
             <bdi className="block text-xs text-fg-dim">
-              כינויים: {entity.aliases.join(", ")}
+              כינויים: {aliases.join(", ")}
             </bdi>
           )}
         </div>
@@ -103,11 +106,11 @@ export function EntityDetailPage() {
       <div className="grid gap-6 md:grid-cols-2">
         <section aria-label="ציר זמן">
           <h3 className="mb-2 text-sm font-semibold text-fg-dim">ציר זמן</h3>
-          {entity.timeline.length === 0 ? (
+          {timeline.length === 0 ? (
             <EmptyState title="אין אירועים בציר הזמן" />
           ) : (
             <ol className="space-y-2 border-r-2 border-border ps-4">
-              {entity.timeline.map((t) => (
+              {timeline.map((t) => (
                 <li key={`${t.kind}-${t.id}`} className="relative">
                   <span className="absolute -end-[1.15rem] top-1.5 h-2 w-2 rounded-full bg-accent" />
                   <Link
@@ -127,11 +130,11 @@ export function EntityDetailPage() {
 
         <section aria-label="ישויות שכנות">
           <h3 className="mb-2 text-sm font-semibold text-fg-dim">שכנים</h3>
-          {entity.neighbors.length === 0 ? (
+          {neighbors.length === 0 ? (
             <EmptyState title="אין ישויות שכנות" />
           ) : (
             <ul className="space-y-1.5">
-              {entity.neighbors.map((n, i) => (
+              {neighbors.map((n, i) => (
                 <li key={i}>
                   <Link
                     to={`/entities/${n.entity_id}`}

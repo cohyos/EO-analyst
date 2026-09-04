@@ -89,6 +89,7 @@ class OllamaCfg(BaseModel):
 class SearxngCfg(BaseModel):
     url: str = "http://searxng:8080"
     engines: list[str] = []
+    engines_by_lang: dict[str, list[str]] = {}
     rate_limit_per_minute: int = 20
 
 

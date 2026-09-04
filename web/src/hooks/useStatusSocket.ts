@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { StatusResponse, StatusWsMessage } from "@/types/api";
 import { USE_MOCKS } from "@/api";
+import { normalizeStatus } from "@/api/normalize";
 import { mockStatus } from "@/mocks/data/misc";
 
 export interface StatusSocketState {
@@ -26,10 +27,10 @@ export function useStatusSocket(): StatusSocketState {
 
     if (USE_MOCKS) {
       setConnected(true);
-      setStatus(mockStatus());
+      setStatus(normalizeStatus(mockStatus()));
       const interval = setInterval(() => {
         if (cancelled) return;
-        setStatus(mockStatus());
+        setStatus(normalizeStatus(mockStatus()));
       }, 2000);
       const logInterval = setInterval(() => {
         if (cancelled) return;
@@ -75,7 +76,7 @@ export function useStatusSocket(): StatusSocketState {
               ),
             );
           } else {
-            setStatus(data as StatusResponse);
+            setStatus(normalizeStatus(data as Partial<StatusResponse>));
           }
         } catch {
           // ignore malformed frame

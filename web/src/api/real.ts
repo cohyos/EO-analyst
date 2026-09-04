@@ -23,6 +23,7 @@ import type {
   TriageLevel,
 } from "@/types/api";
 import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery } from "./types";
+import { arr, bool, normalizeNightSummary, num, str } from "./normalize";
 
 class ApiError extends Error {
   code: string;
@@ -68,11 +69,214 @@ function qs(params: Record<string, string | number | undefined>): string {
   return s ? `?${s}` : "";
 }
 
-export const realApi: ApiClient = {
-  getMorning: () => request<MorningResponse>("/api/morning"),
+// --- Normalizers ------------------------------------------------------
+// The backend can return partial rows (empty DB, mid-ingest, a field the
+// pipeline hasn't populated yet). These coerce every nullable-in-practice
+// field into the shape web/src/types/api.ts + the pages expect, so no page
+// component needs to special-case a missing array or object.
 
-  getItems: (query: ItemsQuery) =>
-    request<ItemsResponse>(
+function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    title: str(r.title),
+    url: str(r.url),
+    source_name: str(r.source_name),
+    published_at: r.published_at ?? null,
+    lang: str(r.lang),
+    domain: str(r.domain),
+    subdomain: r.subdomain ?? null,
+    report_kind: str(r.report_kind),
+    trl: r.trl ?? null,
+    geography: r.geography ?? null,
+    score: num(r.score),
+    level: (r.level ?? "yellow") as TriageLevel,
+    triage_reason: r.triage_reason ?? null,
+    summary_he: r.summary_he ?? null,
+    so_what_he: r.so_what_he ?? null,
+    entities_mentioned: arr(r.entities_mentioned),
+    tags: arr(r.tags),
+    security_status: r.security_status ?? "clean",
+    dedup_of: r.dedup_of ?? null,
+    key_facts: arr(r.key_facts),
+  };
+}
+
+function normalizeItemDetail(raw: Partial<ItemDetail> | null | undefined): ItemDetail {
+  const r = raw ?? {};
+  return {
+    ...normalizeItemCard(r),
+    clean_text: str(r.clean_text),
+    events: arr(r.events),
+    edges: arr(r.edges),
+    investigations: arr(r.investigations).map(normalizeInvestigationSummary),
+  };
+}
+
+function normalizeEntitySummary(raw: Partial<EntitySummary> | null | undefined): EntitySummary {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    name: str(r.name),
+    kind: str(r.kind),
+    country: r.country ?? null,
+    aliases: arr(r.aliases),
+    focus: r.focus ?? null,
+    item_count: num(r.item_count),
+    last_seen: r.last_seen ?? null,
+  };
+}
+
+function normalizeEntityDetail(raw: Partial<EntityDetail> | null | undefined): EntityDetail {
+  const r = raw ?? {};
+  return {
+    ...normalizeEntitySummary(r),
+    timeline: arr(r.timeline),
+    neighbors: arr(r.neighbors),
+  };
+}
+
+function normalizeGraph(raw: Partial<GraphResponse> | null | undefined): GraphResponse {
+  const r = raw ?? {};
+  return { nodes: arr(r.nodes), edges: arr(r.edges) };
+}
+
+function normalizeInvestigationSummary(
+  raw: Partial<InvestigationSummary> | null | undefined,
+): InvestigationSummary {
+  const r = raw ?? {};
+  return {
+    job_id: str(r.job_id),
+    item_id: r.item_id ?? null,
+    question: str(r.question),
+    state: r.state ?? "not_found",
+    rounds: num(r.rounds),
+    queries: num(r.queries),
+    pages_read: num(r.pages_read),
+    outcome: r.outcome ?? null,
+    started_at: r.started_at ?? null,
+    finished_at: r.finished_at ?? null,
+  };
+}
+
+function normalizeInvestigationDetail(
+  raw: Partial<InvestigationDetail> | null | undefined,
+): InvestigationDetail {
+  const r = raw ?? {};
+  return {
+    ...normalizeInvestigationSummary(r),
+    log: arr(r.log),
+    answer: r.answer
+      ? {
+          answer_he: str(r.answer.answer_he),
+          sources: arr(r.answer.sources),
+          outcome: str(r.answer.outcome),
+        }
+      : null,
+  };
+}
+
+function normalizeReportSummary(raw: Partial<ReportSummary> | null | undefined): ReportSummary {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    kind: str(r.kind),
+    period_start: str(r.period_start),
+    period_end: str(r.period_end),
+    path_docx: r.path_docx ?? null,
+    path_md: r.path_md ?? null,
+    path_html: r.path_html ?? null,
+    qa_passed: bool(r.qa_passed),
+    created_at: str(r.created_at),
+    headline_count: num(r.headline_count),
+  };
+}
+
+function normalizeReportDetail(raw: Partial<ReportDetail> | null | undefined): ReportDetail {
+  const r = raw ?? {};
+  return {
+    ...normalizeReportSummary(r),
+    html: str(r.html),
+    open_points: arr(r.open_points),
+    items_included: arr(r.items_included),
+  };
+}
+
+function normalizeConference(raw: Partial<Conference> | null | undefined): Conference {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    name: str(r.name),
+    location: r.location ?? null,
+    starts_at: str(r.starts_at),
+    ends_at: str(r.ends_at),
+    url: r.url ?? null,
+    relevance_he: r.relevance_he ?? null,
+  };
+}
+
+function normalizeClarification(raw: Partial<Clarification> | null | undefined): Clarification {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    kind: str(r.kind),
+    question: str(r.question),
+    options: r.options ?? null,
+    answer: r.answer ?? null,
+    asked_at: str(r.asked_at),
+    timeout_at: r.timeout_at ?? null,
+    assumed: bool(r.assumed),
+  };
+}
+
+function normalizeSurvey(raw: Partial<Survey> | null | undefined): Survey {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    report_id: r.report_id ?? null,
+    questions: arr(r.questions),
+    answers: r.answers ?? null,
+  };
+}
+
+function normalizeLesson(raw: Partial<Lesson> | null | undefined): Lesson {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    kind: str(r.kind),
+    text: str(r.text),
+    active: bool(r.active),
+    created_at: str(r.created_at),
+  };
+}
+
+function normalizeJob(raw: Partial<Job> | null | undefined): Job {
+  const r = raw ?? {};
+  return {
+    id: str(r.id),
+    scope: str(r.scope),
+    mode: (r.mode ?? "eco") as Job["mode"],
+    state: (r.state ?? "queued") as Job["state"],
+    created_at: str(r.created_at),
+    started_at: r.started_at ?? null,
+    finished_at: r.finished_at ?? null,
+    progress: r.progress ?? null,
+  };
+}
+
+export const realApi: ApiClient = {
+  getMorning: async () => {
+    const data = await request<Partial<MorningResponse>>("/api/morning");
+    return {
+      report: data?.report ? normalizeReportDetail(data.report) : null,
+      headlines: arr(data?.headlines),
+      open_points: arr(data?.open_points),
+      night_summary: normalizeNightSummary(data?.night_summary),
+    };
+  },
+
+  getItems: async (query: ItemsQuery) => {
+    const data = await request<Partial<ItemsResponse>>(
       `/api/items${qs({
         level: query.level?.join(","),
         domain: query.domain,
@@ -82,39 +286,58 @@ export const realApi: ApiClient = {
         page_size: query.page_size,
         sort: query.sort,
       })}`,
+    );
+    const items = arr(data?.items).map(normalizeItemCard);
+    return { total: num(data?.total, items.length), items };
+  },
+  getItem: async (id: number) =>
+    normalizeItemDetail(await request<Partial<ItemDetail>>(`/api/items/${id}`)),
+  postItemFeedback: async (id, body) =>
+    normalizeItemCard(
+      await request<Partial<ItemCard>>(`/api/items/${id}/feedback`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
     ),
-  getItem: (id: number) => request<ItemDetail>(`/api/items/${id}`),
-  postItemFeedback: (id, body) =>
-    request<ItemCard>(`/api/items/${id}/feedback`, {
+  postItemInvestigate: async (id, body) => {
+    const data = await request<{ job_id?: string }>(`/api/items/${id}/investigate`, {
       method: "POST",
       body: JSON.stringify(body),
-    }),
-  postItemInvestigate: (id, body) =>
-    request<{ job_id: string }>(`/api/items/${id}/investigate`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+    });
+    return { job_id: str(data?.job_id) };
+  },
 
-  getEntities: (query: EntitiesQuery) =>
-    request<EntitySummary[]>(
+  getEntities: async (query: EntitiesQuery) => {
+    const data = await request<Partial<EntitySummary>[] | null>(
       `/api/entities${qs({ q: query.q, kind: query.kind, limit: query.limit })}`,
+    );
+    return arr(data).map(normalizeEntitySummary);
+  },
+  getEntity: async (id: number) =>
+    normalizeEntityDetail(await request<Partial<EntityDetail>>(`/api/entities/${id}`)),
+  getGraph: async (query: GraphQuery) =>
+    normalizeGraph(
+      await request<Partial<GraphResponse>>(
+        `/api/graph${qs({
+          entity_id: query.entity_id,
+          depth: query.depth,
+          labels: query.labels,
+        })}`,
+      ),
     ),
-  getEntity: (id: number) => request<EntityDetail>(`/api/entities/${id}`),
-  getGraph: (query: GraphQuery) =>
-    request<GraphResponse>(
-      `/api/graph${qs({
-        entity_id: query.entity_id,
-        depth: query.depth,
-        labels: query.labels,
-      })}`,
-    ),
-  getGraphNamedQuery: (name: string, arg: string) =>
-    request<unknown[]>(`/api/graph/query${qs({ name, arg })}`),
+  getGraphNamedQuery: async (name: string, arg: string) =>
+    arr(await request<unknown[] | null>(`/api/graph/query${qs({ name, arg })}`)),
 
-  getInvestigations: (limit = 20) =>
-    request<InvestigationSummary[]>(`/api/investigations${qs({ limit })}`),
-  getInvestigation: (jobId: string) =>
-    request<InvestigationDetail>(`/api/investigations/${jobId}`),
+  getInvestigations: async (limit = 20) =>
+    arr(
+      await request<Partial<InvestigationSummary>[] | null>(
+        `/api/investigations${qs({ limit })}`,
+      ),
+    ).map(normalizeInvestigationSummary),
+  getInvestigation: async (jobId: string) =>
+    normalizeInvestigationDetail(
+      await request<Partial<InvestigationDetail>>(`/api/investigations/${jobId}`),
+    ),
   postInvestigationStop: (jobId: string) =>
     request<void>(`/api/investigations/${jobId}/stop`, { method: "POST" }),
 
@@ -147,9 +370,14 @@ export const realApi: ApiClient = {
             if (!dataLine) continue;
             const json = dataLine.slice(5).trim();
             if (!json) continue;
-            const evt = JSON.parse(json) as AskSseEvent;
-            if (evt.type === "token") handlers.onToken(evt.text);
-            else if (evt.type === "citations") handlers.onCitations(evt.items);
+            let evt: AskSseEvent;
+            try {
+              evt = JSON.parse(json) as AskSseEvent;
+            } catch {
+              continue; // ignore malformed SSE frame rather than crashing the stream
+            }
+            if (evt.type === "token") handlers.onToken(str(evt.text));
+            else if (evt.type === "citations") handlers.onCitations(arr(evt.items));
             else if (evt.type === "done") handlers.onDone();
           }
         }
@@ -161,48 +389,73 @@ export const realApi: ApiClient = {
     return () => controller.abort();
   },
 
-  getConferences: (from, to) =>
-    request<Conference[]>(`/api/conferences${qs({ from, to })}`),
+  getConferences: async (from, to) =>
+    arr(await request<Partial<Conference>[] | null>(`/api/conferences${qs({ from, to })}`)).map(
+      normalizeConference,
+    ),
   getConferencesIcalUrl: () => "/api/conferences/ical",
 
-  getClarifications: (open = true) =>
-    request<Clarification[]>(`/api/clarifications${qs({ open: open ? "true" : "false" })}`),
+  getClarifications: async (open = true) =>
+    arr(
+      await request<Partial<Clarification>[] | null>(
+        `/api/clarifications${qs({ open: open ? "true" : "false" })}`,
+      ),
+    ).map(normalizeClarification),
   postClarificationAnswer: (id, answer) =>
     request<void>(`/api/clarifications/${id}/answer`, {
       method: "POST",
       body: JSON.stringify({ answer }),
     }),
-  getLatestSurvey: () => request<Survey>("/api/surveys/latest"),
+  getLatestSurvey: async () =>
+    normalizeSurvey(await request<Partial<Survey>>("/api/surveys/latest")),
   postSurveyAnswers: (id, answers) =>
     request<void>(`/api/surveys/${id}/answers`, {
       method: "POST",
       body: JSON.stringify({ answers }),
     }),
-  getLessons: () => request<Lesson[]>("/api/lessons"),
-  postLesson: (kind, text) =>
-    request<Lesson>("/api/lessons", { method: "POST", body: JSON.stringify({ kind, text }) }),
+  getLessons: async () =>
+    arr(await request<Partial<Lesson>[] | null>("/api/lessons")).map(normalizeLesson),
+  postLesson: async (kind, text) =>
+    normalizeLesson(
+      await request<Partial<Lesson>>("/api/lessons", {
+        method: "POST",
+        body: JSON.stringify({ kind, text }),
+      }),
+    ),
   deleteLesson: (id) => request<void>(`/api/lessons/${id}`, { method: "DELETE" }),
 
-  getJobs: (state, limit = 50) =>
-    request<Job[]>(`/api/jobs${qs({ state, limit })}`),
-  postRun: (scope, mode) =>
-    request<{ job_id: string }>("/api/run", {
+  getJobs: async (state, limit = 50) =>
+    arr(await request<Partial<Job>[] | null>(`/api/jobs${qs({ state, limit })}`)).map(
+      normalizeJob,
+    ),
+  postRun: async (scope, mode) => {
+    const data = await request<{ job_id?: string }>("/api/run", {
       method: "POST",
       body: JSON.stringify({ scope, mode }),
-    }),
+    });
+    return { job_id: str(data?.job_id) };
+  },
   postJobCancel: (id) => request<void>(`/api/jobs/${id}/cancel`, { method: "POST" }),
 
-  getReports: (kind, limit = 30) =>
-    request<ReportSummary[]>(`/api/reports${qs({ kind, limit })}`),
-  getReport: (id) => request<ReportDetail>(`/api/reports/${id}`),
+  getReports: async (kind, limit = 30) =>
+    arr(
+      await request<Partial<ReportSummary>[] | null>(`/api/reports${qs({ kind, limit })}`),
+    ).map(normalizeReportSummary),
+  getReport: async (id) =>
+    normalizeReportDetail(await request<Partial<ReportDetail>>(`/api/reports/${id}`)),
   getReportFileUrl: (id, fmt) => `/api/reports/${id}/file?fmt=${fmt}`,
 
-  getSettings: (name: SettingsName) => request<SettingsGetResponse>(`/api/settings/${name}`),
-  putSettings: (name: SettingsName, yaml: string) =>
-    request<SettingsPutResponse>(`/api/settings/${name}`, {
+  getSettings: async (name: SettingsName) => {
+    const data = await request<Partial<SettingsGetResponse>>(`/api/settings/${name}`);
+    return { yaml: str(data?.yaml) };
+  },
+  putSettings: async (name: SettingsName, yaml: string) => {
+    const data = await request<Partial<SettingsPutResponse>>(`/api/settings/${name}`, {
       method: "PUT",
       body: JSON.stringify({ yaml }),
-    }),
+    });
+    return { ok: bool(data?.ok), errors: arr(data?.errors) };
+  },
 };
 
 export type { TriageLevel };

@@ -45,7 +45,12 @@ export function ReportsPage() {
   const processed = useMemo(
     () =>
       detailQuery.data
-        ? addHeadingIds(linkifyReportCitations(detailQuery.data.html, detailQuery.data.items_included))
+        ? addHeadingIds(
+            linkifyReportCitations(
+              detailQuery.data.html ?? "",
+              detailQuery.data.items_included ?? [],
+            ),
+          )
         : null,
     [detailQuery.data],
   );
@@ -85,7 +90,7 @@ export function ReportsPage() {
                   {KIND_LABEL[r.kind] ?? r.kind} — {formatDate(r.period_end)}
                 </span>
                 <span className="text-xs text-fg-dim">
-                  {r.headline_count} כותרות · {r.qa_passed ? "QA עבר" : "QA נכשל"}
+                  {r.headline_count ?? 0} כותרות · {r.qa_passed ? "QA עבר" : "QA נכשל"}
                 </span>
               </button>
             </li>

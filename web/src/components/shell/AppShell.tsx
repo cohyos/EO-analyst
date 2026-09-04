@@ -1,16 +1,18 @@
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { useEffect } from "react";
 import { NavRail } from "./NavRail";
 import { TopBar } from "./TopBar";
 import { StatusStrip } from "./StatusStrip";
 import { ChatPanel } from "./ChatPanel";
 import { CommandPalette } from "./CommandPalette";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useStatusSocket } from "@/hooks/useStatusSocket";
 import { useUiStore } from "@/store/uiStore";
 
 export function AppShell() {
   const statusState = useStatusSocket();
   const theme = useUiStore((s) => s.theme);
+  const location = useLocation();
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -23,7 +25,9 @@ export function AppShell() {
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar nightWindow={statusState.status?.pipeline.night_window ?? false} />
           <main className="min-h-0 flex-1 overflow-y-auto bg-bg">
-            <Outlet />
+            <ErrorBoundary key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
           </main>
         </div>
         <ChatPanel />

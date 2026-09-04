@@ -79,6 +79,9 @@ export function InboxPage() {
       <section aria-label="שאלון יומי">
         <h2 className="mb-2 text-sm font-semibold text-fg-dim">שאלון יומי</h2>
         {surveyQuery.isLoading && <LoadingState label="טוען שאלון…" />}
+        {!surveyQuery.isLoading && !surveyQuery.data && (
+          <EmptyState title="אין שאלון זמין" description="השאלון היומי טרם נוצר." />
+        )}
         {surveyQuery.data && !surveySubmitted && (
           <form
             onSubmit={(e) => {
@@ -87,7 +90,7 @@ export function InboxPage() {
             }}
             className="space-y-4 rounded-lg border border-border bg-bg-raised p-3"
           >
-            {surveyQuery.data.questions.map((q) => (
+            {(surveyQuery.data.questions ?? []).map((q) => (
               <div key={q.id}>
                 <label className="mb-1 block text-sm" htmlFor={`q-${q.id}`}>
                   {q.text_he}

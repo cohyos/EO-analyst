@@ -6,10 +6,15 @@
  * as a 1-based index into `items_included` — the same convention the report
  * builder uses when emitting `[n]` while walking that list.
  */
-export function linkifyReportCitations(html: string, itemsIncluded: number[]): string {
-  return html.replace(/\[(\d+)\]/g, (match, nStr) => {
+export function linkifyReportCitations(
+  html: string | null | undefined,
+  itemsIncluded: number[] | null | undefined,
+): string {
+  const safeHtml = html ?? "";
+  const items = itemsIncluded ?? [];
+  return safeHtml.replace(/\[(\d+)\]/g, (match, nStr) => {
     const n = Number(nStr);
-    const itemId = itemsIncluded[n - 1];
+    const itemId = items[n - 1];
     if (!itemId) return match;
     return `<a class="eo-citation" href="/feed?open=${itemId}" title="פתח פריט מקור ${n}">${match}</a>`;
   });

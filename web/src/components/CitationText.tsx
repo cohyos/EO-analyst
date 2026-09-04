@@ -22,8 +22,8 @@ export function CitationText({
   citations: CitationLike[];
   onOpenItem?: (itemId: number) => void;
 }) {
-  const byN = new Map(citations.map((c) => [c.n, c]));
-  const parts = text.split(/(\[\d+\])/g);
+  const byN = new Map((citations ?? []).map((c) => [c.n, c]));
+  const parts = (text ?? "").split(/(\[\d+\])/g);
 
   return (
     <span>

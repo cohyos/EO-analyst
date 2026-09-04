@@ -45,8 +45,14 @@ export function SettingsPage() {
   const save = useMutation({
     mutationFn: () => api.putSettings(tab, draft),
     onSuccess: (res) => {
-      setSaveResult(res);
+      setSaveResult({ ok: res.ok, errors: res.errors ?? [] });
       if (res.ok) queryClient.invalidateQueries({ queryKey: ["settings", tab] });
+    },
+    onError: (err: unknown) => {
+      setSaveResult({
+        ok: false,
+        errors: [err instanceof Error ? err.message : "שגיאת שמירה לא ידועה"],
+      });
     },
   });
 
@@ -145,7 +151,7 @@ export function SettingsPage() {
                 <span className={cn("text-sm", saveResult.ok ? "text-ok" : "text-danger")}>
                   {saveResult.ok
                     ? "נשמר בהצלחה"
-                    : `שגיאות: ${saveResult.errors.join("; ")}`}
+                    : `שגיאות: ${(saveResult.errors ?? []).join("; ") || "שגיאה לא ידועה"}`}
                 </span>
               )}
             </div>

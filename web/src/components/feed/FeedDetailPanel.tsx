@@ -24,6 +24,8 @@ export function FeedDetailPanel({
 }) {
   const [showWhy, setShowWhy] = useState(false);
   const queryClient = useQueryClient();
+  const keyFacts = item.key_facts ?? [];
+  const entitiesMentioned = item.entities_mentioned ?? [];
 
   const feedback = useMutation({
     mutationFn: (level: TriageLevel) => api.postItemFeedback(item.id, { user_level: level, comment: null }),
@@ -114,11 +116,11 @@ export function FeedDetailPanel({
           </section>
         )}
 
-        {item.key_facts.length > 0 && (
+        {keyFacts.length > 0 && (
           <section>
             <h3 className="mb-1 text-xs font-semibold text-fg-dim">עובדות מפתח</h3>
             <ul className="list-disc space-y-1 ps-4 text-sm text-fg">
-              {item.key_facts.map((f, i) => (
+              {keyFacts.map((f, i) => (
                 <li key={i}>
                   <bdi>{f}</bdi>
                 </li>
@@ -127,11 +129,11 @@ export function FeedDetailPanel({
           </section>
         )}
 
-        {item.entities_mentioned.length > 0 && (
+        {entitiesMentioned.length > 0 && (
           <section>
             <h3 className="mb-1 text-xs font-semibold text-fg-dim">ישויות מוזכרות</h3>
             <div className="flex flex-wrap gap-1.5">
-              {item.entities_mentioned.map((e) => (
+              {entitiesMentioned.map((e) => (
                 <span
                   key={e}
                   className="rounded-full bg-bg-sunken px-2 py-0.5 text-xs text-fg-muted"

@@ -152,7 +152,7 @@ export function FeedPage() {
       <div className="flex min-w-0 flex-1 flex-col">
         <FeedFilters value={filters} onChange={setFilters} />
         <div className="border-b border-border bg-bg-raised px-3 py-1.5 text-xs text-fg-dim">
-          {data ? `${data.total} פריטים` : "…"} · ניווט: J/K · דרג: 1-4 · X ארכיון · Enter פרטים · I חקור · A הוסף להקשר
+          {data ? `${data.total ?? items.length} פריטים` : "…"} · ניווט: J/K · דרג: 1-4 · X ארכיון · Enter פרטים · I חקור · A הוסף להקשר
         </div>
 
         {isLoading && <LoadingState label="טוען פיד…" />}
