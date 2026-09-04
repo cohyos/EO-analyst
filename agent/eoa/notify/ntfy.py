@@ -50,6 +50,8 @@ def send(
     if actions:
         headers["Actions"] = "; ".join(_fmt_action(a) for a in actions)
     last_url = ""
+    first: Sent | None = None
+    mirror = settings().notify.mirror_to_public
     for i, (base, topic) in enumerate(_targets()):
         if i == 1 and not to_public_fallback:
             break
@@ -69,11 +71,14 @@ def send(
                     else None
                 )
                 log.info("ntfy_sent", url=url, title=title[:60])
-                return Sent(True, mid, url)
+                if i == 0 and mirror and to_public_fallback and len(_targets()) > 1:
+                    first = Sent(True, mid, url)
+                    continue  # also deliver to the public topic (phone not yet subscribed to self-hosted)
+                return first or Sent(True, mid, url)
             log.warning("ntfy_http_error", url=url, status=r.status_code)
         except Exception as exc:
             log.warning("ntfy_failed", url=url, error=str(exc)[:120])
-    return Sent(False, None, last_url)
+    return first or Sent(False, None, last_url)
 
 
 def _fmt_action(a: dict[str, Any]) -> str:
