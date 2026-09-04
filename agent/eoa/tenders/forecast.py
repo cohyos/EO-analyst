@@ -241,6 +241,12 @@ def _llm_rationale(
             {"role": "user", "content": prompt},
         ],
         task="classify",
+        # config.yaml's "classify" task caps num_predict at 700 tokens, sized for the short
+        # ClassifyOut/TriageOut/ConferenceExtract-style schemas that share this task tag -- a
+        # Hebrew rationale_he sentence plus JSON overhead can exceed that mid-string, producing
+        # invalid/truncated JSON (observed live). Raise the cap for this call only; every other
+        # "classify"-task caller is unaffected since this is a per-call override, not a config edit.
+        options={"num_predict": 1400},
     )
     return out.rationale_he
 

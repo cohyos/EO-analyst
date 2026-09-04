@@ -21,7 +21,7 @@ test.describe("Settings screen (/settings)", () => {
 
   test(
     "a no-op save (writing the same YAML back) fires PUT and shows success or a validation error",
-    async ({ page }) => {
+    async ({ page }, testInfo) => {
       await page.goto("/settings");
       await page.getByRole("tab", { name: "config", exact: true }).click();
       const textarea = page.getByLabel("עריכת config.yaml");
@@ -37,7 +37,17 @@ test.describe("Settings screen (/settings)", () => {
         ),
         saveBtn.click(),
       ]);
-      expect(response.status()).toBeLessThan(500);
+
+      if (response.status() >= 500) {
+        const body = await response.text().catch(() => "(unreadable body)");
+        await recordFinding(page, testInfo, {
+          screen: "Settings (/settings)",
+          expected: "PUT /api/settings/config succeeds (2xx) or returns a client-side validation error (4xx) for a no-op save",
+          actual: `Server returned ${response.status()}: ${body}`,
+          severity: "critical",
+        });
+      }
+      expect(response.status(), "PUT /api/settings/config should not 5xx on a no-op save").toBeLessThan(500);
 
       const success = page.getByText("נשמר בהצלחה");
       const failure = page.getByText(/^שגיאות:/);

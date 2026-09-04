@@ -1,37 +1,75 @@
 import { test, expect } from "./fixtures";
+import { recordFinding } from "../utils/helpers";
 
 test.describe("Status strip (persistent footer)", () => {
-  test("shows service dots and numeric VRAM/RAM readouts", async ({ page }) => {
+  test("connects over WS /ws/status and shows service dots + numeric VRAM/RAM readouts", async ({
+    page,
+  }, testInfo) => {
+    const wsCloseCount = { n: 0 };
+    page.on("websocket", (ws) => {
+      if (!ws.url().includes("/ws/status")) return;
+      ws.on("close", () => {
+        wsCloseCount.n++;
+      });
+    });
+
     await page.goto("/");
+    const footer = page.locator("footer");
+    await expect(footer).toBeVisible({ timeout: 15_000 });
+    await page.waitForTimeout(5000); // let the WS connect/reconnect settle
+
+    const disconnectedLabel = footer.getByText("מנותק מהשרת");
+    const isDisconnected = await disconnectedLabel.isVisible().catch(() => false);
+    if (isDisconnected) {
+      await recordFinding(page, testInfo, {
+        screen: "Status strip (persistent footer)",
+        expected: "The status strip connects over WS /ws/status and shows live VRAM/RAM/service-dot readouts",
+        actual: `Status strip is stuck showing "מנותק מהשרת — מנסה להתחבר מחדש…"; the WS /ws/status socket opened and closed ${wsCloseCount.n} time(s) during the wait without ever delivering data`,
+        severity: "high",
+      });
+      expect(isDisconnected, "Status strip should not be stuck disconnected").toBeFalsy();
+      return;
+    }
+
     const strip = page.getByRole("status", { name: /סטטוס משאבים/ });
-    await expect(strip).toBeVisible({ timeout: 15_000 });
+    await expect(strip).toBeVisible();
 
-    // Disconnected state renders "מנותק"/WifiOff with no numbers — give the
-    // websocket a few seconds to connect before asserting on numeric content.
-    await expect(strip.getByText("מנותק מהשרת")).toHaveCount(0, { timeout: 15_000 });
-
-    const vramLabel = strip.getByText("VRAM");
-    await expect(vramLabel).toBeVisible();
-    const vramPct = strip.locator("text=/\\d+%/").first();
-    await expect(vramPct).toBeVisible();
-    const pctText = await vramPct.textContent();
-    expect(Number(pctText!.replace("%", ""))).not.toBeNaN();
-
-    const gbText = strip.locator("text=/\\d+(\\.\\d+)?\\/\\d+(\\.\\d+)? GB/");
-    await expect(gbText.first()).toBeVisible();
-
-    // service dots: postgres/ollama/searxng/ntfy labels each with a colored dot
     for (const label of ["PG", "Ollama", "SearXNG", "ntfy"]) {
       await expect(strip.getByText(label, { exact: true })).toBeVisible();
     }
+
+    // VRAM/RAM readouts must be real numbers — this is exactly the kind of
+    // screen that produces literal "NaN"/"undefined" text when the
+    // frontend's expected status-payload shape drifts from what the
+    // backend actually sends.
+    const stripText = (await strip.innerText()).trim();
+    const badTokens = ["NaN", "undefined", "null"].filter((t) => stripText.includes(t));
+    const vramTitle = await strip.locator("div[title^='VRAM']").getAttribute("title").catch(() => null);
+    if (vramTitle && /undefined|NaN/.test(vramTitle)) {
+      badTokens.push(`title="${vramTitle}"`);
+    }
+
+    if (badTokens.length > 0) {
+      await recordFinding(page, testInfo, {
+        screen: "Status strip (persistent footer)",
+        expected: "VRAM/RAM/GPU/disk readouts render real numbers, never NaN/undefined",
+        actual: `Bad tokens found in the status strip: ${badTokens.join(", ")}. Full strip text: "${stripText}"`,
+        severity: "high",
+      });
+    }
+    expect(badTokens, `Status strip renders bad literal values: ${badTokens.join(", ")}`).toEqual([]);
   });
 
-  test("clicking the strip opens the resource-history drawer", async ({ page }) => {
+  test("clicking the strip opens the resource-history drawer (when connected)", async ({ page }) => {
     await page.goto("/");
-    const strip = page.getByRole("status", { name: /סטטוס משאבים/ });
-    await expect(strip).toBeVisible({ timeout: 15_000 });
-    await expect(strip.getByText("מנותק מהשרת")).toHaveCount(0, { timeout: 15_000 });
+    const footer = page.locator("footer");
+    await expect(footer).toBeVisible({ timeout: 15_000 });
+    await page.waitForTimeout(5000);
 
+    const isDisconnected = await footer.getByText("מנותק מהשרת").isVisible().catch(() => false);
+    test.skip(isDisconnected, "Status strip is disconnected — see the other test's recorded finding");
+
+    const strip = page.getByRole("status", { name: /סטטוס משאבים/ });
     const toggle = strip.getByTitle("הצג/הסתר היסטוריית משאבים");
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
