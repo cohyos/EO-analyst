@@ -126,7 +126,7 @@ export function FeedPage() {
       }
       if (e.key === "Enter") {
         e.preventDefault();
-        setOpenItemId(selected.id);
+        navigate(`/items/${selected.id}`);
         return;
       }
       if (e.key === "i" || e.key === "I") {
@@ -158,6 +158,7 @@ export function FeedPage() {
     hasNextPage,
     isFetchingNextPage,
     fetchNextPage,
+    navigate,
   ]);
 
   const { containerRef, totalHeight, visibleItems, scrollToIndex } = useVirtualList<ItemCard>({

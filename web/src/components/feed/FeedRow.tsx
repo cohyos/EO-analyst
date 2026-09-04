@@ -25,6 +25,11 @@ export function FeedRow({
   style?: React.CSSProperties;
 }) {
   const hasUrl = Boolean(item.url);
+  // Real data (2026-09-04 QA against the live backend): a handful of ingested
+  // items carry an empty `title` (a fetch/parse gap upstream, out of scope
+  // here) — render a visible placeholder instead of a blank, mysterious
+  // clickable strip.
+  const displayTitle = item.title || "(ללא כותרת)";
   return (
     <div
       role="row"
@@ -36,7 +41,7 @@ export function FeedRow({
       onDragStart={(e) => {
         e.dataTransfer.setData(
           "application/x-eo-context",
-          JSON.stringify({ kind: "item", id: item.id, label: item.title }),
+          JSON.stringify({ kind: "item", id: item.id, label: displayTitle }),
         );
         e.dataTransfer.effectAllowed = "copy";
       }}
@@ -65,11 +70,12 @@ export function FeedRow({
           data-testid={`feed-row-title-link-${item.id}`}
           title={hasUrl ? "פתח מקור בכרטיסייה חדשה" : undefined}
           className={cn(
-            "block truncate font-medium text-fg",
+            "block truncate font-medium",
+            item.title ? "text-fg" : "italic text-fg-dim",
             hasUrl && "hover:text-accent hover:underline",
           )}
         >
-          <bdi>{item.title}</bdi>
+          <bdi>{displayTitle}</bdi>
         </a>
         <div className="flex items-center gap-2 text-xs text-fg-dim">
           <bdi className="truncate">{item.source_name}</bdi>

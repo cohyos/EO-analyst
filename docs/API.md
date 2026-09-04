@@ -45,6 +45,12 @@ Auth: none (bound to localhost / Tailscale only). CORS: allow `http://localhost:
 ## Conferences (phase C, stub returns [] for now)
 - `GET /api/conferences?from=&to=` ; `GET /api/conferences/ical` (text/calendar)
 
+## Tenders / RFI / RFP (section 5.2, `eoa.tenders`)
+- `GET /api/tenders?status=open|closed|awarded|unknown&country=&q=&limit=100` → `[TenderCard]`
+  `TenderCard = {"id","source","external_ref","title","agency","country","published_at","deadline","url","cpv_naics","summary_he","relevance","matched_terms","entities","status","item_id","created_at","updated_at"}`
+- `GET /api/tenders/forecasts?limit=100` → `[ForecastCard]`
+  `ForecastCard = {"id","platform","buyer_country","trigger_event_id","trigger_item_id","payload_need","candidate_vendors","likelihood","window_from","window_to","rationale_he","sources","created_at","updated_at"}`
+
 ## Clarifications & feedback
 - `GET /api/clarifications?open=true` → `[{"id","kind","question","options","answer","asked_at","timeout_at","assumed"}]`
 - `POST /api/clarifications/{id}/answer` body `{"answer": str}`

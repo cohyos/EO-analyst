@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ItemCard, ItemDetail } from "@/types/api";
 
 const getItems = vi.fn();
@@ -57,7 +57,10 @@ function renderFeedPage() {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/feed"]}>
-        <FeedPage />
+        <Routes>
+          <Route path="/feed" element={<FeedPage />} />
+          <Route path="/items/:id" element={<div data-testid="items-page-stub">item page</div>} />
+        </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -136,13 +139,22 @@ describe("FeedPage keyboard behavior", () => {
     );
   });
 
-  it("opens the detail panel for the selected row on Enter", async () => {
+  it("navigates to the full item page (/items/:id) for the selected row on Enter", async () => {
     renderFeedPage();
     await screen.findByTestId("feed-row-1");
 
     fireEvent.keyDown(window, { key: "Enter" });
+    expect(await screen.findByTestId("items-page-stub")).toBeInTheDocument();
+  });
+
+  it("opens the inline quick-preview panel on a row double-click, without navigating", async () => {
+    renderFeedPage();
+    const row1 = await screen.findByTestId("feed-row-1");
+
+    fireEvent.doubleClick(row1);
     await waitFor(() => expect(getItem).toHaveBeenCalledWith(1));
     expect(await screen.findByTestId("feed-detail-panel")).toBeInTheDocument();
+    expect(screen.queryByTestId("items-page-stub")).not.toBeInTheDocument();
   });
 
   it("triggers a deep-search investigation with 'i'", async () => {

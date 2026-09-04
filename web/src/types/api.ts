@@ -70,7 +70,10 @@ export interface EntitySummary {
   kind: string;
   country: string | null;
   aliases: string[];
-  focus: string | null;
+  // Real API check, 2026-09-04: `GET /api/entities` returns `focus` as an
+  // array of domain ids (e.g. `["air_defense","c_uas"]`), not a string —
+  // rendering it directly used to concatenate the ids with no separator.
+  focus: string[];
   item_count: number;
   last_seen: string | null;
 }

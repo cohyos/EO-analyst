@@ -858,6 +858,84 @@ def conferences_ical() -> bytes:
 
 
 # --------------------------------------------------------------------------
+# tenders / forecasts (section 5.2 / FR-5.2 -- eoa.tenders)
+# --------------------------------------------------------------------------
+
+
+def _tender_card(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "source": row.get("source"),
+        "external_ref": row.get("external_ref"),
+        "title": row.get("title"),
+        "agency": row.get("agency"),
+        "country": row.get("country"),
+        "published_at": row.get("published_at"),
+        "deadline": row.get("deadline"),
+        "url": row.get("url"),
+        "cpv_naics": row.get("cpv_naics") or [],
+        "summary_he": row.get("summary_he"),
+        "relevance": row.get("relevance"),
+        "matched_terms": row.get("matched_terms") or [],
+        "entities": row.get("entities") or [],
+        "status": row.get("status"),
+        "item_id": row.get("item_id"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def list_tenders(
+    *, status: str | None = None, country: str | None = None, q: str | None = None, limit: int = 100
+) -> list[dict[str, Any]]:
+    where = ["1 = 1"]
+    params: dict[str, Any] = {"limit": min(max(limit, 1), 500)}
+    if status:
+        where.append("status = %(status)s")
+        params["status"] = status
+    if country:
+        where.append("country = %(country)s")
+        params["country"] = country
+    if q:
+        where.append("(title ILIKE %(q)s OR summary_he ILIKE %(q)s OR agency ILIKE %(q)s)")
+        params["q"] = f"%{q}%"
+    where_sql = " AND ".join(where)
+    rows = _fetchall(
+        f"SELECT * FROM tenders WHERE {where_sql} "
+        "ORDER BY deadline ASC NULLS LAST, relevance DESC NULLS LAST, id DESC LIMIT %(limit)s",
+        params,
+    )
+    return [_tender_card(r) for r in rows]
+
+
+def _forecast_card(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "platform": row.get("platform"),
+        "buyer_country": row.get("buyer_country"),
+        "trigger_event_id": row.get("trigger_event_id"),
+        "trigger_item_id": row.get("trigger_item_id"),
+        "payload_need": row.get("payload_need"),
+        "candidate_vendors": row.get("candidate_vendors") or [],
+        "likelihood": row.get("likelihood"),
+        "window_from": row.get("window_from"),
+        "window_to": row.get("window_to"),
+        "rationale_he": row.get("rationale_he"),
+        "sources": row.get("sources") or [],
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def list_tender_forecasts(*, limit: int = 100) -> list[dict[str, Any]]:
+    rows = _fetchall(
+        "SELECT * FROM tender_forecasts ORDER BY likelihood DESC NULLS LAST, id DESC LIMIT %(limit)s",
+        {"limit": min(max(limit, 1), 500)},
+    )
+    return [_forecast_card(r) for r in rows]
+
+
+# --------------------------------------------------------------------------
 # clarifications
 # --------------------------------------------------------------------------
 

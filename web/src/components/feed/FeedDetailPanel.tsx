@@ -1,11 +1,13 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, HelpCircle, Search, X } from "lucide-react";
+import { ExternalLink, HelpCircle, Maximize2, Search, X } from "lucide-react";
 import type { ItemCard, TriageLevel } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { AddToContextButton } from "@/components/AddToContextButton";
 import { domainLabel } from "@/lib/taxonomy";
 import { formatDateTime } from "@/lib/time";
+import { cn } from "@/lib/cn";
 import { api } from "@/api";
 
 const LEVEL_KEYS: Record<string, TriageLevel> = {
@@ -26,6 +28,10 @@ export function FeedDetailPanel({
   const queryClient = useQueryClient();
   const keyFacts = item.key_facts ?? [];
   const entitiesMentioned = item.entities_mentioned ?? [];
+  // Real data (2026-09-04 QA against the live backend): a handful of
+  // ingested items carry an empty `title` — show a placeholder instead of a
+  // blank heading.
+  const displayTitle = item.title || "(ללא כותרת)";
 
   const feedback = useMutation({
     mutationFn: (level: TriageLevel) => api.postItemFeedback(item.id, { user_level: level, comment: null }),
@@ -46,7 +52,9 @@ export function FeedDetailPanel({
       <div className="flex items-start gap-2 border-b border-border p-3">
         <LevelBadge level={item.level} />
         <div className="min-w-0 flex-1">
-          <bdi className="block font-semibold text-fg">{item.title}</bdi>
+          <bdi className={cn("block font-semibold", item.title ? "text-fg" : "italic text-fg-dim")}>
+            {displayTitle}
+          </bdi>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-fg-dim">
             <bdi>{item.source_name}</bdi>
             <span>·</span>
@@ -55,6 +63,14 @@ export function FeedDetailPanel({
             <span>{domainLabel(item.domain)}</span>
           </div>
         </div>
+        <Link
+          to={`/items/${item.id}`}
+          className="rounded p-1.5 text-fg-muted hover:bg-bg-sunken"
+          aria-label="פתח עמוד מלא"
+          title="פתח עמוד מלא"
+        >
+          <Maximize2 size={16} aria-hidden="true" />
+        </Link>
         <a
           href={item.url}
           target="_blank"
@@ -84,7 +100,7 @@ export function FeedDetailPanel({
             <HelpCircle size={12} aria-hidden="true" />
             למה הציון?
           </button>
-          <AddToContextButton kind="item" id={item.id} label={item.title} size="sm" />
+          <AddToContextButton kind="item" id={item.id} label={displayTitle} size="sm" />
           <button
             type="button"
             onClick={() => investigate.mutate()}

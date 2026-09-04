@@ -29,6 +29,7 @@ from eoa.api.routes import (
     reports,
     status,
     surveys,
+    tenders,
 )
 from eoa.api.routes import settings as settings_routes
 from eoa.config import REPO_ROOT
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(investigations.ws_router)
     app.include_router(ask.router, prefix="/api")
     app.include_router(conferences.router, prefix="/api")
+    app.include_router(tenders.router, prefix="/api")
     app.include_router(clarifications.router, prefix="/api")
     app.include_router(surveys.router, prefix="/api")
     app.include_router(lessons.router, prefix="/api")

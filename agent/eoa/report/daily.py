@@ -466,6 +466,22 @@ def build_daily(
 
     citation_items, events_with_n = _extend_citation_registry(items, events)
 
+    # section 5.2 / FR-5.2: tenders/RFI/RFP section -- deterministic (not LLM-drafted), so it is
+    # rendered via the additive extra_sections/tables hooks below rather than touching
+    # DailyReportDraft or the citation QA gate. A failure here must never break the daily report.
+    tender_sections: list[dict[str, Any]] = []
+    tender_tables: list[dict[str, Any]] = []
+    try:
+        from eoa.tenders.report_section import collect_tenders, tenders_extra_section, tenders_table
+
+        tenders_data = collect_tenders(start, end)
+        if tenders_data.get("open_tenders") or tenders_data.get("new_forecasts"):
+            tender_sections = [tenders_extra_section(tenders_data)]
+        tbl = tenders_table(tenders_data)
+        tender_tables = [tbl] if tbl else []
+    except Exception as exc:
+        log.warning("daily_report_tenders_section_failed", error=str(exc)[:160])
+
     docx_path = _report_path(end, "docx")
     md_path = _report_path(end, "md")
     html_path = _report_path(end, "html")
@@ -478,6 +494,8 @@ def build_daily(
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
+        extra_sections=tender_sections,
+        tables=tender_tables,
     )
     save_docx(doc, docx_path)
     validate_docx(docx_path)
@@ -490,6 +508,8 @@ def build_daily(
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
+        extra_sections=tender_sections,
+        tables=tender_tables,
     )
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(md_text, encoding="utf-8")
@@ -502,6 +522,8 @@ def build_daily(
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
+        extra_sections=tender_sections,
+        tables=tender_tables,
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")

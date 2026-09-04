@@ -49,7 +49,9 @@ class ClassifyOut(BaseModel):
             "amount+currency verbatim in relevance_note instead)."
         ),
     )
-    dates: list[str] = Field(default_factory=list, description="ISO dates (YYYY-MM-DD) explicitly stated; empty if none")
+    dates: list[str] = Field(
+        default_factory=list, description="ISO dates (YYYY-MM-DD) explicitly stated; empty if none"
+    )
     one_line_he: str = Field(description="משפט אחד בעברית: מה קרה")
     relevance_note: str = Field(
         default="",
@@ -117,14 +119,30 @@ class EdgeOut(BaseModel):
 class AnalyzeOut(BaseModel):
     """Stage: analyze (resident model). Everything cites the item implicitly (single-source)."""
 
-    summary_he: str = Field(description="2-4 משפטים בעברית, מונחים מקצועיים באנגלית בסוגריים")
-    so_what_he: str = Field(description="'מה זה אומר': השלכות תחרותיות/טכנולוגיות/מבצעיות, 1-3 משפטים")
-    key_facts: list[str] = Field(
-        default_factory=list, max_length=8, description="עובדות בדידות, כל אחת ניתנת לאימות במקור"
+    summary_he: str = Field(
+        description="FACT mode, 2-4 משפטים בעברית: רק מה שכתוב במפורש במקור, מונחים מקצועיים באנגלית בסוגריים"
     )
-    events: list[EventOut] = Field(default_factory=list)
-    edges: list[EdgeOut] = Field(default_factory=list)
-    uncertainty_he: str = Field(default="", description="מה לא ברור / סותר / דורש אימות")
+    so_what_he: str = Field(
+        description=(
+            "ASSESSMENT mode, 1-3 משפטים: השלכות תחרותיות/טכנולוגיות/מבצעיות. חובה להתחיל במילה 'להערכתנו'"
+        )
+    )
+    key_facts: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="FACT mode: עד 8 עובדות בדידות, כל אחת ניתנת לאימות במקור; רשימה ריקה אם אין",
+    )
+    events: list[EventOut] = Field(
+        default_factory=list,
+        max_length=4,
+        description="עד 4 אירועים משמעותיים; כל מספר (amount_usd/date) חייב להופיע במקור כלשונו; [] אם אין",
+    )
+    edges: list[EdgeOut] = Field(
+        default_factory=list,
+        max_length=6,
+        description="עד 6 קשתות בין ישויות שמופיעות במפורש במקור; [] אם אין",
+    )
+    uncertainty_he: str = Field(default="", description="מה לא ברור / סותר / דורש אימות; מחרוזת ריקה אם אין")
 
 
 class GuardVerdict(BaseModel):
@@ -142,7 +160,9 @@ class GuardVerdict(BaseModel):
         "persuasion",
         "other",
     ] = "none"
-    excerpt: str = Field(default="", max_length=300)
+    excerpt: str = Field(
+        default="", max_length=300, description="offending text, up to 2 sentences; empty if not injection"
+    )
 
 
 class QueryPlan(BaseModel):

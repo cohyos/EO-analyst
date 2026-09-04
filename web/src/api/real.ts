@@ -126,7 +126,7 @@ function normalizeEntitySummary(raw: Partial<EntitySummary> | null | undefined):
     kind: str(r.kind),
     country: r.country ?? null,
     aliases: arr(r.aliases),
-    focus: r.focus ?? null,
+    focus: arr(r.focus),
     item_count: num(r.item_count),
     last_seen: r.last_seen ?? null,
   };

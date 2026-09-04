@@ -1,0 +1,46 @@
+{
+  "notices": [
+    {
+      "ND": "555001-2026",
+      "TI": {
+        "eng": "Germany-Koblenz: Supply of electro-optical targeting pods for fighter aircraft",
+        "deu": "Deutschland-Koblenz: Lieferung von elektrooptischen Zielbehältern"
+      },
+      "PD": "2026-08-20+02:00",
+      "publication-number": "555001-2026",
+      "links": {
+        "htmlDirect": {
+          "ENG": "https://ted.europa.eu/en/notice/555001-2026/html"
+        }
+      }
+    },
+    {
+      "ND": "555002-2026",
+      "TI": {
+        "eng": "France-Paris: Office furniture framework agreement"
+      },
+      "PD": "2026-08-21+02:00",
+      "publication-number": "555002-2026",
+      "links": {
+        "htmlDirect": {
+          "ENG": "https://ted.europa.eu/en/notice/555002-2026/html"
+        }
+      }
+    },
+    {
+      "ND": "555003-2016",
+      "TI": {
+        "eng": "Italy-Rome: Infrared thermal imaging cameras for border surveillance towers"
+      },
+      "PD": "2016-05-10+02:00",
+      "publication-number": "555003-2016",
+      "links": {
+        "htmlDirect": {
+          "ENG": "https://ted.europa.eu/en/notice/555003-2016/html"
+        }
+      }
+    }
+  ],
+  "totalNoticeCount": 3,
+  "timedOut": false
+}

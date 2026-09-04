@@ -10,6 +10,7 @@ import { SecurityStatusIcon } from "@/components/feed/SecurityStatusIcon";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { domainLabel } from "@/lib/taxonomy";
 import { formatDateTime } from "@/lib/time";
+import { cn } from "@/lib/cn";
 
 const INV_STATE_LABEL: Record<string, string> = {
   queued: "בתור",
@@ -73,6 +74,10 @@ export function ItemDetailPage() {
 
   const item = itemQuery.data;
   const hasUrl = Boolean(item.url);
+  // Real data (2026-09-04 QA against the live backend): a handful of
+  // ingested items carry an empty `title` (a fetch/parse gap upstream, out
+  // of scope here) — show a visible placeholder instead of a blank heading.
+  const displayTitle = item.title || "(ללא כותרת)";
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
@@ -85,13 +90,23 @@ export function ItemDetailPage() {
                 href={item.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-start gap-1.5 text-lg font-semibold text-fg hover:text-accent hover:underline"
+                className={cn(
+                  "inline-flex items-start gap-1.5 text-lg font-semibold hover:text-accent hover:underline",
+                  item.title ? "text-fg" : "italic text-fg-dim",
+                )}
               >
-                <bdi>{item.title}</bdi>
+                <bdi>{displayTitle}</bdi>
                 <ExternalLink size={14} className="mt-1.5 shrink-0" aria-hidden="true" />
               </a>
             ) : (
-              <bdi className="block text-lg font-semibold text-fg">{item.title}</bdi>
+              <bdi
+                className={cn(
+                  "block text-lg font-semibold",
+                  item.title ? "text-fg" : "italic text-fg-dim",
+                )}
+              >
+                {displayTitle}
+              </bdi>
             )}
           </div>
           <SecurityStatusIcon status={item.security_status} />
@@ -109,7 +124,7 @@ export function ItemDetailPage() {
           <ExplainScorePopover item={item} onRate={(l) => feedback.mutate(l)} isRating={feedback.isPending} size="sm" />
         </div>
         <div className="flex flex-wrap items-center gap-2 pt-1">
-          <AddToContextButton kind="item" id={item.id} label={item.title} size="sm" />
+          <AddToContextButton kind="item" id={item.id} label={displayTitle} size="sm" />
           <button
             type="button"
             onClick={() => investigate.mutate()}

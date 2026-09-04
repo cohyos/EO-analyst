@@ -5,6 +5,7 @@ import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { AddToContextButton } from "@/components/AddToContextButton";
 import { EntityGraph } from "@/components/entities/EntityGraph";
+import { domainLabel } from "@/lib/taxonomy";
 import { formatDateTime } from "@/lib/time";
 
 const NAMED_QUERIES = [
@@ -57,7 +58,11 @@ export function EntityDetailPage() {
               {entity.kind}
             </span>
           </div>
-          {entity.focus && <bdi className="block text-sm text-fg-muted">{entity.focus}</bdi>}
+          {entity.focus.length > 0 && (
+            <bdi className="block text-sm text-fg-muted">
+              {entity.focus.map(domainLabel).join(" · ")}
+            </bdi>
+          )}
           {aliases.length > 0 && (
             <bdi className="block text-xs text-fg-dim">
               כינויים: {aliases.join(", ")}

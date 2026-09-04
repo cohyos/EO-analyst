@@ -1,0 +1,17 @@
+{
+  "name": "eo-analyst-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright E2E / UI-quality suite for the EO-Analyst web console, run against the live app + real backend at http://127.0.0.1:8765.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report report",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.1",
+    "@playwright/test": "^1.48.0"
+  }
+}

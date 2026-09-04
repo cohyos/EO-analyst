@@ -37,6 +37,7 @@ STAGE_ORDER = [
     "triage",
     "deep_search",
     "analyze",
+    "tenders",
     "report",
     "export_backup",
     "notify",
@@ -182,6 +183,7 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
             "analyze",
             lambda: __import__("eoa.pipeline.analyze", fromlist=["run_analyze"]).run_analyze(role=role),
         )
+        _run_stage(rs, "tenders", lambda: _as_dict(_run_tenders(role=role)))
         paths = _run_stage(rs, "report", _build_report, mandatory=True)
         _run_stage(rs, "export_backup", _backup, mandatory=True)
         _run_stage(rs, "notify", lambda: _notify(rs, paths), mandatory=True)
@@ -378,8 +380,9 @@ def _pg_dump() -> dict[str, Any]:
                     fh.write(f"\\copy {ident} FROM STDIN WITH (FORMAT csv, HEADER)\n")
                     with (
                         conn.cursor() as cur,
-                        cur.copy(sql.SQL("COPY {} TO STDOUT WITH (FORMAT csv, HEADER)").format(sql.Identifier(t)))
-                        as cp,
+                        cur.copy(
+                            sql.SQL("COPY {} TO STDOUT WITH (FORMAT csv, HEADER)").format(sql.Identifier(t))
+                        ) as cp,
                     ):
                         for chunk in cp:
                             fh.write(bytes(chunk).decode("utf-8"))
@@ -441,6 +444,26 @@ def run_conference_scan(job: dict[str, Any]) -> dict[str, Any]:
     return monthly_scan()
 
 
+def _run_tenders(role: str = "resident") -> dict[str, Any]:
+    """section 5.2 / FR-5.2: tender/RFI/RFP ingestion + tender-likelihood forecasting
+    (``eoa.tenders``). Called both as the ``"tenders"`` stage inside :func:`run_daily` (after
+    ``analyze``) and by :func:`run_tender_scan` for the standalone ``tender_scan`` job kind."""
+    from eoa.tenders.forecast import forecast_tenders
+    from eoa.tenders.scan import scan_tenders
+
+    scan_stats = scan_tenders(role=role)
+    forecast_stats = forecast_tenders(role=role)
+    return {"scan": _as_dict(scan_stats), "forecast": _as_dict(forecast_stats)}
+
+
+def run_tender_scan(job: dict[str, Any]) -> dict[str, Any]:
+    """``tender_scan`` job kind: an on-demand/standalone run of the same scan+forecast pair the
+    ``"tenders"`` daily-run stage performs (see :func:`_run_tenders`)."""
+    payload = job.get("payload") or {}
+    role = "light" if payload.get("mode") == "eco" and settings().has_model("light") else "resident"
+    return _run_tenders(role=role)
+
+
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "daily_run": run_daily,
     "ingest": lambda job: _as_dict(_ingest()),
@@ -449,10 +472,20 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "weekly_run": run_weekly,
     "monthly_run": run_monthly,
     "conference_scan": run_conference_scan,
+    "tender_scan": run_tender_scan,
 }
 
 
 # ----------------------------------------------------------------------------- worker loop
+def _terminal_state(res: dict[str, Any]) -> str:
+    """The job's terminal state from a handler result's optional `status` field (#16): a
+    recognized `done`/`partial`/`failed` value wins (e.g. `run_daily`'s computed status);
+    otherwise default to `done` (the handler didn't opt into stage-aware status and returned
+    without raising)."""
+    state = res.get("status")
+    return state if state in {"done", "partial", "failed"} else "done"
+
+
 def _default_kinds() -> list[str]:
     """Role-aware default job kinds: the isolated ``agent`` worker never claims ``ingest`` — that
     is fetcher-owned (the fetcher container is the one with egress network access). Host/dev
@@ -500,8 +533,7 @@ class Worker(threading.Thread):
                     continue
                 result = handler(job)
                 res = result if isinstance(result, dict) else _as_dict(result)
-                state = res.get("status") if res.get("status") in {"done", "partial", "failed"} else "done"
-                finish_job(job["id"], state, result=res, worker_id=self.worker_id)
+                finish_job(job["id"], _terminal_state(res), result=res, worker_id=self.worker_id)
             except Exception as exc:
                 log.error("job_failed", job_id=job["id"], kind=job["kind"], error=str(exc)[:300])
                 finish_job(job["id"], "failed", error=f"{exc}"[:400], worker_id=self.worker_id)

@@ -5,6 +5,7 @@ import { Search } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { AddToContextButton } from "@/components/AddToContextButton";
+import { domainLabel } from "@/lib/taxonomy";
 import { timeAgo } from "@/lib/time";
 
 export function EntitiesListPage() {
@@ -65,7 +66,11 @@ export function EntitiesListPage() {
                     <span className="font-mono text-xs text-fg-dim">{e.country}</span>
                   )}
                 </div>
-                {e.focus && <bdi className="block truncate text-sm text-fg-muted">{e.focus}</bdi>}
+                {e.focus.length > 0 && (
+                  <bdi className="block truncate text-sm text-fg-muted">
+                    {e.focus.map(domainLabel).join(" · ")}
+                  </bdi>
+                )}
                 <div className="mt-1 flex items-center gap-2 text-xs text-fg-dim">
                   <span>{e.item_count} פריטים</span>
                   <span>·</span>
