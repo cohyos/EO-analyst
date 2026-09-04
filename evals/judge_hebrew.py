@@ -39,9 +39,7 @@ def score_hebrew(text: str) -> HebrewMetrics:
     # Latin terms in parentheses
     parens_content = re.findall(r"\(([^)]+)\)", text)
     if parens_content:
-        latin_in_parens = sum(
-            1 for match in parens_content if re.search(r"[a-zA-Z]", match)
-        )
+        latin_in_parens = sum(1 for match in parens_content if re.search(r"[a-zA-Z]", match))
         latin_terms_in_parens_ratio = latin_in_parens / len(parens_content)
     else:
         latin_terms_in_parens_ratio = 0

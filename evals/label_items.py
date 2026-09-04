@@ -49,8 +49,8 @@ def prompt_for_level() -> str:
     """Prompt user for triage level."""
     levels = ["red", "orange", "yellow", "archive"]
     print("\nTriage Levels:")
-    for i, l in enumerate(levels, 1):
-        print(f"  {i}. {l}")
+    for i, level in enumerate(levels, 1):
+        print(f"  {i}. {level}")
     while True:
         try:
             choice = input("Select level (1-4 or enter to skip): ").strip()
@@ -66,7 +66,15 @@ def prompt_for_level() -> str:
 
 def prompt_for_report_kind() -> str:
     """Prompt user for report kind."""
-    kinds = ["verified_report", "company_pr", "rumor_speculation", "academic", "tender", "patent", "regulatory"]
+    kinds = [
+        "verified_report",
+        "company_pr",
+        "rumor_speculation",
+        "academic",
+        "tender",
+        "patent",
+        "regulatory",
+    ]
     print("\nReport Kinds:")
     for i, k in enumerate(kinds, 1):
         print(f"  {i}. {k}")
@@ -85,15 +93,18 @@ def prompt_for_report_kind() -> str:
 
 def format_item_for_display(item: dict[str, Any]) -> str:
     """Format DB item for display to user."""
+    text = item.get("clean_text", "")
+    text_preview = f"{text[:500]}...\n" if len(text) > 500 else f"{text}\n"
+    text_size = len(text) // 10
     lines = [
-        f"\n{'='*80}",
+        f"\n{'=' * 80}",
         f"ID: {item['id']} | Source: {item.get('source_name', '?')}",
         f"Title: {item.get('title', '?')[:100]}",
         f"Lang: {item.get('lang', '?')} | Published: {item.get('published_at', '?')}",
-        f"\nText ({len(item.get('clean_text', '')) // 10} x 10 chars):",
-        f"{item.get('clean_text', '')[:500]}...\n" if len(item.get('clean_text', '')) > 500 else f"{item.get('clean_text', '')}\n",
+        f"\nText ({text_size} x 10 chars):",
+        text_preview,
     ]
-    if item.get('entities_mentioned'):
+    if item.get("entities_mentioned"):
         lines.append(f"Entities: {', '.join(item['entities_mentioned'][:10])}\n")
     return "".join(lines)
 
@@ -104,7 +115,7 @@ def item_to_golden(item: dict[str, Any], domain: str, level: str, report_kind: s
     next_id = -1
     golden_path = GOLDEN_DIR / "classify_triage.jsonl"
     if golden_path.exists():
-        with open(golden_path) as f:
+        with open(golden_path, encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     obj = json.loads(line)
@@ -179,7 +190,7 @@ def main(
             f.write(json.dumps(golden_item) + "\n")
 
         labeled_count += 1
-        print(f"✓ Item labeled and saved.")
+        print("✓ Item labeled and saved.")
 
     print(f"\n{labeled_count} items labeled and appended to {golden_path}")
     log.info("label_complete", labeled=labeled_count)

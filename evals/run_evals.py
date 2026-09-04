@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +10,6 @@ from typing import Any
 
 import structlog
 import typer
-from pydantic import ValidationError
 
 from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.schemas.analysis import ClassifyOut, TriageOut
@@ -34,7 +32,7 @@ def load_golden_set(name: str) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"Golden set not found: {path}")
     items = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 items.append(json.loads(line))
@@ -55,7 +53,9 @@ def make_fake_item(golden: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def compute_metrics(predicted: ClassifyOut | TriageOut, expected: dict[str, Any], stage: str) -> dict[str, Any]:
+def compute_metrics(
+    predicted: ClassifyOut | TriageOut, expected: dict[str, Any], stage: str
+) -> dict[str, Any]:
     """Compute accuracy metrics for one prediction."""
     metrics: dict[str, Any] = {}
 
@@ -69,9 +69,7 @@ def compute_metrics(predicted: ClassifyOut | TriageOut, expected: dict[str, Any]
         expected_entities = set(e.lower() for e in expected.get("entities", []))
         pred_entities = set(e.name.lower() for e in pred.entities)
         if expected_entities:
-            entity_matches = sum(
-                1 for exp in expected_entities if any(exp in p for p in pred_entities)
-            )
+            entity_matches = sum(1 for exp in expected_entities if any(exp in p for p in pred_entities))
             metrics["entity_recall"] = entity_matches / len(expected_entities)
         else:
             metrics["entity_recall"] = 1.0 if not pred_entities else 0.0
@@ -215,20 +213,24 @@ def format_markdown_report(eval_results: dict[str, Any]) -> str:
     for metric, data in sorted(aggregated["classify"].items()):
         lines.append(f"| {metric} | {data['mean']:.3f} | {data['count']} |\n")
 
-    lines.extend([
-        "\n## Triage Metrics\n",
-        "| Metric | Mean | Count |\n",
-        "|--------|------|-------|\n",
-    ])
+    lines.extend(
+        [
+            "\n## Triage Metrics\n",
+            "| Metric | Mean | Count |\n",
+            "|--------|------|-------|\n",
+        ]
+    )
 
     for metric, data in sorted(aggregated["triage"].items()):
         lines.append(f"| {metric} | {data['mean']:.3f} | {data['count']} |\n")
 
-    lines.extend([
-        "\n## Per-Item Results\n",
-        "| ID | Domain | Report Kind | Level | Score | Latency (ms) | Errors |\n",
-        "|---|--------|-------------|-------|-------|------------|--------|\n",
-    ])
+    lines.extend(
+        [
+            "\n## Per-Item Results\n",
+            "| ID | Domain | Report Kind | Level | Score | Latency (ms) | Errors |\n",
+            "|---|--------|-------------|-------|-------|------------|--------|\n",
+        ]
+    )
 
     for r in results:
         domain = r.get("classify", {}).get("domain", "—")
@@ -242,7 +244,8 @@ def format_markdown_report(eval_results: dict[str, Any]) -> str:
         if "triage_error" in r:
             errors.append(f"triage: {r['triage_error'][:50]}")
         error_str = " | ".join(errors) if errors else "—"
-        lines.append(f"| {r['id']} | {domain} | {report_kind} | {level} | {score} | {latency} | {error_str} |\n")
+        row = f"| {r['id']} | {domain} | {report_kind} | {level} | {score} | {latency} | {error_str} |\n"
+        lines.append(row)
 
     return "".join(lines)
 

@@ -823,6 +823,177 @@ docx test is saved at `output/reports/sample_daily.docx` (generated and
 `validate_docx`-checked directly against `docx_builder`, not through
 `build_daily`, since that needs a live DB).
 
+## Web UI
+
+`web/` — React 19 + TypeScript + Vite + Tailwind v3, the "חדר מצב + עמית"
+hybrid ops console (`תוכנית_פיתוח_מפורטת_v2.md` §8, alternative C): a
+dashboard-first console with a persistent, dockable "שאל את האנליסט" chat
+panel, built end to end against `docs/API.md` with no dependency on the
+concurrently-developed backend. Fully RTL (`dir="rtl" lang="he"` on
+`<html>`), dark theme by default with a light toggle, Heebo (Hebrew/body)
++ IBM Plex Mono (numbers/codes, `tabular-nums`) via Google Fonts, petrol
+accent (`--accent: #17909f`) / thermal-amber "hot" accent
+(`--hot: #d97a3f`), triage colors paired with icons (not color alone).
+Latin tokens inside Hebrew text are wrapped in `<bdi>` throughout.
+
+### Layout
+
+`src/components/shell/AppShell.tsx` composes the persistent shell used by
+every route: `TopBar` (page title, night-window badge, "הרץ עכשיו" →
+`POST /api/run`, theme toggle, ⌘K), `NavRail` (right/start side, the 9
+screens, icon-only under `md:`), `StatusStrip` (bottom, fixed — VRAM bar,
+GPU %/°C, RAM, disk, loaded-model chip, queue depth, current stage,
+PG/Ollama/SearXNG/ntfy service dots, fed by `useStatusSocket` from
+`WS /ws/status` with backoff auto-reconnect and an explicit "מנותק"
+state), and `ChatPanel` (left/end side, collapsible, backed by the shared
+`useAskChat` hook so the docked panel and the full `/ask` page are the
+same logic). `CommandPalette` is the ⌘K global search over items/entities.
+`useUiStore` (zustand, `src/store/uiStore.ts`) holds only small UI state —
+theme (persisted to `localStorage`), chat open/collapsed, and the chat's
+context-item list (drag-and-drop or "הוסף להקשר" from any item/entity via
+`AddToContextButton`) — everything else is server state through TanStack
+Query.
+
+### Screens (`src/pages/`, routed in `src/App.tsx`)
+
+1. `MorningPage` (`/`) — night-summary tiles, latest report's HTML exec
+   summary with `[n]` citation chips linked to `/feed?open=<id>`
+   (`lib/reportHtml.ts` maps `[n]` → `items_included[n-1]`, the report
+   builder's own convention — the contract has no explicit per-report
+   citation map), 3 headlines, open points with inline one-click answers,
+   "פתח דוח docx" download.
+2. `FeedPage` (`/feed`) — dense, windowed feed (`hooks/useVirtualList.ts`,
+   a small fixed-row-height windower, no external virtualization
+   dependency) with level/domain/text/sort filters, a master-detail panel
+   (`FeedDetailPanel`) instead of inline row expansion so row height stays
+   fixed. Full keyboard set on `window` (ignored while a form field has
+   focus): `J`/`K` or arrows move selection, `1`-`4` set
+   red/orange/yellow/archive via `POST /api/items/{id}/feedback`, `X`
+   archives, `Enter` opens the detail panel, `I` opens a deep-search via
+   `POST /api/items/{id}/investigate`, `A` adds the item to the chat
+   context. "למה הציון?" reveals `triage_reason`. `?open=<id>` deep-links
+   into a specific item (used by Morning/Ask citation clicks).
+3. `EntitiesListPage` (`/entities`) + `EntityDetailPage`
+   (`/entities/:id`) — search list; detail page has a Cytoscape graph
+   (`components/entities/EntityGraph.tsx`, nodes shaped/colored by kind,
+   click an edge for its label/evidence + a link to the source item),
+   depth 1/2 selector, the three named-query buttons ("שותפי המתחרים" /
+   "ספקי המתמודדים בתוכנית" / "סטארטאפים מחוברים" →
+   `GET /api/graph/query`), an entity timeline, and a neighbors list.
+4. `InvestigationsListPage` (`/investigations`) + `InvestigationDetailPage`
+   (`/investigations/:jobId`) — table of jobs; detail view live-tails the
+   ReAct log (round/lang/query/results/outcome) via
+   `hooks/useInvestigationSocket.ts` (`WS /ws/investigations/{job_id}`),
+   shows the final cited answer, and offers "עצור" /
+   "המשך חקירה".
+5. `AskPage` (`/ask`) — the same `ChatThread` component as the docked
+   panel, uncollapsed, with a sources side-list; streams
+   `POST /api/ask` SSE (`token`/`citations`/`done`) through
+   `hooks/useAskChat.ts`. `[n]` markers are rendered as hover/click
+   citation chips by `components/CitationText.tsx` (shared with the
+   investigation answer view).
+6. `ConferencesPage` (`/conferences`) — 24-month table + iCal export
+   link; renders the "לוח הכנסים יופעל בשלב ג׳" empty state whenever the
+   (stub) API returns `[]`, per contract.
+7. `InboxPage` (`/inbox`) — open clarifications with one-click answers,
+   the latest survey (choice/scale/text question types), and "מה למדתי
+   ממך" lessons with delete.
+8. `ReportsPage` (`/reports`) — kind-filtered list; HTML report viewer
+   with an auto-generated TOC (`h2`/`h3` walk) and docx/md download
+   links.
+9. `SettingsPage` (`/settings`) — tabbed YAML editors for
+   config/sources/watchlist/taxonomy/models against `GET`/`PUT
+   /api/settings/{name}`, surfacing `errors[]` from a failed validation;
+   quick eco/full mode + "הרץ ריצה יומית" controls; a jobs table with
+   cancel.
+
+### API layer and mock mode
+
+`src/api/types.ts` defines one `ApiClient` interface mirroring
+`docs/API.md` exactly (same field names, same endpoints); `src/api/real.ts`
+implements it against `fetch`/SSE/`WebSocket` through the Vite dev proxy
+(`/api`, `/ws` → `http://127.0.0.1:8765`, see `vite.config.ts`) and
+`src/mocks/mockApi.ts` implements the identical interface over in-memory
+data — no page or component ever branches on which one is active.
+`src/api/index.ts` picks one via `VITE_USE_MOCKS` (`.env`/`.env.local`,
+default **off**, see `.env.example`). Mock data
+(`src/mocks/data/*.ts`) is realistic Hebrew defense-EO content: 40 items
+(deterministic `mulberry32` PRNG so runs and tests are stable) across the
+`config/taxonomy.yaml` domains, 12 entities (Elbit Systems, Rafael,
+Leonardo DRS, HENSOLDT, Teledyne FLIR, Safran, Anduril, Aselsan, IAI,
+מפא"ת, EDF, a fictional startup), 2 investigations (one done, one
+running), 1 daily report, plus clarifications/survey/lessons/jobs and a
+simulated `/ws/status` tick and `/ws/investigations/{id}` log feed.
+`src/lib/taxonomy.ts` mirrors `config/taxonomy.yaml`'s domain
+ids/labels for filter UI only — the backend config files stay the
+source of truth.
+
+### Stack notes / deviations
+
+- React 19, TypeScript, Vite 5, Tailwind v3 (CSS-variable tokens in
+  `src/styles/globals.css`, light override via `[data-theme="light"]`,
+  dark via `prefers-color-scheme` when no explicit choice is stored),
+  `react-router-dom` v6, `@tanstack/react-query` v5, `zustand` v5,
+  `cytoscape` + `@types/cytoscape`, `recharts`, `lucide-react`.
+- `recharts` is installed per the required stack but not yet wired into
+  a chart — the screens built in this pass use compact stat tiles/meters
+  (`StatTile`, the status-strip `Meter`) rather than time-series charts;
+  nothing in `docs/API.md` v1 currently demands one. Left as a documented
+  gap, not a silent omission.
+- No UI kit; all components hand-written for RTL correctness. Only
+  physical Tailwind border/inset utilities are used for panel dividers
+  (`border-l`/`border-r`) even where a logical `border-s`/`border-e`
+  would read more "correctly RTL", because Tailwind v3's logical-property
+  support does not clearly cover border-*width* utilities; logical
+  utilities that Tailwind v3.3+ does support (`ms-`/`me-`/`ps-`/`pe-`/
+  `start-`/`end-`/`text-start`/`text-end`) are used freely.
+- Command palette (⌘K) does a live client-side query against
+  `GET /api/items`/`GET /api/entities` rather than a dedicated search
+  endpoint (none exists in the contract).
+- `npm run build` code-splits `cytoscape`, `recharts`, the React/router
+  vendor chunk, and the TanStack Query vendor chunk
+  (`vite.config.ts` → `build.rollupOptions.output.manualChunks`) so no
+  chunk exceeds Vite's 500 kB warning threshold. Current production build:
+  index.html 1.1 kB, CSS 18.1 kB (4.7 kB gzip), JS ≈795 kB raw / ≈255 kB
+  gzip total across 5 chunks (largest: `cytoscape` 443.8 kB raw /
+  142.4 kB gzip, `index` 274.7 kB raw / 83.0 kB gzip).
+
+### Scripts (`web/package.json`)
+
+`npm run dev` (Vite dev server, port 5173, proxying `/api` and `/ws` to
+`127.0.0.1:8765`), `build` (`tsc -b && vite build`), `preview`, `test`
+(`vitest run`) / `test:watch`, `lint` (`eslint .`), `format`
+(`prettier --write .`).
+
+### Tests (`vitest` + `@testing-library/react`, `src/test/setup.ts`)
+
+20 tests across 4 files, all green: `LevelBadge.test.tsx` (label +
+`data-level` + accessible name per triage level, size variant),
+`CitationText.test.tsx` (`[n]` → chip, unmatched `n` left as plain text,
+hover tooltip content, `onOpenItem` callback), `StatusStrip.test.tsx`
+(parses a full `StatusResponse` into the VRAM/GPU/RAM/disk/service-dot
+readouts, and renders the disconnected state instead of stale numbers),
+and `FeedPage.test.tsx` (J/K selection movement including the
+end-of-list clamp, 1-4 feedback calls, `X` archive, `Enter` opens the
+detail panel via `GET /api/items/{id}`, `I` triggers investigate, and
+typing shortcuts are ignored while a form field has focus) — the API
+module is mocked with `vi.mock("@/api", ...)` so these run without a
+backend or `VITE_USE_MOCKS`.
+
+### What's stubbed / left for later
+
+- `ConferencesPage` only implements the phase-C empty state and the
+  table/iCal-link chrome — there is no real data to page through yet,
+  matching the backend's own stub (`docs/API.md`: "phase C, stub returns
+  [] for now").
+- No dedicated E2E/Playwright suite — verification here was `lint` +
+  `vitest` + `build` plus a manual pass through all 9 screens (both
+  themes, desktop and a 375 px mobile viewport) against
+  `VITE_USE_MOCKS=true` in the browser preview tool.
+- The "3 usability sessions with the analyst" step in §8.4 of the dev
+  plan is a product/pilot activity, not a coding task, and is out of
+  scope for this pass.
+
 ## Orchestrator
 
 Files: `agent/eoa/orchestrator/main.py`, `agent/eoa/orchestrator/jobs.py`.
