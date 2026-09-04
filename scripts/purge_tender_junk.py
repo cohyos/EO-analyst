@@ -118,6 +118,19 @@ def purge(*, dry_run: bool = False) -> dict[str, Any]:
                 )
                 deleted_items = cur.rowcount
 
+    # Belt-and-suspenders: an `items` row can end up report_kind='tender' with no *surviving*
+    # tenders.item_id pointer even outside the batch just deleted above -- e.g. two different
+    # scan_tenders() notices resolving (via insert_item's ON CONFLICT (url)) to the same existing
+    # item, where only one of the two owning `tenders` rows got captured by a given purge pass.
+    # Never deletes an item some other tenders row still legitimately points to.
+    if not dry_run:
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM items WHERE report_kind = 'tender' "
+                "AND id NOT IN (SELECT item_id FROM tenders WHERE item_id IS NOT NULL)"
+            )
+            deleted_items += cur.rowcount
+
     after = before - (len(to_delete) if not dry_run else 0)
     return {
         "before": before,

@@ -46,14 +46,14 @@ programs:
 people: []   # publications-level tracking only; populated dynamically
 
 conferences_seed:
-  - { name: AUSA, month: 10, city: Washington, relevance: 4 }
-  - { name: DSEI, month: 9, city: London, cadence: biennial_odd, relevance: 5 }
-  - { name: Eurosatory, month: 6, city: Paris, cadence: biennial_even, relevance: 5 }
-  - { name: "Paris Air Show", month: 6, city: Paris, cadence: biennial_odd, relevance: 4 }
-  - { name: "Farnborough Air Show", month: 7, city: Farnborough, cadence: biennial_even, relevance: 4 }
-  - { name: "SOF Week", month: 5, city: Tampa, relevance: 4 }
-  - { name: Xponential, month: 5, city: US, relevance: 4 }
-  - { name: "SPIE Defense + Commercial Sensing", month: 4, city: US, relevance: 5 }
-  - { name: "ISDEF", month: 6, city: "Tel Aviv", cadence: biennial_odd, relevance: 4 }
-  - { name: "Euronaval", month: 11, city: Paris, cadence: biennial_even, relevance: 4 }
-  - { name: "IDEX / NAVDEX", month: 2, city: "Abu Dhabi", cadence: biennial_odd, relevance: 4 }
+  - { name: AUSA, month: 10, city: Washington, relevance: 4, url: "https://www.ausa.org", organizer: "Association of the United States Army" }
+  - { name: DSEI, month: 9, city: London, cadence: biennial_odd, relevance: 5, url: "https://www.dsei.co.uk", organizer: "Clarion Events" }
+  - { name: Eurosatory, month: 6, city: Paris, cadence: biennial_even, relevance: 5, url: "https://www.eurosatory.com", organizer: "Française de l'Aéronautique" }
+  - { name: "Paris Air Show", month: 6, city: Paris, cadence: biennial_odd, relevance: 4, url: "https://www.siae.fr", organizer: "Groupement des Industries Françaises Aéronautiques et Spatiales (GIFAS)" }
+  - { name: "Farnborough Air Show", month: 7, city: Farnborough, cadence: biennial_even, relevance: 4, url: "https://www.farnboroughairshow.com", organizer: "Farnborough International Limited" }
+  - { name: "SOF Week", month: 5, city: Tampa, relevance: 4, url: "https://www.sofweek.org", organizer: "SOFWERX" }
+  - { name: Xponential, month: 5, city: US, relevance: 4, url: "https://www.xponential.org", organizer: "AUVSI (Association for Unmanned Vehicle Systems International)" }
+  - { name: "SPIE Defense + Commercial Sensing", month: 4, city: US, relevance: 5, url: "https://www.spie.org/conferences-and-exhibitions/defense-and-commercial-sensing", organizer: "SPIE (Society of Photo-Optical Instrumentation Engineers)" }
+  - { name: "ISDEF", month: 6, city: "Tel Aviv", cadence: biennial_odd, relevance: 4, url: "https://www.isdefexpo.com", organizer: "Israel Defense Exposition" }
+  - { name: "Euronaval", month: 11, city: Paris, cadence: biennial_even, relevance: 4, url: "https://www.euronaval.fr", organizer: "Française de l'Aéronautique" }
+  - { name: "IDEX / NAVDEX", month: 2, city: "Abu Dhabi", cadence: biennial_odd, relevance: 4, url: "https://www.idexuae.ae", organizer: "IDEX" }

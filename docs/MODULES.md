@@ -2021,11 +2021,25 @@ as a monthly job (`conference_scan`, `schedule.monthly_run.day` at 02:30 — `or
   rolling-horizon table respectively.
 - `conference_card(row)` — DB row → API/report dict. Carries both the fields already declared in
   `web/src/types/api.ts: Conference` (`location`, `starts_at`, `ends_at`, `url`, `relevance_he`, a
-  Hebrew label + number e.g. "גבוהה (4)") and the full FR-12 field set (`start_date`, `end_date`,
+  Hebrew label + number e.g. "גבוהה (4)", `organizer`) and the full FR-12 field set (`start_date`, `end_date`,
   `city`, `venue`, `cadence`, `relevance`, `rationale`, `registration_opens`,
-  `early_bird_deadline`, `cfp_deadline`, `cost_range`, `registration_url`, `entry_conditions`,
+  `early_bird_deadline`, `cfp_deadline`, `cost_range`, `registration_url`, `organizer`, `entry_conditions`,
   `status`, `last_verified_at`), plus `changes` — a `{field: {"from","to"}}` diff of `prev_snapshot`
   against the row's current values.
+
+### Conferences seed data: `url` and `organizer` fields
+
+`config/watchlist.yaml: conferences_seed` entries each include:
+- `url` — the canonical official registration/event website (stored as `registration_url` in the DB);
+  never overwritten by seed updates once a row is confirmed.
+- `organizer` — the event's organizer name (e.g., "Association of the United States Army" for AUSA);
+  never overwritten once a row is confirmed.
+
+`db/seed/seed_watchlist.py:seed_conferences()` reads these fields and writes them to the DB,
+preserving any manually-entered values (if a row's `registration_url` or `organizer` is already set,
+the seed update leaves it alone). `roll_horizon()` in `agent/eoa/conferences/tracker.py` also carries
+these fields forward when merging duplicate occurrences or creating new rows, via `_merge_occurrence`
+and `_insert_estimated`; both functions check `_MERGE_FILL_FIELDS` to avoid overwriting verified data.
 
 ### `agent/eoa/conferences/reminders.py` (FR-12.4)
 

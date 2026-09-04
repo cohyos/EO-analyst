@@ -137,16 +137,19 @@ test.describe("Feed screen (/feed)", () => {
     await expect(page.locator('[data-testid^="feed-row-"]').first()).toBeVisible({ timeout: 20_000 });
 
     const redToggle = page.getByRole("group", { name: "סינון לפי רמה" }).getByRole("button", { name: "קריטי" });
-    await redToggle.click();
+    // Register the response wait BEFORE the click that triggers it — the
+    // refetch can resolve faster than a wait registered after the click,
+    // which would otherwise miss the event and time out.
+    const [response] = await Promise.all([
+      page.waitForResponse((r) => r.url().includes("/api/items") && r.url().includes("level=red")),
+      redToggle.click(),
+    ]);
+    expect(response.ok()).toBeTruthy();
     await expect(redToggle).toHaveAttribute("aria-pressed", "true");
 
-    // Wait for the refetch to actually land, then re-read the row list fresh
-    // right before asserting each level — the feed is virtualized, so a
-    // count captured too early (mid-refetch) can go stale by the time we
-    // reach a later index.
-    await page.waitForResponse(
-      (r) => r.url().includes("/api/items") && r.url().includes("level=red") && r.ok(),
-    );
+    // Re-read the row list fresh right before asserting each level — the
+    // feed is virtualized, so a count captured too early (mid-refetch) can
+    // go stale by the time we reach a later index.
     await page.waitForTimeout(300);
 
     const levelBadges = page.locator('[data-testid^="feed-row-"] [data-level]');

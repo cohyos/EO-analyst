@@ -456,6 +456,8 @@ class TestMergeOccurrence:
             "relevance": None,
             "end_date": None,
             "rationale": None,
+            "registration_url": None,
+            "organizer": None,
         }
         with patch("eoa.conferences.tracker._execute") as mock_execute:
             changed = _merge_occurrence(
@@ -467,12 +469,16 @@ class TestMergeOccurrence:
                 rationale="est.",
                 canonical_name="AUSA 2026",
                 names_in_use=set(),
+                registration_url="https://www.ausa.org",
+                organizer="Association of the United States Army",
             )
         assert changed is True
         mock_execute.assert_called_once()
         params = mock_execute.call_args[0][1]
         assert params["city"] == "Washington"
         assert params["name"] == "AUSA 2026"
+        assert params["registration_url"] == "https://www.ausa.org"
+        assert params["organizer"] == "Association of the United States Army"
         assert row["city"] == "Washington"  # in-memory row updated too
 
     def test_does_not_rename_if_already_has_a_year(self):
@@ -521,6 +527,65 @@ class TestMergeOccurrence:
                 names_in_use={"AUSA 2026"},
             )
         # nothing else was missing and the rename was blocked -> no-op
+        assert changed is False
+        mock_execute.assert_not_called()
+
+    def test_fills_registration_url_and_organizer(self):
+        row = {
+            "id": 1,
+            "name": "DSEI",
+            "city": "London",
+            "registration_url": None,
+            "organizer": None,
+            "cadence": "biennial_odd",
+            "relevance": 5,
+            "end_date": None,
+            "rationale": None,
+        }
+        with patch("eoa.conferences.tracker._execute") as mock_execute:
+            changed = _merge_occurrence(
+                row,
+                city="London",
+                cadence="biennial_odd",
+                relevance=5,
+                end_date=dt.date(2026, 10, 18),
+                rationale="x",
+                canonical_name="DSEI 2027",
+                names_in_use=set(),
+                registration_url="https://www.dsei.co.uk",
+                organizer="Clarion Events",
+            )
+        assert changed is True
+        params = mock_execute.call_args[0][1]
+        assert params["registration_url"] == "https://www.dsei.co.uk"
+        assert params["organizer"] == "Clarion Events"
+
+    def test_does_not_overwrite_existing_registration_url_or_organizer(self):
+        row = {
+            "id": 1,
+            "name": "AUSA 2026",
+            "city": "Washington",
+            "registration_url": "https://existing.com",
+            "organizer": "Existing Org",
+            "cadence": "annual",
+            "relevance": 4,
+            "end_date": dt.date(2026, 10, 18),
+            "rationale": "x",
+        }
+        with patch("eoa.conferences.tracker._execute") as mock_execute:
+            changed = _merge_occurrence(
+                row,
+                city="Washington",
+                cadence="annual",
+                relevance=4,
+                end_date=dt.date(2026, 10, 18),
+                rationale="x",
+                canonical_name="AUSA 2026",
+                names_in_use=set(),
+                registration_url="https://new.com",
+                organizer="New Org",
+            )
+        # all fields already filled -> no-op
         assert changed is False
         mock_execute.assert_not_called()
 

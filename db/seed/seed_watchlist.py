@@ -104,13 +104,17 @@ def seed_conferences(data: dict[str, Any], today: dt.date | None = None) -> list
     today = today or dt.date.today()
     ids = []
     query = """
-        INSERT INTO conferences (name, city, relevance, cadence, start_date, status)
-        VALUES (%(name)s, %(city)s, %(relevance)s, %(cadence)s, %(start_date)s, 'estimated')
+        INSERT INTO conferences (name, city, relevance, cadence, start_date, registration_url, organizer, status)
+        VALUES (%(name)s, %(city)s, %(relevance)s, %(cadence)s, %(start_date)s, %(registration_url)s, %(organizer)s, 'estimated')
         ON CONFLICT (name) DO UPDATE SET
             city = EXCLUDED.city,
             relevance = EXCLUDED.relevance,
             cadence = EXCLUDED.cadence,
             start_date = EXCLUDED.start_date,
+            registration_url = CASE WHEN conferences.registration_url IS NULL
+                                    THEN EXCLUDED.registration_url ELSE conferences.registration_url END,
+            organizer = CASE WHEN conferences.organizer IS NULL
+                             THEN EXCLUDED.organizer ELSE conferences.organizer END,
             status = CASE WHEN conferences.status = 'confirmed'
                           THEN conferences.status ELSE 'estimated' END
         RETURNING id
@@ -126,6 +130,8 @@ def seed_conferences(data: dict[str, Any], today: dt.date | None = None) -> list
                     "relevance": conf.get("relevance"),
                     "cadence": conf.get("cadence"),
                     "start_date": next_date,
+                    "registration_url": conf.get("url"),
+                    "organizer": conf.get("organizer"),
                 },
             )
             ids.append(cur.fetchone()["id"])

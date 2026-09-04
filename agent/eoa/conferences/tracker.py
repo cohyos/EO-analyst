@@ -188,6 +188,7 @@ _MERGE_FILL_FIELDS = (
     "cfp_deadline",
     "cost_range",
     "registration_url",
+    "organizer",
     "entry_conditions",
 )
 
@@ -290,12 +291,14 @@ def _insert_estimated(
     start_date: dt.date,
     end_date: dt.date,
     rationale: str,
+    registration_url: str | None = None,
+    organizer: str | None = None,
 ) -> int | None:
     """Insert one ``estimated`` row keyed by its unique ``name``; no-op (returns None) if it exists."""
     row = _fetchone(
         """
-        INSERT INTO conferences (name, city, cadence, relevance, start_date, end_date, status, rationale)
-        VALUES (%(name)s, %(city)s, %(cadence)s, %(relevance)s, %(start_date)s, %(end_date)s, 'estimated', %(rationale)s)
+        INSERT INTO conferences (name, city, cadence, relevance, start_date, end_date, status, rationale, registration_url, organizer)
+        VALUES (%(name)s, %(city)s, %(cadence)s, %(relevance)s, %(start_date)s, %(end_date)s, 'estimated', %(rationale)s, %(registration_url)s, %(organizer)s)
         ON CONFLICT (name) DO NOTHING
         RETURNING id
         """,
@@ -307,6 +310,8 @@ def _insert_estimated(
             "start_date": start_date,
             "end_date": end_date,
             "rationale": rationale,
+            "registration_url": registration_url,
+            "organizer": organizer,
         },
     )
     return row["id"] if row is not None else None
@@ -337,6 +342,8 @@ def _merge_occurrence(
     rationale: str,
     canonical_name: str,
     names_in_use: set[str],
+    registration_url: str | None = None,
+    organizer: str | None = None,
 ) -> bool:
     """Fold a would-be roll_horizon insert into `existing_row` (the same occurrence, found by
     `_find_occurrence_row`) instead of creating a duplicate: fill in whatever fields it is
@@ -354,6 +361,10 @@ def _merge_occurrence(
         updates["end_date"] = end_date
     if not existing_row.get("rationale"):
         updates["rationale"] = rationale
+    if not existing_row.get("registration_url") and registration_url:
+        updates["registration_url"] = registration_url
+    if not existing_row.get("organizer") and organizer:
+        updates["organizer"] = organizer
     if _year_from_name(existing_row.get("name") or "") is None and canonical_name not in names_in_use:
         updates["name"] = canonical_name
 
@@ -425,6 +436,8 @@ def roll_horizon(months: int = 24) -> dict[str, Any]:
                     rationale=rationale,
                     canonical_name=canonical_name,
                     names_in_use=names_in_use,
+                    registration_url=seed.get("url"),
+                    organizer=seed.get("organizer"),
                 )
                 merged += 1 if changed else 0
                 skipped += 0 if changed else 1
@@ -438,6 +451,8 @@ def roll_horizon(months: int = 24) -> dict[str, Any]:
                 start_date=start_date,
                 end_date=end_date,
                 rationale=rationale,
+                registration_url=seed.get("url"),
+                organizer=seed.get("organizer"),
             )
             if new_id is not None:
                 created += 1
@@ -451,6 +466,8 @@ def roll_horizon(months: int = 24) -> dict[str, Any]:
                         "start_date": start_date,
                         "end_date": end_date,
                         "rationale": rationale,
+                        "registration_url": seed.get("url"),
+                        "organizer": seed.get("organizer"),
                         "status": "estimated",
                     }
                 )
