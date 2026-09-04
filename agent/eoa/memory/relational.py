@@ -46,6 +46,9 @@ _ITEM_UPDATABLE_FIELDS = {
     "level",
     "triage_reason",
     "dedup_of",
+    "key_facts",
+    "uncertainty_he",
+    "source_name",
     "security_status",
     "classification",
 }

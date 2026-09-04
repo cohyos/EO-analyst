@@ -195,7 +195,7 @@ def task_classify(client, model, num_ctx):
                 {"role": "user", "content": snippet["text"]}
             ],
             "format": SCHEMA_CLASSIFY,
-            "options": {"temperature": 0.1, "num_ctx": num_ctx}
+            "options": {"temperature": 0.1, "num_ctx": num_ctx, "num_predict": 1500}
         }
         start = time.perf_counter()
         try:
@@ -255,7 +255,7 @@ def task_summarize_he(client, model, num_ctx):
             "stream": False,
             "think": False,
             "messages": [{"role": "user", "content": prompt}],
-            "options": {"temperature": 0.1, "num_ctx": num_ctx}
+            "options": {"temperature": 0.1, "num_ctx": num_ctx, "num_predict": 1500}
         }
         start = time.perf_counter()
         try:
@@ -315,7 +315,7 @@ def run_react_scenario(client, model, num_ctx, query, is_found):
             "think": False,
             "messages": messages,
             "tools": TOOLS_SCHEMA,
-            "options": {"temperature": 0.1, "num_ctx": num_ctx}
+            "options": {"temperature": 0.1, "num_ctx": num_ctx, "num_predict": 1500}
         }
         try:
             r = client.post("http://127.0.0.1:11434/api/chat", json=payload, timeout=300)
@@ -398,7 +398,7 @@ def task_hebrew_edit(client, model, num_ctx):
             "stream": False,
             "think": False,
         "messages": [{"role": "user", "content": prompt}],
-        "options": {"temperature": 0.1, "num_ctx": num_ctx}
+        "options": {"temperature": 0.1, "num_ctx": num_ctx, "num_predict": 1500}
     }
     start = time.perf_counter()
     try:
