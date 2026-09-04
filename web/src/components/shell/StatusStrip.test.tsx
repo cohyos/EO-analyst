@@ -67,4 +67,32 @@ describe("StatusStrip", () => {
     expect(screen.getByText("SearXNG")).toBeInTheDocument();
     expect(screen.getByText("ntfy")).toBeInTheDocument();
   });
+
+  it("opens the resource history drawer on click, showing recent decisions and loaded models", () => {
+    const state: StatusSocketState = { status: baseStatus, connected: true, logs: [] };
+    render(<StatusStrip state={state} />);
+    expect(screen.queryByRole("dialog", { name: "היסטוריית משאבים" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("הצג/הסתר היסטוריית משאבים"));
+    expect(screen.getByRole("dialog", { name: "היסטוריית משאבים" })).toBeInTheDocument();
+    expect(screen.getByText("vram ok")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("סגור"));
+    expect(screen.queryByRole("dialog", { name: "היסטוריית משאבים" })).not.toBeInTheDocument();
+  });
+
+  it("flags a loaded model that is partially offloaded to CPU", () => {
+    const withOffload: StatusResponse = {
+      ...baseStatus,
+      gate: {
+        ...baseStatus.gate,
+        loaded_models: [
+          { name: "big-model:70b", size_mb: 40000, size_vram_mb: 12000, cpu_offload: true },
+        ],
+      },
+    };
+    const state: StatusSocketState = { status: withOffload, connected: true, logs: [] };
+    render(<StatusStrip state={state} />);
+    expect(screen.getByText(/CPU offload/)).toBeInTheDocument();
+  });
 });

@@ -68,8 +68,8 @@ describe("pushResourceSample", () => {
 });
 
 describe("pruneResourceHistory", () => {
-  it("drops everything older than the window relative to `nowMs`", () => {
-    const history = [sample(0), sample(HISTORY_WINDOW_MS / 2), sample(HISTORY_WINDOW_MS)];
+  it("drops everything strictly older than the window relative to `nowMs`", () => {
+    const history = [sample(0), sample(HISTORY_WINDOW_MS / 2), sample(HISTORY_WINDOW_MS - 1)];
     const now = HISTORY_WINDOW_MS * 2;
     expect(pruneResourceHistory(history, now)).toHaveLength(0);
   });

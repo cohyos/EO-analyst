@@ -50,7 +50,8 @@ class TestDatabaseSchema:
         if result.returncode != 0:
             pytest.skip(f"alembic current failed: {result.stderr[:200]}")
 
-        current_revision = result.stdout.strip().split()[-1] if result.stdout.strip() else None
+        tokens = [t for t in result.stdout.strip().replace("(head)", " ").split() if t]
+        current_revision = tokens[-1] if tokens else None
 
         # Get the latest revision from migration files
         migrations_dir = REPO_ROOT / "db" / "migrations" / "versions"
