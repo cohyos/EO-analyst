@@ -658,7 +658,12 @@ def _extra_sections_md(lines: list[str], sections: list[dict[str, Any]], positio
 def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
     for tbl in tables:
         headers = tbl.get("headers") or []
-        lines += [f"## {tbl.get('title_he') or ''}", "", "| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+        lines += [
+            f"## {tbl.get('title_he') or ''}",
+            "",
+            "| " + " | ".join(headers) + " |",
+            "|" + "---|" * len(headers),
+        ]
         for row in tbl.get("rows") or []:
             lines.append("| " + " | ".join("—" if v is None else str(v) for v in row) + " |")
         lines.append("")
@@ -758,7 +763,11 @@ def _tables_html(parts: list[str], tables: list[dict[str, Any]]) -> None:
     for tbl in tables:
         headers = tbl.get("headers") or []
         parts.append(f"<h2>{html.escape(tbl.get('title_he') or '')}</h2>")
-        parts.append("<table><thead><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in headers) + "</tr></thead><tbody>")
+        parts.append(
+            "<table><thead><tr>"
+            + "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+            + "</tr></thead><tbody>"
+        )
         for row in tbl.get("rows") or []:
             cells = "".join(f"<td>{html.escape('—' if v is None else str(v))}</td>" for v in row)
             parts.append(f"<tr>{cells}</tr>")

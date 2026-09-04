@@ -87,7 +87,7 @@ def _entity_clusters_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
         out.append(
             {
                 "kind": "entity_cluster",
-                "title_he": f'מגמה: פעילות מוגברת סביב {entity} בתחום {_domain_label(domain)}',
+                "title_he": f"מגמה: פעילות מוגברת סביב {entity} בתחום {_domain_label(domain)}",
                 "evidence_item_ids": item_ids,
                 "entities": [entity] if entity else [],
                 "strength": _clamp(n),
@@ -218,9 +218,7 @@ def _convergence_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out.append(
             {
                 "kind": "market_convergence",
-                "title_he": (
-                    f'התכנסות שוק בתת-התחום "{subdomain}" — {n} עסקאות מיזוג/רכישה ושותפות בתקופה'
-                ),
+                "title_he": (f'התכנסות שוק בתת-התחום "{subdomain}" — {n} עסקאות מיזוג/רכישה ושותפות בתקופה'),
                 "evidence_item_ids": sorted(set(row.get("item_ids") or [])),
                 "entities": sorted(set(row.get("parties") or [])),
                 "strength": _clamp(n + 1, lo=3, hi=5),
@@ -265,8 +263,7 @@ def _tech_race_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "kind": "tech_race",
                 "title_he": (
-                    f'מירוץ טכנולוגי בתת-התחום "{subdomain}" — '
-                    f"{len(companies)} חברות עם השקות/ניסויים בתקופה"
+                    f'מירוץ טכנולוגי בתת-התחום "{subdomain}" — {len(companies)} חברות עם השקות/ניסויים בתקופה'
                 ),
                 "evidence_item_ids": sorted(set(row.get("item_ids") or [])),
                 "entities": companies,

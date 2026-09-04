@@ -380,3 +380,5 @@ def test_month_range_defaults_to_previous_calendar_month(monkeypatch):
 
 def test_month_range_explicit_end_computes_full_month_bounds():
     start, end = monthly._month_range(dt.date(2026, 2, 15))
+    assert start == dt.date(2026, 2, 1)
+    assert end == dt.date(2026, 2, 28)

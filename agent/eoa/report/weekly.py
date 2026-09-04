@@ -134,7 +134,9 @@ def collect_week_items(
         LIMIT %(limit)s
     """
     with connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, {"levels": list(_LEVELS_MAIN), "start": period_start, "end": period_end, "limit": cap})
+        cur.execute(
+            sql, {"levels": list(_LEVELS_MAIN), "start": period_start, "end": period_end, "limit": cap}
+        )
         rows = cur.fetchall()
     for row in rows:
         row.setdefault("key_facts", [])
@@ -343,9 +345,7 @@ def format_trends_block(trend_list: list[dict[str, Any]], id_to_n: dict[int, int
 
 def _no_items_draft() -> WeeklyReportDraft:
     return WeeklyReportDraft(
-        exec_summary_he=(
-            "לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח השבועי."
-        ),
+        exec_summary_he=("לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח השבועי."),
         trend_paragraphs=[],
         sections=[],
         outlook_he="",
@@ -591,7 +591,11 @@ def build_weekly(
             for c in conferences_90
         ]
         tables.append(
-            {"title_he": "לוח 90 הימים הקרובים", "headers": ["שם", "תאריכים", "עיר", "רלוונטיות"], "rows": rows}
+            {
+                "title_he": "לוח 90 הימים הקרובים",
+                "headers": ["שם", "תאריכים", "עיר", "רלוונטיות"],
+                "rows": rows,
+            }
         )
 
     docx_path = _report_path(end, "docx")

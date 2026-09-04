@@ -144,6 +144,134 @@ def _years_in_horizon(cadence: str | None, month: int, today: dt.date, horizon_e
 
 
 # --------------------------------------------------------------------------
+# name matching helpers -- shared by the roll_horizon merge logic and discover_new's dedupe
+# --------------------------------------------------------------------------
+
+_LEADING_YEAR_RE = re.compile(r"^\s*(20\d{2})\b[\s,\-–—:]*")
+_TRAILING_YEAR_RE = re.compile(r"[\s,\-–—:]*\b(20\d{2})\s*$")
+_EDGE_PUNCT_RE = re.compile(r"^[\s,\-–—:]+|[\s,\-–—:]+$")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _year_from_name(name: str) -> int | None:
+    """A trailing 4-digit year on `name`, if it has one (e.g. "AUSA 2026" -> 2026)."""
+    m = re.search(r"(20\d{2})\s*$", name)
+    return int(m.group(1)) if m else None
+
+
+def _normalize_name(name: str) -> str:
+    """Casefold `name` with a leading/trailing 4-digit year and surrounding whitespace/punctuation
+    stripped, so "AUSA", "AUSA 2026", "AUSA, 2026" and "2026 AUSA" all normalise to "ausa". Used to
+    recognise that two differently-named rows (a bare seed_watchlist.py name vs a roll_horizon
+    "<name> <year>") are the same conference before comparing dates."""
+    s = name.strip()
+    s = _TRAILING_YEAR_RE.sub("", s)
+    s = _LEADING_YEAR_RE.sub("", s)
+    s = _EDGE_PUNCT_RE.sub("", s)
+    s = _WHITESPACE_RE.sub(" ", s).strip()
+    return s.casefold()
+
+
+# --------------------------------------------------------------------------
+# merge_duplicates (bugfix: seed_watchlist.py's bare "AUSA" vs roll_horizon's "AUSA 2026")
+# --------------------------------------------------------------------------
+
+_MERGE_FILL_FIELDS = (
+    "city",
+    "venue",
+    "cadence",
+    "relevance",
+    "rationale",
+    "end_date",
+    "registration_opens",
+    "early_bird_deadline",
+    "cfp_deadline",
+    "cost_range",
+    "registration_url",
+    "entry_conditions",
+)
+
+
+def _occurrence_key(row: dict[str, Any]) -> tuple[str, int, int] | None:
+    """(normalised name, start-date year, start-date month), or None if the row has no start_date
+    (nothing to key an occurrence on yet -- e.g. a freshly discovered candidate with unknown dates)."""
+    start = row.get("start_date")
+    name = row.get("name")
+    if not start or not name:
+        return None
+    return (_normalize_name(name), start.year, start.month)
+
+
+def _find_duplicate_groups(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Rows sharing an `_occurrence_key`, oldest (lowest id) first; only groups of 2+ matter."""
+    groups: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = _occurrence_key(row)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append(row)
+    return [sorted(g, key=lambda r: r["id"]) for g in groups.values() if len(g) > 1]
+
+
+def _merged_fields(keep: dict[str, Any], dup: dict[str, Any]) -> dict[str, Any]:
+    """Fields to write onto `keep` so it absorbs whatever `dup` has that `keep` is missing:
+    empty fields filled in, `status` upgraded to 'confirmed' if either side is, and the dated
+    canonical name ("<base> <year>") adopted if only one side already has a year in its name."""
+    updates: dict[str, Any] = {}
+    for field in _MERGE_FILL_FIELDS:
+        if not keep.get(field) and dup.get(field):
+            updates[field] = dup[field]
+    if keep.get("status") != "confirmed" and dup.get("status") == "confirmed":
+        updates["status"] = "confirmed"
+    keep_has_year = _year_from_name(keep.get("name") or "") is not None
+    dup_has_year = _year_from_name(dup.get("name") or "") is not None
+    if dup_has_year and not keep_has_year:
+        updates["name"] = dup["name"]
+    return updates
+
+
+def merge_duplicates(rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """One-off cleanup: collapse conference rows that represent the same occurrence under two
+    different names -- typically ``db/seed/seed_watchlist.py``'s bare seed name (e.g. "AUSA",
+    dated the 1st of the month) vs ``roll_horizon``'s "<name> <year>" (dated the 15th). Rows are
+    grouped by normalised name + start-date year/month (`_occurrence_key`); within each group the
+    oldest (lowest id) row is kept, absorbs any fields only the newer row had (`_merged_fields`),
+    and every newer row's `conference_reminders` are moved onto the kept row (skipping any that
+    would collide with a reminder the kept row already has) before the newer row is deleted.
+    """
+    if rows is None:
+        rows = _fetchall("SELECT * FROM conferences WHERE start_date IS NOT NULL")
+
+    groups_merged, rows_deleted = 0, 0
+    for group in _find_duplicate_groups(rows):
+        keep, dups = group[0], group[1:]
+        for dup in dups:
+            updates = _merged_fields(keep, dup)
+            if updates:
+                set_clauses = ", ".join(f"{k} = %({k})s" for k in updates)
+                _execute(
+                    f"UPDATE conferences SET {set_clauses} WHERE id = %(id)s", {**updates, "id": keep["id"]}
+                )
+                keep.update(updates)
+            _execute(
+                "DELETE FROM conference_reminders d USING conference_reminders k "
+                "WHERE d.conf_id = %(dup_id)s AND k.conf_id = %(keep_id)s AND d.kind = k.kind",
+                {"dup_id": dup["id"], "keep_id": keep["id"]},
+            )
+            _execute(
+                "UPDATE conference_reminders SET conf_id = %(keep_id)s WHERE conf_id = %(dup_id)s",
+                {"keep_id": keep["id"], "dup_id": dup["id"]},
+            )
+            _execute("DELETE FROM conferences WHERE id = %(dup_id)s", {"dup_id": dup["id"]})
+            rows_deleted += 1
+        groups_merged += 1
+
+    if rows_deleted:
+        log.info("conference_merge_duplicates_done", groups_merged=groups_merged, rows_deleted=rows_deleted)
+    return {"groups_merged": groups_merged, "rows_deleted": rows_deleted}
+
+
+# --------------------------------------------------------------------------
 # roll_horizon (FR-12.1 / FR-12.3)
 # --------------------------------------------------------------------------
 
@@ -157,8 +285,8 @@ def _insert_estimated(
     start_date: dt.date,
     end_date: dt.date,
     rationale: str,
-) -> bool:
-    """Insert one ``estimated`` row keyed by its unique ``name``; no-op (returns False) if it exists."""
+) -> int | None:
+    """Insert one ``estimated`` row keyed by its unique ``name``; no-op (returns None) if it exists."""
     row = _fetchone(
         """
         INSERT INTO conferences (name, city, cadence, relevance, start_date, end_date, status, rationale)
@@ -176,7 +304,60 @@ def _insert_estimated(
             "rationale": rationale,
         },
     )
-    return row is not None
+    return row["id"] if row is not None else None
+
+
+def _find_occurrence_row(
+    existing: list[dict[str, Any]], base_name: str, year: int, month: int
+) -> dict[str, Any] | None:
+    """The existing row (if any) that is the same occurrence as `base_name`'s `year`/`month`
+    candidate: same normalised name, same start-date year and month."""
+    norm = _normalize_name(base_name)
+    for row in existing:
+        start = row.get("start_date")
+        if not start or start.year != year or start.month != month:
+            continue
+        if _normalize_name(row.get("name") or "") == norm:
+            return row
+    return None
+
+
+def _merge_occurrence(
+    existing_row: dict[str, Any],
+    *,
+    city: str | None,
+    cadence: str | None,
+    relevance: int | None,
+    end_date: dt.date,
+    rationale: str,
+    canonical_name: str,
+    names_in_use: set[str],
+) -> bool:
+    """Fold a would-be roll_horizon insert into `existing_row` (the same occurrence, found by
+    `_find_occurrence_row`) instead of creating a duplicate: fill in whatever fields it is
+    missing, and adopt the dated canonical name ("<base> <year>") only if it currently has no
+    year of its own and that name isn't already taken by a different row. Returns whether
+    anything was actually changed."""
+    updates: dict[str, Any] = {}
+    if not existing_row.get("city") and city:
+        updates["city"] = city
+    if not existing_row.get("cadence") and cadence:
+        updates["cadence"] = cadence
+    if existing_row.get("relevance") is None and relevance is not None:
+        updates["relevance"] = relevance
+    if not existing_row.get("end_date"):
+        updates["end_date"] = end_date
+    if not existing_row.get("rationale"):
+        updates["rationale"] = rationale
+    if _year_from_name(existing_row.get("name") or "") is None and canonical_name not in names_in_use:
+        updates["name"] = canonical_name
+
+    if not updates:
+        return False
+    set_clauses = ", ".join(f"{k} = %({k})s" for k in updates)
+    _execute(f"UPDATE conferences SET {set_clauses} WHERE id = %(id)s", {**updates, "id": existing_row["id"]})
+    existing_row.update(updates)
+    return True
 
 
 def _transition_past(today: dt.date, rows: list[dict[str, Any]] | None = None) -> int:
@@ -199,13 +380,20 @@ def _is_past(row: dict[str, Any], today: dt.date) -> bool:
 def roll_horizon(months: int = 24) -> dict[str, Any]:
     """FR-12.1/12.3: ensure every seed conference has an ``estimated`` row for each occurrence
     within the next ``months``, never duplicating an existing (confirmed or estimated) row for
-    the same year, then transition passed conferences to ``status='past'``.
+    the same occurrence -- an existing row for the same normalised name in the same start-date
+    month/year is merged into (`_merge_occurrence`) rather than re-inserted -- then transition
+    passed conferences to ``status='past'``. Starts with `merge_duplicates()` to collapse any
+    duplicates already in the table (e.g. from before this de-duplication existed, or from
+    ``db/seed/seed_watchlist.py`` seeding a bare name the same month a previous run also rolled).
     """
+    merge_stats = merge_duplicates()
+
     today = dt.date.today()
     horizon_end = today + relativedelta(months=months)
     seeds = (settings().watchlist or {}).get("conferences_seed") or []
+    existing_rows = _fetchall("SELECT * FROM conferences WHERE start_date IS NOT NULL")
 
-    created, skipped = 0, 0
+    created, skipped, merged = 0, 0, 0
     for seed in seeds:
         name, month = seed.get("name"), seed.get("month")
         if not name or not month:
@@ -214,28 +402,71 @@ def roll_horizon(months: int = 24) -> dict[str, Any]:
         cadence = seed.get("cadence", "annual")
         for year in _years_in_horizon(cadence, month, today, horizon_end):
             start_date = dt.date(year, month, 15)
-            inserted = _insert_estimated(
-                name=f"{name} {year}",
+            end_date = start_date + dt.timedelta(days=3)
+            rationale = (
+                f"מועד משוער לפי מחזוריות היסטורית (חודש {month}, {cadence}); "
+                "יאומת בסריקה החודשית (FR-12.3)."
+            )
+            canonical_name = f"{name} {year}"
+
+            existing_row = _find_occurrence_row(existing_rows, name, year, month)
+            if existing_row is not None:
+                names_in_use = {r["name"] for r in existing_rows if r["id"] != existing_row["id"]}
+                changed = _merge_occurrence(
+                    existing_row,
+                    city=seed.get("city"),
+                    cadence=cadence,
+                    relevance=seed.get("relevance"),
+                    end_date=end_date,
+                    rationale=rationale,
+                    canonical_name=canonical_name,
+                    names_in_use=names_in_use,
+                )
+                merged += 1 if changed else 0
+                skipped += 0 if changed else 1
+                continue
+
+            new_id = _insert_estimated(
+                name=canonical_name,
                 city=seed.get("city"),
                 cadence=cadence,
                 relevance=seed.get("relevance"),
                 start_date=start_date,
-                end_date=start_date + dt.timedelta(days=3),
-                rationale=(
-                    f"מועד משוער לפי מחזוריות היסטורית (חודש {month}, {cadence}); "
-                    "יאומת בסריקה החודשית (FR-12.3)."
-                ),
+                end_date=end_date,
+                rationale=rationale,
             )
-            if inserted:
+            if new_id is not None:
                 created += 1
+                existing_rows.append(
+                    {
+                        "id": new_id,
+                        "name": canonical_name,
+                        "city": seed.get("city"),
+                        "cadence": cadence,
+                        "relevance": seed.get("relevance"),
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "rationale": rationale,
+                        "status": "estimated",
+                    }
+                )
             else:
                 skipped += 1
 
     transitioned = _transition_past(today)
-    log.info("conference_roll_horizon_done", created=created, skipped=skipped, transitioned_past=transitioned)
+    log.info(
+        "conference_roll_horizon_done",
+        created=created,
+        skipped=skipped,
+        merged=merged,
+        duplicates_merged=merge_stats["rows_deleted"],
+        transitioned_past=transitioned,
+    )
     return {
         "created": created,
         "skipped_existing": skipped,
+        "merged": merged,
+        "duplicates_merged": merge_stats["rows_deleted"],
         "transitioned_past": transitioned,
         "horizon_end": horizon_end.isoformat(),
     }
@@ -244,11 +475,6 @@ def roll_horizon(months: int = 24) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 # verify_conference (FR-12.3: deep-search-lite)
 # --------------------------------------------------------------------------
-
-
-def _year_from_name(name: str) -> int | None:
-    m = re.search(r"(20\d{2})\s*$", name)
-    return int(m.group(1)) if m else None
 
 
 def _top_official_urls(hits: list[SearchHit], limit: int = 2) -> list[str]:
@@ -405,8 +631,11 @@ def verify_conference(conf_id: int) -> dict[str, Any]:
 
 
 def _is_near_duplicate(name: str, existing: list[str], threshold: float = 0.85) -> bool:
-    n = name.strip().lower()
-    return any(SequenceMatcher(None, n, other.strip().lower()).ratio() >= threshold for other in existing)
+    """True if `name` normalises to (or is a close match of) any name already tracked -- names
+    are compared with their leading/trailing year stripped (`_normalize_name`) first, so "AUSA"
+    and "AUSA 2026" count as the same conference even though the raw strings differ."""
+    n = _normalize_name(name)
+    return any(SequenceMatcher(None, n, _normalize_name(other)).ratio() >= threshold for other in existing)
 
 
 def _relevance_score(candidate: ConferenceCandidate, extra_keywords: list[str]) -> int:

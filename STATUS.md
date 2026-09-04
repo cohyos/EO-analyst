@@ -1,43 +1,46 @@
 # STATUS — EO-Analyst autonomous build
 
-> If a session is resumed, read this file first. Then `git log --oneline -20`, `docs/NIGHT_CHECKLIST.md`,
-> `docs/RUNBOOK.md`, `docs/MODULES.md`.
+> If a session is resumed, read this file first. Then `git log --oneline -30`, `docs/NIGHT_CHECKLIST.md`,
+> `docs/RUNBOOK.md`, `docs/MODULES.md`, `docs/USER_GUIDE_HE.md`.
 
-## Goal for this run (started 2026-09-04 14:00 Israel time)
-Working end-to-end analyst: first real nightly run at 01:00 on 2026-09-05 producing a docx report at ~06:00 and ntfy
-notifications; full web UI (hybrid ops console + analyst chat); second night with deep search.
+## Goal (started 2026-09-04 14:00 Israel time)
+Working end-to-end analyst with a first real nightly run at 01:00 on 2026-09-05 (docx ~06:00, ntfy), full web UI,
+and phase B/C features built while waiting (per the user's instruction "אל תעצור בהמתנה ללילה").
 
-## Decisions (docs/adr/)
-- ADR-001 (bake-off): `resident` = DictaLM-3.0-Nemotron-12B, `investigator` = gemma4:12b, `light` = gemma4:e4b,
-  `embed` = snowflake-arctic-embed2 (1024-d). gemma4:26b rejected.
-- ADR-002: Ollama native on Windows (0.0.0.0:11434, hardened env); containers reach it via host.docker.internal;
-  `agent` has no internet (verified by scripts/verify_isolation.{sh,ps1}).
-- ADR-003: agent↔fetcher jobs-table bridge (`ingest`, `fetch_url`); ntfy relay in the fetcher mirrors self-hosted
-  messages to the public topic while `notify.mirror_to_public` is true.
-- SearXNG: only google / bing / "bing news" / "google news" (+ baidu for zh, yandex for ru) return results;
-  duckduckgo/brave/startpage get CAPTCHA-suspended. Configured per language in config.yaml.
+## Decisions (docs/adr/): 001 models · 002 Ollama native + isolation · 003 fetcher bridge + ntfy relay
 
-## Live system (2026-09-04 ~16:00)
-- Containers: postgres (healthy), searxng (dev port 8088), ntfy (8090), fetcher (job server + relay), agent
-  (orchestrator: daily 01:00, pre-flight 23:30, wake guard 00:55, daytime poll, weekly Sat), web (UI+API 8765).
-- Ollama server started manually with hardened env (`output/logs/ollama_serve.log`); the tray app's auto-updater
-  hung and was killed. After a reboot the tray app starts with the user-scope env vars.
-- Host: scheduled task "EO-Analyst Wake" 00:55; `.wslconfig` written but pending `wsl --shutdown` (apply at reboot).
-- DB: ~251 items ingested, embeddings/dedup done; classify/triage/analyze catch-up loop running on host
-  (`scripts/catchup.sh`, log output/logs/catchup.log) — gated by free RAM (the user's data jobs left 2–5 GB by day).
-- Deep search e2e: first run reached `not_found` honestly but SearXNG returned 0 hits (engine config); fixed,
-  second run in progress (output/logs/e2e_investigate2.log).
-- Tests: 292 unit+security tests green (pytest), web 25 vitest green, lint clean.
+## Live system
+- Containers: postgres (healthy), searxng (8088 dev), ntfy (8090), fetcher (job server + relay), agent
+  (orchestrator; daily 01:00, pre-flight 23:30, wake guard 00:55, daytime poll, weekly Sat 01:00, conference scan
+  monthly 02:30, monthly report 03:30 once the reports agent lands), web (UI+API 8765).
+- Verified end-to-end: ingest (251 items), embeddings + dedup, first classifications visible in the UI feed,
+  deep search on a real question → `found` 0.95 with sources, isolation checks PASS, ntfy relay to the public topic,
+  docx report builder (sample), API + UI pages (Morning / Feed / Investigations screenshots OK).
+- Tests: 402 unit + security tests green; web vitest 25 green.
 
-## Remaining before tonight
-- [ ] Rebuild web image with the API 404 fix; screenshot the real UI once (Morning page must render with zero data).
-- [ ] Confirm e2e deep search reads pages and finishes with sources.
-- [ ] Let the catch-up finish (or at least classify/triage) so the first report has content; optionally run
-      `eo run report` once on host to produce a first docx before the night.
-- [ ] Night checklist (docs/NIGHT_CHECKLIST.md) at ~23:00.
+## Host constraints observed
+- The user's own data jobs leave 0.5–5 GB RAM free by day → GPU stages queue (by design). Host-side catch-up
+  (`scripts/catchup.sh`) is paused; `scripts/ram_watch_resume.sh` restarts it when ≥ 10 GB stays free for 2 minutes.
+  Golden-set evals (`evals/run_evals.py --set-name classify_triage`) still need a run when RAM allows.
+- Ollama runs via manual `ollama serve` (tray updater hung). `.wslconfig` pending `scripts/host/apply_wslconfig.ps1`.
 
-## Known gaps / next (phase B/C)
-- Cross-language dedup (he↔en similarity ≈ 0.53 < 0.92) — entity+date matching later.
-- Graph edge provenance not exposed by `memory.graph.neighbors()` (API/Obsidian show unresolved source).
-- Conferences tracker (FR-12), weekly/monthly reports, surveys UI wiring end-to-end — phase C.
-- Codex CLI writes blocked until the user runs scripts/host/codex_sandbox_setup.ps1; firewall script needs admin.
+## Built this session (see docs/MODULES.md)
+core config/gate/llm client · fetch (40 sources) + sanitizer · security heuristics (83 fixtures) + guard L1/L2 ·
+pipeline dedup/xlang-dedup/classify/triage/analyze · deep search ReAct (persistence protocol, read-before-finish) ·
+report daily docx RTL + QA citations · orchestrator/jobs/scheduler/backup · ntfy + clarification gate + relay ·
+FastAPI (all API.md routes) · React RTL UI (9 screens, error boundary) · Obsidian export · evals harness + 40 golden ·
+conferences tracker FR-12 (horizon, verify/discover, reminders, iCal, API) · feedback loop (calibration, surveys,
+weekly meta) · graph edge provenance · install scripts, README, runbook, user guide (HE), night checklist.
+
+## In flight
+- reports-weekly-monthly agent (trends, weekly/monthly docx, jobs + monthly cron).
+- guard-l1-onnx agent (bake the Protect AI classifier into the agent image, offline).
+- conferences agent: dedupe seed vs generated rows ("AUSA" vs "AUSA 2026").
+
+## Before 01:00 tonight
+- Rebuild agent + web images with everything above (`docker compose build agent web && docker compose up -d`).
+- Apply any new migration (`alembic upgrade head`), run `docs/NIGHT_CHECKLIST.md`.
+
+## Known gaps / next
+- Weekly meta summary needs a scheduler slot (Sat 06:30) once main.py is free of concurrent edits.
+- Firewall script (admin) and Codex sandbox setup remain user actions.

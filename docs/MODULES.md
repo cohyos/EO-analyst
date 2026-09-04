@@ -820,6 +820,161 @@ docx test is saved at `output/reports/sample_daily.docx` (generated and
 `validate_docx`-checked directly against `docx_builder`, not through
 `build_daily`, since that needs a live DB).
 
+### Weekly/monthly reports (`agent/eoa/report/trends.py`, `weekly.py`, `monthly.py`)
+
+Files: `agent/eoa/report/trends.py`, `agent/eoa/report/weekly.py`,
+`agent/eoa/report/monthly.py`, `agent/eoa/llm/schemas/reports.py`,
+`agent/eoa/llm/prompts/report_weekly.md`, `report_monthly.md`,
+`tests/unit/test_report_weekly_monthly.py`. FR-4.3 (trend detection),
+FR-5.4 (weekly/monthly product shape), FR-11.4 (weekly meta-summary),
+FR-12.5 (calendar integration in the weekly/monthly reports).
+
+**`trends.py` — pure SQL/Python, no LLM call anywhere in this module.**
+`detect_trends(period)` (`period = (start, end)`) looks for four FR-4.3
+pattern kinds, each split into a thin single-query `_*_rows`/`_*_counts`
+DB helper plus a pure `_*_from_rows`/`_*_from_counts` function that turns
+already-fetched rows into trend dicts — the pure half is what
+`tests/unit/test_report_weekly_monthly.py` exercises against synthetic
+rows, with no database: (a) **entity clusters** — `unnest(entities_mentioned)`
+grouped by `(entity, domain)`, `HAVING count(*) >= 3`; (b) **domain surge**
+— a domain's item count in the period vs. its average over the
+`_BASELINE_WEEKS = 4` weeks immediately preceding `start` (`>= 2x`, or a
+plain `>= 3` floor when the domain has no baseline history at all, since a
+2x ratio against zero is meaningless); (c) **market convergence** — `events`
+with `kind IN ('m_and_a','partnership')` joined to `items` for `subdomain`
+(events carry no subdomain of their own), grouped by subdomain, `HAVING
+count(DISTINCT event) >= 2`; (d) **tech race** — same join, `kind IN
+('launch','test')`, grouped by subdomain, kept when `>= 2` distinct
+companies (`unnest(parties)`, falling back to `customer` when `parties` is
+empty) touched it. Every trend dict is `{kind, title_he, evidence_item_ids,
+entities, strength}` (`strength` 1-5, `_clamp`-derived from cluster size /
+surge ratio / event or company count), and `detect_trends` returns them
+sorted strongest-first. `weekly_stats(period)` — named exactly per the task
+spec, but period-length agnostic, so `monthly.py` reuses it for a
+full-month range — aggregates `items_by_domain_level`, `top_entities` (with
+a `delta` vs. the immediately preceding equal-length period), `events_by_kind`,
+and `deep_search_outcomes`.
+
+**`weekly.py`** — `build_weekly(period_end=None)`: `_week_range` (7 days
+ending `period_end`, default today Asia/Jerusalem) -> `collect_week_items`
+(red/orange, like `daily.collect_items` but no yellow fallback, capped at
+`triage.daily_report_max_items * 7`) + `collect_yellow_domain_summary`
+(yellow-level domain counts only, context — never cited) ->
+`trends.detect_trends` -> the citation registry is extended twice: first
+with any trend-evidence item id not already numbered
+(`_extend_registry_with_ids`, a DB fetch only for what's actually missing),
+then with event source items (`_extend_registry_with_events`, same
+convention as `daily._extend_citation_registry`) -> `draft_weekly` (resident
+model, `report_weekly.md`: one `trend_paragraphs` entry per detected trend
+plus the usual per-domain `sections`) -> `qa_citations.check(draft,
+citation_items, extra_sections=[(tp.title_he, tp.prose_he) for tp in
+draft.trend_paragraphs])` — trend paragraphs are checked exactly like
+`draft.sections`; the corrective-retry / strip-uncited pair mirror
+`daily.py`'s, extended to also prune `trend_paragraphs`. Two things are
+deliberately **not** sent to the LLM and are rendered as deterministic
+`docx_builder` `extra_sections`/`tables` instead (rule 4, "never invent" —
+neither can carry an `[n]` citation): `collect_meta_summary` (FR-11.4:
+`lessons` rows with `kind='meta'` created in the week, plus
+`triage_feedback` rows where `user_level != agent_level` — a calibration
+delta) formatted by `format_meta_summary_he` into an `after_outlook`
+section; and `upcoming_conferences(90)` (FR-12.5 "לוח 90 הימים הקרובים")
+rendered as a `tables` entry. `upcoming_conferences` lazily imports
+`eoa.conferences.tracker.upcoming` inside a `try/except ImportError`,
+falling back to `[]` — the concurrently-developed `eoa.conferences` package
+is never created by this module. A `reports` row is inserted with
+`kind='weekly'`.
+
+**`monthly.py`** — mirrors `weekly.py`'s pipeline over `_month_range`
+(default: the previous full calendar month, matching
+`config.schedule.monthly_run.day=1` running on the 1st) and imports several
+of `weekly.py`'s private helpers directly (`_domain_label`,
+`_extend_registry_with_events`, `_extend_registry_with_ids`,
+`collect_yellow_domain_summary`, `format_items_block`, `format_trends_block`,
+`format_yellow_summary_block`) rather than duplicating them, since both
+modules are owned by this same task. FR-5.4's "נוף תחרותי" (competitive
+landscape) is `players_map()`: for every entity, infer its primary domain
+from the `items` that mention it (`entities` has no `domain` column of its
+own — the same `items.entities_mentioned` bridge join used elsewhere, e.g.
+`eoa.memory.graph.entity_timeline`), then attach
+COMPETITOR_OF/SUPPLIER_OF/PARTNER_OF edge counts per entity from
+`eoa.memory.graph.neighbors`, returning `{domain: [{"name", "COMPETITOR_OF",
+"SUPPLIER_OF", "PARTNER_OF"}, ...]}` sorted by total edge count. Three more
+deterministic, non-LLM data sources render as `docx_builder` tables/sections
+alongside it, same "never invent" rationale as `weekly.py`'s meta-summary:
+`top_events_by_amount` (top 10 `events` by `amount_usd` in the month),
+`full_horizon_table` (lazily imports
+`eoa.conferences.tracker.full_horizon_table`, `[]` fallback, per FR-12.5's
+"הלוח הדו-שנתי המלא... עם סימון שינויים מהחודש הקודם"), and
+`watchlist_changes` (entities with `created_at` in the month — the schema
+has no dedicated "first seen" column beyond `created_at`/`first_seen_item`)
+formatted by `format_watchlist_he` into an `after_outlook` section. A
+`reports` row is inserted with `kind='monthly'`.
+
+**Generalizing `docx_builder.py`/`qa_citations.py` — additive only, no
+existing behaviour changed** (`tests/unit/test_docx_builder.py`'s 3-table
+daily fixture still renders exactly 2 tables with every existing assertion
+intact): `build_docx`/`render_markdown`/`render_html` gained three optional
+keyword params — `title_text` (overrides `TITLE_TEXT`, `None` keeps the
+daily title), `extra_sections` (`[{"title_he", "body_he", "position":
+"after_summary"|"after_outlook"}]`, rendered via `_add_extra_sections`
+in docx / inline loops in markdown/html — `after_summary` for the weekly's
+trend paragraphs, `after_outlook` for the meta-summary/watchlist prose),
+and `tables` (`[{"title_he", "headers", "rows"}]`, rendered via
+`_add_generic_table` — the calendar/players-map/top-events/horizon tables).
+`qa_citations.check` gained `extra_sections`/`exempt_sections` (both
+`list[tuple[label, text]]`, both `None` by default): `extra_sections` are
+checked exactly like `draft.sections`; `exempt_sections` get the
+`outlook_he` treatment (no citation requirement, out-of-range refs still
+flagged) — available for a future citation-exempt block (e.g. a calendar
+caption) though neither weekly.py nor monthly.py currently populates it,
+since the calendar/players/events/horizon data is rendered purely via
+`tables` and never passes through `check()` at all. `draft`'s type hint
+widened from `DailyReportDraft` to `DailyReportDraft | Any` in both modules
+(duck-typed: only `exec_summary_he`/`sections`/`outlook_he`/`open_points_he`
+are accessed), so `WeeklyReportDraft`/`MonthlyReportDraft` — same shape,
+plus `trend_paragraphs` handled separately — pass through unchanged.
+
+**`agent/eoa/llm/schemas/reports.py`** — `TrendParagraph(title_he,
+prose_he)`, `WeeklyReportDraft`/`MonthlyReportDraft` (`exec_summary_he`,
+`trend_paragraphs: list[TrendParagraph]`, `sections: list[ReportSection]`
+reusing `eoa.llm.schemas.analysis.ReportSection`, `outlook_he`,
+`open_points_he`) — deliberately carry no field for the players
+map/top-events/conference-horizon/meta-summary data, all of which are
+DB-only and never touch the LLM.
+
+**`jobs.py`/`main.py`** — `HANDLERS["weekly_run"]` now points at
+`run_weekly` (runs the full nightly pipeline via `run_daily`, including the
+daily report, then additionally calls `eoa.report.weekly.build_weekly()`;
+a weekly-report failure is logged/recorded but doesn't fail the job, since
+the daily pipeline's own results remain the primary outcome) and
+`HANDLERS["monthly_run"]` at `run_monthly` (`eoa.report.monthly.build_monthly()`
+only — no daily-pipeline stages). `main.py`'s scheduler gained one cron job,
+`id="monthly"`, at `schedule.monthly_run.day` (config: day 1) **03:30** —
+placed 1 hour after the concurrently-added `id="conference_scan"` job at
+02:30 so the monthly report can eventually pick up that scan's fresh
+conference data, without this task touching that other cron entry.
+
+### Tests
+
+`tests/unit/test_report_weekly_monthly.py` (19 tests, no DB/GPU/Ollama) —
+`trends.py`'s pure detectors against synthetic rows for all four kinds
+(built, filtered-below-threshold, and a `detect_trends` integration test
+combining all four with every DB row-fetcher monkeypatched) plus a
+`weekly_stats` assembly smoke test; `weekly.build_weekly` with every
+DB/LLM collector monkeypatched (`collect_week_items`, `draft_weekly`,
+`trends_mod.detect_trends`, `upcoming_conferences`, `_persist_report`,
+`_report_path`, ...) — asserts QA passes on the fixture draft, the
+rendered docx has the trend/meta-summary headings and a `["שם", "תאריכים",
+"עיר", "רלוונטיות"]` calendar table with the expected row, the md/html
+outputs contain the same, and a zero-items run never calls
+`chat_structured` at all; `monthly.build_monthly` likewise, asserting a
+`["ישות", "מתחרים", "ספקים", "שותפים"]` players-map table renders per
+domain with the expected edge counts, plus `_month_range`'s
+previous-month-default and explicit-month-bounds cases. 421/421 pass
+(402 pre-existing + 19 new) via `PYTHONPATH=agent python -m pytest
+tests/unit -q`; every touched/new file is clean under `ruff check` /
+`ruff format --check`.
+
 ## Web UI
 
 `web/` — React 19 + TypeScript + Vite + Tailwind v3, the "חדר מצב + עמית"

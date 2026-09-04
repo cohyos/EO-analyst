@@ -16,9 +16,15 @@ from eoa.conferences.ical import build_ical
 from eoa.conferences.reminders import due_reminders, send_reminders
 from eoa.conferences.tracker import (
     _apply_conference_update,
+    _find_duplicate_groups,
+    _find_occurrence_row,
     _is_near_duplicate,
     _is_past,
     _jsonable,
+    _merge_occurrence,
+    _merged_fields,
+    _normalize_name,
+    _occurrence_key,
     _occurs_in_year,
     _parse_date,
     _relevance_score,
@@ -26,6 +32,7 @@ from eoa.conferences.tracker import (
     _year_from_name,
     _years_in_horizon,
     conference_card,
+    merge_duplicates,
     roll_horizon,
 )
 from eoa.llm.schemas.conferences import ConferenceCandidate

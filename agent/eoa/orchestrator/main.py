@@ -125,6 +125,35 @@ def build_scheduler() -> BackgroundScheduler:
         misfire_grace_time=3600,
         coalesce=True,
     )
+
+    # FR-11.4: transparency loop — what changed because of the user's feedback (Saturday morning)
+    def _weekly_meta() -> None:
+        try:
+            from eoa.feedback.calibration import calibrate
+            from eoa.feedback.meta import post_weekly_meta
+
+            calibrate()
+            post_weekly_meta()
+        except Exception as exc:
+            log.warning("weekly_meta_failed", error=str(exc)[:160])
+
+    sched.add_job(
+        _weekly_meta,
+        _cron(tz, "06:30", day_of_week=wk.get("weekday", "sat")),
+        id="weekly_meta",
+        coalesce=True,
+    )
+
+    # FR-12.4: conference reminders every morning
+    def _reminders() -> None:
+        try:
+            from eoa.conferences.reminders import send_reminders
+
+            send_reminders()
+        except Exception as exc:
+            log.warning("conference_reminders_failed", error=str(exc)[:160])
+
+    sched.add_job(_reminders, _cron(tz, "07:00"), id="conference_reminders", coalesce=True)
     return sched
 
 
