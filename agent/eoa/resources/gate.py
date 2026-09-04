@@ -177,6 +177,36 @@ class ResourceGate:
                     "polite mode: GPU busy with external work; deferred to night window"
                 )
 
+            # transient RAM pressure (the user's own jobs by day): queue with backoff instead of failing
+            if host.ram_total_mb and host.ram_free_mb < rc.min_free_ram_mb:
+                if time.monotonic() > deadline:
+                    self._record(
+                        self._decision(
+                            "deferred",
+                            model_name,
+                            host,
+                            waited_ms,
+                            f"ram {host.ram_free_mb}MB too low; timeout",
+                        )
+                    )
+                    raise ResourceUnavailable(
+                        f"RAM free {host.ram_free_mb} MB < {rc.min_free_ram_mb} MB after {waited_ms // 1000}s"
+                    )
+                delay = backoffs[min(attempt, len(backoffs) - 1)]
+                self._record(
+                    self._decision(
+                        "queued",
+                        model_name,
+                        host,
+                        waited_ms,
+                        f"ram {host.ram_free_mb}MB too low; retry in {delay}s",
+                    )
+                )
+                self._sleep(delay)
+                waited_ms += delay * 1000
+                attempt += 1
+                continue
+
             # already loaded -> go
             if any(m.name == model_name for m in host.loaded_models):
                 self._loaded_since.setdefault(model_name, time.monotonic())
@@ -243,9 +273,6 @@ class ResourceGate:
         if host.gpu.available and host.gpu.temp_c >= rc.gpu_temp_stop_c:
             self._record(self._decision("deferred", model_name, host, 0, f"gpu {host.gpu.temp_c}C stop"))
             raise ResourceUnavailable(f"GPU temperature {host.gpu.temp_c}C >= stop threshold")
-        if host.ram_total_mb and host.ram_free_mb < rc.min_free_ram_mb:
-            self._record(self._decision("deferred", model_name, host, 0, f"ram {host.ram_free_mb}MB too low"))
-            raise ResourceUnavailable(f"RAM free {host.ram_free_mb} MB < {rc.min_free_ram_mb} MB")
 
     def _unload_others(self, host: telemetry.HostStatus, keep: str) -> None:
         from eoa.llm.ollama_client import unload_model
