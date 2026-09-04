@@ -489,7 +489,50 @@ sanitization-hardened) truncated to 200k chars; `items.clean_text` is
 runs once on start, then loops every `config.schedule.
 daytime_rss_poll_minutes`.
 
+### Title fallback chain
+
+`agent/eoa/fetch/sanitize.choose_title(clean_title, fallback_title, html,
+clean_text, url) -> str` — guarantees a non-empty title for every stored
+item via an explicit fallback chain:
+
+1. **`clean_title`** (extracted by trafilatura/readability): Most reliable
+   when present — training on article extraction produces better results than
+   regex.
+2. **HTML extraction** (`_extract_title_from_html`): Article-specific metadata
+   from the fetched page (`<meta property="og:title">` preferred over bare
+   `<title>` tag), extracted via simple regex (no new dependencies). Preferred
+   over RSS fallback because og:title is specific to the article, whereas
+   RSS entry titles are often generic (e.g., "Latest News").
+3. **`fallback_title`** (from RSS feed): Generic feed entry title, used only
+   when neither trafilatura nor HTML extraction succeeded.
+4. **First non-empty line of `clean_text`**: Structured content extraction
+   fallback (≤ 120 characters, trimmed and whitespace-normalized).
+5. **URL path segment**: Ultimate fallback (last path component of the article
+   URL, e.g., `ir-targeting-pod` from `.../articles/ir-targeting-pod`).
+
+`choose_title` normalizes all candidates (surrounding whitespace stripped,
+internal whitespace collapsed) and never returns empty; falls back to
+`"Untitled"` only if URL has no path. Called by `_store_item` during ingest;
+called by `scripts/repair_titles.py` to backfill empty/null title rows.
+
+Called by:
+- `_store_item()` when storing fetched articles (RSS or HTML sources)
+- `scripts/repair_titles.py` to retroactively fix items with empty titles
+
+Updated by `_store_item()` to invoke `choose_title()` with the extracted
+clean text, raw HTML, and fallback title from the RSS feed (if any), ensuring
+no item reaches the database with an empty or whitespace-only title.
+
 ### Tests
+
+`tests/unit/test_title_fallback.py` (29 tests) — each rung of the chain in
+isolation, plus chain-order verification tests and real-world scenarios
+(Globes English feed with og:title + RSS fallback, RSS-only items, HTML
+source landing pages). Covers whitespace normalization, Unicode preservation
+(Hebrew + English), special character handling, truncation at 120 chars, and
+fallback sequencing. No DB or network access; all tests pure-function
+`choose_title()` calls with fixtures. Passes via `PYTHONPATH=agent python -m
+pytest tests/unit/test_title_fallback.py -q`.
 
 `tests/unit/test_rss.py` (9 tests) — parses `tests/fixtures/feeds/sample.xml`
 (a 4-item RSS 2.0 fixture: two recent dated items, one old dated item, one
@@ -520,8 +563,25 @@ the detector's regex into several under-threshold pieces, which isn't
 representative of a real smuggled blob) vs. short alphanumeric runs left
 alone, Hebrew RTL text preserved end-to-end plus `detect_lang()` heuristics,
 and `text_hash()` stability across whitespace-only differences. Passes today
-via `PYTHONPATH=agent python -m pytest tests/unit -q` (40/40 across the
+via `PYTHONPATH=agent python -m pytest tests/unit -q` (679/679 across the
 whole suite, no DB or network required).
+
+### Repair script: `scripts/repair_titles.py`
+
+Backfills empty/null titles in the live `items` table (items where
+`title IS NULL OR title ~ '^[[:space:]]*$'`) using the fallback chain
+over DB row data (raw_text, clean_text, url — no HTML since sanitized
+pages aren't persisted). Logs progress and reports count of fixed rows.
+
+Usage:
+```
+DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \
+PYTHONPATH=agent python scripts/repair_titles.py
+```
+
+Output: summary line showing total empty titles found, successfully
+repaired, and failed repairs. Exit code 0 on success (including zero
+empty titles), 1 if any repairs failed.
 
 ## Web API
 

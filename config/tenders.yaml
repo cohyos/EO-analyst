@@ -11,31 +11,101 @@
 # kept as documentation of "known dead ends" (per FR-1.3: a failing source never blocks the
 # pipeline) with a `notes` explaining why.
 #
-# Keywords are the shared EO/IR relevance vocabulary (section 2 of the spec) used by
+# Keywords are the shared EO/IR/CV DOMAIN-signal vocabulary (section 2 of the spec) used by
 # eoa.tenders.scan for client-side keyword filtering -- every source's server-side "keyword"
 # param (when it has one) is unreliable/best-effort, so this filter is always re-applied locally.
-
+# `eoa.tenders.scan._passes_gate` requires this DOMAIN signal to be paired with a PROCUREMENT
+# signal (`procurement_signals` below) before a notice is ever stored -- deliberately precise
+# multi-word phrases; a bare generic word ("camera", "windows", "sensor") is never enough on its
+# own, only e.g. "surveillance camera".
 keywords: &kw
   - electro-optical
   - electro-optic
+  - electro optic
+  - electro-optics
   - EO/IR
   - infrared
   - thermal imaging
+  - thermal imager
+  - FLIR
   - targeting pod
   - gimbal
   - laser rangefinder
   - laser designator
   - seeker
-  - counter-UAS
-  - counter-drone
-  - surveillance camera
   - night vision
-  - hyperspectral
+  - image intensifier
   - optronic
-  - electro-optics
+  - optronics
+  - surveillance camera
+  - counter-UAS
+  - C-UAS
+  - counter-drone
+  - drone detection
+  - hyperspectral
+  - computer vision
+  - ATR
   - IRST
-  - FLIR
   - imaging sensor
+
+# PROCUREMENT signal vocabulary: at least one of these must also be present (in title+summary) for
+# a notice from a general source (kind: search / rss) before it is stored -- this is what keeps a
+# Wikipedia "What is Infrared" article or a NASA outreach page out even though it mentions
+# "infrared". A structured procurement-portal API (kind: api_json -- TED, Contracts Finder) is
+# itself already conclusive evidence of "this is a tender", so this signal is implicit there
+# (eoa.tenders.scan._has_procurement_signal) -- most real notices never literally spell "tender"
+# in their title text, so requiring the word there too would reject the majority of genuine ones.
+procurement_signals: &proc
+  - tender
+  - RFP
+  - RFI
+  - RFQ
+  - solicitation
+  - sources sought
+  - invitation to tender
+  - contract notice
+  - prior information notice
+  - request for proposal
+  - request for information
+  - request for quotation
+  - call for proposals
+  - מכרז
+  - בקשה למידע
+  - בקשת מידע
+
+# Hosts never treated as a tender/RFI/RFP lead regardless of keyword matches -- defense-in-depth
+# against a general SearXNG web search returning content (encyclopedia articles, market-research
+# press releases, social media, consumer tech news) that happens to mention a domain term without
+# being a procurement source at all. Matched by exact domain or subdomain
+# (eoa.tenders.scan._is_denylisted_domain), applied to every `kind: search`/`kind: rss` hit before
+# the two-signal gate even runs.
+deny_domains: &deny
+  - wikipedia.org
+  - reddit.com
+  - youtube.com
+  - facebook.com
+  - twitter.com
+  - x.com
+  - instagram.com
+  - linkedin.com
+  - quora.com
+  - medium.com
+  - britannica.com
+  - nasa.gov
+  - marketsandmarkets.com
+  - grandviewresearch.com
+  - alliedmarketresearch.com
+  - researchandmarkets.com
+  - globenewswire.com
+  - prnewswire.com
+  - businesswire.com
+  - techradar.com
+  - sciencenotes.org
+  - scienceinsights.org
+  - coolcosmos.ipac.caltech.edu
+  - howstuffworks.com
+  - thoughtco.com
+  - investopedia.com
 
 sources:
   # ---------------------------------------------------------------- TED (EU) -- api_json, verified working
@@ -121,7 +191,7 @@ sources:
     queries:
       - "site:sam.gov opportunity electro-optical"
       - "site:sam.gov opportunity infrared targeting pod"
-      - "site:sam.gov opportunity counter-UAS sources sought"
+      - "site:sam.gov sources sought counter-UAS"
     keywords: *kw
     verified: true
     verified_at: "2026-09-04"
@@ -147,13 +217,13 @@ sources:
     country: IL
     engine_lang: he
     queries:
-      - "מכרז משרד הביטחון אלקטרו-אופטי"
-      - "מכרז משרד הביטחון מטען אלקטרו אופטי כטבמ"
-      - "בקשת מידע קול קורא מערכת אלקטרו אופטית ביטחון"
+      - "site:mod.gov.il מכרז אלקטרו-אופטי"
+      - "site:mod.gov.il מכרז אלקטרו אופטי כטבמ"
+      - "site:mod.gov.il בקשת מידע מערכת אלקטרו אופטית"
     keywords: *kw
     verified: true
     verified_at: "2026-09-04"
-    notes: "SearXNG fallback (he-IL engines); does not depend on mod.gov.il directly."
+    notes: "SearXNG fallback (he-IL engines), site-restricted to mod.gov.il; does not depend on mod.gov.il's own bot-protection/JS-shell."
 
   # ---------------------------------------------------------------- NATO NSPA / NCIA -- documented, bot-blocked
   - id: nato_nspa
@@ -184,7 +254,7 @@ sources:
     queries:
       - "site:nspa.nato.int business opportunity electro-optical"
       - "site:ncia.nato.int business opportunity counter-UAS"
-      - "NATO NSPA request for information EO/IR sensor"
+      - "site:nspa.nato.int request for information EO/IR sensor"
     keywords: *kw
     verified: true
     verified_at: "2026-09-04"
@@ -251,15 +321,20 @@ sources:
     country: other
     engine_lang: en
     queries:
-      - "request for information electro-optical defense"
-      - "RFP targeting pod"
-      - "sources sought infrared sensor"
-      - "request for proposal counter-UAS EO/IR"
-      - "RFI naval EO director laser rangefinder"
+      - "request for information electro-optical defense -site:wikipedia.org -site:reddit.com -site:youtube.com"
+      - "RFP targeting pod -site:wikipedia.org -site:reddit.com -site:youtube.com"
+      - "sources sought infrared sensor -site:wikipedia.org -site:reddit.com -site:youtube.com"
+      - "request for proposal counter-UAS EO/IR -site:wikipedia.org -site:reddit.com -site:youtube.com"
+      - "RFI naval EO director laser rangefinder -site:wikipedia.org -site:reddit.com -site:youtube.com"
     keywords: *kw
     verified: true
     verified_at: "2026-09-04"
-    notes: "General multilingual RFI/RFP sweep via SearXNG; not tied to a single procurement portal."
+    notes: >
+      General multilingual RFI/RFP sweep via SearXNG; not tied to a single procurement portal, so
+      every query already embeds a procurement-signal term (RFI/RFP/"sources sought"/"request
+      for...") plus a `-site:` exclusion for the worst offenders observed live (encyclopedia/social/
+      video junk) -- the two-signal gate (procurement_signals + keywords) and deny_domains below
+      are still the actual enforcement layer, this is just to reduce noise before it gets there.
 
   - id: rfi_rfp_news_he
     name: "RFI/RFP הודעות ביטחוניות -- SearXNG (עברית)"
@@ -267,9 +342,9 @@ sources:
     country: IL
     engine_lang: he
     queries:
-      - "מכרז משרד הביטחון אלקטרו-אופטי"
-      - "בקשת מידע מערכת אלקטרו אופטית צבאית"
-      - "מכרז מטען אלקטרו אופטי כטבמ צהל"
+      - "מכרז משרד הביטחון אלקטרו-אופטי -site:wikipedia.org"
+      - "בקשת מידע מערכת אלקטרו אופטית צבאית -site:wikipedia.org"
+      - "מכרז מטען אלקטרו אופטי כטבמ צהל -site:wikipedia.org"
     keywords: *kw
     verified: true
     verified_at: "2026-09-04"

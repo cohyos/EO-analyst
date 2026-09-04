@@ -2,17 +2,22 @@
 
 For each source in ``config/tenders.yaml``: fetch (``eoa.fetch.remote.fetch_raw_remote`` for
 ``api_json``/``rss`` sources needing the raw body; ``eoa.search.searxng_client`` for ``kind:
-search`` sources) -> parse into ``NoticeRaw`` rows -> client-side keyword filter (server-side
-keyword params are unreliable, see config/tenders.yaml notes) -> dedupe by a globally-unique
-``external_ref`` (``"<source_id>:<notice id>"``) -> insert one ``tenders`` row + one ``items`` row
-(``source`` ``"tenders:<source_id>"``, ``report_kind`` ``"tender"``) so the normal
-classify/triage/analyze pipeline covers it -> best-effort LLM relevance/summary enrichment
-(``chat_structured``, DATA-guarded, budget-capped).
+search`` sources, denylist-filtered) -> parse into ``NoticeRaw`` rows -> a **two-signal gate**
+(``_passes_gate``: at least one PROCUREMENT-context signal -- explicit for ``search``/``rss``
+sources, implicit for a structured procurement-portal ``api_json`` source like TED/Contracts
+Finder -- AND at least one EO/IR/CV DOMAIN signal; server-side keyword params are unreliable, see
+config/tenders.yaml notes, so this is always re-applied client-side) -> dedupe by a
+globally-unique ``external_ref`` (``"<source_id>:<notice id>"``) -> **LLM relevance gate**
+(``chat_structured``, DATA-guarded, budget-capped: ``relevance <= 2`` -> not stored at all,
+``== 3`` -> stored with ``status='unknown'``, ``>= 4`` -> stored normally) -> insert one
+``tenders`` row + one ``items`` row (``report_kind`` ``"tender"``) so the normal
+classify/triage/analyze pipeline covers it.
 
-The deterministic parts (keyword-hit relevance, matched_terms, status) are always written first
-and never depend on the LLM call succeeding (FR-9 / "never invent" -- a stalled/unavailable model
-degrades to "still ingested, just not yet enriched", never to fabricated data). Finally transitions
-any ``tenders`` row whose ``deadline`` has passed to ``status='closed'``.
+When the LLM is unavailable/deferred/fails, the row still gets inserted using the deterministic
+keyword-hit relevance/status (FR-9 / "never invent" -- a stalled model degrades to "still
+ingested on the strength of the two-signal gate alone", never to a fabricated verdict; but a model
+that *did* respond and said "this is not relevant" is trusted and blocks persistence). Finally
+transitions any ``status='open'`` row whose ``deadline`` has passed to ``status='closed'``.
 
 ``kind: html`` sources in config/tenders.yaml are documented but intentionally not scraped here
 (see the notes on each entry -- bot-protected or client-hydrated pages); ``kind: api_json`` sources
@@ -30,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import structlog
 import yaml
@@ -53,25 +58,85 @@ log = structlog.get_logger(__name__)
 
 TENDERS_YAML = CONFIG_DIR / "tenders.yaml"
 
-# Fallback if a config entry somehow omits `keywords` (every entry in config/tenders.yaml merges
-# the shared `&kw` anchor, so this should never actually trigger outside of ad-hoc test fixtures).
+# Fallback if a config entry/file somehow omits these (every entry in config/tenders.yaml merges
+# the shared `&kw` anchor and the file carries top-level `procurement_signals`/`deny_domains`, so
+# these should never actually trigger outside of ad-hoc test fixtures).
 DEFAULT_KEYWORDS = [
     "electro-optical",
     "infrared",
     "thermal imaging",
+    "thermal imager",
+    "FLIR",
     "targeting pod",
     "EO/IR",
     "gimbal",
     "laser rangefinder",
+    "laser designator",
     "seeker",
     "counter-UAS",
+    "C-UAS",
     "surveillance camera",
     "night vision",
+    "image intensifier",
     "hyperspectral",
     "optronic",
+    "computer vision",
+    "ATR",
+]
+
+DEFAULT_PROCUREMENT_SIGNALS = [
+    "tender",
+    "RFP",
+    "RFI",
+    "RFQ",
+    "solicitation",
+    "sources sought",
+    "invitation to tender",
+    "contract notice",
+    "prior information notice",
+    "request for proposal",
+    "request for information",
+    "request for quotation",
+    "call for proposals",
+    "מכרז",
+    "בקשה למידע",
+    "בקשת מידע",
+]
+
+DEFAULT_DENY_DOMAINS = [
+    "wikipedia.org",
+    "reddit.com",
+    "youtube.com",
+    "facebook.com",
+    "twitter.com",
+    "x.com",
+    "instagram.com",
+    "linkedin.com",
+    "quora.com",
+    "medium.com",
+    "britannica.com",
+    "nasa.gov",
+    "marketsandmarkets.com",
+    "grandviewresearch.com",
+    "alliedmarketresearch.com",
+    "researchandmarkets.com",
+    "globenewswire.com",
+    "prnewswire.com",
+    "businesswire.com",
+    "techradar.com",
+    "sciencenotes.org",
+    "scienceinsights.org",
+    "coolcosmos.ipac.caltech.edu",
+    "howstuffworks.com",
+    "thoughtco.com",
+    "investopedia.com",
 ]
 
 MAX_KEYWORDS_PER_API_SOURCE = 5
+
+# Relevance thresholds (LLM gate -- see module docstring / coordinator spec).
+RELEVANCE_REJECT_MAX = 2  # <= this: not stored at all
+RELEVANCE_UNKNOWN = 3  # == this: stored, but status forced to 'unknown'
 
 
 # --------------------------------------------------------------------------
@@ -99,15 +164,35 @@ class TenderSource(BaseModel):
     notes: str | None = None
 
 
-def load_tender_sources(path: str | Path | None = None) -> list[TenderSource]:
-    """Load and validate every entry in ``config/tenders.yaml`` (or an alternate ``path``)."""
+def _load_yaml(path: str | Path | None) -> dict[str, Any]:
     file_path = Path(path) if path is not None else TENDERS_YAML
     with file_path.open(encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-    entries = raw.get("sources", [])
-    sources = [TenderSource.model_validate(e) for e in entries]
-    log.debug("tenders.sources_loaded", count=len(sources), path=str(file_path))
+        return yaml.safe_load(fh) or {}
+
+
+def load_tender_sources(path: str | Path | None = None) -> list[TenderSource]:
+    """Load and validate every entry in ``config/tenders.yaml`` (or an alternate ``path``)."""
+    raw = _load_yaml(path)
+    sources = [TenderSource.model_validate(e) for e in raw.get("sources", [])]
+    log.debug("tenders.sources_loaded", count=len(sources), path=str(path or TENDERS_YAML))
     return sources
+
+
+def load_procurement_signals(path: str | Path | None = None) -> list[str]:
+    """Top-level ``procurement_signals`` list from ``config/tenders.yaml`` -- words/phrases whose
+    presence marks a notice as being *about* a solicitation/tender process (as opposed to e.g. a
+    general-interest article that merely mentions a domain term)."""
+    raw = _load_yaml(path)
+    return list(raw.get("procurement_signals") or DEFAULT_PROCUREMENT_SIGNALS)
+
+
+def load_deny_domains(path: str | Path | None = None) -> list[str]:
+    """Top-level ``deny_domains`` list -- hosts (matched by exact domain or subdomain) never
+    treated as a tender/RFI/RFP lead regardless of keyword matches (Wikipedia, Reddit, market-
+    research-report publishers, ...): defense-in-depth against a generic web search returning
+    content that happens to mention a domain term without being a procurement source at all."""
+    raw = _load_yaml(path)
+    return list(raw.get("deny_domains") or DEFAULT_DENY_DOMAINS)
 
 
 # --------------------------------------------------------------------------
@@ -117,7 +202,7 @@ def load_tender_sources(path: str | Path | None = None) -> list[TenderSource]:
 
 @dataclass
 class NoticeRaw:
-    """One parsed notice, before keyword filtering / DB insertion."""
+    """One parsed notice, before the gate / DB insertion."""
 
     source_id: str
     external_ref: str
@@ -227,10 +312,22 @@ _API_PARSERS: dict[str, Callable[[dict[str, Any], TenderSource], list[NoticeRaw]
 }
 
 
-def _parse_search_hits(hits: list[SearchHit], src: TenderSource) -> list[NoticeRaw]:
+def _is_denylisted_domain(url: str, deny_domains: list[str]) -> bool:
+    """True if ``url``'s host is (or is a subdomain of) one of ``deny_domains``."""
+    if not url:
+        return False
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in deny_domains)
+
+
+def _parse_search_hits(hits: list[SearchHit], src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
     out: list[NoticeRaw] = []
     for h in hits:
-        if not h.url:
+        if not h.url or _is_denylisted_domain(h.url, deny_domains):
             continue
         out.append(
             NoticeRaw(
@@ -247,10 +344,10 @@ def _parse_search_hits(hits: list[SearchHit], src: TenderSource) -> list[NoticeR
     return out
 
 
-def _parse_rss_notices(raw_text: str, src: TenderSource) -> list[NoticeRaw]:
+def _parse_rss_notices(raw_text: str, src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
     out: list[NoticeRaw] = []
     for e in parse_feed(raw_text):
-        if not e.url:
+        if not e.url or _is_denylisted_domain(e.url, deny_domains):
             continue
         out.append(
             NoticeRaw(
@@ -272,6 +369,11 @@ def _parse_rss_notices(raw_text: str, src: TenderSource) -> list[NoticeRaw]:
 
 
 def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
+    """Requirement: the EO keyword set must ride in the API query itself, not just a post-filter
+    -- ``query_template``/``query_params`` (config/tenders.yaml) both embed ``{keyword}`` directly
+    in the request TED/Contracts Finder actually receive; the client-side gate below is a
+    (necessary, per each source's own notes on unreliable server-side filtering) second pass, not
+    the only one."""
     if not src.url:
         return []
     if src.query_template:
@@ -291,28 +393,28 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
     return parser(data, src) if parser else []
 
 
-def _fetch_search(src: TenderSource) -> list[NoticeRaw]:
+def _fetch_search(src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
     out: list[NoticeRaw] = []
     for q in src.queries or []:
         resp = search(q, lang=src.engine_lang, max_results=8)
         if resp.error:
             log.debug("tender_search_query_failed", source=src.id, query=q, error=resp.error)
             continue
-        out.extend(_parse_search_hits(resp.hits, src))
+        out.extend(_parse_search_hits(resp.hits, src, deny_domains))
     return out
 
 
-def _fetch_rss(src: TenderSource) -> list[NoticeRaw]:
+def _fetch_rss(src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
     if not src.url:
         return []
     resp = fetch_raw_remote(src.url, method="GET")
     text = resp.get("text")
     if not text:
         return []
-    return _parse_rss_notices(text, src)
+    return _parse_rss_notices(text, src, deny_domains)
 
 
-def _collect_source_notices(src: TenderSource) -> list[NoticeRaw]:
+def _collect_source_notices(src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
     if src.kind == "api_json":
         seen: set[str] = set()
         out: list[NoticeRaw] = []
@@ -323,20 +425,48 @@ def _collect_source_notices(src: TenderSource) -> list[NoticeRaw]:
                     out.append(n)
         return out
     if src.kind == "search":
-        return _fetch_search(src)
+        return _fetch_search(src, deny_domains)
     if src.kind == "rss":
-        return _fetch_rss(src)
+        return _fetch_rss(src, deny_domains)
     return []  # html: documented, not scraped (see config/tenders.yaml notes)
 
 
 # --------------------------------------------------------------------------
-# keyword filter / dedupe / persistence
+# two-signal gate / dedupe / status
 # --------------------------------------------------------------------------
 
 
 def _matches_keywords(notice: NoticeRaw, keywords: list[str]) -> list[str]:
+    """DOMAIN signal: EO/IR/CV terms actually present (casefold substring) in title+summary."""
     text = f"{notice.title} {notice.summary}".casefold()
     return [kw for kw in (keywords or DEFAULT_KEYWORDS) if kw.casefold() in text]
+
+
+def _has_procurement_signal(notice: NoticeRaw, src_kind: str, procurement_signals: list[str]) -> bool:
+    """PROCUREMENT signal: explicit tender/RFI/RFP/... language in title+summary for a general
+    source (search/rss -- could be any web content), or implicitly satisfied for a structured
+    procurement-portal API (``api_json`` -- TED/Contracts Finder notices *are*, by construction,
+    real tender/contract records; most don't literally spell "tender" in their title text, so
+    requiring the word there would reject the overwhelming majority of genuine notices)."""
+    if src_kind == "api_json":
+        return True
+    text = f"{notice.title} {notice.summary}".casefold()
+    return any(sig.casefold() in text for sig in (procurement_signals or DEFAULT_PROCUREMENT_SIGNALS))
+
+
+def _passes_gate(
+    notice: NoticeRaw, src_kind: str, domain_keywords: list[str], procurement_signals: list[str]
+) -> list[str]:
+    """Two-signal gate (coordinator requirement): a notice is stored only if it carries at least
+    one DOMAIN term AND at least one PROCUREMENT signal. Returns the matched domain terms (used
+    as ``tenders.matched_terms``) on success, or ``[]`` -- treated as "gate failed" by the caller,
+    including the case where domain terms matched but the procurement signal did not."""
+    domain_terms = _matches_keywords(notice, domain_keywords)
+    if not domain_terms:
+        return []
+    if not _has_procurement_signal(notice, src_kind, procurement_signals):
+        return []
+    return domain_terms
 
 
 def _within_window(notice: NoticeRaw, since_days: int, today: dt.date) -> bool:
@@ -368,10 +498,22 @@ def _as_datetime(d: dt.date | None) -> dt.datetime | None:
     return None if d is None else dt.datetime.combine(d, dt.time(), tzinfo=dt.UTC)
 
 
-def _insert_tender_and_item(notice: NoticeRaw, matched_terms: list[str]) -> tuple[int | None, int]:
+def _insert_tender_and_item(
+    notice: NoticeRaw,
+    matched_terms: list[str],
+    *,
+    relevance: int | None = None,
+    summary_he: str = "",
+    entities: list[str] | None = None,
+    status_override: str | None = None,
+) -> tuple[int | None, int]:
     """Insert the ``items`` row first (so ``tenders.item_id`` can reference it), then the
-    ``tenders`` row itself. Returns ``(tender_id, item_id)`` -- ``tender_id`` is ``None`` if a
-    concurrent scan already inserted the same ``external_ref`` (``ON CONFLICT DO NOTHING``)."""
+    ``tenders`` row itself. ``relevance``/``summary_he``/``entities`` default to the deterministic
+    keyword-hit baseline when the caller didn't supply an LLM-derived value (LLM unavailable);
+    ``status_override`` forces ``status`` regardless of the deadline-derived value (used for the
+    ``relevance == 3`` -> ``'unknown'`` rule). Returns ``(tender_id, item_id)`` -- ``tender_id`` is
+    ``None`` if a concurrent scan already inserted the same ``external_ref`` (``ON CONFLICT DO
+    NOTHING``)."""
     clean_text = f"{notice.title}\n\n{notice.summary}".strip()
     url = notice.url or f"urn:tender:{notice.external_ref}"
     item_id = insert_item(
@@ -384,21 +526,23 @@ def _insert_tender_and_item(notice: NoticeRaw, matched_terms: list[str]) -> tupl
         report_kind="tender",
         geography=notice.country,
     )
+    if summary_he:
+        update_item_fields(item_id, summary_he=summary_he)
 
     today = dt.date.today()
-    status = _initial_status(notice, today)
-    relevance = max(1, min(10, len(matched_terms)))
+    status = status_override or _initial_status(notice, today)
+    final_relevance = relevance if relevance is not None else max(1, min(10, len(matched_terms)))
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO tenders (
                 source, external_ref, title, agency, country, published_at, deadline,
-                url, cpv_naics, summary_he, relevance, matched_terms, status, item_id, raw
+                url, cpv_naics, summary_he, relevance, matched_terms, entities, status, item_id, raw
             )
             VALUES (
                 %(source)s, %(external_ref)s, %(title)s, %(agency)s, %(country)s, %(published_at)s,
                 %(deadline)s, %(url)s, %(cpv_naics)s, %(summary_he)s, %(relevance)s, %(matched_terms)s,
-                %(status)s, %(item_id)s, %(raw)s
+                %(entities)s, %(status)s, %(item_id)s, %(raw)s
             )
             ON CONFLICT (external_ref) DO NOTHING
             RETURNING id
@@ -413,9 +557,10 @@ def _insert_tender_and_item(notice: NoticeRaw, matched_terms: list[str]) -> tupl
                 "deadline": notice.deadline,
                 "url": notice.url,
                 "cpv_naics": notice.cpv_naics or None,
-                "summary_he": "",
-                "relevance": relevance,
-                "matched_terms": matched_terms,
+                "summary_he": summary_he or "",
+                "relevance": final_relevance,
+                "matched_terms": matched_terms or None,
+                "entities": entities or None,
                 "status": status,
                 "item_id": item_id,
                 "raw": Json(notice.raw),
@@ -425,17 +570,18 @@ def _insert_tender_and_item(notice: NoticeRaw, matched_terms: list[str]) -> tupl
     return (row["id"] if row else None), item_id
 
 
-def _llm_enrich(tender_id: int, item_id: int, notice: NoticeRaw, *, role: str, interactive: bool) -> TenderExtract:
-    """Best-effort LLM relevance/summary pass; overwrites the deterministic baseline only on
-    success. Raises ``ResourceUnavailable``/``LLMOutputError`` to the caller, which treats either
-    as "still ingested, just not yet enriched" (the deterministic row already exists)."""
+def _llm_classify(notice: NoticeRaw, *, role: str, interactive: bool) -> TenderExtract:
+    """Pure LLM relevance/summary classification -- no DB writes (the caller decides what to do
+    with the result, including whether to store anything at all: see ``scan_tenders``'s relevance
+    gate). DATA-guarded via ``wrap_data``, keyed by the notice's ``external_ref`` since no
+    ``items`` row exists yet at this point (the gate runs *before* insertion)."""
     prompt = render(
         "tender_extract",
         source_name=notice.source_id,
         country=notice.country or "?",
-        data=wrap_data(f"{notice.title}\n\n{notice.summary}"[:6000], item_id, notice.url or ""),
+        data=wrap_data(f"{notice.title}\n\n{notice.summary}"[:6000], notice.external_ref, notice.url or ""),
     )
-    out = chat_structured(
+    return chat_structured(
         role,
         TenderExtract,
         [
@@ -445,22 +591,6 @@ def _llm_enrich(tender_id: int, item_id: int, notice: NoticeRaw, *, role: str, i
         task="classify",
         interactive=interactive,
     )
-    if out.confidence >= 0.4:
-        with connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE tenders SET relevance=%(relevance)s, summary_he=%(summary_he)s, "
-                "matched_terms=%(matched_terms)s, entities=%(entities)s WHERE id=%(id)s",
-                {
-                    "relevance": out.relevance,
-                    "summary_he": out.summary_he,
-                    "matched_terms": out.matched_terms or None,
-                    "entities": out.entities or None,
-                    "id": tender_id,
-                },
-            )
-        if out.summary_he:
-            update_item_fields(item_id, summary_he=out.summary_he)
-    return out
 
 
 def _transition_closed() -> int:
@@ -485,11 +615,12 @@ class TenderStats:
     sources_failed: int = 0
     notices_fetched: int = 0
     matched: int = 0
-    inserted: int = 0
     duplicates: int = 0
-    llm_enriched: int = 0
+    llm_used: int = 0
     llm_deferred: int = 0
     llm_failed: int = 0
+    llm_rejected: int = 0
+    inserted: int = 0
     closed_transitioned: int = 0
 
 
@@ -504,14 +635,17 @@ def scan_tenders(
     llm_budget_s: float = LLM_BUDGET_SECONDS_DEFAULT,
     sources: list[TenderSource] | None = None,
 ) -> TenderStats:
-    """FR/section-5.2 entry point: scan every configured tender source, keyword-filter, dedupe,
-    insert ``tenders``+``items`` rows, best-effort LLM-enrich within ``llm_budget_s``, and
-    transition passed-deadline tenders to ``status='closed'``. A single source failing (network,
-    parse error, ...) never stops the others (docs/CONVENTIONS.md rule 9)."""
+    """FR/section-5.2 entry point: scan every configured tender source, apply the two-signal gate,
+    dedupe, LLM-relevance-gate within ``llm_budget_s`` (best-effort -- degrades to the
+    deterministic baseline when unavailable, per the module docstring), insert ``tenders``+
+    ``items`` rows, and transition passed-deadline tenders to ``status='closed'``. A single source
+    failing (network, parse error, ...) never stops the others (docs/CONVENTIONS.md rule 9)."""
     stats = TenderStats()
     today = dt.date.today()
     llm_deadline = time.monotonic() + llm_budget_s
     seen_refs: set[str] = set()
+    procurement_signals = load_procurement_signals()
+    deny_domains = load_deny_domains()
 
     for src in sources if sources is not None else load_tender_sources():
         if src.kind == "html":
@@ -519,7 +653,7 @@ def scan_tenders(
         if src.kind == "api_json" and not src.verified:
             continue
         try:
-            notices = _collect_source_notices(src)
+            notices = _collect_source_notices(src, deny_domains)
         except Exception as exc:
             log.warning("tender_source_failed", source=src.id, error=str(exc)[:200])
             stats.sources_failed += 1
@@ -532,16 +666,59 @@ def scan_tenders(
                 continue
             if src.kind == "api_json" and not _within_window(notice, since_days, today):
                 continue
-            terms = _matches_keywords(notice, src.keywords)
-            if not terms:
+            domain_terms = _passes_gate(notice, src.kind, src.keywords, procurement_signals)
+            if not domain_terms:
                 continue
             stats.matched += 1
             if _tender_exists(notice.external_ref):
                 stats.duplicates += 1
                 seen_refs.add(notice.external_ref)
                 continue
+
+            extract: TenderExtract | None = None
+            if time.monotonic() < llm_deadline:
+                try:
+                    extract = _llm_classify(notice, role=role, interactive=interactive)
+                    stats.llm_used += 1
+                except ResourceUnavailable:
+                    stats.llm_deferred += 1
+                except LLMOutputError as exc:
+                    log.warning("tender_llm_classify_failed", external_ref=notice.external_ref, error=str(exc)[:200])
+                    stats.llm_failed += 1
+                except Exception as exc:
+                    # Never let one notice's LLM call take down the whole scan (docs/
+                    # CONVENTIONS.md rule 9) -- fall back to the deterministic gate's own verdict.
+                    log.warning(
+                        "tender_llm_classify_unexpected_error", external_ref=notice.external_ref, error=str(exc)[:200]
+                    )
+                    stats.llm_failed += 1
+            else:
+                stats.llm_deferred += 1
+
+            if extract is not None and (not extract.relevant or extract.relevance <= RELEVANCE_REJECT_MAX):
+                stats.llm_rejected += 1
+                log.info(
+                    "tender_llm_rejected",
+                    external_ref=notice.external_ref,
+                    relevance=extract.relevance,
+                    relevant=extract.relevant,
+                )
+                seen_refs.add(notice.external_ref)
+                continue
+
+            status_override = "unknown" if extract is not None and extract.relevance == RELEVANCE_UNKNOWN else None
             try:
-                tender_id, item_id = _insert_tender_and_item(notice, terms)
+                if extract is not None:
+                    tender_id, _item_id = _insert_tender_and_item(
+                        notice,
+                        extract.matched_terms or domain_terms,
+                        relevance=extract.relevance,
+                        summary_he=extract.summary_he,
+                        entities=extract.entities,
+                        status_override=status_override,
+                    )
+                else:
+                    tender_id, _item_id = _insert_tender_and_item(notice, domain_terms)
             except Exception as exc:
                 log.warning("tender_insert_failed", external_ref=notice.external_ref, error=str(exc)[:200])
                 continue
@@ -550,23 +727,6 @@ def scan_tenders(
                 stats.duplicates += 1
                 continue
             stats.inserted += 1
-
-            if time.monotonic() >= llm_deadline:
-                stats.llm_deferred += 1
-                continue
-            try:
-                _llm_enrich(tender_id, item_id, notice, role=role, interactive=interactive)
-                stats.llm_enriched += 1
-            except ResourceUnavailable:
-                stats.llm_deferred += 1
-            except LLMOutputError as exc:
-                log.warning("tender_llm_enrich_failed", tender_id=tender_id, error=str(exc)[:200])
-                stats.llm_failed += 1
-            except Exception as exc:
-                # Never let one tender's LLM enrichment call take down the whole scan (docs/
-                # CONVENTIONS.md rule 9). The deterministic tenders/items rows are already inserted.
-                log.warning("tender_llm_enrich_unexpected_error", tender_id=tender_id, error=str(exc)[:200])
-                stats.llm_failed += 1
 
     stats.closed_transitioned = _transition_closed()
     log.info("tender_scan_done", **vars(stats))

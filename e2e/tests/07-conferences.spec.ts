@@ -22,22 +22,30 @@ test.describe("Conferences screen (/conferences)", () => {
     await expect(rows.first()).toBeVisible({ timeout: 15_000 });
     const n = await rows.count();
 
+    // The name cell's column index isn't stable across builds (an older
+    // build had no leading chevron column; the current source
+    // (ConferencesPage.tsx) puts the name in td:nth(1), after the chevron
+    // toggle in td:nth(0)). Read the title from whatever holds it instead
+    // of hard-coding a column: the row's outbound link (its text is the
+    // conference name, per ConferencesPage.tsx's `<a>...<bdi>{c.name}</bdi>`)
+    // when present, else the first <bdi> in the row (the plain-text name
+    // fallback when there's no outUrl).
     const problems: string[] = [];
     for (let i = 0; i < n; i++) {
       const row = rows.nth(i);
-      const nameCell = row.locator("td").nth(0);
-      const link = nameCell.locator("a");
+      const link = row.locator("a");
       const hasLink = (await link.count()) > 0;
       if (hasLink) {
         const href = await link.getAttribute("href");
         if (!href || !/^https?:\/\//.test(href)) {
-          problems.push(`row ${i}: link present but href is not http(s): "${href}"`);
+          const name = (await link.innerText()).trim();
+          problems.push(`row ${i} ("${name}"): link present but href is not http(s): "${href}"`);
         }
         continue;
       }
       const noLinkLabel = row.getByText("אין קישור");
       if ((await noLinkLabel.count()) === 0) {
-        const name = (await nameCell.innerText()).trim();
+        const name = (await row.locator("bdi").first().innerText()).trim();
         problems.push(`row ${i} ("${name}"): no outbound link AND no "אין קישור" label`);
       }
     }

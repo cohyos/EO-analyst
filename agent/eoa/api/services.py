@@ -910,8 +910,19 @@ def _tender_card(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# A row can only reach the DB with relevance <= 2 if it was inserted before the LLM-relevance
+# gate existed (eoa.tenders.scan.scan_tenders) or the LLM was never available to score it down --
+# the API's default view hides these rather than trusting every historical/ungated row.
+DEFAULT_MIN_RELEVANCE = 3
+
+
 def list_tenders(
-    *, status: str | None = None, country: str | None = None, q: str | None = None, limit: int = 100
+    *,
+    status: str | None = None,
+    country: str | None = None,
+    q: str | None = None,
+    min_relevance: int | None = DEFAULT_MIN_RELEVANCE,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     where = ["1 = 1"]
     params: dict[str, Any] = {"limit": min(max(limit, 1), 500)}
@@ -924,6 +935,9 @@ def list_tenders(
     if q:
         where.append("(title ILIKE %(q)s OR summary_he ILIKE %(q)s OR agency ILIKE %(q)s)")
         params["q"] = f"%{q}%"
+    if min_relevance is not None:
+        where.append("relevance >= %(min_relevance)s")
+        params["min_relevance"] = min_relevance
     where_sql = " AND ".join(where)
     rows = _fetchall(
         f"SELECT * FROM tenders WHERE {where_sql} "

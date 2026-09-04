@@ -543,6 +543,146 @@ def _max_base64_blob_chars() -> int:
         return _DEFAULT_MAX_BASE64_BLOB_CHARS
 
 
+def _extract_title_from_html(html: str) -> str | None:
+    """Extract title from raw HTML via <title> or og:title meta tag.
+
+    Uses simple regex (no new dependencies). Returns None if neither tag is found.
+    """
+    # Try og:title first (more explicit intent).
+    # Matches meta tags with property="og:title" or property='og:title'
+    # and extracts the content attribute value.
+    og_pattern_1 = r'<meta\s+property="og:title"\s+content="([^"]+)"'
+    og_match = re.search(og_pattern_1, html, re.IGNORECASE)
+    if og_match:
+        return og_match.group(1)
+
+    og_pattern_2 = r"<meta\s+property='og:title'\s+content='([^']+)'"
+    og_match = re.search(og_pattern_2, html, re.IGNORECASE)
+    if og_match:
+        return og_match.group(1)
+
+    # Also try with content before property (HTML attribute order can vary)
+    og_pattern_3 = r'<meta\s+content="([^"]+)"\s+property="og:title"'
+    og_match = re.search(og_pattern_3, html, re.IGNORECASE)
+    if og_match:
+        return og_match.group(1)
+
+    og_pattern_4 = r"<meta\s+content='([^']+)'\s+property='og:title'"
+    og_match = re.search(og_pattern_4, html, re.IGNORECASE)
+    if og_match:
+        return og_match.group(1)
+
+    # Fall back to <title> tag
+    title_match = re.search(r"<title\s*>([^<]+)<\s*/\s*title\s*>", html, re.IGNORECASE)
+    if title_match:
+        return title_match.group(1)
+
+    return None
+
+
+def _first_line_of_text(text: str, max_chars: int = 120) -> str | None:
+    """Extract first non-empty line from text, trimmed and bounded by max_chars.
+
+    Used as a fallback when structured title extraction fails.
+    """
+    if not text:
+        return None
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped:
+            # Trim to max_chars and return
+            return stripped[:max_chars]
+
+    return None
+
+
+def _url_path_as_title(url: str) -> str | None:
+    """Extract the last path segment from a URL as a fallback title.
+
+    E.g., "https://example.com/articles/ir-targeting-pod" -> "ir-targeting-pod"
+    """
+    if not url:
+        return None
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if path:
+        segments = path.split("/")
+        last_segment = segments[-1]
+        if last_segment:
+            return last_segment
+    return None
+
+
+def choose_title(
+    clean_title: str | None,
+    fallback_title: str | None,
+    html: str,
+    clean_text: str,
+    url: str,
+) -> str:
+    """Implement explicit title fallback chain.
+
+    Returns the first non-empty/whitespace-only candidate from:
+    1. clean_title (sanitized page title from extract_clean_text)
+    2. <title> or og:title from raw HTML (regex extraction, article-specific)
+    3. fallback_title (RSS entry title, generic feed title)
+    4. First non-empty line of clean_text (≤ 120 chars)
+    5. Last path segment of URL
+
+    Note: HTML extraction is prioritized over RSS fallback because when
+    fetching an RSS item's article, the article page's own title metadata
+    (og:title) is more specific/accurate than the RSS feed's generic entry
+    title. RSS fallback is only used if HTML extraction also fails.
+
+    All results are whitespace-stripped and have internal whitespace collapsed.
+    Never returns an empty string; always finds some title.
+    """
+
+    def _normalize_candidate(text: str | None) -> str | None:
+        """Strip whitespace and collapse internal whitespace."""
+        if not text:
+            return None
+        cleaned = text.strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned if cleaned else None
+
+    # Try each rung in order
+    # Rung 1: Sanitized page title (extracted by trafilatura/readability)
+    normalized = _normalize_candidate(clean_title)
+    if normalized:
+        return normalized
+
+    # Rung 2: HTML extraction (<title> or og:title from fetched article page)
+    html_title = _extract_title_from_html(html)
+    normalized = _normalize_candidate(html_title)
+    if normalized:
+        return normalized
+
+    # Rung 3: RSS entry title (fallback_title, generic feed title)
+    normalized = _normalize_candidate(fallback_title)
+    if normalized:
+        return normalized
+
+    # Rung 4: First non-empty line of clean_text
+    text_title = _first_line_of_text(clean_text)
+    normalized = _normalize_candidate(text_title)
+    if normalized:
+        return normalized
+
+    # Rung 5: Last path segment of URL
+    url_title = _url_path_as_title(url)
+    normalized = _normalize_candidate(url_title)
+    if normalized:
+        return normalized
+
+    # Absolute fallback (should never reach this given url_title as last resort)
+    return "Untitled"
+
+
 def extract_clean_text(html: str, url: str) -> CleanText:
     """Turn raw article HTML into sanitized, provenance-safe text.
 

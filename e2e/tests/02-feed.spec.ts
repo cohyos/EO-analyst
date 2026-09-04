@@ -183,24 +183,45 @@ test.describe("Feed screen (/feed)", () => {
     expect(sawFilteredRequest).toBeTruthy();
   });
 
-  test("keyboard: J/K move selection, Enter opens the detail panel", async ({ page }) => {
+  test("keyboard: J/K move selection, Enter navigates to the item's full page (/items/:id)", async ({
+    page,
+  }) => {
+    // NOTE: as of the latest rebuild, Enter no longer opens the inline
+    // FeedDetailPanel — FeedPage.tsx's onKeyDown now calls
+    // navigate(`/items/${selected.id}`) directly (full route navigation to
+    // the new ItemDetailPage). The inline panel is opened by double-clicking
+    // a row instead (FeedRow's onDoubleClick={onOpen}); see the next test.
     await page.goto("/feed");
     const firstRow = page.locator('[data-testid^="feed-row-"]').first();
     await expect(firstRow).toBeVisible({ timeout: 20_000 });
     await expect(firstRow).toHaveAttribute("data-selected", "true");
+    const firstRowId = (await firstRow.getAttribute("data-testid"))!.replace("feed-row-", "");
 
     await page.keyboard.press("j");
     await page.waitForTimeout(200);
     await expect(firstRow).toHaveAttribute("data-selected", "false");
     const secondSelected = page.locator('[data-testid^="feed-row-"][data-selected="true"]');
     await expect(secondSelected).toHaveCount(1);
+    const secondRowId = (await secondSelected.getAttribute("data-testid"))!.replace("feed-row-", "");
 
     await page.keyboard.press("k");
     await page.waitForTimeout(200);
     await expect(firstRow).toHaveAttribute("data-selected", "true");
 
     await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`/items/${firstRowId}$`), { timeout: 10_000 });
+    await expect(page.locator("header h1")).toHaveText("פרטי פריט");
+    void secondRowId;
+  });
+
+  test("double-clicking a row opens the inline detail panel (without navigating away)", async ({ page }) => {
+    await page.goto("/feed");
+    const firstRow = page.locator('[data-testid^="feed-row-"]').first();
+    await expect(firstRow).toBeVisible({ timeout: 20_000 });
+
+    await firstRow.dblclick();
     await expect(page.locator('[data-testid="feed-detail-panel"]')).toBeVisible({ timeout: 10_000 });
+    await expect(page).toHaveURL(/\/feed/); // stays on the feed, unlike Enter
   });
 
   test("keyboard: 1-4 re-rates the selected row via POST /api/items/{id}/feedback", async ({ page }) => {
@@ -267,8 +288,9 @@ test.describe("Feed screen (/feed)", () => {
     await page.goto("/feed");
     const firstRow = page.locator('[data-testid^="feed-row-"]').first();
     await expect(firstRow).toBeVisible({ timeout: 20_000 });
-    await firstRow.click();
-    await page.keyboard.press("Enter");
+    // Double-click opens the inline panel (Enter now navigates to /items/:id
+    // instead — see the dedicated Enter-navigation test above).
+    await firstRow.dblclick();
 
     const panel = page.locator('[data-testid="feed-detail-panel"]');
     await expect(panel).toBeVisible({ timeout: 10_000 });

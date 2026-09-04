@@ -46,7 +46,8 @@ Auth: none (bound to localhost / Tailscale only). CORS: allow `http://localhost:
 - `GET /api/conferences?from=&to=` ; `GET /api/conferences/ical` (text/calendar)
 
 ## Tenders / RFI / RFP (section 5.2, `eoa.tenders`)
-- `GET /api/tenders?status=open|closed|awarded|unknown&country=&q=&limit=100` → `[TenderCard]`
+- `GET /api/tenders?status=open|closed|awarded|unknown&country=&q=&min_relevance=3&limit=100` → `[TenderCard]`
+  (`min_relevance` defaults to `3` -- rows below that are hidden unless the caller explicitly passes `min_relevance=0`)
   `TenderCard = {"id","source","external_ref","title","agency","country","published_at","deadline","url","cpv_naics","summary_he","relevance","matched_terms","entities","status","item_id","created_at","updated_at"}`
 - `GET /api/tenders/forecasts?limit=100` → `[ForecastCard]`
   `ForecastCard = {"id","platform","buyer_country","trigger_event_id","trigger_item_id","payload_need","candidate_vendors","likelihood","window_from","window_to","rationale_he","sources","created_at","updated_at"}`

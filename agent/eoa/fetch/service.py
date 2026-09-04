@@ -137,13 +137,20 @@ def _store_item(
     fallback_title: str | None = None,
     fallback_published_at: datetime | None = None,
 ) -> None:
-    from eoa.fetch.sanitize import extract_clean_text, text_hash
+    from eoa.fetch.sanitize import choose_title, extract_clean_text, text_hash
     from eoa.memory import relational
 
     clean = extract_clean_text(html_text, url)
     raw_text = _strip_tags_fast(html_text)[:_RAW_TEXT_MAX_CHARS]
 
-    title = clean.title or fallback_title or ""
+    # Use explicit title fallback chain
+    title = choose_title(
+        clean_title=clean.title,
+        fallback_title=fallback_title,
+        html=html_text,
+        clean_text=clean.text,
+        url=url,
+    )
     published_at = clean.published_at or fallback_published_at
 
     try:

@@ -6,11 +6,15 @@ from pydantic import BaseModel, Field
 
 
 class TenderExtract(BaseModel):
-    """Stage: ``eoa.tenders.scan._llm_enrich``. LLM relevance/summary pass on one raw notice.
+    """Stage: ``eoa.tenders.scan._llm_classify``. LLM relevance/summary classification of one raw
+    notice, run *before* any DB write.
 
-    The deterministic keyword-hit relevance/matched_terms computed in ``scan.py`` are always
-    written first and never depend on this call succeeding (FR-9 / "never invent"); this is a
-    best-effort enrichment that overwrites them only when it succeeds with reasonable confidence.
+    ``relevant``/``relevance`` gate persistence itself (see ``scan.py``'s module docstring):
+    ``relevance <= 2`` -> the notice is not stored at all; ``== 3`` -> stored with
+    ``status='unknown'``; ``>= 4`` -> stored normally. When this call is unavailable/fails, the
+    deterministic two-signal-gate verdict (keyword-hit relevance/matched_terms) is used instead --
+    a stalled model degrades to "still ingested on the gate's own strength", never blocks
+    persistence outright (only an actual "not relevant" verdict from the model does that).
     """
 
     relevant: bool = Field(description="Whether this notice is genuinely about EO/IR/CV defense systems")
