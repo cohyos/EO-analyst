@@ -8,9 +8,10 @@ Layout written under `vault_dir`:
 - `Entities/<Name>.md` -- one note per `entities` row: YAML frontmatter
   (kind/country/aliases/focus/tags), then "ציר זמן" (events from
   `eoa.memory.graph.entity_timeline` plus items whose `entities_mentioned`
-  names the entity, newest first), "קשרים" (from
-  `eoa.memory.graph.neighbors`, one call per edge label since that function
-  returns only vertices), "מקורות" (every item referenced above).
+  names the entity, newest first), "קשרים" (neighbor discovery from
+  `eoa.memory.graph.neighbors`, one call per edge label, with the real
+  evidencing item linked per edge via `eoa.memory.graph.edges_of`),
+  "מקורות" (every item referenced above).
 - `Items/<id> <slug>.md` -- one note per exported item: frontmatter
   (url/source/published_at/domain/level/score/entities), then
   `summary_he`, `so_what_he`, `key_facts`, `uncertainty_he`, and wikilinks
@@ -45,7 +46,7 @@ from pydantic import BaseModel
 from eoa.config import REPO_ROOT, settings
 from eoa.db import connection
 from eoa.errors import ConfigError
-from eoa.memory.graph import EDGE_LABELS, entity_timeline, neighbors
+from eoa.memory.graph import EDGE_LABELS, edges_of, entity_timeline, neighbors
 
 log = structlog.get_logger(__name__)
 
@@ -305,17 +306,37 @@ def _entity_timeline_lines(
     return lines, sorted(source_ids)
 
 
-def _entity_neighbor_lines(entity: dict[str, Any]) -> list[str]:
-    """Render "קשרים" lines for `entity` via `eoa.memory.graph.neighbors`, one call per label.
+def _entity_neighbor_lines(entity: dict[str, Any], id_title_map: dict[int, str] | None = None) -> list[str]:
+    """Render "קשרים" lines for `entity`, with the real evidencing item linked per edge.
 
-    KNOWN LIMITATION: `neighbors()` returns only the neighboring `Entity`
-    vertices, not the edge itself, so the evidencing `item_id` cannot be
-    resolved through the public graph API (same gap documented for
-    `eoa.api.services.build_graph()`'s edges, which are also evidence-less).
-    The מקור parenthetical is rendered as unresolved rather than inventing a
-    source, per `docs/CONVENTIONS.md` rule 5 ("never invent").
+    Neighbor discovery still goes through `eoa.memory.graph.neighbors()`
+    (one call per edge label, unchanged) for the entity/kind list; the
+    evidencing `item_id`/`evidence` for each edge is layered on top via
+    `eoa.memory.graph.edges_of()`, matched by `(label, other entity id)`, so
+    the מקור line now links the real source item instead of an unresolved
+    placeholder. If the provenance lookup itself fails (e.g. graph backend
+    unavailable), each line still renders with an explicit "not available"
+    placeholder -- never an invented source, per `docs/CONVENTIONS.md` rule 5
+    ("never invent").
     """
     entity_id = entity["id"]
+    id_title_map = id_title_map if id_title_map is not None else {}
+
+    provenance: dict[tuple[str, Any], tuple[int | None, str | None]] = {}
+    try:
+        for e in edges_of(entity_id, depth=1):
+            other_id = e.dst_entity_id if e.src_entity_id == entity_id else e.src_entity_id
+            provenance[(e.label, other_id)] = (e.item_id, e.evidence)
+    except Exception as exc:  # pragma: no cover - defensive: graph backend may be unavailable
+        log.warning("obsidian.edges_of_failed", entity_id=entity_id, error=str(exc))
+
+    needed_item_ids = sorted(
+        {iid for iid, _ev in provenance.values() if iid is not None and iid not in id_title_map}
+    )
+    if needed_item_ids:
+        for row in _items_by_ids(needed_item_ids):
+            id_title_map[row["id"]] = row.get("title") or ""
+
     lines: list[str] = []
     for label in sorted(EDGE_LABELS):
         try:
@@ -326,10 +347,18 @@ def _entity_neighbor_lines(entity: dict[str, Any]) -> list[str]:
         for vertex in related:
             if not isinstance(vertex, dict):
                 continue
-            other_name = vertex.get("name")
+            # Tolerant of both the real AGE agtype shape (nested "properties")
+            # and an already-flattened dict -- see `eoa.memory.graph._vertex_fields`.
+            props = vertex.get("properties", vertex)
+            if not isinstance(props, dict):
+                continue
+            other_name = props.get("name")
+            other_id = props.get("entity_id")
             if not other_name:
                 continue
-            lines.append(f"- {_entity_link(other_name)} — {label} (מקור: לא זמין דרך neighbors())")
+            item_id, _evidence = provenance.get((label, other_id), (None, None))
+            source = _item_link(item_id, id_title_map.get(item_id, "")) if item_id is not None else "לא זמין"
+            lines.append(f"- {_entity_link(other_name)} — {label} (מקור: {source})")
     return lines
 
 
@@ -508,7 +537,7 @@ def export_vault(since_days: int | None = None) -> ExportStats:
     if cfg.entities:
         for entity in _list_entities():
             timeline_lines, source_ids = _entity_timeline_lines(entity, id_title_map)
-            neighbor_lines = _entity_neighbor_lines(entity)
+            neighbor_lines = _entity_neighbor_lines(entity, id_title_map)
             content = render_entity_md(entity, timeline_lines, neighbor_lines, source_ids, id_title_map)
             path = vault_dir / "Entities" / f"{slugify(entity['name'])}.md"
             _atomic_write(path, content)

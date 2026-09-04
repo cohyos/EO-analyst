@@ -1,5 +1,5 @@
-"""Job runner: executes queued jobs (daily_run, ingest, deep_search, report, weekly_run) with
-deadline budgeting, heartbeats, carry-over and a circuit breaker per stage.
+"""Job runner: executes queued jobs (daily_run, ingest, deep_search, report, weekly_run,
+monthly_run) with deadline budgeting, heartbeats, carry-over and a circuit breaker per stage.
 """
 
 from __future__ import annotations
@@ -257,6 +257,38 @@ def _build_report() -> Any:
     return build_daily()
 
 
+def run_weekly(job: dict[str, Any]) -> dict[str, Any]:
+    """``weekly_run`` handler: runs the full nightly pipeline (ingest..notify, including the daily
+    report) via :func:`run_daily`, then additionally builds the weekly analyst report (trends,
+    business events, conference lookahead, FR-11.4 meta-summary) on top of the same night's
+    freshly-analyzed items. A weekly-report failure is logged and recorded but never fails the job
+    outright — the daily pipeline's own results still count as the run's primary outcome."""
+    stats = run_daily(job)
+    try:
+        from eoa.report.weekly import build_weekly
+
+        paths = build_weekly()
+        stats["weekly_report"] = {"report_id": paths.report_id, "qa_passed": paths.qa.passed}
+    except Exception as exc:
+        log.error("weekly_report_failed", error=str(exc)[:300])
+        stats["weekly_report_error"] = str(exc)[:300]
+    return stats
+
+
+def run_monthly(job: dict[str, Any]) -> dict[str, Any]:
+    """``monthly_run`` handler: builds the monthly competitive-landscape report (players map, top
+    events, 24-month conference horizon, watchlist changes) on the previous full calendar month.
+    No daily-pipeline stages run here — this is purely a report build on already-collected data."""
+    try:
+        from eoa.report.monthly import build_monthly
+
+        paths = build_monthly()
+        return {"monthly_report": {"report_id": paths.report_id, "qa_passed": paths.qa.passed}}
+    except Exception as exc:
+        log.error("monthly_report_failed", error=str(exc)[:300])
+        return {"monthly_report_error": str(exc)[:300]}
+
+
 def _backup() -> dict[str, Any]:
     """Obsidian vault export (if enabled) + pg_dump via docker (best effort) + retention prune."""
     out: dict[str, Any] = {}
@@ -355,12 +387,21 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
     return {"headlines": len(headlines)}
 
 
+def run_conference_scan(job: dict[str, Any]) -> dict[str, Any]:
+    """FR-12.3: monthly conference-tracker scan (roll horizon + verify stale + discover new)."""
+    from eoa.conferences.tracker import monthly_scan
+
+    return monthly_scan()
+
+
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "daily_run": run_daily,
     "ingest": lambda job: _as_dict(asyncio.run(_ingest())),
     "report": lambda job: _as_dict(_build_report()),
     "deep_search": run_deep_search_job,
-    "weekly_run": run_daily,  # phase C will extend
+    "weekly_run": run_weekly,
+    "monthly_run": run_monthly,
+    "conference_scan": run_conference_scan,
 }
 
 

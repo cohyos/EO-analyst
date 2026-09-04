@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -154,6 +155,117 @@ def neighbors(entity_id: int, label: str | None = None, depth: int = 1) -> list[
     """
     rows = _run_cypher(cypher_body, {"eid": entity_id}, "b agtype")
     return [_parse_agtype(row["b"]) for row in rows]
+
+
+@dataclass
+class EdgeRow:
+    """One graph edge with its full provenance, as returned by :func:`edges_of`.
+
+    ``src_entity_id``/``dst_entity_id`` (and their ``*_name`` counterparts)
+    reflect the edge's true creation direction (``startNode``/``endNode``),
+    which is not necessarily the direction it was traversed from the queried
+    entity when the underlying Cypher match is undirected. ``item_id`` and
+    ``evidence`` mirror the properties :func:`add_edge` stamped onto the
+    edge; ``created_at`` is whatever (if anything) the edge happens to carry
+    under that property name today -- nothing stamps it automatically, so it
+    is commonly ``None`` (never invented).
+    """
+
+    src_entity_id: int
+    src_name: str | None
+    dst_entity_id: int
+    dst_name: str | None
+    label: str
+    item_id: int | None
+    evidence: str | None
+    created_at: Any | None
+
+
+def _vertex_fields(vertex: Any) -> tuple[int | None, str | None]:
+    """Return `(entity_id, name)` from a parsed vertex, tolerant of both the
+    real AGE agtype shape (`{"properties": {...}}`) and an already-flattened
+    dict, since other modules in this codebase have historically assumed the
+    latter."""
+    if not isinstance(vertex, dict):
+        return None, None
+    props = vertex.get("properties", vertex)
+    if not isinstance(props, dict):
+        return None, None
+    return props.get("entity_id"), props.get("name")
+
+
+def _edge_fields(edge: Any) -> tuple[str | None, int | None, str | None, Any | None]:
+    """Return `(label, item_id, evidence, created_at)` from a parsed edge, same tolerance as `_vertex_fields`."""
+    if not isinstance(edge, dict):
+        return None, None, None, None
+    label = edge.get("label")
+    props = edge.get("properties", edge)
+    if not isinstance(props, dict):
+        props = {}
+    return label, props.get("item_id"), props.get("evidence"), props.get("created_at")
+
+
+def edges_of(entity_id: int, label: str | None = None, depth: int = 1) -> list[EdgeRow]:
+    """Return every edge touching `entity_id` within `depth` hops, each carrying its provenance.
+
+    Unlike `neighbors()` (which returns only the neighboring `Entity`
+    vertices), this walks every relationship along each matched path via
+    Cypher's `relationships()` and resolves each one back to its real
+    `startNode`/`endNode`, so `item_id`/`evidence` -- the properties
+    `add_edge()` stamps on creation -- come back intact instead of being
+    dropped.
+    """
+    if label is not None:
+        _require_edge_label(label)
+    rel_type = f":{label}" if label else ""
+    hop_range = f"*1..{int(depth)}"
+    cypher_body = f"""
+        MATCH p = (a:Entity {{entity_id: $eid}})-[{rel_type}{hop_range}]-(b:Entity)
+        UNWIND relationships(p) AS r
+        WITH DISTINCT r, startNode(r) AS s, endNode(r) AS e
+        RETURN s, e, r
+    """
+    rows = _run_cypher(cypher_body, {"eid": entity_id}, "s agtype, e agtype, r agtype")
+
+    out: list[EdgeRow] = []
+    for row in rows:
+        s = _parse_agtype(row["s"])
+        e = _parse_agtype(row["e"])
+        r = _parse_agtype(row["r"])
+        src_id, src_name = _vertex_fields(s)
+        dst_id, dst_name = _vertex_fields(e)
+        r_label, item_id, evidence, created_at = _edge_fields(r)
+        if src_id is None or dst_id is None or r_label is None:
+            continue
+        out.append(
+            EdgeRow(
+                src_entity_id=src_id,
+                src_name=src_name,
+                dst_entity_id=dst_id,
+                dst_name=dst_name,
+                label=r_label,
+                item_id=item_id,
+                evidence=evidence,
+                created_at=created_at,
+            )
+        )
+    return out
+
+
+def edge_stats() -> dict[str, int]:
+    """Return a count of edges per `EDGE_LABELS` label (0 for labels with no edges yet)."""
+    cypher_body = """
+        MATCH ()-[r]->()
+        RETURN label(r) AS lbl, count(r) AS n
+    """
+    rows = _run_cypher(cypher_body, {}, "lbl agtype, n agtype")
+    counts: dict[str, int] = dict.fromkeys(EDGE_LABELS, 0)
+    for row in rows:
+        lbl = _parse_agtype(row["lbl"])
+        n = _parse_agtype(row["n"])
+        if isinstance(lbl, str) and lbl in counts and isinstance(n, int | float):
+            counts[lbl] = int(n)
+    return counts
 
 
 def partners_of_competitors(entity_name: str) -> list[dict[str, Any]]:

@@ -108,6 +108,23 @@ def build_scheduler() -> BackgroundScheduler:
         id="weekly",
         coalesce=True,
     )
+    mo_day = s.schedule.monthly_run.get("day", 1)
+    sched.add_job(
+        lambda: enqueue_job("conference_scan", {}, priority=4),
+        CronTrigger(day=mo_day, hour=2, minute=30, timezone=tz),
+        id="conference_scan",
+        name="monthly conference tracker scan (FR-12.3)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+    sched.add_job(
+        lambda: enqueue_job("monthly_run", {}, priority=2),
+        CronTrigger(day=mo_day, hour=3, minute=30, timezone=tz),
+        id="monthly",
+        name="monthly report (FR-5.4: נוף תחרותי מלא ומפת שחקנים)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
     return sched
 
 

@@ -1,4 +1,4 @@
-"""`GET /api/conferences`, `/api/conferences/ical` -- phase C, honest stub (returns [] for now)."""
+"""`GET /api/conferences`, `/api/conferences/ical` -- FR-12 rolling conference tracker (eoa.conferences)."""
 
 from __future__ import annotations
 

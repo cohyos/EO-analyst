@@ -7,12 +7,21 @@ at least one ``[n]`` citation whose ``n`` is a valid index into the item list th
 model. The ``outlook_he`` section is exempt from the citation requirement but must instead open
 with an explicit assessment marker, since it is the analyst's own forward-looking judgement rather
 than a restatement of sourced facts.
+
+Two optional, additive parameters generalize ``check()`` beyond :class:`DailyReportDraft` for the
+weekly/monthly report drafts (``eoa.report.weekly`` / ``eoa.report.monthly``), which carry extra
+LLM-authored prose blocks outside ``draft.sections`` (e.g. one paragraph per detected trend):
+``extra_sections`` are checked exactly like ``draft.sections`` (citation required on every factual
+sentence); ``exempt_sections`` get the same treatment as ``outlook_he`` — no citation requirement,
+but any ``[n]`` present must still resolve to a real item. Neither parameter is used by the daily
+report, so passing neither reproduces the original behaviour exactly.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from eoa.llm.schemas.analysis import DailyReportDraft
 
@@ -183,8 +192,21 @@ def _check_prose(
             errors.append(f'ב{label}: משפט עובדתי ללא הפניה [n] — "{sentence}"')
 
 
-def check(draft: DailyReportDraft, items: list[dict]) -> QAResult:
-    """Validate every factual sentence in ``draft`` carries an ``[n]`` citation into ``items``."""
+def check(
+    draft: DailyReportDraft | Any,
+    items: list[dict],
+    *,
+    extra_sections: list[tuple[str, str]] | None = None,
+    exempt_sections: list[tuple[str, str]] | None = None,
+) -> QAResult:
+    """Validate every factual sentence in ``draft`` carries an ``[n]`` citation into ``items``.
+
+    ``draft`` only needs ``exec_summary_he``, ``sections`` (each with ``title_he``/``prose_he``)
+    and ``outlook_he`` — duck-typed so :class:`~eoa.llm.schemas.reports.WeeklyReportDraft` /
+    ``MonthlyReportDraft`` work here unchanged. ``extra_sections``/``exempt_sections`` are
+    ``(label, text)`` pairs checked in addition to ``draft.sections`` — the former like a normal
+    section, the latter like ``outlook_he`` (citation-exempt, out-of-range refs still flagged).
+    """
     valid_ns = _valid_range(items)
     errors: list[str] = []
     uncited: list[str] = []
@@ -193,6 +215,13 @@ def check(draft: DailyReportDraft, items: list[dict]) -> QAResult:
     _check_prose("תקציר המנהלים", draft.exec_summary_he, valid_ns, errors, uncited, bad_refs)
     for section in draft.sections:
         _check_prose(f"סעיף '{section.title_he}'", section.prose_he, valid_ns, errors, uncited, bad_refs)
+    for label, text in extra_sections or []:
+        _check_prose(f"'{label}'", text, valid_ns, errors, uncited, bad_refs)
+    for label, text in exempt_sections or []:
+        for n in citations_in(text):
+            if n not in valid_ns:
+                bad_refs.add(n)
+                errors.append(f"ב'{label}': ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה")
 
     outlook = (draft.outlook_he or "").strip()
     if outlook:

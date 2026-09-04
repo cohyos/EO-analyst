@@ -1358,3 +1358,222 @@ vault directory never created). Passes today via
 `PYTHONPATH=agent python -c "from eoa.config import settings; print(settings().export.obsidian)"`
 confirms the config wiring: `enabled=True vault_dir='output/obsidian'
 entities=True items=True reports=True min_level='yellow'`.
+
+## Security guard — L1 CPU classifier (ONNX, offline)
+
+Files: `agent/eoa/security/guard.py` (`_l1_pipeline`, `_l1_injection_label`,
+`_l1_score` only), `pyproject.toml` (`guard-onnx` extra), `docker/agent/Dockerfile`,
+`tests/security/test_guard_l1.py`.
+
+Makes the L1b classifier named in `docs/adr/001-model-selection.md`
+(`protectai/deberta-v3-base-prompt-injection-v2`, Apache-2.0, `config/models.yaml`'s
+`prompt_injection_deberta`) actually load and score inside the `agent`
+container, which has no internet access at runtime (`docker-compose.yml` sets
+`dns: [0.0.0.0]` on it — see the Docker infrastructure section above) — without
+pulling the `guard` extra's multi-GB CUDA `torch` wheel, which the previous
+`_l1_pipeline()` implementation (a plain `transformers.pipeline(..., device=-1)`
+over the HF model id) required and which can never resolve a hub download from
+inside that container in the first place.
+
+### Model bake (`docker/agent/Dockerfile`, Stage 0 `guard-model`)
+
+Verified via the model repo's file listing (Hugging Face, 2026-09) that
+`protectai/deberta-v3-base-prompt-injection-v2` ships a pre-exported `onnx/`
+folder (`model.onnx` + tokenizer files, ~750 MB) alongside the safetensors
+checkpoint — so the build-time bake downloads that folder directly
+(`huggingface_hub.snapshot_download(..., allow_patterns=["onnx/*"])`, then
+flattened into `/opt/models/prompt-guard`) rather than exporting locally. A
+`optimum-cli export onnx --model ... --task text-classification` fallback path
+is kept for if a future revision of that repo ever drops the `onnx/` folder,
+so the build doesn't silently break — it's a plain `if any(f.startswith("onnx/")
+for f in list_repo_files(...))` check via a Python heredoc `RUN` (needs
+`# syntax=docker/dockerfile:1.7` at the top of the file for heredoc `RUN`
+support). This stage has internet (it's a separate build stage, not the final
+image); the final `agent` stage does not, and never runs this code.
+
+The baked model directory is `COPY --from=guard-model` into the final image at
+`/opt/models/prompt-guard`, and the final stage sets
+`EOA_GUARD_L1_DIR=/opt/models/prompt-guard` + `HF_HUB_OFFLINE=1` as image
+`ENV` (not `docker-compose.yml` environment — `docker-compose.yml` was left
+untouched since it doesn't override or unset those two vars, so the Dockerfile
+`ENV` values apply as-is once the container runs). The final stage installs
+`.[guard-onnx]` (`optimum[onnxruntime]`, `transformers`, `tokenizers`,
+`onnxruntime` — no `torch`), not the pre-existing `guard` extra.
+
+### `agent/eoa/security/guard.py`
+
+`_l1_pipeline()` resolution order, unchanged in every other function in this
+module:
+1. `EOA_GUARD_L1_DIR` env var set → load `ORTModelForSequenceClassification`
+   + `AutoTokenizer` from that local directory (no repo id, no `subfolder=`
+   needed — the Dockerfile already flattened the `onnx/` subfolder contents
+   directly into that directory) and build a `transformers.pipeline(...)`
+   around them. This is the only path exercised inside the `agent` container.
+2. Local load fails or the env var is unset → the original dev-machine path:
+   resolve `config.models.guard_l1` → `ModelSpec.hf` from the registry and
+   `transformers.pipeline("text-classification", model=spec.hf, ...)`
+   (downloads from the hub — only reachable with internet).
+3. Either path unavailable → `None`, same graceful fallback as before;
+   `screen()` (untouched by this change) continues to run on heuristics
+   (`scan_heuristics`) plus the L2 LLM judge alone.
+
+If the local-dir load raises and `HF_HUB_OFFLINE=1` is set (true inside the
+`agent` container), step 2 is skipped outright — retrying against the hub
+would just fail identically, having already been told not to reach it.
+
+`_l1_injection_label(pipe)` reads `pipe.model.config.id2label` and returns
+whichever label name contains `"inject"` (case-insensitive) — the ONNX config
+carries the same `id2label={"0": "SAFE", "1": "INJECTION"}` as the base
+checkpoint's `config.json` (confirmed directly from the model repo), so this
+resolves to `"INJECTION"` for this specific model, but the lookup keeps
+`_l1_score` correct against any checkpoint using the generic `LABEL_0`/`LABEL_1`
+convention too (falls back to checking `label in {"INJECTION", "LABEL_1"}`
+directly if `id2label` introspection itself raises). `_l1_score` is otherwise
+identical to before: max injection probability over 512-token, 1800-char
+windows (300-char stride) across up to the first 30k characters of
+`f"{title}\n{text}"`.
+
+### Tests (`tests/security/test_guard_l1.py`)
+
+`@pytest.mark.security`, mirrors `tests/security/test_heuristics.py`'s fixture
+loading (`tests/fixtures/injection_samples/manifest.yaml` /
+`tests/fixtures/clean_samples/manifest.yaml`) but scores every fixture through
+`_l1_score` directly rather than `scan_heuristics`. A `setup_class` probe call
+(`_l1_score` on a short direct-injection string) decides once per class
+whether the classifier loaded at all in this environment; if not, both tests
+skip with an explicit reason naming the two ways it could still work
+(`EOA_GUARD_L1_DIR` baked model, or internet for the dev-machine fallback) —
+never a silent pass, per `docs/CONVENTIONS.md` rule 10. When available:
+asserts >= 80% of injection samples score >= 0.5, excluding the three
+sanitizer-layer vectors (`html_hidden`, `base64_encoded`, `zero_width_unicode`
+— same exclusion set as the heuristics test, since those attacks are
+neutralized by `eoa.fetch.sanitize` before the classifier ever sees them) and
+<= 2/19 clean samples score >= 0.5, printing a pass/fail table for both groups
+on failure or under `-s`.
+
+**Not run against the real ONNX model in this environment** — no Docker/GPU
+runtime available at authoring time on the host running this change, and no
+`guard`/`guard-onnx` extra installed on the bare host Python, so
+`PYTHONPATH=agent python -m pytest tests/security -q` exercises the clean-skip
+path only (`_l1_score(...)` returns `None`, both new tests skip with the
+message above; the existing 23 heuristics tests still pass, unaffected).
+Verify the scored path with `docker compose build agent` +
+`docker compose run --rm --no-deps agent python -m pytest tests/security -q -m security`
+
+## Conferences (FR-12: rolling conference tracker)
+
+Files: `agent/eoa/conferences/tracker.py`, `reminders.py`, `ical.py`;
+`agent/eoa/llm/schemas/conferences.py`, `agent/eoa/llm/prompts/conference_extract.md`;
+`db/migrations/versions/0003_conference_reminders.py`; conference-related functions in
+`agent/eoa/api/services.py` + `agent/eoa/api/routes/conferences.py`;
+`config/watchlist.yaml: conferences_seed` (name, month, city, cadence, relevance).
+
+Keeps the `conferences` table (schema in `0001_core.py`) populated 24 months into a rolling
+horizon, verifies stale entries via a small deep-search-lite pass, discovers conferences not yet
+tracked, sends deduped ntfy reminders, and exports the horizon as iCal. Wired into the scheduler
+as a monthly job (`conference_scan`, `schedule.monthly_run.day` at 02:30 — `orchestrator/main.py`
+`build_scheduler()`) whose handler (`orchestrator/jobs.py: run_conference_scan`) calls
+`tracker.monthly_scan()`.
+
+### `agent/eoa/conferences/tracker.py`
+
+- `roll_horizon(months=24)` → `{"created", "skipped_existing", "transitioned_past", "horizon_end"}`.
+  For every `config/watchlist.yaml: conferences_seed` entry, computes the years it occurs in
+  within `[today, today+months]` (`_years_in_horizon`, cadence-filtered by `_occurs_in_year`:
+  `annual` always, `biennial_odd`/`biennial_even` by year parity, plain `biennial` defaults to
+  even years, any unknown cadence string is treated as annual so a conference is never silently
+  dropped) and inserts a `status='estimated'` row named `"<seed name> <year>"` (e.g. "AUSA 2026")
+  with a day-15-of-month placeholder `start_date`/`end_date` — `ON CONFLICT (name) DO NOTHING`, so
+  a confirmed or already-estimated row for that year is never duplicated or overwritten. Then
+  flips every non-terminal row whose `end_date` (or `start_date` if no end date) is in the past to
+  `status='past'` (`_transition_past`).
+- `verify_conference(conf_id)` → `{"verified", "changed": {field: {"from","to"}}, "confidence", "status"}`
+  (or `{"verified": False, "reason": ...}`). Deep-search-lite: 4 SearXNG queries (official site,
+  "`<name> <year>` dates", "... registration", "... call for papers"), the top 2 hits by score
+  deduplicated by domain and filtered against a small social/aggregator blocklist
+  (`_top_official_urls`) are fetched via `eoa.fetch.remote.fetch_remote`, then
+  `chat_structured("resident", ConferenceExtract, ...)` (prompt: `llm/prompts/conference_extract.md`,
+  DATA-wrapped) extracts dates/venue/registration/CFP/cost/entry-conditions/key-exhibitors. Only
+  fields with `confidence >= 0.6` are written; the previous values of exactly those fields are kept
+  in `prev_snapshot` (jsonb) for "what changed" reporting, and `last_verified_at` is always
+  stamped. Status becomes `confirmed` once a date field is written, or `cancelled` if the model
+  reports an explicit cancellation.
+- `discover_new(domain_keywords=None)` → `{"searched", "candidates_found", "inserted", "skipped_duplicate"}`.
+  6 SearXNG queries (4 fixed EO/IR/C-UAS/naval defense queries + up to 2 built from
+  `domain_keywords`), search hits are handed to
+  `chat_structured("resident", ConferenceCandidates, ...)` to propose distinct real conferences;
+  each candidate is scored 1-5 by a keyword-hit rubric (`_relevance_score`: 1 base point + 1 per
+  distinct domain keyword found in its name/rationale, capped at 5) and skipped as a near-duplicate
+  (`_is_near_duplicate`, `difflib.SequenceMatcher` ratio >= 0.85 against every tracked name) before
+  being inserted as `status='estimated'`.
+- `monthly_scan(discover_keywords=None, verify_cap=15)` → `{"roll_horizon", "verified": [...],
+  "verify_stopped_budget", "discover"}`. FR-12.3 entry point: `roll_horizon()` + verify up to
+  `verify_cap` conferences starting within 12 months whose `last_verified_at` is `NULL` or older
+  than 30 days (`_conferences_needing_verification`, ordered by soonest `start_date`) + `discover_new()`.
+  Budget-aware: a `ResourceUnavailable` from the resource gate during verification stops the
+  verify loop (discovery still runs) instead of failing the whole scan.
+- `upcoming(days=90)` / `full_horizon_table()` — report-layer helpers (FR-12.5) returning
+  `list[dict]` via `conference_card`, for the weekly "next 90 days" board and the monthly full
+  rolling-horizon table respectively.
+- `conference_card(row)` — DB row → API/report dict. Carries both the fields already declared in
+  `web/src/types/api.ts: Conference` (`location`, `starts_at`, `ends_at`, `url`, `relevance_he`, a
+  Hebrew label + number e.g. "גבוהה (4)") and the full FR-12 field set (`start_date`, `end_date`,
+  `city`, `venue`, `cadence`, `relevance`, `rationale`, `registration_opens`,
+  `early_bird_deadline`, `cfp_deadline`, `cost_range`, `registration_url`, `entry_conditions`,
+  `status`, `last_verified_at`), plus `changes` — a `{field: {"from","to"}}` diff of `prev_snapshot`
+  against the row's current values.
+
+### `agent/eoa/conferences/reminders.py` (FR-12.4)
+
+- `due_reminders(today, rows=None)` → `list[(conference_row, kind)]`. Four kinds, gated exactly per
+  spec 12.4: `registration_opens` (relevance >= 4, fires the day it opens), `early_bird` /
+  `cfp` (14 days before the respective deadline, any relevance), `major_conference` (relevance ==
+  5, 30 days before `start_date`). `rows` is injectable (defaults to a DB read of non-terminal
+  conferences) so the date math is unit-testable without a database.
+- `send_reminders(today=None)` → `{"due", "sent", "skipped_already_sent"}`. Sends each due
+  reminder via `eoa.notify.ntfy.send` and records it in `conference_reminders(conf_id, kind,
+  sent_at)` (migration 0003) so it never re-fires for the same conference occurrence — a
+  recurring conference's next year is a different row (`conf_id`), so the same kind fires again
+  then.
+
+### `agent/eoa/conferences/ical.py` (FR-12.7)
+
+- `build_ical(confs) -> str` — one all-day VEVENT per conference span (`"כנס: <name>"`, RTL-safe)
+  plus one all-day VEVENT per known critical date (`registration_opens` /
+  `early_bird_deadline` / `cfp_deadline`). No VALARM components — reminder timing is left to the
+  importing calendar app; ntfy (above) is the system's own notification channel. UTF-8
+  `text/calendar` output via the `icalendar` package; accepts either the new (`start_date`/
+  `end_date`) or legacy (`starts_at`/`ends_at`) field names so it can consume a raw `conferences`
+  row or a `conference_card()` dict interchangeably. Conferences with no known start date are
+  skipped (nothing to place on a calendar yet).
+
+### API (`agent/eoa/api/services.py` + `routes/conferences.py`)
+
+- `GET /api/conferences?from=&to=` → rows overlapping `[from, to]` (default: today .. +24 months),
+  sorted by `start_date`, each a `conference_card` (includes `changes`).
+- `GET /api/conferences/ical` → `text/calendar`, the full non-cancelled horizon via `build_ical`.
+
+### Tests
+
+`tests/unit/test_conferences.py` (67 tests, no DB/LLM — every DB write is monkeypatched at the
+`eoa.conferences.*` module level, mirroring `tests/unit/test_triage_levels.py`'s stubbing style;
+`due_reminders`/`_transition_past` take an injectable `rows` list instead of being monkeypatched):
+occurrence math (`_occurs_in_year` for annual/biennial_odd/biennial_even/plain-biennial/unknown
+cadence, `_years_in_horizon` across year boundaries including the "month already passed this
+year" and "candidate beyond horizon end" edges) and `roll_horizon()`'s seed-reading/insert-per-
+occurrence orchestration; status transition (`_is_past`, `_transition_past`); date parsing
+(`_parse_date` ISO/free-text/garbage) and year extraction (`_year_from_name`); snapshot
+diffing (`_jsonable`, `_apply_conference_update`); name-similarity dedupe (`_is_near_duplicate`)
+and the relevance rubric (`_relevance_score`); `conference_card`'s legacy-field mapping and
+`changes` computation; reminder due-dates for all four kinds plus `send_reminders`' dedupe;
+`build_ical` producing the expected VEVENT count (main span + N reminder dates) and round-tripping
+through `icalendar.Calendar.from_ical`, including a Hebrew-summary/location UTF-8 case. Passes via
+`PYTHONPATH=agent python -m pytest tests/unit/test_conferences.py -q` (67/67) and is clean under
+`ruff check` / `ruff format --check`; `PYTHONPATH=agent python -m pytest tests/unit -q` stays
+green (365/365 including the other in-flight modules' tests).
+
+Not exercised by these tests (would require a live DB/Ollama/SearXNG, per `docs/CONVENTIONS.md`
+rule 10): `verify_conference`'s and `discover_new`'s end-to-end search/fetch/LLM flow, and
+`monthly_scan`'s DB-backed candidate selection — their pure helpers (query construction, URL
+ranking, field-confidence gating logic) are covered directly instead.
+once the image is built.

@@ -6,6 +6,7 @@ their raw text to a tool-enabled model. The L2 judge runs with no tools and sees
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,13 +41,54 @@ class ScreenResult:
 
 
 def _l1_pipeline() -> Any:
-    """Lazy-load the CPU prompt-injection classifier (Protect AI DeBERTa v2). None if unavailable."""
+    """Lazy-load the CPU prompt-injection classifier (Protect AI DeBERTa v2). None if unavailable.
+
+    Resolution order:
+    1. ``EOA_GUARD_L1_DIR`` env var — a model baked into the image at build time
+       (ONNX weights + tokenizer, loaded via ``optimum``'s ``ORTModelForSequenceClassification``).
+       This is the path used inside the `agent` container, which has no internet
+       access at runtime (see ``docker/agent/Dockerfile``); ``HF_HUB_OFFLINE=1`` is
+       set there too, so no step here can silently fall back to a network call.
+    2. The HF model id from the registry (``config/models.yaml`` -> ``guard_l1``),
+       downloaded live via ``transformers.pipeline`` — only reachable on dev
+       machines with internet.
+    3. ``None`` — the existing graceful fallback; ``screen()`` still runs on
+       heuristics alone.
+    """
     global _L1_PIPE, _L1_FAILED
     if _L1_PIPE is not None or _L1_FAILED:
         return _L1_PIPE
     with _L1_LOCK:
         if _L1_PIPE is not None or _L1_FAILED:
             return _L1_PIPE
+
+        local_dir = os.environ.get("EOA_GUARD_L1_DIR")
+        if local_dir:
+            try:
+                from optimum.onnxruntime import (  # type: ignore[import-not-found]
+                    ORTModelForSequenceClassification,
+                )
+                from transformers import AutoTokenizer, pipeline  # type: ignore[import-not-found]
+
+                model = ORTModelForSequenceClassification.from_pretrained(local_dir)
+                tokenizer = AutoTokenizer.from_pretrained(local_dir)
+                _L1_PIPE = pipeline(
+                    "text-classification",
+                    model=model,
+                    tokenizer=tokenizer,
+                    truncation=True,
+                    max_length=512,
+                )
+                log.info("guard_l1_loaded", model=local_dir, runtime="onnx")
+                return _L1_PIPE
+            except Exception as exc:
+                log.warning("guard_l1_local_load_failed", dir=local_dir, error=str(exc)[:200])
+                if os.environ.get("HF_HUB_OFFLINE") == "1":
+                    # Offline-forced (the agent container): no point trying the
+                    # network path below, it will only fail the same way.
+                    _L1_FAILED = True
+                    return None
+
         spec = settings().registry.models.get(settings().models.get("guard_l1") or "")
         if spec is None or not spec.hf:
             _L1_FAILED = True
@@ -64,17 +106,36 @@ def _l1_pipeline() -> Any:
     return _L1_PIPE
 
 
+def _l1_injection_label(pipe: Any) -> str:
+    """Resolve the output label name that means "injection" for the loaded model.
+
+    Prefers the model's own ``config.id2label`` (robust to a checkpoint using
+    ``INJECTION``/``SAFE`` vs. the generic ``LABEL_0``/``LABEL_1``); falls back to
+    the common conventions if the config can't be introspected.
+    """
+    try:
+        id2label = pipe.model.config.id2label
+        for name in id2label.values():
+            if "inject" in str(name).upper():
+                return str(name).upper()
+    except Exception:
+        pass
+    return "INJECTION"
+
+
 def _l1_score(text: str) -> float | None:
     """Max injection probability over 512-token windows; None if the classifier is unavailable."""
     pipe = _l1_pipeline()
     if pipe is None:
         return None
+    injection_label = _l1_injection_label(pipe)
     chunks = [text[i : i + 1800] for i in range(0, min(len(text), 30_000), 1500)] or [text]
     best = 0.0
     for out in pipe(chunks, batch_size=8):
         label = str(out.get("label", "")).upper()
         p = float(out.get("score", 0.0))
-        best = max(best, p if label in {"INJECTION", "LABEL_1"} else 1.0 - p)
+        is_injection = label == injection_label or label in {"INJECTION", "LABEL_1"}
+        best = max(best, p if is_injection else 1.0 - p)
     return best
 
 

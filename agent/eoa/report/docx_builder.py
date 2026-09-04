@@ -464,6 +464,38 @@ def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
             _emit_mixed_runs(link_p, "—", size_pt=10)
 
 
+def _add_extra_sections(doc: DocxDocument, sections: list[dict[str, Any]], position: str) -> None:
+    """Render additive Heading-1 + prose sections at a given insertion ``position``.
+
+    Each entry is ``{"title_he": str, "body_he": str, "position": "after_summary"|"after_outlook"}``
+    (``position`` defaults to ``"after_summary"`` when omitted). Used by the weekly/monthly report
+    builders for LLM-authored trend paragraphs (``after_summary``) and deterministic, non-LLM prose
+    like the FR-11.4 meta-summary or watchlist changes (``after_outlook``) — never by the daily
+    report, which always passes ``None``.
+    """
+    for sec in sections:
+        if (sec.get("position") or "after_summary") != position:
+            continue
+        add_mixed_paragraph(doc, sec.get("title_he") or "", style="Heading 1")
+        for para in _split_paragraphs(sec.get("body_he") or ""):
+            add_mixed_paragraph(doc, para)
+
+
+def _add_generic_table(doc: DocxDocument, title_he: str, headers: list[str], rows: list[list[Any]]) -> None:
+    """A deterministic, non-citation RTL table under its own Heading-1 — the 90-day conference
+    lookahead (weekly) and the players-map/top-events/24-month-horizon tables (monthly)."""
+    add_mixed_paragraph(doc, title_he, style="Heading 1")
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    _set_table_rtl(table)
+    for cell, text in zip(table.rows[0].cells, headers, strict=True):
+        _fill_cell(cell, text, bold=True)
+    for row_values in rows:
+        row = table.add_row().cells
+        for cell, value in zip(row, row_values, strict=True):
+            _fill_cell(cell, "—" if value is None else str(value))
+
+
 def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None:
     for entry in deep_search:
         heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
@@ -482,7 +514,7 @@ def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None
 
 
 def build_docx(
-    draft: DailyReportDraft,
+    draft: DailyReportDraft | Any,
     items: list[dict],
     events: list[dict],
     *,
@@ -491,17 +523,29 @@ def build_docx(
     open_clarifications: list[dict] | None = None,
     generated_at: dt.datetime | None = None,
     qa: QAResult | None = None,
+    title_text: str | None = None,
+    extra_sections: list[dict[str, Any]] | None = None,
+    tables: list[dict[str, Any]] | None = None,
 ) -> DocxDocument:
-    """Build the full daily-report ``Document`` in memory (caller saves it)."""
+    """Build the full report ``Document`` in memory (caller saves it).
+
+    ``draft`` only needs ``exec_summary_he``, ``sections`` (``title_he``/``prose_he``),
+    ``outlook_he`` and ``open_points_he`` — duck-typed, so the weekly/monthly drafts render here
+    unchanged. ``title_text`` overrides the daily-report title (defaults to ``TITLE_TEXT``);
+    ``extra_sections`` (see :func:`_add_extra_sections`) and ``tables`` (see
+    :func:`_add_generic_table`) are additive, optional hooks used only by the weekly/monthly report
+    builders — omitted, this reproduces the original daily-report layout exactly.
+    """
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
+    extra_sections = extra_sections or []
     generated_at = generated_at or dt.datetime.now(dt.UTC)
 
     doc = docx.Document()
     _configure_document_defaults(doc)
     _add_footer_page_number(doc)
 
-    add_mixed_paragraph(doc, TITLE_TEXT, style="Title")
+    add_mixed_paragraph(doc, title_text or TITLE_TEXT, style="Title")
     add_mixed_paragraph(doc, hebrew_date_str(period_end), style="Subtitle")
     add_mixed_paragraph(
         doc,
@@ -524,6 +568,8 @@ def build_docx(
 
     add_mixed_paragraph(doc, "תקציר מנהלים", style="Heading 1")
     add_mixed_paragraph(doc, draft.exec_summary_he or "אין תקציר לתקופה זו.")
+
+    _add_extra_sections(doc, extra_sections, "after_summary")
 
     for section in draft.sections:
         add_mixed_paragraph(doc, section.title_he, style="Heading 1")
@@ -548,6 +594,11 @@ def build_docx(
     if draft.outlook_he:
         add_mixed_paragraph(doc, "מבט קדימה", style="Heading 1")
         add_mixed_paragraph(doc, draft.outlook_he)
+
+    _add_extra_sections(doc, extra_sections, "after_outlook")
+
+    for tbl in tables or []:
+        _add_generic_table(doc, tbl.get("title_he") or "", tbl.get("headers") or [], tbl.get("rows") or [])
 
     add_mixed_paragraph(doc, "נספח מקורות", style="Heading 1")
     _add_sources_appendix(doc, items)
@@ -597,8 +648,24 @@ def _qa_warning_line(qa: QAResult | None) -> str | None:
     return None
 
 
+def _extra_sections_md(lines: list[str], sections: list[dict[str, Any]], position: str) -> None:
+    for sec in sections:
+        if (sec.get("position") or "after_summary") != position:
+            continue
+        lines += [f"## {sec.get('title_he') or ''}", "", sec.get("body_he") or "", ""]
+
+
+def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
+    for tbl in tables:
+        headers = tbl.get("headers") or []
+        lines += [f"## {tbl.get('title_he') or ''}", "", "| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+        for row in tbl.get("rows") or []:
+            lines.append("| " + " | ".join("—" if v is None else str(v) for v in row) + " |")
+        lines.append("")
+
+
 def render_markdown(
-    draft: DailyReportDraft,
+    draft: DailyReportDraft | Any,
     items: list[dict],
     events: list[dict],
     *,
@@ -606,11 +673,16 @@ def render_markdown(
     deep_search: list[dict] | None = None,
     open_clarifications: list[dict] | None = None,
     qa: QAResult | None = None,
+    title_text: str | None = None,
+    extra_sections: list[dict[str, Any]] | None = None,
+    tables: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render the daily report as GitHub-flavoured Markdown."""
+    """Render the report as GitHub-flavoured Markdown (see :func:`build_docx` for the shared,
+    additive ``title_text``/``extra_sections``/``tables`` hooks)."""
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
-    lines = [f"# {TITLE_TEXT}", ""]
+    extra_sections = extra_sections or []
+    lines = [f"# {title_text or TITLE_TEXT}", ""]
     if period_end is not None:
         lines += [f"**תאריך:** {hebrew_date_str(period_end)}", ""]
     warning = _qa_warning_line(qa)
@@ -618,6 +690,8 @@ def render_markdown(
         lines += [f"> **{warning}**", ""]
 
     lines += ["## תקציר מנהלים", "", draft.exec_summary_he or "אין תקציר לתקופה זו.", ""]
+
+    _extra_sections_md(lines, extra_sections, "after_summary")
 
     for section in draft.sections:
         lines += [f"## {section.title_he}", "", section.prose_he, ""]
@@ -659,6 +733,9 @@ def render_markdown(
     if draft.outlook_he:
         lines += ["## מבט קדימה", "", draft.outlook_he, ""]
 
+    _extra_sections_md(lines, extra_sections, "after_outlook")
+    _tables_md(lines, tables or [])
+
     lines += ["## נספח מקורות", "", "| # | כותרת | מקור | תאריך | קישור |", "|---|---|---|---|---|"]
     for it in sorted(items, key=lambda x: x.get("n") or 0):
         url = it.get("url") or ""
@@ -669,8 +746,27 @@ def render_markdown(
     return "\n".join(lines) + "\n"
 
 
+def _extra_sections_html(parts: list[str], sections: list[dict[str, Any]], position: str) -> None:
+    for sec in sections:
+        if (sec.get("position") or "after_summary") != position:
+            continue
+        parts.append(f"<h2>{html.escape(sec.get('title_he') or '')}</h2>")
+        parts.append(f"<p>{html.escape(sec.get('body_he') or '')}</p>")
+
+
+def _tables_html(parts: list[str], tables: list[dict[str, Any]]) -> None:
+    for tbl in tables:
+        headers = tbl.get("headers") or []
+        parts.append(f"<h2>{html.escape(tbl.get('title_he') or '')}</h2>")
+        parts.append("<table><thead><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in headers) + "</tr></thead><tbody>")
+        for row in tbl.get("rows") or []:
+            cells = "".join(f"<td>{html.escape('—' if v is None else str(v))}</td>" for v in row)
+            parts.append(f"<tr>{cells}</tr>")
+        parts.append("</tbody></table>")
+
+
 def render_html(
-    draft: DailyReportDraft,
+    draft: DailyReportDraft | Any,
     items: list[dict],
     events: list[dict],
     *,
@@ -678,10 +774,15 @@ def render_html(
     deep_search: list[dict] | None = None,
     open_clarifications: list[dict] | None = None,
     qa: QAResult | None = None,
+    title_text: str | None = None,
+    extra_sections: list[dict[str, Any]] | None = None,
+    tables: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render the daily report as a standalone RTL HTML document."""
+    """Render the report as a standalone RTL HTML document (see :func:`build_docx` for the shared,
+    additive ``title_text``/``extra_sections``/``tables`` hooks)."""
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
+    extra_sections = extra_sections or []
     item_by_n = {it.get("n"): it for it in items}
 
     def cite_links(text: str) -> str:
@@ -694,7 +795,7 @@ def render_html(
 
         return _CITATION_RE.sub(repl, escaped)
 
-    parts = ['<div dir="rtl" lang="he">', f"<h1>{html.escape(TITLE_TEXT)}</h1>"]
+    parts = ['<div dir="rtl" lang="he">', f"<h1>{html.escape(title_text or TITLE_TEXT)}</h1>"]
     if period_end is not None:
         parts.append(f'<p class="date">{html.escape(hebrew_date_str(period_end))}</p>')
     warning = _qa_warning_line(qa)
@@ -703,6 +804,8 @@ def render_html(
 
     parts.append("<h2>תקציר מנהלים</h2>")
     parts.append(f"<p>{cite_links(draft.exec_summary_he or 'אין תקציר לתקופה זו.')}</p>")
+
+    _extra_sections_html(parts, extra_sections, "after_summary")
 
     for section in draft.sections:
         parts.append(f"<h2>{html.escape(section.title_he)}</h2>")
@@ -755,6 +858,9 @@ def render_html(
     if draft.outlook_he:
         parts.append("<h2>מבט קדימה</h2>")
         parts.append(f"<p>{html.escape(draft.outlook_he)}</p>")
+
+    _extra_sections_html(parts, extra_sections, "after_outlook")
+    _tables_html(parts, tables or [])
 
     parts.append("<h2>נספח מקורות</h2>")
     parts.append(

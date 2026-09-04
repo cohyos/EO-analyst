@@ -32,6 +32,12 @@ dependencies = [
 
 [project.optional-dependencies]
 guard = ["torch>=2.3", "transformers>=4.44", "onnxruntime>=1.18", "optimum>=1.21"]
+# CPU-only path for the L1 prompt-injection classifier (Protect AI DeBERTa v2):
+# no torch/CUDA wheel, just ONNX Runtime + optimum's ORTModel wrapper. This is
+# what docker/agent/Dockerfile installs into the (internet-isolated at runtime)
+# `agent` image; the model itself is baked into the image at build time under
+# /opt/models/prompt-guard (see EOA_GUARD_L1_DIR in agent/eoa/security/guard.py).
+guard-onnx = ["optimum[onnxruntime]>=1.21", "transformers>=4.44", "tokenizers", "onnxruntime>=1.18"]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

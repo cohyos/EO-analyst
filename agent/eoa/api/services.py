@@ -8,8 +8,8 @@ directly) so tests can monkeypatch a single, request-shaped surface.
 
 For features owned by concurrently-developed modules that are not yet
 implemented (`eoa.search` deep-search internals, `eoa.orchestrator`
-scheduler, conferences), functions here try an optional import and fall back
-to an honest stub (`{"error": {"code": "not_implemented", ...}}` or an empty
+scheduler), functions here try an optional import and fall back to an
+honest stub (`{"error": {"code": "not_implemented", ...}}` or an empty
 list) -- never fabricated data.
 """
 
@@ -23,12 +23,12 @@ from typing import Any
 import httpx
 import structlog
 import yaml
-from psycopg.types.json import Json
 
 from eoa import config as eoa_config
 from eoa import db
 from eoa.config import CONFIG_DIR, REPO_ROOT, ModelsRegistry
 from eoa.config import Settings as EOASettings
+from eoa.feedback import surveys as feedback_surveys
 from eoa.llm import ollama_client
 from eoa.memory import graph, relational, vector
 from eoa.resources.gate import gate
@@ -259,9 +259,7 @@ def get_item(item_id: int) -> dict[str, Any] | None:
     card["events"] = _fetchall(
         "SELECT * FROM events WHERE item_id = %s ORDER BY date NULLS LAST, id", (item_id,)
     )
-    # `eoa.memory.graph` exposes no "edges evidenced by this item_id" lookup
-    # yet (only entity-keyed traversal) -- honest empty stub, not fabricated.
-    card["edges"] = []
+    card["edges"] = _item_edges(item_id, card.get("entities_mentioned") or [])
     card["investigations"] = _fetchall(
         "SELECT j.id AS job_id, j.state, j.payload->>'question' AS question, j.started_at, j.finished_at "
         "FROM jobs j WHERE j.kind = 'deep_search' AND (j.payload->>'item_id')::bigint = %s "
@@ -269,6 +267,40 @@ def get_item(item_id: int) -> dict[str, Any] | None:
         (item_id,),
     )
     return card
+
+
+def _item_edges(item_id: int, entities_mentioned: list[str]) -> list[dict[str, Any]]:
+    """Graph edges evidenced by `item_id`: every `entities_mentioned` name is resolved to its
+    `entities.id`, then `eoa.memory.graph.edges_of` is walked for each and filtered down to the
+    edges this item actually evidenced (`edge.item_id == item_id`)."""
+    if not entities_mentioned:
+        return []
+    rows = _fetchall("SELECT id FROM entities WHERE name = ANY(%(names)s)", {"names": entities_mentioned})
+    seen: set[tuple[int, int, str]] = set()
+    edges: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            edge_rows = graph.edges_of(row["id"], depth=1)
+        except Exception as exc:
+            log.warning("graph.edges_of_failed", entity_id=row["id"], item_id=item_id, error=str(exc))
+            continue
+        for e in edge_rows:
+            if e.item_id != item_id:
+                continue
+            key = (e.src_entity_id, e.dst_entity_id, e.label)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append(
+                {
+                    "src": e.src_entity_id,
+                    "dst": e.dst_entity_id,
+                    "label": e.label,
+                    "item_id": e.item_id,
+                    "evidence": e.evidence,
+                }
+            )
+    return edges
 
 
 def item_feedback(item_id: int, user_level: str, comment: str | None) -> dict[str, Any] | None:
@@ -390,23 +422,36 @@ def build_graph(entity_id: int, *, depth: int = 1, labels: str | None = None) ->
 
     nodes: dict[int, dict[str, Any]] = {entity_id: dict(center)}
     edges: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, str, int | None]] = set()
     for label in label_list:
         try:
-            neighbors = graph.neighbors(entity_id, label=label, depth=depth)
+            edge_rows = graph.edges_of(entity_id, label=label, depth=depth)
         except Exception as exc:
-            log.warning("graph.neighbors_failed", entity_id=entity_id, label=label, error=str(exc))
+            log.warning("graph.edges_failed", entity_id=entity_id, label=label, error=str(exc))
             continue
-        for n in neighbors:
-            nid = n.get("entity_id")
-            if nid is None:
+        for e in edge_rows:
+            key = (e.src_entity_id, e.dst_entity_id, e.label, e.item_id)
+            if key in seen:
                 continue
+            seen.add(key)
+            # Nodes discovered only through an edge (not the center entity)
+            # carry a name but no kind/country -- edges_of() doesn't fetch
+            # those, and inventing them would violate "never invent".
             nodes.setdefault(
-                nid, {"id": nid, "name": n.get("name"), "kind": n.get("kind"), "country": n.get("country")}
+                e.src_entity_id, {"id": e.src_entity_id, "name": e.src_name, "kind": None, "country": None}
             )
-            # The public `eoa.memory.graph` API exposes neighbor vertices but
-            # not per-edge properties (item_id/evidence) -- real edge and
-            # label, evidence left null rather than invented.
-            edges.append({"src": entity_id, "dst": nid, "label": label, "item_id": None, "evidence": None})
+            nodes.setdefault(
+                e.dst_entity_id, {"id": e.dst_entity_id, "name": e.dst_name, "kind": None, "country": None}
+            )
+            edges.append(
+                {
+                    "src": e.src_entity_id,
+                    "dst": e.dst_entity_id,
+                    "label": e.label,
+                    "item_id": e.item_id,
+                    "evidence": e.evidence,
+                }
+            )
 
     return {"nodes": list(nodes.values()), "edges": edges}
 
@@ -536,8 +581,16 @@ def _night_summary() -> dict[str, Any] | None:
     )
     if job is None:
         # No completed nightly run yet: return an explicit all-zero summary (never null) so the UI renders.
-        return {"items_ingested": 0, "classified": 0, "red": 0, "orange": 0, "deep_searches": 0,
-                "duration_min": None, "errors": 0, "state": "none"}
+        return {
+            "items_ingested": 0,
+            "classified": 0,
+            "red": 0,
+            "orange": 0,
+            "deep_searches": 0,
+            "duration_min": None,
+            "errors": 0,
+            "state": "none",
+        }
     result = job.get("result") or {}
     started, finished = job.get("started_at"), job.get("finished_at")
     duration_min = round((finished - started).total_seconds() / 60, 1) if started and finished else None
@@ -769,22 +822,38 @@ def ask_build_messages(
 
 
 # --------------------------------------------------------------------------
-# conferences (phase C stub)
+# conferences (FR-12: rolling conference tracker -- eoa.conferences)
 # --------------------------------------------------------------------------
 
 
+def _conference_rows(date_from: str | None, date_to: str | None) -> list[dict[str, Any]]:
+    start = date_from or dt.date.today().isoformat()
+    end = date_to or (dt.date.today() + dt.timedelta(days=730)).isoformat()
+    return _fetchall(
+        "SELECT * FROM conferences WHERE status != 'cancelled' "
+        "AND COALESCE(end_date, start_date) >= %(start)s AND COALESCE(start_date, end_date) <= %(end)s "
+        "ORDER BY start_date ASC NULLS LAST, id",
+        {"start": start, "end": end},
+    )
+
+
 def list_conferences(date_from: str | None, date_to: str | None) -> list[dict[str, Any]]:
-    """Phase-C feature; conferences pipeline not implemented yet. Honest stub per docs/API.md."""
-    return []
+    """Conferences whose span overlaps [date_from, date_to] (default: today .. +24 months),
+    sorted by start_date, each row including `changes` vs `prev_snapshot` (docs/API.md)."""
+    from eoa.conferences.tracker import conference_card
+
+    return [conference_card(r) for r in _conference_rows(date_from, date_to)]
 
 
 def conferences_ical() -> bytes:
-    from icalendar import Calendar
+    """The full (non-cancelled) horizon as a `text/calendar` payload (FR-12.7)."""
+    from eoa.conferences.ical import build_ical
+    from eoa.conferences.tracker import conference_card
 
-    cal = Calendar()
-    cal.add("prodid", "-//EO-Analyst//conferences//")
-    cal.add("version", "2.0")
-    return cal.to_ical()
+    rows = _fetchall(
+        "SELECT * FROM conferences WHERE status != 'cancelled' ORDER BY start_date ASC NULLS LAST"
+    )
+    return build_ical([conference_card(r) for r in rows]).encode("utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -810,126 +879,20 @@ def answer_clarification(clarification_id: int, answer: str) -> dict[str, Any] |
 
 
 # --------------------------------------------------------------------------
-# surveys
+# surveys (FR-11: question bank, rotation, and answer ingestion live in
+# `eoa.feedback.surveys` -- this is now a thin passthrough so routes/surveys.py
+# doesn't need to know that module exists).
 # --------------------------------------------------------------------------
-
-# 12 rotating Hebrew questions; roughly 70/30 closed-vs-open per docs/API.md
-# (8 choice/scale here, 4 open -- close to that split while keeping every
-# open question genuinely open-ended).
-SURVEY_QUESTION_BANK: list[dict[str, Any]] = [
-    {
-        "id": "q1",
-        "type": "scale",
-        "text_he": "עד כמה הדוח היום היה רלוונטי לתחומי המעקב שלך?",
-        "options": ["1", "2", "3", "4", "5"],
-    },
-    {
-        "id": "q2",
-        "type": "scale",
-        "text_he": "עד כמה הציונים (red/orange/yellow) תאמו את השיפוט שלך?",
-        "options": ["1", "2", "3", "4", "5"],
-    },
-    {
-        "id": "q3",
-        "type": "choice",
-        "text_he": "האם היו כתבות שסווגו red/orange שהיו צריכות רמה נמוכה יותר?",
-        "options": ["כן, הרבה", "כן, מעט", "לא"],
-    },
-    {
-        "id": "q4",
-        "type": "choice",
-        "text_he": "האם היו כתבות רלוונטיות שהיו צריכות סיווג גבוה יותר?",
-        "options": ["כן, הרבה", "כן, מעט", "לא"],
-    },
-    {
-        "id": "q5",
-        "type": "choice",
-        "text_he": "האם רשימת החברות למעקב (watchlist) עדכנית?",
-        "options": ["כן", "חסרות חברות", "יש חברות מיותרות"],
-    },
-    {
-        "id": "q6",
-        "type": "scale",
-        "text_he": "עד כמה הסיכומים בעברית (summary/so-what) היו ברורים ומדויקים?",
-        "options": ["1", "2", "3", "4", "5"],
-    },
-    {
-        "id": "q7",
-        "type": "choice",
-        "text_he": "האם תדירות הדוחות (יומי/שבועי) מתאימה?",
-        "options": ["מתאימה", "יותר מדי", "פחות מדי"],
-    },
-    {
-        "id": "q8",
-        "type": "scale",
-        "text_he": "עד כמה החקירות המעמיקות (deep search) הביאו ערך מוסף?",
-        "options": ["1", "2", "3", "4", "5"],
-    },
-    {
-        "id": "q9",
-        "type": "open",
-        "text_he": "אילו נושאים או חברות היית רוצה שנעקוב אחריהם ועדיין לא עוקבים?",
-        "options": None,
-    },
-    {"id": "q10", "type": "open", "text_he": "האם היו טעויות עובדתיות בדוח? אם כן, פרט/י.", "options": None},
-    {"id": "q11", "type": "open", "text_he": "מה היה הכי שימושי בדוח היום/השבוע?", "options": None},
-    {"id": "q12", "type": "open", "text_he": "הערות חופשיות נוספות לשיפור המערכת.", "options": None},
-]
-
-
-def _rotating_subset(seed: int, k: int = 6) -> list[dict[str, Any]]:
-    n = len(SURVEY_QUESTION_BANK)
-    start = seed % n
-    return [SURVEY_QUESTION_BANK[(start + i) % n] for i in range(k)]
 
 
 def latest_survey() -> dict[str, Any]:
     latest_report = _fetchone("SELECT id FROM reports ORDER BY created_at DESC LIMIT 1")
     report_id = latest_report["id"] if latest_report else None
-
-    if report_id is not None:
-        existing = _fetchone(
-            "SELECT * FROM feedback_surveys WHERE report_id = %s ORDER BY created_at DESC LIMIT 1",
-            (report_id,),
-        )
-    else:
-        existing = _fetchone(
-            "SELECT * FROM feedback_surveys WHERE report_id IS NULL ORDER BY created_at DESC LIMIT 1"
-        )
-
-    if existing:
-        return {
-            "id": existing["id"],
-            "report_id": existing.get("report_id"),
-            "questions": existing.get("questions") or [],
-            "answers": existing.get("answers") or {},
-        }
-
-    seed = report_id if report_id is not None else int(dt.datetime.now(tz=dt.UTC).timestamp())
-    questions = _rotating_subset(seed)
-    row = _fetchone(
-        "INSERT INTO feedback_surveys (report_id, questions, answers) VALUES (%s, %s, %s) RETURNING *",
-        (report_id, Json(questions), Json({})),
-    )
-    return {"id": row["id"], "report_id": row.get("report_id"), "questions": questions, "answers": {}}
+    return feedback_surveys.create_for_report(report_id)
 
 
 def submit_survey_answers(survey_id: int, answers: dict[str, Any]) -> dict[str, Any] | None:
-    row = _fetchone("SELECT * FROM feedback_surveys WHERE id = %s", (survey_id,))
-    if row is None:
-        return None
-    _execute(
-        "UPDATE feedback_surveys SET answers = %s, answered_at = now() WHERE id = %s",
-        (Json(answers), survey_id),
-    )
-
-    questions_by_id = {q["id"]: q for q in (row.get("questions") or [])}
-    for qid, value in answers.items():
-        question = questions_by_id.get(qid)
-        if question and question.get("type") == "open" and isinstance(value, str) and value.strip():
-            relational.add_lesson("decision", value.strip(), source_ref=f"survey:{survey_id}:{qid}")
-
-    return _fetchone("SELECT * FROM feedback_surveys WHERE id = %s", (survey_id,))
+    return feedback_surveys.ingest_answers(survey_id, answers)
 
 
 # --------------------------------------------------------------------------

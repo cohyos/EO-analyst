@@ -21,6 +21,7 @@ from eoa.api.routes import (
     clarifications,
     conferences,
     entities,
+    feedback,
     investigations,
     items,
     jobs,
@@ -144,6 +145,7 @@ def create_app() -> FastAPI:
     app.include_router(clarifications.router, prefix="/api")
     app.include_router(surveys.router, prefix="/api")
     app.include_router(lessons.router, prefix="/api")
+    app.include_router(feedback.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
 
