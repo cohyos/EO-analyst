@@ -249,22 +249,78 @@ def _build_report() -> Any:
 
 
 def _backup() -> dict[str, Any]:
-    """pg_dump via docker (best effort) + retention prune."""
+    """Obsidian vault export (if enabled) + pg_dump via docker (best effort) + retention prune."""
+    out: dict[str, Any] = {}
+    try:
+        from eoa.export.obsidian import export_vault
+
+        if settings().export.obsidian.enabled:
+            stats = export_vault()
+            out["obsidian"] = {
+                k: v for k, v in vars(stats).items() if isinstance(v, int | float | str | bool)
+            }
+    except Exception as exc:
+        log.warning("obsidian_export_skipped", error=str(exc)[:160])
+        out["obsidian_error"] = str(exc)[:160]
+    out.update(_pg_dump())
+    return out
+
+
+def _pg_dump() -> dict[str, Any]:
+    """Nightly backup. Host: `docker compose exec postgres pg_dump`. Inside the agent container (no docker CLI):
+    per-table `COPY ... TO STDOUT` into a gzip-compressed SQL-ish archive that psql can restore with its copy meta-command."""
+    import gzip
+    import os
     import subprocess
     from pathlib import Path
 
     out_dir = Path("output/backups")
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = out_dir / f"eoanalyst_{datetime.now(tz=UTC):%Y%m%d}.sql.gz"
+    stamp = f"{datetime.now(tz=UTC):%Y%m%d}"
+    keep = settings().retention.backups_keep
     try:
-        with name.open("wb") as fh:
-            p1 = subprocess.Popen(
-                ["docker", "compose", "exec", "-T", "postgres", "pg_dump", "-U", "eoa", "-d", "eoanalyst"],
-                stdout=subprocess.PIPE,
-            )
-            subprocess.run(["gzip", "-c"], stdin=p1.stdout, stdout=fh, check=True, timeout=600)
-        keep = settings().retention.backups_keep
-        for old in sorted(out_dir.glob("eoanalyst_*.sql.gz"))[:-keep]:
+        if os.environ.get("EOA_ROLE") == "agent":
+            from eoa.db import connection
+
+            name = out_dir / f"eoanalyst_{stamp}.copy.gz"
+            with connection() as conn, gzip.open(name, "wt", encoding="utf-8") as fh:
+                tables = [
+                    r["tablename"]
+                    for r in conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY 1"
+                    ).fetchall()
+                ]
+                for t in tables:
+                    fh.write(f"-- TABLE {t}\n")
+                    with (
+                        conn.cursor() as cur,
+                        cur.copy(f"COPY {t} TO STDOUT WITH (FORMAT csv, HEADER)") as cp,
+                    ):
+                        for chunk in cp:
+                            fh.write(bytes(chunk).decode("utf-8"))
+                    fh.write("\n-- END TABLE\n")
+        else:
+            name = out_dir / f"eoanalyst_{stamp}.sql.gz"
+            with gzip.open(name, "wb") as fh:
+                p1 = subprocess.run(
+                    [
+                        "docker",
+                        "compose",
+                        "exec",
+                        "-T",
+                        "postgres",
+                        "pg_dump",
+                        "-U",
+                        "eoa",
+                        "-d",
+                        "eoanalyst",
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=600,
+                )
+                fh.write(p1.stdout)
+        for old in sorted(out_dir.glob("eoanalyst_*"))[:-keep]:
             old.unlink(missing_ok=True)
         return {"backup": str(name)}
     except Exception as exc:

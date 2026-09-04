@@ -139,6 +139,19 @@ class ApiCfg(BaseModel):
     status_push_seconds: int = 2
 
 
+class ObsidianExportCfg(BaseModel):
+    enabled: bool = False
+    vault_dir: str = "output/obsidian"
+    entities: bool = True
+    items: bool = True
+    reports: bool = True
+    min_level: str = "yellow"
+
+
+class ExportCfg(BaseModel):
+    obsidian: ObsidianExportCfg = ObsidianExportCfg()
+
+
 class ModelSpec(BaseModel):
     key: str
     ollama: str | None = None
@@ -182,6 +195,7 @@ class Settings(BaseModel):
     notify: NotifyCfg = NotifyCfg()
     retention: RetentionCfg = RetentionCfg()
     api: ApiCfg = ApiCfg()
+    export: ExportCfg = ExportCfg()
 
     registry: ModelsRegistry
     taxonomy: dict[str, Any] = {}

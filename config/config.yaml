@@ -114,3 +114,6 @@ api:
   host: 127.0.0.1
   port: 8765
   status_push_seconds: 2
+
+export:
+  obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }
