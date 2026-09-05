@@ -94,6 +94,21 @@ class SearxngCfg(BaseModel):
     rate_limit_per_minute: int = 20
 
 
+class DdgsCfg(BaseModel):
+    """Settings for the pure-Python `ddgs` metasearch backend (native-Windows default, no SearXNG container)."""
+
+    backends: list[str] = ["duckduckgo", "bing", "google", "brave", "yahoo"]
+    timeout_s: int = 15
+    max_results: int = 10
+
+
+class SearchCfg(BaseModel):
+    """Which metasearch backend `eoa.search.provider.search()` dispatches to."""
+
+    provider: str = "ddgs"  # "ddgs" (pure-Python, default) | "searxng" (legacy Docker container)
+    ddgs: DdgsCfg = DdgsCfg()
+
+
 class FetchCfg(BaseModel):
     timeout_seconds: int = 20
     max_bytes: int = 2_000_000
@@ -191,6 +206,7 @@ class Settings(BaseModel):
     ollama: OllamaCfg = OllamaCfg()
     models: dict[str, str | None] = {}
     searxng: SearxngCfg = SearxngCfg()
+    search: SearchCfg = SearchCfg()
     fetch: FetchCfg = FetchCfg()
     security: SecurityCfg = SecurityCfg()
     report: ReportCfg = ReportCfg()

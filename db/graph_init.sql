@@ -1,5 +1,12 @@
 -- db/graph_init.sql
 --
+-- DEPRECATED -- AGE no longer used (ADR-004, docs/PLAN_WINDOWS_NATIVE.md step 1a).
+-- The knowledge graph is now the plain-SQL `graph_edges` table (migration 0006,
+-- db/migrations/versions/0006_drop_extensions.py), read/written by the rewritten
+-- agent/eoa/memory/graph.py -- no Cypher, no `age` extension required. This file
+-- is kept only as a reference for exporting the docker-era AGE graph's data (see
+-- scripts/export_age_edges.py) and is no longer applied by install.ps1/install.sh.
+--
 -- Idempotent Apache AGE initialization for the EO-Analyst knowledge graph.
 -- Safe to run multiple times, and safe to run before or after any given
 -- backfill of the `entities` table. Requires the `entities` table to already

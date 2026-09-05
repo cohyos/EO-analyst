@@ -43,31 +43,40 @@ def send(
     actions: list[dict[str, Any]] | None = None,
     to_public_fallback: bool = True,
 ) -> Sent:
-    """Publish a message. Tries the self-hosted server first, then the public fallback topic."""
-    headers = {"Title": title, "Priority": str(PRIORITY.get(priority, 3)), "Tags": ",".join(tags or [])}
+    """Publish a message via ntfy's JSON publish endpoint. Tries the self-hosted server first,
+    then the public fallback topic.
+
+    Bug F11 fix: the previous implementation sent ``title`` as a raw ``Title`` HTTP header.
+    httpx/h11 encode header *values* as latin-1 (effectively ASCII for anything above U+00FF),
+    so any non-ASCII title -- every Hebrew report title, e.g. "דוח יומי מוכן" -- raised
+    ``UnicodeEncodeError: 'ascii' codec can't encode characters`` and silently dropped the
+    notification. ntfy's JSON publish endpoint (POST to the server root, not `/<topic>`, with
+    a JSON body carrying ``topic``/``title``/``message``/...) carries all of that as UTF-8 JSON
+    instead of headers, so non-ASCII text is never an issue. See
+    https://docs.ntfy.sh/publish/#publish-as-json.
+    """
+    payload: dict[str, Any] = {"title": title, "message": body, "priority": PRIORITY.get(priority, 3)}
+    if tags:
+        payload["tags"] = tags
     if click:
-        headers["Click"] = click
+        payload["click"] = click
     if actions:
-        headers["Actions"] = "; ".join(_fmt_action(a) for a in actions)
+        payload["actions"] = [_fmt_action(a) for a in actions]
+
     last_url = ""
     for i, (base, topic) in enumerate(_targets()):
         if i == 1 and not to_public_fallback:
             break
-        url = f"{base}/{topic}"
+        url = f"{base}/{topic}"  # kept for logging/return value; the JSON endpoint itself is POSTed to `base`
         last_url = url
         try:
-            r = httpx.post(
-                url,
-                content=body.encode("utf-8"),
-                headers={**headers, "Content-Type": "text/plain; charset=utf-8"},
-                timeout=10,
-            )
+            r = httpx.post(base, json={**payload, "topic": topic}, timeout=10)
             if r.status_code < 300:
-                mid = (
-                    r.json().get("id")
-                    if r.headers.get("content-type", "").startswith("application/json")
-                    else None
-                )
+                mid = None
+                try:
+                    mid = r.json().get("id")
+                except Exception:
+                    pass
                 log.info("ntfy_sent", url=url, title=title[:60])
                 return Sent(True, mid, url)  # mirroring to the public topic is done by eoa.notify.relay (fetcher)
             log.warning("ntfy_http_error", url=url, status=r.status_code)
@@ -76,12 +85,23 @@ def send(
     return Sent(False, None, last_url)
 
 
-def _fmt_action(a: dict[str, Any]) -> str:
-    """ntfy action header: `view, Label, url` | `http, Label, url, method=POST, body=...`."""
+def _fmt_action(a: dict[str, Any]) -> dict[str, Any]:
+    """Convert our action dict (``kind``/``label``/``url``/...) into an ntfy JSON action object.
+
+    The JSON publish endpoint takes ``actions`` as an array of objects
+    (https://docs.ntfy.sh/publish/#action-buttons), not the header mini-DSL
+    (``view, Label, url``) the old plain-text/header-based endpoint used.
+    """
     kind = a.get("kind", "view")
     if kind == "http":
-        return f"http, {a['label']}, {a['url']}, method={a.get('method', 'POST')}, body={a.get('body', '')}"
-    return f"view, {a['label']}, {a['url']}"
+        return {
+            "action": "http",
+            "label": a["label"],
+            "url": a["url"],
+            "method": a.get("method", "POST"),
+            "body": a.get("body", ""),
+        }
+    return {"action": "view", "label": a["label"], "url": a["url"]}
 
 
 # ------------------------------------------------------------------ typed helpers

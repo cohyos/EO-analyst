@@ -207,24 +207,12 @@ if (-not $migrateViaHost) {
 Pop-Location
 
 # ============================================================================
-# 7. Apply graph_init.sql
+# 7. Apply graph_init.sql -- NO-OP (ADR-004: AGE replaced by the plain-SQL
+#    graph_edges table, created by alembic migration 0006, applied in step 6).
+#    db/graph_init.sql is kept only for reference; another agent owns this
+#    installer, so this step is disabled rather than removed/rewritten.
 # ============================================================================
-Write-Host "`n[7/10] Initializing knowledge graph..." -ForegroundColor Cyan
-
-Push-Location $repoRoot
-
-$graphInit = Join-Path $repoRoot "db" "graph_init.sql"
-if (-not (Test-Path $graphInit)) {
-    Write-Error "db/graph_init.sql not found"
-}
-
-Get-Content $graphInit | & docker compose exec -T postgres psql -U eoa -d eoanalyst
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Graph initialization failed"
-}
-Write-Verbose "✓ Knowledge graph initialized"
-
-Pop-Location
+Write-Host "`n[7/10] Knowledge graph: no-op (AGE deprecated, ADR-004; graph_edges created by alembic)" -ForegroundColor Cyan
 
 # ============================================================================
 # 8. Run seed

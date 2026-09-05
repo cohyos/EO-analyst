@@ -13,7 +13,7 @@ from typing import Any
 
 import structlog
 
-from eoa.config import settings
+from eoa.config import REPO_ROOT, settings
 from eoa.security.heuristics import HeuristicResult, scan_heuristics
 
 log = structlog.get_logger(__name__)
@@ -63,6 +63,18 @@ def _l1_pipeline() -> Any:
             return _L1_PIPE
 
         local_dir = os.environ.get("EOA_GUARD_L1_DIR")
+        if not local_dir:
+            # Native/Windows install (docs/adr/004-windows-native.md): scripts/native/install_native.ps1
+            # downloads the same ONNX weights docker/agent/Dockerfile bakes into the image, into
+            # <repo>/runtime/models/prompt-guard, and scripts/native/eoa-supervisor.ps1 sets
+            # EOA_GUARD_L1_DIR from runtime/eoa.env before launching the orchestrator/api -- but a
+            # bare `eo` invocation (or a shell that hasn't sourced runtime/eoa.env) would otherwise
+            # silently fall through heuristics-only. Fall back to that default location when it
+            # actually exists, so the guard model still loads without the env var explicitly set.
+            default_dir = REPO_ROOT / "runtime" / "models" / "prompt-guard"
+            if default_dir.is_dir():
+                local_dir = str(default_dir)
+                log.info("guard_l1_using_default_dir", dir=local_dir)
         if local_dir:
             try:
                 from optimum.onnxruntime import (  # type: ignore[import-not-found]

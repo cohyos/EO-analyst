@@ -9,19 +9,20 @@ contracts/conferences/reports/jobs/run_log/resource_log/model_registry/security_
 triage_feedback/source_reliability/search_playbook/lessons/investigation_log/
 clarifications/feedback_surveys.
 
-Only the ``vector`` (pgvector) extension is enabled here. Apache AGE setup lives in
-``db/graph_init.sql`` and is applied separately (it is optional -- integration tests
-may run against a plain pgvector image with no AGE installed, and this migration must
-still succeed there), and its post-insert sync trigger on ``entities`` is created
-there too, since it can only be added once the ``entities`` table below exists.
-
-``items.embedding`` dimension is read from the ``EMBED_DIM`` env var at migration
-apply time, defaulting to 1024 (matches ``config.models.embed`` -> ``models.yaml``).
+2026-09-05 (ADR-004, docs/PLAN_WINDOWS_NATIVE.md step 1a): ``items.embedding`` is a
+plain ``REAL[]`` column, not a pgvector ``vector(N)`` column -- no PostgreSQL
+extension is created by this migration at all. This lets a fresh
+``alembic upgrade head`` succeed against plain PostgreSQL 17 with zero extensions
+(the Windows-native target). Cosine similarity is computed in Python/numpy by
+``eoa.memory.vector`` instead of via a pgvector operator/HNSW index. Apache AGE
+setup (``db/graph_init.sql``) is deprecated for the same reason -- see migration
+0006, which also drops the ``vector`` extension on any DB that still has it
+(the docker-era DB this migration originally ran against did create it; editing
+this already-applied revision only affects *new* databases replaying the chain
+from scratch, never a DB that already recorded 0001 in ``alembic_version``).
 """
 
 from __future__ import annotations
-
-import os
 
 from alembic import op
 
@@ -31,12 +32,8 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-EMBED_DIM = int(os.environ.get("EMBED_DIM", "1024"))
-
 
 def upgrade() -> None:
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-
     op.execute(
         """
         CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
@@ -75,7 +72,7 @@ def upgrade() -> None:
 
     # -- items ---------------------------------------------------------------
     op.execute(
-        f"""
+        """
         CREATE TABLE items (
             id                  BIGSERIAL PRIMARY KEY,
             source_id           BIGINT REFERENCES sources(id) ON DELETE SET NULL,
@@ -102,7 +99,7 @@ def upgrade() -> None:
             level               TEXT CHECK (level IN ('red', 'orange', 'yellow', 'archive')),
             triage_reason       TEXT,
             dedup_of            BIGINT REFERENCES items(id) ON DELETE SET NULL,
-            embedding           VECTOR({EMBED_DIM}),
+            embedding           REAL[],
             security_status     TEXT NOT NULL DEFAULT 'clean'
                                  CHECK (security_status IN ('clean', 'flagged', 'quarantined')),
             classification      TEXT NOT NULL DEFAULT 'OSINT',
@@ -117,7 +114,8 @@ def upgrade() -> None:
     op.execute("CREATE INDEX ix_items_source_id ON items (source_id)")
     op.execute("CREATE INDEX ix_items_dedup_of ON items (dedup_of)")
     op.execute("CREATE INDEX ix_items_security_status ON items (security_status)")
-    op.execute("CREATE INDEX ix_items_embedding_hnsw ON items USING hnsw (embedding vector_cosine_ops)")
+    # No index on `embedding` -- it is a plain REAL[] column, scanned/scored in numpy by
+    # `eoa.memory.vector` rather than through a pgvector ANN index. See migration 0006.
     op.execute(
         "CREATE TRIGGER trg_items_updated_at BEFORE UPDATE ON items "
         "FOR EACH ROW EXECUTE FUNCTION set_updated_at()"

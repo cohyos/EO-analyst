@@ -2,7 +2,7 @@
 name = "eo-analyst"
 version = "0.1.0"
 description = "Local, offline-first OSINT analyst agent for defense electro-optics and computer vision"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 readme = "README.md"
 dependencies = [
     "pydantic>=2.7",
@@ -12,7 +12,7 @@ dependencies = [
     "psycopg[binary,pool]>=3.2",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
-    "pgvector>=0.3",
+    "numpy>=1.26",
     "apscheduler>=3.10,<4",
     "structlog>=24.1",
     "feedparser>=6.0",
@@ -29,6 +29,7 @@ dependencies = [
     "langdetect>=1.0.9",
     "icalendar>=5.0",
     "charset-normalizer>=3.3",
+    "ddgs>=9.0",
 ]
 
 [project.optional-dependencies]

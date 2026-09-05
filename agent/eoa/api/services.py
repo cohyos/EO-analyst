@@ -104,12 +104,20 @@ def _http_reachable(url: str, timeout: float = 2.0) -> bool:
 
 
 def services_status() -> dict[str, bool]:
-    """Health of the four backing services shown on the status panel."""
+    """Health of the four backing services shown on the status panel.
+
+    The "searxng" key is kept for web UI compatibility even though, since migration step 1b
+    (docs/PLAN_WINDOWS_NATIVE.md, docs/MODULES.md search/ note 2026-09-05), it now reflects
+    whichever backend `settings().search.provider` selects (ddgs by default has no container
+    to reach; `eoa.search.provider.ping()` runs a lightweight query instead).
+    """
+    from eoa.search.provider import ping as search_ping
+
     s = eoa_config.settings()
     return {
         "postgres": db.ping(),
         "ollama": ollama_client.ping(),
-        "searxng": _http_reachable(s.searxng.url),
+        "searxng": search_ping(),
         "ntfy": _http_reachable(s.notify.url),
     }
 

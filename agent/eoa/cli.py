@@ -1,10 +1,11 @@
-"""`eo` command line: run cycles, investigate, status, models, serve."""
+"""`eo` command line: run cycles, investigate, status, models, serve, native lifecycle."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import typer
 from rich import print as rprint
@@ -13,6 +14,12 @@ from rich.table import Table
 app = typer.Typer(help="EO-Analyst — local OSINT analyst for defense EO/IR & CV", no_args_is_help=True)
 models_app = typer.Typer(help="Model registry & allow-list")
 app.add_typer(models_app, name="models")
+native_app = typer.Typer(
+    help="Native (no-Docker) lifecycle: postgres/ntfy/orchestrator/api via scripts/native/ "
+    "(docs/adr/004-windows-native.md)",
+    no_args_is_help=True,
+)
+app.add_typer(native_app, name="native")
 
 
 @app.command()
@@ -86,7 +93,7 @@ def status() -> None:
     from eoa import db
     from eoa.llm import ollama_client
     from eoa.resources.gate import gate
-    from eoa.search.searxng_client import ping as searx_ping
+    from eoa.search.provider import ping as searx_ping
 
     st = gate().status()
     t = Table(title=f"EO-Analyst status {datetime.now(tz=UTC):%H:%M:%S}Z")
@@ -170,6 +177,188 @@ def models_lock() -> None:
             }
     (CONFIG_DIR / "models.lock").write_text(json.dumps(lock, indent=2), encoding="utf-8")
     rprint(f"locked {len(lock)} models → config/models.lock")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort liveness check for a pid on Windows, without adding a psutil dependency.
+
+    `os.kill(pid, 0)` (the usual POSIX trick) is not meaningful on Windows: signal 0 isn't a
+    supported value there. `tasklist` is a native Windows command available on every install.
+    """
+    if pid <= 0:
+        return False
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, timeout=5
+        )
+        return str(pid) in r.stdout
+    except Exception:
+        return False
+
+
+def _native_paths() -> dict[str, Path]:
+    from eoa.config import REPO_ROOT
+
+    root = REPO_ROOT
+    return {
+        "root": root,
+        "supervisor_script": root / "scripts" / "native" / "eoa-supervisor.ps1",
+        "runtime": root / "runtime",
+        "pid_dir": root / "runtime" / "pids",
+        "log_dir": root / "runtime" / "logs",
+        "sentinel": root / "runtime" / "supervisor.stop",
+        "supervisor_pid": root / "runtime" / "supervisor.pid",
+    }
+
+
+@native_app.command("start")
+def native_start() -> None:
+    """Launch scripts/native/eoa-supervisor.ps1 detached, unless it's already running."""
+    import subprocess
+
+    paths = _native_paths()
+    if paths["supervisor_pid"].exists():
+        pid_text = paths["supervisor_pid"].read_text(encoding="utf-8").strip()
+        if pid_text and _pid_alive(int(pid_text)):
+            rprint(f"[yellow]supervisor already running (pid {pid_text})[/yellow]")
+            return
+        rprint("[dim]stale supervisor pidfile found; starting a new one[/dim]")
+
+    if not paths["supervisor_script"].exists():
+        rprint(f"[red]{paths['supervisor_script']} not found[/red]")
+        raise typer.Exit(code=1)
+
+    paths["sentinel"].unlink(missing_ok=True)
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+        subprocess, "DETACHED_PROCESS", 0
+    )
+    subprocess.Popen(
+        ["pwsh", "-NoProfile", "-WindowStyle", "Hidden", "-File", str(paths["supervisor_script"])],
+        cwd=str(paths["root"]),
+        creationflags=creationflags,
+        close_fds=True,
+    )
+    rprint("[green]native supervisor launched (detached) — check `eo native status` shortly[/green]")
+
+
+@native_app.command("stop")
+def native_stop(
+    timeout: int = typer.Option(30, help="seconds to wait for the supervisor to exit"),
+) -> None:
+    """Write the stop sentinel and wait for the supervisor (and its children) to exit."""
+    import time
+
+    paths = _native_paths()
+    paths["runtime"].mkdir(parents=True, exist_ok=True)
+    paths["sentinel"].write_text("stop", encoding="utf-8")
+    rprint(f"stop sentinel written ({paths['sentinel']}); waiting up to {timeout}s...")
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not paths["supervisor_pid"].exists():
+            rprint("[green]supervisor stopped[/green]")
+            return
+        pid_text = paths["supervisor_pid"].read_text(encoding="utf-8").strip()
+        if not pid_text or not _pid_alive(int(pid_text)):
+            rprint("[green]supervisor stopped[/green]")
+            return
+        time.sleep(1)
+    rprint("[yellow]supervisor still running after timeout — check runtime/logs/supervisor.log[/yellow]")
+
+
+@native_app.command("status")
+def native_status() -> None:
+    """pg_ctl status, ntfy health, api /api/status, orchestrator/supervisor process liveness."""
+    import subprocess
+
+    import httpx
+
+    paths = _native_paths()
+    t = Table(title="EO-Analyst native status")
+    t.add_column("component")
+    t.add_column("state")
+
+    pg_ctl = paths["runtime"] / "pgsql" / "bin" / "pg_ctl.exe"
+    pgdata = paths["runtime"] / "pgdata"
+    if pg_ctl.exists():
+        r = subprocess.run([str(pg_ctl), "-D", str(pgdata), "status"], capture_output=True, text=True)
+        t.add_row("postgres", "up" if r.returncode == 0 else "down")
+    else:
+        t.add_row("postgres", "not installed (run scripts/native/install_native.ps1)")
+
+    try:
+        r = httpx.get("http://127.0.0.1:8090/v1/health", timeout=3)
+        t.add_row("ntfy", "up" if r.status_code == 200 else f"http {r.status_code}")
+    except Exception as exc:
+        t.add_row("ntfy", f"down ({exc.__class__.__name__})")
+
+    try:
+        # agent/eoa/api/routes/status.py — this codebase has no separate /api/health route.
+        r = httpx.get("http://127.0.0.1:8765/api/status", timeout=3)
+        t.add_row("api", "up" if r.status_code == 200 else f"http {r.status_code}")
+    except Exception as exc:
+        t.add_row("api", f"down ({exc.__class__.__name__})")
+
+    for name in ("orchestrator", "api"):
+        pid_file = paths["pid_dir"] / f"{name}.pid"
+        if pid_file.exists():
+            pid_text = pid_file.read_text(encoding="utf-8").strip()
+            alive = pid_text and _pid_alive(int(pid_text))
+            t.add_row(f"{name} process", f"pid {pid_text} ({'alive' if alive else 'stale pidfile'})")
+        else:
+            t.add_row(f"{name} process", "no pidfile")
+
+    if paths["supervisor_pid"].exists():
+        pid_text = paths["supervisor_pid"].read_text(encoding="utf-8").strip()
+        alive = pid_text and _pid_alive(int(pid_text))
+        t.add_row("supervisor", f"pid {pid_text} ({'alive' if alive else 'stale pidfile'})")
+    else:
+        t.add_row("supervisor", "not running")
+
+    rprint(t)
+
+
+@native_app.command("logs")
+def native_logs(
+    name: str = typer.Argument("supervisor", help="supervisor|postgres|ntfy|orchestrator|api"),
+    lines: int = typer.Option(100, "-n", "--lines", help="tail this many lines"),
+    follow: bool = typer.Option(False, "-f", "--follow", help="keep printing new lines (like tail -f)"),
+) -> None:
+    """Tail runtime/logs/<name>*.log (supervisor.log, or the daily-rotated <name>.<date>.log)."""
+    import time
+
+    paths = _native_paths()
+    log_dir = paths["log_dir"]
+    if name == "supervisor":
+        candidates = [log_dir / "supervisor.log"]
+    else:
+        candidates = sorted(log_dir.glob(f"{name}.*.log"), reverse=True)
+        if not candidates:
+            candidates = [log_dir / f"{name}.log"]
+    log_file = next((c for c in candidates if c.exists()), None)
+    if log_file is None:
+        rprint(f"[red]no log file found for '{name}' under {log_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    if not follow:
+        text = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        for line in text[-lines:]:
+            print(line)
+        return
+
+    with log_file.open("r", encoding="utf-8", errors="replace") as fh:
+        fh.seek(0, 2)
+        try:
+            while True:
+                line = fh.readline()
+                if line:
+                    print(line, end="")
+                else:
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

@@ -348,6 +348,132 @@ all core tables exist, an item with an embedding is found by `nearest()`, an
 `claim_next_job`/`finish_job` flow round-trips. Not run as part of this
 change (no Docker available in this environment) — verify locally.
 
+### 2026-09-05 — pgvector + Apache AGE removed (ADR-004, `docs/PLAN_WINDOWS_NATIVE.md` step 1a)
+
+Both remaining PostgreSQL extension dependencies are gone so the app runs on
+plain PostgreSQL 17 (Windows-native target). Every public function in
+`vector.py`/`graph.py` keeps its original name/signature; callers
+(`eoa.pipeline.dedup`, `eoa.pipeline.analyze`, `eoa.api.services`,
+`eoa.export.obsidian`, `eoa.report.monthly`) were **not** modified.
+
+**Vectors.** `items.embedding` is now `REAL[]`, not `vector(N)`. Migration
+`0001_core.py` was edited in place to create the column this way from
+scratch and drop the `CREATE EXTENSION vector`/HNSW-index statements
+entirely — safe because editing an already-applied revision only affects a
+*new* database replaying the chain from zero; a DB that already recorded
+`0001` in `alembic_version` is untouched by the edit. New migration
+`0006_drop_extensions.py` bridges an *existing* DB (still has
+`vector(N)` + the extension) to the same end state: adds `embedding_arr
+REAL[]`, backfills it via pgvector's native `vector -> real[]` cast (guarded
+by `SELECT 1 FROM pg_type WHERE typname='vector'` so it can't fail even if
+the column is typed `vector` but the extension has since vanished), drops
+the old column, renames the new one, then unconditionally
+`DROP EXTENSION IF EXISTS vector`. On a fresh install (edited `0001`
+already created `REAL[]`) this migration detects `udt_name != 'vector'` and
+no-ops the vector half entirely. `vector.py` was rewritten to load candidate
+embeddings via plain SQL (optionally windowed by `days`, same clause as
+before) and score them with numpy (normalise + dot product) instead of
+pgvector's `<=>` operator; `nearest()`'s `(item_id, similarity)` contract
+and `find_duplicate()`'s threshold semantics are byte-for-byte the same as
+before (`1 - cosine_distance` under pgvector *is* cosine similarity, which
+is exactly what the numpy formula computes). `pgvector` dropped from
+`pyproject.toml`; `numpy>=1.26` added.
+
+**Graph.** New table `graph_edges` (migration `0006`):
+`src_entity_id, dst_entity_id, label, item_id, props jsonb, created_at,
+updated_at`, unique on `(src_entity_id, dst_entity_id, label, item_id)`,
+indexed on src/dst/label. `entities` rows are the vertices directly now —
+there is no separate graph-side copy to keep in sync, so `db/graph_init.sql`
+(AGE extension + `eo_graph` graph + the `entities` sync trigger) is
+deprecated (header comment added) and no longer applied by
+`install.ps1`/`install.sh` (step 7 in both is now a no-op with a note —
+those installers are otherwise untouched, per instructions, since another
+agent owns them). `graph.py` was rewritten end to end onto plain SQL; no
+Cypher, no `_run_cypher`, no `_parse_agtype` (removed along with
+`tests/unit/test_agtype_parse.py`, which tested that function directly and
+had nothing left to test). Depth-bounded traversals (`neighbors`,
+`edges_of`) use a `WITH RECURSIVE` edge-by-edge BFS (not node-by-node) so
+that, exactly like the old `-[*1..depth]-` Cypher pattern, an edge between
+two depth-1 peers is only included once the walk actually reaches depth 2;
+depth is clamped to `[1, 3]` and every query carries a row cap (500 for
+`neighbors`, 2000 for `edges_of`). `EDGE_LABELS`/`_require_edge_label`,
+`entity_timeline` (already plain SQL), and `edges_of`'s `EdgeRow` dataclass
+are unchanged in shape — `EdgeRow.created_at` is now genuinely populated
+(the table stamps it via `DEFAULT now()`) rather than "commonly `None`"
+under AGE. `neighbors()` returns flattened `{"entity_id", "name", "kind",
+"country"}` dicts, which every real caller already tolerated
+(`eoa.export.obsidian`'s `vertex.get("properties", vertex)` fallback path;
+this is the exact "already-flattened dict" shape
+`tests/unit/test_graph_edges.py`'s own fixtures used to exercise that
+tolerance). `merge_entity`/`add_edge`/the three named analytic queries
+(`partners_of_competitors`, `suppliers_of_program_bidders`,
+`startups_linked_to_majors`) now return a plain flattened dict of columns
+instead of AGE's nested `{"properties": {...}}` wire shape — verified by
+grep that no caller inspects their return values' keys (call sites only use
+`add_edge`/`merge_entity` for the side effect; the three query functions'
+rows flow straight through `eoa.api.services.run_named_graph_query` to the
+web UI, which types them `unknown[]`). **One deliberate behavior change**:
+`merge_entity(entity_id, name, kind, country)` used to unconditionally
+overwrite the AGE-side vertex's `country` with `""` whenever a caller passed
+`country=None` (which `eoa.pipeline.analyze.persist_analysis` always does) —
+harmless before, since it only clobbered a disposable shadow copy. Now that
+`merge_entity` writes straight to the real `entities.country` column,
+doing the same would silently erase real data on every edge write, so it
+uses `COALESCE(%(country)s, country)` instead (preserve the existing value
+when `None` is passed) — documented in the function's own docstring.
+
+`scripts/export_age_edges.py` (new): one-off, run by hand against the live
+docker DB *after* `alembic upgrade head` has created `graph_edges` there.
+Reads every AGE edge via Cypher (`MATCH (a)-[r]->(b) RETURN a, r, b` against
+graph `eo_graph` — the codebase's actual graph name; the task brief's
+example used `eoa_graph`, which does not exist), resolves each vertex back
+to `entities.id` via its `entity_id` property, and upserts into
+`graph_edges` (idempotent via the same unique constraint). It is the last
+piece of code in the repo that speaks Cypher/AGE at all — necessarily
+self-contained (a local agtype-suffix parser duplicating what `graph.py`
+used to have), since `graph.py` itself no longer knows how to talk to AGE.
+Migration `0006` deliberately does not touch the `age` extension or
+`eo_graph`'s data — the docker DB is being retired wholesale, not migrated
+in place.
+
+**Tests.** `tests/unit/test_graph_edges.py` rewritten (was Cypher-string/
+agtype-parsing focused, now mocks `eoa.db.connection` with a minimal fake
+psycopg3 connection/cursor — same style `test_persist_analysis.py` already
+used — and asserts on generated SQL/params plus `EdgeRow`/dict parsing).
+New `tests/unit/test_vector.py` (none existed before; `vector.py` was only
+exercised by the Docker-gated `tests/integration/test_schema.py`), same
+DB-mocking style, covering similarity ordering/limit/dimension-mismatch/
+zero-vector edge cases and the `days`-window SQL clause.
+
+**Verified**: `ruff check agent tests` clean (pre-existing, unrelated
+findings only, in `tests/conftest.py` and `tests/fixtures/generate_fixtures.py`
+— not touched by this change); `PYTHONPATH=agent python -m pytest
+tests/unit -q` — 746 passed, 1 pre-existing unrelated failure
+(`test_tenders_scan.py::TestInitialStatus::test_no_deadline_is_open`, in a
+file already modified by a concurrent agent's tenders work, untouched by
+this change). The live docker DB at `127.0.0.1:5433` **was** reachable in
+this environment, so migration correctness was verified per the task's
+own scratch-DB protocol rather than only by reasoning: created
+`eoa_mig_test` (`CREATE DATABASE ... TEMPLATE template0`) on that same
+server, ran `alembic upgrade head` against it start-to-finish (0001→0006,
+no errors), confirmed the result (`items.embedding` is `_float4[]`;
+`graph_edges` exists with all five expected constraints — pk, 2 fk, the
+unique, and 3 non-unique indexes on src/dst/label; `pg_extension` lists
+only `plpgsql`, i.e. neither `vector` nor `age` was ever created by the
+fresh chain), then exercised `vector.upsert_embedding`/`nearest`/
+`find_duplicate` and every `graph.py` public function end to end against
+real rows (`add_edge`/`merge_entity`/`neighbors`/`edges_of`/`edge_stats`/
+all three named queries), before dropping `eoa_mig_test`. This confirms
+the *fresh-chain* path on a server that happens to have the extensions
+available. What it does **not** confirm — and could not, on this server
+— is the fresh chain on a server with the extensions genuinely
+unavailable (verified by code reading only: migration 0006's vector branch
+is gated on the column's `udt_name`, never on the `vector` type being
+installed, and the graph half never references `age`/Cypher at all) or
+the *existing* docker DB's own upgrade path (0001-0005 already applied,
+`vector`/AGE actually present) — the task explicitly reserves running
+`alembic upgrade head` against that DB for Fable, not this pass.
+
 ## Fetch layer
 
 Files: `config/sources.yaml`, `agent/eoa/fetch/` (`__init__.py`, `rss.py`,
@@ -1617,14 +1743,60 @@ Each stage reads from `items` with `processed_stages` filtering, processes via L
 
 ## Deep Search
 
-Files: `agent/eoa/search/deep_search.py`, `agent/eoa/search/searxng_client.py`.
+Files: `agent/eoa/search/provider.py`, `agent/eoa/search/searxng_client.py`, `agent/eoa/search/deep_search.py`.
 
 Autonomous multi-round ReAct investigation triggered for red-level items. Logs every attempt to `investigation_log`.
 
-### `searxng_client.py`
+### `provider.py` (2026-09-05, migration step 1b)
 
-- `search(query, lang='en', *, pages=1)` → list[SearchHit] (title, snippet, url, engine).
-- `ping()` → bool (SearXNG liveness check, 2s timeout).
+The single entry point every caller now imports (`from eoa.search.provider import SearchHit, search` /
+`ping`) instead of `searxng_client` directly. Dispatches on `settings().search.provider`
+(`"ddgs"` default | `"searxng"`) — see the `searxng_client.py` note below for why.
+
+- `search(query, lang='en', *, categories='general', max_results=10, time_range=None, engines=None)`
+  → `SearchResponse` — identical signature/dataclass shape to the pre-migration `searxng_client.search`.
+- `ping()` → bool.
+- ddgs backend (`_ddgs_search`): uses the `ddgs` PyPI package (`from ddgs import DDGS`). Region
+  mapping `LANG_REGION` (he→il-he, en→us-en, ru→ru-ru, zh→cn-zh, fr→fr-fr, de→de-de). Engine
+  selection: an explicit `engines=` kwarg is used as-is (searxng-flavoured names, e.g.
+  `["google", "bing news"]`, split by `_split_backends` into ddgs text/news backend sets); with no
+  explicit `engines`, the legacy `searxng.engines_by_lang`/`searxng.engines` config is mapped the
+  same way and then **unioned with `search.ddgs.backends`** — a lone SearXNG-tuned engine (e.g.
+  `he` → just `google` once `bing` is dropped as a disabled ddgs text engine) is exactly the kind
+  of single scraping backend that gets rate-limited; ddgs queries every backend in a `backend=`
+  list concurrently and merges+dedupes, so more candidates only helps. "…news" engines
+  (`"bing news"`, `"google news"`) route to `DDGS().news()` instead of `.text()`; ddgs 9.x has no
+  Google news engine at all, so `"google news"` falls back to the `duckduckgo` news backend.
+  ddgs raises on rate limits *and* on a plain zero-result search (`DDGSException("No results
+  found.")`) — both are caught and turned into `SearchResponse(error=...)`, never raised into the
+  ReAct loop, matching `searxng_client`'s contract. Rate limiting: `search.ddgs` has no per-minute
+  field of its own; `searxng.rate_limit_per_minute` is reused as the one configured "external
+  metasearch calls per minute" budget regardless of which backend is active (a second,
+  independent `_RateLimiter` instance from `searxng_client`'s).
+- Live-verified 2026-09-05 (host Python 3.14, `ddgs` installed via
+  `pip install --user ddgs`, not yet in the project venv — see pyproject.toml): "Rheinmetall
+  Skyranger contract 2026" (en) → 8 hits (Wikipedia, Defense Express, ad-hoc-news.de coverage);
+  "אלביט מערכות חוזה" (he) → 8 hits (Maariv, Ynet, Kikar HaShabat). `provider: searxng` against
+  the container at `http://127.0.0.1:8088` also round-trips correctly (same `SearchHit` shape) —
+  that container's own engines returned unrelated results in this environment, which is a
+  property of that SearXNG instance's configured engines, not of the dispatch wiring.
+- Tests: `tests/unit/test_search_provider.py` (ddgs client mocked; `_split_backends`, region
+  mapping, error handling, provider switch, rate limiter).
+
+### `searxng_client.py` (kept as the "searxng" backend, migration step 1b, 2026-09-05)
+
+SearXNG is a Linux/Docker-only metasearch container; the native-Windows build
+(`docs/PLAN_WINDOWS_NATIVE.md`) has no container runtime for it, so a pure-Python default
+(`provider.py`'s ddgs backend) replaces it. This module is **unchanged** and kept only as the
+optional legacy backend (`search.provider: searxng` in config), imported lazily from
+`provider.py` so a native install with no SearXNG container never touches it. Direct imports of
+`searxng_client` were replaced with `eoa.search.provider` in every caller (`deep_search.py`,
+`conferences/tracker.py`, `tenders/scan.py`, `orchestrator/main.py`, `cli.py`,
+`api/services.py::services_status` — the last two only used `ping()`/a raw reachability check for
+the status panel, not `search()`).
+
+- `search(query, lang='en', *, categories='general', max_results=10, time_range=None, engines=None)` → `SearchResponse` (hits: list[SearchHit] — title, snippet, url, engine, score, published).
+- `ping()` → bool (SearXNG liveness check, 3s timeout).
 - Every search is logged with query, count, query_plan round, and timestamp.
 
 ### `deep_search.py`
@@ -2920,3 +3092,206 @@ green, and repeated clean `npm --prefix e2e test` runs against the local
 preview build at 166 passed / 0 failed / 2 skipped (the 2 skips are
 `test.skip` guards for preconditions not met in this environment's current
 data — no reports generated yet — not failures).
+
+### Tenders F1/F2/F13 fixes -- forecast rationale leaks, expired-tender status (2026-09-05)
+
+Follow-up to the "Tenders / RFI / RFP tracking + forecasting" section above, addressing
+`docs/REVIEW_2026-09-05.md` findings F1, F2, F13. Files touched: `agent/eoa/tenders/forecast.py`,
+`agent/eoa/tenders/scan.py`, `agent/eoa/tenders/report_section.py`,
+`agent/eoa/llm/schemas/tenders.py`, `agent/eoa/llm/prompts/tender_extract.md`,
+`tests/unit/test_tenders_forecast.py`, `tests/unit/test_tenders_scan.py`,
+`tests/unit/test_tenders_report_section.py`; two new one-off repair scripts,
+`scripts/repair_forecast_rationales.py` and `scripts/repair_tenders.py`. `config/tenders.yaml` and
+the tenders API (`agent/eoa/api/`) were **not** changed -- no new persisted fields were needed (see
+below).
+
+**F1 -- leaked model reasoning in `rationale_he`** (`forecast.py`). Root cause confirmed in the
+Ollama logs (12x "truncating input prompt", 01:06-01:13): `_rationale_data_block` could carry
+9-18 trigger items at up to 2000 chars each, blowing past the `classify` task's 4096 `num_ctx`
+once the system prompt/instructions were added; Ollama silently truncates the *start* of an
+over-length prompt, dropping the instructions, so the model narrated its own confused
+understanding of the (partial) prompt instead of writing a rationale. Fix: (a) `_rationale_data_block`
+now caps at 5 trigger items (most-recent-first -- the list is already ordered that way),
+700 chars/item, ~3000 chars total, preferring `summary_he` over raw `clean_text`; (b) the rationale
+call moved from `task="classify"` (4096 ctx) to `task="summarize"` (8192 ctx), plus an explicit
+chars/2.5 token-budget estimate that trims the data block further if it would exceed ~70% of
+`num_ctx`; (c) a new output guard (`_rationale_guard_failure`) rejects a rationale with no
+`[item N]` citation, a known reasoning-leak phrase (English "the prompt"/"the user"/"let me"/...,
+Hebrew "השאלה מבקשת"/"המשימה דורשת"/...), or over 900 chars -- one retry with a halved data block,
+then the existing deterministic `_fallback_rationale`, logging `forecast_rationale_rejected` with
+the reason either way. `scripts/repair_forecast_rationales.py` reruns the guarded rationale call
+for every `tender_forecasts` row that fails the new guard (reconstructing a `ForecastCandidate`
+from the row's own `sources`/`trigger_item_id`/`payload_need`/etc. columns -- the deterministic
+`likelihood`/`window_from`/`window_to` are reused as-is, never recomputed); run live against the 8
+existing rows, 7 needed repair (all but the one that was already the deterministic fallback
+rationale) -- see the session report for the full before/after text.
+
+**F2 -- "expired" tenders shown as open** (`scan.py`, `schemas/tenders.py`,
+`prompts/tender_extract.md`). `TenderExtract` gained `published_at`/`deadline`/`agency`/`country`/
+`notice_type` (all optional, "never guess" per the prompt) -- `tenders.published_at/deadline/
+agency/country` columns already existed (used by the TED/Contracts Finder structured parsers), so
+no migration was needed, only filling them for the search/rss-hit sources that never had them.
+`_llm_classify` (renamed param `src_kind`) now fetches the actual notice page via
+`eoa.fetch.remote.fetch_remote` (capped 6000 chars) for `search`/`rss` sources before the LLM call
+-- `api_json` sources are skipped (they already have structured dates) -- via the new
+`_fetch_notice_text` helper, which falls back to title+summary on any fetch failure. New
+`_apply_extraction_to_notice`/`_apply_domain_country_fallback` merge the extraction's
+dates/agency/country onto the `NoticeRaw` before insertion (never overwriting a value the
+source's own structured parser supplied) and apply a `_DOMAIN_COUNTRY_FALLBACK` table (F13:
+sam.gov/highergov.com/usarfp.com -> US, ted.europa.eu -> EU, contractsfinder.service.gov.uk -> UK,
+mod.gov.il -> IL, nspa.nato.int/ncia.nato.int -> NATO, tenders.gov.au -> AU,
+canadabuys.canada.ca -> CA) when the country is still missing/`'other'`. `_initial_status` rewritten
+per the coordinator's rules (priority order: source `status_hint` > LLM `notice_type == 'award'` >
+deadline-based open/closed > **undated with no `published_at` either -> `'unknown'`** (the actual
+bug -- it used to default to `'open'`) > `published_at` older than 365 days with no deadline ->
+`'closed'` (stale) > open. `_transition_closed`'s nightly SQL now also closes the stale-undated
+case, not just past-deadline rows. `scripts/repair_tenders.py` reruns this whole pipeline (LLM
+classify with page fetch + merge + fallback + status recompute) against every existing `tenders`
+row; run live against the 6 existing rows -- see the session report for the resulting
+status/dates.
+
+**F2.d -- report section** (`report_section.py`). `collect_tenders` now also returns
+`unknown_count` (count of `status='unknown'` rows) -- additive key, existing callers (`daily.py`)
+reading only `open_tenders`/`new_forecasts` are unaffected. `tenders_extra_section` renders it as
+one short "X הודעות נוספות לבדיקה (ללא תאריכים)" line instead of ever listing `'unknown'` rows as
+open (they were already excluded from the `status='open'` query, this just makes the count
+visible), and each forecast line now carries `_trim_rationale(rationale_he)` -- the first sentence,
+hard-capped at 200 chars -- instead of the full multi-sentence LLM prose, so the forecasts list is
+exactly one line per forecast as required. Function signatures (`collect_tenders`,
+`tenders_extra_section`, `tenders_table`) are unchanged; `report/daily.py` (owned separately) needs
+no edit.
+
+Tests: `tests/unit/test_tenders_forecast.py` gained `TestRationaleDataBlockCaps`,
+`TestRationaleGuardFailure`, `TestLlmRationaleGuarded`; `tests/unit/test_tenders_scan.py` gained
+`TestCountryFromDomain`, `TestApplyExtractionToNotice`, `TestApplyDomainCountryFallback`,
+`TestFetchNoticeText`, `TestTransitionClosedSql`, plus new `TestInitialStatus`/
+`TestScanTendersLlmRelevanceGate` cases for the new status rules and notice_type/date/country
+propagation (the old `test_no_deadline_is_open` was replaced -- that was literally the F2 bug
+being fixed); `tests/unit/test_tenders_report_section.py` gained cases for the unknown-count line
+and rationale trimming. `PYTHONPATH=agent python -m pytest tests/unit/test_tenders_scan.py
+tests/unit/test_tenders_forecast.py tests/unit/test_tenders_report_section.py -q` -- 134 passed.
+`ruff check agent/eoa/tenders agent/eoa/llm/schemas/tenders.py scripts/repair_forecast_rationales.py
+scripts/repair_tenders.py tests/unit/test_tenders_*.py` -- clean.
+
+### Windows-native migration step 1c: runtime scripts, ntfy F11 fix, `eo native` (2026-09-05)
+
+Part of the Docker-to-native migration (`docs/PLAN_WINDOWS_NATIVE.md` step 1c, ADR-004). New:
+`scripts/native/install_native.ps1`, `scripts/native/eoa-supervisor.ps1`,
+`scripts/native/register_autostart.ps1`, `scripts/native/migrate_from_docker.ps1`. Changed:
+`agent/eoa/cli.py` (new `eo native` command group), `agent/eoa/notify/ntfy.py` (F11 fix),
+`agent/eoa/orchestrator/main.py` (Windows signal-handling note), `agent/eoa/security/guard.py`
+(default guard-model dir), `.gitignore` (`runtime/`). New tests: `tests/unit/test_ntfy_publish.py`;
+`tests/unit/test_ntfy_match.py`'s `TestFormatAction` updated for `_fmt_action`'s new return type.
+
+**`scripts/native/install_native.ps1`** -- idempotent one-time installer, no admin rights, all
+downloads/state under `<repo>\runtime\` except the venv (`<repo>\.venv`, matching
+`docker/agent/Dockerfile`'s own `uv pip install -e ".[guard-onnx]"` pattern rather than `uv sync`,
+since no `uv.lock` is committed). Steps: `uv` (via host pip) -> `uv python install 3.12` into
+`runtime\python` -> `uv venv .venv --python 3.12` -> `uv pip install -e ".[guard-onnx]"` (`,dev`
+with `-Dev`) -> PostgreSQL 17 portable (EDB zip) into `runtime\pgsql`/`runtime\pgdata`, `initdb`,
+`postgresql.conf` overrides (port 5433, `Asia/Jerusalem`, logging), `CREATE DATABASE eoanalyst`,
+`alembic upgrade head`, `db\seed\seed_watchlist.py` (`db\graph_init.sql` intentionally skipped --
+Apache AGE retired per plan step 1a) -> ntfy (GitHub release zip, SHA256-verified against its
+published `checksums.txt`) + `runtime\ntfy\server.yml` (`listen-http: 0.0.0.0:8090` for the
+existing Tailscale subscription, see ADR-003/ADR-004) -> guard model (`huggingface_hub`
+`snapshot_download` of the `onnx/` folder, mirroring `docker/agent/Dockerfile`'s `guard-model`
+stage, with the same `optimum-cli export onnx` fallback) into `runtime\models\prompt-guard` ->
+`npm ci && npm run build` in `web\` -> Ollama reachability + configured-role-vs-`ollama list`
+check (verify only, never pulls) -> `runtime\eoa.env` for the supervisor/CLI. Every download
+step prints filename/source/expected-size before fetching. No PSYaml/`powershell-yaml` module is
+installed on the target machine (verified), so the Ollama-model-check step reads
+`config/config.yaml`'s and `config/models.yaml`'s `models:` blocks with a small
+regex-based reader (`Get-YamlTopBlock`/`Get-YamlNestedBlock`/`Get-YamlScalarField`) instead of
+adding a YAML-module dependency -- normalizes CRLF to LF first (`$` in .NET multiline regex
+matches before `\n`, not before a literal `\r`, so skipping that normalization silently broke
+every field match against real, CRLF-saved, config files; caught by hand-testing the parser
+against the actual `config/*.yaml` before wiring it into the script). Verified live end-to-end on
+this machine (real PostgreSQL 17.9, ntfy 2.28.0, and the guard model already installed under
+`runtime\` by the time this step ran) -- `PgVersion`/`NtfyVersion` default to `17.6`/`2.11.0` in
+the script itself since neither could be live-verified from *this* agent's own sandboxed session;
+override with `-PgVersion`/`-NtfyVersion` if newer.
+
+**`scripts/native/eoa-supervisor.ps1`** -- loads `runtime\eoa.env`, starts postgres (`pg_ctl -D
+runtime\pgdata -w start`, skipped if already running per `pg_ctl status`), then ntfy/orchestrator/api
+as managed children with restart-on-exit (exponential backoff 1s->60s, reset after 60s uptime),
+each logging to `runtime\logs\<name>.<date>.log` (daily rotation by filename). Writes
+`runtime\supervisor.pid` and `runtime\pids\<name>.pid`; stops on a `runtime\supervisor.stop`
+sentinel (polled every 2s) via `Stop-Process` for the managed children and `pg_ctl stop -m fast`
+for postgres -- not SIGTERM (see the Windows signal note below for why). Probes
+`http://127.0.0.1:8765/api/status` every 60s (this codebase has no separate `/api/health` route;
+`agent/eoa/api/routes/status.py` is the only status endpoint) and logs the result. Verified live:
+ran it against the real `runtime\` state already on this machine -- postgres start-if-not-running,
+ntfy/orchestrator/api start, restart-with-backoff when ntfy/api couldn't bind their ports (occupied
+by the still-running Docker containers during this same migration window -- expected), and a clean
+sentinel-triggered shutdown (`pg_ctl stop -m fast` succeeded, all pidfiles removed). Postgres was
+manually restarted after this test to restore the pre-test state for whichever other process/agent
+depends on it.
+
+**`scripts/native/register_autostart.ps1`** -- registers/unregisters a user-level (no admin) Task
+Scheduler task "EO-Analyst Supervisor" (at logon, restart-on-failure). Deliberately does not touch
+the pre-existing "EO-Analyst Wake" task (`Get-ScheduledTask 'EO-Analyst Wake' | Export-ScheduledTask`
+inspected: daily 00:55, `WakeToRun=true`, no-op `cmd.exe /c exit 0` action -- its only job is
+forcing the machine out of sleep before the night window; see ADR-004 Section 2 for how the two
+tasks relate).
+
+**`scripts/native/migrate_from_docker.ps1`** -- one-time `pg_dump` (custom `-Fc` for `pg_restore`
+plus a plain `-Fp` copy for inspection, both excluding the AGE/pgvector schema/extensions) from the
+docker `postgres` container into `output\backups\docker_final_<timestamp>.{dump,sql}`,
+`pg_restore --no-owner --clean --if-exists` into the native cluster, then row counts for
+items/entities/events/tenders/tender_forecasts/graph_edges/reports/conferences/jobs on both sides.
+Assumes migration 0006 (real[] embeddings + `graph_edges`) and `scripts/export_age_edges.py` have
+already run against the docker DB. `-DryRun` prints every command without executing any of them
+(verified); `-SkipRestore` dumps only.
+
+**`agent/eoa/cli.py`** -- new `eo native start|stop|status|logs [name]` typer sub-app.
+`start` launches the supervisor script detached (`subprocess.Popen` with
+`CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS`) unless a live pidfile says it's already running;
+`stop` writes the sentinel and polls `runtime\supervisor.pid` for exit; `status` reports
+`pg_ctl status`, `GET /v1/health` (ntfy) and `GET /api/status` (api), plus pidfile liveness for
+orchestrator/api/supervisor; `logs` tails `runtime\logs\<name>*.log` (`-n`/`-f`). Liveness checks
+use `tasklist /FI "PID eq <n>"` rather than `os.kill(pid, 0)`, which isn't meaningful on Windows
+(no signal 0), to avoid a new `psutil` dependency. Verified live: `eo native status` correctly
+reported the real postgres/ntfy/api state on this machine at each point in testing; `eo native
+start`/`native stop` round-tripped against a real supervisor process.
+
+**`agent/eoa/notify/ntfy.py` -- bug F11 fix.** `send()` previously set `title` as a raw `Title`
+HTTP header; httpx/h11 encode header values as effectively-ASCII, so any Hebrew title (every daily
+report notification) raised `UnicodeEncodeError` and the notification was silently dropped every
+night. Rewritten to POST to ntfy's JSON publish endpoint (server root, not `/<topic>`, with `topic`
+in the JSON body) instead -- `title`/`message` travel as UTF-8 JSON fields, never header bytes.
+`_fmt_action` now returns an ntfy JSON action object (`{"action": ..., "label": ..., "url": ...}`)
+instead of the old header mini-DSL string, since JSON `actions` is an array of those objects;
+existing callers (`report_ready`'s callers, if any pass `actions`) are unaffected since they only
+ever pass the same `kind`/`label`/`url`/`method`/`body` dict shape into `send(actions=...)`.
+`tests/unit/test_ntfy_match.py`'s `TestFormatAction` updated for the dict return type. New
+`tests/unit/test_ntfy_publish.py` (respx) asserts a Hebrew title/body round-trips as JSON without
+raising and without any non-ASCII byte ever appearing in a header. `PYTHONPATH=agent python -m
+pytest tests/unit/test_ntfy_match.py tests/unit/test_ntfy_publish.py -q` -- 22 passed (host Python
+3.14 -- respx/pytest import fine even though the project targets 3.12 for its real venv).
+
+**`agent/eoa/orchestrator/main.py`** -- Windows note added around the existing
+`signal.signal(SIGINT/SIGTERM, ...)` loop (no code-behavior change: both were already accepted by
+`signal.signal()` on Windows, and there is no asyncio event loop here at all -- `BackgroundScheduler`
+is thread-based, so `loop.add_signal_handler`, unsupported on Windows' `ProactorEventLoop`, was
+never actually in play). Documents that SIGTERM's handler is effectively dead code on Windows
+(`os.kill`/`Stop-Process` call `TerminateProcess()` directly, bypassing any handler -- which is why
+`eoa-supervisor.ps1` stops this process with `Stop-Process`, not a signal) and additionally
+registers `SIGBREAK` (Ctrl+Break) on `sys.platform == "win32"`, since that -- like SIGINT/Ctrl+C --
+*is* delivered as a real console control event for interactive `eo orchestrate` runs.
+
+**`agent/eoa/security/guard.py`** -- `_l1_pipeline()`'s `EOA_GUARD_L1_DIR` resolution now falls
+back to `<REPO_ROOT>/runtime/models/prompt-guard` (native install's own model location, see
+`install_native.ps1` above) when the env var is unset and that directory exists, before falling
+through to the HF-hub-download path. Keeps the container image's behavior (env var always set)
+unchanged; only adds a default for a bare `eo ...` invocation whose shell hasn't sourced
+`runtime\eoa.env`.
+
+**Grep sweep for Linux-only assumptions** (`/app`, `/opt`, `/tmp`, `os.fork`, `fcntl`, `uvloop`)
+across `agent/eoa/**/*.py`: no matches. Nothing else to report as owned-elsewhere Linux-only code
+from this pass.
+
+**Verification**: `[System.Management.Automation.Language.Parser]::ParseFile` clean on all four new
+`.ps1` scripts; `pwsh -File migrate_from_docker.ps1 -DryRun` and `-Unregister` on
+`register_autostart.ps1` both ran successfully; `eoa-supervisor.ps1` and `eo native start/stop/status`
+verified live against this machine's real (in-progress, parallel-agent-installed) `runtime\` state,
+as detailed above. `python -m py_compile` and `ruff check` clean on all changed `.py` files.

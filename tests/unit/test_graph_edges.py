@@ -1,16 +1,14 @@
-"""Unit tests for `eoa.memory.graph.edges_of` / `edge_stats` (graph edge provenance).
+"""Unit tests for `eoa.memory.graph` (plain-SQL `graph_edges`, no Apache AGE/Cypher).
 
-No DB/AGE: `_run_cypher` is monkeypatched with a fake returning rows shaped
-exactly like a real `cypher()` call would -- a list of dict rows keyed by
-the requested output columns, each value a raw agtype string (JSON plus an
-optional `::vertex`/`::edge` suffix), same as `tests/unit/test_agtype_parse.py`'s
-fixtures. This exercises both the Cypher-string construction and the
-agtype-parsing path without a database.
+2026-09-05 (ADR-004): `eoa.memory.graph` was rewritten off Apache AGE onto plain SQL
+(`graph_edges`). This file replaces the old Cypher/agtype-focused test suite: instead
+of monkeypatching `_run_cypher` (which no longer exists), it monkeypatches
+`eoa.db.connection` with a minimal fake psycopg3 connection/cursor, in the same style
+`tests/unit/test_persist_analysis.py` uses for `eoa.db.connection`. No DB required.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 import types
 
@@ -28,161 +26,227 @@ if "eoa.db" not in sys.modules:
 from eoa.memory import graph
 
 
-def _vertex(entity_id: int, name: str, kind: str = "company", country: str | None = "US") -> str:
-    props: dict = {"entity_id": entity_id, "name": name, "kind": kind}
-    if country is not None:
-        props["country"] = country
-    return json.dumps({"id": entity_id, "label": "Entity", "properties": props}) + "::vertex"
+class _FakeCursor:
+    """Minimal stand-in for `conn.cursor()`'s context-managed cursor."""
+
+    def __init__(self, rows: list[dict] | None) -> None:
+        self._rows = rows or []
+        self.executed: tuple[str, dict | tuple | None] | None = None
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def execute(self, query: str, params: dict | tuple | None = None) -> None:
+        self.executed = (query, params)
+
+    def fetchall(self) -> list[dict]:
+        return self._rows
+
+    def fetchone(self) -> dict | None:
+        return self._rows[0] if self._rows else None
 
 
-def _edge(edge_id: int, label: str, item_id: int | None = None, evidence: str | None = None) -> str:
-    props: dict = {}
-    if item_id is not None:
-        props["item_id"] = item_id
-    if evidence is not None:
-        props["evidence"] = evidence
-    return (
-        json.dumps({"id": edge_id, "label": label, "start_id": 1, "end_id": 2, "properties": props})
-        + "::edge"
-    )
+class _FakeConnection:
+    """Minimal stand-in for `eoa.db.connection()`'s context-managed connection."""
+
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self._rows = rows
+        self.last_cursor: _FakeCursor | None = None
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def cursor(self) -> _FakeCursor:
+        self.last_cursor = _FakeCursor(self._rows)
+        return self.last_cursor
+
+
+def _fail_connection() -> _FakeConnection:
+    raise AssertionError("connection() should not be called for an invalid label")
+
+
+def _patch_connection(monkeypatch: pytest.MonkeyPatch, rows: list[dict] | None = None) -> _FakeConnection:
+    conn = _FakeConnection(rows)
+    monkeypatch.setattr(graph, "connection", lambda: conn)
+    return conn
 
 
 # --------------------------------------------------------------------------
-# add_edge: Cypher string construction (regression -- AGE 1.7 rejects
-# `SET r += $props` / `SET r = $props` with a parameterized map: "SET
-# clause expects a map". The fix SETs each property individually through
-# its own scalar parameter instead of merging a map in one shot.)
+# label validation (shared by add_edge/neighbors/edges_of)
 # --------------------------------------------------------------------------
 
 
-class TestAddEdgeCypher:
-    def test_no_map_merge_syntax_in_generated_cypher(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict = {}
-
-        def fake_run_cypher(cypher_body, params, out_columns):
-            captured.update(cypher_body=cypher_body, params=params, out_columns=out_columns)
-            return []
-
-        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
-        graph.add_edge(1, 2, "PARTNER_OF", 42, {"evidence": "some evidence"})
-
-        cypher_body = captured["cypher_body"]
-        # The buggy forms must never reappear.
-        assert "+= $props" not in cypher_body
-        assert "= $props" not in cypher_body
-        # Each property is set individually through its own scalar param.
-        assert "r.item_id = $p" in cypher_body
-        assert "r.evidence = $p" in cypher_body
-
-    def test_params_are_flat_scalars_not_a_nested_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict = {}
-
-        def fake_run_cypher(cypher_body, params, out_columns):
-            captured["params"] = params
-            return []
-
-        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
-        graph.add_edge(1, 2, "SUPPLIER_OF", 7, {"evidence": "ev"})
-
-        params = captured["params"]
-        assert params["src"] == 1
-        assert params["dst"] == 2
-        # No nested "props" dict anywhere in the params -- every value is a
-        # flat scalar so AGE receives a genuine agtype scalar per param.
-        assert "props" not in params
-        assert set(params.values()) >= {1, 2, 7, "ev"}
-        for value in params.values():
-            assert not isinstance(value, dict)
-
-    def test_item_id_and_evidence_round_trip_via_edges_of_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The generated SET clause still stamps item_id/evidence, so `edges_of()`
-        (which reads those two property names) keeps working unchanged."""
-        captured: dict = {}
-
-        def fake_run_cypher(cypher_body, params, out_columns):
-            captured.update(cypher_body=cypher_body, params=params)
-            return [{"r": _edge(1, "SUPPLIER_OF", item_id=params["p1"], evidence=params["p0"])}]
-
-        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
-        result = graph.add_edge(1, 2, "SUPPLIER_OF", 99, {"evidence": "proof"})
-
-        assert result["properties"]["item_id"] == 99
-        assert result["properties"]["evidence"] == "proof"
-
-    def test_unsafe_property_key_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def fail(*a, **k):
-            raise AssertionError("_run_cypher should not be called for an unsafe key")
-
-        monkeypatch.setattr(graph, "_run_cypher", fail)
-        with pytest.raises(ValueError, match="unsafe edge property key"):
-            graph.add_edge(1, 2, "PARTNER_OF", 1, {"evidence; DROP TABLE entities;--": "x"})
-
-    def test_unknown_edge_label_raises_before_querying(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def fail(*a, **k):
-            raise AssertionError("_run_cypher should not be called for an invalid label")
-
-        monkeypatch.setattr(graph, "_run_cypher", fail)
+class TestLabelValidation:
+    def test_add_edge_unknown_label_raises_before_querying(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(graph, "connection", _fail_connection)
         with pytest.raises(ValueError, match="unknown edge label"):
             graph.add_edge(1, 2, "NOT_A_LABEL", 1)
 
+    def test_neighbors_unknown_label_raises_before_querying(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(graph, "connection", _fail_connection)
+        with pytest.raises(ValueError, match="unknown edge label"):
+            graph.neighbors(1, label="NOT_A_LABEL")
 
-# --------------------------------------------------------------------------
-# edges_of: Cypher string construction
-# --------------------------------------------------------------------------
-
-
-class TestEdgesOfCypher:
-    def test_no_label_depth_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict = {}
-
-        def fake_run_cypher(cypher_body, params, out_columns):
-            captured.update(cypher_body=cypher_body, params=params, out_columns=out_columns)
-            return []
-
-        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
-        graph.edges_of(5)
-
-        assert captured["params"] == {"eid": 5}
-        assert "MATCH p = (a:Entity {entity_id: $eid})-[*1..1]-(b:Entity)" in captured["cypher_body"]
-        assert "UNWIND relationships(p) AS r" in captured["cypher_body"]
-        assert captured["out_columns"] == "s agtype, e agtype, r agtype"
-
-    def test_with_label_and_depth(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict = {}
-
-        def fake_run_cypher(cypher_body, params, out_columns):
-            captured["cypher_body"] = cypher_body
-
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: fake_run_cypher(*a, **k) or [])
-        graph.edges_of(7, label="PARTNER_OF", depth=3)
-
-        assert "[:PARTNER_OF*1..3]" in captured["cypher_body"]
-
-    def test_unknown_label_raises_before_querying(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def fail(*a, **k):
-            raise AssertionError("_run_cypher should not be called for an invalid label")
-
-        monkeypatch.setattr(graph, "_run_cypher", fail)
+    def test_edges_of_unknown_label_raises_before_querying(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(graph, "connection", _fail_connection)
         with pytest.raises(ValueError, match="unknown edge label"):
             graph.edges_of(1, label="NOT_A_LABEL")
 
 
 # --------------------------------------------------------------------------
-# edges_of: agtype parsing
+# add_edge
 # --------------------------------------------------------------------------
 
 
-class TestEdgesOfParsing:
-    def test_parses_edge_row_into_edgerow(self, monkeypatch: pytest.MonkeyPatch) -> None:
+class TestAddEdge:
+    def test_upsert_query_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.add_edge(1, 2, "PARTNER_OF", 42, {"evidence": "some evidence"})
+
+        query, params = conn.last_cursor.executed
+        assert "INSERT INTO graph_edges" in query
+        assert "ON CONFLICT (src_entity_id, dst_entity_id, label, item_id)" in query
+        assert params["src"] == 1
+        assert params["dst"] == 2
+        assert params["label"] == "PARTNER_OF"
+        assert params["item_id"] == 42
+
+    def test_returns_empty_dict_when_no_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_connection(monkeypatch, rows=[])
+        assert graph.add_edge(1, 2, "PARTNER_OF", 1) == {}
+
+    def test_returns_row_as_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {
+            "id": 5,
+            "src_entity_id": 1,
+            "dst_entity_id": 2,
+            "label": "SUPPLIER_OF",
+            "item_id": 99,
+            "props": {"evidence": "proof"},
+            "created_at": None,
+            "updated_at": None,
+        }
+        _patch_connection(monkeypatch, rows=[row])
+        result = graph.add_edge(1, 2, "SUPPLIER_OF", 99, {"evidence": "proof"})
+        assert result["item_id"] == 99
+        assert result["props"]["evidence"] == "proof"
+
+    def test_props_defaults_to_empty_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.add_edge(1, 2, "ACQUIRED", None)
+        _query, params = conn.last_cursor.executed
+        assert params["item_id"] is None
+        # Json(...) wraps the dict; confirm no nested "props" leak into src/dst/label.
+        assert params["src"] == 1 and params["dst"] == 2 and params["label"] == "ACQUIRED"
+
+
+# --------------------------------------------------------------------------
+# merge_entity
+# --------------------------------------------------------------------------
+
+
+class TestMergeEntity:
+    def test_update_query_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[{"entity_id": 1, "name": "RTX", "kind": "company", "country": "US"}])
+        result = graph.merge_entity(1, "RTX", "company", None)
+
+        query, params = conn.last_cursor.executed
+        assert "UPDATE entities" in query
+        assert "COALESCE(%(country)s, country)" in query
+        assert params == {"entity_id": 1, "name": "RTX", "kind": "company", "country": None}
+        assert result["entity_id"] == 1
+
+    def test_returns_empty_dict_when_entity_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_connection(monkeypatch, rows=[])
+        assert graph.merge_entity(999, "Ghost Co", "company") == {}
+
+
+# --------------------------------------------------------------------------
+# neighbors
+# --------------------------------------------------------------------------
+
+
+class TestNeighbors:
+    def test_no_label_depth_1_query_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.neighbors(5)
+
+        query, params = conn.last_cursor.executed
+        assert "WITH RECURSIVE walk" in query
+        assert "JOIN entities e ON e.id = w.endpoint" in query
+        assert params == {"eid": 5, "depth": 1}
+        assert "%(label)s" not in query  # no label param referenced when label=None
+
+    def test_with_label_includes_label_param(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.neighbors(7, label="PARTNER_OF", depth=2)
+
+        query, params = conn.last_cursor.executed
+        assert "ge.label = %(label)s" in query
+        assert params == {"eid": 7, "depth": 2, "label": "PARTNER_OF"}
+
+    def test_depth_clamped_to_max_3(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.neighbors(1, depth=99)
+        _query, params = conn.last_cursor.executed
+        assert params["depth"] == 3
+
+    def test_depth_clamped_to_min_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.neighbors(1, depth=0)
+        _query, params = conn.last_cursor.executed
+        assert params["depth"] == 1
+
+    def test_returns_rows_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [{"entity_id": 9, "name": "IAI", "kind": "company", "country": "IL"}]
+        _patch_connection(monkeypatch, rows=rows)
+        result = graph.neighbors(5)
+        assert result == rows
+
+
+# --------------------------------------------------------------------------
+# edges_of
+# --------------------------------------------------------------------------
+
+
+class TestEdgesOf:
+    def test_query_shape_no_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.edges_of(5)
+
+        query, params = conn.last_cursor.executed
+        assert "WITH RECURSIVE walk" in query
+        assert "JOIN entities s ON s.id = w.src_entity_id" in query
+        assert "JOIN entities d ON d.id = w.dst_entity_id" in query
+        assert params == {"eid": 5, "depth": 1}
+
+    def test_query_shape_with_label_and_depth(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.edges_of(7, label="PARTNER_OF", depth=3)
+        _query, params = conn.last_cursor.executed
+        assert params == {"eid": 7, "depth": 3, "label": "PARTNER_OF"}
+
+    def test_parses_row_into_edgerow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [
             {
-                "s": _vertex(5, "RTX", country="US"),
-                "e": _vertex(9, "IAI", country="IL"),
-                "r": _edge(1, "PARTNER_OF", item_id=42, evidence='ידיעה על שת"פ'),
+                "edge_id": 1,
+                "src_entity_id": 5,
+                "dst_entity_id": 9,
+                "label": "PARTNER_OF",
+                "item_id": 42,
+                "props": {"evidence": 'ידיעה על שת"פ'},
+                "created_at": "2026-09-05T00:00:00+00:00",
+                "src_name": "RTX",
+                "dst_name": "IAI",
             }
         ]
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: rows)
-
+        _patch_connection(monkeypatch, rows=rows)
         result = graph.edges_of(5)
 
         assert len(result) == 1
@@ -195,51 +259,49 @@ class TestEdgesOfParsing:
         assert e.label == "PARTNER_OF"
         assert e.item_id == 42
         assert e.evidence == 'ידיעה על שת"פ'
-        assert e.created_at is None  # never stamped today -- honest, not invented
+        assert e.created_at == "2026-09-05T00:00:00+00:00"
 
-    def test_multiple_edges_both_directions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_props_evidence_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [
-            {"s": _vertex(5, "RTX"), "e": _vertex(9, "IAI"), "r": _edge(1, "PARTNER_OF", item_id=1)},
-            {"s": _vertex(9, "IAI"), "e": _vertex(5, "RTX"), "r": _edge(2, "COMPETITOR_OF", item_id=2)},
+            {
+                "edge_id": 1,
+                "src_entity_id": 5,
+                "dst_entity_id": 9,
+                "label": "PARTNER_OF",
+                "item_id": None,
+                "props": {},
+                "created_at": None,
+                "src_name": "RTX",
+                "dst_name": "IAI",
+            }
         ]
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: rows)
-
-        result = graph.edges_of(5)
-        assert len(result) == 2
-        assert {e.label for e in result} == {"PARTNER_OF", "COMPETITOR_OF"}
-        by_label = {e.label: e for e in result}
-        assert by_label["PARTNER_OF"].src_entity_id == 5
-        assert by_label["COMPETITOR_OF"].src_entity_id == 9
-
-    def test_missing_item_id_and_evidence_are_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rows = [{"s": _vertex(5, "RTX"), "e": _vertex(9, "IAI"), "r": _edge(1, "PARTNER_OF")}]
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: rows)
-
+        _patch_connection(monkeypatch, rows=rows)
         result = graph.edges_of(5)
         assert result[0].item_id is None
         assert result[0].evidence is None
 
-    def test_skips_row_with_unparseable_vertex(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rows = [{"s": "not json at all", "e": _vertex(9, "IAI"), "r": _edge(1, "PARTNER_OF")}]
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: rows)
-
-        assert graph.edges_of(5) == []
-
-    def test_tolerates_already_flattened_vertex_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """`_vertex_fields`/`_edge_fields` tolerate a dict without a nested "properties" key too."""
+    def test_null_props_column_treated_as_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [
             {
-                "s": {"entity_id": 5, "name": "RTX"},
-                "e": {"entity_id": 9, "name": "IAI"},
-                "r": {"label": "PARTNER_OF", "item_id": 7},
+                "edge_id": 1,
+                "src_entity_id": 5,
+                "dst_entity_id": 9,
+                "label": "PARTNER_OF",
+                "item_id": 7,
+                "props": None,
+                "created_at": None,
+                "src_name": "RTX",
+                "dst_name": "IAI",
             }
         ]
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: rows)
-
+        _patch_connection(monkeypatch, rows=rows)
         result = graph.edges_of(5)
-        assert len(result) == 1
-        assert result[0].src_name == "RTX"
+        assert result[0].evidence is None
         assert result[0].item_id == 7
+
+    def test_no_rows_returns_empty_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_connection(monkeypatch, rows=[])
+        assert graph.edges_of(5) == []
 
 
 # --------------------------------------------------------------------------
@@ -248,101 +310,102 @@ class TestEdgesOfParsing:
 
 
 class TestEdgeStats:
-    def test_cypher_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict = {}
-
-        def fake_run_cypher(cypher_body, params, out_columns):
-            captured.update(cypher_body=cypher_body, params=params, out_columns=out_columns)
-            return []
-
-        monkeypatch.setattr(graph, "_run_cypher", fake_run_cypher)
+    def test_query_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
         graph.edge_stats()
-
-        assert "MATCH ()-[r]->()" in captured["cypher_body"]
-        assert "label(r)" in captured["cypher_body"]
-        assert captured["out_columns"] == "lbl agtype, n agtype"
+        query, _params = conn.last_cursor.executed
+        assert "SELECT label, count(*) AS n FROM graph_edges GROUP BY label" in query
 
     def test_defaults_all_labels_to_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: [])
+        _patch_connection(monkeypatch, rows=[])
         stats = graph.edge_stats()
         assert set(stats.keys()) == graph.EDGE_LABELS
         assert all(v == 0 for v in stats.values())
 
     def test_counts_by_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rows = [{"lbl": '"PARTNER_OF"', "n": "3"}, {"lbl": '"COMPETITOR_OF"', "n": "5"}]
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: rows)
-
+        rows = [{"label": "PARTNER_OF", "n": 3}, {"label": "COMPETITOR_OF", "n": 5}]
+        _patch_connection(monkeypatch, rows=rows)
         stats = graph.edge_stats()
         assert stats["PARTNER_OF"] == 3
         assert stats["COMPETITOR_OF"] == 5
         assert stats["SUPPLIER_OF"] == 0
 
     def test_unknown_label_in_results_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rows = [{"lbl": '"NOT_A_REAL_LABEL"', "n": "1"}]
-        monkeypatch.setattr(graph, "_run_cypher", lambda *a, **k: rows)
-
+        rows = [{"label": "NOT_A_REAL_LABEL", "n": 1}]
+        _patch_connection(monkeypatch, rows=rows)
         stats = graph.edge_stats()
         assert "NOT_A_REAL_LABEL" not in stats
 
 
 # --------------------------------------------------------------------------
-# add_edge: live-DB regression for the "SET clause expects a map" bug.
-# Requires the docker-compose stack (`docker compose up postgres`) with
-# `db/graph_init.sql` applied. Skips gracefully when unreachable; always
-# cleans up the one edge it creates, identified by a marker `item_id` no
-# real pipeline would ever use, so it never touches anyone else's data.
+# named analytic queries
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.integration
-class TestAddEdgeLiveDB:
-    _MARKER_ITEM_ID = -987654321
+class TestNamedQueries:
+    def test_partners_of_competitors_query_shape_and_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [{"entity_id": 3, "name": "Elbit", "kind": "company", "country": "IL"}]
+        conn = _patch_connection(monkeypatch, rows=rows)
+        result = graph.partners_of_competitors("RTX")
+        query, params = conn.last_cursor.executed
+        assert "COMPETITOR_OF" in query and "PARTNER_OF" in query
+        assert params == {"name": "RTX"}
+        assert result == rows
 
-    def test_add_edge_then_read_back_via_edges_of(self) -> None:
-        pytest.importorskip("psycopg")
-        try:
-            from eoa.db import connection
+    def test_suppliers_of_program_bidders_query_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.suppliers_of_program_bidders("Blue Horizon")
+        query, params = conn.last_cursor.executed
+        assert "BIDS_AGAINST" in query and "SUPPLIER_OF" in query
+        assert params == {"name": "Blue Horizon"}
 
-            with connection() as conn, conn.cursor() as cur:
-                cur.execute("SELECT id FROM entities ORDER BY id LIMIT 2")
-                rows = cur.fetchall()
-        except Exception as exc:
-            pytest.skip(f"live DB unreachable: {exc}")
+    def test_startups_linked_to_majors_query_shape_and_default_min_links(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        graph.startups_linked_to_majors()
+        query, params = conn.last_cursor.executed
+        assert "link_count" in query
+        assert params == {"min_links": 2}
 
-        if len(rows) < 2:
-            pytest.skip("need at least 2 existing entities in the live DB for this test")
+    def test_startups_linked_to_majors_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [{"entity_id": 1, "name": "Startup Co", "kind": "company", "country": "US", "link_count": 4}]
+        _patch_connection(monkeypatch, rows=rows)
+        assert graph.startups_linked_to_majors(min_links=3) == rows
 
-        src_id, dst_id = rows[0]["id"], rows[1]["id"]
 
-        try:
-            created = graph.add_edge(
-                src_id,
-                dst_id,
-                "DERIVED_FROM",
-                self._MARKER_ITEM_ID,
-                {"evidence": "integration test edge -- safe to ignore/delete"},
-            )
-            assert created.get("properties", {}).get("item_id") == self._MARKER_ITEM_ID
-            assert (
-                created.get("properties", {}).get("evidence")
-                == "integration test edge -- safe to ignore/delete"
-            )
+# --------------------------------------------------------------------------
+# ensure_graph
+# --------------------------------------------------------------------------
 
-            edges = graph.edges_of(src_id, label="DERIVED_FROM")
-            match = [e for e in edges if e.item_id == self._MARKER_ITEM_ID]
-            assert match, "edge just created via add_edge() was not found by edges_of()"
-            assert match[0].src_entity_id == src_id
-            assert match[0].dst_entity_id == dst_id
-            assert match[0].evidence == "integration test edge -- safe to ignore/delete"
-        finally:
-            # Clean up: delete only the edge(s) carrying our marker item_id,
-            # never a blanket delete that could touch real data.
-            graph._run_cypher(
-                """
-                MATCH (a:Entity {entity_id: $src})-[r:DERIVED_FROM]->(b:Entity {entity_id: $dst})
-                WHERE r.item_id = $marker
-                DELETE r
-                """,
-                {"src": src_id, "dst": dst_id, "marker": self._MARKER_ITEM_ID},
-                "r agtype",
-            )
+
+class TestEnsureGraph:
+    def test_raises_when_table_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_connection(monkeypatch, rows=[{"t": None}])
+        with pytest.raises(RuntimeError, match="graph_edges"):
+            graph.ensure_graph()
+
+    def test_no_rows_also_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_connection(monkeypatch, rows=[])
+        with pytest.raises(RuntimeError, match="graph_edges"):
+            graph.ensure_graph()
+
+    def test_passes_when_table_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_connection(monkeypatch, rows=[{"t": "graph_edges"}])
+        graph.ensure_graph()  # should not raise
+
+
+# --------------------------------------------------------------------------
+# entity_timeline (plain relational join, unchanged from before this rewrite)
+# --------------------------------------------------------------------------
+
+
+class TestEntityTimeline:
+    def test_query_shape_and_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [{"id": 1, "kind": "contract_award"}]
+        conn = _patch_connection(monkeypatch, rows=rows)
+        result = graph.entity_timeline(42)
+        query, params = conn.last_cursor.executed
+        assert "JOIN events ev" in query
+        assert params == (42,)
+        assert result == rows

@@ -1,4 +1,4 @@
-"""Stage: embed + cross-language de-duplication (pgvector cosine)."""
+"""Stage: embed + cross-language de-duplication (numpy cosine, see `eoa.memory.vector`)."""
 
 from __future__ import annotations
 

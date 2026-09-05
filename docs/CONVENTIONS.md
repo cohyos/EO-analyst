@@ -46,11 +46,15 @@ docs/adr/             Architecture Decision Records
 12. **No secrets in repo.** `.env` only. No API keys exist in this project at all.
 13. **Networks.** In compose, `fetcher` and `searxng` are on `egress`; everything else is on `internal` (`internal: true`). `worker` must fail to reach the internet — there is a test for this.
 
-## Database (PostgreSQL 17 + Apache AGE + pgvector)
+## Database (plain PostgreSQL 17 -- no extensions; ADR-004)
 Core tables: `sources, items, entities, events, contracts, conferences, reports, jobs, run_log, resource_log,
 model_registry, security_log, triage_feedback, source_reliability, search_playbook, lessons, investigation_log`.
-Vector column: `items.embedding vector(1024)` (dimension comes from `config.models.embed` → `models.yaml[dim]`; migration reads env `EMBED_DIM`, default 1024).
-Graph: AGE graph `eo_graph`; vertex label `Entity`; edge labels `COMPETITOR_OF, SUPPLIER_OF, PARTNER_OF, ACQUIRED, INTEGRATES_WITH, BIDS_AGAINST, DERIVED_FROM`; every edge has `item_id` property. All graph access via `eoa.memory.graph`.
+Vector column: `items.embedding real[]` (no pgvector; cosine similarity computed in numpy by `eoa.memory.vector`).
+Graph: plain-SQL table `graph_edges` (`src_entity_id, dst_entity_id, label, item_id, props jsonb`, unique per
+`(src, dst, label, item_id)`) -- `entities` rows are the vertices directly, no separate graph store. Edge labels
+`COMPETITOR_OF, SUPPLIER_OF, PARTNER_OF, ACQUIRED, INTEGRATES_WITH, BIDS_AGAINST, DERIVED_FROM`; every edge has
+an `item_id` column. All graph access via `eoa.memory.graph` (no Apache AGE, no Cypher). See
+`docs/PLAN_WINDOWS_NATIVE.md` §1a and migration `0006_drop_extensions.py`.
 
 ## LLM roles (config.models)
 `resident` (all night work), `light` (daytime/quick), `hebrew_editor` (optional final polish), `heavy_investigator` (optional), `embed`, `guard_l1` (CPU classifier), `guard_l2` (LLM judge, no tools).

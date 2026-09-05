@@ -26,7 +26,7 @@ from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import InvestigationOut, QueryPlan
-from eoa.search.searxng_client import SearchHit, search
+from eoa.search.provider import SearchHit, search
 
 log = structlog.get_logger(__name__)
 

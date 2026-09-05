@@ -46,7 +46,7 @@ def pre_flight() -> dict:
     from eoa.llm import ollama_client
     from eoa.memory.relational import reap_stale_jobs
     from eoa.resources.gate import gate
-    from eoa.search.searxng_client import ping as searx_ping
+    from eoa.search.provider import ping as searx_ping
 
     st = gate().status()
     try:
@@ -189,10 +189,25 @@ def main() -> None:
     def _sig(*_: object) -> None:
         stop.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    # Windows note: there is no asyncio event loop here at all (BackgroundScheduler is
+    # thread-based, not AsyncIOScheduler), so `loop.add_signal_handler` -- unsupported on
+    # Windows' ProactorEventLoop -- never enters the picture. Plain `signal.signal()` for
+    # SIGINT and SIGTERM is accepted without error on Windows too (both are in the small set
+    # CPython documents as settable there), but SIGTERM's handler is effectively dead code on
+    # Windows: `os.kill(pid, signal.SIGTERM)` (and PowerShell's `Stop-Process`) call
+    # TerminateProcess() directly, which kills the process without ever invoking a registered
+    # handler. That's why scripts/native/eoa-supervisor.ps1 stops this process with
+    # `Stop-Process` + a `runtime\supervisor.stop` sentinel it manages itself, not SIGTERM.
+    # SIGINT (Ctrl+C) and, on Windows only, SIGBREAK (Ctrl+Break) *are* delivered as real
+    # console control events and do invoke Python handlers, so they're kept here for
+    # interactive `eo orchestrate` runs.
+    sigs: list[int] = [signal.SIGINT, signal.SIGTERM]
+    if sys.platform == "win32" and hasattr(signal, "SIGBREAK"):
+        sigs.append(signal.SIGBREAK)  # type: ignore[attr-defined]
+    for sig in sigs:
         try:
             signal.signal(sig, _sig)
-        except ValueError:
+        except (ValueError, OSError):
             pass
     while not stop.is_set():
         time.sleep(1)

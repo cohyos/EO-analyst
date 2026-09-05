@@ -72,6 +72,15 @@ models:              # roles -> keys in models.yaml (decided by bake-off, ADR-00
   guard_l1: prompt_injection_deberta
   guard_l2: granite_guardian_2b
 
+search:
+  # migration step 1b (docs/PLAN_WINDOWS_NATIVE.md): SearXNG (Docker/Linux) goes away on native Windows.
+  # provider: ddgs (pure-Python, default, no container needed) | searxng (legacy, requires the container).
+  provider: ddgs
+  ddgs:
+    backends: [duckduckgo, bing, google, brave, yahoo]   # bing/yahoo only resolve for the *news* category in ddgs 9.x
+    timeout_s: 15
+    max_results: 10
+
 searxng:
   url: http://searxng:8080
   engines: [google, bing, "bing news", "google news"]   # verified 2026-09-04; ddg/brave/startpage get CAPTCHA-suspended

@@ -33,7 +33,7 @@ from eoa.fetch.remote import fetch_remote
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.conferences import ConferenceCandidate, ConferenceCandidates, ConferenceExtract
-from eoa.search.searxng_client import SearchHit, search
+from eoa.search.provider import SearchHit, search
 
 log = structlog.get_logger(__name__)
 

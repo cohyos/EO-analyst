@@ -86,19 +86,20 @@ class TestMatch:
 
 
 class TestFormatAction:
-    """Test the _fmt_action() function for ntfy action headers."""
+    """Test the _fmt_action() function -- converts our action dict into an ntfy JSON action object
+    (https://docs.ntfy.sh/publish/#action-buttons), used by the JSON publish endpoint (bug F11 fix)."""
 
     def test_view_action_default(self):
         """Default (view) action format."""
         action = {"label": "Open Report", "url": "https://example.com/report"}
         result = _fmt_action(action)
-        assert result == "view, Open Report, https://example.com/report"
+        assert result == {"action": "view", "label": "Open Report", "url": "https://example.com/report"}
 
     def test_view_action_explicit(self):
         """Explicit view action."""
         action = {"kind": "view", "label": "Click Here", "url": "http://localhost:8080"}
         result = _fmt_action(action)
-        assert result == "view, Click Here, http://localhost:8080"
+        assert result == {"action": "view", "label": "Click Here", "url": "http://localhost:8080"}
 
     def test_http_action_post(self):
         """HTTP POST action."""
@@ -110,10 +111,13 @@ class TestFormatAction:
             "body": '{"status":"approved"}',
         }
         result = _fmt_action(action)
-        assert "http" in result
-        assert "Approve" in result
-        assert "method=POST" in result
-        assert 'body={"status":"approved"}' in result
+        assert result == {
+            "action": "http",
+            "label": "Approve",
+            "url": "https://api.example.com/approve",
+            "method": "POST",
+            "body": '{"status":"approved"}',
+        }
 
     def test_http_action_get(self):
         """HTTP GET action."""
@@ -124,8 +128,8 @@ class TestFormatAction:
             "method": "GET",
         }
         result = _fmt_action(action)
-        assert "http" in result
-        assert "method=GET" in result
+        assert result["action"] == "http"
+        assert result["method"] == "GET"
 
     def test_http_action_default_method(self):
         """HTTP action without method defaults to POST."""
@@ -135,7 +139,7 @@ class TestFormatAction:
             "url": "https://api.example.com/submit",
         }
         result = _fmt_action(action)
-        assert "method=POST" in result
+        assert result["method"] == "POST"
 
     def test_http_action_empty_body(self):
         """HTTP action without body."""
@@ -145,10 +149,10 @@ class TestFormatAction:
             "url": "https://api.example.com/trigger",
         }
         result = _fmt_action(action)
-        assert "body=" in result
+        assert result["body"] == ""
 
     def test_kind_default_is_view(self):
         """Missing kind defaults to view."""
         action = {"label": "Link", "url": "https://example.com"}
         result = _fmt_action(action)
-        assert result == "view, Link, https://example.com"
+        assert result == {"action": "view", "label": "Link", "url": "https://example.com"}
