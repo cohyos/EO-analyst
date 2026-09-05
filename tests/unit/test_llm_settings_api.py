@@ -28,6 +28,7 @@ def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config_yaml = (
         "schedule: { night_window: { start: '01:00', end: '06:00' } }\n"
         "llm_providers:\n"
+        "  mode: local\n"
         "  allow_cloud: true\n"
         '  interactive_default: "ollama"\n'
         "  timeout_s: 120\n"
@@ -95,6 +96,23 @@ class TestPatchLlmProviderSettings:
         parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
         assert parsed["llm_providers"]["interactive_default"] == 'has "quote'
 
+    def test_updates_mode(self, settings_tmp: Path):
+        ok, errors, _ = services.patch_llm_provider_settings(interactive_default=None, allow_cloud=None, mode="cloud")
+        assert ok is True
+        assert errors == []
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        assert parsed["llm_providers"]["mode"] == "cloud"
+
+    def test_invalid_mode_rejected_without_touching_file(self, settings_tmp: Path):
+        before = (settings_tmp / "config.yaml").read_text(encoding="utf-8")
+        ok, errors, revision = services.patch_llm_provider_settings(
+            interactive_default=None, allow_cloud=None, mode="bogus"
+        )
+        assert ok is False
+        assert errors
+        assert revision is None
+        assert (settings_tmp / "config.yaml").read_text(encoding="utf-8") == before
+
     def test_stale_revision_conflicts(self, settings_tmp: Path):
         with pytest.raises(services.SettingsConflict):
             services.patch_llm_provider_settings(
@@ -110,12 +128,27 @@ class TestListLlmProviders:
         out = services.list_llm_providers()
         assert out["allow_cloud"] is True
         assert out["interactive_default"] == "ollama"
+        assert out["mode"] == "local"
+        assert out["chains"] == {}
         ids = [p["id"] for p in out["providers"]]
         assert ids[0] == "ollama"
-        assert set(ids) == {"ollama", "agy", "claude", "codex"}
+        assert set(ids) == {"ollama", "agy", "claude", "codex", "anthropic", "gemini", "openai"}
         ollama_entry = next(p for p in out["providers"] if p["id"] == "ollama")
         assert ollama_entry["kind"] == "local"
         assert ollama_entry["available"] is True
+        # U8-ו: API providers are always "לא מוגדר" (unavailable) without a real env key -- never
+        # error out, and never surface anything beyond the availability boolean.
+        api_entries = {p["id"]: p for p in out["providers"] if p["kind"] == "api"}
+        assert set(api_entries) == {"anthropic", "gemini", "openai"}
+        for entry in api_entries.values():
+            assert entry["available"] is False
+            assert "key_env" in entry
+            assert entry["power_levels"]
+        # U8-ג: CLI providers also carry power_levels (agy/claude --effort, codex -c override).
+        cloud_entries = {p["id"]: p for p in out["providers"] if p["kind"] == "cloud"}
+        assert set(cloud_entries) == {"agy", "claude", "codex"}
+        for entry in cloud_entries.values():
+            assert entry["power_levels"] == ["low", "medium", "high"]
 
     def test_cloud_hidden_when_allow_cloud_false(self, settings_tmp: Path):
         (settings_tmp / "config.yaml").write_text(
@@ -166,3 +199,27 @@ class TestLlmRoute:
             headers={"If-Match": '"stale"'},
         )
         assert res.status_code == 409
+
+    def test_put_settings_route_updates_mode(self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.ollama.OllamaProvider.is_available", lambda self: False)
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: False)
+        from eoa.api.app import create_app
+
+        client = TestClient(create_app())
+        res = client.put("/api/llm/settings", json={"mode": "cloud"})
+        assert res.status_code == 200
+        assert res.json()["ok"] is True
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        assert parsed["llm_providers"]["mode"] == "cloud"
+
+    def test_get_calls_route(self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            "eoa.memory.relational.summarize_llm_calls",
+            lambda since_hours: {"since_hours": since_hours, "providers": [], "totals": {}},
+        )
+        from eoa.api.app import create_app
+
+        client = TestClient(create_app())
+        res = client.get("/api/llm/calls?since=48h")
+        assert res.status_code == 200
+        assert res.json()["since_hours"] == 48

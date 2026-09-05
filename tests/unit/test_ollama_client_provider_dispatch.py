@@ -10,15 +10,42 @@ from types import SimpleNamespace
 
 import pytest
 
+from eoa.config import ChainEntryCfg
 from eoa.errors import ProviderUnavailable
 from eoa.llm import ollama_client as oc
 from eoa.llm.providers.base import ProviderResult
 
 
-def _fake_settings(*, allow_cloud=True, interactive_default="ollama"):
+def _fake_settings(*, allow_cloud=True, interactive_default="ollama", mode="local", chains=None):
+    """A minimal stand-in for ``Settings`` -- ``effective_chain`` mirrors the real
+    ``LlmProvidersCfg.effective_chain`` logic (mode=local -> just ollama; mode=cloud -> the
+    role's configured chain, ollama-terminated) so `chat()`'s new pipeline branch can be tested
+    without touching real config.yaml."""
+    chains = chains or {}
+
+    def _effective_chain(role: str) -> list[ChainEntryCfg]:
+        if mode != "cloud":
+            return [ChainEntryCfg(provider="ollama")]
+        chain = list(chains.get(role) or [])
+        if not chain:
+            return [ChainEntryCfg(provider="ollama")]
+        if chain[-1].provider != "ollama":
+            chain.append(ChainEntryCfg(provider="ollama"))
+        return chain
+
+    llm_providers = SimpleNamespace(
+        allow_cloud=allow_cloud,
+        interactive_default=interactive_default,
+        cli={},
+        timeout_s=120,
+        mode=mode,
+        chains=chains,
+        effective_chain=_effective_chain,
+    )
     return SimpleNamespace(
-        llm_providers=SimpleNamespace(allow_cloud=allow_cloud, interactive_default=interactive_default, cli={}, timeout_s=120),
+        llm_providers=llm_providers,
         models={"resident": "dictalm3_12b"},
+        ollama=SimpleNamespace(keep_alive="30m", num_ctx={}, num_predict={}, options={}),
     )
 
 
@@ -142,6 +169,90 @@ class TestChatStreamDispatch:
         chunks = list(oc.chat_stream("resident", [{"role": "user", "content": "hi"}], provider="agy"))
         assert "".join(chunks) == "x" * 50
         assert len(chunks) > 1  # actually chunked, not one giant blob
+
+
+class TestPipelineChainDispatch:
+    """U8-א/ה (Revision 2026-09-06): inside the pipeline process, `mode: cloud` routes a
+    role-based call through its configured chain, falling back to ollama; `mode: local` (default)
+    is byte-for-byte the old behaviour."""
+
+    def test_local_mode_never_touches_chain_dispatch(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(oc, "settings", lambda: _fake_settings(mode="local"))
+        monkeypatch.setenv("EOA_PIPELINE", "1")
+
+        def boom(*a, **k):
+            raise AssertionError("chain dispatch must not run in local mode")
+
+        monkeypatch.setattr(oc, "_dispatch_chain", boom)
+        monkeypatch.setattr(
+            oc, "gate", lambda: SimpleNamespace(acquire=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ollama-path")))
+        )
+        with pytest.raises(RuntimeError, match="ollama-path"):
+            oc.chat("resident", [{"role": "user", "content": "hi"}])
+
+    def test_cloud_mode_first_entry_success_never_touches_ollama(self, monkeypatch: pytest.MonkeyPatch):
+        chains = {"resident": [ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium")]}
+        monkeypatch.setattr(oc, "settings", lambda: _fake_settings(mode="cloud", chains=chains))
+        monkeypatch.setenv("EOA_PIPELINE", "1")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.CliProvider.is_available", lambda self: True
+        )
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.CliProvider.chat",
+            lambda self, messages, **kw: ProviderResult(
+                content="PONG", model="gemini-3.8-flash-medium", provider="agy", duration_ms=5, usage={}
+            ),
+        )
+        monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: None)
+
+        def boom(*a, **k):
+            raise AssertionError("gate().acquire() must not be called when the first chain entry succeeds")
+
+        monkeypatch.setattr(oc, "gate", lambda: SimpleNamespace(acquire=boom))
+        res = oc.chat("resident", [{"role": "user", "content": "hi"}])
+        assert res.content == "PONG"
+        assert res.model == "agy:gemini-3.8-flash-medium"
+
+    def test_cloud_mode_falls_back_to_ollama_on_failure(self, monkeypatch: pytest.MonkeyPatch):
+        chains = {"resident": [ChainEntryCfg(provider="agy", model="bogus-model")]}
+        monkeypatch.setattr(oc, "settings", lambda: _fake_settings(mode="cloud", chains=chains))
+        monkeypatch.setenv("EOA_PIPELINE", "1")
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: True)
+
+        from eoa.errors import CliProviderError
+
+        def fail_chat(self, messages, **kw):
+            raise CliProviderError("bogus model id rejected")
+
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.chat", fail_chat)
+        monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: None)
+        monkeypatch.setattr(
+            oc,
+            "gate",
+            lambda: SimpleNamespace(acquire=lambda *a, **k: SimpleNamespace(ollama="dictalm3_12b", key="resident", ctx_max=8192)),
+        )
+
+        class _FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"message": {"content": "local answer"}, "prompt_eval_count": 3, "eval_count": 4}
+
+        class _FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **k):
+                return _FakeResp()
+
+        monkeypatch.setattr(oc, "_client", lambda: _FakeClient())
+        res = oc.chat("resident", [{"role": "user", "content": "hi"}])
+        assert res.content == "local answer"
+        assert res.model == "dictalm3_12b"  # the chain's local terminal entry answered
 
 
 class TestChatStructuredProviderThreading:

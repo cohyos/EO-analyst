@@ -331,12 +331,35 @@ def record_resource_decision(
     return log_id
 
 
-def log_llm_call(*, provider: str, model: str, prompt_chars: int, duration_ms: int) -> int:
-    """Insert a row into ``llm_calls`` (U8 privacy log): provider/model/size/duration only --
-    never the prompt or response text. Returns the new row's id."""
+def log_llm_call(
+    *,
+    provider: str,
+    model: str,
+    prompt_chars: int,
+    duration_ms: int,
+    attempt_no: int | None = None,
+    fell_back_from: str | None = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    est_cost_usd: float = 0.0,
+    batch_size: int = 1,
+    role: str | None = None,
+    error: str | None = None,
+) -> int:
+    """Insert a row into ``llm_calls`` (U8 privacy log; migration 0009 added the chain/cost
+    columns): provider/model/size/duration -- and, since Revision 2026-09-06, per-attempt chain
+    accounting -- only. Never the prompt or response text. Returns the new row's id."""
     query = """
-        INSERT INTO llm_calls (provider, model, prompt_chars, duration_ms)
-        VALUES (%(provider)s, %(model)s, %(prompt_chars)s, %(duration_ms)s)
+        INSERT INTO llm_calls (
+            provider, model, prompt_chars, duration_ms,
+            attempt_no, fell_back_from, prompt_tokens, completion_tokens,
+            est_cost_usd, batch_size, role, error
+        )
+        VALUES (
+            %(provider)s, %(model)s, %(prompt_chars)s, %(duration_ms)s,
+            %(attempt_no)s, %(fell_back_from)s, %(prompt_tokens)s, %(completion_tokens)s,
+            %(est_cost_usd)s, %(batch_size)s, %(role)s, %(error)s
+        )
         RETURNING id
     """
     params = {
@@ -344,11 +367,55 @@ def log_llm_call(*, provider: str, model: str, prompt_chars: int, duration_ms: i
         "model": model,
         "prompt_chars": prompt_chars,
         "duration_ms": duration_ms,
+        "attempt_no": attempt_no,
+        "fell_back_from": fell_back_from,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "est_cost_usd": est_cost_usd,
+        "batch_size": batch_size,
+        "role": role,
+        "error": error,
     }
     with connection() as conn, conn.cursor() as cur:
         cur.execute(query, params)
         row_id: int = cur.fetchone()["id"]
     return row_id
+
+
+def summarize_llm_calls(since_hours: int = 24) -> dict[str, Any]:
+    """``GET /api/llm/calls?since=24h`` (U8-4): per-provider calls/failures/fallbacks/tokens/cost
+    over the last ``since_hours`` hours, plus a total row. A row is a "failure" when ``error`` is
+    not NULL; a "fallback" is a row whose ``fell_back_from`` is not NULL (i.e. it was only
+    attempted because an earlier chain entry failed)."""
+    query = """
+        SELECT
+            provider,
+            count(*)                                   AS calls,
+            count(*) FILTER (WHERE error IS NOT NULL)  AS failures,
+            count(*) FILTER (WHERE fell_back_from IS NOT NULL) AS fallbacks,
+            COALESCE(sum(prompt_tokens), 0)             AS prompt_tokens,
+            COALESCE(sum(completion_tokens), 0)         AS completion_tokens,
+            COALESCE(sum(est_cost_usd), 0)              AS est_cost_usd
+        FROM llm_calls
+        WHERE created_at >= now() - (%(hours)s || ' hours')::interval
+        GROUP BY provider
+        ORDER BY provider
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, {"hours": since_hours})
+        rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["est_cost_usd"] = float(r["est_cost_usd"])  # NUMERIC -> Decimal by default; JSON-unsafe
+    totals = {
+        "calls": sum(r["calls"] for r in rows),
+        "failures": sum(r["failures"] for r in rows),
+        "fallbacks": sum(r["fallbacks"] for r in rows),
+        "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
+        "completion_tokens": sum(r["completion_tokens"] for r in rows),
+        "est_cost_usd": float(sum(r["est_cost_usd"] for r in rows)),
+        "cloud_calls": sum(r["calls"] for r in rows if r["provider"] != "ollama"),
+    }
+    return {"since_hours": since_hours, "providers": rows, "totals": totals}
 
 
 def log_security(

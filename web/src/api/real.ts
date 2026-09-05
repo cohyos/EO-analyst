@@ -15,6 +15,7 @@ import type {
   ItemsResponse,
   Job,
   Lesson,
+  LlmCallsSummary,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
@@ -633,15 +634,43 @@ export const realApi: ApiClient = {
   getLlmProviders: async () => {
     const data = await request<Partial<LlmProvidersResponse>>("/api/llm/providers");
     return {
+      mode: data?.mode === "cloud" ? "cloud" : "local",
       allow_cloud: bool(data?.allow_cloud),
       interactive_default: str(data?.interactive_default) || "ollama",
+      chains: data?.chains ?? {},
       providers: arr(data?.providers).map((p) => ({
         id: str(p?.id),
         label: str(p?.label),
-        kind: p?.kind === "cloud" ? "cloud" : "local",
+        kind: p?.kind === "cloud" ? "cloud" : p?.kind === "api" ? "api" : "local",
         available: bool(p?.available),
         models: arr(p?.models).map((m) => str(m)),
+        key_env: p?.key_env ? str(p.key_env) : undefined,
+        power_levels: p?.power_levels ? arr(p.power_levels).map((lvl) => str(lvl)) : undefined,
       })),
+    };
+  },
+  getLlmCalls: async (since = "24h") => {
+    const data = await request<Partial<LlmCallsSummary>>(`/api/llm/calls${qs({ since })}`);
+    return {
+      since_hours: Number(data?.since_hours) || 24,
+      providers: arr(data?.providers).map((p) => ({
+        provider: str(p?.provider),
+        calls: Number(p?.calls) || 0,
+        failures: Number(p?.failures) || 0,
+        fallbacks: Number(p?.fallbacks) || 0,
+        prompt_tokens: Number(p?.prompt_tokens) || 0,
+        completion_tokens: Number(p?.completion_tokens) || 0,
+        est_cost_usd: Number(p?.est_cost_usd) || 0,
+      })),
+      totals: {
+        calls: Number(data?.totals?.calls) || 0,
+        failures: Number(data?.totals?.failures) || 0,
+        fallbacks: Number(data?.totals?.fallbacks) || 0,
+        prompt_tokens: Number(data?.totals?.prompt_tokens) || 0,
+        completion_tokens: Number(data?.totals?.completion_tokens) || 0,
+        est_cost_usd: Number(data?.totals?.est_cost_usd) || 0,
+        cloud_calls: Number(data?.totals?.cloud_calls) || 0,
+      },
     };
   },
   putLlmSettings: async (body) => {

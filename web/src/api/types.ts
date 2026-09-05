@@ -15,6 +15,7 @@ import type {
   ItemsResponse,
   Job,
   Lesson,
+  LlmCallsSummary,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
@@ -120,12 +121,16 @@ export interface ApiClient {
     },
   ): () => void; // returns an abort function
 
-  /** U8: local Ollama vs. cloud CLI (agy/claude/codex) — availability, models, current default. */
+  /** U8: local Ollama vs. cloud CLI/API — availability, models, power levels, current mode/default. */
   getLlmProviders(): Promise<LlmProvidersResponse>;
   putLlmSettings(body: {
     interactive_default?: string;
     allow_cloud?: boolean;
+    /** U8-א (Revision 2026-09-06): the global local/cloud switch. */
+    mode?: "local" | "cloud";
   }): Promise<LlmSettingsPutResponse>;
+  /** U8-4: per-provider fallback-chain call accounting (`?since=24h`) for the Settings card. */
+  getLlmCalls(since?: string): Promise<LlmCallsSummary>;
 
   getConferences(from?: string, to?: string): Promise<Conference[]>;
   getConferencesIcalUrl(): string;

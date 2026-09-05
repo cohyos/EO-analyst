@@ -8,7 +8,13 @@ from datetime import date
 import structlog
 
 from eoa.errors import LLMOutputError, ResourceUnavailable
-from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
+from eoa.llm.ollama_client import (
+    DATA_GUARD_SYSTEM,
+    chat_structured,
+    chat_structured_batch,
+    is_cloud_batch_mode,
+    wrap_data,
+)
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import AnalyzeOut, EventOut
 from eoa.memory.relational import (
@@ -23,6 +29,7 @@ log = structlog.get_logger(__name__)
 
 STAGE = "analyze"
 MAX_CHARS = 12000
+BATCH_SIZE = 8  # U8-6 (Revision 2026-09-06): "analyze in batches of up to 8"
 
 _ORG_KEYWORDS = (
     "air force",
@@ -69,9 +76,8 @@ def _context_for(item: dict) -> str:
         return "אין."
 
 
-def analyze_item(item: dict, *, role: str = "resident", interactive: bool = False) -> AnalyzeOut:
-    """Produce the AnalyzeOut for one item (does not persist)."""
-    prompt = render(
+def _analyze_prompt(item: dict) -> str:
+    return render(
         "analyze",
         context=_context_for(item),
         title=item.get("title") or "",
@@ -80,16 +86,36 @@ def analyze_item(item: dict, *, role: str = "resident", interactive: bool = Fals
         published_at=item.get("published_at") or "לא ידוע",
         data=wrap_data((item.get("clean_text") or "")[:MAX_CHARS], item["id"], item.get("url") or ""),
     )
+
+
+def _analyze_system() -> str:
+    return render("system_analyst", data_guard=DATA_GUARD_SYSTEM)
+
+
+def analyze_item(item: dict, *, role: str = "resident", interactive: bool = False) -> AnalyzeOut:
+    """Produce the AnalyzeOut for one item (does not persist)."""
     return chat_structured(
         role,
         AnalyzeOut,
         [
-            {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": _analyze_system()},
+            {"role": "user", "content": _analyze_prompt(item)},
         ],
         task="summarize",
         interactive=interactive,
         options={"temperature": 0.3},
+    )
+
+
+def analyze_batch(items: list[dict], *, role: str = "resident") -> dict[int, AnalyzeOut]:
+    """U8-6 batch mode (Revision 2026-09-06): analyze up to ``BATCH_SIZE`` (8) items in one cloud
+    call instead of one call per item -- point 6's "cross-item context" is most valuable here,
+    since related items (same program/contract from different outlets) benefit from being scored
+    together. Returns ``{item_id: AnalyzeOut}``. Only used by ``run_analyze`` when
+    ``is_cloud_batch_mode()`` is true."""
+    prompts = [(it["id"], _analyze_prompt(it)) for it in items]
+    return chat_structured_batch(
+        role, AnalyzeOut, prompts, system=_analyze_system(), task="summarize", options={"temperature": 0.3}
     )
 
 
@@ -219,6 +245,30 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     return n_events, n_edges
 
 
+def _persist_analysis_and_score(it: dict, out: AnalyzeOut, stats: AnalyzeStats) -> None:
+    """Shared per-item tail of ``run_analyze``'s two loops (plain and U8-6 batch mode): persist,
+    mark the stage, and rescore entity relevance (F15). Only DB/side-effect failures are caught
+    here -- an LLM-side failure is the caller's problem (it decides whether to fail one item or
+    the whole batch chunk)."""
+    ne, ng = persist_analysis(it, out)
+    mark_stage(it["id"], STAGE)
+    stats.done += 1
+    stats.events += ne
+    stats.edges += ng
+    # --- entity relevance scoring (F15) --------------------------------------
+    # Rescore every entity this item mentions now that its level/domain (set by
+    # earlier stages) and entities_mentioned (set by classify.py) are both final.
+    # Guarded, best-effort, one call per name -- never blocks/fails the item.
+    try:
+        from eoa.pipeline.entity_relevance import score_and_persist_entity
+
+        for name in it.get("entities_mentioned") or []:
+            score_and_persist_entity(name)
+    except Exception as exc:
+        log.debug("entity_relevance_scoring_skipped", item_id=it["id"], error=str(exc)[:120])
+    # --- end entity relevance scoring ----------------------------------------
+
+
 def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yellow") -> AnalyzeStats:
     """Analyze triaged items at or above ``min_level`` (red > orange > yellow)."""
     order = {"red": 0, "orange": 1, "yellow": 2, "archive": 3}
@@ -229,31 +279,49 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
         if it.get("security_status") != "quarantined" and not it.get("dedup_of")
     ]
     items.sort(key=lambda it: order.get(it.get("level") or "archive", 3))
+    eligible: list[dict] = []
     for it in items:
         if it.get("level") is None:
             continue  # not triaged yet — leave for the next pass, do not mark
         if order.get(it.get("level") or "archive", 3) > order[min_level]:
             mark_stage(it["id"], STAGE)
             continue
+        eligible.append(it)
+
+    # --- U8-6 batch mode (Revision 2026-09-06): cloud mode analyzes BATCH_SIZE (8) items per
+    # call. Persistence/side-effects are identical to the per-item path via
+    # _persist_analysis_and_score. Local mode (default) never enters this branch. -------------
+    if is_cloud_batch_mode():
+        for i in range(0, len(eligible), BATCH_SIZE):
+            chunk = eligible[i : i + BATCH_SIZE]
+            try:
+                results = analyze_batch(chunk, role=role)
+            except ResourceUnavailable:
+                log.warning("analyze_batch_deferred_resources", n=len(chunk))
+                break
+            except LLMOutputError as exc:
+                log.error("analyze_batch_bad_output", n=len(chunk), error=str(exc)[:200])
+                stats.failed += len(chunk)
+                continue
+            for it in chunk:
+                out = results.get(it["id"])
+                if out is None:
+                    log.error("analyze_batch_missing_item", item_id=it["id"])
+                    stats.failed += 1
+                    continue
+                try:
+                    _persist_analysis_and_score(it, out, stats)
+                except Exception as exc:
+                    log.error("analyze_persist_failed", item_id=it["id"], error=str(exc)[:200])
+                    stats.failed += 1
+        log.info("analyze_done", **stats.__dict__)
+        return stats
+    # --- end U8-6 batch mode -------------------------------------------------------------------
+
+    for it in eligible:
         try:
             out = analyze_item(it, role=role)
-            ne, ng = persist_analysis(it, out)
-            mark_stage(it["id"], STAGE)
-            stats.done += 1
-            stats.events += ne
-            stats.edges += ng
-            # --- entity relevance scoring (F15) --------------------------------------
-            # Rescore every entity this item mentions now that its level/domain (set by
-            # earlier stages) and entities_mentioned (set by classify.py) are both final.
-            # Guarded, best-effort, one call per name -- never blocks/fails the item.
-            try:
-                from eoa.pipeline.entity_relevance import score_and_persist_entity
-
-                for name in it.get("entities_mentioned") or []:
-                    score_and_persist_entity(name)
-            except Exception as exc:
-                log.debug("entity_relevance_scoring_skipped", item_id=it["id"], error=str(exc)[:120])
-            # --- end entity relevance scoring ----------------------------------------
+            _persist_analysis_and_score(it, out, stats)
         except ResourceUnavailable:
             log.warning("analyze_deferred_resources", item_id=it["id"])
             break

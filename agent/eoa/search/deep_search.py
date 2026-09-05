@@ -15,18 +15,27 @@ Everything tried is logged to ``investigation_log``; a not-found result is repor
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
 
 import structlog
+from pydantic import BaseModel, Field, ValidationError
 
 from eoa.config import settings
-from eoa.errors import LLMOutputError, ResourceUnavailable
+from eoa.errors import CliProviderError, LLMOutputError, ProviderUnavailable, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import InvestigationOut, QueryPlan
 from eoa.search.provider import SearchHit, search
+
+# U8-6b (Revision 2026-09-06): pending question shape for `investigate_batch_cloud` below --
+# {"job_id":..., "item_id":..., "question":..., "entities": [...], "seed_en":..., "context_he":...}
 
 log = structlog.get_logger(__name__)
 
@@ -645,3 +654,304 @@ def _learn(inv: Investigation) -> None:
                 )
     except Exception as exc:
         log.debug("playbook_write_failed", error=str(exc)[:120])
+
+
+# =================================================================================================
+# U8-6b (Revision 2026-09-06): cloud-delegated batch deep search.
+#
+# When the active provider chain for the "investigator" role is a cloud CLI with its own web
+# tools (agy/claude -- codex has no verified web/search flag on this machine, see
+# scripts/verify_cloud_tools.py), ALL pending investigations of the current run are written to
+# ONE file and handed to ONE CLI call instead of running the per-item ReAct loop above N times.
+# The CLI does its own searching/fetching; this project's job is limited to: build the file,
+# make the one call, validate the JSON schema, screen the returned text for injected content
+# before it ever reaches the DB/UI (docs/CONVENTIONS.md rule #3), and keep only http(s) sources.
+#
+# The local ReAct path (`investigate()` above) is completely untouched -- this is a new, separate
+# entry point, used only in cloud mode; an API provider (anthropic/gemini/openai) has no
+# CLI-native web tool here, so callers fall back to `investigate()` per question for those.
+# =================================================================================================
+
+_CLOUD_TOOL_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_CLOUD_TOOL_TIMEOUT_S = 600  # one call covers every pending question of the run -- generous
+
+
+class CloudSourceOut(BaseModel):
+    url: str
+    title: str = ""
+
+
+class CloudInvestigationAnswer(BaseModel):
+    """One pending question's answer from the cloud-delegated batch call."""
+
+    answer_he: str
+    confidence: float = Field(ge=0, le=1, default=0.0)
+    sources: list[CloudSourceOut] = Field(default_factory=list)
+    what_was_tried_he: str = ""
+
+
+class CloudBatchInvestigationOut(BaseModel):
+    """Whole-file response contract (U8-6b): per-question answers keyed by the string form of
+    the question id used in the file (`str(job_id or item_id)`), plus cross-question insights --
+    point 6's "כולל סעיף תובנות רוחביות" (a cross-insights section)."""
+
+    results: dict[str, CloudInvestigationAnswer] = Field(default_factory=dict)
+    cross_insights_he: str = ""
+
+
+def _cloud_delegation_binary(kind: str) -> str | None:
+    cli = settings().llm_providers.cli.get(kind)
+    binary = cli.binary if cli else kind
+    return shutil.which(binary)
+
+
+def write_investigations_file(pending: list[dict[str, Any]], *, out_dir: Path | None = None) -> Path:
+    """U8-6b: write every pending investigation of this run to one Markdown file -- question,
+    entities, seed, and item context -- for a single delegated CLI call to read end to end."""
+    from eoa.config import REPO_ROOT
+
+    out_dir = out_dir or (REPO_ROOT / "runtime" / "tmp")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    path = out_dir / f"investigations_{ts}.md"
+
+    lines = [
+        "# חקירות עומק ממתינות -- קובץ אצווה לחקירה בענן (U8-6b)",
+        "",
+        "לכל שאלה למטה: חפש וקרא מקורות בעצמך (search/fetch), ואל תמציא -- אם לא נמצא מידע "
+        "מהימן, ציין זאת ב-answer_he ותן confidence נמוך.",
+        "",
+    ]
+    for q in pending:
+        qid = str(q.get("job_id") if q.get("job_id") is not None else q.get("item_id"))
+        lines.append(f"## שאלה {qid}")
+        lines.append(f"**שאלה:** {q.get('question', '')}")
+        entities = q.get("entities") or []
+        if entities:
+            lines.append(f"**ישויות:** {', '.join(entities)}")
+        if q.get("seed_en"):
+            lines.append(f"**זרע חיפוש (אנגלית):** {q['seed_en']}")
+        if q.get("context_he"):
+            lines.append(f"**הקשר הפריט:**\n{q['context_he']}")
+        lines.append("")
+
+    lines += [
+        "---",
+        "",
+        "החזר אך ורק JSON תואם לסכמה הבאה, ללא טקסט נוסף וללא markdown fences:",
+        '{"results": {"<מזהה שאלה כמחרוזת>": {"answer_he": "...", "confidence": 0.0, '
+        '"sources": [{"url": "...", "title": "..."}], "what_was_tried_he": "..."}, ...}, '
+        '"cross_insights_he": "קשרים בין השאלות, אם יש"}',
+        "יש לכלול מפתח בתוצאה לכל שאלה שמופיעה למעלה, לפי המזהה שבכותרת (## שאלה <מזהה>).",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _run_claude_with_tools(file_path: Path, model: str | None) -> str:
+    """Verified live 2026-09-06 (scripts/verify_cloud_tools.py): `--restricted` +
+    `--allowedTools WebSearch,WebFetch` grants exactly the two research tools headlessly, no
+    permission-bypass flag needed, while still stripping Bash/code-execution per ADR-005's
+    tool-permission design."""
+    binary = _cloud_delegation_binary("claude")
+    if not binary:
+        raise ProviderUnavailable("claude CLI not found on PATH")
+    args = [binary, "-p", "--output-format", "json", "--restricted", "--allowedTools", "WebSearch,WebFetch"]
+    if model:
+        args += ["--model", model]
+    prompt = (
+        f"קרא את כל תוכן הקובץ {file_path} וענה על כל השאלות בו לפי ההוראות שבסוף הקובץ. "
+        "חפש והבא מקורות בעצמך באמצעות הכלים שברשותך.\n\n" + file_path.read_text(encoding="utf-8")
+    )
+    proc = subprocess.run(
+        args,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=_CLOUD_TOOL_TIMEOUT_S,
+        creationflags=_CLOUD_TOOL_CREATE_NO_WINDOW,
+    )
+    if proc.returncode != 0:
+        raise CliProviderError(f"claude CLI failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise CliProviderError(f"claude CLI returned non-JSON output: {proc.stdout[:300]!r}") from exc
+    if data.get("is_error"):
+        raise CliProviderError(f"claude CLI reported an error: {str(data.get('result'))[:300]}")
+    return str(data.get("result", ""))
+
+
+def _run_agy_with_tools(file_path: Path, model: str | None) -> str:
+    """agy has no documented tool-permission flag (scripts/verify_cloud_tools.py) -- called only
+    as a second attempt after claude, on the chance its default Gemini grounding covers the
+    question; its answer gets exactly the same schema validation and guard screening as claude's,
+    so an ungrounded answer is caught by the ordinary "never invent"/low-confidence contract
+    rather than trusted blindly."""
+    binary = _cloud_delegation_binary("agy")
+    if not binary:
+        raise ProviderUnavailable("agy CLI not found on PATH")
+    prompt = (
+        "קרא את הקובץ הבא וענה על כל השאלות בו לפי ההוראות שבסופו. חפש מידע עדכני אם תוכל.\n\n"
+        + file_path.read_text(encoding="utf-8")
+    )
+    args = [binary, "-p", prompt, "--output-format", "json"]
+    if model:
+        args += ["--model", model]
+    proc = subprocess.run(
+        args,
+        input=None,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=_CLOUD_TOOL_TIMEOUT_S,
+        creationflags=_CLOUD_TOOL_CREATE_NO_WINDOW,
+    )
+    if proc.returncode != 0:
+        raise CliProviderError(f"agy CLI failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise CliProviderError(f"agy CLI returned non-JSON output: {proc.stdout[:300]!r}") from exc
+    if data.get("status") and data["status"] != "SUCCESS":
+        raise CliProviderError(f"agy CLI status={data.get('status')}: {str(data)[:300]}")
+    return str(data.get("response", ""))
+
+
+def _screen_cloud_answer(qid: str, answer: CloudInvestigationAnswer) -> CloudInvestigationAnswer:
+    """docs/CONVENTIONS.md rule #3: content a cloud CLI fetched from the open web on our behalf
+    is still untrusted -- run it through the same guard `screen()` every fetched page goes
+    through before it can reach the DB/UI. A flagged answer is replaced with a safe not_found-
+    shaped stand-in rather than persisted; only http(s) sources are ever kept (U8-6's "sources
+    are kept only if they are http(s) URLs")."""
+    from eoa.security.guard import screen
+
+    text = f"{answer.answer_he}\n{answer.what_was_tried_he}"
+    try:
+        result = screen(text, title="", item_id=f"cloud_investigation:{qid}", use_l2=False)
+    except Exception as exc:  # guard failing must never crash the investigation
+        log.warning("cloud_investigation_screen_failed", question_id=qid, error=str(exc)[:160])
+        result = None
+    safe_sources = [s for s in answer.sources if s.url.startswith(("http://", "https://"))]
+    if result is not None and not result.is_clean:
+        log.warning("cloud_investigation_flagged", question_id=qid, verdict=result.verdict, kind=result.kind)
+        return CloudInvestigationAnswer(
+            answer_he="התשובה נחסמה בבדיקת אבטחה (חשד להזרקת הוראות בתוכן שנשלף).",
+            confidence=0.0,
+            sources=[],
+            what_was_tried_he=answer.what_was_tried_he[:300],
+        )
+    return CloudInvestigationAnswer(
+        answer_he=answer.answer_he,
+        confidence=answer.confidence,
+        sources=safe_sources,
+        what_was_tried_he=answer.what_was_tried_he,
+    )
+
+
+def cfg_deep_search_confidence_stop() -> float:
+    """Small indirection so tests can monkeypatch the threshold without reaching into `settings()`."""
+    return settings().deep_search.confidence_stop
+
+
+def _batch_strip_fences(text: str) -> str:
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else t[3:]
+        if t.endswith("```"):
+            t = t[:-3]
+    return t.strip()
+
+
+def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, Investigation], str]:
+    """U8-6b: delegate every pending investigation of this run to one cloud CLI call.
+
+    ``pending`` items: ``{"job_id": int|None, "item_id": int|None, "question": str,
+    "entities": list[str], "seed_en": str, "context_he": str}``. Returns
+    ``({question_id: Investigation}, cross_insights_he)`` -- ``question_id`` is
+    ``job_id if job_id is not None else item_id``, matching the file's own question ids, so the
+    caller (``eoa.orchestrator.jobs.run_deep_searches``) can map results back onto its claimed
+    jobs exactly as it would ``investigate()``'s return value.
+
+    Tries claude first, then agy (see ``_run_claude_with_tools``/``_run_agy_with_tools`` for why);
+    raises the last error if both fail -- the caller is expected to fall back to per-question
+    ``investigate()`` in that case (point 6: "API providers without tools fall back to the
+    existing local ReAct loop", which this project extends to "no tool-capable CLI available
+    either").
+    """
+    if not pending:
+        return {}, ""
+
+    file_path = write_investigations_file(pending)
+    cfg = settings().llm_providers
+    last_exc: Exception | None = None
+    raw_text: str | None = None
+    for kind, runner in (("claude", _run_claude_with_tools), ("agy", _run_agy_with_tools)):
+        cli_cfg = cfg.cli.get(kind)
+        model = (cli_cfg.models[0] if cli_cfg and cli_cfg.models else None) if kind == "agy" else None
+        try:
+            raw_text = runner(file_path, model)
+            break
+        except Exception as exc:  # ProviderUnavailable / CliProviderError / timeout
+            last_exc = exc
+            log.warning("cloud_batch_investigation_provider_failed", provider=kind, error=str(exc)[:200])
+            continue
+    if raw_text is None:
+        raise LLMOutputError(f"no tool-capable cloud CLI available for batch deep search: {last_exc}") from last_exc
+
+    try:
+        parsed = CloudBatchInvestigationOut.model_validate_json(_batch_strip_fences(raw_text))
+    except (ValidationError, json.JSONDecodeError) as exc:
+        raise LLMOutputError(f"cloud batch investigation returned invalid JSON: {exc}") from exc
+
+    out: dict[int, Investigation] = {}
+    for q in pending:
+        qid_int = q.get("job_id") if q.get("job_id") is not None else q.get("item_id")
+        qid_str = str(qid_int)
+        answer = parsed.results.get(qid_str)
+        inv = Investigation(job_id=q.get("job_id"), item_id=q.get("item_id"), question=q.get("question", ""))
+        if answer is None:
+            inv.result = InvestigationOut(
+                outcome="not_found",
+                answer_he="הסוכן בענן לא החזיר תשובה לשאלה זו.",
+                confidence=0.0,
+                sources=[],
+                what_was_tried_he="חקירת אצווה בענן -- לא נמצא מפתח מתאים בתשובה.",
+            )
+            inv.outcome = "not_found"
+        else:
+            screened = _screen_cloud_answer(qid_str, answer)
+            outcome: Literal["found", "partial", "not_found"]
+            if not screened.sources and screened.confidence < 0.3:
+                outcome = "not_found"
+            elif screened.confidence >= cfg_deep_search_confidence_stop():
+                outcome = "found"
+            else:
+                outcome = "partial"
+            confidence = min(screened.confidence, NOT_FOUND_MAX_CONFIDENCE) if outcome == "not_found" else screened.confidence
+            inv.result = InvestigationOut(
+                outcome=outcome,
+                answer_he=screened.answer_he,
+                confidence=confidence,
+                sources=[s.url for s in screened.sources],
+                what_was_tried_he=screened.what_was_tried_he or "חקירת אצווה בענן עם כלי חיפוש/הבאה מובנים.",
+            )
+            inv.outcome = outcome
+        _log(
+            inv,
+            0,
+            None,
+            None,
+            engine="cloud_batch",
+            results_n=len(inv.result.sources),
+            pages_read=0,
+            outcome=inv.outcome,
+            notes=inv.result.answer_he[:500],
+        )
+        _learn(inv)
+        out[qid_int if qid_int is not None else -1] = inv
+    return out, parsed.cross_insights_he

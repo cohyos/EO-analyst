@@ -263,13 +263,103 @@ def _investigation_result_payload(inv: Any) -> dict[str, Any]:
     return payload
 
 
-def run_deep_searches(rs: RunState) -> dict[str, Any]:
-    """Consume queued deep_search jobs (from triage) within this run's budget and the nightly cap."""
+def _run_deep_search_job_local(job: dict[str, Any]) -> str:
+    """The local, per-job ReAct investigation for one claimed ``deep_search`` job -- unchanged
+    behaviour, factored out of ``run_deep_searches`` so both the ordinary local-mode loop and the
+    U8-6b cloud-batch-failure fallback (below) can call it. Returns the outcome string; job
+    finish/deferred/red-alert side effects happen here, same as before this revision."""
     from eoa.search.deep_search import investigate
 
+    p = job.get("payload") or {}
+    try:
+        inv = investigate(
+            p.get("question", ""),
+            item_id=p.get("item_id"),
+            job_id=job["id"],
+            context_he=p.get("context_he", ""),
+            budget_multiplier=float(p.get("budget_multiplier") or 1.0),
+            prior_findings_he=p.get("prior_findings_he", ""),
+        )
+        finish_job(job["id"], "done", result=_investigation_result_payload(inv))
+        if p.get("level") == "red" and inv.result and inv.result.outcome != "not_found":
+            _red_alert_for(p.get("item_id"), inv.result.answer_he)
+        return inv.outcome
+    except ResourceUnavailable as exc:
+        # could not search at all (GPU/RAM) — keep the job for a later retry instead of
+        # recording a fabricated not_found; retry after a cooldown rather than immediately
+        finish_job(
+            job["id"],
+            "deferred",
+            error=str(exc)[:300],
+            not_before=datetime.now(tz=UTC) + timedelta(minutes=30),
+        )
+        raise
+    except Exception as exc:
+        finish_job(job["id"], "failed", error=str(exc)[:400])
+        return "failed"
+
+
+def run_deep_searches(rs: RunState) -> dict[str, Any]:
+    """Consume queued deep_search jobs (from triage) within this run's budget and the nightly cap.
+
+    U8-6b (Revision 2026-09-06): when ``llm_providers.mode == "cloud"``, every job claimed for
+    this run is delegated to ``eoa.search.deep_search.investigate_batch_cloud`` in ONE call
+    instead of one ``investigate()`` ReAct loop per job -- point 6's "כל שאלות החקירה בקובץ אחד
+    וקריאה אחת". If that call itself fails outright (both tool-capable CLIs unavailable/erroring
+    -- ``investigate_batch_cloud`` already tried claude then agy internally), the already-claimed
+    jobs fall back to the same local per-job loop local mode always used, via
+    ``_run_deep_search_job_local`` -- no job is ever silently dropped. Local mode (default) is
+    completely unchanged, byte for byte, from before this revision.
+    """
     cap = settings().deep_search.max_per_night
-    done, outcomes = 0, []
     per_min = settings().deep_search.per_investigation_timeout_min
+
+    if settings().llm_providers.mode == "cloud":
+        from eoa.search.deep_search import investigate_batch_cloud
+
+        claimed: list[dict[str, Any]] = []
+        while len(claimed) < cap:
+            job = claim_next_job(["deep_search"], worker_id=_worker_id())
+            if not job:
+                break
+            claimed.append(job)
+        if not claimed:
+            return {"investigations": 0, "outcomes": ""}
+        pending = [
+            {
+                "job_id": job["id"],
+                "item_id": (job.get("payload") or {}).get("item_id"),
+                "question": (job.get("payload") or {}).get("question", ""),
+                "entities": [],
+                "seed_en": "",
+                "context_he": (job.get("payload") or {}).get("context_he", ""),
+            }
+            for job in claimed
+        ]
+        try:
+            results, cross_insights_he = investigate_batch_cloud(pending)
+        except Exception as exc:
+            log.warning("deep_search_cloud_batch_failed_falling_back_local", n=len(claimed), error=str(exc)[:300])
+            outcomes = [_run_deep_search_job_local(job) for job in claimed]
+            return {"investigations": len(claimed), "outcomes": ",".join(outcomes)}
+
+        outcomes = []
+        for job in claimed:
+            inv = results.get(job["id"])
+            p = job.get("payload") or {}
+            if inv is None:
+                finish_job(job["id"], "failed", error="cloud batch investigation returned no result for this job")
+                outcomes.append("failed")
+                continue
+            finish_job(job["id"], "done", result=_investigation_result_payload(inv))
+            outcomes.append(inv.outcome)
+            if p.get("level") == "red" and inv.result and inv.result.outcome != "not_found":
+                _red_alert_for(p.get("item_id"), inv.result.answer_he)
+        if cross_insights_he:
+            log.info("deep_search_cloud_cross_insights", text=cross_insights_he[:500])
+        return {"investigations": len(claimed), "outcomes": ",".join(outcomes), "cross_insights_he": cross_insights_he}
+
+    done, outcomes = 0, []
     while done < cap:
         left = rs.time_left_min()
         if left is not None and left < per_min + settings().stages.get("report", 30) + 10:
@@ -278,34 +368,7 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
         job = claim_next_job(["deep_search"], worker_id=_worker_id())
         if not job:
             break
-        p = job.get("payload") or {}
-        try:
-            inv = investigate(
-                p.get("question", ""),
-                item_id=p.get("item_id"),
-                job_id=job["id"],
-                context_he=p.get("context_he", ""),
-                budget_multiplier=float(p.get("budget_multiplier") or 1.0),
-                prior_findings_he=p.get("prior_findings_he", ""),
-            )
-            finish_job(job["id"], "done", result=_investigation_result_payload(inv))
-            outcomes.append(inv.outcome)
-            if p.get("level") == "red" and inv.result and inv.result.outcome != "not_found":
-                _red_alert_for(p.get("item_id"), inv.result.answer_he)
-        except ResourceUnavailable as exc:
-            # could not search at all (GPU/RAM) — keep the job for a later retry instead of
-            # recording a fabricated not_found; retry after a cooldown rather than immediately
-            finish_job(
-                job["id"],
-                "deferred",
-                error=str(exc)[:300],
-                not_before=datetime.now(tz=UTC) + timedelta(minutes=30),
-            )
-            outcomes.append("deferred")
-            raise
-        except Exception as exc:
-            finish_job(job["id"], "failed", error=str(exc)[:400])
-            outcomes.append("failed")
+        outcomes.append(_run_deep_search_job_local(job))
         done += 1
     return {"investigations": done, "outcomes": ",".join(outcomes)}
 

@@ -12,6 +12,7 @@ import type {
   Job,
   JobState,
   Lesson,
+  LlmCallsSummary,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
@@ -70,8 +71,12 @@ const clarifications = mockClarifications.map((c) => ({ ...c }));
 const lessons = [...mockLessons];
 const jobs = [...mockJobs];
 const settingsStore = { ...mockSettingsYaml };
-// U8: mock-only in-memory mirror of `llm_providers.{interactive_default,allow_cloud}`.
-const llmSettingsStore = { interactive_default: "ollama", allow_cloud: true };
+// U8: mock-only in-memory mirror of `llm_providers.{interactive_default,allow_cloud,mode}`.
+const llmSettingsStore: { interactive_default: string; allow_cloud: boolean; mode: "local" | "cloud" } = {
+  interactive_default: "ollama",
+  allow_cloud: true,
+  mode: "local",
+};
 let lessonId = lessons.length + 1;
 let investigateJobCounter = 9000;
 
@@ -519,8 +524,10 @@ export const mockApi: ApiClient = {
 
   getLlmProviders: async (): Promise<LlmProvidersResponse> =>
     delay({
+      mode: llmSettingsStore.mode,
       allow_cloud: llmSettingsStore.allow_cloud,
       interactive_default: llmSettingsStore.interactive_default,
+      chains: {},
       providers: [
         { id: "ollama", label: "מקומי (Ollama)", kind: "local", available: true, models: ["resident", "light"] },
         {
@@ -544,11 +551,55 @@ export const mockApi: ApiClient = {
           available: llmSettingsStore.allow_cloud,
           models: ["default"],
         },
+        // U8-ו (Revision 2026-09-06): direct-API providers — never available in the mock (no
+        // real key), matching the real backend's "מוגדר / לא מוגדר" contract.
+        {
+          id: "anthropic",
+          label: "Anthropic (API)",
+          kind: "api",
+          available: false,
+          models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+          key_env: "ANTHROPIC_API_KEY",
+          power_levels: ["low", "medium", "high"],
+        },
+        {
+          id: "gemini",
+          label: "Gemini (API)",
+          kind: "api",
+          available: false,
+          models: ["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
+          key_env: "GEMINI_API_KEY",
+          power_levels: ["low", "medium", "high"],
+        },
+        {
+          id: "openai",
+          label: "OpenAI (API)",
+          kind: "api",
+          available: false,
+          models: ["gpt-5.1", "gpt-5.1-mini"],
+          key_env: "OPENAI_API_KEY",
+          power_levels: ["low", "medium", "high"],
+        },
       ],
+    }),
+  getLlmCalls: async (): Promise<LlmCallsSummary> =>
+    delay({
+      since_hours: 24,
+      providers: [],
+      totals: {
+        calls: 0,
+        failures: 0,
+        fallbacks: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        est_cost_usd: 0,
+        cloud_calls: 0,
+      },
     }),
   putLlmSettings: async (body): Promise<LlmSettingsPutResponse> => {
     if (body.interactive_default !== undefined) llmSettingsStore.interactive_default = body.interactive_default;
     if (body.allow_cloud !== undefined) llmSettingsStore.allow_cloud = body.allow_cloud;
+    if (body.mode !== undefined) llmSettingsStore.mode = body.mode;
     return delay({ ok: true, errors: [], revision: String(Date.now()) }, 200);
   },
 };

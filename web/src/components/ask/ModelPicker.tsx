@@ -28,6 +28,9 @@ export function ModelPicker({
   const providers = data?.providers ?? [];
   const local = providers.filter((p) => p.kind === "local");
   const cloud = providers.filter((p) => p.kind === "cloud");
+  // U8-ו (Revision 2026-09-06): direct-API providers (anthropic/gemini/openai) — same picker
+  // shape as a cloud CLI (id:model), only ever offered when the key is configured server-side.
+  const apiProviders = providers.filter((p) => p.kind === "api");
   const isCloudSelected = !!value && value !== "ollama" && !value.startsWith("ollama:");
 
   return (
@@ -61,7 +64,7 @@ export function ModelPicker({
           </optgroup>
         )}
         {data && data.allow_cloud && cloud.length > 0 && (
-          <optgroup label="ענן">
+          <optgroup label="ענן (CLI)">
             {cloud.flatMap((p) =>
               p.models.length > 0
                 ? p.models.map((m) => (
@@ -76,6 +79,18 @@ export function ModelPicker({
                       {!p.available ? " (לא מותקן)" : ""}
                     </option>,
                   ],
+            )}
+          </optgroup>
+        )}
+        {data && data.allow_cloud && apiProviders.length > 0 && (
+          <optgroup label="ענן (API)">
+            {apiProviders.flatMap((p) =>
+              p.models.map((m) => (
+                <option key={`${p.id}:${m}`} value={`${p.id}:${m}`} disabled={!p.available}>
+                  {p.label} — {m}
+                  {!p.available ? " (לא מוגדר מפתח)" : ""}
+                </option>
+              )),
             )}
           </optgroup>
         )}

@@ -134,4 +134,25 @@ export const en: Dictionary = {
     addToContext: "Add to chat context",
     openSource: "Open the source in a new tab",
   },
+  llm: {
+    modeLabel: "Model mode",
+    modeLocal: "Local",
+    modeCloud: "Cloud (falls back to local)",
+    modeHint: "Applies everywhere: chat, the night run, classify/triage/analyze, and deep search.",
+    power: {
+      low: "Low",
+      medium: "Medium",
+      high: "High",
+    },
+    powerLabel: "Power",
+    providerKind: {
+      local: "Local",
+      cloud: "Cloud (CLI)",
+      api: "Cloud (API)",
+    },
+    keyConfigured: "Configured",
+    keyNotConfigured: "Not configured",
+    callsSummary: "Models: {cloud} cloud calls, {fallback} fell back to local, est. cost ${cost}",
+    callsSummaryEmpty: "No cloud usage in the last 24h",
+  },
 };

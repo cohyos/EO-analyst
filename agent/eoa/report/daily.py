@@ -660,6 +660,19 @@ def build_daily(
     md_path = _report_path(label, "md")
     html_path = _report_path(label, "html")
 
+    # U8-4 (docs/adr/005-cloud-llm-cli.md, Revision 2026-09-06): a one-line cloud-usage footer --
+    # "מודלים: X קריאות ענן, Y נפלו למקומי, עלות משוערת $Z" -- appended to every rendering of the
+    # report. Empty (no line added) when there was no cloud activity in the last 24h (the common
+    # case in local mode). Best-effort: a failure here must never break the report itself.
+    llm_footer_he = ""
+    try:
+        from eoa.llm.cost import format_daily_report_footer
+        from eoa.memory.relational import summarize_llm_calls
+
+        llm_footer_he = format_daily_report_footer(summarize_llm_calls(24).get("totals", {}))
+    except Exception as exc:
+        log.debug("daily_report_llm_footer_unavailable", error=str(exc)[:120])
+
     doc = build_docx(
         draft,
         citation_items,
@@ -670,6 +683,8 @@ def build_daily(
         qa=qa,
         tables=tender_tables,
     )
+    if llm_footer_he:
+        doc.add_paragraph(llm_footer_he)
     save_docx(doc, docx_path)
     validate_docx(docx_path)
 
@@ -683,6 +698,8 @@ def build_daily(
         qa=qa,
         tables=tender_tables,
     )
+    if llm_footer_he:
+        md_text = f"{md_text}\n\n---\n\n{llm_footer_he}\n"
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(md_text, encoding="utf-8")
 
@@ -696,6 +713,9 @@ def build_daily(
         qa=qa,
         tables=tender_tables,
     )
+    if llm_footer_he:
+        footer_html = f'<p class="llm-footer">{llm_footer_he}</p>'
+        html_text = html_text.replace("</body>", f"{footer_html}</body>") if "</body>" in html_text else html_text + footer_html
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")
 

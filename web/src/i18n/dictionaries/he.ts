@@ -136,4 +136,27 @@ export const he = {
     addToContext: "הוספה להקשר הצ'אט",
     openSource: "פתיחת המקור בכרטיסייה חדשה",
   },
+  // U8-א/ה/ו (docs/adr/005-cloud-llm-cli.md, Revision 2026-09-06): global local/cloud switch,
+  // fallback chains, direct-API providers, and cloud-usage accounting in Settings + the picker.
+  llm: {
+    modeLabel: "מצב מודלים",
+    modeLocal: "מקומי",
+    modeCloud: "ענן (עם נפילה למקומי)",
+    modeHint: "המתג חל על הכול: צ'אט, ריצת הלילה, סיווג/מיון/ניתוח, וחקירות עומק.",
+    power: {
+      low: "נמוכה",
+      medium: "בינונית",
+      high: "גבוהה",
+    },
+    powerLabel: "עוצמה",
+    providerKind: {
+      local: "מקומי",
+      cloud: "ענן (CLI)",
+      api: "ענן (API)",
+    },
+    keyConfigured: "מוגדר",
+    keyNotConfigured: "לא מוגדר",
+    callsSummary: "מודלים: {cloud} קריאות ענן, {fallback} נפלו למקומי, עלות משוערת ${cost}",
+    callsSummaryEmpty: "אין שימוש בענן ב-24 השעות האחרונות",
+  },
 } as const;

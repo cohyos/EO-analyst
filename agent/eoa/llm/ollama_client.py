@@ -15,9 +15,9 @@ from typing import Any, TypeVar
 
 import httpx
 import structlog
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, create_model
 
-from eoa.config import ModelSpec, settings
+from eoa.config import ChainEntryCfg, ModelSpec, settings
 from eoa.errors import LLMOutputError, ProviderUnavailable
 from eoa.resources.gate import gate
 
@@ -71,23 +71,43 @@ def _num_ctx(task: str, spec: ModelSpec) -> int:
 
 
 # ---------------------------------------------------------------------------------------------
-# U8 provider dispatch (docs/adr/005-cloud-llm-cli.md) -- the ONLY hook cloud CLI providers get
-# into this module. Everything below `chat()`/`chat_structured()`'s own bodies is unchanged
-# Ollama logic; a non-"ollama" provider returns before any of it runs.
+# U8 provider dispatch (docs/adr/005-cloud-llm-cli.md + "Revision 2026-09-06" section) -- the
+# ONLY hook cloud providers (CLI or direct-API) get into this module.
+#
+# `chat()` picks exactly one of two dispatch paths, in this priority order:
+#
+#  1. Inside the orchestrator/worker process (`EOA_PIPELINE=1`, set by `eoa.orchestrator.jobs` at
+#     import time -- the night pipeline AND every queued job, including a manually triggered
+#     "investigate"/"run now"): ALWAYS resolved from `llm_providers.mode` + `.chains` via
+#     `Settings.effective_chain(role)`, via `_dispatch_chain` -- regardless of whatever `provider`
+#     argument the caller happened to pass. This is the same defense-in-depth choke point ADR-005
+#     originally described (no call site's `provider` argument can leak a cloud choice into an
+#     automated/queued run); its behavior changed from "force ollama outright" to "use the
+#     configured chain, which itself always terminates in ollama" (U8-א/ה, Revision 2026-09-06).
+#     No pipeline call site currently passes an explicit `provider` anyway -- this is belt-and-
+#     braces, matching the pre-existing guarantee.
+#
+#  2. Everywhere else (the separate API/uvicorn process serving `/api/ask`, which never sets that
+#     env var): the interactive chat's own per-question override -- an explicit `provider`
+#     argument, or `llm_providers.interactive_default` when none was given -- exactly as before
+#     this revision, via `_dispatch_explicit_provider`.
 # ---------------------------------------------------------------------------------------------
 
 
-def _resolve_provider(provider: str | None) -> str:
-    """Resolve the effective provider string for one call.
+def _in_pipeline_process() -> bool:
+    """True inside the orchestrator/worker process (night pipeline + every queued job, including
+    a manually triggered "investigate"/"run now" -- see module docstring above)."""
+    return os.environ.get("EOA_PIPELINE") == "1"
 
-    The night pipeline and every queued job (daily/weekly/monthly/ingest/deep_search -- including
-    a manually triggered "investigate" or "run now", which are enqueued onto the same job queue)
-    run inside the orchestrator/worker process, which sets ``EOA_PIPELINE=1`` at import time
-    (``eoa.orchestrator.jobs``, top of file). That always wins, regardless of what the caller
-    passed or what ``llm_providers.interactive_default`` says -- this is the single choke point
-    that keeps a user's cloud default from ever leaking into an automated run.
+
+def _resolve_provider(provider: str | None) -> str:
+    """Resolve the effective provider string for an *interactive* call (explicit override or
+    ``llm_providers.interactive_default``), forced to "ollama" inside the pipeline/worker process
+    regardless of what was passed -- the original ADR-005 defense-in-depth guarantee, kept as a
+    belt-and-braces floor even though ``chat()`` itself now branches on ``_in_pipeline_process()``
+    before ever reaching this function for its own dispatch decision.
     """
-    if os.environ.get("EOA_PIPELINE") == "1":
+    if _in_pipeline_process():
         return "ollama"
     if provider:
         return provider
@@ -104,26 +124,50 @@ def resolve_provider_info(provider: str | None) -> tuple[str, str]:
     if kind == "ollama" or not kind:
         return "ollama", settings().models.get("resident") or "resident"
     if not model:
-        from eoa.llm.providers.cli import CliProvider
-
-        models = CliProvider(kind).list_models()
+        models = _explicit_provider_models(kind)
         model = models[0] if models else "default"
     return kind, model
 
 
-def _dispatch_cli_chat(
+def _explicit_provider_models(kind: str) -> list[str]:
+    if kind in ("agy", "claude", "codex"):
+        from eoa.llm.providers.cli import CliProvider
+
+        return CliProvider(kind).list_models()
+    if kind in ("anthropic", "gemini", "openai"):
+        from eoa.llm.providers.api import get_api_provider
+
+        return get_api_provider(kind).list_models()
+    return []
+
+
+def _dispatch_explicit_provider(
     provider: str, messages: list[dict[str, Any]], *, format_schema: dict[str, Any] | None
 ) -> ChatResult:
-    """Run one chat turn through a cloud CLI provider and adapt it into ``ChatResult``."""
+    """Run one chat turn through an explicitly-chosen cloud provider (the interactive chat's
+    per-question override, U8's original picker) -- CLI (agy/claude/codex) or direct-API
+    (anthropic/gemini/openai, U8-ו) -- and adapt it into ``ChatResult``. Always honored regardless
+    of ``llm_providers.mode`` or process (this is the override the spec calls "chat keeps the
+    per-question override").
+    """
     kind, _, model = provider.partition(":")
     if not settings().llm_providers.allow_cloud:
         raise ProviderUnavailable(
             "cloud LLM providers are disabled (llm_providers.allow_cloud=false in config.yaml)"
         )
-    from eoa.llm.providers.cli import CliProvider
+    # U8-ג: an explicit "<model>@<power>" suffix picks a power/effort level for this one call,
+    # for either an API provider or a CLI provider (agy/claude get `--effort`, codex gets
+    # `-c model_reasoning_effort=`, see eoa.llm.providers.cli.CliProvider._build_args).
+    power, _, model = model.partition("@") if "@" in model else (None, "", model)
+    if kind in ("anthropic", "gemini", "openai"):
+        from eoa.llm.providers.api import get_api_provider
 
-    cli = CliProvider(kind, model or None)
-    result = cli.chat(messages, model=model or None, json_schema=format_schema)
+        client = get_api_provider(kind, model or None, power or None)
+    else:
+        from eoa.llm.providers.cli import CliProvider
+
+        client = CliProvider(kind, model or None, power or None)
+    result = client.chat(messages, model=model or None, json_schema=format_schema)
     _log_cloud_call(provider=kind, model=result.model, prompt_chars=result.prompt_chars, duration_ms=result.duration_ms)
     log.info(
         "llm_chat_cloud",
@@ -156,6 +200,61 @@ def _log_cloud_call(*, provider: str, model: str, prompt_chars: int, duration_ms
         log.warning("llm_call_log_failed", provider=provider, error=str(exc)[:200])
 
 
+def _dispatch_chain(
+    role: str,
+    messages: list[dict[str, Any]],
+    *,
+    task: str,
+    format_schema: dict[str, Any] | None,
+    options: dict[str, Any] | None,
+    think: bool | None,
+    interactive: bool,
+    keep_alive: str | None,
+) -> ChatResult:
+    """U8-א/ה (Revision 2026-09-06): role-based dispatch through the global mode's fallback
+    chain, used only for a `provider=None` call made from inside the pipeline/worker process
+    (see `chat()`). Delegates the actual try-in-order/fallback/logging logic to
+    `eoa.llm.chain.run_chain`; the chain's local terminal entry calls straight back into
+    `_ollama_chat` so the resource gate/num_ctx path is defined in exactly one place.
+    """
+    from eoa.llm.chain import run_chain
+    from eoa.llm.providers.base import ProviderResult
+
+    def _call_ollama_leg() -> ProviderResult:
+        res = _ollama_chat(
+            role,
+            messages,
+            task=task,
+            tools=None,
+            format_schema=format_schema,
+            options=options,
+            think=think,
+            interactive=interactive,
+            keep_alive=keep_alive,
+        )
+        return ProviderResult(
+            content=res.content,
+            model=res.model,
+            provider="ollama",
+            duration_ms=res.duration_ms,
+            prompt_chars=sum(len(m.get("content", "") or "") for m in messages),
+            usage={"prompt_tokens": res.prompt_tokens, "eval_tokens": res.eval_tokens},
+        )
+
+    chain = settings().llm_providers.effective_chain(role)
+    result, attempts = run_chain(role, chain, _call_ollama_leg, messages=messages, json_schema=format_schema)
+    return ChatResult(
+        content=result.content,
+        tool_calls=[],
+        thinking=None,
+        prompt_tokens=int(result.usage.get("input_tokens") or result.usage.get("prompt_tokens") or 0),
+        eval_tokens=int(result.usage.get("output_tokens") or result.usage.get("eval_tokens") or 0),
+        duration_ms=result.duration_ms,
+        model=f"{result.provider}:{result.model}" if result.provider != "ollama" else result.model,
+        raw={"provider": result.provider, "chain_attempts": [a.__dict__ for a in attempts]},
+    )
+
+
 def chat(
     role: str,
     messages: list[dict[str, Any]],
@@ -170,17 +269,72 @@ def chat(
     provider: str | None = None,
 ) -> ChatResult:
     """One chat completion. ``role`` is a config role (resident/light/...), used for the local
-    Ollama path (default). ``provider`` (U8) can route this call to a cloud CLI instead --
-    "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"; ``None`` resolves from
-    ``llm_providers.interactive_default``, forced back to "ollama" for any pipeline/job call
-    (see ``_resolve_provider``). A cloud provider bypasses the resource gate entirely (it does
-    not touch the local GPU) and returns here without running any of the Ollama-specific code
-    below.
-    """
-    resolved = _resolve_provider(provider)
-    if resolved != "ollama":
-        return _dispatch_cli_chat(resolved, messages, format_schema=format_schema)
+    Ollama path (default).
 
+    ``provider`` (U8) can route this single call to an explicitly-chosen cloud provider instead
+    -- "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]" |
+    "anthropic[:<model>[@<power>]]" | "gemini[:<model>[@<power>]]" | "openai[:<model>[@<power>]]"
+    -- and always wins, in any process (the interactive chat's per-question override).
+
+    Inside the orchestrator/worker process (``EOA_PIPELINE=1``, night pipeline or any queued job
+    incl. a manual "investigate"/"run now"), any ``provider`` argument is ignored -- the call
+    ALWAYS follows ``llm_providers.mode``'s configured fallback chain for ``role`` instead (U8-א/ה,
+    Revision 2026-09-06; the same defense-in-depth choke point ADR-005 originally described, so a
+    cloud choice can never leak into an automated/queued run except through the configured,
+    audited chain): "local" mode (default) resolves to just Ollama, unchanged from before; "cloud"
+    mode tries the role's chain, always falling back to Ollama at the end. Everywhere else (the
+    separate API/uvicorn process serving `/api/ask`), an explicit ``provider`` -- or
+    ``llm_providers.interactive_default`` when none was given -- is honored exactly as before this
+    revision (the interactive chat's per-question override).
+
+    A cloud/API leg bypasses the resource gate entirely (it does not touch the local GPU).
+    """
+    if _in_pipeline_process():
+        chain = settings().llm_providers.effective_chain(role)
+        if len(chain) > 1 or chain[0].provider != "ollama":
+            return _dispatch_chain(
+                role,
+                messages,
+                task=task,
+                format_schema=format_schema,
+                options=options,
+                think=think,
+                interactive=interactive,
+                keep_alive=keep_alive,
+            )
+    else:
+        resolved = _resolve_provider(provider)
+        if resolved != "ollama":
+            return _dispatch_explicit_provider(resolved, messages, format_schema=format_schema)
+
+    return _ollama_chat(
+        role,
+        messages,
+        task=task,
+        tools=tools,
+        format_schema=format_schema,
+        options=options,
+        think=think,
+        interactive=interactive,
+        keep_alive=keep_alive,
+    )
+
+
+def _ollama_chat(
+    role: str,
+    messages: list[dict[str, Any]],
+    *,
+    task: str,
+    tools: list[dict[str, Any]] | None,
+    format_schema: dict[str, Any] | None,
+    options: dict[str, Any] | None,
+    think: bool | None,
+    interactive: bool,
+    keep_alive: str | None,
+) -> ChatResult:
+    """The actual local-Ollama call path (resource gate -> HTTP -> ``ChatResult``), factored out
+    of ``chat()`` so both the plain local path and the fallback chain's local terminal entry
+    (``_dispatch_chain``) share exactly one implementation."""
     spec = gate().acquire(role, interactive=interactive)
     assert spec.ollama, f"{spec.key} is not an Ollama model"
     s = settings()
@@ -232,21 +386,31 @@ def chat(
     return res
 
 
-def chat_structured(
+def _provider_string(entry: ChainEntryCfg) -> str:
+    if entry.provider == "ollama":
+        return "ollama"
+    tail = entry.model or ""
+    if entry.power:
+        tail = f"{tail}@{entry.power}"
+    return f"{entry.provider}:{tail}" if tail else entry.provider
+
+
+def _structured_once(
     role: str,
     schema: type[T],
     messages: list[dict[str, Any]],
     *,
-    task: str = "classify",
-    interactive: bool = False,
-    options: dict[str, Any] | None = None,
-    provider: str | None = None,
-) -> T:
-    """Chat with a JSON schema constraint and validate into ``schema``; one corrective retry.
-
-    ``provider`` (U8) is threaded straight through to each ``chat()`` call, including the
-    corrective retry -- a cloud CLI provider gets the same "return ONLY JSON matching this
-    schema" instruction and the same one-retry-on-validation-failure contract as Ollama.
+    task: str,
+    interactive: bool,
+    options: dict[str, Any] | None,
+    provider: str | None,
+) -> tuple[T, ChatResult]:
+    """One provider's worth of ``chat_structured``: the JSON-schema call plus its own
+    one-corrective-retry contract, against a *single* resolved provider (``chat()``'s own
+    per-call resolution -- explicit, chain, or interactive-default, exactly as before). Raises
+    ``LLMOutputError`` if both attempts fail validation -- the caller (``chat_structured``)
+    decides whether that means "give up" (plain/no-chain call) or "try the next chain entry"
+    (``_chat_structured_chain``, U8-4: "a schema validation failure after the corrective retry").
     """
     json_schema = schema.model_json_schema()
     last_err: Exception | None = None
@@ -263,7 +427,7 @@ def chat_structured(
             provider=provider,
         )
         try:
-            return schema.model_validate_json(_strip_fences(res.content))
+            return schema.model_validate_json(_strip_fences(res.content)), res
         except (ValidationError, json.JSONDecodeError) as exc:
             last_err = exc
             log.warning("llm_schema_invalid", attempt=attempt, error=str(exc)[:300])
@@ -275,7 +439,170 @@ def chat_structured(
                     "content": f"הפלט לא תקין לפי הסכמה: {str(exc)[:500]}. החזר JSON תקין בלבד.",
                 },
             ]
-    raise LLMOutputError(f"schema validation failed for {schema.__name__}: {last_err}")
+    raise LLMOutputError(f"schema validation failed for {schema.__name__}: {last_err}") from last_err
+
+
+def chat_structured(
+    role: str,
+    schema: type[T],
+    messages: list[dict[str, Any]],
+    *,
+    task: str = "classify",
+    interactive: bool = False,
+    options: dict[str, Any] | None = None,
+    provider: str | None = None,
+) -> T:
+    """Chat with a JSON schema constraint and validate into ``schema``; one corrective retry.
+
+    ``provider`` (U8) is threaded straight through to each ``chat()`` call, including the
+    corrective retry -- an explicit cloud provider gets the same "return ONLY JSON matching this
+    schema" instruction and the same one-retry-on-validation-failure contract as Ollama. Inside
+    the pipeline/worker process, ``provider`` is ignored the same way ``chat()`` ignores it --
+    see below.
+
+    When this call is running inside the pipeline/worker process with a real (more-than-just-
+    ollama) fallback chain configured for ``role`` (U8-ה, Revision 2026-09-06), a schema-
+    validation failure that survives one corrective retry against the chain's *current* entry now
+    falls back to the *next* chain entry (a fresh one-corrective-retry attempt there), rather than
+    raising immediately -- exactly like a provider/HTTP failure does.
+    """
+    if _in_pipeline_process():
+        chain = settings().llm_providers.effective_chain(role)
+        if len(chain) > 1 or chain[0].provider != "ollama":
+            return _chat_structured_chain(role, chain, schema, messages, task=task, interactive=interactive, options=options)
+    validated, _res = _structured_once(role, schema, messages, task=task, interactive=interactive, options=options, provider=provider)
+    return validated
+
+
+def _chat_structured_chain(
+    role: str,
+    chain: list[ChainEntryCfg],
+    schema: type[T],
+    messages: list[dict[str, Any]],
+    *,
+    task: str,
+    interactive: bool,
+    options: dict[str, Any] | None,
+) -> T:
+    """Chain-aware structured dispatch (U8-4/U8-ה): each entry gets its own full
+    ``_structured_once`` (schema call + one corrective retry); a provider/HTTP failure *or* a
+    schema-validation failure that survives that retry moves on to the next entry. Every attempt
+    is logged to ``llm_calls`` via ``eoa.llm.chain``'s recorder, same as the plain-chat chain path.
+    """
+    from eoa.llm.chain import FALLBACK_EXCEPTIONS, ChainAttempt, _record
+
+    fell_back_from: str | None = None
+    last_err: Exception | None = None
+    for i, entry in enumerate(chain):
+        attempt_no = i + 1
+        provider_str = _provider_string(entry)
+        try:
+            validated, res = _structured_once(
+                role, schema, messages, task=task, interactive=interactive, options=options, provider=provider_str
+            )
+        except FALLBACK_EXCEPTIONS as exc:
+            attempt = ChainAttempt(
+                provider=entry.provider,
+                model=entry.model or "",
+                power=entry.power,
+                ok=False,
+                error=str(exc)[:300],
+                fell_back_from=fell_back_from,
+                attempt_no=attempt_no,
+            )
+            _record(role, attempt, 1)
+            if entry.provider == "ollama":  # nothing left to fall back to
+                raise
+            last_err = exc
+            fell_back_from = entry.provider
+            log.warning("llm_chain_fallback_structured", role=role, provider=entry.provider, error=str(exc)[:200])
+            continue
+        attempt = ChainAttempt(
+            provider=entry.provider,
+            model=res.model,
+            power=entry.power,
+            ok=True,
+            duration_ms=res.duration_ms,
+            prompt_tokens=res.prompt_tokens,
+            completion_tokens=res.eval_tokens,
+            fell_back_from=fell_back_from,
+            attempt_no=attempt_no,
+        )
+        _record(role, attempt, 1)
+        return validated
+
+    raise LLMOutputError(f"structured llm chain for role={role!r} exhausted: {last_err}") from last_err
+
+
+def is_cloud_batch_mode() -> bool:
+    """U8-6 (Revision 2026-09-06): true when the global switch is "cloud" -- the signal a pipeline
+    call site (``classify``/``triage``/``analyze``) uses to decide whether to batch several items
+    into one structured call (see ``chat_structured_batch``) instead of one call per item. Local
+    mode (default) always returns ``False``, so every batch-mode call site's non-batch code path
+    is completely unchanged, byte for byte, from before this revision.
+    """
+    return settings().llm_providers.mode == "cloud"
+
+
+_BATCH_ITEM_MODELS: dict[type[BaseModel], type[BaseModel]] = {}
+_BATCH_WRAPPER_MODELS: dict[type[BaseModel], type[BaseModel]] = {}
+
+
+def _batch_wrapper_schema(item_schema: type[T]) -> type[BaseModel]:
+    """``{"items": [{"item_id": int, **item_schema fields}, ...]}`` -- built once per
+    ``item_schema`` and cached, so repeated batches (every classify/analyze call in a cloud-mode
+    pipeline run) don't rebuild the pydantic model on every call."""
+    item_model = _BATCH_ITEM_MODELS.get(item_schema)
+    if item_model is None:
+        item_model = create_model(f"{item_schema.__name__}Batched", item_id=(int, ...), __base__=item_schema)
+        _BATCH_ITEM_MODELS[item_schema] = item_model
+    wrapper = _BATCH_WRAPPER_MODELS.get(item_schema)
+    if wrapper is None:
+        wrapper = create_model(f"{item_schema.__name__}Batch", items=(list[item_model], ...))  # type: ignore[valid-type]
+        _BATCH_WRAPPER_MODELS[item_schema] = wrapper
+    return wrapper
+
+
+def chat_structured_batch(
+    role: str,
+    item_schema: type[T],
+    items: list[tuple[int, str]],
+    *,
+    system: str,
+    task: str = "classify",
+    intro_he: str = "",
+    options: dict[str, Any] | None = None,
+) -> dict[int, T]:
+    """U8-6 batch mode: one structured call covering multiple items' prompts (``items`` is
+    ``[(item_id, per_item_prompt), ...]``, up to whatever batch size the caller chunked to --
+    point 6 asks for up to 25 for classify/triage, up to 8 for analyze), keyed by ``item_id`` in
+    the response, ``{item_id: item_schema instance}``. A cloud provider gets one call instead of
+    N -- point 6's "fewer calls, cross-item context" -- and can use one item's content while
+    scoring another (e.g. two press releases about the same contract). Uses the same
+    ``chat_structured`` (chain-aware, one-corrective-retry) contract as a plain per-item call, so
+    a schema failure or provider outage still falls back exactly as it would for one item.
+
+    Any ``item_id`` the model's response omits is simply absent from the returned dict -- the
+    caller's own per-item loop treats that the same as any other per-item failure (log + count as
+    failed), never inventing a result for a missing item.
+    """
+    wrapper = _batch_wrapper_schema(item_schema)
+    body = "\n\n".join(f"### item_id={item_id}\n{prompt}" for item_id, prompt in items)
+    intro = intro_he or (
+        f"להלן {len(items)} פריטים לעיבוד באצווה אחת. החזר מערך אחד בשדה \"items\" עם אובייקט "
+        "נפרד לכל פריט; כל אובייקט חייב לכלול item_id התואם למספר שניתן לו למטה, ואת שאר השדות "
+        "לפי הסכמה הנדרשת לכל פריט בנפרד -- אין לערבב מידע בין פריטים שונים בתשובה עצמה."
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"{intro}\n\n{body}"},
+    ]
+    out = chat_structured(role, wrapper, messages, task=task, options=options)
+    result: dict[int, T] = {}
+    for row in out.items:  # type: ignore[attr-defined]
+        data = row.model_dump(exclude={"item_id"})
+        result[row.item_id] = item_schema.model_validate(data)
+    return result
 
 
 def embed(texts: Iterable[str], *, role: str = "embed", interactive: bool = False) -> list[list[float]]:

@@ -195,6 +195,80 @@ class TestCliProviderTimeout:
             CliProvider("agy").chat([{"role": "user", "content": "ping"}], timeout_s=1)
 
 
+class TestPowerEffortFlag:
+    """U8-ג (Revision 2026-09-06): power/effort level -> the flag each CLI actually accepts,
+    verified live against `agy --help`/`claude --help`/`codex exec --help` (see
+    docs/adr/005-cloud-llm-cli.md's Revision 2026-09-06 permission matrix)."""
+
+    def test_agy_gets_bare_effort_flag(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"}))
+
+        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        CliProvider("agy", power="high").chat([{"role": "user", "content": "ping"}])
+        assert "--effort" in captured["args"]
+        assert captured["args"][captured["args"].index("--effort") + 1] == "high"
+
+    def test_claude_gets_bare_effort_flag(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return _completed(stdout=json.dumps({"is_error": False, "result": "ok"}))
+
+        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        CliProvider("claude", power="low").chat([{"role": "user", "content": "ping"}])
+        assert "--effort" in captured["args"]
+        assert captured["args"][captured["args"].index("--effort") + 1] == "low"
+
+    def test_codex_gets_config_override_not_a_dedicated_flag(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            out_path = args[args.index("-o") + 1]
+            from pathlib import Path
+
+            Path(out_path).write_text("ok", encoding="utf-8")
+            return _completed(stdout="")
+
+        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        CliProvider("codex", power="medium").chat([{"role": "user", "content": "ping"}])
+        assert "--effort" not in captured["args"]
+        assert "-c" in captured["args"]
+        assert captured["args"][captured["args"].index("-c") + 1] == "model_reasoning_effort=medium"
+
+    def test_no_power_omits_the_flag_entirely(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"}))
+
+        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        CliProvider("agy").chat([{"role": "user", "content": "ping"}])
+        assert "--effort" not in captured["args"]
+
+    def test_call_time_power_overrides_constructor_power(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"}))
+
+        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        CliProvider("agy", power="low").chat([{"role": "user", "content": "ping"}], power="high")
+        assert captured["args"][captured["args"].index("--effort") + 1] == "high"
+
+
 class TestJsonSchemaInstruction:
     def test_schema_appended_to_prompt(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")

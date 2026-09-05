@@ -274,18 +274,36 @@ export type AskSseEvent =
   | { type: "meta"; provider: string; model: string }
   | { type: "done" };
 
-// U8 (docs/adr/005-cloud-llm-cli.md): local Ollama vs. cloud CLI (agy/claude/codex) provider routing.
+// U8 (docs/adr/005-cloud-llm-cli.md + "Revision 2026-09-06"): local Ollama vs. cloud CLI
+// (agy/claude/codex) vs. direct-API (anthropic/gemini/openai) provider routing.
 export interface LlmProviderInfo {
   id: string;
   label: string;
-  kind: "local" | "cloud";
+  kind: "local" | "cloud" | "api";
   available: boolean;
   models: string[];
+  /** api providers only: the .env variable name whose presence controls `available` — the key
+   * value itself is never sent to the UI. */
+  key_env?: string;
+  /** api providers only: effort/thinking levels this provider's chat() call accepts. */
+  power_levels?: string[];
+}
+
+/** One link of a role's fallback chain (U8-ה), as returned by GET /api/llm/providers. */
+export interface LlmChainEntry {
+  provider: string;
+  model?: string | null;
+  power?: string | null;
 }
 
 export interface LlmProvidersResponse {
+  /** U8-א: the global local/cloud switch — applies to chat AND the night pipeline/queued jobs. */
+  mode: "local" | "cloud";
   allow_cloud: boolean;
   interactive_default: string;
+  /** U8-ה: per-role ("resident"/"investigator"/"light"/"report") configured fallback chains,
+   * used only when `mode === "cloud"`. Empty when no chains are configured yet. */
+  chains: Record<string, LlmChainEntry[]>;
   providers: LlmProviderInfo[];
 }
 
@@ -293,6 +311,31 @@ export interface LlmSettingsPutResponse {
   ok: boolean;
   errors: string[];
   revision: string | null;
+}
+
+/** U8-4: GET /api/llm/calls?since=24h — per-provider fallback-chain call accounting. */
+export interface LlmCallsProviderSummary {
+  provider: string;
+  calls: number;
+  failures: number;
+  fallbacks: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  est_cost_usd: number;
+}
+
+export interface LlmCallsSummary {
+  since_hours: number;
+  providers: LlmCallsProviderSummary[];
+  totals: {
+    calls: number;
+    failures: number;
+    fallbacks: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    est_cost_usd: number;
+    cloud_calls: number;
+  };
 }
 
 export interface ReportSummary {

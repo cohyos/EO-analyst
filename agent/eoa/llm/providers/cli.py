@@ -89,11 +89,12 @@ def _flatten_messages(messages: list[dict[str, Any]]) -> str:
 class CliProvider:
     """One cloud CLI (``kind`` in ``agy``/``claude``/``codex``), optionally pinned to ``model``."""
 
-    def __init__(self, kind: str, model: str | None = None) -> None:
+    def __init__(self, kind: str, model: str | None = None, power: str | None = None) -> None:
         if kind not in _STATIC_MODELS:
             raise ValueError(f"unknown CLI provider kind: {kind!r}")
         self.kind = kind
         self.model = model
+        self.power = power
         self.name = kind
 
     def is_available(self) -> bool:
@@ -110,6 +111,7 @@ class CliProvider:
         model: str | None = None,
         json_schema: dict[str, Any] | None = None,
         timeout_s: float | None = None,
+        power: str | None = None,
     ) -> ProviderResult:
         binary = _resolve_binary(self.kind)
         if not binary:
@@ -118,12 +120,13 @@ class CliProvider:
                 f"'{_binary_setting(self.kind)}'; install/authenticate it or pick another provider)"
             )
         mdl = model or self.model
+        pwr = power or self.power
         prompt = _flatten_messages(messages)
         if json_schema:
             prompt += _JSON_INSTRUCTION.format(schema=json.dumps(json_schema, ensure_ascii=False))
         timeout = timeout_s or float(settings().llm_providers.timeout_s)
 
-        args, stdin_data, tmp_out = self._build_args(binary, mdl, prompt)
+        args, stdin_data, tmp_out = self._build_args(binary, mdl, prompt, pwr)
         creationflags = _CREATE_NO_WINDOW if os.name == "nt" else 0
 
         t0 = time.monotonic()
@@ -179,8 +182,15 @@ class CliProvider:
     # -- per-kind argv/stdin construction --------------------------------------------------
 
     def _build_args(
-        self, binary: str, model: str | None, prompt: str
+        self, binary: str, model: str | None, prompt: str, power: str | None = None
     ) -> tuple[list[str], str | None, Path | None]:
+        """U8-ג (Revision 2026-09-06): ``power`` ("low"/"medium"/"high", ...) is appended as a
+        bare ``--effort <level>`` for ``agy``/``claude`` -- both accept that exact flag name,
+        confirmed live 2026-09-06 against `agy --help`/`claude --help` on this machine (`claude`'s
+        `--effort` also accepts "xhigh"/"max", not offered in this project's config default);
+        `codex` has no such flag (`codex exec --help`, same check) and gets
+        ``-c model_reasoning_effort=<level>`` instead, via its generic config-override mechanism.
+        """
         real_model = None if model == "default" else model
         if self.kind == "agy":
             # No stdin support (see docs/adr/005-cloud-llm-cli.md); the prompt is a plain argv
@@ -188,21 +198,29 @@ class CliProvider:
             args = [binary, "-p", prompt, "--output-format", "json"]
             if real_model:
                 args += ["--model", real_model]
+            if power:
+                args += ["--effort", power]
             return args, None, None
         if self.kind == "claude":
             # `-p` with no attached value reads the prompt from stdin.
             args = [binary, "-p", "--output-format", "json", "--restricted"]
             if real_model:
                 args += ["--model", real_model]
+            if power:
+                args += ["--effort", power]
             return args, prompt, None
         # codex: final message is written to -o/--output-last-message rather than parsed out of
-        # the NDJSON --json stream, which also carries hook/skill noise on this machine.
+        # the NDJSON --json stream, which also carries hook/skill noise on this machine. No
+        # dedicated effort/power flag exists (`codex exec --help`, checked 2026-09-06) -- routed
+        # through the generic `-c key=value` config override instead, per the ADR's design.
         fd, tmp_name = tempfile.mkstemp(prefix="eoa_codex_", suffix=".txt")
         os.close(fd)
         tmp_out = Path(tmp_name)
         args = [binary, "exec", "-s", "read-only", "--json", "-o", str(tmp_out)]
         if real_model:
             args += ["-m", real_model]
+        if power:
+            args += ["-c", f"model_reasoning_effort={power}"]
         return args, prompt, tmp_out
 
     @staticmethod

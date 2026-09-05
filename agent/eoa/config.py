@@ -172,18 +172,66 @@ class ExportCfg(BaseModel):
 class CliProviderCfg(BaseModel):
     """One cloud CLI provider (U8, docs/adr/005-cloud-llm-cli.md): ``binary`` is looked up via
     ``shutil.which`` (a bare name resolves through PATH; an absolute path works too), ``models``
-    is the static list offered in the picker (the CLIs don't expose a reliable model-listing API)."""
+    is the static list offered in the picker (the CLIs don't expose a reliable model-listing API).
+    ``power_levels`` (U8-ג, Revision 2026-09-06) are the effort/reasoning levels the CLI accepts
+    on this machine (verified live 2026-09-06 against each CLI's ``--help``): ``agy``/``claude``
+    both take a bare ``--effort <level>`` (``claude`` additionally accepts ``xhigh``/``max``, not
+    offered here to keep the three CLI providers' pickers uniform); ``codex`` has no dedicated
+    flag but honors the same values via ``-c model_reasoning_effort=<level>``.
+    """
 
     binary: str
     models: list[str] = Field(default_factory=list)
+    power_levels: list[str] = Field(default_factory=lambda: ["low", "medium", "high"])
+
+
+class ChainEntryCfg(BaseModel):
+    """One link of a role's fallback chain (U8-ה, Revision 2026-09-06).
+
+    ``provider`` is any provider id known to ``eoa.llm.chain`` -- a CLI kind
+    (``agy``/``claude``/``codex``), a direct API kind (``anthropic``/``gemini``/``openai``), or
+    ``ollama`` for the local terminal entry. ``power`` is a provider-specific effort/thinking
+    level (e.g. ``"low"``/``"medium"``/``"high"``); ``None`` uses that provider's default.
+    """
+
+    provider: str
+    model: str | None = None
+    power: str | None = None
+
+
+class ApiProviderCfg(BaseModel):
+    """One direct-API cloud provider (U8-ו, Revision 2026-09-06). The API key itself is never
+    configured here -- it is read straight from the environment (``ANTHROPIC_API_KEY`` /
+    ``GEMINI_API_KEY`` / ``OPENAI_API_KEY``, populated from ``.env`` only) and never logged or
+    surfaced to the UI beyond a "מוגדר / לא מוגדר" boolean.
+    """
+
+    models: list[str] = Field(default_factory=list)
+    power_levels: list[str] = Field(default_factory=lambda: ["low", "medium", "high"])
+
+
+class PricingEntryCfg(BaseModel):
+    """USD per million tokens for one ``"<provider>:<model>"`` key (U8-ו/5). CLI/subscription
+    providers (agy/claude/codex) are not priced here -- they cost $0 by design, even though their
+    reported token usage is still counted in ``llm_calls`` when available."""
+
+    input_per_mtok: float = 0.0
+    output_per_mtok: float = 0.0
 
 
 class LlmProvidersCfg(BaseModel):
-    """U8: interactive-only cloud LLM routing via CLI (agy/claude/codex), never used by the
-    night pipeline (``eoa.orchestrator.jobs`` forces ``EOA_PIPELINE=1`` at import time, which
-    ``eoa.llm.ollama_client`` checks before honoring any provider choice -- see the ADR).
+    """U8: LLM provider routing (docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06).
+
+    ``mode`` is the global local/cloud switch (U8-א): "local" (default) means every role resolves
+    to the local Ollama model everywhere, including the night pipeline; "cloud" means each role in
+    ``chains`` resolves to its configured fallback chain (``eoa.llm.chain.run_chain``), which is
+    *always* terminated by a local Ollama entry (enforced by ``effective_chain`` below even if the
+    user's own chain omits one). The interactive chat keeps its own per-question override
+    (``interactive_default`` / the request's explicit ``provider``), which is independent of
+    ``mode`` and always wins when set.
     """
 
+    mode: str = "local"  # "local" | "cloud" -- global switch, applies pipeline-wide (U8-א)
     allow_cloud: bool = True
     interactive_default: str = "ollama"  # "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
     timeout_s: int = 120
@@ -200,6 +248,61 @@ class LlmProvidersCfg(BaseModel):
             "codex": CliProviderCfg(binary="codex", models=["default"]),
         }
     )
+    # U8-ו: direct-API providers (key-based, no CLI). Model lists here are the "approximate,
+    # edit me" defaults asked for in point 5 -- ``list_models()`` refreshes them live when the key
+    # is present and the API exposes a listing endpoint (currently only Gemini's).
+    api: dict[str, ApiProviderCfg] = Field(
+        default_factory=lambda: {
+            "anthropic": ApiProviderCfg(
+                models=["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+                power_levels=["low", "medium", "high"],
+            ),
+            "gemini": ApiProviderCfg(
+                models=["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
+                power_levels=["low", "medium", "high"],
+            ),
+            "openai": ApiProviderCfg(
+                models=["gpt-5.1", "gpt-5.1-mini"],
+                power_levels=["low", "medium", "high"],
+            ),
+        }
+    )
+    # U8-ה: per-role ("resident"/"investigator"/"light"/"report") ordered fallback chains, used
+    # only when mode == "cloud". A role missing from this dict (or mode == "local") falls back to
+    # a single-entry local chain -- see ``effective_chain``.
+    chains: dict[str, list[ChainEntryCfg]] = Field(default_factory=dict)
+    # U8-ו/5: "approximate, edit me" USD-per-million-token defaults for the API models above.
+    # Keyed "<provider>:<model>"; CLI providers are intentionally absent (cost 0).
+    pricing: dict[str, PricingEntryCfg] = Field(
+        default_factory=lambda: {
+            "anthropic:claude-opus-5": PricingEntryCfg(input_per_mtok=15.0, output_per_mtok=75.0),
+            "anthropic:claude-sonnet-5": PricingEntryCfg(input_per_mtok=3.0, output_per_mtok=15.0),
+            "anthropic:claude-haiku-4-5-20251001": PricingEntryCfg(input_per_mtok=0.8, output_per_mtok=4.0),
+            "gemini:gemini-3.1-pro-preview": PricingEntryCfg(input_per_mtok=1.25, output_per_mtok=10.0),
+            "gemini:gemini-3.5-flash": PricingEntryCfg(input_per_mtok=0.3, output_per_mtok=2.5),
+            "gemini:gemini-3.1-flash-lite": PricingEntryCfg(input_per_mtok=0.1, output_per_mtok=0.4),
+            "openai:gpt-5.1": PricingEntryCfg(input_per_mtok=5.0, output_per_mtok=15.0),
+            "openai:gpt-5.1-mini": PricingEntryCfg(input_per_mtok=0.5, output_per_mtok=2.0),
+        }
+    )
+
+    def effective_chain(self, role: str) -> list[ChainEntryCfg]:
+        """The chain a role-based call (no explicit ``provider`` override) should try, in order.
+
+        ``mode == "local"`` (default): always just ``[ollama]``, regardless of ``chains`` -- the
+        global switch (U8-א) means a "cloud" chain configured for a role has zero effect until the
+        user flips ``mode`` to "cloud". ``mode == "cloud"``: the role's configured chain, with a
+        local Ollama entry enforced at the end even if the user's own list omits one (U8-א: "the
+        chain always ends with the local Ollama model (enforced)").
+        """
+        if self.mode != "cloud":
+            return [ChainEntryCfg(provider="ollama")]
+        chain = list(self.chains.get(role) or [])
+        if not chain:
+            return [ChainEntryCfg(provider="ollama")]
+        if chain[-1].provider != "ollama":
+            chain.append(ChainEntryCfg(provider="ollama"))
+        return chain
 
 
 class ModelSpec(BaseModel):

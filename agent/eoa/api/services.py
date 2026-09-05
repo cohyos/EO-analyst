@@ -1959,6 +1959,7 @@ def list_llm_providers() -> dict[str, Any]:
     if cfg.allow_cloud:
         for kind in ("agy", "claude", "codex"):
             cli = CliProvider(kind)
+            cli_cfg = cfg.cli.get(kind)
             providers.append(
                 {
                     "id": kind,
@@ -1966,6 +1967,8 @@ def list_llm_providers() -> dict[str, Any]:
                     "kind": "cloud",
                     "available": cli.is_available(),
                     "models": cli.list_models(),
+                    # U8-ג: effort/reasoning levels this CLI accepts (see CliProviderCfg).
+                    "power_levels": list(cli_cfg.power_levels) if cli_cfg else ["low", "medium", "high"],
                 }
             )
         from eoa.llm.providers.api import get_api_provider

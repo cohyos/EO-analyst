@@ -4,8 +4,45 @@ from __future__ import annotations
 
 import pytest
 
-from eoa.config import settings
+from eoa.config import ChainEntryCfg, LlmProvidersCfg, settings
 from eoa.errors import ConfigError, ModelNotAllowed
+
+
+class TestLlmProvidersEffectiveChain:
+    """U8-א/ה (Revision 2026-09-06): the global local/cloud switch + per-role fallback chains."""
+
+    def test_default_is_local_mode(self):
+        assert LlmProvidersCfg().mode == "local"
+
+    def test_local_mode_ignores_configured_chains(self):
+        cfg = LlmProvidersCfg(mode="local", chains={"resident": [ChainEntryCfg(provider="agy")]})
+        assert cfg.effective_chain("resident") == [ChainEntryCfg(provider="ollama")]
+
+    def test_cloud_mode_with_no_chain_for_role_falls_back_to_local(self):
+        cfg = LlmProvidersCfg(mode="cloud", chains={"resident": [ChainEntryCfg(provider="agy")]})
+        assert cfg.effective_chain("light") == [ChainEntryCfg(provider="ollama")]
+
+    def test_cloud_mode_returns_configured_chain_with_ollama_appended(self):
+        cfg = LlmProvidersCfg(
+            mode="cloud",
+            chains={"resident": [ChainEntryCfg(provider="claude", model="claude-sonnet-5", power="high")]},
+        )
+        chain = cfg.effective_chain("resident")
+        assert [e.provider for e in chain] == ["claude", "ollama"]
+
+    def test_cloud_mode_does_not_duplicate_an_explicit_ollama_terminal(self):
+        cfg = LlmProvidersCfg(
+            mode="cloud",
+            chains={"resident": [ChainEntryCfg(provider="agy"), ChainEntryCfg(provider="ollama")]},
+        )
+        chain = cfg.effective_chain("resident")
+        assert [e.provider for e in chain] == ["agy", "ollama"]
+
+    def test_api_and_pricing_defaults_present(self):
+        cfg = LlmProvidersCfg()
+        assert set(cfg.api) == {"anthropic", "gemini", "openai"}
+        assert "anthropic:claude-sonnet-5" in cfg.pricing
+        assert cfg.pricing["anthropic:claude-sonnet-5"].input_per_mtok > 0
 
 
 class TestSettingsLoading:

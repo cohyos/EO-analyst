@@ -4179,3 +4179,234 @@ every eco/host-mode `daily_run` past ingest and is worth fixing separately. e2e 
 `01-morning`/`11-status-strip`/`09-reports` were run against the live 8765 app after the frontend
 build (backend-dependent assertions necessarily still reflect the *old* backend there) -- see the
 session's final report for the pass/fail breakdown.
+
+## Cloud LLM providers, Revision 2026-09-06 (U8-א through U8-ו, docs/adr/005-cloud-llm-cli.md
+## "Revision 2026-09-06" section)
+
+Replaces U8's original "cloud is chat-only, pipeline hard-gated to ollama" design with a global
+local/cloud switch, per-role fallback chains, direct-API providers, batch mode, and cloud-delegated
+deep search. The section above (plain "Cloud LLM providers via CLI (U8, ...)") still describes the
+CLI provider mechanics (`CliProvider`, the JSON-schema-append contract, subprocess plumbing)
+unchanged; this section describes what got added/changed around it.
+
+**Config** (`eoa.config.LlmProvidersCfg`, `config/config.yaml`): new `mode: "local"|"cloud"`
+(default `"local"`) -- the global switch; new `chains: dict[role, list[ChainEntryCfg]]`
+(`ChainEntryCfg = {provider, model?, power?}`) -- per-role ("resident"/"investigator"/"light"/
+"report") ordered fallback chains, used only when `mode == "cloud"`; new `api:
+dict[kind, ApiProviderCfg]` (`anthropic`/`gemini`/`openai`, each `{models, power_levels}`); new
+`pricing: dict["<provider>:<model>", {input_per_mtok, output_per_mtok}]` ("approximate, edit me"
+USD-per-million-token defaults). `Settings.llm_providers.effective_chain(role)` is the one place
+that resolves all of this: `mode != "cloud"` -> always `[{provider: "ollama"}]`; `mode == "cloud"`
+-> the role's configured chain with a local `ollama` entry appended if the user's own list omits
+one (the chain can never fail to terminate locally, even if misconfigured).
+
+**Direct-API providers** (`agent/eoa/llm/providers/api.py`, new): `AnthropicProvider`,
+`GeminiProvider`, `OpenAIProvider`, one `httpx.Client` call each (120 s timeout,
+`tenacity`-retried on 429/5xx/timeout, 4 attempts, exponential backoff), implementing the same
+`Provider` protocol (`chat`/`list_models`/`is_available`) as `CliProvider`/`OllamaProvider`.
+`is_available()` is `bool(os.environ.get("<...>_API_KEY"))` -- the key is read from the
+environment only (`.env`), never written to config.yaml, never logged, never returned by any API
+response beyond that boolean. Structured output uses each API's native mechanism: Anthropic
+tool-use (`tool_choice: {type: "tool", name: "emit_result"}`, the schema as the tool's
+`input_schema`, the result read back from the `tool_use` content block); Gemini
+`generationConfig.responseSchema` + `responseMimeType: "application/json"` (`_gemini_schema`
+inlines `$defs`/`$ref` and strips keys Gemini's schema subset doesn't accept -- `title`,
+`additionalProperties`, `$schema`, `default` -- since pydantic's `model_json_schema()` output
+uses all of those); OpenAI `response_format: {type: "json_schema", json_schema: {...}}`. Power
+levels map onto each API's own effort/thinking knob: Anthropgic `thinking: {type: "enabled",
+budget_tokens}` (low=1024/medium=4096/high=16000, `max_tokens` raised to cover the budget);
+Gemini `generationConfig.thinkingConfig.thinkingBudget` (512/4096/16000); OpenAI
+`reasoning_effort: "low"|"medium"|"high"` passed straight through. `GeminiProvider.list_models()`
+refreshes live from `GET /v1beta/models` (filtered to models supporting `generateContent`) when
+the key is present, falling back to the config default on any error (network, bad key, etc.).
+
+**Fallback chain execution** (`agent/eoa/llm/chain.py`, new): `run_chain(role, chain,
+call_ollama, *, messages, json_schema, batch_size)` tries each `ChainEntryCfg` in order --
+`_build_provider` maps `agy`/`claude`/`codex` to `CliProvider` and `anthropic`/`gemini`/`openai`
+to the API classes above; `"ollama"` calls the caller-supplied `call_ollama()` zero-arg callable
+instead (so the resource-gate/`num_ctx` path stays defined in exactly one place,
+`ollama_client._ollama_chat`, not duplicated here). A `ProviderUnavailable` (binary/key missing),
+`CliProviderError` (HTTP-after-retry/non-zero-exit/timeout), or `LLMOutputError` (schema
+validation failed after `chat_structured`'s own corrective retry) on a non-terminal entry logs
+that attempt and moves to the next one; failing on the terminal `"ollama"` entry raises
+`ChainExhausted` (nothing left to fall back to). Every attempt -- success or failure -- is
+recorded to `llm_calls` via `_record`/`log_llm_call` (best-effort, wrapped so a logging failure
+never breaks the actual call), including `attempt_no`, `fell_back_from` (the previous entry's
+provider id, or `None` for the first attempt), `prompt_tokens`/`completion_tokens`, `est_cost_usd`
+(`eoa.llm.cost.estimate_cost_usd`, `0.0` for any CLI provider or unpriced API model), `batch_size`,
+`role`, and `error` (`NULL` on success -- this is how the summary endpoint tells success from
+failure, there is no separate boolean column).
+
+**`ollama_client.py` dispatch, revised.** `chat()`'s priority order changed from a single
+`_resolve_provider` call to two branches: (1) inside the orchestrator/worker process
+(`EOA_PIPELINE=1`, same env var `eoa.orchestrator.jobs` has always set at import time) -- ANY
+`provider` argument is ignored (defense-in-depth, unchanged intent from the original ADR) and the
+call ALWAYS goes through `settings().llm_providers.effective_chain(role)` via `_dispatch_chain`,
+which adapts `eoa.llm.chain.run_chain`'s result back into a `ChatResult`; (2) everywhere else (the
+API/uvicorn process serving `/api/ask`) -- `_resolve_provider(provider)` (explicit override or
+`interactive_default`) exactly as before this revision, via `_dispatch_explicit_provider` (renamed
+from `_dispatch_cli_chat`, now also handles `anthropic`/`gemini`/`openai` kinds, model@power
+syntax after the `:`). In "local" mode (default), `effective_chain(role)` is always
+`[{provider: "ollama"}]`, so branch (1) falls straight through to the same `_ollama_chat` local
+path as before -- zero behavioral change, zero overhead, for every existing deployment.
+`chat_structured` mirrors this: a schema-validation failure that survives its own one corrective
+retry against the chain's *current* entry now falls back to the *next* entry too (`
+_chat_structured_chain`, a fresh `_structured_once` -- schema call + its own corrective retry --
+per entry), not just a provider/HTTP failure. `_ollama_chat` is the old `chat()` body, factored
+out so both the plain local path and the chain's local terminal leg share one implementation
+(resource gate, `num_ctx`, the Ollama HTTP call itself).
+
+**Batch mode (U8-6).** `ollama_client.is_cloud_batch_mode()` is `settings().llm_providers.mode ==
+"cloud"` -- the signal a pipeline call site uses to decide whether to batch. `
+chat_structured_batch(role, item_schema, items: list[tuple[item_id, prompt]], *, system, task)`
+builds (and caches per `item_schema`) a wrapper pydantic model via `pydantic.create_model`:
+`{item_id: int, **item_schema fields}` per item, wrapped in `{"items": [...]}`; the prompt
+concatenates every item's prompt under a `### item_id=<id>` heading with one intro instruction,
+and the whole thing goes through the ordinary `chat_structured` (chain-aware, one-corrective-retry)
+contract -- a schema failure or provider outage falls back exactly as a single-item call would.
+The response is split back into `{item_id: item_schema instance}`; any `item_id` the model's
+response omits is simply absent (the caller's per-item loop treats that as any other per-item
+failure). Wired into the batch-mode-only branches (delimited with `# --- U8-6 batch mode ---`
+comments) of:
+- `eoa.pipeline.classify.run_classify` -- `classify_batch`, `BATCH_SIZE = 25`.
+- `eoa.pipeline.triage.run_triage` -- `triage_batch`, `BATCH_SIZE = 25` (recomputes `level` from
+  score after the batch call, same as `triage_item`).
+- `eoa.pipeline.analyze.run_analyze` -- `analyze_batch`, `BATCH_SIZE = 8`; persistence/entity-
+  relevance-scoring is shared between the batch and per-item loops via a new
+  `_persist_analysis_and_score(it, out, stats)` helper (no duplicated logic).
+
+Every batch call site's *local-mode* code path (the `for it in eligible:` loop after the batch
+branch) is untouched, byte for byte, from before this revision -- `is_cloud_batch_mode()` gates
+the entire batch branch with an early `return`.
+
+**Cloud-delegated batch deep search (U8-6b)**, `agent/eoa/search/deep_search.py` (new section,
+appended -- the local ReAct `investigate()` above it is completely untouched):
+`write_investigations_file(pending)` writes every pending investigation of the run (question,
+entities, seed, item context) to one `runtime/tmp/investigations_<ts>.md`; `investigate_batch_cloud
+(pending)` hands that file to ONE agentic-CLI call with its own web tools and returns
+`({question_id: Investigation}, cross_insights_he)`. Tries `claude` first --
+**verified live 2026-09-06** (`scripts/verify_cloud_tools.py`): `--restricted --allowedTools
+WebSearch,WebFetch --output-format json` grants exactly those two research tools headlessly, no
+permission-bypass flag needed at all, while `--restricted` still strips Bash/code-execution tools
+per the original ADR's tool-permission design -- then `agy` (no documented tool-permission flag;
+attempted on the chance its default Gemini grounding covers the question, same schema validation
+either way); `codex` is excluded from this path entirely (`codex exec --help` on this machine's
+installed version has no `--search`/`--web`/`-c web_search=...` option, confirmed live). Both
+failing raises `LLMOutputError`, which the caller (`eoa.orchestrator.jobs.run_deep_searches`)
+catches to fall back to the local per-job loop for the jobs it already claimed -- no job is ever
+silently dropped. The CLI's JSON response (`CloudBatchInvestigationOut`: `results: {question_id:
+{answer_he, confidence, sources: [{url, title}], what_was_tried_he}}`, `cross_insights_he`) is
+schema-validated, then every answer is run through `_screen_cloud_answer` -- the SAME
+`eoa.security.guard.screen()` every fetched page goes through (docs/CONVENTIONS.md rule #3: a
+cloud CLI's web-fetched content is still untrusted) -- a flagged answer is replaced with a safe
+not_found-shaped stand-in rather than persisted, and only `http(s)://` sources ever survive.
+`_log`/`_learn` (the existing per-investigation logging/playbook functions) are reused unchanged,
+`engine="cloud_batch"` distinguishing these rows from the ReAct loop's own per-round log entries.
+
+**`eoa.orchestrator.jobs.run_deep_searches`, revised.** The old single per-job `while` loop is
+now two branches: `mode == "cloud"` claims every available `deep_search` job up to
+`deep_search.max_per_night` FIRST, delegates all of them to `investigate_batch_cloud` in one call,
+and finishes each job from the returned `{job_id: Investigation}` map (a job missing from the
+response is marked `failed`, never silently dropped) -- falling back to the local loop (via the
+new `_run_deep_search_job_local(job)` helper, factored out of the original loop body so both
+branches share it) for the already-claimed jobs if the cloud call itself raises. `mode == "local"`
+(default) is the exact original loop, calling `_run_deep_search_job_local` per claimed job --
+byte-for-byte unchanged behavior.
+
+**Pipeline gate, meaning changed (not removed).** `eoa.orchestrator.jobs` still sets
+`os.environ.setdefault("EOA_PIPELINE", "1")` at import time -- same env var, same "every job in
+this process" scope (night pipeline + queued jobs incl. manual "investigate"/"run now") -- but its
+effect changed from "force ollama outright" to "use `llm_providers.mode`'s configured chain,
+which itself always terminates in ollama". This satisfies U8-א's "one global switch that also
+applies to the night pipeline" while keeping the original ADR's defense-in-depth property: no
+call site's `provider` argument (there currently is none, in any pipeline module) can leak an
+uncontrolled cloud choice into an automated/queued run -- only the configured, audited chain can
+route a pipeline call to the cloud now, and it always has a local answer as its last resort.
+
+**Migration `0009_llm_calls_chain`** (chained after `0008`): adds `attempt_no INTEGER`,
+`fell_back_from TEXT`, `prompt_tokens/completion_tokens INTEGER DEFAULT 0`,
+`est_cost_usd NUMERIC(12,6) DEFAULT 0`, `batch_size INTEGER DEFAULT 1`, `role TEXT`, `error TEXT`
+to `llm_calls`, plus an index on `role`. `provider` may now be `'ollama'` (0008's docstring
+excluded it "by convention" back when every logged call was necessarily a successful cloud CLI
+call; the chain concept means a local terminal leg's own attempt is logged too, e.g. to show a
+fallback happened). `eoa.memory.relational.log_llm_call` gained the matching optional kwargs
+(all default to the old no-chain values, so every pre-existing call site is unaffected);
+new `eoa.memory.relational.summarize_llm_calls(since_hours=24)` -> per-provider
+`{calls, failures, fallbacks, prompt_tokens, completion_tokens, est_cost_usd}` (a row is a
+"failure" when `error IS NOT NULL`, a "fallback" when `fell_back_from IS NOT NULL`) plus a
+`totals` row (`cloud_calls` = every non-`"ollama"` provider's calls summed).
+
+**API** (`agent/eoa/api/routes/llm.py` + `services.py`): `GET /api/llm/providers` response gained
+`mode` and `chains` (role -> `[{provider, model, power}]`, from `cfg.chains` verbatim via
+`ChainEntryCfg.model_dump()`); the `providers` list gained a third `kind: "api"` alongside
+`"local"`/`"cloud"`, with `key_env` (which `.env` variable controls availability -- never the key
+value) and `power_levels`. `PUT /api/llm/settings` gained `mode?: "local"|"cloud"` (rejected with
+an error, without touching the file, for any other value) alongside the existing
+`interactive_default?`/`allow_cloud?`, patched via the same `_patch_yaml_scalar` line-anchored
+regex + `write_settings_yaml` atomic-write path as before. New `GET /api/llm/calls?since=24h` (or
+any `"<n>h"`/bare integer) -> `services.summarize_llm_calls` -> the relational function's output
+verbatim, for the Settings "מודלים" card's cost/fallback line.
+
+**Report footer** (`agent/eoa/report/daily.py`, LLM-call-site-only edit): a new
+`eoa.llm.cost.format_daily_report_footer(totals)` helper renders "מודלים: X קריאות ענן, Y נפלו
+למקומי, עלות משוערת $Z" (empty string, no line added, when there was no cloud activity in the
+last 24h) from `summarize_llm_calls(24)["totals"]`; appended as a paragraph in the docx (`doc.
+add_paragraph`, no `docx_builder.py` signature change needed), and as a trailing line in the
+markdown/HTML renderings -- wrapped in `try/except` so a DB/summary failure can never break the
+report itself.
+
+**UI**: `ModelPicker.tsx` gained a third `optgroup` ("ענן (API)") for `kind === "api"` providers,
+same `id:model` value shape as a cloud CLI option, disabled with "(לא מוגדר מפתח)" when
+unavailable. `SettingsPage.tsx`'s "מודלים" card gained: a mode toggle (`t("llm.modeLabel")`,
+local/cloud buttons wired to `PUT /api/llm/settings {mode}`) above the existing chat-only default
+selector (whose label now clarifies it "overrides the global mode, for this question only"); the
+provider list now shows each provider's kind (`t("llm.providerKind.*")`) and, for `api` providers,
+"מוגדר"/"לא מוגדר" instead of "זמין"/"לא זמין" (`t("llm.keyConfigured")`/`keyNotConfigured`); and
+a cost/fallback summary line (`t("llm.callsSummary", {cloud, fallback, cost})` /
+`callsSummaryEmpty`) from a new `GET /api/llm/calls` React Query (`refetchInterval: 30_000`). The
+stale "the night run always uses the local model regardless of this setting" paragraph was
+corrected to describe the new global-mode behavior. New `llm.*` namespace added to both
+`web/src/i18n/dictionaries/{he,en}.ts` (`modeLabel`, `modeLocal`, `modeCloud`, `modeHint`,
+`power.{low,medium,high}`, `powerLabel`, `providerKind.{local,cloud,api}`, `keyConfigured`,
+`keyNotConfigured`, `callsSummary`, `callsSummaryEmpty`) -- per this file's existing convention,
+only the *new* interactive strings this revision adds went through `t()`; the surrounding
+pre-existing hardcoded Hebrew text in `SettingsPage.tsx`/`ModelPicker.tsx` was left as-is (neither
+file was on the i18n migration list before this change).
+
+**`.env.example`** gained `ANTHROPIC_API_KEY`/`GEMINI_API_KEY`/`OPENAI_API_KEY` (empty, commented)
+-- optional, only needed for a `chains` entry naming that provider kind.
+
+**`scripts/verify_cloud_tools.py`** (new, standalone, never imported elsewhere): runs one
+research question through each CLI with the exact flags `investigate_batch_cloud` uses and
+records whether the CLI's own response metadata confirms a real tool call happened (Claude's
+`usage.server_tool_use.web_search_requests`/`web_fetch_requests`) vs. an unconfirmable answer
+(agy has no such field) vs. not attempted (codex, no flag). Writes both a stdout table and
+`runtime/tmp/verify_cloud_tools_<ts>.json`. See the ADR's permission matrix for this run's actual
+results and the caveat about response caching suppressing a repeated identical question's own
+`web_search_requests` count.
+
+**Tests** (all new except where noted): `tests/unit/test_llm_chain.py` (fallback/multi-hop/
+recording), `tests/unit/test_llm_cost.py`, `tests/unit/test_llm_api_providers.py`
+(`respx`-mocked HTTP for all three API providers, retry/structured-output/power-level behavior),
+`tests/unit/test_llm_batch_mode.py` (`chat_structured_batch` + classify/triage/analyze wiring),
+`tests/unit/test_deep_search_cloud_batch.py` (subprocess mocked), `tests/unit/
+test_jobs_deep_search_batch.py` (`run_deep_searches` cloud/local/fallback branches); extended
+`tests/unit/test_config.py` (`effective_chain`), `tests/unit/test_ollama_client_provider_dispatch.py`
+(pipeline-process chain dispatch, local-mode no-op), `tests/unit/test_llm_settings_api.py`
+(`mode` field, `GET /api/llm/calls` route). `PYTHONPATH=agent python -m pytest tests/unit -q`:
+1072 passed. `ruff check`/`mypy` clean on every new/changed Python file (mypy's pre-existing
+`tuple[Any,...]` row-typing errors in `relational.py`/`daily.py`/`jobs.py`/`analyze.py`/
+`deep_search.py` are unchanged in count from before this revision -- confirmed via `git stash`
+diff, not introduced here). `npm --prefix web run {lint,build}` clean; `npx vitest run`: 111
+passed / 16 files (no dedicated `SettingsPage`/`ModelPicker` test files existed before or after
+this change).
+
+**Left for the user**: restart the port-8765 uvicorn (and the orchestrator/worker process) to
+pick up every backend change in this section -- none of it is live there yet, only verified via
+`scripts/verify_cloud_tools.py`'s real CLI calls, a throwaway second uvicorn on port 8766
+(`runtime/eoa.env`, stopped after), and the unit tests above. Add `ANTHROPIC_API_KEY`/
+`GEMINI_API_KEY`/`OPENAI_API_KEY` to `.env` (or `runtime/eoa.env`) for any `chains` entry naming
+one of those providers -- none is required for CLI-only chains (`agy`/`claude`/`codex`) or for
+`mode: local` (the default, unchanged behavior). A `chains` entry must be added to config.yaml by
+hand for `mode: cloud` to do anything beyond "try nothing, fall straight to ollama" -- no UI exists
+yet to author a chain (only to flip the global `mode` and the chat's own `interactive_default`).

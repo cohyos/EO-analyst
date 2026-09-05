@@ -8,7 +8,13 @@ import structlog
 
 from eoa.config import settings
 from eoa.errors import LLMOutputError, ResourceUnavailable
-from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
+from eoa.llm.ollama_client import (
+    DATA_GUARD_SYSTEM,
+    chat_structured,
+    chat_structured_batch,
+    is_cloud_batch_mode,
+    wrap_data,
+)
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import TriageOut
 from eoa.memory.relational import (
@@ -23,6 +29,7 @@ log = structlog.get_logger(__name__)
 
 STAGE = "triage"
 MAX_CHARS = 6000
+BATCH_SIZE = 25  # U8-6 (Revision 2026-09-06): "triage ... run in batches of up to 25 items"
 
 # U11: phrases that indicate the model produced a non-question / meta-commentary about the
 # article instead of a self-contained research question (docs/REVIEW_2026-09-05.md U11/F17/F18).
@@ -169,10 +176,9 @@ def _lessons_text() -> str:
     return "\n".join(parts) or "אין לקחים קודמים."
 
 
-def triage_item(item: dict, *, role: str = "resident", interactive: bool = False) -> TriageOut:
-    """Score one classified item (does not persist). Level is recomputed from config thresholds."""
+def _triage_prompt(item: dict) -> str:
     lv = settings().triage.levels
-    prompt = render(
+    return render(
         "triage",
         red_min=lv["red"],
         orange_min=lv["orange"],
@@ -188,12 +194,20 @@ def triage_item(item: dict, *, role: str = "resident", interactive: bool = False
         one_line_he=item.get("summary_he") or "",
         data=wrap_data((item.get("clean_text") or "")[:MAX_CHARS], item["id"], item.get("url") or ""),
     )
+
+
+def _triage_system() -> str:
+    return render("system_analyst", data_guard=DATA_GUARD_SYSTEM)
+
+
+def triage_item(item: dict, *, role: str = "resident", interactive: bool = False) -> TriageOut:
+    """Score one classified item (does not persist). Level is recomputed from config thresholds."""
     out = chat_structured(
         role,
         TriageOut,
         [
-            {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": _triage_system()},
+            {"role": "user", "content": _triage_prompt(item)},
         ],
         task="triage",
         interactive=interactive,
@@ -202,9 +216,22 @@ def triage_item(item: dict, *, role: str = "resident", interactive: bool = False
     return out
 
 
+def triage_batch(items: list[dict], *, role: str = "resident") -> dict[int, TriageOut]:
+    """U8-6 batch mode (Revision 2026-09-06): triage up to ``BATCH_SIZE`` items in one cloud call
+    instead of one call per item; returns ``{item_id: TriageOut}`` with ``level`` already
+    recomputed from config thresholds, same as ``triage_item``. Only used by ``run_triage`` when
+    ``is_cloud_batch_mode()`` is true."""
+    prompts = [(it["id"], _triage_prompt(it)) for it in items]
+    results = chat_structured_batch(role, TriageOut, prompts, system=_triage_system(), task="triage")
+    for out in results.values():
+        out.level = level_for(out.score)  # type: ignore[assignment]
+    return results
+
+
 def run_triage(limit: int = 300, role: str = "resident") -> TriageStats:
     """Triage all classified, in-scope items."""
     stats = TriageStats()
+    eligible: list[dict] = []
     for it in get_items_for_stage(STAGE, limit):
         if it.get("domain") is None:
             continue  # not classified yet — leave for the next pass, do not mark
@@ -215,6 +242,45 @@ def run_triage(limit: int = 300, role: str = "resident") -> TriageStats:
         ):
             mark_stage(it["id"], STAGE)
             continue
+        eligible.append(it)
+
+    # --- U8-6 batch mode (Revision 2026-09-06): cloud mode triages BATCH_SIZE items per call.
+    # Persistence/side-effects below are identical to the per-item path; only how TriageOut is
+    # obtained differs. Local mode (default) never enters this branch. -----------------------
+    if is_cloud_batch_mode():
+        for i in range(0, len(eligible), BATCH_SIZE):
+            chunk = eligible[i : i + BATCH_SIZE]
+            try:
+                results = triage_batch(chunk, role=role)
+            except ResourceUnavailable:
+                log.warning("triage_batch_deferred_resources", n=len(chunk))
+                break
+            except LLMOutputError as exc:
+                log.error("triage_batch_bad_output", n=len(chunk), error=str(exc)[:200])
+                stats.failed += len(chunk)
+                continue
+            for it in chunk:
+                out = results.get(it["id"])
+                if out is None:
+                    log.error("triage_batch_missing_item", item_id=it["id"])
+                    stats.failed += 1
+                    continue
+                try:
+                    update_item_fields(it["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600])
+                    if out.needs_deep_search or out.level == "red":
+                        _enqueue_deep_search(it, out)
+                    mark_stage(it["id"], STAGE)
+                    stats.done += 1
+                    stats.red += out.level == "red"
+                    stats.orange += out.level == "orange"
+                except Exception as exc:
+                    log.error("triage_persist_failed", item_id=it["id"], error=str(exc)[:200])
+                    stats.failed += 1
+        log.info("triage_done", **stats.__dict__)
+        return stats
+    # --- end U8-6 batch mode -------------------------------------------------------------------
+
+    for it in eligible:
         try:
             out = triage_item(it, role=role)
             update_item_fields(it["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600])

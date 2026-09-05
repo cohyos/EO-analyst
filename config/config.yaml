@@ -131,9 +131,10 @@ api:
 export:
   obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }
 
-llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md — interactive-only cloud models via CLI (never the night pipeline)
-  allow_cloud: true                 # kill switch: false disables agy/claude/codex everywhere, chat falls back to ollama
-  interactive_default: "ollama"     # "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
+llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — global local/cloud switch + fallback chains
+  mode: cloud
+  allow_cloud: true                 # kill switch: false disables every cloud provider everywhere, chat falls back to ollama
+  interactive_default: "ollama"     # chat's OWN per-question override (independent of `mode`): "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
   timeout_s: 120
   cli:
     agy:
@@ -145,3 +146,38 @@ llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md — interactive-only cloud
     codex:
       binary: codex    # Codex CLI (read-only sandbox, exec mode)
       models: [default]
+  # U8-ו: direct-API providers. Keys come from .env ONLY (ANTHROPIC_API_KEY / GEMINI_API_KEY /
+  # OPENAI_API_KEY) — never put a key here, never in the UI. Model lists below are the
+  # "approximate, edit me" defaults asked for in point 5; Gemini's list refreshes live from
+  # /v1beta/models when GEMINI_API_KEY is set.
+  api:
+    anthropic:
+      models: [claude-opus-5, claude-sonnet-5, claude-haiku-4-5-20251001]
+      power_levels: [low, medium, high]   # -> thinking.budget_tokens
+    gemini:
+      models: [gemini-3.1-pro-preview, gemini-3.5-flash, gemini-3.1-flash-lite]
+      power_levels: [low, medium, high]   # -> thinkingConfig.thinkingBudget
+    openai:
+      models: [gpt-5.1, gpt-5.1-mini]
+      power_levels: [low, medium, high]   # -> reasoning_effort
+  # U8-ה: per-role ordered fallback chains, used only when mode: cloud. A role missing here (or
+  # mode: local) resolves to a single-entry local chain. The last entry of ANY chain is always
+  # forced to `ollama` even if omitted below (see Settings.llm_providers.effective_chain).
+  # Example (commented out — the default ships with mode: local and no chains configured):
+  # chains:
+  #   resident:      [{provider: agy, model: gemini-3.8-flash-medium}, {provider: ollama}]
+  #   investigator:  [{provider: claude, model: claude-sonnet-5, power: high}, {provider: agy, model: gemini-3.1-pro-high}, {provider: ollama}]
+  #   light:         [{provider: agy, model: gemini-3.8-flash-medium}, {provider: ollama}]
+  #   report:        [{provider: claude, model: claude-opus-5, power: high}, {provider: ollama}]
+  chains: {}
+  # U8-ו/5: USD per million tokens, "approximate, edit me". CLI providers (agy/claude/codex) are
+  # intentionally absent — subscription-based, cost 0 even when usage is reported.
+  pricing:
+    "anthropic:claude-opus-5": { input_per_mtok: 15.0, output_per_mtok: 75.0 }
+    "anthropic:claude-sonnet-5": { input_per_mtok: 3.0, output_per_mtok: 15.0 }
+    "anthropic:claude-haiku-4-5-20251001": { input_per_mtok: 0.8, output_per_mtok: 4.0 }
+    "gemini:gemini-3.1-pro-preview": { input_per_mtok: 1.25, output_per_mtok: 10.0 }
+    "gemini:gemini-3.5-flash": { input_per_mtok: 0.3, output_per_mtok: 2.5 }
+    "gemini:gemini-3.1-flash-lite": { input_per_mtok: 0.1, output_per_mtok: 0.4 }
+    "openai:gpt-5.1": { input_per_mtok: 5.0, output_per_mtok: 15.0 }
+    "openai:gpt-5.1-mini": { input_per_mtok: 0.5, output_per_mtok: 2.0 }
