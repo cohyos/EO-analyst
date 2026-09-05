@@ -4410,3 +4410,80 @@ one of those providers -- none is required for CLI-only chains (`agy`/`claude`/`
 `mode: local` (the default, unchanged behavior). A `chains` entry must be added to config.yaml by
 hand for `mode: cloud` to do anything beyond "try nothing, fall straight to ollama" -- no UI exists
 yet to author a chain (only to flip the global `mode` and the chat's own `interactive_default`).
+
+## Ingest stats, daily-report filters, HTML theme, post-tenders catch-up (F19/F20/F21/F22, 2026-09-06)
+
+Four independent fixes from `docs/REVIEW_2026-09-05.md` section ב, each scoped to its own file/area.
+
+**F19 (`eoa.fetch.service`)**: `_store_item`'s `IngestStats` accounting over-counted --
+`relational.insert_item`'s `INSERT ... ON CONFLICT (url) DO UPDATE ... RETURNING id` always
+returns an id, whether the row is brand new or just had `fetched_at` refreshed on conflict, so the
+old `if item_id: stats.items_inserted += 1` counted every successful upsert as a fresh insert (one
+run reported `items_inserted=115` against 61 real new rows over 26h). New `_url_already_seen(url)`
+probes `items` for the row *before* calling `insert_item`, so `_store_item` can now tell a genuine
+insert (`items_inserted`) from a same-URL refresh (`items_skipped`) apart, without touching the
+shared `insert_item` upsert (also used by `eoa.tenders.scan`). Best-effort: any DB error in the
+probe degrades to the old over-counting behavior rather than blocking ingestion; a small race
+remains for two concurrent fetches of the exact same URL within one `run_ingest` call (both could
+count as inserted) -- accepted given the per-domain throttle. Tests:
+`tests/unit/test_fetch_service.py`.
+
+**F20 (`eoa.report.daily.collect_items`)**: two new `WHERE` conditions on the news-item query --
+`AND NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)` (a tender-derived item is
+already rendered in the tenders board/forecast table, so showing it again as a news headline is a
+duplicate -- this is what let a 2015 TED notice with no `published_at` surface as "today's" tender
+via `COALESCE(published_at, fetched_at, created_at)`), and `AND NOT (i.published_at IS NULL AND
+i.source_id IS NULL)` (an undated, source-less row is a search/deep-search-derived page scrape,
+not a dated news item). Tests (SQL-text characterization via a fake cursor, no DB):
+`tests/unit/test_report_daily.py::test_collect_items_sql_excludes_tender_linked_rows` /
+`::test_collect_items_sql_excludes_undated_sourceless_rows`.
+
+**F21 (`eoa.report.docx_builder._EOA_HTML_STYLE`)**: the self-contained report HTML's stylesheet
+was a fixed light theme (`background:#fff`), clashing with the dark Morning screen. Confirmed via
+`web/src/components/reports/ReportBody.tsx`/`web/src/lib/reportHtml.ts`: the report HTML is
+embedded with React `dangerouslySetInnerHTML` (not an `<iframe>`), so this `<style>` tag becomes
+part of the real page's DOM and its selectors match the real document root -- letting a
+`:root[data-theme]` rule here see the app's own theme attribute
+(`web/src/components/shell/AppShell.tsx` sets `document.documentElement.dataset.theme`). Fix:
+`.eoa-report`'s own text/background are now `color:inherit;background:transparent` (blends into
+whatever page embeds it, with zero visible seam) instead of a fixed palette; everything that can't
+just inherit (table borders/header fill, link colour, the QA-warning colour, the TOC box) now
+comes from CSS custom properties (`--eoa-border`, `--eoa-th-bg`, `--eoa-link`, `--eoa-warning`,
+`--eoa-toc-bg`/`--eoa-toc-border`, `--eoa-date`) with light defaults, overridden via `@media
+(prefers-color-scheme: dark)` (guarded `:root:not([data-theme="light"])`) and via explicit
+`:root[data-theme="dark"]`/`:root[data-theme="light"]` rules (the embedding page's own theme wins
+over the OS preference when it sets one). A standalone-opened `output/reports/*.html` file has no
+`data-theme` and no embedding-page background/colour to inherit from, so it naturally renders with
+the browser's own black-on-white default; `@media print` pins that light look explicitly regardless
+of on-screen theme. Test: `tests/unit/test_docx_builder.py::test_render_html_stylesheet_is_theme_aware`.
+
+**F22 (`eoa.orchestrator.jobs`, additive)**: the `tenders` stage (in `STAGE_ORDER`, after
+`embed_dedup`/`classify`/`triage`/`analyze`) inserts `items` rows for new tender notices, so
+anything it creates never went through those three stages tonight and used to sit unembedded/
+unclassified until the next night's stages happened to sweep up the backlog. New
+`post_tenders_catchup` stage (budget `config.yaml: stages.post_tenders_catchup: 5` minutes, same
+`_run_stage` budget/circuit-breaker/heartbeat machinery as every other stage) runs right after
+`tenders`: `_tender_items_needing_pipeline()` selects ids of `items` where `report_kind = 'tender'
+AND (embedding IS NULL OR level IS NULL)`; `_post_tenders_catchup(role=...)` then calls
+`run_dedup`/`run_classify`/`run_triage` scoped to just those ids via a new additive `item_ids:
+list[int] | None = None` keyword parameter (threaded through to
+`eoa.memory.relational.get_items_for_stage`'s new `item_ids` filter) -- a handful of rows, not a
+re-sweep of each stage's whole backlog (which is ordered oldest-first by `fetched_at` and would
+likely never reach today's newest rows within a 5-minute budget anyway). A failure in any one of
+the three sub-calls is caught and recorded (`..._error` key) without blocking the other two or
+failing the run -- worst case, the items are picked up by ordinary backlog processing later, same
+as before this fix. `_DAILY_RUN_STAGE_ORDER` in `eoa.api.services` (the UI run-timeline's own
+stage-order list, deliberately not the same object as `jobs.STAGE_ORDER`) also gained the new stage
+name so it slots into the timeline between `tenders` and `report` instead of falling through to the
+"unrecognized stage, appended at the end" branch. Tests:
+`tests/unit/test_jobs_post_tenders_catchup.py`, `tests/unit/test_relational_stage_filter.py`; the
+pre-existing `tests/unit/test_llm_batch_mode.py` classify/triage fakes for `get_items_for_stage`
+were widened to accept the new keyword-only `item_ids` parameter.
+
+**Quality**: `ruff check` clean on every changed file. `mypy` clean on the actual diff lines in
+every touched file -- the pre-existing `tuple[Any, ...]` row-typing gaps in `relational.py`
+(unrelated lines), `pipeline/dedup.py` (`link_cross_language`, untouched), `report/daily.py`
+(`collect_events`/`collect_deep_search`, untouched) and `orchestrator/jobs.py`
+(`_red_alert_for`/`_daily_run_already_covered`/`_notify`/`_terminal_state`, untouched) are all
+outside this change's diff, confirmed by cross-checking every mypy error's line number against
+`git diff`. `PYTHONPATH=agent python -m pytest tests/unit -q`: 1107 passed.

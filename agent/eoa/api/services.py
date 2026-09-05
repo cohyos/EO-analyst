@@ -31,7 +31,7 @@ import yaml
 
 from eoa import config as eoa_config
 from eoa import db
-from eoa.config import CONFIG_DIR, REPO_ROOT, ModelsRegistry
+from eoa.config import CONFIG_DIR, REPO_ROOT, ChainEntryCfg, ModelsRegistry
 from eoa.config import Settings as EOASettings
 from eoa.feedback import surveys as feedback_surveys
 from eoa.llm import ollama_client
@@ -165,6 +165,7 @@ _DAILY_RUN_STAGE_ORDER = (
     "deep_search",
     "analyze",
     "tenders",
+    "post_tenders_catchup",
     "report",
     "export_backup",
     "notify",
@@ -2020,27 +2021,139 @@ def _patch_yaml_scalar(text: str, key: str, replacement_value: str) -> str:
     return new_text
 
 
+_KNOWN_CHAIN_ROLES = {"resident", "investigator", "light", "report"}
+_KNOWN_CHAIN_PROVIDER_IDS = {"ollama", "agy", "claude", "codex", "anthropic", "gemini", "openai"}
+
+
+def _chain_provider_power_levels() -> dict[str, list[str]]:
+    """provider id -> the power/effort levels it accepts, for chain-entry validation.
+
+    Sourced from the live ``eoa_config.settings().llm_providers`` config (``cli``/``api`` maps),
+    not hardcoded, so a future provider or a locally-edited power-level list is honored. ``ollama``
+    has no power levels (the local model has no effort/thinking knob).
+    """
+    cfg = eoa_config.settings().llm_providers
+    levels: dict[str, list[str]] = {"ollama": []}
+    for kind, cli_cfg in cfg.cli.items():
+        levels[kind] = list(cli_cfg.power_levels)
+    for kind, api_cfg in cfg.api.items():
+        levels[kind] = list(api_cfg.power_levels)
+    return levels
+
+
+def _validate_chains(chains: dict[str, list[ChainEntryCfg]]) -> list[str]:
+    """Business-rule validation for a `PUT /api/llm/settings` ``chains`` payload, beyond the
+    structural typing pydantic's ``ChainEntryCfg`` already enforces: known role names, known
+    provider ids, a non-empty ``model`` on every non-``ollama`` step, and ``power`` (when given)
+    must be one of that provider's own ``power_levels``. Returns Hebrew error messages (empty on
+    success) -- the file is never touched when this list is non-empty.
+    """
+    errors: list[str] = []
+    power_levels = _chain_provider_power_levels()
+    for role, chain in chains.items():
+        if role not in _KNOWN_CHAIN_ROLES:
+            errors.append(f"תפקיד לא ידוע בשרשרת: {role!r} (מותר: {', '.join(sorted(_KNOWN_CHAIN_ROLES))})")
+            continue
+        for i, entry in enumerate(chain):
+            if entry.provider not in _KNOWN_CHAIN_PROVIDER_IDS:
+                errors.append(f"{role}[{i}]: ספק לא ידוע: {entry.provider!r}")
+                continue
+            if entry.provider != "ollama" and not (entry.model and entry.model.strip()):
+                errors.append(f"{role}[{i}]: יש לבחור מודל עבור ספק {entry.provider!r}")
+            if entry.power is not None:
+                allowed = power_levels.get(entry.provider, [])
+                if entry.power not in allowed:
+                    errors.append(
+                        f"{role}[{i}]: רמת עוצמה לא נתמכת עבור {entry.provider!r}: {entry.power!r} "
+                        f"(מותר: {', '.join(allowed) or 'אין'})"
+                    )
+    return errors
+
+
+def _with_terminal_ollama(chain: list[ChainEntryCfg]) -> list[ChainEntryCfg]:
+    """Append the local ``ollama`` terminal step when a chain doesn't already end with one --
+    same rule `Settings.llm_providers.effective_chain` enforces at read time, applied here too so
+    the persisted config.yaml itself always shows the terminal step (matching what the fixed,
+    non-removable "מקומי (Ollama)" row in the UI's ChainsEditor implies is always true)."""
+    if not chain or chain[-1].provider != "ollama":
+        return [*chain, ChainEntryCfg(provider="ollama")]
+    return chain
+
+
+def _render_chains_yaml_block(chains: dict[str, list[ChainEntryCfg]]) -> str:
+    """Render ``  chains: ...`` (2-space indented, nested under ``llm_providers:``) as a
+    self-contained block of text ending in a newline, for `_patch_yaml_chains_block` to splice
+    into config.yaml. An empty map renders as the same one-line ``chains: {}`` the shipped
+    config.yaml uses when no chains are configured yet."""
+    if not chains:
+        return "  chains: {}\n"
+    payload = {
+        role: [entry.model_dump(exclude_none=True) for entry in entries] for role, entries in chains.items()
+    }
+    dumped = yaml.safe_dump({"chains": payload}, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    lines = dumped.rstrip("\n").split("\n")
+    return "\n".join(f"  {line}" if line else line for line in lines) + "\n"
+
+
+def _patch_yaml_chains_block(text: str, block_text: str) -> str:
+    """Replace the ``  chains:`` block (the key line plus every more-deeply-indented line that
+    follows it) under ``llm_providers:`` with ``block_text``. Unlike `_patch_yaml_scalar` (a
+    single-line replace), ``chains`` can grow from a one-line ``{}`` into a multi-line nested
+    block, so the whole block's extent has to be found, not just one line.
+
+    Falls back to inserting ``block_text`` right after the ``llm_providers:`` line when no
+    ``chains:`` key exists yet at all (e.g. a minimal test fixture's config.yaml) -- so this
+    always succeeds as long as ``llm_providers:`` itself is present, same contract as
+    `_patch_yaml_scalar` raising only when the anchor is entirely missing.
+    """
+    existing = re.compile(r"(?m)^  chains:.*$(?:\n  [ \t]+.*$)*\n?")
+    if existing.search(text):
+        return existing.sub(lambda m: block_text, text, count=1)
+    anchor = re.compile(r"(?m)^llm_providers:.*$\n?")
+    match = anchor.search(text)
+    if not match:
+        raise KeyError("llm_providers")
+    return text[: match.end()] + block_text + text[match.end() :]
+
+
 def patch_llm_provider_settings(
     *,
     interactive_default: str | None,
     allow_cloud: bool | None,
     mode: str | None = None,
+    chains: dict[str, list[ChainEntryCfg]] | None = None,
     expected_revision: str | None = None,
 ) -> tuple[bool, list[str], str | None]:
-    """`PUT /api/llm/settings`: update just ``interactive_default``/``allow_cloud``/``mode`` in
-    config.yaml, going through the exact same validated atomic write as the generic settings
-    editor (`write_settings_yaml`) -- this is a convenience for the friendly "מודלים" card, not
-    a second write path with weaker guarantees.
+    """`PUT /api/llm/settings`: update just ``interactive_default``/``allow_cloud``/``mode``/
+    ``chains`` in config.yaml, going through the exact same validated atomic write as the generic
+    settings editor (`write_settings_yaml`) -- this is a convenience for the friendly "מודלים"
+    card, not a second write path with weaker guarantees.
 
     ``mode`` (U8-א, Revision 2026-09-06) is the global local/cloud switch; only "local"/"cloud"
     are accepted -- anything else is rejected via the returned ``errors`` list, matching this
     endpoint's existing validation contract, without ever touching the file.
+
+    ``chains`` (per-role fallback chains, the Settings ChainsEditor) replaces the *entire*
+    ``llm_providers.chains`` map when given -- a role missing from the payload simply keeps
+    whatever role-name/mode based default `effective_chain` would already fall back to, it isn't
+    an error. Each role's chain is validated (`_validate_chains`: known role/provider ids,
+    non-empty model on a non-ollama step, power within that provider's own power_levels) *before*
+    the file is touched -- any error rejects the whole write, none of the fields in the same
+    request are applied, matching ``mode``'s existing "reject without touching the file" contract.
+    The local `ollama` terminal step is appended to any role's chain that doesn't already end with
+    one (`_with_terminal_ollama`), so the persisted YAML always shows what `effective_chain` would
+    resolve to anyway.
 
     Returns ``(ok, errors, new_revision)``. Raises ``SettingsConflict`` on a stale
     ``expected_revision``, same as `write_settings_yaml`.
     """
     if mode is not None and mode not in ("local", "cloud"):
         return False, [f"מצב לא תקין: {mode!r} (מותר local/cloud)"], None
+
+    if chains is not None:
+        chain_errors = _validate_chains(chains)
+        if chain_errors:
+            return False, chain_errors, None
 
     text = read_settings_yaml("config")
     if interactive_default is not None:
@@ -2050,6 +2163,9 @@ def patch_llm_provider_settings(
         text = _patch_yaml_scalar(text, "allow_cloud", "true" if allow_cloud else "false")
     if mode is not None:
         text = _patch_yaml_scalar(text, "mode", mode)
+    if chains is not None:
+        normalized = {role: _with_terminal_ollama(chain) for role, chain in chains.items()}
+        text = _patch_yaml_chains_block(text, _render_chains_yaml_block(normalized))
 
     errors = write_settings_yaml("config", text, expected_revision=expected_revision)
     new_revision = settings_revision("config") if not errors else None

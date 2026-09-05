@@ -18,6 +18,7 @@ stages:            # per-stage time budgets in minutes (scheduler trims later st
   deep_search: 100
   analyze: 45
   tenders: 15       # section 5.2 / FR-5.2: tender/RFI/RFP scan + forecast (eoa.tenders)
+  post_tenders_catchup: 5  # F22: embed+classify+triage catch-up for items the tenders stage just created
   report: 30
   export_backup: 10
 
@@ -132,9 +133,9 @@ export:
   obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }
 
 llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — global local/cloud switch + fallback chains
-  mode: cloud
+  mode: local
   allow_cloud: true                 # kill switch: false disables every cloud provider everywhere, chat falls back to ollama
-  interactive_default: "ollama"     # chat's OWN per-question override (independent of `mode`): "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
+  interactive_default: "ollama"
   timeout_s: 120
   cli:
     agy:

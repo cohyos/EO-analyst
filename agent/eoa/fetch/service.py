@@ -128,6 +128,32 @@ def _extract_links(
     return deduped
 
 
+def _url_already_seen(url: str) -> bool:
+    """F19: best-effort existence probe for ``items.url`` used by :func:`_store_item` to tell a
+    genuine new-row insert from ``relational.insert_item``'s ``ON CONFLICT (url) DO UPDATE``
+    refresh of an already-seen URL apart.
+
+    ``insert_item`` always ``RETURNING id`` — on conflict it just bumps ``fetched_at`` and still
+    returns the (pre-existing) row's id — so the old ``if item_id: stats.items_inserted += 1`` in
+    ``_store_item`` counted every successful upsert as a fresh insert, whether or not a row was
+    actually created (e.g. 115 reported vs. 61 real new rows over 26h). Checking first, here,
+    keeps that shared upsert helper (also used by ``eoa.tenders.scan``) untouched. Race note: two
+    concurrent fetches of the very same URL within one ``run_ingest`` call could both see "not
+    seen" and both count as inserted even though only one row is actually new — acceptably rare
+    given the per-domain throttle and that duplicate URLs normally come from a single domain.
+    Any DB error here is treated as "not seen" (degrades to the old over-counting behaviour rather
+    than blocking ingestion — docs/CONVENTIONS.md rule 9)."""
+    from eoa.db import connection
+
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM items WHERE url = %(url)s", {"url": url})
+            return cur.fetchone() is not None
+    except Exception as exc:
+        log.debug("fetch.url_seen_check_failed", url=url, error=repr(exc))
+        return False
+
+
 def _store_item(
     *,
     source_db_id: int | None,
@@ -153,6 +179,10 @@ def _store_item(
     )
     published_at = clean.published_at or fallback_published_at
 
+    # F19: probe for an existing row *before* the upsert, so a same-URL refresh (conflict) can be
+    # told apart from a genuine new row — see `_url_already_seen`.
+    already_seen = _url_already_seen(url)
+
     try:
         item_id = relational.insert_item(
             source_id=source_db_id,
@@ -169,7 +199,7 @@ def _store_item(
         stats.items_skipped += 1
         return
 
-    if item_id:
+    if item_id and not already_seen:
         stats.items_inserted += 1
     else:
         stats.items_skipped += 1

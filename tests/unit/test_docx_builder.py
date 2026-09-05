@@ -184,10 +184,15 @@ def test_add_mixed_paragraph_is_bidi_and_right_aligned():
 
 
 def test_add_mixed_paragraph_citation_is_superscript():
+    """F23: `[7]` is now an internal-hyperlink run (jumping to the `src_7` appendix bookmark), so
+    its run lives inside `paragraph.hyperlinks`, not `paragraph.runs` directly."""
     doc = docx.Document()
     paragraph = db.add_mixed_paragraph(doc, "עובדה חשובה [7].")
-    cite_runs = [r for r in paragraph.runs if r.text == "[7]"]
+    cite_hyperlinks = [h for h in paragraph.hyperlinks if h.fragment == "src_7"]
+    assert cite_hyperlinks
+    cite_runs = cite_hyperlinks[0].runs
     assert cite_runs
+    assert cite_runs[0].text == "[7]"
     assert cite_runs[0].font.superscript is True
 
 
@@ -271,8 +276,40 @@ def test_build_docx_title_page_present(built_doc):
     assert "נוצר אוטומטית" in all_text
 
 
-def test_build_docx_hyperlink_count_matches_items(built_doc, fixture_items):
-    assert _count_hyperlinks(built_doc) == len(fixture_items)
+def test_build_docx_hyperlink_count_matches_items_and_citations(built_doc, fixture_items):
+    """F23: every appendix row still gets its external hyperlink, and every ``[n]`` citation in
+    the prose (exec summary [1][2][3] + the two section paragraphs [1][2] = 5 in the fixture) is
+    now ALSO a (internal, anchor-based) hyperlink rather than inert superscript text."""
+    external = len(fixture_items)
+    internal_citations = 5  # [1][2][3] in exec summary + [1] and [2] in the two sections
+    assert _count_hyperlinks(built_doc) == external + internal_citations
+
+
+def test_build_docx_citation_is_internal_hyperlink_to_appendix_bookmark(built_doc):
+    """F23: a `[n]` citation marker is a real internal hyperlink (``w:anchor``) to the bookmark on
+    its row in the sources appendix, not just superscript text."""
+    citation_hyperlinks = [
+        h
+        for p in _all_paragraphs(built_doc)
+        for h in p.hyperlinks
+        if h.fragment.startswith("src_")
+    ]
+    assert citation_hyperlinks
+    fragments = {h.fragment for h in citation_hyperlinks}
+    assert "src_1" in fragments
+    assert "src_2" in fragments
+    for h in citation_hyperlinks:
+        assert h.runs
+        assert h.runs[0].font.superscript is True
+
+
+def test_build_docx_sources_appendix_rows_are_bookmarked(built_doc):
+    """F23: every numbered row in the sources appendix carries a `src_{n}` bookmark so citation
+    hyperlinks (:func:`eoa.report.docx_builder.add_citation_run`) have somewhere to land."""
+    xml = built_doc.element.xml
+    assert 'w:name="src_1"' in xml
+    assert 'w:name="src_2"' in xml
+    assert 'w:name="src_3"' in xml
 
 
 def test_build_docx_has_tables(built_doc):
@@ -422,6 +459,26 @@ def test_render_html_is_rtl_and_links_citations(fixture_draft, fixture_items, fi
     assert 'dir="rtl"' in html_out
     assert 'id="src-1"' in html_out
     assert 'href="#src-1"' in html_out
+
+
+def test_render_html_stylesheet_is_theme_aware(fixture_draft, fixture_items, fixture_events):
+    """F21: the embedded HTML stylesheet must be theme-aware (CSS variables + a dark-mode media
+    query + an explicit data-theme override) instead of a fixed white background that clashes with
+    the dark Morning screen (web/src/components/reports/ReportBody.tsx embeds this HTML inline via
+    `dangerouslySetInnerHTML`, not an <iframe> -- see docx_builder._EOA_HTML_STYLE's docstring)."""
+    html_out = db.render_html(fixture_draft, fixture_items, fixture_events, period_end=dt.date(2026, 9, 4))
+
+    assert "--eoa-" in html_out  # CSS custom properties present
+    assert "@media (prefers-color-scheme: dark)" in html_out
+    assert 'data-theme="dark"' in html_out
+    assert 'data-theme="light"' in html_out
+    # The root .eoa-report rule must inherit the embedding page's colours, not hard-code a light
+    # background that clashes with a dark host page.
+    assert "color:inherit;background:transparent" in html_out.replace(" ", "")
+    # No unscoped hard-coded white body background left anywhere in the stylesheet -- the only
+    # remaining "#fff" is inside the `@media print` block, guarded to `.eoa-report`, never `body`.
+    assert "body{background:#fff" not in html_out.replace(" ", "")
+    assert "body{background: #fff" not in html_out
 
 
 def test_render_html_escapes_content():

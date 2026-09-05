@@ -29,11 +29,20 @@ def _embed_text(item: dict) -> str:
     return f"{title}\n{body}"
 
 
-def run_dedup(limit: int = 500, batch_size: int = 16) -> DedupStats:
-    """Embed new items and link near-duplicates (same story, any language) via ``dedup_of``."""
+def run_dedup(
+    limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | None = None
+) -> DedupStats:
+    """Embed new items and link near-duplicates (same story, any language) via ``dedup_of``.
+
+    F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
+    ``eoa.memory.relational.get_items_for_stage``."""
     cfg = settings().dedup
     stats = DedupStats()
-    items = [it for it in get_items_for_stage(STAGE, limit) if it.get("security_status") != "quarantined"]
+    items = [
+        it
+        for it in get_items_for_stage(STAGE, limit, item_ids=item_ids)
+        if it.get("security_status") != "quarantined"
+    ]
     for i in range(0, len(items), batch_size):
         batch = items[i : i + batch_size]
         try:

@@ -156,17 +156,26 @@ def insert_item(
     return item_id
 
 
-def get_items_for_stage(stage: str, limit: int = 50) -> list[dict[str, Any]]:
-    """Return up to `limit` clean items that have not yet completed pipeline `stage`."""
+def get_items_for_stage(
+    stage: str, limit: int = 50, *, item_ids: list[int] | None = None
+) -> list[dict[str, Any]]:
+    """Return up to `limit` clean items that have not yet completed pipeline `stage`.
+
+    F22 (docs/REVIEW_2026-09-05.md): ``item_ids``, when given, additionally restricts the result to
+    those specific ids -- used by ``orchestrator.jobs``'s ``post_tenders_catchup`` mini-stage to
+    embed/classify/triage only the handful of tender-derived items created by the ``tenders`` stage
+    this run, instead of sweeping the whole stage backlog (which is ordered oldest-first and would
+    likely not even reach today's newest rows within a short budget)."""
     query = """
         SELECT * FROM items
         WHERE security_status = 'clean'
           AND NOT (%(stage)s = ANY(COALESCE(processed_stages, '{}')))
+          AND (%(item_ids)s IS NULL OR id = ANY(%(item_ids)s))
         ORDER BY fetched_at NULLS LAST, id
         LIMIT %(limit)s
     """
     with connection() as conn, conn.cursor() as cur:
-        cur.execute(query, {"stage": stage, "limit": limit})
+        cur.execute(query, {"stage": stage, "limit": limit, "item_ids": item_ids})
         rows = cur.fetchall()
     return rows
 
@@ -416,6 +425,70 @@ def summarize_llm_calls(since_hours: int = 24) -> dict[str, Any]:
         "cloud_calls": sum(r["calls"] for r in rows if r["provider"] != "ollama"),
     }
     return {"since_hours": since_hours, "providers": rows, "totals": totals}
+
+
+def log_mcp_call(
+    *,
+    server: str,
+    tool: str,
+    args_hash: str,
+    chars: int,
+    duration_ms: int,
+    verdict: str,
+    error: str | None = None,
+) -> int:
+    """Insert a row into ``mcp_calls`` (A8, migration 0010): server/tool/duration/output size and
+    the guard verdict for one MCP tool call. Never the arguments or the tool's output text -- only
+    a hash of the arguments, matching ``llm_calls``' "never the prompt/response body" convention."""
+    query = """
+        INSERT INTO mcp_calls (server, tool, args_hash, chars, duration_ms, verdict, error)
+        VALUES (%(server)s, %(tool)s, %(args_hash)s, %(chars)s, %(duration_ms)s, %(verdict)s, %(error)s)
+        RETURNING id
+    """
+    params = {
+        "server": server,
+        "tool": tool,
+        "args_hash": args_hash,
+        "chars": chars,
+        "duration_ms": duration_ms,
+        "verdict": verdict,
+        "error": error,
+    }
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, params)
+        row_id: int = cur.fetchone()["id"]
+    return row_id
+
+
+def summarize_mcp_calls(since_hours: int = 24) -> dict[str, Any]:
+    """``GET /api/mcp/calls?since=24h``: per-server-and-tool call counts/failures/avg duration
+    over the last ``since_hours`` hours, plus a total row. A row is a "failure" when ``error`` is
+    not NULL (connection failure, tool-reported error, or guard quarantine)."""
+    query = """
+        SELECT
+            server,
+            tool,
+            count(*)                                     AS calls,
+            count(*) FILTER (WHERE error IS NOT NULL)    AS failures,
+            count(*) FILTER (WHERE verdict != 'clean')    AS flagged,
+            COALESCE(avg(duration_ms), 0)                 AS avg_duration_ms,
+            COALESCE(sum(chars), 0)                       AS total_chars
+        FROM mcp_calls
+        WHERE created_at >= now() - (%(hours)s || ' hours')::interval
+        GROUP BY server, tool
+        ORDER BY server, tool
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, {"hours": since_hours})
+        rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["avg_duration_ms"] = float(r["avg_duration_ms"])
+    totals = {
+        "calls": sum(r["calls"] for r in rows),
+        "failures": sum(r["failures"] for r in rows),
+        "flagged": sum(r["flagged"] for r in rows),
+    }
+    return {"since_hours": since_hours, "calls": rows, "totals": totals}
 
 
 def log_security(

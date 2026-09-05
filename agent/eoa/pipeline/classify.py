@@ -105,10 +105,15 @@ def persist_classification(item_id: int, out: ClassifyOut) -> None:
     )
 
 
-def run_classify(limit: int = 300, role: str = "resident") -> ClassifyStats:
-    """Classify all items that passed dedup and are not duplicates or quarantined."""
+def run_classify(
+    limit: int = 300, role: str = "resident", *, item_ids: list[int] | None = None
+) -> ClassifyStats:
+    """Classify all items that passed dedup and are not duplicates or quarantined.
+
+    F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
+    ``eoa.memory.relational.get_items_for_stage``."""
     stats = ClassifyStats()
-    items = get_items_for_stage(STAGE, limit)
+    items = get_items_for_stage(STAGE, limit, item_ids=item_ids)
     eligible: list[dict] = []
     for it in items:
         if it.get("security_status") == "quarantined" or it.get("dedup_of"):

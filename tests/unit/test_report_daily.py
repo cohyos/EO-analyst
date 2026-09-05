@@ -8,6 +8,7 @@ Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_report_daily.py -q
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any
 
 from eoa.llm.schemas.analysis import DailyReportDraft, ReportSection
 from eoa.report import daily
@@ -138,6 +139,87 @@ def test_collect_events_sort_and_limit_via_helpers():
 
 def test_tenders_forecast_table_none_when_no_forecasts():
     assert daily._tenders_forecast_table({"open_tenders": [], "new_forecasts": []}) is None
+
+
+class _FakeCursor:
+    """Records the executed SQL/params and returns a fixed row set, regardless of the query --
+    good enough to characterize the WHERE clause `collect_items` builds without a live DB."""
+
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+        self.queries: list[tuple[str, dict]] = []
+
+    def execute(self, sql, params=None):
+        self.queries.append((sql, params or {}))
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, cursor: _FakeCursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fake_item_row(item_id: int) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "url": f"https://example.com/{item_id}",
+        "title": "t",
+        "domain": "d",
+        "subdomain": None,
+        "published_at": None,
+        "level": "red",
+        "score": 5,
+        "summary_he": "",
+        "so_what_he": "",
+        "report_kind": None,
+        "geography": None,
+        "trl": None,
+        "source_name": "s",
+    }
+
+
+# --------------------------------------------------------------------------
+# F20: collect_items excludes tender-linked items and undated/source-less rows
+# --------------------------------------------------------------------------
+
+
+def test_collect_items_sql_excludes_tender_linked_rows(monkeypatch):
+    fake_cursor = _FakeCursor([_fake_item_row(1), _fake_item_row(2), _fake_item_row(3)])
+    monkeypatch.setattr(daily, "connection", lambda: _FakeConn(fake_cursor))
+
+    rows = daily.collect_items(dt.date(2026, 9, 5), dt.date(2026, 9, 5))
+
+    executed_sql = fake_cursor.queries[0][0]
+    assert "NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)" in executed_sql
+    assert len(rows) == 3
+    assert [r["n"] for r in rows] == [1, 2, 3]
+
+
+def test_collect_items_sql_excludes_undated_sourceless_rows(monkeypatch):
+    fake_cursor = _FakeCursor([_fake_item_row(1), _fake_item_row(2), _fake_item_row(3)])
+    monkeypatch.setattr(daily, "connection", lambda: _FakeConn(fake_cursor))
+
+    daily.collect_items(dt.date(2026, 9, 5), dt.date(2026, 9, 5))
+
+    executed_sql = fake_cursor.queries[0][0]
+    assert "NOT (i.published_at IS NULL AND i.source_id IS NULL)" in executed_sql
 
 
 def test_tenders_forecast_table_shape_and_rationale_cap():

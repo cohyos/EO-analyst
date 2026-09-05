@@ -228,11 +228,16 @@ def triage_batch(items: list[dict], *, role: str = "resident") -> dict[int, Tria
     return results
 
 
-def run_triage(limit: int = 300, role: str = "resident") -> TriageStats:
-    """Triage all classified, in-scope items."""
+def run_triage(
+    limit: int = 300, role: str = "resident", *, item_ids: list[int] | None = None
+) -> TriageStats:
+    """Triage all classified, in-scope items.
+
+    F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
+    ``eoa.memory.relational.get_items_for_stage``."""
     stats = TriageStats()
     eligible: list[dict] = []
-    for it in get_items_for_stage(STAGE, limit):
+    for it in get_items_for_stage(STAGE, limit, item_ids=item_ids):
         if it.get("domain") is None:
             continue  # not classified yet — leave for the next pass, do not mark
         if (

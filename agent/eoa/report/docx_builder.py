@@ -284,12 +284,13 @@ def _emit_mixed_runs(paragraph, text: str, *, size_pt: float | None = BODY_SIZE_
     for cls, chunk in split_runs_with_citations(text):
         if not chunk:
             continue
-        run = paragraph.add_run(chunk)
         if cls == "cite":
-            run.font.superscript = True
-            _style_run(run, hebrew=False, size_pt=(size_pt - 2) if size_pt else 9)
-        else:
-            _style_run(run, hebrew=(cls == "he"), size_pt=size_pt)
+            m = _CITATION_RE.match(chunk)
+            if m:
+                add_citation_run(paragraph, int(m.group(1)), size_pt=size_pt)
+                continue
+        run = paragraph.add_run(chunk)
+        _style_run(run, hebrew=(cls == "he"), size_pt=size_pt)
 
 
 def add_mixed_paragraph(
@@ -338,18 +339,30 @@ def add_hyperlink(paragraph, url: str, text: str, *, hebrew: bool = False) -> Ru
     return run
 
 
-def add_internal_hyperlink(paragraph, anchor: str, text: str, *, hebrew: bool = True) -> Run:
+def add_internal_hyperlink(
+    paragraph,
+    anchor: str,
+    text: str,
+    *,
+    hebrew: bool = True,
+    style: str | None = "Hyperlink",
+    size_pt: float = 10,
+) -> Run:
     """Add a run-of-the-mill *internal* hyperlink (a Word bookmark reference, ``w:anchor`` rather
     than a relationship ``r:id``) to ``paragraph``; returns the run. Used to build a real,
     immediately-navigable table of contents (see :func:`_add_bookmark`/:func:`_add_real_toc`)
-    instead of a ``TOC`` field that shows nothing until the user manually updates fields (F10)."""
+    instead of a ``TOC`` field that shows nothing until the user manually updates fields (F10), and
+    (F23) to turn every ``[n]`` citation marker into a real jump to its row in the sources appendix
+    (``style=None`` there — a small superscript numeral, not a full blue/underlined "Hyperlink"
+    styled chunk)."""
     hyperlink = OxmlElement("w:hyperlink")
     hyperlink.set(qn("w:anchor"), anchor)
     run_elm = OxmlElement("w:r")
     rpr = OxmlElement("w:rPr")
-    rstyle = OxmlElement("w:rStyle")
-    rstyle.set(qn("w:val"), "Hyperlink")
-    rpr.append(rstyle)
+    if style:
+        rstyle = OxmlElement("w:rStyle")
+        rstyle.set(qn("w:val"), style)
+        rpr.append(rstyle)
     run_elm.append(rpr)
     t = OxmlElement("w:t")
     t.set(qn("xml:space"), "preserve")
@@ -358,7 +371,29 @@ def add_internal_hyperlink(paragraph, anchor: str, text: str, *, hebrew: bool = 
     hyperlink.append(run_elm)
     paragraph._p.append(hyperlink)
     run = Run(run_elm, paragraph)
-    _style_run(run, hebrew=hebrew, size_pt=10)
+    _style_run(run, hebrew=hebrew, size_pt=size_pt)
+    return run
+
+
+def add_citation_run(paragraph, n: int, *, size_pt: float | None = None) -> Run:
+    """A ``[n]`` citation marker rendered as an internal-hyperlink run (F23): superscript,
+    non-Hebrew styled, jumping straight to the bookmark ``src_{n}`` on that item's row in the
+    sources appendix (:func:`_add_sources_appendix`) instead of being inert text. Used both by
+    :func:`_emit_mixed_runs` (citations inside prose) and :func:`_add_events_table` (the events
+    table's "מקור" column), so every ``[n]`` in the document behaves identically.
+
+    Real Word footnotes (a ``word/footnotes.xml`` part with ``w:footnoteReference``) were
+    considered for F23 as well, but python-docx has no footnote API and hand-rolling the extra
+    OOXML part (content-type override, document-relationship, its own rels part for the source
+    URL, id bookkeeping) carries real corruption risk for a document this pipeline regenerates
+    nightly with no human review before delivery. The internal-hyperlink-to-appendix approach
+    below gives the same practical outcome — one click from a citation to its full source record
+    — without that risk, so it is the only mechanism implemented here.
+    """
+    run = add_internal_hyperlink(
+        paragraph, f"src_{n}", f"[{n}]", hebrew=False, style=None, size_pt=(size_pt - 2) if size_pt else 9
+    )
+    run.font.superscript = True
     return run
 
 
@@ -541,9 +576,7 @@ def _add_events_table(doc: DocxDocument, events: list[dict]) -> None:
         _paragraph_rtl_right(source_cell_p)
         n = ev.get("n")
         if n is not None:
-            run = source_cell_p.add_run(f"[{n}]")
-            run.font.superscript = True
-            _style_run(run, hebrew=False, size_pt=9)
+            add_citation_run(source_cell_p, n, size_pt=11)
         else:
             _emit_mixed_runs(
                 source_cell_p, source_label(ev.get("source_name"), ev.get("item_url")), size_pt=9
@@ -561,6 +594,11 @@ def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
     for it in sorted(items, key=lambda x: x.get("n") or 0):
         row = table.add_row().cells
         _fill_cell(row[0], str(it.get("n", "")))
+        n = it.get("n")
+        if n is not None:
+            # F23: a bookmark on this row so every `[n]` citation elsewhere in the document
+            # (:func:`add_citation_run`) can jump straight here via an internal hyperlink.
+            _add_bookmark(row[0].paragraphs[0], f"src_{n}")
         _fill_cell(row[1], it.get("title") or "—")
         _fill_cell(row[2], source_label(it.get("source_name"), it.get("url")))
         _fill_cell(row[3], fmt_date(it.get("published_at")))
@@ -833,6 +871,12 @@ def _md_cell(value: Any) -> str:
     return f"[{text}]({text})" if _looks_like_url(text) else text
 
 
+def _md_citations(text: str) -> str:
+    """(F23) Turn every ``[n]`` citation marker in ``text`` into a real markdown link to its
+    appendix row anchor (``[n](#src-n)``) instead of inert bracketed text."""
+    return _CITATION_RE.sub(lambda m: f"[{m.group(1)}](#src-{m.group(1)})", text or "")
+
+
 def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
     for tbl in tables:
         headers = tbl.get("headers") or []
@@ -872,12 +916,17 @@ def render_markdown(
     if warning:
         lines += [f"> **{warning}**", ""]
 
-    lines += ["## תקציר מנהלים", "", draft.exec_summary_he or "אין תקציר לתקופה זו.", ""]
+    lines += [
+        "## תקציר מנהלים",
+        "",
+        _md_citations(draft.exec_summary_he) or "אין תקציר לתקופה זו.",
+        "",
+    ]
 
     _extra_sections_md(lines, extra_sections, "after_summary")
 
     for section in draft.sections:
-        lines += [f"## {section.title_he}", "", section.prose_he, ""]
+        lines += [f"## {section.title_he}", "", _md_citations(section.prose_he), ""]
 
     if events:
         lines += [
@@ -888,7 +937,7 @@ def render_markdown(
         ]
         for ev in events:
             n = ev.get("n")
-            src = f"[{n}]" if n is not None else source_label(ev.get("source_name"), ev.get("item_url"))
+            src = f"[{n}](#src-{n})" if n is not None else source_label(ev.get("source_name"), ev.get("item_url"))
             lines.append(
                 f"| {fmt_date(ev.get('date'))} "
                 f"| {_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—')} "
@@ -903,18 +952,18 @@ def render_markdown(
         for entry in deep_search:
             heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
             outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
-            lines.append(f"- **{heading}** — {outcome}: {entry.get('answer_he', '')}")
+            lines.append(f"- **{heading}** — {outcome}: {_md_citations(entry.get('answer_he', ''))}")
         lines.append("")
 
     open_points = list(draft.open_points_he or [])
     open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
     if open_points:
         lines += ["## נקודות פתוחות", ""]
-        lines += [f"- {p}" for p in open_points]
+        lines += [f"- {_md_citations(p)}" for p in open_points]
         lines.append("")
 
     if draft.outlook_he:
-        lines += ["## מבט קדימה", "", draft.outlook_he, ""]
+        lines += ["## מבט קדימה", "", _md_citations(draft.outlook_he), ""]
 
     _extra_sections_md(lines, extra_sections, "after_outlook")
     _tables_md(lines, tables or [])
@@ -980,21 +1029,85 @@ def _tables_html(parts: list[str], tables: list[dict[str, Any]], h2) -> None:
 
 
 _EOA_HTML_STYLE = """
-.eoa-report{font-family:-apple-system,"Segoe UI",Arial,sans-serif;line-height:1.7;color:#1a1a1a;
-  background:#fff;max-width:920px;margin:0 auto;padding:1.5rem}
-.eoa-report h1{font-size:1.5rem;border-bottom:2px solid #10243e;padding-bottom:.4rem;color:#10243e}
-.eoa-report h2{font-size:1.15rem;margin-top:1.8rem;color:#10243e}
+/* F21 (docs/REVIEW_2026-09-05.md): theme-aware stylesheet.
+ *
+ * This markup ends up rendered two different ways (see web/src/components/reports/ReportBody.tsx
+ * + web/src/lib/reportHtml.ts): (a) inlined via React `dangerouslySetInnerHTML` straight into the
+ * dark/light Morning-screen page -- NOT an <iframe>, so this <style> tag itself becomes part of
+ * the real page's DOM and its selectors match against the *real* document root, letting a
+ * `:root[data-theme]` rule here see the app's own theme attribute (set by
+ * web/src/components/shell/AppShell.tsx on <html>); or (b) opened directly as the standalone
+ * `output/reports/*.html` file, where <html>/<body> are real and carry no `data-theme`.
+ *
+ * `.eoa-report`'s own text colour/background are `inherit`/`transparent` (not a fixed light
+ * palette) so case (a) always blends into whatever the embedding page already looks like, with
+ * zero visible seam -- this is the fix for the reported white-box-on-dark-page clash. Case (b)
+ * then naturally renders with the browser's own default black-on-white, which is exactly the
+ * "print-friendly light" standalone look; `@media print` below pins that explicitly regardless of
+ * on-screen theme.
+ *
+ * Everything that ISN'T plain text/background (table borders, header fill, link colour, the QA
+ * warning colour, the TOC box) can't just "inherit" -- those get real light-mode defaults via CSS
+ * variables, overridden for dark via `@media (prefers-color-scheme: dark)` (comfortable standalone
+ * reading on a dark OS) and via an explicit `[data-theme="dark"/"light"]` rule (the embedding page
+ * wins over the OS preference when it sets one).
+ */
+.eoa-report{
+  --eoa-border:#d0d5dd;
+  --eoa-border-strong:#10243e;
+  --eoa-th-bg:#eef1f5;
+  --eoa-link:#1a56db;
+  --eoa-warning:#b42318;
+  --eoa-toc-bg:#f8f9fb;
+  --eoa-toc-border:#e2e5ea;
+  --eoa-date:#555;
+  font-family:-apple-system,"Segoe UI",Arial,sans-serif;line-height:1.7;
+  color:inherit;background:transparent;max-width:920px;margin:0 auto;padding:1.5rem}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .eoa-report{
+    --eoa-border:#3a4650;
+    --eoa-border-strong:#4f6a86;
+    --eoa-th-bg:#1c2b38;
+    --eoa-link:#6ea8fe;
+    --eoa-warning:#ff8a80;
+    --eoa-toc-bg:#16222c;
+    --eoa-toc-border:#2c3d42;
+    --eoa-date:#9fb0b4}
+}
+:root[data-theme="dark"] .eoa-report{
+  --eoa-border:#3a4650;
+  --eoa-border-strong:#4f6a86;
+  --eoa-th-bg:#1c2b38;
+  --eoa-link:#6ea8fe;
+  --eoa-warning:#ff8a80;
+  --eoa-toc-bg:#16222c;
+  --eoa-toc-border:#2c3d42;
+  --eoa-date:#9fb0b4}
+:root[data-theme="light"] .eoa-report{
+  --eoa-border:#d0d5dd;
+  --eoa-border-strong:#10243e;
+  --eoa-th-bg:#eef1f5;
+  --eoa-link:#1a56db;
+  --eoa-warning:#b42318;
+  --eoa-toc-bg:#f8f9fb;
+  --eoa-toc-border:#e2e5ea;
+  --eoa-date:#555}
+.eoa-report h1{font-size:1.5rem;border-bottom:2px solid var(--eoa-border-strong);padding-bottom:.4rem;color:inherit}
+.eoa-report h2{font-size:1.15rem;margin-top:1.8rem;color:inherit}
 .eoa-report p{margin:.5rem 0}
 .eoa-report table{width:100%;border-collapse:collapse;margin:.75rem 0 1.25rem;font-size:.9rem}
-.eoa-report th,.eoa-report td{border:1px solid #d0d5dd;padding:.4rem .6rem;text-align:right;vertical-align:top}
-.eoa-report th{background:#eef1f5}
-.eoa-report a{color:#1a56db}
+.eoa-report th,.eoa-report td{border:1px solid var(--eoa-border);padding:.4rem .6rem;text-align:right;vertical-align:top}
+.eoa-report th{background:var(--eoa-th-bg)}
+.eoa-report a{color:var(--eoa-link)}
 .eoa-report a.cite{text-decoration:none;font-size:.75em;vertical-align:super}
-.eoa-report .qa-warning{color:#b42318}
-.eoa-report .date{color:#555}
-.eoa-report nav.toc{background:#f8f9fb;border:1px solid #e2e5ea;border-radius:6px;padding:.25rem 1.25rem;margin:1rem 0}
+.eoa-report .qa-warning{color:var(--eoa-warning)}
+.eoa-report .date{color:var(--eoa-date)}
+.eoa-report nav.toc{background:var(--eoa-toc-bg);border:1px solid var(--eoa-toc-border);border-radius:6px;padding:.25rem 1.25rem;margin:1rem 0}
 .eoa-report nav.toc ul{margin:.5rem 0;padding-inline-start:1.25rem}
 .eoa-report nav.toc li{margin:.15rem 0}
+@media print{
+  .eoa-report{color:#1a1a1a !important;background:#fff !important}
+}
 """
 
 

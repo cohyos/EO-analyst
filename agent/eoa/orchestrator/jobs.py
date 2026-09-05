@@ -56,6 +56,7 @@ STAGE_ORDER = [
     "deep_search",
     "analyze",
     "tenders",
+    "post_tenders_catchup",
     "report",
     "export_backup",
     "notify",
@@ -209,6 +210,7 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
             lambda: __import__("eoa.pipeline.analyze", fromlist=["run_analyze"]).run_analyze(role=role),
         )
         _run_stage(rs, "tenders", lambda: _as_dict(_run_tenders(role=role)))
+        _run_stage(rs, "post_tenders_catchup", lambda: _post_tenders_catchup(role=role))
         paths = _run_stage(rs, "report", _build_report, mandatory=True)
         _run_stage(rs, "export_backup", _backup, mandatory=True)
         _run_stage(rs, "notify", lambda: _notify(rs, paths), mandatory=True)
@@ -603,6 +605,73 @@ def _run_tenders(role: str = "resident") -> dict[str, Any]:
     scan_stats = scan_tenders(role=role)
     forecast_stats = forecast_tenders(role=role)
     return {"scan": _as_dict(scan_stats), "forecast": _as_dict(forecast_stats)}
+
+
+def _tender_items_needing_pipeline() -> list[int]:
+    """F22 (docs/REVIEW_2026-09-05.md): ids of tender-derived ``items`` rows (``report_kind =
+    'tender'``, inserted by ``eoa.tenders.scan._insert_tender_and_item``) still missing an
+    embedding or a triage level. The ``tenders`` stage runs after ``embed_dedup``/``classify``/
+    ``triage``/``analyze`` in :data:`STAGE_ORDER`, so any item it creates this run never went
+    through those stages tonight and would otherwise sit unprocessed until the *next* night's
+    stages happen to sweep up the backlog (5 such items observed one morning). Not restricted to
+    "created this run" -- a tender item still missing these fields for any reason (e.g. a previous
+    night's catch-up itself got deferred) is equally worth picking up here, and the set is normally
+    tiny either way."""
+    from eoa.db import connection
+
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM items
+                WHERE report_kind = 'tender' AND security_status = 'clean'
+                  AND (embedding IS NULL OR level IS NULL)
+                ORDER BY id
+                """
+            )
+            return [r["id"] for r in cur.fetchall()]
+    except Exception as exc:
+        log.warning("post_tenders_catchup_query_failed", error=str(exc)[:200])
+        return []
+
+
+def _post_tenders_catchup(*, role: str = "resident") -> dict[str, Any]:
+    """F22: run embed_dedup + classify + triage, scoped (via each stage function's additive
+    ``item_ids`` parameter) to just the tender-derived items still missing an embedding/level --
+    see :func:`_tender_items_needing_pipeline`. A handful of rows, not a backlog re-sweep of
+    everything else still pending those stages; a failure in one sub-stage never blocks the others
+    (docs/CONVENTIONS.md rule 9) and never fails the run -- the items simply get caught by the next
+    night's stages as before this fix."""
+    item_ids = _tender_items_needing_pipeline()
+    if not item_ids:
+        return {"items": 0}
+
+    out: dict[str, Any] = {"items": len(item_ids)}
+    try:
+        from eoa.pipeline.dedup import run_dedup
+
+        out["embed_dedup"] = _as_dict(run_dedup(item_ids=item_ids))
+    except Exception as exc:
+        log.warning("post_tenders_catchup_embed_dedup_failed", error=str(exc)[:200])
+        out["embed_dedup_error"] = str(exc)[:200]
+
+    try:
+        from eoa.pipeline.classify import run_classify
+
+        out["classify"] = _as_dict(run_classify(role=role, item_ids=item_ids))
+    except Exception as exc:
+        log.warning("post_tenders_catchup_classify_failed", error=str(exc)[:200])
+        out["classify_error"] = str(exc)[:200]
+
+    try:
+        from eoa.pipeline.triage import run_triage
+
+        out["triage"] = _as_dict(run_triage(role=role, item_ids=item_ids))
+    except Exception as exc:
+        log.warning("post_tenders_catchup_triage_failed", error=str(exc)[:200])
+        out["triage_error"] = str(exc)[:200]
+
+    return out
 
 
 def run_tender_scan(job: dict[str, Any]) -> dict[str, Any]:

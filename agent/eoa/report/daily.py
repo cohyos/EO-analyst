@@ -112,6 +112,15 @@ def collect_items(
               AND i.dedup_of IS NULL
               AND i.level = ANY(%(levels)s)
               AND COALESCE(i.published_at, i.fetched_at, i.created_at) BETWEEN %(start)s AND %(end)s
+              -- F20: a tender-derived item (e.g. a 2015 notice with no published_at, picked up by
+              -- fetched_at/created_at falling in the window) is already rendered in the tenders
+              -- board/forecast table (eoa.tenders.report_section) -- showing it again here as a
+              -- news headline is a duplicate, and for an old notice a misleading one.
+              AND NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)
+              -- F20: an undated, source-less row is a search/deep-search-derived page scrape
+              -- (no RSS/HTML source, no article publish date) -- not a dated news item, so it
+              -- does not belong in the dated news sections either.
+              AND NOT (i.published_at IS NULL AND i.source_id IS NULL)
             ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
             LIMIT %(limit)s
         """

@@ -77,7 +77,7 @@ class TestClassifyBatchWiring:
         from eoa.pipeline import classify
 
         monkeypatch.setattr(classify, "is_cloud_batch_mode", lambda: False)
-        monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit: [])
+        monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit, item_ids=None: [])
 
         def boom(*a, **k):
             raise AssertionError("classify_batch must not run in local mode")
@@ -95,7 +95,7 @@ class TestClassifyBatchWiring:
             {"id": 2, "title": "b", "clean_text": "y", "url": "http://b"},
         ]
         monkeypatch.setattr(classify, "is_cloud_batch_mode", lambda: True)
-        monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit: items)
+        monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
         marked = []
         monkeypatch.setattr(classify, "mark_stage", lambda item_id, stage: marked.append(item_id))
         persisted = []
@@ -131,7 +131,7 @@ class TestClassifyBatchWiring:
 
         items = [{"id": i, "title": "x", "clean_text": "y", "url": "http://x"} for i in range(1, 3)]
         monkeypatch.setattr(classify, "is_cloud_batch_mode", lambda: True)
-        monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit: items)
+        monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
         monkeypatch.setattr(classify, "mark_stage", lambda *a, **k: None)
 
         def fail_batch(chunk, *, role):
@@ -148,7 +148,7 @@ class TestTriageBatchWiring:
         from eoa.pipeline import triage
 
         monkeypatch.setattr(triage, "is_cloud_batch_mode", lambda: False)
-        monkeypatch.setattr(triage, "get_items_for_stage", lambda stage, limit: [])
+        monkeypatch.setattr(triage, "get_items_for_stage", lambda stage, limit, item_ids=None: [])
 
         def boom(*a, **k):
             raise AssertionError("triage_batch must not run in local mode")
@@ -163,7 +163,7 @@ class TestTriageBatchWiring:
 
         items = [{"id": 1, "domain": "airborne_pods", "title": "t", "clean_text": "x", "url": "http://x"}]
         monkeypatch.setattr(triage, "is_cloud_batch_mode", lambda: True)
-        monkeypatch.setattr(triage, "get_items_for_stage", lambda stage, limit: items)
+        monkeypatch.setattr(triage, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
         monkeypatch.setattr(triage, "mark_stage", lambda *a, **k: None)
         monkeypatch.setattr(triage, "update_item_fields", lambda *a, **k: None)
         enqueued = []
