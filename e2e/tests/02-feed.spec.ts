@@ -12,11 +12,13 @@ test.describe("Feed screen (/feed)", () => {
     const firstRow = page.locator('[data-testid^="feed-row-"]').first();
     await expect(firstRow).toBeVisible({ timeout: 20_000 });
 
-    // docs/MODULES.md documents "מציג X מתוך Y" (shown vs. total). The
-    // currently-deployed build may predate that and only show a bare
-    // total ("N פריטים") — accept either, but flag the older copy as a
-    // finding rather than silently treating it as equivalent.
-    const newFormat = page.locator("text=/מציג \\d+ מתוך \\d+/");
+    // docs/MODULES.md documents "מוצגים X מתוך Y פריטים" (U5, 2026-09-05 —
+    // a plain Hebrew status sentence, replacing the old mixed-language
+    // "מציג X מתוך Y · ניווט: J/K · ..." cheat-sheet line). The
+    // currently-deployed build may predate either and only show a bare
+    // total ("N פריטים") — accept any of the three, but flag the oldest
+    // copy as a finding rather than silently treating it as equivalent.
+    const newFormat = page.locator("text=/מ(?:ציג|וצגים) \\d+ מתוך \\d+/");
     const oldFormat = page.locator("text=/^\\d+ פריטים/");
 
     if (await newFormat.count()) {

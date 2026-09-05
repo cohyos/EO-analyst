@@ -1,14 +1,17 @@
 import { NavLink } from "react-router-dom";
-import { NAV_ITEMS } from "./nav";
+import { useNavItems } from "./nav";
+import { useT } from "@/i18n";
 import { cn } from "@/lib/cn";
 
 export function NavRail() {
+  const navItems = useNavItems();
+  const t = useT();
   return (
     <nav
-      aria-label="ניווט ראשי"
+      aria-label={t("nav.ariaLabel")}
       className="flex w-16 shrink-0 flex-col items-center gap-1 border-l border-border bg-bg-raised py-3 md:w-48 md:items-stretch md:px-2"
     >
-      {NAV_ITEMS.map((item) => {
+      {navItems.map((item) => {
         const Icon = item.icon;
         return (
           <NavLink

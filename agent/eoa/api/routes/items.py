@@ -28,14 +28,39 @@ def list_items(
     domain: str | None = None,
     since: str | None = None,
     q: str | None = None,
+    country: str | None = None,
+    group_by: str | None = Query(None, pattern="^country$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     sort: str = Query("score", pattern="^(score|published_at)$"),
 ) -> dict:
     total, items = services.list_items(
-        level=level, domain=domain, since=since, q=q, page=page, page_size=page_size, sort=sort
+        level=level,
+        domain=domain,
+        since=since,
+        q=q,
+        country=country,
+        page=page,
+        page_size=page_size,
+        sort=sort,
     )
-    return {"total": total, "items": items}
+    result: dict = {"total": total, "items": items}
+    # U7a: additive -- only present when `group_by=country` is requested, so
+    # existing callers of the contract (docs/API.md) see no shape change.
+    if group_by == "country":
+        result["groups"] = services.items_by_country_groups(level=level, domain=domain, since=since)
+    return result
+
+
+@router.get("/items/by-country")
+def items_by_country(
+    level: str | None = None,
+    domain: str | None = None,
+    since: str | None = None,
+) -> dict:
+    """U7c: per-country item counts + level breakdown for the current feed
+    filters -- backs the Feed screen's "מפת מדינות" panel."""
+    return {"countries": services.items_by_country_groups(level=level, domain=domain, since=since)}
 
 
 @router.get("/items/{item_id}")

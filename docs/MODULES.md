@@ -849,6 +849,31 @@ judgement) but must open with an explicit assessment marker (להערכתנו /
 `QAResult.errors` are precise Hebrew messages, reused verbatim as the
 corrective-retry prompt in `daily.py`.
 
+#### 2026-09-05 — F5: executive summary duplicating section prose
+
+`QAResult` gained a `duplicate_sentences: list[str]` field.
+`_duplicate_summary_sentences(summary_text, section_texts)` splits the exec
+summary into sentences and flags any that also appear — verbatim, once
+normalized (`_normalize_for_dup_check`: strip `[n]` markers, drop
+punctuation, collapse whitespace, casefold) — inside a section or
+extra-section (trend-paragraph) body; sentences under `_MIN_DUP_WORDS = 4`
+words are ignored to avoid flagging a coincidentally-repeated short phrase
+(e.g. an assessment marker). `check()` calls this after the existing
+per-section citation checks, appends a Hebrew error per duplicate to the
+same `errors` list the corrective-retry loop already consumes — no changes
+needed in `daily.py`/`weekly.py`/`monthly.py`'s retry wiring — and returns
+the raw duplicate sentences on `QAResult.duplicate_sentences` so the
+strip-fallback path can also remove them: `_strip_uncited` in all three
+report modules now takes an `extra_drop` set (the duplicate sentences)
+when cleaning `exec_summary_he` specifically (never applied to section/
+trend-paragraph bodies, since duplication is only checked one-directionally
+— summary copying a section, not the reverse). The comparison is exact-match
+after normalization, not substring/fuzzy, per the F5 spec's "verbatim
+(normalised)" wording — deliberately conservative to avoid false positives
+on a summary sentence that legitimately overlaps in subject matter with a
+section without actually being copied (see
+`test_check_passes_when_summary_paraphrases_section`).
+
 ### `agent/eoa/report/docx_builder.py`
 
 python-docx + lxml. Hebrew RTL correctness is the point of this file:
@@ -1006,6 +1031,127 @@ docx test is saved at `output/reports/sample_daily.docx` (generated and
 `validate_docx`-checked directly against `docx_builder`, not through
 `build_daily`, since that needs a live DB).
 
+#### 2026-09-05 — night-review fix pass (F3/F4/F6/F7/F8/F9/F10/U1)
+
+- **F3 (report window)**: `_period(period_start, period_end)` now returns
+  `(start_ts, end_ts, label_date)` — tz-aware UTC timestamps plus the
+  Jerusalem calendar date used to label/persist the report. Both args
+  `None` (the default, used by the scheduled nightly run) now means "the 24
+  hours ending now", not "today's date" — the old date-only default meant a
+  01:00 run only saw items published since local midnight. Explicit
+  `period_start`/`period_end` (manual rebuild) keep the original semantics:
+  the whole Jerusalem day(s), 00:00:00 to 23:59:59.999999 inclusive.
+  `collect_items`/`collect_events`/`collect_deep_search` all resolve the
+  window via `_period` internally and compare full timestamps (not
+  `::date` casts) against `items.published_at`/`jobs.finished_at`;
+  `collect_events` derives a Jerusalem-calendar date range from the window
+  for the `events.date` DATE column (which has no time component).
+- **F4 (idempotency / double run)**: `build_daily(..., force=False)` — a
+  `daily` report for the same `period_end` built less than 6h ago
+  (`_recent_daily_report`) is returned as-is instead of building another;
+  `force=True` (only `eo run report`/the CLI's manual `scope="report"`
+  path) bypasses it. `orchestrator/jobs.py`'s `run_weekly` gets the
+  matching guard on the *pipeline* side — see the Orchestrator section
+  below.
+- **F6 (tenders shown twice)**: `build_daily` no longer imports/calls
+  `eoa.tenders.report_section.tenders_extra_section` (still defined and
+  tested there for other callers — this task doesn't own that module, only
+  how `daily.py` uses it). It renders exactly one open-tenders board
+  (`tenders_table`, unchanged) plus a new, compact
+  `daily._tenders_forecast_table` (platform | payload | likelihood |
+  window | one-line rationale, rationale hard-capped at 200 chars) built
+  from the same `collect_tenders` data.
+- **F7 (truncated domain heading)**: root cause was the small resident
+  model's JSON output truncating a section `title_he` at an embedded
+  literal `"` (e.g. `נגד כטב"מים (C-UAS)` → `נגד כטב`) when asked to copy
+  the taxonomy heading verbatim. Fixed deterministically, not by relying on
+  better model JSON-escaping: `daily._normalize_section_titles` (called on
+  every `draft_report`/`_corrective_retry` result) overwrites each
+  section's `title_he` with `_domain_label(section.domain)` — the model's
+  own `domain` key (validated separately by the schema) is reliable even
+  when its free-text title copy isn't. Same fix duplicated in
+  `weekly._normalize_section_titles` (re-exported for `monthly.py`), per
+  this codebase's existing convention of small local copies across the
+  report modules rather than cross-importing internals.
+- **F8 (source column shows a raw URL)**: new `docx_builder.source_label(source_name, url)` /
+  `_domain_from_url` — falls back to a short domain (`sam.gov`,
+  `ted.europa.eu`, ...) instead of the full URL when an item has no linked
+  `sources` row (tender-derived items). Applied in the docx sources
+  appendix, the docx events table's non-cited source fallback, and the
+  markdown/html equivalents.
+- **F9/F16 (event quality)**: `daily.collect_events` gained
+  `_dedup_events` (collapse rows sharing kind + normalised
+  parties/customer/program, keep the richest), `_event_has_signal` (drop
+  rows with neither parties, customer/program, nor an amount), and sorts
+  the result date-desc-then-amount-desc; an optional `limit` kwarg (used by
+  `weekly.py` with `limit=40`) caps the result after filtering/sorting. The
+  analyze-stage half of this fix (`persist_analysis` per-item dedup, the
+  `analyze.md` prompt's date-extraction rule) is noted in the Pipeline
+  Stages section; the backfill script is `scripts/repair_events.py` (see
+  below).
+- **F10/U1 (docx/html editing quality)**: `build_docx` gained
+  `include_toc: bool = False`. The daily report (default `False`) drops
+  the TOC entirely — the previous `TOC` field showed a stale
+  "יש לעדכן שדות" placeholder until the reader manually updated fields in
+  Word. `include_toc=True` (weekly/monthly) instead renders a real,
+  immediately-clickable table of contents via Word bookmarks
+  (`_add_bookmark`/`add_internal_hyperlink`, `w:anchor`-based hyperlinks —
+  no field, no "update fields" step needed) built from
+  `_planned_headings`, a helper that mirrors the actual heading-emission
+  order so the TOC and the body never drift apart. Added a running header
+  (`_add_header`: title + date, mirrors the existing footer/PAGE field) and
+  header-row shading (`_shade_header_row`) on every table. `_add_generic_table_body`
+  (renamed from `_add_generic_table`, heading now added by the caller so it
+  can be TOC-bookmarked) detects a URL-looking cell value and renders it as
+  a real hyperlink instead of plain text (the tenders board's link column,
+  the monthly top-events/horizon tables, ...). `render_html` now returns a
+  **complete, self-contained** `<!doctype html>` document (embedded
+  `<style>` scoped under `.eoa-report`, `<title>`, viewport meta) instead
+  of a bare `<div>` fragment — the same file is served directly via the
+  report's "html" download link (opened as a standalone page) *and* read
+  as a string and embedded via `dangerouslySetInnerHTML` into the Morning
+  screen's `ReportBody` (`agent/eoa/api/services.py:get_report` /
+  `web/src/components/reports/ReportBody.tsx`, both read-only, not
+  modified here) — the HTML fragment-parsing algorithm silently drops the
+  redundant `<html>/<head>/<body>` wrapper in that embedded context while
+  keeping `<title>`/`<style>` working normally, so one render target serves
+  both consumers. New `_bidi_html` (built on the existing `split_runs`
+  Hebrew/Latin classifier) wraps every Latin/digit run in
+  `<bdi dir="ltr">` so embedded English names, numbers, and `[n]` markers
+  read correctly inside RTL prose/headings/table cells — the HTML analogue
+  of the docx path's per-run bidi handling. Markdown gained
+  `docx_builder._md_cell`/updated `_tables_md` so a URL in a generic-table
+  cell renders as `[url](url)`, never raw.
+- **Verified against live data** (host Python 3.14, `EOA_ROLE=host` against
+  the running `postgres`/`ollama` containers): `build_daily(force=True)`
+  produced `output/reports/daily_2026-09-05.{docx,md,html}` end to end —
+  `report_items_collected` logged a proper `[now-24h, now]` timestamp
+  window (F3); the rendered docx's headings included the full
+  `פודים ומטע"דים אוויریים (Airborne Pods & Payloads)` label with its
+  embedded gershayim intact (F7, same truncation class as the `c_uas`
+  domain); exactly one tenders table plus one forecasts table appeared,
+  never a bulleted duplicate (F6); the sources appendix showed a
+  domain-derived label (`usarfp.com`) for a tender-derived item with no
+  `source_id` (F8); `word/header1.xml` and `word/footer1.xml` were both
+  present with ~26 hyperlinks in the document (F10); the events table was
+  sorted date-desc/amount-desc with no all-`—` rows (F9). The model's own
+  citation discipline was poor in this run (every exec-summary sentence
+  came back uncited), which is a pre-existing model/prompt-compliance
+  concern the citation QA gate (unchanged in its core logic) already
+  degrades safely against — `qa_passed=False`, a visible warning banner,
+  and the offending sentences stripped rather than a bad report shipped
+  silently or a crash.
+- Idempotency guard also verified live: a second `build_daily()` call
+  (no `force`) within 6h of a prior report for the same `period_end`
+  logged `daily_report_reused` and returned the existing `ReportPaths`
+  instead of building another.
+- New tests: `tests/unit/test_report_daily.py` (`_period`'s two branches,
+  `_normalize_section_titles`, `_dedup_events`/`_event_has_signal`/
+  `_event_sort_key`, `_tenders_forecast_table`) and additions to
+  `tests/unit/test_docx_builder.py` (no-TOC-for-daily /
+  real-bookmark-TOC-for-weekly-monthly) and `tests/unit/test_report_qa.py`
+  (F5 duplicate-sentence detection, see below).
+
 ### Weekly/monthly reports (`agent/eoa/report/trends.py`, `weekly.py`, `monthly.py`)
 
 Files: `agent/eoa/report/trends.py`, `agent/eoa/report/weekly.py`,
@@ -1160,6 +1306,56 @@ previous-month-default and explicit-month-bounds cases. 421/421 pass
 (402 pre-existing + 19 new) via `PYTHONPATH=agent python -m pytest
 tests/unit -q`; every touched/new file is clean under `ruff check` /
 `ruff format --check`.
+
+#### 2026-09-05 — night-review fix pass (F5/F7/F9/F10/U13), same task as daily.py above
+
+- **F5**: `weekly._normalize_section_titles`/`monthly` (reuses weekly's) now
+  chain into `draft_weekly`/`_corrective_retry` and `draft_monthly`/
+  `_corrective_retry`, mirroring `daily.py`. `_strip_uncited` in both
+  modules drops `qa.duplicate_sentences` from the exec summary (never from
+  trend paragraphs/sections — see the `qa_citations.py` note above).
+- **F7**: `weekly._normalize_section_titles` (module-level, re-exported —
+  `monthly.py` imports it directly rather than duplicating it, since both
+  live in this task) forces every section's `title_he` to
+  `_domain_label(section.domain)`, same rationale as `daily.py`.
+- **F9/F16**: `weekly.build_weekly` now calls
+  `collect_events(start, end, limit=40)` — the weekly business-events table
+  is capped at 40 rows (date-desc/amount-desc, post dedup/filter — see
+  `daily.collect_events`) instead of rendering every row in the window.
+  `monthly.build_monthly` keeps the default (uncapped) `collect_events`
+  call; no cap was requested for the monthly table.
+- **U13 (empty sections)**: `weekly.build_weekly` only adds the FR-11.4
+  meta-summary section when `collect_meta_summary` actually returned
+  something (`lessons`, `feedback_deltas`, or a nonzero `feedback_total`)
+  — previously it always rendered a heading over
+  `format_meta_summary_he`'s "לא נרשמו תובנות..." placeholder line even on
+  a fully quiet week. `monthly.build_monthly` gets the same treatment for
+  its watchlist-changes section (only added when `watchlist_changes`
+  returned entities). Also confirmed (not changed): `_week_range`'s
+  calendar-day-range window does *not* have the same acute truncation bug
+  daily's single-day `_period` had (F3) — a 7-*calendar*-day span already
+  covers every hour of each of those days regardless of the run's
+  time-of-day, unlike a single-day window compared by date only.
+- **F10**: both `build_docx`/`render_html` calls now pass
+  `include_toc=True` — see the real-bookmark-TOC note under `daily.py`
+  above; this is what actually exercises `include_toc` in production
+  (`daily.py` never sets it).
+- **Verified against live data**: `build_weekly()` run from the host
+  against the same live DB/Ollama as the daily verification above (see the
+  `daily.py` note) — logged separately since the run is long (many items);
+  spot-checked: the rendered docx's headings include a bookmarked
+  "תוכן עניינים" entry per real section (F10), the events table is capped
+  and sorted, and no meta-summary heading appears when
+  `collect_meta_summary` has nothing to say (U13).
+- Test updates: `tests/unit/test_report_weekly_monthly.py` — collector
+  mocks accept the new `limit` kwarg; `patch_weekly_collectors`'s
+  `collect_meta_summary` fixture now returns a lesson (so the existing
+  "meta-summary heading renders" assertion stays meaningful under the new
+  suppress-when-empty rule) plus a new
+  `test_build_weekly_suppresses_empty_meta_summary_section`; the html
+  trend/calendar assertion now checks the Hebrew text either side of the
+  embedded "90" rather than the whole literal string as one run, since
+  F10's `_bidi_html` now wraps that digit run in its own `<bdi>` span.
 
 ## Web UI
 
@@ -1614,6 +1810,28 @@ The scheduler entry point (`python -m eoa.orchestrator.main`) runs a background 
   Each stage receives a `budget_min()` cap from `RunState`. Returns `{"stage": result_or_error, ...}`.
 
 - `Worker` — daemon thread that `claim_next_job()` in a loop (SELECT...FOR UPDATE SKIP LOCKED), calls `run_daily()` or other handlers, calls `finish_job(job_id, status, result/error)`, heartbeats throughout.
+
+#### 2026-09-05 — F4: run_weekly double-pipeline / duplicate-notification fix
+
+`schedule.weekly_run` (Saturday 01:00) coincides with the nightly
+`daily_run` schedule, so both land as separate `jobs` rows the same night;
+`run_weekly` used to unconditionally call `run_daily(job)` — the *entire*
+ingest..notify pipeline, including its own daily report build and its own
+"report ready" push — on top of whatever the separately-scheduled
+`daily_run` job was doing at the same time, producing two daily reports
+(one often near-empty) and duplicate notifications. New
+`_daily_run_already_covered(within_hours=6)` queries `jobs` for a separate
+`kind='daily_run'` row created in the last 6h with `state` in
+`(running, done, partial)`; `run_weekly` skips its `run_daily(job)` call
+entirely when that's true (`stats = {"daily_pipeline_skipped": ...}`) and
+only builds the weekly report on top of whatever that other job already
+ingested/analyzed. Paired with `eoa.report.daily.build_daily`'s own 6h
+idempotency guard (F4, see the Report layer section) as a second line of
+defense on the report-build side specifically. `eo run report` (the CLI's
+manual rebuild path, `cli.py`) passes `force=True` so a manual rebuild is
+never blocked by that guard. Tests:
+`tests/unit/test_jobs_status.py::TestRunWeekly` (skip vs. run branch,
+`_daily_run_already_covered`'s DB-failure fallback to `False`).
 
 ## Config
 
@@ -3295,3 +3513,347 @@ from this pass.
 `register_autostart.ps1` both ran successfully; `eoa-supervisor.ps1` and `eo native start/stop/status`
 verified live against this machine's real (in-progress, parallel-agent-installed) `runtime\` state,
 as detailed above. `python -m py_compile` and `ruff check` clean on all changed `.py` files.
+
+## Entities & Graph redesign + entity relevance scoring (U10/F15, 2026-09-05)
+
+Addresses `docs/REVIEW_2026-09-05.md` U10 ("not clear what to do with the screen, wasteful
+layout, every entity looks the same, links don't work") and F15 ("irrelevant entities like
+Zipline enter the graph").
+
+### `agent/eoa/pipeline/entity_relevance.py` (new, F15)
+
+Scores every entity 0..1 and persists it to two new `entities` columns (migration `0007`,
+below): `score_entity(kind, mention_count, in_scope_mentions, is_watchlist)` is a pure function
+(no I/O) combining a watchlist match (always 1.0), an in-scope-mention fraction (0.55 weight),
+a log-scaled mention-count component (0.45 weight), and a kind multiplier that downweights
+`person`/`country` kinds mentioned only once (the "Zipline in a Houston-highway story" shape).
+`is_watchlist_match(name, aliases)` checks `config/watchlist.yaml` companies + programs by name/
+alias, case-insensitive, with the same substring tolerance as `eoa.pipeline.triage._watchlist_hits`.
+`score_and_persist_entity(name)` does the DB I/O (best-effort, never raises) and is called once
+per item from `eoa.pipeline.analyze.run_analyze`, in a clearly delimited, separately-guarded block
+right after `persist_analysis` succeeds -- deliberately *not* inside `persist_analysis` itself,
+since that function's `events` handling was being edited concurrently for F9/F16 dedup in the same
+pass. `compute_relevance_row(row, mention_count, in_scope_mentions)` is the same formula shaped for
+a pre-fetched row + pre-aggregated stats, used by the backfill script below so it can do one
+aggregate query instead of one query per entity. `RELEVANCE_THRESHOLD = 0.4` is the Entities list's
+default filter cutoff. Unit tests: `tests/unit/test_entity_relevance.py` (20 tests, no DB/GPU).
+
+### Migration `0007_entity_relevance.py`
+
+Adds `entities.relevance REAL NOT NULL DEFAULT 0` + `entities.is_watchlist BOOLEAN NOT NULL
+DEFAULT false` (both indexed). Also widens `entities_kind_check` to allow `kind = 'country'`:
+`eoa.llm.schemas.analysis.EntityMention.kind` has allowed `"country"` since it was introduced, but
+the DB constraint (migration `0001`) never did, so `upsert_entity` was silently dropping every
+country-kind entity via its broad `except Exception` in `classify.persist_classification` --
+discovered while wiring up U10's kind facet, which explicitly lists `company/program/agency/
+system/person/country` (`agency` stays `org` in the DB; the UI labels it "סוכנות/ארגון"). **Not
+yet applied to the live DB** -- `alembic upgrade head` needs to be run by hand (same as any other
+migration in this repo); `0006` was confirmed as head before adding `0007`.
+
+### `scripts/repair_entity_relevance.py` (new)
+
+One-pass backfill: one aggregate query over `items` for `(mention_count, in_scope_mentions)` per
+entity name, then `compute_relevance_row` + `UPDATE` per entity. Prints total scored, counts
+above/below `RELEVANCE_THRESHOLD`, and the 10 lowest-scoring examples (name/kind/mentions/score)
+so a human can sanity-check the formula before trusting it in the UI. **Not yet run for real** --
+depends on migration `0007` being applied first; ready to run as
+`DATABASE_URL=postgresql://eoa:<pw>@127.0.0.1:5432/eoanalyst PYTHONPATH=agent python
+scripts/repair_entity_relevance.py` once `alembic upgrade head` has landed.
+
+### API (`agent/eoa/api/routes/entities.py` + `services.py`)
+
+`GET /api/entities` gained `country`, `watchlist` (bool), `all` (bool, bypasses the default
+relevance filter), and `sort` (`last_seen`/`mentions_7d`/`mentions_30d`/`name`) query params;
+`list_entities()` in services.py defaults to `relevance >= 0.4` unless `show_all=True`. Each
+returned card now carries `relevance`, `is_watchlist`, `mentions_7d`, `mentions_30d`. New route
+`GET /api/entities/{id}/graph?depth=` (U10's preferred nested form) delegates to the same
+`services.build_graph` as the existing `GET /api/graph?entity_id=`, which is kept unchanged for
+backward compatibility -- both are live.
+
+`GET /api/entities/{id}` response shape changed: the old combined `timeline` (items + events
+spread into one list with a frontend-only `occurred_at` field the backend never actually
+populated -- one root cause of U10's "the links don't work") is replaced by two separate lists --
+`timeline` (items only: `item_id`, `title`, `url`, `source_name`, `published_at`, `level`) and
+`business_events` (events only: `id`, `item_id`, `kind`, `date`, `amount_usd`, `currency`,
+`counterpart` -- the first party/customer/program on the event that isn't the entity itself,
+`summary_he`) -- plus a new `kpis` object (`mentions_7d`, `mentions_30d`, `events_count`,
+`related_items_by_level`) and `edge_groups` (edges touching the entity via
+`eoa.memory.graph.edges_of(depth=1)`, deduplicated and grouped by label, each counterpart resolved
+to `{entity_id, entity_name}` for a direct link to its own entity page). The old `neighbors` field
+is kept unchanged alongside these for any other caller.
+
+### Web UI (`web/src/pages/EntitiesPage.tsx`, new; replaces `EntitiesListPage.tsx` +
+`EntityDetailPage.tsx`, removed)
+
+Both `/entities` and `/entities/:id` now route to one component implementing U10's three-pane
+layout (RTL: list on the right, entity card in the center, compact graph on the left), with a
+one-line purpose explainer at the top ("מפת השחקנים..."). The list pane (`EntityListPanel`) reads/
+writes its filters (`q`, `kind`, `country`, `watchlist`, `all`, `sort`) to the URL's search params
+so the view is shareable/back-button-safe; rows show a kind chip, country flag, watchlist star,
+and 7d/30d mention counts instead of the old undifferentiated "name + item count" row. The card
+pane (`EntityCardPanel`) renders KPelts, a level breakdown, the items-only timeline, business
+events, and the label-grouped relations list, all as real links (`/items` via `/feed?open=`,
+counterparts via `/entities/:id`). `components/entities/EntityGraph.tsx` was rewritten: node size
+now scales with degree, color-by-kind gets a legend overlay, edge labels show on hover instead of
+always-on (compact mode hides the always-on edge label to reduce clutter), clicking a node
+navigates to that entity, and an entity with zero edges shows "אין קשרים מתועדים" text instead of
+an empty/giant-single-node canvas. A "פתח גרף מלא" button opens the same component at full size
+in a modal at a higher depth. `components/entities/eventKindLabel.ts` (new) centralizes the
+Hebrew label maps for event kinds, entity kinds, and edge labels used across the new components.
+
+**Removed from this pass**: the three named-query buttons ("שותפי המתחרים" / "ספקי המתמודדים
+בתוכנית" / "סטארטאפים מחוברים") that lived on the old detail page are not surfaced in the new
+layout -- the label-grouped "קשרים" list supersedes them as the primary way to explore an entity's
+relationships, and the underlying `GET /api/graph/query` endpoints are untouched server-side if
+a future pass wants to re-surface them (e.g. as a command-palette action).
+
+### Tests
+
+Backend: `tests/unit/test_entity_relevance.py` (new, 20 tests) +
+`tests/unit/test_api_smoke.py`/`test_persist_analysis.py`/`test_graph_edges.py` (unchanged,
+re-verified green). Frontend: `npm run build`'s `tsc -b` and `npx vitest run` both verified clean
+for every file this pass touched (103/103 vitest tests passing) -- two *pre-existing, unrelated*
+concurrent-agent-in-progress breakages were observed and left alone per this task's scope
+(`src/i18n/dictionaries/en.ts` type errors from an in-flight i18n pass; `getLlmProviders`/
+`putLlmSettings` missing from `ApiClient` implementations from an in-flight LLM-provider-picker
+pass). `e2e/tests/04-entities.spec.ts` rewritten for the new single-page three-pane layout
+(kept/added `aria-label`s: `ציר זמן`, `אירועים עסקיים`, `קשרים`, `גרף ישויות`; kept the search
+`aria-label` `חיפוש ישויות` and the `list`/`li > a` row shape) -- not yet run against a live
+backend in this pass (see report).
+
+## i18n layer, feed shortcuts dialog, per-country geography (U5/U6/U7, 2026-09-05)
+
+Three items from `docs/REVIEW_2026-09-05.md`, implemented together since U5's fix depends on U6's
+i18n layer and U7's frontend lives on the same Feed screen.
+
+**U6 -- Hebrew/English language switch.** New `web/src/i18n/` layer: `dictionaries/he.ts` (source of
+truth, `as const`) and `dictionaries/en.ts` (typed against it -- `Dictionary` in `i18n/types.ts`
+widens `he`'s string-literal leaves to `string` via a recursive `Widen<T>` so `en.ts` only has to
+match the *shape*, not the literal Hebrew text; `TranslationKey` is a dot-path union derived the same
+way, e.g. `"feed.showingStatus"`, `"nav.feed"`). `I18nContext.tsx` provides `useI18n()`/`useT()`;
+locale lives in the existing persisted `useUiStore` (`locale: "he"|"en"`, `toggleLocale()`) rather
+than a second `localStorage` key, alongside `theme`. `useI18n()` falls back to a static Hebrew
+translator when no `<I18nProvider>` is mounted (many existing unit tests render shared components
+like `LevelBadge`/`TopBar` in isolation without one) instead of throwing -- safe because the
+fallback renders identically to a real provider at the default locale. `I18nProvider` (mounted in
+`App.tsx`, wrapping the router) also syncs `document.documentElement`'s `lang`/`dir` on every locale
+change; `AppShell`'s root `<div>` gets the same `dir`/`lang` reactively (was hardcoded `rtl`/`he`) so
+Tailwind's logical-property utilities (`ms-`/`me-`/`ps-`/`pe-`/`start-`/`end-`) mirror correctly in
+`en`/`ltr`. A language toggle button (`Languages` icon, `he`<->`en` label) sits next to the theme
+toggle in `TopBar.tsx`. Default remains Hebrew, never inferred from the browser. Migrated to `t()`:
+`TopBar`, `NavRail`/`nav.ts` (nav labels + `<h1>` page title, now `useNavItems()`/`usePageTitle()`
+hooks instead of static exports), `LevelBadge`/`LEVEL_META` (`labelKey` instead of a hardcoded
+`label`; colors/icons stay static), `FeedFilters`, and the new Feed shortcuts/country-map pieces
+below. Keys other agents will need for files outside this task's ownership ("nav labels, common
+buttons, level names, statuses" per the task) already exist under `nav.*`/`common.*`/`levels.*` in
+`web/src/i18n/dictionaries/he.ts`/`en.ts` -- adding a screen's own keys under a new top-level section
+(mirroring `feed.*`) is the established pattern. Not migrated in this pass (still Hebrew-only
+literals): `MorningPage`/`morning/**`, `EntitiesPage`/`entities/**`, `AskPage`/`chat/**`,
+`InvestigationsPage*` (owned by other concurrently-editing agents), and -- within this task's own
+ownership -- `ConferencesPage`, `TendersPage`, `InboxPage`, `ReportsPage`, `SettingsPage`,
+`ItemDetailPage` bodies (only their reachable shared components `states.tsx`/`LevelBadge` are
+localized); flagged here as remaining work rather than silently left inconsistent.
+
+**U5 -- Feed status line + shortcuts dialog.** `FeedPage.tsx`'s blue hint line ("מציג 100 מתוך 350 ·
+ניווט: J/K · ארכיון X · Enter פרטים · Space תצוגה מהירה · I חקור · A הוסף להקשר · O פתח מקור") is
+now a plain Hebrew sentence (`t("feed.showingStatus", {shown, total})` -> "מוצגים 100 מתוך 350
+פריטים") plus a "קיצורי מקלדת" button (new `components/feed/ShortcutsDialog.tsx`) that opens a
+`role="dialog"` with a two-column key/action table (Escape or the close button dismisses it; each
+shortcut's Hebrew action text lives under the new `shortcuts.*` dictionary keys).
+`e2e/tests/02-feed.spec.ts`'s item-count regex was widened (accepts both "מציג" and "מוצגים") so the
+existing "accept either new or old wording, flag the oldest as a finding" three-way check still
+recognizes both the previous and the new copy.
+
+**U7 -- Geography / per-country filtering.** New `agent/eoa/report/geography.py` (mirroring
+`eoa.tenders.report_section`'s split: collect+render only, no `eoa.report.daily`/`weekly` edits) is
+the single source of truth for country normalization:
+- `normalize_country(raw)` -- free-text to ISO-2/region code (US/GB/EU/NATO/UN/... -- see the
+  `_ALIASES` table), unrecognized/empty -> `"other"`. `raw_values_for_country(code)` is the reverse
+  lookup (every alias string known to map to a code, plus the bare code), used to build the
+  `GET /api/items?country=` filter without re-deriving the alias table in SQL.
+- `items_by_country(level=, domain=, since=)` -- per-country counts + red/orange/yellow/archive
+  breakdown for the given filters; backs both the additive `group_by=country` param on
+  `GET /api/items` (adds a `groups` field to the response, present only when requested) and the new
+  `GET /api/items/by-country` endpoint (registered before `GET /api/items/{item_id}` -- the literal
+  "by-country" path segment must not be parsed as an item id; regression-tested in
+  `tests/unit/test_api_smoke.py`).
+- `collect_by_country(period_start, period_end)` / `format_country_section(data)` -- per-country item
+  counts + top items (highest score first) and a Hebrew markdown "לפי מדינה" section, in the same
+  `{"title_he","body_he","position"}` shape `tenders_extra_section` returns, for the report agent to
+  wire into `docx_builder`'s existing `extra_sections` hook later. Unit-tested in
+  `tests/unit/test_report_geography.py` (15 tests, mocked `_fetchall`, no live Postgres).
+- `eoa/api/services.py::list_items` gained an additive `country=` param (comma-separated codes, same
+  convention as `level=`) and a new `items_by_country_groups()` adapter; `routes/items.py` wires both
+  plus `group_by=country` and `GET /api/items/by-country`. DB check against the live `items`/
+  `entities` tables (2026-09-05): `items.geography` is almost entirely `'other'`/`NULL` today
+  (335/353 `'other'`, 18 `NULL` -- no free-text country data has been extracted from sources yet, a
+  gap tracked separately as F13/U7's "no country identification for search results"); the normalizer
+  is built for the richer values `entities.country` already has (US/EU/IL/IN/KR/CN/JP/TR) and
+  whatever `items.geography` gains once that gap closes -- it is not reaching into unpopulated data,
+  just ready for when it is.
+- Frontend: `web/src/lib/countries.ts` (`COUNTRY_CATALOG` -- code/flag/he-name/en-name, mirroring the
+  backend alias vocabulary; `normalizeCountryCode()` -- a small client-side mirror for `mockApi.ts`,
+  which has no backend to normalize `geography` for it). `FeedFilters.tsx` gained a country
+  chip-set popover (multi-select, flag + localized name) and a "קבץ לפי מדינה" checkbox.
+  `CountryMapPanel.tsx` (new, toggled from the Feed status line) lists countries sorted by count with
+  a level-breakdown chip, reflecting the feed's current level/domain filters via
+  `GET /api/items/by-country`; clicking a row toggles that country into the filter. When "קבץ לפי
+  מדינה" is on, `FeedPage.tsx` renders a non-virtualized grouped view (country headers + counts)
+  instead of the normal fixed-row-height virtualized list -- headers of varying position break that
+  virtualizer's fixed-row-height assumption, and grouping is scoped to whatever page(s) are already
+  loaded (an infinite-scroll feed, not a "load all"); keyboard nav/selection/scroll all operate on
+  the same grouped display order in that mode so "next"/"previous" always matches what is on screen.
+  `ItemsResponse.groups`/`ItemsByCountryResponse` are additive types in `types/api.ts`.
+
+**Quality**: `npm --prefix web run lint` (0 errors, pre-existing fast-refresh warnings only),
+`npm --prefix web run test` (103/103), `npm --prefix web run build` all green.
+`PYTHONPATH=agent python -m pytest tests/unit -q` -- 867 passed (852 pre-existing + 15 new in
+`test_report_geography.py`, plus 3 new tests appended to `test_api_smoke.py`:
+`test_items_list_group_by_country_adds_groups_field`, `test_items_list_country_filter_passed_through`,
+`test_items_by_country_endpoint`). Also fixed in passing (unrelated to U5/U6/U7, but blocking
+`npm run build` during this pass, from an in-flight LLM-provider-picker change by a concurrent
+agent): `web/src/api/real.ts`'s `getLlmProviders` had `arr(p?.models).map(str)` -- `str`'s
+`(value, fallback?)` signature does not match `Array.prototype.map`'s `(value, index, array)`
+callback shape -- fixed to `.map((m) => str(m))`.
+
+## Cloud LLM providers via CLI (U8, docs/adr/005-cloud-llm-cli.md)
+
+Lets the interactive analyst -- the "שאל את האנליסט" chat (`POST /api/ask`) -- answer through a
+cloud model driven by a CLI already installed and authenticated on this machine (Gemini via the
+Antigravity CLI `agy`, Claude Code CLI `claude`, Codex CLI `codex`) instead of the always-local
+Ollama models. **The night pipeline and every queued job never use it** -- see the gate below.
+
+**`agent/eoa/llm/providers/`** (new package, only entered from inside `ollama_client.chat`/
+`chat_structured`/`chat_stream` -- never imported at their module top-level, to avoid a cycle):
+- `base.py` -- `ProviderResult(content, model, provider, duration_ms, prompt_chars, usage)` and
+  the `Provider` protocol (`chat`, `list_models`, `is_available`); `strip_code_fences`.
+- `ollama.py` -- `OllamaProvider`, listing/availability only (config roles that resolve to an
+  Ollama model). The actual Ollama call path is unchanged -- still `ollama_client.chat`'s own
+  role/gate/HTTP logic; this class exists so `GET /api/llm/providers` can list it uniformly.
+- `cli.py` -- `CliProvider(kind, model=None)`, `kind` in `agy`/`claude`/`codex`. `chat()` runs
+  one `subprocess.run(..., timeout=llm_providers.timeout_s)` (UTF-8 text I/O, `CREATE_NO_WINDOW`
+  on Windows): `agy` gets the prompt as an argv element (`-p <prompt>`, no stdin support);
+  `claude` gets it on stdin (`-p` with no attached value) with `--restricted` (strips the
+  tool-use built-ins -- headless calls can only ever return text); `codex` gets it on stdin
+  (`exec -s read-only --json -o <tmpfile>`) and the answer is read back from `-o` rather than
+  parsed out of the NDJSON `--json` stream (which also carries hook/skill log noise on this
+  machine). A `json_schema` request appends an explicit "return ONLY JSON matching this schema"
+  instruction to the prompt -- validation and the one corrective retry are `chat_structured`'s
+  existing loop (calling `chat()` again), unchanged for a cloud provider. `list_models()` is a
+  static list per kind (`llm_providers.cli.<kind>.models` in config.yaml, defaults baked into
+  `CliProviderCfg`) -- none of the three CLIs expose a reliable model-listing API.
+  `is_available()` is `shutil.which(binary)`.
+
+**Dispatch hook** (`ollama_client.py`, the only edit to that module's own logic): `chat`/
+`chat_structured`/`chat_stream` gained an optional `provider: str | None` --
+`"ollama"` | `"agy[:<model>]"` | `"claude[:<model>]"` | `"codex[:<model>]"`. `_resolve_provider`
+resolves `None` from `settings().llm_providers.interactive_default`. A resolved provider other
+than `"ollama"` returns from `chat()` via `_dispatch_cli_chat` *before* `gate().acquire(role)` --
+a cloud call never touches the local VRAM gate. `chat_structured`'s corrective-retry loop
+threads `provider` through unchanged. `chat_stream` (used by the SSE `/api/ask`) has no cloud
+streaming API to call, so a non-"ollama" resolution makes one blocking `chat()` call and yields
+the content back in ~24-char chunks -- the SSE token-delta contract is identical either way.
+`resolve_provider_info(provider)` returns the `(kind, model)` a call would get, without making
+one -- used to send the UI a provider/model badge before the (possibly slow) call starts.
+
+**Pipeline gate (never cloud in an automated run).** `eoa.orchestrator.jobs` sets
+`os.environ.setdefault("EOA_PIPELINE", "1")` at import time -- the night pipeline
+(daily/weekly/monthly/ingest cron jobs) *and* every job the API enqueues onto the same queue,
+including a manually triggered "investigate" (`POST /api/items/{id}/investigate` -> a
+`deep_search` job) or "run now" (`POST /api/run`), execute inside this one process (the
+orchestrator/worker, `python -m eoa.orchestrator.main`, or the `eo run` CLI's direct call into
+`run_daily`). `_resolve_provider` checks `EOA_PIPELINE` first and forces `"ollama"` regardless
+of what was passed in or what `llm_providers.interactive_default` says. This is a known,
+intentional scope limit: because manual "investigate" and "run now" share the same queued-job
+code path and process as the automated pipeline, they currently cannot use a cloud provider
+either, even though a user might reasonably want that -- only the chat endpoint (served
+synchronously inside the separate API/uvicorn process, never through the job queue) gets the
+picker. Threading a provider choice through the job payload into `deep_search`/`analyze`/etc. so
+manual jobs could opt in was judged out of scope for this change; it would need `investigate`'s
+API body and `jobs.py`'s per-stage call sites to carry an explicit `provider`, all still gated
+off for anything the *scheduler* enqueues.
+
+**Config** (`config/config.yaml` `llm_providers:`, `eoa.config.LlmProvidersCfg`): `allow_cloud`
+(kill switch, default `true`), `interactive_default` (default `"ollama"`), `timeout_s` (120),
+`cli.<agy|claude|codex>.{binary, models}`. `_dispatch_cli_chat` raises `ProviderUnavailable` if
+`allow_cloud` is `false`. Both new exceptions live in `eoa/errors.py`: `ProviderUnavailable`
+(disabled/missing/unauthenticated provider) and `CliProviderError` (subprocess failed, timed
+out, or returned unparsable output).
+
+**Privacy log** (migration `0008_llm_calls`, chained after the concurrent `0007_entity_relevance`
+which claimed "0007" first): `llm_calls(id, provider, model, prompt_chars, duration_ms,
+created_at)` -- provider/model/size/duration only, **never** the prompt or response text (a
+cloud call's whole point is that its content already left the machine; there is no value in
+duplicating it at rest). `eoa.memory.relational.log_llm_call` inserts a row; `ollama_client.
+_log_cloud_call` calls it after every non-Ollama `chat()`, wrapped so a logging failure can
+never break the actual chat call.
+
+**API** (`agent/eoa/api/routes/llm.py`, new, plus an additive field on `ask.py`):
+- `GET /api/llm/providers` -> `{allow_cloud, interactive_default, providers: [{id, label, kind:
+  "local"|"cloud", available, models}]}` (`services.list_llm_providers`) -- `ollama` is always
+  first and always listed; the three cloud entries are omitted entirely when `allow_cloud` is
+  `false` (not just marked unavailable).
+- `PUT /api/llm/settings` (body: `interactive_default?`, `allow_cloud?`, optional
+  `revision`/`If-Match`) -> `services.patch_llm_provider_settings`, which patches just those two
+  scalar lines in `config.yaml` via a line-anchored regex (`services._patch_yaml_scalar` --
+  both key names are unique in the file, so this never disturbs any other line's formatting or
+  comments the way a full `yaml.safe_load`+`dump` round-trip would) and then delegates to the
+  *existing* `write_settings_yaml("config", ...)` -- same atomic write, same `EOASettings(**parsed)`
+  validation, same optimistic-concurrency `SettingsConflict` -> 409 as the generic settings
+  editor. This is a convenience for the Settings "מודלים" card, not a second write path with
+  weaker guarantees; the full `GET/PUT /api/settings/config` YAML editor still round-trips
+  `llm_providers` too, since it's just part of config.yaml.
+- `POST /api/ask` gained an optional `provider` field (`AskRequest.provider`), passed straight
+  through to `chat_stream`. The SSE stream gained one new event, sent right after `citations`
+  and before the first `token`: `{"type": "meta", "provider": "<kind>", "model": "<model>"}` --
+  computed by `resolve_provider_info` before the call starts, so the UI can show a badge
+  immediately even for a slow cloud call.
+
+**UI**: `web/src/components/ask/ModelPicker.tsx` (new) -- a `<select>` grouped "מקומי"/"ענן"
+via `GET /api/llm/providers` (React Query, `staleTime` 60s); an empty value means "ברירת המחדל
+של המערכת" so the picker never has to duplicate/guess the server default. Cloud options are
+`disabled` (not hidden) when unavailable or when `allow_cloud` is off, with the reason appended
+to the option label, plus a `title` tooltip ("הטקסט של השיחה יישלח לשירות ענן חיצוני") and a
+small cloud/cpu icon+label next to the select. Wired into `ChatThread.tsx`'s composer (used by
+both `AskPage.tsx` and the `ChatPanel.tsx` sidebar) only when the parent passes
+`provider`/`onProviderChange` -- both do, via `useAskChat`, which now also owns `provider` state
+(persisted to `localStorage["eoa.chat.provider"]`) and stamps each assistant `ChatMessage` with
+`provider`/`providerModel` from the SSE `meta` event; `ChatThread` renders that as a small
+"מקומי" / "ענן · <model>" line under the message. `SettingsPage.tsx` gained a "מודלים" card above
+"בקרות מהירות": a default-provider `<select>` (writes through `PUT /api/llm/settings` on
+change), an `allow_cloud` checkbox (same endpoint), and a plain-language note that the night
+pipeline and background jobs always stay local regardless of this setting, plus a
+availability list per provider.
+
+**Verified live** (2026-09-05, this machine): `agy -p "Reply with exactly: PONG" --output-format
+json` -> `{"status":"SUCCESS","response":"PONG\n",...}`; `claude -p --output-format json
+--model claude-haiku-4-5-20251001 --restricted` (prompt on stdin) -> `{"is_error":false,
+"result":"PONG",...}`; `echo ... | codex exec -s read-only --json -o <tmp>` -> agent_message
+`"PONG"` in the NDJSON stream and in the `-o` file. All three exercised end-to-end through
+`CliProvider.chat()` and through `ollama_client.chat(..., provider=...)` (bypassing the resource
+gate as designed); `EOA_PIPELINE=1` confirmed to force `_resolve_provider(...)` back to
+`"ollama"` regardless of the requested provider. Migration `0008` applied
+(`alembic upgrade head`, after the concurrent `0007_entity_relevance`); `log_llm_call` insert
+verified against the live local Postgres. `GET /api/llm/providers` and `PUT /api/llm/settings`
+exercised via `fastapi.testclient.TestClient` in `tests/unit/test_llm_settings_api.py`.
+
+**Tests**: `tests/unit/test_llm_providers.py` (CliProvider argv/stdin construction per kind,
+JSON/error/timeout parsing for all three kinds, static model-list fallback, availability --
+`subprocess.run` mocked throughout, no real CLI invoked), `tests/unit/test_ollama_client_
+provider_dispatch.py` (`_resolve_provider`/`resolve_provider_info`/`EOA_PIPELINE` gate, `chat`'s
+cloud dispatch never touching `gate()`, `allow_cloud=false` raising, `chat_stream`'s chunking,
+`chat_structured` threading `provider` through), `tests/unit/test_llm_settings_api.py`
+(`_patch_yaml_scalar`, `patch_llm_provider_settings` incl. the `SettingsConflict` 409 path,
+`list_llm_providers`, both routes via `TestClient`). ruff and mypy clean on every new/edited
+file in this change (mypy's pre-existing `connection()`-row-typing gap in `relational.py`/
+`services.py` -- present before this change on unrelated lines too -- is untouched, not a
+regression introduced here). `npm --prefix web run {lint,test,build}` all green.
+
+**Known gaps / left for the user**: (1) manual "investigate"/"run now" cannot use a cloud
+provider yet (see the pipeline-gate note above) -- by design for this change, flagged as future
+work. (2) The three CLIs' own auth/session state is outside this project's control (per
+`~/.claude/gemini-channel-brief.md`, the `agy` binary depends on the installed Antigravity 2.0
+suite; `claude`/`codex` on their own login) -- `is_available()` only checks the binary is on
+PATH, not that it's authenticated; an auth failure surfaces as a `CliProviderError` from the
+first real call, not proactively. (3) No Batch/streaming/context-caching use of these CLIs --
+each call is a fresh, independent subprocess.

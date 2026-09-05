@@ -1,18 +1,20 @@
 import { useLocation } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Command, Moon, Play, Search, Sun } from "lucide-react";
+import { Command, Languages, Moon, Play, Search, Sun } from "lucide-react";
 import { useState } from "react";
-import { pageTitleFor } from "./nav";
+import { usePageTitle } from "./nav";
 import { useUiStore } from "@/store/uiStore";
 import { api } from "@/api";
 import { cn } from "@/lib/cn";
+import { useI18n } from "@/i18n";
 
 export function TopBar({ nightWindow }: { nightWindow: boolean }) {
   const location = useLocation();
-  const title = pageTitleFor(location.pathname);
+  const title = usePageTitle(location.pathname);
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
   const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
+  const { t, locale, toggleLocale } = useI18n();
   const queryClient = useQueryClient();
   const [justRan, setJustRan] = useState(false);
 
@@ -37,10 +39,13 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
             ? "bg-accent-muted text-accent-fg"
             : "bg-bg-sunken text-fg-dim",
         )}
-        title={nightWindow ? "בתוך חלון הלילה הפעיל" : "מחוץ לחלון הלילה"}
+        title={nightWindow ? t("topBar.nightWindowActiveTitle") : t("topBar.nightWindowInactiveTitle")}
       >
         <span aria-hidden="true">{nightWindow ? "🌙" : "☀️"}</span>
-        <span className="hidden sm:inline"> {nightWindow ? "חלון לילה פעיל" : "מחוץ לחלון לילה"}</span>
+        <span className="hidden sm:inline">
+          {" "}
+          {nightWindow ? t("topBar.nightWindowActive") : t("topBar.nightWindowInactive")}
+        </span>
       </span>
 
       <div className="min-w-0 flex-1" />
@@ -49,10 +54,10 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
         type="button"
         onClick={() => setCommandPaletteOpen(true)}
         className="flex shrink-0 items-center gap-2 rounded-md border border-border-strong p-1.5 text-sm text-fg-muted hover:bg-bg-sunken sm:px-3 sm:py-1.5"
-        aria-label="חיפוש גלובלי"
+        aria-label={t("common.searchGlobal")}
       >
         <Search size={16} aria-hidden="true" className="sm:hidden" />
-        <span className="hidden sm:inline">חיפוש</span>
+        <span className="hidden sm:inline">{t("common.search")}</span>
         <span className="hidden items-center gap-0.5 rounded border border-border-strong bg-bg px-1 font-mono text-xs sm:flex">
           <Command size={11} aria-hidden="true" />K
         </span>
@@ -62,20 +67,33 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
         type="button"
         onClick={() => runNow.mutate()}
         disabled={runNow.isPending}
-        aria-label={runNow.isPending ? "מריץ ריצה כעת" : justRan ? "הריצה הופעלה בהצלחה" : "הרץ עכשיו"}
+        aria-label={runNow.isPending ? t("topBar.runningAriaLabel") : justRan ? t("topBar.ranSuccessfullyAriaLabel") : t("topBar.runNow")}
         className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60 sm:px-3"
       >
         <Play size={14} aria-hidden="true" />
         <span className="hidden sm:inline">
-          {runNow.isPending ? "מריץ…" : justRan ? "הופעל ✓" : "הרץ עכשיו"}
+          {runNow.isPending ? t("topBar.running") : justRan ? t("topBar.ranSuccessfully") : t("topBar.runNow")}
         </span>
+      </button>
+
+      <button
+        type="button"
+        onClick={toggleLocale}
+        className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2 py-2 text-xs font-medium text-fg-muted hover:bg-bg-sunken"
+        aria-label={t("topBar.languageToggleAriaLabel")}
+        title={t("topBar.languageToggleAriaLabel")}
+        data-testid="language-toggle"
+        data-locale={locale}
+      >
+        <Languages size={16} aria-hidden="true" />
+        <span aria-hidden="true">{t("topBar.languageToggleLabel")}</span>
       </button>
 
       <button
         type="button"
         onClick={toggleTheme}
         className="shrink-0 rounded-md border border-border-strong p-2 text-fg-muted hover:bg-bg-sunken"
-        aria-label={theme === "dark" ? "עבור לערכת נושא בהירה" : "עבור לערכת נושא כהה"}
+        aria-label={theme === "dark" ? t("topBar.themeToLight") : t("topBar.themeToDark")}
       >
         {theme === "dark" ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
       </button>

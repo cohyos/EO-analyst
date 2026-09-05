@@ -11,40 +11,53 @@ import {
   Telescope,
   FileText,
 } from "lucide-react";
+import { useT } from "@/i18n";
+import type { TranslationKey } from "@/i18n/types";
 
 export interface NavItem {
   to: string;
-  label: string;
-  icon: typeof LayoutDashboard;
   end?: boolean;
+  labelKey: TranslationKey;
+  icon: typeof LayoutDashboard;
 }
 
-export const NAV_ITEMS: NavItem[] = [
-  { to: "/", label: "הבוקר", icon: LayoutDashboard, end: true },
-  { to: "/feed", label: "פיד Triage", icon: Search },
-  { to: "/entities", label: "ישויות וגרף", icon: Network },
-  { to: "/investigations", label: "חקירות עומק", icon: Telescope },
-  { to: "/ask", label: "שאל את האנליסט", icon: MessageSquareText },
-  { to: "/conferences", label: "לוח כנסים", icon: CalendarDays },
-  { to: "/tenders", label: "מכרזים והזדמנויות", icon: Gavel },
-  { to: "/inbox", label: "הבהרות ומשוב", icon: Inbox },
-  { to: "/reports", label: "דוחות", icon: FileText },
-  { to: "/settings", label: "הגדרות", icon: SettingsIcon },
+// Route/icon table only — labels are resolved through `t()` at render time
+// (U6) via `useNavItems()`/`usePageTitle()` below, so both the nav rail and
+// the top-bar heading follow the active locale.
+const NAV_ROUTES: NavItem[] = [
+  { to: "/", end: true, labelKey: "nav.morning", icon: LayoutDashboard },
+  { to: "/feed", labelKey: "nav.feed", icon: Search },
+  { to: "/entities", labelKey: "nav.entities", icon: Network },
+  { to: "/investigations", labelKey: "nav.investigations", icon: Telescope },
+  { to: "/ask", labelKey: "nav.ask", icon: MessageSquareText },
+  { to: "/conferences", labelKey: "nav.conferences", icon: CalendarDays },
+  { to: "/tenders", labelKey: "nav.tenders", icon: Gavel },
+  { to: "/inbox", labelKey: "nav.inbox", icon: Inbox },
+  { to: "/reports", labelKey: "nav.reports", icon: FileText },
+  { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon },
 ];
 
-export function pageTitleFor(pathname: string): string {
-  if (pathname === "/") return "הבוקר";
-  if (pathname.startsWith("/items")) return "פרטי פריט";
-  if (pathname.startsWith("/feed")) return "פיד Triage";
-  if (pathname.startsWith("/entities")) return "ישויות וגרף";
-  if (pathname.startsWith("/investigations")) return "חקירות עומק";
-  if (pathname.startsWith("/ask")) return "שאל את האנליסט";
-  if (pathname.startsWith("/conferences")) return "לוח כנסים";
-  if (pathname.startsWith("/tenders")) return "מכרזים והזדמנויות";
-  if (pathname.startsWith("/inbox")) return "הבהרות ומשוב";
-  if (pathname.startsWith("/reports")) return "דוחות";
-  if (pathname.startsWith("/settings")) return "הגדרות";
-  return "חדר מצב + עמית";
+/** Resolved (icon + localized label) nav entries for `NavRail`. */
+export function useNavItems(): Array<{ to: string; end?: boolean; label: string; icon: typeof LayoutDashboard }> {
+  const t = useT();
+  return NAV_ROUTES.map((item) => ({ to: item.to, end: item.end, label: t(item.labelKey), icon: item.icon }));
+}
+
+/** Localized page heading for the given pathname, used by `TopBar`'s `<h1>`. */
+export function usePageTitle(pathname: string): string {
+  const t = useT();
+  if (pathname === "/") return t("nav.morning");
+  if (pathname.startsWith("/items")) return t("nav.itemDetail");
+  if (pathname.startsWith("/feed")) return t("nav.feed");
+  if (pathname.startsWith("/entities")) return t("nav.entities");
+  if (pathname.startsWith("/investigations")) return t("nav.investigations");
+  if (pathname.startsWith("/ask")) return t("nav.ask");
+  if (pathname.startsWith("/conferences")) return t("nav.conferences");
+  if (pathname.startsWith("/tenders")) return t("nav.tenders");
+  if (pathname.startsWith("/inbox")) return t("nav.inbox");
+  if (pathname.startsWith("/reports")) return t("nav.reports");
+  if (pathname.startsWith("/settings")) return t("nav.settings");
+  return t("nav.shellFallback");
 }
 
 export { Bot };

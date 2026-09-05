@@ -8,18 +8,20 @@ import { CommandPalette } from "./CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useStatusSocket } from "@/hooks/useStatusSocket";
 import { useUiStore } from "@/store/uiStore";
+import { useI18n } from "@/i18n";
 
 export function AppShell() {
   const statusState = useStatusSocket();
   const theme = useUiStore((s) => s.theme);
   const location = useLocation();
+  const { locale, dir } = useI18n();
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
   return (
-    <div className="flex h-screen flex-col" dir="rtl" lang="he">
+    <div className="flex h-screen flex-col" dir={dir} lang={locale}>
       <div className="flex min-h-0 flex-1">
         <NavRail />
         <div className="flex min-w-0 flex-1 flex-col">
