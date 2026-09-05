@@ -235,16 +235,25 @@ def native_start() -> None:
         raise typer.Exit(code=1)
 
     paths["sentinel"].unlink(missing_ok=True)
-    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
-        subprocess, "DETACHED_PROCESS", 0
-    )
-    subprocess.Popen(
-        ["pwsh", "-NoProfile", "-WindowStyle", "Hidden", "-File", str(paths["supervisor_script"])],
+    # Q6-1 (2026-09-06): DETACHED_PROCESS makes the `pwsh` App-Execution-Alias exit 0 without running
+    # -File; CREATE_NO_WINDOW keeps the console hidden and actually starts the script.
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.Popen(
+        ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(paths["supervisor_script"])],
         cwd=str(paths["root"]),
         creationflags=creationflags,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         close_fds=True,
     )
-    rprint("[green]native supervisor launched (detached) — check `eo native status` shortly[/green]")
+    import time as _time
+
+    _time.sleep(3)
+    if proc.poll() is not None:
+        rprint(f"[red]supervisor exited immediately (code {proc.returncode}); see runtime/logs/supervisor.log[/red]")
+        raise typer.Exit(code=1)
+    rprint("[green]native supervisor launched (hidden window) — check `eo native status` shortly[/green]")
 
 
 @native_app.command("stop")
