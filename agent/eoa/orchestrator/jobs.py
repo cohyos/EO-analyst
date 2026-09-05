@@ -498,9 +498,15 @@ def _backup() -> dict[str, Any]:
 
 
 def _pg_dump() -> dict[str, Any]:
-    """Nightly backup. Host: `docker compose exec postgres pg_dump`. Inside the agent container (no docker CLI):
-    per-table `COPY ... TO STDOUT` into a gzip-compressed SQL-ish archive that psql can restore with its copy meta-command."""
+    """Nightly logical backup of the LIVE database (ADR-004, native stack).
+
+    Order of preference: (1) the portable ``pg_dump`` shipped under ``runtime/pgsql/bin`` (or any
+    ``pg_dump`` on PATH) run against ``DATABASE_URL`` -> ``eoanalyst_<stamp>.dump`` (custom format,
+    restorable with ``pg_restore``); (2) per-table ``COPY ... TO STDOUT`` through psycopg into a
+    gzip archive -> ``eoanalyst_<stamp>.copy.gz``. The old ``docker compose exec postgres pg_dump``
+    path was removed: with EOA_ROLE=host it silently dumped the retired Docker database (Q1-1)."""
     import gzip
+    import shutil
     import subprocess
     from pathlib import Path
 
@@ -508,8 +514,20 @@ def _pg_dump() -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = f"{datetime.now(tz=UTC):%Y%m%d}"
     keep = settings().retention.backups_keep
+    db_url = settings().database_url
+    root = Path(os.environ.get("EOA_ROOT", Path(__file__).resolve().parents[3]))
+    candidates = [root / "runtime" / "pgsql" / "bin" / "pg_dump.exe", root / "runtime" / "pgsql" / "bin" / "pg_dump"]
+    pg_dump_bin = next((str(c) for c in candidates if c.exists()), None) or shutil.which("pg_dump")
     try:
-        if os.environ.get("EOA_ROLE") == "agent":
+        if pg_dump_bin:
+            name = out_dir / f"eoanalyst_{stamp}.dump"
+            subprocess.run(
+                [pg_dump_bin, "--format=custom", "--no-owner", "--no-privileges", "--file", str(name), db_url],
+                capture_output=True,
+                check=True,
+                timeout=900,
+            )
+        else:
             from psycopg import sql
 
             from eoa.db import connection
@@ -538,27 +556,6 @@ def _pg_dump() -> dict[str, Any]:
                         for chunk in cp:
                             fh.write(bytes(chunk).decode("utf-8"))
                     fh.write("\\.\n")
-        else:
-            name = out_dir / f"eoanalyst_{stamp}.sql.gz"
-            with gzip.open(name, "wb") as fh:
-                p1 = subprocess.run(
-                    [
-                        "docker",
-                        "compose",
-                        "exec",
-                        "-T",
-                        "postgres",
-                        "pg_dump",
-                        "-U",
-                        "eoa",
-                        "-d",
-                        "eoanalyst",
-                    ],
-                    capture_output=True,
-                    check=True,
-                    timeout=600,
-                )
-                fh.write(p1.stdout)
         for old in sorted(out_dir.glob("eoanalyst_*"))[:-keep]:
             old.unlink(missing_ok=True)
         return {"backup": str(name)}

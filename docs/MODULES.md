@@ -220,7 +220,7 @@ memory-layer upsert helpers have a conflict target:** `sources.name` UNIQUE
 and `items.url` UNIQUE were explicit in the spec.
 
 `db/migrations/env.py` reads `DATABASE_URL` (default
-`postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst`, matching
+`postgresql://eoa:<POSTGRES_PASSWORD>@127.0.0.1:5432/eoanalyst`, matching
 `eoa.config.settings().database_url`) and rewrites a bare `postgresql://`
 scheme to `postgresql+psycopg://` for SQLAlchemy/Alembic, since the project
 standardizes on psycopg3.
@@ -701,7 +701,7 @@ pages aren't persisted). Logs progress and reports count of fixed rows.
 
 Usage:
 ```
-DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \
+DATABASE_URL=postgresql://eoa:<POSTGRES_PASSWORD>@127.0.0.1:5432/eoanalyst \
 PYTHONPATH=agent python scripts/repair_titles.py
 ```
 
@@ -4487,3 +4487,122 @@ every touched file -- the pre-existing `tuple[Any, ...]` row-typing gaps in `rel
 (`_red_alert_for`/`_daily_run_already_covered`/`_notify`/`_terminal_state`, untouched) are all
 outside this change's diff, confirmed by cross-checking every mypy error's line number against
 `git diff`. `PYTHONPATH=agent python -m pytest tests/unit -q`: 1107 passed.
+
+## Settings ChainsEditor + ModelPicker power selector (U8 full-UI close-out, 2026-09-06)
+
+Closes the last gap the "Revision 2026-09-06" section above left open: `llm_providers.chains`
+(per-role fallback chains) could be read via `GET /api/llm/providers` and inspected, but writing
+one required hand-editing `config.yaml` -- there was no UI path and `PUT /api/llm/settings`
+silently ignored a `chains` field. This change adds both the write path and the editor.
+
+**`agent/eoa/api/routes/llm.py`** (additive): `LlmSettingsPayload` gained `chains: dict[str,
+list[ChainEntryCfg]] | None`, threaded straight through to
+`services.patch_llm_provider_settings(chains=...)`. `ChainEntryCfg` (already defined in
+`eoa.config` for the read side) is reused as-is for the write side too -- one schema, no drift
+between what `GET` returns and what `PUT` accepts.
+
+**`agent/eoa/api/services.py`** (additive): `patch_llm_provider_settings` gained a `chains`
+keyword. When given, it replaces the *entire* `llm_providers.chains` map (a role missing from the
+payload is simply left as whatever `effective_chain` would already fall back to -- not an error).
+Three new pieces:
+- `_validate_chains` -- business-rule validation beyond `ChainEntryCfg`'s own field typing: every
+  role name must be one of `resident`/`investigator`/`light`/`report`; every `provider` must be a
+  known id (`ollama`/`agy`/`claude`/`codex`/`anthropic`/`gemini`/`openai`); every non-`ollama` step
+  needs a non-empty `model`; a given `power` must be one of that *specific* provider's own
+  `power_levels` (read live from `settings().llm_providers.cli`/`.api`, not hardcoded, via
+  `_chain_provider_power_levels`). Any violation rejects the whole write with Hebrew error
+  messages, before the file is touched -- same "reject without touching the file" contract `mode`
+  already had.
+- `_with_terminal_ollama` -- appends `{provider: "ollama"}` to any role's chain that doesn't
+  already end with one, so the persisted YAML always shows literally what
+  `Settings.llm_providers.effective_chain` would resolve to (including for an intentionally empty
+  chain, which round-trips as `[{provider: ollama}]`, not `[]` -- the UI's `ChainsEditor` strips
+  that trailing entry back off on read, since it renders its own fixed "מקומי (Ollama)" terminal
+  row and must not show the server's implicit entry as a second, editable one).
+- `_render_chains_yaml_block` / `_patch_yaml_chains_block` -- unlike every other field this
+  endpoint patches (`_patch_yaml_scalar`, a single-line regex replace), `chains` can grow from the
+  shipped `chains: {}` one-liner into a multi-line nested block, so the *whole* block's extent
+  (the `  chains:` key line plus every more-deeply-indented line under it) has to be found and
+  replaced, not just one line -- `_patch_yaml_chains_block` does that with a regex anchored on
+  indentation, and falls back to inserting the rendered block right after `llm_providers:` when no
+  `chains:` key exists at all yet (documented by
+  `test_chains_absent_key_in_fixture_gets_inserted`), so this never depends on the shipped
+  config.yaml's exact current shape. The rendered block itself is a plain `yaml.safe_dump` of just
+  the `chains` map, re-indented by two spaces -- every other line and comment in config.yaml is
+  untouched, verified by `test_chains_absent_key_in_fixture_gets_inserted`'s
+  `parsed["llm_providers"]["cli"] == {}` assertion surviving the same write.
+
+**`web/src/components/settings/ChainsEditor.tsx`** (new): the per-role fallback-chain editor for
+the Settings "מודלים" card -- previously the only place `chains` could be edited was the raw YAML
+tab. One tab per role (`resident`/`investigator`/`light`/`report`, each tab showing its own step
+count); each step is a row with a provider `<select>` (cloud/API providers only -- `ollama` is
+never a mid-chain choice, only the fixed terminal), a model `<select>` cascading from the chosen
+provider's `models`, and -- only when that provider has `power_levels` -- a third `<select>` for
+the effort/thinking level. Reordering is both keyboard-accessible (up/down buttons, disabled at
+the ends) and drag-and-drop (native HTML5 `draggable`, a grip handle per row). "הוסף שלב" appends a
+default step; the X button removes one; "העתק לכל התפקידים" copies the active role's steps
+(without its implicit terminal) onto the other three roles' drafts. A fixed, greyed,
+non-removable "מקומי (Ollama)" row is always rendered last, reading the `ollama` provider's own
+`label` from `GET /api/llm/providers` rather than a hardcoded string.
+
+Editing is local-draft-first: typing/reordering never round-trips to the server per keystroke, and
+a background refetch of the `llm-providers` query (e.g. a sibling query invalidation elsewhere on
+the page) is not allowed to clobber in-progress edits -- the draft only resyncs from a fresh
+`chains` prop while it still exactly equals the last-known-saved baseline. Saving is one `PUT
+/api/llm/settings {chains: <all four roles>}` (owned by `SettingsPage.tsx`'s own mutation, passed
+in as `onSave`); a validation failure surfaces as a dismissible floating toast (the same
+fixed-position pattern `RunNowButton.tsx`'s `RunToast` already uses elsewhere in this app) without
+discarding the user's draft, and an "שינויים לא נשמרו" pill next to the heading tracks dirtiness
+so it's never ambiguous whether the visible state has been persisted.
+
+**`web/src/components/ask/ModelPicker.tsx`** (revised): regrouped from one `<optgroup>` per *kind*
+("ענן (CLI)" / "ענן (API)" holding every provider's models flattened together) to one `<optgroup>`
+per *provider* (a separate group for "Gemini (Antigravity CLI)", "Claude (Claude Code CLI)",
+"Anthropic (API)", etc.), and gained a second, dependent `<select>` for power/effort level,
+rendered only when the chosen provider's `power_levels` is non-empty. `parsePickerValue` decodes
+the picker's own value format (`"<id>:<model>"` or `"<id>:<model>@<power>"`, U8-ג's documented
+wire format) so the two selects (and the existing "ענן" warning badge) can derive their state from
+one string without `useAskChat` (the value's owner, unchanged) needing to know about power at all
+-- whatever full string the picker emits (power suffix included) is what already gets persisted to
+`localStorage["eoa.chat.provider"]` and remembered across sessions, no change needed there. The
+default option's label was clarified to "ברירת המחדל של המערכת (לפי ההגדרות)" to name the option
+whose meaning users kept having to infer.
+
+**i18n**: `llm.chains.*` added to both `web/src/i18n/dictionaries/{he,en}.ts` (`title`, `unsaved`,
+`cloudDisabledHint`, `role.{resident,investigator,light,report}`, `stepLabel`, `dragHandle`,
+`providerLabel`, `modelLabel`, `powerDefault`, `moveUp`, `moveDown`, `removeStep`, `notInstalled`,
+`terminalStepLabel`, `terminalHint`, `addStep`, `copyToAll`, `save`, `saving`, `savedOk`,
+`saveErrorGeneric`) -- the pre-existing `llm.power.*`/`llm.powerLabel` keys (added alongside the
+Revision 2026-09-06 config work but left unused until now) are reused by both `ChainsEditor` and
+`ModelPicker` rather than duplicated.
+
+**Mocks**: `web/src/mocks/mockApi.ts`'s `llmSettingsStore` gained a `chains` field;
+`mockValidateChains`/`mockWithTerminalOllama` mirror the real backend's business rules (known
+role/provider ids, non-empty model on a non-ollama step, power within that provider's
+`power_levels`) closely enough that the mock rejects/normalizes the same way the real API does, so
+a component test or a manual run against the mock backend exercises the same success/error paths.
+
+**Tests**: `tests/unit/test_llm_settings_api.py` gained `TestPatchLlmProviderSettingsChains` (round
+trip incl. automatic terminal-step append, reorder round trip, terminal-not-duplicated, unknown
+provider/role rejected without touching the file, empty model rejected for a non-ollama step, an
+`ollama` step needing no model, power-not-in-provider's-levels rejected, clearing to `{}`, and the
+no-`chains:`-key-yet fixture path) plus two `TestLlmRoute` cases (`PUT` with `chains` through
+`TestClient`, and a bad-provider payload returning `{ok: false, errors: [...]}` rather than an HTTP
+error, matching `mode`'s existing contract). `e2e/tests/10-settings.spec.ts` gained a
+`"Settings — LLM chain editor (throwaway instance)"` block covering add-step-with-power/save/
+reload, reorder-with-move-button/save/reload, and remove-step + copy-to-all-roles -- scoped via
+`test.use({ baseURL: ... })` to a throwaway `python -m uvicorn eoa.api.app:app --port 8766`
+instance (env from `runtime/eoa.env`) rather than the shared live instance at the suite's default
+`BASE_URL` (8765), specifically so a run against this new, code-dependent surface can never
+corrupt the live app's session or an in-progress night run; each test resets all four roles'
+chains via a direct API call in `afterEach`, since `config.yaml` is a real, shared file. All three
+passed against a freshly `npm --prefix web run build`-ed frontend served by that throwaway
+instance (verified live, 2026-09-06); the shared 8765 instance's config.yaml was restored to its
+original `chains: {}` afterward.
+
+**Known follow-up, not part of this change**: while wiring the power selector, `ollama_client.
+_dispatch_explicit_provider`'s `"<model>@<power>"` suffix parsing was found to swap `model` and
+`power` (`model.partition("@")`'s three-tuple unpacked as `power, _, model = ...` instead of
+`model, _, power = ...`) -- a pre-existing bug outside this change's file ownership, flagged
+separately rather than fixed here since `ollama_client.py` wasn't part of this change's scope.
+

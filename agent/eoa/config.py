@@ -433,7 +433,7 @@ class Settings(BaseModel):
     @property
     def database_url(self) -> str:
         return os.environ.get(
-            "DATABASE_URL", "postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst"
+            "DATABASE_URL", "postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst"
         )
 
     @property

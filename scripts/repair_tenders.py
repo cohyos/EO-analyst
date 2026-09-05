@@ -18,7 +18,7 @@ without writing it.
 
 Run with the same ``DATABASE_URL``/Ollama as the app, e.g.:
 
-    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \\
+    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \\
         python scripts/repair_tenders.py [--dry-run] [--force] [--role resident]
 """
 

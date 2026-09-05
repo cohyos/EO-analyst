@@ -547,7 +547,7 @@ The live stack (PostgreSQL, web API, fetcher, ntfy) has a comprehensive smoke te
 
 ```bash
 # Set environment variables (optional; defaults to localhost)
-export DATABASE_URL="postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst"
+export DATABASE_URL="postgresql://eoa:<POSTGRES_PASSWORD>@127.0.0.1:5432/eoanalyst"
 export API_BASE_URL="http://127.0.0.1:8765"
 export NTFY_BASE_URL="http://127.0.0.1:8091"
 

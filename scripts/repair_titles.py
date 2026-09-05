@@ -5,7 +5,7 @@ For each item with a null or empty title, recompute using the explicit title
 fallback chain and UPDATE the database. Prints counts of fixed rows.
 
 Usage:
-    DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \
+    DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \
     PYTHONPATH=agent python scripts/repair_titles.py
 
 Note: Requires `raw_text` column (visible text via lxml, pre-sanitization) and

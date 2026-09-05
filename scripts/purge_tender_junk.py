@@ -23,7 +23,7 @@ what would be deleted without deleting it.
 
 Run with the same ``DATABASE_URL`` as the app, e.g.:
 
-    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \\
+    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \\
         python scripts/purge_tender_junk.py [--dry-run]
 """
 

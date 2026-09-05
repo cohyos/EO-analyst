@@ -20,7 +20,7 @@ Two independent passes, in this order:
    when there is nothing to discount.
 
 Usage:
-    DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \
+    DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \
     PYTHONPATH=agent python scripts/repair_events.py [--dry-run]
 
 `--dry-run` computes and prints the same counts without writing anything.

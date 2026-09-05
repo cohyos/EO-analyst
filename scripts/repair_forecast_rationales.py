@@ -18,7 +18,7 @@ would change without writing it.
 
 Run with the same ``DATABASE_URL`` as the app and Ollama reachable, e.g.:
 
-    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \\
+    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \\
         python scripts/repair_forecast_rationales.py [--dry-run] [--force] [--role resident]
 """
 

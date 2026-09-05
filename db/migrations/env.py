@@ -13,7 +13,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-DEFAULT_DATABASE_URL = "postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst"
+DEFAULT_DATABASE_URL = "postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst"
 
 # this is the Alembic Config object, which provides access to values within the .ini file in use.
 config = context.config

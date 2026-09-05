@@ -78,6 +78,7 @@ def assert_public_http_url(url: str) -> None:
             or ip.is_multicast
             or ip.is_reserved
             or ip.is_unspecified
+            or not ip.is_global  # also rejects CGNAT/Tailscale 100.64.0.0/10 (Q2-2, 2026-09-06)
         ):
             raise FetchError(f"refusing non-public address for {host}: {ip}")
 
