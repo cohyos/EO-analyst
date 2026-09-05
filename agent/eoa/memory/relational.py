@@ -51,6 +51,13 @@ _ITEM_UPDATABLE_FIELDS = {
     "source_name",
     "security_status",
     "classification",
+    # A12 (מעקב טכנולוגי, 2026-09-06): additive tech-watch fields on `items`, see migration 0011.
+    "tech_maturity",
+    "tech_actor_kind",
+    "tech_readiness_note_he",
+    # Q3-10 (docs/qa/findings_Q3_r1.md): 'full' | 'partial' | 'stub', see migration 0015 and
+    # eoa.fetch.content_quality.assess / eoa.pipeline.analyze's pre-check.
+    "content_status",
 }
 
 
@@ -231,7 +238,23 @@ def insert_event(
     summary_he: str | None = None,
     confidence: float | None = None,
 ) -> int:
-    """Insert an event row derived from `item_id`, returning its id."""
+    """Upsert an event row derived from `item_id` (Q3-5/Q3-6, docs/qa/findings_Q3_r1.md), returning
+    its id.
+
+    Logical identity is `(item_id, kind, lower(title))` -- enforced by the unique index
+    `ux_events_item_kind_title` (``db/migrations/versions/0016_events_dedup_unique_index.py``).
+    Re-processing an item (or a model re-extracting a slightly different reading of the same
+    underlying fact) previously always inserted a fresh row, producing duplicate events for the
+    same (item, kind, title) -- e.g. item 70's investment event, inserted twice, once without an
+    amount and once with. Now a repeat insert merges into the existing row instead: `date`,
+    `amount_usd`, `currency`, `customer`, `program`, and `summary_he` keep whichever of the two
+    values is non-null (preferring the value already on record when both are present); `parties`
+    keeps the existing list unless it was empty; `confidence` keeps the higher of the two.
+
+    A `title=None` event never conflicts with anything (`lower(NULL)` is `NULL`, and Postgres
+    unique indexes treat `NULL` as distinct from every other `NULL`) -- there's no title to key
+    identity on, so every such row is inserted as new, exactly as before this change.
+    """
     query = """
         INSERT INTO events (
             item_id, kind, title, date, amount_usd, currency, parties, customer, program,
@@ -241,6 +264,20 @@ def insert_event(
             %(item_id)s, %(kind)s, %(title)s, %(date)s, %(amount_usd)s, %(currency)s, %(parties)s,
             %(customer)s, %(program)s, %(summary_he)s, %(confidence)s
         )
+        ON CONFLICT (item_id, kind, (lower(title)))
+        DO UPDATE SET
+            date = COALESCE(events.date, EXCLUDED.date),
+            amount_usd = COALESCE(events.amount_usd, EXCLUDED.amount_usd),
+            currency = COALESCE(events.currency, EXCLUDED.currency),
+            parties = CASE
+                WHEN events.parties IS NULL OR array_length(events.parties, 1) IS NULL
+                THEN EXCLUDED.parties ELSE events.parties
+            END,
+            customer = COALESCE(events.customer, EXCLUDED.customer),
+            program = COALESCE(events.program, EXCLUDED.program),
+            summary_he = COALESCE(events.summary_he, EXCLUDED.summary_he),
+            confidence = GREATEST(COALESCE(events.confidence, 0), COALESCE(EXCLUDED.confidence, 0)),
+            updated_at = now()
         RETURNING id
     """
     params = {
@@ -263,6 +300,18 @@ def insert_event(
     return event_id
 
 
+def _find_case_insensitive_existing_name(name: str) -> str | None:
+    """Q3-13: an existing `entities.name` differing from `name` only by case (e.g. "elbit
+    systems" already on record when this call spells it "Elbit Systems") -- used so `upsert_entity`
+    reuses that row's exact spelling instead of creating a case-variant duplicate. Returns `None`
+    on no case-insensitive match (including when `name` itself is already the exact match)."""
+    query = "SELECT name FROM entities WHERE lower(name) = lower(%(name)s) AND name <> %(name)s LIMIT 1"
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, {"name": name})
+        row = cur.fetchone()
+    return row["name"] if row else None
+
+
 def upsert_entity(
     *,
     name: str,
@@ -272,8 +321,38 @@ def upsert_entity(
     focus: list[str] | None = None,
     notes: str | None = None,
     first_seen_item: int | None = None,
-) -> int:
-    """Insert or update an entity keyed by its unique `name`, returning its id."""
+) -> int | None:
+    """Insert or update an entity keyed by its unique `name`, returning its id.
+
+    Q3-13 (docs/qa/findings_Q3_r1.md, ``eoa.pipeline.entity_normalize``): before writing,
+    ``name``/``kind`` are resolved through the watchlist (an alias like "Elbit Systems UK" maps
+    to the canonical "Elbit"; ``kind`` is normalised onto the ``entities`` table's actually
+    allowed values -- e.g. the schema's "country" `EntityMention.kind`, which the table's CHECK
+    constraint does not accept, maps to "org"), a watchlist-known `country`/`aliases`/`focus`
+    backfills whatever the caller didn't supply, and a case-insensitive match against an existing
+    row reuses that row's exact spelling instead of creating a duplicate. A technique/algorithm
+    name masquerading as an entity (e.g. "image captioning") is rejected outright: **not stored**,
+    and this returns ``None`` instead of an id -- every current caller (``classify.persist_
+    classification``, ``analyze.persist_analysis``'s edge writer) already treats "this entity
+    didn't get an id" as "skip it", so this is a safe additive contract change.
+    """
+    from eoa.pipeline.entity_normalize import canonical_name_and_kind, is_technique_like, resolve_canonical
+
+    if is_technique_like(name):
+        log.info("entity.rejected_technique_like", name=name)
+        return None
+
+    canonical = resolve_canonical(name)
+    name, kind = canonical_name_and_kind(name, kind)
+    if canonical:
+        country = country or canonical.get("country")
+        aliases = aliases or (canonical.get("aliases") or None)
+        focus = focus or (canonical.get("focus") or None)
+
+    existing_name = _find_case_insensitive_existing_name(name)
+    if existing_name is not None:
+        name = existing_name
+
     query = """
         INSERT INTO entities (name, kind, country, aliases, focus, notes, first_seen_item)
         VALUES (%(name)s, %(kind)s, %(country)s, %(aliases)s, %(focus)s, %(notes)s, %(first_seen_item)s)

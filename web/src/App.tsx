@@ -13,6 +13,8 @@ import { ConferencesPage } from "@/pages/ConferencesPage";
 import { TendersPage } from "@/pages/TendersPage";
 import { InboxPage } from "@/pages/InboxPage";
 import { ReportsPage } from "@/pages/ReportsPage";
+import { BdPage } from "@/pages/BdPage";
+import { TechRadarPage } from "@/pages/TechRadarPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 
@@ -45,6 +47,8 @@ export default function App() {
               <Route path="tenders" element={<TendersPage />} />
               <Route path="inbox" element={<InboxPage />} />
               <Route path="reports" element={<ReportsPage />} />
+              <Route path="bd" element={<BdPage />} />
+              <Route path="tech-radar" element={<TechRadarPage />} />
               <Route path="settings" element={<SettingsPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Route>

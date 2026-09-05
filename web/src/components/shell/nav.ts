@@ -1,11 +1,13 @@
 import {
   Bot,
+  Briefcase,
   CalendarDays,
   Gavel,
   Inbox,
   LayoutDashboard,
   MessageSquareText,
   Network,
+  Radar,
   Search,
   Settings as SettingsIcon,
   Telescope,
@@ -34,6 +36,8 @@ const NAV_ROUTES: NavItem[] = [
   { to: "/tenders", labelKey: "nav.tenders", icon: Gavel },
   { to: "/inbox", labelKey: "nav.inbox", icon: Inbox },
   { to: "/reports", labelKey: "nav.reports", icon: FileText },
+  { to: "/bd", labelKey: "nav.bd", icon: Briefcase },
+  { to: "/tech-radar", labelKey: "nav.techRadar", icon: Radar },
   { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon },
 ];
 
@@ -56,6 +60,8 @@ export function usePageTitle(pathname: string): string {
   if (pathname.startsWith("/tenders")) return t("nav.tenders");
   if (pathname.startsWith("/inbox")) return t("nav.inbox");
   if (pathname.startsWith("/reports")) return t("nav.reports");
+  if (pathname.startsWith("/bd")) return t("nav.bd");
+  if (pathname.startsWith("/tech-radar")) return t("nav.techRadar");
   if (pathname.startsWith("/settings")) return t("nav.settings");
   return t("nav.shellFallback");
 }

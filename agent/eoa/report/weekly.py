@@ -626,6 +626,21 @@ def build_weekly(
             }
         )
 
+    # A12 (מעקב טכנולוגי): per-subdomain radar aggregation (new papers/actors/momentum/so-what) +
+    # a short "developments to follow" pick, deterministic tables extending `citation_items` in
+    # place -- same additive mechanism as the conferences table above. A failure here must never
+    # break the weekly report.
+    try:
+        from eoa.pipeline.tech_watch import run_tech_watch_weekly
+        from eoa.report.tech_watch import weekly_tech_watch_tables
+
+        week_start_ts = dt.datetime.combine(start, dt.time.min, tzinfo=JERUSALEM).astimezone(dt.UTC)
+        week_end_ts = dt.datetime.combine(end, dt.time.max, tzinfo=JERUSALEM).astimezone(dt.UTC)
+        tech_aggregates = run_tech_watch_weekly(week_start_ts, week_end_ts, role=role)
+        tables.extend(weekly_tech_watch_tables(citation_items, tech_aggregates))
+    except Exception as exc:
+        log.warning("weekly_report_tech_watch_section_failed", error=str(exc)[:160])
+
     docx_path = _report_path(end, "docx")
     md_path = _report_path(end, "md")
     html_path = _report_path(end, "html")

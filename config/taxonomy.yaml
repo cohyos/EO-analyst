@@ -54,6 +54,19 @@ domains:
       detectors_fpa: "גלאים ומישורי מוקד (SWIR/MWIR/LWIR, Uncooled, Event Cameras)"
       computational_optics: "אופטיקה חישובית, Gimbal Stabilization, On-Chip"
       defense_ai_infra: "תשתיות AI ביטחוניות (MLOps, Datasets)"
+  tech_dev:
+    label: "התפתחויות טכנולוגיות (Technology Developments)"
+    sub:
+      droic_digital_pixel: "FPA עם פיקסל דיגיטלי (Digital-Pixel FPA / DROIC / In-Pixel ADC)"
+      swir_eswir: "SWIR/eSWIR (InGaAs, Colloidal Quantum Dots)"
+      hot_mct_t2sl: "HOT MCT, T2SL, XBn"
+      event_based: "גלאים מבוססי אירועים (Neuromorphic / Event Cameras)"
+      meta_optics: "אופטיקה מטא-משטחית (Metasurfaces, Flat Optics, Freeform)"
+      on_sensor_ai: "בינה מלאכותית על-החיישן (Edge AI, In-Sensor Compute, ATR on FPGA/SoC)"
+      laser_lidar: "לייזרים ו-LiDAR (Designators, LiDAR, Laser Dazzlers)"
+      cv_atr: "ראייה ממוחשבת לזיהוי מטרות (CV Algorithms for Detection/Tracking/ATR, Multispectral Fusion)"
+      image_processing: "עיבוד תמונה (Super-Resolution, Turbulence Mitigation, NUC)"
+      microbolometer_uncooled: "מיקרו-בולומטר לא-מקורר (Uncooled Microbolometer)"
 
 dimensions:
   technology:
@@ -66,7 +79,7 @@ dimensions:
     label: "עסקי"
     tags: [contract_award, m_and_a, partnership, pricing, new_entrant, export_regulation]
 
-report_kinds: [verified_report, company_pr, rumor_speculation, academic, tender, patent, regulatory]
+report_kinds: [verified_report, company_pr, rumor_speculation, academic, tender, patent, regulatory, science]
 
 trl_scale:
   academic: "פרסום אקדמי (TRL 1-3)"

@@ -162,8 +162,15 @@ def _store_item(
     stats: IngestStats,
     fallback_title: str | None = None,
     fallback_published_at: datetime | None = None,
+    http_status: int | None = None,
 ) -> None:
-    from eoa.fetch.sanitize import choose_title, extract_clean_text, text_hash
+    from eoa.fetch.sanitize import (
+        BLOCKED_ITEM_TITLE_HE,
+        choose_title,
+        detect_block_page,
+        extract_clean_text,
+        text_hash,
+    )
     from eoa.memory import relational
 
     clean = extract_clean_text(html_text, url)
@@ -179,6 +186,16 @@ def _store_item(
     )
     published_at = clean.published_at or fallback_published_at
 
+    # Q4-1: a Cloudflare/WAF/anti-bot challenge page fetched instead of the real article must
+    # never be stored as if it were real content -- neither its title/body (a human- or
+    # LLM-facing lie about what was actually retrieved) nor a `security_status='clean'` that
+    # would let it flow into classify/analyze/RAG. Detected here, before `insert_item`, using the
+    # already-decoded HTML/text and the HTTP status this fetch got.
+    is_blocked = detect_block_page(html_text, clean.text, http_status)
+    stored_title = BLOCKED_ITEM_TITLE_HE if is_blocked else title
+    stored_clean_text = None if is_blocked else clean.text
+    stored_lang = None if is_blocked else clean.lang
+
     # F19: probe for an existing row *before* the upsert, so a same-URL refresh (conflict) can be
     # told apart from a genuine new row — see `_url_already_seen`.
     already_seen = _url_already_seen(url)
@@ -187,17 +204,28 @@ def _store_item(
         item_id = relational.insert_item(
             source_id=source_db_id,
             url=url,
-            title=title,
-            lang=clean.lang,
+            title=stored_title,
+            lang=stored_lang,
             published_at=published_at,
             raw_text=raw_text,
-            clean_text=clean.text,
+            clean_text=stored_clean_text,
             text_hash=text_hash(clean.text),
         )
     except Exception as exc:
         log.warning("fetch.item_store_failed", url=url, error=repr(exc))
         stats.items_skipped += 1
         return
+
+    # Only stamp `security_status='blocked'` on a genuinely new row. `insert_item`'s
+    # ON CONFLICT path never touches title/clean_text on a refetch of an already-seen URL, so
+    # downgrading an existing (possibly good) row here on a merely-transient block would disagree
+    # with what is actually stored -- and could clobber a previously successful fetch's status.
+    if is_blocked and not already_seen:
+        try:
+            relational.update_item_fields(item_id, security_status="blocked")
+        except Exception as exc:
+            log.warning("fetch.blocked_status_update_failed", url=url, item_id=item_id, error=repr(exc))
+        log.info("fetch.block_page_detected", url=url, item_id=item_id, status=http_status)
 
     if item_id and not already_seen:
         stats.items_inserted += 1
@@ -230,7 +258,18 @@ async def _fetch_and_store(
         stats=stats,
         fallback_title=fallback_title,
         fallback_published_at=fallback_published_at,
+        http_status=page.status,
     )
+
+
+def _matches_keywords(entry, keywords_any: list[str]) -> bool:
+    """A12: does an RSS entry's title/summary contain at least one of `keywords_any`
+    (case-insensitive substring)? Always True when the source sets no `keywords_any` (the
+    default -- every other source is unaffected)."""
+    if not keywords_any:
+        return True
+    haystack = f"{entry.title or ''} {entry.summary or ''}".casefold()
+    return any(kw.casefold() in haystack for kw in keywords_any)
 
 
 async def _ingest_rss_source(
@@ -243,6 +282,10 @@ async def _ingest_rss_source(
     feed_page = await fetch_page(source.url)
     entries = parse_feed(feed_page.html, since_days=since_days)
     stats.entries_seen += len(entries)
+
+    keywords_any = getattr(source, "keywords_any", None) or []
+    if keywords_any:
+        entries = [e for e in entries if _matches_keywords(e, keywords_any)]
 
     for entry in entries:
         await _fetch_and_store(
@@ -304,7 +347,10 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
     """
     from eoa.fetch.sources_loader import load_sources, upsert_sources_to_db
 
-    sources = load_sources()
+    # Q4-2/Q4-3: a source config can be `enabled: false` (dead feed with no replacement, or
+    # robots.txt blocks its only feed) -- excluded before it is even upserted to `sources`, so it
+    # neither gets fetched nor accumulates `fail_count` for a fetch path known not to work.
+    sources = [s for s in load_sources() if s.enabled]
     id_map = upsert_sources_to_db(sources)
 
     targets = [(id_map.get(s.id), s) for s in sources]

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+import structlog
+from pydantic import BaseModel, Field, model_validator
+
+log = structlog.get_logger(__name__)
 
 Domain = Literal[
     "airborne_pods",
@@ -14,15 +17,29 @@ Domain = Literal[
     "c_uas",
     "computer_vision",
     "secondary",
+    "tech_dev",
     "out_of_scope",
 ]
 ReportKind = Literal[
-    "verified_report", "company_pr", "rumor_speculation", "academic", "tender", "patent", "regulatory"
+    "verified_report",
+    "company_pr",
+    "rumor_speculation",
+    "academic",
+    "tender",
+    "patent",
+    "regulatory",
+    # A12 (מעקב טכנולוגי, 2026-09-06): peer-reviewed/preprint papers, conference proceedings and
+    # patents/lab press releases about tech_dev subjects -- additive, distinct from "academic"
+    # (which covers non-tech_dev scholarly items already in use elsewhere).
+    "science",
 ]
 Dimension = Literal["technology", "operational", "business"]
 Trl = Literal["academic", "demo", "prototype", "operational", "unknown"]
 Level = Literal["red", "orange", "yellow", "archive"]
 Geography = Literal["US", "EU", "UK", "IL", "TR", "KR", "JP", "IN", "CN", "RU", "UA", "ME", "other"]
+# A12 (מעקב טכנולוגי, 2026-09-06): only ever filled for domain == "tech_dev" items.
+TechMaturity = Literal["lab", "prototype", "qualified", "fielded"]
+TechActorKind = Literal["academia", "lab", "startup", "prime", "government"]
 
 
 class EntityMention(BaseModel):
@@ -63,6 +80,30 @@ class ClassifyOut(BaseModel):
             "non-USD amount was found) the original amount+currency verbatim"
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_subdomain_against_taxonomy(self) -> "ClassifyOut":
+        """Q3-3 (docs/qa/findings_Q3_r1.md): ``subdomain`` must be one of the chosen ``domain``'s
+        sub-keys in ``config/taxonomy.yaml`` -- the LLM otherwise sometimes invents a value (6
+        rows in the QA sample had a subdomain that doesn't exist in the taxonomy at all). An
+        unknown value is reset to ``""`` (the schema's own "no sub-domain" convention) with a
+        warning logged, rather than rejecting the whole classification."""
+        if not self.subdomain:
+            return self
+        try:
+            from eoa.config import settings
+
+            domains = settings().taxonomy.get("domains", {}) or {}
+        except Exception as exc:  # pragma: no cover - settings() unavailable (e.g. bare unit test)
+            log.debug("subdomain_taxonomy_check_skipped", error=str(exc)[:160])
+            return self
+        valid_subs = (domains.get(self.domain) or {}).get("sub", {}) or {}
+        if self.subdomain not in valid_subs:
+            log.warning(
+                "classify_invalid_subdomain", domain=self.domain, subdomain=self.subdomain
+            )
+            self.subdomain = ""
+        return self
 
 
 class TriageOut(BaseModel):
@@ -162,6 +203,17 @@ class AnalyzeOut(BaseModel):
         description="עד 6 קשתות בין ישויות שמופיעות במפורש במקור; [] אם אין",
     )
     uncertainty_he: str = Field(default="", description="מה לא ברור / סותר / דורש אימות; מחרוזת ריקה אם אין")
+    # A12 (מעקב טכנולוגי): additive, optional -- filled only when the item's domain is
+    # "tech_dev" (see prompts/analyze.md); null/empty for every other domain.
+    tech_maturity: TechMaturity | None = Field(
+        default=None, description="tech_dev בלבד: lab/prototype/qualified/fielded"
+    )
+    tech_actor_kind: TechActorKind | None = Field(
+        default=None, description="tech_dev בלבד: academia/lab/startup/prime/government"
+    )
+    tech_readiness_note_he: str = Field(
+        default="", description="tech_dev בלבד: הערת בגרות קצרה בעברית; מחרוזת ריקה אם לא רלוונטי"
+    )
 
 
 class GuardVerdict(BaseModel):

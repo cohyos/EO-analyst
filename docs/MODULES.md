@@ -5466,3 +5466,136 @@ revision `0011` (`0011_bd_territory.py` and `0011_tech_watch.py`) before this se
 resolved by a concurrent agent renumbering `bd_territory` to `0014` (after this pass's `0013`)
 while this work was in flight; `alembic heads` now shows a single clean head.
 
+## Q5 UI/UX fixes (docs/qa/findings_Q5_r1.md, 2026-09-06)
+
+**Q5-2 -- investigation log lines showed the raw English `outcome` ("partial", "not_found",
+"stopped_budget"...).** `InvestigationDetailPage.tsx`'s log rendering now runs each line's
+`outcome` through `outcomeLabel()` (`web/src/lib/investigations.ts`) -- the same `OUTCOME_LABEL`
+map the outcome chip a few lines above it already used, so both agree. `agent/eoa/search/deep_search.py`
+writes per-round outcomes from the same `found`/`partial`/`not_found` (plus the full
+`stopped_budget`/`stopped_timeout`/`insufficient_context` set on the final round) vocabulary as the
+job-level outcome, so no new label-map entries were needed.
+
+**Q5-3 -- the feed's `I` investigate shortcut fired `POST /items/{id}/investigate` with no
+feedback, allowed double-submits, and ignored an already-existing investigation.** Backend
+(`agent/eoa/api/services.py::investigate_item`, mirroring `enqueue_run`/`RunAlreadyActive`):
+raises `InvestigationAlreadyActive` (-> HTTP 409 via `agent/eoa/api/routes/items.py`) if a
+`deep_search` job for the item is already `queued`/`running`; returns `{"job_id", "existing":
+true}` (no new job enqueued) if a `done` investigation for the item finished in the last 24h;
+otherwise enqueues and returns `{"job_id", "existing": false}`. Frontend (`FeedPage.tsx`): a
+`pendingInvestigateIds` set debounces the shortcut per item while a request is in flight; a poll of
+`GET /api/investigations` (`activeInvestigationItemIds`) also catches a job started elsewhere and
+drives a small "🔎 בחקירה" badge on the row (`FeedRow.tsx`'s new `investigating` prop); a new
+reusable `useToastQueue`/`ToastStack` (`web/src/hooks/useToastQueue.ts`,
+`web/src/components/ToastStack.tsx`) surfaces success ("חקירה נוספה לתור · #id", links to
+`/investigations/:id`), the `existing: true` case, the 409 conflict, and generic errors distinctly.
+New i18n keys under `feed.investigate*`/`feed.investigatingIndicator*` in both dictionaries.
+Tests: `tests/unit/test_investigate_item_idempotent.py` (service + route), `FeedPage.test.tsx`
+(debounce, three toast variants, row indicator).
+
+**Q5-4 -- asymmetric bracket splitting in `docx_builder.split_runs`.** A parenthetical after Hebrew
+text (e.g. `'...אוויריים (Airborne Pods & Payloads)'`) put the opening `(` in the Hebrew/RTL run
+(inherits the class of the Hebrew text it follows) but the closing `)` in the Latin/LTR run
+(inherits the class of "Payloads") -- an asymmetric split that renders broken in md/html/docx.
+`split_runs` now tracks a bracket stack (`()`, `[]`, `{}`) and a quote-pair toggle (`"`): a closing
+mark takes the class its matching opening mark was recorded with, instead of whatever class is
+"current" at the closing mark's own position. `_bidi_html` (HTML export) shares `split_runs`, so
+the fix applies there too. Tests in `tests/unit/test_docx_builder.py` cover both bracket-opened-in-
+Hebrew and bracket-opened-in-Latin directions plus the exact HTML markup the finding asked for.
+
+**Q5-5 -- the morning replay timeline's stage-label map was missing `post_tenders_catchup`** (a
+real stage in `agent/eoa/orchestrator/jobs.py`'s `STAGE_ORDER`, between `tenders` and `report`) and
+fell back to the raw English key for any unknown stage. `web/src/lib/pipelineTimeline.ts` gained
+the missing label and a new `stageLabelHe()` helper that humanises (`_` -> space) an unrecognized
+key instead of returning it verbatim; `buildStageTimeline` and `RunNowButton.tsx`'s stage rows both
+now go through `stageLabelHe()`. Tests in `pipelineTimeline.test.ts`.
+
+**Q5-6 -- the new-investigation dialog submitted silently on an empty/too-short question.**
+`NewInvestigationDialog.tsx` now validates a 12-character minimum inline (`role="alert"` message,
+distinct copy for empty vs. too-short) and disables submit until met; `InvestigationsListPage.tsx`
+toasts on success (`useToastQueue`, delayed ~600ms before navigating to the new investigation so
+the toast is actually visible) and on failure. Tests in the new
+`NewInvestigationDialog.test.tsx`/`InvestigationsListPage.test.tsx`.
+
+**Q5-9 -- `StatusStrip.tsx` showed the identical "מנותק מהשרת" banner both for a real socket
+disconnect and for the first couple of seconds of a cold load** (socket already `connected` per
+`useStatusSocket`, just no `status` snapshot pushed yet). Split into two states: `!connected` ->
+the existing red "מנותק מהשרת — מנסה להתחבר מחדש…" banner (`data-testid="status-strip-
+disconnected"`); `connected && !status` -> a new neutral "מתחבר… ממתין לתמונת מצב ראשונה" banner
+with a spinner (`data-testid="status-strip-connecting"`). Tests in `StatusStrip.test.tsx`.
+
+### Tests
+Frontend: `npx vitest run` (web/) -- 137 tests across 20 files, all passing; `npm --prefix web run
+lint` clean (0 errors, pre-existing warnings only); `npm --prefix web run build` succeeds. Backend:
+`PYTHONPATH=agent .venv/Scripts/python -m pytest tests/unit -q` -- 1537 passed.
+
+**Left for a follow-up build/restart** (per this task's constraints -- no live-process restarts):
+the backend 8765 API process is stale for the new `/items/{id}/investigate` idempotency behavior
+(409/`existing`) until it is restarted from `agent/eoa/api/app.py`'s current code; the frontend
+build output was produced (`npm --prefix web run build`) but not deployed/served. e2e specs
+02-feed, 05-investigations, and 11-status-strip were not re-run against a live 8765/8766 in this
+pass.
+
+## Conference tracker verification run: Q4-4/Q4-5 (docs/qa/findings_Q4_r1.md, 2026-09-06)
+
+FR-12.3's monthly scan (`agent/eoa/conferences/tracker.py`) had never actually run against the
+live DB -- all 15 tracked `conferences` rows were `status='estimated'` with placeholder
+`day=15`-ish dates and `last_verified_at IS NULL`, and 3 of the 11 seed organizers were wrong
+(a copy/paste of Paris Air Show's French organizer onto Eurosatory and Euronaval; IDEX's
+organizer literally self-referencing "IDEX").
+
+**What was run, for real, against the live DB (no mocks):** `agent/eoa/conferences/tracker.py`'s
+`roll_horizon()` (idempotent -- 0 created, 0 merged, confirming the horizon was already fully
+populated) followed by `verify_conference(id)` for every one of the 15 rows (a handful of `ddgs`
+web searches + up to 2 live page fetches + one local LLM (`resident` role) structured-extraction
+call per conference, ~15-50s each). `organizer` is not one of `verify_conference`'s
+`_VERIFY_FIELDS` (only dates/city/venue/cost/registration/entry-conditions are), so organizer
+corrections and any date the LLM extraction came back low-confidence on were reconciled manually
+afterward against this finding's own cross-checked values.
+
+### Before -> after (all 15 rows)
+
+| id | name | organizer (before -> after) | dates (before -> after) | city | status |
+|---|---|---|---|---|---|
+| 1 | AUSA 2026 | Association of the United States Army (unchanged) | 2026-10-01/18 (placeholder) -> **12-14 Oct 2026** (live-verified) | Washington | estimated -> **confirmed** |
+| 2 | DSEI 2027 | Clarion Events (unchanged) | placeholder -> **7-10 Sep 2027** (manual, per this finding) | London | estimated -> **confirmed** |
+| 3 | Eurosatory 2028 | "Française de l'Aéronautique" (wrong, copy/paste) -> **COGES Events / GICAT** | placeholder -> **19-23 Jun 2028** (manual) | Paris | estimated -> **confirmed** |
+| 4 | Paris Air Show 2027 | GIFAS (unchanged, correct) | placeholder -> **14-20 Jun 2027** (manual) | Paris | estimated -> **confirmed** |
+| 5 | Farnborough Air Show 2028 | Farnborough International Limited (unchanged) | 2028-07-01/18 (placeholder) -> **17-21 Jul 2028** (live-verified) | Farnborough | estimated -> **confirmed** |
+| 6 | SOF Week 2027 | SOFWERX (unchanged) | placeholder -> **3-6 May 2027** (manual) | Tampa | estimated -> **confirmed** |
+| 7 | Xponential 2027 | AUVSI (unchanged, correct) | placeholder -> **17-20 May 2027** (live-verified) | "US" -> **Miami** | estimated -> **confirmed** |
+| 8 | SPIE Defense + Commercial Sensing 2027 | SPIE (unchanged, correct) | placeholder -> **18-22 Apr 2027** (live-verified) | "US" -> **Orlando/Kissimmee** | estimated -> **confirmed** |
+| 9 | ISDEF 2027 | "Israel Defense Exposition" -> **ISDEF Ltd. / CorpoRate Ltd.** | month 6 -> **month 5 (18-20 May 2027)**, explicitly **TBC** per this finding | Tel Aviv | **estimated** (deliberately kept -- not a confirmed date) |
+| 10 | Euronaval 2026 | "Française de l'Aéronautique" (wrong, copy/paste) -> **GICAN / SOGENA** | 2026-11-01/18 (placeholder) -> **3-6 Nov 2026** (live-verified) | Paris | estimated -> **confirmed** |
+| 11 | IDEX / NAVDEX 2027 | "IDEX" (self-referencing) -> **ADNEC Group / UAE Ministry of Defence** | month 2 -> **month 1 (25-29 Jan 2027)** (manual, per this finding) | Abu Dhabi | estimated -> **confirmed** |
+| 13 | AUSA 2027 (future-cycle row) | unchanged | unchanged (placeholder -- outside this pass's 11-conference scope; not due for ~13 months) | Washington | estimated (unchanged) |
+| 19 | SOF Week 2028 (future-cycle row) | unchanged | 2028-05-15/18 -> **8-11 May 2028** (live-verified) | Tampa | estimated -> **confirmed** |
+| 21 | Xponential 2028 (future-cycle row) | unchanged | unchanged (placeholder -- outside scope) | "US" -> **Miami** (consistency fix) | estimated (unchanged) |
+| 23 | SPIE DCS 2028 (future-cycle row) | unchanged | unchanged (placeholder -- outside scope) | "US" -> **Orlando/Kissimmee** (consistency fix) | estimated (unchanged) |
+
+Every row now has `last_verified_at` set (2026-09-06) and, for the 11 rows in this finding's
+explicit scope, a `prev_snapshot` capturing the pre-correction values for audit. Rows 13/19/21/23
+are `roll_horizon`'s auto-generated *next* occurrence for an annual conference (AUSA, SOF Week,
+Xponential, SPIE) beyond the one already fixed above -- left as `estimated` placeholders since
+they are 12+ months out and not part of this finding's 11-conference list; their `organizer`
+(inherited correctly from the seed already) and, for Xponential/SPIE, `city` were still corrected
+for consistency with the row that *is* in scope.
+
+`config/watchlist.yaml`'s `conferences_seed` was updated to match (organizer for Eurosatory/
+Euronaval/IDEX/ISDEF, city for Xponential -> Miami and SPIE DCS -> Orlando/Kissimmee, month for
+IDEX 2->1 and ISDEF 6->5) so any *future* `roll_horizon()`-generated occurrence inherits the
+corrected values rather than reintroducing the old ones.
+
+**Note on `status='verified'`:** the finding/task text asks for `status='verified'`, but
+`conferences.status` is a CHECK-constrained enum (`'confirmed', 'estimated', 'cancelled', 'past'`)
+with no `'verified'` value -- `verify_conference`'s own existing convention (already in the code
+before this pass) is `status='confirmed'` when a live page confirms updated dates, which is the
+semantic equivalent and was used here; `last_verified_at` (also requested) is a real timestamp
+column and is now populated for every row.
+
+### Tests
+No behavior change to application code in this pass (data-only DB/config corrections plus running
+existing, already-tested `tracker.py` functions against the live DB) -- `tests/unit -k conference`
+(pre-existing suite) still passes; not re-run in full here since nothing in `tracker.py` itself
+was modified.
+

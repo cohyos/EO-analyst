@@ -665,6 +665,19 @@ def build_daily(
     except Exception as exc:
         log.warning("daily_report_tenders_section_failed", error=str(exc)[:160])
 
+    # A12 (מעקב טכנולוגי): deterministic (not LLM-drafted) tech_dev items-of-the-day table --
+    # same additive-tables mechanism as the tenders section above; extends `citation_items` in
+    # place so its `[n]` refs resolve in the "נספח מקורות" appendix. A failure here must never
+    # break the daily report.
+    try:
+        from eoa.report.tech_watch import daily_tech_watch_table
+
+        tech_table = daily_tech_watch_table(citation_items, start_ts, _end_ts)
+        if tech_table:
+            tender_tables.append(tech_table)
+    except Exception as exc:
+        log.warning("daily_report_tech_watch_section_failed", error=str(exc)[:160])
+
     docx_path = _report_path(label, "docx")
     md_path = _report_path(label, "md")
     html_path = _report_path(label, "html")

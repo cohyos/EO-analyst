@@ -33,11 +33,25 @@ class Source(BaseModel):
     reliability: int = Field(ge=1, le=5)
     tags: list[str] = Field(default_factory=list)
     schedule: Literal["daily", "weekly"] = "daily"
+    # Q4-2/Q4-3 (docs/qa/findings_Q4_r1.md): a source with no working fetch path at all (feed
+    # dead with no replacement, robots.txt blocks the only feed that exists) is disabled here
+    # rather than left in the config to fail every run -- `run_ingest` filters these out before
+    # upserting/fetching. Defaults to True so every pre-existing entry (no `enabled:` key) is
+    # unaffected.
+    enabled: bool = True
     notes: str | None = None
     verified: bool = False
     verified_at: str | None = None
     list_selector: str | None = None
     link_selector: str | None = None
+    # A12 (מעקב טכנולוגי, 2026-09-06): additive. `category` is free-text metadata (e.g.
+    # "science") carried through to the DB row for downstream reporting; `keywords_any`, when
+    # set, restricts a broad `rss` feed (site-wide, journal TOC, etc.) to entries whose title or
+    # summary contains at least one of these substrings (case-insensitive) -- applied in
+    # `eoa.fetch.service._ingest_rss_source` before the article is even fetched, so an
+    # off-topic issue of e.g. an IEEE journal TOC doesn't burn a fetch + LLM classify call.
+    category: str | None = None
+    keywords_any: list[str] = Field(default_factory=list)
 
 
 def load_sources(path: str | Path | None = None) -> list[Source]:

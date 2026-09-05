@@ -81,7 +81,22 @@ sources:
     reliability: 5
     tags: [airborne_pods, air_defense]
     schedule: daily
-    notes: "Site-wide AWN feed (commercial+defense mixed); classify/filter downstream for defense EO/IR relevance. A section-scoped 'awn-rss' feed also exists (aviationweek.com/awn-rss/feed) if narrower coverage is preferred later."
+    enabled: false
+    # Q4-3 (docs/qa/findings_Q4_r1.md): this feed returns 200 but is dead -- its entries are a
+    # jumbled mix of old dates (2016, 2017, 2025) with no real recency signal (newest live-checked
+    # 2026-09-06 was a 2026-03-31 item), i.e. it stopped being updated as a real chronological feed
+    # months ago. Checked live for a replacement and found none:
+    #   - aviationweek.com/awn-rss/feed -> 200 but serves the HTML app shell, not RSS (0 feed
+    #     entries when parsed) -- the "section-scoped feed" this note used to claim does not exist.
+    #   - aviationweek.com/rss/awn.xml, /defense-space/rss.xml, /defense-space/feed,
+    #     /category/defense-space/feed, /feeds/defense-space, /rss/all -> all 404.
+    #   - /sitemap.xml is a real sitemap index but every page's <lastmod> is 2024-08-08 (also
+    #     stale) and Drupal sitemaps don't carry per-article dates anyway.
+    #   - No <link rel="alternate" type="application/rss+xml"> is advertised on the site's own
+    #     /defense-space listing page.
+    # Disabled rather than left enabled-but-broken; re-enable if Aviation Week ships a working feed
+    # (or add an `html` listing-page source for /defense-space if scraping becomes worthwhile).
+    notes: "DISABLED 2026-09-06 (Q4-3): rss.xml is dead (jumbled old dates, not a live feed) and no working RSS alternative exists -- see comment above for everything checked live."
     verified: true
     verified_at: "2026-09-04"
 
@@ -105,7 +120,20 @@ sources:
     reliability: 4
     tags: [airborne_pods, land_surveillance, naval_surveillance]
     schedule: daily
-    notes: "Feed lives under /news/feed/ (bare /feed/ 404s). Land/sea/air platform trade coverage."
+    enabled: false
+    # Q4-2 (docs/qa/findings_Q4_r1.md): robots.txt (fetched live 2026-09-06) disallows exactly
+    # this path for `User-agent: *` (our fetcher's UA isn't one of the specifically-named bots):
+    #   User-agent: *
+    #   Disallow: /news/login
+    #   Disallow: /news/feed/
+    # `eoa.fetch.html` respects robots.txt (docs/CONVENTIONS.md), so every fetch of this URL is a
+    # `FetchError` today, which is exactly the observed fail_count=37 with 0 items ever ingested.
+    # Checked live for a robots-permitted alternative: the site's only advertised feed
+    # (<link rel="alternate" type="application/rss+xml"> on /news/) is this same /news/feed/ URL;
+    # /feed/ (site root) 404s; sitemap-*.xml (sitemap.xml, sitemap-news.xml, ...) exist but are
+    # sitemaps, not feeds, and robots.txt disallows only the two paths above -- there is no
+    # category-scoped feed to fall back to. Disabled rather than bypassing robots.
+    notes: "DISABLED 2026-09-06 (Q4-2): the only feed the site publishes (/news/feed/) is disallowed by robots.txt for User-agent: *; no permitted alternative feed exists -- see comment above. Re-enable if Shephard ever publishes a feed under an allowed path."
     verified: true
     verified_at: "2026-09-04"
 
@@ -117,7 +145,19 @@ sources:
     reliability: 5
     tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense]
     schedule: daily
-    notes: "No public RSS (both /feeds/news and /feeds/defence-news 404). Free-tier 'defence-news' listing page is server-rendered and confirmed to carry real article links; paywalled analysis excluded."
+    enabled: false
+    # Q4-2 (docs/qa/findings_Q4_r1.md): robots.txt (fetched live 2026-09-06) ends with a
+    # catch-all that disallows the entire site for any UA not individually named above it
+    # (Googlebot, GPTBot, ClaudeBot, PerplexityBot, ... -- our `eo-analyst/0.1` fetcher is none
+    # of these):
+    #   User-agent: *
+    #   Disallow:/
+    # `eoa.fetch.html` respects robots.txt (docs/CONVENTIONS.md), so this source can never
+    # actually fetch anything -- matches the observed fail_count=37, 0 items ever ingested.
+    # Scraping is not an option here (robots + ToS), and there is no public RSS. The user has a
+    # Janes API subscription: use `agent/eoa/mcp_servers/janes.py` (the Janes Data Services MCP
+    # wrapper, A8/docs/adr/006-mcp-sources.md) instead of this scraping source for Janes coverage.
+    notes: "DISABLED 2026-09-06 (Q4-2): robots.txt Disallow:/ for our UA (catch-all group) blocks the entire site -- see comment above. Do not bypass robots; use the Janes MCP server (agent/eoa/mcp_servers/janes.py) with the user's API subscription instead."
     verified: true
     verified_at: "2026-09-04"
     list_selector: "a.redesign-general-card"
@@ -456,7 +496,15 @@ sources:
     reliability: 2
     tags: [airborne_pods, secondary]
     schedule: weekly
-    notes: "Company PR. rss.xml 403s; the pressroom listing page is server-rendered with confirmed real /pressroom/<slug> article links."
+    # Q4-1 (docs/qa/findings_Q4_r1.md): the listing page above still fetches fine (200), but every
+    # /pressroom/<slug> article detail page is Cloudflare-blocked (403 "Attention Required! |
+    # Cloudflare", confirmed live 2026-09-06 from this host and IP) -- 13 items had the challenge
+    # page's own text stored as title/clean_text before eoa.fetch.sanitize.detect_block_page
+    # started catching this at ingest (repaired retroactively via scripts/repair_blocked_items.py).
+    # No RSS alternative exists: /rss.xml, /pressroom/rss.xml, /pressroom.xml and /news/rss.xml all
+    # 403 with the identical Cloudflare challenge body (verified live 2026-09-06). Re-verify this
+    # host's block from a different network before assuming it is permanent.
+    notes: "Company PR. rss.xml 403s; the pressroom listing page is server-rendered with confirmed real /pressroom/<slug> article links. Article detail pages are Cloudflare-blocked -- see Q4-1 comment above; items are now marked security_status='blocked' automatically rather than stored as the challenge page."
     verified: true
     verified_at: "2026-09-04"
     list_selector: "a[href^='/pressroom/']"
@@ -545,3 +593,139 @@ sources:
     verified_at: "2026-09-04"
     list_selector: "div.news-item"
     link_selector: "a"
+
+  # ---------------------------------------------------------------- A12: מעקב טכנולוגי (tech_dev)
+  # Academic/professional sources for technology-watch (2026-09-05 user request: FPA with digital
+  # pixel and similar EO/IR/CV research advances). Verified live 2026-09-06 the same way as the
+  # rest of this registry (desktop Chrome UA, checking HTTP status + a raw parseable RSS body) --
+  # only sources that actually returned a parseable feed are listed; SPIE Digital Library (both
+  # JEI and Optical Engineering RSS) is behind an Incapsula bot-challenge, Optica's oe/ol "RSS"
+  # endpoints resolve to the JS-rendered site shell (no feed), MDPI is behind an Akamai block, and
+  # DTIC/OSTI/photonics.com/Nature Light:Science&Applications either 404 or redirect to an
+  # auth-gated URL for a plain UA -- all omitted rather than kept as broken placeholders, per this
+  # source registry's "only sources that parse" bar for `kind: rss`.
+  - id: arxiv_eess_iv_tech
+    name: "arXiv eess.IV (EO/IR keyword-filtered)"
+    url: "https://rss.arxiv.org/rss/eess.IV"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 4
+    tags: [tech_dev]
+    schedule: daily
+    keywords_any: ["infrared", "focal plane array", "digital pixel", "readout integrated circuit", "SWIR", "event camera", "target recognition"]
+    notes: "arXiv's official per-category daily-announcement RSS (info.arxiv.org/help/rss.html), keyword-filtered downstream. Superseded the export.arxiv.org /api/query URL originally verified here (483 matching results, https 200) after a live ingest run showed export.arxiv.org's robots.txt (`Disallow: /` for all user agents) blocks this app's polite fetcher entirely, even though it disallows crawling generally rather than API use specifically -- rss.arxiv.org is a distinct subdomain with no such robots.txt. Verified live 2026-09-06: 200 OK, valid RSS 2.0 (channel metadata parses); the announcement list itself was empty at verification time because arXiv's `skipDays` (Sat/Sun) means no new-paper announcements are issued on weekends -- confirmed structurally correct, not confirmed with real entries until a weekday run."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: arxiv_cs_cv_tech
+    name: "arXiv cs.CV (IR/target-recognition keyword-filtered)"
+    url: "https://rss.arxiv.org/rss/cs.CV"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 4
+    tags: [tech_dev]
+    schedule: daily
+    keywords_any: ["infrared", "target recognition", "event camera", "multispectral"]
+    notes: "arXiv's official per-category daily-announcement RSS, keyword-filtered downstream (same export.arxiv.org robots.txt substitution as arxiv_eess_iv_tech -- see its notes). Verified live 2026-09-06: 200 OK, valid RSS 2.0; empty at verification time (weekend skipDays), not yet confirmed with real entries."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: arxiv_physics_optics_tech
+    name: "arXiv physics.optics (detectors/metasurfaces keyword-filtered)"
+    url: "https://rss.arxiv.org/rss/physics.optics"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 4
+    tags: [tech_dev]
+    schedule: daily
+    keywords_any: ["detector", "metasurface", "focal plane array", "meta-optic", "flat optics"]
+    notes: "arXiv's official per-category daily-announcement RSS, keyword-filtered downstream (same export.arxiv.org robots.txt substitution -- see arxiv_eess_iv_tech's notes). Verified live 2026-09-06: 200 OK, valid RSS 2.0; empty at verification time (weekend skipDays), not yet confirmed with real entries."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: arxiv_physics_ins_det_tech
+    name: "arXiv physics.ins-det (IR detector keyword-filtered)"
+    url: "https://rss.arxiv.org/rss/physics.ins-det"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 4
+    tags: [tech_dev]
+    schedule: daily
+    keywords_any: ["infrared", "detector", "focal plane", "microbolometer", "HOT MCT", "T2SL"]
+    notes: "arXiv's official per-category daily-announcement RSS (Instrumentation & Detectors), keyword-filtered downstream (same export.arxiv.org robots.txt substitution -- see arxiv_eess_iv_tech's notes). Verified live 2026-09-06: 200 OK, valid RSS 2.0; empty at verification time (weekend skipDays), not yet confirmed with real entries."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: ieee_sensors_journal_toc
+    name: "IEEE Sensors Journal (new TOC alerts)"
+    url: "https://ieeexplore.ieee.org/rss/TOC7361.XML"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 5
+    tags: [tech_dev]
+    schedule: weekly
+    keywords_any: ["infrared", "focal plane", "FPA", "SWIR", "photodetector", "readout", "pixel", "event camera", "microbolometer", "target recognition", "ATR", "metasurface"]
+    notes: "Publication #7361 TOC-alert RSS (peer-reviewed journal, includes every article in each new issue, so keyword-filtered downstream to EO/IR-relevant papers). Verified live 2026-09-06: 200 OK, 50 <item> entries, channel title confirms 'IEEE Sensors Journal - new TOC'."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: ieee_tgrs_toc
+    name: "IEEE Transactions on Geoscience and Remote Sensing (new TOC alerts)"
+    url: "https://ieeexplore.ieee.org/rss/TOC36.XML"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 5
+    tags: [tech_dev]
+    schedule: weekly
+    keywords_any: ["infrared", "focal plane", "hyperspectral", "multispectral", "SWIR", "target recognition", "ATR", "sensor fusion", "event camera"]
+    notes: "Publication #36 TOC-alert RSS, keyword-filtered to EO/IR-relevant remote-sensing papers. Verified live 2026-09-06: 200 OK, 50 <item> entries, channel title confirms 'IEEE Transactions on Geoscience and Remote Sensing - new TOC'."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: laser_focus_world_tech
+    name: "Laser Focus World"
+    url: "https://www.laserfocusworld.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 3
+    tags: [tech_dev]
+    schedule: daily
+    keywords_any: ["infrared", "SWIR", "focal plane", "detector", "lidar", "laser", "photonics", "sensor", "imaging", "quantum dot", "metasurface", "microbolometer"]
+    notes: "Endeavor Business Media site-wide feed (mixed lasers/photonics/fiber-optics content), keyword-filtered to EO/IR-relevant items. Verified live 2026-09-06: 200 OK, 25 <item> entries."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: vision_systems_design_tech
+    name: "Vision Systems Design"
+    url: "https://www.vision-systems.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 3
+    tags: [tech_dev, computer_vision]
+    schedule: daily
+    keywords_any: ["infrared", "SWIR", "detector", "camera", "sensor", "AI", "edge", "ATR", "target", "event camera", "multispectral", "FPGA"]
+    notes: "Endeavor Business Media site-wide feed (mixed machine-vision content), keyword-filtered to EO/IR/CV-relevant items (on-sensor AI, ATR, event cameras). Verified live 2026-09-06: 200 OK, 25 <item> entries."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: nature_photonics_tech
+    name: "Nature Photonics"
+    url: "https://www.nature.com/nphoton.rss"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 5
+    tags: [tech_dev]
+    schedule: weekly
+    keywords_any: ["infrared", "detector", "focal plane", "metasurface", "photodetector", "quantum dot", "SWIR", "imaging sensor", "neuromorphic", "event", "flat optics"]
+    notes: "Nature Publishing Group RSS 1.0/RDF feed, keyword-filtered to detector/metasurface/photodetector-relevant articles. Verified live 2026-09-06: 200 OK, 9 <item> entries."
+    verified: true
+    verified_at: "2026-09-06"
