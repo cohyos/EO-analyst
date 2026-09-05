@@ -807,6 +807,11 @@ def list_reports(*, kind: str | None = None, limit: int = 30) -> list[dict[str, 
 
 
 def _resolve_repo_path(raw: str) -> Path:
+    """Resolve a stored report path. Rows written while the app ran in Docker carry the container
+    prefix ``/app/...`` (ADR-004: the same tree is now ``REPO_ROOT``), so that prefix is remapped."""
+    text = str(raw).replace("\\", "/")
+    if text.startswith("/app/"):
+        return REPO_ROOT / text[len("/app/"):]
     p = Path(raw)
     return p if p.is_absolute() else REPO_ROOT / p
 
@@ -1913,10 +1918,27 @@ _PROVIDER_LABELS: dict[str, str] = {
 }
 
 
+_API_PROVIDER_LABELS: dict[str, str] = {
+    "anthropic": "Anthropic (API)",
+    "gemini": "Gemini (API)",
+    "openai": "OpenAI (API)",
+}
+_API_PROVIDER_KEY_ENV: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
+
 def list_llm_providers() -> dict[str, Any]:
     """`GET /api/llm/providers`: availability + model list per provider, plus the current
-    default/kill-switch, so the chat's ModelPicker and the Settings "מודלים" card can render
-    without parsing config.yaml themselves."""
+    default/kill-switch/global mode, so the chat's ModelPicker and the Settings "מודלים" card can
+    render without parsing config.yaml themselves.
+
+    U8-ו (Revision 2026-09-06): a direct-API provider's ``available`` is ONLY ever a boolean
+    derived from whether its env var is set ("מוגדר / לא מוגדר") -- the key itself never appears
+    in this response, is never logged, and is never accepted by any write endpoint.
+    """
     from eoa.llm.providers.cli import CliProvider
     from eoa.llm.providers.ollama import OllamaProvider
 
@@ -1946,11 +1968,38 @@ def list_llm_providers() -> dict[str, Any]:
                     "models": cli.list_models(),
                 }
             )
+        from eoa.llm.providers.api import get_api_provider
+
+        for kind in ("anthropic", "gemini", "openai"):
+            api_cfg = cfg.api.get(kind)
+            client = get_api_provider(kind)
+            providers.append(
+                {
+                    "id": kind,
+                    "label": _API_PROVIDER_LABELS[kind],
+                    "kind": "api",
+                    "key_env": _API_PROVIDER_KEY_ENV[kind],
+                    "available": client.is_available(),
+                    "models": client.list_models(),
+                    "power_levels": list(api_cfg.power_levels) if api_cfg else ["low", "medium", "high"],
+                }
+            )
     return {
+        "mode": cfg.mode,
         "allow_cloud": cfg.allow_cloud,
         "interactive_default": cfg.interactive_default,
+        "chains": {role: [e.model_dump() for e in chain] for role, chain in cfg.chains.items()},
         "providers": providers,
     }
+
+
+def summarize_llm_calls(since_hours: int = 24) -> dict[str, Any]:
+    """`GET /api/llm/calls?since=24h` (U8-4): thin pass-through to
+    ``eoa.memory.relational.summarize_llm_calls`` -- kept here so the route module never talks to
+    the DB layer directly, matching every other endpoint in this module."""
+    from eoa.memory.relational import summarize_llm_calls as _summarize
+
+    return _summarize(since_hours=since_hours)
 
 
 def _patch_yaml_scalar(text: str, key: str, replacement_value: str) -> str:
@@ -1972,22 +2021,32 @@ def patch_llm_provider_settings(
     *,
     interactive_default: str | None,
     allow_cloud: bool | None,
+    mode: str | None = None,
     expected_revision: str | None = None,
 ) -> tuple[bool, list[str], str | None]:
-    """`PUT /api/llm/settings`: update just ``interactive_default``/``allow_cloud`` in
+    """`PUT /api/llm/settings`: update just ``interactive_default``/``allow_cloud``/``mode`` in
     config.yaml, going through the exact same validated atomic write as the generic settings
     editor (`write_settings_yaml`) -- this is a convenience for the friendly "מודלים" card, not
     a second write path with weaker guarantees.
 
+    ``mode`` (U8-א, Revision 2026-09-06) is the global local/cloud switch; only "local"/"cloud"
+    are accepted -- anything else is rejected via the returned ``errors`` list, matching this
+    endpoint's existing validation contract, without ever touching the file.
+
     Returns ``(ok, errors, new_revision)``. Raises ``SettingsConflict`` on a stale
     ``expected_revision``, same as `write_settings_yaml`.
     """
+    if mode is not None and mode not in ("local", "cloud"):
+        return False, [f"מצב לא תקין: {mode!r} (מותר local/cloud)"], None
+
     text = read_settings_yaml("config")
     if interactive_default is not None:
         escaped = interactive_default.replace("\\", "\\\\").replace('"', '\\"')
         text = _patch_yaml_scalar(text, "interactive_default", f'"{escaped}"')
     if allow_cloud is not None:
         text = _patch_yaml_scalar(text, "allow_cloud", "true" if allow_cloud else "false")
+    if mode is not None:
+        text = _patch_yaml_scalar(text, "mode", mode)
 
     errors = write_settings_yaml("config", text, expected_revision=expected_revision)
     new_revision = settings_revision("config") if not errors else None
