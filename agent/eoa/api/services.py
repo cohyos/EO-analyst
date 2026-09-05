@@ -2170,3 +2170,95 @@ def patch_llm_provider_settings(
     errors = write_settings_yaml("config", text, expected_revision=expected_revision)
     new_revision = settings_revision("config") if not errors else None
     return (not errors, errors, new_revision)
+
+
+# =====================================================================================
+# A8: MCP (Model Context Protocol) tool sources (docs/adr/006-mcp-sources.md).
+# =====================================================================================
+
+
+class McpServerNotFound(Exception):
+    """`{server_id}` isn't in `config/mcp.yaml` -- routes turn this into HTTP 404, matching the
+    `SettingsConflict` -> 409 pattern above."""
+
+
+def _mcp_key_configured(server: Any) -> bool | None:
+    """`None` when the server needs no key at all (nothing to report); otherwise whether every
+    named env var is actually set -- never the values themselves."""
+    if not server.env:
+        return None
+    return all(bool(os.environ.get(name)) for name in server.env)
+
+
+def list_mcp_servers() -> dict[str, Any]:
+    """`GET /api/mcp/servers`: every configured server's static config plus a live connectivity
+    check (tool count / ok / last error) for servers this project can actually reach -- an
+    `inherit_cli_only` server (reachable only via a cloud CLI's own MCP config, docs/adr/006's
+    point 3) is listed with its config but never dialed directly."""
+    from eoa.mcp.registry import ping_server
+
+    cfg = eoa_config.settings().mcp
+    servers: list[dict[str, Any]] = []
+    for server in cfg.servers:
+        status: dict[str, Any] = {"tool_count": None, "ok": None, "error": None, "latency_ms": None, "tools": []}
+        if cfg.enabled and server.enabled and not server.inherit_cli_only:
+            try:
+                result = ping_server(server)
+                status = {
+                    "tool_count": result.tool_count,
+                    "ok": result.ok,
+                    "error": result.error,
+                    "latency_ms": result.latency_ms,
+                    "tools": result.tools,
+                }
+            except Exception as exc:  # a broken server must never break the whole listing
+                status["error"] = str(exc)[:300]
+        servers.append(
+            {
+                "id": server.id,
+                "label": server.label or server.id,
+                "transport": server.transport,
+                "enabled": server.enabled,
+                "inherit_cli_only": server.inherit_cli_only,
+                "key_configured": _mcp_key_configured(server),
+                "key_env": list(server.env) or None,
+                **status,
+            }
+        )
+    return {"mcp_enabled": cfg.enabled, "servers": servers}
+
+
+def ping_mcp_server(server_id: str) -> dict[str, Any]:
+    """`POST /api/mcp/servers/{id}/ping` ("בדוק חיבור"): connect, list tools, disconnect."""
+    from eoa.mcp.registry import ping_server
+
+    cfg = eoa_config.settings().mcp
+    server = cfg.server(server_id)
+    if server is None:
+        raise McpServerNotFound(server_id)
+    if server.inherit_cli_only:
+        return {
+            "id": server.id,
+            "ok": False,
+            "error": "server is inherit_cli_only -- reachable only via a cloud CLI's own MCP config, not directly",
+            "tool_count": 0,
+            "tools": [],
+            "latency_ms": 0,
+        }
+    result = ping_server(server)
+    return {
+        "id": result.id,
+        "ok": result.ok,
+        "error": result.error,
+        "tool_count": result.tool_count,
+        "tools": result.tools,
+        "latency_ms": result.latency_ms,
+    }
+
+
+def summarize_mcp_calls(since_hours: int = 24) -> dict[str, Any]:
+    """`GET /api/mcp/calls?since=24h`: thin pass-through to
+    `eoa.memory.relational.summarize_mcp_calls`, matching `summarize_llm_calls` above."""
+    from eoa.memory.relational import summarize_mcp_calls as _summarize
+
+    return _summarize(since_hours=since_hours)

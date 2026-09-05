@@ -30,6 +30,7 @@ dependencies = [
     "icalendar>=5.0",
     "charset-normalizer>=3.3",
     "ddgs>=9.0",
+    "mcp>=1.6,<2.0",
 ]
 
 [project.optional-dependencies]

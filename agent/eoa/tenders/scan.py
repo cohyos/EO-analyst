@@ -132,6 +132,14 @@ DEFAULT_DENY_DOMAINS = [
     "howstuffworks.com",
     "thoughtco.com",
     "investopedia.com",
+    # F24: document-hosting/aggregator sites -- see config/tenders.yaml's deny_domains comment.
+    "scribd.com",
+    "docplayer.net",
+    "docplayer.com",
+    "yumpu.com",
+    "slideshare.net",
+    "pdfcoffee.com",
+    "coursehero.com",
 ]
 
 MAX_KEYWORDS_PER_API_SOURCE = 5

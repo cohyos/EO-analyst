@@ -13,6 +13,7 @@ import type {
   JobState,
   Lesson,
   LlmCallsSummary,
+  LlmChainEntry,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
@@ -71,14 +72,63 @@ const clarifications = mockClarifications.map((c) => ({ ...c }));
 const lessons = [...mockLessons];
 const jobs = [...mockJobs];
 const settingsStore = { ...mockSettingsYaml };
-// U8: mock-only in-memory mirror of `llm_providers.{interactive_default,allow_cloud,mode}`.
-const llmSettingsStore: { interactive_default: string; allow_cloud: boolean; mode: "local" | "cloud" } = {
+// U8: mock-only in-memory mirror of `llm_providers.{interactive_default,allow_cloud,mode,chains}`.
+const llmSettingsStore: {
+  interactive_default: string;
+  allow_cloud: boolean;
+  mode: "local" | "cloud";
+  chains: Record<string, LlmChainEntry[]>;
+} = {
   interactive_default: "ollama",
   allow_cloud: true,
   mode: "local",
+  chains: {},
 };
 let lessonId = lessons.length + 1;
 let investigateJobCounter = 9000;
+
+// U8-ה, ChainsEditor: mirrors the real `services._validate_chains`/`_with_terminal_ollama`
+// business rules closely enough for the mock backend to reject/normalize the same way, so e2e
+// tests exercising the editor against the mock behave like the real API.
+const MOCK_CHAIN_POWER_LEVELS: Record<string, string[]> = {
+  ollama: [],
+  agy: ["low", "medium", "high"],
+  claude: ["low", "medium", "high"],
+  codex: ["low", "medium", "high"],
+  anthropic: ["low", "medium", "high"],
+  gemini: ["low", "medium", "high"],
+  openai: ["low", "medium", "high"],
+};
+const MOCK_CHAIN_ROLES = new Set(["resident", "investigator", "light", "report"]);
+
+function mockWithTerminalOllama(chain: LlmChainEntry[]): LlmChainEntry[] {
+  const last = chain[chain.length - 1];
+  return last && last.provider === "ollama" ? chain : [...chain, { provider: "ollama" }];
+}
+
+function mockValidateChains(chains: Record<string, LlmChainEntry[]>): string[] {
+  const errors: string[] = [];
+  for (const [role, chain] of Object.entries(chains)) {
+    if (!MOCK_CHAIN_ROLES.has(role)) {
+      errors.push(`תפקיד לא ידוע בשרשרת: ${role}`);
+      continue;
+    }
+    chain.forEach((entry, i) => {
+      const levels = MOCK_CHAIN_POWER_LEVELS[entry.provider];
+      if (levels === undefined) {
+        errors.push(`${role}[${i}]: ספק לא ידוע: ${entry.provider}`);
+        return;
+      }
+      if (entry.provider !== "ollama" && !(entry.model && entry.model.trim())) {
+        errors.push(`${role}[${i}]: יש לבחור מודל עבור ספק ${entry.provider}`);
+      }
+      if (entry.power && !levels.includes(entry.power)) {
+        errors.push(`${role}[${i}]: רמת עוצמה לא נתמכת עבור ${entry.provider}: ${entry.power}`);
+      }
+    });
+  }
+  return errors;
+}
 
 // U10/F15 (2026-09-05): deterministic, seed-derived relevance/watchlist/mention-count
 // fields so `mocks/data/entities.ts` doesn't need every fixture row hand-edited every
@@ -527,7 +577,7 @@ export const mockApi: ApiClient = {
       mode: llmSettingsStore.mode,
       allow_cloud: llmSettingsStore.allow_cloud,
       interactive_default: llmSettingsStore.interactive_default,
-      chains: {},
+      chains: llmSettingsStore.chains,
       providers: [
         { id: "ollama", label: "מקומי (Ollama)", kind: "local", available: true, models: ["resident", "light"] },
         {
@@ -597,9 +647,18 @@ export const mockApi: ApiClient = {
       },
     }),
   putLlmSettings: async (body): Promise<LlmSettingsPutResponse> => {
+    if (body.chains !== undefined) {
+      const errors = mockValidateChains(body.chains);
+      if (errors.length > 0) return delay({ ok: false, errors, revision: null }, 200);
+    }
     if (body.interactive_default !== undefined) llmSettingsStore.interactive_default = body.interactive_default;
     if (body.allow_cloud !== undefined) llmSettingsStore.allow_cloud = body.allow_cloud;
     if (body.mode !== undefined) llmSettingsStore.mode = body.mode;
+    if (body.chains !== undefined) {
+      llmSettingsStore.chains = Object.fromEntries(
+        Object.entries(body.chains).map(([role, chain]) => [role, mockWithTerminalOllama(chain)]),
+      );
+    }
     return delay({ ok: true, errors: [], revision: String(Date.now()) }, 200);
   },
 };

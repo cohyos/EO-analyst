@@ -16,6 +16,7 @@ import type {
   Job,
   Lesson,
   LlmCallsSummary,
+  LlmChainEntry,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
@@ -128,6 +129,11 @@ export interface ApiClient {
     allow_cloud?: boolean;
     /** U8-א (Revision 2026-09-06): the global local/cloud switch. */
     mode?: "local" | "cloud";
+    /** U8-ה, ChainsEditor: replaces the entire `llm_providers.chains` map when provided. The
+     * server validates every entry (known provider id, non-empty model on a non-ollama step,
+     * power within that provider's own power_levels) and appends the local `ollama` terminal
+     * step to any role that doesn't already end with one. */
+    chains?: Record<string, LlmChainEntry[]>;
   }): Promise<LlmSettingsPutResponse>;
   /** U8-4: per-provider fallback-chain call accounting (`?since=24h`) for the Settings card. */
   getLlmCalls(since?: string): Promise<LlmCallsSummary>;

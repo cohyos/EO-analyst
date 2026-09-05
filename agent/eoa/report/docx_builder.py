@@ -859,7 +859,7 @@ def _extra_sections_md(lines: list[str], sections: list[dict[str, Any]], positio
     for sec in sections:
         if (sec.get("position") or "after_summary") != position:
             continue
-        lines += [f"## {sec.get('title_he') or ''}", "", sec.get("body_he") or "", ""]
+        lines += [f"## {sec.get('title_he') or ''}", "", _md_citations(sec.get("body_he") or ""), ""]
 
 
 def _md_cell(value: Any) -> str:
@@ -972,8 +972,15 @@ def render_markdown(
     for it in sorted(items, key=lambda x: x.get("n") or 0):
         url = it.get("url") or ""
         link = f"[{url}]({url})" if url else "—"
+        n = it.get("n")
+        # F23: an inline HTML anchor (GFM tables can't carry a raw markdown link target of their
+        # own) so `[n](#src-n)` from `_md_citations` above lands on this exact row in renderers
+        # that pass raw HTML through (GitHub, `markdown-it` with `html: true`, `react-markdown` +
+        # `rehype-raw`); in a renderer that doesn't, the anchor is simply invisible and the row
+        # number cell still reads correctly.
+        n_cell = f'<a id="src-{n}"></a>{n}' if n is not None else ""
         lines.append(
-            f"| {it.get('n')} | {it.get('title') or '—'} | {source_label(it.get('source_name'), url)} "
+            f"| {n_cell} | {it.get('title') or '—'} | {source_label(it.get('source_name'), url)} "
             f"| {fmt_date(it.get('published_at'))} | {link} |"
         )
     return "\n".join(lines) + "\n"

@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from eoa import config as eoa_config
 from eoa.api import services
+from eoa.config import ChainEntryCfg
 
 
 @pytest.fixture()
@@ -120,6 +121,148 @@ class TestPatchLlmProviderSettings:
             )
 
 
+class TestPatchLlmProviderSettingsChains:
+    """U8 Settings ChainsEditor: `PUT /api/llm/settings {chains: ...}` (services.py additive)."""
+
+    def test_round_trip_add_step_and_terminal_appended(self, settings_tmp: Path):
+        chains = {
+            "resident": [ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium")],
+        }
+        ok, errors, revision = services.patch_llm_provider_settings(
+            interactive_default=None, allow_cloud=None, chains=chains
+        )
+        assert ok is True
+        assert errors == []
+        assert revision is not None
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        resident = parsed["llm_providers"]["chains"]["resident"]
+        # the local terminal step is appended automatically since the payload omitted it.
+        assert resident == [
+            {"provider": "agy", "model": "gemini-3.8-flash-medium"},
+            {"provider": "ollama"},
+        ]
+
+    def test_reorder_round_trip(self, settings_tmp: Path):
+        first = {
+            "investigator": [
+                ChainEntryCfg(provider="claude", model="claude-sonnet-5"),
+                ChainEntryCfg(provider="agy", model="gemini-3.1-pro-high"),
+            ]
+        }
+        services.patch_llm_provider_settings(interactive_default=None, allow_cloud=None, chains=first)
+        reordered = {
+            "investigator": [
+                ChainEntryCfg(provider="agy", model="gemini-3.1-pro-high"),
+                ChainEntryCfg(provider="claude", model="claude-sonnet-5"),
+            ]
+        }
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None, allow_cloud=None, chains=reordered
+        )
+        assert ok is True
+        assert errors == []
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        providers_in_order = [e["provider"] for e in parsed["llm_providers"]["chains"]["investigator"]]
+        assert providers_in_order == ["agy", "claude", "ollama"]
+
+    def test_terminal_ollama_not_duplicated(self, settings_tmp: Path):
+        chains = {
+            "light": [
+                ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium"),
+                ChainEntryCfg(provider="ollama"),
+            ]
+        }
+        ok, errors, _ = services.patch_llm_provider_settings(interactive_default=None, allow_cloud=None, chains=chains)
+        assert ok is True
+        assert errors == []
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        assert parsed["llm_providers"]["chains"]["light"] == [
+            {"provider": "agy", "model": "gemini-3.8-flash-medium"},
+            {"provider": "ollama"},
+        ]
+
+    def test_unknown_provider_rejected_without_touching_file(self, settings_tmp: Path):
+        before = (settings_tmp / "config.yaml").read_text(encoding="utf-8")
+        ok, errors, revision = services.patch_llm_provider_settings(
+            interactive_default=None,
+            allow_cloud=None,
+            chains={"resident": [ChainEntryCfg(provider="bogus", model="x")]},
+        )
+        assert ok is False
+        assert errors
+        assert revision is None
+        assert (settings_tmp / "config.yaml").read_text(encoding="utf-8") == before
+
+    def test_empty_model_rejected_for_non_ollama_provider(self, settings_tmp: Path):
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None,
+            allow_cloud=None,
+            chains={"resident": [ChainEntryCfg(provider="claude", model="")]},
+        )
+        assert ok is False
+        assert any("מודל" in e for e in errors)
+
+    def test_ollama_step_needs_no_model(self, settings_tmp: Path):
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None, allow_cloud=None, chains={"resident": [ChainEntryCfg(provider="ollama")]}
+        )
+        assert ok is True
+        assert errors == []
+
+    def test_power_not_in_providers_levels_rejected(self, settings_tmp: Path):
+        # "gemini" (a direct-API provider) keeps its default power_levels (["low","medium","high"])
+        # in this fixture since it never overrides `llm_providers.api` -- unlike `cli: {}`, which
+        # the fixture does override to empty, so this isolates "known provider, bad power value"
+        # from "provider has no power_levels configured at all" (covered by the CLI-provider path
+        # in `test_reorder_round_trip`, where power is simply omitted).
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None,
+            allow_cloud=None,
+            chains={"resident": [ChainEntryCfg(provider="gemini", model="gemini-3.5-flash", power="ultra")]},
+        )
+        assert ok is False
+        assert any("עוצמה" in e for e in errors)
+
+    def test_unknown_role_rejected(self, settings_tmp: Path):
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None,
+            allow_cloud=None,
+            chains={"not_a_role": [ChainEntryCfg(provider="ollama")]},
+        )
+        assert ok is False
+        assert any("תפקיד" in e for e in errors)
+
+    def test_clearing_chains_writes_empty_map(self, settings_tmp: Path):
+        setup_ok, setup_errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None,
+            allow_cloud=None,
+            chains={"resident": [ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium")]},
+        )
+        assert setup_ok is True
+        assert setup_errors == []
+        ok, errors, _ = services.patch_llm_provider_settings(interactive_default=None, allow_cloud=None, chains={})
+        assert ok is True
+        assert errors == []
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        assert parsed["llm_providers"]["chains"] == {}
+
+    def test_chains_absent_key_in_fixture_gets_inserted(self, settings_tmp: Path):
+        # settings_tmp's config.yaml fixture has no `chains:` key at all (documents the
+        # insert-after-`llm_providers:` fallback path in `_patch_yaml_chains_block`).
+        before = (settings_tmp / "config.yaml").read_text(encoding="utf-8")
+        assert "chains" not in before
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None,
+            allow_cloud=None,
+            chains={"resident": [ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium")]},
+        )
+        assert ok is True
+        assert errors == []
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        assert parsed["llm_providers"]["chains"]["resident"][0]["provider"] == "agy"
+        assert parsed["llm_providers"]["cli"] == {}  # rest of the section untouched
+
+
 class TestListLlmProviders:
     def test_shape_and_ollama_always_present(self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("eoa.llm.providers.ollama.OllamaProvider.is_available", lambda self: True)
@@ -211,6 +354,45 @@ class TestLlmRoute:
         assert res.json()["ok"] is True
         parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
         assert parsed["llm_providers"]["mode"] == "cloud"
+
+    def test_put_settings_route_updates_chains(self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.ollama.OllamaProvider.is_available", lambda self: False)
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: False)
+        from eoa.api.app import create_app
+
+        client = TestClient(create_app())
+        res = client.put(
+            "/api/llm/settings",
+            json={"chains": {"resident": [{"provider": "agy", "model": "gemini-3.8-flash-medium"}]}},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["ok"] is True
+        parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
+        assert parsed["llm_providers"]["chains"]["resident"] == [
+            {"provider": "agy", "model": "gemini-3.8-flash-medium"},
+            {"provider": "ollama"},
+        ]
+        # GET reflects the newly persisted chain immediately (no cache clear needed on this route).
+        res2 = client.get("/api/llm/providers")
+        assert res2.json()["chains"]["resident"][0]["provider"] == "agy"
+
+    def test_put_settings_route_rejects_bad_chain_provider(
+        self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("eoa.llm.providers.ollama.OllamaProvider.is_available", lambda self: False)
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: False)
+        from eoa.api.app import create_app
+
+        client = TestClient(create_app())
+        res = client.put(
+            "/api/llm/settings",
+            json={"chains": {"resident": [{"provider": "not-a-provider", "model": "x"}]}},
+        )
+        assert res.status_code == 200  # validation errors, not an HTTP error -- same as `mode`
+        body = res.json()
+        assert body["ok"] is False
+        assert body["errors"]
 
     def test_get_calls_route(self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(

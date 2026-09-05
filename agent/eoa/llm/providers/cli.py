@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -67,6 +68,37 @@ def _binary_setting(kind: str) -> str:
 
 def _resolve_binary(kind: str) -> str | None:
     return shutil.which(_binary_setting(kind))
+
+
+def _mcp_config_path(cli_kind: str) -> Path | None:
+    """A8 (docs/adr/006-mcp-sources.md, point 4): build a temporary ``--mcp-config`` JSON file
+    (``{"mcpServers": {...}}``, the same shape ``claude mcp add-json`` writes) from this project's
+    own enabled stdio MCP servers -- ``None`` when MCP is disabled, ``cli_kind`` isn't opted in via
+    ``mcp.inherit_cli_mcp``, or there are no stdio servers to hand over. The caller is responsible
+    for cleaning the returned path up (``CliProvider._cleanup``, same as codex's output tmpfile)."""
+    try:
+        cfg = settings().mcp
+    except Exception:  # config not loadable (e.g. a unit test with a minimal fixture) -> no MCP
+        return None
+    if not cfg.enabled or not cfg.inherit_cli_mcp.get(cli_kind, False):
+        return None
+    servers = cfg.stdio_servers_for_cli()
+    if not servers:
+        return None
+
+    mcp_servers: dict[str, Any] = {}
+    for server in servers:
+        command = sys.executable if server.command == "{python}" else server.command
+        entry: dict[str, Any] = {"command": command, "args": list(server.args)}
+        env = {name: os.environ[name] for name in server.env if name in os.environ}
+        if env:
+            entry["env"] = env
+        mcp_servers[server.id] = entry
+
+    fd, tmp_name = tempfile.mkstemp(prefix="eoa_mcp_config_", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"mcpServers": mcp_servers}, fh)
+    return Path(tmp_name)
 
 
 def _flatten_messages(messages: list[dict[str, Any]]) -> str:
@@ -195,6 +227,10 @@ class CliProvider:
         if self.kind == "agy":
             # No stdin support (see docs/adr/005-cloud-llm-cli.md); the prompt is a plain argv
             # element (no shell involved), reliable up to ~32KB per the field notes.
+            # A8/point 4 (docs/adr/006-mcp-sources.md): `agy --help` (checked 2026-09-06) has only
+            # a persistent `agy mcp add/remove/list/enable/disable` server registry, no per-call
+            # config flag equivalent to claude's `--mcp-config` -- not wired here; documented gap,
+            # `mcp.inherit_cli_mcp.agy` defaults to `false` in config/mcp.yaml accordingly.
             args = [binary, "-p", prompt, "--output-format", "json"]
             if real_model:
                 args += ["--model", real_model]
@@ -208,11 +244,29 @@ class CliProvider:
                 args += ["--model", real_model]
             if power:
                 args += ["--effort", power]
-            return args, prompt, None
+            mcp_config_path = _mcp_config_path("claude")
+            if mcp_config_path:
+                # A8 (docs/adr/006-mcp-sources.md): hand this project's own stdio MCP servers to
+                # the CLI, same shape `claude mcp add-json` writes. NOTE (known limitation, see the
+                # ADR): `--restricted` still blocks every tool -- including one loaded this way --
+                # unless it is also named in `--allowedTools` (verified live for WebSearch/WebFetch
+                # in `eoa.search.deep_search._run_claude_with_tools`; not re-verified here for MCP
+                # tool names, so this flag alone loads the servers without yet granting access to
+                # them in THIS text-only call path). Left honestly incomplete rather than guessing
+                # an unverified `--allowedTools` pattern; the tool-granting call path (deep search's
+                # cloud-batch delegation) is a separate function this change does not touch.
+                args += ["--mcp-config", str(mcp_config_path)]
+            return args, prompt, mcp_config_path
         # codex: final message is written to -o/--output-last-message rather than parsed out of
         # the NDJSON --json stream, which also carries hook/skill noise on this machine. No
         # dedicated effort/power flag exists (`codex exec --help`, checked 2026-09-06) -- routed
         # through the generic `-c key=value` config override instead, per the ADR's design.
+        # A8/point 4 (docs/adr/006-mcp-sources.md): `codex exec --help` has no per-call MCP flag
+        # either -- only a persistent `codex mcp` server registry (config.toml), same shape as
+        # agy's. Its generic `-c key=value` override could in principle inject
+        # `mcp_servers.<id>.command=...` entries, but that was judged too speculative to ship
+        # unverified (TOML value/array quoting through `-c` is unconfirmed for this shape) --
+        # documented gap, `mcp.inherit_cli_mcp.codex` defaults to `false`.
         fd, tmp_name = tempfile.mkstemp(prefix="eoa_codex_", suffix=".txt")
         os.close(fd)
         tmp_out = Path(tmp_name)

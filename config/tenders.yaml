@@ -106,6 +106,18 @@ deny_domains: &deny
   - howstuffworks.com
   - thoughtco.com
   - investopedia.com
+  # F24 (docs/QA_PROGRAM.md section 4, 2026-09-06): document-hosting/aggregator sites -- a page
+  # here is someone's re-upload of a PDF/slide deck (often years old), never the live notice
+  # itself, so it is always rejected outright rather than risk showing a stale or misattributed
+  # "tender" (e.g. a Scribd-hosted "RFP for EO/IR Pods for Heron UAV" scan with no verifiable
+  # status).
+  - scribd.com
+  - docplayer.net
+  - docplayer.com
+  - yumpu.com
+  - slideshare.net
+  - pdfcoffee.com
+  - coursehero.com
 
 sources:
   # ---------------------------------------------------------------- TED (EU) -- api_json, verified working

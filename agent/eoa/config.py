@@ -305,6 +305,78 @@ class LlmProvidersCfg(BaseModel):
         return chain
 
 
+class McpServerCfg(BaseModel):
+    """One MCP (Model Context Protocol) server (A8, docs/adr/006-mcp-sources.md).
+
+    ``transport`` is ``"stdio"`` (``command``/``args``/``env`` spawn a local subprocess -- our own
+    servers under ``eoa.mcp_servers.*``) or ``"http"`` (``url`` -- a streamable-HTTP server, e.g. a
+    server already running elsewhere). ``env`` lists environment variable *names* only (values come
+    from the process environment / ``.env``, never from this file -- ``docs/CONVENTIONS.md`` rule
+    #12). ``allow_tools``/``deny_tools`` are tool-name allow/deny lists (empty ``allow_tools`` means
+    "every tool this server advertises"); ``deny_tools`` always wins over ``allow_tools``.
+    """
+
+    id: str
+    label: str = ""
+    transport: str = "stdio"  # "stdio" | "http"
+    enabled: bool = False
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    url: str | None = None
+    env: list[str] = Field(default_factory=list)
+    allow_tools: list[str] = Field(default_factory=list)
+    deny_tools: list[str] = Field(default_factory=list)
+    timeout_s: int = 30
+    max_output_chars: int = 8000
+    # A9 (config/mcp.yaml comments): a server that only exists inside the user's own Claude
+    # desktop/CLI session (no local process, no HTTP endpoint this project can reach directly) --
+    # reachable only by the `claude` CLI provider inheriting its own configured MCP servers, never
+    # by `eoa.mcp.registry` connecting to it itself.
+    inherit_cli_only: bool = False
+
+
+class ProcurementMcpCfg(BaseModel):
+    """Defaults consumed by ``eoa.mcp_servers.procurement`` (not by the client/registry)."""
+
+    psc_codes_eo_ir: list[str] = Field(
+        default_factory=lambda: ["5855", "6650", "1270", "5840", "5841"]
+    )
+
+
+class McpCfg(BaseModel):
+    """A8: MCP tool layer for the local ReAct deep-search loop (docs/adr/006-mcp-sources.md).
+
+    ``enabled`` is the config-level kill switch checked before any MCP tool is added to the
+    investigator's tool list or before any cloud CLI is handed ``--mcp-config`` -- disabled by
+    default so existing behaviour is completely unchanged until explicitly turned on.
+
+    ``inherit_cli_mcp`` (point 4, docs/adr/006-mcp-sources.md): per-CLI-kind opt-in for handing our
+    stdio servers (and any ``inherit_cli_only`` server) to that CLI via its own MCP flag --
+    verified live only for ``claude`` (``--mcp-config``) as of 2026-09-06; ``agy``/``codex`` default
+    to ``False`` since neither has a documented equivalent flag.
+    """
+
+    enabled: bool = False
+    servers: list[McpServerCfg] = Field(default_factory=list)
+    inherit_cli_mcp: dict[str, bool] = Field(
+        default_factory=lambda: {"claude": True, "agy": False, "codex": False}
+    )
+    procurement: ProcurementMcpCfg = ProcurementMcpCfg()
+
+    def server(self, server_id: str) -> McpServerCfg | None:
+        return next((s for s in self.servers if s.id == server_id), None)
+
+    def enabled_servers(self) -> list[McpServerCfg]:
+        return [s for s in self.servers if s.enabled and not s.inherit_cli_only]
+
+    def stdio_servers_for_cli(self) -> list[McpServerCfg]:
+        """Stdio servers to hand a supporting cloud CLI via its own MCP-config flag: our own
+        enabled stdio servers, plus any ``inherit_cli_only`` server IS excluded here (that one has
+        no local command for the CLI to spawn -- it depends on the CLI's own separately configured
+        MCP servers, not ours)."""
+        return [s for s in self.servers if s.enabled and s.transport == "stdio" and s.command]
+
+
 class ModelSpec(BaseModel):
     key: str
     ollama: str | None = None
@@ -351,6 +423,7 @@ class Settings(BaseModel):
     api: ApiCfg = ApiCfg()
     export: ExportCfg = ExportCfg()
     llm_providers: LlmProvidersCfg = LlmProvidersCfg()
+    mcp: McpCfg = McpCfg()
 
     registry: ModelsRegistry
     taxonomy: dict[str, Any] = {}
@@ -405,6 +478,15 @@ def _load_yaml(name: str) -> dict[str, Any]:
     return data
 
 
+def _load_yaml_optional(name: str) -> dict[str, Any]:
+    """Like ``_load_yaml`` but tolerant of a missing file -- used for ``mcp.yaml`` (A8), which is
+    additive and may not exist yet on an older checkout or a fresh test fixture directory."""
+    path = CONFIG_DIR / name
+    if not path.exists():
+        return {}
+    return _load_yaml(name)
+
+
 @lru_cache(maxsize=1)
 def settings() -> Settings:
     """Load and cache settings. Call `settings.cache_clear()` in tests to reload."""
@@ -412,4 +494,7 @@ def settings() -> Settings:
     registry = ModelsRegistry(**_load_yaml("models.yaml"))
     taxonomy = _load_yaml("taxonomy.yaml")
     watchlist = _load_yaml("watchlist.yaml")
+    mcp_data = _load_yaml_optional("mcp.yaml")
+    if "mcp" not in base and mcp_data:
+        base = {**base, "mcp": mcp_data}
     return Settings(registry=registry, taxonomy=taxonomy, watchlist=watchlist, **base)

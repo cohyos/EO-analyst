@@ -27,6 +27,7 @@ from eoa.api.routes import (
     jobs,
     lessons,
     llm,
+    mcp,
     reports,
     runs,
     status,
@@ -154,6 +155,7 @@ def create_app() -> FastAPI:
     app.include_router(runs.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
     app.include_router(llm.router, prefix="/api")
+    app.include_router(mcp.router, prefix="/api")
 
     if WEB_DIST.exists():
         # Registered after every API router, so `/api/*` and `/ws/*` paths

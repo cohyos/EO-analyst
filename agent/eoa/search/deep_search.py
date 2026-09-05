@@ -215,6 +215,46 @@ def _tool_search(inv: Investigation, budget: Budget, query: str, lang: str, roun
     return _data_frame(payload, f"search:{lang}")
 
 
+def _mcp_tool_specs() -> list[dict[str, Any]]:
+    """A8 (docs/adr/006-mcp-sources.md): MCP tools (`mcp.<server>.<tool>`), appended to the local
+    ReAct loop's tool list behind ``settings().mcp.enabled`` -- a disabled/missing config returns
+    an empty list, so this is a strict, no-op-by-default addition on top of the existing
+    search/read/finish tools above, never a change to them."""
+    if not settings().mcp.enabled:
+        return []
+    try:
+        from eoa.mcp.registry import tool_specs_for_react
+
+        return tool_specs_for_react()
+    except Exception as exc:  # a broken MCP server must never take deep search down with it
+        log.warning("mcp_tool_specs_failed", error=str(exc)[:200])
+        return []
+
+
+def _tool_mcp(inv: Investigation, budget: Budget, full_name: str, args: dict[str, Any], round_no: int) -> str:
+    """Dispatch one ``mcp.<server>.<tool>`` call; counts against the page budget like `read`, since
+    an MCP tool call is an external-data fetch just like reading a URL."""
+    if budget.pages >= budget.max_pages:
+        return json.dumps({"error": "page budget exhausted"})
+    budget.pages += 1
+    from eoa.mcp.registry import call as mcp_call
+
+    out = mcp_call(full_name, args, item_id=f"inv-{inv.job_id or inv.item_id or 0}")
+    is_error = '"error"' in out[:200] and not out.startswith("תוצאת כלי")
+    _log(
+        inv,
+        round_no,
+        None,
+        None,
+        engine="mcp",
+        results_n=0 if is_error else 1,
+        pages_read=1,
+        outcome="not_found" if is_error else "partial",
+        notes=full_name,
+    )
+    return out
+
+
 def _data_frame(payload: str, src: str) -> str:
     """Tool outputs are untrusted web-derived DATA; frame them so the tool-enabled model never treats them as orders."""
     from eoa.llm.ollama_client import wrap_data
@@ -466,6 +506,7 @@ def investigate(
         cfg.confidence_stop,
     )
     primary = langs or cfg.langs_primary
+    react_tools = TOOLS + _mcp_tool_specs()
     transcript: list[dict[str, Any]] = [
         {
             "role": "system",
@@ -498,7 +539,7 @@ def investigate(
                     f"≥ {cfg.confidence_stop} או כשמיצית את הסבב. לעולם אל תמציא — אם לא נמצא, finish עם not_found.",
                 }
             )
-            finished = _act(inv, budget, transcript, round_no)
+            finished = _act(inv, budget, transcript, round_no, tools=react_tools)
             if finished:
                 break
             if inv.result and inv.result.confidence >= cfg.confidence_stop:
@@ -539,9 +580,20 @@ def investigate(
 
 
 def _act(
-    inv: Investigation, budget: Budget, transcript: list[dict[str, Any]], round_no: int, max_steps: int = 8
+    inv: Investigation,
+    budget: Budget,
+    transcript: list[dict[str, Any]],
+    round_no: int,
+    max_steps: int = 8,
+    tools: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """Let the model call tools until it finishes or the step/budget cap; returns True if finished."""
+    """Let the model call tools until it finishes or the step/budget cap; returns True if finished.
+
+    ``tools`` defaults to the original fixed ``TOOLS`` list (search/read/finish); callers pass the
+    A8-extended list (``TOOLS + _mcp_tool_specs()``) to add MCP tools without changing this
+    function's own defaults or any existing call site that doesn't care about MCP.
+    """
+    tools = tools if tools is not None else TOOLS
     for _ in range(max_steps):
         _check_stop(inv)
         if budget.exhausted:
@@ -556,7 +608,7 @@ def _act(
                 _role(),
                 transcript,
                 task="react",
-                tools=TOOLS,
+                tools=tools,
                 think=False,
                 options={"temperature": 0.2, "num_predict": 1200},
             )
@@ -585,6 +637,8 @@ def _act(
                 )
             elif name == "read":
                 out = _tool_read(inv, budget, str(args.get("url", "")), round_no)
+            elif name and name.startswith("mcp."):
+                out = _tool_mcp(inv, budget, name, args, round_no)
             elif name == "finish":
                 if (
                     str(args.get("outcome")) in {"found", "partial"}

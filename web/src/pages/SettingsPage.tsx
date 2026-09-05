@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, Cloud, Cpu, Save } from "lucide-react";
 import { api } from "@/api";
-import { SETTINGS_NAMES, type SettingsName } from "@/types/api";
+import { SETTINGS_NAMES, type LlmChainEntry, type SettingsName } from "@/types/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { ChainsEditor } from "@/components/settings/ChainsEditor";
 import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
@@ -118,6 +119,22 @@ export function SettingsPage() {
     refetchInterval: 30_000,
   });
 
+  // U8-ה: the ChainsEditor's own save action — replaces the whole `llm_providers.chains` map.
+  const [chainsSaveResult, setChainsSaveResult] = useState<{ ok: boolean; errors: string[] } | null>(null);
+  const saveChains = useMutation({
+    mutationFn: (chains: Record<string, LlmChainEntry[]>) => api.putLlmSettings({ chains }),
+    onSuccess: (res) => {
+      setChainsSaveResult({ ok: res.ok, errors: res.errors });
+      if (res.ok) queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
+    },
+    onError: (err: unknown) => {
+      setChainsSaveResult({
+        ok: false,
+        errors: [err instanceof Error ? err.message : "שגיאת שמירה לא ידועה"],
+      });
+    },
+  });
+
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-6">
       <section aria-label="מודלים" className="rounded-lg border border-border bg-bg-raised p-3">
@@ -203,6 +220,17 @@ export function SettingsPage() {
               ומשימות הרקע (סיווג/מיון/ניתוח, חקירת עומק, "הרץ עכשיו") משתמשות בענן או במקומי בלבד
               — ומהו הדגם הזמין הוא נגזרת של המתג הזה.
             </p>
+
+            {/* U8-ה: per-role fallback-chain editor — previously chains could only be hand-edited
+                in config.yaml via the raw YAML tab below. */}
+            <ChainsEditor
+              chains={llmQuery.data.chains}
+              providers={llmQuery.data.providers}
+              allowCloud={llmQuery.data.allow_cloud}
+              onSave={(chains) => saveChains.mutate(chains)}
+              saving={saveChains.isPending}
+              saveResult={chainsSaveResult}
+            />
 
             <ul className="space-y-1 text-xs text-fg-dim">
               {llmQuery.data.providers.map((p) => (

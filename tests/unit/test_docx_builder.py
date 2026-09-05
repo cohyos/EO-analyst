@@ -454,6 +454,15 @@ def test_render_markdown_contains_citations_and_appendix(fixture_draft, fixture_
     assert "https://example.com/news/elbit-pod-contract" in md
 
 
+def test_render_markdown_citations_are_links_to_appendix_anchors(fixture_draft, fixture_items, fixture_events):
+    """F23: `[n]` in markdown body text becomes a real `[n](#src-n)` link, and the appendix row
+    carries a matching `<a id="src-n">` anchor for it to land on."""
+    md = db.render_markdown(fixture_draft, fixture_items, fixture_events, period_end=dt.date(2026, 9, 4))
+    assert "[1](#src-1)" in md
+    assert "[2](#src-2)" in md
+    assert '<a id="src-1"></a>' in md
+
+
 def test_render_html_is_rtl_and_links_citations(fixture_draft, fixture_items, fixture_events):
     html_out = db.render_html(fixture_draft, fixture_items, fixture_events, period_end=dt.date(2026, 9, 4))
     assert 'dir="rtl"' in html_out

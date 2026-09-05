@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from eoa.api import services
 from eoa.api.errors import APIError
+from eoa.config import ChainEntryCfg
 
 router = APIRouter(tags=["llm"])
 
@@ -23,6 +24,12 @@ class LlmSettingsPayload(BaseModel):
     interactive_default: str | None = None
     allow_cloud: bool | None = None
     mode: str | None = None  # U8-א (Revision 2026-09-06): "local" | "cloud" global switch
+    # Settings "מודלים" chain editor (per-role fallback chains) — replaces the whole
+    # `llm_providers.chains` map when provided; validated in `services.patch_llm_provider_settings`
+    # (known provider ids, non-empty model on a non-ollama step, power in the provider's own
+    # power_levels). The server appends the local `ollama` terminal step to any role's chain that
+    # doesn't already end with one.
+    chains: dict[str, list[ChainEntryCfg]] | None = None
     revision: str | None = None
 
 
@@ -42,6 +49,7 @@ def put_llm_settings(
             interactive_default=body.interactive_default,
             allow_cloud=body.allow_cloud,
             mode=body.mode,
+            chains=body.chains,
             expected_revision=expected_revision,
         )
     except services.SettingsConflict as exc:

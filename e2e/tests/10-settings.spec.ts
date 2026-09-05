@@ -84,3 +84,132 @@ test.describe("Settings screen (/settings)", () => {
     await assertNoBadText(page, testInfo, "Settings (/settings)");
   });
 });
+
+// U8-ה (ChainsEditor): the fallback-chain editor persists through `PUT /api/llm/settings
+// {chains}`, which only exists in code added alongside the editor itself -- the shared live
+// instance at BASE_URL (8765 by default) may still be running the pre-chains build. These tests
+// therefore target a throwaway instance (a freshly built frontend + a `python -m uvicorn
+// eoa.api.app:app --port 8766` process, per docs/MODULES.md's llm section) via
+// EOA_CHAINS_BASE_URL, defaulting to http://127.0.0.1:8766 -- never the shared 8765 the rest of
+// this file exercises, so a failed/aborted run here can't corrupt the live app's session or an
+// in-progress night run.
+test.describe("Settings — LLM chain editor (throwaway instance)", () => {
+  test.use({ baseURL: process.env.EOA_CHAINS_BASE_URL ?? "http://127.0.0.1:8766" });
+
+  // Every test in this block starts from an empty `resident` chain and restores it afterward
+  // (direct API call, not through the UI) -- config.yaml's `llm_providers.chains` is a real,
+  // shared file, and this suite must never leave test data behind in it.
+  test.afterEach(async ({ page }) => {
+    await page.request
+      .put("/api/llm/settings", {
+        data: { chains: { resident: [], investigator: [], light: [], report: [] } },
+      })
+      .catch(() => undefined);
+  });
+
+  test("add step, pick a model and power, save, and reload to confirm it persisted", async ({ page }) => {
+    await page.request.put("/api/llm/settings", { data: { chains: { resident: [] } } });
+    await page.goto("/settings");
+
+    const chainsSection = page.getByRole("region", { name: "שרשראות נפילה לפי תפקיד" });
+    await expect(chainsSection).toBeVisible({ timeout: 15_000 });
+
+    await page.getByRole("tab", { name: /תושב \(resident\)/ }).click();
+    await page.getByRole("button", { name: "הוסף שלב" }).click();
+
+    const row = chainsSection.locator("li[aria-label='שלב 1']");
+    await expect(row).toBeVisible();
+
+    const providerSelect = row.getByLabel("ספק");
+    await providerSelect.selectOption("claude");
+    const modelSelect = row.getByLabel("מודל");
+    await modelSelect.selectOption("claude-sonnet-5");
+    const powerSelect = row.getByLabel("עוצמה");
+    await expect(powerSelect).toBeVisible();
+    await powerSelect.selectOption("high");
+
+    await expect(page.getByText("שינויים לא נשמרו")).toBeVisible();
+
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/api/llm/settings") && r.request().method() === "PUT",
+      ),
+      page.getByRole("button", { name: "שמור שרשראות" }).click(),
+    ]);
+    expect(response.ok()).toBeTruthy();
+    await expect(page.getByText("השרשראות נשמרו בהצלחה")).toBeVisible();
+
+    // Reload from scratch and confirm the step round-tripped through config.yaml, including power.
+    await page.reload();
+    await page.getByRole("tab", { name: /תושב \(resident\)/ }).click();
+    const reloadedRow = page.locator("li[aria-label='שלב 1']");
+    await expect(reloadedRow.getByLabel("ספק")).toHaveValue("claude");
+    await expect(reloadedRow.getByLabel("מודל")).toHaveValue("claude-sonnet-5");
+    await expect(reloadedRow.getByLabel("עוצמה")).toHaveValue("high");
+
+    // The fixed, non-removable local terminal step is always shown after the configured steps.
+    await expect(chainsSection.getByText("מקומי (Ollama)")).toBeVisible();
+  });
+
+  test("reorder two steps with the move-down button and the new order survives a reload", async ({
+    page,
+  }) => {
+    await page.request.put("/api/llm/settings", {
+      data: {
+        chains: {
+          resident: [
+            { provider: "agy", model: "gemini-3.8-flash-medium" },
+            { provider: "claude", model: "claude-sonnet-5" },
+          ],
+        },
+      },
+    });
+    await page.goto("/settings");
+    await page.getByRole("tab", { name: /תושב \(resident\)/ }).click();
+
+    const firstRow = page.locator("li[aria-label='שלב 1']");
+    await expect(firstRow.getByLabel("ספק")).toHaveValue("agy");
+
+    await firstRow.getByLabel("העבר למטה").click();
+
+    // After moving step 1 down, step 1 should now be the one that used to be step 2 (claude).
+    await expect(page.locator("li[aria-label='שלב 1']").getByLabel("ספק")).toHaveValue("claude");
+    await expect(page.locator("li[aria-label='שלב 2']").getByLabel("ספק")).toHaveValue("agy");
+
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/api/llm/settings") && r.request().method() === "PUT",
+      ),
+      page.getByRole("button", { name: "שמור שרשראות" }).click(),
+    ]);
+    expect(response.ok()).toBeTruthy();
+
+    await page.reload();
+    await page.getByRole("tab", { name: /תושב \(resident\)/ }).click();
+    await expect(page.locator("li[aria-label='שלב 1']").getByLabel("ספק")).toHaveValue("claude");
+    await expect(page.locator("li[aria-label='שלב 2']").getByLabel("ספק")).toHaveValue("agy");
+  });
+
+  test("removing a step and the copy-to-all-roles action both update the draft immediately", async ({
+    page,
+  }) => {
+    await page.request.put("/api/llm/settings", {
+      data: { chains: { resident: [{ provider: "agy", model: "gemini-3.8-flash-medium" }] } },
+    });
+    await page.goto("/settings");
+    const chainsSection = page.getByRole("region", { name: "שרשראות נפילה לפי תפקיד" });
+    await expect(chainsSection).toBeVisible({ timeout: 15_000 });
+
+    await page.getByRole("tab", { name: /תושב \(resident\)/ }).click();
+    await expect(chainsSection.locator("li[aria-label='שלב 1']")).toBeVisible();
+
+    await page.getByRole("button", { name: "העתק לכל התפקידים" }).click();
+    await page.getByRole("tab", { name: /חוקר \(investigator\)/ }).click();
+    await expect(chainsSection.locator("li[aria-label='שלב 1']").getByLabel("ספק")).toHaveValue("agy");
+
+    await page.getByRole("tab", { name: /תושב \(resident\)/ }).click();
+    await chainsSection.locator("li[aria-label='שלב 1']").getByLabel("הסר שלב").click();
+    await expect(chainsSection.locator("li[aria-label='שלב 1']")).toHaveCount(0);
+    await expect(chainsSection.getByText("מקומי (Ollama)")).toBeVisible();
+  });
+});
