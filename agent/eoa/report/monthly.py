@@ -50,6 +50,7 @@ from eoa.report.weekly import (
     _domain_label,
     _extend_registry_with_events,
     _extend_registry_with_ids,
+    _normalize_section_titles,
     collect_yellow_domain_summary,
     format_items_block,
     format_trends_block,
@@ -135,7 +136,9 @@ def collect_month_items(
         LIMIT %(limit)s
     """
     with connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, {"levels": list(_LEVELS_MAIN), "start": period_start, "end": period_end, "limit": cap})
+        cur.execute(
+            sql, {"levels": list(_LEVELS_MAIN), "start": period_start, "end": period_end, "limit": cap}
+        )
         rows = cur.fetchall()
     for row in rows:
         row.setdefault("key_facts", [])
@@ -175,7 +178,9 @@ def players_map() -> dict[str, list[dict[str, Any]]]:
             try:
                 counts[label] = len(graph_mod.neighbors(eid, label))
             except Exception as exc:
-                log.warning("players_map_graph_query_failed", entity_id=eid, label=label, error=str(exc)[:150])
+                log.warning(
+                    "players_map_graph_query_failed", entity_id=eid, label=label, error=str(exc)[:150]
+                )
                 counts[label] = 0
         out.setdefault(row["domain"], []).append({"entity_id": eid, "name": row["name"], **counts})
     for domain_rows in out.values():
@@ -249,9 +254,7 @@ def format_watchlist_he(entries: list[dict[str, Any]]) -> str:
 
 def _no_items_draft() -> MonthlyReportDraft:
     return MonthlyReportDraft(
-        exec_summary_he=(
-            "לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח החודשי."
-        ),
+        exec_summary_he=("לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח החודשי."),
         trend_paragraphs=[],
         sections=[],
         outlook_he="",
@@ -280,7 +283,7 @@ def draft_monthly(
             format_yellow_summary_block(yellow_summary), "report_yellow", "internal"
         ),
     )
-    return chat_structured(
+    draft = chat_structured(
         role,
         MonthlyReportDraft,
         [
@@ -291,6 +294,7 @@ def draft_monthly(
         interactive=interactive,
         options={"temperature": 0.3},
     )
+    return _normalize_section_titles(draft)
 
 
 def _corrective_retry(
@@ -319,7 +323,7 @@ def _corrective_retry(
         "ותקינה מחדש (JSON לפי הסכמה בלבד, ללא הסברים נוספים), מבלי להמציא עובדות חדשות שלא הופיעו "
         "ברשימת הפריטים או ברשימת המגמות:\n" + errors_text
     )
-    return chat_structured(
+    draft = chat_structured(
         role,
         MonthlyReportDraft,
         [
@@ -332,23 +336,27 @@ def _corrective_retry(
         interactive=interactive,
         options={"temperature": 0.2},
     )
+    return _normalize_section_titles(draft)
 
 
 def _strip_uncited(draft: MonthlyReportDraft, qa: QAResult) -> MonthlyReportDraft:
+    """Mirrors ``weekly._strip_uncited`` (F5: also drops an exec-summary sentence duplicated
+    verbatim from a section/trend paragraph)."""
     bad_refs = set(qa.bad_refs)
     uncited = set(qa.uncited_sentences)
+    duplicates = set(qa.duplicate_sentences)
 
-    def _clean(text: str) -> str:
+    def _clean(text: str, *, extra_drop: set[str] = frozenset()) -> str:
         kept = []
         for sentence in split_sentences(text):
-            if sentence in uncited:
+            if sentence in uncited or sentence in extra_drop:
                 continue
             if bad_refs and set(citations_in(sentence)) & bad_refs:
                 continue
             kept.append(sentence)
         return " ".join(kept)
 
-    new_summary = _clean(draft.exec_summary_he)
+    new_summary = _clean(draft.exec_summary_he, extra_drop=duplicates)
     if not new_summary:
         new_summary = "תקציר המנהלים קוצץ במלואו עקב בדיקת אזכורים שנכשלה; ראו qa_report לפרטים."
     new_trends: list[TrendParagraph] = []
@@ -394,6 +402,7 @@ def _persist_report(
         "errors": qa.errors,
         "uncited_sentences": qa.uncited_sentences,
         "bad_refs": qa.bad_refs,
+        "duplicate_sentences": qa.duplicate_sentences,
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
     sql = """
@@ -469,6 +478,7 @@ def build_monthly(
             errors=original_errors.errors,
             uncited_sentences=original_errors.uncited_sentences,
             bad_refs=original_errors.bad_refs,
+            duplicate_sentences=original_errors.duplicate_sentences,
         )
 
     # deterministic, non-LLM data (rule 4: never ask the model to narrate ungrounded numbers)
@@ -481,12 +491,17 @@ def build_monthly(
         {"title_he": tp.title_he, "body_he": tp.prose_he, "position": "after_summary"}
         for tp in draft.trend_paragraphs
     ]
-    watchlist_section = {
-        "title_he": "שינויים ברשימת המעקב (Watchlist) — ישויות חדשות החודש",
-        "body_he": format_watchlist_he(watchlist_new),
-        "position": "after_outlook",
-    }
-    extra_sections = [*trend_sections, watchlist_section]
+    # U13 (applied here too, same class of issue): suppress the watchlist section when nothing
+    # changed this month, rather than a heading over a "nothing new" placeholder line.
+    extra_sections = list(trend_sections)
+    if watchlist_new:
+        extra_sections.append(
+            {
+                "title_he": "שינויים ברשימת המעקב (Watchlist) — ישויות חדשות החודש",
+                "body_he": format_watchlist_he(watchlist_new),
+                "position": "after_outlook",
+            }
+        )
 
     tables: list[dict[str, Any]] = []
     for domain, rows in players.items():
@@ -494,9 +509,7 @@ def build_monthly(
             {
                 "title_he": f"נוף תחרותי — {_domain_label(domain)}",
                 "headers": ["ישות", "מתחרים", "ספקים", "שותפים"],
-                "rows": [
-                    [r["name"], r["COMPETITOR_OF"], r["SUPPLIER_OF"], r["PARTNER_OF"]] for r in rows
-                ],
+                "rows": [[r["name"], r["COMPETITOR_OF"], r["SUPPLIER_OF"], r["PARTNER_OF"]] for r in rows],
             }
         )
     if top_events:
@@ -550,6 +563,7 @@ def build_monthly(
         title_text=MONTHLY_TITLE_TEXT,
         extra_sections=extra_sections,
         tables=tables or None,
+        include_toc=True,
     )
     save_docx(doc, docx_path)
     validate_docx(docx_path)
@@ -580,6 +594,7 @@ def build_monthly(
         title_text=MONTHLY_TITLE_TEXT,
         extra_sections=extra_sections,
         tables=tables or None,
+        include_toc=True,
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")

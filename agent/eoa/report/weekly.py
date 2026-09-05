@@ -106,6 +106,20 @@ def _group_by_domain(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[s
     return [(d, buckets[d]) for d in ordered]
 
 
+def _normalize_section_titles(draft: WeeklyReportDraft | Any) -> WeeklyReportDraft | Any:
+    """Force every section's ``title_he`` to the authoritative taxonomy label for its ``domain``
+    (F7) — see ``eoa.report.daily._normalize_section_titles`` for why: a domain heading containing
+    an embedded literal ``"`` (e.g. 'נגד כטב"מים (C-UAS)') can come back truncated from the model's
+    JSON output, so the deterministic taxonomy label is used instead of trusting the model's copy.
+    Duck-typed (only touches ``draft.sections``), so ``eoa.report.monthly`` reuses this unchanged
+    for ``MonthlyReportDraft``."""
+    new_sections = [
+        section.model_copy(update={"title_he": _domain_label(section.domain)}) if section.domain else section
+        for section in draft.sections
+    ]
+    return draft.model_copy(update={"sections": new_sections})
+
+
 # --------------------------------------------------------------------------
 # collection
 # --------------------------------------------------------------------------
@@ -374,7 +388,7 @@ def draft_weekly(
             format_yellow_summary_block(yellow_summary), "report_yellow", "internal"
         ),
     )
-    return chat_structured(
+    draft = chat_structured(
         role,
         WeeklyReportDraft,
         [
@@ -385,6 +399,7 @@ def draft_weekly(
         interactive=interactive,
         options={"temperature": 0.3},
     )
+    return _normalize_section_titles(draft)
 
 
 def _corrective_retry(
@@ -413,7 +428,7 @@ def _corrective_retry(
         "ותקינה מחדש (JSON לפי הסכמה בלבד, ללא הסברים נוספים), מבלי להמציא עובדות חדשות שלא הופיעו "
         "ברשימת הפריטים או ברשימת המגמות:\n" + errors_text
     )
-    return chat_structured(
+    draft = chat_structured(
         role,
         WeeklyReportDraft,
         [
@@ -426,25 +441,28 @@ def _corrective_retry(
         interactive=interactive,
         options={"temperature": 0.2},
     )
+    return _normalize_section_titles(draft)
 
 
 def _strip_uncited(draft: WeeklyReportDraft, qa: QAResult) -> WeeklyReportDraft:
-    """Drop the sentences ``qa`` flagged (uncited-factual or out-of-range refs) from the exec
-    summary, every trend paragraph, and every section — mirrors ``daily._strip_uncited``."""
+    """Drop the sentences ``qa`` flagged (uncited-factual, out-of-range refs, or an exec-summary
+    sentence duplicated verbatim from a section/trend paragraph — F5) from the exec summary, every
+    trend paragraph, and every section — mirrors ``daily._strip_uncited``."""
     bad_refs = set(qa.bad_refs)
     uncited = set(qa.uncited_sentences)
+    duplicates = set(qa.duplicate_sentences)
 
-    def _clean(text: str) -> str:
+    def _clean(text: str, *, extra_drop: set[str] = frozenset()) -> str:
         kept = []
         for sentence in split_sentences(text):
-            if sentence in uncited:
+            if sentence in uncited or sentence in extra_drop:
                 continue
             if bad_refs and set(citations_in(sentence)) & bad_refs:
                 continue
             kept.append(sentence)
         return " ".join(kept)
 
-    new_summary = _clean(draft.exec_summary_he)
+    new_summary = _clean(draft.exec_summary_he, extra_drop=duplicates)
     if not new_summary:
         new_summary = "תקציר המנהלים קוצץ במלואו עקב בדיקת אזכורים שנכשלה; ראו qa_report לפרטים."
     new_trends: list[TrendParagraph] = []
@@ -490,6 +508,7 @@ def _persist_report(
         "errors": qa.errors,
         "uncited_sentences": qa.uncited_sentences,
         "bad_refs": qa.bad_refs,
+        "duplicate_sentences": qa.duplicate_sentences,
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
     sql = """
@@ -530,7 +549,7 @@ def build_weekly(
 
     items = collect_week_items(start, end)
     yellow_summary = collect_yellow_domain_summary(start, end)
-    events = collect_events(start, end)
+    events = collect_events(start, end, limit=40)  # F9/F16: cap the weekly events table at 40 rows
     deep_search = collect_deep_search(start, end)
     open_clarifications = collect_open_clarifications()
     trend_list = trends_mod.detect_trends((start, end))
@@ -566,18 +585,27 @@ def build_weekly(
             errors=original_errors.errors,
             uncited_sentences=original_errors.uncited_sentences,
             bad_refs=original_errors.bad_refs,
+            duplicate_sentences=original_errors.duplicate_sentences,
         )
 
     trend_sections = [
         {"title_he": tp.title_he, "body_he": tp.prose_he, "position": "after_summary"}
         for tp in draft.trend_paragraphs
     ]
-    meta_section = {
-        "title_he": "סיכום מטא שבועי — משוב משתמש (FR-11.4)",
-        "body_he": format_meta_summary_he(meta),
-        "position": "after_outlook",
-    }
-    extra_sections = [*trend_sections, meta_section]
+    # U13: suppress the meta-summary section entirely when there is nothing to report, rather than
+    # printing a heading followed only by a "nothing happened" placeholder line.
+    meta_has_content = (
+        bool(meta.get("lessons")) or bool(meta.get("feedback_deltas")) or bool(meta.get("feedback_total"))
+    )
+    extra_sections = list(trend_sections)
+    if meta_has_content:
+        extra_sections.append(
+            {
+                "title_he": "סיכום מטא שבועי — משוב משתמש (FR-11.4)",
+                "body_he": format_meta_summary_he(meta),
+                "position": "after_outlook",
+            }
+        )
 
     tables: list[dict[str, Any]] = []
     if conferences_90:
@@ -613,6 +641,7 @@ def build_weekly(
         title_text=WEEKLY_TITLE_TEXT,
         extra_sections=extra_sections,
         tables=tables or None,
+        include_toc=True,
     )
     save_docx(doc, docx_path)
     validate_docx(docx_path)
@@ -643,6 +672,7 @@ def build_weekly(
         title_text=WEEKLY_TITLE_TEXT,
         extra_sections=extra_sections,
         tables=tables or None,
+        include_toc=True,
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")

@@ -66,8 +66,34 @@ function baseItem(over: Partial<ItemDetail> = {}): ItemDetail {
 }
 
 const ENTITIES: EntitySummary[] = [
-  { id: 100, name: "General Atomics", kind: "company", country: "US", aliases: [], focus: [], item_count: 5, last_seen: null },
-  { id: 101, name: "MQ-9B SkyGuardian", kind: "program", country: null, aliases: [], focus: [], item_count: 2, last_seen: null },
+  {
+    id: 100,
+    name: "General Atomics",
+    kind: "company",
+    country: "US",
+    aliases: [],
+    focus: [],
+    item_count: 5,
+    last_seen: null,
+    relevance: 0.8,
+    is_watchlist: false,
+    mentions_7d: 1,
+    mentions_30d: 5,
+  },
+  {
+    id: 101,
+    name: "MQ-9B SkyGuardian",
+    kind: "program",
+    country: null,
+    aliases: [],
+    focus: [],
+    item_count: 2,
+    last_seen: null,
+    relevance: 0.6,
+    is_watchlist: false,
+    mentions_7d: 0,
+    mentions_30d: 2,
+  },
 ];
 
 function renderPage(path = "/items/3") {

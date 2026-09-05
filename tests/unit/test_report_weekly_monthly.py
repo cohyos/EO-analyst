@@ -191,8 +191,8 @@ def patch_weekly_collectors(monkeypatch, tmp_path):
     monkeypatch.setattr(
         weekly, "collect_yellow_domain_summary", lambda s, e: [{"domain": "computer_vision", "n": 4}]
     )
-    monkeypatch.setattr(weekly, "collect_events", lambda s, e: [])
-    monkeypatch.setattr(weekly, "collect_deep_search", lambda s, e: [])
+    monkeypatch.setattr(weekly, "collect_events", lambda s, e, limit=None: [])
+    monkeypatch.setattr(weekly, "collect_deep_search", lambda s, e, limit=None: [])
     monkeypatch.setattr(weekly, "collect_open_clarifications", lambda: [])
     monkeypatch.setattr(
         weekly.trends_mod,
@@ -210,7 +210,11 @@ def patch_weekly_collectors(monkeypatch, tmp_path):
     monkeypatch.setattr(
         weekly,
         "collect_meta_summary",
-        lambda s, e: {"lessons": [], "feedback_total": 0, "feedback_deltas": []},
+        lambda s, e: {
+            "lessons": [{"id": 1, "text": "פריטי RFI סווגו כ-yellow באופן שיטתי מדי", "created_at": None}],
+            "feedback_total": 2,
+            "feedback_deltas": [],
+        },
     )
     monkeypatch.setattr(
         weekly,
@@ -255,21 +259,40 @@ def test_build_weekly_renders_docx_with_trend_section_and_calendar_table(patch_w
     assert calendar_table.rows[1].cells[0].text == "DSEI"
 
 
+def test_build_weekly_suppresses_empty_meta_summary_section(patch_weekly_collectors, monkeypatch):
+    """U13: a heading over a "nothing happened" placeholder line is worse than no section at all —
+    when there are no lessons, no feedback deltas, and zero feedback total, the meta-summary
+    section must not be rendered."""
+    monkeypatch.setattr(
+        weekly,
+        "collect_meta_summary",
+        lambda s, e: {"lessons": [], "feedback_total": 0, "feedback_deltas": []},
+    )
+    paths = weekly.build_weekly(period_end=dt.date(2026, 9, 4))
+    doc = docx.Document(str(paths.docx))
+    heading_texts = {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"}
+    assert "סיכום מטא שבועי — משוב משתמש (FR-11.4)" not in heading_texts
+
+
 def test_build_weekly_md_and_html_contain_trend_and_calendar(patch_weekly_collectors):
     paths = weekly.build_weekly(period_end=dt.date(2026, 9, 4))
     md_text = paths.md.read_text(encoding="utf-8")
     html_text = paths.html.read_text(encoding="utf-8")
     assert "לוח 90 הימים הקרובים" in md_text
     assert "DSEI" in md_text
-    assert "לוח 90 הימים הקרובים" in html_text
+    # the heading text survives, but the embedded "90" is wrapped in its own <bdi dir="ltr"> span
+    # (F10: html bidi handling for a Latin/digit run inside RTL Hebrew text), so check the Hebrew
+    # part either side of the number rather than the whole literal string as one run.
+    assert "לוח " in html_text
+    assert "הימים הקרובים" in html_text
     assert "DSEI" in html_text
 
 
 def test_build_weekly_no_items_skips_llm_and_still_persists(monkeypatch, tmp_path):
-    monkeypatch.setattr(weekly, "collect_week_items", lambda s, e: [])
-    monkeypatch.setattr(weekly, "collect_yellow_domain_summary", lambda s, e: [])
-    monkeypatch.setattr(weekly, "collect_events", lambda s, e: [])
-    monkeypatch.setattr(weekly, "collect_deep_search", lambda s, e: [])
+    monkeypatch.setattr(weekly, "collect_week_items", lambda s, e, limit=None: [])
+    monkeypatch.setattr(weekly, "collect_yellow_domain_summary", lambda s, e, limit=None: [])
+    monkeypatch.setattr(weekly, "collect_events", lambda s, e, limit=None: [])
+    monkeypatch.setattr(weekly, "collect_deep_search", lambda s, e, limit=None: [])
     monkeypatch.setattr(weekly, "collect_open_clarifications", lambda: [])
     monkeypatch.setattr(weekly.trends_mod, "detect_trends", lambda period: [])
     monkeypatch.setattr(
@@ -327,9 +350,9 @@ def _monthly_draft_fixture() -> MonthlyReportDraft:
 @pytest.fixture
 def patch_monthly_collectors(monkeypatch, tmp_path):
     monkeypatch.setattr(monthly, "collect_month_items", lambda s, e: [dict(it) for it in MONTH_ITEMS])
-    monkeypatch.setattr(monthly, "collect_yellow_domain_summary", lambda s, e: [])
-    monkeypatch.setattr(monthly, "collect_events", lambda s, e: [])
-    monkeypatch.setattr(monthly, "collect_deep_search", lambda s, e: [])
+    monkeypatch.setattr(monthly, "collect_yellow_domain_summary", lambda s, e, limit=None: [])
+    monkeypatch.setattr(monthly, "collect_events", lambda s, e, limit=None: [])
+    monkeypatch.setattr(monthly, "collect_deep_search", lambda s, e, limit=None: [])
     monkeypatch.setattr(monthly, "collect_open_clarifications", lambda: [])
     monkeypatch.setattr(monthly.trends_mod, "detect_trends", lambda period: [])
     monkeypatch.setattr(monthly, "draft_monthly", lambda *a, **k: _monthly_draft_fixture())
@@ -344,7 +367,7 @@ def patch_monthly_collectors(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(monthly, "top_events_by_amount", lambda s, e, limit=10: [])
     monkeypatch.setattr(monthly, "full_horizon_table", lambda: [])
-    monkeypatch.setattr(monthly, "watchlist_changes", lambda s, e: [])
+    monkeypatch.setattr(monthly, "watchlist_changes", lambda s, e, limit=None: [])
     monkeypatch.setattr(monthly, "_persist_report", lambda *a, **k: 888)
     monkeypatch.setattr(monthly, "_report_path", lambda period_end, ext: tmp_path / f"monthly.{ext}")
     return tmp_path

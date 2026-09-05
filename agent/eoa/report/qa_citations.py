@@ -167,6 +167,45 @@ class QAResult:
     errors: list[str] = field(default_factory=list)
     uncited_sentences: list[str] = field(default_factory=list)
     bad_refs: list[int] = field(default_factory=list)
+    duplicate_sentences: list[str] = field(default_factory=list)
+
+
+_NORMALIZE_PUNCT_RE = re.compile(r"[^\w\s]", flags=re.UNICODE)
+_WHITESPACE_RE = re.compile(r"\s+")
+_MIN_DUP_WORDS = 4
+
+
+def _normalize_for_dup_check(sentence: str) -> str:
+    """Normalize a sentence for verbatim-duplication comparison (F5): strip ``[n]`` citation
+    markers (a summary sentence and its section-body twin often carry different reference
+    numbers), drop punctuation, collapse whitespace, casefold."""
+    text = _CITATION_RE.sub("", sentence)
+    text = _NORMALIZE_PUNCT_RE.sub("", text)
+    text = _WHITESPACE_RE.sub(" ", text).strip().casefold()
+    return text
+
+
+def _duplicate_summary_sentences(summary_text: str, section_texts: list[tuple[str, str]]) -> list[str]:
+    """Executive-summary sentences (F5) that also appear — verbatim, once normalized — inside a
+    section/trend-paragraph body: the model copying a section sentence into the summary instead of
+    synthesizing across items. Returns the *original* (non-normalized) summary sentences so callers
+    can both report and strip them. Very short sentences are ignored (``_MIN_DUP_WORDS``) since a
+    trivial phrase ("היום.") repeating by chance is not a real duplication."""
+    summary_sentences = split_sentences(summary_text)
+    if not summary_sentences:
+        return []
+    section_norms: set[str] = set()
+    for _label, text in section_texts:
+        for sentence in split_sentences(text):
+            norm = _normalize_for_dup_check(sentence)
+            if norm:
+                section_norms.add(norm)
+    duplicates = []
+    for sentence in summary_sentences:
+        norm = _normalize_for_dup_check(sentence)
+        if len(norm.split()) >= _MIN_DUP_WORDS and norm in section_norms:
+            duplicates.append(sentence)
+    return duplicates
 
 
 def _valid_range(items: list[dict]) -> set[int]:
@@ -217,6 +256,19 @@ def check(
         _check_prose(f"סעיף '{section.title_he}'", section.prose_he, valid_ns, errors, uncited, bad_refs)
     for label, text in extra_sections or []:
         _check_prose(f"'{label}'", text, valid_ns, errors, uncited, bad_refs)
+
+    # F5: the executive summary must synthesize across sections, never copy a section sentence
+    # verbatim — flagged here so the existing corrective-retry loop (daily.py/weekly.py/monthly.py)
+    # picks it up like any other QA error.
+    section_texts = [(section.title_he, section.prose_he) for section in draft.sections]
+    section_texts += list(extra_sections or [])
+    duplicate_sentences = _duplicate_summary_sentences(draft.exec_summary_he, section_texts)
+    for sentence in duplicate_sentences:
+        errors.append(
+            f'בתקציר המנהלים: המשפט "{sentence}" מועתק כלשונו מתוך גוף אחד הסעיפים — התקציר חייב '
+            "לסכם ולקשר בין ממצאי הסעיפים, לא לצטט אותם במדויק."
+        )
+
     for label, text in exempt_sections or []:
         for n in citations_in(text):
             if n not in valid_ns:
@@ -240,4 +292,5 @@ def check(
         errors=errors,
         uncited_sentences=uncited,
         bad_refs=sorted(bad_refs),
+        duplicate_sentences=duplicate_sentences,
     )

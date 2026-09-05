@@ -24,6 +24,17 @@ from eoa.notify import ntfy
 
 log = structlog.get_logger(__name__)
 
+# U8 (docs/adr/005-cloud-llm-cli.md): every LLM call made anywhere in this process runs inside
+# the orchestrator/worker -- the night pipeline (daily/weekly/monthly/ingest cron jobs, built
+# below) *and* every job the API enqueues onto the same queue, including a manually triggered
+# "investigate" (POST /api/items/{id}/investigate -> a `deep_search` job) or "run now"
+# (POST /api/run). `eoa.llm.ollama_client.chat`/`chat_structured` check this before honoring
+# any `provider` argument or the user's `llm_providers.interactive_default` setting, and force
+# "ollama" whenever it is set -- this is the single choke point that keeps a cloud-model choice
+# from ever leaking into an automated or queued run. `setdefault` so a test harness that needs
+# to opt a single process out can still set the env var before importing this module.
+os.environ.setdefault("EOA_PIPELINE", "1")
+
 
 def _worker_id() -> str:
     """A stable-enough identifier for this process, used as the job lease owner."""
@@ -220,6 +231,24 @@ def _ingest() -> Any:
     return run_ingest_remote()
 
 
+def _investigation_result_payload(inv: Any) -> dict[str, Any]:
+    """U11/F17/F18 (docs/REVIEW_2026-09-05.md): merge the model's `InvestigationOut` with the
+    budget/outcome accounting the API/UI need to show *why* an investigation ended the way it did
+    (a bare `not_found` chip told the analyst nothing) instead of the raw model output alone."""
+    payload: dict[str, Any] = inv.result.model_dump() if inv.result else {}
+    payload.update(
+        {
+            "queries_used": inv.queries_used,
+            "max_queries": inv.max_queries,
+            "pages_read": inv.pages_used,
+            "max_pages": inv.max_pages,
+            "rounds": inv.rounds_done,
+            "stopped_reason": inv.stopped_reason,
+        }
+    )
+    return payload
+
+
 def run_deep_searches(rs: RunState) -> dict[str, Any]:
     """Consume queued deep_search jobs (from triage) within this run's budget and the nightly cap."""
     from eoa.search.deep_search import investigate
@@ -242,8 +271,10 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
                 item_id=p.get("item_id"),
                 job_id=job["id"],
                 context_he=p.get("context_he", ""),
+                budget_multiplier=float(p.get("budget_multiplier") or 1.0),
+                prior_findings_he=p.get("prior_findings_he", ""),
             )
-            finish_job(job["id"], "done", result=inv.result.model_dump() if inv.result else None)
+            finish_job(job["id"], "done", result=_investigation_result_payload(inv))
             outcomes.append(inv.outcome)
             if p.get("level") == "red" and inv.result and inv.result.outcome != "not_found":
                 _red_alert_for(p.get("item_id"), inv.result.answer_he)
@@ -266,14 +297,22 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
 
 
 def run_deep_search_job(job: dict[str, Any]) -> dict[str, Any]:
-    """A single on-demand investigation (from the UI/CLI)."""
+    """A single on-demand investigation (from the UI/CLI). U12's "הרחב חקירה" (expand) sets
+    `budget_multiplier`/`prior_findings_he` in the payload (see `eoa.api.services.expand_investigation`)
+    to re-run with a larger budget and the prior attempt's findings folded in, instead of a
+    plain identical re-run of the same question."""
     from eoa.search.deep_search import investigate
 
     p = job.get("payload") or {}
     inv = investigate(
-        p.get("question", ""), item_id=p.get("item_id"), job_id=job["id"], context_he=p.get("context_he", "")
+        p.get("question", ""),
+        item_id=p.get("item_id"),
+        job_id=job["id"],
+        context_he=p.get("context_he", ""),
+        budget_multiplier=float(p.get("budget_multiplier") or 1.0),
+        prior_findings_he=p.get("prior_findings_he", ""),
     )
-    return inv.result.model_dump() if inv.result else {}
+    return _investigation_result_payload(inv)
 
 
 def _red_alert_for(item_id: int | None, answer_he: str) -> None:
@@ -296,13 +335,46 @@ def _build_report() -> Any:
     return build_daily()
 
 
+def _daily_run_already_covered(within_hours: int = 6) -> bool:
+    """F4: True if a separate ``daily_run`` job started/finished within the last ``within_hours``
+    hours in a ``running``/``done``/``partial`` state. Both ``daily_run`` and ``weekly_run`` are
+    scheduled for the same night (config ``schedule.weekly_run`` sat 01:00, same as the nightly
+    ``daily_run``); without this guard, ``run_weekly`` unconditionally re-running the *entire*
+    nightly pipeline (ingest..notify, including its own daily report + notification) produced two
+    daily reports and duplicate notifications on Saturday nights."""
+    from eoa.db import connection
+
+    sql = """
+        SELECT 1 FROM jobs
+        WHERE kind = 'daily_run'
+          AND state IN ('running', 'done', 'partial')
+          AND created_at > now() - make_interval(hours => %(hours)s)
+        LIMIT 1
+    """
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(sql, {"hours": within_hours})
+            return cur.fetchone() is not None
+    except Exception as exc:
+        log.warning("daily_run_covered_check_failed", error=str(exc)[:160])
+        return False
+
+
 def run_weekly(job: dict[str, Any]) -> dict[str, Any]:
-    """``weekly_run`` handler: runs the full nightly pipeline (ingest..notify, including the daily
-    report) via :func:`run_daily`, then additionally builds the weekly analyst report (trends,
-    business events, conference lookahead, FR-11.4 meta-summary) on top of the same night's
-    freshly-analyzed items. A weekly-report failure is logged and recorded but never fails the job
-    outright — the daily pipeline's own results still count as the run's primary outcome."""
-    stats = run_daily(job)
+    """``weekly_run`` handler: normally runs the full nightly pipeline (ingest..notify, including
+    the daily report) via :func:`run_daily`, then additionally builds the weekly analyst report
+    (trends, business events, conference lookahead, FR-11.4 meta-summary) on top of the same
+    night's freshly-analyzed items. F4: when a separate ``daily_run`` job has already run (or is
+    running) tonight (:func:`_daily_run_already_covered`), the nightly pipeline is *not* re-run
+    here — only the weekly report is built, on top of whatever that other job already
+    ingested/analyzed — since running it twice produced two daily reports and duplicate
+    notifications. A weekly-report failure is logged and recorded but never fails the job outright —
+    the (possibly skipped) daily pipeline's own results still count as the run's primary outcome."""
+    if _daily_run_already_covered():
+        log.info("weekly_run_skips_daily_pipeline", reason="daily_run_already_covered_tonight")
+        stats: dict[str, Any] = {"daily_pipeline_skipped": "daily_run_already_covered"}
+    else:
+        stats = run_daily(job)
     try:
         from eoa.report.weekly import build_weekly
 

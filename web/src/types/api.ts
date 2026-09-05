@@ -62,6 +62,23 @@ export interface EdgeRow {
 export interface ItemsResponse {
   total: number;
   items: ItemCard[];
+  // U7a: present only when the request set `group_by=country` — per-country
+  // counts (+ level breakdown) for the *current* filters, additive so
+  // existing callers reading only total/items are unaffected.
+  groups?: CountryGroup[];
+}
+
+export interface CountryGroup {
+  country: string;
+  total: number;
+  red: number;
+  orange: number;
+  yellow: number;
+  archive: number;
+}
+
+export interface ItemsByCountryResponse {
+  countries: CountryGroup[];
 }
 
 export interface EntitySummary {
@@ -76,15 +93,56 @@ export interface EntitySummary {
   focus: string[];
   item_count: number;
   last_seen: string | null;
+  // U10/F15 (2026-09-05): relevance score 0..1 (eoa.pipeline.entity_relevance) and
+  // whether the entity matches a config/watchlist.yaml company/program. The list
+  // defaults to relevance >= 0.4; `is_watchlist` drives the "רשימת מעקב" facet/badge.
+  relevance: number;
+  is_watchlist: boolean;
+  mentions_7d: number;
+  mentions_30d: number;
 }
 
-export interface TimelineEntry {
-  kind: "event" | "item";
-  id: number;
+// U10 (2026-09-05): the entity timeline is items-only now (title links to
+// /items/:id, source domain, date, level badge) — business events (kind/date/
+// amount/counterpart) are a separate list, see BusinessEvent below. This
+// replaces the old combined event+item `TimelineEntry` shape, which relied on
+// a frontend-only `occurred_at` field the backend never actually populated
+// (one of U10's "the links don't work" causes).
+export interface EntityTimelineItem {
+  item_id: number;
   title: string;
-  summary_he?: string | null;
-  occurred_at: string | null;
+  url: string;
+  source_name: string | null;
+  published_at: string | null;
+  level: TriageLevel;
+}
+
+export interface BusinessEvent {
+  id: number;
   item_id: number | null;
+  kind: string;
+  date: string | null;
+  amount_usd: number | null;
+  currency: string | null;
+  counterpart: string | null;
+  summary_he: string | null;
+}
+
+export interface EntityKpis {
+  mentions_7d: number;
+  mentions_30d: number;
+  events_count: number;
+  related_items_by_level: Record<string, number>;
+}
+
+export interface EdgeGroupCounterpart {
+  entity_id: number;
+  entity_name: string;
+}
+
+export interface EdgeGroup {
+  label: string;
+  counterparts: EdgeGroupCounterpart[];
 }
 
 export interface NeighborEdge {
@@ -95,7 +153,10 @@ export interface NeighborEdge {
 }
 
 export interface EntityDetail extends EntitySummary {
-  timeline: TimelineEntry[];
+  timeline: EntityTimelineItem[];
+  business_events: BusinessEvent[];
+  kpis: EntityKpis;
+  edge_groups: EdgeGroup[];
   neighbors: NeighborEdge[];
 }
 
@@ -126,6 +187,17 @@ export type InvestigationState =
   | "stopped"
   | "error"
   | "not_found";
+
+// U11/F17/F18 (docs/REVIEW_2026-09-05.md): the granular reason an investigation ended, distinct
+// from the raw job `state` -- lets the UI show "נעצר בגלל תקציב" vs "לא נמצא" vs "נמצא" instead of
+// one opaque outcome string.
+export type InvestigationOutcomeReason =
+  | "found"
+  | "partial"
+  | "not_found"
+  | "stopped_budget"
+  | "stopped_timeout"
+  | "insufficient_context";
 
 export interface InvestigationSummary {
   job_id: string;
@@ -160,6 +232,17 @@ export interface InvestigationOut {
   answer_he: string;
   sources: InvestigationSource[];
   outcome: string;
+  key_facts?: string[];
+  what_was_tried_he?: string;
+  contradictions_he?: string;
+  // U11/F17/F18: budget/outcome accounting merged into the job result so the UI can show *why*
+  // an investigation ended (docs/REVIEW_2026-09-05.md) instead of a single opaque outcome string.
+  queries_used?: number;
+  max_queries?: number;
+  pages_read?: number;
+  max_pages?: number;
+  rounds?: number;
+  stopped_reason?: InvestigationOutcomeReason | string;
 }
 
 export interface InvestigationDetail extends InvestigationSummary {
@@ -181,12 +264,36 @@ export interface AskRequest {
   context_item_ids: number[];
   context_entity_ids: number[];
   history: AskHistoryMessage[];
+  /** U8: "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"; omit for the server default. */
+  provider?: string | null;
 }
 
 export type AskSseEvent =
   | { type: "token"; text: string }
   | { type: "citations"; items: AskCitation[] }
+  | { type: "meta"; provider: string; model: string }
   | { type: "done" };
+
+// U8 (docs/adr/005-cloud-llm-cli.md): local Ollama vs. cloud CLI (agy/claude/codex) provider routing.
+export interface LlmProviderInfo {
+  id: string;
+  label: string;
+  kind: "local" | "cloud";
+  available: boolean;
+  models: string[];
+}
+
+export interface LlmProvidersResponse {
+  allow_cloud: boolean;
+  interactive_default: string;
+  providers: LlmProviderInfo[];
+}
+
+export interface LlmSettingsPutResponse {
+  ok: boolean;
+  errors: string[];
+  revision: string | null;
+}
 
 export interface ReportSummary {
   id: number;

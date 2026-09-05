@@ -33,3 +33,11 @@ class ConfigError(EOAError):
 
 class ModelNotAllowed(EOAError):
     """A model outside the Western-origin allow-list (or with a changed digest) was requested."""
+
+
+class ProviderUnavailable(EOAError):
+    """A requested LLM provider (cloud CLI or otherwise) is not installed/authenticated/enabled."""
+
+
+class CliProviderError(EOAError):
+    """A cloud CLI provider (agy/claude/codex) subprocess failed, timed out, or returned unparsable output."""

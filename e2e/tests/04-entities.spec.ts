@@ -18,7 +18,9 @@ test.describe("Entities screens (/entities, /entities/:id)", () => {
     expect(text).toContain("elbit");
   });
 
-  test("entity detail page shows a timeline section and a Cytoscape graph canvas", async ({ page }) => {
+  test("selecting an entity shows its card, timeline and a compact Cytoscape graph — no page navigation lost", async ({
+    page,
+  }) => {
     await page.goto("/entities");
     await page.getByLabel("חיפוש ישויות").fill("Elbit");
     await page.waitForTimeout(600);
@@ -28,48 +30,74 @@ test.describe("Entities screens (/entities, /entities/:id)", () => {
     await firstLink.click();
     await expect(page).toHaveURL(/\/entities\/\d+/);
 
+    // Three-pane layout: the list stays visible next to the selected entity's card.
+    await expect(page.getByLabel("חיפוש ישויות")).toBeVisible();
+
     const timelineSection = page.locator("section[aria-label='ציר זמן']");
     await expect(timelineSection).toBeVisible({ timeout: 15_000 });
 
+    const businessEventsSection = page.locator("section[aria-label='אירועים עסקיים']");
+    await expect(businessEventsSection).toBeVisible();
+
+    const relationsSection = page.locator("section[aria-label='קשרים']");
+    await expect(relationsSection).toBeVisible();
+
     const graphSection = page.locator("section[aria-label='גרף ישויות']");
     await expect(graphSection).toBeVisible();
+    // Either a graph canvas renders (entity has edges) or the explicit
+    // "no documented relations" empty state does — never a blank/giant-node panel.
     const canvas = graphSection.locator("canvas");
-    await expect(canvas.first()).toBeVisible({ timeout: 15_000 });
+    const emptyState = graphSection.getByText("אין קשרים מתועדים");
+    await expect(canvas.first().or(emptyState)).toBeVisible({ timeout: 15_000 });
   });
 
-  test("named-query buttons respond without an error toast/alert", async ({ page, consoleErrors }, testInfo) => {
+  test("every entity name and item title in the card is a working link", async ({ page }) => {
     await page.goto("/entities");
     await page.getByLabel("חיפוש ישויות").fill("Elbit");
     await page.waitForTimeout(600);
     const firstLink = page.getByRole("list").locator("li a").first();
     await expect(firstLink).toBeVisible({ timeout: 15_000 });
     await firstLink.click();
-    await expect(page.locator("section[aria-label='גרף ישויות']")).toBeVisible({ timeout: 15_000 });
 
-    const namedQueryButtons = [
-      "שותפי המתחרים",
-      "ספקי המתמודדים בתוכנית",
-      "סטארטאפים מחוברים",
-    ];
+    const timelineSection = page.locator("section[aria-label='ציר זמן']");
+    await expect(timelineSection).toBeVisible({ timeout: 15_000 });
 
-    for (const label of namedQueryButtons) {
-      const btn = page.getByRole("button", { name: label });
-      await expect(btn).toBeVisible();
-      await btn.click();
-      await page.waitForTimeout(500);
-      await expect(page.getByRole("alert")).toHaveCount(0);
+    // Timeline item links must carry a real href (not "#") to /feed?open=<id>.
+    const timelineLinks = timelineSection.locator("a");
+    const linkCount = await timelineLinks.count();
+    if (linkCount > 0) {
+      const href = await timelineLinks.first().getAttribute("href");
+      expect(href).toMatch(/\/feed\?open=\d+/);
     }
 
-    // Named-query result summary must render a real result count, not a
-    // crash/blank.
-    const resultLine = page.getByText(/תוצאות$/);
-    await expect(resultLine).toBeVisible({ timeout: 10_000 });
-
-    void testInfo;
-    void consoleErrors;
+    // Relation counterpart links (if any) must point at another entity page.
+    const relationsSection = page.locator("section[aria-label='קשרים']");
+    const relationLinks = relationsSection.locator("a");
+    const relationCount = await relationLinks.count();
+    for (let i = 0; i < relationCount; i++) {
+      const href = await relationLinks.nth(i).getAttribute("href");
+      expect(href).toMatch(/\/entities\/\d+/);
+    }
   });
 
-  test("no bad literal text on the entities list or an entity detail page", async ({ page }, testInfo) => {
+  test("watchlist-only toggle and kind/country filters narrow the list without an error", async ({
+    page,
+  }) => {
+    await page.goto("/entities");
+    const list = page.getByRole("list");
+    await expect(list).toBeVisible({ timeout: 15_000 });
+
+    await page.getByLabel("רשימת מעקב בלבד", { exact: false }).check();
+    await page.waitForTimeout(400);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+
+    await page.getByLabel("רשימת מעקב בלבד", { exact: false }).uncheck();
+    await page.getByLabel("סינון לפי סוג ישות").selectOption("company");
+    await page.waitForTimeout(400);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  });
+
+  test("no bad literal text on the entities list or an entity detail view", async ({ page }, testInfo) => {
     await page.goto("/entities");
     await assertNoBadText(page, testInfo, "Entities list (/entities)");
 

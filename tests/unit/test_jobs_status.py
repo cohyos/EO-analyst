@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import types
 
-from eoa.orchestrator.jobs import RunState, _compute_run_status, _notify
+from eoa.orchestrator import jobs
+from eoa.orchestrator.jobs import RunState, _compute_run_status, _notify, run_weekly
 
 
 def _raise_no_db():
@@ -74,6 +75,54 @@ class TestComputeRunStatus:
         # "backup_error"), so this documents current behavior: only the four recognized keys
         # trip "partial" — a differently-named problem marker is not detected as one.
         assert _compute_run_status(stats) == "done"
+
+
+class TestRunWeekly:
+    """F4: run_weekly must not re-run the full nightly pipeline when a separate daily_run job
+    already covered tonight -- it should only build the weekly report on top of whatever that
+    other job already did."""
+
+    def test_skips_daily_pipeline_when_already_covered(self, monkeypatch) -> None:
+        monkeypatch.setattr(jobs, "_daily_run_already_covered", lambda: True)
+
+        def _fail_if_called(job):
+            raise AssertionError("run_daily should not be called when a daily_run already covered tonight")
+
+        monkeypatch.setattr(jobs, "run_daily", _fail_if_called)
+
+        class _Paths:
+            report_id = 42
+            qa = types.SimpleNamespace(passed=True)
+
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", lambda: _Paths())
+
+        stats = run_weekly({"id": 1, "kind": "weekly_run", "payload": {}})
+
+        assert stats["daily_pipeline_skipped"] == "daily_run_already_covered"
+        assert stats["weekly_report"] == {"report_id": 42, "qa_passed": True}
+
+    def test_runs_daily_pipeline_when_not_covered(self, monkeypatch) -> None:
+        monkeypatch.setattr(jobs, "_daily_run_already_covered", lambda: False)
+        calls: list[dict] = []
+        monkeypatch.setattr(jobs, "run_daily", lambda job: (calls.append(job), {"report": {"docx": "x"}})[1])
+
+        class _Paths:
+            report_id = 7
+            qa = types.SimpleNamespace(passed=False)
+
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", lambda: _Paths())
+
+        job = {"id": 2, "kind": "weekly_run", "payload": {}}
+        stats = run_weekly(job)
+
+        assert calls == [job]
+        assert "daily_pipeline_skipped" not in stats
+        assert stats["report"] == {"docx": "x"}
+        assert stats["weekly_report"] == {"report_id": 7, "qa_passed": False}
+
+    def test_daily_run_already_covered_returns_false_on_db_error(self, monkeypatch) -> None:
+        monkeypatch.setattr("eoa.db.connection", _raise_no_db)
+        assert jobs._daily_run_already_covered() is False
 
 
 class TestNotify:

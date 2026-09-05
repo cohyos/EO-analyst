@@ -11,9 +11,12 @@ import type {
   InvestigationSummary,
   ItemCard,
   ItemDetail,
+  ItemsByCountryResponse,
   ItemsResponse,
   Job,
   Lesson,
+  LlmProvidersResponse,
+  LlmSettingsPutResponse,
   MorningResponse,
   ReportDetail,
   ReportSummary,
@@ -70,7 +73,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-function qs(params: Record<string, string | number | undefined>): string {
+function qs(params: Record<string, string | number | boolean | undefined>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== "") usp.set(k, String(v));
@@ -139,6 +142,10 @@ function normalizeEntitySummary(raw: Partial<EntitySummary> | null | undefined):
     focus: arr(r.focus),
     item_count: num(r.item_count),
     last_seen: r.last_seen ?? null,
+    relevance: typeof r.relevance === "number" ? r.relevance : 0,
+    is_watchlist: bool(r.is_watchlist),
+    mentions_7d: num(r.mentions_7d),
+    mentions_30d: num(r.mentions_30d),
   };
 }
 
@@ -147,6 +154,9 @@ function normalizeEntityDetail(raw: Partial<EntityDetail> | null | undefined): E
   return {
     ...normalizeEntitySummary(r),
     timeline: arr(r.timeline),
+    business_events: arr(r.business_events),
+    kpis: r.kpis ?? { mentions_7d: 0, mentions_30d: 0, events_count: 0, related_items_by_level: {} },
+    edge_groups: arr(r.edge_groups),
     neighbors: arr(r.neighbors),
   };
 }
@@ -186,6 +196,15 @@ function normalizeInvestigationDetail(
           answer_he: str(r.answer.answer_he),
           sources: arr(r.answer.sources),
           outcome: str(r.answer.outcome),
+          key_facts: arr(r.answer.key_facts),
+          what_was_tried_he: str(r.answer.what_was_tried_he),
+          contradictions_he: str(r.answer.contradictions_he),
+          queries_used: r.answer.queries_used ?? undefined,
+          max_queries: r.answer.max_queries ?? undefined,
+          pages_read: r.answer.pages_read ?? undefined,
+          max_pages: r.answer.max_pages ?? undefined,
+          rounds: r.answer.rounds ?? undefined,
+          stopped_reason: r.answer.stopped_reason ?? undefined,
         }
       : null,
   };
@@ -363,13 +382,25 @@ export const realApi: ApiClient = {
         domain: query.domain,
         since: query.since,
         q: query.q,
+        country: query.country?.join(","),
+        group_by: query.group_by,
         page: query.page,
         page_size: query.page_size,
         sort: query.sort,
       })}`,
     );
     const items = arr(data?.items).map(normalizeItemCard);
-    return { total: num(data?.total, items.length), items };
+    return { total: num(data?.total, items.length), items, groups: data?.groups ?? undefined };
+  },
+  getItemsByCountry: async (query) => {
+    const data = await request<Partial<ItemsByCountryResponse>>(
+      `/api/items/by-country${qs({
+        level: query.level?.join(","),
+        domain: query.domain,
+        since: query.since,
+      })}`,
+    );
+    return { countries: arr(data?.countries) };
   },
   getItem: async (id: number) =>
     normalizeItemDetail(await request<Partial<ItemDetail>>(`/api/items/${id}`)),
@@ -390,7 +421,15 @@ export const realApi: ApiClient = {
 
   getEntities: async (query: EntitiesQuery) => {
     const data = await request<Partial<EntitySummary>[] | null>(
-      `/api/entities${qs({ q: query.q, kind: query.kind, limit: query.limit })}`,
+      `/api/entities${qs({
+        q: query.q,
+        kind: query.kind,
+        country: query.country,
+        watchlist: query.watchlist || undefined,
+        all: query.all || undefined,
+        sort: query.sort,
+        limit: query.limit,
+      })}`,
     );
     return arr(data).map(normalizeEntitySummary);
   },
@@ -421,6 +460,20 @@ export const realApi: ApiClient = {
     ),
   postInvestigationStop: (jobId: string) =>
     request<void>(`/api/investigations/${jobId}/stop`, { method: "POST" }),
+  postInvestigationNew: async (body) => {
+    const data = await request<{ job_id?: string | number }>(`/api/investigations`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return { job_id: idStr(data?.job_id) };
+  },
+  postInvestigationExpand: async (jobId: string) => {
+    const data = await request<{ job_id?: string | number }>(
+      `/api/investigations/${jobId}/expand`,
+      { method: "POST" },
+    );
+    return { job_id: idStr(data?.job_id) };
+  },
 
   askStream: (body: AskRequest, handlers) => {
     const controller = new AbortController();
@@ -459,6 +512,7 @@ export const realApi: ApiClient = {
             }
             if (evt.type === "token") handlers.onToken(str(evt.text));
             else if (evt.type === "citations") handlers.onCitations(arr(evt.items));
+            else if (evt.type === "meta") handlers.onMeta?.(str(evt.provider), str(evt.model));
             else if (evt.type === "done") handlers.onDone();
           }
         }
@@ -554,6 +608,28 @@ export const realApi: ApiClient = {
       body: JSON.stringify({ yaml }),
     });
     return { ok: bool(data?.ok), errors: arr(data?.errors) };
+  },
+
+  getLlmProviders: async () => {
+    const data = await request<Partial<LlmProvidersResponse>>("/api/llm/providers");
+    return {
+      allow_cloud: bool(data?.allow_cloud),
+      interactive_default: str(data?.interactive_default) || "ollama",
+      providers: arr(data?.providers).map((p) => ({
+        id: str(p?.id),
+        label: str(p?.label),
+        kind: p?.kind === "cloud" ? "cloud" : "local",
+        available: bool(p?.available),
+        models: arr(p?.models).map((m) => str(m)),
+      })),
+    };
+  },
+  putLlmSettings: async (body) => {
+    const data = await request<Partial<LlmSettingsPutResponse>>("/api/llm/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    return { ok: bool(data?.ok), errors: arr(data?.errors), revision: data?.revision ?? null };
   },
 };
 

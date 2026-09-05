@@ -55,10 +55,30 @@ def _today_jerusalem() -> dt.date:
     return dt.datetime.now(JERUSALEM).date()
 
 
-def _period(period_start: dt.date | None, period_end: dt.date | None) -> tuple[dt.date, dt.date]:
-    end = period_end or _today_jerusalem()
-    start = period_start or end
-    return start, end
+def _period(
+    period_start: dt.date | None, period_end: dt.date | None
+) -> tuple[dt.datetime, dt.datetime, dt.date]:
+    """Resolve the collection window as tz-aware UTC timestamps, plus the Jerusalem calendar date
+    used to label/persist the report.
+
+    F3: both ``None`` (the default — a scheduled night run) means the 24 hours ending *now*
+    (Asia/Jerusalem), expressed as timestamps rather than a bare date — the previous
+    date-only default meant a 01:00 run only ever saw items published since local midnight (~1
+    hour), not a real trailing day. The report is still labeled with the run's own Jerusalem
+    calendar date. Either given (manual/CLI rebuild of a specific date/range) keeps the original,
+    reproducible semantics: the whole Jerusalem day(s) from ``period_start`` 00:00:00 to
+    ``period_end`` 23:59:59.999999 inclusive.
+    """
+    if period_start is None and period_end is None:
+        end_ts = dt.datetime.now(JERUSALEM)
+        start_ts = end_ts - dt.timedelta(hours=24)
+        return start_ts.astimezone(dt.UTC), end_ts.astimezone(dt.UTC), end_ts.date()
+    end_date = period_end or period_start
+    start_date = period_start or end_date
+    assert end_date is not None and start_date is not None  # for type-checkers; unreachable otherwise
+    start_ts = dt.datetime.combine(start_date, dt.time.min, tzinfo=JERUSALEM)
+    end_ts = dt.datetime.combine(end_date, dt.time.max, tzinfo=JERUSALEM)
+    return start_ts.astimezone(dt.UTC), end_ts.astimezone(dt.UTC), end_date
 
 
 # --------------------------------------------------------------------------
@@ -78,7 +98,7 @@ def collect_items(
     ``summary_he``/``so_what_he`` are persisted from the analyze stage), so ``key_facts`` here is
     always ``[]`` until that gap is closed upstream; the report prompt degrades gracefully.
     """
-    start, end = _period(period_start, period_end)
+    start, end, _label = _period(period_start, period_end)
     cap = max_items or settings().triage.daily_report_max_items
 
     def _query(levels: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -91,8 +111,7 @@ def collect_items(
             WHERE i.security_status = 'clean'
               AND i.dedup_of IS NULL
               AND i.level = ANY(%(levels)s)
-              AND COALESCE(i.published_at, i.fetched_at, i.created_at)::date
-                  BETWEEN %(start)s AND %(end)s
+              AND COALESCE(i.published_at, i.fetched_at, i.created_at) BETWEEN %(start)s AND %(end)s
             ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
             LIMIT %(limit)s
         """
@@ -111,11 +130,64 @@ def collect_items(
     return rows
 
 
+def _normalize_event_key(ev: dict[str, Any]) -> tuple[str, str, str, str]:
+    """A dedup key for a business event: same kind + same normalised parties/customer/program is
+    almost always the same underlying fact re-extracted from more than one covering article, or
+    emitted more than once for a single item by the analyze stage (F9/F16)."""
+    parties = ev.get("parties") or []
+    parties_norm = tuple(sorted(p.strip().casefold() for p in parties if p and p.strip()))
+    customer_norm = (ev.get("customer") or "").strip().casefold()
+    program_norm = (ev.get("program") or "").strip().casefold()
+    return (ev.get("kind") or "", "|".join(parties_norm), customer_norm, program_norm)
+
+
+def _event_richness(ev: dict[str, Any]) -> int:
+    score = sum(1 for k in ("date", "amount_usd", "currency", "customer", "program") if ev.get(k))
+    return score + len(ev.get("parties") or [])
+
+
+def _dedup_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse events sharing :func:`_normalize_event_key` across the whole report window,
+    keeping the richest (most fields populated) row per group (F9/F16)."""
+    best: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for ev in rows:
+        key = _normalize_event_key(ev)
+        cur = best.get(key)
+        if cur is None or _event_richness(ev) > _event_richness(cur):
+            best[key] = ev
+    return list(best.values())
+
+
+def _event_has_signal(ev: dict[str, Any]) -> bool:
+    """An event with neither parties, a customer/program, nor an amount carries no information for
+    the reader — drop it rather than render an almost-empty row (F9/F16)."""
+    return bool(
+        ev.get("parties") or ev.get("customer") or ev.get("program") or ev.get("amount_usd") is not None
+    )
+
+
+def _event_sort_key(ev: dict[str, Any]) -> tuple[dt.date, float]:
+    date = ev.get("date") or dt.date.min
+    amount = ev.get("amount_usd")
+    try:
+        amount_val = float(amount) if amount is not None else 0.0
+    except (TypeError, ValueError):
+        amount_val = 0.0
+    return (date, amount_val)
+
+
 def collect_events(
-    period_start: dt.date | None = None, period_end: dt.date | None = None
+    period_start: dt.date | None = None,
+    period_end: dt.date | None = None,
+    *,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Business events (contract awards, M&A, ...) in the period, most recent first."""
-    start, end = _period(period_start, period_end)
+    """Business events (contract awards, M&A, ...) in the period, deduplicated, stripped of
+    information-free rows, sorted date desc then amount desc (F9/F16), most recent first.
+    ``limit`` (used by the weekly report to cap its table at 40 rows) is applied last, after
+    dedup/filter/sort."""
+    start_ts, end_ts, _label = _period(period_start, period_end)
+    start_date, end_date = start_ts.astimezone(JERUSALEM).date(), end_ts.astimezone(JERUSALEM).date()
     sql = """
         SELECT e.id, e.item_id, e.kind, e.title, e.date, e.amount_usd, e.currency, e.parties,
                e.customer, e.program, e.summary_he, e.confidence,
@@ -129,8 +201,14 @@ def collect_events(
         ORDER BY e.date DESC NULLS LAST, e.id DESC
     """
     with connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, {"start": start, "end": end})
-        return cur.fetchall()
+        cur.execute(sql, {"start": start_date, "end": end_date})
+        rows = cur.fetchall()
+    rows = _dedup_events(rows)
+    rows = [ev for ev in rows if _event_has_signal(ev)]
+    rows.sort(key=_event_sort_key, reverse=True)
+    if limit is not None:
+        rows = rows[:limit]
+    return rows
 
 
 def collect_deep_search(
@@ -138,7 +216,7 @@ def collect_deep_search(
 ) -> list[dict[str, Any]]:
     """Deep-search jobs (``kind='deep_search'``) finished in the period, with the investigation's
     final result (``jobs.result``, an ``InvestigationOut``-shaped payload) when present."""
-    start, end = _period(period_start, period_end)
+    start, end, _label = _period(period_start, period_end)
     sql = """
         SELECT j.id AS job_id, j.payload, j.result, j.state, j.finished_at,
                i.id AS trigger_item_id, i.title AS trigger_title, i.url AS trigger_url
@@ -147,7 +225,7 @@ def collect_deep_search(
         WHERE j.kind = 'deep_search'
           AND j.state IN ('done', 'partial')
           AND j.finished_at IS NOT NULL
-          AND j.finished_at::date BETWEEN %(start)s AND %(end)s
+          AND j.finished_at BETWEEN %(start)s AND %(end)s
         ORDER BY j.finished_at DESC
     """
     with connection() as conn, conn.cursor() as cur:
@@ -236,6 +314,21 @@ def _format_items_block(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _normalize_section_titles(draft: DailyReportDraft) -> DailyReportDraft:
+    """Force every section's ``title_he`` to the authoritative taxonomy label for its ``domain``
+    (F7): the report prompt asks the model to copy the domain heading verbatim, but a heading like
+    'נגד כטב"מים (C-UAS)' contains an embedded literal ``"`` that a small local model's JSON output
+    sometimes fails to escape correctly, truncating the string at that quote ('נגד כטב'). Rather
+    than depend on the model's JSON-escaping fidelity for a value we already know deterministically
+    ("config, not code"), the section's own ``domain`` key (validated separately) is used to look
+    the label up again here — a domain not found in the taxonomy keeps whatever the model wrote."""
+    new_sections = [
+        section.model_copy(update={"title_he": _domain_label(section.domain)}) if section.domain else section
+        for section in draft.sections
+    ]
+    return draft.model_copy(update={"sections": new_sections})
+
+
 def _no_items_draft() -> DailyReportDraft:
     return DailyReportDraft(
         exec_summary_he=(
@@ -260,7 +353,7 @@ def draft_report(
         data_guard=DATA_GUARD_SYSTEM,
         items_block=wrap_data(_format_items_block(items), "report_items", "internal"),
     )
-    return chat_structured(
+    draft = chat_structured(
         role,
         DailyReportDraft,
         [
@@ -271,6 +364,7 @@ def draft_report(
         interactive=interactive,
         options={"temperature": 0.3},
     )
+    return _normalize_section_titles(draft)
 
 
 def _corrective_retry(
@@ -288,7 +382,7 @@ def _corrective_retry(
         "ותקינה מחדש (JSON לפי הסכמה בלבד, ללא הסברים נוספים), מבלי להמציא עובדות חדשות שלא הופיעו "
         "ברשימת הפריטים:\n" + errors_text
     )
-    return chat_structured(
+    draft = chat_structured(
         role,
         DailyReportDraft,
         [
@@ -301,24 +395,27 @@ def _corrective_retry(
         interactive=interactive,
         options={"temperature": 0.2},
     )
+    return _normalize_section_titles(draft)
 
 
 def _strip_uncited(draft: DailyReportDraft, qa: QAResult) -> DailyReportDraft:
-    """Drop the sentences ``qa`` flagged (uncited-factual or out-of-range refs), keep the rest."""
+    """Drop the sentences ``qa`` flagged (uncited-factual, out-of-range refs, or an exec-summary
+    sentence duplicated verbatim from a section — F5), keep the rest."""
     bad_refs = set(qa.bad_refs)
     uncited = set(qa.uncited_sentences)
+    duplicates = set(qa.duplicate_sentences)
 
-    def _clean(text: str) -> str:
+    def _clean(text: str, *, extra_drop: set[str] = frozenset()) -> str:
         kept = []
         for sentence in split_sentences(text):
-            if sentence in uncited:
+            if sentence in uncited or sentence in extra_drop:
                 continue
             if bad_refs and set(citations_in(sentence)) & bad_refs:
                 continue
             kept.append(sentence)
         return " ".join(kept)
 
-    new_summary = _clean(draft.exec_summary_he)
+    new_summary = _clean(draft.exec_summary_he, extra_drop=duplicates)
     if not new_summary:
         new_summary = "תקציר המנהלים קוצץ במלואו עקב בדיקת אזכורים שנכשלה; ראו qa_report לפרטים."
     new_sections: list[ReportSection] = []
@@ -394,6 +491,7 @@ def _persist_report(
         "errors": qa.errors,
         "uncited_sentences": qa.uncited_sentences,
         "bad_refs": qa.bad_refs,
+        "duplicate_sentences": qa.duplicate_sentences,
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
     sql = """
@@ -421,6 +519,64 @@ def _persist_report(
     return report_id
 
 
+def _recent_daily_report(period_end: dt.date, *, within_hours: int = 6) -> ReportPaths | None:
+    """F4 idempotency guard: a ``daily`` report for ``period_end`` already built within the last
+    ``within_hours`` hours, reconstructed as :class:`ReportPaths` — or ``None`` if there isn't one.
+    Used by :func:`build_daily` (unless ``force=True``) to avoid building a second, near-identical
+    report when e.g. both a ``daily_run`` and a ``weekly_run`` job land on the same night."""
+    sql = """
+        SELECT id, path_docx, path_md, path_html, qa_passed, qa_report
+        FROM reports
+        WHERE kind = 'daily' AND period_end = %(period_end)s
+          AND created_at > now() - make_interval(hours => %(hours)s)
+        ORDER BY created_at DESC
+        LIMIT 1
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, {"period_end": period_end, "hours": within_hours})
+        row = cur.fetchone()
+    if row is None:
+        return None
+    qa_report = row.get("qa_report") or {}
+    qa = QAResult(
+        passed=bool(row.get("qa_passed")),
+        errors=qa_report.get("errors", []),
+        uncited_sentences=qa_report.get("uncited_sentences", []),
+        bad_refs=qa_report.get("bad_refs", []),
+        duplicate_sentences=qa_report.get("duplicate_sentences", []),
+    )
+    log.info("daily_report_reused", report_id=row["id"], period_end=str(period_end))
+    return ReportPaths(
+        docx=Path(row["path_docx"]),
+        md=Path(row["path_md"]),
+        html=Path(row["path_html"]),
+        report_id=row["id"],
+        qa=qa,
+    )
+
+
+def _tenders_forecast_table(tenders_data: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
+    """F6: a compact tender-forecasts sub-table (platform | payload | likelihood | window |
+    one-line rationale), rendered here (not by ``eoa.tenders.report_section``) from
+    ``collect_tenders``'s data — replaces the old ``tenders_extra_section`` bulleted prose block,
+    which duplicated the open-tenders board (rendered separately by ``tenders_table``) and printed
+    the full, unbounded rationale text. ``None`` when there is nothing to show."""
+    forecasts = tenders_data.get("new_forecasts") or []
+    if not forecasts:
+        return None
+    headers = ["פלטפורמה", "צורך/Payload", "סבירות", "חלון", "נימוק"]
+    rows: list[list[Any]] = []
+    for f in forecasts[:10]:
+        likelihood = f.get("likelihood")
+        pct = f"{likelihood:.0%}" if isinstance(likelihood, int | float) else "—"
+        window = f"{fmt_date(f.get('window_from'))} - {fmt_date(f.get('window_to'))}"
+        rationale = (f.get("rationale_he") or "").strip() or "—"
+        if len(rationale) > 200:
+            rationale = rationale[:199] + "…"
+        rows.append([f.get("platform") or "—", f.get("payload_need") or "—", pct, window, rationale])
+    return {"title_he": "תחזיות מכרזים", "headers": headers, "rows": rows}
+
+
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
@@ -432,13 +588,25 @@ def build_daily(
     *,
     role: str = "resident",
     interactive: bool = False,
+    force: bool = False,
 ) -> ReportPaths:
-    """Collect -> draft -> QA-gate -> render docx/md/html -> persist. Returns the written paths."""
-    start, end = _period(period_start, period_end)
+    """Collect -> draft -> QA-gate -> render docx/md/html -> persist. Returns the written paths.
 
-    items = collect_items(start, end)
-    events = collect_events(start, end)
-    deep_search = collect_deep_search(start, end)
+    F4: unless ``force=True`` (set by the manual ``eo run report`` CLI command), a daily report for
+    the same ``period_end`` built less than 6 hours ago is returned as-is instead of building
+    another one — guards against e.g. both ``daily_run`` and ``weekly_run`` landing on the same
+    night and each triggering a full report build.
+    """
+    start_ts, _end_ts, label = _period(period_start, period_end)
+
+    if not force:
+        existing = _recent_daily_report(label)
+        if existing is not None:
+            return existing
+
+    items = collect_items(period_start, period_end)
+    events = collect_events(period_start, period_end)
+    deep_search = collect_deep_search(period_start, period_end)
     open_clarifications = collect_open_clarifications()
 
     draft = draft_report(items, role=role, interactive=interactive)
@@ -462,39 +630,44 @@ def build_daily(
             errors=original_errors.errors,
             uncited_sentences=original_errors.uncited_sentences,
             bad_refs=original_errors.bad_refs,
+            duplicate_sentences=original_errors.duplicate_sentences,
         )
 
     citation_items, events_with_n = _extend_citation_registry(items, events)
 
-    # section 5.2 / FR-5.2: tenders/RFI/RFP section -- deterministic (not LLM-drafted), so it is
-    # rendered via the additive extra_sections/tables hooks below rather than touching
-    # DailyReportDraft or the citation QA gate. A failure here must never break the daily report.
-    tender_sections: list[dict[str, Any]] = []
+    # section 5.2 / FR-5.2: tenders/RFI/RFP -- deterministic (not LLM-drafted), so it is rendered
+    # via the additive tables hook below rather than touching DailyReportDraft or the citation QA
+    # gate. F6: ONE rendering of tenders (the open-tenders board) plus a compact forecasts
+    # sub-table -- the old tenders_extra_section bulleted block (duplicating the same open tenders
+    # as prose, and printing the full unbounded forecast rationale) is no longer used here. A
+    # failure here must never break the daily report.
     tender_tables: list[dict[str, Any]] = []
     try:
-        from eoa.tenders.report_section import collect_tenders, tenders_extra_section, tenders_table
+        from eoa.tenders.report_section import collect_tenders, tenders_table
 
-        tenders_data = collect_tenders(start, end)
-        if tenders_data.get("open_tenders") or tenders_data.get("new_forecasts"):
-            tender_sections = [tenders_extra_section(tenders_data)]
-        tbl = tenders_table(tenders_data)
-        tender_tables = [tbl] if tbl else []
+        window_start = start_ts.astimezone(JERUSALEM).date()
+        tenders_data = collect_tenders(window_start, label)
+        open_table = tenders_table(tenders_data)
+        if open_table:
+            tender_tables.append(open_table)
+        forecast_table = _tenders_forecast_table(tenders_data)
+        if forecast_table:
+            tender_tables.append(forecast_table)
     except Exception as exc:
         log.warning("daily_report_tenders_section_failed", error=str(exc)[:160])
 
-    docx_path = _report_path(end, "docx")
-    md_path = _report_path(end, "md")
-    html_path = _report_path(end, "html")
+    docx_path = _report_path(label, "docx")
+    md_path = _report_path(label, "md")
+    html_path = _report_path(label, "html")
 
     doc = build_docx(
         draft,
         citation_items,
         events_with_n,
-        period_end=end,
+        period_end=label,
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
-        extra_sections=tender_sections,
         tables=tender_tables,
     )
     save_docx(doc, docx_path)
@@ -504,11 +677,10 @@ def build_daily(
         draft,
         citation_items,
         events_with_n,
-        period_end=end,
+        period_end=label,
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
-        extra_sections=tender_sections,
         tables=tender_tables,
     )
     md_path.parent.mkdir(parents=True, exist_ok=True)
@@ -518,16 +690,16 @@ def build_daily(
         draft,
         citation_items,
         events_with_n,
-        period_end=end,
+        period_end=label,
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
-        extra_sections=tender_sections,
         tables=tender_tables,
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")
 
-    report_id = _persist_report(start, end, docx_path, md_path, html_path, items, qa)
+    period_start_date = start_ts.astimezone(JERUSALEM).date()
+    report_id = _persist_report(period_start_date, label, docx_path, md_path, html_path, items, qa)
 
     return ReportPaths(docx=docx_path, md=md_path, html=html_path, report_id=report_id, qa=qa)

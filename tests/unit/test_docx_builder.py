@@ -297,10 +297,41 @@ def test_build_docx_sources_appendix_has_all_items(built_doc, fixture_items):
     assert header_cells == ["#", "כותרת", "מקור", "תאריך", "קישור"]
 
 
-def test_build_docx_toc_field_present(built_doc):
+def test_build_docx_no_toc_for_daily(built_doc):
+    """F10: the daily report (``include_toc`` defaults to ``False``) drops the TOC entirely rather
+    than show a ``TOC`` field placeholder that displays nothing until the reader manually updates
+    fields in Word."""
     xml = built_doc.element.xml
-    assert "TOC" in xml
-    assert "fldSimple" in xml
+    assert "fldSimple" not in xml
+    assert "יש לעדכן שדות" not in xml
+    heading_texts = {
+        p.text for p in built_doc.paragraphs if p.style is not None and p.style.name == "Heading 1"
+    }
+    assert "תוכן עניינים" not in heading_texts
+
+
+def test_build_docx_real_toc_for_weekly_monthly(fixture_draft, fixture_items, fixture_events):
+    """F10: ``include_toc=True`` (used by weekly/monthly) renders a real, immediately-clickable
+    bookmark-based table of contents instead of a stale ``TOC`` field."""
+    doc = db.build_docx(
+        fixture_draft,
+        fixture_items,
+        fixture_events,
+        period_end=dt.date(2026, 9, 4),
+        qa=QAResult(passed=True),
+        include_toc=True,
+    )
+    xml = doc.element.xml
+    assert "fldSimple" not in xml
+    assert "bookmarkStart" in xml
+    assert "w:anchor" in xml
+    heading_texts = {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"}
+    assert "תוכן עניינים" in heading_texts
+    # the TOC lists every real section, including the domain sections from the fixture draft
+    toc_paragraphs = [p for p in doc.paragraphs if p.style is not None and p.style.name == "List Bullet"]
+    toc_texts = {p.text for p in toc_paragraphs}
+    assert any("פודים" in t for t in toc_texts)
+    assert any("כטב" in t for t in toc_texts)
 
 
 def test_build_docx_page_field_in_footer(built_doc):

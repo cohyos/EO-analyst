@@ -180,3 +180,44 @@ def test_check_multiple_citations_in_one_sentence_all_validated():
     draft = _draft("אלביט ורפאל חתמו הסכם משותף [1][2].")
     result = check(draft, ITEMS)
     assert result.passed
+
+
+# --------------------------------------------------------------------------
+# F5: exec-summary sentences duplicated verbatim from a section
+# --------------------------------------------------------------------------
+
+
+def test_check_fails_when_summary_copies_section_sentence_verbatim():
+    section = ReportSection(
+        title_he="פודים אוויריים",
+        domain="airborne_pods",
+        prose_he="אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון [1].",
+    )
+    draft = _draft("אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון [1].", sections=[section])
+    result = check(draft, ITEMS)
+    assert not result.passed
+    assert result.duplicate_sentences
+    assert any("מועתק כלשונו" in e for e in result.errors)
+
+
+def test_check_passes_when_summary_paraphrases_section():
+    """A summary sentence that overlaps in subject matter but isn't a verbatim (normalised) copy
+    must not be flagged -- only exact duplication is a problem."""
+    section = ReportSection(
+        title_he="פודים אוויריים",
+        domain="airborne_pods",
+        prose_he="אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון [1].",
+    )
+    draft = _draft("אלביט מערכות זכתה בחוזה משמעותי לאספקת פודי כיוון החודש [1].", sections=[section])
+    result = check(draft, ITEMS)
+    assert result.passed
+    assert not result.duplicate_sentences
+
+
+def test_check_duplicate_detection_ignores_citation_numbers_and_short_sentences():
+    """A trivial short sentence repeating by coincidence (e.g. an assessment marker) must not be
+    flagged as a duplicate -- only substantial (>= 4 word) overlaps count."""
+    section = ReportSection(title_he="סעיף", domain="d", prose_he="להערכתנו זה חשוב [1].")
+    draft = _draft("תקציר תקין [1]. להערכתנו זה חשוב.", sections=[section])
+    result = check(draft, ITEMS)
+    assert not result.duplicate_sentences

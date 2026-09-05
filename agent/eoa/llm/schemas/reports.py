@@ -31,7 +31,10 @@ class WeeklyReportDraft(BaseModel):
     trend's evidence)."""
 
     exec_summary_he: str = Field(
-        description="עד כ-250 מילים: מה קרה השבוע, מה המגמות המרכזיות, ומה דורש תשומת לב, עם [n]"
+        description=(
+            "3-5 משפטים בלבד, המסכמים ומקשרים בין ממצאי הסעיפים והמגמות של השבוע (מה השתנה, למה זה "
+            "חשוב, מה לעקוב אחריו), עם [n]; אסור להעתיק משפט כלשונו מגוף אחד הסעיפים/פסקאות המגמה"
+        )
     )
     trend_paragraphs: list[TrendParagraph] = Field(
         default_factory=list, description="פסקה אחת לכל מגמה שזוהתה השבוע (מגמות השבוע)"
@@ -47,7 +50,10 @@ class MonthlyReportDraft(BaseModel):
     with any item that only fed a trend's evidence)."""
 
     exec_summary_he: str = Field(
-        description="עד כ-300 מילים: נוף תחרותי, מגמות מרכזיות של החודש, ומה דורש תשומת לב, עם [n]"
+        description=(
+            "3-5 משפטים בלבד, המסכמים ומקשרים בין ממצאי הסעיפים והמגמות של החודש (נוף תחרותי, מה "
+            "השתנה, מה לעקוב אחריו), עם [n]; אסור להעתיק משפט כלשונו מגוף אחד הסעיפים/פסקאות המגמה"
+        )
     )
     trend_paragraphs: list[TrendParagraph] = Field(
         default_factory=list, description="פסקה אחת לכל מגמה שזוהתה החודש"

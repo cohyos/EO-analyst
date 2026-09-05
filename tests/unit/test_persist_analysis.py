@@ -215,11 +215,15 @@ def test_persist_analysis_handles_date_parsing(monkeypatch: pytest.MonkeyPatch) 
         summary_he="תקציר",
         so_what_he="השלכות",
         key_facts=[],
+        # Each event carries a distinct `program` so persist_analysis's F9/F16 dedup (kind +
+        # normalised parties/customer/program) doesn't collapse these three into one — they are
+        # deliberately otherwise-identical here to isolate the date-parsing behavior under test.
         events=[
             EventOut(
                 kind="test",
                 title="Test",
                 date="2025-12-25",
+                program="Program A",
                 summary_he="test",
                 confidence=0.8,
             ),
@@ -227,6 +231,7 @@ def test_persist_analysis_handles_date_parsing(monkeypatch: pytest.MonkeyPatch) 
                 kind="test",
                 title="Test",
                 date=None,  # No date
+                program="Program B",
                 summary_he="test",
                 confidence=0.8,
             ),
@@ -234,6 +239,7 @@ def test_persist_analysis_handles_date_parsing(monkeypatch: pytest.MonkeyPatch) 
                 kind="test",
                 title="Test",
                 date="invalid-date",  # Unparseable date
+                program="Program C",
                 summary_he="test",
                 confidence=0.8,
             ),
@@ -258,6 +264,58 @@ def test_persist_analysis_handles_date_parsing(monkeypatch: pytest.MonkeyPatch) 
     # Third event: unparseable date -> None
     _, kwargs3 = insert_event_stub.calls[2]
     assert kwargs3["date"] is None
+
+
+def test_persist_analysis_dedups_identical_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F9/F16: two events sharing (kind, normalised parties/customer/program) within the same
+    item's extraction collapse to one insert -- the richer of the two (more populated fields) is
+    kept."""
+    insert_event_stub = RecordingStub()
+    monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", RecordingStub())
+    monkeypatch.setattr("eoa.pipeline.analyze.insert_event", insert_event_stub)
+    monkeypatch.setattr("eoa.pipeline.analyze.upsert_entity", RecordingStub())
+
+    out = AnalyzeOut(
+        summary_he="תקציר",
+        so_what_he="השלכות",
+        key_facts=[],
+        events=[
+            EventOut(
+                kind="contract_award",
+                title="Elbit wins pod contract",
+                customer="USAF",
+                parties=["Elbit Systems"],
+                summary_he="חוזה",
+                confidence=0.8,
+            ),
+            EventOut(
+                kind="contract_award",
+                title="Elbit wins pod contract",
+                customer="usaf",  # same customer, different case -- still a duplicate
+                parties=["elbit systems"],
+                amount_usd=80_000_000.0,  # the richer duplicate: also carries an amount
+                summary_he="חוזה בהיקף 80 מיליון דולר",
+                confidence=0.85,
+            ),
+            EventOut(
+                kind="launch",  # different kind -- not a duplicate of the two above
+                title="Rafael launches C-UAS system",
+                parties=["Rafael"],
+                summary_he="השקה",
+                confidence=0.7,
+            ),
+        ],
+        edges=[],
+    )
+
+    item = {"id": 201, "title": "Test", "url": "https://example.com"}
+    n_events, _ = persist_analysis(item, out)
+
+    assert n_events == 2
+    assert len(insert_event_stub.calls) == 2
+    contract_calls = [kw for _, kw in insert_event_stub.calls if kw["kind"] == "contract_award"]
+    assert len(contract_calls) == 1
+    assert contract_calls[0]["amount_usd"] == 80_000_000.0  # the richer duplicate won
 
 
 def test_persist_analysis_creates_edges(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -490,10 +548,12 @@ def test_persist_analysis_returns_counts(monkeypatch: pytest.MonkeyPatch) -> Non
         summary_he="תקציר",
         so_what_he="השלכות",
         key_facts=["עובדה 1", "עובדה 2"],
+        # Distinct `program` per event so F9/F16 dedup doesn't collapse these three (otherwise
+        # identical) events into one -- this test is about the events/edges counts, not dedup.
         events=[
-            EventOut(kind="test", title="e1", summary_he="e1", confidence=0.8),
-            EventOut(kind="test", title="e2", summary_he="e2", confidence=0.8),
-            EventOut(kind="test", title="e3", summary_he="e3", confidence=0.8),
+            EventOut(kind="test", title="e1", program="Program A", summary_he="e1", confidence=0.8),
+            EventOut(kind="test", title="e2", program="Program B", summary_he="e2", confidence=0.8),
+            EventOut(kind="test", title="e3", program="Program C", summary_he="e3", confidence=0.8),
         ],
         edges=[
             EdgeOut(src="A", dst="B", label="PARTNER_OF", evidence_he="test"),

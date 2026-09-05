@@ -15,6 +15,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import docx
 from docx.document import Document as DocxDocument
@@ -149,6 +150,42 @@ def fmt_amount(ev: dict) -> str:
 def _split_paragraphs(text: str) -> list[str]:
     parts = [p.strip() for p in (text or "").split("\n\n")]
     return [p for p in parts if p] or [""]
+
+
+# -- source display label (F8: never show a raw URL as the "source" column) --------------
+
+
+_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _domain_from_url(url: str) -> str:
+    """A short display domain for ``url`` (e.g. 'sam.gov', 'ted.europa.eu'), stripping a leading
+    'www.'. Falls back to the raw string if it doesn't parse as a URL at all."""
+    try:
+        netloc = urlparse(url).netloc or url
+    except ValueError:
+        netloc = url
+    netloc = netloc.split("@")[-1].split(":")[0]
+    if netloc.lower().startswith("www."):
+        netloc = netloc[4:]
+    return netloc or "—"
+
+
+def source_label(source_name: str | None, url: str | None) -> str:
+    """The display label for an item's source: ``source_name`` when it is a real name, otherwise a
+    short domain derived from ``url`` — never the raw URL itself (F8: tender-derived items with no
+    linked ``sources`` row fall back to ``COALESCE(src.name, i.url)`` at the query layer, which put
+    the full URL in the "מקור" column; the URL belongs only in the dedicated link column)."""
+    name = (source_name or "").strip()
+    if name and not _URL_RE.match(name):
+        return name
+    if url:
+        return _domain_from_url(url)
+    return name or "—"
+
+
+def _looks_like_url(value: Any) -> bool:
+    return isinstance(value, str) and bool(_URL_RE.match(value.strip()))
 
 
 # -- Hebrew/Latin run segmentation ------------------------------------------------
@@ -301,10 +338,65 @@ def add_hyperlink(paragraph, url: str, text: str, *, hebrew: bool = False) -> Ru
     return run
 
 
+def add_internal_hyperlink(paragraph, anchor: str, text: str, *, hebrew: bool = True) -> Run:
+    """Add a run-of-the-mill *internal* hyperlink (a Word bookmark reference, ``w:anchor`` rather
+    than a relationship ``r:id``) to ``paragraph``; returns the run. Used to build a real,
+    immediately-navigable table of contents (see :func:`_add_bookmark`/:func:`_add_real_toc`)
+    instead of a ``TOC`` field that shows nothing until the user manually updates fields (F10)."""
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("w:anchor"), anchor)
+    run_elm = OxmlElement("w:r")
+    rpr = OxmlElement("w:rPr")
+    rstyle = OxmlElement("w:rStyle")
+    rstyle.set(qn("w:val"), "Hyperlink")
+    rpr.append(rstyle)
+    run_elm.append(rpr)
+    t = OxmlElement("w:t")
+    t.set(qn("xml:space"), "preserve")
+    t.text = text
+    run_elm.append(t)
+    hyperlink.append(run_elm)
+    paragraph._p.append(hyperlink)
+    run = Run(run_elm, paragraph)
+    _style_run(run, hebrew=hebrew, size_pt=10)
+    return run
+
+
+_bookmark_id_counter = 0
+
+
+def _add_bookmark(paragraph, name: str) -> None:
+    """Wrap ``paragraph`` in a ``w:bookmarkStart``/``w:bookmarkEnd`` pair named ``name`` so an
+    internal hyperlink (:func:`add_internal_hyperlink`) can jump straight to it."""
+    global _bookmark_id_counter
+    _bookmark_id_counter += 1
+    start = OxmlElement("w:bookmarkStart")
+    start.set(qn("w:id"), str(_bookmark_id_counter))
+    start.set(qn("w:name"), name)
+    end = OxmlElement("w:bookmarkEnd")
+    end.set(qn("w:id"), str(_bookmark_id_counter))
+    paragraph._p.insert(0, start)
+    paragraph._p.append(end)
+
+
 def _set_table_rtl(table) -> None:
     tbl_pr = table._tbl.tblPr
     if tbl_pr.find(qn("w:bidiVisual")) is None:
         tbl_pr.append(OxmlElement("w:bidiVisual"))
+
+
+def _shade_header_row(table, *, fill: str = "D9D9D9") -> None:
+    """Light grey shading on every cell of a table's first (header) row, per F10's "table style
+    with header row shading" requirement."""
+    for cell in table.rows[0].cells:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        shd = tc_pr.find(qn("w:shd"))
+        if shd is None:
+            shd = OxmlElement("w:shd")
+            tc_pr.append(shd)
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), fill)
 
 
 # -- document-level defaults ------------------------------------------------------
@@ -383,18 +475,31 @@ def _flag_update_fields(doc: DocxDocument) -> None:
     settings_elm.insert_element_before(el, *_SETTINGS_TAGS_AFTER_UPDATE_FIELDS)
 
 
-def _add_toc_field(doc: DocxDocument) -> None:
+def _add_real_toc(doc: DocxDocument, entries: list[tuple[str, str]]) -> None:
+    """A literal, immediately-clickable table of contents built from Word bookmarks
+    (:func:`_add_bookmark`/:func:`add_internal_hyperlink`) rather than a ``TOC`` field — a field
+    shows a stale/placeholder instruction ("update fields") until the user manually refreshes it in
+    Word, which is exactly the F10 complaint. ``entries`` is ``[(title, bookmark_name), ...]`` in
+    document order; used only for the weekly/monthly reports (see ``build_docx``'s ``include_toc``)
+    since the daily report drops the TOC entirely rather than show a fake one."""
     add_mixed_paragraph(doc, "תוכן עניינים", style="Heading 1")
-    paragraph = doc.add_paragraph()
+    for title, bookmark in entries:
+        if not title:
+            continue
+        paragraph = doc.add_paragraph(style="List Bullet")
+        _paragraph_rtl_right(paragraph)
+        add_internal_hyperlink(paragraph, bookmark, title)
+
+
+def _add_header(doc: DocxDocument, title_text: str, period_end: dt.date) -> None:
+    """A running header (report title + date) on every page, per F10."""
+    section = doc.sections[0]
+    header = section.header
+    header.is_linked_to_previous = False
+    paragraph = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    paragraph.text = ""
     _paragraph_rtl_right(paragraph)
-    fld = OxmlElement("w:fldSimple")
-    fld.set(qn("w:instr"), 'TOC \\o "1-2" \\h \\z \\u')
-    inner_r = OxmlElement("w:r")
-    inner_t = OxmlElement("w:t")
-    inner_t.text = "יש לעדכן שדות (F9) להצגת תוכן העניינים."
-    inner_r.append(inner_t)
-    fld.append(inner_r)
-    paragraph._p.append(fld)
+    _emit_mixed_runs(paragraph, f"{title_text} — {hebrew_date_str(period_end)}", size_pt=9)
 
 
 def _add_footer_page_number(doc: DocxDocument) -> None:
@@ -424,6 +529,7 @@ def _add_events_table(doc: DocxDocument, events: list[dict]) -> None:
     _set_table_rtl(table)
     for cell, text in zip(table.rows[0].cells, headers, strict=True):
         _fill_cell(cell, text, bold=True)
+    _shade_header_row(table)
     for ev in events:
         row = table.add_row().cells
         _fill_cell(row[0], fmt_date(ev.get("date")))
@@ -439,7 +545,9 @@ def _add_events_table(doc: DocxDocument, events: list[dict]) -> None:
             run.font.superscript = True
             _style_run(run, hebrew=False, size_pt=9)
         else:
-            _emit_mixed_runs(source_cell_p, ev.get("source_name") or "—", size_pt=9)
+            _emit_mixed_runs(
+                source_cell_p, source_label(ev.get("source_name"), ev.get("item_url")), size_pt=9
+            )
 
 
 def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
@@ -449,11 +557,12 @@ def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
     _set_table_rtl(table)
     for cell, text in zip(table.rows[0].cells, headers, strict=True):
         _fill_cell(cell, text, bold=True)
+    _shade_header_row(table)
     for it in sorted(items, key=lambda x: x.get("n") or 0):
         row = table.add_row().cells
         _fill_cell(row[0], str(it.get("n", "")))
         _fill_cell(row[1], it.get("title") or "—")
-        _fill_cell(row[2], it.get("source_name") or "—")
+        _fill_cell(row[2], source_label(it.get("source_name"), it.get("url")))
         _fill_cell(row[3], fmt_date(it.get("published_at")))
         url = it.get("url") or ""
         link_p = row[4].paragraphs[0]
@@ -464,36 +573,26 @@ def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
             _emit_mixed_runs(link_p, "—", size_pt=10)
 
 
-def _add_extra_sections(doc: DocxDocument, sections: list[dict[str, Any]], position: str) -> None:
-    """Render additive Heading-1 + prose sections at a given insertion ``position``.
-
-    Each entry is ``{"title_he": str, "body_he": str, "position": "after_summary"|"after_outlook"}``
-    (``position`` defaults to ``"after_summary"`` when omitted). Used by the weekly/monthly report
-    builders for LLM-authored trend paragraphs (``after_summary``) and deterministic, non-LLM prose
-    like the FR-11.4 meta-summary or watchlist changes (``after_outlook``) — never by the daily
-    report, which always passes ``None``.
-    """
-    for sec in sections:
-        if (sec.get("position") or "after_summary") != position:
-            continue
-        add_mixed_paragraph(doc, sec.get("title_he") or "", style="Heading 1")
-        for para in _split_paragraphs(sec.get("body_he") or ""):
-            add_mixed_paragraph(doc, para)
-
-
-def _add_generic_table(doc: DocxDocument, title_he: str, headers: list[str], rows: list[list[Any]]) -> None:
-    """A deterministic, non-citation RTL table under its own Heading-1 — the 90-day conference
-    lookahead (weekly) and the players-map/top-events/24-month-horizon tables (monthly)."""
-    add_mixed_paragraph(doc, title_he, style="Heading 1")
+def _add_generic_table_body(doc: DocxDocument, headers: list[str], rows: list[list[Any]]) -> None:
+    """The table itself (no heading) for a deterministic, non-citation RTL table — the 90-day
+    conference lookahead (weekly) and the players-map/top-events/24-month-horizon tables (monthly).
+    Split out so ``build_docx`` can add the Heading-1 itself
+    (wrapped in a TOC bookmark when ``include_toc`` is set) immediately before the table."""
     table = doc.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
     _set_table_rtl(table)
     for cell, text in zip(table.rows[0].cells, headers, strict=True):
         _fill_cell(cell, text, bold=True)
+    _shade_header_row(table)
     for row_values in rows:
         row = table.add_row().cells
         for cell, value in zip(row, row_values, strict=True):
-            _fill_cell(cell, "—" if value is None else str(value))
+            if _looks_like_url(value):
+                link_p = cell.paragraphs[0]
+                _paragraph_rtl_right(link_p)
+                add_hyperlink(link_p, str(value), str(value))
+            else:
+                _fill_cell(cell, "—" if value is None else str(value))
 
 
 def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None:
@@ -513,6 +612,42 @@ def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None
 # -- public entry points --------------------------------------------------------
 
 
+def _planned_headings(
+    draft: Any,
+    events: list[dict],
+    deep_search: list[dict],
+    open_points: list[str],
+    extra_sections: list[dict[str, Any]],
+    tables: list[dict[str, Any]] | None,
+) -> list[str]:
+    """The ordered list of top-level ("Heading 1") section titles this draft will actually render
+    — computed once so a real table of contents (docx bookmarks / html anchors) can be built
+    without duplicating each renderer's own conditionals (F10)."""
+    headings = ["תקציר מנהלים"]
+    headings += [
+        sec.get("title_he") or ""
+        for sec in extra_sections
+        if (sec.get("position") or "after_summary") == "after_summary"
+    ]
+    headings += [section.title_he for section in draft.sections]
+    if events:
+        headings.append("טבלת אירועים עסקיים")
+    if deep_search:
+        headings.append("חקירות עומק")
+    if open_points:
+        headings.append("נקודות פתוחות")
+    if draft.outlook_he:
+        headings.append("מבט קדימה")
+    headings += [
+        sec.get("title_he") or ""
+        for sec in extra_sections
+        if (sec.get("position") or "after_summary") == "after_outlook"
+    ]
+    headings += [t.get("title_he") or "" for t in (tables or [])]
+    headings.append("נספח מקורות")
+    return headings
+
+
 def build_docx(
     draft: DailyReportDraft | Any,
     items: list[dict],
@@ -526,26 +661,50 @@ def build_docx(
     title_text: str | None = None,
     extra_sections: list[dict[str, Any]] | None = None,
     tables: list[dict[str, Any]] | None = None,
+    include_toc: bool = False,
 ) -> DocxDocument:
     """Build the full report ``Document`` in memory (caller saves it).
 
     ``draft`` only needs ``exec_summary_he``, ``sections`` (``title_he``/``prose_he``),
     ``outlook_he`` and ``open_points_he`` — duck-typed, so the weekly/monthly drafts render here
     unchanged. ``title_text`` overrides the daily-report title (defaults to ``TITLE_TEXT``);
-    ``extra_sections`` (see :func:`_add_extra_sections`) and ``tables`` (see
-    :func:`_add_generic_table`) are additive, optional hooks used only by the weekly/monthly report
+    ``extra_sections`` and ``tables`` (see
+    :func:`_add_generic_table_body`) are additive, optional hooks used only by the weekly/monthly report
     builders — omitted, this reproduces the original daily-report layout exactly.
+
+    ``include_toc`` (F10): the daily report never shows one (``False``, the default) rather than a
+    ``TOC`` field that displays nothing until the reader manually updates fields in Word; the
+    weekly/monthly builders pass ``True`` to get a real, immediately-clickable bookmark-based TOC
+    (:func:`_add_real_toc`) instead.
     """
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []
     generated_at = generated_at or dt.datetime.now(dt.UTC)
+    resolved_title = title_text or TITLE_TEXT
+
+    open_points = list(draft.open_points_he or [])
+    open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
+
+    headings = _planned_headings(draft, events, deep_search, open_points, extra_sections, tables)
+    bookmark_names = [f"eoa_toc_{i}" for i in range(len(headings))]
+    bookmarks = iter(bookmark_names)
+    toc_entries = list(zip(headings, bookmark_names, strict=True))
+
+    def _heading1(doc: DocxDocument, text: str):
+        paragraph = add_mixed_paragraph(doc, text, style="Heading 1")
+        if include_toc:
+            name = next(bookmarks, None)
+            if name:
+                _add_bookmark(paragraph, name)
+        return paragraph
 
     doc = docx.Document()
     _configure_document_defaults(doc)
+    _add_header(doc, resolved_title, period_end)
     _add_footer_page_number(doc)
 
-    add_mixed_paragraph(doc, title_text or TITLE_TEXT, style="Title")
+    add_mixed_paragraph(doc, resolved_title, style="Title")
     add_mixed_paragraph(doc, hebrew_date_str(period_end), style="Subtitle")
     add_mixed_paragraph(
         doc,
@@ -563,44 +722,54 @@ def build_docx(
             run.font.bold = True
     doc.add_page_break()
 
-    _add_toc_field(doc)
-    doc.add_page_break()
+    if include_toc:
+        _add_real_toc(doc, toc_entries)
+        doc.add_page_break()
 
-    add_mixed_paragraph(doc, "תקציר מנהלים", style="Heading 1")
+    _heading1(doc, "תקציר מנהלים")
     add_mixed_paragraph(doc, draft.exec_summary_he or "אין תקציר לתקופה זו.")
 
-    _add_extra_sections(doc, extra_sections, "after_summary")
+    for sec in extra_sections:
+        if (sec.get("position") or "after_summary") != "after_summary":
+            continue
+        _heading1(doc, sec.get("title_he") or "")
+        for para in _split_paragraphs(sec.get("body_he") or ""):
+            add_mixed_paragraph(doc, para)
 
     for section in draft.sections:
-        add_mixed_paragraph(doc, section.title_he, style="Heading 1")
+        _heading1(doc, section.title_he)
         for para in _split_paragraphs(section.prose_he):
             add_mixed_paragraph(doc, para)
 
     if events:
-        add_mixed_paragraph(doc, "טבלת אירועים עסקיים", style="Heading 1")
+        _heading1(doc, "טבלת אירועים עסקיים")
         _add_events_table(doc, events)
 
     if deep_search:
-        add_mixed_paragraph(doc, "חקירות עומק", style="Heading 1")
+        _heading1(doc, "חקירות עומק")
         _add_deep_search_section(doc, deep_search)
 
-    open_points = list(draft.open_points_he or [])
-    open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
     if open_points:
-        add_mixed_paragraph(doc, "נקודות פתוחות", style="Heading 1")
+        _heading1(doc, "נקודות פתוחות")
         for point in open_points:
             add_mixed_paragraph(doc, point, style="List Bullet")
 
     if draft.outlook_he:
-        add_mixed_paragraph(doc, "מבט קדימה", style="Heading 1")
+        _heading1(doc, "מבט קדימה")
         add_mixed_paragraph(doc, draft.outlook_he)
 
-    _add_extra_sections(doc, extra_sections, "after_outlook")
+    for sec in extra_sections:
+        if (sec.get("position") or "after_summary") != "after_outlook":
+            continue
+        _heading1(doc, sec.get("title_he") or "")
+        for para in _split_paragraphs(sec.get("body_he") or ""):
+            add_mixed_paragraph(doc, para)
 
     for tbl in tables or []:
-        _add_generic_table(doc, tbl.get("title_he") or "", tbl.get("headers") or [], tbl.get("rows") or [])
+        _heading1(doc, tbl.get("title_he") or "")
+        _add_generic_table_body(doc, tbl.get("headers") or [], tbl.get("rows") or [])
 
-    add_mixed_paragraph(doc, "נספח מקורות", style="Heading 1")
+    _heading1(doc, "נספח מקורות")
     _add_sources_appendix(doc, items)
 
     _flag_update_fields(doc)
@@ -655,6 +824,15 @@ def _extra_sections_md(lines: list[str], sections: list[dict[str, Any]], positio
         lines += [f"## {sec.get('title_he') or ''}", "", sec.get("body_he") or "", ""]
 
 
+def _md_cell(value: Any) -> str:
+    """A markdown table cell: a bare URL becomes a real ``[url](url)`` link (never a raw URL
+    string sitting in running text), per F10."""
+    if value is None:
+        return "—"
+    text = str(value)
+    return f"[{text}]({text})" if _looks_like_url(text) else text
+
+
 def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
     for tbl in tables:
         headers = tbl.get("headers") or []
@@ -665,7 +843,7 @@ def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
             "|" + "---|" * len(headers),
         ]
         for row in tbl.get("rows") or []:
-            lines.append("| " + " | ".join("—" if v is None else str(v) for v in row) + " |")
+            lines.append("| " + " | ".join(_md_cell(v) for v in row) + " |")
         lines.append("")
 
 
@@ -710,7 +888,7 @@ def render_markdown(
         ]
         for ev in events:
             n = ev.get("n")
-            src = f"[{n}]" if n is not None else (ev.get("source_name") or "—")
+            src = f"[{n}]" if n is not None else source_label(ev.get("source_name"), ev.get("item_url"))
             lines.append(
                 f"| {fmt_date(ev.get('date'))} "
                 f"| {_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—')} "
@@ -744,34 +922,80 @@ def render_markdown(
     lines += ["## נספח מקורות", "", "| # | כותרת | מקור | תאריך | קישור |", "|---|---|---|---|---|"]
     for it in sorted(items, key=lambda x: x.get("n") or 0):
         url = it.get("url") or ""
+        link = f"[{url}]({url})" if url else "—"
         lines.append(
-            f"| {it.get('n')} | {it.get('title') or '—'} | {it.get('source_name') or '—'} "
-            f"| {fmt_date(it.get('published_at'))} | [{url}]({url}) |"
+            f"| {it.get('n')} | {it.get('title') or '—'} | {source_label(it.get('source_name'), url)} "
+            f"| {fmt_date(it.get('published_at'))} | {link} |"
         )
     return "\n".join(lines) + "\n"
 
 
-def _extra_sections_html(parts: list[str], sections: list[dict[str, Any]], position: str) -> None:
+def _bidi_html(text: str) -> str:
+    """Escape ``text`` for HTML, wrapping every Latin/digit run in ``<bdi dir="ltr">`` so embedded
+    English names, numbers, and citation markers read correctly inside RTL Hebrew prose/headings —
+    the HTML analogue of ``docx_builder``'s own per-run bidi handling (:func:`split_runs`), per F10
+    ("HTML: proper dir=rtl, <bdi>/dir=ltr for URLs and Latin names")."""
+    parts = []
+    for cls, chunk in split_runs(text or ""):
+        escaped = html.escape(chunk)
+        parts.append(f'<bdi dir="ltr">{escaped}</bdi>' if cls == "other" else escaped)
+    return "".join(parts)
+
+
+def _html_link(url: str, text: str | None = None) -> str:
+    """A real ``<a href>`` for ``url``, its visible text wrapped LTR — never a raw URL sitting in
+    running Hebrew text."""
+    label = text if text is not None else url
+    return f'<a href="{html.escape(url)}"><bdi dir="ltr">{html.escape(label)}</bdi></a>'
+
+
+def _html_cell(value: Any) -> str:
+    if value is None:
+        return "—"
+    text = str(value)
+    return _html_link(text) if _looks_like_url(text) else _bidi_html(text)
+
+
+def _extra_sections_html(parts: list[str], sections: list[dict[str, Any]], position: str, h2) -> None:
     for sec in sections:
         if (sec.get("position") or "after_summary") != position:
             continue
-        parts.append(f"<h2>{html.escape(sec.get('title_he') or '')}</h2>")
-        parts.append(f"<p>{html.escape(sec.get('body_he') or '')}</p>")
+        parts.append(h2(sec.get("title_he") or ""))
+        parts.append(f"<p>{_bidi_html(sec.get('body_he') or '')}</p>")
 
 
-def _tables_html(parts: list[str], tables: list[dict[str, Any]]) -> None:
+def _tables_html(parts: list[str], tables: list[dict[str, Any]], h2) -> None:
     for tbl in tables:
         headers = tbl.get("headers") or []
-        parts.append(f"<h2>{html.escape(tbl.get('title_he') or '')}</h2>")
+        parts.append(h2(tbl.get("title_he") or ""))
         parts.append(
             "<table><thead><tr>"
             + "".join(f"<th>{html.escape(h)}</th>" for h in headers)
             + "</tr></thead><tbody>"
         )
         for row in tbl.get("rows") or []:
-            cells = "".join(f"<td>{html.escape('—' if v is None else str(v))}</td>" for v in row)
+            cells = "".join(f"<td>{_html_cell(v)}</td>" for v in row)
             parts.append(f"<tr>{cells}</tr>")
         parts.append("</tbody></table>")
+
+
+_EOA_HTML_STYLE = """
+.eoa-report{font-family:-apple-system,"Segoe UI",Arial,sans-serif;line-height:1.7;color:#1a1a1a;
+  background:#fff;max-width:920px;margin:0 auto;padding:1.5rem}
+.eoa-report h1{font-size:1.5rem;border-bottom:2px solid #10243e;padding-bottom:.4rem;color:#10243e}
+.eoa-report h2{font-size:1.15rem;margin-top:1.8rem;color:#10243e}
+.eoa-report p{margin:.5rem 0}
+.eoa-report table{width:100%;border-collapse:collapse;margin:.75rem 0 1.25rem;font-size:.9rem}
+.eoa-report th,.eoa-report td{border:1px solid #d0d5dd;padding:.4rem .6rem;text-align:right;vertical-align:top}
+.eoa-report th{background:#eef1f5}
+.eoa-report a{color:#1a56db}
+.eoa-report a.cite{text-decoration:none;font-size:.75em;vertical-align:super}
+.eoa-report .qa-warning{color:#b42318}
+.eoa-report .date{color:#555}
+.eoa-report nav.toc{background:#f8f9fb;border:1px solid #e2e5ea;border-radius:6px;padding:.25rem 1.25rem;margin:1rem 0}
+.eoa-report nav.toc ul{margin:.5rem 0;padding-inline-start:1.25rem}
+.eoa-report nav.toc li{margin:.15rem 0}
+"""
 
 
 def render_html(
@@ -786,43 +1010,74 @@ def render_html(
     title_text: str | None = None,
     extra_sections: list[dict[str, Any]] | None = None,
     tables: list[dict[str, Any]] | None = None,
+    include_toc: bool = False,
 ) -> str:
-    """Render the report as a standalone RTL HTML document (see :func:`build_docx` for the shared,
-    additive ``title_text``/``extra_sections``/``tables`` hooks)."""
+    """Render the report as a self-contained, standalone RTL HTML document — a full
+    ``<!doctype html>`` page with its own embedded stylesheet (scoped under the ``.eoa-report``
+    class so it stays inert if this markup is instead embedded as a fragment, e.g. the Morning
+    screen's ``ReportBody`` component), not just an inner ``<div>`` fragment (F10/U1: the file at
+    ``output/reports/*.html`` is also served and opened directly via the report's "html" download
+    link, where it must stand on its own). ``include_toc`` (see :func:`build_docx`) adds a simple
+    anchor-based table of contents; the daily report leaves it off.
+    """
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []
+    resolved_title = title_text or TITLE_TEXT
     item_by_n = {it.get("n"): it for it in items}
 
     def cite_links(text: str) -> str:
-        escaped = html.escape(text or "")
-
-        def repl(m: re.Match[str]) -> str:
+        raw = text or ""
+        out: list[str] = []
+        pos = 0
+        for m in _CITATION_RE.finditer(raw):
+            out.append(_bidi_html(raw[pos : m.start()]))
             n = int(m.group(1))
             target = "#src-" + str(n) if n in item_by_n else "#"
-            return f'<a href="{target}" class="cite">[{n}]</a>'
+            out.append(f'<a href="{target}" class="cite">[{n}]</a>')
+            pos = m.end()
+        out.append(_bidi_html(raw[pos:]))
+        return "".join(out)
 
-        return _CITATION_RE.sub(repl, escaped)
+    open_points = list(draft.open_points_he or [])
+    open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
 
-    parts = ['<div dir="rtl" lang="he">', f"<h1>{html.escape(title_text or TITLE_TEXT)}</h1>"]
+    headings = _planned_headings(draft, events, deep_search, open_points, extra_sections, tables)
+    heading_ids = [f"sec-{i}" for i in range(len(headings))]
+    id_iter = iter(heading_ids)
+
+    def h2(title: str) -> str:
+        hid = next(id_iter, None)
+        attr = f' id="{hid}"' if hid else ""
+        return f"<h2{attr}>{_bidi_html(title)}</h2>"
+
+    parts = [f"<h1>{_bidi_html(resolved_title)}</h1>"]
     if period_end is not None:
-        parts.append(f'<p class="date">{html.escape(hebrew_date_str(period_end))}</p>')
+        parts.append(f'<p class="date">{_bidi_html(hebrew_date_str(period_end))}</p>')
     warning = _qa_warning_line(qa)
     if warning:
         parts.append(f'<p class="qa-warning"><strong>{html.escape(warning)}</strong></p>')
 
-    parts.append("<h2>תקציר מנהלים</h2>")
+    if include_toc:
+        toc_items = "".join(
+            f'<li><a href="#{hid}">{_bidi_html(title)}</a></li>'
+            for title, hid in zip(headings, heading_ids, strict=True)
+            if title
+        )
+        parts.append(f'<nav class="toc"><h2>תוכן עניינים</h2><ul>{toc_items}</ul></nav>')
+
+    parts.append(h2("תקציר מנהלים"))
     parts.append(f"<p>{cite_links(draft.exec_summary_he or 'אין תקציר לתקופה זו.')}</p>")
 
-    _extra_sections_html(parts, extra_sections, "after_summary")
+    _extra_sections_html(parts, extra_sections, "after_summary", h2)
 
     for section in draft.sections:
-        parts.append(f"<h2>{html.escape(section.title_he)}</h2>")
+        parts.append(h2(section.title_he))
         for para in _split_paragraphs(section.prose_he):
             parts.append(f"<p>{cite_links(para)}</p>")
 
     if events:
-        parts.append("<h2>טבלת אירועים עסקיים</h2>")
+        parts.append(h2("טבלת אירועים עסקיים"))
         parts.append(
             "<table><thead><tr><th>תאריך</th><th>סוג</th><th>צדדים</th>"
             "<th>לקוח/תוכנית</th><th>סכום</th><th>מקור</th></tr></thead><tbody>"
@@ -832,14 +1087,14 @@ def render_html(
             src = (
                 f'<a href="#src-{n}" class="cite">[{n}]</a>'
                 if n is not None
-                else html.escape(ev.get("source_name") or "—")
+                else _bidi_html(source_label(ev.get("source_name"), ev.get("item_url")))
             )
             parts.append(
                 "<tr>"
                 f"<td>{html.escape(fmt_date(ev.get('date')))}</td>"
                 f"<td>{html.escape(_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—'))}</td>"
-                f"<td>{html.escape(', '.join(ev.get('parties') or []) or '—')}</td>"
-                f"<td>{html.escape(ev.get('customer') or ev.get('program') or '—')}</td>"
+                f"<td>{_bidi_html(', '.join(ev.get('parties') or []) or '—')}</td>"
+                f"<td>{_bidi_html(ev.get('customer') or ev.get('program') or '—')}</td>"
                 f"<td>{html.escape(fmt_amount(ev))}</td>"
                 f"<td>{src}</td>"
                 "</tr>"
@@ -847,47 +1102,61 @@ def render_html(
         parts.append("</tbody></table>")
 
     if deep_search:
-        parts.append("<h2>חקירות עומק</h2><ul>")
+        parts.append(h2("חקירות עומק"))
+        parts.append("<ul>")
         for entry in deep_search:
             heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
             outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
             parts.append(
-                f"<li><strong>{html.escape(heading)}</strong> — {html.escape(outcome)}: "
-                f"{html.escape(entry.get('answer_he', ''))}</li>"
+                f"<li><strong>{_bidi_html(heading)}</strong> — {html.escape(outcome)}: "
+                f"{_bidi_html(entry.get('answer_he', ''))}</li>"
             )
         parts.append("</ul>")
 
-    open_points = list(draft.open_points_he or [])
-    open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
     if open_points:
-        parts.append("<h2>נקודות פתוחות</h2><ul>")
-        parts += [f"<li>{html.escape(p)}</li>" for p in open_points]
+        parts.append(h2("נקודות פתוחות"))
+        parts.append("<ul>")
+        parts += [f"<li>{_bidi_html(p)}</li>" for p in open_points]
         parts.append("</ul>")
 
     if draft.outlook_he:
-        parts.append("<h2>מבט קדימה</h2>")
-        parts.append(f"<p>{html.escape(draft.outlook_he)}</p>")
+        parts.append(h2("מבט קדימה"))
+        parts.append(f"<p>{_bidi_html(draft.outlook_he)}</p>")
 
-    _extra_sections_html(parts, extra_sections, "after_outlook")
-    _tables_html(parts, tables or [])
+    _extra_sections_html(parts, extra_sections, "after_outlook", h2)
+    _tables_html(parts, tables or [], h2)
 
-    parts.append("<h2>נספח מקורות</h2>")
+    parts.append(h2("נספח מקורות"))
     parts.append(
         "<table><thead><tr><th>#</th><th>כותרת</th><th>מקור</th><th>תאריך</th>"
         "<th>קישור</th></tr></thead><tbody>"
     )
     for it in sorted(items, key=lambda x: x.get("n") or 0):
         url = it.get("url") or ""
-        link = f'<a href="{html.escape(url)}">{html.escape(url)}</a>' if url else "—"
+        link = _html_link(url) if url else "—"
         parts.append(
             f'<tr id="src-{it.get("n")}">'
             f"<td>{it.get('n')}</td>"
-            f"<td>{html.escape(it.get('title') or '—')}</td>"
-            f"<td>{html.escape(it.get('source_name') or '—')}</td>"
+            f"<td>{_bidi_html(it.get('title') or '—')}</td>"
+            f"<td>{_bidi_html(source_label(it.get('source_name'), url))}</td>"
             f"<td>{html.escape(fmt_date(it.get('published_at')))}</td>"
             f"<td>{link}</td>"
             "</tr>"
         )
     parts.append("</tbody></table>")
-    parts.append("</div>")
-    return "\n".join(parts)
+
+    body = "\n".join(parts)
+    return (
+        "<!doctype html>\n"
+        '<html lang="he" dir="rtl">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{html.escape(resolved_title)}</title>\n"
+        f"<style>{_EOA_HTML_STYLE}</style>\n"
+        "</head>\n"
+        "<body>\n"
+        f'<div class="eoa-report" dir="rtl" lang="he">\n{body}\n</div>\n'
+        "</body>\n"
+        "</html>\n"
+    )

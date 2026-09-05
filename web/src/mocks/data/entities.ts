@@ -1,6 +1,15 @@
 import type { EntitySummary } from "@/types/api";
 
-export const mockEntities: EntitySummary[] = [
+// U10/F15 (2026-09-05): `relevance`/`is_watchlist`/`mentions_7d`/`mentions_30d` are
+// synthesized at runtime in mockApi.ts (deterministic, derived from `item_count`)
+// rather than hand-authored per row here, so this fixture list doesn't need touching
+// every time a new EntitySummary field is added.
+export type MockEntitySeed = Omit<
+  EntitySummary,
+  "relevance" | "is_watchlist" | "mentions_7d" | "mentions_30d"
+>;
+
+export const mockEntities: MockEntitySeed[] = [
   {
     id: 1,
     name: "Elbit Systems",

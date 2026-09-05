@@ -10,7 +10,7 @@ import structlog
 from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.analysis import AnalyzeOut
+from eoa.llm.schemas.analysis import AnalyzeOut, EventOut
 from eoa.memory.relational import (
     get_items_for_stage,
     insert_event,
@@ -134,13 +134,40 @@ def _resolve_edge_kinds(names: list[str]) -> dict[str, str]:
         from eoa.db import connection
 
         with connection() as conn:
-            rows = conn.execute(
-                "SELECT name, kind FROM entities WHERE name = ANY(%s)", (names,)
-            ).fetchall()
+            rows = conn.execute("SELECT name, kind FROM entities WHERE name = ANY(%s)", (names,)).fetchall()
         existing = {r["name"]: r["kind"] for r in rows if r.get("kind")}
     except Exception as exc:
         log.debug("edge_kind_lookup_failed", error=str(exc)[:120])
     return {name: existing.get(name) or _heuristic_kind(name) for name in names}
+
+
+def _event_dedup_key(ev: EventOut) -> tuple[str, str, str, str]:
+    """Same normalised-identity key as ``eoa.report.daily._normalize_event_key`` (kept as a small,
+    local duplicate rather than an import, per this codebase's convention for report/pipeline
+    boundary helpers): a small local model frequently emits near-duplicate events for the same
+    underlying fact within a single item's ``events`` list (F9/F16)."""
+    parties_norm = tuple(sorted(p.strip().casefold() for p in (ev.parties or []) if p and p.strip()))
+    customer_norm = (ev.customer or "").strip().casefold()
+    program_norm = (ev.program or "").strip().casefold()
+    return (ev.kind, "|".join(parties_norm), customer_norm, program_norm)
+
+
+def _event_richness(ev: EventOut) -> int:
+    return sum(
+        1 for v in (ev.date, ev.amount_usd, ev.currency, ev.customer, ev.program) if v not in (None, "")
+    ) + len(ev.parties or [])
+
+
+def _dedup_events(events: list[EventOut]) -> list[EventOut]:
+    """Collapse events sharing :func:`_event_dedup_key` within a single item's extraction, keeping
+    the richest (most fields populated) one per group (F9/F16)."""
+    best: dict[tuple[str, str, str, str], EventOut] = {}
+    for ev in events:
+        key = _event_dedup_key(ev)
+        cur = best.get(key)
+        if cur is None or _event_richness(ev) > _event_richness(cur):
+            best[key] = ev
+    return list(best.values())
 
 
 def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
@@ -153,7 +180,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
         uncertainty_he=out.uncertainty_he or None,
     )
     n_events = 0
-    for ev in out.events:
+    for ev in _dedup_events(out.events):
         try:
             insert_event(
                 item_id=item["id"],
@@ -215,6 +242,18 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
             stats.done += 1
             stats.events += ne
             stats.edges += ng
+            # --- entity relevance scoring (F15) --------------------------------------
+            # Rescore every entity this item mentions now that its level/domain (set by
+            # earlier stages) and entities_mentioned (set by classify.py) are both final.
+            # Guarded, best-effort, one call per name -- never blocks/fails the item.
+            try:
+                from eoa.pipeline.entity_relevance import score_and_persist_entity
+
+                for name in it.get("entities_mentioned") or []:
+                    score_and_persist_entity(name)
+            except Exception as exc:
+                log.debug("entity_relevance_scoring_skipped", item_id=it["id"], error=str(exc)[:120])
+            # --- end entity relevance scoring ----------------------------------------
         except ResourceUnavailable:
             log.warning("analyze_deferred_resources", item_id=it["id"])
             break

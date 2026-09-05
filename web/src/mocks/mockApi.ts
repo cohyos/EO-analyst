@@ -2,6 +2,7 @@ import type {
   AskCitation,
   Conference,
   EntityDetail,
+  EntitySummary,
   EventRow,
   ForecastCard,
   GraphResponse,
@@ -11,6 +12,8 @@ import type {
   Job,
   JobState,
   Lesson,
+  LlmProvidersResponse,
+  LlmSettingsPutResponse,
   MorningResponse,
   ReportDetail,
   SettingsGetResponse,
@@ -21,7 +24,9 @@ import type {
   TriageLevel,
 } from "@/types/api";
 import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery, TendersQuery } from "@/api/types";
-import { mockEntities } from "./data/entities";
+import type { CountryGroup } from "@/types/api";
+import { normalizeCountryCode } from "@/lib/countries";
+import { mockEntities, type MockEntitySeed } from "./data/entities";
 import { findMockItem, mockItems } from "./data/items";
 import { findMockInvestigation, mockInvestigations } from "./data/investigations";
 import { mockReport } from "./data/reports";
@@ -41,6 +46,21 @@ function delay<T>(value: T, ms = 220): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms));
 }
 
+// U7a/U7c mock-mode mirror of `eoa.report.geography.items_by_country`.
+function groupItemsByCountry(rows: ItemCard[]): CountryGroup[] {
+  const buckets = new Map<string, CountryGroup>();
+  for (const it of rows) {
+    const code = normalizeCountryCode(it.geography);
+    const bucket = buckets.get(code) ?? { country: code, total: 0, red: 0, orange: 0, yellow: 0, archive: 0 };
+    bucket.total += 1;
+    if (it.level === "red" || it.level === "orange" || it.level === "yellow" || it.level === "archive") {
+      bucket[it.level] += 1;
+    }
+    buckets.set(code, bucket);
+  }
+  return [...buckets.values()].sort((a, b) => b.total - a.total);
+}
+
 // Mutable in-memory copies so feedback / answers / lessons persist for the
 // lifetime of the tab.
 const items = mockItems.map((it) => ({ ...it }));
@@ -48,8 +68,24 @@ const clarifications = mockClarifications.map((c) => ({ ...c }));
 const lessons = [...mockLessons];
 const jobs = [...mockJobs];
 const settingsStore = { ...mockSettingsYaml };
+// U8: mock-only in-memory mirror of `llm_providers.{interactive_default,allow_cloud}`.
+const llmSettingsStore = { interactive_default: "ollama", allow_cloud: true };
 let lessonId = lessons.length + 1;
 let investigateJobCounter = 9000;
+
+// U10/F15 (2026-09-05): deterministic, seed-derived relevance/watchlist/mention-count
+// fields so `mocks/data/entities.ts` doesn't need every fixture row hand-edited every
+// time an EntitySummary field is added (see MockEntitySeed's docstring there). Every
+// mock entity is a "known player" fixture, so all score at/above the 0.4 threshold.
+function toEntitySummary(seed: MockEntitySeed): EntitySummary {
+  return {
+    ...seed,
+    relevance: seed.kind === "government" ? 0.75 : Math.min(1, 0.5 + seed.item_count / 20),
+    is_watchlist: seed.item_count >= 5,
+    mentions_7d: Math.min(seed.item_count, Math.round(seed.item_count * 0.6)),
+    mentions_30d: seed.item_count,
+  };
+}
 
 function itemToEvents(item: ItemCard): EventRow[] {
   return [
@@ -93,6 +129,10 @@ export const mockApi: ApiClient = {
       const since = new Date(query.since).getTime();
       filtered = filtered.filter((it) => new Date(it.published_at).getTime() >= since);
     }
+    if (query.country?.length) {
+      const wanted = new Set(query.country.map((c) => c.toUpperCase()));
+      filtered = filtered.filter((it) => wanted.has(normalizeCountryCode(it.geography)));
+    }
     const sort = query.sort ?? "score";
     filtered = filtered.slice().sort((a, b) =>
       sort === "score"
@@ -105,7 +145,19 @@ export const mockApi: ApiClient = {
     return delay({
       total: filtered.length,
       items: filtered.slice(start, start + pageSize),
+      groups: query.group_by === "country" ? groupItemsByCountry(filtered) : undefined,
     });
+  },
+
+  getItemsByCountry: async (query) => {
+    let filtered = items.slice();
+    if (query.level?.length) filtered = filtered.filter((it) => query.level!.includes(it.level));
+    if (query.domain) filtered = filtered.filter((it) => it.domain === query.domain);
+    if (query.since) {
+      const since = new Date(query.since).getTime();
+      filtered = filtered.filter((it) => new Date(it.published_at).getTime() >= since);
+    }
+    return delay({ countries: groupItemsByCountry(filtered) });
   },
 
   getItem: async (id: number): Promise<ItemDetail> => {
@@ -145,22 +197,66 @@ export const mockApi: ApiClient = {
       );
     }
     if (query.kind) filtered = filtered.filter((e) => e.kind === query.kind);
-    return delay(filtered.slice(0, query.limit ?? 50));
+    if (query.country) filtered = filtered.filter((e) => e.country === query.country);
+    let withRelevance = filtered.map(toEntitySummary);
+    if (query.watchlist) withRelevance = withRelevance.filter((e) => e.is_watchlist);
+    if (!query.all) withRelevance = withRelevance.filter((e) => e.relevance >= 0.4);
+    const sort = query.sort ?? "last_seen";
+    withRelevance.sort((a, b) => {
+      if (sort === "name") return a.name.localeCompare(b.name);
+      if (sort === "mentions_7d") return b.mentions_7d - a.mentions_7d;
+      if (sort === "mentions_30d") return b.mentions_30d - a.mentions_30d;
+      return new Date(b.last_seen ?? 0).getTime() - new Date(a.last_seen ?? 0).getTime();
+    });
+    return delay(withRelevance.slice(0, query.limit ?? 50));
   },
 
   getEntity: async (id: number): Promise<EntityDetail> => {
     const entity = mockEntities.find((e) => e.id === id);
     if (!entity) throw new Error("not_found");
+    const summary = toEntitySummary(entity);
     const relatedItems = items.filter((it) => it.entities_mentioned.includes(entity.name));
+    const businessEvents = itemToEvents(relatedItems[0] ?? items[0]);
+    const edgeGroups = new Map<string, { entity_id: number; entity_name: string }[]>();
+    for (const e of mockGraph.edges) {
+      if (e.src !== id && e.dst !== id) continue;
+      const otherId = e.src === id ? e.dst : e.src;
+      const other = mockGraph.nodes.find((n) => n.id === otherId);
+      const list = edgeGroups.get(e.label) ?? [];
+      list.push({ entity_id: otherId, entity_name: other?.name ?? `ישות #${otherId}` });
+      edgeGroups.set(e.label, list);
+    }
+    const levelCounts: Record<string, number> = {};
+    for (const it of relatedItems) levelCounts[it.level] = (levelCounts[it.level] ?? 0) + 1;
     return delay({
-      ...entity,
+      ...summary,
       timeline: relatedItems.map((it) => ({
-        kind: "item" as const,
-        id: it.id,
-        title: it.title,
-        summary_he: it.summary_he,
-        occurred_at: it.published_at,
         item_id: it.id,
+        title: it.title,
+        url: it.url,
+        source_name: it.source_name,
+        published_at: it.published_at,
+        level: it.level,
+      })),
+      business_events: businessEvents.map((ev) => ({
+        id: ev.id,
+        item_id: ev.item_id,
+        kind: ev.kind,
+        date: ev.occurred_at,
+        amount_usd: null,
+        currency: null,
+        counterpart: null,
+        summary_he: ev.summary_he,
+      })),
+      kpis: {
+        mentions_7d: summary.mentions_7d,
+        mentions_30d: summary.mentions_30d,
+        events_count: businessEvents.length,
+        related_items_by_level: levelCounts,
+      },
+      edge_groups: Array.from(edgeGroups.entries()).map(([label, counterparts]) => ({
+        label,
+        counterparts,
       })),
       neighbors: mockGraph.edges
         .filter((e) => e.src === id || e.dst === id)
@@ -216,6 +312,14 @@ export const mockApi: ApiClient = {
     return delay(inv, 300);
   },
   postInvestigationStop: async (_jobId: string) => delay(undefined),
+  postInvestigationNew: async (_body) => {
+    investigateJobCounter += 1;
+    return delay({ job_id: `inv-${investigateJobCounter}` }, 300);
+  },
+  postInvestigationExpand: async (_jobId: string) => {
+    investigateJobCounter += 1;
+    return delay({ job_id: `inv-${investigateJobCounter}` }, 300);
+  },
 
   askStream: (body, handlers) => {
     let cancelled = false;
@@ -236,6 +340,8 @@ export const mockApi: ApiClient = {
     ];
     const words = answer.split(" ");
     let i = 0;
+    const [kind, model] = (body.provider ?? "ollama").split(":");
+    const mockModel = model || (kind === "ollama" ? "DictaLM 3 12B" : "default");
     const tick = () => {
       if (cancelled) return;
       if (i >= words.length) {
@@ -247,6 +353,7 @@ export const mockApi: ApiClient = {
       i += 1;
       setTimeout(tick, 35);
     };
+    handlers.onMeta?.(kind || "ollama", mockModel);
     setTimeout(tick, 150);
     return () => {
       cancelled = true;
@@ -370,6 +477,41 @@ export const mockApi: ApiClient = {
     }
     settingsStore[name] = yaml;
     return delay({ ok: true, errors: [] }, 300);
+  },
+
+  getLlmProviders: async (): Promise<LlmProvidersResponse> =>
+    delay({
+      allow_cloud: llmSettingsStore.allow_cloud,
+      interactive_default: llmSettingsStore.interactive_default,
+      providers: [
+        { id: "ollama", label: "מקומי (Ollama)", kind: "local", available: true, models: ["resident", "light"] },
+        {
+          id: "agy",
+          label: "Gemini (Antigravity CLI)",
+          kind: "cloud",
+          available: llmSettingsStore.allow_cloud,
+          models: ["gemini-3.5-flash", "gemini-3.1-pro-preview"],
+        },
+        {
+          id: "claude",
+          label: "Claude (Claude Code CLI)",
+          kind: "cloud",
+          available: llmSettingsStore.allow_cloud,
+          models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+        },
+        {
+          id: "codex",
+          label: "Codex (Codex CLI)",
+          kind: "cloud",
+          available: llmSettingsStore.allow_cloud,
+          models: ["default"],
+        },
+      ],
+    }),
+  putLlmSettings: async (body): Promise<LlmSettingsPutResponse> => {
+    if (body.interactive_default !== undefined) llmSettingsStore.interactive_default = body.interactive_default;
+    if (body.allow_cloud !== undefined) llmSettingsStore.allow_cloud = body.allow_cloud;
+    return delay({ ok: true, errors: [], revision: String(Date.now()) }, 200);
   },
 };
 

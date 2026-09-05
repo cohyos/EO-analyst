@@ -78,7 +78,15 @@ class TriageOut(BaseModel):
     reason_he: str = Field(max_length=400, description="נימוק קצר בעברית, עד 2 משפטים")
     needs_deep_search: bool = False
     deep_search_question: str = Field(
-        default="", description="What exactly should the investigation establish"
+        default="",
+        description=(
+            "Self-contained Hebrew research question the investigation should answer. Must name "
+            "the specific entities/systems/programs involved and state what is unknown -- never a "
+            "bare reference like 'the article' with no carried context."
+        ),
+    )
+    deep_search_seed_en: str = Field(
+        default="", description="4-8 word English search-seed phrase (entity/system names, program terms)"
     )
 
 
@@ -95,7 +103,14 @@ class EventOut(BaseModel):
         "other",
     ]
     title: str
-    date: str | None = Field(default=None, description="ISO date if stated")
+    date: str | None = Field(
+        default=None,
+        description=(
+            "Event date in ISO format if the source states one explicitly, or can be derived from "
+            "the item's published date for a relative-day phrase (today/yesterday); null if the "
+            "date cannot be determined at all — never guess"
+        ),
+    )
     amount_usd: float | None = None
     currency: str | None = None
     parties: list[str] = Field(default_factory=list)
@@ -196,7 +211,12 @@ class ReportSection(BaseModel):
 class DailyReportDraft(BaseModel):
     """Report writer output. [n] refer to the numbered item list given in the prompt."""
 
-    exec_summary_he: str = Field(description="עד ~200 מילים: מה קרה, מה זה אומר, מה דורש תשומת לב, עם [n]")
+    exec_summary_he: str = Field(
+        description=(
+            "3-5 משפטים בלבד, המסכמים ומקשרים בין ממצאי הסעיפים (מה השתנה, למה זה חשוב, מה לעקוב "
+            "אחריו), עם [n]; אסור להעתיק משפט כלשונו מגוף אחד הסעיפים"
+        )
+    )
     sections: list[ReportSection]
     outlook_he: str = Field(default="", description="מבט קדימה קצר")
     open_points_he: list[str] = Field(default_factory=list, description="נקודות פתוחות להכרעת המשתמש")

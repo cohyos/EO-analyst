@@ -11,9 +11,12 @@ import type {
   InvestigationSummary,
   ItemCard,
   ItemDetail,
+  ItemsByCountryResponse,
   ItemsResponse,
   Job,
   Lesson,
+  LlmProvidersResponse,
+  LlmSettingsPutResponse,
   MorningResponse,
   ReportDetail,
   ReportSummary,
@@ -31,14 +34,29 @@ export interface ItemsQuery {
   domain?: string;
   since?: string;
   q?: string;
+  /** U7b: one or more ISO-2/region codes (e.g. `["US","IL"]`) — comma-joined on the wire. */
+  country?: string[];
+  /** U7a: request the additive `groups` aggregation on the response. */
+  group_by?: "country";
   page?: number;
   page_size?: number;
   sort?: "score" | "published_at";
 }
 
+export interface ItemsByCountryQuery {
+  level?: TriageLevel[];
+  domain?: string;
+  since?: string;
+}
+
 export interface EntitiesQuery {
   q?: string;
   kind?: string;
+  country?: string;
+  watchlist?: boolean;
+  /** "הצג הכל" — bypass the backend's default relevance >= 0.4 filter (F15). */
+  all?: boolean;
+  sort?: "last_seen" | "mentions_7d" | "mentions_30d" | "name";
   limit?: number;
 }
 
@@ -64,6 +82,7 @@ export interface ApiClient {
   getMorning(): Promise<MorningResponse>;
 
   getItems(query: ItemsQuery): Promise<ItemsResponse>;
+  getItemsByCountry(query: ItemsByCountryQuery): Promise<ItemsByCountryResponse>;
   getItem(id: number): Promise<ItemDetail>;
   postItemFeedback(
     id: number,
@@ -82,16 +101,29 @@ export interface ApiClient {
   getInvestigations(limit?: number): Promise<InvestigationSummary[]>;
   getInvestigation(jobId: string): Promise<InvestigationDetail>;
   postInvestigationStop(jobId: string): Promise<void>;
+  /** U12 "חקירה חדשה": start a free-standing investigation from a typed question. */
+  postInvestigationNew(body: { question: string; item_id?: number | null }): Promise<{ job_id: string }>;
+  /** U12 "הרחב חקירה (תקציב נוסף)": re-run with double budget + prior findings as context. */
+  postInvestigationExpand(jobId: string): Promise<{ job_id: string }>;
 
   askStream(
     body: AskRequest,
     handlers: {
       onToken: (text: string) => void;
       onCitations: (items: AskCitation[]) => void;
+      /** U8: provider/model that will answer — sent once, right after citations. */
+      onMeta?: (provider: string, model: string) => void;
       onDone: () => void;
       onError: (err: Error) => void;
     },
   ): () => void; // returns an abort function
+
+  /** U8: local Ollama vs. cloud CLI (agy/claude/codex) — availability, models, current default. */
+  getLlmProviders(): Promise<LlmProvidersResponse>;
+  putLlmSettings(body: {
+    interactive_default?: string;
+    allow_cloud?: boolean;
+  }): Promise<LlmSettingsPutResponse>;
 
   getConferences(from?: string, to?: string): Promise<Conference[]>;
   getConferencesIcalUrl(): string;
