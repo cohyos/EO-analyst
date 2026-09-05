@@ -108,6 +108,60 @@ def test_items_list(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None
     assert captured["level"] == "red,orange"
 
 
+def test_items_list_group_by_country_adds_groups_field(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """U7a: `group_by=country` is additive -- omitted entirely unless requested."""
+    from eoa.api import services
+
+    monkeypatch.setattr(services, "list_items", lambda **kwargs: (0, []))
+    monkeypatch.setattr(
+        services,
+        "items_by_country_groups",
+        lambda **kwargs: [{"country": "US", "total": 2, "red": 1, "orange": 1, "yellow": 0, "archive": 0}],
+    )
+
+    r = client.get("/api/items", params={"page": 1, "page_size": 50})
+    assert r.status_code == 200
+    assert "groups" not in r.json()
+
+    r = client.get("/api/items", params={"group_by": "country"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["groups"] == [{"country": "US", "total": 2, "red": 1, "orange": 1, "yellow": 0, "archive": 0}]
+
+
+def test_items_list_country_filter_passed_through(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from eoa.api import services
+
+    captured: dict = {}
+
+    def fake_list_items(**kwargs):
+        captured.update(kwargs)
+        return 0, []
+
+    monkeypatch.setattr(services, "list_items", fake_list_items)
+    r = client.get("/api/items", params={"country": "US,IL"})
+    assert r.status_code == 200
+    assert captured["country"] == "US,IL"
+
+
+def test_items_by_country_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """U7c: `GET /api/items/by-country` -- must route here, not to
+    `GET /api/items/{item_id}` (the literal "by-country" segment must not be
+    parsed as an item id -- regression guard for route declaration order)."""
+    from eoa.api import services
+
+    monkeypatch.setattr(
+        services,
+        "items_by_country_groups",
+        lambda **kwargs: [{"country": "IL", "total": 3, "red": 1, "orange": 1, "yellow": 1, "archive": 0}],
+    )
+    r = client.get("/api/items/by-country", params={"level": "red,orange"})
+    assert r.status_code == 200
+    assert r.json() == {
+        "countries": [{"country": "IL", "total": 3, "red": 1, "orange": 1, "yellow": 1, "archive": 0}]
+    }
+
+
 def test_item_feedback(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from eoa.api import services
 

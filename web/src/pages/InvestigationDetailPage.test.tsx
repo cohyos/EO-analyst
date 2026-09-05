@@ -7,12 +7,14 @@ import type { InvestigationDetail, InvestigationLogLine } from "@/types/api";
 const getInvestigation = vi.fn();
 const postInvestigationStop = vi.fn();
 const postItemInvestigate = vi.fn();
+const postInvestigationExpand = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
     getInvestigation: (...args: unknown[]) => getInvestigation(...args),
     postInvestigationStop: (...args: unknown[]) => postInvestigationStop(...args),
     postItemInvestigate: (...args: unknown[]) => postItemInvestigate(...args),
+    postInvestigationExpand: (...args: unknown[]) => postInvestigationExpand(...args),
   },
 }));
 
@@ -68,6 +70,7 @@ beforeEach(() => {
   getInvestigation.mockReset();
   postInvestigationStop.mockReset();
   postItemInvestigate.mockReset();
+  postInvestigationExpand.mockReset();
   useInvestigationSocketMock.mockReset();
   getInvestigation.mockResolvedValue(baseDetail());
   useInvestigationSocketMock.mockReturnValue({ liveLines: [], connected: true });
@@ -134,5 +137,64 @@ describe("InvestigationDetailPage live log auto-scroll", () => {
     await screen.findByTestId("investigation-log");
     fireEvent.click(screen.getByText("עצור"));
     await waitFor(() => expect(postInvestigationStop).toHaveBeenCalledWith("10"));
+  });
+});
+
+// U12 (docs/REVIEW_2026-09-05.md): the old "המשך חקירה" button silently re-ran the identical
+// question with no explanation; it is now "הרחב חקירה (תקציב נוסף)" and calls the dedicated
+// expand endpoint instead of re-triggering a plain item investigation from scratch.
+describe("InvestigationDetailPage expand ('הרחב חקירה')", () => {
+  it("shows 'הרחב חקירה (תקציב נוסף)' instead of the old 'המשך חקירה' once the investigation is done", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      state: "not_found",
+      answer: { answer_he: "לא נמצא", sources: [], outcome: "not_found", stopped_reason: "not_found" },
+    });
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.getByText("הרחב חקירה (תקציב נוסף)")).toBeInTheDocument();
+    expect(screen.queryByText("המשך חקירה")).not.toBeInTheDocument();
+  });
+
+  it("calls postInvestigationExpand (not postItemInvestigate) and navigates to the new job", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      state: "stopped",
+      answer: { answer_he: "נעצר", sources: [], outcome: "not_found", stopped_reason: "stopped_budget" },
+    });
+    postInvestigationExpand.mockResolvedValue({ job_id: "99" });
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    fireEvent.click(screen.getByText("הרחב חקירה (תקציב נוסף)"));
+    await waitFor(() => expect(postInvestigationExpand).toHaveBeenCalledWith("10"));
+    expect(postItemInvestigate).not.toHaveBeenCalled();
+  });
+
+  it("shows a human Hebrew outcome chip instead of the raw outcome string", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      state: "stopped",
+      answer: {
+        answer_he: "נעצר",
+        sources: [],
+        outcome: "not_found",
+        stopped_reason: "stopped_budget",
+        queries_used: 15,
+        max_queries: 15,
+        pages_read: 30,
+        max_pages: 30,
+      },
+    });
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.getByText("נעצר בגלל תקציב")).toBeInTheDocument();
+    expect(screen.getByText(/15\/15 שאילתות/)).toBeInTheDocument();
+  });
+
+  it("shows a 'רץ עכשיו' badge while running instead of an outcome chip", async () => {
+    getInvestigation.mockResolvedValue({ ...baseDetail(), state: "running", answer: null });
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.getByText("רץ עכשיו")).toBeInTheDocument();
   });
 });

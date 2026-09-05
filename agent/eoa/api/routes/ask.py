@@ -24,6 +24,7 @@ class AskRequest(BaseModel):
     context_item_ids: list[int] = []
     context_entity_ids: list[int] = []
     history: list[dict[str, str]] = []
+    provider: str | None = None  # U8: "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
 
 
 def _sse(event: dict) -> str:
@@ -39,11 +40,17 @@ async def ask(body: AskRequest) -> StreamingResponse:
             )
             messages, citations = services.ask_build_messages(body.question, body.history, retrieved)
             yield _sse({"type": "citations", "items": citations})
+            # U8: tell the UI up front which provider/model will answer (badge chip), before
+            # the (possibly slow, for a cloud CLI) call even starts.
+            provider_kind, provider_model = ollama_client.resolve_provider_info(body.provider)
+            yield _sse({"type": "meta", "provider": provider_kind, "model": provider_model})
             # `chat_stream` is a synchronous generator over blocking HTTP reads; this is a
             # local, single-user deployment (see docs/CONVENTIONS.md), so driving it directly
             # inside the async generator (rather than off-loading to a thread) is an accepted
             # trade-off -- it blocks the event loop only for the duration of this one request.
-            for chunk in ollama_client.chat_stream("resident", messages, task="react", interactive=True):
+            for chunk in ollama_client.chat_stream(
+                "resident", messages, task="react", interactive=True, provider=body.provider
+            ):
                 yield _sse({"type": "token", "text": chunk})
         except Exception as exc:
             log.warning("ask.stream_failed", error=str(exc))

@@ -9,6 +9,9 @@ export interface ChatMessage {
   content: string;
   citations: AskCitation[];
   streaming?: boolean;
+  /** U8: provider/model that answered this message (assistant messages only). */
+  provider?: string;
+  providerModel?: string;
 }
 
 let idCounter = 0;
@@ -17,12 +20,35 @@ function nextId(): string {
   return `msg-${idCounter}`;
 }
 
+const PROVIDER_STORAGE_KEY = "eoa.chat.provider";
+
+function loadStoredProvider(): string | null {
+  try {
+    return localStorage.getItem(PROVIDER_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 export function useAskChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // U8: null means "use the server default" (llm_providers.interactive_default) — the picker
+  // shows that as its own option rather than guessing a value here.
+  const [provider, setProviderState] = useState<string | null>(loadStoredProvider);
   const abortRef = useRef<(() => void) | null>(null);
   const chatContext = useUiStore((s) => s.chatContext);
+
+  const setProvider = useCallback((next: string | null) => {
+    setProviderState(next);
+    try {
+      if (next) localStorage.setItem(PROVIDER_STORAGE_KEY, next);
+      else localStorage.removeItem(PROVIDER_STORAGE_KEY);
+    } catch {
+      // best-effort — a private/blocked storage just means the choice isn't remembered
+    }
+  }, []);
 
   const send = useCallback(
     (question: string) => {
@@ -62,6 +88,7 @@ export function useAskChat() {
           context_item_ids: contextItemIds,
           context_entity_ids: contextEntityIds,
           history,
+          provider,
         },
         {
           onToken: (text) => {
@@ -74,6 +101,13 @@ export function useAskChat() {
           onCitations: (items) => {
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantId ? { ...m, citations: items } : m)),
+            );
+          },
+          onMeta: (providerKind, providerModel) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, provider: providerKind, providerModel } : m,
+              ),
             );
           },
           onDone: () => {
@@ -93,7 +127,7 @@ export function useAskChat() {
       );
       abortRef.current = abort;
     },
-    [messages, isStreaming, chatContext],
+    [messages, isStreaming, chatContext, provider],
   );
 
   const stop = useCallback(() => {
@@ -106,5 +140,5 @@ export function useAskChat() {
     setError(null);
   }, []);
 
-  return { messages, isStreaming, error, send, stop, reset };
+  return { messages, isStreaming, error, send, stop, reset, provider, setProvider };
 }

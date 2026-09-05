@@ -1,11 +1,12 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { Send, Square, X } from "lucide-react";
+import { Cloud, Send, Square, X } from "lucide-react";
 import type { ChatMessage } from "@/hooks/useAskChat";
 import { CitationText } from "@/components/CitationText";
 import { EmptyState } from "@/components/states";
 import { useUiStore } from "@/store/uiStore";
 import { cn } from "@/lib/cn";
+import { ModelPicker } from "./ModelPicker";
 
 export function ChatThread({
   messages,
@@ -14,6 +15,8 @@ export function ChatThread({
   onSend,
   onStop,
   compact,
+  provider = null,
+  onProviderChange,
 }: {
   messages: ChatMessage[];
   isStreaming: boolean;
@@ -21,6 +24,9 @@ export function ChatThread({
   onSend: (question: string) => void;
   onStop: () => void;
   compact?: boolean;
+  /** U8: selected provider ("" / null = server default); omit both props to hide the picker. */
+  provider?: string | null;
+  onProviderChange?: (next: string | null) => void;
 }) {
   const [draft, setDraft] = useState("");
   const navigate = useNavigate();
@@ -86,6 +92,15 @@ export function ChatThread({
               {m.streaming && (
                 <span className="ms-1 inline-block h-3 w-1 animate-pulse bg-accent align-middle" />
               )}
+              {m.role === "assistant" && m.provider && (m.content || !m.streaming) && (
+                <div className="mt-1.5 flex items-center gap-1 text-[10px] text-fg-dim">
+                  {m.provider !== "ollama" && <Cloud size={10} aria-hidden="true" />}
+                  <span>
+                    {m.provider === "ollama" ? "מקומי" : "ענן"}
+                    {m.providerModel ? ` · ${m.providerModel}` : ""}
+                  </span>
+                </div>
+              )}
             </div>
           ))
         )}
@@ -96,7 +111,12 @@ export function ChatThread({
         )}
       </div>
 
-      <form onSubmit={handleSubmit} className="flex items-center gap-2 border-t border-border p-2">
+      {onProviderChange && (
+        <div className="flex items-center justify-end border-t border-border px-2 pt-2">
+          <ModelPicker value={provider} onChange={onProviderChange} compact={compact} />
+        </div>
+      )}
+      <form onSubmit={handleSubmit} className={cn("flex items-center gap-2 p-2", !onProviderChange && "border-t border-border")}>
         <input
           type="text"
           value={draft}

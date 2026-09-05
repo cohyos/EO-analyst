@@ -115,6 +115,17 @@ class Budget:
         return f"queries {self.queries}/{self.max_queries}, pages {self.pages}/{self.max_pages}, {left // 60} min left"
 
 
+#: U11/F17/F18 (docs/REVIEW_2026-09-05.md): the persistence protocol requires this many queries
+#: and page reads before the model is allowed to `finish` with `not_found` -- unless the search
+#: turned up literally zero hits, in which case there is nothing more to read and an immediate
+#: not_found is honest, not lazy.
+MIN_QUERIES_BEFORE_NOT_FOUND = 3
+MIN_PAGES_BEFORE_NOT_FOUND = 2
+#: F18: a `not_found` outcome asserting high confidence is meaningless -- confidence measures how
+#: sure the model is of a *finding*, and there is no finding to be sure of.
+NOT_FOUND_MAX_CONFIDENCE = 0.3
+
+
 @dataclass
 class Investigation:
     job_id: int | None
@@ -127,6 +138,14 @@ class Investigation:
     attempted_urls: list[str] = field(default_factory=list)
     hits_seen: dict[str, SearchHit] = field(default_factory=dict)
     stop_requested: bool = False
+    # U11/F17 (docs/REVIEW_2026-09-05.md): budget/outcome accounting exposed to the API/UI so an
+    # investigation's card can show "x/y queries", "x/y pages" and *why* it stopped, instead of a
+    # single opaque outcome string.
+    queries_used: int = 0
+    max_queries: int = 0
+    pages_used: int = 0
+    max_pages: int = 0
+    stopped_reason: str = "not_found"
 
 
 class StopRequested(Exception):
@@ -365,6 +384,47 @@ def plan_queries(question: str, round_no: int, langs: list[str], context_he: str
         return [{"lang": lang, "query": question} for lang in langs[:2]]
 
 
+def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
+    """Settle `inv.result`/`inv.outcome` and the budget-accounting fields once the loop stops,
+    whether by a model `finish` call or by running out of rounds/budget.
+
+    docs/REVIEW_2026-09-05.md U11/F17/F18:
+      - a missing result becomes an honest, low-confidence `not_found` (never invents an answer).
+      - a `not_found` outcome is refined into `stopped_budget`/`stopped_timeout` (ran out of
+        budget mid-investigation), `insufficient_context` (search returned zero hits -- nothing
+        to work with at all), or a plain `not_found` (searched thoroughly, genuinely nothing
+        there); any other outcome (`found`/`partial`) is kept as the model reported it.
+      - a `not_found` outcome can never claim confidence above :data:`NOT_FOUND_MAX_CONFIDENCE`.
+      - `queries_used`/`max_queries`/`pages_used`/`max_pages`/`stopped_reason` are populated for
+        the API/UI (job result), which previously had no way to show *why* an investigation ended.
+    """
+    if inv.result is None:
+        inv.result = InvestigationOut(
+            outcome="not_found",
+            answer_he="לא נמצא מידע מספק במסגרת התקציב.",
+            confidence=0.0,
+            sources=list(inv.read_urls),
+            what_was_tried_he=f"{budget.queries} שאילתות, {budget.pages} דפים, {inv.rounds_done} סבבים.",
+        )
+    if inv.result.outcome == "not_found" and inv.result.confidence > NOT_FOUND_MAX_CONFIDENCE:
+        inv.result.confidence = NOT_FOUND_MAX_CONFIDENCE
+
+    if inv.result.outcome != "not_found":
+        inv.outcome = inv.result.outcome
+    elif budget.exhausted:
+        inv.outcome = budget.exhausted
+    elif not inv.hits_seen:
+        inv.outcome = "insufficient_context"
+    else:
+        inv.outcome = "not_found"
+
+    inv.queries_used = budget.queries
+    inv.max_queries = budget.max_queries
+    inv.pages_used = budget.pages
+    inv.max_pages = budget.max_pages
+    inv.stopped_reason = inv.outcome
+
+
 # ----------------------------------------------------------------------------- main loop
 def investigate(
     question: str,
@@ -374,14 +434,26 @@ def investigate(
     context_he: str = "",
     langs: list[str] | None = None,
     max_rounds: int = 4,
+    budget_multiplier: float = 1.0,
+    prior_findings_he: str = "",
 ) -> Investigation:
-    """Run the persistence protocol; returns an Investigation with ``result`` (never invents)."""
+    """Run the persistence protocol; returns an Investigation with ``result`` (never invents).
+
+    ``budget_multiplier``/``prior_findings_he`` back U12's "הרחב חקירה" (expand investigation):
+    a re-run of a `not_found`/`stopped_budget` investigation with a larger budget and the prior
+    attempt's findings folded into the context, instead of a plain re-run of the same question.
+    """
     cfg = settings().deep_search
     inv = Investigation(job_id=job_id, item_id=item_id, question=question)
+    if prior_findings_he:
+        context_he = (context_he + "\n\nממצאי החקירה הקודמת (להרחבה, לא לחזרה):\n" + prior_findings_he).strip()
+    max_queries = max(cfg.max_queries, round(cfg.max_queries * budget_multiplier))
+    max_pages = max(cfg.max_pages, round(cfg.max_pages * budget_multiplier))
+    timeout_min = max(cfg.per_investigation_timeout_min, round(cfg.per_investigation_timeout_min * budget_multiplier))
     budget = Budget(
-        cfg.max_queries,
-        cfg.max_pages,
-        time.monotonic() + cfg.per_investigation_timeout_min * 60,
+        max_queries,
+        max_pages,
+        time.monotonic() + timeout_min * 60,
         cfg.confidence_stop,
     )
     primary = langs or cfg.langs_primary
@@ -439,18 +511,7 @@ def investigate(
         )
         raise
 
-    if inv.result is None:
-        inv.result = InvestigationOut(
-            outcome="not_found",
-            answer_he="לא נמצא מידע מספק במסגרת התקציב.",
-            confidence=0.0,
-            sources=list(inv.read_urls),
-            what_was_tried_he=f"{budget.queries} שאילתות, {budget.pages} דפים, {inv.rounds_done} סבבים.",
-        )
-    # a completed `finish` keeps its own outcome even if it consumed the last unit of budget
-    inv.outcome = (
-        inv.result.outcome if inv.result.outcome != "not_found" else (budget.exhausted or "not_found")
-    )
+    _finalize_outcome(inv, budget)
     _log(
         inv,
         inv.rounds_done,
@@ -460,7 +521,7 @@ def investigate(
         results_n=len(inv.hits_seen),
         pages_read=budget.pages,
         outcome=inv.outcome
-        if inv.outcome in {"found", "partial", "not_found", "stopped_budget", "stopped_timeout"}
+        if inv.outcome in {"found", "partial", "not_found", "stopped_budget", "stopped_timeout", "insufficient_context"}
         else "partial",
         notes=inv.result.answer_he[:500],
     )
@@ -525,6 +586,26 @@ def _act(
                     # rigor rule (FR-4.4): a confident answer must rest on at least one page actually read
                     out = json.dumps(
                         {"error": "read at least one source page (read) before finishing with found/partial"}
+                    )
+                    transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
+                    continue
+                if (
+                    str(args.get("outcome")) == "not_found"
+                    and inv.hits_seen  # zero hits at all -> nothing left to search/read, honest to stop now
+                    and not budget.exhausted
+                    and (budget.queries < MIN_QUERIES_BEFORE_NOT_FOUND or budget.pages < MIN_PAGES_BEFORE_NOT_FOUND)
+                ):
+                    # U11/F17 rigor rule: don't accept a lazy not_found before the persistence
+                    # protocol's minimum search effort has actually been spent.
+                    out = json.dumps(
+                        {
+                            "error": (
+                                f"not_found requires at least {MIN_QUERIES_BEFORE_NOT_FOUND} queries and "
+                                f"{MIN_PAGES_BEFORE_NOT_FOUND} page reads first (currently "
+                                f"{budget.queries} queries, {budget.pages} pages) -- search more or read "
+                                "one of the hits already found before giving up."
+                            )
+                        }
                     )
                     transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
                     continue

@@ -123,17 +123,24 @@ def _run_stage(rs: RunState, stage: str, fn: Callable[[], Any], *, mandatory: bo
         return out
     except ResourceUnavailable as exc:
         rs.stats[stage] = {"deferred": str(exc)[:200], "minutes": round((time.monotonic() - t0) / 60, 1)}
-        _hb(rs, "deferred", stage=stage, error=str(exc)[:200])
+        _hb(rs, "deferred", stage=stage, error=str(exc)[:200], minutes=rs.stats[stage]["minutes"])
         log.warning("stage_deferred", stage=stage, error=str(exc))
         return None
     except DeadlineExceeded:
-        rs.stats[stage] = {"partial": "deadline"}
-        _hb(rs, "deadline", stage=stage)
+        rs.stats[stage] = {"partial": "deadline", "minutes": round((time.monotonic() - t0) / 60, 1)}
+        _hb(rs, "deadline", stage=stage, minutes=rs.stats[stage]["minutes"])
         return None
     except Exception as exc:
         rs.failures[stage] = rs.failures.get(stage, 0) + 1
-        rs.stats[stage] = {"error": str(exc)[:300]}
-        _hb(rs, "error", stage=stage, error=str(exc)[:300], trace=traceback.format_exc()[-1500:])
+        rs.stats[stage] = {"error": str(exc)[:300], "minutes": round((time.monotonic() - t0) / 60, 1)}
+        _hb(
+            rs,
+            "error",
+            stage=stage,
+            error=str(exc)[:300],
+            minutes=rs.stats[stage]["minutes"],
+            trace=traceback.format_exc()[-1500:],
+        )
         log.error("stage_failed", stage=stage, error=str(exc))
         if rs.failures[stage] >= 3:
             ntfy.failure(stage, f"{exc}"[:300])

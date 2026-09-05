@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pause, Square } from "lucide-react";
 import { api } from "@/api";
@@ -7,10 +7,13 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { CitationText } from "@/components/CitationText";
 import { useInvestigationSocket } from "@/hooks/useInvestigationSocket";
 import { formatDateTime } from "@/lib/time";
+import { outcomeLabel, outcomeTone } from "@/lib/investigations";
+import { cn } from "@/lib/cn";
 
 export function InvestigationDetailPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["investigation", jobId],
@@ -27,9 +30,19 @@ export function InvestigationDetailPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["investigation", jobId] }),
   });
 
-  const continueInvestigation = useMutation({
-    mutationFn: () => api.postItemInvestigate(data?.item_id ?? 0, { question: data?.question ?? null }),
+  // U12 (docs/REVIEW_2026-09-05.md): the old "המשך חקירה" button silently re-ran the identical
+  // question from scratch with no explanation of what it actually did. "הרחב חקירה" is explicit:
+  // it re-runs with double the search budget and folds the prior findings in as context, and
+  // navigates straight to the new (expanded) investigation once it starts.
+  const expandInvestigation = useMutation({
+    mutationFn: () => api.postInvestigationExpand(jobId!),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["investigations"] });
+      navigate(`/investigations/${res.job_id}`);
+    },
   });
+
+  const displayOutcome = data?.answer?.stopped_reason ?? data?.outcome ?? null;
 
   const allLog = [...(data?.log ?? []), ...liveLines];
 
@@ -52,13 +65,36 @@ export function InvestigationDetailPage() {
     <div className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">
-            <bdi>{data.question}</bdi>
-          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">
+              <bdi>{data.question}</bdi>
+            </h2>
+            {isRunning ? (
+              <span className="flex items-center gap-1 rounded-full bg-accent-muted px-2 py-0.5 text-xs font-medium text-accent">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" aria-hidden="true" />
+                רץ עכשיו
+              </span>
+            ) : (
+              displayOutcome && (
+                <span
+                  className={cn("rounded-full px-2 py-0.5 text-xs font-medium", outcomeTone(displayOutcome))}
+                >
+                  {outcomeLabel(displayOutcome)}
+                </span>
+              )
+            )}
+          </div>
           <p className="mt-1 text-xs text-fg-dim">
             {formatDateTime(data.started_at)} · {data.rounds} סבבים · {data.pages_read} עמודים ·{" "}
             {connected ? "מחובר" : "מנותק"}
           </p>
+          {data.answer && (
+            <p className="mt-1 text-xs text-fg-dim">
+              תקציב: {data.answer.queries_used ?? data.queries}/{data.answer.max_queries ?? "—"} שאילתות ·{" "}
+              {data.answer.pages_read ?? data.pages_read}/{data.answer.max_pages ?? "—"} עמודים ·{" "}
+              {(data.answer.sources ?? []).length} מקורות נקראו
+            </p>
+          )}
         </div>
         {isRunning && (
           <button
@@ -125,18 +161,29 @@ export function InvestigationDetailPage() {
               citations={data.answer.sources ?? []}
             />
           </bdi>
+          {data.answer.what_was_tried_he && (
+            <div className="mt-3 border-t border-border pt-3">
+              <h4 className="mb-1 text-xs font-semibold text-fg-dim">מה נוסה</h4>
+              <bdi className="block text-xs text-fg-muted" dir="auto">
+                {data.answer.what_was_tried_he}
+              </bdi>
+            </div>
+          )}
         </section>
       )}
 
-      {(data.state === "done" || data.state === "stopped" || data.state === "not_found") && (
-        <button
-          type="button"
-          onClick={() => continueInvestigation.mutate()}
-          disabled={continueInvestigation.isPending}
-          className="rounded-md border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent-muted disabled:opacity-50"
-        >
-          {continueInvestigation.isPending ? "פותח…" : "המשך חקירה"}
-        </button>
+      {(data.state === "done" || data.state === "stopped" || data.state === "not_found" || data.state === "error") && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => expandInvestigation.mutate()}
+            disabled={expandInvestigation.isPending}
+            title="מריץ מחדש את אותה חקירה עם תקציב חיפוש כפול ותוצאות החקירה הקודמת כהקשר -- לא חקירה זהה מאפס."
+            className="rounded-md border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent-muted disabled:opacity-50"
+          >
+            {expandInvestigation.isPending ? "פותח…" : "הרחב חקירה (תקציב נוסף)"}
+          </button>
+        </div>
       )}
     </div>
   );

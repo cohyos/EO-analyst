@@ -12,6 +12,8 @@ export function AskPage() {
         error={chat.error}
         onSend={chat.send}
         onStop={chat.stop}
+        provider={chat.provider}
+        onProviderChange={chat.setProvider}
       />
     </div>
   );

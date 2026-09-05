@@ -3857,3 +3857,100 @@ suite; `claude`/`codex` on their own login) -- `is_available()` only checks the 
 PATH, not that it's authenticated; an auth failure surfaces as a `CliProviderError` from the
 first real call, not proactively. (3) No Batch/streaming/context-caching use of these CLIs --
 each call is a fresh, independent subprocess.
+
+## Ask/chat RAG + deep-search question quality + outcome accounting (2026-09-05, docs/REVIEW_2026-09-05.md U9/U11/U12/F17/F18)
+
+**U9 (chat ignored attached item, cited blocked pages)** -- root cause was in
+`eoa.api.services.ask_retrieve`/`ask_build_messages`: explicit `context_item_ids` were fetched
+with only `clean_text`/`summary_he` and given no priority over vector retrieval, and retrieval had
+no filter at all -- a quarantined, out-of-scope, or fetch-failed item could outrank the item the
+user actually attached. Fix:
+- `ask_retrieve` now always includes explicit context items (full row: `title`, `url`,
+  `clean_text`, `summary_he`, `key_facts`), tagged `_is_context=True`, regardless of security
+  status -- the user attached them on purpose.
+- Retrieval-only items go through `_ask_item_retrievable`: excludes `security_status != 'clean'`,
+  `domain == 'out_of_scope'`, and -- the live-verified case -- items with no `summary_he` (a fetch
+  failure/403/Cloudflare-challenge page can still have non-empty `clean_text`, e.g. several
+  `safran-group.com` press-room fetches in the live DB whose `clean_text` was literally "This
+  website is using a security service..."; the reliable signal that analyze never actually ran on
+  it is the missing `summary_he`, not text presence). `_looks_like_fetch_failure` is a second,
+  defense-in-depth heuristic on title/text boilerplate.
+- Hybrid retrieval: `_rare_tokens` extracts alnum-mixed tokens (program/model names like "XM30",
+  "F-35") from the question and runs an ILIKE match on `title`/`clean_text` first (exact-token
+  boost), merged with the existing vector-nearest search -- a small embedding model can rank the
+  right item below the top-N neighbours for a term like "XM30" that vector similarity blurs past.
+- `ask_build_messages` cites context items first (`[1]`, `[2]`, ...), renders them with full detail
+  (summary_he + key_facts + ~1500 chars of clean_text) labelled "הקשר מצורף", and retrieved items
+  labelled "מהמאגר"; the system prompt tells the model to answer from attached items first and to
+  say explicitly when it falls back to general knowledge vs. the corpus.
+- **Live-verified** (2026-09-05, second uvicorn on port 8766, real DB item 257 "Rheinmetall and
+  GDLS deliver first XM30 prototypes to US Army"): before the fix, `POST /api/ask` with
+  `context_item_ids=[257]` and question "מה זה XM30?" returned citations `[3..9]` pointing at
+  quarantine-free but content-empty `safran-group.com` Cloudflare-challenge items; after the fix,
+  citations are exactly item 257 (cited `[1]`) plus 3 genuinely relevant, summarized items, and the
+  streamed answer correctly describes the XM30 program with specifics (contract value, competing
+  designs, armament) sourced from the attached item. A same-context follow-up question ("מה המחיר
+  ליחידה?") with `history` set kept citing item 257 as `[1]`, confirming context persistence across
+  a clarification turn (the frontend already never clears `chatContext` between sends --
+  `web/src/store/uiStore.ts` -- so this was a backend-only fix).
+
+**U11/F17/F18 (deep-search questions malformed; not_found conflated with budget/context)**:
+- `eoa.llm.schemas.analysis.TriageOut` gained `deep_search_seed_en` (English search-seed phrase)
+  alongside `deep_search_question`; `llm/prompts/triage.md` now requires the Hebrew question to be
+  self-contained (>= 12 words, names the entities/systems explicitly, never a bare "the article"
+  reference with no carried context) and forbids meta-phrase non-questions like "האם הכתבה מספקת
+  את כל המידע הנדרש" (investigation #46's actual malformed question).
+- `eoa.pipeline.triage._ensure_valid_investigation_question` deterministically repairs (never just
+  rejects) any question failing validation -- builds a fallback from the item's title/entities so a
+  bad LLM output can never reach the search budget as an unusable question. Live-verified against
+  the running Ollama model (`hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:Q4_K_M`, items
+  96 and 10): the repaired question is always self-contained, >= 12 words, and carries the item
+  title/entities.
+- `_enqueue_deep_search` now also writes a `context_he` field into the `deep_search` job payload
+  (title, entities, summary, the seed_en) -- previously only the bare question was passed to
+  `eoa.search.deep_search.investigate()`.
+- `eoa.search.deep_search`: `_finalize_outcome` (new, extracted from `investigate()` for
+  testability) classifies the end state into `found`/`partial`/`stopped_budget`/`stopped_timeout`/
+  `insufficient_context` (search returned zero hits at all -- nothing to work with)/`not_found`
+  (searched thoroughly, genuinely nothing there) instead of collapsing the last three into one
+  `not_found` string; a `not_found` outcome is clamped to confidence <= `NOT_FOUND_MAX_CONFIDENCE`
+  (0.3) -- F18's investigation #46 had reported confidence 1.0 on a `not_found`. `_act`'s `finish`
+  handling gained a symmetric rigor rule to the existing found/partial one: rejects `finish` with
+  `not_found` before `MIN_QUERIES_BEFORE_NOT_FOUND`/`MIN_PAGES_BEFORE_NOT_FOUND` (3/2) are spent,
+  unless zero hits were ever seen (nothing left to search/read, so an immediate honest not_found is
+  correct, not lazy).
+- `investigate()` gained `budget_multiplier`/`prior_findings_he` kwargs (U12 "הרחב חקירה"): scales
+  `max_queries`/`max_pages`/`per_investigation_timeout_min` and folds prior findings into
+  `context_he`. `agent/eoa/orchestrator/jobs.py`'s `_investigation_result_payload` merges
+  `queries_used`/`max_queries`/`pages_read`/`max_pages`/`rounds`/`stopped_reason` into the job
+  `result` alongside the model's `InvestigationOut`, for both `run_deep_searches` (nightly) and
+  `run_deep_search_job` (on-demand) -- previously only the raw `InvestigationOut` was stored, so
+  the API/UI had no way to show *why* an investigation ended.
+- New services/routes: `eoa.api.services.start_investigation`/`expand_investigation`, wired to
+  `POST /api/investigations` (free-standing question, U12 "חקירה חדשה") and
+  `POST /api/investigations/{job_id}/expand` (U12 "הרחב חקירה", double budget + prior findings).
+  The ReAct tool contract (`search`/`read`/`finish` schemas in `TOOLS`) and the security guards
+  (DATA framing, URL allow-list from `hits_seen`, SSRF checks in `_tool_read`) are untouched.
+
+**UI**: `web/src/lib/investigations.ts` (new) -- `outcomeLabel`/`outcomeTone` mapping the granular
+outcome to Hebrew chips (נמצא / נמצא חלקית / לא נמצא / נעצר בגלל תקציב / נעצר בגלל זמן / אין
+מספיק מידע לחיפוש). `InvestigationsListPage.tsx`: "רץ עכשיו" replaces the bare "רץ" state label
+(F17 -- a running investigation should be visually loud, not blend in), a "חקירה חדשה" button opens
+`web/src/components/investigations/NewInvestigationDialog.tsx` (new) and navigates to the created
+job. `InvestigationDetailPage.tsx`: outcome chip (from `answer.stopped_reason`, falling back to
+`state.outcome`), a "רץ עכשיו" pulse badge while running, a budget-used line (queries/pages
+used/max, sources-read count), a "מה נוסה" block when present, and the old "המשך חקירה" button is
+now "הרחב חקירה (תקציב נוסף)" (tooltip explains the double-budget/prior-findings re-run) calling
+the new `postInvestigationExpand` instead of re-triggering a plain `postItemInvestigate`.
+
+**Tests**: `tests/unit/test_ask_retrieval.py`, `tests/unit/test_triage_question_validation.py`,
+`tests/unit/test_deep_search_outcomes.py` (all new, LLM/DB mocked) plus extended
+`web/src/pages/InvestigationDetailPage.test.tsx`. `PYTHONPATH=agent python -m pytest tests/unit -q`
+(941 passed) and `ruff check` clean on every changed file; `npm --prefix web run {lint,test,build}`
+all green; e2e specs `05-investigations`/`06-ask` (10/10) pass against the live app on port 8765
+after `npm --prefix web run build`.
+
+**Left for the user**: restart the port-8765 uvicorn to pick up the backend changes (services.py,
+deep_search.py, triage.py, jobs.py, routes/investigations.py) -- they are not live yet, only
+verified against a throwaway second instance on port 8766 (stopped after verification) and via
+unit tests. The frontend changes are already live (this session ran `npm --prefix web run build`).
