@@ -27,13 +27,63 @@ All Western origin. Hebrew+English system prompts. Prompts live in `agent/eoa/ll
 
 ## Quick Start
 
-### Prerequisites
+**As of 2026-09-05, the primary supported path on Windows is native (no Docker)** — see
+ADR-004 (`docs/adr/004-windows-native.md`). Docker Compose still works and is documented below
+as the legacy path.
+
+### Native (Windows, no Docker) — primary path
+
+#### Prerequisites
+- Python ≥3.12 already on the host (the `py` launcher or `python` on PATH — no download needed)
+- NVIDIA GPU + Ollama native install
+- Node.js ≥20
+- PowerShell 7 (`pwsh`)
+
+#### Install
+
+```powershell
+pwsh -File scripts\native\install_native.ps1
+# preview what it would do first, with no changes:
+pwsh -File scripts\native\install_native.ps1 -DryRun
+```
+
+Idempotent — safe to run twice. Provisions `.venv`, PostgreSQL 17, ntfy, the prompt-guard
+model, and the frontend build entirely under `<repo>\runtime\` (no admin rights). See the
+script's own `Get-Help scripts\native\install_native.ps1 -Full` for all options
+(`-Dev`, `-SkipPostgres`, `-SkipNtfy`, `-SkipGuardModel`, `-SkipFrontend`).
+
+#### First run
+
+```powershell
+# Start postgres + ntfy + orchestrator + api
+eo native start
+
+# Check status (postgres, ollama, GPU/RAM/disk, native process liveness)
+eo status
+eo native status
+
+# Run a single cycle (ingest → classify → triage → analyze → report)
+eo run daily --mode=eco
+
+# Open UI
+# http://127.0.0.1:8765
+
+# Register autostart at logon (once)
+pwsh -File scripts\native\register_autostart.ps1
+```
+
+See `docs/RUNBOOK.md` § "Native (Windows) Operations" for day-to-day commands (start/stop,
+logs, psql, alembic, backups).
+
+### Docker (legacy, pre-2026-09-05)
+
+#### Prerequisites
 - Docker Desktop (WSL2) or Linux with Docker
 - NVIDIA GPU + Ollama native install
 - Python ≥3.12 (or uv)
 - Node.js ≥20
 
-### Install
+#### Install
 
 ```bash
 # Windows (PowerShell 7)
@@ -45,7 +95,7 @@ bash install.sh
 
 Idempotent — safe to run twice. Checks prerequisites, builds images, starts services, runs migrations, pulls models, seeds data. See the script for options (`-SkipModels`, `-SkipBuild`).
 
-### First run
+#### First run
 
 ```bash
 # Check status (postgres, ollama, searxng, GPU/RAM/disk)
@@ -208,13 +258,59 @@ See **docs/**:
 
 ## התחלה מהירה
 
-### דרישות מקדמיות
+**החל מ-2026-09-05, מסלול ההתקנה הראשי בוינדוס הוא נייטיב (ללא Docker)** — ראו ADR-004
+(`docs/adr/004-windows-native.md`). Docker Compose עדיין עובד ומתועד למטה כמסלול legacy.
+
+### נייטיב (Windows, ללא Docker) — מסלול ראשי
+
+#### דרישות מקדמיות
+- Python ≥3.12 כבר מותקן במחשב (launcher `py` או `python` ב-PATH — אין צורך בהורדה)
+- GPU של NVIDIA + התקנה מקומית של Ollama
+- Node.js ≥20
+- PowerShell 7 (`pwsh`)
+
+#### התקן
+
+```powershell
+pwsh -File scripts\native\install_native.ps1
+# תצוגה מקדימה בלבד, בלי לשנות כלום:
+pwsh -File scripts\native\install_native.ps1 -DryRun
+```
+
+Idempotent — בטוח להריץ פעמיים. מתקין `.venv`, PostgreSQL 17, ntfy, מודל ה-guard, ובניית
+הפרונטאנד — הכל תחת `<repo>\runtime\` (ללא הרשאות admin).
+
+#### הריצה ראשונה
+
+```powershell
+# התחל postgres + ntfy + orchestrator + api
+eo native start
+
+# בדוק סטטוס
+eo status
+eo native status
+
+# הרץ מחזור יחיד (ingest → classify → triage → analyze → report)
+eo run daily --mode=eco
+
+# פתח UI
+# http://127.0.0.1:8765
+
+# רישום הפעלה אוטומטית בכניסה למשתמש (פעם אחת)
+pwsh -File scripts\native\register_autostart.ps1
+```
+
+ראו `docs/RUNBOOK.md` § "Native (Windows) Operations" לפקודות היומיומיות.
+
+### Docker (legacy, לפני 2026-09-05)
+
+#### דרישות מקדמיות
 - Docker Desktop (WSL2) או Linux עם Docker
 - GPU של NVIDIA + התקנה מקומית של Ollama
 - Python ≥3.12 (או uv)
 - Node.js ≥20
 
-### התקן
+#### התקן
 
 ```bash
 # Windows (PowerShell 7)
@@ -226,7 +322,7 @@ bash install.sh
 
 Idempotent — בטוח להריץ פעמיים. בודק דרישות מקדמיות, בונה תמונות, מפעיל שירותים, מריץ הגדלות, משך מודלים, זורע נתונים.
 
-### הריצה ראשונה
+#### הריצה ראשונה
 
 ```bash
 # בדוק סטטוס (postgres, ollama, searxng, GPU/RAM/disk)

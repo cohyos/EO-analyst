@@ -68,7 +68,10 @@ def run(
     elif scope == "report":
         from eoa.report.daily import build_daily
 
-        rprint(build_daily())
+        # F4: a manual `eo run report` always builds a fresh report, bypassing build_daily's
+        # 6-hour idempotency guard (which exists to stop the automatic nightly pipeline from
+        # building a second daily report on top of one built minutes earlier by another job).
+        rprint(build_daily(force=True))
     else:
         raise typer.BadParameter(f"unknown scope {scope}")
 
@@ -289,7 +292,7 @@ def native_status() -> None:
         t.add_row("postgres", "not installed (run scripts/native/install_native.ps1)")
 
     try:
-        r = httpx.get("http://127.0.0.1:8090/v1/health", timeout=3)
+        r = httpx.get(os.environ.get("NTFY_URL", "http://127.0.0.1:8091").rstrip("/") + "/v1/health", timeout=3)
         t.add_row("ntfy", "up" if r.status_code == 200 else f"http {r.status_code}")
     except Exception as exc:
         t.add_row("ntfy", f"down ({exc.__class__.__name__})")

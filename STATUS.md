@@ -11,7 +11,7 @@ re-run until green → rebuild images → re-run against the live app.
 ## Decisions: ADR-001 models · ADR-002 Ollama native + isolation · ADR-003 fetcher bridge + ntfy relay
 
 ## Live system (2026-09-04 20:10)
-- Containers rebuilt 20:00 (rebuild6): postgres, searxng (8088), ntfy (8090), fetcher (jobs + relay + raw fetch +
+- Containers rebuilt 20:00 (rebuild6): postgres, searxng (8088), ntfy (8091), fetcher (jobs + relay + raw fetch +
   title chain), agent (orchestrator, 8 scheduler jobs, tenders stage), web (UI+API 8765).
 - **Playwright QA suite against the LIVE app: 166 passed / 0 failed / 2 skipped** (desktop + mobile).
 - Night checklist: all green (services, Ollama, isolation PASS, scheduler registered, no stale jobs, ntfy + relay,
@@ -37,4 +37,4 @@ timeline, citation chips, a11y roles/names, Space quick-preview · install scrip
 
 ## Pending user actions
 firewall script (admin) · apply_wslconfig (quiet moment/reboot) · codex sandbox setup · phone ntfy subscription
-(http://100.70.157.25:8090/eo-analyst).
+(http://100.70.157.25:8091/eo-analyst).

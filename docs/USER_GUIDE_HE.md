@@ -102,12 +102,12 @@
 כדי לקבל התראות **ללא רשת عامה**, אתה יכול להירשם לשרת ה-ntfy הפרטי שלך דרך Tailscale:
 
 ```
-http://100.70.157.25:8090/eo-analyst
+http://100.70.157.25:8091/eo-analyst
 ```
 
 **צעדים:**
 1. התחבר ל-Tailscale VPN (אם כבר קשור — דלג)
-2. בדפדפן או באפליקציית ntfy נייד, הוסף subscription ל-`http://100.70.157.25:8090/eo-analyst`
+2. בדפדפן או באפליקציית ntfy נייד, הוסף subscription ל-`http://100.70.157.25:8091/eo-analyst`
 3. התראות יגיעו דרך הקשר המקומי בלבד, לא דרך ערוץ ציבורי
 
 **כרגע** המערכת שולחת גם לערוץ ציבורי (fallback) — זה יסגר ברגע שתירשם לפרטי.
@@ -233,19 +233,25 @@ nano config/taxonomy.yaml
 
 ## 9. משהו לא עובד — מה לעשות?
 
+> **מ-2026-09-05 המערכת רצה נייטיב על Windows (ללא Docker)** — ראו ADR-004
+> (`docs/adr/004-windows-native.md`) ו-`docs/RUNBOOK.md` § "Native (Windows) Operations"
+> לפירוט המלא. הפקודות למטה מעודכנות למסלול הנייטיב; `docker compose` כבר לא רלוונטי.
+
 ### בדיקות מהירות (מתוך RUNBOOK)
 
-```bash
+```powershell
 # 1. בדוק סטטוס כללי
 eo status
+eo native status
 
-# יציג: postgres בריא?, Ollama עלה?, GPU VRAM פנוי?, RAM? disk?
+# יציג: postgres בריא?, Ollama עלה?, GPU VRAM פנוי?, RAM? disk?, ותהליכי postgres/ntfy/orchestrator/api חיים?
 
 # 2. עקוב אחרי יומני המערכת בזמן אמת
-docker compose logs -f agent
+eo native logs orchestrator
+eo native logs api
 
-# 3. בדוק את ריצת הלילה האחרונה בבסיס
-psql -h 127.0.0.1 -p 5433 -U eoa -d eoanalyst
+# 3. בדוק את ריצת הלילה האחרונה בבסיס (פורט 5432, לא 5433 — 5433 היה רק מיפוי Docker)
+runtime\pgsql\bin\psql -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst
 
 # בתוך psql:
 SELECT kind, started_at, finished_at, error FROM jobs 
@@ -261,19 +267,19 @@ WHERE state='running' AND started_at < now() - interval '6 hours';
 | תקלה | סימן ל-OS | תיקון |
 |---|---|---|
 | "VRAM 8000 MB < min 9500 MB" | GPU אין מספיק זיכרון | `ollama list`, `ollama rm <model>` אחת, הרץ שוב |
-| "Connection refused (postgres)" | DB down | `docker compose logs postgres`, וודא volume mounted |
+| "Connection refused (postgres)" | DB down | `eo native status`, `eo native logs postgres`, ואז `eo native start` |
 | "FetchError: robots.txt blocks" | מקור חוסם | הסר מקור מ-sources.yaml או בקש חריגות |
 | "Deadline exceeded at stage" | לקחה יותר מדי זמן | הרץ `eo run daily --mode eco` או הרחב חלון בלילה ב-config.yaml |
 
 ### אם הכל נשבר
-```bash
+```powershell
 # תמונת snapshot קיימת לכל לילה:
 ls output/backups/
 
 # שחזר מגיבוי (בעדינות):
-docker compose down agent web
-sqlite3 output/backups/eo-analyst_2026-09-04.sqlite .dump | psql -h 127.0.0.1 -p 5433 -U eoa eoanalyst
-docker compose up -d agent web
+eo native stop
+runtime\pgsql\bin\pg_restore -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst --clean --if-exists output\backups\<שם-קובץ>.dump
+eo native start
 ```
 
 ---
@@ -303,7 +309,7 @@ docker compose up -d agent web
 ## מידע קישור
 
 - **API של המערכת:** `http://127.0.0.1:8765`
-- **ntfy (Tailscale):** `http://100.70.157.25:8090/eo-analyst`
+- **ntfy (Tailscale):** `http://100.70.157.25:8091/eo-analyst`
 - **שרת ntfy ציבורי (fallback):** `https://ntfy.sh/dissertation_editor_ysf`
 - **RUNBOOK מלא:** `docs/RUNBOOK.md`
 - **פרטי API:** `docs/API.md`

@@ -23,16 +23,20 @@ to compensate, and what is still owed as follow-up.
 ### 1. One process topology, no containers
 | Process | Was (Docker) | Now (native) |
 |---|---|---|
-| PostgreSQL 17 | `postgres` container, `internal` network, port 5433 published to loopback | `runtime\pgsql` (EDB "binaries without installer" zip) + `runtime\pgdata`, `pg_ctl`-managed, same port 5433 -- `DATABASE_URL` in code and `.env` is unchanged |
-| ntfy | `ntfy` container, port 8090 published to loopback | `runtime\ntfy\ntfy.exe serve`, port 8090, **listening on `0.0.0.0`** (not `127.0.0.1`) because the phone already subscribes over Tailscale at `http://100.70.157.25:8090/eo-analyst` (ADR-003) and that path only exists if the process actually binds the non-loopback interface |
+| PostgreSQL 17 | `postgres` container, `internal` network, port 5433 published to loopback | `runtime\pgsql` (EDB "binaries without installer" zip, 17.9) + `runtime\pgdata`, `pg_ctl`-managed, **port 5432** -- 5433 was only ever the Docker Compose host-mapping; the native cluster uses postgres's actual default port instead. `DATABASE_URL` in `.env`/`runtime\eoa.env` reflects this (`postgresql://eoa:<pw>@127.0.0.1:5432/eoanalyst`) |
+| ntfy | `ntfy` container, port 8091 published to loopback | `runtime\ntfy\ntfy.exe serve`, port 8091, **listening on `0.0.0.0`** (not `127.0.0.1`) because the phone already subscribes over Tailscale at `http://100.70.157.25:8091/eo-analyst` (ADR-003) and that path only exists if the process actually binds the non-loopback interface |
 | agent (orchestrator) | `agent` container, `internal`+`hostlink` networks, DNS pinned to `0.0.0.0`, static `extra_hosts` | `.venv\Scripts\python.exe -m eoa.orchestrator.main`, `EOA_ROLE=host` (already the code's default role -- `agent/eoa/fetch/remote.py`'s `_role()` -- so the in-process fetch path activates automatically; the jobs-table bridge to a separate `fetcher` container is no longer exercised) |
 | web/API | `web` container | `.venv\Scripts\python.exe -m uvicorn eoa.api.app:app --host 127.0.0.1 --port 8765`, same port, now also serving `web\dist` built by `npm run build` directly on the host |
 | SearXNG | `searxng` container | retired; replaced by `eoa.search.provider` (`ddgs`, multi-engine, per `docs/PLAN_WINDOWS_NATIVE.md` §1 item 4 -- a separate work item, not part of this ADR) |
 | Ollama | native Windows service (already, per ADR-002) | unchanged |
 
-`scripts\native\install_native.ps1` provisions all of the above (Python 3.12 via `uv`, PostgreSQL,
-ntfy, the guard model, the frontend build) with no admin rights, entirely under `<repo>\runtime\`
-(gitignored) plus a project-local `.venv`. `scripts\native\eoa-supervisor.ps1` starts and supervises
+`scripts\native\install_native.ps1` provisions all of the above (a `.venv` built from the host's
+own Python -- no managed download; `pyproject.toml` requires `>=3.12` and this machine runs
+Python 3.14 -- PostgreSQL, ntfy, the guard model, the frontend build) with no admin rights,
+entirely under `<repo>\runtime\` (gitignored) plus a project-local `.venv`. The guard model step
+prefers `docker cp` out of the (retiring) `eoa-agent` container's filesystem when that container
+still exists, falling back to a Hugging Face download otherwise.
+`scripts\native\eoa-supervisor.ps1` starts and supervises
 postgres/ntfy/orchestrator/api with restart-on-exit (exponential backoff) and logs to
 `runtime\logs\`; `scripts\native\register_autostart.ps1` registers it as a **user-level** (no admin)
 Task Scheduler task, "EO-Analyst Supervisor", at logon. `scripts\native\migrate_from_docker.ps1`
@@ -90,11 +94,13 @@ rather than "second line of defense."
   loop (`eo native start/stop/status/logs` instead of `docker compose ...`).
 - **Negative**: the network-isolation boundary that ADR-002/ADR-003 built around is gone; the
   outbound-HTTP audit log that would partially compensate is not yet built (tracked above).
-  `ntfy` now listens on `0.0.0.0:8090` rather than loopback-only, so Windows Firewall's private-network
+  `ntfy` now listens on `0.0.0.0:8091` rather than loopback-only, so Windows Firewall's private-network
   profile is the only thing standing between an untrusted LAN peer and the ntfy API (no auth) --
   same posture ADR-002 already accepted for Ollama on `0.0.0.0:11434`.
-- **Neutral**: `DATABASE_URL`, `NTFY_URL`'s port (8090), and the API's port (8765) are unchanged, so
-  application code and the web frontend needed no changes for the topology switch itself.
+- **Neutral**: `NTFY_URL`'s port (8091) and the API's port (8765) are unchanged, so application
+  code and the web frontend needed no changes for those. `DATABASE_URL`'s port did change, from
+  5433 (the Docker Compose host-mapping) to 5432 (postgres's actual default, now that nothing
+  else is competing for it) -- `.env` and `runtime\eoa.env` both carry the new value.
 - **Follow-up**: outbound HTTP audit log (§3); retire the Docker Compose files and images once
   `scripts\native\migrate_from_docker.ps1` has verified row counts and the native stack has run
   unattended through at least one full night window; SearXNG retirement is tracked separately

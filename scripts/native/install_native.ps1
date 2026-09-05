@@ -9,18 +9,32 @@ single Task Scheduler entry (see scripts\native\register_autostart.ps1, run sepa
 
 Steps:
   0. Create .env from .env.example if missing (same pattern as install.ps1); read POSTGRES_PASSWORD.
-  1. Python 3.12: install `uv` via host pip if missing, `uv python install 3.12` into
-     runtime\python, `uv venv .venv --python 3.12`, `uv pip install -e ".[guard-onnx]"`
-     (+ `,dev` with -Dev).
+  1. Python (host, >=3.12, no download): resolve the newest suitable interpreter already on
+     this machine -- tries `py -3.14`, `py -3.13`, `py -3.12` via the Windows `py` launcher,
+     then falls back to whatever `python` resolves to on PATH (pyproject.toml's
+     `requires-python = ">=3.12"` is enforced either way) -- `python -m venv .venv`, then
+     `.venv\Scripts\python -m pip install -e ".[guard-onnx]"` (+ `,dev` with -Dev). No `uv`,
+     no python.org download: this repo runs on whatever Python 3.12+ the host already has
+     (verified 2026-09-05 against the host's Python 3.14 install).
   2. PostgreSQL 17 portable (EDB "binaries without installer" zip) into runtime\pgsql;
-     initdb into runtime\pgdata; postgresql.conf overrides (port 5433 etc.); start it;
-     CREATE DATABASE eoanalyst; alembic upgrade head; db\seed\seed_watchlist.py.
+     initdb into runtime\pgdata; postgresql.conf overrides (port 5432 -- the native port;
+     5433 was only ever the Docker Compose host-mapping, now retired); start it;
+     CREATE DATABASE eoanalyst; alembic upgrade head; db\seed\seed_watchlist.py. The unused
+     pgAdmin 4 / StackBuilder / symbols folders that ship inside the zip are deleted after
+     extraction (~300 MB saved; nothing under runtime\pgsql\bin is touched).
      (db\graph_init.sql is intentionally skipped -- Apache AGE is retired, see
      docs\PLAN_WINDOWS_NATIVE.md step 1a.)
   3. ntfy: download the Windows amd64 release zip into runtime\ntfy, verify its SHA256
-     against the release's checksums.txt, write runtime\ntfy\server.yml.
-  4. Guard model: huggingface_hub snapshot_download of the ONNX prompt-injection classifier
-     into runtime\models\prompt-guard (mirrors docker\agent\Dockerfile's `guard-model` stage).
+     against the release's checksums.txt, flatten the zip's nested
+     `ntfy_<version>_windows_amd64\ntfy.exe` into runtime\ntfy\ntfy.exe, write
+     runtime\ntfy\server.yml (deliberately WITHOUT `attachment-cache-dir` -- see step 3 body).
+  4. Guard model: try `docker cp eoa-agent:/opt/models/prompt-guard runtime\models\prompt-guard`
+     first, if a docker container literally named `eoa-agent` exists (its filesystem already
+     has the baked-in ONNX model from docker\agent\Dockerfile's `guard-model` build stage --
+     `docker cp` reads a container's filesystem and works whether it's running or stopped; it
+     does not start, stop, or otherwise touch the container's run state). Falls back to a
+     huggingface_hub snapshot_download of the ONNX prompt-injection classifier only when no
+     such container is found or the copy fails.
   5. Frontend: `npm ci` + `npm run build` in web\.
   6. Ollama: verify http://127.0.0.1:11434/api/version reachable and warn about any
      configured model role missing from `ollama list` (never installs/pulls anything).
@@ -40,7 +54,7 @@ Skip the entire PostgreSQL step (download/initdb/migrate/seed).
 Skip the ntfy download + server.yml step.
 
 .PARAMETER SkipGuardModel
-Skip the prompt-guard ONNX model download.
+Skip the prompt-guard ONNX model install (docker cp or Hugging Face download).
 
 .PARAMETER SkipFrontend
 Skip `npm ci && npm run build` in web\.
@@ -48,24 +62,34 @@ Skip `npm ci && npm run build` in web\.
 .PARAMETER Dev
 Also install the `dev` extra (pytest, ruff, mypy, ...) into the venv.
 
+.PARAMETER DryRun
+Print every action this script would take (downloads, extractions, file writes, subprocess
+calls) and exit without changing anything on disk or in any running service. Safe to run at
+any time to preview what a real invocation would do; combine with -Dev / -Skip* to preview
+a specific configuration.
+
 .PARAMETER PgVersion
-PostgreSQL 17.x minor version for the EDB binaries zip. Default: 17.6 (could not be
-live-verified against https://www.enterprisedb.com/download-postgresql-binaries from this
-session -- confirm/override before running with real downloads).
+PostgreSQL 17.x minor version for the EDB binaries zip. Default: 17.9 -- this is the exact
+version installed and verified working on this machine on 2026-09-05 (zip size 334,313,473
+bytes from https://get.enterprisedb.com/postgresql/postgresql-17.9-1-windows-x64-binaries.zip).
 
 .PARAMETER NtfyVersion
-ntfy release tag (without the leading "v"). Default: 2.11.0 -- likewise unverified against
-https://github.com/binwiederhier/ntfy/releases from this session; check the latest release
-and pass -NtfyVersion to override if newer.
+ntfy release tag (without the leading "v"). Default: 2.28.0 -- the exact version installed
+and verified working on this machine on 2026-09-05, downloaded from
+https://github.com/binwiederhier/ntfy/releases/download/v2.28.0/ntfy_2.28.0_windows_amd64.zip
+(sha256 fa49abd3462a588e1555701d360de84f192a45764a97054c4cafb486ea3cdf78, verified against
+that release's checksums.txt).
 
 .EXAMPLE
 ./scripts/native/install_native.ps1
+./scripts/native/install_native.ps1 -DryRun
 ./scripts/native/install_native.ps1 -Dev
 ./scripts/native/install_native.ps1 -SkipPostgres -SkipNtfy   # re-run just venv+frontend+guard
 
 .NOTES
-Non-admin. No system-wide installs. Nothing here touches Program Files or the registry
-except `uv`'s user-site pip install (scripts land in the per-user Python Scripts dir).
+Non-admin. No system-wide installs. Nothing here touches Program Files or the registry.
+Does not start, stop, or otherwise manage the live stack (postgres/ntfy/orchestrator/api) --
+that is scripts\native\eoa-supervisor.ps1's job, run separately via `eo native start`.
 #>
 
 #Requires -Version 7
@@ -77,8 +101,9 @@ param(
     [switch] $SkipGuardModel,
     [switch] $SkipFrontend,
     [switch] $Dev,
-    [string] $PgVersion = "17.6",
-    [string] $NtfyVersion = "2.11.0"
+    [switch] $DryRun,
+    [string] $PgVersion = "17.9",
+    [string] $NtfyVersion = "2.28.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -90,11 +115,21 @@ $runtimeDir = Join-Path $repoRoot "runtime"
 $envFile = Join-Path $repoRoot ".env"
 $envExample = Join-Path $repoRoot ".env.example"
 
-New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+function New-DirIfNeeded {
+    # All directory creation goes through here so -DryRun genuinely changes nothing on disk.
+    param([Parameter(Mandatory)][string[]] $Path)
+    if ($DryRun) { return }
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+}
+
+New-DirIfNeeded -Path $runtimeDir
 
 Write-Host "EO-Analyst native installer (Windows, PowerShell 7, no Docker)" -ForegroundColor Cyan
 Write-Host "repo root: $repoRoot" -ForegroundColor DarkGray
 Write-Host "runtime:   $runtimeDir" -ForegroundColor DarkGray
+if ($DryRun) {
+    Write-Host "-DryRun: no files will be created/modified/deleted and no subprocess with side effects will run." -ForegroundColor Yellow
+}
 
 # ============================================================================
 # Helpers
@@ -122,6 +157,11 @@ function Announce-Download {
     if ($SkipDownloads) {
         Write-Error "-SkipDownloads was passed and '$FileName' is not already cached -- aborting."
     }
+}
+
+function Write-DryRun {
+    param([Parameter(Mandatory)][string]$Message)
+    Write-Host "  [DryRun] would $Message" -ForegroundColor Yellow
 }
 
 # ---- Minimal, dependency-free YAML scalar reader -----------------------------------------
@@ -165,71 +205,114 @@ function Get-YamlScalarField {
 Write-Host "`n[0/7] Preparing .env..." -ForegroundColor Cyan
 
 if (-not (Test-Path $envFile)) {
-    if (-not (Test-Path $envExample)) { Write-Error ".env.example not found at $envExample" }
-    Copy-Item $envExample $envFile
-    Write-Verbose "Created $envFile from .env.example"
+    if ($DryRun) {
+        Write-DryRun "create $envFile from $envExample"
+    } else {
+        if (-not (Test-Path $envExample)) { Write-Error ".env.example not found at $envExample" }
+        Copy-Item $envExample $envFile
+        Write-Verbose "Created $envFile from .env.example"
+    }
 } else {
     Write-Verbose "$envFile already exists"
 }
 
 $pgPassword = Get-EnvValue -Path $envFile -Key "POSTGRES_PASSWORD"
-if (-not $pgPassword) { Write-Error "POSTGRES_PASSWORD missing from $envFile" }
+if (-not $pgPassword) {
+    if ($DryRun) {
+        Write-Warning "POSTGRES_PASSWORD not readable yet (likely because .env doesn't exist yet and -DryRun skipped creating it) -- using a placeholder for the rest of this dry run."
+        $pgPassword = "<POSTGRES_PASSWORD>"
+    } else {
+        Write-Error "POSTGRES_PASSWORD missing from $envFile"
+    }
+}
 if ($pgPassword -eq "change-me-local-only") {
     Write-Warning "POSTGRES_PASSWORD in .env is still the placeholder value. Consider changing it before running this in anything but a fully local dev box."
 }
 
 # ============================================================================
-# Step 1: Python 3.12 (uv) + venv + package install
+# Step 1: Python (host, >=3.12) + venv + package install
 # ============================================================================
-Write-Host "`n[1/7] Python 3.12 (uv) + venv + package install..." -ForegroundColor Cyan
+Write-Host "`n[1/7] Python (host, >=3.12) + venv + package install..." -ForegroundColor Cyan
 
-$uvPythonDir = Join-Path $runtimeDir "python"
-$venvDir = Join-Path $repoRoot ".venv"
-New-Item -ItemType Directory -Force -Path $uvPythonDir | Out-Null
+function Find-HostPython {
+    <#
+    Resolves the newest suitable Python already installed on this machine. No download, no
+    `uv`: this project runs fine on whatever Python >=3.12 the host provides (verified against
+    the host's Python 3.14 install on 2026-09-05 -- all wheels for
+    ".[guard-onnx,dev]" installed cleanly, including onnxruntime, torch-cpu, numpy,
+    psycopg-binary, lxml, ddgs).
+    #>
+    $tried = New-Object System.Collections.Generic.List[string]
 
-$uvCmd = Get-Command uv -ErrorAction SilentlyContinue
-if (-not $uvCmd) {
-    Write-Verbose "uv not found on PATH; installing via host pip (python -m pip install --user uv)"
-    & python -m pip install --user uv
-    if ($LASTEXITCODE -ne 0) { Write-Error "python -m pip install --user uv failed" }
-    $userScripts = (& python -m site --user-base) + "\Scripts"
-    if (Test-Path $userScripts) { $env:PATH = "$userScripts;$env:PATH" }
-    $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
-    if (-not $uvCmd) {
-        Write-Error "uv was installed but is still not on PATH. Open a new shell (so PATH picks up $userScripts) and re-run this script, or add that directory to PATH yourself."
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        foreach ($ver in @("3.14", "3.13", "3.12")) {
+            $tried.Add("py -$ver") | Out-Null
+            & py "-$ver" -c "import sys" *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return [pscustomobject]@{ Exe = "py"; Args = @("-$ver") }
+            }
+        }
     }
+
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCmd) {
+        $tried.Add("python (PATH: $($pythonCmd.Source))") | Out-Null
+        $verOut = & python -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $verOut) {
+            $parts = $verOut.Trim().Split(".")
+            $maj = [int]$parts[0]; $min = [int]$parts[1]
+            if ($maj -gt 3 -or ($maj -eq 3 -and $min -ge 12)) {
+                return [pscustomobject]@{ Exe = "python"; Args = @() }
+            }
+            Write-Warning "python on PATH is $($verOut.Trim()), which is below the pyproject.toml floor of >=3.12"
+        }
+    }
+
+    Write-Error "No Python >=3.12 found (tried: $($tried -join ', ')). Install Python 3.12+ (e.g. from python.org or the Microsoft Store) and ensure it's on PATH or reachable via the 'py' launcher, then re-run this script."
 }
-Write-Verbose "uv: $($uvCmd.Source)"
 
-$env:UV_PYTHON_INSTALL_DIR = $uvPythonDir
-Write-Verbose "uv python install 3.12 (UV_PYTHON_INSTALL_DIR=$uvPythonDir)"
-& uv python install 3.12
-if ($LASTEXITCODE -ne 0) { Write-Error "uv python install 3.12 failed" }
+$hostPython = Find-HostPython
+$hostPythonArgsDisplay = ($hostPython.Args -join " ")
+$hostPythonVersion = (& $hostPython.Exe @($hostPython.Args) -c "import sys; print(sys.version.split()[0])").Trim()
+Write-Verbose "Using host Python $hostPythonVersion ($($hostPython.Exe) $hostPythonArgsDisplay)"
 
-if (-not (Test-Path $venvDir)) {
-    Write-Verbose "uv venv $venvDir --python 3.12"
-    & uv venv $venvDir --python 3.12
-    if ($LASTEXITCODE -ne 0) { Write-Error "uv venv failed" }
+$venvDir = Join-Path $repoRoot ".venv"
+$venvPython = Join-Path $venvDir "Scripts\python.exe"
+
+if (-not (Test-Path $venvPython)) {
+    if ($DryRun) {
+        Write-DryRun "run: $($hostPython.Exe) $hostPythonArgsDisplay -m venv `"$venvDir`""
+    } else {
+        Write-Verbose "$($hostPython.Exe) $hostPythonArgsDisplay -m venv $venvDir"
+        & $hostPython.Exe @($hostPython.Args) -m venv $venvDir
+        if ($LASTEXITCODE -ne 0) { Write-Error "python -m venv failed" }
+    }
 } else {
     Write-Verbose "$venvDir already exists; leaving it in place"
 }
 
-$venvPython = Join-Path $venvDir "Scripts\python.exe"
-if (-not (Test-Path $venvPython)) { Write-Error "venv python not found at $venvPython" }
-
 $extras = if ($Dev) { ".[guard-onnx,dev]" } else { ".[guard-onnx]" }
-Write-Host "  Decision: 'uv pip install --python <venv> -e $extras' rather than 'uv sync'." -ForegroundColor DarkGray
-Write-Host "  Reason: no uv.lock is committed to this repo, and docker\agent\Dockerfile already" -ForegroundColor DarkGray
-Write-Host "  installs the exact same way ('uv pip install --system -e `".[guard-onnx]`"'), so the" -ForegroundColor DarkGray
-Write-Host "  native venv and the (retiring) container image resolve dependencies identically." -ForegroundColor DarkGray
-Push-Location $repoRoot
-try {
-    & uv pip install --python $venvPython -e $extras
-    if ($LASTEXITCODE -ne 0) { Write-Error "uv pip install -e $extras failed" }
-} finally {
-    Pop-Location
+
+if ($DryRun) {
+    Write-DryRun "run: `"$venvPython`" -m pip install -e `"$extras`" (from $repoRoot)"
+} else {
+    if (-not (Test-Path $venvPython)) { Write-Error "venv python not found at $venvPython" }
+    Write-Host "  Decision: '<venv>\Scripts\python -m pip install -e $extras' -- no uv, no lock file." -ForegroundColor DarkGray
+    Write-Host "  Reason: no uv.lock is committed to this repo, and pip resolves the same" -ForegroundColor DarkGray
+    Write-Host "  pyproject.toml dependency set uv would; the native venv only needs to be" -ForegroundColor DarkGray
+    Write-Host "  reproducible on this one machine, not distributed as a locked artifact." -ForegroundColor DarkGray
+    Push-Location $repoRoot
+    try {
+        & $venvPython -m pip install --upgrade pip
+        if ($LASTEXITCODE -ne 0) { Write-Error "pip install --upgrade pip failed" }
+        & $venvPython -m pip install -e $extras
+        if ($LASTEXITCODE -ne 0) { Write-Error "pip install -e $extras failed" }
+    } finally {
+        Pop-Location
+    }
+    Write-Verbose "Python environment ready: $venvPython"
 }
-Write-Verbose "Python environment ready: $venvPython"
 
 # ============================================================================
 # Step 2: PostgreSQL 17 portable
@@ -237,13 +320,13 @@ Write-Verbose "Python environment ready: $venvPython"
 if ($SkipPostgres) {
     Write-Host "`n[2/7] Skipping PostgreSQL (-SkipPostgres)" -ForegroundColor Yellow
 } else {
-    Write-Host "`n[2/7] PostgreSQL $PgVersion (portable, no installer)..." -ForegroundColor Cyan
+    Write-Host "`n[2/7] PostgreSQL $PgVersion (portable, no installer, port 5432)..." -ForegroundColor Cyan
 
     $pgRoot = Join-Path $runtimeDir "pgsql"
     $pgData = Join-Path $runtimeDir "pgdata"
     $downloadsDir = Join-Path $runtimeDir "downloads"
     $pgLogDir = Join-Path $runtimeDir "logs\pg"
-    New-Item -ItemType Directory -Force -Path $downloadsDir, $pgLogDir | Out-Null
+    New-DirIfNeeded -Path @($downloadsDir, $pgLogDir)
 
     $pgCtl = Join-Path $pgRoot "bin\pg_ctl.exe"
     $initdb = Join-Path $pgRoot "bin\initdb.exe"
@@ -255,25 +338,53 @@ if ($SkipPostgres) {
         $zipPath = Join-Path $downloadsDir $zipName
 
         if (-not (Test-Path $zipPath)) {
-            Announce-Download -FileName $zipName -Source $zipUrl -SizeNote "~330-360 MB (EDB publishes no manifest/SHA256 for this zip -- see warning below)"
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
-            $sizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
-            Write-Verbose "Downloaded $zipPath ($sizeMb MB)"
-            Write-Warning "EDB does not publish a SHA256/manifest for the 'binaries without installer' zip -- integrity here rests on TLS transport + a successful HTTP 200 only; no hash verification was possible."
+            $sizeNote = if ($PgVersion -eq "17.9") { "334,313,473 bytes (verified 2026-09-05; EDB publishes no SHA256/manifest for this zip -- see warning below)" } else { "~320-360 MB (EDB publishes no manifest/SHA256 for this zip -- see warning below)" }
+            Announce-Download -FileName $zipName -Source $zipUrl -SizeNote $sizeNote
+            if ($DryRun) {
+                Write-DryRun "download $zipUrl -> $zipPath"
+            } else {
+                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+                $sizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+                Write-Verbose "Downloaded $zipPath ($sizeMb MB)"
+                Write-Warning "EDB does not publish a SHA256/manifest for the 'binaries without installer' zip -- integrity here rests on TLS transport + a successful HTTP 200 only; no hash verification was possible."
+            }
         } else {
             Write-Verbose "Reusing cached $zipPath"
         }
 
-        Write-Verbose "Expanding $zipPath -> $runtimeDir (the zip has a top-level pgsql\ folder)"
-        Expand-Archive -Path $zipPath -DestinationPath $runtimeDir -Force
-        if (-not (Test-Path (Join-Path $pgRoot "bin\postgres.exe"))) {
-            Write-Error "postgres.exe not found under $pgRoot after extraction -- unexpected zip layout"
+        if ($DryRun) {
+            Write-DryRun "expand $zipPath -> $runtimeDir, then delete runtime\pgsql\pgAdmin 4, StackBuilder, symbols (~300 MB of unused bundled tools)"
+        } elseif (Test-Path $zipPath) {
+            Write-Verbose "Expanding $zipPath -> $runtimeDir (the zip has a top-level pgsql\ folder)"
+            Expand-Archive -Path $zipPath -DestinationPath $runtimeDir -Force
+            if (-not (Test-Path (Join-Path $pgRoot "bin\postgres.exe"))) {
+                Write-Error "postgres.exe not found under $pgRoot after extraction -- unexpected zip layout"
+            }
+
+            # The EDB zip bundles pgAdmin 4, StackBuilder, and debug symbols -- none of which
+            # this project uses (we drive postgres via pg_ctl/psql only). Removing them saves
+            # ~300 MB and leaves everything under runtime\pgsql\bin untouched.
+            $bloatDirs = @(
+                (Join-Path $pgRoot "pgAdmin 4"),
+                (Join-Path $pgRoot "StackBuilder"),
+                (Join-Path $pgRoot "symbols")
+            )
+            foreach ($dir in $bloatDirs) {
+                if (Test-Path $dir) {
+                    Remove-Item -Path $dir -Recurse -Force
+                    Write-Verbose "Removed $dir"
+                }
+            }
         }
     } else {
         Write-Verbose "$pgRoot already has PostgreSQL binaries"
     }
 
-    if (-not (Test-Path (Join-Path $pgData "PG_VERSION"))) {
+    if ((Test-Path (Join-Path $pgData "PG_VERSION"))) {
+        Write-Verbose "$pgData already initialized (PG_VERSION present); leaving initdb alone"
+    } elseif ($DryRun) {
+        Write-DryRun "run: initdb -D $pgData -U eoa --auth=scram-sha-256 -E UTF8 --locale=C, then append postgresql.conf overrides (port=5432, listen_addresses=127.0.0.1, timezone/log_timezone=Asia/Jerusalem, shared_buffers=512MB, max_connections=60, logging_collector=on, log_directory=$pgLogDir, log_filename=postgresql-%Y-%m-%d.log, log_rotation_age=1d)"
+    } else {
         Write-Verbose "Running initdb -D $pgData -U eoa"
         $pwFile = Join-Path ([System.IO.Path]::GetTempPath()) "eoa_pg_pw_$([guid]::NewGuid().ToString('N')).txt"
         Set-Content -Path $pwFile -Value $pgPassword -NoNewline -Encoding ascii
@@ -289,57 +400,62 @@ if ($SkipPostgres) {
         Add-Content -Path $confPath -Value @"
 
 # --- EO-Analyst native overrides (scripts\native\install_native.ps1) ---
-port = 5433
+port = 5432
 listen_addresses = '127.0.0.1'
 timezone = 'Asia/Jerusalem'
+log_timezone = 'Asia/Jerusalem'
 shared_buffers = 512MB
 max_connections = 60
-log_destination = 'stderr'
 logging_collector = on
 log_directory = '$pgLogDirForward'
+log_filename = 'postgresql-%Y-%m-%d.log'
+log_rotation_age = 1d
 "@
-        Write-Verbose "Wrote postgresql.conf overrides (port 5433, Asia/Jerusalem, logging -> $pgLogDir)"
+        Write-Verbose "Wrote postgresql.conf overrides (port 5432, Asia/Jerusalem, logging -> $pgLogDir)"
+    }
+
+    # --- From here on: (re-)start, ensure DB exists, migrate, seed. Skipped entirely under
+    #     -DryRun since each of these steps depends on the previous one's real effect. ---
+    if ($DryRun) {
+        Write-DryRun "start postgres if not already running (pg_ctl -D $pgData -w start), CREATE DATABASE eoanalyst if missing, run 'alembic upgrade head' and db\seed\seed_watchlist.py against postgresql://eoa:***@127.0.0.1:5432/eoanalyst"
     } else {
-        Write-Verbose "$pgData already initialized (PG_VERSION present); leaving initdb alone"
-    }
+        $statusResult = & $pgCtl -D $pgData status 2>&1
+        $isRunning = $LASTEXITCODE -eq 0
+        if (-not $isRunning) {
+            Write-Verbose "Starting postgres (pg_ctl -D $pgData -w start)"
+            & $pgCtl -D $pgData -l (Join-Path $pgLogDir "startup.log") -w start
+            if ($LASTEXITCODE -ne 0) { Write-Error "pg_ctl start failed -- see $pgLogDir\startup.log" }
+        } else {
+            Write-Verbose "postgres already running"
+        }
 
-    # --- Idempotent from here: (re-)start, ensure DB exists, migrate, seed ---
-    $statusResult = & $pgCtl -D $pgData status 2>&1
-    $isRunning = $LASTEXITCODE -eq 0
-    if (-not $isRunning) {
-        Write-Verbose "Starting postgres (pg_ctl -D $pgData -w start)"
-        & $pgCtl -D $pgData -l (Join-Path $pgLogDir "startup.log") -w start
-        if ($LASTEXITCODE -ne 0) { Write-Error "pg_ctl start failed -- see $pgLogDir\startup.log" }
-    } else {
-        Write-Verbose "postgres already running"
-    }
+        $env:PGPASSWORD = $pgPassword
+        $dbExists = & $psql -U eoa -h 127.0.0.1 -p 5432 -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='eoanalyst'" 2>$null
+        if ($dbExists -notmatch "1") {
+            Write-Verbose "Creating database eoanalyst (owner eoa)"
+            & $psql -U eoa -h 127.0.0.1 -p 5432 -d postgres -c "CREATE DATABASE eoanalyst OWNER eoa;" | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Error "CREATE DATABASE eoanalyst failed" }
+        } else {
+            Write-Verbose "database eoanalyst already exists"
+        }
 
-    $env:PGPASSWORD = $pgPassword
-    $dbExists = & $psql -U eoa -h 127.0.0.1 -p 5433 -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='eoanalyst'" 2>$null
-    if ($dbExists -notmatch "1") {
-        Write-Verbose "Creating database eoanalyst (owner eoa)"
-        & $psql -U eoa -h 127.0.0.1 -p 5433 -d postgres -c "CREATE DATABASE eoanalyst OWNER eoa;" | Out-Null
-        if ($LASTEXITCODE -ne 0) { Write-Error "CREATE DATABASE eoanalyst failed" }
-    } else {
-        Write-Verbose "database eoanalyst already exists"
-    }
+        $env:DATABASE_URL = "postgresql://eoa:$pgPassword@127.0.0.1:5432/eoanalyst"
+        Push-Location $repoRoot
+        try {
+            Write-Verbose "alembic upgrade head"
+            & $venvPython -m alembic upgrade head
+            if ($LASTEXITCODE -ne 0) { Write-Error "alembic upgrade head failed" }
 
-    $env:DATABASE_URL = "postgresql://eoa:$pgPassword@127.0.0.1:5433/eoanalyst"
-    Push-Location $repoRoot
-    try {
-        Write-Verbose "alembic upgrade head"
-        & $venvPython -m alembic upgrade head
-        if ($LASTEXITCODE -ne 0) { Write-Error "alembic upgrade head failed" }
-
-        Write-Verbose "db\seed\seed_watchlist.py"
-        & $venvPython (Join-Path $repoRoot "db\seed\seed_watchlist.py")
-        if ($LASTEXITCODE -ne 0) { Write-Error "seed_watchlist.py failed" }
-    } finally {
-        Pop-Location
-        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+            Write-Verbose "db\seed\seed_watchlist.py"
+            & $venvPython (Join-Path $repoRoot "db\seed\seed_watchlist.py")
+            if ($LASTEXITCODE -ne 0) { Write-Error "seed_watchlist.py failed" }
+        } finally {
+            Pop-Location
+            Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+        }
+        Write-Verbose "db\graph_init.sql intentionally skipped -- Apache AGE is retired (docs\PLAN_WINDOWS_NATIVE.md step 1a; graph_edges table comes from an alembic migration instead)."
+        Write-Verbose "PostgreSQL ready on 127.0.0.1:5432/eoanalyst"
     }
-    Write-Verbose "db\graph_init.sql intentionally skipped -- Apache AGE is retired (docs\PLAN_WINDOWS_NATIVE.md step 1a; graph_edges table comes from an alembic migration instead)."
-    Write-Verbose "PostgreSQL ready on 127.0.0.1:5433/eoanalyst"
 }
 
 # ============================================================================
@@ -352,7 +468,7 @@ if ($SkipNtfy) {
 
     $ntfyDir = Join-Path $runtimeDir "ntfy"
     $downloadsDir = Join-Path $runtimeDir "downloads"
-    New-Item -ItemType Directory -Force -Path $ntfyDir, $downloadsDir | Out-Null
+    New-DirIfNeeded -Path @($ntfyDir, $downloadsDir)
     $ntfyExe = Join-Path $ntfyDir "ntfy.exe"
 
     if (-not (Test-Path $ntfyExe)) {
@@ -360,67 +476,80 @@ if ($SkipNtfy) {
         $zipUrl = "https://github.com/binwiederhier/ntfy/releases/download/v$NtfyVersion/$zipName"
         $checksumsUrl = "https://github.com/binwiederhier/ntfy/releases/download/v$NtfyVersion/checksums.txt"
         $zipPath = Join-Path $downloadsDir $zipName
+        # The zip extracts to a nested folder named after itself, e.g.
+        # ntfy_2.28.0_windows_amd64\ntfy.exe -- flattened into runtime\ntfy\ntfy.exe below.
 
         if (-not (Test-Path $zipPath)) {
-            Announce-Download -FileName $zipName -Source $zipUrl -SizeNote "~10-15 MB (single static Go binary; exact size varies per release)"
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
-            $sizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
-            Write-Verbose "Downloaded $zipPath ($sizeMb MB)"
+            $sizeNote = if ($NtfyVersion -eq "2.28.0") { "single static Go binary, sha256 fa49abd3462a588e1555701d360de84f192a45764a97054c4cafb486ea3cdf78 (verified 2026-09-05)" } else { "~10-15 MB (single static Go binary; exact size varies per release)" }
+            Announce-Download -FileName $zipName -Source $zipUrl -SizeNote $sizeNote
+            if ($DryRun) {
+                Write-DryRun "download $zipUrl -> $zipPath"
+            } else {
+                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+                $sizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+                Write-Verbose "Downloaded $zipPath ($sizeMb MB)"
+            }
         } else {
             Write-Verbose "Reusing cached $zipPath"
         }
 
-        $checksumsPath = Join-Path $downloadsDir "ntfy_$($NtfyVersion)_checksums.txt"
-        try {
-            if (-not $SkipDownloads -or (Test-Path $checksumsPath)) {
-                if (-not (Test-Path $checksumsPath)) {
-                    Write-Verbose "Fetching $checksumsUrl for SHA256 verification"
-                    Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath
-                }
-                $checksumLine = Get-Content $checksumsPath | Where-Object { $_ -match [Regex]::Escape($zipName) } | Select-Object -First 1
-                if ($checksumLine) {
-                    $expectedHash = ($checksumLine -split '\s+')[0].ToLower()
-                    $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
-                    if ($expectedHash -ne $actualHash) {
-                        Write-Error "ntfy zip SHA256 mismatch for ${zipName}: expected $expectedHash, got $actualHash"
+        if ($DryRun) {
+            Write-DryRun "fetch $checksumsUrl, verify SHA256 of $zipName, expand it, and copy the nested ntfy.exe to $ntfyExe"
+        } elseif (Test-Path $zipPath) {
+            $checksumsPath = Join-Path $downloadsDir "ntfy_$($NtfyVersion)_checksums.txt"
+            try {
+                if (-not $SkipDownloads -or (Test-Path $checksumsPath)) {
+                    if (-not (Test-Path $checksumsPath)) {
+                        Write-Verbose "Fetching $checksumsUrl for SHA256 verification"
+                        Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath
                     }
-                    Write-Verbose "SHA256 verified for $zipName ($actualHash)"
-                } else {
-                    Write-Warning "checksums.txt did not list an entry for $zipName -- skipping hash verification"
+                    $checksumLine = Get-Content $checksumsPath | Where-Object { $_ -match [Regex]::Escape($zipName) } | Select-Object -First 1
+                    if ($checksumLine) {
+                        $expectedHash = ($checksumLine -split '\s+')[0].ToLower()
+                        $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+                        if ($expectedHash -ne $actualHash) {
+                            Write-Error "ntfy zip SHA256 mismatch for ${zipName}: expected $expectedHash, got $actualHash"
+                        }
+                        Write-Verbose "SHA256 verified for $zipName ($actualHash)"
+                    } else {
+                        Write-Warning "checksums.txt did not list an entry for $zipName -- skipping hash verification"
+                    }
                 }
+            } catch {
+                Write-Warning "Could not fetch/verify ntfy checksums.txt: $_"
             }
-        } catch {
-            Write-Warning "Could not fetch/verify ntfy checksums.txt: $_"
-        }
 
-        $extractDir = Join-Path $downloadsDir "ntfy_extract"
-        Write-Verbose "Expanding $zipPath -> $extractDir"
-        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-        $foundExe = Get-ChildItem -Path $extractDir -Filter "ntfy.exe" -Recurse | Select-Object -First 1
-        if (-not $foundExe) { Write-Error "ntfy.exe not found inside $zipName" }
-        Copy-Item $foundExe.FullName $ntfyExe -Force
-        Write-Verbose "Installed $ntfyExe"
+            $extractDir = Join-Path $downloadsDir "ntfy_extract"
+            Write-Verbose "Expanding $zipPath -> $extractDir"
+            Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+            $foundExe = Get-ChildItem -Path $extractDir -Filter "ntfy.exe" -Recurse | Select-Object -First 1
+            if (-not $foundExe) { Write-Error "ntfy.exe not found inside $zipName" }
+            Copy-Item $foundExe.FullName $ntfyExe -Force
+            Write-Verbose "Installed $ntfyExe"
+        }
     } else {
         Write-Verbose "$ntfyExe already present"
     }
 
-    $attachDir = Join-Path $ntfyDir "attachments"
-    New-Item -ItemType Directory -Force -Path $attachDir | Out-Null
     $cacheFile = (Join-Path $ntfyDir "cache.db") -replace '\\', '/'
-    $attachDirForward = $attachDir -replace '\\', '/'
     $serverYml = Join-Path $ntfyDir "server.yml"
-    @"
-base-url: http://127.0.0.1:8090
-# Bound to 0.0.0.0 (not 127.0.0.1): the phone subscribes over Tailscale at
-# http://100.70.157.25:8090/eo-analyst (see docs\adr\003-agent-fetcher-bridge-and-notify-relay.md
-# and docs\adr\004-windows-native.md). Windows Firewall's default "private network" inbound
-# rules still gate who on the LAN/Tailscale interface can actually reach this port.
-listen-http: "0.0.0.0:8090"
-cache-file: $cacheFile
-attachment-cache-dir: $attachDirForward
+    $serverYmlContent = @"
+# EO-Analyst self-hosted ntfy (native). Phone subscribes via Tailscale: http://100.70.157.25:8091/eo-analyst
+# NOTE: attachment-cache-dir is deliberately NOT set -- with it, ntfy 2.28.0 on Windows fails
+# to serve (verified 2026-09-05: requests come back 501/refused). Leave it unset.
+base-url: "http://100.70.157.25:8091"
+listen-http: "0.0.0.0:8091"
+cache-file: "$cacheFile"
+cache-duration: "72h"
 behind-proxy: false
-"@ | Set-Content -Path $serverYml -Encoding utf8
-    Write-Verbose "Wrote $serverYml"
+log-level: info
+"@
+    if ($DryRun) {
+        Write-DryRun "write $serverYml"
+    } else {
+        $serverYmlContent | Set-Content -Path $serverYml -Encoding utf8
+        Write-Verbose "Wrote $serverYml"
+    }
 }
 
 # ============================================================================
@@ -435,12 +564,48 @@ if ($SkipGuardModel) {
     if (Test-Path (Join-Path $modelDir "model.onnx")) {
         Write-Verbose "$modelDir already has model.onnx; skipping"
     } else {
-        New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
-        Announce-Download -FileName "protectai/deberta-v3-base-prompt-injection-v2 (onnx/ subfolder)" `
-            -Source "https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2" `
-            -SizeNote "~370 MB (model.onnx + tokenizer files; via huggingface_hub, not a single direct URL -- mirrors docker\agent\Dockerfile's 'guard-model' build stage)"
+        New-DirIfNeeded -Path @($modelDir)
 
-        $guardScript = @'
+        # Prefer copying the already-baked-in model out of the (retiring) docker container's
+        # filesystem over re-downloading ~370 MB from Hugging Face. `docker cp` reads a
+        # container's filesystem regardless of whether it's running or stopped -- it does not
+        # start, stop, or otherwise manage the container.
+        $dockerContainerName = "eoa-agent"
+        $dockerContainerExists = $false
+        $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+        if ($dockerCmd) {
+            $existingNames = & docker ps -a --filter "name=^/$dockerContainerName`$" --format "{{.Names}}" 2>$null
+            $dockerContainerExists = ($LASTEXITCODE -eq 0) -and ($existingNames -match [Regex]::Escape($dockerContainerName))
+        }
+
+        $modelInstalled = $false
+        if ($dockerContainerExists) {
+            Write-Host "Found docker container '$dockerContainerName' -- copying its baked-in guard model instead of downloading from Hugging Face." -ForegroundColor DarkGray
+            if ($DryRun) {
+                Write-DryRun "run: docker cp ${dockerContainerName}:/opt/models/prompt-guard `"$modelDir`""
+                $modelInstalled = $true
+            } else {
+                & docker cp "${dockerContainerName}:/opt/models/prompt-guard" $modelDir
+                if ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $modelDir "model.onnx"))) {
+                    $modelInstalled = $true
+                    Write-Verbose "Copied guard model from docker container '$dockerContainerName' -> $modelDir"
+                } else {
+                    Write-Warning "docker cp from '$dockerContainerName' failed or produced no model.onnx -- falling back to huggingface_hub download"
+                }
+            }
+        } else {
+            Write-Verbose "No docker container named '$dockerContainerName' found -- will download from Hugging Face"
+        }
+
+        if (-not $modelInstalled) {
+            Announce-Download -FileName "protectai/deberta-v3-base-prompt-injection-v2 (onnx/ subfolder)" `
+                -Source "https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2" `
+                -SizeNote "~370 MB (model.onnx + tokenizer files; via huggingface_hub, not a single direct URL -- mirrors docker\agent\Dockerfile's 'guard-model' build stage)"
+
+            if ($DryRun) {
+                Write-DryRun "run a Python helper script that snapshot_download()s $MODEL_ID's onnx/ folder (or exports it locally via optimum-cli if no onnx/ folder exists on the hub) into $modelDir"
+            } else {
+                $guardScript = @'
 import os
 import shutil
 import subprocess
@@ -475,15 +640,17 @@ else:
 assert os.path.isfile(os.path.join(DEST, "model.onnx")), f"guard model install failed: no model.onnx in {DEST}"
 print("[guard-model] done:", sorted(os.listdir(DEST)))
 '@
-        $scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "eoa_guard_model_install_$([guid]::NewGuid().ToString('N')).py"
-        Set-Content -Path $scriptPath -Value $guardScript -Encoding utf8
-        try {
-            & $venvPython $scriptPath $modelDir
-            if ($LASTEXITCODE -ne 0) { Write-Error "Guard model install failed" }
-        } finally {
-            Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
+                $scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "eoa_guard_model_install_$([guid]::NewGuid().ToString('N')).py"
+                Set-Content -Path $scriptPath -Value $guardScript -Encoding utf8
+                try {
+                    & $venvPython $scriptPath $modelDir
+                    if ($LASTEXITCODE -ne 0) { Write-Error "Guard model install failed" }
+                } finally {
+                    Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
+                }
+                Write-Verbose "Guard model ready at $modelDir"
+            }
         }
-        Write-Verbose "Guard model ready at $modelDir"
     }
 }
 
@@ -494,16 +661,20 @@ if ($SkipFrontend) {
     Write-Host "`n[5/7] Skipping frontend build (-SkipFrontend)" -ForegroundColor Yellow
 } else {
     Write-Host "`n[5/7] Frontend (npm ci && npm run build)..." -ForegroundColor Cyan
-    Push-Location (Join-Path $repoRoot "web")
-    try {
-        & npm ci
-        if ($LASTEXITCODE -ne 0) { Write-Error "npm ci failed" }
-        & npm run build
-        if ($LASTEXITCODE -ne 0) { Write-Error "npm run build failed" }
-    } finally {
-        Pop-Location
+    if ($DryRun) {
+        Write-DryRun "run: npm ci && npm run build (in $(Join-Path $repoRoot 'web'))"
+    } else {
+        Push-Location (Join-Path $repoRoot "web")
+        try {
+            & npm ci
+            if ($LASTEXITCODE -ne 0) { Write-Error "npm ci failed" }
+            & npm run build
+            if ($LASTEXITCODE -ne 0) { Write-Error "npm run build failed" }
+        } finally {
+            Pop-Location
+        }
+        Write-Verbose "Frontend built -> web\dist (served by FastAPI's StaticFiles mount)"
     }
-    Write-Verbose "Frontend built -> web\dist (served by FastAPI's StaticFiles mount)"
 }
 
 # ============================================================================
@@ -559,25 +730,35 @@ Write-Host "`n[7/7] Writing runtime\eoa.env..." -ForegroundColor Cyan
 
 $guardDir = (Join-Path $runtimeDir "models\prompt-guard") -replace '\\', '/'
 $eoaEnvPath = Join-Path $runtimeDir "eoa.env"
-@"
-DATABASE_URL=postgresql://eoa:$pgPassword@127.0.0.1:5433/eoanalyst
+$eoaEnvContent = @"
+EOA_ROOT=$($repoRoot -replace '\\', '/')
 EOA_ROLE=host
+DATABASE_URL=postgresql://eoa:$pgPassword@127.0.0.1:5432/eoanalyst
 OLLAMA_URL=http://127.0.0.1:11434
-NTFY_URL=http://127.0.0.1:8090
-NTFY_TOPIC=eo-analyst
+NTFY_URL=http://127.0.0.1:8091
 EOA_GUARD_L1_DIR=$guardDir
 HF_HUB_OFFLINE=1
 TZ=Asia/Jerusalem
 PYTHONUTF8=1
-EOA_ROOT=$repoRoot
-"@ | Set-Content -Path $eoaEnvPath -Encoding utf8
-Write-Verbose "Wrote $eoaEnvPath"
+PYTHONUNBUFFERED=1
+"@
+if ($DryRun) {
+    Write-DryRun "write $eoaEnvPath with:"
+    $eoaEnvContent -split "`n" | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+} else {
+    $eoaEnvContent | Set-Content -Path $eoaEnvPath -Encoding utf8
+    Write-Verbose "Wrote $eoaEnvPath"
+}
 
 # ============================================================================
 # Summary
 # ============================================================================
 Write-Host "`n" -ForegroundColor Cyan
-Write-Host "Native install complete." -ForegroundColor Green
+if ($DryRun) {
+    Write-Host "Dry run complete -- nothing was changed." -ForegroundColor Green
+} else {
+    Write-Host "Native install complete." -ForegroundColor Green
+}
 Write-Host @"
 
 Next steps:
@@ -590,12 +771,14 @@ Next steps:
                                    pwsh -File scripts\native\migrate_from_docker.ps1 -DryRun
 
 Files/dirs created under runtime\ (gitignored):
-  runtime\python\           uv-managed CPython 3.12
-  runtime\pgsql\, pgdata\   PostgreSQL 17 binaries + cluster (port 5433)
-  runtime\ntfy\             ntfy.exe + server.yml (port 8090, listens on 0.0.0.0 for Tailscale)
+  runtime\pgsql\, pgdata\   PostgreSQL $PgVersion binaries + cluster (port 5432)
+  runtime\ntfy\             ntfy.exe + server.yml (port 8091, listens on 0.0.0.0 for Tailscale)
   runtime\models\prompt-guard\  ONNX prompt-injection classifier
   runtime\eoa.env           env vars for the supervisor / eo CLI
   runtime\logs\             per-service logs (written by the supervisor)
+
+.venv\ (repo root): project virtualenv, built from the host's own Python (>=3.12) -- no
+managed Python download.
 
 See docs\adr\004-windows-native.md for the full rationale and security posture.
 "@

@@ -3,6 +3,7 @@
 > If you're on the ops console or responding to a failed run, start here.
 
 ## Table of Contents
+0. [Native (Windows) Operations](#native-windows-operations)
 1. [Daily Status Checks](#daily-status-checks)
 2. [Re-Running a Stage](#re-running-a-stage)
 3. [Restoring from Backup](#restoring-from-backup)
@@ -12,6 +13,93 @@
 7. [Network Isolation Verification](#network-isolation-verification)
 8. [Integration Smoke Tests](#integration-smoke-tests)
 9. [Web UI Quality Suite (Playwright)](#web-ui-quality-suite-playwright)
+
+> **Sections 1-9 below predate the 2026-09-05 switch to native Windows** (ADR-004). The `eo ...`
+> CLI commands in them (`eo status`, `eo run daily`, `eo investigate`, ...) still work unchanged.
+> Anything that says `docker compose ...`, references port **5433**, or talks about Apache AGE /
+> the `agent`+`fetcher`+`searxng` container network is **legacy (pre 2026-09-05, retired)** --
+> use the native equivalent from section 0 instead (postgres is now on port **5432**, there is no
+> `fetcher`/`searxng` container, and network isolation is gone per ADR-004 §3-4).
+
+---
+
+## Native (Windows) Operations
+
+As of 2026-09-05 (ADR-004) the stack runs as native Windows processes -- no Docker. This section
+is the current, authoritative one; everything under sections 1-9 that mentions `docker compose`
+or port 5433 is legacy.
+
+### Start / stop / status / logs
+
+```powershell
+# Start postgres + ntfy + orchestrator + api (idempotent -- no-ops if already running)
+eo native start
+
+# Status of each managed process (reads runtime\pids\*.pid)
+eo native status
+
+# Tail a service's log (supervisor | postgres | ntfy | orchestrator | api)
+eo native logs supervisor
+eo native logs api
+
+# Stop everything (writes runtime\supervisor.stop, waits for graceful shutdown)
+eo native stop
+```
+
+Equivalent direct invocation of the supervisor (useful for foreground debugging):
+
+```powershell
+pwsh -NoProfile -File scripts\native\eoa-supervisor.ps1
+# from another shell, to stop it:
+New-Item -ItemType File -Force runtime\supervisor.stop
+```
+
+### Where things live
+
+| What | Path |
+|---|---|
+| Logs (all services, daily-rotated) | `runtime\logs\` (e.g. `runtime\logs\api.2026-09-05.log`) |
+| Postgres logs | `runtime\logs\pg\` |
+| Pidfiles | `runtime\pids\<name>.pid` (`ntfy`, `orchestrator`, `api`) + `runtime\supervisor.pid` |
+| Environment | `runtime\eoa.env` (written by `scripts\native\install_native.ps1`) |
+| Python venv | `.venv\` (repo root, built from the host's own Python >=3.12 -- no managed download) |
+| Postgres binaries + data | `runtime\pgsql\`, `runtime\pgdata\` |
+| ntfy binary + config | `runtime\ntfy\ntfy.exe`, `runtime\ntfy\server.yml` |
+
+### Alembic migrations
+
+```powershell
+# Load DATABASE_URL from runtime\eoa.env into the current shell, then migrate
+Get-Content runtime\eoa.env | ForEach-Object {
+    if ($_ -match '^([^#=]+)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] }
+}
+.venv\Scripts\alembic upgrade head
+```
+
+### psql
+
+```powershell
+runtime\pgsql\bin\psql -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst
+```
+
+(Port **5432** -- the native default. 5433 was only ever the Docker Compose host-mapping and no
+longer applies.)
+
+### Backup
+
+```powershell
+# Custom-format dump, restorable with pg_restore
+runtime\pgsql\bin\pg_dump -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -Fc -f output\backups\eoanalyst_$(Get-Date -Format yyyyMMdd_HHmmss).dump
+```
+
+### One-time Docker -> native data migration
+
+```powershell
+pwsh -File scripts\native\migrate_from_docker.ps1 -DryRun   # preview
+pwsh -File scripts\native\migrate_from_docker.ps1            # dump docker, restore into native
+```
+
+See `docs\adr\004-windows-native.md` for the full topology and security-posture writeup.
 
 ---
 
@@ -66,7 +154,7 @@ WHERE incident = TRUE ORDER BY flagged_at DESC;
 # or over Tailscale: http://ntfy:80 (if on the network)
 
 # Terminal monitoring:
-curl -s "http://127.0.0.1:8090/eo-analyst/json" | jq .
+curl -s "http://127.0.0.1:8091/eo-analyst/json" | jq .
 ```
 
 ### Manual Trigger
@@ -405,6 +493,11 @@ eo run embed_dedup
 
 ## Network Isolation Verification
 
+> **Legacy (pre-2026-09-05).** This entire section describes the retired Docker container
+> network isolation. ADR-004 retired it with no native replacement yet (an outbound-HTTP audit
+> log is tracked as follow-up there); there is no `docker compose exec agent ...` to run anymore.
+> Kept for historical reference only.
+
 The `agent` container must NOT reach the public internet (ADR-002). Verify:
 
 ### Option 1: Windows (PowerShell)
@@ -456,7 +549,7 @@ The live stack (PostgreSQL, web API, fetcher, ntfy) has a comprehensive smoke te
 # Set environment variables (optional; defaults to localhost)
 export DATABASE_URL="postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst"
 export API_BASE_URL="http://127.0.0.1:8765"
-export NTFY_BASE_URL="http://127.0.0.1:8090"
+export NTFY_BASE_URL="http://127.0.0.1:8091"
 
 # Run all integration tests
 PYTHONPATH=agent python -m pytest tests/integration/test_live_stack.py -q -m integration
@@ -494,7 +587,7 @@ PYTHONPATH=agent python -m pytest tests/integration/test_live_stack.py -v -m int
 - Job result contains fetched content with `text` field
 
 **Ntfy Integration (TestNtfyIntegration)**
-- `POST` to `http://ntfy:8090/eo-analyst-test` returns 200 OK
+- `POST` to `http://ntfy:8091/eo-analyst-test` returns 200 OK
 - (Does NOT post to production topic `eo-analyst`)
 
 **Network Isolation (TestNetworkIsolation)**

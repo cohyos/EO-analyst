@@ -20,7 +20,8 @@ Steps:
      --exclude-schema=ag_catalog --exclude-extension=age --exclude-extension=vector -Fc`
      -> output\backups\docker_final_<timestamp>.dump (custom format, for pg_restore)
      and a second plain-SQL dump (`-Fp`) alongside it, for human inspection/grep.
-  2. `pg_restore --no-owner --clean --if-exists` into the native cluster (127.0.0.1:5433).
+  2. `pg_restore --no-owner --clean --if-exists` into the native cluster (127.0.0.1:5432 --
+     the native port; 5433 was only ever the Docker Compose host-mapping, now retired).
   3. Row counts, both sides, for: items, entities, events, tenders, tender_forecasts,
      graph_edges, reports, conferences, jobs.
 
@@ -38,7 +39,7 @@ Dump only; do not restore. Useful to inspect the dump before committing to the r
 
 .NOTES
 Requires the `postgres` container from docker-compose.yml to still be up (for pg_dump) and
-the native cluster (runtime\pgsql, port 5433) to already be running (for pg_restore).
+the native cluster (runtime\pgsql, port 5432) to already be running (for pg_restore).
 #>
 
 #Requires -Version 7
@@ -144,11 +145,11 @@ $psql = Join-Path $runtimeDir "pgsql\bin\psql.exe"
 if ($SkipRestore) {
     Write-Host "`n-SkipRestore: leaving the native database untouched." -ForegroundColor Yellow
 } else {
-    Invoke-Step -Description "pg_restore --no-owner --clean --if-exists into native eoanalyst (127.0.0.1:5433)" -Block {
+    Invoke-Step -Description "pg_restore --no-owner --clean --if-exists into native eoanalyst (127.0.0.1:5432)" -Block {
         if (-not (Test-Path $pgRestore)) { Write-Error "$pgRestore not found -- run install_native.ps1 first" }
         $env:PGPASSWORD = $pgPassword
         try {
-            & $pgRestore -h 127.0.0.1 -p 5433 -U eoa -d eoanalyst --no-owner --clean --if-exists $dumpCustom
+            & $pgRestore -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst --no-owner --clean --if-exists $dumpCustom
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "pg_restore exited $LASTEXITCODE -- pg_restore commonly warns/exits non-zero on harmless 'does not exist, skipping' DROP statements from --clean --if-exists on a fresh DB. Verify the row counts below before trusting this exit code alone."
             } else {
@@ -201,9 +202,9 @@ if ($DryRun) {
 
     $env:PGPASSWORD = $pgPassword
     try {
-        $nativeCounts = Get-RowCounts -Label "native (target, 127.0.0.1:5433)" -RunPsql {
+        $nativeCounts = Get-RowCounts -Label "native (target, 127.0.0.1:5432)" -RunPsql {
             param($sql)
-            & $psql -h 127.0.0.1 -p 5433 -U eoa -d eoanalyst -tAc $sql
+            & $psql -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -tAc $sql
         }
     } finally {
         Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue

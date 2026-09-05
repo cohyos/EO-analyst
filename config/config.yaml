@@ -82,7 +82,7 @@ search:
     max_results: 10
 
 searxng:
-  url: http://searxng:8080
+  url: http://127.0.0.1:8088   # legacy SearXNG container (search.provider=ddgs is the default now)
   engines: [google, bing, "bing news", "google news"]   # verified 2026-09-04; ddg/brave/startpage get CAPTCHA-suspended
   engines_by_lang: { zh: [baidu, google], ru: [yandex, google], he: [google, "google news", bing] }
   rate_limit_per_minute: 20
@@ -108,7 +108,7 @@ report:
   require_citations: true       # QA blocks uncited claims
 
 notify:
-  url: http://ntfy:80
+  url: http://127.0.0.1:8091      # native ntfy (ADR-004); NTFY_URL env overrides
   topic: eo-analyst
   public_fallback_url: https://ntfy.sh
   public_fallback_topic: dissertation_editor_ysf
@@ -116,7 +116,7 @@ notify:
   send_red_alerts: true
   send_security_alerts: true
   clarification_timeout_min: 5
-  mirror_to_public: true        # until the phone subscribes to the self-hosted server (Tailscale http://100.70.157.25:8090/eo-analyst)
+  mirror_to_public: true        # until the phone subscribes to the self-hosted server (Tailscale http://100.70.157.25:8091/eo-analyst)
 
 retention:
   raw_text_days: 90
