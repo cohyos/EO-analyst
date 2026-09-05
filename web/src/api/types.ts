@@ -18,8 +18,10 @@ import type {
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
+  ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
+  RunsCurrentResponse,
   SettingsGetResponse,
   SettingsName,
   SettingsPutResponse,
@@ -140,12 +142,22 @@ export interface ApiClient {
   deleteLesson(id: number): Promise<void>;
 
   getJobs(state?: string, limit?: number): Promise<Job[]>;
+  /**
+   * U4/F17: idempotent on the server -- if an equivalent run is already queued/running, this
+   * rejects with an `ApiError` (code `"conflict"`, `detail: {job_id, kind, state}`) instead of
+   * enqueueing a second one. Callers that want "run now" semantics (rather than a hard failure)
+   * should catch that specific case and treat it as "already running".
+   */
   postRun(scope: string, mode: "eco" | "full"): Promise<{ job_id: string }>;
   postJobCancel(id: number): Promise<void>;
+  /** U4/F17: the active run's stage-by-stage progress/ETA, plus any other concurrently-running job. */
+  getRunsCurrent(): Promise<RunsCurrentResponse>;
 
   getReports(kind?: string, limit?: number): Promise<ReportSummary[]>;
   getReport(id: number): Promise<ReportDetail>;
   getReportFileUrl(id: number, fmt: "docx" | "md" | "html"): string;
+  /** U3: `n -> {item_id, url, title}` for every `[n]` citation marker the report contains. */
+  getReportCitations(id: number): Promise<ReportCitationsResponse>;
 
   getSettings(name: SettingsName): Promise<SettingsGetResponse>;
   putSettings(name: SettingsName, yaml: string): Promise<SettingsPutResponse>;

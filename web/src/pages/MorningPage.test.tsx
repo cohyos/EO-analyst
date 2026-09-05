@@ -81,6 +81,10 @@ describe("MorningPage against an empty/partial backend", () => {
         deep_searches: 0,
         duration_min: 0,
         errors: 0,
+        state: "none",
+        tenders_open: 0,
+        tenders_unknown: 0,
+        new_forecasts: 0,
       },
     };
     getMorning.mockResolvedValue(payload);
@@ -114,6 +118,10 @@ describe("MorningPage against an empty/partial backend", () => {
         deep_searches: 1,
         duration_min: 45,
         errors: 0,
+        state: "done",
+        tenders_open: 0,
+        tenders_unknown: 0,
+        new_forecasts: 0,
       },
     };
     getMorning.mockResolvedValue(payload);

@@ -130,3 +130,18 @@ api:
 
 export:
   obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }
+
+llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md — interactive-only cloud models via CLI (never the night pipeline)
+  allow_cloud: true                 # kill switch: false disables agy/claude/codex everywhere, chat falls back to ollama
+  interactive_default: "ollama"     # "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
+  timeout_s: 120
+  cli:
+    agy:
+      binary: agy      # Gemini via Antigravity CLI (resolved through PATH; falls back to an absolute path if set)
+      models: [gemini-3.8-flash-medium, gemini-3.8-flash-high, gemini-3.1-pro-high]  # ids from `agy models` (verified 2026-09-05)
+    claude:
+      binary: claude   # Claude Code CLI
+      models: [claude-opus-5, claude-sonnet-5, claude-haiku-4-5-20251001]
+    codex:
+      binary: codex    # Codex CLI (read-only sandbox, exec mode)
+      models: [default]

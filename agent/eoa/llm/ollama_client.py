@@ -7,6 +7,7 @@ Fetched content is always passed through ``wrap_data`` so the model treats it as
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ import structlog
 from pydantic import BaseModel, ValidationError
 
 from eoa.config import ModelSpec, settings
-from eoa.errors import LLMOutputError
+from eoa.errors import LLMOutputError, ProviderUnavailable
 from eoa.resources.gate import gate
 
 log = structlog.get_logger(__name__)
@@ -69,6 +70,92 @@ def _num_ctx(task: str, spec: ModelSpec) -> int:
     return min(cfg.get(task, cfg.get("summarize", 8192)), spec.ctx_max)
 
 
+# ---------------------------------------------------------------------------------------------
+# U8 provider dispatch (docs/adr/005-cloud-llm-cli.md) -- the ONLY hook cloud CLI providers get
+# into this module. Everything below `chat()`/`chat_structured()`'s own bodies is unchanged
+# Ollama logic; a non-"ollama" provider returns before any of it runs.
+# ---------------------------------------------------------------------------------------------
+
+
+def _resolve_provider(provider: str | None) -> str:
+    """Resolve the effective provider string for one call.
+
+    The night pipeline and every queued job (daily/weekly/monthly/ingest/deep_search -- including
+    a manually triggered "investigate" or "run now", which are enqueued onto the same job queue)
+    run inside the orchestrator/worker process, which sets ``EOA_PIPELINE=1`` at import time
+    (``eoa.orchestrator.jobs``, top of file). That always wins, regardless of what the caller
+    passed or what ``llm_providers.interactive_default`` says -- this is the single choke point
+    that keeps a user's cloud default from ever leaking into an automated run.
+    """
+    if os.environ.get("EOA_PIPELINE") == "1":
+        return "ollama"
+    if provider:
+        return provider
+    return settings().llm_providers.interactive_default or "ollama"
+
+
+def resolve_provider_info(provider: str | None) -> tuple[str, str]:
+    """``(kind, model)`` an interactive caller (the /api/ask chat) would get for ``provider``.
+
+    Used to send the UI a "provider/model" badge before streaming starts, without making a call.
+    """
+    resolved = _resolve_provider(provider)
+    kind, _, model = resolved.partition(":")
+    if kind == "ollama" or not kind:
+        return "ollama", settings().models.get("resident") or "resident"
+    if not model:
+        from eoa.llm.providers.cli import CliProvider
+
+        models = CliProvider(kind).list_models()
+        model = models[0] if models else "default"
+    return kind, model
+
+
+def _dispatch_cli_chat(
+    provider: str, messages: list[dict[str, Any]], *, format_schema: dict[str, Any] | None
+) -> ChatResult:
+    """Run one chat turn through a cloud CLI provider and adapt it into ``ChatResult``."""
+    kind, _, model = provider.partition(":")
+    if not settings().llm_providers.allow_cloud:
+        raise ProviderUnavailable(
+            "cloud LLM providers are disabled (llm_providers.allow_cloud=false in config.yaml)"
+        )
+    from eoa.llm.providers.cli import CliProvider
+
+    cli = CliProvider(kind, model or None)
+    result = cli.chat(messages, model=model or None, json_schema=format_schema)
+    _log_cloud_call(provider=kind, model=result.model, prompt_chars=result.prompt_chars, duration_ms=result.duration_ms)
+    log.info(
+        "llm_chat_cloud",
+        provider=kind,
+        model=result.model,
+        prompt_chars=result.prompt_chars,
+        ms=result.duration_ms,
+    )
+    return ChatResult(
+        content=result.content,
+        tool_calls=[],
+        thinking=None,
+        prompt_tokens=int(result.usage.get("input_tokens") or result.usage.get("prompt_tokens") or 0),
+        eval_tokens=int(result.usage.get("output_tokens") or result.usage.get("eval_tokens") or 0),
+        duration_ms=result.duration_ms,
+        model=f"{kind}:{result.model}",
+        raw={"provider": kind, "usage": result.usage},
+    )
+
+
+def _log_cloud_call(*, provider: str, model: str, prompt_chars: int, duration_ms: int) -> None:
+    """Privacy/security (U8 step 3): every cloud call is logged (provider, model, prompt size,
+    duration) to the ``llm_calls`` table -- never the prompt or response text. Best-effort: a
+    logging failure must never break the chat call itself."""
+    try:
+        from eoa.memory.relational import log_llm_call
+
+        log_llm_call(provider=provider, model=model, prompt_chars=prompt_chars, duration_ms=duration_ms)
+    except Exception as exc:  # logging must never break the call
+        log.warning("llm_call_log_failed", provider=provider, error=str(exc)[:200])
+
+
 def chat(
     role: str,
     messages: list[dict[str, Any]],
@@ -80,8 +167,20 @@ def chat(
     think: bool | None = None,
     interactive: bool = False,
     keep_alive: str | None = None,
+    provider: str | None = None,
 ) -> ChatResult:
-    """One chat completion through the gate. ``role`` is a config role (resident/light/...)."""
+    """One chat completion. ``role`` is a config role (resident/light/...), used for the local
+    Ollama path (default). ``provider`` (U8) can route this call to a cloud CLI instead --
+    "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"; ``None`` resolves from
+    ``llm_providers.interactive_default``, forced back to "ollama" for any pipeline/job call
+    (see ``_resolve_provider``). A cloud provider bypasses the resource gate entirely (it does
+    not touch the local GPU) and returns here without running any of the Ollama-specific code
+    below.
+    """
+    resolved = _resolve_provider(provider)
+    if resolved != "ollama":
+        return _dispatch_cli_chat(resolved, messages, format_schema=format_schema)
+
     spec = gate().acquire(role, interactive=interactive)
     assert spec.ollama, f"{spec.key} is not an Ollama model"
     s = settings()
@@ -141,8 +240,14 @@ def chat_structured(
     task: str = "classify",
     interactive: bool = False,
     options: dict[str, Any] | None = None,
+    provider: str | None = None,
 ) -> T:
-    """Chat with a JSON schema constraint and validate into ``schema``; one corrective retry."""
+    """Chat with a JSON schema constraint and validate into ``schema``; one corrective retry.
+
+    ``provider`` (U8) is threaded straight through to each ``chat()`` call, including the
+    corrective retry -- a cloud CLI provider gets the same "return ONLY JSON matching this
+    schema" instruction and the same one-retry-on-validation-failure contract as Ollama.
+    """
     json_schema = schema.model_json_schema()
     last_err: Exception | None = None
     msgs = list(messages)
@@ -155,6 +260,7 @@ def chat_structured(
             interactive=interactive,
             options={"temperature": 0.1, **(options or {})},
             think=False,
+            provider=provider,
         )
         try:
             return schema.model_validate_json(_strip_fences(res.content))
@@ -246,6 +352,7 @@ def chat_stream(
     think: bool | None = None,
     interactive: bool = False,
     keep_alive: str | None = None,
+    provider: str | None = None,
 ) -> Iterable[str]:
     """Stream a chat completion through the gate, yielding content deltas as they arrive.
 
@@ -253,7 +360,20 @@ def chat_stream(
     each non-empty ``message.content`` delta as Ollama sends it (newline-delimited
     JSON). Used by the ``/api/ask`` SSE endpoint. Tool calls and ``format`` schema
     constraints are not supported here, mirroring Ollama's own streaming contract.
+
+    U8: a cloud CLI ``provider`` has no streaming API, so this makes one blocking
+    ``chat()`` call and yields the full answer back in small chunks -- the SSE
+    contract (a sequence of ``{"type": "token", "text": ...}`` deltas) stays identical
+    for the UI either way.
     """
+    resolved = _resolve_provider(provider)
+    if resolved != "ollama":
+        res = chat(role, messages, task=task, interactive=interactive, provider=resolved)
+        chunk_size = 24
+        for i in range(0, len(res.content), chunk_size):
+            yield res.content[i : i + chunk_size]
+        return
+
     spec = gate().acquire(role, interactive=interactive)
     assert spec.ollama, f"{spec.key} is not an Ollama model"
     s = settings()

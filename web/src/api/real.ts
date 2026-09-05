@@ -18,8 +18,10 @@ import type {
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
+  ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
+  RunsCurrentResponse,
   SettingsGetResponse,
   SettingsName,
   SettingsPutResponse,
@@ -34,11 +36,16 @@ import {
   idStr,
   normalizeInvestigationLogLine,
   normalizeNightSummary,
+  normalizeReportCitations,
+  normalizeRunsCurrent,
   num,
   str,
 } from "./normalize";
 
-class ApiError extends Error {
+/** Thrown by `request()` for any non-2xx response carrying the `{"error": {...}}` envelope
+ * (see `eoa.api.errors`/`app.py`). Exported so callers can distinguish e.g. a `"conflict"` (409,
+ * U4/F17: an equivalent run is already active) from any other failure. */
+export class ApiError extends Error {
   code: string;
   detail: unknown;
   constructor(code: string, messageHe: string, detail: unknown) {
@@ -372,6 +379,13 @@ export const realApi: ApiClient = {
       headlines: arr(data?.headlines),
       open_points: arr(data?.open_points),
       night_summary: normalizeNightSummary(data?.night_summary),
+      recent_errors: arr(data?.recent_errors).map((e) => ({
+        id: num(e?.id),
+        job_id: e?.job_id ?? null,
+        stage: e?.stage ?? null,
+        message: str(e?.message),
+        at: e?.at ?? null,
+      })),
     };
   },
 
@@ -589,6 +603,8 @@ export const realApi: ApiClient = {
   postJobCancel: (id) => request<void>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   // (`id` is a `jobs.id` integer on the wire — the template literal above
   // coerces either the numeric or string form the caller passes.)
+  getRunsCurrent: async () =>
+    normalizeRunsCurrent(await request<Partial<RunsCurrentResponse>>("/api/runs/current")),
 
   getReports: async (kind, limit = 30) =>
     arr(
@@ -597,6 +613,10 @@ export const realApi: ApiClient = {
   getReport: async (id) =>
     normalizeReportDetail(await request<Partial<ReportDetail>>(`/api/reports/${id}`)),
   getReportFileUrl: (id, fmt) => `/api/reports/${id}/file?fmt=${fmt}`,
+  getReportCitations: async (id) =>
+    normalizeReportCitations(
+      await request<Partial<ReportCitationsResponse>>(`/api/reports/${id}/citations`),
+    ),
 
   getSettings: async (name: SettingsName) => {
     const data = await request<Partial<SettingsGetResponse>>(`/api/settings/${name}`);

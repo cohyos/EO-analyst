@@ -944,7 +944,35 @@ def morning() -> dict[str, Any]:
         "headlines": headlines,
         "open_points": open_points,
         "night_summary": _night_summary(),
+        "recent_errors": recent_errors(),
     }
+
+
+def recent_errors(hours: int = 24, limit: int = 20) -> list[dict[str, Any]]:
+    """U2: backs the Morning "שגיאות אחרונות" drawer -- every `run_log` error event in the last
+    `hours`, newest first, with a short human-readable message extracted from that event's
+    `detail` (never the raw traceback -- see `eoa.orchestrator.jobs._run_stage`'s `error` event)."""
+    window_start, window_end = _kpi_window(hours)
+    rows = _fetchall(
+        "SELECT id, job_id, stage, event, detail, COALESCE(heartbeat_at, created_at) AS at "
+        "FROM run_log WHERE event ILIKE %(pat)s AND COALESCE(heartbeat_at, created_at) BETWEEN %(start)s AND %(end)s "
+        "ORDER BY id DESC LIMIT %(limit)s",
+        {"pat": "%error%", "start": window_start, "end": window_end, "limit": limit},
+    )
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        detail = r.get("detail") or {}
+        message = detail.get("error") or detail.get("message") or r.get("event") or "שגיאה"
+        out.append(
+            {
+                "id": r["id"],
+                "job_id": r.get("job_id"),
+                "stage": r.get("stage"),
+                "message": str(message)[:300],
+                "at": r["at"].isoformat() if r.get("at") else None,
+            }
+        )
+    return out
 
 
 def _kpi_window(hours: int = 24) -> tuple[dt.datetime, dt.datetime]:
@@ -1521,6 +1549,23 @@ def deactivate_lesson(lesson_id: int) -> bool:
 
 RUN_SCOPE_TO_KIND = {"daily": "daily_run", "ingest": "ingest", "report": "report", "weekly": "weekly_run"}
 
+# U4/F17 (docs/REVIEW_2026-09-05.md): kinds that count as "the same effective run" for
+# idempotency -- requesting a fresh daily run while a weekly run (which performs the full daily
+# pipeline first, see `eoa.orchestrator.jobs.run_weekly`) is already in flight is still a
+# duplicate from the user's point of view, not a second independent run.
+_RUN_IDEMPOTENCY_GROUPS: dict[str, tuple[str, ...]] = {
+    "daily_run": ("daily_run", "weekly_run"),
+    "report": ("report", "daily_run", "weekly_run"),
+}
+
+
+class RunAlreadyActive(Exception):
+    """An equivalent run is already queued/running; the route surfaces this as HTTP 409."""
+
+    def __init__(self, job: dict[str, Any]) -> None:
+        self.job = job
+        super().__init__(f"a {job.get('kind')} job is already {job.get('state')} (id={job.get('id')})")
+
 
 def list_jobs(*, state: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
     where = "state = %(state)s" if state else "1 = 1"
@@ -1531,10 +1576,124 @@ def list_jobs(*, state: str | None = None, limit: int = 50) -> list[dict[str, An
 
 
 def enqueue_run(scope: str, mode: str) -> int:
+    """U4/F17: idempotent -- if an equivalent job is already `queued`/`running`, raises
+    `RunAlreadyActive(job)` instead of enqueueing a second one (repro: the "הרץ עכשיו" button gave
+    no feedback, got double-clicked, and enqueued two overlapping daily runs)."""
     kind = RUN_SCOPE_TO_KIND.get(scope)
     if kind is None:
         raise ValueError(f"unknown scope: {scope}")
+    equivalent_kinds = list(_RUN_IDEMPOTENCY_GROUPS.get(kind, (kind,)))
+    existing = _fetchone(
+        "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND state IN ('queued', 'running') "
+        "ORDER BY created_at DESC LIMIT 1",
+        {"kinds": equivalent_kinds},
+    )
+    if existing is not None:
+        raise RunAlreadyActive(_json_safe_row(existing) or {})
     return relational.enqueue_job(kind, {"mode": mode}, priority=5)
+
+
+# --------------------------------------------------------------------------
+# run progress (U4/F17): GET /api/runs/current
+# --------------------------------------------------------------------------
+
+# Jobs the "run now" button (or the scheduler) can start that the analyst thinks of as "a run" --
+# excludes `deep_search` (consumed piecemeal from inside `daily_run`'s own stage, or triggered
+# individually from the UI/chat -- see `other_running` below).
+_PRIMARY_RUN_KINDS = ("daily_run", "weekly_run", "monthly_run", "report", "ingest", "tender_scan", "conference_scan")
+
+
+def _stage_progress_for_job(job_id: int, job_state: str) -> dict[str, Any]:
+    stages_log = _stage_timeline_from_log(job_id, job_state)
+    ordered: list[dict[str, Any]] = []
+    current_stage: str | None = None
+    for stage in _DAILY_RUN_STAGE_ORDER:
+        info = stages_log.get(stage, {"status": "pending", "minutes": None})
+        ordered.append({"stage": stage, "status": info["status"], "minutes": info.get("minutes")})
+        if info["status"] == "running" and current_stage is None:
+            current_stage = stage
+    for stage, info in stages_log.items():
+        if stage not in _DAILY_RUN_STAGE_ORDER:
+            ordered.append({"stage": stage, "status": info["status"], "minutes": info.get("minutes")})
+    if current_stage is None:
+        current_stage = next((s["stage"] for s in ordered if s["status"] == "pending"), None)
+    return {"stages": ordered, "current_stage": current_stage}
+
+
+def _historical_stage_minutes(stage: str, limit: int = 5) -> float | None:
+    """Average `minutes` of the last `limit` completed runs of `stage`, for the ETA estimate."""
+    rows = _fetchall(
+        "SELECT (detail->>'minutes')::float AS minutes FROM run_log "
+        "WHERE stage = %(stage)s AND event = 'done' AND detail ? 'minutes' "
+        "ORDER BY id DESC LIMIT %(limit)s",
+        {"stage": stage, "limit": limit},
+    )
+    values = [r["minutes"] for r in rows if r.get("minutes") is not None]
+    return round(sum(values) / len(values), 1) if values else None
+
+
+def _eta_minutes(stages: list[dict[str, Any]]) -> float | None:
+    """Remaining-time estimate: historical average minutes per not-yet-finished stage, falling
+    back to that stage's configured budget (`config.yaml` `stages:`) when there's no history yet."""
+    if not stages:
+        return None
+    budgets = eoa_config.settings().stages
+    remaining = 0.0
+    pending_any = False
+    for entry in stages:
+        if entry["status"] in ("done", "failed", "skipped"):
+            continue
+        pending_any = True
+        hist = _historical_stage_minutes(entry["stage"])
+        remaining += hist if hist is not None else float(budgets.get(entry["stage"], 15))
+    return round(remaining, 1) if pending_any else 0.0
+
+
+def current_run_progress() -> dict[str, Any]:
+    """U4/F17: what "run now" (or the scheduler) currently has in flight, with per-stage
+    progress/ETA, plus any other job a separate worker has claimed concurrently (F17: a
+    `deep_search` job ran to completion without the analyst ever seeing it)."""
+    primary = _fetchone(
+        "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND state IN ('running', 'queued') "
+        "ORDER BY (state = 'running') DESC, started_at DESC NULLS LAST, created_at DESC LIMIT 1",
+        {"kinds": list(_PRIMARY_RUN_KINDS)},
+    )
+    current: dict[str, Any] | None = None
+    if primary is not None:
+        started = primary.get("started_at")
+        elapsed_min = (
+            round((dt.datetime.now(tz=dt.UTC) - started).total_seconds() / 60, 1) if started else None
+        )
+        if primary["state"] == "running":
+            progress = _stage_progress_for_job(primary["id"], primary["state"])
+        else:
+            progress = {"stages": [], "current_stage": None}
+        current = {
+            "job_id": primary["id"],
+            "kind": primary["kind"],
+            "state": primary["state"],
+            "current_stage": progress["current_stage"],
+            "stages": progress["stages"],
+            "started_at": started.isoformat() if started else None,
+            "elapsed_min": elapsed_min,
+            "eta_min": _eta_minutes(progress["stages"]),
+        }
+
+    exclude_id = primary["id"] if primary else -1
+    other_rows = _fetchall(
+        "SELECT id, kind, started_at FROM jobs WHERE state = 'running' AND id != %(exclude)s "
+        "ORDER BY started_at DESC NULLS LAST",
+        {"exclude": exclude_id},
+    )
+    other_running = [
+        {
+            "job_id": r["id"],
+            "kind": r["kind"],
+            "started_at": r["started_at"].isoformat() if r.get("started_at") else None,
+        }
+        for r in other_rows
+    ]
+    return {"current": current, "other_running": other_running}
 
 
 def cancel_job(job_id: int) -> dict[str, Any] | None:

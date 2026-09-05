@@ -8,14 +8,21 @@
 // /ws/status directly, outside the ApiClient) can both normalize incoming
 // data into the shapes web/src/types/api.ts promises the rest of the app.
 import type {
+  CurrentRun,
   GateDecision,
   InvestigationLogLine,
   LoadedModel,
   NightSummary,
+  OtherRunningJob,
   PipelineLastRun,
   PipelineStageInfo,
   PipelineStatus,
+  ReportCitation,
+  ReportCitationsResponse,
   ResourceGateStatus,
+  RunsCurrentResponse,
+  RunStageEntry,
+  StageStatus,
   StatusResponse,
 } from "@/types/api";
 
@@ -62,8 +69,12 @@ export const ZERO_NIGHT_SUMMARY: NightSummary = {
   red: 0,
   orange: 0,
   deep_searches: 0,
-  duration_min: 0,
+  duration_min: null,
   errors: 0,
+  state: "none",
+  tenders_open: 0,
+  tenders_unknown: 0,
+  new_forecasts: 0,
 };
 
 export function normalizeNightSummary(
@@ -75,8 +86,12 @@ export function normalizeNightSummary(
     red: num(raw?.red),
     orange: num(raw?.orange),
     deep_searches: num(raw?.deep_searches),
-    duration_min: num(raw?.duration_min),
+    duration_min: typeof raw?.duration_min === "number" ? raw.duration_min : null,
     errors: num(raw?.errors),
+    state: raw?.state ?? "none",
+    tenders_open: num(raw?.tenders_open),
+    tenders_unknown: num(raw?.tenders_unknown),
+    new_forecasts: num(raw?.new_forecasts),
   };
 }
 
@@ -147,10 +162,19 @@ export function normalizeGate(raw: Partial<ResourceGateStatus> | null | undefine
   };
 }
 
+const VALID_STAGE_STATUSES: readonly StageStatus[] = ["pending", "running", "done", "failed", "skipped"];
+
+function normalizeStageStatus(value: unknown): StageStatus {
+  return typeof value === "string" && (VALID_STAGE_STATUSES as readonly string[]).includes(value)
+    ? (value as StageStatus)
+    : "pending";
+}
+
 function normalizeStageInfo(raw: Partial<PipelineStageInfo> | null | undefined): PipelineStageInfo {
   const r = raw ?? {};
   return {
-    events: num(r.events),
+    status: normalizeStageStatus(r.status),
+    minutes: typeof r.minutes === "number" ? r.minutes : null,
     last_event: r.last_event ?? null,
     last_at: r.last_at ?? null,
   };
@@ -180,6 +204,65 @@ export function normalizePipeline(raw: Partial<PipelineStatus> | null | undefine
     next_run_at: r.next_run_at ?? null,
     last_run: normalizeLastRun(r.last_run),
   };
+}
+
+function normalizeRunStageEntry(raw: Partial<RunStageEntry> | null | undefined): RunStageEntry {
+  const r = raw ?? {};
+  return {
+    stage: str(r.stage),
+    status: normalizeStageStatus(r.status),
+    minutes: typeof r.minutes === "number" ? r.minutes : null,
+  };
+}
+
+function normalizeCurrentRun(raw: Partial<CurrentRun> | null | undefined): CurrentRun | null {
+  if (!raw) return null;
+  return {
+    job_id: num(raw.job_id),
+    kind: str(raw.kind),
+    state: (raw.state ?? "queued") as CurrentRun["state"],
+    current_stage: raw.current_stage ?? null,
+    stages: arr(raw.stages).map(normalizeRunStageEntry),
+    started_at: raw.started_at ?? null,
+    elapsed_min: typeof raw.elapsed_min === "number" ? raw.elapsed_min : null,
+    eta_min: typeof raw.eta_min === "number" ? raw.eta_min : null,
+  };
+}
+
+function normalizeOtherRunningJob(raw: Partial<OtherRunningJob> | null | undefined): OtherRunningJob {
+  const r = raw ?? {};
+  return { job_id: num(r.job_id), kind: str(r.kind), started_at: r.started_at ?? null };
+}
+
+/** Normalizes `GET /api/runs/current` (U4/F17) into a guaranteed shape. */
+export function normalizeRunsCurrent(
+  raw: Partial<RunsCurrentResponse> | null | undefined,
+): RunsCurrentResponse {
+  return {
+    current: normalizeCurrentRun(raw?.current),
+    other_running: arr(raw?.other_running).map(normalizeOtherRunningJob),
+  };
+}
+
+function normalizeReportCitation(raw: Partial<ReportCitation> | null | undefined): ReportCitation {
+  const r = raw ?? {};
+  return {
+    item_id: typeof r.item_id === "number" ? r.item_id : null,
+    url: r.url ?? null,
+    title: r.title ?? null,
+  };
+}
+
+/** Normalizes `GET /api/reports/{id}/citations` (U3) into a guaranteed shape. */
+export function normalizeReportCitations(
+  raw: Partial<ReportCitationsResponse> | null | undefined,
+): ReportCitationsResponse {
+  const rawCitations = raw?.citations ?? {};
+  const citations: Record<string, ReportCitation> = {};
+  for (const [n, c] of Object.entries(rawCitations)) {
+    citations[n] = normalizeReportCitation(c);
+  }
+  return { report_id: num(raw?.report_id), citations };
 }
 
 /** Normalizes a `/api/status` or `/ws/status` push into a guaranteed shape. */

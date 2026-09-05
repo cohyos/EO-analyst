@@ -169,6 +169,39 @@ class ExportCfg(BaseModel):
     obsidian: ObsidianExportCfg = ObsidianExportCfg()
 
 
+class CliProviderCfg(BaseModel):
+    """One cloud CLI provider (U8, docs/adr/005-cloud-llm-cli.md): ``binary`` is looked up via
+    ``shutil.which`` (a bare name resolves through PATH; an absolute path works too), ``models``
+    is the static list offered in the picker (the CLIs don't expose a reliable model-listing API)."""
+
+    binary: str
+    models: list[str] = Field(default_factory=list)
+
+
+class LlmProvidersCfg(BaseModel):
+    """U8: interactive-only cloud LLM routing via CLI (agy/claude/codex), never used by the
+    night pipeline (``eoa.orchestrator.jobs`` forces ``EOA_PIPELINE=1`` at import time, which
+    ``eoa.llm.ollama_client`` checks before honoring any provider choice -- see the ADR).
+    """
+
+    allow_cloud: bool = True
+    interactive_default: str = "ollama"  # "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
+    timeout_s: int = 120
+    cli: dict[str, CliProviderCfg] = Field(
+        default_factory=lambda: {
+            "agy": CliProviderCfg(
+                binary="agy",
+                models=["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.1-pro-high"],
+            ),
+            "claude": CliProviderCfg(
+                binary="claude",
+                models=["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+            ),
+            "codex": CliProviderCfg(binary="codex", models=["default"]),
+        }
+    )
+
+
 class ModelSpec(BaseModel):
     key: str
     ollama: str | None = None
@@ -214,6 +247,7 @@ class Settings(BaseModel):
     retention: RetentionCfg = RetentionCfg()
     api: ApiCfg = ApiCfg()
     export: ExportCfg = ExportCfg()
+    llm_providers: LlmProvidersCfg = LlmProvidersCfg()
 
     registry: ModelsRegistry
     taxonomy: dict[str, Any] = {}

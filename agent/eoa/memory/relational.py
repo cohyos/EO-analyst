@@ -331,6 +331,26 @@ def record_resource_decision(
     return log_id
 
 
+def log_llm_call(*, provider: str, model: str, prompt_chars: int, duration_ms: int) -> int:
+    """Insert a row into ``llm_calls`` (U8 privacy log): provider/model/size/duration only --
+    never the prompt or response text. Returns the new row's id."""
+    query = """
+        INSERT INTO llm_calls (provider, model, prompt_chars, duration_ms)
+        VALUES (%(provider)s, %(model)s, %(prompt_chars)s, %(duration_ms)s)
+        RETURNING id
+    """
+    params = {
+        "provider": provider,
+        "model": model,
+        "prompt_chars": prompt_chars,
+        "duration_ms": duration_ms,
+    }
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, params)
+        row_id: int = cur.fetchone()["id"]
+    return row_id
+
+
 def log_security(
     *,
     item_id: int | None = None,

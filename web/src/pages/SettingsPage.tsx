@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, Save } from "lucide-react";
+import { Ban, Cloud, Cpu, Save } from "lucide-react";
 import { api } from "@/api";
 import { SETTINGS_NAMES, type SettingsName } from "@/types/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
@@ -73,8 +73,108 @@ export function SettingsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
   });
 
+  const llmQuery = useQuery({
+    queryKey: ["llm-providers"],
+    queryFn: () => api.getLlmProviders(),
+  });
+  const [llmSaveResult, setLlmSaveResult] = useState<{ ok: boolean; errors: string[] } | null>(null);
+  const saveLlmDefault = useMutation({
+    mutationFn: (interactive_default: string) => api.putLlmSettings({ interactive_default }),
+    onSuccess: (res) => {
+      setLlmSaveResult({ ok: res.ok, errors: res.errors });
+      if (res.ok) queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
+    },
+  });
+  const saveAllowCloud = useMutation({
+    mutationFn: (allow_cloud: boolean) => api.putLlmSettings({ allow_cloud }),
+    onSuccess: (res) => {
+      setLlmSaveResult({ ok: res.ok, errors: res.errors });
+      if (res.ok) queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
+    },
+  });
+
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-6">
+      <section aria-label="מודלים" className="rounded-lg border border-border bg-bg-raised p-3">
+        <h2 className="mb-2 text-sm font-semibold text-fg-dim">מודלים</h2>
+        {llmQuery.isLoading && <LoadingState label="טוען הגדרות מודלים…" />}
+        {llmQuery.data && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <label htmlFor="llm-default" className="text-sm text-fg-muted">
+                מודל ברירת מחדל לצ׳אט ולחקירות אינטראקטיביות:
+              </label>
+              <select
+                id="llm-default"
+                defaultValue={llmQuery.data.interactive_default}
+                onChange={(e) => saveLlmDefault.mutate(e.target.value)}
+                className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+              >
+                {llmQuery.data.providers
+                  .filter((p) => p.kind === "local" || llmQuery.data!.allow_cloud)
+                  .flatMap((p) =>
+                    p.kind === "local"
+                      ? [
+                          <option key={p.id} value={p.id}>
+                            {p.label}
+                          </option>,
+                        ]
+                      : p.models.map((m) => (
+                          <option key={`${p.id}:${m}`} value={`${p.id}:${m}`}>
+                            {p.label} — {m}
+                          </option>
+                        )),
+                  )}
+              </select>
+              <span className="flex items-center gap-1 text-xs text-fg-dim">
+                {llmQuery.data.interactive_default === "ollama" ? (
+                  <>
+                    <Cpu size={12} aria-hidden="true" /> מקומי
+                  </>
+                ) : (
+                  <>
+                    <Cloud size={12} aria-hidden="true" /> ענן
+                  </>
+                )}
+              </span>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-fg-muted">
+              <input
+                type="checkbox"
+                checked={llmQuery.data.allow_cloud}
+                onChange={(e) => saveAllowCloud.mutate(e.target.checked)}
+                className="h-4 w-4 rounded border-border-strong"
+              />
+              אפשר מודלי ענן (Gemini / Claude / Codex) בכל המערכת
+            </label>
+            <p className="text-xs text-fg-dim">
+              כיבוי המתג חוסם כל שימוש במודל ענן — הצ׳אט ייפול תמיד חזרה למודל המקומי. הריצה
+              הלילית ומשימות רקע (חקירת עומק, "הרץ עכשיו") תמיד משתמשות במודל מקומי בלבד, ללא
+              קשר להגדרה הזו.
+            </p>
+
+            <ul className="space-y-1 text-xs text-fg-dim">
+              {llmQuery.data.providers.map((p) => (
+                <li key={p.id} className="flex items-center gap-1.5">
+                  {p.kind === "local" ? <Cpu size={11} aria-hidden="true" /> : <Cloud size={11} aria-hidden="true" />}
+                  <bdi>{p.label}</bdi>
+                  <span className={p.available ? "text-ok" : "text-danger"}>
+                    {p.available ? "זמין" : "לא זמין"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+
+            {llmSaveResult && (
+              <span className={cn("block text-sm", llmSaveResult.ok ? "text-ok" : "text-danger")}>
+                {llmSaveResult.ok ? "נשמר בהצלחה" : `שגיאות: ${llmSaveResult.errors.join("; ")}`}
+              </span>
+            )}
+          </div>
+        )}
+      </section>
+
       <section aria-label="בקרות מהירות" className="rounded-lg border border-border bg-bg-raised p-3">
         <h2 className="mb-2 text-sm font-semibold text-fg-dim">בקרות מהירות</h2>
         <div className="flex flex-wrap items-center gap-3">

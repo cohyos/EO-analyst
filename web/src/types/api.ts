@@ -330,14 +330,31 @@ export interface Headline {
   url: string;
 }
 
+// F12 (docs/REVIEW_2026-09-05.md): every count here is a rolling last-24h aggregate straight from
+// the DB (agent/eoa/api/services.py `_night_summary`) -- `duration_min`/`state` are the one
+// exception, describing the last *completed* nightly run specifically (there's no 24h-window
+// meaning for "how long did the run take").
 export interface NightSummary {
   items_ingested: number;
   classified: number;
   red: number;
   orange: number;
   deep_searches: number;
-  duration_min: number;
+  duration_min: number | null;
   errors: number;
+  state: JobState | "none";
+  tenders_open: number;
+  tenders_unknown: number;
+  new_forecasts: number;
+}
+
+// U2: backs the Morning "שגיאות אחרונות" drawer (agent/eoa/api/services.py `recent_errors`).
+export interface RecentErrorLogEntry {
+  id: number;
+  job_id: number | null;
+  stage: string | null;
+  message: string;
+  at: string | null;
 }
 
 export interface MorningResponse {
@@ -345,6 +362,7 @@ export interface MorningResponse {
   headlines: Headline[];
   open_points: OpenPoint[];
   night_summary: NightSummary;
+  recent_errors: RecentErrorLogEntry[];
 }
 
 // Mirrors eoa.conferences.tracker.conference_card (agent/eoa/conferences/tracker.py):
@@ -535,8 +553,14 @@ export interface ResourceGateStatus {
   recent_decisions: GateDecision[];
 }
 
+// F12: a stage's `status` is derived from its own terminal `run_log` event (not a raw heartbeat
+// row count, which is why the old timeline showed "2" for nearly every stage regardless of what
+// it actually did) -- "pending" means the stage was never reached this run.
+export type StageStatus = "pending" | "running" | "done" | "failed" | "skipped";
+
 export interface PipelineStageInfo {
-  events: number;
+  status: StageStatus;
+  minutes: number | null;
   last_event: string | null;
   last_at: string | null;
 }
@@ -555,6 +579,50 @@ export interface PipelineStatus {
   night_window: boolean;
   next_run_at: string | null;
   last_run: PipelineLastRun | null;
+}
+
+// U4/F17: `GET /api/runs/current` -- what "הרץ עכשיו" kicked off (if anything), with per-stage
+// progress/ETA, plus any other job a separate worker has claimed concurrently (F17: a
+// `deep_search` job ran to completion without the analyst ever seeing it in the UI).
+export interface RunStageEntry {
+  stage: string;
+  status: StageStatus;
+  minutes: number | null;
+}
+
+export interface CurrentRun {
+  job_id: number;
+  kind: string;
+  state: JobState;
+  current_stage: string | null;
+  stages: RunStageEntry[];
+  started_at: string | null;
+  elapsed_min: number | null;
+  eta_min: number | null;
+}
+
+export interface OtherRunningJob {
+  job_id: number;
+  kind: string;
+  started_at: string | null;
+}
+
+export interface RunsCurrentResponse {
+  current: CurrentRun | null;
+  other_running: OtherRunningJob[];
+}
+
+// U3: `GET /api/reports/{id}/citations` -- `n -> {item_id, url, title}` for every `[n]` marker a
+// report can contain (agent/eoa/api/services.py `report_citations`).
+export interface ReportCitation {
+  item_id: number | null;
+  url: string | null;
+  title: string | null;
+}
+
+export interface ReportCitationsResponse {
+  report_id: number;
+  citations: Record<string, ReportCitation>;
 }
 
 export interface StatusResponse {
