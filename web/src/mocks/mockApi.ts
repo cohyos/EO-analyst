@@ -1,5 +1,6 @@
 import type {
   AskCitation,
+  BdTerritoryOption,
   Conference,
   EntityDetail,
   EntitySummary,
@@ -27,7 +28,9 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
-  TenderCard,
+  TechRadarResponse,
+  TenderStatus,
+  TendersResponse,
   TriageLevel,
 } from "@/types/api";
 import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery, TendersQuery } from "@/api/types";
@@ -37,6 +40,7 @@ import { mockEntities, type MockEntitySeed } from "./data/entities";
 import { findMockItem, mockItems } from "./data/items";
 import { findMockInvestigation, mockInvestigations } from "./data/investigations";
 import { mockReport } from "./data/reports";
+import { mockBdReports, mockBdTerritories } from "./data/bd";
 import { mockForecasts, mockTenders } from "./data/tenders";
 import {
   mockClarifications,
@@ -432,9 +436,12 @@ export const mockApi: ApiClient = {
   getConferences: async (_from?: string, _to?: string): Promise<Conference[]> => delay([]),
   getConferencesIcalUrl: () => "/api/conferences/ical",
 
-  getTenders: async (query: TendersQuery): Promise<TenderCard[]> => {
+  getTenders: async (query: TendersQuery): Promise<TendersResponse> => {
+    // F24: mirrors eoa.api.services.list_tenders -- default view is 'open'/'unknown' within
+    // since_days (widened by include_closed/include_archived); an explicit status bypasses all of
+    // that. country/q narrow both the list AND the count summary; status/since_days/include_*
+    // narrow only the list, never the counts (the header chips need the true totals).
     let filtered = mockTenders.slice();
-    if (query.status) filtered = filtered.filter((t) => t.status === query.status);
     if (query.country) filtered = filtered.filter((t) => t.country === query.country);
     if (query.q) {
       const q = query.q.toLowerCase();
@@ -446,10 +453,64 @@ export const mockApi: ApiClient = {
           t.matched_terms.some((m) => m.toLowerCase().includes(q)),
       );
     }
-    return delay(filtered.slice(0, query.limit ?? 100));
+    const counts: Partial<Record<TenderStatus, number>> = {};
+    for (const t of filtered) counts[t.status] = (counts[t.status] ?? 0) + 1;
+
+    if (query.status) {
+      filtered = filtered.filter((t) => t.status === query.status);
+    } else {
+      const statuses: TenderStatus[] = ["open", "unknown"];
+      if (query.include_closed) statuses.push("closed");
+      if (query.include_archived) statuses.push("archived");
+      filtered = filtered.filter((t) => statuses.includes(t.status));
+      const sinceDays = query.since_days ?? 90;
+      const cutoff = Date.now() - sinceDays * 86_400_000;
+      filtered = filtered.filter((t) => {
+        const ref = t.deadline ?? t.published_at ?? t.created_at;
+        return ref ? new Date(ref).getTime() >= cutoff : true;
+      });
+    }
+    return delay({ tenders: filtered.slice(0, query.limit ?? 100), counts });
   },
   getTenderForecasts: async (limit = 100): Promise<ForecastCard[]> =>
     delay(mockForecasts.slice(0, limit)),
+
+  // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
+  getTechRadar: async (weeks = 12): Promise<TechRadarResponse> => {
+    const techItems = items.filter((it) => it.domain === "tech_dev");
+    const bySub = new Map<string, { label_he: string; items: ItemCard[] }>();
+    for (const it of techItems) {
+      const key = it.subdomain ?? "";
+      const entry = bySub.get(key) ?? { label_he: key, items: [] };
+      entry.items.push(it);
+      bySub.set(key, entry);
+    }
+    const maturities: TechRadarResponse["maturities"] = ["lab", "prototype", "qualified", "fielded"];
+    const subdomains = [...bySub.entries()].map(([subdomain, { items }]) => {
+      const counts: Partial<Record<(typeof maturities)[number] | "unknown", number>> = {};
+      for (const it of items) {
+        const m = it.tech_maturity ?? "unknown";
+        counts[m] = (counts[m] ?? 0) + 1;
+      }
+      return {
+        subdomain,
+        label_he: items[0]?.subdomain ?? subdomain,
+        counts,
+        total: items.length,
+        sparkline: [1, 2, 1, items.length],
+      };
+    });
+    return delay({ weeks, maturities, subdomains });
+  },
+  getTechItems: async (query = {}): Promise<{ total: number; items: ItemCard[] }> => {
+    let filtered = items.filter((it) => it.domain === "tech_dev");
+    if (query.subdomain) filtered = filtered.filter((it) => it.subdomain === query.subdomain);
+    if (query.maturity) filtered = filtered.filter((it) => it.tech_maturity === query.maturity);
+    const pageSize = query.page_size ?? 50;
+    const page = query.page ?? 1;
+    const start = (page - 1) * pageSize;
+    return delay({ total: filtered.length, items: filtered.slice(start, start + pageSize) });
+  },
 
   getClarifications: async (open = true) =>
     delay(clarifications.filter((c) => (open ? c.answer === null : true))),
@@ -543,6 +604,7 @@ export const mockApi: ApiClient = {
               qa_passed: mockReport.qa_passed,
               created_at: mockReport.created_at,
               headline_count: mockReport.headline_count,
+              territory: mockReport.territory,
             },
           ],
     ),
@@ -564,6 +626,15 @@ export const mockApi: ApiClient = {
         }),
       ),
     }),
+
+  getBdTerritories: async (): Promise<BdTerritoryOption[]> => delay(mockBdTerritories),
+  getBdReports: async (territory?: string) =>
+    delay(mockBdReports.filter((r) => !territory || r.territory === territory)),
+  postBdReport: async (territory: string, _lookbackDays: number) => {
+    const existing = mockBdReports.find((r) => r.territory === territory);
+    if (existing) return delay({ job_id: "mock-bd-job", report: existing }, 400);
+    return delay({ job_id: "mock-bd-job", status: "queued" as const }, 300);
+  },
 
   getSettings: async (name: SettingsName): Promise<SettingsGetResponse> =>
     delay({ yaml: settingsStore[name] ?? "" }),

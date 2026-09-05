@@ -1,0 +1,116 @@
+# MCP (Model Context Protocol) tool sources for the interactive analyst (A8).
+#
+# Read-only, allow-listed, DATA-framed exactly like a fetched web page (docs/CONVENTIONS.md rule
+# #3): every tool result is wrapped with `wrap_data(...)` and passed through the L1 security guard
+# (`eoa.security.guard.screen`) before any model sees it. See docs/adr/006-mcp-sources.md.
+#
+# `enabled: false` at the top level is a global kill switch: no MCP tool is ever added to the
+# investigator's tool list, and no cloud CLI is ever handed `--mcp-config`, regardless of what is
+# configured below. Flip to `true` (or use the Settings "MCP" card) to turn the layer on.
+enabled: false
+
+servers:
+  # ---------------------------------------------------------------------------------------------
+  # Our own servers (agent/eoa/mcp_servers/*), spawned as `python -m eoa.mcp_servers.<name>`.
+  # ---------------------------------------------------------------------------------------------
+  - id: procurement
+    label: "רכש והתקשרויות (SAM.gov / USAspending / DSCA / Federal Register / Congress.gov)"
+    transport: stdio
+    enabled: true
+    command: "{python}"
+    args: ["-m", "eoa.mcp_servers.procurement"]
+    # Names only -- values come from .env / the process environment (docs/CONVENTIONS.md #12).
+    # SAM_GOV_API_KEY and CONGRESS_GOV_API_KEY are free-tier keys; USAspending, Federal Register
+    # and DSCA need no key at all. A missing key degrades the matching tool to a graceful
+    # "not_configured" JSON error, never a crash.
+    env: ["SAM_GOV_API_KEY", "CONGRESS_GOV_API_KEY"]
+    allow_tools: []
+    deny_tools: []
+    timeout_s: 30
+    max_output_chars: 8000
+
+  - id: janes
+    label: "Janes Data Services (equipment / news / markets / budgets / events)"
+    transport: stdio
+    enabled: true
+    command: "{python}"
+    args: ["-m", "eoa.mcp_servers.janes"]
+    # The user's own Janes subscription; never logged. See docs/adr/006-mcp-sources.md for the
+    # "verify against your subscription's API docs" caveat on JANES_API_BASE/endpoint templates.
+    env: ["JANES_API_KEY", "JANES_API_BASE"]
+    allow_tools: []
+    deny_tools: []
+    timeout_s: 30
+    max_output_chars: 8000
+
+  - id: patents
+    label: "פטנטים (EPO OPS / USPTO PatentsView)"
+    transport: stdio
+    enabled: true
+    command: "{python}"
+    args: ["-m", "eoa.mcp_servers.patents"]
+    env: ["EPO_OPS_KEY", "EPO_OPS_SECRET", "PATENTSVIEW_API_KEY"]
+    allow_tools: []
+    deny_tools: []
+    timeout_s: 30
+    max_output_chars: 8000
+
+  # ---------------------------------------------------------------------------------------------
+  # Pre-wired external servers (already connected in the user's Claude desktop/CLI session, not
+  # local processes this project can spawn or reach over HTTP). Disabled by default; see
+  # docs/adr/006-mcp-sources.md "Point 3" for how to enable each path.
+  # ---------------------------------------------------------------------------------------------
+  - id: financial_data
+    label: "נתונים פיננסיים (FMP -- SEC filings / תמלילי רווחים / חדשות) -- מחובר בסשן Claude של המשתמש"
+    transport: http
+    enabled: false
+    # Verified live 2026-09-06 via `claude mcp list`: the user's Claude session already has
+    # "FMP" (Financial Modeling Prep) connected at this URL. It is a real, reachable streamable-
+    # HTTP endpoint -- but the session that connected it holds its own auth (OAuth/API key) that
+    # this project has no access to; connecting `eoa.mcp.registry` directly to this URL would need
+    # its own FMP credential (not configured here -- no key exists in this project for it, per
+    # docs/CONVENTIONS.md rule #12), so it stays `enabled: false` / `inherit_cli_only: true` until
+    # the user supplies one. Flip `inherit_cli_only: false` + `enabled: true` once that credential
+    # is available and confirmed working.
+    url: "https://financialmodelingprep.com/mcp"
+    inherit_cli_only: true
+    env: []
+    allow_tools: []
+    deny_tools: []
+    timeout_s: 30
+    max_output_chars: 8000
+
+  - id: academic_research
+    label: "מחקר אקדמי (Undermind) -- מחובר בסשן Claude של המשתמש"
+    transport: http
+    enabled: false
+    # Verified live 2026-09-06 via `claude mcp list`: "Undermind" (mcp.undermind.ai), connected in
+    # the user's Claude session. Same caveat as `financial_data` above -- the URL is real and
+    # reachable, but the session's own auth is not something this project can read or reuse.
+    url: "https://mcp.undermind.ai/mcp"
+    inherit_cli_only: true
+    env: []
+    allow_tools: []
+    deny_tools: []
+    timeout_s: 30
+    max_output_chars: 8000
+
+# Cloud CLI integration (point 4, docs/adr/006-mcp-sources.md): when `enabled: true` above and the
+# active chain entry's provider is `claude`, our own stdio servers (and, if inheriting, the user's
+# already-connected ones) are passed via `--mcp-config <generated json>`. Verified live only for
+# `claude`; `agy`/`codex` have no documented equivalent flag on this machine as of 2026-09-06 (see
+# docs/adr/006-mcp-sources.md) -- opt-in per provider, off unless the flag is confirmed to exist.
+inherit_cli_mcp:
+  claude: true
+  agy: false
+  codex: false
+
+# USAspending PSC (Product/Service Code) list for EO/IR-relevant awards (`usaspending_awards_by_psc`
+# with no explicit `psc_codes` argument uses this default list).
+procurement:
+  psc_codes_eo_ir:
+    - "5855"  # night vision equipment, emitted/reflected radiation
+    - "6650"  # optical instruments
+    - "1270"  # aircraft gunnery fire control components
+    - "5840"  # radar equipment, except airborne
+    - "5841"  # radar equipment, airborne

@@ -5,6 +5,7 @@ import { api } from "@/api";
 import { SETTINGS_NAMES, type LlmChainEntry, type SettingsName } from "@/types/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ChainsEditor } from "@/components/settings/ChainsEditor";
+import { MCPCard } from "@/components/settings/MCPCard";
 import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
@@ -277,6 +278,8 @@ export function SettingsPage() {
           </div>
         )}
       </section>
+
+      <MCPCard />
 
       <section aria-label="בקרות מהירות" className="rounded-lg border border-border bg-bg-raised p-3">
         <h2 className="mb-2 text-sm font-semibold text-fg-dim">בקרות מהירות</h2>

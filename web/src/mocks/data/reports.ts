@@ -11,6 +11,7 @@ export const mockReport: ReportDetail = {
   qa_passed: true,
   created_at: "2026-09-04T06:05:00+03:00",
   headline_count: 3,
+  territory: null,
   items_included: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
   open_points: [
     {

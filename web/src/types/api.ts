@@ -34,6 +34,28 @@ export interface ItemCard {
   // the gaps" complement to `key_facts`, missing from the original
   // docs/API.md ItemCard field list.
   uncertainty_he: string | null;
+  // A12 (מעקב טכנולוגי, 2026-09-06): additive, only ever non-null for domain === "tech_dev".
+  tech_maturity: TechMaturity | null;
+  tech_actor_kind: TechActorKind | null;
+  tech_readiness_note_he: string | null;
+}
+
+// A12 (מעקב טכנולוגי): "רדאר טכנולוגי" -- GET /api/tech/radar, GET /api/tech/items.
+export type TechMaturity = "lab" | "prototype" | "qualified" | "fielded";
+export type TechActorKind = "academia" | "lab" | "startup" | "prime" | "government";
+
+export interface TechRadarSubdomain {
+  subdomain: string;
+  label_he: string;
+  counts: Partial<Record<TechMaturity | "unknown", number>>;
+  total: number;
+  sparkline: number[];
+}
+
+export interface TechRadarResponse {
+  weeks: number;
+  maturities: TechMaturity[];
+  subdomains: TechRadarSubdomain[];
 }
 
 export interface ItemDetail extends ItemCard {
@@ -338,6 +360,54 @@ export interface LlmCallsSummary {
   };
 }
 
+// A8 (docs/adr/006-mcp-sources.md): MCP (Model Context Protocol) tool sources for the
+// interactive analyst — read-only, allow-listed, DATA-framed exactly like a fetched web page.
+export interface McpServerInfo {
+  id: string;
+  label: string;
+  transport: "stdio" | "http";
+  enabled: boolean;
+  inherit_cli_only: boolean;
+  /** null when the server needs no key at all. */
+  key_configured: boolean | null;
+  key_env: string[] | null;
+  tool_count: number | null;
+  ok: boolean | null;
+  error: string | null;
+  latency_ms: number | null;
+  tools: string[];
+}
+
+export interface McpServersResponse {
+  mcp_enabled: boolean;
+  servers: McpServerInfo[];
+}
+
+export interface McpPingResponse {
+  id: string;
+  ok: boolean;
+  error: string | null;
+  tool_count: number;
+  tools: string[];
+  latency_ms: number;
+}
+
+export interface McpCallSummary {
+  server: string;
+  tool: string;
+  calls: number;
+  failures: number;
+  flagged: number;
+  avg_duration_ms: number;
+  total_chars: number;
+}
+
+export interface McpCallsResponse {
+  since_hours: number;
+  calls: McpCallSummary[];
+  totals: { calls: number; failures: number; flagged: number };
+}
+
 export interface ReportSummary {
   id: number;
   kind: string;
@@ -349,6 +419,26 @@ export interface ReportSummary {
   qa_passed: boolean;
   created_at: string;
   headline_count: number;
+  /** A11: only populated for kind === "bd_territory" (ISO-2/region code) -- null otherwise. */
+  territory: string | null;
+}
+
+// A11 "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (eoa.report.bd_territory).
+// Mirrors `eoa.api.services.bd_territories` (agent/eoa/api/services.py).
+export interface BdTerritoryOption {
+  territory: string;
+  items: number;
+  tenders: number;
+  forecasts: number;
+  configured: boolean;
+}
+
+// Mirrors `eoa.api.services.build_or_enqueue_bd_report`'s three possible shapes.
+export interface BdReportCreateResponse {
+  job_id: string | number;
+  status?: "queued" | "failed";
+  error?: string | null;
+  report?: ReportDetail;
 }
 
 export interface ReportDetail extends ReportSummary {
@@ -443,8 +533,10 @@ export interface Conference {
   changes: Record<string, ConferenceFieldChange>;
 }
 
-// Mirrors the `tenders` table CHECK constraint (db/migrations/versions/0004_tenders.py).
-export type TenderStatus = "open" | "closed" | "awarded" | "unknown";
+// Mirrors the `tenders` table CHECK constraint (db/migrations/versions/0004_tenders.py,
+// 0012_tenders_archived_status.py). "archived" (F24, 2026-09-06): a 'closed' tender more than 30
+// days past its deadline -- never deleted, just hidden from the board's default view.
+export type TenderStatus = "open" | "closed" | "awarded" | "unknown" | "archived";
 
 // Mirrors `_tender_card` (agent/eoa/api/services.py) / docs/API.md section 5.2.
 export interface TenderCard {
@@ -466,6 +558,15 @@ export interface TenderCard {
   item_id: number | null;
   created_at: string;
   updated_at: string;
+}
+
+// F24 (2026-09-06): `GET /api/tenders` response shape -- the filtered/capped tender list PLUS a
+// status -> count summary that always reflects the true totals (honoring country/q, but not the
+// status/since_days/include_* narrowing) for the board's header chips. Mirrors
+// `services.list_tenders` (agent/eoa/api/services.py).
+export interface TendersResponse {
+  tenders: TenderCard[];
+  counts: Partial<Record<TenderStatus, number>>;
 }
 
 // Mirrors `_forecast_card` (agent/eoa/api/services.py) / docs/API.md section 5.2.

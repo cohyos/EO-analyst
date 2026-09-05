@@ -1,4 +1,4 @@
-import type { ItemCard, TriageLevel } from "@/types/api";
+import type { ItemCard, TechActorKind, TechMaturity, TriageLevel } from "@/types/api";
 
 // Deterministic PRNG (mulberry32) so mock data — and any test asserting on
 // it — is stable across runs.
@@ -45,7 +45,16 @@ const DOMAINS: Array<{ domain: string; sub: string; label: string }> = [
   { domain: "computer_vision", sub: "atr", label: "זיהוי מטרות אוטומטי" },
   { domain: "computer_vision", sub: "edge_ai", label: "Edge AI" },
   { domain: "secondary", sub: "detectors_fpa", label: "גלאים ומישורי מוקד" },
+  // A12 (מעקב טכנולוגי, 2026-09-06).
+  { domain: "tech_dev", sub: "droic_digital_pixel", label: "FPA עם פיקסל דיגיטלי" },
+  { domain: "tech_dev", sub: "swir_eswir", label: "SWIR/eSWIR" },
+  { domain: "tech_dev", sub: "event_based", label: "גלאים מבוססי אירועים" },
+  { domain: "tech_dev", sub: "cv_atr", label: "ראייה ממוחשבת לזיהוי מטרות" },
 ];
+
+// A12 (מעקב טכנולוגי): only used for DOMAINS rows with domain === "tech_dev".
+const TECH_MATURITIES: TechMaturity[] = ["lab", "prototype", "qualified", "fielded"];
+const TECH_ACTOR_KINDS: TechActorKind[] = ["academia", "lab", "startup", "prime", "government"];
 
 const ENTITY_NAMES = [
   "Elbit Systems",
@@ -154,6 +163,13 @@ function buildItem(i: number): ItemCard {
       `מקור: ${source}, פורסם ${publishedAt.toLocaleDateString("he-IL")}`,
     ],
     uncertainty_he: i % 5 === 0 ? "המקור לא מציין את היקף ההתקשרות הכספי." : null,
+    // A12 (מעקב טכנולוגי): only ever populated for domain === "tech_dev" mock rows.
+    tech_maturity: domainInfo.domain === "tech_dev" ? pick(TECH_MATURITIES, i * 29 + 8) : null,
+    tech_actor_kind: domainInfo.domain === "tech_dev" ? pick(TECH_ACTOR_KINDS, i * 31 + 9) : null,
+    tech_readiness_note_he:
+      domainInfo.domain === "tech_dev"
+        ? `להערכתנו, התפתחות זו עשויה לקצר את זמן ההבשלה למוצרי EO/IR בתחום ${domainInfo.label}.`
+        : null,
   };
 }
 

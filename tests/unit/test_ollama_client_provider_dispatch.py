@@ -156,6 +156,89 @@ class TestChatDispatch:
             oc.chat("light", [{"role": "user", "content": "ping"}], provider="agy")
 
 
+class TestDispatchExplicitProviderPowerSuffix:
+    """Regression test for the "<provider>:<model>@<power>" suffix parse in
+    ``_dispatch_explicit_provider``: it must split into (model, power) in that order, not swapped.
+    Before the fix, ``power, _, model = model.partition("@")`` assigned the model name to
+    ``power`` and the power/effort level to ``model``, so a CLI provider was constructed with a
+    bogus model id and its power/effort argument silently dropped.
+    """
+
+    def test_cli_provider_gets_model_and_power_in_correct_order(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(oc, "settings", lambda: _fake_settings())
+        captured: dict[str, Any] = {}
+
+        class _FakeCli:
+            def __init__(self, kind, model=None, power=None):
+                captured["kind"] = kind
+                captured["model"] = model
+                captured["power"] = power
+
+            def chat(self, messages, **kw):
+                return ProviderResult(content="ok", model=captured["model"] or "m", provider=captured["kind"])
+
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider", _FakeCli)
+        monkeypatch.setattr(oc, "_log_cloud_call", lambda **kw: None)
+
+        oc._dispatch_explicit_provider(
+            "agy:gemini-3.8-flash-medium@high", [{"role": "user", "content": "hi"}], format_schema=None
+        )
+
+        assert captured["kind"] == "agy"
+        assert captured["model"] == "gemini-3.8-flash-medium"
+        assert captured["power"] == "high"
+
+    def test_api_provider_gets_model_and_power_in_correct_order(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(oc, "settings", lambda: _fake_settings())
+        captured: dict[str, Any] = {}
+
+        def fake_get_api_provider(kind, model=None, power=None):
+            captured["kind"] = kind
+            captured["model"] = model
+            captured["power"] = power
+
+            class _Fake:
+                def chat(self, messages, **kw):
+                    return ProviderResult(content="ok", model=model or "m", provider=kind)
+
+            return _Fake()
+
+        monkeypatch.setattr("eoa.llm.providers.api.get_api_provider", fake_get_api_provider)
+        monkeypatch.setattr(oc, "_log_cloud_call", lambda **kw: None)
+
+        oc._dispatch_explicit_provider(
+            "anthropic:claude-sonnet-5@low", [{"role": "user", "content": "hi"}], format_schema=None
+        )
+
+        assert captured["kind"] == "anthropic"
+        assert captured["model"] == "claude-sonnet-5"
+        assert captured["power"] == "low"
+
+    def test_no_power_suffix_leaves_power_none(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(oc, "settings", lambda: _fake_settings())
+        captured: dict[str, Any] = {}
+
+        class _FakeCli:
+            def __init__(self, kind, model=None, power=None):
+                self.kind = kind
+                self.model = model
+                captured["model"] = model
+                captured["power"] = power
+
+            def chat(self, messages, **kw):
+                return ProviderResult(content="ok", model=self.model or "m", provider=self.kind)
+
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider", _FakeCli)
+        monkeypatch.setattr(oc, "_log_cloud_call", lambda **kw: None)
+
+        oc._dispatch_explicit_provider(
+            "codex:default", [{"role": "user", "content": "hi"}], format_schema=None
+        )
+
+        assert captured["model"] == "default"
+        assert captured["power"] is None
+
+
 class TestChatStreamDispatch:
     def test_cloud_provider_chunks_full_content(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(oc, "settings", lambda: _fake_settings())

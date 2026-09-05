@@ -18,6 +18,7 @@ from eoa import db
 from eoa.api.errors import APIError
 from eoa.api.routes import (
     ask,
+    bd,
     clarifications,
     conferences,
     entities,
@@ -32,6 +33,7 @@ from eoa.api.routes import (
     runs,
     status,
     surveys,
+    tech,
     tenders,
 )
 from eoa.api.routes import settings as settings_routes
@@ -156,6 +158,8 @@ def create_app() -> FastAPI:
     app.include_router(settings_routes.router, prefix="/api")
     app.include_router(llm.router, prefix="/api")
     app.include_router(mcp.router, prefix="/api")
+    app.include_router(bd.router, prefix="/api")
+    app.include_router(tech.router, prefix="/api")
 
     if WEB_DIST.exists():
         # Registered after every API router, so `/api/*` and `/ws/*` paths

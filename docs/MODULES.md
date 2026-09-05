@@ -4606,3 +4606,158 @@ _dispatch_explicit_provider`'s `"<model>@<power>"` suffix parsing was found to s
 `model, _, power = ...`) -- a pre-existing bug outside this change's file ownership, flagged
 separately rather than fixed here since `ollama_client.py` wasn't part of this change's scope.
 
+## MCP (Model Context Protocol) tool sources (A8, docs/adr/006-mcp-sources.md)
+
+Read-only, allow-listed MCP tools for the interactive analyst's deep-search ReAct loop, gated
+entirely off by default (`config/mcp.yaml`'s top-level `enabled: false`).
+
+**`agent/eoa/config.py`**: `McpServerCfg` (one server -- `id`, `label`, `transport` `"stdio"`/
+`"http"`, `enabled`, `command`/`args`/`env` or `url`, `allow_tools`/`deny_tools`, `timeout_s`,
+`max_output_chars`, `inherit_cli_only`) and `McpCfg` (`enabled` global switch, `servers: list[...]`,
+`inherit_cli_mcp: dict[str, bool]` per CLI kind, `procurement: ProcurementMcpCfg` with
+`psc_codes_eo_ir`). `Settings.mcp: McpCfg` is loaded from the new `config/mcp.yaml` via
+`_load_yaml_optional` (tolerant of a missing file, unlike every other `_load_yaml` call) so an
+older checkout or a minimal test-fixture directory without `mcp.yaml` still loads `Settings` with
+`mcp` defaulting to an all-disabled `McpCfg()`.
+
+**`agent/eoa/mcp/client.py`**: thin async wrapper over the official `mcp` SDK (pinned
+`mcp>=1.6,<2.0` -- the SDK's 2.x line renamed `FastMCP` to `MCPServer` and changed several client
+APIs; 1.29.1 is the last 1.x release and is what this project's servers/client are written
+against). `list_tools`/`call_tool` each open one session (stdio via `stdio_client`/
+`StdioServerParameters`, http via `streamablehttp_client`), do the one thing asked, and tear the
+session down -- no persistent connection pool (judged unnecessary complexity for a low-frequency,
+interactive tool layer; see the ADR). `"{python}"` as a server's `command` resolves to
+`sys.executable`, so a stdio server always runs with this project's own venv/dependencies.
+
+**`agent/eoa/mcp/registry.py`**: the synchronous surface everything else uses (`asyncio.run` per
+call, matching `eoa.fetch.remote._fetch_local`'s existing async-from-sync pattern). `build_tool_name`/
+`parse_tool_name` encode/decode `"mcp.<server_id>.<tool_name>"`. `tool_specs_for_react()` returns
+OpenAI-style function-tool specs for every enabled, connectable server's allow/deny-filtered tools
+(`[]` whenever `mcp.enabled` is false or a server fails to connect -- a broken server is skipped
+and logged, never allowed to break every other tool). `call(full_tool_name, arguments)` resolves
+the server/tool, calls it, truncates the result to `max_output_chars`, wraps it with
+`eoa.llm.ollama_client.wrap_data` and runs it through `eoa.security.guard.screen` (`use_l2=False`,
+same as `deep_search._tool_read`) before ever returning it -- a flagged/quarantined result becomes
+a small JSON error object, never the raw text. Every call (successful or not) is logged via
+`eoa.memory.relational.log_mcp_call` to the new `mcp_calls` table (migration `0010`): server, tool,
+a *hash* of the arguments (never the arguments or the tool's output text -- matching `llm_calls`'
+"never the prompt/response body" convention), output size, duration, and the guard verdict.
+`ping_server`/`list_server_tools` back the API's server-status listing and "בדוק חיבור" action.
+
+**`agent/eoa/mcp_servers/*`** -- this project's own stdio MCP servers, each runnable as
+`python -m eoa.mcp_servers.<name>` (exactly what `config/mcp.yaml`'s `command`/`args` invoke), built
+on `mcp.server.fastmcp.FastMCP`. `_common.py` is a small shared HTTP helper (`http_get_json`/
+`http_post_json`/`http_post_form`, all routed through `eoa.fetch.remote.assert_public_http_url` --
+the project's SSRF guard -- even though every host here is a fixed, well-known public API) plus
+`not_configured(*env_names)` for a uniform "missing API key" JSON error shape.
+
+- `procurement.py`: `ping`, `sam_gov_search` (SAM.gov Opportunities API v2, needs
+  `SAM_GOV_API_KEY`), `usaspending_awards_by_psc` (USAspending.gov awards filtered by
+  Product/Service Code, no key -- defaults to `mcp.procurement.psc_codes_eo_ir`'s EO/IR watch list:
+  night vision 5855, optical instruments 6650, aircraft gunnery fire control 1270, radar
+  5840/5841), `dsca_major_arms_sales` (best-effort HTML listing scrape, no key -- **dsca.mil
+  returned HTTP 403 to every request from this project's dev/CI network, Akamai bot protection,
+  checked live 2026-09-06; the tool still attempts the fetch and surfaces the real status rather
+  than fabricating a result**), `federal_register_search` (Federal Register full-text search, no
+  key, **confirmed live** -- also independently covers DSCA-adjacent arms-sales notifications),
+  `congress_gov_search` (Congress.gov bill search, needs `CONGRESS_GOV_API_KEY`). Live-verified
+  2026-09-06: Federal Register (200, real results), USAspending (200, real awards --
+  `filters.psc_codes` takes a flat list of code strings, not the nested `{"require": [[...]]}`
+  shape an earlier attempt assumed).
+- `janes.py`: `ping`, `janes_search`/`janes_equipment`/`janes_news`/`janes_markets`/
+  `janes_budgets`/`janes_events` -- a generic REST client against `JANES_API_BASE` (default
+  `https://developer.janes.com/api`) with `JANES_API_KEY` sent as both `Authorization: Bearer` and
+  `Ocp-Apim-Subscription-Key` headers (covering either convention). **The exact path/response shape
+  per tool is unverified against a live subscription** (the public developer portal serves a docs
+  front-end, not raw JSON, at the paths tried) -- every tool's docstring says "VERIFY... against
+  your subscription's API docs"; only `JANES_API_BASE` and the per-tool path constant need changing
+  if a path is wrong, the client itself (auth, JSON passthrough, not_configured handling) is solid.
+- `patents.py`: `ping`, `epo_ops_search` (EPO Open Patent Services, OAuth2 client-credentials via
+  `EPO_OPS_KEY`/`EPO_OPS_SECRET` -- **the token endpoint's shape confirmed live 2026-09-06**: an
+  unauthenticated POST to `https://ops.epo.org/3.2/auth/accesstoken` returns `401 "Client
+  identifier is required"`, proving the endpoint and auth flow are real; a token is cached
+  in-process and refreshed on expiry), `patentsview_search` (USPTO PatentsView's 2023+ Search API
+  at `https://search.patentsview.org/api/v1`, `PATENTSVIEW_API_KEY` via `X-Api-Key` --
+  **`search.patentsview.org` did not resolve (DNS failure) from this project's dev/CI network**,
+  while the legacy `api.patentsview.org` resolved but serves a docs front-end at the paths tried;
+  `PATENTSVIEW_API_BASE` is overridable if your network resolves a different host).
+
+**Deep search wiring (`agent/eoa/search/deep_search.py`)**: `_mcp_tool_specs()` returns
+`eoa.mcp.registry.tool_specs_for_react()` when `settings().mcp.enabled`, else `[]` -- swallows any
+registry exception so a broken MCP layer can never take deep search down. `investigate()` computes
+`react_tools = TOOLS + _mcp_tool_specs()` once per investigation and passes it through `_act`'s new
+`tools` parameter (defaults to the original fixed `TOOLS` list -- every other call site is
+unaffected). `_act`'s tool-call dispatch gained one new branch, `name.startswith("mcp.")` ->
+`_tool_mcp` (counts against the page budget like `read`, logs to `investigation_log` with
+`engine="mcp"`) -- the existing `search`/`read`/`finish` tool definitions and their handling are
+untouched. `agent/eoa/llm/prompts/deep_search_system.md` gained one paragraph (point 8) telling the
+investigator when `mcp.procurement.*`/`mcp.janes.*`/`mcp.patents.*` are preferable to general
+`search`, and that a `not_configured` error means "no key set", not "not found".
+
+**Cloud CLI integration (`agent/eoa/llm/providers/cli.py`, point 4)**: `_mcp_config_path(cli_kind)`
+builds a temporary `--mcp-config` JSON file (`{"mcpServers": {...}}`, the shape `claude mcp
+add-json` writes) from `mcp.stdio_servers_for_cli()` when `mcp.enabled` and
+`mcp.inherit_cli_mcp[cli_kind]` are both true; `CliProvider._build_args`'s `claude` branch appends
+`--mcp-config <path>` when one is built (cleaned up via the existing `tmp_out` slot/`_cleanup`).
+**Known limitation, documented in the code**: `claude`'s `--restricted` flag (already used for
+every plain-text `CliProvider` call, per ADR-005) still blocks every tool -- including one loaded
+this way -- unless it is also named in `--allowedTools`; this change loads the servers but does not
+attempt an unverified `--allowedTools` MCP-tool-naming pattern, so this plain-text call path does
+not yet actually invoke MCP tools through `claude`, only makes them loadable. `agy`/`codex` have no
+per-call MCP-config-equivalent flag on this machine (`agy --help`/`codex exec --help`, checked
+2026-09-06 -- both only offer a persistent `mcp` server-registry subcommand, not an ephemeral
+per-invocation config); `mcp.inherit_cli_mcp`'s `agy`/`codex` entries default to `false`
+accordingly, and nothing is wired for them.
+
+**API (`agent/eoa/api/routes/mcp.py` + `eoa.api.services.{list_mcp_servers,ping_mcp_server,
+summarize_mcp_calls}`)**: `GET /api/mcp/servers` (every configured server's static config plus a
+live connectivity check for servers this project can reach directly -- an `inherit_cli_only`
+server is listed but never dialed), `POST /api/mcp/servers/{id}/ping` (connect/list-tools/
+disconnect; 404 via `services.McpServerNotFound` for an unknown id), `GET /api/mcp/calls?since=24h`
+(per-server/tool call counts/failures/flagged/avg-duration from `mcp_calls`). Registered in
+`app.py` as `mcp.router` alongside the existing routers.
+
+**Pre-wired external servers (point 3)**: `config/mcp.yaml`'s `financial_data`/`academic_research`
+entries are disabled `http`-transport placeholders with **real, live-confirmed URLs**
+(`claude mcp list`, checked 2026-09-06, showed the user's Claude session already connected to "FMP"
+at `https://financialmodelingprep.com/mcp` and "Undermind" at `https://mcp.undermind.ai/mcp`) --
+both `inherit_cli_only: true` since the session's own auth for those endpoints is not something
+this project can read or reuse; flip `inherit_cli_only: false` + `enabled: true` once a project-own
+credential for either service is added to `.env`.
+
+**Frontend**: `web/src/components/settings/MCPCard.tsx` -- one card per the API's server list
+(status chip, transport badge, key-configured indicator, tool count, "בדוק חיבור" per-server
+button) plus a 24h call-accounting line; rendered once, between the existing "מודלים" and "בקרות
+מהירות" sections in `SettingsPage.tsx`. `web/src/api/{types.ts,real.ts}` gained
+`getMcpServers`/`postMcpServerPing`/`getMcpCalls`; `web/src/mocks/mockApi.ts` mirrors the same
+five-server shape (`config/mcp.yaml`'s defaults) with `mcp_enabled: false`. `web/src/types/api.ts`
+gained `McpServerInfo`/`McpServersResponse`/`McpPingResponse`/`McpCallSummary`/`McpCallsResponse`.
+i18n: a new top-level `mcp.*` namespace in both `he.ts`/`en.ts` (`title`, `globalEnabled`/
+`globalDisabled`/`globalHint`, `transport.{stdio,http}`, `enabledChip`/`disabledChip`,
+`inheritCliOnly`, `keyConfigured`/`keyNotConfigured`, `toolCount`, `ping`/`pinging`/`pingOk`/
+`pingFailed`, `lastError`, `callsSummary`/`callsSummaryEmpty`). No write/toggle endpoint exists for
+a server's `enabled` flag in this change -- that stays a `config/mcp.yaml` edit (via the existing
+raw "config" tab, or the file directly); the card's per-server chip is a read-only status display,
+not an interactive toggle, matching the three read-only endpoints actually shipped.
+
+**Migration**: `0010_mcp_calls.py` -- `mcp_calls` table (`server`, `tool`, `args_hash`, `chars`,
+`duration_ms`, `verdict`, `error`), indexed on `created_at`/`server`.
+
+**Tests**: `tests/unit/test_mcp_config.py` (config model defaults/helpers, `config/mcp.yaml` itself
+loads), `test_mcp_registry.py` (tool-name build/parse, allow/deny filtering, `tool_specs_for_react`
+disabled/filtered/broken-server-skipped, `call()`'s unknown-name/disabled/denied/success/
+truncation/guard-quarantine/connection-error/tool-error paths, `ping_server` ok/failure --
+`eoa.mcp.client`'s async functions, `eoa.security.guard.screen`, and `eoa.memory.relational.
+log_mcp_call` all mocked, no real subprocess/network/DB), `test_mcp_servers_{procurement,janes,
+patents}.py` (every tool's success/error/not-configured path with mocked HTTP transport, plus
+EPO OAuth2 token caching and DSCA HTML-listing parsing), `test_deep_search_mcp_tools.py`
+(`_mcp_tool_specs`'s enabled/disabled/broken-registry paths, `TOOLS` itself proven unmutated,
+`_tool_mcp`'s budget/logging behavior, `_act` routing an `mcp.*` tool call to `_tool_mcp`),
+`test_cli_mcp_config.py` (`_mcp_config_path`'s enabled/opted-in/no-servers/config-error paths, the
+generated JSON file's shape, `claude`'s `_build_args` including the flag and `agy`'s never doing
+so), `test_mcp_api.py` (all three routes, service layer mocked). One live, ad-hoc end-to-end check
+(stdio client -> spawned `procurement` server -> real `federal_register_search` call -> guard
+screen -> DATA-wrapped result) was also run manually during development, confirming the whole
+`eoa.mcp.client` <-> `eoa.mcp_servers.procurement` <-> `eoa.mcp.registry` path works end to end, not
+just against mocks.
+

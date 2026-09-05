@@ -1,6 +1,8 @@
 import type {
   AskCitation,
   AskRequest,
+  BdReportCreateResponse,
+  BdTerritoryOption,
   Clarification,
   Conference,
   EntityDetail,
@@ -31,8 +33,10 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TechRadarResponse,
   TenderCard,
   TenderStatus,
+  TendersResponse,
   TriageLevel,
 } from "@/types/api";
 
@@ -77,7 +81,20 @@ export interface TendersQuery {
   status?: TenderStatus;
   country?: string;
   q?: string;
+  /** F24: default view is 'open'/'unknown' from the last `since_days` days -- ignored once
+   * `status` is set explicitly. */
+  since_days?: number;
+  include_closed?: boolean;
+  include_archived?: boolean;
   limit?: number;
+}
+
+/** A12 (מעקב טכנולוגי): `GET /api/tech/items` filters. */
+export interface TechItemsQuery {
+  subdomain?: string;
+  maturity?: string;
+  page?: number;
+  page_size?: number;
 }
 
 /**
@@ -151,8 +168,12 @@ export interface ApiClient {
   getConferences(from?: string, to?: string): Promise<Conference[]>;
   getConferencesIcalUrl(): string;
 
-  getTenders(query: TendersQuery): Promise<TenderCard[]>;
+  getTenders(query: TendersQuery): Promise<TendersResponse>;
   getTenderForecasts(limit?: number): Promise<ForecastCard[]>;
+
+  /** A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי" -- subdomain x maturity matrix. */
+  getTechRadar(weeks?: number): Promise<TechRadarResponse>;
+  getTechItems(query?: TechItemsQuery): Promise<{ total: number; items: ItemCard[] }>;
 
   getClarifications(open?: boolean): Promise<Clarification[]>;
   postClarificationAnswer(id: number, answer: string): Promise<void>;
@@ -179,6 +200,14 @@ export interface ApiClient {
   getReportFileUrl(id: number, fmt: "docx" | "md" | "html"): string;
   /** U3: `n -> {item_id, url, title}` for every `[n]` citation marker the report contains. */
   getReportCitations(id: number): Promise<ReportCitationsResponse>;
+
+  // A11 "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (eoa.report.bd_territory).
+  /** Candidate territories for the selector, with item/tender/forecast counts, most active first. */
+  getBdTerritories(): Promise<BdTerritoryOption[]>;
+  getBdReports(territory?: string): Promise<ReportSummary[]>;
+  /** Builds synchronously if the underlying job finishes within ~55s (returns `report`), else
+   * returns just a `job_id` to poll via `getBdReports`. */
+  postBdReport(territory: string, lookbackDays: number): Promise<BdReportCreateResponse>;
 
   getSettings(name: SettingsName): Promise<SettingsGetResponse>;
   putSettings(name: SettingsName, yaml: string): Promise<SettingsPutResponse>;

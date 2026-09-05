@@ -1,6 +1,8 @@
 import type {
   AskRequest,
   AskSseEvent,
+  BdReportCreateResponse,
+  BdTerritoryOption,
   Clarification,
   Conference,
   EntityDetail,
@@ -18,6 +20,9 @@ import type {
   LlmCallsSummary,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
+  McpCallsResponse,
+  McpPingResponse,
+  McpServersResponse,
   MorningResponse,
   ReportCitationsResponse,
   ReportDetail,
@@ -27,10 +32,19 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TechRadarResponse,
   TenderCard,
+  TenderStatus,
   TriageLevel,
 } from "@/types/api";
-import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery, TendersQuery } from "./types";
+import type {
+  ApiClient,
+  EntitiesQuery,
+  GraphQuery,
+  ItemsQuery,
+  TechItemsQuery,
+  TendersQuery,
+} from "./types";
 import {
   arr,
   bool,
@@ -125,6 +139,24 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     dedup_of: r.dedup_of ?? null,
     key_facts: arr(r.key_facts),
     uncertainty_he: r.uncertainty_he ?? null,
+    tech_maturity: r.tech_maturity ?? null,
+    tech_actor_kind: r.tech_actor_kind ?? null,
+    tech_readiness_note_he: r.tech_readiness_note_he ?? null,
+  };
+}
+
+function normalizeTechRadar(raw: Partial<TechRadarResponse> | null | undefined): TechRadarResponse {
+  const r = raw ?? {};
+  return {
+    weeks: num(r.weeks, 12),
+    maturities: arr(r.maturities),
+    subdomains: arr(r.subdomains).map((s) => ({
+      subdomain: str(s.subdomain),
+      label_he: str(s.label_he),
+      counts: s.counts ?? {},
+      total: num(s.total),
+      sparkline: arr(s.sparkline),
+    })),
   };
 }
 
@@ -231,6 +263,7 @@ function normalizeReportSummary(raw: Partial<ReportSummary> | null | undefined):
     qa_passed: bool(r.qa_passed),
     created_at: str(r.created_at),
     headline_count: num(r.headline_count),
+    territory: r.territory ?? null,
   };
 }
 
@@ -545,21 +578,46 @@ export const realApi: ApiClient = {
     ),
   getConferencesIcalUrl: () => "/api/conferences/ical",
 
-  getTenders: async (query: TendersQuery) =>
-    arr(
-      await request<Partial<TenderCard>[] | null>(
-        `/api/tenders${qs({
-          status: query.status,
-          country: query.country,
-          q: query.q,
-          limit: query.limit,
-        })}`,
-      ),
-    ).map(normalizeTenderCard),
+  getTenders: async (query: TendersQuery) => {
+    const raw = await request<{
+      tenders?: Partial<TenderCard>[] | null;
+      counts?: Partial<Record<TenderStatus, number>> | null;
+    } | null>(
+      `/api/tenders${qs({
+        status: query.status,
+        country: query.country,
+        q: query.q,
+        since_days: query.since_days,
+        include_closed: query.include_closed,
+        include_archived: query.include_archived,
+        limit: query.limit,
+      })}`,
+    );
+    return {
+      tenders: arr(raw?.tenders).map(normalizeTenderCard),
+      counts: raw?.counts ?? {},
+    };
+  },
   getTenderForecasts: async (limit = 100) =>
     arr(
       await request<Partial<ForecastCard>[] | null>(`/api/tenders/forecasts${qs({ limit })}`),
     ).map(normalizeForecastCard),
+
+  // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
+  getTechRadar: async (weeks = 12) =>
+    normalizeTechRadar(await request<Partial<TechRadarResponse>>(`/api/tech/radar${qs({ weeks })}`)),
+  getTechItems: async (query: TechItemsQuery = {}) => {
+    const data = await request<{ total?: number; items?: Partial<ItemCard>[] | null }>(
+      `/api/tech/items${qs({
+        subdomain: query.subdomain,
+        maturity: query.maturity,
+        page: query.page,
+        page_size: query.page_size,
+      })}`,
+    );
+    const items = arr(data?.items).map(normalizeItemCard);
+    return { total: num(data?.total, items.length), items };
+  },
 
   getClarifications: async (open = true) =>
     arr(
@@ -618,6 +676,31 @@ export const realApi: ApiClient = {
     normalizeReportCitations(
       await request<Partial<ReportCitationsResponse>>(`/api/reports/${id}/citations`),
     ),
+
+  getBdTerritories: async () =>
+    arr(await request<Partial<BdTerritoryOption>[] | null>("/api/bd/territories")).map((t) => ({
+      territory: str(t.territory),
+      items: num(t.items),
+      tenders: num(t.tenders),
+      forecasts: num(t.forecasts),
+      configured: bool(t.configured),
+    })),
+  getBdReports: async (territory) =>
+    arr(
+      await request<Partial<ReportSummary>[] | null>(`/api/bd/reports${qs({ territory })}`),
+    ).map(normalizeReportSummary),
+  postBdReport: async (territory, lookbackDays) => {
+    const data = await request<Partial<BdReportCreateResponse>>("/api/bd/reports", {
+      method: "POST",
+      body: JSON.stringify({ territory, lookback_days: lookbackDays }),
+    });
+    return {
+      job_id: idStr(data?.job_id),
+      status: data?.status,
+      error: data?.error ?? null,
+      report: data?.report ? normalizeReportDetail(data.report) : undefined,
+    };
+  },
 
   getSettings: async (name: SettingsName) => {
     const data = await request<Partial<SettingsGetResponse>>(`/api/settings/${name}`);
@@ -679,6 +762,60 @@ export const realApi: ApiClient = {
       body: JSON.stringify(body),
     });
     return { ok: bool(data?.ok), errors: arr(data?.errors), revision: data?.revision ?? null };
+  },
+
+  getMcpServers: async () => {
+    const data = await request<Partial<McpServersResponse>>("/api/mcp/servers");
+    return {
+      mcp_enabled: bool(data?.mcp_enabled),
+      servers: arr(data?.servers).map((s) => ({
+        id: str(s?.id),
+        label: str(s?.label),
+        transport: s?.transport === "http" ? "http" : "stdio",
+        enabled: bool(s?.enabled),
+        inherit_cli_only: bool(s?.inherit_cli_only),
+        key_configured: s?.key_configured === null || s?.key_configured === undefined ? null : bool(s.key_configured),
+        key_env: s?.key_env ? arr(s.key_env).map((k) => str(k)) : null,
+        tool_count: s?.tool_count === null || s?.tool_count === undefined ? null : Number(s.tool_count),
+        ok: s?.ok === null || s?.ok === undefined ? null : bool(s.ok),
+        error: s?.error ?? null,
+        latency_ms: s?.latency_ms === null || s?.latency_ms === undefined ? null : Number(s.latency_ms),
+        tools: arr(s?.tools).map((tName) => str(tName)),
+      })),
+    };
+  },
+  postMcpServerPing: async (serverId: string) => {
+    const data = await request<Partial<McpPingResponse>>(`/api/mcp/servers/${encodeURIComponent(serverId)}/ping`, {
+      method: "POST",
+    });
+    return {
+      id: str(data?.id) || serverId,
+      ok: bool(data?.ok),
+      error: data?.error ?? null,
+      tool_count: Number(data?.tool_count) || 0,
+      tools: arr(data?.tools).map((t) => str(t)),
+      latency_ms: Number(data?.latency_ms) || 0,
+    };
+  },
+  getMcpCalls: async (since = "24h") => {
+    const data = await request<Partial<McpCallsResponse>>(`/api/mcp/calls${qs({ since })}`);
+    return {
+      since_hours: Number(data?.since_hours) || 24,
+      calls: arr(data?.calls).map((c) => ({
+        server: str(c?.server),
+        tool: str(c?.tool),
+        calls: Number(c?.calls) || 0,
+        failures: Number(c?.failures) || 0,
+        flagged: Number(c?.flagged) || 0,
+        avg_duration_ms: Number(c?.avg_duration_ms) || 0,
+        total_chars: Number(c?.total_chars) || 0,
+      })),
+      totals: {
+        calls: Number(data?.totals?.calls) || 0,
+        failures: Number(data?.totals?.failures) || 0,
+        flagged: Number(data?.totals?.flagged) || 0,
+      },
+    };
   },
 };
 

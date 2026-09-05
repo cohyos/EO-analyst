@@ -20,6 +20,7 @@ from eoa.llm.providers.api import (
     OpenAIProvider,
     _gemini_schema,
     get_api_provider,
+    redact_secrets,
 )
 
 
@@ -246,6 +247,96 @@ class TestOpenAIChat:
         sent = json.loads(route.calls[0].request.content)
         assert sent["response_format"]["type"] == "json_schema"
         assert sent["response_format"]["json_schema"]["schema"] == schema
+
+
+class TestGeminiKeyHandling:
+    """Q2-3: the Gemini key travels only in the `x-goog-api-key` header, never a
+    `?key=` query param, and never leaks into a raised/logged message on failure."""
+
+    @respx.mock
+    def test_chat_sends_key_as_header_not_query_param(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "gk-secret-value")
+        route = respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(return_value=httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "x"}]}}]}))
+        GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "hi"}])
+        sent = route.calls[0].request
+        assert sent.headers["x-goog-api-key"] == "gk-secret-value"
+        assert "key=" not in str(sent.url)
+
+    @respx.mock
+    def test_list_models_sends_key_as_header_not_query_param(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "gk-secret-value")
+        route = respx.get("https://generativelanguage.googleapis.com/v1beta/models").mock(
+            return_value=httpx.Response(200, json={"models": []})
+        )
+        GeminiProvider().list_models()
+        sent = route.calls[0].request
+        assert sent.headers["x-goog-api-key"] == "gk-secret-value"
+        assert "key=" not in str(sent.url)
+
+    @respx.mock
+    def test_500_error_does_not_leak_key_in_raised_message(self, monkeypatch):
+        secret = "AIzaSuperSecretGeminiKey1234567890"
+        monkeypatch.setenv("GEMINI_API_KEY", secret)
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(return_value=httpx.Response(500, text=f"upstream failure, echoing ?key={secret} back"))
+        with pytest.raises(ApiProviderError) as exc_info:
+            GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "hi"}])
+        assert secret not in str(exc_info.value)
+
+    @respx.mock
+    def test_500_error_does_not_leak_key_in_logged_message(self, monkeypatch, caplog):
+        import logging
+
+        secret = "AIzaSuperSecretGeminiKey1234567890"
+        monkeypatch.setenv("GEMINI_API_KEY", secret)
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(return_value=httpx.Response(500, text=f"upstream failure, echoing ?key={secret} back"))
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(ApiProviderError):
+                GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "hi"}])
+        assert secret not in caplog.text
+
+    @respx.mock
+    def test_list_models_failure_does_not_leak_key(self, monkeypatch, caplog):
+        import logging
+
+        secret = "AIzaSuperSecretGeminiKey1234567890"
+        monkeypatch.setenv("GEMINI_API_KEY", secret)
+        respx.get("https://generativelanguage.googleapis.com/v1beta/models").mock(
+            return_value=httpx.Response(500, text=f"boom key={secret}")
+        )
+        with caplog.at_level(logging.WARNING):
+            GeminiProvider().list_models()
+        assert secret not in caplog.text
+
+
+class TestRedactSecrets:
+    def test_redacts_key_query_param(self):
+        assert "AIzaXYZ" not in redact_secrets("https://x.example/foo?key=AIzaXYZ123456789&other=1")
+
+    def test_redacts_aiza_key_literal(self):
+        out = redact_secrets("token is AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
+        assert "AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ1234" not in out
+
+    def test_redacts_sk_prefixed_key(self):
+        out = redact_secrets("using sk-abcdefghijklmnopqrstuvwx now")
+        assert "sk-abcdefghijklmnopqrstuvwx" not in out
+
+    def test_redacts_bearer_token(self):
+        out = redact_secrets("Authorization: Bearer abc123.def456-ghi789")
+        assert "abc123.def456-ghi789" not in out
+        assert "Bearer" in out
+
+    def test_empty_and_none_like_input_untouched(self):
+        assert redact_secrets("") == ""
+
+    def test_leaves_ordinary_text_untouched(self):
+        text = "gemini API error 429: rate limited, try again later"
+        assert redact_secrets(text) == text
 
 
 class TestGeminiSchemaAdaptation:

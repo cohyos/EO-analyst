@@ -132,6 +132,19 @@ class ReportCfg(BaseModel):
     require_citations: bool = True
 
 
+class BdReportCfg(BaseModel):
+    """A11 "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (``eoa.report.bd_territory``).
+
+    ``territories`` is the default set the weekly scheduler job (``bd_report``, no ``territory``
+    in its payload) builds a report for -- ISO-2 country codes or a recognized region code (EU),
+    normalized via ``eoa.report.geography.normalize_country``. An on-demand report (``POST
+    /api/bd/reports``) is never limited to this list -- it accepts any territory the caller asks
+    for."""
+
+    territories: list[str] = Field(default_factory=lambda: ["US", "IL", "EU", "GB", "IN", "KR"])
+    lookback_days: int = 90
+
+
 class NotifyCfg(BaseModel):
     url: str = "http://ntfy:80"
     topic: str = "eo-analyst"
@@ -418,6 +431,7 @@ class Settings(BaseModel):
     fetch: FetchCfg = FetchCfg()
     security: SecurityCfg = SecurityCfg()
     report: ReportCfg = ReportCfg()
+    bd_report: BdReportCfg = BdReportCfg()
     notify: NotifyCfg = NotifyCfg()
     retention: RetentionCfg = RetentionCfg()
     api: ApiCfg = ApiCfg()
