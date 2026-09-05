@@ -3621,6 +3621,73 @@ pass). `e2e/tests/04-entities.spec.ts` rewritten for the new single-page three-p
 `aria-label` `חיפוש ישויות` and the `list`/`li > a` row shape) -- not yet run against a live
 backend in this pass (see report).
 
+### `entity_relevance.py` rework: graph/event evidence, country + news-source kinds (2026-09-06)
+
+The formula above scored purely from `items.entities_mentioned`, which is populated on only
+32/353 items -- so 271/408 entities scored 0 and were hidden under the default
+`relevance >= 0.4` filter, including entities that are obviously in-scope by other evidence
+already in the DB: "US Navy" (org, 8 `graph_edges`), "Air Force" (5 edges + an event), etc.
+`score_entity`'s signature changed to add three more evidence sources, checked in this order:
+
+1. **Watchlist match** (unchanged) -> 1.0.
+2. **News-source / media-outlet detection** (new: `is_news_source(name, source_names)`, a
+   curated static list of defense trade press plus a fuzzy match against the polled
+   `sources` table) -> 0.1. Catches "The War Zone", "Breaking Defense", etc. -- legitimate
+   NER hits (a story attributed to an outlet) that are never a market participant.
+3. **Country kind** (new: `resolve_country_kind(name, current_kind)`, a static ~90-name
+   EN/HE list, only promotes from the LLM's generic fallback kinds `'company'`/`'org'` so it
+   never overrides a more specific kind like `'person'`) -> flat 0.45 if the country has >=1
+   graph edge or event, else 0.2 (a name-dropped country stays hidden; one that is an actual
+   party/customer is not, but a country is still a market, not a tracked player).
+4. Otherwise, a weighted combination (`mention` 0.25 / `edge` 0.25 / `event` 0.20 /
+   `in_scope_fraction` 0.30, weights re-derived to make room for the two new components) of:
+   `mention_count` (now also matching entity aliases, not just canonical name),
+   `edge_count` (`graph_edges` rows with the entity as src or dst), `event_count` (`events`
+   rows where the entity is a listed party, the customer, or appears in the program text),
+   and `in_scope_fraction` computed over the *deduplicated union* of every item backing any
+   of the three sources. `org`/`program`/`system` kinds (this DB's `org` covers agencies and
+   military branches -- no separate `agency`/`military` kind exists) are floored at 0.5 once
+   they have >=1 edge or event. `person`/unexpected kinds keep the old single-hit downweight
+   (0.35x total evidence <=1, else 0.7x), now counting mentions+edges+events together instead
+   of mentions alone.
+
+`compute_relevance_row(row, evidence: EntityEvidence, *, is_news_source=False)` replaced the
+old `(row, mention_count, in_scope_mentions)` signature -- `EntityEvidence` is a small
+dataclass (`mention_count`, `edge_count`, `event_count`, `in_scope_evidence_count`,
+`total_evidence_count`) built by the new `_build_evidence()` helper, and the return value
+gained a third element, `resolved_kind`, since scoring can now also fix a country's kind.
+`score_and_persist_entity(name)`'s own signature is unchanged (still the only thing
+`eoa.pipeline.analyze` calls) but now does three extra queries (edges, events, sources)
+per entity and also writes `kind` on every persist, not just `relevance`/`is_watchlist`.
+
+`scripts/repair_entity_relevance.py` rewritten to match: five bulk queries up front
+(entities, items, `graph_edges` JOIN items, `events` JOIN items, sources), all evidence
+aggregation done in Python (a `defaultdict`-based reverse index for mentions/edges, a
+brute-force entities x events scan for the party/customer/program match -- ~400 x ~120,
+trivial at this scale) so the backfill stays at a handful of queries total, not one-to-four
+per entity. Report now prints 15 highest *and* 15 lowest (was 10 lowest only) plus a
+reclassified-to-`'country'` count. Run for real against the native DB (`postgresql://eoa:...@
+127.0.0.1:5432/eoanalyst`, migration `0007` already applied): 408 entities scored, 184 above
+threshold (was ~137 under the old formula) / 224 below, 11 reclassified to `kind='country'`
+(Japan, China, Israel, Russia, Germany, ...). Target sanity confirmed: US Navy (org, 0.55),
+Air Force (company, 0.50), USAF (company, 0.55), US Air Force (org, 0.70), Thales/Rheinmetall/
+Elbit (watchlist, 1.0) all visible; Zipline (0.079), Eric Trump (0.379), The War Zone (0.1,
+news-source) all stay hidden. No "Rolls-Royce" entity row exists in this DB (it only appears
+as Hebrew event-party text, "רולס-רויס", never NER'd into its own `entities` row) -- nothing
+to fix there.
+
+One pre-existing, unrelated wrinkle observed while spot-checking results: `is_watchlist_match`'s
+substring tolerance (unchanged by this pass) also matches short acronym-shaped entities like
+"AI"/"AV"/"MMA" against unrelated watchlist aliases (e.g. "ai" is a substring of IAI's alias
+"Israel Aerospace Industries"), pinning them to 1.0. Not in this task's scope (the task asked
+for the scoring *formula*, not `is_watchlist_match`'s existing matching tolerance) and does not
+affect any of the target entities above -- flagged here for a future pass.
+
+Unit tests: `tests/unit/test_entity_relevance.py` rewritten for the new signatures (50 tests,
+no DB/GPU) -- covers each evidence path (mention/edge/event, in isolation and combined),
+watchlist/news-source/country precedence, `_build_evidence`'s item-id dedup, and
+`resolve_country_kind`'s person-kind guard. `ruff check` clean.
+
 ## i18n layer, feed shortcuts dialog, per-country geography (U5/U6/U7, 2026-09-05)
 
 Three items from `docs/REVIEW_2026-09-05.md`, implemented together since U5's fix depends on U6's
