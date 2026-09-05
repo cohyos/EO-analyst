@@ -16,6 +16,7 @@ export const he = {
     inbox: "הבהרות ומשוב",
     reports: "דוחות",
     bd: "פיתוח עסקי",
+    techRadar: "רדאר טכנולוגי",
     settings: "הגדרות",
     itemDetail: "פרטי פריט",
     shellFallback: "חדר מצב + עמית",
@@ -126,6 +127,15 @@ export const he = {
     searchPlaceholder: "חיפוש טקסט חופשי…",
     searchAria: "חיפוש בפיד",
     countryGroupCount: "{count} פריטים",
+    // Q5-3 (docs/qa/findings_Q5_r1.md): the "I" investigate shortcut used to fire silently, allow
+    // double-submits, and ignore an investigation that already existed for the item.
+    investigateQueuedToast: "חקירה נוספה לתור · #{jobId}",
+    investigateExistingToast: "נמצאה חקירה קיימת · #{jobId}",
+    investigateConflictToast: "חקירה כבר רצה או ממתינה בתור",
+    investigateErrorToast: "פתיחת החקירה נכשלה — נסה שוב",
+    investigateToastViewLink: "צפה בחקירה",
+    investigatingIndicator: "🔎 בחקירה",
+    investigatingIndicatorAria: "חקירת עומק בתהליך עבור פריט זה",
   },
   shortcuts: {
     navigate: "ניווט בין פריטים",

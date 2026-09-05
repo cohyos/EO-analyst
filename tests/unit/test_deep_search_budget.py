@@ -6,7 +6,7 @@ import json
 import time
 from unittest.mock import MagicMock
 
-from eoa.search.deep_search import Budget, Investigation, _act
+from eoa.search.deep_search import Budget, Investigation, _act, _finalize_outcome
 
 
 class TestBudget:
@@ -172,7 +172,13 @@ class TestActToolCalls:
         assert inv.result.outcome == "found"
 
     def test_act_filters_sources_to_read_urls(self, monkeypatch):
-        """_act() finish only includes sources that were read."""
+        """Q3-5 (docs/qa/findings_Q3_r1.md): the model's own `sources` claim in `finish` is never
+        trusted -- `_act()` accepts it provisionally, but `_finalize_outcome()` (called once the
+        loop ends, see `investigate()`) unconditionally overwrites `sources` with `inv.read_urls`,
+        the ground truth of what was actually fetched via the `read` tool. This replaces the old
+        contract where `_act()` itself intersected the model's claim against `read_urls` -- that
+        intersection dropped a page that WAS read whenever the model simply forgot to list it,
+        which is exactly the "14/18 jobs persisted sources: []" bug Q3-5 fixes."""
         inv = Investigation(job_id=None, item_id=None, question="test")
         budget = Budget(
             max_queries=10,
@@ -212,10 +218,11 @@ class TestActToolCalls:
 
         result = _act(inv, budget, [], round_no=1, max_steps=5)
         assert result is True
-        # Only the URL that was read or in hits_seen should be kept
-        assert "https://example.com/1" in inv.result.sources
-        assert "https://example.com/2" not in inv.result.sources  # seen but never read: excluded
-        assert "https://example.com/3" not in inv.result.sources  # Not in either
+
+        _finalize_outcome(inv, budget)
+        # sources is exactly the set of URLs actually read -- neither the merely-seen URL nor the
+        # never-seen one the model hallucinated, regardless of what `finish` claimed.
+        assert inv.result.sources == ["https://example.com/1"]
 
 
 class TestActBudgetExhaustion:

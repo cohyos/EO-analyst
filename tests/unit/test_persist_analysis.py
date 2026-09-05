@@ -232,6 +232,7 @@ def test_persist_analysis_handles_date_parsing(monkeypatch: pytest.MonkeyPatch) 
                 title="Test",
                 date=None,  # No date
                 program="Program B",
+                customer="Client B",  # anchor so Q3-6's narrative-title filter doesn't reject it
                 summary_he="test",
                 confidence=0.8,
             ),
@@ -550,10 +551,12 @@ def test_persist_analysis_returns_counts(monkeypatch: pytest.MonkeyPatch) -> Non
         key_facts=["עובדה 1", "עובדה 2"],
         # Distinct `program` per event so F9/F16 dedup doesn't collapse these three (otherwise
         # identical) events into one -- this test is about the events/edges counts, not dedup.
+        # `customer` gives each event an anchor so Q3-6's narrative-title filter doesn't reject
+        # these factless placeholder titles -- this test is about counts, not that filter.
         events=[
-            EventOut(kind="test", title="e1", program="Program A", summary_he="e1", confidence=0.8),
-            EventOut(kind="test", title="e2", program="Program B", summary_he="e2", confidence=0.8),
-            EventOut(kind="test", title="e3", program="Program C", summary_he="e3", confidence=0.8),
+            EventOut(kind="test", title="e1", program="Program A", customer="Client", summary_he="e1", confidence=0.8),
+            EventOut(kind="test", title="e2", program="Program B", customer="Client", summary_he="e2", confidence=0.8),
+            EventOut(kind="test", title="e3", program="Program C", customer="Client", summary_he="e3", confidence=0.8),
         ],
         edges=[
             EdgeOut(src="A", dst="B", label="PARTNER_OF", evidence_he="test"),

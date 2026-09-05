@@ -34,7 +34,6 @@ import type {
   SettingsPutResponse,
   Survey,
   TechRadarResponse,
-  TenderCard,
   TenderStatus,
   TendersResponse,
   TriageLevel,
@@ -93,6 +92,9 @@ export interface TendersQuery {
 export interface TechItemsQuery {
   subdomain?: string;
   maturity?: string;
+  actor_kind?: string;
+  /** period filter -- ISO date/datetime, items published/fetched on or after this. */
+  since?: string;
   page?: number;
   page_size?: number;
 }
@@ -112,10 +114,12 @@ export interface ApiClient {
     id: number,
     body: { user_level: TriageLevel; comment: string | null },
   ): Promise<ItemCard>;
+  /** `existing: true` (Q5-3, docs/qa/findings_Q5_r1.md) means the backend reused a `done`
+   * investigation for this item from the last 24h instead of enqueueing a new job. */
   postItemInvestigate(
     id: number,
     body: { question: string | null },
-  ): Promise<{ job_id: string }>;
+  ): Promise<{ job_id: string; existing: boolean }>;
 
   getEntities(query: EntitiesQuery): Promise<EntitySummary[]>;
   getEntity(id: number): Promise<EntityDetail>;

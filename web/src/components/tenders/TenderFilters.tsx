@@ -1,8 +1,9 @@
 import { Search } from "lucide-react";
 import type { TenderStatus } from "@/types/api";
 import { TENDER_STATUS_LABEL } from "@/lib/tenders";
+import { useT } from "@/i18n";
 
-const ALL_STATUSES: TenderStatus[] = ["open", "closed", "awarded", "unknown"];
+const ALL_STATUSES: TenderStatus[] = ["open", "closed", "awarded", "unknown", "archived"];
 
 export interface TenderFiltersState {
   status: TenderStatus | "";
@@ -14,13 +15,28 @@ export function TenderFilters({
   value,
   onChange,
   countries,
+  showClosedArchived,
+  onToggleClosedArchived,
 }: {
   value: TenderFiltersState;
   onChange: (next: TenderFiltersState) => void;
   countries: string[];
+  /** F24: whether the (no-explicit-status) default list also widens to include 'closed'/
+   * 'archived' tenders — an explicit `value.status` pick always wins regardless. */
+  showClosedArchived: boolean;
+  onToggleClosedArchived: (next: boolean) => void;
 }) {
+  const t = useT();
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border bg-bg-raised p-3">
+      <label className="flex items-center gap-1.5 text-sm text-fg-dim">
+        <input
+          type="checkbox"
+          checked={showClosedArchived}
+          onChange={(e) => onToggleClosedArchived(e.target.checked)}
+        />
+        {t("tenders.showClosedArchived")}
+      </label>
       <select
         value={value.status}
         onChange={(e) => onChange({ ...value, status: e.target.value as TenderStatus | "" })}

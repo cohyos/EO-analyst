@@ -405,3 +405,54 @@ class TestLlmRoute:
         res = client.get("/api/llm/calls?since=48h")
         assert res.status_code == 200
         assert res.json()["since_hours"] == 48
+
+
+class TestLlmSettingsRouteRequiresToken:
+    """Q2-8: `PUT /api/llm/settings` enforces the same optional `X-EOA-Token` shared-secret
+    check as `PUT /api/settings/{name}` -- see `eoa.api.routes.settings._require_token`."""
+
+    def test_put_llm_settings_requires_token_when_configured(
+        self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("eoa.llm.providers.ollama.OllamaProvider.is_available", lambda self: False)
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: False)
+        monkeypatch.setenv("EOA_API_TOKEN", "s3cr3t")
+        from eoa.api.app import create_app
+
+        client = TestClient(create_app())
+
+        r_no_token = client.put("/api/llm/settings", json={"interactive_default": "agy"})
+        assert r_no_token.status_code == 401
+        assert r_no_token.json()["error"]["code"] == "unauthorized"
+
+        r_wrong_token = client.put(
+            "/api/llm/settings", json={"interactive_default": "agy"}, headers={"X-EOA-Token": "wrong"}
+        )
+        assert r_wrong_token.status_code == 401
+
+        r_right_token = client.put(
+            "/api/llm/settings", json={"interactive_default": "agy"}, headers={"X-EOA-Token": "s3cr3t"}
+        )
+        assert r_right_token.status_code == 200
+
+    def test_put_llm_settings_no_token_required_when_env_unset(
+        self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("eoa.llm.providers.ollama.OllamaProvider.is_available", lambda self: False)
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: False)
+        monkeypatch.delenv("EOA_API_TOKEN", raising=False)
+        from eoa.api.app import create_app
+
+        client = TestClient(create_app())
+        r = client.put("/api/llm/settings", json={"interactive_default": "agy"})
+        assert r.status_code == 200
+
+    def test_get_llm_providers_unaffected_by_token(self, settings_tmp: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.ollama.OllamaProvider.is_available", lambda self: False)
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: False)
+        monkeypatch.setenv("EOA_API_TOKEN", "s3cr3t")
+        from eoa.api.app import create_app
+
+        client = TestClient(create_app())
+        r = client.get("/api/llm/providers")
+        assert r.status_code == 200

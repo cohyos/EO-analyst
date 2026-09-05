@@ -7,18 +7,51 @@ import { TenderFilters, type TenderFiltersState } from "@/components/tenders/Ten
 import { TenderTable } from "@/components/tenders/TenderTable";
 import { ForecastList } from "@/components/tenders/ForecastList";
 import { cn } from "@/lib/cn";
+import { useT } from "@/i18n";
+import { TENDER_STATUS_CHIP_CLASS, TENDER_STATUS_LABEL } from "@/lib/tenders";
+import type { TenderStatus } from "@/types/api";
 
 type Tab = "open" | "forecast";
 
+// F24: header chips shown in this fixed order regardless of which statuses actually have rows.
+const COUNT_CHIP_ORDER: TenderStatus[] = ["open", "unknown", "closed", "archived", "awarded"];
+
+function TenderCountChips({ counts }: { counts: Partial<Record<TenderStatus, number>> }) {
+  return (
+    <div className="flex flex-wrap gap-1.5" role="list" aria-label="ספירת מכרזים לפי סטטוס">
+      {COUNT_CHIP_ORDER.map((status) => {
+        const n = counts[status] ?? 0;
+        if (n === 0) return null;
+        return (
+          <span
+            key={status}
+            role="listitem"
+            className={cn("rounded-md px-2 py-0.5 text-xs font-medium", TENDER_STATUS_CHIP_CLASS[status])}
+          >
+            {TENDER_STATUS_LABEL[status]}: {n}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export function TendersPage() {
+  const t = useT();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab: Tab = searchParams.get("tab") === "forecast" ? "forecast" : "open";
   const [filters, setFilters] = useState<TenderFiltersState>({ status: "", country: "", q: "" });
+  const [showClosedArchived, setShowClosedArchived] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const tendersQuery = useQuery({
-    queryKey: ["tenders"],
-    queryFn: () => api.getTenders({}),
+    queryKey: ["tenders", filters.status, showClosedArchived],
+    queryFn: () =>
+      api.getTenders({
+        status: filters.status || undefined,
+        include_closed: showClosedArchived,
+        include_archived: showClosedArchived,
+      }),
   });
   const forecastsQuery = useQuery({
     queryKey: ["tender-forecasts"],
@@ -26,30 +59,47 @@ export function TendersPage() {
     enabled: tab === "forecast",
   });
 
+  const tenders = tendersQuery.data?.tenders ?? [];
+  const counts = tendersQuery.data?.counts ?? {};
+  // F24: the true grand total across every status (not just the current filtered view) -- used
+  // to tell "nothing exists at all" (show the big empty state) apart from "the default/current
+  // view is empty but toggling 'show closed/archived' or changing filters might reveal rows"
+  // (show the filters + toggle so the user actually can).
+  const totalTendersEverywhere = Object.values(counts).reduce((sum, n) => sum + (n ?? 0), 0);
+
   const countries = useMemo(() => {
     const set = new Set<string>();
-    for (const t of tendersQuery.data ?? []) {
-      if (t.country) set.add(t.country);
+    for (const tender of tenders) {
+      if (tender.country) set.add(tender.country);
     }
     return [...set].sort();
-  }, [tendersQuery.data]);
+  }, [tenders]);
 
   const filteredTenders = useMemo(() => {
-    let list = tendersQuery.data ?? [];
-    if (filters.status) list = list.filter((t) => t.status === filters.status);
-    if (filters.country) list = list.filter((t) => t.country === filters.country);
+    let list = tenders;
+    // Status is already applied server-side (filters.status, when set); country/q stay
+    // client-side since the server call is shared across the country/q-agnostic count summary.
+    if (filters.country) list = list.filter((tender) => tender.country === filters.country);
     if (filters.q) {
       const needle = filters.q.toLowerCase();
       list = list.filter(
-        (t) =>
-          (t.title ?? "").toLowerCase().includes(needle) ||
-          (t.summary_he ?? "").toLowerCase().includes(needle) ||
-          (t.agency ?? "").toLowerCase().includes(needle) ||
-          t.matched_terms.some((m) => m.toLowerCase().includes(needle)),
+        (tender) =>
+          (tender.title ?? "").toLowerCase().includes(needle) ||
+          (tender.summary_he ?? "").toLowerCase().includes(needle) ||
+          (tender.agency ?? "").toLowerCase().includes(needle) ||
+          tender.matched_terms.some((m) => m.toLowerCase().includes(needle)),
       );
     }
-    return list;
-  }, [tendersQuery.data, filters]);
+    // Sort by deadline then published date (F24) — undated rows ("unknown" status) sort last.
+    return [...list].sort((a, b) => {
+      const ad = a.deadline ?? "";
+      const bd = b.deadline ?? "";
+      if (ad !== bd) return ad === "" ? 1 : bd === "" ? -1 : ad.localeCompare(bd);
+      const ap = a.published_at ?? "";
+      const bp = b.published_at ?? "";
+      return bp.localeCompare(ap);
+    });
+  }, [tenders, filters.country, filters.q]);
 
   const sortedForecasts = useMemo(
     () => [...(forecastsQuery.data ?? [])].sort((a, b) => (b.likelihood ?? 0) - (a.likelihood ?? 0)),
@@ -97,26 +147,35 @@ export function TendersPage() {
         <div className="space-y-3">
           {tendersQuery.isLoading && <LoadingState label="טוען מכרזים…" />}
           {tendersQuery.isError && <ErrorState onRetry={() => tendersQuery.refetch()} />}
-          {!tendersQuery.isLoading &&
-            !tendersQuery.isError &&
-            (tendersQuery.data ?? []).length === 0 && (
-              <EmptyState
-                title="אין מכרזים פתוחים כרגע"
-                description="מעקב המכרזים מתעדכן בסריקה הלילית (FR-5.2); אין כרגע רשומות."
-              />
-            )}
-          {!tendersQuery.isLoading &&
-            !tendersQuery.isError &&
-            (tendersQuery.data ?? []).length > 0 && (
-              <>
-                <TenderFilters value={filters} onChange={setFilters} countries={countries} />
-                <TenderTable
-                  tenders={filteredTenders}
-                  expandedId={expandedId}
-                  onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
+          {!tendersQuery.isLoading && !tendersQuery.isError && (
+            <>
+              <TenderCountChips counts={counts} />
+              {totalTendersEverywhere === 0 ? (
+                // F24: truly nothing in the whole system (every status, ignoring the current
+                // view/filters) -- the "show closed/archived" toggle below can't help here, so
+                // there's no reason to show it.
+                <EmptyState
+                  title={t("tenders.emptyOpenTitle")}
+                  description={t("tenders.emptyOpenDescription")}
                 />
-              </>
-            )}
+              ) : (
+                <>
+                  <TenderFilters
+                    value={filters}
+                    onChange={setFilters}
+                    countries={countries}
+                    showClosedArchived={showClosedArchived}
+                    onToggleClosedArchived={setShowClosedArchived}
+                  />
+                  <TenderTable
+                    tenders={filteredTenders}
+                    expandedId={expandedId}
+                    onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
+                  />
+                </>
+              )}
+            </>
+          )}
         </div>
       )}
 

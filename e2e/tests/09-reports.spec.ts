@@ -45,4 +45,35 @@ test.describe("Reports screen (/reports)", () => {
     await expect(page.locator("header h1")).toHaveText("דוחות");
     await assertNoBadText(page, testInfo, "Reports (/reports)");
   });
+
+  // F23 (docs/QA_PROGRAM.md section 4, 2026-09-06): `[n]` citations must be real, single (not
+  // nested) links, and clicking one that resolves to a real item must navigate to /items/:id.
+  test("citation markers are single anchors (no nested <a>) and a resolved one navigates to /items/:id", async ({
+    page,
+    request,
+  }) => {
+    const reports = await (await request.get(`${API_BASE}/api/reports?limit=30`)).json();
+    test.skip(!Array.isArray(reports) || reports.length === 0, "No reports exist in this environment");
+
+    await page.goto(`/reports?id=${reports[0].id}`);
+    const article = page.locator("article");
+    await expect(article).toBeVisible({ timeout: 15_000 });
+
+    const citations = article.locator("a.cite");
+    const count = await citations.count();
+    test.skip(count === 0, "This report has no [n] citation markers");
+
+    // No citation anchor should itself contain another <a> (the reportHtml.ts nesting bug F23 fixed).
+    for (let i = 0; i < count; i++) {
+      const nestedAnchors = await citations.nth(i).locator("a").count();
+      expect(nestedAnchors, `citation #${i} must not nest another <a>`).toBe(0);
+    }
+
+    const resolvedCitation = article.locator("a.eo-citation[data-item-id]").first();
+    if ((await resolvedCitation.count()) > 0) {
+      const itemId = await resolvedCitation.getAttribute("data-item-id");
+      await resolvedCitation.click();
+      await expect(page).toHaveURL(new RegExp(`/items/${itemId}$`));
+    }
+  });
 });

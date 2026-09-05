@@ -12,6 +12,7 @@ import {
   daysLeft,
 } from "@/lib/tenders";
 import { EmptyState } from "@/components/states";
+import { useT } from "@/i18n";
 
 function DeadlineChip({ deadline }: { deadline: string | null }) {
   if (!deadline) return <span className="text-fg-dim">—</span>;
@@ -53,14 +54,28 @@ function RelevanceDots({ value }: { value: number | null }) {
 }
 
 function TenderDetailRow({ t }: { t: TenderCard }) {
+  const translate = useT();
+  const whyRelevant = [t.matched_terms.join(", "), t.summary_he].filter(Boolean).join(" — ");
   return (
     <tr className="border-t border-border bg-bg-sunken/60">
       <td colSpan={8} className="p-3 text-xs">
-        {t.summary_he && (
+        {whyRelevant && (
           <p className="mb-2">
-            <bdi dir="auto">{t.summary_he}</bdi>
+            <span className="text-fg-dim">{translate("tenders.whyRelevantPrefix")}</span>
+            <bdi dir="auto">{whyRelevant}</bdi>
           </p>
         )}
+        <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-fg-dim">
+          <span>
+            פורסם: <span className="font-mono text-fg">{formatDate(t.published_at)}</span>
+          </span>
+          <span>
+            גוף מזמין: <bdi className="text-fg">{t.agency ?? "—"}</bdi>
+          </span>
+          <span>
+            מדינה: <span className="font-mono text-fg">{t.country ?? "—"}</span>
+          </span>
+        </div>
         <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2">
           {t.entities.length > 0 && (
             <div>
@@ -103,11 +118,12 @@ export function TenderTable({
   expandedId: number | null;
   onToggleExpand: (id: number) => void;
 }) {
+  const t = useT();
   if (tenders.length === 0) {
     return (
       <EmptyState
-        title="אין מכרזים תואמים"
-        description="נסה לשנות את מסנני הסטטוס/מדינה/חיפוש."
+        title={t("tenders.emptyFilteredTitle")}
+        description={t("tenders.emptyFilteredDescription")}
       />
     );
   }

@@ -42,7 +42,7 @@ if str(_AGENT_DIR) not in sys.path:
 
 from eoa import db  # noqa: E402
 from eoa.tenders.scan import (  # noqa: E402
-    RELEVANCE_REJECT_MAX,
+    RELEVANCE_MIN_ACCEPT,
     NoticeRaw,
     _has_procurement_signal,
     _is_denylisted_domain,
@@ -51,6 +51,12 @@ from eoa.tenders.scan import (  # noqa: E402
     load_procurement_signals,
     load_tender_sources,
 )
+
+# F24 (2026-09-06): superseded by scripts/purge_stale_tenders.py, which re-applies the full,
+# tightened F24 gate (relevance floor raised from >2 to >=6, notice-type validity, deadline/age
+# checks, unverified-undated rejection) rather than just this script's original three checks
+# (deny-domain / two-signal gate / a much looser relevance floor). Kept working (not removed) as a
+# lighter-weight, faster alternative when only the original three checks are needed.
 
 
 def _fails_gate(row: dict[str, Any], sources_by_id: dict[str, Any], procurement_signals: list[str], deny_domains: list[str]) -> str | None:
@@ -77,7 +83,7 @@ def _fails_gate(row: dict[str, Any], sources_by_id: dict[str, Any], procurement_
         return "no_procurement_signal"
 
     relevance = row.get("relevance")
-    if relevance is not None and relevance <= RELEVANCE_REJECT_MAX:
+    if relevance is not None and relevance < RELEVANCE_MIN_ACCEPT:
         return "relevance_too_low"
 
     return None

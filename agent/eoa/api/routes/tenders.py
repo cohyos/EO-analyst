@@ -16,9 +16,22 @@ def list_tenders(
     q: str | None = Query(None),
     # Default hides relevance < 3 (see services.DEFAULT_MIN_RELEVANCE); pass 0 to see everything.
     min_relevance: int | None = Query(services.DEFAULT_MIN_RELEVANCE, ge=0, le=10),
+    # F24: default view is 'open'/'unknown' from the last 90 days -- ignored once `status` is set.
+    since_days: int | None = Query(services.DEFAULT_SINCE_DAYS, ge=1),
+    include_closed: bool = Query(False),
+    include_archived: bool = Query(False),
     limit: int = Query(100, ge=1, le=500),
-) -> list[dict]:
-    return services.list_tenders(status=status, country=country, q=q, min_relevance=min_relevance, limit=limit)
+) -> dict:
+    return services.list_tenders(
+        status=status,
+        country=country,
+        q=q,
+        min_relevance=min_relevance,
+        since_days=since_days,
+        include_closed=include_closed,
+        include_archived=include_archived,
+        limit=limit,
+    )
 
 
 @router.get("/tenders/forecasts")

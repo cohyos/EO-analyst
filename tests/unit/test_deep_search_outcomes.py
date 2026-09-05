@@ -23,6 +23,9 @@ from eoa.search.deep_search import (
     MIN_PAGES_BEFORE_NOT_FOUND,
     MIN_QUERIES_BEFORE_NOT_FOUND,
     NOT_FOUND_MAX_CONFIDENCE,
+    PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE,
+    PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE,
+    UNVERIFIED_PREFIX_HE,
     Budget,
     Investigation,
     _act,
@@ -98,6 +101,98 @@ class TestFinalizeOutcomeClassification:
         assert inv.pages_used == 4
         assert inv.max_pages == 30
         assert inv.stopped_reason == "found"
+
+
+class TestFinalizeOutcomeSourcesGroundTruth:
+    """Q3-5 (docs/qa/findings_Q3_r1.md): `sources` always ends up as exactly the URLs actually
+    fetched via the `read` tool (`inv.read_urls`), regardless of outcome and regardless of what
+    the model's own `finish` call reported -- fixes the "14/18 deep-search jobs persisted
+    sources: []" bug (a page WAS read, but the model's own `sources` list omitted or
+    mis-formatted it, and the old code trusted that list instead of the tool-call record)."""
+
+    def test_read_urls_populate_sources_even_when_model_omitted_them(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.read_urls = ["https://example.com/a"]
+        inv.result = InvestigationOut(outcome="partial", answer_he="נמצא חלקית", confidence=0.5, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert inv.result.sources == ["https://example.com/a"]
+
+    def test_hallucinated_source_never_read_is_dropped(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.read_urls = ["https://example.com/a"]
+        inv.result = InvestigationOut(
+            outcome="partial",
+            answer_he="נמצא חלקית",
+            confidence=0.5,
+            sources=["https://example.com/a", "https://example.com/never-read"],
+        )
+        _finalize_outcome(inv, _budget())
+        assert inv.result.sources == ["https://example.com/a"]
+
+    def test_not_found_outcome_still_gets_actually_read_sources(self) -> None:
+        """A `not_found` conclusion can still rest on pages that were read (they just didn't
+        answer the question) -- those reads must still be recorded as sources."""
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.read_urls = ["https://example.com/a", "https://example.com/b"]
+        inv.result = InvestigationOut(outcome="not_found", answer_he="לא נמצא", confidence=0.0, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert inv.result.sources == ["https://example.com/a", "https://example.com/b"]
+
+    def test_no_reads_yields_empty_sources(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.result = InvestigationOut(outcome="not_found", answer_he="לא נמצא", confidence=0.0, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert inv.result.sources == []
+
+
+class TestFinalizeOutcomePartialConfidenceCap:
+    """Q3-5: a `partial` outcome needs >= 2 independently read sources to justify confidence
+    above :data:`PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE`; zero sources gets the
+    :data:`UNVERIFIED_PREFIX_HE` prefix so the claim never reads as verified."""
+
+    def test_single_source_partial_confidence_capped(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.read_urls = ["https://example.com/a"]
+        inv.result = InvestigationOut(outcome="partial", answer_he="נמצא", confidence=0.9, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert inv.result.confidence <= PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE
+
+    def test_two_sources_partial_confidence_not_capped(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.read_urls = ["https://example.com/a", "https://example.com/b"]
+        assert len(inv.read_urls) >= PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE
+        inv.result = InvestigationOut(outcome="partial", answer_he="נמצא", confidence=0.9, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert inv.result.confidence == 0.9
+
+    def test_zero_source_partial_gets_unverified_prefix(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.result = InvestigationOut(outcome="partial", answer_he="חרב ברזל פותחה בשיתוף רפאל", confidence=0.5, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert inv.result.answer_he.startswith(UNVERIFIED_PREFIX_HE)
+        assert inv.result.confidence <= PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE
+
+    def test_unverified_prefix_not_doubled(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.result = InvestigationOut(
+            outcome="partial", answer_he=f"{UNVERIFIED_PREFIX_HE}כבר קיים", confidence=0.5, sources=[]
+        )
+        _finalize_outcome(inv, _budget())
+        assert inv.result.answer_he == f"{UNVERIFIED_PREFIX_HE}כבר קיים"
+
+    def test_partial_with_sources_not_prefixed(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.read_urls = ["https://example.com/a"]
+        inv.result = InvestigationOut(outcome="partial", answer_he="נמצא חלקית", confidence=0.5, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert not inv.result.answer_he.startswith(UNVERIFIED_PREFIX_HE)
+
+    def test_found_outcome_never_gets_unverified_prefix_or_cap(self) -> None:
+        inv = Investigation(job_id=1, item_id=1, question="q")
+        inv.result = InvestigationOut(outcome="found", answer_he="נמצא בוודאות", confidence=0.95, sources=[])
+        _finalize_outcome(inv, _budget())
+        assert inv.result.confidence == 0.95
+        assert not inv.result.answer_he.startswith(UNVERIFIED_PREFIX_HE)
 
 
 class TestActNotFoundRigor:

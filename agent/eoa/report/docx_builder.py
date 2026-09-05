@@ -202,12 +202,24 @@ def _char_class(ch: str) -> str | None:
     return None
 
 
+_BRACKET_OPEN_TO_CLOSE = {"(": ")", "[": "]", "{": "}"}
+_BRACKET_CLOSE_TO_OPEN = {v: k for k, v in _BRACKET_OPEN_TO_CLOSE.items()}
+
+
 def split_runs(text: str) -> list[tuple[str, str]]:
     """Split ``text`` into ``(cls, chunk)`` pairs, ``cls`` in {'he', 'other'}.
 
     Whitespace/punctuation characters inherit the class of the run they fall in (so a space between
     two Hebrew words does not itself force a run break); a class change happens only when a Hebrew
     letter follows non-Hebrew content or vice versa.
+
+    Bracket pairs (``()``, ``[]``, ``{}``) and ``"`` pairs are kept symmetric: a closing mark takes
+    the class its matching opening mark was assigned, instead of whatever class happens to be
+    "current" at the closing mark's own position. Without this, a parenthetical like
+    'פודים ומטע"דים אוויריים (Airborne Pods & Payloads)' put the opening '(' in the Hebrew run (it
+    follows Hebrew text, per the plain inherit-from-``cur`` rule) but the closing ')' in the Latin
+    run (it follows "Payloads") -- an asymmetric split that renders as broken bidi (Q5-4,
+    docs/qa/findings_Q5_r1.md).
     """
     if not text:
         return []
@@ -220,13 +232,32 @@ def split_runs(text: str) -> list[tuple[str, str]]:
     runs: list[tuple[str, str]] = []
     buf: list[str] = []
     cur = default
+    bracket_stack: list[tuple[str, str]] = []  # (opening char, class it was emitted with)
+    quote_open_class: str | None = None  # class the currently-open '"' was emitted with, if any
     for ch in text:
-        c = _char_class(ch) or cur
+        base = _char_class(ch)
+        if base is not None:
+            c = base
+        elif ch in _BRACKET_CLOSE_TO_OPEN and bracket_stack and bracket_stack[-1][0] == _BRACKET_CLOSE_TO_OPEN[ch]:
+            c = bracket_stack[-1][1]
+        elif ch == '"' and quote_open_class is not None:
+            c = quote_open_class
+        else:
+            c = cur
+
         if c != cur and buf:
             runs.append((cur, "".join(buf)))
             buf = []
         cur = c
         buf.append(ch)
+
+        if base is None:
+            if ch in _BRACKET_OPEN_TO_CLOSE:
+                bracket_stack.append((ch, cur))
+            elif ch in _BRACKET_CLOSE_TO_OPEN and bracket_stack and bracket_stack[-1][0] == _BRACKET_CLOSE_TO_OPEN[ch]:
+                bracket_stack.pop()
+            elif ch == '"':
+                quote_open_class = None if quote_open_class is not None else cur
     if buf:
         runs.append((cur, "".join(buf)))
     return runs

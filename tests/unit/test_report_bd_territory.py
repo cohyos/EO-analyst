@@ -292,3 +292,46 @@ def test_extend_registry_with_tenders_assigns_sequential_n():
     assert len(out) == 3
     assert data["tenders"][0]["n"] == 2
     assert data["forecasts"][0]["n"] == 3
+
+
+def test_extend_registry_with_conferences_covers_both_lists():
+    citation_items = [{"id": 1, "n": 1}]
+    data = {"territory": [{"name": "AUSA"}], "international": [{"name": "DSEI"}]}
+    out = bdt._extend_registry_with_conferences(citation_items, data)
+    assert len(out) == 3
+    assert data["territory"][0]["n"] == 2
+    assert data["international"][0]["n"] == 3
+
+
+def test_attach_win_citations_reuses_market_item_n():
+    citation_items = [{"id": 501, "n": 1}, {"id": 502, "n": 2}]
+    competitors = [{"recent_wins": [{"item_id": 501}, {"item_id": 999}]}]
+    bdt._attach_win_citations(citation_items, competitors)
+    assert competitors[0]["recent_wins"][0]["n"] == 1
+    assert competitors[0]["recent_wins"][1]["n"] is None
+
+
+def test_format_tenders_block_includes_citation_numbers():
+    data = {"tenders": [{"title": "RFI", "n": 4, "agency": "US Navy"}], "forecasts": []}
+    block = bdt.format_tenders_block(data)
+    assert "[4]" in block
+
+
+def test_format_conferences_block_includes_citation_numbers():
+    data = {"territory": [{"name": "AUSA", "n": 7}], "international": []}
+    block = bdt.format_conferences_block(data)
+    assert "[7]" in block
+
+
+def test_format_competitors_block_includes_win_citation_numbers():
+    competitors = [
+        {
+            "name": "Elbit",
+            "is_israeli_industry": True,
+            "country": "IL",
+            "mentions": 1,
+            "recent_wins": [{"title": "win", "n": 3, "date": None, "amount_usd": None}],
+        }
+    ]
+    block = bdt.format_competitors_block(competitors)
+    assert "[3]" in block

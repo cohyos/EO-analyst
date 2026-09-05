@@ -91,7 +91,7 @@ class TestItemsByCountry:
     def test_passes_filters_through_to_query(self):
         with patch("eoa.report.geography._fetchall", return_value=[]) as mock_fetchall:
             items_by_country(level=["red", "orange"], domain="c_uas", since="2026-09-01")
-        args, kwargs = mock_fetchall.call_args
+        args, _kwargs = mock_fetchall.call_args
         query = args[0]
         params = args[1]
         assert "i.level = ANY(%(levels)s)" in query

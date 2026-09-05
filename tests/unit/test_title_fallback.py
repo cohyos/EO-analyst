@@ -11,12 +11,26 @@ from eoa.fetch.sanitize import choose_title
 class TestChooseTitleFallbackChain:
     """Test rung by rung of the title fallback chain."""
 
-    def test_clean_title_takes_precedence(self) -> None:
-        """Rung 1: Sanitized page title has highest priority."""
+    def test_html_title_takes_precedence_over_clean_title(self) -> None:
+        """Rung 2: a raw <title> tag outranks clean_title (Q4-9: trafilatura's own title guess
+        is exactly what produced the Globes lead-paragraph and Leonardo "Financial highlights"
+        bugs, so a structured HTML tag is preferred whenever the page actually has one)."""
         title = choose_title(
             clean_title="Clean Article Title",
             fallback_title="RSS Title",
             html="<title>HTML Title</title>",
+            clean_text="First line of body",
+            url="https://example.com/articles/some-slug",
+        )
+        assert title == "HTML Title"
+
+    def test_clean_title_used_when_no_html_tags_present(self) -> None:
+        """Rung 4: clean_title is still used as a fallback when the page has no og:title,
+        <title>, or <h1> at all."""
+        title = choose_title(
+            clean_title="Clean Article Title",
+            fallback_title="RSS Title",
+            html="<html><body>No structured title here</body></html>",
             clean_text="First line of body",
             url="https://example.com/articles/some-slug",
         )
@@ -260,8 +274,8 @@ class TestChooseTitleFallbackChain:
         )
         assert title == "Parsed article headline goes here"
 
-    def test_chain_order_verification_clean_preferred_over_rss(self) -> None:
-        """Verify clean_title is preferred even when other good options exist."""
+    def test_chain_order_verification_og_title_preferred_over_clean_and_rss(self) -> None:
+        """Verify og:title is preferred even when clean_title/RSS/other HTML tags exist."""
         title = choose_title(
             clean_title="Clean Title",
             fallback_title="RSS Title",
@@ -269,8 +283,8 @@ class TestChooseTitleFallbackChain:
             clean_text="First line of body",
             url="https://example.com/test",
         )
-        # clean_title should win
-        assert title == "Clean Title"
+        # og:title should win
+        assert title == "OG Title"
 
     def test_chain_order_verification_html_preferred_over_rss(self) -> None:
         """Verify HTML title is preferred over RSS title when available."""
@@ -353,6 +367,112 @@ class TestChooseTitleFallbackChain:
             url="https://example.com/test",
         )
         assert title == "Defense Update: התקנה חדשה"
+
+    def test_q4_9_globes_lead_paragraph_rejected_in_favor_of_og_title(self) -> None:
+        """Q4-9 real bug: trafilatura's clean_title picked the article's lead paragraph as the
+        "title" (item 67 et al.); the page's real og:title/<title> were correct the whole time."""
+        html = (
+            '<html><head><meta property="og:title" content="German defense exports to Israel '
+            'soar" /><title>German defense exports to Israel soar - Globes</title></head>'
+            "<body>...</body></html>"
+        )
+        lead_paragraph = (
+            "Germany approved defense exports to Israel worth nearly €800 million (about "
+            '$930 million) in the first half of 2026, "Der Spiegel" reported today, citing '
+            "government data obtained under freedom of information requests."
+        )
+        title = choose_title(
+            clean_title=lead_paragraph,
+            fallback_title=None,
+            html=html,
+            clean_text=lead_paragraph,
+            url="https://en.globes.co.il/en/article-german-defense-exports-to-israel-soar-1001554312",
+        )
+        assert title == "German defense exports to Israel soar"
+
+    def test_q4_9_leonardo_sidebar_widget_rejected_as_generic(self) -> None:
+        """Q4-9 real bug: 12 different Leonardo press-release items all got clean_title
+        "Financial highlights" (a sidebar widget heading reused on every page); the real
+        <title>/og:title carried the actual per-article headline."""
+        html = (
+            '<html><head><title>LEONARDO IS EXPANDING IN THE US WITH THE ACQUISITION OF RAFT'
+            "</title></head><body>...</body></html>"
+        )
+        title = choose_title(
+            clean_title="Financial highlights",
+            fallback_title=None,
+            html=html,
+            clean_text="Leonardo today announced the acquisition of RAFT...",
+            url="https://www.leonardo.com/en/press-release-detail/-/detail/28-07-2026-leonardo-is-expanding-in-the-us-with-the-acquisition-of-raft",
+        )
+        assert title == "LEONARDO IS EXPANDING IN THE US WITH THE ACQUISITION OF RAFT"
+
+    def test_generic_clean_title_falls_through_to_rss(self) -> None:
+        """A generic clean_title (no HTML tags at all) is rejected, falling through to RSS."""
+        title = choose_title(
+            clean_title="Financial highlights",
+            fallback_title="Leonardo acquires RAFT to expand US cyber footprint",
+            html="<html><body>no structured tags</body></html>",
+            clean_text="Leonardo today announced the acquisition of RAFT...",
+            url="https://www.leonardo.com/en/press-release-detail/-/detail/28-07-2026",
+        )
+        assert title == "Leonardo acquires RAFT to expand US cyber footprint"
+
+    def test_oversized_og_title_rejected(self) -> None:
+        """An og:title over 200 chars (a lead paragraph mistakenly used as og:title) is rejected."""
+        long_lead = "A" * 210
+        title = choose_title(
+            clean_title=None,
+            fallback_title="Short RSS Title",
+            html=f'<meta property="og:title" content="{long_lead}" />',
+            clean_text="body",
+            url="https://example.com/test",
+        )
+        assert title == "Short RSS Title"
+
+    def test_h1_used_when_no_meta_or_title_tag(self) -> None:
+        """Rung 3: <h1> is used when og:title/<title> are both absent."""
+        title = choose_title(
+            clean_title=None,
+            fallback_title=None,
+            html="<html><body><h1>Headline From H1</h1><p>body</p></body></html>",
+            clean_text="body text",
+            url="https://example.com/test",
+        )
+        assert title == "Headline From H1"
+
+    def test_title_tag_site_suffix_stripped(self) -> None:
+        """<title> tag's trailing " - Site Name" suffix is stripped."""
+        title = choose_title(
+            clean_title=None,
+            fallback_title=None,
+            html="<title>Real Headline Text - Globes</title>",
+            clean_text="body",
+            url="https://example.com/test",
+        )
+        assert title == "Real Headline Text"
+
+    def test_title_tag_pipe_suffix_stripped(self) -> None:
+        """<title> tag's trailing " | Site Name" suffix is stripped."""
+        title = choose_title(
+            clean_title=None,
+            fallback_title=None,
+            html="<title>Real Headline Text | Defense News</title>",
+            clean_text="body",
+            url="https://example.com/test",
+        )
+        assert title == "Real Headline Text"
+
+    def test_title_tag_separator_in_long_headline_not_stripped(self) -> None:
+        """A " - " that's part of a long headline (not a short site-name suffix) is preserved."""
+        title = choose_title(
+            clean_title=None,
+            fallback_title=None,
+            html="<title>Company A - Company B sign landmark defense cooperation agreement</title>",
+            clean_text="body",
+            url="https://example.com/test",
+        )
+        assert title == "Company A - Company B sign landmark defense cooperation agreement"
 
     def test_special_characters_preserved(self) -> None:
         """Special characters (quotes, punctuation) are preserved."""

@@ -460,11 +460,14 @@ export const realApi: ApiClient = {
       }),
     ),
   postItemInvestigate: async (id, body) => {
-    const data = await request<{ job_id?: string | number }>(`/api/items/${id}/investigate`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    return { job_id: idStr(data?.job_id) };
+    const data = await request<{ job_id?: string | number; existing?: boolean }>(
+      `/api/items/${id}/investigate`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    );
+    return { job_id: idStr(data?.job_id), existing: bool(data?.existing) };
   },
 
   getEntities: async (query: EntitiesQuery) => {
@@ -611,6 +614,8 @@ export const realApi: ApiClient = {
       `/api/tech/items${qs({
         subdomain: query.subdomain,
         maturity: query.maturity,
+        actor_kind: query.actor_kind,
+        since: query.since,
         page: query.page,
         page_size: query.page_size,
       })}`,

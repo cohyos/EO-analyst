@@ -256,7 +256,7 @@ export const mockApi: ApiClient = {
 
   postItemInvestigate: async (_id, _body) => {
     investigateJobCounter += 1;
-    return delay({ job_id: `inv-${investigateJobCounter}` }, 350);
+    return delay({ job_id: `inv-${investigateJobCounter}`, existing: false }, 350);
   },
 
   getEntities: async (query: EntitiesQuery) => {
@@ -506,6 +506,11 @@ export const mockApi: ApiClient = {
     let filtered = items.filter((it) => it.domain === "tech_dev");
     if (query.subdomain) filtered = filtered.filter((it) => it.subdomain === query.subdomain);
     if (query.maturity) filtered = filtered.filter((it) => it.tech_maturity === query.maturity);
+    if (query.actor_kind) filtered = filtered.filter((it) => it.tech_actor_kind === query.actor_kind);
+    if (query.since) {
+      const since = new Date(query.since).getTime();
+      filtered = filtered.filter((it) => new Date(it.published_at).getTime() >= since);
+    }
     const pageSize = query.page_size ?? 50;
     const page = query.page ?? 1;
     const start = (page - 1) * pageSize;

@@ -300,6 +300,10 @@ def _item_card(row: dict[str, Any]) -> dict[str, Any]:
         "dedup_of": row.get("dedup_of"),
         "key_facts": row.get("key_facts") or [],
         "uncertainty_he": row.get("uncertainty_he"),
+        # A12 (מעקב טכנולוגי): additive, only ever non-null for domain == "tech_dev".
+        "tech_maturity": row.get("tech_maturity"),
+        "tech_actor_kind": row.get("tech_actor_kind"),
+        "tech_readiness_note_he": row.get("tech_readiness_note_he"),
     }
 
 
@@ -447,11 +451,43 @@ def item_feedback(item_id: int, user_level: str, comment: str | None) -> dict[st
     return get_item(item_id)
 
 
-def investigate_item(item_id: int, question: str | None) -> int | None:
+class InvestigationAlreadyActive(Exception):
+    """A deep_search job for this item is already queued/running; the route surfaces this as HTTP
+    409 (Q5-3, docs/qa/findings_Q5_r1.md -- mirrors `RunAlreadyActive`/"הרץ עכשיו" above)."""
+
+    def __init__(self, job: dict[str, Any]) -> None:
+        self.job = job
+        super().__init__(f"a deep_search job for this item is already {job.get('state')} (id={job.get('id')})")
+
+
+def investigate_item(item_id: int, question: str | None) -> dict[str, Any] | None:
+    """U3/Q5-3 (docs/qa/findings_Q5_r1.md): the "I" feed shortcut used to fire-and-forget a new
+    `deep_search` job every press -- a double-press queued two overlapping investigations of the
+    same item, and an already-running or recently-finished investigation was never checked at all.
+    Now: `None` if the item doesn't exist; raises `InvestigationAlreadyActive` if one is already
+    queued/running for this item (-> HTTP 409); returns `{"job_id", "existing": True}` if a `done`
+    investigation for this item finished within the last 24h (no new job enqueued); otherwise
+    enqueues a new job and returns `{"job_id", "existing": False}`."""
     exists = _fetchone("SELECT id FROM items WHERE id = %s", (item_id,))
     if exists is None:
         return None
-    return relational.enqueue_job("deep_search", {"item_id": item_id, "question": question}, priority=0)
+    active = _fetchone(
+        "SELECT * FROM jobs WHERE kind = 'deep_search' AND (payload->>'item_id')::bigint = %(item_id)s "
+        "AND state IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1",
+        {"item_id": item_id},
+    )
+    if active is not None:
+        raise InvestigationAlreadyActive(_json_safe_row(active) or {})
+    recent_done = _fetchone(
+        "SELECT * FROM jobs WHERE kind = 'deep_search' AND (payload->>'item_id')::bigint = %(item_id)s "
+        "AND state = 'done' AND finished_at >= now() - interval '24 hours' "
+        "ORDER BY finished_at DESC LIMIT 1",
+        {"item_id": item_id},
+    )
+    if recent_done is not None:
+        return {"job_id": recent_done["id"], "existing": True}
+    job_id = relational.enqueue_job("deep_search", {"item_id": item_id, "question": question}, priority=0)
+    return {"job_id": job_id, "existing": False}
 
 
 def start_investigation(question: str, item_id: int | None = None) -> int | None:
@@ -1433,6 +1469,15 @@ def _tender_card(row: dict[str, Any]) -> dict[str, Any]:
 # the API's default view hides these rather than trusting every historical/ungated row.
 DEFAULT_MIN_RELEVANCE = 3
 
+# F24 (docs/QA_PROGRAM.md section 4, 2026-09-06): the tenders board's default view is "open and
+# recently-seen unknown" tenders only -- an explicit `status=` (or `include_closed`/
+# `include_archived`) is required to see anything else. `awarded` is intentionally excluded from
+# the default set too: it means "already decided", not "worth an analyst's attention as an open
+# opportunity" (see eoa.tenders.scan's F24 gate, which now rejects newly-scanned awarded notices
+# outright -- any 'awarded' row left in the DB predates that fix).
+DEFAULT_STATUSES: tuple[str, ...] = ("open", "unknown")
+DEFAULT_SINCE_DAYS = 90
+
 
 def list_tenders(
     *,
@@ -1440,13 +1485,37 @@ def list_tenders(
     country: str | None = None,
     q: str | None = None,
     min_relevance: int | None = DEFAULT_MIN_RELEVANCE,
+    since_days: int | None = DEFAULT_SINCE_DAYS,
+    include_closed: bool = False,
+    include_archived: bool = False,
     limit: int = 100,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
+    """F24: the default view (no explicit ``status``) is ``DEFAULT_STATUSES`` ('open'/'unknown')
+    within the last ``since_days`` days (by ``COALESCE(deadline, published_at, created_at)`` --
+    whichever date the row actually has); ``include_closed``/``include_archived`` widen that
+    default set. An explicit ``status=`` always wins outright and ignores ``since_days``/
+    ``include_*`` -- an operator who asks for e.g. ``status=closed`` wants every closed tender, not
+    just recent ones. Returns both the (possibly capped) tender list AND a status -> count summary
+    (honoring ``country``/``q`` but not the status/since_days/include_* narrowing) for the UI's
+    header chips, since those need the true totals regardless of what the list itself shows."""
     where = ["1 = 1"]
     params: dict[str, Any] = {"limit": min(max(limit, 1), 500)}
+
     if status:
         where.append("status = %(status)s")
         params["status"] = status
+    else:
+        statuses = list(DEFAULT_STATUSES)
+        if include_closed:
+            statuses.append("closed")
+        if include_archived:
+            statuses.append("archived")
+        where.append("status = ANY(%(statuses)s)")
+        params["statuses"] = statuses
+        if since_days is not None:
+            where.append("COALESCE(deadline, published_at::date, created_at::date) >= (CURRENT_DATE - %(since_days)s)")
+            params["since_days"] = since_days
+
     if country:
         where.append("country = %(country)s")
         params["country"] = country
@@ -1459,10 +1528,26 @@ def list_tenders(
     where_sql = " AND ".join(where)
     rows = _fetchall(
         f"SELECT * FROM tenders WHERE {where_sql} "
-        "ORDER BY deadline ASC NULLS LAST, relevance DESC NULLS LAST, id DESC LIMIT %(limit)s",
+        "ORDER BY deadline ASC NULLS LAST, published_at ASC NULLS LAST, "
+        "relevance DESC NULLS LAST, id DESC LIMIT %(limit)s",
         params,
     )
-    return [_tender_card(r) for r in rows]
+
+    count_where = ["1 = 1"]
+    count_params: dict[str, Any] = {}
+    if country:
+        count_where.append("country = %(country)s")
+        count_params["country"] = country
+    if q:
+        count_where.append("(title ILIKE %(q)s OR summary_he ILIKE %(q)s OR agency ILIKE %(q)s)")
+        count_params["q"] = f"%{q}%"
+    count_rows = _fetchall(
+        f"SELECT status, count(*) AS n FROM tenders WHERE {' AND '.join(count_where)} GROUP BY status",
+        count_params,
+    )
+    counts = {r["status"]: r["n"] for r in count_rows}
+
+    return {"tenders": [_tender_card(r) for r in rows], "counts": counts}
 
 
 def _forecast_card(row: dict[str, Any]) -> dict[str, Any]:
@@ -2264,3 +2349,224 @@ def summarize_mcp_calls(since_hours: int = 24) -> dict[str, Any]:
     from eoa.memory.relational import summarize_mcp_calls as _summarize
 
     return _summarize(since_hours=since_hours)
+
+
+# --------------------------------------------------------------------------
+# A11: business-development-by-territory reports (eoa.report.bd_territory)
+# --------------------------------------------------------------------------
+
+# Long enough that a quiet territory (small item/event set, a fast resident-model draft) usually
+# finishes inside the same request; report generation itself always runs in the orchestrator's
+# Worker process (the `bd_report` job kind, same as `weekly_run`/`monthly_run`) -- this is a poll
+# loop, never an in-process build.
+_BD_SYNC_WAIT_SECONDS = 55.0
+_BD_POLL_INTERVAL_SECONDS = 1.0
+
+
+def list_bd_reports(*, territory: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+    where = ["kind = 'bd_territory'"]
+    params: dict[str, Any] = {"limit": min(max(limit, 1), 200)}
+    if territory:
+        where.append("territory = %(territory)s")
+        params["territory"] = geography.normalize_country(territory)
+    rows = _fetchall(
+        f"SELECT * FROM reports WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %(limit)s", params
+    )
+    return [_report_card(r) for r in rows]
+
+
+def bd_territories() -> list[dict[str, Any]]:
+    """`GET /api/bd/territories`: candidate territories for the BD report's selector -- the
+    configured default set (`config/config.yaml` `bd_report.territories`) plus any other
+    territory with market activity, each with item/tender/forecast counts (item counts scoped to
+    the configured `bd_report.lookback_days` window) so the UI can rank/suggest, most active
+    first."""
+    cfg = eoa_config.settings().bd_report
+    configured = {geography.normalize_country(t) for t in cfg.territories}
+
+    since = dt.date.today() - dt.timedelta(days=max(cfg.lookback_days, 1))
+    item_rows = _fetchall(
+        "SELECT geography FROM items WHERE security_status='clean' AND dedup_of IS NULL "
+        "AND level = ANY(%(levels)s) AND COALESCE(published_at, fetched_at, created_at)::date >= %(since)s",
+        {"levels": ["red", "orange", "yellow"], "since": since},
+    )
+    tender_rows = _fetchall("SELECT country FROM tenders WHERE status IN ('open', 'unknown')")
+    forecast_rows = _fetchall("SELECT buyer_country FROM tender_forecasts")
+
+    def _counts(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in rows:
+            code = geography.normalize_country(r.get(key))
+            out[code] = out.get(code, 0) + 1
+        return out
+
+    item_counts = _counts(item_rows, "geography")
+    tender_counts = _counts(tender_rows, "country")
+    forecast_counts = _counts(forecast_rows, "buyer_country")
+
+    codes = (configured | set(item_counts) | set(tender_counts) | set(forecast_counts)) - {
+        geography.UNKNOWN_COUNTRY
+    }
+    out = [
+        {
+            "territory": code,
+            "items": item_counts.get(code, 0),
+            "tenders": tender_counts.get(code, 0),
+            "forecasts": forecast_counts.get(code, 0),
+            "configured": code in configured,
+        }
+        for code in sorted(codes)
+    ]
+    out.sort(key=lambda t: (t["items"] + t["tenders"] + t["forecasts"]), reverse=True)
+    return out
+
+
+def enqueue_bd_report(territory: str, lookback_days: int) -> int:
+    """Enqueue a `bd_report` job for one territory -- picked up by the orchestrator's Worker
+    (`eoa.orchestrator.jobs.HANDLERS["bd_report"]`), same as any other job kind."""
+    code = geography.normalize_country(territory)
+    if code == geography.UNKNOWN_COUNTRY:
+        raise ValueError(f"unrecognized territory: {territory!r}")
+    return relational.enqueue_job("bd_report", {"territory": code, "lookback_days": lookback_days}, priority=4)
+
+
+def build_or_enqueue_bd_report(territory: str, lookback_days: int = 90) -> dict[str, Any]:
+    """`POST /api/bd/reports`: enqueue, then poll for up to `_BD_SYNC_WAIT_SECONDS` -- returns
+    `{"report": <report card with html>, "job_id": <id>}` if the job finished in time, else
+    `{"job_id": <id>, "status": "queued"}` for the client to poll `GET /api/bd/reports?territory=`
+    (or retry this same endpoint's `job_id` via `GET /api/jobs`)."""
+    import time
+
+    job_id = enqueue_bd_report(territory, lookback_days)
+    deadline = time.monotonic() + _BD_SYNC_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        job = _fetchone("SELECT state, result, error FROM jobs WHERE id = %s", (job_id,))
+        if job is None:
+            break
+        state = job.get("state")
+        if state in ("done", "partial"):
+            result = job.get("result") or {}
+            report_id = (result.get("bd_report") or {}).get("report_id")
+            if report_id is not None:
+                report = get_report(report_id)
+                if report is not None:
+                    return {"report": report, "job_id": job_id}
+            break
+        if state == "failed":
+            return {"job_id": job_id, "status": "failed", "error": job.get("error")}
+        time.sleep(_BD_POLL_INTERVAL_SECONDS)
+    return {"job_id": job_id, "status": "queued"}
+
+
+# --------------------------------------------------------------------------
+# tech watch / רדאר טכנולוגי (A12, 2026-09-06 -- eoa.pipeline.tech_watch, eoa.report.tech_watch)
+# --------------------------------------------------------------------------
+
+_TECH_DOMAIN = "tech_dev"
+_TECH_MATURITIES = ("lab", "prototype", "qualified", "fielded")
+
+
+def tech_radar(weeks: int = 12) -> dict[str, Any]:
+    """subdomain x maturity item-count matrix over the last `weeks` weeks, plus a per-subdomain
+    4-week momentum sparkline -- backs the "רדאר טכנולוגי" UI (`GET /api/tech/radar`)."""
+    weeks = max(1, min(weeks, 52))
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(weeks=weeks)
+    sub_labels = dict(eoa_config.settings().taxonomy.get("domains", {}).get(_TECH_DOMAIN, {}).get("sub", {}))
+
+    rows = _fetchall(
+        """
+        SELECT subdomain, tech_maturity, count(*) AS n
+        FROM items
+        WHERE domain = %(domain)s AND security_status = 'clean' AND dedup_of IS NULL
+          AND COALESCE(published_at, fetched_at, created_at) >= %(since)s
+        GROUP BY subdomain, tech_maturity
+        """,
+        {"domain": _TECH_DOMAIN, "since": since},
+    )
+    matrix: dict[str, dict[str, int]] = {sub: {m: 0 for m in _TECH_MATURITIES} for sub in sub_labels}
+    for row in rows:
+        sub = row.get("subdomain") or ""
+        bucket = matrix.setdefault(sub, {m: 0 for m in _TECH_MATURITIES})
+        maturity = row.get("tech_maturity")
+        if maturity in _TECH_MATURITIES:
+            bucket[maturity] += row["n"]
+        else:
+            bucket["unknown"] = bucket.get("unknown", 0) + row["n"]
+
+    # 4-point weekly sparkline per subdomain (most recent week last).
+    sparkline_rows = _fetchall(
+        """
+        SELECT subdomain, date_trunc('week', COALESCE(published_at, fetched_at, created_at)) AS wk,
+               count(*) AS n
+        FROM items
+        WHERE domain = %(domain)s AND security_status = 'clean' AND dedup_of IS NULL
+          AND COALESCE(published_at, fetched_at, created_at) >= %(since4)s
+        GROUP BY subdomain, wk
+        ORDER BY wk ASC
+        """,
+        {"domain": _TECH_DOMAIN, "since4": dt.datetime.now(dt.UTC) - dt.timedelta(weeks=4)},
+    )
+    sparkline: dict[str, list[int]] = {sub: [] for sub in sub_labels}
+    for row in sparkline_rows:
+        sub = row.get("subdomain") or ""
+        sparkline.setdefault(sub, []).append(row["n"])
+
+    subdomains_out = [
+        {
+            "subdomain": sub,
+            "label_he": label,
+            "counts": matrix.get(sub, {m: 0 for m in _TECH_MATURITIES}),
+            "total": sum(matrix.get(sub, {}).values()),
+            "sparkline": sparkline.get(sub, []),
+        }
+        for sub, label in sub_labels.items()
+    ]
+    return {"weeks": weeks, "maturities": list(_TECH_MATURITIES), "subdomains": subdomains_out}
+
+
+def list_tech_items(
+    *,
+    subdomain: str | None = None,
+    maturity: str | None = None,
+    actor_kind: str | None = None,
+    since: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[int, list[dict[str, Any]]]:
+    """`tech_dev` items, optionally filtered by `subdomain`/`tech_maturity`/`tech_actor_kind`/
+    `since` (period) -- backs `GET /api/tech/items`, the radar's click-through list (reuses
+    `_item_card`, same shape as `list_items`)."""
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 200)
+    where = ["i.domain = %(domain)s"]
+    params: dict[str, Any] = {"domain": _TECH_DOMAIN}
+    if subdomain:
+        where.append("i.subdomain = %(subdomain)s")
+        params["subdomain"] = subdomain
+    if maturity:
+        where.append("i.tech_maturity = %(maturity)s")
+        params["maturity"] = maturity
+    if actor_kind:
+        where.append("i.tech_actor_kind = %(actor_kind)s")
+        params["actor_kind"] = actor_kind
+    if since:
+        where.append("COALESCE(i.published_at, i.fetched_at) >= %(since)s")
+        params["since"] = since
+    where_sql = " AND ".join(where)
+
+    total_row = _fetchone(f"SELECT count(*) AS n FROM items i WHERE {where_sql}", params)
+    total = total_row["n"] if total_row else 0
+
+    params = {**params, "limit": page_size, "offset": (page - 1) * page_size}
+    rows = _fetchall(
+        f"""
+        SELECT i.*, s.name AS source_name
+        FROM items i
+        LEFT JOIN sources s ON s.id = i.source_id
+        WHERE {where_sql}
+        ORDER BY i.score DESC NULLS LAST, i.id DESC
+        LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        params,
+    )
+    return total, [_item_card(r) for r in rows]

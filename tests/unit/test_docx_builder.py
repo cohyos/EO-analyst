@@ -144,6 +144,40 @@ def test_split_runs_with_citations_isolates_citation_token():
     assert cite_chunks == ["[3]"]
 
 
+def test_split_runs_bracket_pair_stays_symmetric():
+    """Q5-4 (docs/qa/findings_Q5_r1.md): a parenthetical after Hebrew text used to put the opening
+    '(' in the Hebrew run (it follows Hebrew) but the closing ')' in the Latin run (it follows the
+    English words) -- an asymmetric split. Both brackets must land in the same (Hebrew/RTL) run.
+    Uses the exact heading from the finding (gershayim ״, U+05F4, is itself a Hebrew-range char)."""
+    text = 'פודים ומטע״דים אוויריים (Airborne Pods & Payloads)'
+    runs = db.split_runs(text)
+    assert runs == [
+        ("he", 'פודים ומטע״דים אוויריים ('),
+        ("other", "Airborne Pods & Payloads"),
+        ("he", ")"),
+    ]
+    assert "".join(chunk for _, chunk in runs) == text
+
+
+def test_split_runs_bracket_pair_symmetric_when_opened_in_latin_run():
+    """The mirror case: a parenthetical opened after Latin text and closed after Hebrew text keeps
+    both brackets in the Latin/other run."""
+    runs = db.split_runs("Elbit (מערכת אלרון) ready")
+    assert runs == [
+        ("other", "Elbit ("),
+        ("he", "מערכת אלרון"),
+        ("other", ") ready"),
+    ]
+
+
+def test_bidi_html_renders_symmetric_bracket_pair():
+    """The HTML export (`_bidi_html`, used for md/html reports) shares `split_runs` -- verify the
+    fix actually produces the bidi-safe markup the finding asked for: both parens outside the
+    <bdi dir="ltr"> span, not the closing one trailing inside it."""
+    html_out = db._bidi_html('פודים ומטע״דים אוויריים (Airborne Pods & Payloads)')
+    assert '(<bdi dir="ltr">Airborne Pods &amp; Payloads</bdi>)' in html_out
+
+
 # --------------------------------------------------------------------------
 # add_mixed_paragraph
 # --------------------------------------------------------------------------

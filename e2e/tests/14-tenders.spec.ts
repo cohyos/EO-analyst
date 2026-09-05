@@ -150,6 +150,34 @@ test.describe("Tenders screen (/tenders)", () => {
     );
   });
 
+  // F24 (docs/QA_PROGRAM.md section 4, 2026-09-06): header status-count chips + the "show
+  // closed/archived" toggle. Tolerant of the pre-restart API version skew documented in
+  // docs/MODULES.md's F23/F24 section (the running API process must restart to pick up the new
+  // `{tenders, counts}` /api/tenders response shape -- until then the page correctly shows its
+  // empty state and neither the chips nor the toggle render, which this test accepts rather than
+  // failing on).
+  test("status count chips and the show-closed/archived toggle behave once tenders exist", async ({ page }) => {
+    await page.goto("/tenders");
+    await expect(page.getByRole("status").filter({ hasText: "טוען" })).toHaveCount(0, { timeout: 15_000 });
+
+    const chips = page.getByRole("list", { name: "ספירת מכרזים לפי סטטוס" });
+    const toggle = page.getByRole("checkbox");
+    // The chips <div role="list"> is always in the DOM once loaded, even with zero counts (it
+    // just renders no <span> children then) -- check for an actual chip, not just the container.
+    const hasChips = (await chips.locator("[role='listitem']").count()) > 0;
+    test.skip(!hasChips, "No tenders in any status yet (or the API hasn't restarted onto the new /api/tenders contract)");
+
+    await expect(toggle).toBeVisible();
+    const rowsBefore = await page.locator("tbody tr[aria-expanded]").count();
+    await toggle.check();
+    // Toggling must not error out -- either more rows appear (closed/archived included) or the
+    // count stays the same (none exist), but the table/empty-state must still render cleanly.
+    await expect(async () => {
+      const rowsAfter = await page.locator("tbody tr[aria-expanded]").count();
+      expect(rowsAfter).toBeGreaterThanOrEqual(rowsBefore);
+    }).toPass({ timeout: 5_000 });
+  });
+
   test("no bad literal text renders on either tab", async ({ page }, testInfo) => {
     await page.goto("/tenders");
     await expect(page.getByRole("tablist", { name: "מכרזים והזדמנויות" })).toBeVisible({

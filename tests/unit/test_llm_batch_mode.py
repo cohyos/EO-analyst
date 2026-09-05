@@ -208,10 +208,23 @@ class TestAnalyzeBatchWiring:
         from eoa.llm.schemas.analysis import AnalyzeOut
         from eoa.pipeline import analyze
 
-        items = [{"id": 1, "level": "yellow", "title": "t", "clean_text": "x", "url": "http://x"}]
+        # clean_text must be long enough to clear Q3-10's content-quality precheck (see
+        # eoa.fetch.content_quality.STUB_MAX_CHARS=400) -- a one-character body is classified
+        # 'stub' and skipped by run_analyze() before it ever reaches the batch path this test
+        # exercises.
+        items = [
+            {
+                "id": 1,
+                "level": "yellow",
+                "title": "t",
+                "clean_text": "x" * 500,
+                "url": "http://x",
+            }
+        ]
         monkeypatch.setattr(analyze, "is_cloud_batch_mode", lambda: True)
         monkeypatch.setattr(analyze, "get_items_for_stage", lambda stage, limit: items)
         monkeypatch.setattr(analyze, "mark_stage", lambda *a, **k: None)
+        monkeypatch.setattr(analyze, "update_item_fields", lambda *a, **k: None)
         monkeypatch.setattr(analyze, "persist_analysis", lambda it, out: (2, 1))
 
         def fake_batch(chunk, *, role):

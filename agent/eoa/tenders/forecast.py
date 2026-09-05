@@ -36,6 +36,7 @@ from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.tenders import TenderForecastOut
+from eoa.report.geography import UNKNOWN_COUNTRY, country_mentions_in_text, normalize_country
 
 log = structlog.get_logger(__name__)
 
@@ -134,9 +135,17 @@ def _watchlist_vendor_names() -> set[str]:
 def _build_candidates(platforms: list[PlatformSpec], events: list[dict[str, Any]]) -> list[ForecastCandidate]:
     """Group matching events by (platform_key, buyer_country) so multiple events about the same
     platform/buyer within the lookback window corroborate one candidate rather than each spawning
-    its own (matching the ``unique(platform, buyer_country, payload_need)`` DB constraint)."""
+    its own (matching the ``unique(platform, buyer_country, payload_need)`` DB constraint).
+
+    Q3-11 (docs/qa/findings_Q3_r1.md): ``buyer_country`` is grouped on the *normalized*
+    (``eoa.report.geography.normalize_country``) code rather than the raw ``items.geography``
+    string, so two events tagged with different spellings of the same country still corroborate
+    one candidate instead of silently splitting into two. A still-unknown (``"other"``) country
+    at this stage is refined further in ``forecast_tenders`` (entities.country, then a country
+    mention scan over the trigger text/rationale) before the row is persisted.
+    """
     watchlist_vendors = _watchlist_vendor_names()
-    groups: dict[tuple[str, str | None], ForecastCandidate] = {}
+    groups: dict[tuple[str, str], ForecastCandidate] = {}
 
     for ev in events:
         text = " ".join(
@@ -146,7 +155,7 @@ def _build_candidates(platforms: list[PlatformSpec], events: list[dict[str, Any]
         )
         if not text:
             continue
-        buyer_country = ev.get("geography")
+        buyer_country = normalize_country(ev.get("geography"))
         for platform in platforms:
             if not platform.matches(text):
                 continue
@@ -177,6 +186,108 @@ def _build_candidates(platforms: list[PlatformSpec], events: list[dict[str, Any]
 # --------------------------------------------------------------------------
 # likelihood rubric (deterministic, no LLM)
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Q3-11: buyer_country refinement + platform-type sanity check
+# --------------------------------------------------------------------------
+
+
+def _country_from_entities(item_ids: list[int]) -> str | None:
+    """Q3-11: the country of any watchlist/known entity mentioned by one of ``item_ids``, when
+    ``items.geography`` itself came back unknown. Best-effort -- returns ``None`` (never raises)
+    on any DB issue or when no mentioned entity carries a known country."""
+    if not item_ids:
+        return None
+    try:
+        rows = _fetchall(
+            """
+            SELECT en.country
+            FROM items i
+            JOIN LATERAL unnest(COALESCE(i.entities_mentioned, '{}')) AS ent_name ON true
+            JOIN entities en ON en.name = ent_name
+            WHERE i.id = ANY(%(ids)s) AND en.country IS NOT NULL AND en.country <> %(unknown)s
+            LIMIT 1
+            """,
+            {"ids": item_ids, "unknown": UNKNOWN_COUNTRY},
+        )
+    except Exception as exc:
+        log.debug("forecast_country_from_entities_failed", error=str(exc)[:120])
+        return None
+    return rows[0]["country"] if rows else None
+
+
+def _resolve_buyer_country(candidate: ForecastCandidate, rationale_he: str = "") -> str:
+    """Q3-11: refine an ``"other"``/unknown ``buyer_country`` before persistence, in priority
+    order: (1) the trigger items' ``entities.country``; (2) a country name mentioned in the
+    trigger text itself; (3) a country name mentioned in the generated rationale. Returns the
+    original value unchanged if it was already a known code, or if none of the three signals
+    found anything."""
+    if candidate.buyer_country and candidate.buyer_country != UNKNOWN_COUNTRY:
+        return candidate.buyer_country
+    country = _country_from_entities(candidate.trigger_item_ids)
+    if country:
+        return country
+    mentions = country_mentions_in_text(" ".join(candidate.trigger_texts))
+    if mentions:
+        return mentions[0]
+    if rationale_he:
+        mentions = country_mentions_in_text(rationale_he)
+        if mentions:
+            return mentions[0]
+    return candidate.buyer_country or UNKNOWN_COUNTRY
+
+
+#: Q3-11: a candidate's platform key mapped to a broad airframe/vehicle class -- used only to spot
+#: an internally-contradictory match (the trigger text matches two platforms whose classes cannot
+#: both be true of the same program), never to re-derive the candidate's own category.
+_PLATFORM_CLASS: dict[str, str] = {
+    "fighter_jet": "fixed_wing_manned",
+    "attack_helicopter": "rotary_wing",
+    "male_uav": "fixed_wing_uas",
+    "small_uas": "fixed_wing_uas",
+    "opv_corvette": "naval",
+    "submarine": "naval",
+    "apc_ifv": "ground_vehicle",
+    "border_project": "fixed_installation",
+}
+#: Class pairs that cannot both genuinely describe the same triggering program -- e.g. the
+#: canonical Q3-11 example, "fixed-wing UAS vs combat helicopter" (rotary_wing vs fixed_wing_uas).
+_CONTRADICTING_PLATFORM_CLASSES: frozenset[frozenset[str]] = frozenset(
+    {
+        frozenset({"rotary_wing", "fixed_wing_uas"}),
+        frozenset({"rotary_wing", "fixed_wing_manned"}),
+        frozenset({"naval", "ground_vehicle"}),
+        frozenset({"naval", "fixed_wing_manned"}),
+        frozenset({"ground_vehicle", "fixed_wing_manned"}),
+    }
+)
+#: Likelihood penalty applied when the trigger text contradicts the candidate's own platform type.
+PLATFORM_SANITY_PENALTY = 0.2
+
+
+def _platform_type_contradiction(
+    candidate: ForecastCandidate, platforms: list[PlatformSpec]
+) -> PlatformSpec | None:
+    """Q3-11: the first other platform whose keywords also appear in ``candidate``'s trigger text
+    AND whose class contradicts ``candidate``'s own class (e.g. attack_helicopter wording
+    alongside a male_uav/small_uas match) -- a signal the matched text may actually describe an
+    unrelated platform mentioned in the same article, not the one this candidate is about.
+    Returns ``None`` when there is no such contradiction (the overwhelming majority of candidates,
+    including anything for a platform key not in :data:`_PLATFORM_CLASS`)."""
+    own_class = _PLATFORM_CLASS.get(candidate.platform_key)
+    if own_class is None:
+        return None
+    combined = " ".join(candidate.trigger_texts)
+    for spec in platforms:
+        if spec.key == candidate.platform_key:
+            continue
+        other_class = _PLATFORM_CLASS.get(spec.key)
+        if other_class is None or other_class == own_class:
+            continue
+        if frozenset({own_class, other_class}) in _CONTRADICTING_PLATFORM_CLASSES and spec.matches(combined):
+            return spec
+    return None
 
 
 def _has_prior_history(buyer_country: str | None, payload_need_he: str) -> bool:
@@ -377,19 +488,29 @@ def _fallback_rationale(candidate: ForecastCandidate) -> str:
 
 
 def _upsert_forecast(
-    candidate: ForecastCandidate, likelihood: float, window: tuple[dt.date, dt.date], rationale_he: str
+    candidate: ForecastCandidate,
+    likelihood: float,
+    window: tuple[dt.date, dt.date],
+    rationale_he: str,
+    *,
+    needs_regen: bool = False,
 ) -> int:
+    """Q3-11: ``needs_regen`` is true whenever ``rationale_he`` came from the deterministic
+    fallback (LLM unavailable/failed/rejected by the output guard) rather than a real LLM call --
+    the nightly run's ``_regenerate_flagged_forecasts`` retries these once the LLM is available
+    again, instead of leaving a generic fallback rationale in place forever."""
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO tender_forecasts (
                 platform, buyer_country, trigger_event_id, trigger_item_id, payload_need,
-                candidate_vendors, likelihood, window_from, window_to, rationale_he, sources
+                candidate_vendors, likelihood, window_from, window_to, rationale_he, sources,
+                needs_regen
             )
             VALUES (
                 %(platform)s, %(buyer_country)s, %(trigger_event_id)s, %(trigger_item_id)s,
                 %(payload_need)s, %(vendors)s, %(likelihood)s, %(window_from)s, %(window_to)s,
-                %(rationale_he)s, %(sources)s
+                %(rationale_he)s, %(sources)s, %(needs_regen)s
             )
             ON CONFLICT (platform, buyer_country, payload_need) DO UPDATE SET
                 trigger_event_id = EXCLUDED.trigger_event_id,
@@ -399,7 +520,8 @@ def _upsert_forecast(
                 window_from = EXCLUDED.window_from,
                 window_to = EXCLUDED.window_to,
                 rationale_he = EXCLUDED.rationale_he,
-                sources = EXCLUDED.sources
+                sources = EXCLUDED.sources,
+                needs_regen = EXCLUDED.needs_regen
             RETURNING id
             """,
             {
@@ -414,9 +536,90 @@ def _upsert_forecast(
                 "window_to": window[1],
                 "rationale_he": rationale_he,
                 "sources": [f"item:{iid}" for iid in candidate.trigger_item_ids] or None,
+                "needs_regen": needs_regen,
             },
         )
         return cur.fetchone()["id"]
+
+
+def _item_ids_from_sources(sources: list[str] | None) -> list[int]:
+    """Parse ``tender_forecasts.sources`` (``["item:123", ...]``, see ``_upsert_forecast``) back
+    into item ids -- used by ``_regenerate_flagged_forecasts`` to re-fetch a flagged row's own
+    trigger items. Any non-conforming entry is silently skipped."""
+    ids: list[int] = []
+    for s in sources or []:
+        if not isinstance(s, str) or not s.startswith("item:"):
+            continue
+        try:
+            ids.append(int(s.split(":", 1)[1]))
+        except ValueError:
+            continue
+    return ids
+
+
+def _regenerate_flagged_forecasts(role: str) -> int:
+    """Q3-11: retry the LLM rationale for every ``tender_forecasts`` row still flagged
+    ``needs_regen`` (set when its rationale came from the deterministic fallback) -- run once at
+    the start of every ``forecast_tenders`` call, so a row produced while the LLM was unavailable
+    gets a real rationale as soon as it is again, instead of keeping the generic fallback text
+    forever. A row that still fails (LLM still unavailable, or the output guard still rejects it
+    twice) is left exactly as it was, flag included, to retry again next run. Returns the count of
+    rows actually regenerated.
+    """
+    try:
+        rows = _fetchall(
+            "SELECT id, platform, buyer_country, trigger_event_id, trigger_item_id, payload_need, "
+            "candidate_vendors, likelihood, window_from, window_to, sources FROM tender_forecasts "
+            "WHERE needs_regen = true"
+        )
+    except Exception as exc:
+        log.warning("forecast_regen_fetch_failed", error=str(exc)[:160])
+        return 0
+    if not rows:
+        return 0
+
+    all_item_ids = sorted({iid for row in rows for iid in _item_ids_from_sources(row.get("sources"))})
+    item_rows = _fetchall(
+        "SELECT id, title, url, clean_text, summary_he FROM items WHERE id = ANY(%(ids)s)", {"ids": all_item_ids}
+    )
+    items_by_id = {r["id"]: r for r in item_rows}
+
+    regenerated = 0
+    for row in rows:
+        trigger_item_ids = _item_ids_from_sources(row.get("sources"))
+        if not trigger_item_ids:
+            continue
+        cand = ForecastCandidate(
+            platform_key="",  # unknown here -- only used for the Q3-11 sanity check, skipped below
+            platform_he=row["platform"],
+            buyer_country=row["buyer_country"],
+            payload_need_he=row["payload_need"],
+            candidate_vendors=list(row.get("candidate_vendors") or []),
+            trigger_event_ids=[row["trigger_event_id"]] if row.get("trigger_event_id") else [],
+            trigger_item_ids=trigger_item_ids,
+            trigger_texts=[],
+            lag_min=0,
+            lag_max=0,
+        )
+        window = (row["window_from"], row["window_to"])
+        data_block = _rationale_data_block(cand, items_by_id)
+        try:
+            rationale_he = _llm_rationale(cand, row["likelihood"], window, data_block, role=role)
+        except (ResourceUnavailable, LLMOutputError) as exc:
+            log.debug("forecast_regen_still_unavailable", forecast_id=row["id"], error=str(exc)[:160])
+            continue
+        except Exception as exc:
+            log.warning("forecast_regen_unexpected_error", forecast_id=row["id"], error=str(exc)[:160])
+            continue
+        if _rationale_guard_failure(rationale_he) is not None:
+            continue  # still not a real rationale -- leave flagged, try again next run
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tender_forecasts SET rationale_he=%s, needs_regen=false, updated_at=now() WHERE id=%s",
+                (rationale_he, row["id"]),
+            )
+        regenerated += 1
+    return regenerated
 
 
 # --------------------------------------------------------------------------
@@ -431,12 +634,27 @@ class ForecastStats:
     llm_used: int = 0
     llm_deferred: int = 0
     llm_failed: int = 0
+    #: Q3-11: rows whose rationale came from the deterministic fallback this run (needs_regen=true).
+    needs_regen: int = 0
+    #: Q3-11: previously-flagged rows successfully regenerated at the start of this run.
+    regenerated: int = 0
+    #: Q3-11: candidates whose trigger text contradicted their own platform type (penalized).
+    platform_sanity_flags: int = 0
 
 
 def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_DAYS) -> ForecastStats:
     """section-5.2 entry point: recent platform events -> deterministic candidates+likelihood ->
-    upsert ``tender_forecasts`` (Hebrew rationale via the LLM, best-effort)."""
+    upsert ``tender_forecasts`` (Hebrew rationale via the LLM, best-effort).
+
+    Q3-11 (docs/qa/findings_Q3_r1.md): before building this run's candidates, first retries the
+    LLM rationale for any existing row still flagged ``needs_regen`` (see
+    ``_regenerate_flagged_forecasts``) -- a fallback-authored rationale from a past run where the
+    LLM was unavailable gets replaced with a real one as soon as it's available again, rather than
+    staying generic forever.
+    """
     stats = ForecastStats()
+    stats.regenerated = _regenerate_flagged_forecasts(role)
+
     platforms = load_platform_payloads()
     events = _recent_trigger_events(lookback_days)
     candidates = _build_candidates(platforms, events)
@@ -454,18 +672,41 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
     today = dt.date.today()
     for cand in candidates:
         likelihood = compute_likelihood(cand)
+
+        # Q3-11: platform-type sanity check -- the trigger text contradicting the candidate's own
+        # platform category (e.g. fixed-wing UAS wording alongside combat-helicopter wording)
+        # lowers confidence and gets an explicit note, rather than silently forecasting as if the
+        # match were clean.
+        contradiction = _platform_type_contradiction(cand, platforms)
+        sanity_note_he = ""
+        if contradiction is not None:
+            likelihood = round(max(0.0, likelihood - PLATFORM_SANITY_PENALTY), 3)
+            sanity_note_he = (
+                f" אזהרת עקביות: הטקסט המקור מזכיר גם מאפיינים של '{contradiction.category_he}', "
+                "ייתכן שהזיהוי אינו חד-משמעי."
+            )
+            stats.platform_sanity_flags += 1
+            log.info(
+                "tender_forecast_platform_sanity_flag",
+                platform=cand.platform_key,
+                contradicts=contradiction.key,
+            )
+
         window = _window(cand, today)
         data_block = _rationale_data_block(cand, items_by_id)
+        used_fallback = False
         try:
             rationale_he = _llm_rationale_guarded(cand, likelihood, window, data_block, role=role)
             stats.llm_used += 1
         except ResourceUnavailable:
             rationale_he = _fallback_rationale(cand)
             stats.llm_deferred += 1
+            used_fallback = True
         except LLMOutputError as exc:
             log.warning("tender_forecast_llm_failed", platform=cand.platform_key, error=str(exc)[:200])
             rationale_he = _fallback_rationale(cand)
             stats.llm_failed += 1
+            used_fallback = True
         except Exception as exc:
             # Never let one candidate's LLM call (schema retry, logging, transport, ...) take down
             # the whole forecast run -- docs/CONVENTIONS.md rule 9 ("a failing item never stops the
@@ -475,8 +716,19 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
             )
             rationale_he = _fallback_rationale(cand)
             stats.llm_failed += 1
+            used_fallback = True
 
-        _upsert_forecast(cand, likelihood, window, rationale_he)
+        if sanity_note_he:
+            rationale_he = f"{rationale_he}{sanity_note_he}"
+
+        # Q3-11: resolve buyer_country as late as possible -- after the rationale text exists, so
+        # a country name mentioned only in the (LLM-written) rationale can still be picked up as a
+        # last-resort signal when geography/entities gave nothing.
+        cand.buyer_country = _resolve_buyer_country(cand, rationale_he)
+
+        if used_fallback:
+            stats.needs_regen += 1
+        _upsert_forecast(cand, likelihood, window, rationale_he, needs_regen=used_fallback)
         stats.upserted += 1
 
     log.info("tender_forecast_done", **vars(stats))

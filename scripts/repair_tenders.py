@@ -45,7 +45,6 @@ if str(_AGENT_DIR) not in sys.path:
 from eoa import db  # noqa: E402
 from eoa.errors import LLMOutputError, ResourceUnavailable  # noqa: E402
 from eoa.tenders.scan import (  # noqa: E402
-    RELEVANCE_UNKNOWN,
     NoticeRaw,
     _apply_domain_country_fallback,
     _apply_extraction_to_notice,
@@ -104,7 +103,10 @@ def repair(*, dry_run: bool = False, force: bool = False, role: str = "resident"
         extract = None
         extract_error: str | None = None
         try:
-            extract = _llm_classify(notice, role=role, interactive=False, src_kind=src_kind)
+            # F24 (2026-09-06): _llm_classify now also returns whether the notice page was
+            # actually verified (vs. only a search snippet) -- not needed by this repair script's
+            # date/agency/country enrichment, so it's discarded here.
+            extract, _page_verified = _llm_classify(notice, role=role, interactive=False, src_kind=src_kind)
         except (ResourceUnavailable, LLMOutputError) as exc:
             extract_error = str(exc)[:200]
         except Exception as exc:  # one row's failure must not stop the batch
@@ -122,9 +124,11 @@ def repair(*, dry_run: bool = False, force: bool = False, role: str = "resident"
             _apply_extraction_to_notice(notice, extract)
         _apply_domain_country_fallback(notice)
 
-        status_override = "unknown" if extract is not None and extract.relevance == RELEVANCE_UNKNOWN else None
+        # F24: the old relevance==3 -> 'unknown' override no longer exists (see
+        # eoa.tenders.scan._gate_reject_reason); _initial_status's own no-deadline/no-published_at
+        # rule already resolves to 'unknown' for a genuinely undated notice.
         notice_type = extract.notice_type if extract is not None else None
-        new_status = status_override or _initial_status(notice, today, notice_type)
+        new_status = _initial_status(notice, today, notice_type)
 
         after = {
             "status": new_status,

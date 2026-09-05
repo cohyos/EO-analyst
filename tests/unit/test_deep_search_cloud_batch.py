@@ -217,3 +217,51 @@ class TestInvestigateBatchCloud:
         monkeypatch.setattr(ds, "_run_claude_with_tools", lambda file_path, model: "not json at all")
         with pytest.raises(LLMOutputError):
             ds.investigate_batch_cloud([{"job_id": 1, "item_id": None, "question": "q1"}])
+
+
+class TestInvestigateBatchCloudPartialConfidenceCap:
+    """Q3-5: the cloud-delegated batch path applies the same partial-confidence/unverified-claim
+    rules as the local ReAct path (`_finalize_outcome`) -- a `partial` result needs >= 2 sources
+    for confidence above the cap, and zero sources gets the unverified prefix."""
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, *, confidence: float, sources: list[dict]):
+        monkeypatch.setattr(ds, "write_investigations_file", lambda pending, **k: Path("fake.md"))
+        monkeypatch.setattr(
+            ds,
+            "_run_claude_with_tools",
+            lambda file_path, model: json.dumps(
+                {
+                    "results": {
+                        "1": {
+                            "answer_he": "חרב ברזל פותחה בשיתוף רפאל",
+                            "confidence": confidence,
+                            "sources": sources,
+                            "what_was_tried_he": "חיפוש",
+                        }
+                    },
+                }
+            ),
+        )
+        monkeypatch.setattr(ds, "_screen_cloud_answer", lambda qid, answer: answer)
+        monkeypatch.setattr(ds, "cfg_deep_search_confidence_stop", lambda: 0.95)  # keep this a "partial"
+        results, _cross = ds.investigate_batch_cloud([{"job_id": 1, "item_id": None, "question": "q1"}])
+        return results[1].result
+
+    def test_single_source_partial_confidence_capped(self, monkeypatch: pytest.MonkeyPatch):
+        result = self._run(monkeypatch, confidence=0.9, sources=[{"url": "https://a.example", "title": "A"}])
+        assert result.outcome == "partial"
+        assert result.confidence <= ds.PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE
+
+    def test_two_sources_partial_confidence_not_capped(self, monkeypatch: pytest.MonkeyPatch):
+        result = self._run(
+            monkeypatch,
+            confidence=0.9,
+            sources=[{"url": "https://a.example", "title": "A"}, {"url": "https://b.example", "title": "B"}],
+        )
+        assert result.outcome == "partial"
+        assert result.confidence == 0.9
+
+    def test_zero_source_partial_gets_unverified_prefix(self, monkeypatch: pytest.MonkeyPatch):
+        result = self._run(monkeypatch, confidence=0.5, sources=[])
+        assert result.outcome == "partial"
+        assert result.answer_he.startswith(ds.UNVERIFIED_PREFIX_HE)

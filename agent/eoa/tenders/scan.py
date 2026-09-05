@@ -7,19 +7,29 @@ search`` sources, denylist-filtered) -> parse into ``NoticeRaw`` rows -> a **two
 sources, implicit for a structured procurement-portal ``api_json`` source like TED/Contracts
 Finder -- AND at least one EO/IR/CV DOMAIN signal; server-side keyword params are unreliable, see
 config/tenders.yaml notes, so this is always re-applied client-side) -> dedupe by a
-globally-unique ``external_ref`` (``"<source_id>:<notice id>"``) -> **LLM relevance gate**
-(``chat_structured``, DATA-guarded, budget-capped: ``relevance <= 2`` -> not stored at all,
-``== 3`` -> stored with ``status='unknown'``, ``>= 4`` -> stored normally) -> insert one
-``tenders`` row + one ``items`` row (``report_kind`` ``"tender"``) so the normal
-classify/triage/analyze pipeline covers it.
+globally-unique ``external_ref`` (``"<source_id>:<notice id>"``) -> LLM classification
+(``chat_structured``, DATA-guarded, budget-capped) -> a **strict F24 quality gate**
+(``_gate_reject_reason``, docs/QA_PROGRAM.md section 4, 2026-09-06): reject outright (never insert,
+log ``tender_rejected`` with a reason) on any of -- no successful LLM classification at all;
+``relevance < 6``; ``notice_type`` not one of ``rfi``/``rfp``/``rfq``/``sources_sought``/``tender``
+(so an already-``award``ed notice or anything the model couldn't place is dropped, not stored as
+"closed"/"awarded"); a ``deadline`` already in the past; a ``published_at`` older than 90 days; a
+document-hosting/aggregator domain (Scribd, DocPlayer, Yumpu, SlideShare, ...); or an *unverified*
+notice (only a search snippet, the actual page was never successfully fetched) that also has no
+date at all. A notice that clears every check but states no date either way is stored with
+``status='unknown'`` -- reachable only because the gate above already confirmed its page was
+actually fetched -- and insert one ``tenders`` row + one ``items`` row (``report_kind`` ``"tender"``)
+so the normal classify/triage/analyze pipeline covers it.
 
-When the LLM is unavailable/deferred/fails, the row still gets inserted using the deterministic
-keyword-hit relevance/status (FR-9 / "never invent" -- a stalled model degrades to "still
-ingested on the strength of the two-signal gate alone", never to a fabricated verdict; but a model
-that *did* respond and said "this is not relevant" is trusted and blocks persistence). Finally
-transitions any ``status='open'`` row whose ``deadline`` has passed, or whose ``published_at`` is
-stale (>365 days) with no deadline at all, to ``status='closed'`` (see ``_initial_status``/
-``_transition_closed``, F2 2026-09-05: an undated notice is never assumed to stay open forever).
+Unlike before this fix, an unavailable/deferred/failed LLM call is itself a rejection, not a
+"still insert on the deterministic two-signal gate's own strength alone" degrade path -- that
+degrade path is exactly how the stale/irrelevant rows this fix targets (an unrelated "Green Tech
+Projects Corp." hit, a Scribd PDF reupload of an old RFP, 13 undated "unknown" rows nobody ever
+actually verified) got into the DB. Finally transitions any ``status='open'`` row whose
+``deadline`` has passed, or whose ``published_at`` is stale (>365 days) with no deadline at all, to
+``status='closed'`` (see ``_initial_status``/``_transition_closed``, F2 2026-09-05: an undated
+notice is never assumed to stay open forever), and archives any ``status='closed'`` row whose
+``deadline`` passed more than 30 days ago (``_archive_stale_closed``, F24 2026-09-06).
 
 ``kind: html`` sources in config/tenders.yaml are documented but intentionally not scraped here
 (see the notes on each entry -- bot-protected or client-hydrated pages); ``kind: api_json`` sources
@@ -144,9 +154,15 @@ DEFAULT_DENY_DOMAINS = [
 
 MAX_KEYWORDS_PER_API_SOURCE = 5
 
-# Relevance thresholds (LLM gate -- see module docstring / coordinator spec).
-RELEVANCE_REJECT_MAX = 2  # <= this: not stored at all
-RELEVANCE_UNKNOWN = 3  # == this: stored, but status forced to 'unknown'
+# F24 (docs/QA_PROGRAM.md section 4, 2026-09-06): the strict post-classification quality gate --
+# see _gate_reject_reason. Replaces the old three-tier relevance rubric (<=2 reject / ==3 unknown /
+# >=4 store): a live audit of the DB (21 rows, 8 closed 2015-2025, 13 undated "unknown", including
+# an unrelated "Green Tech Projects Corp." row and a Scribd PDF reupload) showed that rubric let far
+# too much through, largely via the "LLM unavailable -> insert on the deterministic gate alone"
+# degrade path.
+RELEVANCE_MIN_ACCEPT = 6  # below this: never stored, regardless of the deterministic gate's own hit count
+NOTICE_MAX_AGE_DAYS = 90  # a notice published longer ago than this is stale -- never stored
+VALID_NOTICE_TYPES = frozenset({"rfi", "rfp", "rfq", "sources_sought", "tender"})
 
 
 # --------------------------------------------------------------------------
@@ -670,39 +686,55 @@ def _insert_tender_and_item(
 _NOTICE_FETCH_CHAR_CAP = 6000
 
 
-def _fetch_notice_text(notice: NoticeRaw, src_kind: str) -> str:
-    """F2: for a ``search``/``rss``-hit-derived notice (title+snippet only), fetch the actual notice
-    page so the LLM extraction can find real dates/agency/notice_type -- a snippet essentially never
-    carries a deadline. ``api_json`` sources (TED/Contracts Finder) already parsed those fields
-    structurally and don't need a page fetch. Never raises: a fetch failure (network, bot-block,
-    SSRF-guard rejection, ...) just falls back to title+summary, same as before this fix -- a
-    failing fetch must never block classification (docs/CONVENTIONS.md rule 9)."""
+def _fetch_notice_text(notice: NoticeRaw, src_kind: str) -> tuple[str, bool]:
+    """F2/F24: for a ``search``/``rss``-hit-derived notice (title+snippet only), fetch the actual
+    notice page so the LLM extraction can find real dates/agency/notice_type -- a snippet
+    essentially never carries a deadline. ``api_json`` sources (TED/Contracts Finder) already
+    parsed those fields structurally and don't need a page fetch. Never raises: a fetch failure
+    (network, bot-block, SSRF-guard rejection, ...) just falls back to title+summary, same as
+    before this fix -- a failing fetch must never block classification (docs/CONVENTIONS.md rule 9).
+
+    Returns ``(text, page_verified)``. ``page_verified`` is ``True`` for a structured ``api_json``
+    source (the record itself, not a page, is the authoritative source) or when a live page fetch
+    for a ``search``/``rss`` notice actually returned real content; ``False`` when there was no URL
+    to fetch, the fetch failed, or it came back empty -- meaning the caller is left with nothing
+    but a search snippet/RSS blurb. F24's gate (:func:`_gate_reject_reason`) rejects an undated
+    notice outright when this is ``False``: an unverified snippet with no dates is exactly the
+    "unknown, undated, never actually looked at" shape that let stale/irrelevant rows in before.
+    """
     base = f"{notice.title}\n\n{notice.summary}".strip()
-    if src_kind == "api_json" or not notice.url:
-        return base
+    if src_kind == "api_json":
+        return base, True
+    if not notice.url:
+        return base, False
     try:
         page = fetch_remote(notice.url)
     except Exception as exc:
         log.debug("tender_notice_fetch_failed", url=(notice.url or "")[:200], error=str(exc)[:200])
-        return base
+        return base, False
     text = (page.get("text") or "").strip()
-    return text[:_NOTICE_FETCH_CHAR_CAP] if text else base
+    if text:
+        return text[:_NOTICE_FETCH_CHAR_CAP], True
+    return base, False
 
 
-def _llm_classify(notice: NoticeRaw, *, role: str, interactive: bool, src_kind: str = "search") -> TenderExtract:
+def _llm_classify(
+    notice: NoticeRaw, *, role: str, interactive: bool, src_kind: str = "search"
+) -> tuple[TenderExtract, bool]:
     """Pure LLM relevance/summary/date classification -- no DB writes (the caller decides what to
-    do with the result, including whether to store anything at all: see ``scan_tenders``'s
-    relevance gate). DATA-guarded via ``wrap_data``, keyed by the notice's ``external_ref`` since no
-    ``items`` row exists yet at this point (the gate runs *before* insertion). ``src_kind`` controls
-    whether the notice page itself is fetched first (see ``_fetch_notice_text``)."""
-    text_for_llm = _fetch_notice_text(notice, src_kind)
+    do with the result, including whether to store anything at all: see ``scan_tenders``'s gate).
+    DATA-guarded via ``wrap_data``, keyed by the notice's ``external_ref`` since no ``items`` row
+    exists yet at this point (the gate runs *before* insertion). ``src_kind`` controls whether the
+    notice page itself is fetched first (see ``_fetch_notice_text``). Returns ``(extract,
+    page_verified)`` -- the latter feeds F24's "unverified + undated -> reject" rule."""
+    text_for_llm, page_verified = _fetch_notice_text(notice, src_kind)
     prompt = render(
         "tender_extract",
         source_name=notice.source_id,
         country=notice.country or "?",
         data=wrap_data(text_for_llm[:_NOTICE_FETCH_CHAR_CAP], notice.external_ref, notice.url or ""),
     )
-    return chat_structured(
+    extract = chat_structured(
         role,
         TenderExtract,
         [
@@ -712,6 +744,49 @@ def _llm_classify(notice: NoticeRaw, *, role: str, interactive: bool, src_kind: 
         task="classify",
         interactive=interactive,
     )
+    return extract, page_verified
+
+
+def _gate_reject_reason(
+    notice: NoticeRaw,
+    extract: TenderExtract | None,
+    *,
+    page_verified: bool,
+    today: dt.date,
+    deny_domains: list[str],
+) -> str | None:
+    """F24 (docs/QA_PROGRAM.md section 4, 2026-09-06): the final quality gate applied just before a
+    notice is ever inserted. Returns a short machine-readable rejection reason (logged as
+    ``tender_rejected``), or ``None`` if the notice clears every check and may be stored.
+
+    Nothing is stored any more without a real, successful LLM classification -- ``extract is None``
+    (LLM deferred/failed/unavailable) is itself a rejection now. The old "insert on the
+    deterministic two-signal gate's own strength alone" degrade path is exactly how the
+    stale/irrelevant rows this fix targets got in (an unrelated "Green Tech Projects Corp." hit, a
+    Scribd PDF reupload, 13 undated rows nobody ever actually verified).
+
+    ``'unknown'`` status (assigned by the caller via :func:`_initial_status`) remains possible only
+    for a notice that clears every other check but has no ``deadline``/``published_at`` at all --
+    which by construction here means the page WAS actually verified (``page_verified``), it's a
+    real, current, sufficiently-relevant notice; it simply doesn't state a date.
+    """
+    if notice.status_hint in ("awarded", "closed"):
+        return f"status_hint_{notice.status_hint}"
+    if extract is None:
+        return "no_llm_classification"
+    if not extract.relevant or extract.relevance < RELEVANCE_MIN_ACCEPT:
+        return f"relevance_{extract.relevance}_below_{RELEVANCE_MIN_ACCEPT}"
+    if extract.notice_type not in VALID_NOTICE_TYPES:
+        return f"notice_type_{extract.notice_type}"
+    if notice.deadline is not None and notice.deadline < today:
+        return "deadline_passed"
+    if notice.published_at is not None and (today - notice.published_at).days > NOTICE_MAX_AGE_DAYS:
+        return "published_over_90_days"
+    if _is_denylisted_domain(notice.url or "", deny_domains):
+        return "denylisted_domain"
+    if not page_verified and notice.deadline is None and notice.published_at is None:
+        return "unverified_undated"
+    return None
 
 
 def _transition_closed() -> int:
@@ -736,6 +811,34 @@ def _transition_closed() -> int:
         return len(cur.fetchall())
 
 
+# F24 (docs/QA_PROGRAM.md section 4, 2026-09-06): a tender/RFI/RFP stays useful as a "recently
+# closed" reference for a while, but a board cluttered with notices closed months or years ago
+# (the review found rows closed 2015-2025 still showing) is not -- archived rows are never
+# deleted (F1: no fetched-content row is ever destroyed outright), just excluded from the tenders
+# board's default view (see eoa.api.services / TendersPage).
+_ARCHIVE_AFTER_DAYS = 30
+
+
+def _archive_stale_closed() -> int:
+    """Nightly transition (F24): move any ``'closed'`` tender to ``'archived'`` once it has been
+    closed for more than ``_ARCHIVE_AFTER_DAYS`` -- measured from ``deadline`` when known, else
+    ``published_at``, else (both absent -- a stale-undated closure, see ``_transition_closed``)
+    ``updated_at`` (the moment it was actually transitioned to ``'closed'``)."""
+    today = dt.date.today()
+    archive_before = today - dt.timedelta(days=_ARCHIVE_AFTER_DAYS)
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE tenders SET status = 'archived'
+            WHERE status = 'closed'
+              AND COALESCE(deadline, published_at::date, updated_at::date) < %(archive_before)s
+            RETURNING id
+            """,
+            {"archive_before": archive_before},
+        )
+        return len(cur.fetchall())
+
+
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
@@ -751,9 +854,13 @@ class TenderStats:
     llm_used: int = 0
     llm_deferred: int = 0
     llm_failed: int = 0
-    llm_rejected: int = 0
+    llm_rejected: int = 0  # LLM ran and explicitly said "not relevant" / below the relevance floor
+    gate_rejected: int = 0  # F24: passed matching but failed the strict post-classification gate
+    # (no LLM classification at all, an invalid notice_type, an expired deadline, a stale
+    # publish date, a denylisted document-host domain, or an unverified undated snippet)
     inserted: int = 0
     closed_transitioned: int = 0
+    archived_transitioned: int = 0
 
 
 LLM_BUDGET_SECONDS_DEFAULT = 15 * 60
@@ -808,9 +915,10 @@ def scan_tenders(
                 continue
 
             extract: TenderExtract | None = None
+            page_verified = False
             if time.monotonic() < llm_deadline:
                 try:
-                    extract = _llm_classify(notice, role=role, interactive=interactive, src_kind=src.kind)
+                    extract, page_verified = _llm_classify(notice, role=role, interactive=interactive, src_kind=src.kind)
                     stats.llm_used += 1
                 except ResourceUnavailable:
                     stats.llm_deferred += 1
@@ -819,7 +927,8 @@ def scan_tenders(
                     stats.llm_failed += 1
                 except Exception as exc:
                     # Never let one notice's LLM call take down the whole scan (docs/
-                    # CONVENTIONS.md rule 9) -- fall back to the deterministic gate's own verdict.
+                    # CONVENTIONS.md rule 9) -- it just falls through to F24's gate below, which
+                    # rejects an unclassified notice outright (see _gate_reject_reason).
                     log.warning(
                         "tender_llm_classify_unexpected_error", external_ref=notice.external_ref, error=str(exc)[:200]
                     )
@@ -827,39 +936,46 @@ def scan_tenders(
             else:
                 stats.llm_deferred += 1
 
-            if extract is not None and (not extract.relevant or extract.relevance <= RELEVANCE_REJECT_MAX):
-                stats.llm_rejected += 1
-                log.info(
-                    "tender_llm_rejected",
-                    external_ref=notice.external_ref,
-                    relevance=extract.relevance,
-                    relevant=extract.relevant,
-                )
-                seen_refs.add(notice.external_ref)
-                continue
-
             # F2/F13: fill in date/agency/country gaps from the LLM extraction (when it ran and
             # succeeded), then fall back to the URL-domain country table regardless -- both mutate
-            # `notice` in place so `_insert_tender_and_item` (which reads notice.* directly) picks
-            # them up without needing its own signature to grow further.
+            # `notice` in place so the gate below and `_insert_tender_and_item` (which reads
+            # notice.* directly) pick them up without needing their own signatures to grow further.
             if extract is not None:
                 _apply_extraction_to_notice(notice, extract)
             _apply_domain_country_fallback(notice)
 
-            status_override = "unknown" if extract is not None and extract.relevance == RELEVANCE_UNKNOWN else None
-            try:
-                if extract is not None:
-                    tender_id, _item_id = _insert_tender_and_item(
-                        notice,
-                        extract.matched_terms or domain_terms,
-                        relevance=extract.relevance,
-                        summary_he=extract.summary_he,
-                        entities=extract.entities,
-                        status_override=status_override,
-                        notice_type=extract.notice_type,
-                    )
+            reject_reason = _gate_reject_reason(
+                notice, extract, page_verified=page_verified, today=today, deny_domains=deny_domains
+            )
+            if reject_reason is not None:
+                if extract is not None and reject_reason.startswith("relevance_"):
+                    stats.llm_rejected += 1
                 else:
-                    tender_id, _item_id = _insert_tender_and_item(notice, domain_terms)
+                    stats.gate_rejected += 1
+                log.info(
+                    "tender_rejected",
+                    external_ref=notice.external_ref,
+                    reason=reject_reason,
+                    relevance=(extract.relevance if extract else None),
+                )
+                seen_refs.add(notice.external_ref)
+                continue
+
+            # Past the gate: `extract` is guaranteed non-None (a None extract always yields
+            # "no_llm_classification" above), so `_initial_status` naturally resolves to 'open'
+            # (a future deadline or a recent publish date -- both already gate-verified) or
+            # 'unknown' (no date at all, but the gate has already confirmed the page was actually
+            # verified) -- never 'closed'/'awarded', both of which are gate-rejected outright.
+            assert extract is not None
+            try:
+                tender_id, _item_id = _insert_tender_and_item(
+                    notice,
+                    extract.matched_terms or domain_terms,
+                    relevance=extract.relevance,
+                    summary_he=extract.summary_he,
+                    entities=extract.entities,
+                    notice_type=extract.notice_type,
+                )
             except Exception as exc:
                 log.warning("tender_insert_failed", external_ref=notice.external_ref, error=str(exc)[:200])
                 continue
@@ -870,5 +986,6 @@ def scan_tenders(
             stats.inserted += 1
 
     stats.closed_transitioned = _transition_closed()
+    stats.archived_transitioned = _archive_stale_closed()
     log.info("tender_scan_done", **vars(stats))
     return stats

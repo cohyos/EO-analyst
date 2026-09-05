@@ -1390,6 +1390,18 @@ Query.
 
 ### Screens (`src/pages/`, routed in `src/App.tsx`)
 
+> **2026-09-06 note:** this section (and Stack notes / Tests / What's-stubbed below it) described
+> the UI as it stood on 2026-09-04, before U6-U13, A6b, A7 (LLM cloud mode + settings chains), A8
+> (MCP), A11 (BD territory report) and A12 (technology watch) landed. `EntitiesListPage` +
+> `EntityDetailPage` were merged into one `EntitiesPage` component; `ConferencesPage` moved from a
+> phase-C stub to a fully populated screen; three routes (`/tenders`, `/bd`, `/tech-radar`) were
+> added; `react-router-dom` went 6 → 7 (Q1-12). The prose below is corrected in place rather than
+> appended, as an explicit exception to this file's normal append-only convention, because leaving
+> a stale "Screens" section standing next to the later, correct per-feature sections it now
+> contradicts (see e.g. "Web UI (`web/src/pages/EntitiesPage.tsx`, new; replaces
+> `EntitiesListPage.tsx` + `EntityDetailPage.tsx`, removed)" further down this file) was actively
+> misleading. Everything else in this file remains append-only.
+
 1. `MorningPage` (`/`) — night-summary tiles, latest report's HTML exec
    summary with `[n]` citation chips linked to `/feed?open=<id>`
    (`lib/reportHtml.ts` maps `[n]` → `items_included[n-1]`, the report
@@ -1409,13 +1421,21 @@ Query.
    deep-search via `POST /api/items/{id}/investigate`, `A` adds the item
    to the chat context, `O` opens the source in a new tab. "למה הציון?" reveals `triage_reason`. `?open=<id>` deep-links
    into a specific item (used by Morning/Ask citation clicks).
-3. `EntitiesListPage` (`/entities`) + `EntityDetailPage`
-   (`/entities/:id`) — search list; detail page has a Cytoscape graph
-   (`components/entities/EntityGraph.tsx`, nodes shaped/colored by kind,
-   click an edge for its label/evidence + a link to the source item),
-   depth 1/2 selector, the three named-query buttons ("שותפי המתחרים" /
-   "ספקי המתמודדים בתוכנית" / "סטארטאפים מחוברים" →
-   `GET /api/graph/query`), an entity timeline, and a neighbors list.
+3. `EntitiesPage` (`/entities` and `/entities/:id`, **one component** —
+   `EntitiesListPage`/`EntityDetailPage` were removed and merged) —
+   U10's three-pane layout (RTL: list on the right, entity card in the
+   center, compact graph on the left). The list pane (`EntityListPanel`)
+   reads/writes its filters (`q`, `kind`, `country`, `watchlist`, `all`,
+   `sort`) to the URL's search params; rows show a kind chip, country
+   flag, watchlist star, and 7d/30d mention counts. The card pane
+   (`EntityCardPanel`) renders KPI tiles, a level breakdown, an
+   items-only timeline, business events, and the label-grouped relations
+   list as real links. `components/entities/EntityGraph.tsx`: node size
+   scales with degree, color-by-kind legend overlay, edge labels on
+   hover, clicking a node navigates to that entity, "אין קשרים מתועדים"
+   for a zero-edge entity, "פתח גרף מלא" opens the full-size graph. See
+   the dedicated "Web UI (`web/src/pages/EntitiesPage.tsx`...)" section
+   further down this file for the full write-up.
 4. `InvestigationsListPage` (`/investigations`) + `InvestigationDetailPage`
    (`/investigations/:jobId`) — table of jobs; detail view live-tails the
    ReAct log (round/lang/query/results/outcome) via
@@ -1428,20 +1448,44 @@ Query.
    `hooks/useAskChat.ts`. `[n]` markers are rendered as hover/click
    citation chips by `components/CitationText.tsx` (shared with the
    investigation answer view).
-6. `ConferencesPage` (`/conferences`) — 24-month table + iCal export
-   link; renders the "לוח הכנסים יופעל בשלב ג׳" empty state whenever the
-   (stub) API returns `[]`, per contract.
+6. `ConferencesPage` (`/conferences`) — **no longer a stub.** 24-month
+   table + iCal export link, backed by real seeded conference rows with
+   official URLs/organizers (merged 2026-09-06); a row with neither
+   `registration_url` nor `url` shows an explicit "אין קישור" chip
+   instead of bare unlinked text. The phase-C empty state still renders
+   whenever the API genuinely returns `[]` (e.g. an empty DB), it is just
+   no longer the only thing this screen can show.
 7. `InboxPage` (`/inbox`) — open clarifications with one-click answers,
    the latest survey (choice/scale/text question types), and "מה למדתי
    ממך" lessons with delete.
 8. `ReportsPage` (`/reports`) — kind-filtered list; HTML report viewer
    with an auto-generated TOC (`h2`/`h3` walk) and docx/md download
    links.
-9. `SettingsPage` (`/settings`) — tabbed YAML editors for
-   config/sources/watchlist/taxonomy/models against `GET`/`PUT
-   /api/settings/{name}`, surfacing `errors[]` from a failed validation;
-   quick eco/full mode + "הרץ ריצה יומית" controls; a jobs table with
-   cancel.
+9. `TendersPage` (`/tenders`, **new**, A1) — tenders/RFI/RFP table with
+   header count chips, status filter (defaults to open + recent, with an
+   explicit "הצג סגורים/לא ידוע" toggle per Q7 F24), and a forecast list
+   (`components/tenders/ForecastList.tsx`) alongside the tender table
+   (`components/tenders/TenderTable.tsx`). See "Frontend" under the
+   tenders section further down this file.
+10. `BdPage` (`/bd`, **new**, A11) — business-development-by-territory
+    report screen: `TerritorySelector` (activity counts, 30/60/180-day
+    lookback), "צור דוח" (sync result or polled `job_id`), a
+    per-territory report history list, and the report body rendered with
+    the same `ReportBody` component `ReportsPage` uses. See "Frontend"
+    under the BD-territory-report section further down this file.
+11. `TechRadarPage` (`/tech-radar`, **new**, A12) — subdomain × maturity
+    matrix (`components/tech/RadarMatrix.tsx`), a 4/12/26/52-week period
+    selector, an actor-kind filter, and a click-through item list
+    (`components/tech/TechItemsList.tsx`) into `/items/:id`. See
+    "Frontend" under the technology-watch section further down this file.
+12. `SettingsPage` (`/settings`) — tabbed YAML editors for
+    config/sources/watchlist/taxonomy/models against `GET`/`PUT
+    /api/settings/{name}`, surfacing `errors[]` from a failed validation;
+    quick eco/full mode + "הרץ ריצה יומית" controls; a jobs table with
+    cancel; **since 2026-09-06 also**: the LLM cloud-mode switch, the
+    per-role fallback-chain editor (`ChainsEditor.tsx` — provider/model/
+    power, reorder, local-terminal option), a `ModelPicker` power select,
+    and the MCP allow-list card (A7/A7c/A8).
 
 ### API layer and mock mode
 
@@ -4760,4 +4804,652 @@ so), `test_mcp_api.py` (all three routes, service layer mocked). One live, ad-ho
 screen -> DATA-wrapped result) was also run manually during development, confirming the whole
 `eoa.mcp.client` <-> `eoa.mcp_servers.procurement` <-> `eoa.mcp.registry` path works end to end, not
 just against mocks.
+
+## Business development by territory (A11, 2026-09-06)
+
+"דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" -- for one territory (ISO-2 country code or a
+recognized region code, e.g. `US`/`IL`/`EU`/`GB`, normalized via `eoa.report.geography
+.normalize_country`) and a lookback window (default 90 days), an analyst-grade Hebrew report
+covering the territory's market picture, procurement/platform activity, tenders/forecasts, active
+competitors, upcoming conferences, and a structured set of recommended entry points/actions.
+Follows the exact daily/weekly/monthly pipeline shape (collect -> draft -> `qa_citations.check` ->
+one corrective retry -> strip any still-uncited sentences -> render docx/md/html -> persist a
+`reports` row) so it reuses `eoa.report.docx_builder`'s builders and the citation registry/QA
+convention unchanged.
+
+### `agent/eoa/report/bd_territory.py`
+
+Seven collectors, each deterministic/DB-only except the market synthesis and the recommended
+actions (LLM):
+
+1. `collect_market_items` -- in-scope items (level >= yellow) whose `geography` normalizes to the
+   territory, or whose `entities_mentioned` includes a territory-local entity (`entities.country`),
+   published in the lookback window.
+2. `collect_platform_events` -- business events in the territory whose `kind` is
+   `contract_award`/`m_and_a`/`deployment`/`test` (the real `events.kind` enum has no separate
+   "contract"/"award"/"acquisition"/"trial" values, so this is the closest match to those terms),
+   matched against `eoa.tenders.platform_payloads.yaml` (via `eoa.tenders.forecast
+   .load_platform_payloads`) to attach the typical EO/IR payload need. Rendered as its own
+   "רכש ופלטפורמות" table (`platform_events_table`), not the daily/weekly events table.
+3. `collect_tenders_and_forecasts` -- open/unknown `tenders` and `tender_forecasts` whose
+   country/`buyer_country` normalizes to the territory.
+4. `collect_active_competitors` -- `entities` (kind='company', relevance >= 0.4) headquartered in
+   the territory or mentioned by one of its market items, with recent `contract_award` wins among
+   those same items and an `is_israeli_industry` flag (Elbit/Rafael/IAI/Controp, per
+   `config/watchlist.yaml`'s canonical names) for the Israeli-industry angle.
+5. `collect_conferences_for_territory` -- upcoming conferences (next 12 months) in the territory,
+   best-effort matched by a small city->territory lookup (`_CONFERENCE_CITY_TERRITORY`) since
+   `conferences` carries no country column, plus the top 5 upcoming conferences overall as
+   "international ones the territory's buyers attend" context.
+6. LLM-drafted (`BdTerritoryReportDraft`, `agent/eoa/llm/schemas/reports.py`): `exec_summary_he`
+   (3-5 sentences), `market_bullets_he` (5-8 cited bullets synthesizing #1 by domain),
+   `recommended_actions` (5-8 `BdAction` objects: `action_he`/`priority` H-M-L/`rationale_he` with
+   `[n]`/`owner_role_he`/`timing_he`), `risks_assumptions_he` (citation-exempt, like `outlook_he`
+   elsewhere). `sections`/`outlook_he` are always empty -- kept only for duck-type compatibility
+   with `docx_builder.build_docx`/`qa_citations.check`.
+7. Citation registry: `collect_market_items`'s items, extended with any event/tender source item
+   not already numbered (`_extend_registry_with_source_items`, the same numbering-extension
+   convention as `eoa.report.weekly._extend_registry_with_events`) and with synthetic negative-id
+   rows for tenders/forecasts (`_extend_registry_with_tenders`, since those have a `url` but no
+   `item_id`).
+
+QA: `_run_qa` calls `eoa.report.qa_citations.check` with `extra_sections` = the market bullets (as
+one sentence per bullet, `_bullets_text` appends a trailing period so `split_sentences` parses each
+bullet as its own sentence) plus one entry per recommended action's `rationale_he`, and
+`exempt_sections` = `risks_assumptions_he`. `_strip_uncited` mirrors `eoa.report.weekly
+._strip_uncited`, additionally dropping any recommended action whose rationale becomes empty after
+stripping (a recommendation with no surviving grounding is worse than none, rule 5).
+
+Rendering: `market_bullets_he` -> an `extra_sections` entry ("תמונת שוק בטריטוריה", `after_summary`);
+`risks_assumptions_he` -> `after_outlook`; five `tables` entries (platform events, tenders,
+competitors, conferences, and `recommended_actions_table` sorted H/M/L) via the same
+`docx_builder` `tables` hook the weekly/monthly reports use. `events=[]` is always passed to
+`build_docx`/`render_markdown`/`render_html` -- the standard events table expects a different row
+shape than the platform-events rows here, which get their own table instead. Output paths:
+`output/reports/bd_<territory-lower>_<period_end>.{docx,md,html}`.
+
+Persistence: `reports` row with `kind='bd_territory'`, `territory=<code>` (migration `0014`).
+
+### Prompt / schema
+
+`agent/eoa/llm/prompts/report_bd_territory.md` (mirrors `report_weekly.md`'s "כללי ברזל" structure);
+`BdAction`/`BdTerritoryReportDraft` in `agent/eoa/llm/schemas/reports.py`.
+
+### API (`agent/eoa/api/routes/bd.py` + `services.py`)
+
+`POST /api/bd/reports {territory, lookback_days}` -- enqueues a `bd_report` job
+(`services.enqueue_bd_report`) and polls for up to 55s (`services.build_or_enqueue_bd_report`);
+returns `{"report": <card with html>, "job_id"}` if it finished in time, else `{"job_id",
+"status": "queued"}`. `GET /api/bd/reports?territory=` (`services.list_bd_reports`, reuses
+`_report_card` -- every `ReportSummary`/`ReportDetail` now additively carries a `territory` field,
+`None` for every non-`bd_territory` kind). `GET /api/bd/territories` (`services.bd_territories`) --
+candidate territories (the configured default set plus any other territory with market activity)
+with item/tender/forecast counts, most active first. A generated report is a normal `reports` row,
+so its full detail/download/citations continue to be served by the existing generic `GET
+/api/reports/{id}`, `GET /api/reports/{id}/file`, `GET /api/reports/{id}/citations` -- `bd.py` only
+adds the create + territory-scoped list/selector endpoints.
+
+### Scheduler / job / CLI
+
+`eoa.orchestrator.jobs.run_bd_report` (`HANDLERS["bd_report"]`): with a `territory` in the job
+payload (API-enqueued), builds that one territory's report; with no `territory` (the weekly
+scheduler job), loops over every territory in `config.bd_report.territories`, one failure never
+blocking the others (rule 9). `eoa.orchestrator.main.build_scheduler` adds one additive cron job,
+Sunday 06:30 Asia/Jerusalem, `enqueue_job("bd_report", {})`. `eo run bd --territory US
+[--lookback-days 90]` (`cli.py`) builds one territory's report synchronously and prints its
+`report_id`/`qa_passed`/docx path.
+
+### Config
+
+`config/config.yaml` `bd_report:` (`territories: [US, IL, EU, GB, IN, KR]`, `lookback_days: 90`) --
+`agent/eoa/config.py` `BdReportCfg`. The on-demand endpoint/CLI accept any territory, not just the
+configured default set; the config only bounds the weekly scheduler's loop-over-defaults run.
+
+### Frontend
+
+`web/src/pages/BdPage.tsx` + `web/src/components/bd/TerritorySelector.tsx` (reuses `web/src/lib
+/countries.ts`'s flag/name catalog -- the same one the Feed's country filter uses): territory
+selector with activity counts, lookback selector (30/60/90/180 days), "צור דוח" with a lightweight
+queued/failed status line (the create call either returns the finished report synchronously or a
+`job_id` the page polls for by re-fetching the report list every few seconds), a per-territory list
+of past reports, and the report body rendered with the same `ReportBody` component the generic
+Reports page uses (so `[n]` citations behave identically -- clickable, resolving via the existing
+`GET /api/reports/{id}/citations`). Nav entry `/bd` (`web/src/components/shell/nav.ts`), route in
+`App.tsx`. `web/src/api/{types.ts,real.ts}` gained `getBdTerritories`/`getBdReports`/`postBdReport`;
+`web/src/mocks/mockApi.ts` + `web/src/mocks/data/bd.ts` mirror the same shapes.
+`web/src/types/api.ts` gained `BdTerritoryOption`/`BdReportCreateResponse`, and `ReportSummary`
+gained the additive `territory` field. i18n: a new top-level `bd.*` namespace in both `he.ts`/
+`en.ts`, plus `nav.bd`.
+
+### Migration
+
+`0014_bd_territory.py` -- `reports.territory TEXT` (indexed), widens `reports_kind_check` to allow
+`'bd_territory'`. Chained after `0013_items_blocked_status.py` (concurrent migrations from other
+in-flight changes claimed `0011`-`0013` first).
+
+### Tests
+
+`tests/unit/test_report_bd_territory.py` -- every DB-/LLM-touching collector monkeypatched: pure
+helpers (`lookback_range`, `territory_label`, `_bullets_text`, the empty-input `format_*_block`
+cases), the citation-registry extension helpers, and `build_bd_territory` end-to-end against a
+fixture draft (QA passes, all five tables render with the expected headers, actions table sorted by
+priority, zero-items path skips the LLM call and still persists). `e2e/tests/15-bd.spec.ts` --
+header/territory-selector rendering, selecting a territory reveals the lookback selector + create
+button, an existing report (if any) renders via `ReportBody` with working docx/md download links,
+no bad literal text.
+
+## Citation links + tenders quality gate (F23/F24, docs/QA_PROGRAM.md section 4, 2026-09-06)
+
+### F23 — `[n]` citations are now real links everywhere
+
+**docx** (`agent/eoa/report/docx_builder.py`): every `[n]` marker (`_emit_mixed_runs`, the events
+table's "מקור" column) is now `add_citation_run` -- a superscript, non-Hebrew-styled **internal
+hyperlink** (`w:hyperlink w:anchor="src_{n}"`, via a `style=None` variant of `add_internal_hyperlink`
+that skips the blue/underlined "Hyperlink" character style) jumping to a matching `w:bookmarkStart
+w:name="src_{n}"` on that item's row in the sources appendix (`_add_sources_appendix`). Real Word
+footnotes (a `word/footnotes.xml` part) were considered and deliberately NOT implemented -- see
+`add_citation_run`'s docstring for why (no python-docx API for it, and hand-rolling the extra OOXML
+part/content-type/relationship/rels-for-the-source-URL carries real corruption risk for a document
+this pipeline regenerates nightly with no human review). **HTML** (`render_html`'s `cite_links`)
+already emitted `<a href="#src-n" class="cite">[n]</a>`; unchanged by this fix, but
+`web/src/lib/reportHtml.ts`'s `linkifyReportCitations` had a real bug feeding off it: its old regex
+blindly wrapped every `[n]` substring in a NEW `<a class="eo-citation">`, nesting a second anchor
+inside the server's `<a class="cite">` (invalid HTML, breaks `ReportBody`'s `.closest(".eo-citation")`
+click handling). Fixed with a single combined regex (`<a ... class="cite">[n]</a>` OR a bare `[n]`)
+that augments an existing anchor's class/data attributes in place instead of nesting; a bare `[n]`
+(older stored reports, pre-fix) still gets wrapped fresh, same as before. **Markdown**
+(`render_markdown`): a new `_md_citations()` turns `[n]` into `[n](#src-n)`; the appendix's `#`
+cell becomes `<a id="src-n"></a>n` (an inline HTML anchor GFM tables can't otherwise carry) as the
+link target.
+
+Tests: `tests/unit/test_docx_builder.py` (bookmark presence, hyperlink-count accounting including
+internal citation links, citation-is-internal-hyperlink assertions, MD citation-link assertions),
+`web/src/lib/reportHtml.test.ts` (new -- augment-in-place vs. nest-a-second-anchor, unresolved
+citation left alone, backward compat with a bare `[n]`). Verified live: rebuilt `daily_2026-09-05`
+via `build_daily(period_end=..., force=True)`, confirmed 0 dead internal anchors in the HTML, every
+`[n]` in the docx XML now sits inside a `w:hyperlink w:anchor="src_N"`, and clicking `[2]` in the
+running app (port 8765) navigates to `/items/2386`.
+
+### F24 — tenders quality gate tightened + lifecycle + board default view
+
+**`agent/eoa/tenders/scan.py`**: the old three-tier relevance rubric (`<=2` reject / `==3`
+'unknown' / `>=4` store, with an "LLM unavailable -> insert on the deterministic two-signal gate's
+own strength alone" degrade path) is replaced by `_gate_reject_reason` -- a single strict
+post-classification gate applied just before insert. Rejects (logs `tender_rejected` with a
+reason, never inserts) on: no successful LLM classification at all (`extract is None` is now
+itself a rejection -- the old degrade path is exactly how the review's stale/irrelevant rows got
+in); `relevance < RELEVANCE_MIN_ACCEPT` (6, up from 2); `notice_type` not one of
+`rfi`/`rfp`/`rfq`/`sources_sought`/`tender` (so an `award`-type notice is dropped outright, not
+stored as `status='awarded'` -- the tenders board is for open solicitations); a `deadline` already
+in the past; a `published_at` older than `NOTICE_MAX_AGE_DAYS` (90); a document-hosting/aggregator
+domain (`config/tenders.yaml` `deny_domains` gained scribd.com/docplayer/yumpu/slideshare/
+pdfcoffee/coursehero); or a `status_hint` of `awarded`/`closed` from a structured source. `'unknown'`
+status survives only when every other check passes but there's no date at all -- and only because
+`_fetch_notice_text` now also returns `page_verified` (true for `api_json`, true for a
+`search`/`rss` notice whose page was actually fetched with real content, false otherwise) which
+`_gate_reject_reason` requires to be true for a dateless notice (an unverified snippet with no date
+-- the review's "13 undated unknown rows" case -- is rejected, not stored). `_llm_classify` now
+returns `(extract, page_verified)` instead of just `extract`.
+
+Lifecycle: `_transition_closed` (F2, unchanged) still closes a passed-deadline/stale-undated
+`'open'` row nightly; new `_archive_stale_closed` (`_ARCHIVE_AFTER_DAYS = 30`) moves a `'closed'`
+row to a new `'archived'` status once 30 days have passed since `COALESCE(deadline, published_at,
+updated_at)` -- never deleted (F1), just hidden from the board's default view. Migration
+`0012_tenders_archived_status.py` widens the `tenders.status` CHECK constraint.
+
+**API** (`agent/eoa/api/services.py`/`routes/tenders.py`): `list_tenders` (and `GET /api/tenders`)
+now return `{"tenders": [...], "counts": {status: n, ...}}` instead of a bare list -- a real
+contract change, so **an API process restart is required** for this to take effect (the frontend
+was rebuilt to the new contract; until the running API restarts, `GET /api/tenders` still returns
+the old bare-array shape and the Tenders page's default view will look empty). Default (no
+explicit `status`): `DEFAULT_STATUSES = ('open', 'unknown')` within `DEFAULT_SINCE_DAYS` (90) days
+of `COALESCE(deadline, published_at, created_at)`; `include_closed`/`include_archived` widen that
+default set; an explicit `status=` bypasses the default set and `since_days` entirely. `counts`
+reflects the TRUE totals (honoring `country`/`q`, not the status/since_days/include_* narrowing) so
+the UI's header chips are accurate regardless of what the list itself shows. Sort gained
+`published_at ASC NULLS LAST` as the tiebreaker after `deadline`.
+
+**Frontend**: `web/src/types/api.ts` gained `TendersResponse` and `"archived"` on `TenderStatus`;
+`web/src/api/{real.ts,types.ts}` and `web/src/mocks/mockApi.ts` updated to the new
+query params/response shape (the mock mirrors the default/include_*/since_days narrowing +
+count-summary logic against the static fixture data). `TendersPage.tsx`: header count chips
+(`TenderCountChips`, one per non-zero status), a "show closed/archived" checkbox
+(`TenderFilters`) that sets `include_closed`/`include_archived`, sorts the visible list by deadline
+then published date, and only shows the big "no tenders" empty state when the true grand total
+(every status) is zero -- otherwise always shows the filters/toggle even if the current
+default/filtered view is empty, so the toggle is actually reachable. `TenderTable.tsx`'s detail row
+gained a "why relevant" line (`matched_terms` + `summary_he`) and published/agency/country. New
+i18n `tenders.*` keys (he/en) for the empty states, status labels, count-chip aria label, and the
+toggle.
+
+**`scripts/purge_stale_tenders.py`** (new): re-applies a DB-only approximation of the F24 gate to
+every existing row (no live LLM re-classification or page re-fetch -- `notice_type` isn't a stored
+column, so that one check is skipped; `page_verified` is approximated as "an `'unknown'` row with
+neither `deadline` nor `published_at` has no stored evidence it was ever verified" -> purged).
+`status in ('closed', 'awarded')` is exempt from the undated/stale checks (that lifecycle belongs to
+`_transition_closed`/`_archive_stale_closed`, not this purge) but NOT from the
+domain/relevance/procurement-signal/denylist checks. A failing row's linked item is deleted
+alongside it only if it has "no other use" (`level IS NULL` or `'archive'`); otherwise the item is
+kept (just unlinked). `--dry-run` supported. Run for real against the native DB 2026-09-06: 21 rows
+before (13 `unknown`, 8 `closed`) -> 16 purged (7 unverified-undated-unknown, 7 no-domain-signal
+[e.g. the "Green Tech Projects Corp." row], 1 relevance-below-floor, 1 deny-domain [the Scribd PDF
+reupload]) -> 5 rows after (all `closed`, correctly exempt from deletion since their lifecycle is
+archival, not purge). 16 tenders deleted, 12 linked items deleted, 1 item kept (still triaged to a
+real level elsewhere). `scripts/purge_tender_junk.py` (pre-F24, lighter/looser) and
+`scripts/repair_tenders.py` had their imports/call sites updated for the renamed
+`RELEVANCE_MIN_ACCEPT` constant and `_llm_classify`'s new `(extract, page_verified)` return tuple.
+
+### Tests
+
+`tests/unit/test_tenders_scan.py` -- rewritten `TestScanTendersLlmRelevanceGate` (every rejection
+reason exercised through `scan_tenders` end-to-end) + new `TestGateRejectReason` (direct matrix
+tests on `_gate_reject_reason`) + `TestArchiveStaleClosedSql`. `tests/unit/test_api_tenders_service.py`
+(new) -- default status/since_days narrowing, include_closed/include_archived widening, explicit
+status bypass, and the count-summary query. `tests/unit/test_purge_stale_tenders.py` (new) -- the
+full gate matrix on `fails_gate` plus mocked-DB orchestration (dry-run vs. real, item
+keep-vs-delete). `tests/unit/test_docx_builder.py` + `web/src/lib/reportHtml.test.ts` -- see F23
+above. `web/src/pages/TendersPage.test.tsx` -- header count chips, explicit-status re-query,
+"show closed/archived" toggle re-query.
+
+## Technology watch — "רדאר טכנולוגי" (A12, 2026-09-06)
+
+**User request (2026-09-06):** "לא ראיתי התייחסות להתפתחויות טכנולוגיות — לדוגמה פרסומים מדעיים
+בנושא FPA עם פיקסל דיגיטלי" (no coverage of technology developments, e.g. scientific publications
+on digital-pixel FPAs). Peer-reviewed/preprint papers, conference proceedings, patents and lab
+press releases about EO/IR/CV sensor technology are now in scope **even without a defense
+customer** (a pure academic advance can still mature into a defense product), routed to their own
+taxonomy domain, sources, classification rule, analysis fields, and report/UI surfaces so they are
+never silently dropped by the news-oriented triage thresholds the rest of the pipeline uses.
+
+### Taxonomy (`config/taxonomy.yaml`)
+
+New domain `tech_dev` ("התפתחויות טכנולוגיות") with 10 subdomains: `droic_digital_pixel` (FPA עם
+פיקסל דיגיטלי / DROIC / in-pixel ADC), `swir_eswir`, `hot_mct_t2sl`, `event_based` (neuromorphic /
+event cameras), `meta_optics`, `on_sensor_ai` (edge AI / in-sensor compute / ATR on FPGA-SoC),
+`laser_lidar`, `cv_atr`, `image_processing` (super-resolution / turbulence mitigation / NUC),
+`microbolometer_uncooled`. `report_kinds` gained `science` (additive; distinct from the existing
+`academic`, which stays the value for non-`tech_dev` scholarly items).
+
+### Classification rule (`agent/eoa/llm/prompts/classify.md`)
+
+A rule instructs the classifier that a peer-reviewed paper, conference proceedings (e.g. SPIE DCS,
+IEEE), patent, or lab/academia press release about the subdomains above is in-scope and classified
+`tech_dev` regardless of whether a defense customer is named, and that such items always get
+`report_kind = "science"`. `agent/eoa/llm/schemas/analysis.py`'s `Domain`/`ReportKind` literals
+gained `"tech_dev"`/`"science"` (additive; existing values unchanged).
+
+### Sources (`config/sources.yaml`, `agent/eoa/fetch/sources_loader.py`)
+
+Nine new `kind: rss` sources tagged `tech_dev`, each **fetched live and verified** on 2026-09-06
+(desktop-Chrome UA, checked for HTTP 200 + a parseable RSS/Atom body) before being added — the
+same verification bar this registry already applies to every other entry:
+
+| id | what | verified |
+|---|---|---|
+| `arxiv_eess_iv_tech` | arXiv eess.IV, keyword-filtered (FPA/digital-pixel/SWIR/event-camera/ATR terms in the abstract query) | 200 OK, 483 matching results |
+| `arxiv_cs_cv_tech` | arXiv cs.CV, keyword-filtered (IR/target-recognition/event-camera/multispectral) | 200 OK, 3366 matching results |
+| `arxiv_physics_optics_tech` | arXiv physics.optics, keyword-filtered (detector/metasurface/FPA) | 200 OK, 4448 matching results |
+| `arxiv_physics_ins_det_tech` | arXiv physics.ins-det, keyword-filtered (IR/detector/focal-plane) | 200 OK, 12580 matching results |
+| `ieee_sensors_journal_toc` | IEEE Sensors Journal TOC-alert RSS (`keywords_any`-filtered downstream, see below) | 200 OK, 50 `<item>` entries |
+| `ieee_tgrs_toc` | IEEE Transactions on Geoscience & Remote Sensing TOC-alert RSS (`keywords_any`-filtered) | 200 OK, 50 `<item>` entries |
+| `laser_focus_world_tech` | Laser Focus World site feed (`keywords_any`-filtered) | 200 OK, 25 `<item>` entries |
+| `vision_systems_design_tech` | Vision Systems Design site feed (`keywords_any`-filtered) | 200 OK, 25 `<item>` entries |
+| `nature_photonics_tech` | Nature Photonics RSS 1.0/RDF (`keywords_any`-filtered) | 200 OK, 9 `<item>` entries |
+
+Rejected as unusable (not added, consistent with this registry's "only sources that parse"
+convention): SPIE Digital Library (JEI + Optical Engineering RSS) — Incapsula bot-challenge on both
+feed URLs; Optica `oe`/`ol` "RSS" endpoints — resolve to the JS-rendered site shell, not a feed;
+MDPI Sensors — Akamai block; DTIC/OSTI, photonics.com, Nature *Light: Science & Applications* — 404
+or redirect to an auth-gated URL for a plain UA.
+
+`Source` (`sources_loader.py`) gained two additive fields: `category` (free-text, e.g. `"science"`)
+and `keywords_any: list[str]`. When set, `eoa.fetch.service._ingest_rss_source` drops any RSS entry
+whose title+summary contains none of `keywords_any` (case-insensitive substring) **before** it is
+fetched — used for the four broad feeds above (a journal TOC or a general engineering-press feed
+covers far more than EO/IR) so an off-topic article never burns a fetch + LLM classify call; the
+arXiv sources rely on their own abstract-search query instead and set no `keywords_any`.
+
+### Analysis fields (`items` table, migration `0011_tech_watch.py`)
+
+Three new nullable columns, only ever populated for `domain = 'tech_dev'` items (the existing `trl`
+column, already on `items` since `0001_core`, is reused as-is for tech_dev items too):
+`tech_maturity` (`lab`/`prototype`/`qualified`/`fielded`, CHECK-constrained),
+`tech_actor_kind` (`academia`/`lab`/`startup`/`prime`/`government`, CHECK-constrained),
+`tech_readiness_note_he` (free Hebrew text). A partial index
+`ix_items_domain_subdomain ON items (domain, subdomain) WHERE domain = 'tech_dev'` backs the radar
+matrix/list queries. `agent/eoa/llm/prompts/analyze.md` gained a rule to fill these three fields
+only when the item's (already-classified) `domain` is `tech_dev`; `AnalyzeOut`
+(`llm/schemas/analysis.py`) and `_ITEM_UPDATABLE_FIELDS`/`persist_analysis`
+(`memory/relational.py`, `pipeline/analyze.py`) carry them through additively.
+
+### `agent/eoa/pipeline/tech_watch.py` (new)
+
+Weekly per-subdomain aggregation, independent of triage `level` (see below for why): `new_count`
+(items in the period), `notable_items` (top-N by score), `actors` (distinct entities mentioned),
+`momentum` (`"up"`/`"down"`/`"flat"` + percent delta, this week's count vs. the trailing 4-week
+average for the same subdomain, `compute_momentum`), and `so_what_he` — one resident-LLM-generated
+Hebrew sentence ("מה זה אומר למוצרי EO/IR"), grounded only in that subdomain's own notable items
+(`generate_so_what`, prompt `llm/prompts/tech_watch_so_what.md`; empty string, no LLM call, when a
+subdomain has nothing to summarize). `run_tech_watch_weekly(period_start, period_end)` returns one
+`SubdomainAggregate` per taxonomy subdomain, sorted by `new_count` descending; a single subdomain's
+LLM call failing degrades to an empty `so_what_he` for that subdomain only, never blocking the rest.
+
+### `agent/eoa/report/tech_watch.py` (new)
+
+Report-layer rendering, wired into `eoa.report.daily.build_daily` / `eoa.report.weekly.build_weekly`
+as additive `tables=[...]` entries — the same deterministic-table mechanism
+`eoa.tenders.report_section.tenders_table` already uses, so neither report's LLM-drafted sections
+nor the citation QA gate (`eoa.report.qa_citations`) change:
+
+- **Daily** — "מעקב טכנולוגי" table: every `tech_dev` item of the day (title, actor, TRL/maturity,
+  so-what, `[n]`), **not** filtered by triage `level` — an academic paper with no defense customer
+  routinely scores too low on novelty/magnitude/core_relevance (`eoa.pipeline.triage`) to reach the
+  level-gated main sections, which is exactly the gap this feature exists to close.
+- **Weekly** — two tables built from `eoa.pipeline.tech_watch.run_tech_watch_weekly`: a
+  subdomain-x-momentum radar summary (new papers / actors / momentum arrow+delta / so-what), and a
+  short "התפתחויות שכדאי לעקוב" pick of the 3-5 highest-scoring notable items across every
+  subdomain.
+
+Both functions take the caller's `citation_items` list and extend it in place with a continuing `n`
+(mirroring `eoa.report.daily._extend_citation_registry`'s event-registry pattern, duplicated
+locally per this codebase's pipeline/report-boundary convention) so every `[n]` printed here also
+gets a real, clickable entry in the report's "נספח מקורות" appendix.
+
+### API (`agent/eoa/api/routes/tech.py` + `services.py`)
+
+`GET /api/tech/radar?weeks=` (default 12, 1-52) — subdomain x maturity item-count matrix plus a
+4-week momentum sparkline per subdomain (`services.tech_radar`). `GET
+/api/tech/items?subdomain=&maturity=&actor_kind=&since=&page=&page_size=` — `tech_dev` items,
+optionally filtered (`services.list_tech_items`, reuses `_item_card` — every `ItemCard` gained the
+additive `tech_maturity`/`tech_actor_kind`/`tech_readiness_note_he` fields, `None` for non-tech_dev
+items). Registered in `agent/eoa/api/app.py` as `app.include_router(tech.router, prefix="/api")`.
+
+### Frontend
+
+`web/src/pages/TechRadarPage.tsx` ("רדאר טכנולוגי") + `web/src/components/tech/{RadarMatrix,
+Sparkline,TechItemsList}.tsx`: a subdomain x maturity matrix (click a cell, or a row's total, to
+filter), a period selector (4/12/26/52 weeks) and an actor-kind filter, and a click-through item
+list linking into the existing `/items/:id` detail page (a lighter sibling of
+`components/feed/FeedRow` — no selection/rating/drag-and-drop, those are Feed-page-specific,
+consistent with how `components/tenders/TenderTable` renders its own domain independently of
+`FeedRow` too). Nav entry `/tech-radar` (`web/src/components/shell/nav.ts`, icon `Radar`), route in
+`App.tsx`, i18n key `nav.techRadar` (`he.ts`/`en.ts`). `web/src/api/{types.ts,real.ts}` gained
+`getTechRadar`/`getTechItems`; `web/src/mocks/mockApi.ts` + `web/src/mocks/data/items.ts` (four new
+`tech_dev` `DOMAINS` rows + `tech_maturity`/`tech_actor_kind`/`tech_readiness_note_he` on every mock
+item) mirror the same shapes. `web/src/types/api.ts` gained `TechMaturity`/`TechActorKind`/
+`TechRadarSubdomain`/`TechRadarResponse`, and `ItemCard`/`ItemDetail` gained the three additive
+tech fields (existing item-fixture tests updated accordingly).
+
+### Migration
+
+`0011_tech_watch.py` — `tech_maturity`/`tech_actor_kind`/`tech_readiness_note_he` columns on
+`items` (two CHECK constraints) + the partial `ix_items_domain_subdomain` index. Chained directly
+after `0010_mcp_calls.py` (head at authoring time); `0012`-`0016` (other concurrent work) chain
+after it in turn.
+
+### Backfill + live verification
+
+`scripts/reclassify_tech_items.py` (new, `--dry-run` default) — re-classifies existing
+`out_of_scope`/`archive` items whose title/`clean_text` matches the tech_dev keyword set, so
+material ingested *before* this feature existed is not permanently stranded outside `tech_dev`.
+See the script's own docstring and the run log below for dry-run vs. real-run counts.
+
+### Tests
+
+`tests/unit/test_tech_watch.py` — `eoa.pipeline.tech_watch` (`_actors` de-dup, `compute_momentum`
+up/down/flat + baseline-zero handling, `generate_so_what` skips the LLM call on an empty item list
+and degrades to `""` on `LLMOutputError`) and `eoa.report.tech_watch` (`_extend_registry`
+continuing-`n` assignment, `daily_tech_watch_table` empty-vs-populated, `weekly_tech_watch_tables`
+momentum-arrow formatting + the "לעקוב" pick), all DB access faked per `docs/CONVENTIONS.md` rule
+10. `web/src/pages/TechRadarPage.test.tsx` — matrix renders from the mocked API, empty state when
+no subdomain has activity, clicking a cell fetches and renders the filtered item list.
+`e2e/tests/16-tech.spec.ts` — page loads, matrix or empty-state renders, no bad literal text.
+
+## Security QA r1 fixes: Q2-3/Q2-4/Q2-5/Q2-6/Q2-8/Q2-9/Q2-10 (2026-09-06)
+
+Fixes for `docs/qa/findings_Q2_r1.md`'s still-open findings (Q2-1/Q2-2/Q2-7/Q2-11/Q2-12 out of
+scope for this pass -- see that doc).
+
+**Q2-3 (P1) -- Gemini key transport + secret redaction (`agent/eoa/llm/providers/api.py`).**
+`GeminiProvider.chat`/`list_models` now send the key via the `x-goog-api-key` header instead of a
+`?key=` query param (matching Anthropic's `x-api-key`/OpenAI's `Authorization: Bearer` headers --
+a query param is far more likely to end up copied into logs, proxies, or browser history). New
+`redact_secrets(text)` helper (`?key=`/`?api_key=`/`?token=` query values, `AIza...` and `sk-...`
+literals, `Bearer <token>`) is applied in every `except` block across all three providers that
+turns an httpx exception/response body into a log line or an `ApiProviderError` message, so a key
+echoed back verbatim by an upstream error page never reaches `runtime/*.log` or a client-visible
+message. `GeminiProvider.list_models`'s bare `except Exception` narrowed to
+`(httpx.HTTPError, ValueError, KeyError)` (its only expected failure modes: transport/status
+errors, a non-JSON body, an unexpected response shape) -- anything else now surfaces instead of
+being silently swallowed as "best effort". Tests: `tests/unit/test_llm_api_providers.py`'s new
+`TestGeminiKeyHandling` (header used, no `key=` in the URL for either call, a mocked 500 whose body
+echoes the key back doesn't leak it into the raised exception or the logged warning) and
+`TestRedactSecrets`.
+
+**Q2-4 (P2) -- TOCTOU/DNS-rebinding in `_fetch_local` (`agent/eoa/fetch/remote.py` +
+`agent/eoa/fetch/html.py`).** The old code validated the request URL once, let `httpx` follow
+every redirect internally (connecting to each hop with zero SSRF re-checks in between), and only
+re-validated the *final* URL after the whole chain had already been fetched. `assert_public_http_
+url` now returns the validated IP set for its host (`_validate_public_ips`, split out so it can be
+reused instead of re-resolving); `_fetch_local` passes that set into `fetch_page`'s two new
+additive, opt-in parameters: `validate_redirect` (a callback -- `assert_public_http_url` itself --
+invoked on every `Location` header value *before* it is requested) and `pin_ips`. When
+`validate_redirect` is given, `fetch_page` disables httpx's automatic redirect-following and walks
+the chain itself (bounded to `_MAX_REDIRECT_HOPS = 5` hops), so a redirect into a private/loopback/
+link-local address is rejected before a single byte is fetched from it. `pin_ips` is checked after
+each hop's connection via the new `_server_addr(response)` helper (`response.extensions
+["network_stream"].get_extra_info("server_addr")`) -- the documented "acceptable alternative" to a
+full custom-resolver `httpx` transport: it can't prevent the one connection attempt from reaching a
+rebound address, but it detects (and rejects) a DNS answer that changed between validation and
+connection, and fails open (logs, doesn't reject) when the installed transport doesn't expose that
+extension (e.g. `respx`'s mock transport in tests). Both parameters are additive/opt-in with
+`None` defaults, so `fetch_page`'s other callers (`eoa.fetch.service`, `rss.py`) are unchanged.
+Tests: `tests/unit/test_remote_fetch.py` (`assert_public_http_url` return-value + rejection cases;
+`_fetch_local`/`fetch_remote` end-to-end: a redirect to `127.0.0.1`/`169.254.169.254` is refused
+*before* that host is ever requested -- asserted via `route.called is False` -- a redirect to
+another public host is allowed and its content returned).
+
+**Q2-5 (P2) -- JSON tool-call/function-call spoofing heuristics
+(`agent/eoa/security/heuristics.py`).** New patterns: `json_tool_call_key` (literal `"tool":`/
+`"tool_call":`/`"function_call":` JSON-key shape -- deliberately not the bare English words, so
+"the tool" or "a function call" in ordinary prose doesn't trip it), `json_tool_name_with_args`
+(`"name":"read"/"fetch"/"search"` co-occurring with `"url":`/`"arguments":`), `file_uri_scheme`
+(`file://`), `link_local_metadata_ip` (`169.254.x.x`, the cloud-metadata SSRF address), and
+`json_localhost_reference` (`"...localhost..."`/`"...127.0.0.1..."` inside a quoted JSON-ish
+value). Combined via the existing noisy-OR scorer, both example payloads from the finding
+(`{"tool":"read","url":"file:///..."}` and a nested `tool_call`/`function_call` payload pointing at
+`169.254.169.254`) now score >= 0.9, comfortably over the >= 0.8 requirement and the 0.5 quarantine
+threshold. Tests added to `tests/security/test_heuristics.py`; the existing 85% injection-coverage
+and <= 2/20 clean-false-positive-rate tests still pass unchanged (verified: the new patterns don't
+fire on any of the existing clean fixtures, including the two that already contain JSON/YAML code
+blocks).
+
+**Q2-6 (P2) -- Hebrew L1 false-positive mitigation (`agent/eoa/security/guard.py`).** The L1
+classifier has measured false positives on benign, predominantly-Hebrew defense/exercise prose
+(0.96-0.98 observed on conference-announcement-style paragraphs) with essentially no heuristic
+support at all. New `_is_hebrew_dominant(text)` (cheap char-ratio check over the Hebrew Unicode
+block, not a `langdetect` model call, to avoid an extra dependency/failure mode on the hot classify
+path). In `screen()`: when text is Hebrew-dominant *and* `heur.score < 0.2` *and* `l1 >= 0.8`
+("hebrew_only_l1_signal"), the existing `heur.score >= 0.8 or l1 >= 0.95` immediate-quarantine
+shortcut is suppressed for that call, forcing a fall-through to the L2 judge instead -- so an
+L1-only verdict on such text can no longer resolve to "quarantined" by itself. If L2 also can't be
+reached (LLM down), the result is "clean" (logged as `guard_hebrew_l2_unavailable_no_flag`) rather
+than the old conservative "flagged" default, per the finding's explicit "never flagged by
+themselves" requirement -- a real attack with any heuristic support (`heur.score >= 0.2`) is
+unaffected by any of this and still quarantines exactly as before. Tests:
+`tests/security/test_guard_hebrew_fp.py` -- 3 benign Hebrew paragraphs (mocked `_l1_score=0.97`,
+`_l2_judge` returning `injection: False`) resolve to `clean`/layer `l2`, never `flagged`; the
+L2-unavailable case also never resolves to `flagged`/`quarantined`; 2 Hebrew attacks -- one with
+heuristic support (exfil URL + the existing `multilingual_he` keyword pattern) quarantines directly
+without even calling the mocked L2, one with no heuristic signal at all but high L1 is forced
+through L2 and quarantines there.
+
+**Q2-8 (P3) -- `PUT /api/llm/settings` token check (`agent/eoa/api/routes/llm.py`).** One-line
+additive: imports and calls `eoa.api.routes.settings._require_token(x_eoa_token)` (same optional
+`EOA_API_TOKEN`/`X-EOA-Token` shared-secret gate as `PUT /api/settings/{name}`) with a new
+`X-EOA-Token` header parameter on the route -- this endpoint edits `config.yaml` just as directly
+as the generic settings editor and had been missing the check. `GET /api/llm/providers` is
+unaffected (matching the generic settings route's own GET-is-never-gated contract). Tests:
+`TestLlmSettingsRouteRequiresToken` in `tests/unit/test_llm_settings_api.py` (401 with no/wrong
+token when `EOA_API_TOKEN` is set, 200 with the right token, 200 when the env var is unset, GET
+unaffected either way).
+
+**Q2-9 (P3) -- global request body-size limit + `question` field bounds.**
+`agent/eoa/api/app.py` gains `BodySizeLimitMiddleware` (a `BaseHTTPMiddleware`; default cap 1 MB,
+registered globally via `app.add_middleware`), rejecting an oversized request with a 413 in the
+app's own `{"error": {...}}` envelope -- checks `Content-Length` up front when present, and
+otherwise polices the byte count incrementally as the body streams in, aborting as soon as the cap
+is crossed. The consumed bytes are stashed directly into `request._body` (matching exactly what
+Starlette's own `Request.body()` does internally) rather than handed to `call_next` some other
+way: `BaseHTTPMiddleware` wraps `request` in Starlette's `_CachedRequest`, whose downstream replay
+logic keys off that exact attribute -- consuming `request.stream()` by hand without also setting
+`_body` (an easy mistake) would silently replay an *empty* body to every route handler instead.
+`PUT /api/settings/{name}` keeps its own tighter, pre-existing 256 KB cap (`eoa.api.services.
+MAX_SETTINGS_BYTES`, surfaced as a validation error in that route's existing `{"ok": false,
+"errors": [...]}` shape, not an HTTP error status) underneath this new global one. `AskRequest.
+question` (`agent/eoa/api/routes/ask.py`) and `NewInvestigationRequest.question`
+(`agent/eoa/api/routes/investigations.py`) both gained `Field(..., max_length=...)` (4000 and 2000
+respectively) so an oversized question can't force an unreasonably large retrieval/LLM-context or
+deep-search payload -- a 422 via the existing `RequestValidationError` handler, no new error shape.
+Tests: `tests/unit/test_app_middleware.py` (413 via both the `Content-Length` precheck and the
+streamed-byte-count path; a normal-sized body still reaches the route handler with its exact
+content intact -- the regression this attribute-based approach specifically guards against; the
+settings-layer's own tighter cap still fires underneath the new global one; `/api/ask`'s SSE
+streaming response is unaffected by the new middleware in the stack) and
+`tests/unit/test_ask_investigations_max_length.py` (422 one character over the limit, 200 exactly
+at it, for both routes).
+
+**Q2-10 (P3) -- generic 500 handler never leaks `str(exc)` (`agent/eoa/api/app.py`).** The
+catch-all `@app.exception_handler(Exception)` now generates a `uuid.uuid4().hex` error id, logs the
+full `traceback.format_exc()` server-side keyed by that id, and returns only a generic Hebrew
+message (`"שגיאה פנימית בשרת"`) plus `{"error_id": ...}` in `detail` -- never the exception's own
+text. Tests: `tests/unit/test_app_middleware.py` (`TestClient(app, raise_server_exceptions=False)`
+-- needed because Starlette's `ServerErrorMiddleware` always re-raises the original exception after
+successfully producing its response, specifically so `raise_server_exceptions=True`, TestClient's
+default, can surface it during test development; these tests want the response itself instead): a
+secret-looking exception message never appears in the client-visible body, `error_id` is a 32-char
+uuid4 hex, and the same id plus the exception's message *do* appear in the server-side log output
+(this app's `structlog` logger renders straight to stdout by default -- no `structlog.configure()`
+routing it through stdlib `logging` at the API layer, so the test asserts against captured stdout
+via `capsys` rather than `caplog`).
+
+**Live sanity (2026-09-06, throwaway `uvicorn` on port 8766, env from `runtime/eoa.env`, stopped
+after):** `POST /api/investigations` with a body over the new 1 MB cap -> `413`
+`{"error":{"code":"payload_too_large",...}}`. `POST /api/ask` with `question` one character over
+4000 -> `422` `validation_error`. Forcing an unhandled exception via a monkeypatched service (no
+dedicated "always-500" test route exists in this app) confirmed the same generic-message +
+`error_id` shape end-to-end against the real server, matching the `TestClient`-level tests above.
+
+**Left for a follow-up, explicitly out of scope for this pass:** Q2-1 (DB password rotation,
+requires a restart -- not performed per this task's "do not restart live processes" constraint),
+Q2-2 (already fixed 2026-09-06 by a prior pass, per the finding doc), Q2-7 (ntfy.sh public-topic
+mirroring -- pending the user's own phone registration to the private 8091 topic), Q2-11 (`shutil.
+which` PATH-hijacking, theoretical/low severity), Q2-12 (agy CLI argument visibility in Task
+Manager, a known `agy` limitation per ADR-005).
+
+## Link/data-quality QA r1 fixes: Q4-1/Q4-9 (2026-09-06)
+
+**Q4-1 (P1) -- Cloudflare/WAF challenge pages stored as if they were real articles.** 13 Safran
+pressroom items (and, discovered live during the repair, 3 war.gov "Access Denied" items) had the
+block/challenge page's own body text sitting in `title`/`clean_text` with `security_status='clean'`
+-- no signal anything was wrong, so they flowed straight into classify/analyze/RAG as if they were
+real content.
+
+- `detect_block_page(html, text, status)` (`agent/eoa/fetch/sanitize.py`): true if a known
+  Cloudflare/WAF/anti-bot phrase ("this website is using a security service", "attention
+  required", "just a moment", "access denied", "enable javascript and cookies", "client
+  challenge", "you don't have permission to access", "ray id:", ...) appears in the raw HTML or
+  extracted text (checked regardless of HTTP status -- a JS challenge commonly answers 200), OR
+  the status is 403/429/503 *and* the extracted text is under 500 chars.
+- `agent/eoa/fetch/service.py`'s `_store_item` now runs this check before `insert_item`: a
+  detected block page is stored with `clean_text=NULL`, `title=` the neutral Hebrew note
+  `"הפריט אינו נגיש: האתר חוסם גישה אוטומטית"` (mirrors the existing convention for a fetch
+  failure item), and `security_status='blocked'` (via `update_item_fields`, applied only on a
+  genuinely new row -- never downgrades an existing good row on a merely-transient re-fetch
+  block, since `insert_item`'s `ON CONFLICT` path never touches title/clean_text either).
+  `page.status` is threaded from `fetch_page` through `_fetch_and_store` into `_store_item` for
+  this. Every ingest source (not just Safran) is covered.
+- Migration `0013_items_blocked_status.py`: widens `items.security_status`'s CHECK constraint to
+  add `'blocked'` alongside the existing `clean`/`flagged`/`quarantined`.
+- `agent/eoa/pipeline/{analyze,classify,dedup,triage}.py`: the four call sites that excluded only
+  `security_status == 'quarantined'` (Python-side dict checks, not SQL) now also exclude
+  `'blocked'`. Every other `security_status = 'clean'` SQL filter (`dedup.py`, `tech_watch.py`,
+  `report/*.py`, `export/obsidian.py`, `api/services.py`) already excludes `'blocked'` for free.
+- `scripts/repair_blocked_items.py` (new): scans every item's stored title/clean_text for the same
+  phrases (dry-run by default, `--apply` to write) and retroactively applies the same fix. Run
+  live 2026-09-06: 16 items matched (13 Safran + 3 war.gov "Access Denied") and were repaired.
+- `config/sources.yaml`'s `safran_press` entry: documents that every `/pressroom/<slug>` article
+  page is Cloudflare-blocked (verified live) with no working RSS alternative found (`/rss.xml`,
+  `/pressroom/rss.xml`, `/pressroom.xml`, `/news/rss.xml` all 403 with the same challenge body);
+  the listing page itself (used for link discovery) is unaffected.
+
+**Q4-3 (P2) -- Aviation Week feed dead, no RSS alternative exists.** Live-verified 2026-09-06:
+`aviationweek.com/rss.xml` still returns 200 but its entries are a jumbled mix of old dates
+(2016/2017/2025, newest 2026-03-31) -- not a live chronological feed. Checked and ruled out:
+`awn-rss/feed` (200 but the HTML app shell, 0 parseable entries), `/rss/awn.xml`,
+`/defense-space/{rss.xml,feed}`, `/category/defense-space/feed`, `/feeds/defense-space`, `/rss/all`
+(all 404), `/sitemap.xml` (real sitemap index but every page's `lastmod` is 2024-08-08), and no
+`<link rel="alternate" type="application/rss+xml">` on the site's own listing page. `aviation_week_
+defense` is now `enabled: false` in `config/sources.yaml` with the above documented in a comment.
+
+**Q4-2 (P2) -- Shephard Media and Janes: robots.txt blocks the only paths that exist.**
+Live-verified 2026-09-06 (not bypassed): Shephard's robots.txt disallows exactly `/news/feed/` --
+the site's *only* advertised feed (`<link rel="alternate" ...>` on `/news/` points at that same
+URL); `/feed/` 404s and the sitemap files are sitemaps, not feeds. Janes' robots.txt ends with a
+catch-all `User-agent: *` / `Disallow:/` that blocks the entire site for any UA not individually
+named above it (our `eo-analyst/0.1` fetcher is none of Googlebot/GPTBot/ClaudeBot/etc.). Both
+`shephard_media` and `janes_news` are now `enabled: false` in `config/sources.yaml`, each with a
+comment quoting the exact robots.txt lines; Janes' comment points at the existing
+`agent/eoa/mcp_servers/janes.py` (Janes Data Services API wrapper, A8) as the intended path forward
+now that the user has an API subscription.
+- `enabled: bool = True` added to the `Source` pydantic model (`agent/eoa/fetch/sources_loader.py`)
+  -- this field didn't exist before (a source could only be removed from the YAML entirely, or left
+  in and left failing every run, which is exactly the observed `fail_count=37`/0 items ever for
+  both). `run_ingest` (`agent/eoa/fetch/service.py`) now filters `load_sources()` to `s.enabled`
+  before upserting/fetching, so a disabled source neither gets fetched nor accumulates `fail_count`.
+
+**Q4-9 (P2) -- title extraction picked the wrong element (Globes lead paragraph, Leonardo sidebar
+widget).** `choose_title`'s (`agent/eoa/fetch/sanitize.py`) old rung 1 was `clean_title` --
+trafilatura/readability's own title guess -- which is exactly what produced both systematic
+wrong-title bugs: Globes' article lead paragraph (item 67 et al., truncated to 120 chars by the
+120-char cap applied at the time) and Leonardo's "Financial highlights" sidebar-widget heading
+(12 different press-release items, all otherwise distinct). Both pages' actual `<title>`/og:title
+tags were correct the whole time.
+
+- New priority: `og:title` meta -> `<title>` tag (trailing `" - Site Name"`/`" | Site Name"`
+  suffix stripped via `_strip_site_suffix`, which only strips when the trailing segment is short
+  (<=40 chars) and shorter than what precedes it, so a headline that legitimately contains
+  `" - "` mid-sentence is left alone) -> `<h1>` -> `clean_title` (now a lower-priority fallback
+  for pages with none of the above) -> RSS entry title -> first line of `clean_text` -> URL path
+  segment -> `"Untitled"`. `_extract_title_from_html` was split into `_extract_og_title`,
+  `_extract_title_tag`, `_extract_h1_title`.
+- Every rung is rejected via `_is_implausible_title` if it is over 200 chars (never a real
+  headline) or matches a small literal set of known site-boilerplate phrases
+  (`_GENERIC_TITLE_PHRASES`: "financial highlights", "home", "press release(s)", "media hub", ...)
+  before falling through to the next rung.
+- `tests/unit/test_title_fallback.py`: the two tests asserting the old `clean_title`-first order
+  were updated to assert the new HTML-tag-first order (and a new test added confirming
+  `clean_title` still wins when the page has no structured tags at all); new tests added
+  reproducing both real Q4-9 bugs verbatim, plus coverage for `<h1>` extraction, suffix-stripping,
+  and the oversized/generic rejection.
+- `scripts/repair_titles.py` extended with a `--requality` mode (`--apply` to write; dry-run by
+  default): flags an item's title as a repair candidate if it's a known-bad/oversized string, is
+  reused 3+ times across different items from the same source (Leonardo's exact signature -- a
+  per-domain repetition check that needs DB history `choose_title` itself doesn't have), or is
+  *exactly* 120 characters (the old truncation-cap boundary -- Globes' specific signature; an
+  organic headline essentially never lands on that exact boundary). Since the DB never retained
+  the original HTML (`raw_text` is already tag-stripped), each candidate is live re-fetched and
+  run through today's `choose_title`. Run live 2026-09-06: 42 items changed (29 Globes, 12
+  Leonardo, 1 Hensoldt caught by the same 120-char signature) -- 5 examples logged by the script's
+  own report; a second dry-run afterward found 0 remaining candidates.
+
+### Tests
+`tests/unit/test_title_fallback.py` (38 tests, all passing) and the existing
+`tests/unit/test_*fetch*`/`test_*sanitize*`/`test_*service*` suites (119 tests) all pass after
+these changes; `ruff check` clean on every touched file.
+
+**Known pre-existing issue, not touched by this pass:** two migrations independently claimed
+revision `0011` (`0011_bd_territory.py` and `0011_tech_watch.py`) before this session started --
+resolved by a concurrent agent renumbering `bd_territory` to `0014` (after this pass's `0013`)
+while this work was in flight; `alembic heads` now shows a single clean head.
 
