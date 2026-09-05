@@ -1081,9 +1081,11 @@ Query.
    fixed. Full keyboard set on `window` (ignored while a form field has
    focus): `J`/`K` or arrows move selection, `1`-`4` set
    red/orange/yellow/archive via `POST /api/items/{id}/feedback`, `X`
-   archives, `Enter` opens the detail panel, `I` opens a deep-search via
-   `POST /api/items/{id}/investigate`, `A` adds the item to the chat
-   context. "למה הציון?" reveals `triage_reason`. `?open=<id>` deep-links
+   archives, `Enter` navigates to the full item page (`/items/:id`,
+   `ItemDetailPage`), `Space` or double-clicking a row opens the inline
+   quick-preview detail panel without navigating away, `I` opens a
+   deep-search via `POST /api/items/{id}/investigate`, `A` adds the item
+   to the chat context, `O` opens the source in a new tab. "למה הציון?" reveals `triage_reason`. `?open=<id>` deep-links
    into a specific item (used by Morning/Ask citation clicks).
 3. `EntitiesListPage` (`/entities`) + `EntityDetailPage`
    (`/entities/:id`) — search list; detail page has a Cytoscape graph
@@ -2894,9 +2896,9 @@ not the deployed `web` container — see the "not yet deployed" caveat below.
   (`02-feed.spec.ts` → "keyboard: Space opens the inline quick-preview
   panel…") and a new unit test (`FeedPage.test.tsx`). **Note**: the
   `src/pages/FeedPage.tsx` §"Screens" prose above (`## Web UI` → item 2)
-  still says "`Enter` opens the detail panel" — that line predates the
-  Enter→full-page-navigation change and is now stale; left as-is here
-  since this section is append-only, flagging it for a future edit pass.
+  used to say "`Enter` opens the detail panel"; it has since been updated
+  to describe the current behaviour (Enter → `/items/:id`, Space or
+  double-click → inline quick preview).
 - **Local e2e verification setup**: `web/vite.config.ts` gained a
   `preview.proxy` block (`vite preview` does **not** inherit
   `server.proxy` — without this, `npm run preview` 404s every `/api`
