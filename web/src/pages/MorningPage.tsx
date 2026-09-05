@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useOutletContext } from "react-router-dom";
 import {
@@ -19,8 +19,10 @@ import { LoadingState, ErrorState, EmptyState } from "@/components/states";
 import { ReportBody } from "@/components/reports/ReportBody";
 import { NowRunningStrip } from "@/components/morning/NowRunningStrip";
 import { PipelineReplayTimeline } from "@/components/morning/PipelineReplayTimeline";
+import { ErrorsDrawer } from "@/components/morning/ErrorsDrawer";
 import { formatDateTime } from "@/lib/time";
 import { DEADLINE_SOON_DAYS, daysLeft } from "@/lib/tenders";
+import { useI18n } from "@/i18n";
 import type { StatusSocketState } from "@/hooks/useStatusSocket";
 
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -45,14 +47,16 @@ function TendersTile() {
     return !Number.isNaN(created) && Date.now() - created <= ONE_WEEK_MS;
   }).length;
 
+  const { t } = useI18n();
   return (
     <Link
       to="/tenders"
+      aria-label={t("morning.tendersAria")}
       className="flex flex-col gap-1 rounded-lg border border-border bg-bg-raised p-3 shadow-panel hover:border-border-strong"
     >
       <div className="flex items-center gap-2 text-xs text-fg-dim">
         <Gavel size={14} aria-hidden="true" />
-        <span>מכרזים ו-RFI/RFP</span>
+        <span>{t("morning.tendersLabel")}</span>
       </div>
       <p className="font-mono font-tabular text-2xl font-semibold text-fg">{openSoonCount}</p>
       <p className="text-xs text-fg-dim">
@@ -63,11 +67,13 @@ function TendersTile() {
 }
 
 export function MorningPage() {
+  const { t } = useI18n();
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["morning"],
     queryFn: () => api.getMorning(),
   });
   const queryClient = useQueryClient();
+  const [errorsDrawerOpen, setErrorsDrawerOpen] = useState(false);
   // Provided by AppShell via <Outlet context={...}> (a single shared
   // WS /ws/status connection) -- undefined when this page renders without
   // that ancestor (e.g. a unit test rendering <MorningPage /> directly), in
@@ -89,45 +95,70 @@ export function MorningPage() {
   const headlines = data.headlines ?? [];
   const open_points = data.open_points ?? [];
   const night_summary = data.night_summary ?? ZERO_NIGHT_SUMMARY;
+  const recent_errors = data.recent_errors ?? [];
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-6">
       {pipeline && <NowRunningStrip pipeline={pipeline} />}
-      {pipeline?.last_run && <PipelineReplayTimeline lastRun={pipeline.last_run} />}
+      {pipeline?.last_run && (
+        <div id="pipeline-replay">
+          <PipelineReplayTimeline lastRun={pipeline.last_run} />
+        </div>
+      )}
+
+      {errorsDrawerOpen && (
+        <ErrorsDrawer errors={recent_errors} onClose={() => setErrorsDrawerOpen(false)} />
+      )}
 
       <section aria-label="מכרזים ו-RFI/RFP" className="grid grid-cols-1 sm:grid-cols-2">
         <TendersTile />
       </section>
 
+      {/* U2 (docs/REVIEW_2026-09-05.md): every KPI card is clickable and navigates to (or, for
+          errors, opens a drawer onto) its filtered view — they used to go nowhere. */}
       <section aria-label="תקציר הלילה" className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile label="פריטים שנקלטו" value={night_summary.items_ingested} icon={<Inbox size={14} />} />
         <StatTile
-          label="קריטי"
+          label={t("morning.itemsIngestedLabel")}
+          value={night_summary.items_ingested}
+          icon={<Inbox size={14} />}
+          to="/feed?since=24h"
+          ariaLabel={t("morning.itemsIngestedAria")}
+        />
+        <StatTile
+          label={t("morning.redLabel")}
           value={night_summary.red}
           tone="danger"
           icon={<AlertOctagon size={14} />}
+          to="/feed?level=red"
+          ariaLabel={t("morning.redAria")}
         />
         <StatTile
-          label="חשוב"
+          label={t("morning.orangeLabel")}
           value={night_summary.orange}
           tone="warn"
           icon={<TriangleAlert size={14} />}
+          to="/feed?level=orange"
+          ariaLabel={t("morning.orangeAria")}
         />
         <StatTile
-          label="חקירות עומק"
+          label={t("morning.deepSearchesLabel")}
           value={night_summary.deep_searches}
           icon={<Search size={14} />}
+          to="/investigations"
+          ariaLabel={t("morning.deepSearchesAria")}
         />
         <StatTile
-          label="משך ריצה"
-          value={`${night_summary.duration_min} דק׳`}
+          label={t("morning.durationLabel")}
+          value={night_summary.duration_min != null ? `${night_summary.duration_min} דק׳` : "—"}
           icon={<Clock size={14} />}
         />
         <StatTile
-          label="שגיאות"
+          label={t("morning.errorsLabel")}
           value={night_summary.errors}
           tone={night_summary.errors > 0 ? "danger" : "default"}
           icon={<FileWarning size={14} />}
+          onClick={() => setErrorsDrawerOpen(true)}
+          ariaLabel={t("morning.errorsAria")}
         />
       </section>
 
@@ -152,11 +183,7 @@ export function MorningPage() {
               </a>
             </div>
           </div>
-          <ReportBody
-            html={report.html ?? ""}
-            itemsIncluded={report.items_included ?? []}
-            className="report-body text-sm text-fg"
-          />
+          <ReportBody html={report.html ?? ""} reportId={report.id} className="report-body text-sm text-fg" />
         </section>
       ) : (
         <EmptyState title="אין ריצה לילית עדיין" description="הריצה הלילית טרם הושלמה." />

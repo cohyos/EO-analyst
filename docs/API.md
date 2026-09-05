@@ -38,9 +38,20 @@ Auth: none (bound to localhost / Tailscale only). CORS: allow `http://localhost:
 - `WS /ws/investigations/{job_id}` → live log lines
 
 ## Ask the analyst (RAG chat)
-- `POST /api/ask` body `{"question": str, "context_item_ids": [int], "context_entity_ids": [int], "history": [{"role","content"}]}`
-  → streams SSE (`text/event-stream`) events: `{"type":"token","text"}`, `{"type":"citations","items":[{"n","item_id","title","url"}]}`, `{"type":"done"}`.
-  Answer text uses `[n]` markers that map to `citations`.
+- `POST /api/ask` body `{"question": str, "context_item_ids": [int], "context_entity_ids": [int], "history": [{"role","content"}], "provider": str|null}`
+  → streams SSE (`text/event-stream`) events: `{"type":"citations","items":[{"n","item_id","title","url"}]}`,
+  `{"type":"meta","provider","model"}` (U8, sent once before the first token), `{"type":"token","text"}`, `{"type":"done"}`.
+  Answer text uses `[n]` markers that map to `citations`. `provider` (U8, docs/adr/005-cloud-llm-cli.md):
+  `"ollama"` | `"agy[:<model>]"` | `"claude[:<model>]"` | `"codex[:<model>]"`; omit/`null` for the server default
+  (`llm_providers.interactive_default`). Always forced back to `"ollama"` for anything running in the
+  orchestrator/job-queue process (night pipeline, "run now", "investigate") regardless of this field.
+
+## LLM providers (U8, docs/adr/005-cloud-llm-cli.md)
+- `GET /api/llm/providers` → `{"allow_cloud", "interactive_default", "providers": [{"id","label","kind":"local"|"cloud","available","models":[str]}]}`
+  (`ollama` always first/present; the three cloud entries are omitted entirely when `allow_cloud` is `false`)
+- `PUT /api/llm/settings` body `{"interactive_default"?: str, "allow_cloud"?: bool, "revision"?: str}` (or `If-Match` header)
+  → `{"ok", "errors": [], "revision"}`; 409 with `{"current_revision"}` on a stale revision, same
+  optimistic-concurrency contract as `PUT /api/settings/config` (this patches the same file's `llm_providers` keys).
 
 ## Conferences (phase C, stub returns [] for now)
 - `GET /api/conferences?from=&to=` ; `GET /api/conferences/ical` (text/calendar)

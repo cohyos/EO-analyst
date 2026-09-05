@@ -17,6 +17,10 @@ export const mockNightSummary: NightSummary = {
   deep_searches: 2,
   duration_min: 47,
   errors: 1,
+  state: "done",
+  tenders_open: 6,
+  tenders_unknown: 1,
+  new_forecasts: 3,
 };
 
 export const mockHeadlines: Headline[] = [
@@ -230,12 +234,26 @@ export function mockStatus(): StatusResponse {
         finished_at: "2026-09-04T06:05:00+03:00",
         state: "done",
         stages: {
-          fetch: { events: 12, last_event: "done", last_at: "2026-09-03T20:12:00+03:00" },
-          dedup: { events: 4, last_event: "done", last_at: "2026-09-03T20:18:00+03:00" },
-          classify: { events: 40, last_event: "done", last_at: "2026-09-03T20:55:00+03:00" },
-          triage: { events: 40, last_event: "done", last_at: "2026-09-03T21:20:00+03:00" },
-          deep_search: { events: 2, last_event: "skipped", last_at: "2026-09-03T21:25:00+03:00" },
-          report: { events: 1, last_event: "done", last_at: "2026-09-04T06:05:00+03:00" },
+          ingest: { status: "done", minutes: 12, last_event: "done", last_at: "2026-09-03T20:12:00+03:00" },
+          embed_dedup: { status: "done", minutes: 4, last_event: "done", last_at: "2026-09-03T20:18:00+03:00" },
+          classify: { status: "done", minutes: 37, last_event: "done", last_at: "2026-09-03T20:55:00+03:00" },
+          triage: { status: "done", minutes: 25, last_event: "done", last_at: "2026-09-03T21:20:00+03:00" },
+          deep_search: {
+            status: "skipped",
+            minutes: null,
+            last_event: "skipped_no_time",
+            last_at: "2026-09-03T21:25:00+03:00",
+          },
+          analyze: { status: "done", minutes: 40, last_event: "done", last_at: "2026-09-04T05:50:00+03:00" },
+          tenders: { status: "done", minutes: 3, last_event: "done", last_at: "2026-09-04T05:55:00+03:00" },
+          report: { status: "done", minutes: 8, last_event: "done", last_at: "2026-09-04T06:03:00+03:00" },
+          export_backup: {
+            status: "done",
+            minutes: 1,
+            last_event: "done",
+            last_at: "2026-09-04T06:04:00+03:00",
+          },
+          notify: { status: "done", minutes: 0.5, last_event: "done", last_at: "2026-09-04T06:05:00+03:00" },
         },
       },
     },

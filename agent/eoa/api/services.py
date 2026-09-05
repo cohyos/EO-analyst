@@ -150,10 +150,12 @@ def _next_night_window_start() -> dt.datetime:
     return candidate
 
 
-# Mirrors `eoa.orchestrator.jobs.STAGE_ORDER` exactly (kept as a local copy, not an import: that
-# module sets `EOA_PIPELINE=1` as an import-time side effect, which forces every LLM call in the
-# importing process onto the local `ollama` provider -- a guarantee that must hold only for the
-# orchestrator/worker process, never for the API process this module also runs in).
+# The pipeline order `eoa.orchestrator.jobs.run_daily()` actually runs stages in -- note this is
+# NOT literally `jobs.STAGE_ORDER` (that list omits "dedup_xlang", which `run_daily()` runs as a
+# real stage between "classify" and "triage" regardless). Kept as a local copy, not an import of
+# that module: it sets `EOA_PIPELINE`/routes cloud-LLM behavior as an import-time/process-wide
+# side effect meant to hold only for the orchestrator/worker process, never for the API process
+# this module also runs in.
 _DAILY_RUN_STAGE_ORDER = (
     "ingest",
     "embed_dedup",

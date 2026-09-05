@@ -15,7 +15,9 @@ import type {
   LlmProvidersResponse,
   LlmSettingsPutResponse,
   MorningResponse,
+  ReportCitationsResponse,
   ReportDetail,
+  RunsCurrentResponse,
   SettingsGetResponse,
   SettingsName,
   SettingsPutResponse,
@@ -106,6 +108,15 @@ export const mockApi: ApiClient = {
       headlines: mockHeadlines,
       open_points: mockReport.open_points,
       night_summary: mockNightSummary,
+      recent_errors: [
+        {
+          id: 1,
+          job_id: mockJobs[0]?.id ?? null,
+          stage: "ingest",
+          message: "FetchError: timeout מול 2/40 מקורות RSS",
+          at: "2026-09-04T01:12:00+03:00",
+        },
+      ],
     }),
 
   getItems: async (query: ItemsQuery) => {
@@ -443,6 +454,20 @@ export const mockApi: ApiClient = {
     }
     return delay(undefined);
   },
+  getRunsCurrent: async (): Promise<RunsCurrentResponse> =>
+    delay({
+      current: {
+        job_id: 8842,
+        kind: "deep_search",
+        state: "running",
+        current_stage: null,
+        stages: [],
+        started_at: "2026-09-04T09:05:02+03:00",
+        elapsed_min: 4.2,
+        eta_min: null,
+      },
+      other_running: [],
+    }),
 
   getReports: async (kind?: string, _limit = 30) =>
     delay(
@@ -468,6 +493,19 @@ export const mockApi: ApiClient = {
     return delay(mockReport);
   },
   getReportFileUrl: (id, fmt) => `#mock-report-${id}.${fmt}`,
+  getReportCitations: async (id: number): Promise<ReportCitationsResponse> =>
+    delay({
+      report_id: id,
+      citations: Object.fromEntries(
+        mockReport.items_included.map((itemId, i) => {
+          const item = findMockItem(itemId);
+          return [
+            String(i + 1),
+            { item_id: itemId, url: item?.url ?? null, title: item?.title ?? null },
+          ];
+        }),
+      ),
+    }),
 
   getSettings: async (name: SettingsName): Promise<SettingsGetResponse> =>
     delay({ yaml: settingsStore[name] ?? "" }),
@@ -490,7 +528,7 @@ export const mockApi: ApiClient = {
           label: "Gemini (Antigravity CLI)",
           kind: "cloud",
           available: llmSettingsStore.allow_cloud,
-          models: ["gemini-3.5-flash", "gemini-3.1-pro-preview"],
+          models: ["gemini-3.8-flash-medium", "gemini-3.1-pro-high"],
         },
         {
           id: "claude",

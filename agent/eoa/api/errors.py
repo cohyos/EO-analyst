@@ -32,3 +32,8 @@ def bad_request(message_he: str, detail: Any = None) -> APIError:
 
 def not_implemented(message_he: str = "התכונה טרם מומשה", detail: Any = None) -> APIError:
     return APIError(501, "not_implemented", message_he, detail)
+
+
+def conflict(message_he: str, detail: Any = None) -> APIError:
+    """HTTP 409 -- the request conflicts with current state (e.g. U4/F17: a run is already active)."""
+    return APIError(409, "conflict", message_he, detail)

@@ -24,15 +24,22 @@ from eoa.notify import ntfy
 
 log = structlog.get_logger(__name__)
 
-# U8 (docs/adr/005-cloud-llm-cli.md): every LLM call made anywhere in this process runs inside
-# the orchestrator/worker -- the night pipeline (daily/weekly/monthly/ingest cron jobs, built
-# below) *and* every job the API enqueues onto the same queue, including a manually triggered
-# "investigate" (POST /api/items/{id}/investigate -> a `deep_search` job) or "run now"
-# (POST /api/run). `eoa.llm.ollama_client.chat`/`chat_structured` check this before honoring
-# any `provider` argument or the user's `llm_providers.interactive_default` setting, and force
-# "ollama" whenever it is set -- this is the single choke point that keeps a cloud-model choice
-# from ever leaking into an automated or queued run. `setdefault` so a test harness that needs
-# to opt a single process out can still set the env var before importing this module.
+# U8 (docs/adr/005-cloud-llm-cli.md + "Revision 2026-09-06" section): every LLM call made
+# anywhere in this process runs inside the orchestrator/worker -- the night pipeline
+# (daily/weekly/monthly/ingest cron jobs, built below) *and* every job the API enqueues onto the
+# same queue, including a manually triggered "investigate" (POST /api/items/{id}/investigate ->
+# a `deep_search` job) or "run now" (POST /api/run). `eoa.llm.ollama_client.chat`/
+# `chat_structured` check this env var before honoring a role-based (no explicit `provider`
+# argument) call -- previously this forced "ollama" outright; as of Revision 2026-09-06 it
+# instead routes the call through `llm_providers.mode`'s configured fallback chain for that role
+# (`Settings.effective_chain`), which is *itself* always terminated by a local Ollama entry
+# (enforced even if the user's own chain configuration omits one). In "local" mode (the default)
+# this is unchanged from before: every role resolves to just Ollama. In "cloud" mode, this is the
+# single choke point that makes the global switch apply to the pipeline AND to a manual
+# "investigate"/"run now" (both queued jobs, run inside this same process) uniformly -- and the
+# one place that guarantees a cloud choice can never leave a run without a local answer if every
+# cloud leg fails. `setdefault` so a test harness that needs to opt a single process out can
+# still set the env var before importing this module.
 os.environ.setdefault("EOA_PIPELINE", "1")
 
 

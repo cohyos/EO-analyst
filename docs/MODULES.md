@@ -4021,3 +4021,161 @@ after `npm --prefix web run build`.
 deep_search.py, triage.py, jobs.py, routes/investigations.py) -- they are not live yet, only
 verified against a throwaway second instance on port 8766 (stopped after verification) and via
 unit tests. The frontend changes are already live (this session ran `npm --prefix web run build`).
+
+## Morning KPIs/timeline, run-now idempotency, report citations (F12/U2/U3/U4/F17, 2026-09-06)
+
+Four items from `docs/REVIEW_2026-09-05.md`, implemented together (all touch the Morning screen's
+data surface and/or `POST /api/run`).
+
+**F12 -- Morning KPIs scoped to the wrong window; timeline showed a heartbeat-row count, not an
+outcome.** `eoa.api.services._night_summary()` previously computed every count over the last
+completed `daily_run` job's own `[started_at, finished_at]` window -- a run lasting 10 minutes only
+"saw" items ingested in those 10 minutes, so "פריטים שנקלטו 5" while 50 came in that day was the
+window being wrong, not the count. Rewritten around a new `_kpi_window(hours=24)` helper (a plain
+`[now-24h, now]` range): `items_ingested`, `classified` (now "in-scope" too -- `'classify' = ANY
+(processed_stages)` AND `level NOT IN ('archive','unclassified')`, so an item binned out-of-scope
+no longer inflates the KPI), `red`, `orange`, `deep_searches`, and a new `errors` count (`run_log`
+rows with `event ILIKE '%error%'` in the 24h window, no longer tied to one job's own log rows) are
+all rolling last-24h DB aggregates. `duration_min`/`state` are the one exception, kept describing
+*the last completed* `daily_run` specifically (there's no 24h-window meaning for "how long did the
+run take"); `duration_min` is `None` (not `0` or a stale value) when no run has completed yet --
+the frontend renders `"—"` for that case, matching the e2e "every stat value is a dash or a number"
+assertion in `01-morning.spec.ts`. Additive new keys: `tenders_open`/`tenders_unknown` (plain
+`count(*)` from `tenders` by `status`) and `new_forecasts` (`tender_forecasts` created in the 24h
+window).
+
+`_last_run()`'s per-stage `stages` dict previously reported `{events, last_event, last_at}` --
+`events` a raw count of that stage's `run_log` rows, which is why the replay timeline showed "2"
+for nearly every stage (one `start` heartbeat + one `done` heartbeat) regardless of what the stage
+actually did. New `_stage_timeline_from_log(job_id, job_state)` walks a job's `run_log` rows in
+order and derives each stage's real outcome from its own *terminal* event
+(`done`->`"done"`, `error`->`"failed"`, `deferred`/`deadline`/`skipped_no_time`/
+`skipped_circuit_open`->`"skipped"`; a stage whose only event is `start` is `"running"` while the
+job itself is still running, else it's folded to `"done"` once the job has ended one way or
+another) plus that event's `minutes` (from `detail`). `_last_run()` now always emits one entry per
+stage in `_DAILY_RUN_STAGE_ORDER` (a *local* copy of the order `run_daily()` actually runs stages
+in -- not literally `jobs.STAGE_ORDER`, which omits "dedup_xlang" even though `run_daily()` runs it
+as a real stage; and not an import of that module, because importing it sets process-wide
+LLM-provider/`EOA_PIPELINE` behavior as an import-time side effect that
+must hold only for the orchestrator/worker process, never the API process this module also runs
+in) so a stage the run never reached shows explicitly as `"pending"` instead of silently
+disappearing. `eoa.orchestrator.jobs._run_stage`'s `deferred`/`deadline`/`error` branches now pass
+`minutes` into their heartbeat call too (previously only the `done` branch did) -- additive, no
+behavior change beyond one more `run_log.detail` key.
+
+Frontend: `web/src/types/api.ts` `PipelineStageInfo` is now `{status, minutes, last_event,
+last_at}` (`StageStatus = "pending"|"running"|"done"|"failed"|"skipped"`); `NightSummary` gained
+`state`/`tenders_open`/`tenders_unknown`/`new_forecasts`, and `duration_min: number | null`.
+`web/src/lib/pipelineTimeline.ts`'s `buildStageTimeline` no longer fabricates a per-stage start
+time from the previous stage's `last_at` (there was never a real per-stage timestamp to base that
+on) -- it just orders stages canonically and passes each one's own `status`/`minutes` through.
+`PipelineReplayTimeline.tsx` renders segment widths proportional to `minutes` (a small fixed
+minimum for stages with none, so a skipped/pending sliver doesn't visually lie about taking equal
+time) and both the bar and the legend show the stage's Hebrew status label and minutes.
+
+**U2 -- KPI cards go nowhere.** `StatTile` (`web/src/components/StatTile.tsx`) gained optional
+`to`/`onClick`/`ariaLabel` props: passing `to` renders the tile as a `react-router` `<Link>`
+(native `role="link"` semantics), `onClick` as a `<button>`; passing neither keeps the original
+plain, non-interactive `<div>` (existing callers with no interaction, e.g. `EntitiesPage`'s KPI
+row, are unaffected). `MorningPage.tsx`: items -> `/feed?since=24h`, red -> `/feed?level=red`,
+orange -> `/feed?level=orange`, deep searches -> `/investigations`, errors -> opens
+`web/src/components/morning/ErrorsDrawer.tsx` (new) listing `recent_errors` (stage/time/message,
+new `MorningResponse.recent_errors` field backed by `services.recent_errors()` -- the last 24h of
+`run_log` error rows, message extracted from `detail.error`/`detail.message`, never the raw
+traceback) with a link back to the replay timeline (`/morning#pipeline-replay`, a new anchor id on
+that section). The tenders tile's existing `/tenders` link and its own live-query-based "open
+within N days" count (a *different*, intentionally-kept metric -- see its dedicated unit test) are
+unchanged. `web/src/pages/FeedPage.tsx` gained a small additive `sinceFilter` state + a
+`useEffect` that reads `?level=`/`?since=24h` from the URL once on arrival and applies them
+(`since=24h` is converted client-side into an ISO cutoff timestamp -- the backend's `since` param
+is a raw SQL comparison value, not a relative-time keyword) -- previously neither query param did
+anything at all.
+
+**U3 -- citation `[n]` markers only show a tooltip, never navigate.** New
+`GET /api/reports/{id}/citations` (`services.report_citations`, `routes/reports.py`) returns
+`n -> {item_id, url, title}` for *every* citation number a report's rendered HTML/exec-summary can
+contain -- not just `reports.items_included` (a 1-based index into that array was the old,
+incomplete convention `web/src/lib/reportHtml.ts` used). The registry `eoa.report.daily
+._extend_citation_registry` builds is never persisted beyond the rendered HTML, so entries beyond
+`items_included` (added only because a business event referenced an item outside that list) are
+recovered by parsing the "נספח מקורות" (sources appendix) table
+`eoa.report.docx_builder.render_html` always emits (`<tr id="src-{n}">` per registry entry, with
+title/source/date/link cells) out of the report's already-persisted `path_html` -- a resolved URL
+is then matched back to `items.url` to recover `item_id` when possible; when it can't be matched
+(the item since deleted, or the entry was never a real item to begin with), the citation still
+returns with a `url` and `item_id: null`, and the frontend opens that URL directly instead. No
+change to `report/daily.py`/`docx_builder.py` was needed. `web/src/lib/reportHtml.ts`'s
+`linkifyReportCitations` now takes the citations map (not `itemsIncluded`) and emits
+`data-item-id="..."` (resolves) or `data-url="..." target="_blank"` (doesn't); `ReportBody.tsx`
+fetches `GET /api/reports/{id}/citations` (new required `reportId` prop, replacing `itemsIncluded`
+on both call sites, `MorningPage.tsx` and `ReportsPage.tsx`) and its click handler intercepts a
+`data-item-id` click to `navigate()` (`/items/:id`) for a real SPA transition instead of the raw
+`<a>`'s full-page reload; a `data-url`-only citation's raw `<a target="_blank">` is left to the
+browser. `web/src/components/CitationText.tsx` (the Ask/Investigation-answer citation chip) now
+navigates to `/items/:id` itself by default (`useNavigate()`) when clicked and no `onOpenItem`
+callback is given -- previously a caller that passed no callback (e.g.
+`InvestigationDetailPage.tsx`) silently swallowed every click -- and opens the citation's `url` in
+a new tab when it has no `item_id` at all (previously did nothing).
+
+**U4/F17 -- "הרץ עכשיו" has no feedback and got double-clicked into two overlapping runs; a
+`deep_search` job (#70) ran invisibly.** `services.enqueue_run(scope, mode)` is now idempotent: a
+new `_RUN_IDEMPOTENCY_GROUPS` maps a requested kind to every kind that counts as "the same
+effective run already in flight" (`daily_run` also blocked by a `weekly_run` in progress, since
+`run_weekly` performs the full daily pipeline first -- see `_daily_run_already_covered`); if an
+equivalent job is `queued`/`running`, raises `RunAlreadyActive(job)` instead of enqueueing a
+second one. `POST /api/run` (`routes/jobs.py`) maps that to a new `conflict()` helper in
+`eoa.api.errors` (HTTP 409, `detail: {job_id, kind, state}`). New `GET /api/runs/current`
+(`routes/runs.py`, `services.current_run_progress`) returns the active primary run (`daily_run`/
+`weekly_run`/`monthly_run`/`report`/`ingest`/`tender_scan`/`conference_scan`) with per-stage
+progress (reusing `_stage_timeline_from_log`) and an ETA (`_eta_minutes`: sums, per not-yet-
+finished stage, the average of that stage's last 5 `run_log.detail->>'minutes'` values when there
+is history, else its `config.yaml` `stages:` budget), plus every *other* concurrently-`running`
+job (F17's exact repro: a `deep_search` job a separate worker claimed independently, invisible
+anywhere in the old UI).
+
+Frontend: `web/src/components/shell/RunNowButton.tsx` (new, extracted out of `TopBar.tsx`, which
+now only renders `<RunNowButton />` where the old inline button/mutation lived) polls
+`GET /api/runs/current` via a new `web/src/hooks/useRunsCurrent.ts` (4s while something is active,
+15s idle). The button shows a spinner + "בתור.../רץ..." while a run it thinks of as active exists;
+clicking it while busy opens a progress popover (per-stage checklist with an icon per
+`StageStatus`, elapsed/ETA, any other running job, a link back to the Morning replay timeline)
+instead of re-submitting. A 409 from `postRun` (checked via the newly-exported `ApiError` class
+from `web/src/api/real.ts`, code `"conflict"`) shows the same popover instead of a silent failure.
+Completion is detected by watching `current` transition from present to absent, then resolving the
+tracked job's final state via `GET /api/jobs` (`done`/`partial`/`failed`) to fire a dismissible
+toast (`"הריצה הסתיימה · דוח חדש זמין"` with a `/morning` link on `done`, invalidating the
+`["morning"]`/`["reports"]` queries; a plainer message on `partial`/`failed`). `StatusStrip.tsx`
+gained a small additive `role="status"` badge (pulsing dot + `pipeline.current_job.kind`) next to
+the existing stage badge, driven by the WS `/ws/status` push it already receives -- no new query
+was added there, to avoid requiring a `QueryClientProvider` in `StatusStrip.test.tsx`, which renders
+the component in isolation. New i18n keys under `topBar.runNow*`/`topBar.backgroundRunIndicator`
+and a new `morning.*` section in `web/src/i18n/dictionaries/{he,en}.ts` back every new interactive
+string (per-file convention: existing static Hebrew text on these screens was left as-is, only the
+new interactive elements were migrated to `t()`).
+
+**Verified live** (throwaway second uvicorn on port 8766, `runtime/eoa.env`, stopped after):
+`GET /api/runs/current`, `GET /api/reports/{id}/citations`, the new `pipeline.last_run.stages`
+shape, and the `POST /api/run` -> 409 idempotency path all matched the real DB. One unintended side
+effect from that verification: a real `daily_run` (eco mode, job id 72) was triggered on the live
+system to test the 409 path; it ran ingest (117 real items) + export_backup successfully, then
+classify/triage/analyze/tenders all failed immediately with `ImportError: cannot import name
+'ProviderUnavailable' from 'eoa.errors'` (report never built, so no duplicate report was
+persisted) -- a **pre-existing bug** unrelated to this task's changes, surfaced by accident. Worth
+a follow-up: every host-mode `daily_run` currently fails past ingest for this reason.
+
+**Tests**: `tests/unit/test_morning_kpis.py`, `tests/unit/test_report_citations.py`,
+`tests/unit/test_run_now_idempotent.py` (all new, DB mocked via `services._fetchone`/`_fetchall`
+monkeypatching) plus extended `web/src/lib/pipelineTimeline.test.ts`,
+`web/src/pages/MorningPage.test.tsx`, `web/src/pages/FeedPage.test.tsx`,
+`web/src/components/CitationText.test.tsx`, `web/src/components/shell/StatusStrip.test.tsx`.
+`PYTHONPATH=agent python -m pytest tests/unit -q` (994 passed) and `ruff check` clean on every
+changed file; `npm --prefix web run {lint,test,build}` all green (111 vitest tests / 16 files).
+
+**Left for the user**: restart the port-8765 uvicorn to pick up the backend changes (services.py,
+errors.py, routes/{reports,jobs,runs}.py, orchestrator/jobs.py) -- not live yet there, only
+verified via the throwaway 8766 instance and unit tests; the frontend changes are already live
+(this session ran `npm --prefix web run build`). The `ProviderUnavailable` import bug above blocks
+every eco/host-mode `daily_run` past ingest and is worth fixing separately. e2e specs
+`01-morning`/`11-status-strip`/`09-reports` were run against the live 8765 app after the frontend
+build (backend-dependent assertions necessarily still reflect the *old* backend there) -- see the
+session's final report for the pass/fail breakdown.

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/cn";
 
 /** Structural shape shared by AskCitation and InvestigationSource. */
@@ -10,8 +11,13 @@ export interface CitationLike {
 }
 
 /**
- * Renders assistant text containing `[n]` markers, turning each into a
- * hover chip that shows the cited source and links to the item.
+ * Renders assistant text containing `[n]` markers, turning each into a hover chip that shows the
+ * cited source and, on click, navigates to it (U3, docs/REVIEW_2026-09-05.md): `/items/:id` when
+ * the citation resolves to a real item, otherwise the source URL in a new tab. Previously this
+ * only showed a tooltip -- `onOpenItem` (when a caller still passes one, e.g. to open an inline
+ * panel instead of a full navigation) took over for the item_id case, but nothing handled a
+ * citation with no item_id at all, and callers that passed no `onOpenItem` (silently swallowing
+ * every click) were exactly the "click does nothing" bug this fixes.
  */
 export function CitationText({
   text,
@@ -51,6 +57,17 @@ function CitationChip({
   onOpenItem?: (itemId: number) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+
+  function handleClick() {
+    if (citation.item_id != null) {
+      if (onOpenItem) onOpenItem(citation.item_id);
+      else navigate(`/items/${citation.item_id}`);
+    } else if (citation.url) {
+      window.open(citation.url, "_blank", "noopener,noreferrer");
+    }
+  }
+
   return (
     <span className="relative inline-block">
       <button
@@ -64,9 +81,7 @@ function CitationChip({
         onMouseLeave={() => setOpen(false)}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
-        onClick={() => {
-          if (citation.item_id != null) onOpenItem?.(citation.item_id);
-        }}
+        onClick={handleClick}
         aria-describedby={`citation-${n}-tip`}
       >
         {n}

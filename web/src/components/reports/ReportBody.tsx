@@ -1,4 +1,5 @@
 import { useState, type MouseEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api";
 import { linkifyReportCitations } from "@/lib/reportHtml";
@@ -40,23 +41,32 @@ function CitationHoverCard({ itemId, x, y }: HoverState) {
 }
 
 /**
- * Renders server-produced report HTML (docs/API.md `GET /api/reports/{id}`)
- * with `[n]` citation markers turned into hover chips that resolve the
- * cited item's title/source/date via `GET /api/items/{id}` on demand
- * (deferred item from the previous pass — the markers previously linked out
- * with only a static "פתח פריט מקור n" title attribute, no source preview).
+ * Renders server-produced report HTML (docs/API.md `GET /api/reports/{id}`) with `[n]` citation
+ * markers turned into hover chips that resolve the cited source (via `GET
+ * /api/reports/{id}/citations`) and, on click (U3, docs/REVIEW_2026-09-05.md), navigate to
+ * `/items/:id` when the citation resolves to a real item, or open the source URL in a new tab
+ * otherwise -- previously every `[n]` only ever linked to `/feed?open=...`, and citations added
+ * only because a business event referenced an item outside `items_included` weren't linked at all.
  */
 export function ReportBody({
   html,
-  itemsIncluded,
+  reportId,
   className = "report-body text-sm",
 }: {
   html: string;
-  itemsIncluded: number[];
+  reportId: number;
   className?: string;
 }) {
   const [hover, setHover] = useState<HoverState | null>(null);
-  const linked = linkifyReportCitations(html, itemsIncluded);
+  const navigate = useNavigate();
+
+  const { data: citationsData } = useQuery({
+    queryKey: ["report-citations", reportId],
+    queryFn: () => api.getReportCitations(reportId),
+    staleTime: 5 * 60_000,
+  });
+
+  const linked = linkifyReportCitations(html, citationsData?.citations);
 
   function citationTargetOf(e: MouseEvent<HTMLDivElement>): HTMLElement | null {
     return (e.target as HTMLElement).closest<HTMLElement>(".eo-citation");
@@ -77,8 +87,26 @@ export function ReportBody({
     setHover(null);
   }
 
+  function handleClick(e: MouseEvent<HTMLDivElement>) {
+    const target = citationTargetOf(e);
+    if (!target) return;
+    const idAttr = target.getAttribute("data-item-id");
+    if (idAttr) {
+      // Intercept for a smooth in-app transition instead of the raw <a>'s full page reload —
+      // the server HTML has no knowledge of the SPA router.
+      e.preventDefault();
+      navigate(`/items/${idAttr}`);
+    }
+    // No data-item-id but a data-url: let the raw `<a target="_blank">` handle it natively.
+  }
+
   return (
-    <div className="relative" onMouseOver={handleMouseOver} onMouseOut={handleMouseOut}>
+    <div
+      className="relative"
+      onMouseOver={handleMouseOver}
+      onMouseOut={handleMouseOut}
+      onClick={handleClick}
+    >
       <div className={className} dangerouslySetInnerHTML={{ __html: linked }} />
       {hover && <CitationHoverCard {...hover} />}
     </div>

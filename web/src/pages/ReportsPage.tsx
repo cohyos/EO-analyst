@@ -128,7 +128,7 @@ export function ReportsPage() {
                   </a>
                 </div>
               </div>
-              <ReportBody html={processed.html} itemsIncluded={detailQuery.data.items_included ?? []} />
+              <ReportBody html={processed.html} reportId={detailQuery.data.id} />
             </article>
             {processed.toc.length > 0 && (
               <nav aria-label="תוכן עניינים" className="hidden w-48 shrink-0 lg:block">

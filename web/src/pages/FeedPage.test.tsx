@@ -50,13 +50,13 @@ function makeItem(id: number, title: string): ItemCard {
 
 const ITEMS = [makeItem(1, "פריט ראשון"), makeItem(2, "פריט שני"), makeItem(3, "פריט שלישי")];
 
-function renderFeedPage() {
+function renderFeedPage(initialPath = "/feed") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/feed"]}>
+      <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
           <Route path="/feed" element={<FeedPage />} />
           <Route path="/items/:id" element={<div data-testid="items-page-stub">item page</div>} />
@@ -184,5 +184,33 @@ describe("FeedPage keyboard behavior", () => {
     fireEvent.keyDown(search, { key: "j" });
 
     expect(screen.getByTestId("feed-row-1")).toHaveAttribute("data-selected", "true");
+  });
+});
+
+describe("FeedPage deep-link query params (U2)", () => {
+  it("applies ?level=red from the Morning KPI card as an active level filter", async () => {
+    renderFeedPage("/feed?level=red");
+    await waitFor(() =>
+      expect(getItems).toHaveBeenCalledWith(expect.objectContaining({ level: ["red"] })),
+    );
+  });
+
+  it("applies ?since=24h from the Morning KPI card as an ISO cutoff roughly 24h ago", async () => {
+    renderFeedPage("/feed?since=24h");
+    await waitFor(() => expect(getItems).toHaveBeenCalled());
+    const call = getItems.mock.calls.find((c) => c[0]?.since);
+    expect(call).toBeTruthy();
+    const sinceMs = new Date(call![0].since as string).getTime();
+    const ageMs = Date.now() - sinceMs;
+    expect(ageMs).toBeGreaterThan(23 * 60 * 60 * 1000);
+    expect(ageMs).toBeLessThan(25 * 60 * 60 * 1000);
+  });
+
+  it("plain /feed (no query params) passes no since/level filter", async () => {
+    renderFeedPage("/feed");
+    await waitFor(() => expect(getItems).toHaveBeenCalled());
+    const lastCall = getItems.mock.calls.at(-1)![0];
+    expect(lastCall.since).toBeUndefined();
+    expect(lastCall.level).toBeUndefined();
   });
 });

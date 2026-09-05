@@ -1,4 +1,5 @@
-"""`GET /api/reports`, `/api/reports/{id}`, `/api/reports/{id}/file`, `GET /api/morning`."""
+"""`GET /api/reports`, `/api/reports/{id}`, `/api/reports/{id}/file`,
+`/api/reports/{id}/citations`, `GET /api/morning`."""
 
 from __future__ import annotations
 
@@ -30,6 +31,14 @@ def download_report_file(report_id: int, fmt: str = Query(..., pattern="^(docx|m
     if path is None:
         raise not_found("הקובץ לא נמצא")
     return FileResponse(path, filename=path.name)
+
+
+@router.get("/reports/{report_id}/citations")
+def get_report_citations(report_id: int) -> dict:
+    citations = services.report_citations(report_id)
+    if citations is None:
+        raise not_found("הדוח לא נמצא")
+    return citations
 
 
 @router.get("/morning")

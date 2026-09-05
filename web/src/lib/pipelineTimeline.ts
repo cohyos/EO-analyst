@@ -1,18 +1,21 @@
 // Pure helpers for the Morning page's night-run replay timeline, built from
-// `pipeline.last_run.stages` (GET /api/status / WS /ws/status). The backend
-// doesn't expose a per-stage start time (only `events`/`last_event`/`last_at`
-// per stage — agent/eoa/api/services.py `pipeline_status()`), so this module
-// approximates each stage's start as the previous stage's `last_at` (or the
-// run's own `started_at` for the first stage). That's an honest
-// approximation, not a real per-stage timestamp.
-import type { PipelineLastRun, PipelineStageInfo } from "@/types/api";
+// `pipeline.last_run.stages` (GET /api/status / WS /ws/status,
+// agent/eoa/api/services.py `_last_run`/`_stage_timeline_from_log`).
+//
+// F12 (docs/REVIEW_2026-09-05.md): each stage's `status`/`minutes` now come from that stage's own
+// terminal `run_log` event, not a raw heartbeat-row count (which was almost always exactly "2" --
+// one `start` + one `done` -- regardless of what the stage actually did).
+import type { PipelineLastRun, PipelineStageInfo, StageStatus } from "@/types/api";
 
-// Mirrors agent/eoa/orchestrator/jobs.py STAGE_ORDER exactly, so a real
-// backend payload replays in true pipeline order.
+// The pipeline order agent/eoa/orchestrator/jobs.py's run_daily() actually runs stages in (NOT
+// literally its STAGE_ORDER constant, which omits "dedup_xlang" even though run_daily() runs it
+// as a real stage between "classify" and "triage" -- see agent/eoa/api/services.py's matching
+// `_DAILY_RUN_STAGE_ORDER` comment), so a real backend payload replays in true pipeline order.
 export const STAGE_ORDER = [
   "ingest",
   "embed_dedup",
   "classify",
+  "dedup_xlang",
   "triage",
   "deep_search",
   "analyze",
@@ -26,6 +29,7 @@ export const STAGE_LABEL_HE: Record<string, string> = {
   ingest: "קליטה",
   embed_dedup: "הטמעה וזיהוי כפילויות",
   classify: "סיווג",
+  dedup_xlang: "זיהוי כפילויות רב-לשוני",
   triage: "מיון (Triage)",
   deep_search: "חיפוש עומק",
   analyze: "ניתוח",
@@ -38,23 +42,14 @@ export const STAGE_LABEL_HE: Record<string, string> = {
 export interface StageTimelineEntry {
   key: string;
   label: string;
-  start: string | null;
-  end: string | null;
-  info: PipelineStageInfo;
-}
-
-function toTime(iso: string | null | undefined): number {
-  if (!iso) return 0;
-  const t = new Date(iso).getTime();
-  return Number.isNaN(t) ? 0 : t;
+  status: StageStatus;
+  minutes: number | null;
 }
 
 /**
- * Orders `last_run.stages` into a replay timeline: known stages first (in
- * canonical pipeline order), then any unrecognized stage keys appended,
- * sorted by their own `last_at` so the sequence still reads chronologically.
- * Each entry's `start` is the previous entry's `end` (or the run's
- * `started_at` for the first entry) -- see module docstring.
+ * Orders `last_run.stages` into a replay timeline: known stages first (in canonical pipeline
+ * order, including any that never ran this time -- they show as "pending"), then any
+ * unrecognized stage key appended alphabetically.
  */
 export function buildStageTimeline(
   lastRun: PipelineLastRun | null | undefined,
@@ -63,43 +58,34 @@ export function buildStageTimeline(
   const stages = lastRun.stages ?? {};
   const stageKeys = Object.keys(stages);
   const known = STAGE_ORDER.filter((k) => stageKeys.includes(k));
-  const extra = stageKeys
-    .filter((k) => !(STAGE_ORDER as readonly string[]).includes(k))
-    .sort((a, b) => toTime(stages[a]?.last_at) - toTime(stages[b]?.last_at));
+  const extra = stageKeys.filter((k) => !(STAGE_ORDER as readonly string[]).includes(k)).sort();
   const orderedKeys = [...known, ...extra];
 
-  let prevEnd: string | null = lastRun.started_at ?? null;
   return orderedKeys.map((key) => {
-    const info = stages[key];
-    const entry: StageTimelineEntry = {
+    const info: PipelineStageInfo = stages[key];
+    return {
       key,
       label: STAGE_LABEL_HE[key] ?? key,
-      start: prevEnd,
-      end: info.last_at,
-      info,
+      status: info.status,
+      minutes: info.minutes,
     };
-    prevEnd = info.last_at ?? prevEnd;
-    return entry;
   });
 }
 
-export type StageEventColor = "done" | "skipped" | "error" | "running" | "unknown";
+export const STAGE_STATUS_LABEL_HE: Record<StageStatus, string> = {
+  pending: "טרם הגיע",
+  running: "בתהליך",
+  done: "הושלם",
+  failed: "נכשל",
+  skipped: "דולג",
+};
 
-export function stageEventColor(lastEvent: string | null | undefined): StageEventColor {
-  if (!lastEvent) return "unknown";
-  if (lastEvent === "done") return "done";
-  if (lastEvent === "skipped") return "skipped";
-  if (lastEvent === "error" || lastEvent === "failed") return "error";
-  if (lastEvent === "running") return "running";
-  return "unknown";
-}
-
-export const STAGE_COLOR_BAR_CLASS: Record<StageEventColor, string> = {
+export const STAGE_COLOR_BAR_CLASS: Record<StageStatus, string> = {
   done: "bg-ok",
   skipped: "bg-level-archive",
-  error: "bg-danger",
+  failed: "bg-danger",
   running: "bg-accent",
-  unknown: "bg-border-strong",
+  pending: "bg-border-strong",
 };
 
 export const STAGE_COLOR_DOT_CLASS = STAGE_COLOR_BAR_CLASS;

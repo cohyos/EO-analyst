@@ -81,6 +81,39 @@ describe("StatusStrip", () => {
     expect(screen.queryByRole("dialog", { name: "היסטוריית משאבים" })).not.toBeInTheDocument();
   });
 
+  it("shows a persistent background-run indicator when a job is running (U4/F17)", () => {
+    const withRunningJob: StatusResponse = {
+      ...baseStatus,
+      pipeline: {
+        ...baseStatus.pipeline,
+        current_job: {
+          id: 70,
+          kind: "deep_search",
+          payload: null,
+          state: "running",
+          priority: 0,
+          attempts: 1,
+          not_before: null,
+          started_at: "2026-09-04T09:59:00+03:00",
+          finished_at: null,
+          error: null,
+          result: null,
+          created_at: "2026-09-04T09:59:00+03:00",
+          updated_at: "2026-09-04T09:59:00+03:00",
+        },
+      },
+    };
+    const state: StatusSocketState = { status: withRunningJob, connected: true, logs: [] };
+    render(<StatusStrip state={state} />);
+    expect(screen.getByText("deep_search")).toBeInTheDocument();
+  });
+
+  it("shows no background-run indicator when nothing is running", () => {
+    const state: StatusSocketState = { status: baseStatus, connected: true, logs: [] };
+    render(<StatusStrip state={state} />);
+    expect(screen.queryByText("deep_search")).not.toBeInTheDocument();
+  });
+
   it("flags a loaded model that is partially offloaded to CPU", () => {
     const withOffload: StatusResponse = {
       ...baseStatus,

@@ -1,10 +1,8 @@
 import { useLocation } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Command, Languages, Moon, Play, Search, Sun } from "lucide-react";
-import { useState } from "react";
+import { Command, Languages, Moon, Search, Sun } from "lucide-react";
 import { usePageTitle } from "./nav";
+import { RunNowButton } from "./RunNowButton";
 import { useUiStore } from "@/store/uiStore";
-import { api } from "@/api";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/i18n";
 
@@ -15,18 +13,6 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
   const toggleTheme = useUiStore((s) => s.toggleTheme);
   const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
   const { t, locale, toggleLocale } = useI18n();
-  const queryClient = useQueryClient();
-  const [justRan, setJustRan] = useState(false);
-
-  const runNow = useMutation({
-    mutationFn: () => api.postRun("daily", "full"),
-    onSuccess: () => {
-      setJustRan(true);
-      queryClient.invalidateQueries({ queryKey: ["status"] });
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      setTimeout(() => setJustRan(false), 2500);
-    },
-  });
 
   return (
     <header className="flex h-14 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-bg-raised px-2 sm:gap-3 sm:px-4">
@@ -63,18 +49,7 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
         </span>
       </button>
 
-      <button
-        type="button"
-        onClick={() => runNow.mutate()}
-        disabled={runNow.isPending}
-        aria-label={runNow.isPending ? t("topBar.runningAriaLabel") : justRan ? t("topBar.ranSuccessfullyAriaLabel") : t("topBar.runNow")}
-        className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60 sm:px-3"
-      >
-        <Play size={14} aria-hidden="true" />
-        <span className="hidden sm:inline">
-          {runNow.isPending ? t("topBar.running") : justRan ? t("topBar.ranSuccessfully") : t("topBar.runNow")}
-        </span>
-      </button>
+      <RunNowButton />
 
       <button
         type="button"

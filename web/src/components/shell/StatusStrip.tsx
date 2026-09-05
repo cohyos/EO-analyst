@@ -4,6 +4,7 @@ import type { StatusSocketState } from "@/hooks/useStatusSocket";
 import { useResourceHistory } from "@/hooks/useResourceHistory";
 import { ResourceHistoryDrawer } from "./ResourceHistoryDrawer";
 import { cn } from "@/lib/cn";
+import { useI18n } from "@/i18n";
 
 function mbToGb(mb: number): string {
   return (mb / 1024).toFixed(1);
@@ -48,6 +49,7 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
   const { status, connected } = state;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const history = useResourceHistory(status);
+  const { t } = useI18n();
 
   if (!connected || !status) {
     return (
@@ -128,6 +130,22 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
         {pipeline.stage && (
           <span className="rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg">
             {pipeline.stage}
+          </span>
+        )}
+        {pipeline.current_job && (
+          // U4/F17: a persistent indicator that *something* is running in the background even
+          // when the analyst isn't on the Morning page watching the run-now popover — F17's
+          // repro was a job nobody could see anywhere in the UI.
+          <span
+            role="status"
+            className="flex shrink-0 items-center gap-1 rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg"
+            title={t("topBar.backgroundRunIndicator", { kind: pipeline.current_job.kind })}
+          >
+            <span className="relative flex h-1.5 w-1.5" aria-hidden="true">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent-fg opacity-75" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent-fg" />
+            </span>
+            {pipeline.current_job.kind}
           </span>
         )}
 

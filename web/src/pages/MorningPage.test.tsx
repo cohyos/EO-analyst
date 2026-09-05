@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import type { MorningResponse } from "@/types/api";
@@ -86,6 +86,7 @@ describe("MorningPage against an empty/partial backend", () => {
         tenders_unknown: 0,
         new_forecasts: 0,
       },
+      recent_errors: [],
     };
     getMorning.mockResolvedValue(payload);
 
@@ -123,6 +124,7 @@ describe("MorningPage against an empty/partial backend", () => {
         tenders_unknown: 0,
         new_forecasts: 0,
       },
+      recent_errors: [],
     };
     getMorning.mockResolvedValue(payload);
 
@@ -130,6 +132,86 @@ describe("MorningPage against an empty/partial backend", () => {
 
     expect(await screen.findByText("כותרת בדיקה")).toBeInTheDocument();
     expect(screen.getByText("שאלה פתוחה?")).toBeInTheDocument();
+  });
+});
+
+describe("MorningPage KPI cards (U2)", () => {
+  const fullNightSummary = {
+    items_ingested: 50,
+    classified: 45,
+    red: 6,
+    orange: 11,
+    deep_searches: 2,
+    duration_min: null,
+    errors: 3,
+    state: "done" as const,
+    tenders_open: 6,
+    tenders_unknown: 1,
+    new_forecasts: 3,
+  };
+
+  it("every KPI card navigates to its filtered view", async () => {
+    getMorning.mockResolvedValue({
+      report: null,
+      headlines: [],
+      open_points: [],
+      night_summary: fullNightSummary,
+      recent_errors: [],
+    });
+    renderMorningPage();
+    await screen.findByText("50");
+
+    expect(screen.getByRole("link", { name: /פריטים שנקלטו/ })).toHaveAttribute(
+      "href",
+      "/feed?since=24h",
+    );
+    expect(screen.getByRole("link", { name: /פריטים קריטיים/ })).toHaveAttribute(
+      "href",
+      "/feed?level=red",
+    );
+    expect(screen.getByRole("link", { name: /פריטים חשובים/ })).toHaveAttribute(
+      "href",
+      "/feed?level=orange",
+    );
+    expect(screen.getByRole("link", { name: /חקירות עומק/ })).toHaveAttribute(
+      "href",
+      "/investigations",
+    );
+  });
+
+  it("the errors card opens a drawer listing recent run_log errors, with a close control", async () => {
+    getMorning.mockResolvedValue({
+      report: null,
+      headlines: [],
+      open_points: [],
+      night_summary: fullNightSummary,
+      recent_errors: [
+        { id: 1, job_id: 9, stage: "ingest", message: "FetchError: timeout", at: "2026-09-04T01:12:00+03:00" },
+      ],
+    });
+    renderMorningPage();
+    await screen.findByText("50");
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /שגיאות/ }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("FetchError: timeout")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "סגור" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows a dash (not a crash) for run duration when no run has completed yet (F12)", async () => {
+    getMorning.mockResolvedValue({
+      report: null,
+      headlines: [],
+      open_points: [],
+      night_summary: fullNightSummary, // duration_min: null
+      recent_errors: [],
+    });
+    renderMorningPage();
+    await screen.findByText("50");
+    expect(screen.getByText("—")).toBeInTheDocument();
   });
 });
 

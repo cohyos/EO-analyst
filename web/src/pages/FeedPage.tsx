@@ -45,6 +45,10 @@ export function FeedPage() {
   });
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [openItemId, setOpenItemId] = useState<number | null>(null);
+  // U2 (docs/REVIEW_2026-09-05.md): the Morning "פריטים שנקלטו" KPI card deep-links here as
+  // `?since=24h` — kept as a separate ISO cutoff (not part of `FeedFiltersState`, which mirrors
+  // the visible filter bar) so it doesn't need a UI control of its own.
+  const [sinceFilter, setSinceFilter] = useState<string | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [countryPanelOpen, setCountryPanelOpen] = useState(false);
   const addToChatContext = useUiStore((s) => s.addToChatContext);
@@ -62,12 +66,13 @@ export function FeedPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["items", filters],
+    queryKey: ["items", filters, sinceFilter],
     queryFn: ({ pageParam }) =>
       api.getItems({
         level: filters.levels.length ? filters.levels : undefined,
         domain: filters.domain || undefined,
         q: filters.q || undefined,
+        since: sinceFilter ?? undefined,
         country: filters.countries.length ? filters.countries : undefined,
         group_by: filters.groupByCountry ? "country" : undefined,
         sort: filters.sort,
@@ -124,6 +129,21 @@ export function FeedPage() {
     const openParam = searchParams.get("open");
     if (openParam) {
       setOpenItemId(Number(openParam));
+    }
+  }, [searchParams]);
+
+  // U2: apply the Morning KPI cards' deep-link filters (`?level=red`, `?since=24h`) once, on
+  // arrival — the URL is the trigger, not a permanently-bound control, so later changes made via
+  // the visible filter bar aren't clobbered by this effect re-running (it only reacts to the
+  // search params themselves changing, which a filter-bar edit doesn't touch).
+  useEffect(() => {
+    const levelParam = searchParams.get("level") as TriageLevel | null;
+    const sinceParam = searchParams.get("since");
+    if (levelParam) {
+      setFilters((f) => ({ ...f, levels: [levelParam] }));
+    }
+    if (sinceParam === "24h") {
+      setSinceFilter(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
     }
   }, [searchParams]);
 
