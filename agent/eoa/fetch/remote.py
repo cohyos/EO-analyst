@@ -55,20 +55,20 @@ def run_ingest_remote(since_days: int = 3, timeout_s: float = 25 * 60) -> dict[s
     return _wait_job(job_id, timeout_s, poll_s=5)
 
 
-def assert_public_http_url(url: str) -> None:
-    """SSRF guard: only http/https, no credentials, standard ports, and a public IP after DNS resolution."""
-    parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname:
-        raise FetchError(f"refusing non-http(s) url: {url[:120]}")
-    if parts.username or parts.password:
-        raise FetchError("refusing url with embedded credentials")
-    if parts.port not in (None, 80, 443, 8080, 8443):
-        raise FetchError(f"refusing unusual port {parts.port}")
-    host = parts.hostname
+def _validate_public_ips(host: str) -> set[str]:
+    """Resolve ``host`` and validate every returned address is public.
+
+    Split out of :func:`assert_public_http_url` (Q2-4, 2026-09-06) so callers that
+    need to *pin* a later connection to the addresses that were actually validated
+    -- see ``_fetch_local``'s redirect loop below -- can get that validated set back
+    instead of re-resolving (and thus re-trusting whatever DNS answers on a second,
+    later lookup -- the classic TOCTOU/DNS-rebinding gap).
+    """
     try:
         infos = socket.getaddrinfo(host, None)
     except OSError as exc:
         raise FetchError(f"dns failure for {host}: {exc}") from exc
+    ips: set[str] = set()
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if (
@@ -81,6 +81,25 @@ def assert_public_http_url(url: str) -> None:
             or not ip.is_global  # also rejects CGNAT/Tailscale 100.64.0.0/10 (Q2-2, 2026-09-06)
         ):
             raise FetchError(f"refusing non-public address for {host}: {ip}")
+        ips.add(str(ip))
+    if not ips:
+        raise FetchError(f"dns resolution returned no usable addresses for {host}")
+    return ips
+
+
+def assert_public_http_url(url: str) -> set[str]:
+    """SSRF guard: only http/https, no credentials, standard ports, and a public IP after DNS
+    resolution. Returns the validated IP address set for ``url``'s host (Q2-4) -- most callers
+    ignore the return value, but ``_fetch_local`` uses it to pin a hop's connection to the
+    addresses that were actually checked."""
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise FetchError(f"refusing non-http(s) url: {url[:120]}")
+    if parts.username or parts.password:
+        raise FetchError("refusing url with embedded credentials")
+    if parts.port not in (None, 80, 443, 8080, 8443):
+        raise FetchError(f"refusing unusual port {parts.port}")
+    return _validate_public_ips(parts.hostname)
 
 
 def fetch_remote(url: str, timeout_s: float = 90) -> dict[str, Any]:
@@ -95,13 +114,28 @@ def fetch_remote(url: str, timeout_s: float = 90) -> dict[str, Any]:
 
 
 def _fetch_local(url: str) -> dict[str, Any]:
+    """Fetch ``url`` in-process, closing the Q2-4 TOCTOU/DNS-rebinding gap.
+
+    The old version validated ``url`` once, let `httpx` follow redirects
+    internally (resolving + connecting to each hop with zero SSRF checks in
+    between), and only re-validated the *final* URL after the whole chain had
+    already been fetched -- a malicious/compromised intermediate host, or a
+    same-host DNS answer that changes between the check and the connect,
+    would already have been reached by the time that check ran.
+
+    Now: every redirect hop is re-validated with :func:`assert_public_http_url`
+    *before* it is requested (``fetch_page``'s ``validate_redirect`` hook,
+    ``follow_redirects`` disabled internally whenever that hook is given), and
+    the connection's actual peer address is compared against the validated IP
+    set for that hop (``pin_ips``) -- best-effort where the transport exposes
+    it, see `eoa.fetch.html._server_addr`'s docstring for why this can't be a
+    hard guarantee with a stock `httpx.AsyncClient`.
+    """
     from eoa.fetch.html import fetch_page
     from eoa.fetch.sanitize import extract_clean_text
 
-    assert_public_http_url(url)
-    page = asyncio.run(fetch_page(url))
-    if page.final_url and page.final_url != url:
-        assert_public_http_url(page.final_url)  # redirects are re-validated
+    initial_ips = assert_public_http_url(url)
+    page = asyncio.run(fetch_page(url, validate_redirect=assert_public_http_url, pin_ips=initial_ips))
     clean = extract_clean_text(page.html, url)
     return {
         "url": url,

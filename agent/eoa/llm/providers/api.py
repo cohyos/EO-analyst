@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -32,6 +33,34 @@ from eoa.llm.providers.base import ProviderResult, strip_code_fences
 log = structlog.get_logger(__name__)
 
 _TIMEOUT_S = 120.0
+
+# Q2-3 (2026-09-06): patterns for secrets that must never reach a log line or an
+# exception message surfaced to a caller -- a `key=` query param (the old Gemini
+# auth mechanism, now replaced by the `x-goog-api-key` header below, but still
+# worth scrubbing defensively from any upstream error body that happens to echo
+# the request URL back), raw API key literals (`AIza...`, `sk-...`), and bearer
+# tokens.
+_SECRET_QUERY_PARAM_RE = re.compile(r"(?i)([?&](?:key|api_key|token)=)[^&\s\"']+")
+_SECRET_AIZA_RE = re.compile(r"AIza[0-9A-Za-z_\-]{10,}")
+_SECRET_SK_RE = re.compile(r"sk-[A-Za-z0-9_\-]{10,}")
+_SECRET_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+")
+
+
+def redact_secrets(text: str) -> str:
+    """Scrub API keys/tokens out of text before it is logged or raised (Q2-3).
+
+    Applied in every ``except`` block below that turns an httpx exception or
+    response body into a log line / ``ApiProviderError`` message, so a key
+    leaked via a query string or echoed back verbatim by an upstream error
+    page never lands in ``runtime/*.log`` or a client-visible message.
+    """
+    if not text:
+        return text
+    redacted = _SECRET_QUERY_PARAM_RE.sub(r"\1[REDACTED]", text)
+    redacted = _SECRET_AIZA_RE.sub("[REDACTED]", redacted)
+    redacted = _SECRET_SK_RE.sub("[REDACTED]", redacted)
+    redacted = _SECRET_BEARER_RE.sub(r"\1[REDACTED]", redacted)
+    return redacted
 
 
 class ApiProviderError(CliProviderError):
@@ -176,10 +205,10 @@ class AnthropicProvider:
             r = _call()
         except httpx.HTTPStatusError as exc:
             raise ApiProviderError(
-                f"anthropic API error {exc.response.status_code}: {exc.response.text[:300]}"
+                f"anthropic API error {exc.response.status_code}: {redact_secrets(exc.response.text[:300])}"
             ) from exc
         except httpx.HTTPError as exc:
-            raise ApiProviderError(f"anthropic API request failed: {exc}") from exc
+            raise ApiProviderError(f"anthropic API request failed: {redact_secrets(str(exc))}") from exc
         duration_ms = int((time.monotonic() - t0) * 1000)
         data = r.json()
         content = ""
@@ -234,7 +263,13 @@ class GeminiProvider:
             return static
         try:
             with httpx.Client(timeout=10.0) as c:
-                r = c.get("https://generativelanguage.googleapis.com/v1beta/models", params={"key": key})
+                # Q2-3: key goes in the `x-goog-api-key` header, never a `?key=` query
+                # param -- a query param is far more likely to end up copied into logs,
+                # proxies, or browser history than a header.
+                r = c.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    headers={"x-goog-api-key": key},
+                )
                 r.raise_for_status()
                 names = [
                     m["name"].removeprefix("models/")
@@ -242,8 +277,12 @@ class GeminiProvider:
                     if "generateContent" in (m.get("supportedGenerationMethods") or [])
                 ]
                 return names or static
-        except Exception as exc:  # live listing is best-effort; never break the picker
-            log.warning("gemini_list_models_failed", error=str(exc)[:200])
+        # Q2-3: narrowed from a bare `except Exception` -- only httpx transport/status
+        # errors, a non-JSON body, and an unexpected response shape (missing "name")
+        # are expected failure modes here; anything else should surface, not be
+        # swallowed as "best effort".
+        except (httpx.HTTPError, ValueError, KeyError) as exc:  # live listing is best-effort; never break the picker
+            log.warning("gemini_list_models_failed", error=redact_secrets(str(exc))[:200])
             return static
 
     def chat(
@@ -281,9 +320,11 @@ class GeminiProvider:
         @_retrying()
         def _call() -> httpx.Response:
             with httpx.Client(timeout=timeout_s or _TIMEOUT_S) as c:
+                # Q2-3: `x-goog-api-key` header, not a `?key=` query param -- see
+                # `list_models` above for why.
                 r = c.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent",
-                    params={"key": key},
+                    headers={"x-goog-api-key": key},
                     json=body,
                 )
                 r.raise_for_status()
@@ -293,9 +334,11 @@ class GeminiProvider:
         try:
             r = _call()
         except httpx.HTTPStatusError as exc:
-            raise ApiProviderError(f"gemini API error {exc.response.status_code}: {exc.response.text[:300]}") from exc
+            raise ApiProviderError(
+                f"gemini API error {exc.response.status_code}: {redact_secrets(exc.response.text[:300])}"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise ApiProviderError(f"gemini API request failed: {exc}") from exc
+            raise ApiProviderError(f"gemini API request failed: {redact_secrets(str(exc))}") from exc
         duration_ms = int((time.monotonic() - t0) * 1000)
         data = r.json()
         content = ""
@@ -380,9 +423,11 @@ class OpenAIProvider:
         try:
             r = _call()
         except httpx.HTTPStatusError as exc:
-            raise ApiProviderError(f"openai API error {exc.response.status_code}: {exc.response.text[:300]}") from exc
+            raise ApiProviderError(
+                f"openai API error {exc.response.status_code}: {redact_secrets(exc.response.text[:300])}"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise ApiProviderError(f"openai API request failed: {exc}") from exc
+            raise ApiProviderError(f"openai API request failed: {redact_secrets(str(exc))}") from exc
         duration_ms = int((time.monotonic() - t0) * 1000)
         data = r.json()
         content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "") or ""

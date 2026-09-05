@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 import structlog
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from eoa.api import services
@@ -20,7 +20,9 @@ router = APIRouter(tags=["ask"])
 
 
 class AskRequest(BaseModel):
-    question: str
+    # Q2-9: bounded so an oversized question can't be used to force an
+    # unreasonably large retrieval/LLM-context payload.
+    question: str = Field(..., max_length=4000)
     context_item_ids: list[int] = []
     context_entity_ids: list[int] = []
     history: list[dict[str, str]] = []

@@ -509,3 +509,280 @@ class TestForecastTendersOrchestration:
 
         assert stats.llm_failed == 1
         assert stats.upserted == 1
+
+
+# --------------------------------------------------------------------------
+# Q3-11 (docs/qa/findings_Q3_r1.md): buyer_country derivation
+# --------------------------------------------------------------------------
+
+
+class TestResolveBuyerCountry:
+    def test_known_country_returned_unchanged(self):
+        cand = _candidate(buyer_country="US")
+        with patch("eoa.tenders.forecast._country_from_entities", return_value=None):
+            assert _resolve_buyer_country(cand) == "US"
+
+    def test_unknown_falls_back_to_entities_country(self):
+        cand = _candidate(buyer_country="other")
+        with patch("eoa.tenders.forecast._country_from_entities", return_value="IL"):
+            assert _resolve_buyer_country(cand) == "IL"
+
+    def test_unknown_falls_back_to_trigger_text_mention(self):
+        cand = _candidate(buyer_country="other", trigger_texts=["Air Force of Israel selects new gimbal"])
+        with patch("eoa.tenders.forecast._country_from_entities", return_value=None):
+            assert _resolve_buyer_country(cand) == "IL"
+
+    def test_unknown_falls_back_to_rationale_mention(self):
+        cand = _candidate(buyer_country="other", trigger_texts=["a contract was signed"])
+        with patch("eoa.tenders.forecast._country_from_entities", return_value=None):
+            result = _resolve_buyer_country(cand, rationale_he="החוזה נחתם עבור חיל האוויר של גרמניה [item 10].")
+        assert result == "DE"
+
+    def test_still_unknown_stays_other(self):
+        cand = _candidate(buyer_country="other", trigger_texts=["a contract was signed"])
+        with patch("eoa.tenders.forecast._country_from_entities", return_value=None):
+            result = _resolve_buyer_country(cand, rationale_he="נימוק כללי ללא אזכור מדינה [item 10].")
+        assert result == "other"
+
+
+# --------------------------------------------------------------------------
+# Q3-11: platform-type sanity check
+# --------------------------------------------------------------------------
+
+
+class TestPlatformTypeContradiction:
+    def _all_platforms(self):
+        return load_platform_payloads()
+
+    def test_no_contradiction_for_clean_match(self):
+        cand = _candidate(platform_key="male_uav", trigger_texts=["Reaper UAV delivered to customer"])
+        assert _platform_type_contradiction(cand, self._all_platforms()) is None
+
+    def test_helicopter_wording_contradicts_fixed_wing_uas(self):
+        cand = _candidate(
+            platform_key="male_uav",
+            trigger_texts=["Reaper UAV program compared against an Apache attack helicopter bid"],
+        )
+        contradiction = _platform_type_contradiction(cand, self._all_platforms())
+        assert contradiction is not None
+        assert contradiction.key == "attack_helicopter"
+
+    def test_unmapped_platform_key_never_flagged(self):
+        cand = _candidate(platform_key="c_uas_program", trigger_texts=["Apache attack helicopter also mentioned"])
+        assert _platform_type_contradiction(cand, self._all_platforms()) is None
+
+
+class TestCandidateBuyerCountryNormalizedInBuildCandidates:
+    def test_unrecognized_geography_normalizes_to_other(self):
+        events = [
+            {
+                "event_id": 1,
+                "item_id": 10,
+                "title": "Reaper UAV contract",
+                "item_title": None,
+                "clean_text": None,
+                "summary_he": None,
+                "geography": "Neverland",
+            }
+        ]
+        with patch("eoa.tenders.forecast._watchlist_vendor_names", return_value=set()):
+            candidates = _build_candidates([_platform()], events)
+        assert candidates[0].buyer_country == "other"
+
+    def test_different_spellings_of_same_country_corroborate_one_candidate(self):
+        events = [
+            {
+                "event_id": 1,
+                "item_id": 10,
+                "title": "Reaper UAV contract",
+                "item_title": None,
+                "clean_text": None,
+                "summary_he": None,
+                "geography": "United States",
+            },
+            {
+                "event_id": 2,
+                "item_id": 11,
+                "title": "Second Reaper UAV deployment",
+                "item_title": None,
+                "clean_text": None,
+                "summary_he": None,
+                "geography": "USA",
+            },
+        ]
+        with patch("eoa.tenders.forecast._watchlist_vendor_names", return_value=set()):
+            candidates = _build_candidates([_platform()], events)
+        assert len(candidates) == 1
+        assert candidates[0].buyer_country == "US"
+        assert candidates[0].trigger_event_ids == [1, 2]
+
+
+# --------------------------------------------------------------------------
+# Q3-11: needs_regen
+# --------------------------------------------------------------------------
+
+
+class TestItemIdsFromSources:
+    def test_parses_item_prefixed_entries(self):
+        assert _item_ids_from_sources(["item:10", "item:22"]) == [10, 22]
+
+    def test_ignores_malformed_entries(self):
+        assert _item_ids_from_sources(["item:10", "not-an-item", "item:abc", None]) == [10]
+
+    def test_none_input_returns_empty(self):
+        assert _item_ids_from_sources(None) == []
+
+
+class TestRegenerateFlaggedForecasts:
+    def test_no_flagged_rows_returns_zero(self):
+        with patch("eoa.tenders.forecast._fetchall", return_value=[]):
+            assert _regenerate_flagged_forecasts("resident") == 0
+
+    def test_successful_regen_clears_flag(self):
+        flagged_row = {
+            "id": 5,
+            "platform": 'כטב"ם MALE',
+            "buyer_country": "US",
+            "trigger_event_id": 1,
+            "trigger_item_id": 10,
+            "payload_need": "מטע\"ד",
+            "candidate_vendors": ["Elbit"],
+            "likelihood": 0.4,
+            "window_from": dt.date(2026, 1, 1),
+            "window_to": dt.date(2026, 6, 1),
+            "sources": ["item:10"],
+        }
+
+        def fake_fetchall(query, params=None):
+            if "needs_regen" in query:
+                return [flagged_row]
+            return [{"id": 10, "title": "t", "url": "u", "clean_text": "c", "summary_he": "s"}]
+
+        executed = []
+
+        class _FakeConnCtx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def cursor(self):
+                class _Cur:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *a):
+                        return False
+
+                    def execute(self, q, p=None):
+                        executed.append((q, p))
+
+                return _Cur()
+
+        with (
+            patch("eoa.tenders.forecast._fetchall", side_effect=fake_fetchall),
+            patch("eoa.tenders.forecast._llm_rationale", return_value="נימוק אמיתי [item 10]."),
+            patch("eoa.tenders.forecast.connection", return_value=_FakeConnCtx()),
+        ):
+            regenerated = _regenerate_flagged_forecasts("resident")
+
+        assert regenerated == 1
+        assert any("needs_regen=false" in q for q, _ in executed)
+
+    def test_still_unavailable_leaves_flag(self):
+        flagged_row = {
+            "id": 5,
+            "platform": 'כטב"ם MALE',
+            "buyer_country": "US",
+            "trigger_event_id": 1,
+            "trigger_item_id": 10,
+            "payload_need": "מטע\"ד",
+            "candidate_vendors": [],
+            "likelihood": 0.4,
+            "window_from": dt.date(2026, 1, 1),
+            "window_to": dt.date(2026, 6, 1),
+            "sources": ["item:10"],
+        }
+
+        def fake_fetchall(query, params=None):
+            if "needs_regen" in query:
+                return [flagged_row]
+            return []
+
+        with (
+            patch("eoa.tenders.forecast._fetchall", side_effect=fake_fetchall),
+            patch("eoa.tenders.forecast._llm_rationale", side_effect=ResourceUnavailable("no vram")),
+        ):
+            regenerated = _regenerate_flagged_forecasts("resident")
+
+        assert regenerated == 0
+
+    def test_row_with_no_recoverable_item_ids_skipped(self):
+        flagged_row = {
+            "id": 5,
+            "platform": "x",
+            "buyer_country": "US",
+            "trigger_event_id": None,
+            "trigger_item_id": None,
+            "payload_need": "x",
+            "candidate_vendors": [],
+            "likelihood": 0.4,
+            "window_from": dt.date(2026, 1, 1),
+            "window_to": dt.date(2026, 6, 1),
+            "sources": None,
+        }
+        with patch("eoa.tenders.forecast._fetchall", return_value=[flagged_row]):
+            assert _regenerate_flagged_forecasts("resident") == 0
+
+
+class TestForecastTendersNeedsRegenWiring:
+    def test_fallback_rationale_marks_needs_regen_on_upsert(self):
+        events = [
+            {
+                "event_id": 1,
+                "item_id": 10,
+                "title": "Reaper UAV contract awarded",
+                "item_title": None,
+                "clean_text": None,
+                "summary_he": None,
+                "geography": "US",
+            }
+        ]
+        with (
+            patch("eoa.tenders.forecast._recent_trigger_events", return_value=events),
+            patch("eoa.tenders.forecast._fetchall", return_value=[]),
+            patch("eoa.tenders.forecast._watchlist_vendor_names", return_value=set()),
+            patch("eoa.tenders.forecast._has_prior_history", return_value=False),
+            patch("eoa.tenders.forecast._llm_rationale", side_effect=ResourceUnavailable("no vram")),
+            patch("eoa.tenders.forecast._upsert_forecast", return_value=1) as mock_upsert,
+        ):
+            stats = forecast_tenders()
+
+        assert stats.needs_regen == 1
+        assert mock_upsert.call_args.kwargs.get("needs_regen") is True
+
+    def test_llm_success_does_not_mark_needs_regen(self):
+        events = [
+            {
+                "event_id": 1,
+                "item_id": 10,
+                "title": "Reaper UAV contract awarded",
+                "item_title": None,
+                "clean_text": None,
+                "summary_he": None,
+                "geography": "US",
+            }
+        ]
+        with (
+            patch("eoa.tenders.forecast._recent_trigger_events", return_value=events),
+            patch("eoa.tenders.forecast._fetchall", return_value=[]),
+            patch("eoa.tenders.forecast._watchlist_vendor_names", return_value=set()),
+            patch("eoa.tenders.forecast._has_prior_history", return_value=False),
+            patch("eoa.tenders.forecast._llm_rationale", return_value="נימוק תקין [item 10]."),
+            patch("eoa.tenders.forecast._upsert_forecast", return_value=1) as mock_upsert,
+        ):
+            stats = forecast_tenders()
+
+        assert stats.needs_regen == 0
+        assert mock_upsert.call_args.kwargs.get("needs_regen") is False

@@ -173,6 +173,31 @@ class _PatternSet:
             re.IGNORECASE | re.UNICODE,
         )
 
+        # Embedded tool-call/function-call JSON spoofing (Q2-5, 2026-09-06): fetched
+        # content that carries a fake tool invocation as JSON, hoping a downstream
+        # step will parse and act on it rather than treat it as inert DATA. Matches
+        # the literal JSON key shape (`"tool":`, `"tool_call":`, `"function_call":`)
+        # rather than the bare English words, so normal prose mentioning "the tool"
+        # or "a function call" doesn't trip this.
+        self.json_tool_call_key = re.compile(
+            r'"(?:tool|tool_call|function_call)"\s*:',
+            re.IGNORECASE | re.UNICODE,
+        )
+        self.json_tool_name_action = re.compile(
+            r'"name"\s*:\s*"(?:read|fetch|search)"',
+            re.IGNORECASE | re.UNICODE,
+        )
+        self.json_tool_call_args = re.compile(
+            r'"(?:url|arguments)"\s*:',
+            re.IGNORECASE | re.UNICODE,
+        )
+        self.file_uri_scheme = re.compile(r"file://", re.IGNORECASE | re.UNICODE)
+        self.link_local_metadata_ip = re.compile(r"\b169\.254\.\d{1,3}\.\d{1,3}\b", re.UNICODE)
+        self.json_localhost_reference = re.compile(
+            r'"[^"\n]*(?:localhost|127\.0\.0\.1)[^"\n]*"',
+            re.IGNORECASE | re.UNICODE,
+        )
+
     def find_hits(self, text: str) -> list[tuple[str, float, re.Pattern[str]]]:
         """
         Scan text for all patterns.
@@ -266,6 +291,18 @@ class _PatternSet:
             add("subtle_compliance", 0.65, self.compliance_pressure)
         if self.rating_manipulation.search(text):
             add("subtle_rating", 0.7, self.rating_manipulation)
+
+        # Embedded tool-call/function-call JSON spoofing (Q2-5)
+        if self.json_tool_call_key.search(text):
+            add("json_tool_call_key", 0.85, self.json_tool_call_key)
+        if self.json_tool_name_action.search(text) and self.json_tool_call_args.search(text):
+            add("json_tool_name_with_args", 0.85, self.json_tool_name_action)
+        if self.file_uri_scheme.search(text):
+            add("file_uri_scheme", 0.6, self.file_uri_scheme)
+        if self.link_local_metadata_ip.search(text):
+            add("link_local_metadata_ip", 0.65, self.link_local_metadata_ip)
+        if self.json_localhost_reference.search(text):
+            add("json_localhost_reference", 0.5, self.json_localhost_reference)
 
         return hits
 

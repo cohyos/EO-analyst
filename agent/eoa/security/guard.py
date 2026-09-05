@@ -7,6 +7,7 @@ their raw text to a tool-enabled model. The L2 judge runs with no tools and sees
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,24 @@ log = structlog.get_logger(__name__)
 _L1_LOCK = threading.Lock()
 _L1_PIPE: Any = None
 _L1_FAILED = False
+
+# Q2-6 (2026-09-06): cheap char-ratio Hebrew-dominance check, used to gate the
+# guard's Hebrew-specific L1 false-positive mitigation below. A `langdetect`
+# model call would work too, but this needs no dependency on the hot classify
+# path and no risk of `langdetect`'s own failure modes (it raises on very
+# short/ambiguous text) -- good enough for "is this mostly Hebrew prose".
+_HEBREW_CHAR_RE = re.compile(r"[֐-׿]")
+_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+_HEBREW_DOMINANT_THRESHOLD = 0.5
+
+
+def _is_hebrew_dominant(text: str, threshold: float = _HEBREW_DOMINANT_THRESHOLD) -> bool:
+    """True when Hebrew-script characters make up most of the letters in `text`."""
+    letters = _LETTER_RE.findall(text)
+    if not letters:
+        return False
+    hebrew = sum(1 for ch in letters if _HEBREW_CHAR_RE.match(ch))
+    return (hebrew / len(letters)) >= threshold
 
 
 @dataclass
@@ -283,8 +302,29 @@ def screen(
     if not suspicious:
         return ScreenResult("clean", max(heur.score, l1 or 0.0), "heuristic", heuristics=heur, l1_score=l1)
 
+    # Q2-6: the L1 classifier has measured false positives on benign,
+    # predominantly-Hebrew defense/exercise prose (0.96-0.98 observed on
+    # conference-announcement-style paragraphs) with essentially no
+    # heuristic support at all. An L1-only verdict on such text must never
+    # resolve to "quarantined" or "flagged" by itself -- it always falls
+    # through to the L2 judge for confirmation instead.
+    hebrew_only_l1_signal = (
+        bool(text)
+        and heur.score < 0.2
+        and l1 is not None
+        and l1 >= 0.8
+        and _is_hebrew_dominant(f"{title}\n{text}")
+    )
+    if hebrew_only_l1_signal:
+        log.info(
+            "guard_hebrew_l1_requires_l2",
+            item_id=item_id,
+            heur_score=heur.score,
+            l1_score=l1,
+        )
+
     # strong signals -> quarantine without asking the LLM
-    if heur.score >= 0.8 or (l1 is not None and l1 >= 0.95):
+    if not hebrew_only_l1_signal and (heur.score >= 0.8 or (l1 is not None and l1 >= 0.95)):
         excerpt = heur.hits[0].excerpt if heur.hits else ""
         return ScreenResult(
             "quarantined",
@@ -299,6 +339,22 @@ def screen(
 
     l2 = _l2_judge(text, item_id, [h.pattern_id for h in heur.hits] + flags) if use_l2 else None
     if l2 is None:
+        if hebrew_only_l1_signal:
+            # L2 is unreachable (LLM down) -- per Q2-6, an L1-only Hebrew
+            # signal must not resolve to "flagged" on its own either, since
+            # that reproduces the same unconfirmed false positive. Log it
+            # and let the item through as clean rather than surface a
+            # verdict we have no way to have actually confirmed.
+            log.warning("guard_hebrew_l2_unavailable_no_flag", item_id=item_id, l1_score=l1)
+            return ScreenResult(
+                "clean",
+                max(heur.score, l1 or 0.0),
+                "l1",
+                kind="hebrew_suspect_l2_unavailable",
+                heuristics=heur,
+                l1_score=l1,
+                sanitizer_flags=flags,
+            )
         # cannot adjudicate -> be conservative: flag (kept out of tool-enabled contexts, reviewable in UI)
         return ScreenResult(
             "flagged",

@@ -100,10 +100,15 @@ class TestNormalizeKind:
         assert en.normalize_kind("US Air Force", "company") == "org"
         assert en.normalize_kind("Ministry of Defense", "company") == "org"
 
-    def test_country_kind_maps_to_org(self) -> None:
-        """The `entities` table's CHECK constraint has no 'country' value -- even though the
-        ClassifyOut schema's EntityMention.kind allows it."""
-        assert en.normalize_kind("Israel", "country") == "org"
+    def test_genuine_country_kind_kept(self) -> None:
+        """Since migration 0007, the `entities` table's CHECK constraint does allow 'country' --
+        a genuine country name keeps that kind."""
+        assert en.normalize_kind("Israel", "country") == "country"
+
+    def test_government_body_kind_wins_over_country_label(self) -> None:
+        """A government/military body mislabeled "country" by the caller is still an org, not a
+        country -- "US Air Force" is not a country."""
+        assert en.normalize_kind("US Air Force", "country") == "org"
 
     def test_unknown_kind_defaults_to_org(self) -> None:
         assert en.normalize_kind("Some New Thing", "widget") == "org"

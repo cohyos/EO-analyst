@@ -83,14 +83,25 @@ def test_system_designation_keeps_own_name_and_kind_system(monkeypatch):
     assert insert_params["kind"] == "system"
 
 
-def test_country_kind_normalized_to_org(monkeypatch):
+def test_government_body_kind_normalized_to_org(monkeypatch):
     cursor = _FakeCursor([None, {"id": 9}])
     _patch_connection(monkeypatch, cursor)
 
-    relational.upsert_entity(name="Some Government", kind="country")
+    relational.upsert_entity(name="Some Government Agency", kind="country")
 
     _, insert_params = cursor.queries[-1]
     assert insert_params["kind"] == "org"
+
+
+def test_genuine_country_kind_kept(monkeypatch):
+    """Since migration 0007, the `entities` table's CHECK constraint allows 'country'."""
+    cursor = _FakeCursor([None, {"id": 11}])
+    _patch_connection(monkeypatch, cursor)
+
+    relational.upsert_entity(name="Israel", kind="country")
+
+    _, insert_params = cursor.queries[-1]
+    assert insert_params["kind"] == "country"
 
 
 def test_case_insensitive_existing_row_reused(monkeypatch):

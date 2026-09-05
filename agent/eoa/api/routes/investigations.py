@@ -6,7 +6,7 @@ import asyncio
 
 import structlog
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from eoa.api import services
@@ -20,7 +20,9 @@ ws_router = APIRouter()
 
 
 class NewInvestigationRequest(BaseModel):
-    question: str
+    # Q2-9: bounded so an oversized question can't be used to force an
+    # unreasonably large deep-search/LLM-context payload.
+    question: str = Field(..., max_length=2000)
     item_id: int | None = None
 
 

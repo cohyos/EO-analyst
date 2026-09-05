@@ -10,6 +10,7 @@ from __future__ import annotations
 import codecs
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
@@ -20,6 +21,10 @@ from pydantic import BaseModel
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 log = structlog.get_logger(__name__)
+
+# Q2-4 (2026-09-06): bounds the manual redirect loop used when a caller passes
+# `validate_redirect` -- see `fetch_page`'s docstring.
+_MAX_REDIRECT_HOPS = 5
 
 _DEFAULT_TIMEOUT_SECONDS = 20.0
 _DEFAULT_MAX_BYTES = 2_000_000
@@ -201,8 +206,11 @@ async def _get_with_retry(
     timeout: float,
     max_bytes: int,
     headers: dict[str, str],
+    follow_redirects: bool = True,
 ) -> tuple[httpx.Response, bytes]:
-    async with client.stream("GET", url, timeout=timeout, headers=headers, follow_redirects=True) as response:
+    async with client.stream(
+        "GET", url, timeout=timeout, headers=headers, follow_redirects=follow_redirects
+    ) as response:
         if _is_retryable_status(response.status_code):
             raise _RetryableStatusError(response.status_code)
         chunks = bytearray()
@@ -212,6 +220,40 @@ async def _get_with_retry(
                 break
         content = bytes(chunks[:max_bytes])
     return response, content
+
+
+def _server_addr(response: httpx.Response) -> str | None:
+    """Best-effort: the IP address `httpx` actually connected to for `response`.
+
+    Q2-4's "pin the connection to the validated IP" mitigation, in the form the
+    task doc calls out as the acceptable alternative to a full custom-resolver
+    transport: `httpx.AsyncClient` (unlike, say, `aiohttp`) does not expose a
+    supported way to force-dial a specific address while still sending the
+    original ``Host`` header short of writing and wiring in a custom
+    `httpx.AsyncHTTPTransport` (real work, deferred -- see docs/adr note this
+    change adds). Post-hoc comparison against the validated address set at
+    least detects (and rejects) a DNS answer that changed between validation
+    and connection, which is the actual TOCTOU/rebinding gap Q2-4 flags; it
+    cannot prevent the one connection attempt itself from reaching a rebound
+    address, only stop that response's content from being used.
+
+    Returns ``None`` when the installed transport doesn't provide this extra
+    info (e.g. `respx`'s mock transport in tests, or older `httpx` versions)
+    -- callers must treat that as "cannot verify", not "verified", and the
+    caller here (`fetch_page`) does exactly that: it logs and continues rather
+    than failing closed, since failing closed would break every fetch on any
+    transport that doesn't expose the extension.
+    """
+    network_stream = response.extensions.get("network_stream")
+    if network_stream is None:
+        return None
+    try:
+        info = network_stream.get_extra_info("server_addr")
+    except Exception:
+        return None
+    if not info:
+        return None
+    return str(info[0]) if isinstance(info, tuple | list) else str(info)
 
 
 async def _get_robot_parser(url: str, client: httpx.AsyncClient, user_agent: str) -> RobotFileParser:
@@ -244,17 +286,35 @@ async def fetch_page(
     *,
     client: httpx.AsyncClient | None = None,
     max_bytes: int | None = None,
+    validate_redirect: Callable[[str], set[str] | None] | None = None,
+    pin_ips: set[str] | None = None,
 ) -> FetchedPage:
     """Fetch one URL, honoring robots.txt and the configured byte cap, with 3x retry on 5xx/429.
 
     `max_bytes` overrides `config.yaml`'s `fetch.max_bytes` for this call only
     (used by tests and by callers that already know a page is huge).
+
+    `validate_redirect`/`pin_ips` (Q2-4, additive, default `None` -- existing
+    callers keep httpx's normal automatic-redirect behavior unchanged): when
+    `validate_redirect` is given, this function disables httpx's own redirect
+    following and instead walks the chain itself (bounded to
+    `_MAX_REDIRECT_HOPS` hops), calling `validate_redirect(next_url)` on every
+    `Location` header *before* requesting it -- typically
+    `eoa.fetch.remote.assert_public_http_url`, so a redirect into a private/
+    loopback/link-local address is rejected before a single byte is fetched
+    from it, closing the TOCTOU gap where the old code only re-validated the
+    *final* URL after the whole chain had already been followed. The
+    callable's return value (the freshly-validated IP set for that hop's
+    host) replaces `pin_ips` for the next hop's connection check. `pin_ips`
+    seeds that check for the initial URL -- pass the set already returned by
+    validating `url` itself, to avoid re-resolving it a second time.
     """
     from eoa.errors import FetchError
 
     timeout, cfg_max_bytes, user_agent, respect_robots = _fetch_settings()
     effective_max_bytes = max_bytes if max_bytes is not None else cfg_max_bytes
     headers = {"User-Agent": user_agent}
+    manual_redirects = validate_redirect is not None
 
     owns_client = client is None
     active_client = client or httpx.AsyncClient()
@@ -264,15 +324,49 @@ async def fetch_page(
             if not parser.can_fetch(user_agent, url):
                 raise FetchError(f"robots.txt disallows fetching {url}")
 
-        try:
-            response, content = await _get_with_retry(
-                active_client, url, timeout=timeout, max_bytes=effective_max_bytes, headers=headers
-            )
-        except _RetryableStatusError as exc:
-            raise FetchError(f"upstream returned {exc.status_code} for {url} after retries") from exc
-        except httpx.HTTPError as exc:
-            raise FetchError(f"transport error fetching {url}: {exc}") from exc
+        current_url = url
+        current_pin_ips = pin_ips
+        response: httpx.Response | None = None
+        content: bytes = b""
+        for _hop in range(_MAX_REDIRECT_HOPS + 1):
+            try:
+                response, content = await _get_with_retry(
+                    active_client,
+                    current_url,
+                    timeout=timeout,
+                    max_bytes=effective_max_bytes,
+                    headers=headers,
+                    follow_redirects=not manual_redirects,
+                )
+            except _RetryableStatusError as exc:
+                raise FetchError(f"upstream returned {exc.status_code} for {current_url} after retries") from exc
+            except httpx.HTTPError as exc:
+                raise FetchError(f"transport error fetching {current_url}: {exc}") from exc
 
+            if current_pin_ips:
+                server_addr = _server_addr(response)
+                if server_addr is not None and server_addr not in current_pin_ips:
+                    raise FetchError(
+                        f"connected address {server_addr} for {current_url} does not match the "
+                        f"validated address set {sorted(current_pin_ips)} -- possible DNS rebinding"
+                    )
+                if server_addr is None:
+                    log.debug("fetch.pin_ip_unverifiable", url=current_url)
+
+            if not manual_redirects or not response.is_redirect:
+                break
+            location = response.headers.get("location")
+            if not location:
+                break
+            next_url = urljoin(current_url, location)
+            validated = validate_redirect(next_url) if validate_redirect is not None else None
+            if validated:
+                current_pin_ips = validated
+            current_url = next_url
+        else:
+            raise FetchError(f"too many redirects (> {_MAX_REDIRECT_HOPS}) fetching {url}")
+
+        assert response is not None  # loop always runs >= 1 iteration
         html_text = _decode(content, response)
         return FetchedPage(
             url=url,

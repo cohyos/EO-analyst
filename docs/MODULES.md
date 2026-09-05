@@ -1513,13 +1513,14 @@ source of truth.
 - React 19, TypeScript, Vite 5, Tailwind v3 (CSS-variable tokens in
   `src/styles/globals.css`, light override via `[data-theme="light"]`,
   dark via `prefers-color-scheme` when no explicit choice is stored),
-  `react-router-dom` v6, `@tanstack/react-query` v5, `zustand` v5,
-  `cytoscape` + `@types/cytoscape`, `recharts`, `lucide-react`.
-- `recharts` is installed per the required stack but not yet wired into
-  a chart — the screens built in this pass use compact stat tiles/meters
-  (`StatTile`, the status-strip `Meter`) rather than time-series charts;
-  nothing in `docs/API.md` v1 currently demands one. Left as a documented
-  gap, not a silent omission.
+  `react-router-dom` **v7.18.3** (upgraded from v6.27.0, Q1-12, 2026-09-06 —
+  the declarative `<BrowserRouter>`/`<Routes>`/`<Route>` API used throughout
+  this codebase is unchanged between the two major versions), `@tanstack/
+  react-query` v5, `zustand` v5, `cytoscape` + `@types/cytoscape`,
+  `recharts`, `lucide-react`.
+- `recharts` is now wired in: `components/shell/ResourceHistoryDrawer.tsx`
+  uses it for the resource-history chart. (Originally installed but unused
+  per the required stack, as this bullet used to say — no longer the case.)
 - No UI kit; all components hand-written for RTL correctness. Only
   physical Tailwind border/inset utilities are used for panel dividers
   (`border-l`/`border-r`) even where a logical `border-s`/`border-e`
@@ -1547,7 +1548,13 @@ source of truth.
 
 ### Tests (`vitest` + `@testing-library/react`, `src/test/setup.ts`)
 
-20 tests across 4 files, all green: `LevelBadge.test.tsx` (label +
+**2026-09-06:** grown well past the original 20/4 figure below as every
+later screen (tenders/BD/tech-radar/settings-chains/etc.) added its own
+`*.test.tsx` — 125 tests across 18 files, all green (`npm run test`); see
+each feature's own "Tests" subsection further down this file for the
+per-screen breakdown rather than trying to keep a running total here.
+The original four files this section documented in detail are still
+current: `LevelBadge.test.tsx` (label +
 `data-level` + accessible name per triage level, size variant),
 `CitationText.test.tsx` (`[n]` → chip, unmatched `n` left as plain text,
 hover tooltip content, `onOpenItem` callback), `StatusStrip.test.tsx`
@@ -1562,17 +1569,23 @@ backend or `VITE_USE_MOCKS`.
 
 ### What's stubbed / left for later
 
-- `ConferencesPage` only implements the phase-C empty state and the
+- **Superseded 2026-09-06:** `ConferencesPage` is no longer a stub (see
+  the Screens section above); a full Playwright/E2E suite now exists
+  (`e2e/tests/`, 18 spec files, one per screen incl. tenders/BD/tech —
+  see `docs/QA_PROGRAM.md` and `docs/qa/` for the QA loop that runs
+  against it). Both bullets below are historical, describing the state on
+  2026-09-04.
+- ~~`ConferencesPage` only implements the phase-C empty state and the
   table/iCal-link chrome — there is no real data to page through yet,
   matching the backend's own stub (`docs/API.md`: "phase C, stub returns
-  [] for now").
-- No dedicated E2E/Playwright suite — verification here was `lint` +
+  [] for now").~~
+- ~~No dedicated E2E/Playwright suite — verification here was `lint` +
   `vitest` + `build` plus a manual pass through all 9 screens (both
   themes, desktop and a 375 px mobile viewport) against
-  `VITE_USE_MOCKS=true` in the browser preview tool.
+  `VITE_USE_MOCKS=true` in the browser preview tool.~~
 - The "3 usability sessions with the analyst" step in §8.4 of the dev
   plan is a product/pilot activity, not a coding task, and is out of
-  scope for this pass.
+  scope for this pass (still true — unchanged).
 
 ### Advanced-HMI pass (2026-09-04) — features + real-API QA log
 

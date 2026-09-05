@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from eoa.api import services
 from eoa.api.errors import APIError
+from eoa.api.routes.settings import _require_token
 from eoa.config import ChainEntryCfg
 
 router = APIRouter(tags=["llm"])
@@ -41,8 +42,13 @@ def get_llm_providers() -> dict:
 @router.put("/llm/settings")
 def put_llm_settings(
     body: LlmSettingsPayload,
+    x_eoa_token: str | None = Header(default=None, alias="X-EOA-Token"),
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> dict:
+    # Q2-8: same optional shared-secret gate as `PUT /api/settings/{name}` (see
+    # `eoa.api.routes.settings._require_token`'s docstring) -- this endpoint edits
+    # config.yaml just as directly and had been missing the check.
+    _require_token(x_eoa_token)
     expected_revision = (if_match.strip('"') if if_match else None) or body.revision
     try:
         ok, errors, revision = services.patch_llm_provider_settings(
