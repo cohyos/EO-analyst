@@ -208,16 +208,58 @@ def _window(candidate: ForecastCandidate, today: dt.date) -> tuple[dt.date, dt.d
 # LLM rationale (the only non-deterministic part)
 # --------------------------------------------------------------------------
 
+# F1 (2026-09-05 root cause): the "classify" task's num_ctx is 4096 -- fine for the short
+# ClassifyOut/TriageOut-style schemas that share the task tag, but a candidate could carry 9-18
+# trigger items at up to 2000 chars each, blowing well past 4096 tokens once the system prompt and
+# instructions are added. Ollama silently truncates the *start* of an over-length prompt (verified
+# live in the Ollama logs -- 12x "truncating input prompt" during the 01:06-01:13 night run), which
+# is exactly where the task instructions live -- the model then "thinks out loud" about whatever
+# fragment of the prompt survived instead of writing a rationale, and that raw reasoning ends up in
+# rationale_he. Fix: cap the data block hard (below), and move to the "summarize" task (8192 ctx)
+# with an explicit token-budget check as a second line of defense.
+_MAX_TRIGGER_ITEMS_FOR_RATIONALE = 5  # most-recent-first (candidate.trigger_item_ids is already
+# ordered this way: _recent_trigger_events sorts `ORDER BY e.date DESC`, and _build_candidates
+# appends in the order events are encountered).
+_MAX_CHARS_PER_TRIGGER_ITEM = 700
+_MAX_DATA_BLOCK_CHARS = 3000
+
+_NUM_CTX_SUMMARIZE = 8192  # config.yaml ollama.num_ctx.summarize -- kept here only for the safety
+# check below; the real value always comes from the live config via chat()/_num_ctx, this is not
+# read back from settings() to avoid this module depending on ollama_client internals.
+_CHARS_PER_TOKEN_ESTIMATE = 2.5  # rough chars-per-token ratio for Hebrew-heavy text
+_CTX_SAFETY_FRACTION = 0.70
+
 
 def _rationale_data_block(candidate: ForecastCandidate, items: dict[int, dict[str, Any]]) -> str:
-    blocks = []
-    for item_id in candidate.trigger_item_ids:
+    """Build the DATA block for the rationale prompt, capped on three axes (F1): at most
+    ``_MAX_TRIGGER_ITEMS_FOR_RATIONALE`` items (the most recent), each trimmed to
+    ``_MAX_CHARS_PER_TRIGGER_ITEM`` chars, and the whole block hard-capped at
+    ``_MAX_DATA_BLOCK_CHARS``. Prefers the item's own ``summary_he`` (already a short LLM/keyword
+    summary) over the raw ``clean_text`` when both are available -- shorter and just as
+    informative for the rationale's purposes."""
+    blocks: list[str] = []
+    total = 0
+    for item_id in candidate.trigger_item_ids[:_MAX_TRIGGER_ITEMS_FOR_RATIONALE]:
         row = items.get(item_id)
         if row is None:
             continue
-        text = (row.get("clean_text") or row.get("title") or "")[:2000]
-        blocks.append(f"[item {item_id}] {row.get('title') or ''}\n{wrap_data(text, item_id, row.get('url') or '')}")
-    return "\n\n".join(blocks) if blocks else "(אין פריטי מקור זמינים)"
+        text = (row.get("summary_he") or row.get("clean_text") or row.get("title") or "")[
+            :_MAX_CHARS_PER_TRIGGER_ITEM
+        ]
+        block = f"[item {item_id}] {row.get('title') or ''}\n{wrap_data(text, item_id, row.get('url') or '')}"
+        if blocks and total + len(block) > _MAX_DATA_BLOCK_CHARS:
+            break
+        blocks.append(block)
+        total += len(block)
+    if not blocks:
+        return "(אין פריטי מקור זמינים)"
+    joined = "\n\n".join(blocks)
+    return joined[:_MAX_DATA_BLOCK_CHARS] if len(joined) > _MAX_DATA_BLOCK_CHARS else joined
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough chars/2.5 token estimate (Hebrew-heavy text runs fewer chars/token than English)."""
+    return int(len(text) / _CHARS_PER_TOKEN_ESTIMATE)
 
 
 def _llm_rationale(
@@ -233,6 +275,15 @@ def _llm_rationale(
         likelihood=f"{likelihood:.0%}",
         data=data_block,
     )
+    # Second line of defense (F1.b): even with the caps above, estimate the rendered prompt's token
+    # count and trim the data block further if it would eat past a safety fraction of the task's
+    # num_ctx -- a live token count isn't available before the call, so this is deliberately
+    # conservative (over-estimating trimming is harmless; under-estimating reproduces the bug).
+    budget_tokens = int(_CTX_SAFETY_FRACTION * _NUM_CTX_SUMMARIZE)
+    if _estimate_tokens(prompt) > budget_tokens and data_block:
+        non_data_chars = len(prompt) - len(data_block)
+        allowed_data_chars = max(200, int(budget_tokens * _CHARS_PER_TOKEN_ESTIMATE) - non_data_chars)
+        prompt = prompt.replace(data_block, data_block[:allowed_data_chars])
     out = chat_structured(
         role,
         TenderForecastOut,
@@ -240,21 +291,79 @@ def _llm_rationale(
             {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
             {"role": "user", "content": prompt},
         ],
-        task="classify",
-        # config.yaml's "classify" task caps num_predict at 700 tokens, sized for the short
-        # ClassifyOut/TriageOut/ConferenceExtract-style schemas that share this task tag -- a
-        # Hebrew rationale_he sentence plus JSON overhead can exceed that mid-string, producing
-        # invalid/truncated JSON (observed live). Raise the cap for this call only; every other
-        # "classify"-task caller is unaffected since this is a per-call override, not a config edit.
+        # "summarize" carries an 8192 num_ctx (vs. "classify"'s 4096) -- the actual F1 fix; the
+        # num_predict override below still applies since this schema's short Hebrew rationale plus
+        # JSON overhead exceeds "summarize"'s own default num_predict cap mid-string otherwise.
+        task="summarize",
         options={"num_predict": 1400},
     )
     return out.rationale_he
 
 
+# F1.c: output guard against the reasoning-leak failure mode -- the model narrating its own
+# instructions/task ("The prompt asks...", "השאלה מבקשת...") instead of writing a rationale. Every
+# valid rationale must cite at least one trigger item; anything matching a known leak phrase, or
+# implausibly long for a "2-4 sentence" rationale, is rejected.
+_CITATION_RE = re.compile(r"\[item\s+\d+\]")
+_REASONING_LEAK_PATTERNS = [
+    r"\bthe prompt\b",
+    r"\bthe user\b",
+    r"\bi need to\b",
+    r"\blet me\b",
+    r"summary of the news article",
+    r"השאלה מבקשת",
+    r"המשימה דורשת",
+    r"ניתוח הנתונים",
+    r"מסקנה\s*:",
+    r"עלי לזהות",
+]
+_REASONING_LEAK_RE = re.compile("|".join(_REASONING_LEAK_PATTERNS), re.IGNORECASE)
+_MAX_RATIONALE_CHARS = 900
+
+
+def _rationale_guard_failure(text: str) -> str | None:
+    """Returns a short reason string if ``text`` fails the output guard, else ``None``."""
+    if not text or not _CITATION_RE.search(text):
+        return "no_citation"
+    if _REASONING_LEAK_RE.search(text):
+        return "reasoning_leak"
+    if len(text) > _MAX_RATIONALE_CHARS:
+        return "too_long"
+    return None
+
+
+def _llm_rationale_guarded(
+    candidate: ForecastCandidate,
+    likelihood: float,
+    window: tuple[dt.date, dt.date],
+    data_block: str,
+    *,
+    role: str,
+) -> str:
+    """``_llm_rationale`` plus the F1.c output guard: one retry with a shorter data block on
+    failure, then the deterministic fallback. ``ResourceUnavailable``/``LLMOutputError`` from the
+    underlying call are never caught here -- they propagate to ``forecast_tenders``'s own
+    try/except so the existing llm_deferred/llm_failed stats bookkeeping still applies; only a
+    *successful call with a bad output* is this function's concern."""
+    rationale = _llm_rationale(candidate, likelihood, window, data_block, role=role)
+    reason = _rationale_guard_failure(rationale)
+    if reason is None:
+        return rationale
+    log.warning("forecast_rationale_rejected", platform=candidate.platform_key, reason=reason, attempt=1)
+
+    shorter_block = data_block[: _MAX_DATA_BLOCK_CHARS // 2]
+    rationale = _llm_rationale(candidate, likelihood, window, shorter_block, role=role)
+    reason = _rationale_guard_failure(rationale)
+    if reason is None:
+        return rationale
+    log.warning("forecast_rationale_rejected", platform=candidate.platform_key, reason=reason, attempt=2)
+    return _fallback_rationale(candidate)
+
+
 def _fallback_rationale(candidate: ForecastCandidate) -> str:
     """Deterministic rationale used when the LLM call is unavailable/fails -- still cites the
     trigger items by id (per FR-5.3's citation rule), just without prose synthesis."""
-    refs = " ".join(f"[item {iid}]" for iid in candidate.trigger_item_ids)
+    refs = " ".join(f"[item {iid}]" for iid in dict.fromkeys(candidate.trigger_item_ids))  # unique, order kept
     return (
         f"זוהו {len(candidate.trigger_event_ids)} אירוע(ים) הקשורים לפלטפורמה '{candidate.platform_he}' "
         f"ב-90 הימים האחרונים {refs}; פלטפורמה זו נזקקת בדרך כלל ל-{candidate.payload_need_he}. "
@@ -338,7 +447,7 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
 
     all_item_ids = sorted({iid for c in candidates for iid in c.trigger_item_ids})
     item_rows = _fetchall(
-        "SELECT id, title, url, clean_text FROM items WHERE id = ANY(%(ids)s)", {"ids": all_item_ids}
+        "SELECT id, title, url, clean_text, summary_he FROM items WHERE id = ANY(%(ids)s)", {"ids": all_item_ids}
     )
     items_by_id = {r["id"]: r for r in item_rows}
 
@@ -348,7 +457,7 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
         window = _window(cand, today)
         data_block = _rationale_data_block(cand, items_by_id)
         try:
-            rationale_he = _llm_rationale(cand, likelihood, window, data_block, role=role)
+            rationale_he = _llm_rationale_guarded(cand, likelihood, window, data_block, role=role)
             stats.llm_used += 1
         except ResourceUnavailable:
             rationale_he = _fallback_rationale(cand)

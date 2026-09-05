@@ -20,6 +20,10 @@ from eoa.tenders.scan import (
     NoticeRaw,
     TenderSource,
     TenderStats,
+    _apply_domain_country_fallback,
+    _apply_extraction_to_notice,
+    _country_from_domain,
+    _fetch_notice_text,
     _has_procurement_signal,
     _initial_status,
     _is_denylisted_domain,
@@ -28,6 +32,7 @@ from eoa.tenders.scan import (
     _parse_search_hits,
     _parse_ted_notices,
     _passes_gate,
+    _transition_closed,
     _within_window,
     load_deny_domains,
     load_procurement_signals,
@@ -341,6 +346,17 @@ class TestInitialStatus:
         n = NoticeRaw(source_id="x", external_ref="x:1", title="t", status_hint="awarded")
         assert _initial_status(n, dt.date(2026, 9, 4)) == "awarded"
 
+    def test_status_hint_wins_over_notice_type(self):
+        """A structured source's own explicit tag is more authoritative than the LLM's notice_type."""
+        n = NoticeRaw(source_id="x", external_ref="x:1", title="t", status_hint="closed")
+        assert _initial_status(n, dt.date(2026, 9, 4), notice_type="award") == "closed"
+
+    def test_notice_type_award_forces_awarded_status(self):
+        """F2: a notice whose own text reports an already-signed contract (LLM notice_type=='award')
+        is 'awarded', not left 'open' just because no deadline/status_hint exists."""
+        n = NoticeRaw(source_id="x", external_ref="x:1", title="t")
+        assert _initial_status(n, dt.date(2026, 9, 4), notice_type="award") == "awarded"
+
     def test_past_deadline_is_closed(self):
         n = NoticeRaw(source_id="x", external_ref="x:1", title="t", deadline=dt.date(2026, 1, 1))
         assert _initial_status(n, dt.date(2026, 9, 4)) == "closed"
@@ -349,9 +365,192 @@ class TestInitialStatus:
         n = NoticeRaw(source_id="x", external_ref="x:1", title="t", deadline=dt.date(2027, 1, 1))
         assert _initial_status(n, dt.date(2026, 9, 4)) == "open"
 
-    def test_no_deadline_is_open(self):
+    def test_no_deadline_and_no_published_at_is_unknown(self):
+        """F2 (the bug this fix addresses): an undated notice with no deadline AND no published_at
+        must never be assumed 'open' -- it's 'unknown' until dates can be established."""
         n = NoticeRaw(source_id="x", external_ref="x:1", title="t")
+        assert _initial_status(n, dt.date(2026, 9, 4)) == "unknown"
+
+    def test_no_deadline_recent_published_is_open(self):
+        n = NoticeRaw(source_id="x", external_ref="x:1", title="t", published_at=dt.date(2026, 8, 1))
         assert _initial_status(n, dt.date(2026, 9, 4)) == "open"
+
+    def test_no_deadline_stale_published_is_closed(self):
+        """F2: a notice with no deadline but a published_at older than 365 days is stale, not
+        indefinitely open (the TED-2016 / HigherGov-FY2023 cases from the review)."""
+        n = NoticeRaw(source_id="x", external_ref="x:1", title="t", published_at=dt.date(2016, 12, 17))
+        assert _initial_status(n, dt.date(2026, 9, 4)) == "closed"
+
+    def test_no_deadline_published_exactly_at_boundary_is_open(self):
+        n = NoticeRaw(source_id="x", external_ref="x:1", title="t", published_at=dt.date(2025, 9, 5))
+        assert _initial_status(n, dt.date(2026, 9, 4)) == "open"
+
+
+class TestCountryFromDomain:
+    def test_sam_gov_maps_to_us(self):
+        assert _country_from_domain("https://sam.gov/opp/1") == "US"
+
+    def test_highergov_maps_to_us(self):
+        assert _country_from_domain("https://www.highergov.com/contract-opportunity/x/") == "US"
+
+    def test_usarfp_maps_to_us(self):
+        assert _country_from_domain("https://www.usarfp.com/tender/x.php") == "US"
+
+    def test_ted_europa_maps_to_eu(self):
+        assert _country_from_domain("https://ted.europa.eu/en/notice/1") == "EU"
+
+    def test_subdomain_matches(self):
+        assert _country_from_domain("https://online.mod.gov.il/x") == "IL"
+
+    def test_unmapped_domain_returns_none(self):
+        assert _country_from_domain("https://www.rfpmart.com/x.html") is None
+
+    def test_empty_url_returns_none(self):
+        assert _country_from_domain("") is None
+        assert _country_from_domain(None) is None
+
+
+class TestApplyExtractionToNotice:
+    def test_fills_missing_published_at_and_deadline(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t")
+        extract = TenderExtract(
+            relevant=True, relevance=6, confidence=0.8,
+            published_at=dt.date(2026, 8, 1), deadline=dt.date(2026, 10, 1),
+        )
+        _apply_extraction_to_notice(notice, extract)
+        assert notice.published_at == dt.date(2026, 8, 1)
+        assert notice.deadline == dt.date(2026, 10, 1)
+
+    def test_never_overwrites_existing_dates(self):
+        """TED/Contracts Finder's own structured parse stays authoritative over the LLM."""
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t",
+            published_at=dt.date(2026, 1, 1), deadline=dt.date(2026, 2, 1),
+        )
+        extract = TenderExtract(
+            relevant=True, relevance=6, confidence=0.8,
+            published_at=dt.date(2099, 1, 1), deadline=dt.date(2099, 1, 1),
+        )
+        _apply_extraction_to_notice(notice, extract)
+        assert notice.published_at == dt.date(2026, 1, 1)
+        assert notice.deadline == dt.date(2026, 2, 1)
+
+    def test_fills_agency_and_country_when_generic(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", country="other")
+        extract = TenderExtract(relevant=True, relevance=6, confidence=0.8, agency="US Air Force", country="US")
+        _apply_extraction_to_notice(notice, extract)
+        assert notice.agency == "US Air Force"
+        assert notice.country == "US"
+
+    def test_does_not_overwrite_real_country(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", country="UK")
+        extract = TenderExtract(relevant=True, relevance=6, confidence=0.8, country="US")
+        _apply_extraction_to_notice(notice, extract)
+        assert notice.country == "UK"
+
+
+class TestApplyDomainCountryFallback:
+    def test_fills_country_from_url_when_generic(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", country="other", url="https://sam.gov/opp/1")
+        _apply_domain_country_fallback(notice)
+        assert notice.country == "US"
+
+    def test_does_not_overwrite_real_country(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", country="IL", url="https://sam.gov/opp/1")
+        _apply_domain_country_fallback(notice)
+        assert notice.country == "IL"
+
+    def test_no_match_leaves_country_unchanged(self):
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t", country="other", url="https://www.rfpmart.com/x.html"
+        )
+        _apply_domain_country_fallback(notice)
+        assert notice.country == "other"
+
+
+class TestFetchNoticeText:
+    def test_api_json_source_never_fetches(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://ted.europa.eu/x")
+        with patch("eoa.tenders.scan.fetch_remote") as mock_fetch:
+            text = _fetch_notice_text(notice, "api_json")
+        mock_fetch.assert_not_called()
+        assert text == "t\n\ns"
+
+    def test_search_source_fetches_and_uses_page_text(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1")
+        with patch("eoa.tenders.scan.fetch_remote", return_value={"text": "full notice body with a deadline"}):
+            text = _fetch_notice_text(notice, "search")
+        assert text == "full notice body with a deadline"
+
+    def test_fetch_failure_falls_back_to_title_and_summary(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1")
+        with patch("eoa.tenders.scan.fetch_remote", side_effect=RuntimeError("blocked")):
+            text = _fetch_notice_text(notice, "search")
+        assert text == "t\n\ns"
+
+    def test_no_url_falls_back_without_fetching(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s")
+        with patch("eoa.tenders.scan.fetch_remote") as mock_fetch:
+            text = _fetch_notice_text(notice, "search")
+        mock_fetch.assert_not_called()
+        assert text == "t\n\ns"
+
+    def test_empty_page_text_falls_back(self):
+        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1")
+        with patch("eoa.tenders.scan.fetch_remote", return_value={"text": ""}):
+            text = _fetch_notice_text(notice, "search")
+        assert text == "t\n\ns"
+
+
+class _FakeCursor:
+    def __init__(self, fetchall_result=None):
+        self.executed: list[tuple[str, dict | None]] = []
+        self._fetchall_result = [] if fetchall_result is None else fetchall_result
+
+    def execute(self, query, params=None):
+        self.executed.append((query, params))
+        return self
+
+    def fetchall(self):
+        return self._fetchall_result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeConnection:
+    def __init__(self, cursor: _FakeCursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestTransitionClosedSql:
+    def test_closes_past_deadline_and_stale_undated_rows(self, monkeypatch):
+        """F2: the nightly transition must close BOTH the original case (deadline passed) AND the
+        newly-added stale-undated case (no deadline, published_at > 365 days old)."""
+        cur = _FakeCursor(fetchall_result=[{"id": 1}, {"id": 2}])
+        conn = _FakeConnection(cur)
+        monkeypatch.setattr("eoa.tenders.scan.connection", lambda: conn)
+
+        count = _transition_closed()
+
+        assert count == 2
+        query, params = cur.executed[0]
+        assert "deadline IS NOT NULL AND deadline <" in query
+        assert "deadline IS NULL AND published_at IS NOT NULL" in query
+        assert "status = 'open'" in query
+        assert params["stale_before"] == params["today"] - dt.timedelta(days=365)
 
 
 # --------------------------------------------------------------------------
@@ -576,3 +775,68 @@ class TestScanTendersLlmRelevanceGate:
             scan_tenders(sources=[src])
         args, _ = mock_insert.call_args
         assert args[1] == ["FLIR", "gimbal"]
+
+    def test_notice_type_from_extraction_passed_to_insert(self):
+        """F2: the LLM's notice_type must reach _insert_tender_and_item so an 'award' notice can be
+        marked 'awarded' rather than left open."""
+        src = _search_source()
+        notice = NoticeRaw(source_id=src.id, external_ref=f"{src.id}:1", title="RFI: infrared targeting pod contract awarded")
+        with (
+            _common_patches(notice),
+            patch(
+                "eoa.tenders.scan._llm_classify",
+                return_value=_extract(relevant=True, relevance=6, notice_type="award"),
+            ),
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
+        ):
+            scan_tenders(sources=[src])
+        _, kwargs = mock_insert.call_args
+        assert kwargs["notice_type"] == "award"
+
+    def test_extraction_dates_and_country_are_merged_into_notice_before_insert(self):
+        """F2/F13: published_at/deadline/agency/country from the LLM extraction must land on the
+        notice actually passed to _insert_tender_and_item (it reads them off notice.*)."""
+        src = _search_source()
+        notice = NoticeRaw(
+            source_id=src.id, external_ref=f"{src.id}:1", title="RFI for infrared sensor", country="other"
+        )
+        extract = _extract(
+            relevant=True,
+            relevance=6,
+            published_at=dt.date(2026, 8, 1),
+            deadline=dt.date(2026, 10, 1),
+            agency="US Navy",
+            country="US",
+        )
+        with (
+            _common_patches(notice),
+            patch("eoa.tenders.scan._llm_classify", return_value=extract),
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
+        ):
+            scan_tenders(sources=[src])
+        args, _ = mock_insert.call_args
+        inserted_notice = args[0]
+        assert inserted_notice.published_at == dt.date(2026, 8, 1)
+        assert inserted_notice.deadline == dt.date(2026, 10, 1)
+        assert inserted_notice.agency == "US Navy"
+        assert inserted_notice.country == "US"
+
+    def test_domain_country_fallback_applied_even_without_llm(self):
+        """F13: a HigherGov/SAM.gov/usarfp URL gets its country filled from the domain table even
+        when the LLM call was deferred/unavailable (the deterministic insert path)."""
+        src = _search_source()
+        notice = NoticeRaw(
+            source_id=src.id,
+            external_ref=f"{src.id}:1",
+            title="RFI for infrared sensor",
+            country="other",
+            url="https://www.highergov.com/contract-opportunity/x/",
+        )
+        with (
+            _common_patches(notice),
+            patch("eoa.tenders.scan._llm_classify", side_effect=ResourceUnavailable("no vram")),
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
+        ):
+            scan_tenders(sources=[src])
+        args, _ = mock_insert.call_args
+        assert args[0].country == "US"

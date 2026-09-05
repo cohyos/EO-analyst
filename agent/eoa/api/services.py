@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import hashlib
+import os
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
@@ -118,7 +119,7 @@ def services_status() -> dict[str, bool]:
         "postgres": db.ping(),
         "ollama": ollama_client.ping(),
         "searxng": search_ping(),
-        "ntfy": _http_reachable(s.notify.url),
+        "ntfy": _http_reachable(os.environ.get("NTFY_URL", s.notify.url)),  # env override like notify/ntfy.py
     }
 
 
@@ -354,6 +355,49 @@ def investigate_item(item_id: int, question: str | None) -> int | None:
     if exists is None:
         return None
     return relational.enqueue_job("deep_search", {"item_id": item_id, "question": question}, priority=0)
+
+
+def start_investigation(question: str, item_id: int | None = None) -> int | None:
+    """U12 "חקירה חדשה": launch a free-standing deep-search investigation from a typed question,
+    not necessarily tied to a feed item (docs/REVIEW_2026-09-05.md U12)."""
+    if not question or not question.strip():
+        return None
+    if item_id is not None:
+        exists = _fetchone("SELECT id FROM items WHERE id = %s", (item_id,))
+        if exists is None:
+            return None
+    return relational.enqueue_job("deep_search", {"item_id": item_id, "question": question}, priority=0)
+
+
+def expand_investigation(job_id: int) -> int | None:
+    """U12 "הרחב חקירה (תקציב נוסף)": re-run a finished investigation with double the search
+    budget and its prior findings folded into context -- replaces the old unexplained "המשך
+    חקירה" button, which silently re-ran the identical question from scratch
+    (docs/REVIEW_2026-09-05.md U12)."""
+    job = _fetchone("SELECT * FROM jobs WHERE id = %s AND kind = 'deep_search'", (job_id,))
+    if job is None:
+        return None
+    payload = job.get("payload") or {}
+    prior_result = job.get("result") or {}
+    prior_bits: list[str] = []
+    if prior_result.get("answer_he"):
+        prior_bits.append(f"תשובה קודמת: {prior_result['answer_he']}")
+    if prior_result.get("key_facts"):
+        prior_bits.append("עובדות שנמצאו: " + "; ".join(prior_result["key_facts"]))
+    if prior_result.get("what_was_tried_he"):
+        prior_bits.append(f"מה כבר נוסה קודם: {prior_result['what_was_tried_he']}")
+    return relational.enqueue_job(
+        "deep_search",
+        {
+            "item_id": payload.get("item_id"),
+            "question": payload.get("question"),
+            "context_he": payload.get("context_he", ""),
+            "prior_findings_he": "\n".join(prior_bits),
+            "budget_multiplier": 2.0,
+            "expanded_from_job_id": job_id,
+        },
+        priority=0,
+    )
 
 
 # --------------------------------------------------------------------------

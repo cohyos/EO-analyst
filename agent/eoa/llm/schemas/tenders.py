@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -15,6 +18,13 @@ class TenderExtract(BaseModel):
     deterministic two-signal-gate verdict (keyword-hit relevance/matched_terms) is used instead --
     a stalled model degrades to "still ingested on the gate's own strength", never blocks
     persistence outright (only an actual "not relevant" verdict from the model does that).
+
+    F2 (2026-09-05): ``published_at``/``deadline``/``agency``/``country``/``notice_type`` were
+    added so ``eoa.tenders.scan`` can fill in dates/geography for search-hit-derived notices
+    (TED/Contracts Finder already carry these structurally; a generic SearXNG hit does not) and so
+    the ``_initial_status`` rubric can tell an actually-awarded notice from an open one. All five
+    default to "unknown"/``None`` -- per the prompt's "never guess" rule, an absent fact in the
+    source text must come back empty, not fabricated.
     """
 
     relevant: bool = Field(description="Whether this notice is genuinely about EO/IR/CV defense systems")
@@ -27,6 +37,20 @@ class TenderExtract(BaseModel):
         default_factory=list, max_length=10, description="שמות חברות/תוכניות/מערכות שמוזכרים"
     )
     confidence: float = Field(ge=0, le=1)
+    published_at: dt.date | None = Field(
+        default=None, description="תאריך פרסום ההודעה, אם מצוין בטקסט במפורש; אחרת null (אסור לנחש)"
+    )
+    deadline: dt.date | None = Field(
+        default=None, description="תאריך אחרון להגשה/דדליין, אם מצוין בטקסט במפורש; אחרת null (אסור לנחש)"
+    )
+    agency: str | None = Field(default=None, description="הגורם המזמין/המפרסם, אם מצוין; אחרת null")
+    country: str | None = Field(
+        default=None,
+        description="מדינת הרוכש, קוד ISO-2 או 'EU'/'NATO', אם ניתן להסיק מהטקסט בבירור; אחרת null (אסור לנחש)",
+    )
+    notice_type: Literal["rfi", "rfp", "rfq", "sources_sought", "tender", "award", "other"] = Field(
+        default="other", description="סוג ההודעה כפי שמשתמע מהטקסט"
+    )
 
 
 class TenderForecastOut(BaseModel):

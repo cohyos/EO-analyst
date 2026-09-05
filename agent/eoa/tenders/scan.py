@@ -17,7 +17,9 @@ When the LLM is unavailable/deferred/fails, the row still gets inserted using th
 keyword-hit relevance/status (FR-9 / "never invent" -- a stalled model degrades to "still
 ingested on the strength of the two-signal gate alone", never to a fabricated verdict; but a model
 that *did* respond and said "this is not relevant" is trusted and blocks persistence). Finally
-transitions any ``status='open'`` row whose ``deadline`` has passed to ``status='closed'``.
+transitions any ``status='open'`` row whose ``deadline`` has passed, or whose ``published_at`` is
+stale (>365 days) with no deadline at all, to ``status='closed'`` (see ``_initial_status``/
+``_transition_closed``, F2 2026-09-05: an undated notice is never assumed to stay open forever).
 
 ``kind: html`` sources in config/tenders.yaml are documented but intentionally not scraped here
 (see the notes on each entry -- bot-protected or client-hydrated pages); ``kind: api_json`` sources
@@ -46,13 +48,13 @@ from pydantic import BaseModel, Field
 from eoa.config import CONFIG_DIR
 from eoa.db import connection
 from eoa.errors import LLMOutputError, ResourceUnavailable
-from eoa.fetch.remote import fetch_raw_remote
+from eoa.fetch.remote import fetch_raw_remote, fetch_remote
 from eoa.fetch.rss import parse_feed
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.tenders import TenderExtract
 from eoa.memory.relational import insert_item, update_item_fields
-from eoa.search.searxng_client import SearchHit, search
+from eoa.search.provider import SearchHit, search
 
 log = structlog.get_logger(__name__)
 
@@ -486,12 +488,94 @@ def _tender_exists(external_ref: str) -> bool:
         return cur.fetchone() is not None
 
 
-def _initial_status(notice: NoticeRaw, today: dt.date) -> str:
+# F2 (2026-09-05): "assume open when undated" bug -- a notice with no deadline (the overwhelming
+# majority of search/rss hits) used to default straight to 'open' forever. A notice whose only date
+# signal (published_at) is this old, with still no deadline, is stale enough to treat as closed
+# rather than showing it as an open opportunity indefinitely.
+_STALE_DAYS = 365
+
+
+def _initial_status(notice: NoticeRaw, today: dt.date, notice_type: str | None = None) -> str:
+    """F2 status rubric. Priority order: (1) a structured source's own explicit tag
+    (``status_hint`` -- e.g. Contracts Finder's OCDS ``tag``) is the most authoritative signal
+    available and wins outright; (2) the LLM extraction's ``notice_type == 'award'`` (a notice
+    reporting an already-signed contract, not a future ask) also means 'awarded'; (3) a known
+    deadline decides open/closed; (4) with no deadline at all, a notice with no ``published_at``
+    either is 'unknown' (not assumed open -- there is no date evidence either way); (5) with no
+    deadline but a ``published_at`` older than ``_STALE_DAYS``, treat it as closed (stale); (6)
+    otherwise open."""
     if notice.status_hint in ("awarded", "closed"):
         return notice.status_hint
-    if notice.deadline is not None and notice.deadline < today:
+    if notice_type == "award":
+        return "awarded"
+    if notice.deadline is not None:
+        return "closed" if notice.deadline < today else "open"
+    if notice.published_at is None:
+        return "unknown"
+    if (today - notice.published_at).days > _STALE_DAYS:
         return "closed"
     return "open"
+
+
+# F13 (2026-09-05): country-by-domain fallback for the generic `kind: search` sources, which carry
+# a placeholder `country` (e.g. "other"/"US" aggregate) in config/tenders.yaml rather than the
+# notice's real geography. Covers the common portals seen live in production (SAM.gov/HigherGov/
+# usarfp.com notices all landing as country='other' via the rfi_rfp_news/sam_gov_search sources)
+# plus every structured-portal domain already in config/tenders.yaml for completeness. Only used
+# when the notice's own country is missing/'other' AND the LLM extraction didn't supply one either
+# -- never overrides a real value.
+_DOMAIN_COUNTRY_FALLBACK: dict[str, str] = {
+    "sam.gov": "US",
+    "highergov.com": "US",
+    "usarfp.com": "US",
+    "ted.europa.eu": "EU",
+    "contractsfinder.service.gov.uk": "UK",
+    "mod.gov.il": "IL",
+    "nspa.nato.int": "NATO",
+    "ncia.nato.int": "NATO",
+    "tenders.gov.au": "AU",
+    "canadabuys.canada.ca": "CA",
+}
+
+
+def _country_from_domain(url: str | None) -> str | None:
+    """Best-effort country inference from a notice URL's hostname (see ``_DOMAIN_COUNTRY_FALLBACK``
+    above). Matches exact domain or subdomain, same convention as ``_is_denylisted_domain``."""
+    if not url:
+        return None
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return None
+    for domain, country in _DOMAIN_COUNTRY_FALLBACK.items():
+        if host == domain or host.endswith("." + domain):
+            return country
+    return None
+
+
+def _apply_extraction_to_notice(notice: NoticeRaw, extract: TenderExtract) -> None:
+    """F2/F13: fill date/agency/country gaps on ``notice`` from the LLM extraction -- never
+    overwrites a value the source's own structured parser already supplied (TED/Contracts Finder
+    stay authoritative over their own fields; this only helps the generic search/rss sources that
+    had nothing but a title+snippet to begin with)."""
+    if notice.published_at is None and extract.published_at is not None:
+        notice.published_at = extract.published_at
+    if notice.deadline is None and extract.deadline is not None:
+        notice.deadline = extract.deadline
+    if not notice.agency and extract.agency:
+        notice.agency = extract.agency
+    if (not notice.country or notice.country == "other") and extract.country:
+        notice.country = extract.country
+
+
+def _apply_domain_country_fallback(notice: NoticeRaw) -> None:
+    """Runs regardless of whether the LLM extraction ran/succeeded -- a pure URL-based fallback for
+    when the country is still missing/generic after the above (F13)."""
+    if not notice.country or notice.country == "other":
+        domain_country = _country_from_domain(notice.url)
+        if domain_country:
+            notice.country = domain_country
 
 
 def _as_datetime(d: dt.date | None) -> dt.datetime | None:
@@ -506,14 +590,19 @@ def _insert_tender_and_item(
     summary_he: str = "",
     entities: list[str] | None = None,
     status_override: str | None = None,
+    notice_type: str | None = None,
 ) -> tuple[int | None, int]:
     """Insert the ``items`` row first (so ``tenders.item_id`` can reference it), then the
     ``tenders`` row itself. ``relevance``/``summary_he``/``entities`` default to the deterministic
     keyword-hit baseline when the caller didn't supply an LLM-derived value (LLM unavailable);
     ``status_override`` forces ``status`` regardless of the deadline-derived value (used for the
-    ``relevance == 3`` -> ``'unknown'`` rule). Returns ``(tender_id, item_id)`` -- ``tender_id`` is
-    ``None`` if a concurrent scan already inserted the same ``external_ref`` (``ON CONFLICT DO
-    NOTHING``)."""
+    ``relevance == 3`` -> ``'unknown'`` rule); ``notice_type`` (from the LLM extraction, F2) feeds
+    ``_initial_status``'s ``'award' -> 'awarded'`` rule when ``status_override`` doesn't already
+    force something else. ``notice.agency``/``notice.country``/``notice.published_at``/
+    ``notice.deadline`` are expected to already carry any LLM-filled values by the time this is
+    called (see ``_apply_extraction_to_notice``/``_apply_domain_country_fallback`` in
+    ``scan_tenders``). Returns ``(tender_id, item_id)`` -- ``tender_id`` is ``None`` if a concurrent
+    scan already inserted the same ``external_ref`` (``ON CONFLICT DO NOTHING``)."""
     clean_text = f"{notice.title}\n\n{notice.summary}".strip()
     url = notice.url or f"urn:tender:{notice.external_ref}"
     item_id = insert_item(
@@ -530,7 +619,7 @@ def _insert_tender_and_item(
         update_item_fields(item_id, summary_he=summary_he)
 
     today = dt.date.today()
-    status = status_override or _initial_status(notice, today)
+    status = status_override or _initial_status(notice, today, notice_type)
     final_relevance = relevance if relevance is not None else max(1, min(10, len(matched_terms)))
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -570,16 +659,40 @@ def _insert_tender_and_item(
     return (row["id"] if row else None), item_id
 
 
-def _llm_classify(notice: NoticeRaw, *, role: str, interactive: bool) -> TenderExtract:
-    """Pure LLM relevance/summary classification -- no DB writes (the caller decides what to do
-    with the result, including whether to store anything at all: see ``scan_tenders``'s relevance
-    gate). DATA-guarded via ``wrap_data``, keyed by the notice's ``external_ref`` since no
-    ``items`` row exists yet at this point (the gate runs *before* insertion)."""
+_NOTICE_FETCH_CHAR_CAP = 6000
+
+
+def _fetch_notice_text(notice: NoticeRaw, src_kind: str) -> str:
+    """F2: for a ``search``/``rss``-hit-derived notice (title+snippet only), fetch the actual notice
+    page so the LLM extraction can find real dates/agency/notice_type -- a snippet essentially never
+    carries a deadline. ``api_json`` sources (TED/Contracts Finder) already parsed those fields
+    structurally and don't need a page fetch. Never raises: a fetch failure (network, bot-block,
+    SSRF-guard rejection, ...) just falls back to title+summary, same as before this fix -- a
+    failing fetch must never block classification (docs/CONVENTIONS.md rule 9)."""
+    base = f"{notice.title}\n\n{notice.summary}".strip()
+    if src_kind == "api_json" or not notice.url:
+        return base
+    try:
+        page = fetch_remote(notice.url)
+    except Exception as exc:
+        log.debug("tender_notice_fetch_failed", url=(notice.url or "")[:200], error=str(exc)[:200])
+        return base
+    text = (page.get("text") or "").strip()
+    return text[:_NOTICE_FETCH_CHAR_CAP] if text else base
+
+
+def _llm_classify(notice: NoticeRaw, *, role: str, interactive: bool, src_kind: str = "search") -> TenderExtract:
+    """Pure LLM relevance/summary/date classification -- no DB writes (the caller decides what to
+    do with the result, including whether to store anything at all: see ``scan_tenders``'s
+    relevance gate). DATA-guarded via ``wrap_data``, keyed by the notice's ``external_ref`` since no
+    ``items`` row exists yet at this point (the gate runs *before* insertion). ``src_kind`` controls
+    whether the notice page itself is fetched first (see ``_fetch_notice_text``)."""
+    text_for_llm = _fetch_notice_text(notice, src_kind)
     prompt = render(
         "tender_extract",
         source_name=notice.source_id,
         country=notice.country or "?",
-        data=wrap_data(f"{notice.title}\n\n{notice.summary}"[:6000], notice.external_ref, notice.url or ""),
+        data=wrap_data(text_for_llm[:_NOTICE_FETCH_CHAR_CAP], notice.external_ref, notice.url or ""),
     )
     return chat_structured(
         role,
@@ -594,12 +707,23 @@ def _llm_classify(notice: NoticeRaw, *, role: str, interactive: bool) -> TenderE
 
 
 def _transition_closed() -> int:
+    """Nightly status transition (F2): close any ``'open'`` tender whose ``deadline`` has passed
+    (unchanged), AND any ``'open'`` tender that has no deadline at all but whose ``published_at`` is
+    older than ``_STALE_DAYS`` -- the "assume open forever when undated" bug this fix addresses
+    also applied to rows already sitting in the DB from before a deadline could be filled in."""
     today = dt.date.today()
+    stale_before = today - dt.timedelta(days=_STALE_DAYS)
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE tenders SET status = 'closed' "
-            "WHERE status = 'open' AND deadline IS NOT NULL AND deadline < %s RETURNING id",
-            (today,),
+            """
+            UPDATE tenders SET status = 'closed'
+            WHERE status = 'open' AND (
+                (deadline IS NOT NULL AND deadline < %(today)s)
+                OR (deadline IS NULL AND published_at IS NOT NULL AND published_at < %(stale_before)s)
+            )
+            RETURNING id
+            """,
+            {"today": today, "stale_before": stale_before},
         )
         return len(cur.fetchall())
 
@@ -678,7 +802,7 @@ def scan_tenders(
             extract: TenderExtract | None = None
             if time.monotonic() < llm_deadline:
                 try:
-                    extract = _llm_classify(notice, role=role, interactive=interactive)
+                    extract = _llm_classify(notice, role=role, interactive=interactive, src_kind=src.kind)
                     stats.llm_used += 1
                 except ResourceUnavailable:
                     stats.llm_deferred += 1
@@ -706,6 +830,14 @@ def scan_tenders(
                 seen_refs.add(notice.external_ref)
                 continue
 
+            # F2/F13: fill in date/agency/country gaps from the LLM extraction (when it ran and
+            # succeeded), then fall back to the URL-domain country table regardless -- both mutate
+            # `notice` in place so `_insert_tender_and_item` (which reads notice.* directly) picks
+            # them up without needing its own signature to grow further.
+            if extract is not None:
+                _apply_extraction_to_notice(notice, extract)
+            _apply_domain_country_fallback(notice)
+
             status_override = "unknown" if extract is not None and extract.relevance == RELEVANCE_UNKNOWN else None
             try:
                 if extract is not None:
@@ -716,6 +848,7 @@ def scan_tenders(
                         summary_he=extract.summary_he,
                         entities=extract.entities,
                         status_override=status_override,
+                        notice_type=extract.notice_type,
                     )
                 else:
                     tender_id, _item_id = _insert_tender_and_item(notice, domain_terms)
