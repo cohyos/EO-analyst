@@ -19,6 +19,9 @@ import type {
   LlmChainEntry,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
+  McpCallsResponse,
+  McpPingResponse,
+  McpServersResponse,
   MorningResponse,
   ReportCitationsResponse,
   ReportDetail,
@@ -137,6 +140,13 @@ export interface ApiClient {
   }): Promise<LlmSettingsPutResponse>;
   /** U8-4: per-provider fallback-chain call accounting (`?since=24h`) for the Settings card. */
   getLlmCalls(since?: string): Promise<LlmCallsSummary>;
+
+  /** A8 (docs/adr/006-mcp-sources.md): MCP tool sources — status/tools/last error per server. */
+  getMcpServers(): Promise<McpServersResponse>;
+  /** A8: "בדוק חיבור" — connect, list tools, disconnect. */
+  postMcpServerPing(serverId: string): Promise<McpPingResponse>;
+  /** A8: per-server/tool call accounting (`?since=24h`) for the Settings MCP card. */
+  getMcpCalls(since?: string): Promise<McpCallsResponse>;
 
   getConferences(from?: string, to?: string): Promise<Conference[]>;
   getConferencesIcalUrl(): string;

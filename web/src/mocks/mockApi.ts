@@ -16,6 +16,9 @@ import type {
   LlmChainEntry,
   LlmProvidersResponse,
   LlmSettingsPutResponse,
+  McpCallsResponse,
+  McpPingResponse,
+  McpServersResponse,
   MorningResponse,
   ReportCitationsResponse,
   ReportDetail,
@@ -661,6 +664,100 @@ export const mockApi: ApiClient = {
     }
     return delay({ ok: true, errors: [], revision: String(Date.now()) }, 200);
   },
+
+  getMcpServers: async (): Promise<McpServersResponse> =>
+    delay({
+      mcp_enabled: false,
+      servers: [
+        {
+          id: "procurement",
+          label: "רכש והתקשרויות (SAM.gov / USAspending / DSCA / Federal Register / Congress.gov)",
+          transport: "stdio",
+          enabled: true,
+          inherit_cli_only: false,
+          key_configured: false,
+          key_env: ["SAM_GOV_API_KEY", "CONGRESS_GOV_API_KEY"],
+          tool_count: null,
+          ok: null,
+          error: null,
+          latency_ms: null,
+          tools: [],
+        },
+        {
+          id: "janes",
+          label: "Janes Data Services (equipment / news / markets / budgets / events)",
+          transport: "stdio",
+          enabled: true,
+          inherit_cli_only: false,
+          key_configured: false,
+          key_env: ["JANES_API_KEY", "JANES_API_BASE"],
+          tool_count: null,
+          ok: null,
+          error: null,
+          latency_ms: null,
+          tools: [],
+        },
+        {
+          id: "patents",
+          label: "פטנטים (EPO OPS / USPTO PatentsView)",
+          transport: "stdio",
+          enabled: true,
+          inherit_cli_only: false,
+          key_configured: false,
+          key_env: ["EPO_OPS_KEY", "EPO_OPS_SECRET", "PATENTSVIEW_API_KEY"],
+          tool_count: null,
+          ok: null,
+          error: null,
+          latency_ms: null,
+          tools: [],
+        },
+        {
+          id: "financial_data",
+          label: "נתונים פיננסיים (FMP) — מחובר בסשן Claude של המשתמש",
+          transport: "http",
+          enabled: false,
+          inherit_cli_only: true,
+          key_configured: null,
+          key_env: null,
+          tool_count: null,
+          ok: null,
+          error: null,
+          latency_ms: null,
+          tools: [],
+        },
+        {
+          id: "academic_research",
+          label: "מחקר אקדמי (Undermind) — מחובר בסשן Claude של המשתמש",
+          transport: "http",
+          enabled: false,
+          inherit_cli_only: true,
+          key_configured: null,
+          key_env: null,
+          tool_count: null,
+          ok: null,
+          error: null,
+          latency_ms: null,
+          tools: [],
+        },
+      ],
+    }),
+  postMcpServerPing: async (serverId: string): Promise<McpPingResponse> =>
+    delay(
+      {
+        id: serverId,
+        ok: serverId !== "financial_data" && serverId !== "academic_research",
+        error:
+          serverId === "financial_data" || serverId === "academic_research"
+            ? "server is inherit_cli_only -- reachable only via a cloud CLI's own MCP config, not directly"
+            : null,
+        tool_count: serverId === "procurement" ? 6 : serverId === "janes" ? 7 : serverId === "patents" ? 3 : 0,
+        tools: [],
+        latency_ms: 120,
+      },
+      400,
+    ),
+  getMcpCalls: async (): Promise<McpCallsResponse> =>
+    delay({ since_hours: 24, calls: [], totals: { calls: 0, failures: 0, flagged: 0 } }),
 };
 
 export type { TriageLevel };

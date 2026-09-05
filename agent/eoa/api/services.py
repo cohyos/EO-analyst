@@ -795,6 +795,8 @@ def _report_card(row: dict[str, Any]) -> dict[str, Any]:
         "qa_passed": row.get("qa_passed"),
         "created_at": row.get("created_at"),
         "headline_count": len(included),
+        # A11: only populated for kind='bd_territory' -- None for every other report kind.
+        "territory": row.get("territory"),
     }
 
 
