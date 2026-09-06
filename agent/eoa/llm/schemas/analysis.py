@@ -409,8 +409,10 @@ class StructuredSection(BaseModel):
 #: Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md D2/W4, ICD 203 "Analytic Standards"): likelihood
 #: (axis 1 -- how probable the event/outcome is) and confidence (axis 2 -- how much the analyst
 #: trusts their own judgement, driven by source quantity/quality) are two INDEPENDENT axes that
-#: must never be merged into one clause -- see ``OutlookIndicator.display_text_he`` below and
-#: ``docs/QA_CONTINUOUS_LOOP.md``'s ``outlook_likelihood_and_confidence_separated`` D6 check.
+#: must never be merged into one clause -- see ``eoa.report.docx_builder._render_outlook_indicator``
+#: (P4, landed the same evening -- renders these two fields natively, see docs/MODULES.md "Round 5
+#: P3" for the coordination note) and ``docs/QA_CONTINUOUS_LOOP.md``'s
+#: ``outlook_likelihood_and_confidence_separated`` D6 check.
 LikelihoodHe = Literal["גבוהה", "בינונית", "נמוכה"]
 ConfidenceLevelHe = Literal["גבוה", "בינוני", "נמוך"]
 
@@ -423,9 +425,9 @@ class OutlookIndicator(BaseModel):
 
     Round 5 P3: ``likelihood``/``confidence_level``/``confidence_basis_he`` are additive and all
     optional (default ``None``/``""``) so an indicator persisted or fixture-built before this round
-    still loads unchanged. When set, they are rendered by :attr:`display_text_he` as two separate,
-    period-terminated clauses appended to ``text_he`` -- never asked of ``text_he`` itself, so the
-    model's own claim text and the deterministic likelihood/confidence suffix never collide."""
+    still loads unchanged. Rendering (two separate, never-mixed clauses appended to ``text_he``) is
+    ``eoa.report.docx_builder``'s job (``_render_outlook_indicator``, P4) -- this schema only
+    validates the data, it never composes display text itself."""
 
     text_he: str
     cites: list[int] = Field(default_factory=list)
@@ -459,29 +461,6 @@ class OutlookIndicator(BaseModel):
         if self.confidence_level and not self.confidence_basis_he.strip():
             raise ValueError("confidence_level requires a short confidence_basis_he explaining why")
         return self
-
-    @property
-    def display_text_he(self) -> str:
-        """``text_he`` plus a deterministic likelihood/confidence suffix (round 5 P3) -- RENDERING
-        ONLY: never persisted, never fed back to the model, and never used by
-        ``eoa.report.indicators`` (which reads ``.text_he`` directly for the cross-issue watchlist
-        dedupe key, so that key stays stable regardless of any confidence-basis rewording).
-
-        Each axis is its own period-terminated clause ("סבירות: X." / "ביטחון: Y (בסיס: ...)."), so
-        a downstream deterministic check that splits on ``[.,;]`` (see
-        ``eoa.qa.d6_daily_report._outlook_likelihood_confidence_check``) never finds both the
-        "סבירות" and "ביטחון" keywords inside the same clause -- see docs/MODULES.md "Round 5 P3"
-        for the exact rendering contract. Returns ``text_he`` unchanged when neither axis is set
-        (an older indicator, or one the model/fallback left unrated)."""
-        parts: list[str] = []
-        if self.likelihood:
-            parts.append(f"סבירות: {self.likelihood}.")
-        if self.confidence_level:
-            basis = f" (בסיס: {self.confidence_basis_he})" if self.confidence_basis_he else ""
-            parts.append(f"ביטחון: {self.confidence_level}{basis}.")
-        if not parts:
-            return self.text_he
-        return f"{self.text_he.rstrip()} " + " ".join(parts)
 
 
 #: Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.1 item 1 / sec 4 item 4, D6
@@ -544,7 +523,7 @@ class DailyReportDraft(BaseModel):
         default_factory=list,
         max_length=MAX_BLUF_SENTENCES,
         description=(
-            "שורה תחתונה: 1-2 אובייקטי Sentence בלבד, עד 40 מילה בסה\"כ, שמכילים את הדבר החשוב "
+            'שורה תחתונה: 1-2 אובייקטי Sentence בלבד, עד 40 מילה בסה"כ, שמכילים את הדבר החשוב '
             "ביותר שהקורא חייב לדעת לפני הפרטים -- כולל אימוג'י העדיפות (🔴/🟠/🟡) של הפריט המוביל, "
             "שאינו מופיע יותר בתקציר המנהלים"
         ),

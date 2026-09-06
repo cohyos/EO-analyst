@@ -12,7 +12,16 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from eoa.llm.schemas.analysis import AnalystNote, OutlookIndicator, ReportSection, Sentence, StructuredSection
+from eoa.llm.schemas.analysis import (
+    MAX_BLUF_SENTENCES,
+    AnalystNote,
+    AssumptionFalsifier,
+    OutlookIndicator,
+    ReportSection,
+    Sentence,
+    StructuredSection,
+    validate_bluf_length,
+)
 
 
 class TrendParagraph(BaseModel):
@@ -74,6 +83,18 @@ class WeeklyReportDraft(BaseModel):
     :class:`MonthlyReportDraftLegacy`.
     """
 
+    # Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.2 item 1): same BLUF contract as
+    # DailyReportDraft (see that class's own docstring) -- 1-2 cited Sentence objects, <=40 words
+    # total, carrying the priority emoji that no longer belongs in exec_summary.
+    bluf: list[Sentence] = Field(
+        default_factory=list,
+        max_length=MAX_BLUF_SENTENCES,
+        description=(
+            'שורה תחתונה: 1-2 אובייקטי Sentence בלבד, עד 40 מילה בסה"כ, שמכילים את הדבר החשוב '
+            "ביותר שהקורא חייב לדעת לפני הפרטים -- כולל אימוג'י העדיפות (🔴/🟠/🟡) של הפריט/המגמה "
+            "המובילים, שאינו מופיע יותר בתקציר המנהלים"
+        ),
+    )
     exec_summary: list[Sentence] = Field(
         default_factory=list,
         max_length=8,
@@ -106,9 +127,23 @@ class WeeklyReportDraft(BaseModel):
         max_length=4,
         description="2-4 אינדיקטורים קונקרטיים למעקב ב'מבט קדימה', כל אחד מצוטט או מסומן כהערכת אנליסט",
     )
+    # Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 1 item 6 / W4): 2-4 recommended by the
+    # prompt (a genuine "key assumptions check" needs at least a couple to be worth the section) --
+    # not enforced as a schema minimum so a thin week's draft (or normalize_draft/QA path) is never
+    # forced to fabricate one just to pass validation.
+    assumptions: list[AssumptionFalsifier] = Field(
+        default_factory=list,
+        max_length=4,
+        description="2-4 זוגות הנחה/הפרכה (key assumptions check) שמבססים את הניתוח השבועי",
+    )
     open_points_he: list[str] = Field(
         default_factory=list, max_length=6, description="עד 6 נקודות פתוחות להכרעת המשתמש"
     )
+
+    @field_validator("bluf")
+    @classmethod
+    def _check_bluf(cls, v: list[Sentence]) -> list[Sentence]:
+        return validate_bluf_length(v)
 
     @field_validator("sections")
     @classmethod
@@ -242,6 +277,17 @@ class MonthlyReportDraft(BaseModel):
     never writes "[n]" itself; ``cites`` is what produces the marker deterministically.
     """
 
+    # Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.3 / M1): same BLUF contract as
+    # DailyReportDraft/WeeklyReportDraft (see DailyReportDraft's own docstring).
+    bluf: list[Sentence] = Field(
+        default_factory=list,
+        max_length=MAX_BLUF_SENTENCES,
+        description=(
+            'שורה תחתונה: 1-2 אובייקטי Sentence בלבד, עד 40 מילה בסה"כ, שמכילים את הדבר החשוב '
+            "ביותר שהקורא חייב לדעת לפני הפרטים -- כולל אימוג'י העדיפות (🔴/🟠/🟡) של הפריט/המגמה "
+            "המובילים, שאינו מופיע יותר בתקציר המנהלים"
+        ),
+    )
     exec_summary: list[Sentence] = Field(
         default_factory=list,
         max_length=8,
@@ -274,9 +320,20 @@ class MonthlyReportDraft(BaseModel):
         max_length=4,
         description="2-4 אינדיקטורים קונקרטיים למעקב ב'מבט קדימה', כל אחד מצוטט או מסומן כהערכת אנליסט",
     )
+    # Round 5 P3: same "2-4 recommended, not schema-enforced" rationale as WeeklyReportDraft's own.
+    assumptions: list[AssumptionFalsifier] = Field(
+        default_factory=list,
+        max_length=4,
+        description="2-4 זוגות הנחה/הפרכה (key assumptions check) שמבססים את הניתוח החודשי",
+    )
     open_points_he: list[str] = Field(
         default_factory=list, max_length=8, description="עד 8 נקודות פתוחות להכרעת המשתמש"
     )
+
+    @field_validator("bluf")
+    @classmethod
+    def _check_bluf(cls, v: list[Sentence]) -> list[Sentence]:
+        return validate_bluf_length(v)
 
     @field_validator("sections")
     @classmethod

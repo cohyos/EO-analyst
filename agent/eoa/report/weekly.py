@@ -48,7 +48,8 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
-from eoa.report.qa_citations import QAResult, check
+from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
+from eoa.report.style import apply_style_guard
 from eoa.report.textnorm import normalize_draft
 
 log = structlog.get_logger(__name__)
@@ -676,7 +677,11 @@ def _deterministic_fallback_draft(
     LLM-drafted narrative still fails citation QA after one corrective retry. Every sentence cites
     a real, already-registered item ``n``, so this cannot itself fail
     :func:`eoa.report.qa_citations.check` (the caller still runs it once anyway, defensively -- see
-    ``build_weekly``)."""
+    ``build_weekly``).
+
+    Round 5 P3: ``bluf`` stays at its default ``[]`` -- see
+    ``eoa.report.daily._deterministic_fallback_draft``'s own docstring for why (P4's
+    ``docx_builder._draft_bluf_info`` already synthesizes a labelled BLUF from this exact shape)."""
     sentences: list[Sentence] = []
     sentences.extend(_fallback_top_item_sentences(items, limit=_FALLBACK_TOP_ITEMS))
     sentences.extend(_fallback_event_sentences(events_with_n, limit=_FALLBACK_TOP_EVENTS))
@@ -935,6 +940,14 @@ def build_weekly(
 
     draft = normalize_draft(draft)
 
+    # Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 4/11; docs/qa/loop/round_3_judge.md
+    # D2): same draft-QA step `textnorm.normalize_draft` is already called from -- strip the W26
+    # filler-phrase list and the D2 so_what template-phrase list from the final draft before it
+    # renders (see `eoa.report.daily.build_daily`'s identical wiring for the full rationale).
+    draft, _style_report = apply_style_guard(draft, report_kind="weekly")
+    _style_report.log_all(report_kind="weekly")
+    draft, _so_what_removed = strip_so_what_phrases_from_draft(draft, report_kind="weekly")
+
     trend_sections = [
         {
             "title_he": tp.title_he,
@@ -955,6 +968,10 @@ def build_weekly(
     # trend sections above); the "מעקב אינדיקטורים" (I&W) watchlist table renders in the outlook
     # area ("after_outlook", before the meta-summary section below). A failure in either must never
     # break the weekly report.
+    #
+    # Round 5 P3: BLUF ("שורה תחתונה") and "הנחות והפרכות" need no wiring here -- `docx_builder`
+    # (P4) renders both natively from `draft.bluf`/`draft.assumptions` (docs/MODULES.md "Round 5
+    # P3").
     extra_sections: list[dict[str, Any]] = []
     indicator_rows: list[dict[str, Any]] = []
     try:

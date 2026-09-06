@@ -40,7 +40,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+import structlog
+
 from eoa.llm.schemas.analysis import DailyReportDraft
+
+log = structlog.get_logger(__name__)
 
 # -- sentence splitting ------------------------------------------------------
 
@@ -468,3 +472,151 @@ def check(
         bad_refs=sorted(bad_refs),
         duplicate_sentences=duplicate_sentences,
     )
+
+
+# =================================================================================================
+# Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 1 item 6, sec 4 item 11;
+# docs/qa/loop/round_3_judge.md D2): the so_what template-phrase post-pass.
+#
+# BLUF ("שורה תחתונה"), the outlook likelihood/confidence separated-clause rendering, and the
+# "הנחות והפרכות" assumptions section were ALSO originally planned as extra_sections helpers here
+# (see git history) -- dropped once it turned out ``eoa.report.docx_builder`` (P4, landed the same
+# evening) already reads ``draft.bluf``/``OutlookIndicator.likelihood``/``confidence_level``/
+# ``confidence_basis_he``/``draft.assumptions`` NATIVELY (``_draft_bluf_text``/
+# ``_render_outlook_indicator``/``_draft_assumptions``+``_render_assumption``), including a
+# "before_summary" extra_sections position and a synthesized-BLUF fallback for a zero-narrative
+# draft (``eoa.report.daily._deterministic_fallback_draft``'s own shape). Adding the extra_sections/
+# render-copy path on top of that would have DOUBLE-rendered every one of these sections/suffixes --
+# see docs/MODULES.md "Round 5 P3" for the full P3<->P4 coordination note, including the one
+# non-fatal value-format mismatch (this schema uses Hebrew literals for
+# ``likelihood``/``confidence_level``; P4's formatters were written expecting a numeric ratio/
+# English key, but both fall back to rendering the value verbatim, so the correct Hebrew text is
+# what actually reaches the page).
+# =================================================================================================
+
+# -- so_what template-phrase ban (docs/qa/loop/round_3_judge.md D2) --------------------------------
+
+#: Round 5 P3: the round-3 judge's D2 finding -- the generic "so_what" template phrasing (originally
+#: only banned in ``analyze.md``, round 3) independently recurs in *report-generation* prose too
+#: (its own example: "לחזק את מעמדה" on a Hensoldt/Elbit item in a cloud-drafted weekly report).
+#: Extends the same ban to report exec_summary/section prose. Deliberately a separate list/pattern
+#: from ``eoa.report.style.BANNED_FILLER_PHRASES_HE`` (that module/list is out of this round's file
+#: ownership to edit) rather than a generic "no template phrases" catch-all -- these are specific,
+#: safe-to-delete-outright formulaic phrases, not general style guidance.
+SO_WHAT_TEMPLATE_PHRASES_HE: tuple[str, ...] = (
+    "מחזק את מעמדה",
+    "מחזקת את מעמדה",
+    "לחזק את מעמדה",
+    "מחזק את מעמדו",
+    "מחזקת את מעמדו",
+    "לחזק את מעמדו",
+    "מהווה צעד משמעותי",
+    "מהווה צעד נוסף",
+    "מהווה צעד חשוב",
+    "מעיד על מגמה",
+    "מעידה על מגמה",
+)  # fmt: skip
+
+_MULTI_SPACE_RE = re.compile(r" {2,}")
+_LEADING_JUNK_RE = re.compile(r"^\s*[,:;]+\s*")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([.,:;)\]])")
+_DOUBLE_PUNCT_RE = re.compile(r"([.,:;])\1+")
+
+
+def _build_phrase_pattern(phrases: tuple[str, ...]) -> re.Pattern[str]:
+    """Small local copy of ``eoa.report.style._build_filler_pattern``'s algorithm (longest-phrase-
+    first, so a longer phrase matches whole before a shorter substring of it could) -- not imported
+    across the module boundary since that name is private and ``style.py`` is out of this round's
+    file-ownership scope to edit (see the module-level note above)."""
+    ordered = sorted(set(phrases), key=len, reverse=True)
+    return re.compile("|".join(re.escape(p) for p in ordered))
+
+
+_SO_WHAT_RE = _build_phrase_pattern(SO_WHAT_TEMPLATE_PHRASES_HE)
+
+
+def strip_so_what_phrases(text: str) -> tuple[str, list[str]]:
+    """Remove every banned so_what template phrase from ``text``, cleaning up leftover
+    whitespace/dangling punctuation -- same safe, deterministic removal mechanics as
+    ``eoa.report.style.strip_filler_phrases`` (this module's own local copy, see
+    :func:`_build_phrase_pattern`). ``(text, [])`` (input returned unchanged) when nothing matched."""
+    if not text:
+        return text, []
+    removed: list[str] = []
+
+    def _sub(m: re.Match[str]) -> str:
+        removed.append(m.group(0))
+        return " "
+
+    cleaned = _SO_WHAT_RE.sub(_sub, text)
+    if not removed:
+        return text, []
+    cleaned = _MULTI_SPACE_RE.sub(" ", cleaned)
+    cleaned = _LEADING_JUNK_RE.sub("", cleaned)
+    cleaned = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", cleaned)
+    cleaned = _DOUBLE_PUNCT_RE.sub(r"\1", cleaned)
+    return cleaned.strip(), removed
+
+
+def strip_so_what_phrases_from_draft(
+    draft: Any, *, report_kind: str = "", job_id: int | None = None
+) -> tuple[Any, int]:
+    """Deterministic post-pass (round 5 P3, docs/qa/loop/round_3_judge.md D2): strips every banned
+    :data:`SO_WHAT_TEMPLATE_PHRASES_HE` phrase from ``draft.exec_summary`` and every
+    ``draft.sections[].sentences`` entry -- the two places the judge finding's evidence actually
+    appeared (report narrative prose), duck-typed so this runs unchanged on the Daily/Weekly/Monthly
+    structured draft shapes. Call this from the same draft-QA step ``eoa.report.style.
+    apply_style_guard`` is already called from (after ``normalize_draft``, before rendering).
+
+    Returns ``(possibly-updated draft, phrases_removed_count)``; the caller should log the count
+    (``log.info("so_what_template_phrases_stripped", ...)``) when non-zero, per this task's "log
+    counts" requirement -- done here directly so every call site gets it for free."""
+    removed_total = 0
+
+    def _clean(text: str) -> str:
+        nonlocal removed_total
+        cleaned, removed = strip_so_what_phrases(text)
+        removed_total += len(removed)
+        return cleaned
+
+    updates: dict[str, Any] = {}
+
+    exec_summary = getattr(draft, "exec_summary", None)
+    if isinstance(exec_summary, list) and exec_summary:
+        new_summary = []
+        for s in exec_summary:
+            text = getattr(s, "text_he", None)
+            if isinstance(text, str) and text:
+                cleaned = _clean(text)
+                new_summary.append(s.model_copy(update={"text_he": cleaned}) if cleaned != text else s)
+            else:
+                new_summary.append(s)
+        updates["exec_summary"] = new_summary
+
+    sections = getattr(draft, "sections", None)
+    if isinstance(sections, list) and sections:
+        new_sections = []
+        for section in sections:
+            if not hasattr(section, "sentences"):
+                new_sections.append(section)
+                continue
+            new_sentences = []
+            for s in section.sentences:
+                text = getattr(s, "text_he", None)
+                if isinstance(text, str) and text:
+                    cleaned = _clean(text)
+                    new_sentences.append(s.model_copy(update={"text_he": cleaned}) if cleaned != text else s)
+                else:
+                    new_sentences.append(s)
+            new_sections.append(section.model_copy(update={"sentences": new_sentences}))
+        updates["sections"] = new_sections
+
+    updated = draft.model_copy(update=updates) if updates else draft
+    if removed_total:
+        log.info(
+            "so_what_template_phrases_stripped",
+            report_kind=report_kind,
+            job_id=job_id,
+            count=removed_total,
+        )
+    return updated, removed_total

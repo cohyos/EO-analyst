@@ -35,7 +35,8 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
-from eoa.report.qa_citations import QAResult, check
+from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
+from eoa.report.style import apply_style_guard
 from eoa.report.textnorm import normalize_draft
 
 log = structlog.get_logger(__name__)
@@ -741,7 +742,13 @@ def _deterministic_fallback_draft(
     uncited claim to slip through, so this cannot fail :func:`eoa.report.qa_citations.check` (the
     caller still runs it once anyway, defensively -- see ``build_daily``). ``system_note_he``
     carries the honest explanation of why the model's own draft was dropped, labelled up front so a
-    reader never mistakes this deterministic summary for the model's own analysis."""
+    reader never mistakes this deterministic summary for the model's own analysis.
+
+    Round 5 P3: ``bluf`` is deliberately left at its default ``[]`` here, not populated from the
+    top item -- ``eoa.report.docx_builder._draft_bluf_info`` (P4) already synthesizes a labelled
+    ("שורה תחתונה אוטומטית מהנתונים, ללא ניסוח מודל") BLUF from this exact shape (empty
+    ``sections`` + non-empty ``system_note_he`` + non-empty ``exec_summary``) at render time; setting
+    ``bluf`` explicitly here would suppress that "no model text" label instead of reproducing it."""
     sentences: list[Sentence] = []
     sentences.extend(_fallback_top_item_sentences(items, limit=_FALLBACK_TOP_ITEMS))
     sentences.extend(_fallback_event_sentences(events_with_n, limit=_FALLBACK_TOP_EVENTS))
@@ -1119,11 +1126,25 @@ def build_daily(
 
     draft = normalize_draft(draft)
 
+    # Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 4/11; docs/qa/loop/round_3_judge.md
+    # D2): the same draft-QA step `textnorm.normalize_draft` already runs from (per
+    # `eoa.report.style`'s own docstring) -- strip the existing banned-filler-phrase list (W26) and
+    # the so_what template-phrase list (D2) from the final draft before it's rendered. Both are
+    # safe, deterministic removals (never a rewrite); violation/removal counts are logged for QA
+    # follow-up, never silently swallowed.
+    draft, _style_report = apply_style_guard(draft, report_kind="daily")
+    _style_report.log_all(report_kind="daily")
+    draft, _so_what_removed = strip_so_what_phrases_from_draft(draft, report_kind="daily")
+
     # Round 5 P2 (docs/PLAN_ROUND5_REPORTS.md P2, D4/D5): "מה השתנה מאז הדוח הקודם" (deterministic
     # delta vs. the previous daily report) and the "מעקב אינדיקטורים" (I&W) watchlist table -- both
     # additive `extra_sections` entries, computed here (after the draft/fallback is final) so the
     # delta's "top new items" and the indicator maturation check both see this issue's real,
     # already-numbered item list. A failure in either must never break the daily report.
+    #
+    # Round 5 P3: BLUF ("שורה תחתונה") and "הנחות והפרכות" need no wiring here at all --
+    # `eoa.report.docx_builder` (P4) renders both natively straight from `draft.bluf`/
+    # `draft.assumptions` (see docs/MODULES.md "Round 5 P3" for the coordination note).
     extra_sections: list[dict[str, Any]] = []
     indicator_rows: list[dict[str, Any]] = []
     try:

@@ -199,3 +199,174 @@ i18n-רוחבי לפריט הזה).
 היחידה שלו (`id=392`) גם היא עדיין `outcome='not_found'`. ה-SQL המדויק (ר' docs/MODULES.md "Round-5
 P7" לגוף המלא) מעדכן את שני המקומות יחד (`jobs.result` + `investigation_log.outcome`) כדי ששני
 העמודים (יומי + UI) יראו את אותה תוצאה.
+
+## סטטוס P4 (עודכן 2026-09-06, בוצע -- כולל אימות חי מול P3/P6 שנחתו במקביל באותו ערב)
+
+כל חמשת הפערים שהוקצו לחבילה (D3/BLUF-בכשל, D7/אמינות-מקור, DS3/blocked, W5/קישור-טבלאות-למגמות,
+P1/סבירות-ביטחון) סגורים ב-`agent/eoa/report/docx_builder.py` בלבד (`textnorm.py` לא נגעתי --
+אף כלל רינדור חדש לא נזקק לו). כל הרינדור נכתב דפנסיבית מול `getattr` (עוטף חדש: `_field`, תומך גם
+במפתחות dict) כדי לעבוד כ-no-op בלי סכמת P3 -- ותוך כדי העבודה P3 אכן נחת (`git diff` חי הראה
+`DailyReportDraft.bluf`/`OutlookIndicator.likelihood`/`confidence_level`/`confidence_basis_he`/
+`assumptions: list[AssumptionFalsifier]`), ואומת חי מול הסכמה האמיתית: BLUF מלא, סבירות/ביטחון
+מופרדים ב-clauses, והנחות/הפרכות נרנדרים נכון end-to-end (ר' פלט `render_markdown` בבדיקה הידנית
+בתיעוד המפורט). P3 עצמו תיעד ב-`qa_citations.py` שהוא ויתר על מסלול `extra_sections` משלו לטובת
+הרינדור הנטיבי הזה בדיוק כדי למנוע רינדור כפול -- ר' docs/MODULES.md "Round 5 P4" לחוזה המדויק
+(שמות שדה, מיקומים, מפתחות) **וגם** לשני ממצאים שהתגלו רק אחרי הנחיתה: (1) תיקון ניסוח קטן שביצעתי
+ב-`_render_assumption` ("הפרכה:" במקום "יופרך אם:", כדי להתאים למילות המפתח הדטרמיניסטיות של
+`eoa.qa.d7_bd_report`); (2) ממצא חוצה-צוותים (לא בבעלות החבילה, לא תוקן) -- `weekly.py`/`monthly.py`
+עדיין מייבאים `bluf_extra_section`/`assumptions_extra_section` שאינם קיימים בשום מקום בקוד (ייבוא
+שבור, ככל הנראה שאריות מתכנון שננטש), חוסם כרגע כמה מודולי בדיקה (`test_monthly_round5.py` וכו').
+
+1. **BLUF ("שורה תחתונה") + D3 (נפילה חלקית ביומי).** `draft.bluf` (כשיגיע מ-P3) מרונדר כסעיף
+   ראשון, לפני "תקציר מנהלים", מודגש, `[n]` דטרמיניסטי מ-`cites`. עד אז -- ודווקא בשביל D3 --
+   `eoa.report.daily._deterministic_fallback_draft`'s הצורה האמיתית שלה כבר קיימת היום (`sections`
+   ריק, `system_note_he` לא ריק, `exec_summary` בנוי מהפריט המוביל) מזוהה אוטומטית והרנדרר בונה
+   ממנה BLUF מסונתז בן 1-2 משפטים (מ-`exec_summary[:2]`), מתויג "(שורה תחתונה אוטומטית מהנתונים,
+   ללא ניסוח מודל)" -- בדיוק התיקון ל"מנגנון הכשל" (docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 item 1)
+   שהיה שמור ל-P3+P4 יחד. תמיכה נוספת ב-`position="before_summary"` עבור `extra_sections` (חלופה
+   ל-P3/P6 לדוחות בפרוזה חופשית שלא יקבלו שדה `bluf` משלהם).
+2. **סבירות/ביטחון נפרדים.** `_render_outlook_indicator` מוסיף "סבירות: X%; ביטחון: <רמה> (<בסיס>)"
+   רק כש-`likelihood`/`confidence_level` קיימים על האינדיקטור -- מופרד בנקודה-פסיק כדי לעמוד ב-
+   `eoa.qa.d6_daily_report._CLAUSE_SPLIT_RE` (בדיקה `outlook_likelihood_and_confidence_separated`);
+   אינדיקטור legacy בלי השדות מרונדר בדיוק כמו היום.
+3. **הנחות והפרכות.** `draft.assumptions` (כשיגיע) מרונדר כסעיף "הנחות והפרכות" מיד אחרי "מבט
+   קדימה", כל שורה "<הנחה> — יופרך אם: <הפרכה> [n]".
+4. **DS3 -- `blocked` ≠ `not_found`.** תווית חדשה ב-`_OUTCOME_LABELS_HE["blocked"]` = "נחסם (לא
+   נחקר בפועל)"; הגוף מוצג מ-`entry.get("blocked_reason_he")` (לא מ-`answer_he`, שלעולם לא הופק).
+   עיצוב ענבר (`class="ds-blocked"`) ב-HTML בלבד (כמבוקש); `rerun_note_he`
+   (מ-`eoa.report.daily.reconcile_deep_search_reruns`, כבר קיים) מוצג מתחת לכל רשומה בשלושת
+   הפלטים -- בפורמט markdown כשורת `  - ` מוזחת כדי שלא תיקרא כרשומה שנייה ע"י ה-regex של
+   `eoa.qa.d4_investigations`. **תלות ידועה, לא בבעלותי (תועדה גם ב-"סטטוס P7" למעלה):**
+   `eoa.report.daily.collect_deep_search` (שורה ~326) עדיין לא כולל `blocked_reason_he` ברשימת
+   המפתחות שהוא בונה מ-`result` -- עד שתתווסף שם השורה `"blocked_reason_he":
+   result.get("blocked_reason_he", "")`, הרנדרר יציג "—" כסיבה (מעולם לא יציג "לא נמצא" בטעות,
+   וזה כל מה שה-QA הדטרמיניסטי `blocked_distinct_from_not_found` בודק).
+5. **D7 -- אמינות מקור בנספח.** עמודת "אמינות" חדשה בנספח המקורות (בין "מקור" ל"תאריך") בשלושת
+   הפלטים; `reliability_label` (חדשה, ציבורית) מקבלת `None`/מחרוזת מוכנה/`dict` בצורה
+   `{"kind": "primary"|"secondary", "score": float|None, "label": str|None}` ומרנדרת "מקור
+   ראשוני/משני · <label> · <score:.2f>"; "—" כשאין נתון. `items[i]["reliability"]` הוא המפתח
+   האופציונלי החדש -- אספני הדוח (לא בבעלותי) יאכלסו אותו מ-`sources.reliability`/טבלת
+   `source_reliability` כשירצו.
+6. **W5 -- קישור טבלאות למגמות.** שורת טבלה יכולה עכשיו להיות גם `dict`
+   `{"cells": [...], "related_trend_he": "..."}` (לצד הצורה הישנה, `list[Any]`, שנשארת עובדת ללא
+   שינוי בכל קורא קיים) -- `related_trend_he` מתקפל כ"(מגמה: …)" בתא האחרון של השורה בשלושת
+   הפלטים; `tbl["related_trend_he"]` ברמת הטבלה כולה מרונדר כהערה נפרדת מתחת לכותרת/`note_he`.
+   `dedupe_rows_across_tables`/`_row_identity` עודכנו לתמוך בשתי הצורות ללא שינוי בהתנהגות הקיימת
+   (נבדק ברגרסיה מול `tests/unit/test_table_dedupe_round4.py`).
+
+**בדיקות:** `tests/unit/test_renderer_round5.py` (חדש, 38 מקרים -- אחד לכל התנהגות/גבול) +
+`tests/unit/test_docx_builder.py` (עודכן: כותרת נספח המקורות כוללת "אמינות"). `pytest tests/unit -q
+-k "docx or renderer or md_body or table_dedupe or report_round3_d6"`: 128 עברו, 0 נכשלו. `ruff
+check`/`ruff format --check` נקיים על שלושת הקבצים שנגעתי בהם
+(`agent/eoa/report/docx_builder.py`, `tests/unit/test_renderer_round5.py`,
+`tests/unit/test_docx_builder.py`).
+
+## סטטוס P6 (2026-09-06, בוצע -- BD טריטוריאלי: מפת קונים, דירוג הזדמנויות, דלתא, הנחות והפרכות)
+
+כל ארבעת הפערים (B1, B2, B4, B5) ופריט ה-BLUF לדוח ה-BD נסגרו. קבצים:
+`agent/eoa/llm/schemas/bd_territory.py`, `agent/eoa/report/bd_territory.py`,
+`agent/eoa/llm/prompts/report_bd_territory.md`, `tests/unit/test_bd_round5.py` (חדש, 45 בדיקות).
+
+**ממצא חוצה-חבילות (P4 כבר רינדר BLUF+הנחות נטיבית):** בזמן חיווט מיקום ה-BLUF (לפי הבריף: לנסות
+`extra_sections` position `"before_summary"`, וליפול חזרה ל-`"after_summary"` אם לא נתמך עדיין),
+התברר ש-`eoa.report.docx_builder` (P4, אותו ערב) כבר בנה רינדור נטיבי, מוקלד-ברווח (duck-typed),
+ישירות מ-`draft.bluf`/`draft.assumptions` -- שני שדות ששמם זהה בדיוק לשדות שהוספתי כאן. `_draft_bluf_
+info`/`_draft_bluf_text` מציגים "שורה תחתונה" ראשונה בדוח, ממש לפני "תקציר מנהלים" (בדיוק המטרה
+שהבריף חשש שתדרוש מנגנון מיוחד), כולל fallback דטרמיניסטי מתויג לדוחות ה-`_tables_only_draft`/
+`_deterministic_fallback_draft` של המודול הזה. `_draft_assumptions`/`_render_assumption` מציגים
+"הנחות והפרכות" מיד אחרי "מבט קדימה". טיוטה ראשונה של העבודה הזו דחפה את שני הסעיפים גם כ-
+`extra_sections` ידניים (וגם הוסיפה helper שבודק אם `docx_builder` תומך ב-`"before_summary"`) --
+נתפס בבדיקה חיה (כותרת "הנחות והפרכות" כפולה באותו דוח) והוסר; ראו ההערות ברמת המודול ב-
+`bd_territory.py`. **שני פערי ניסוח/מילות-מפתח חוצי-צוות תועדו ונשלחו כ-follow-up task (לא תוקנו
+כאן -- שני הקבצים שייכים למהנדסים אחרים הסבב הזה):** (1) `eoa.qa.d6_daily_report`/`d7_bd_report`'s
+`_bluf_check` נכשל (`cited=False`) גם מול BLUF תקין ומצוטט כהלכה, כי מפצל המשפטים המקומי מפריד
+"טקסט. [n]" לשני קטעים ("טקסט." ו-"[n]") ודורש ציטוט בכל קטע בנפרד; (2) `assumptions_falsifiers_
+list_present` נכשל (`falsifier_language=False`) כי הניסוח הנטיבי "... — יופרך אם: ..." אינו מכיל אף
+אחת ממילות-המפתח `("פריך", "הפרכ", "falsif")` כתת-מחרוזת.
+
+**B1 (מפת קונים / צינור הזדמנויות):** טבלה דטרמיניסטית חדשה (`pipeline_table`) -- שורות ממכרזים
+(`_pipeline_rows_from_tenders`, שלב RFI/RFP/הערכה נגזר מכותרת/סטטוס), מתחזיות (`_pipeline_rows_
+from_forecasts`, שלב "החלטה" לחלון קרוב+סבירות גבוהה, אחרת "הערכה"), מאירועי זכייה בלבד
+(`_pipeline_rows_from_events`, `events.kind == 'contract_award'` בלבד -> "לאחר-זכייה") ועד 3 שורות
+מהמודל (`BdPipelineOpportunity`, מאומת ציטוט כמו `rationale` של פעולה מומלצת).
+
+**B2 (דירוג הזדמנויות):** נוסחה מתועדת: `tier_score = magnitude (0-3) + recency (0-2) + watchlist
+bonus (0-1)`; A מ-4 ומעלה, B מ-2, אחרת C (`tier_label`/`_tier_score`, הערת מודול מלאה ב-
+`bd_territory.py`). עמודת "דרג" נוספה לטבלת הצינור וגם ל-`competitors_table`.
+
+**B4 (דלתא טריטוריאלית):** חיווט ישיר, ללא שינוי, של `eoa.report.deltas.compute_deltas`/
+`build_report_state`/`delta_extra_section` עם `kind="bd_territory"` ו-`territory=code` -- בדיוק
+כפי שתועד מראש בסטטוס P2. `reports.report_state` מאוכלס עכשיו גם לדוחות `bd_territory`.
+
+**B5 (הנחות והפרכות):** `BdAssumption` חדש (`assumption_he`/`falsifier_he`/`cites` אופציונלי)
+מחליף את `risks_assumptions_he` בפרומפט החדש; השדה הישן נשאר בסכמה (ריק כברירת מחדל) כדי שטיוטה
+ישנה עדיין תיטען לאובייקט תקין.
+
+**בדיקות:** `tests/unit/test_bd_round5.py` (45, חדש). `pytest tests/unit -q -k "bd or territory or
+acquisition"`: 268 עברו, 0 נכשלו (223 קיימות + 45 חדשות; שורת בדיקה אחת בקובץ לא-בבעלותי,
+`test_report_bd_territory.py`, עודכנה לכותרת הטבלה החדשה עם עמודת "דרג", אותה מוסכמה כמו P1).
+`ruff check`/`ruff format --check` נקיים על כל הקבצים שנגעתי בהם.
+
+## סטטוס P3 (2026-09-06, בוצע -- BLUF + סבירות/ביטחון + הנחה↔הפרכה + איסור so_what בפרומפטי הדוחות)
+
+כל ארבעת המסירות (BLUF, הפרדת סבירות/ביטחון, הנחות↔הפרכות, איסור ניסוחי so_what) סגורות עבור
+הדוח היומי/שבועי/חודשי. קבצים: `agent/eoa/llm/schemas/analysis.py` (מחלקות טיוטת דוח בלבד --
+`Sentence`/`OutlookIndicator`/`AssumptionFalsifier`/`DailyReportDraft`), `agent/eoa/llm/schemas/
+reports.py` (`WeeklyReportDraft`/`MonthlyReportDraft`), `agent/eoa/report/qa_citations.py` (פס
+ה-so_what), `agent/eoa/report/{daily,weekly,monthly}.py` (חיווט בלבד), פרומפטי
+`report_{daily,weekly,monthly}.md`, `tests/unit/test_bluf_round5.py` (חדש, 31 בדיקות).
+
+**דלתת סכמה:** `bluf: list[Sentence]` (עד 2 משפטים, עד 40 מילה בסה"כ, ולידציה משותפת
+`validate_bluf_length`) על שלוש הטיוטות; `OutlookIndicator.likelihood: "גבוהה"|"בינונית"|"נמוכה"|
+None` + `.confidence_level: "גבוה"|"בינוני"|"נמוך"|None` + `.confidence_basis_he: str=""` (אדיטיבי,
+`confidence_level` דורש `confidence_basis_he` לא-ריק); `AssumptionFalsifier` חדש
+(`assumption_he`/`falsifier_he`/`cites` אופציונלי) + שדה `assumptions` (0-4 ביומי, 2-4 מומלץ
+בשבועי/חודשי, לא נאכף כמינימום בסכמה).
+
+**ממצא חוצה-חבילות קריטי (זהה לזה שגילה P6 עצמאית באותו ערב עבור ה-BD):** התוכנית המקורית של
+חבילה זו הייתה לחשוף BLUF/הנחות כ-`extra_sections` ולבנות עותק-רינדור עם סבירות/ביטחון משורשרים
+לתוך `text_he`. תוך כדי מימוש התברר ש-`eoa.report.docx_builder` (P4, אותו ערב) כבר מרנדר נטיבית,
+duck-typed, ישירות מ-`draft.bluf`/`OutlookIndicator.likelihood`/`confidence_level`/
+`confidence_basis_he`/`draft.assumptions` -- בדיוק שמות השדות שחבילה זו נחתה איתם -- כולל תמיכה
+אמיתית ב-`extra_sections` position `"before_summary"` וסינתוז BLUF מתויג לטיוטת-כשל ריקת-נרטיב.
+קוד ה-`extra_sections`/עותק-הרינדור המיותר הוסר לפני נחיתה (היה גורם לכפילות: כותרת "שורה תחתונה"
+כפולה, סיומת "סבירות/ביטחון" כפולה על כל אינדיקטור) -- התוצאה: `daily.py`/`weekly.py`/
+`monthly.py` מעבירים את `draft` המקורי בלי שינוי לשלוש קריאות הרינדור.
+
+**אי-התאמת פורמט-ערך לא-קריטית, מתועדת (לא תוקנה -- `docx_builder.py` קריאה-בלבד לחבילה זו):**
+`_format_likelihood`/`_format_confidence_level` ב-`docx_builder.py` נכתבו בהנחת קלט מספרי (יחס
+0-1)/מפתח אנגלי ("high"/"medium"/"low"); חבילה זו משתמשת בערכי `Literal` עבריים (לפי הבריף של
+חבילה זו). נבדק חי: שני הפונקציות נופלות בבטחה ל-`return str(value)`/`dict.get(value, value)`
+עבור קלט לא-מספרי/לא-מפתח-אנגלי -- כלומר עבור ערך עברי כבר-מוכן זה מחזיר בדיוק את הטקסט הנכון.
+שני הצדדים לא-מסונכרנים על הנייר אך תואמים בפועל; מכוסה ב-`tests/unit/test_bluf_round5.py`.
+
+**אישוש (לא תיקון כפול) לבאג ידוע ב-checker של D6:** P6 כבר דיווח (follow-up task, לא בקובץ
+בבעלותו) ש-`eoa.qa.d6_daily_report._bluf_check`/`d7_bd_report`'s מקבילו נכשלים (`cited=False`)
+גם מול BLUF תקין לגמרי, כי מפצל המשפטים המקומי שובר "טקסט. [1]" לשני קטעים. נבדק חי גם עבור
+היומי/שבועי (הן BLUF מהמודל והן ה-BLUF המסונתז דטרמיניסטית של טיוטת-הכשל) -- אותה תקלה חוזרת,
+בדיוק כפי ש-P6 חזה. לא נשלחה כאן משימת follow-up כפולה -- רק אישוש נוסף לתיעוד הקיים.
+
+**איסור ניסוחי so_what (D2, docs/qa/loop/round_3_judge.md):** `SO_WHAT_TEMPLATE_PHRASES_HE` +
+`strip_so_what_phrases`/`strip_so_what_phrases_from_draft` חדשים ב-`qa_citations.py` (עותק מקומי
+קטן של אלגוריתם `eoa.report.style`'s -- `style.py` עצמו מחוץ לבעלות הקבצים של הסבב הזה); מוריד
+"מחזק את מעמדה"/"מהווה צעד משמעותי"/"מעיד על מגמה" וכו' מ-`exec_summary`/`sections[].sentences`,
+מתעד ספירה ב-structlog. חוברה יחד עם `eoa.report.style.apply_style_guard` (קיים מסבב 4b אך
+מעולם לא חובר בפועל לשלושת בוני הדוח, לפי ההערה ב-`style.py` עצמו) לתוך `build_daily`/
+`build_weekly`/`build_monthly`, מיד אחרי `normalize_draft`.
+
+**פרומפטים:** שלושתם קיבלו מפרט שדה `bluf` (עם אימוג'י העדיפות שעבר מ-`exec_summary`), הסבר שני-
+צירי-ICD-203 ל-`likelihood`/`confidence_level`/`confidence_basis_he` (עם איסור לכתוב "סבירות"/
+"ביטחון" בתוך `text_he` -- זה תפקיד הרנדרר), מפרט `assumptions`, איסור ניסוחי so_what, וכן שלוש
+מילות המילוי החסרות שכבר נאסרו ב-`style.py` אך לא הופיעו עדיין ברשימת הפרומפט
+("כפי שצוין לעיל"/"כאמור לעיל"/"ניתן לומר כי"/"ניתן לציין כי"/"באופן כללי ניתן לומר").
+
+**טיוטות כשל דטרמיניסטיות:** `_deterministic_fallback_draft` בשלושת המודולים משאירה במכוון
+`bluf=[]` (לא ממלאת מהפריט המוביל) -- ר' ההערה למעלה: `docx_builder` כבר מסנתז BLUF מתויג
+מהצורה הזו בדיוק; מילוי מפורש כאן היה מדכא את התווית "ללא ניסוח מודל". נבדק חי מול הרינדור
+האמיתי של שלושת המודולים.
+
+**בדיקות:** `tests/unit/test_bluf_round5.py` (31, חדש). `pytest tests/unit -q -k "bluf or
+report_daily or report_weekly or monthly or style"`: **165 עברו, 0 נכשלו** (כולל `test_qa_round5.py`
+של P9 ו-`test_renderer_round5.py` של P4, שניהם ירוקים מול הסכמה של חבילה זו). `ruff check`/`ruff
+format --check` נקיים על כל הקבצים שנגעתי בהם. ראו docs/MODULES.md "Round 5 P3" לפירוט מלא,
+כולל חוזה הרינדור המדויק (בבעלות P4) וטבלת שדה/מיקום.

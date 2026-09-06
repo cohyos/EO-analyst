@@ -11104,3 +11104,383 @@ passed** (target command from the task); the new file alone: **24 passed**; the 
 pre-existing 267); `npm run lint` -- 0 errors (12 pre-existing warnings, none in touched files);
 `npm run build` (`tsc -b && vite build`) -- clean, confirming the `Dictionary`/`InvestigationOut`
 type-shape changes compile.
+
+## Round 5 P4 -- report renderer: BLUF, likelihood/confidence, assumptions, blocked deep-search,
+## source-reliability appendix column, trend cross-reference (docs/REPORT_TEMPLATE_BENCHMARK.md
+## sec 3.1#1/#9, 3.4#10, 3.6, sec 4 items 1/4/5/7/12, 2026-09-06)
+
+`agent/eoa/report/docx_builder.py` only (`textnorm.py` untouched -- no new rule needed it). P3
+(`eoa.llm.schemas.analysis`: `DailyReportDraft.bluf`, `OutlookIndicator.likelihood`/
+`confidence_level`/`confidence_basis_he`, a draft's `assumptions`) had not landed as of this
+package -- every new rendering path below is `getattr`-guarded (a new `_field(obj, name, default)`
+helper additionally accepts a dict, not just an attribute) so it is a no-op today and activates
+automatically the moment P3 adds the fields, with zero further changes to this module.
+
+**Contract table** (field/key names, positions, exact rendered shape):
+
+| # | Source field/key | Renderer entry point | Rendered as | Position |
+|---|---|---|---|---|
+| 1 | `draft.bluf: list[Sentence]` (P3, not yet landed) | `_draft_bluf_info`/`_draft_bluf_text` | heading "שורה תחתונה", one bold paragraph, deterministic `[n]` from `cites` | first section, before "תקציר מנהלים" |
+| 1b | *(no `bluf`, daily-only)* `system_note_he` non-empty + `sections==[]` + `exec_summary` non-empty (`eoa.report.daily._deterministic_fallback_draft`'s exact shape) | `_draft_bluf_info` | same BLUF heading, text = `exec_summary[:2]` prefixed "(שורה תחתונה אוטומטית מהנתונים, ללא ניסוח מודל)" | same |
+| 1c | `extra_sections[].position == "before_summary"` (new third position, alongside existing `after_summary`/`after_outlook`) | `_extra_sections_md`/`_extra_sections_html`/inline `build_docx` loop | generic heading + `_md_blocks`-rendered body | before "תקציר מנהלים", after the native BLUF |
+| 2 | `OutlookIndicator.likelihood: float` + `.confidence_level: str` + `.confidence_basis_he: str` (P3, not yet landed) | `_render_outlook_indicator` | appended to the indicator's own sentence as `". סבירות: X%; ביטחון: <גבוה/בינוני/נמוך> (<basis>)."` -- semicolon-separated so the two keywords are never in one clause | inline in "מבט קדימה" |
+| 3 | a draft's `assumptions: list[{assumption_he, falsifier_he, cites}]` (P3, not yet landed) | `_draft_assumptions`/`_render_assumption` | heading "הנחות והפרכות", one bullet per item: `"<assumption_he> — יופרך אם: <falsifier_he> [n]"` | right after "מבט קדימה", before `after_outlook` extra_sections |
+| 4 | deep-search entry `outcome == "blocked"` (already a real value, P7) + `blocked_reason_he` (**not yet populated** by `eoa.report.daily.collect_deep_search` -- see caveat below) | `_add_deep_search_section` (docx) / inline loops in `render_markdown`/`render_html` | label "נחסם (לא נחקר בפועל)" (never "לא נמצא"); body = `blocked_reason_he` or "—"; amber `class="ds-blocked"` in HTML only | deep-search entry body |
+| 4b | deep-search entry `rerun_note_he` (already populated, `eoa.report.daily.reconcile_deep_search_reruns`) | same | rendered under the entry: docx italic paragraph, md as an indented `  - ` line (never matches `eoa.qa.d4_investigations`'s `^-` entry regex), html `<em class="ds-rerun-note">` | under the deep-search entry |
+| 5 | item dict key `reliability: None \| str \| {"kind": "primary"\|"secondary", "score": float\|None, "label": str\|None}` (collector-populated, optional) | `reliability_label` (public) | appendix column "אמינות" (new, between "מקור" and "תאריך"): dict renders "<מקור ראשוני/משני> · <label> · <score:.2f>" (parts present only), string passes through verbatim, `None`/empty dict -> "—" | sources-appendix column, all three outputs |
+| 6 | table row as `{"cells": [...], "related_trend_he": "..."}` (new optional dict shape, alongside the existing plain `list[Any]` row -- every existing caller keeps working unchanged) | `_row_cells`/`_row_related_trend`/`_apply_row_trend_note` | `related_trend_he` folded into the row's last cell as `"<last cell> (מגמה: <trend>)"` | any `tables[]` entry, all three outputs |
+| 6b | table dict key `related_trend_he: str` (table-level) | `_tables_md`/`_tables_html`/`build_docx`'s inline loop | a note line "מגמה: <trend>" right under the table heading/`note_he` | same |
+
+**Known handoff (not this package's file scope, documented so it isn't lost):**
+`eoa.report.daily.collect_deep_search` (~line 326) does not yet copy `result.get("blocked_reason_he")`
+into the dict it builds for the renderer (see "Round-5 P7" above, which flagged the same gap from
+the collector side) -- until that one-line addition lands, a `blocked` entry renders "—" as its
+reason (never "לא נמצא", so `eoa.qa.d4_investigations`'s `blocked_distinct_from_not_found` check
+already passes either way).
+
+**`dedupe_rows_across_tables`/`_row_identity`** were generalized to accept either row shape via
+`_row_cells` internally -- behavior for the pre-existing plain-list-row callers (`weekly.py`/
+`monthly.py`/`bd_territory.py`/`tech_watch.py`/`israel_section.py`/`patents/survey.py`, all of
+which only ever pass `list[Any]` rows) is byte-for-byte unchanged (regression-tested against
+`tests/unit/test_table_dedupe_round4.py`, still green).
+
+**`_add_sources_appendix`/render_markdown/render_html appendix table** all gained the "אמינות"
+column (docx header order: `["#", "כותרת", "מקור", "אמינות", "תאריך", "קישור"]`; md/html the same
+order) -- satisfies `eoa.qa.d9_tenders_conferences`'s `source_reliability_column_in_appendix`
+check (keyword match on "אמינות"/"מהימנות" in the appendix header row).
+
+**Verification:** `tests/unit/test_renderer_round5.py` (new, 38 tests, one per behavior/boundary
+across all six contract rows above) + `tests/unit/test_docx_builder.py` (updated: the sources-
+appendix header assertion now expects the "אמינות" column). `pytest tests/unit -q -k "docx or
+renderer or md_body or table_dedupe or report_round3_d6"`: 128 passed, 0 failed (90 pre-existing +
+38 new). `ruff check`/`ruff format --check` clean on `agent/eoa/report/docx_builder.py`,
+`tests/unit/test_renderer_round5.py`, `tests/unit/test_docx_builder.py`. `daily.py`/`weekly.py`/
+`monthly.py`/`bd_territory.py` import unchanged (smoke-imported, no call-site changes needed --
+every new parameter/position/key is additive and optional).
+
+**Post-landing wording fix (same evening, after P6's cross-team discovery below was read):**
+`_render_assumption` originally rendered "<assumption_he> — יופרך אם: <falsifier_he>" -- correct
+Hebrew, but `eoa.qa.d7_bd_report._FALSIFIER_KEYWORDS_HE = ("פריך", "הפרכ", "falsif")` (and
+presumably `d6_daily_report`'s equivalent once it gains the same check) requires one of those
+literal substrings, and "יופרך" contains neither. Changed the connector to "הפרכה:" (contains
+"הפרכ"), verified live against a real rendered report. This is the one item from P6's live-QA
+verification below that was actually this package's own rendering wording (not the QA-scorer
+sentence-splitter issue, which is out of `docx_builder.py`'s scope -- see P6's note).
+
+**Cross-team note (found via `git diff` mid-session, not this package's own file scope to fix):**
+`agent/eoa/report/weekly.py`/`monthly.py` currently import `bluf_extra_section`/
+`assumptions_extra_section` (from `docx_builder`/`qa_citations` respectively, per their own
+in-progress edits) that do not exist anywhere in the codebase as of this note -- both call sites
+appear to be leftover from an earlier "wire BLUF/assumptions in as `extra_sections`" plan that
+`eoa.report.qa_citations`'s own module-level comment (search "ALSO originally planned as
+extra_sections helpers") says was already abandoned once this package's *native* `draft.bluf`/
+`draft.assumptions` getattr-based rendering was discovered -- exactly the discovery P6 made
+independently for `bd_territory.py` below. `weekly.py`/`monthly.py` most likely only need those two
+now-dead call sites (and their now-broken imports) deleted -- `WeeklyReportDraft`/
+`MonthlyReportDraft` already carry real `bluf`/`assumptions` fields (same `Sentence`/
+`AssumptionFalsifier` shapes), so `docx_builder`'s native rendering picks them up with zero extra
+wiring, the same way it already does for `DailyReportDraft` and (per P6's tests) `BdTerritoryReportDraft`.
+Not fixed here: `weekly.py`/`monthly.py` are outside this package's file ownership this round, and
+this note is a live snapshot -- whoever owns those files was almost certainly already mid-edit
+toward exactly this cleanup when this note was written (`git diff` showed both files as freshly
+modified, uncommitted, at the time).
+
+---
+
+## Round 5 P6 -- BD-territory buyer map, opportunity tiering, territory delta, assumptions<->falsifiers (2026-09-06)
+
+docs/PLAN_ROUND5_REPORTS.md package P6, closing docs/REPORT_TEMPLATE_BENCHMARK.md B1 (buyer map /
+opportunity pipeline), B2 (opportunity tiering), B4 (territory delta), B5
+(assumptions<->falsifiers), and the BLUF item for the BD-territory report (sec 3.4 item 1). Files:
+`agent/eoa/llm/schemas/bd_territory.py` (new fields/models), `agent/eoa/report/bd_territory.py`
+(collectors/tiering/rendering), `agent/eoa/llm/prompts/report_bd_territory.md` (prompt), new
+`tests/unit/test_bd_round5.py` (45 tests).
+
+### Cross-team discovery: P4 already renders BLUF and assumptions natively
+
+While reading `eoa.report.docx_builder` to wire the BLUF position (per this package's brief: try
+`extra_sections` position `"before_summary"`, fall back to `"after_summary"` if unsupported), P4's
+own round-5 work (its own docx_builder-renderer entry above this one, landed the same evening)
+turned out to already provide native, duck-typed rendering of both fields straight off the draft
+object -- no `extra_sections` wiring needed at all for either:
+
+- **BLUF**: `_draft_bluf_info`/`_draft_bluf_text` read `draft.bluf` (exactly the field name/shape
+  this package adds to `BdTerritoryReportDraft`) and render "שורה תחתונה" as the very first section
+  in all three formats, genuinely before "תקציר מנהלים" -- the ordering goal this package's brief
+  worried `docx_builder` might not support yet. It also synthesizes a labeled
+  ("שורה תחתונה אוטומטית מהנתונים, ללא ניסוח מודל") BLUF from the top 1-2 `exec_summary` sentences
+  whenever `bluf` is empty but `sections` is also empty (always true for BD -- this report never
+  populates `sections`) and `system_note_he` + `exec_summary` are both non-empty -- exactly the
+  shape of this module's own `_tables_only_draft`/`_deterministic_fallback_draft` fallback paths.
+- **Assumptions**: `_draft_assumptions`/`_render_assumption` read `draft.assumptions` (field names
+  `assumption_he`/`falsifier_he`/`cites` match this package's new `BdAssumption` exactly) and
+  render "הנחות והפרכות" right after "מבט קדימה", before `after_outlook` extra_sections.
+
+Net effect: this package's job for both items shrank to "give the schema the right field, with the
+right field names". An earlier draft of this work manually pushed both as `extra_sections` entries
+(plus a source-introspection helper to detect whether `docx_builder` supported a `"before_summary"`
+position yet) -- caught live via a duplicate-heading regression (two "הנחות והפרכות" sections in
+the same rendered report) and removed; see `bd_territory.py`'s module-level "BLUF note"/
+assumptions-note comments for the full account.
+
+**Known, out-of-scope wording/keyword mismatch (flagged via a spawned follow-up task, not fixed
+here -- both files belong to other engineers this round):** live-verified via
+`eoa.qa.d7_bd_report.score_D7` against a real rendered report --
+
+1. `bluf_present_and_short` fails (`cited=False`) against a correct, single-sentence,
+   correctly-cited BLUF: the checker's local sentence splitter (`(?<=[.?!])(?=\s|$)` boundary,
+   same shape as `eoa.report.qa_citations.split_sentences`) splits "text. [n]" into `["text.",
+   "[n]"]` -- two fragments, one uncited. Will also affect daily/weekly's own BLUF check once P3
+   lands `bluf` there (same renderer convention).
+2. `assumptions_falsifiers_list_present` fails (`falsifier_language=False`) against a correctly
+   rendered assumptions section: `docx_builder._render_assumption`'s wording ("... — יופרך אם:
+   ...") doesn't contain any of `_FALSIFIER_KEYWORDS_HE = ("פריך", "הפרכ", "falsif")` as a
+   substring ("יופרך" has no bare "פריך"/"הפרכ" inside it).
+
+### B1 -- buyer map / opportunity pipeline ("מפת קונים / צינור הזדמנויות")
+
+New deterministic table (`eoa.report.bd_territory.pipeline_table`), rendered via the normal
+`tables[]` hook (headers `["הזדמנות", "שלב", "גורם רוכש", "תאריך יעד", "דרג", "מקור"]`,
+`no_dedupe=True` since a row legitimately re-cites a tender/forecast/event already shown in its own
+table above). Rows come from three deterministic sources plus one model-authored source:
+
+- `_pipeline_rows_from_tenders` -- every open/unknown tender; stage via `_tender_stage` (an
+  explicit RFI/RFP keyword in the title wins; else `status='unknown'` gives "הערכה", `status='open'`
+  gives "RFP" by default, since `tenders` has no dedicated notice-type column).
+- `_pipeline_rows_from_forecasts` -- every procurement forecast; stage via `_forecast_stage` (a
+  near-term, <=30-day window with likelihood >=0.5 gives "החלטה"; otherwise "הערכה").
+- `_pipeline_rows_from_events` -- only `events.kind == "contract_award"` rows (added as an
+  additive `"kind"` key on `collect_platform_events`'s output dict) become "לאחר-זכייה" (follow-on)
+  rows; m_and_a/deployment/test events are not buyer-pipeline opportunities in this table's sense.
+- `_pipeline_rows_from_model` -- up to 3 rows from `BdTerritoryReportDraft.pipeline_opportunities`
+  (new schema field, `BdPipelineOpportunity`: `opportunity_he`/`stage`/`buyer_he`/`target_date_he`/
+  `rationale: list[Sentence]`), validated in `_run_qa` the same way a recommended action's
+  `rationale` is (non-empty `cites` resolving into the citation registry), covered by
+  `_strip_placeholder_echoes`/`_cap_draft_lengths` (pydantic `max_length=3`)/`_normalize_draft_text`
+  the same way every other model-authored field already is. The prompt (`report_bd_territory.md`)
+  restricts this field to opportunities not already covered by the deterministic sources above.
+
+### B2 -- opportunity tiering (documented formula)
+
+`tier_score = magnitude_score (0-3) + recency_score (0-2) + watchlist_fit_bonus (0-1)`, range 0-6;
+Tier A when score >= 4, Tier B when >= 2, else Tier C (`eoa.report.bd_territory.tier_label`/
+`_tier_score`, full formula documented as a module-level comment near `tier_label`).
+`magnitude_score` prefers a real `amount_usd` (>= $50M / $5M / $0 thresholds), falls back to a
+`likelihood` (>= 0.6 / 0.3 / 0), falls back to an item's triage `level` (red/orange/yellow), and
+defaults to a flat baseline of 1 when none of those signals exist (a real, active row outranks
+scoring 0 purely for lacking amount data the schema never tracked, e.g. a plain open tender).
+`recency_score` uses the absolute day-distance between "now" and a reference date that may be a
+past event/win date or a future deadline/window. `watchlist_fit_bonus` checks a row's tender
+`entities`/forecast `candidate_vendors`/event `vendor`+`buyer`/model-row item `entities_mentioned`
+against every configured watchlist name+alias (`_all_watchlist_names`, broader than the in-window
+`is_watchlist` flag on `collect_active_competitors`'s own output). Rendered as a "דרג" column on
+both `pipeline_table` and `competitors_table` (`_competitor_tier`: uses the competitor's most
+recent win's amount+date when one exists, else falls back to in-window mention count as a coarse
+magnitude proxy).
+
+### B4 -- territory delta ("מה השתנה מאז הדוח הקודם")
+
+Wires P2's kind-agnostic `eoa.report.deltas.compute_deltas`/`build_report_state`/
+`delta_extra_section` into `build_bd_territory` unchanged, exactly as that package's own docstring
+anticipated: `compute_deltas("bd_territory", items, before_period_end=end, territory=code,
+id_to_n=...)` (market items only, not the synthetic tender/forecast/conference registry rows,
+matching daily/weekly's own convention), then `delta_extra_section(result)` appended to
+`extra_sections` (its own `position="after_summary"`, right after the BLUF's native slot).
+`reports.report_state` (migration `0023`, already applied) is now populated for `bd_territory`
+rows too via `build_report_state(items)`, passed into `_persist_report`'s new `report_state`
+keyword -- mirrors `daily.py`/`weekly.py`'s identical wiring exactly. Both calls are wrapped in the
+module's own `try`/`except` convention (a DB problem degrades to "no previous report"/no
+`report_state`, never breaks the build).
+
+### B5 -- assumptions <-> falsifiers
+
+New `BdAssumption` model (`agent/eoa/llm/schemas/bd_territory.py`): `assumption_he`, `falsifier_he`,
+optional `cites: list[int]` (may be empty -- an assumption is not itself a factual claim needing a
+source, though supporting evidence is welcome). New `BdTerritoryReportDraft.assumptions:
+list[BdAssumption]` (`max_length=4`) replaces `risks_assumptions_he` for new prompts; that field
+stays on the schema (default `""`, description updated to mark it legacy) purely so a draft
+constructed without it (every out-of-scope test fixture in this codebase, see below) still
+round-trips to a valid model -- `build_bd_territory`'s existing `if draft.risks_assumptions_he:`
+render branch is untouched and simply never fires for a new draft. `_run_qa` validates any non-empty
+`cites` on an assumption against the citation registry (optional presence, not optional validity).
+Rendering is entirely `docx_builder`'s native path (see the cross-team discovery above).
+
+### Schema/prompt summary (`agent/eoa/llm/schemas/bd_territory.py`, `report_bd_territory.md`)
+
+New fields on `BdTerritoryReportDraft`: `bluf: list[Sentence]` (`max_length=2`, before
+`exec_summary`), `pipeline_opportunities: list[BdPipelineOpportunity]` (`max_length=3`),
+`assumptions: list[BdAssumption]` (`max_length=4`). New models `BdPipelineOpportunity`/
+`BdAssumption` (both reject an inline `"[n]"` marker the same way every other text field in this
+schema does). Prompt rules 1/2/9 updated to cover the three new fields' citation/length
+requirements; `risks_assumptions_he`'s prompt instruction removed and replaced by `assumptions`.
+
+### Out-of-scope test-fixture touch-up (same convention as round 5 P1's monthly migration)
+
+`tests/unit/test_report_bd_territory.py::test_build_bd_territory_renders_expected_tables` asserted
+`competitors_table`'s exact header row; updated (one line) to include the new trailing "דרג" column
+-- the only pre-existing test across this codebase's suite this package's additive schema changes
+broke (every new field defaults to an empty list, so every other `BdTerritoryReportDraft(...)`
+construction across `test_bd_structured_round3.py`/`test_bd_round4b.py`/`test_bd_tenders_round3.py`
+kept working unchanged).
+
+**Tests:** `tests/unit/test_bd_round5.py` (new, 45 tests -- tier-formula boundaries, stage
+derivation, all four pipeline-row builders, `pipeline_table` sorting/None-when-empty,
+`_competitor_tier`/the new `competitors_table` column, `BdAssumption` validators, `_run_qa`
+citation checks for `bluf`/`pipeline_opportunities`/`assumptions`, the deterministic BLUF
+back-fill (`_deterministic_bluf`/`_tables_sizing_sentence`), `_strip_placeholder_echoes`/
+`_normalize_draft_text` coverage for all three new fields, `_all_watchlist_names`, and three
+end-to-end `build_bd_territory` scenarios: native BLUF heading before the exec summary,
+pipeline+assumptions headings present, and a genuinely empty territory still building cleanly with
+no BLUF at all -- honest, since there is nothing left to cite). `pytest tests/unit -q -k "bd or
+territory or acquisition"`: 268 passed, 0 failed (223 pre-existing + 45 new). `ruff check`/
+`ruff format --check` clean on every file touched.
+
+---
+
+## Round 5 P3 -- BLUF, likelihood/confidence, assumptions<->falsifiers, so_what template-phrase
+## ban for the daily/weekly/monthly reports (docs/REPORT_TEMPLATE_BENCHMARK.md sec 1 items 1/2/6,
+## sec 3.1#1, sec 3.2#1, sec 3.3, sec 4 items 4/5/11; docs/qa/loop/round_3_judge.md D2; 2026-09-06)
+
+Files: `agent/eoa/llm/schemas/analysis.py` (`Sentence`/`OutlookIndicator`/`AssumptionFalsifier`/
+`DailyReportDraft` -- report draft classes only), `agent/eoa/llm/schemas/reports.py`
+(`WeeklyReportDraft`/`MonthlyReportDraft`), `agent/eoa/report/qa_citations.py` (the so_what-phrase
+post-pass), `agent/eoa/report/{daily,weekly,monthly}.py` (wiring only), `agent/eoa/llm/prompts/
+report_{daily,weekly,monthly}.md`, `tests/unit/test_bluf_round5.py` (new, 31 tests).
+
+### Schema deltas
+
+- **`bluf: list[Sentence]`** on `DailyReportDraft`/`WeeklyReportDraft`/`MonthlyReportDraft`
+  (`max_length=MAX_BLUF_SENTENCES=2`; `MAX_BLUF_WORDS=40`). A shared validator body
+  (`eoa.llm.schemas.analysis.validate_bluf_length`, applied as each draft's own `field_validator`)
+  rejects more than 2 sentences or more than 40 words total; every `Sentence` already requires
+  non-empty `cites` by construction (goal 1). Defaults to `[]` -- optional, so a draft with no
+  qualifying items still validates.
+- **`OutlookIndicator.likelihood: Literal["גבוהה","בינונית","נמוכה"] | None`**,
+  **`.confidence_level: Literal["גבוה","בינוני","נמוך"] | None`**,
+  **`.confidence_basis_he: str = ""`** (ICD 203's two independent analytic-judgement axes -- see
+  docs/REPORT_TEMPLATE_BENCHMARK.md sec 1 item 2). All three additive/optional, defaulting to
+  `None`/`""` so an indicator built before this round still loads unchanged. A model-level
+  validator requires `confidence_basis_he` whenever `confidence_level` is set (an analyst must
+  always say *why* they trust their own judgement at that level) -- `likelihood` alone needs no
+  basis. This schema does NOT compose display text for these fields itself (see "Coordination with
+  P4" below for why).
+- **`AssumptionFalsifier`** (new, `agent/eoa/llm/schemas/analysis.py`): `assumption_he`,
+  `falsifier_he` (both reject an inline `"[n]"` marker, must be non-empty), `cites: list[int]`
+  (may be empty -- a structural assumption like "the current procurement pace continues" is not
+  itself a citable claim). `assumptions: list[AssumptionFalsifier]` (`max_length=4`) added to
+  `DailyReportDraft` (optional, 0-4, per task scope), `WeeklyReportDraft`/`MonthlyReportDraft`
+  (2-4 recommended by the prompt, not schema-enforced as a minimum -- a thin week/month must never
+  be forced to fabricate one just to validate).
+
+### Coordination with P4 (`eoa.report.docx_builder`, landed the same evening)
+
+This package's original plan (per its own brief) was to expose BLUF/assumptions as `extra_sections`
+entries and expand `OutlookIndicator.text_he` into a render-only copy before calling
+`build_docx`/`render_markdown`/`render_html`, with a documented fallback to `"after_summary"` if
+`docx_builder` didn't support a `"before_summary"` position yet. Mid-implementation it turned out
+`docx_builder` (P4, its own entry above) already reads `draft.bluf`/`OutlookIndicator.likelihood`/
+`confidence_level`/`confidence_basis_he`/`draft.assumptions` **natively**, duck-typed, using the
+exact field names this package landed -- including a real `"before_summary"` extra_sections
+position and a labelled BLUF synthesis for a zero-narrative fallback draft
+(`_draft_bluf_info`/`_draft_bluf_text`/`_render_outlook_indicator`/`_draft_assumptions`/
+`_render_assumption`, all in P4's own MODULES.md entry above). This is the same discovery P6 made
+independently for the BD-territory report the same evening (see its "Cross-team discovery" note) --
+adding this package's own `extra_sections`/render-copy path on top would have **double-rendered**
+every one of these sections (a second "שורה תחתונה"/"הנחות והפרכות" heading, and a doubled
+"סבירות/ביטחון" suffix on every outlook indicator). That code was removed before landing; see git
+history on this file/`eoa.report.qa_citations.py` for the earlier version if ever needed. Net
+effect, same as P6's: this package's job for BLUF/likelihood-confidence/assumptions rendering
+shrank to "land the schema fields with the right names" -- `daily.py`/`weekly.py`/`monthly.py`
+pass `draft` straight into `build_docx`/`render_markdown`/`render_html` unchanged, no new
+wiring needed.
+
+**Non-fatal value-format mismatch, documented for future cleanup (not fixed here -- `docx_builder.py`
+is this package's read-only file this round):** `docx_builder._format_likelihood`/
+`_format_confidence_level` were written expecting `likelihood` as a numeric `0..1` ratio (rendered
+as "X%") and `confidence_level` as an English lowercase key (`"high"`/`"medium"`/`"low"`, mapped to
+Hebrew). This package's `likelihood`/`confidence_level` are Hebrew `Literal` strings instead (per
+this package's own task brief). Verified live (`db._render_outlook_indicator` with a real
+`OutlookIndicator("גבוהה"/"בינוני"/...)`): both formatters fall back to `return str(value)`/
+`dict.get(value, value)` for a non-numeric/non-English-key input, which for an already-Hebrew
+literal means "return the value verbatim" -- exactly the correct display text. So the two schemas
+disagree on paper but agree in practice; `tests/unit/test_bluf_round5.py::
+TestLikelihoodConfidenceRendersThroughDocxBuilder` pins this down against the real renderer so a
+future refactor of either formatter doesn't silently break the other side.
+
+**Corroborating a known D6 checker bug (P6 found this first for D7/BD; confirmed here for D6/daily+
+weekly, not fixed -- `eoa.qa.d6_daily_report.py` is P9's file, not this package's):**
+`_bluf_check`'s local sentence splitter breaks a rendered `"...טקסט. [1]"` BLUF into `["...טקסט.",
+"[1]"]` (the citation marker's own trailing period-triggered split lands it in a second,
+citation-only fragment) whenever the BLUF's own `text_he` ends with a period before its `[n]`
+marker is appended -- which `docx_builder._render_sentence`'s convention (marker *after* the
+rstripped text) makes the common case. Verified live against the real `render_markdown` output for
+both a plain `DailyReportDraft.bluf` and this package's own deterministic-fallback-synthesized BLUF
+(`db._draft_bluf_info`'s `exec_summary[:2]` path): `_bluf_check` returns `cited=False` for a
+genuinely correct, fully-cited one-sentence BLUF. P6 already flagged this (and the sibling
+`assumptions_falsifiers_list_present` keyword mismatch) as a spawned follow-up task against
+`eoa.qa.d6_daily_report`/`d7_bd_report` -- not duplicated here, only corroborated with this
+package's own evidence so whoever picks up that follow-up has the daily/weekly case too.
+
+### `eoa.report.qa_citations` -- so_what template-phrase ban (D2)
+
+`docs/qa/loop/round_3_judge.md` D2: the round-3 fix banned generic "so_what" template phrasing
+("מחזק את מעמדה", "מהווה צעד משמעותי", "מעיד על מגמה", …) only in `analyze.md`; the judge found the
+same phrasing recurring independently in report-generation prose (its own evidence: "לחזק את
+מעמדה" on a Hensoldt/Serbia item in a cloud-drafted weekly report). New `SO_WHAT_TEMPLATE_PHRASES_HE`
+tuple + `strip_so_what_phrases`/`strip_so_what_phrases_from_draft` in `eoa.report.qa_citations`
+(small local copy of `eoa.report.style`'s own longest-phrase-first regex/whitespace-cleanup
+algorithm, per this codebase's "no cross-module private-name import" convention --
+`eoa.report.style.py` itself is out of this round's file-ownership scope to edit).
+`strip_so_what_phrases_from_draft` walks `draft.exec_summary` + `draft.sections[].sentences`
+(duck-typed, works unchanged on all three structured drafts), returns `(updated_draft, count)`, and
+logs `so_what_template_phrases_stripped` (structlog, `report_kind`/`count`) when `count > 0`. Wired
+into `build_daily`/`build_weekly`/`build_monthly` right after `normalize_draft`, alongside a newly
+wired `eoa.report.style.apply_style_guard` call (that module existed since round 4b but, per its own
+docstring, was never actually called from any of the three report builders until now -- this round
+wires it in for the existing W26 filler-phrase list too). Both bans (existing filler list + the new
+so_what list) were also added to all three prompts' "כללי כתיבה" sections, alongside the BLUF/
+likelihood-confidence/assumptions field instructions.
+
+### Prompt changes (`report_daily.md`/`report_weekly.md`/`report_monthly.md`)
+
+Each prompt gained: a `bluf` field spec (1-2 `Sentence`, <=40 words total, opens with the priority
+emoji that no longer belongs in `exec_summary`); an `outlook`/`OutlookIndicator` sub-spec explaining
+the `likelihood`/`confidence_level`/`confidence_basis_he` two-axis ICD 203 contract and forbidding
+the model from writing "סבירות"/"ביטחון" itself inside `text_he` (the renderer, per the coordination
+note above, composes that display text deterministically); an `assumptions` field spec (0-4 on
+daily, 2-4 recommended on weekly/monthly); the so_what-phrase ban; and the missing three filler
+phrases (`"כפי שצוין לעיל"`/`"כאמור לעיל"`/`"ניתן לומר כי"`/`"ניתן לציין כי"`/`"באופן כללי ניתן
+לומר"`) that `eoa.report.style.BANNED_FILLER_PHRASES_HE` already banned but the daily/weekly
+prompts hadn't listed yet.
+
+### Deterministic fallback drafts (D3, docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.1's fallback note)
+
+`_deterministic_fallback_draft` in `daily.py`/`weekly.py`/`monthly.py` deliberately leaves `bluf`
+at its default `[]` (does **not** populate it from the top item) -- see the coordination note
+above: `docx_builder._draft_bluf_info` already synthesizes a labelled
+("שורה תחתונה אוטומטית מהנתונים, ללא ניסוח מודל") BLUF from this exact shape (empty `sections` +
+non-empty `system_note_he` + non-empty `exec_summary`) at render time, and an explicitly-populated
+`bluf` here would have suppressed that "no model text" label instead of reproducing it. Verified
+live (`tests/unit/test_bluf_round5.py::TestBlufRendersThroughDocxBuilder`) against the real
+`daily.py`/`weekly.py`/`monthly.py` fallback-draft builders piped through the real
+`docx_builder.render_markdown`.
+
+### Rendering contract (for reference -- owned/implemented by P4, see its own entry above)
+
+| Field | Renders as | Position |
+|---|---|---|
+| `draft.bluf: list[Sentence]` | "שורה תחתונה" heading, bold, deterministic `[n]` | before "תקציר מנהלים" |
+| `OutlookIndicator.likelihood`/`.confidence_level`/`.confidence_basis_he` | appended to the indicator's own sentence, semicolon-separated clauses | inline in "מבט קדימה" |
+| `draft.assumptions: list[AssumptionFalsifier]` | "הנחות והפרכות" heading, one bullet per item | right after "מבט קדימה" |
+
+### Tests
+
+`tests/unit/test_bluf_round5.py` (new, 31 tests): schema-level constraints for `bluf`/
+`OutlookIndicator.likelihood`/`confidence_level`/`AssumptionFalsifier`; end-to-end rendering checks
+against the real `eoa.report.docx_builder` (both a model-authored `bluf` and this package's own
+zero-narrative fallback drafts, confirming the coordination note above); the Hebrew-literal
+value-format pass-through; the so_what-phrase strip/log behavior including the "original draft
+never mutated" pydantic `model_copy` guarantee. `pytest tests/unit -q -k "bluf or report_daily or
+report_weekly or monthly or style"`: **165 passed, 0 failed** (includes P9's `test_qa_round5.py`
+and P4's `test_renderer_round5.py`, both green against this package's landed schema). `ruff check`/
+`ruff format --check` clean on every file touched.

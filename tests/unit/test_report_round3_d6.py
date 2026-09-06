@@ -20,7 +20,12 @@ from eoa.llm.schemas.analysis import (
     Sentence,
     StructuredSection,
 )
-from eoa.llm.schemas.reports import MonthlyReportDraftLegacy, TrendParagraph, WeeklyReportDraft, WeeklyTrendSection
+from eoa.llm.schemas.reports import (
+    MonthlyReportDraftLegacy,
+    TrendParagraph,
+    WeeklyReportDraft,
+    WeeklyTrendSection,
+)
 from eoa.qa import d6_daily_report as d6
 from eoa.report import daily, weekly
 from eoa.report import israel_section as isec
