@@ -268,12 +268,35 @@ def collect_meta_summary(period_start: dt.date, period_end: dt.date) -> dict[str
         lessons = cur.fetchall()
         cur.execute(sql_feedback, {"start": period_start, "end": period_end})
         feedback = cur.fetchall()
-    deltas = [
-        f
-        for f in feedback
-        if f.get("user_level") and f.get("agent_level") and f["user_level"] != f["agent_level"]
-    ]
+    deltas = net_feedback_deltas(feedback)
     return {"lessons": lessons, "feedback_total": len(feedback), "feedback_deltas": deltas}
+
+
+#: Weekly 2026-09-06 (report 51): the meta section listed ~170 lines because every feedback row
+#: was printed, including the e2e suite's rate-then-restore pairs (red←yellow, yellow←red, …).
+#: Only the *net* change per item counts as a calibration, and the section is capped.
+_META_MAX_DELTAS = 20
+
+
+def net_feedback_deltas(feedback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per item: the first agent level seen in the window vs the user's *last* level;
+    items whose feedback nets to no change (toggled and restored) are dropped; newest first,
+    capped at :data:`_META_MAX_DELTAS`."""
+    first_agent: dict[Any, str] = {}
+    last: dict[Any, dict[str, Any]] = {}
+    for f in feedback:  # ordered by created_at
+        if not (f.get("user_level") and f.get("agent_level")):
+            continue
+        key = f.get("item_id") or f.get("id")
+        first_agent.setdefault(key, f["agent_level"])
+        last[key] = f
+    out: list[dict[str, Any]] = []
+    for key, f in last.items():
+        if f["user_level"] == first_agent[key]:
+            continue  # net zero
+        out.append({**f, "agent_level": first_agent[key]})
+    out.sort(key=lambda d: d.get("created_at") or 0, reverse=True)
+    return out[:_META_MAX_DELTAS]
 
 
 def format_meta_summary_he(meta: dict[str, Any]) -> str:
