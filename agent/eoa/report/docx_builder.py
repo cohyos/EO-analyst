@@ -207,7 +207,24 @@ def _draft_analyst_note_text(draft: Any) -> str:
     legacy draft type)."""
     note = getattr(draft, "analyst_note_he", None)
     sentences = getattr(note, "sentences_he", None) if note is not None else None
-    return " ".join(sentences) if sentences else ""
+    text = " ".join(sentences) if sentences else ""
+    return "" if _is_junk_note(text) else text
+
+
+_HEBREW_WORD_RE = re.compile(r"[א-ת]{2,}")
+
+
+def _is_junk_note(text: str) -> bool:
+    """Round-3 (bd_il 2026-09-06 16:06): a structured draft's analyst note rendered as
+    ``"]}, "`` -- a JSON fragment the model left in the field. The note is uncited by design, so
+    the citation QA never sees it; this is the one deterministic gate it gets: drop it when it
+    carries JSON punctuation or fewer than two Hebrew words."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if any(ch in t for ch in "{}[]"):
+        return True
+    return len(_HEBREW_WORD_RE.findall(t)) < 2
 
 
 def _draft_system_note_text(draft: Any) -> str:
