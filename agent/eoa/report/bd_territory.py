@@ -2292,6 +2292,14 @@ def _tables_sizing_sentence(tenders_data: dict[str, Any]) -> Sentence | None:
     return Sentence(text_he=f"בטריטוריה זו מזוהים {' ו-'.join(parts)}.", cites=sorted({int(n) for n in ns}))
 
 
+_MAX_BLUF_WORDS = 40  # mirrors eoa.qa.d7_bd_report._MAX_BLUF_WORDS
+_MAX_BLUF_SENTENCES = 2
+
+
+def _bluf_word_count(bluf: list[Any]) -> int:
+    return sum(len((getattr(sent, "text_he", "") or "").split()) for sent in bluf)
+
+
 def _deterministic_bluf(
     items: list[dict[str, Any]],
     events: list[dict[str, Any]],
@@ -2847,6 +2855,21 @@ def build_bd_territory(
             deterministic_bluf = _deterministic_bluf(items, events, tenders_data, conferences_data)
             if deterministic_bluf:
                 draft = draft.model_copy(update={"bluf": deterministic_bluf})
+    elif _bluf_word_count(draft.bluf) > _MAX_BLUF_WORDS or len(draft.bluf) > _MAX_BLUF_SENTENCES:
+        # Round 5 follow-up (2026-09-07, live bd_gr: a 48-word single-sentence BLUF): the BLUF is
+        # a two-sentence, <=40-word bottom line (docs/REPORT_TEMPLATE_BENCHMARK.md, D7 check
+        # `bluf_present_and_short`); an over-long model BLUF is replaced by the deterministic one
+        # when data allows, else trimmed to its first sentence.
+        deterministic_bluf = _deterministic_bluf(items, events, tenders_data, conferences_data)
+        replacement = deterministic_bluf or draft.bluf[:1]
+        log.info(
+            "bd_bluf_replaced_over_length",
+            territory=territory,
+            words=_bluf_word_count(draft.bluf),
+            sentences=len(draft.bluf),
+            deterministic=bool(deterministic_bluf),
+        )
+        draft = draft.model_copy(update={"bluf": replacement})
 
     extra_sections: list[dict[str, Any]] = []
     # BLUF itself needs no extra_sections entry -- eoa.report.docx_builder renders "שורה תחתונה"

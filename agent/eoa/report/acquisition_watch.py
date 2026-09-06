@@ -234,6 +234,11 @@ def _events_table_rows(
 ) -> tuple[list[str], set[str]]:
     active_companies: set[str] = set()
     lines: list[str] = []
+    seen_rows: set[tuple[str, str, str, int]] = set()
+    # Round 5 follow-up (2026-09-07, live bd_il): the same Elbit partnership from item [11]
+    # rendered twice (once dated, once undated) -- one row per (company, kind, counterparty,
+    # source); dated events first so the surviving row is the informative one.
+    events_rows = sorted(events_rows, key=lambda e: 0 if (e.get("date") or e.get("published_at")) else 1)
     for ev in events_rows:
         parties = ev.get("parties") or []
         company = watch_or_peer_hit(parties)
@@ -246,6 +251,10 @@ def _events_table_rows(
         counterparty = ", ".join(p for p in parties if canonicalize_watch_or_peer_name(p) != company) or "—"
         kind = ev.get("kind") or "אחר"
         kind_label = _EVENT_KIND_LABELS_HE.get(kind, kind)
+        row_key = (company, kind_label, counterparty, n)
+        if row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
         lines.append(
             "| "
             + " | ".join(
@@ -344,9 +353,7 @@ def acquisition_watch_section_md(
         global_lines, global_active = _events_table_rows(registry, global_events)
         if global_lines:
             lines.append("")
-            lines.append(
-                f"פעילות גלובלית של חברות מעקב שמקורן ב-{code} (הקשר בלבד, לא ממוקדת בטריטוריה זו):"
-            )
+            lines.append(f"פעילות גלובלית של חברות מעקב שמקורן ב-{code} (הקשר בלבד, לא ממוקדת בטריטוריה זו):")
             lines.append(_TABLE_HEADER_HE)
             lines.append(_TABLE_SEP)
             lines.extend(global_lines)

@@ -337,7 +337,7 @@ def collect_deep_search(
 
 #: Outcome rank for :func:`reconcile_deep_search_reruns` -- a "found" answer beats a later
 #: "not_found" for the same question (the later run usually failed on budget/search outage).
-_OUTCOME_RANK = {"found": 4, "partial": 3, "off_topic": 1, "not_found": 0}
+_OUTCOME_RANK = {"found": 4, "partial": 3, "blocked": 2, "off_topic": 1, "not_found": 0}  # round-5 judge: `blocked` (P7) must outrank not_found so job 113 renders as נחסם
 
 
 def reconcile_deep_search_reruns(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
