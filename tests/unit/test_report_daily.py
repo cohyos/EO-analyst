@@ -144,7 +144,7 @@ def test_collect_events_sort_and_limit_via_helpers():
 
 
 def test_tenders_forecast_table_none_when_no_forecasts():
-    assert daily._tenders_forecast_table({"open_tenders": [], "new_forecasts": []}) is None
+    assert daily._tenders_forecast_table({"open_tenders": [], "new_forecasts": []}, []) is None
 
 
 # --------------------------------------------------------------------------
@@ -389,10 +389,11 @@ def test_tenders_forecast_table_shape_and_rationale_cap():
             }
         ]
     }
-    tbl = daily._tenders_forecast_table(data)
+    tbl = daily._tenders_forecast_table(data, [])
     assert tbl is not None
-    assert tbl["headers"] == ["פלטפורמה", "צורך/Payload", "סבירות", "חלון", "נימוק"]
+    assert tbl["headers"] == ["פלטפורמה", "צורך/Payload", "סבירות", "חלון", "נימוק", "מקורות"]
     row = tbl["rows"][0]
     assert row[0] == "MQ-9 Reaper"
     assert row[2] == "72%"
     assert len(row[4]) <= 200
+    assert row[5] == "—"  # no `sources` on this forecast fixture -> nothing to cite

@@ -14,16 +14,143 @@ import re
 from typing import Any
 
 from eoa.db import connection
+from eoa.report.link_check import LinkCheckResult
 
 SECTION_TITLE_HE = "מכרזים, RFI/RFP ותחזית"
 
-_STATUS_HE = {"open": "פתוח", "closed": "סגור", "awarded": "הוענק", "unknown": "לא ידוע"}
+_STATUS_HE = {
+    "open": "פתוח",
+    "closed": "סגור",
+    "awarded": "הוענק",
+    "unknown": "לא ידוע",
+    "archived": "ארכיון",
+}
 
 # F2.d: the forecasts list must show exactly one line per forecast (platform/payload/likelihood/
 # window) with the rationale trimmed to a single sentence, never the full 2-4-sentence prose --
 # the un-trimmed rationale is what was making the section "spill" in the rendered report.
 _MAX_RATIONALE_SENTENCE_CHARS = 200
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+# W1 (round 4, docs/qa/loop/round_4_fixes.md): the same platform+payload topic can appear as more
+# than one ``tender_forecasts`` row -- most commonly one per resolved ``buyer_country`` value (see
+# ``eoa.tenders.forecast._resolve_buyer_country``) -- which reads as an outright duplicate in a
+# report table that doesn't even show a buyer_country column. Fetch generously (more than the
+# rendered cap) so the post-dedup result still has enough distinct topics to fill the table.
+_FORECAST_FETCH_LIMIT = 60
+_FORECAST_TOPIC_CAP = 15
+
+
+def _forecast_topic_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (
+        (row.get("platform") or "").strip().casefold(),
+        (row.get("payload_need") or "").strip().casefold(),
+    )
+
+
+def _merge_forecast_sources(rows: list[dict[str, Any]]) -> list[str]:
+    """Union of every group member's ``sources`` (``["item:N", ...]``), order-preserving,
+    deduplicated -- so a merged forecast still cites every item that corroborated any of its
+    (now-collapsed) per-country rows."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for source in row.get("sources") or []:
+            if source not in seen:
+                seen.add(source)
+                merged.append(source)
+    return merged
+
+
+def _forecast_likelihood(row: dict[str, Any]) -> float:
+    value = row.get("likelihood")
+    try:
+        return float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def dedupe_forecasts_by_topic(
+    rows: list[dict[str, Any]], *, cap: int = _FORECAST_TOPIC_CAP
+) -> list[dict[str, Any]]:
+    """W1: collapse ``tender_forecasts`` rows sharing a (platform, payload_need) topic, keeping the
+    highest-likelihood row's own fields but merging every group member's ``sources`` into it, so
+    the merged forecast still cites everything that corroborated it. Sorted likelihood desc, capped
+    at ``cap``. Never raises on well-formed dict rows; an empty/`` []`` input returns `` []``."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(_forecast_topic_key(row), []).append(row)
+    merged_rows: list[dict[str, Any]] = []
+    for group in groups.values():
+        best = max(group, key=_forecast_likelihood)
+        merged = dict(best)
+        merged["sources"] = _merge_forecast_sources(group)
+        merged_rows.append(merged)
+    merged_rows.sort(key=_forecast_likelihood, reverse=True)
+    return merged_rows[:cap]
+
+
+# --------------------------------------------------------------------------
+# W6: forecast -> report citation-registry extension (same convention as
+# eoa.report.tech_watch._extend_registry / eoa.report.israel_section)
+# --------------------------------------------------------------------------
+
+
+def _item_ids_from_forecast_sources(sources: list[str] | None) -> list[int]:
+    """Parse ``tender_forecasts.sources`` (``["item:123", ...]``) back into item ids. Any
+    non-conforming entry is silently skipped."""
+    ids: list[int] = []
+    for source in sources or []:
+        if not isinstance(source, str) or not source.startswith("item:"):
+            continue
+        try:
+            ids.append(int(source.split(":", 1)[1]))
+        except ValueError:
+            continue
+    return ids
+
+
+def attach_forecast_citations(
+    citation_items: list[dict[str, Any]], forecasts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """W6: register every forecast's trigger items into ``citation_items`` (mutated in place --
+    same numbering-extension convention as ``eoa.report.tech_watch._extend_registry``), fetching
+    from the DB only the ids not already numbered. Stamps each forecast dict with
+    ``"_citation_ns"`` -- the list of registry numbers a renderer should cite for that row.
+    Never raises; a DB failure degrades every forecast's ``_citation_ns`` to ``[]`` rather than
+    breaking the report."""
+    all_ids = sorted({iid for f in forecasts for iid in _item_ids_from_forecast_sources(f.get("sources"))})
+    by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
+    missing = [iid for iid in all_ids if iid not in by_id]
+    if missing:
+        try:
+            fetched_rows = _fetchall(
+                """
+                SELECT i.id, i.url, i.title, i.published_at, COALESCE(src.name, i.url) AS source_name
+                FROM items i LEFT JOIN sources src ON src.id = i.source_id
+                WHERE i.id = ANY(%(ids)s)
+                """,
+                {"ids": missing},
+            )
+        except Exception:
+            fetched_rows = []
+        fetched_by_id = {r["id"]: r for r in fetched_rows}
+        next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
+        for iid in missing:
+            row = fetched_by_id.get(iid)
+            if row is None:
+                continue
+            entry = dict(row)
+            entry["n"] = next_n
+            citation_items.append(entry)
+            by_id[iid] = entry
+            next_n += 1
+    for f in forecasts:
+        ids = _item_ids_from_forecast_sources(f.get("sources"))
+        f["_citation_ns"] = sorted(
+            {by_id[i]["n"] for i in ids if i in by_id and by_id[i].get("n") is not None}
+        )
+    return citation_items
 
 
 def _fetchall(query: str, params: Any = None) -> list[dict[str, Any]]:
@@ -51,13 +178,17 @@ def collect_tenders(
     if period_start is not None and period_end is not None:
         new_forecasts = _fetchall(
             "SELECT * FROM tender_forecasts WHERE updated_at::date BETWEEN %(start)s AND %(end)s "
-            "ORDER BY likelihood DESC NULLS LAST, id DESC LIMIT 15",
-            {"start": period_start, "end": period_end},
+            "ORDER BY likelihood DESC NULLS LAST, id DESC LIMIT %(limit)s",
+            {"start": period_start, "end": period_end, "limit": _FORECAST_FETCH_LIMIT},
         )
     else:
         new_forecasts = _fetchall(
-            "SELECT * FROM tender_forecasts ORDER BY likelihood DESC NULLS LAST, id DESC LIMIT 15"
+            "SELECT * FROM tender_forecasts ORDER BY likelihood DESC NULLS LAST, id DESC LIMIT %(limit)s",
+            {"limit": _FORECAST_FETCH_LIMIT},
         )
+    # W1 (round 4): the same platform+payload topic can appear as more than one row (typically one
+    # per resolved buyer_country) -- collapse before this ever reaches a report table.
+    new_forecasts = dedupe_forecasts_by_topic(new_forecasts)
     unknown_rows = _fetchall("SELECT count(*) AS c FROM tenders WHERE status = 'unknown'")
     unknown_count = unknown_rows[0]["c"] if unknown_rows else 0
     return {"open_tenders": open_tenders, "new_forecasts": new_forecasts, "unknown_count": unknown_count}
@@ -125,12 +256,47 @@ def tenders_extra_section(data: dict[str, Any]) -> dict[str, Any]:
     return {"title_he": SECTION_TITLE_HE, "body_he": "\n".join(lines), "position": "after_outlook"}
 
 
-def tenders_table(data: dict[str, Any]) -> dict[str, Any] | None:
+def _tender_status_label(t: dict[str, Any], link_result: LinkCheckResult | None) -> str:
+    """W7: a link_check result overrides the DB status label for display purposes only -- a
+    genuinely dead link means this is no longer really "open" regardless of what ``tenders.status``
+    still says (nothing has re-scanned it since); a stale-looking one is relabeled "ארכיון" rather
+    than silently kept as "open". An unchecked result (budget/timeout) leaves the label alone but
+    for a trailing "(לא אומת)" marker."""
+    base = _STATUS_HE.get(t.get("status"), t.get("status") or "—")
+    if link_result is None:
+        return base
+    if not link_result.checked:
+        return f"{base} (לא אומת)"
+    if link_result.stale:
+        return _STATUS_HE["archived"]
+    return base
+
+
+def tenders_table(
+    data: dict[str, Any], *, link_cache: dict[str, LinkCheckResult] | None = None
+) -> dict[str, Any] | None:
     """``tables`` entry (see ``eoa.report.docx_builder._add_generic_table``) -- the open-tenders
-    board. ``None`` when there is nothing to show (the caller skips an empty table)."""
+    board. ``None`` when there is nothing to show (the caller skips an empty table).
+
+    W7 (round 4): when ``link_cache`` is supplied (a url -> :class:`~eoa.report.link_check.LinkCheckResult`
+    map, built once per report run by the caller via ``eoa.report.link_check.check_urls``), a row
+    whose link came back confirmed dead (4xx/5xx or a network error) is dropped outright -- an
+    "open" tender that 404s is not actually an open opportunity; a row whose link looks stale (an
+    old year alone in the page title, the LITENING-2015 case) is kept but relabeled "ארכיון" rather
+    than "פתוח". ``link_cache is None`` (the default -- and every pre-existing caller/test) means no
+    check was performed and every row renders exactly as before."""
     open_tenders = data.get("open_tenders") or []
     if not open_tenders:
         return None
+    filtered: list[tuple[dict[str, Any], LinkCheckResult | None]] = []
+    for t in open_tenders:
+        url = t.get("url")
+        result = link_cache.get(url) if (link_cache is not None and url) else None
+        if result is not None and result.checked and result.alive is False:
+            continue  # confirmed dead -- drop, never render as an open opportunity
+        filtered.append((t, result))
+    if not filtered:
+        return None  # every row was a confirmed-dead link -- nothing left to show
     headers = ["כותרת", "מדינה", "גורם מזמין", "דדליין", "סטטוס", "קישור"]
     rows = [
         [
@@ -138,9 +304,9 @@ def tenders_table(data: dict[str, Any]) -> dict[str, Any] | None:
             t.get("country") or "—",
             t.get("agency") or "—",
             _fmt_date(t.get("deadline")),
-            _STATUS_HE.get(t.get("status"), t.get("status") or "—"),
+            _tender_status_label(t, result),
             t.get("url") or "—",
         ]
-        for t in open_tenders[:15]
+        for t, result in filtered[:15]
     ]
     return {"title_he": "מכרזים פתוחים (EO/IR)", "headers": headers, "rows": rows}

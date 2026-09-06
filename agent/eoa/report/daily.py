@@ -11,6 +11,7 @@ docx/md/html -> persist a ``reports`` row.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -143,6 +144,46 @@ def collect_items(
     return rows
 
 
+# W5 (round 4, docs/qa/loop/round_4_fixes.md): the analyze-stage classifier over-applies
+# kind='test' to events that carry no trial/demonstration/live-fire vocabulary at all (a contract
+# award, a funding note, an academic paper, a production-line milestone, ...) -- e.g. the review's
+# own example, an event labeled "ניסוי" for what was actually a funding allocation. This is a
+# deterministic, conservative guard: it only ever *downgrades* 'test' to 'other' when none of the
+# vocabulary below appears in the event/item text; it never invents a kind, and it never touches
+# any kind other than 'test'.
+_TEST_VOCAB_RE = re.compile(
+    r"ניסוי|ניסויים|\btest\b|\btests\b|\btrial\b|\btrials\b|\bdemonstration\b|הדגמה|\bfiring\b|ירי",
+    re.IGNORECASE,
+)
+
+#: W5: for kind in ('test', 'other') specifically, a "concrete anchor" is parties/customer/amount/
+#: date -- deliberately narrower than :func:`_event_has_signal`'s general ``program``-inclusive
+#: check, since an unanchored "test"/"other" row is exactly the class of near-empty, unclear-kind
+#: row the review flagged.
+_ANCHOR_KINDS_STRICT = ("test", "other")
+
+
+def _looks_like_test(ev: dict[str, Any]) -> bool:
+    text = " ".join(str(x) for x in (ev.get("title"), ev.get("summary_he"), ev.get("item_title")) if x)
+    return bool(_TEST_VOCAB_RE.search(text))
+
+
+def _sanitize_event_kind(ev: dict[str, Any]) -> dict[str, Any]:
+    """W5: an event tagged ``kind='test'`` whose own title/summary carries none of the trial/test
+    vocabulary is rewritten to ``'other'`` (logged) -- makes the upstream classifier's drift visible
+    instead of silently mislabeling the report's events table."""
+    if ev.get("kind") != "test" or _looks_like_test(ev):
+        return ev
+    log.info("event_kind_test_reclassified_other", event_id=ev.get("id"), item_id=ev.get("item_id"))
+    ev = dict(ev)
+    ev["kind"] = "other"
+    return ev
+
+
+def _has_concrete_anchor(ev: dict[str, Any]) -> bool:
+    return bool(ev.get("parties") or ev.get("customer") or ev.get("amount_usd") is not None or ev.get("date"))
+
+
 def _normalize_event_key(ev: dict[str, Any]) -> tuple[str, str, str, str]:
     """A dedup key for a business event: same kind + same normalised parties/customer/program is
     almost always the same underlying fact re-extracted from more than one covering article, or
@@ -173,10 +214,16 @@ def _dedup_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _event_has_signal(ev: dict[str, Any]) -> bool:
     """An event with neither parties, a customer/program, nor an amount carries no information for
-    the reader — drop it rather than render an almost-empty row (F9/F16)."""
-    return bool(
+    the reader — drop it rather than render an almost-empty row (F9/F16). W5 (round 4): kind
+    'test'/'other' rows are held to the stricter :func:`_has_concrete_anchor` test on top of this
+    -- an unclear-kind row also needs a genuinely concrete anchor (parties/customer/amount/date),
+    not just a bare ``program`` string, to be worth showing."""
+    base = bool(
         ev.get("parties") or ev.get("customer") or ev.get("program") or ev.get("amount_usd") is not None
     )
+    if not base:
+        return False
+    return not (ev.get("kind") in _ANCHOR_KINDS_STRICT and not _has_concrete_anchor(ev))
 
 
 def _event_sort_key(ev: dict[str, Any]) -> tuple[dt.date, float]:
@@ -189,6 +236,15 @@ def _event_sort_key(ev: dict[str, Any]) -> tuple[dt.date, float]:
     return (date, amount_val)
 
 
+#: W5 (round 4): a small grace window on the *start* side of the default (both-None) daily 24h
+#: window only -- ``events.date`` is a DATE column with no time-of-day, so comparing it against a
+#: sharp 24h-ago timestamp cutoff would clip an event dated "today" that happened to land a few
+#: hours before the report actually ran. Applied only to the auto (both-None) daily case; an
+#: explicit period_start/period_end (manual rebuild, or weekly.py's own 7-day range) is already a
+#: whole-day range and gets no extra grace.
+_EVENT_DAILY_GRACE = dt.timedelta(hours=6)
+
+
 def collect_events(
     period_start: dt.date | None = None,
     period_end: dt.date | None = None,
@@ -198,8 +254,20 @@ def collect_events(
     """Business events (contract awards, M&A, ...) in the period, deduplicated, stripped of
     information-free rows, sorted date desc then amount desc (F9/F16), most recent first.
     ``limit`` (used by the weekly report to cap its table at 40 rows) is applied last, after
-    dedup/filter/sort."""
+    dedup/filter/sort.
+
+    W5 (round 4): the window filter is anchored on ``e.date`` -- or, only when that's ``NULL``, the
+    source item's own ``published_at`` -- and nothing further. The previous version additionally
+    fell back to ``i.fetched_at``/``i.created_at`` (ingestion time) whenever *both* were ``NULL``,
+    which is how a business event derived from an undated, search-sourced item could show up in a
+    "yesterday's events" table regardless of how old the underlying fact actually was; an event
+    with no real anchor date now simply falls outside every window instead (``COALESCE(...)  IS
+    NULL`` never satisfies a ``BETWEEN``). The default (both-None) daily window also gets a small
+    grace period on its start side -- see :data:`_EVENT_DAILY_GRACE`.
+    """
     start_ts, end_ts, _label = _period(period_start, period_end)
+    if period_start is None and period_end is None:
+        start_ts = start_ts - _EVENT_DAILY_GRACE
     start_date, end_date = start_ts.astimezone(JERUSALEM).date(), end_ts.astimezone(JERUSALEM).date()
     sql = """
         SELECT e.id, e.item_id, e.kind, e.title, e.date, e.amount_usd, e.currency, e.parties,
@@ -209,13 +277,13 @@ def collect_events(
         FROM events e
         JOIN items i ON i.id = e.item_id
         LEFT JOIN sources src ON src.id = i.source_id
-        WHERE COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
-              BETWEEN %(start)s AND %(end)s
+        WHERE COALESCE(e.date, i.published_at::date) BETWEEN %(start)s AND %(end)s
         ORDER BY e.date DESC NULLS LAST, e.id DESC
     """
     with connection() as conn, conn.cursor() as cur:
         cur.execute(sql, {"start": start_date, "end": end_date})
         rows = cur.fetchall()
+    rows = [_sanitize_event_kind(ev) for ev in rows]
     rows = _dedup_events(rows)
     rows = [ev for ev in rows if _event_has_signal(ev)]
     rows.sort(key=_event_sort_key, reverse=True)
@@ -557,16 +625,28 @@ def _fallback_truncate(text: str | None, limit: int = _FALLBACK_TEXT_TRUNC_CHARS
 
 def _fallback_top_item_sentences(items: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
     """One cited ``Sentence`` per top item (already score-ordered by ``collect_items``): title +
-    level + a one-line ``so_what_he``/``summary_he`` -- judge finding 1's "top red/orange items"."""
+    level + a one-line ``so_what_he``/``summary_he`` -- judge finding 1's "top red/orange items".
+
+    W9 (round 4): items that are really the same underlying story covered by more than one outlet
+    (shared ``dedup_of``, or a near-identical title -- see ``eoa.report.clustering``) are folded
+    into one sentence, citing the richest item first and every other outlet's own registry number
+    right after it, with a "(+N מקורות נוספים)" note -- instead of one near-duplicate sentence per
+    outlet."""
+    from eoa.report.clustering import cluster_extra_ns, cluster_items, extra_sources_note_he
+
+    clusters = cluster_items(items)
     sentences: list[Sentence] = []
-    for it in items[:limit]:
+    for cluster in clusters[:limit]:
+        it = cluster.primary
         n = it.get("n")
         if n is None:
             continue
         level = _level_label(it.get("level"))
         title = it.get("title") or "—"
         so_what = _fallback_truncate(it.get("so_what_he") or it.get("summary_he"))
-        sentences.append(Sentence(text_he=f"{title} ({level}): {so_what}", cites=[int(n)]))
+        extra_ns = cluster_extra_ns(cluster)
+        note = extra_sources_note_he(cluster) if extra_ns else ""
+        sentences.append(Sentence(text_he=f"{title} ({level}): {so_what}{note}", cites=[int(n), *extra_ns]))
     return sentences
 
 
@@ -847,16 +927,30 @@ def _recent_daily_report(period_end: dt.date, *, within_hours: int = 6) -> Repor
     )
 
 
-def _tenders_forecast_table(tenders_data: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
-    """F6: a compact tender-forecasts sub-table (platform | payload | likelihood | window |
-    one-line rationale), rendered here (not by ``eoa.tenders.report_section``) from
-    ``collect_tenders``'s data — replaces the old ``tenders_extra_section`` bulleted prose block,
-    which duplicated the open-tenders board (rendered separately by ``tenders_table``) and printed
-    the full, unbounded rationale text. ``None`` when there is nothing to show."""
+def _tenders_forecast_table(
+    tenders_data: dict[str, list[dict[str, Any]]], citation_items: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """F6: a compact tender-forecasts sub-table (platform | payload | likelihood | window | נימוק |
+    מקורות), rendered here (not by ``eoa.tenders.report_section``) from ``collect_tenders``'s data
+    (already deduped by topic -- W1, see ``report_section.dedupe_forecasts_by_topic``) — replaces
+    the old ``tenders_extra_section`` bulleted prose block, which duplicated the open-tenders board
+    (rendered separately by ``tenders_table``) and printed the full, unbounded rationale text.
+    ``None`` when there is nothing to show.
+
+    W6 (round 4): every row now carries a "מקורות" column citing the forecast's own trigger
+    items — ``eoa.tenders.report_section.attach_forecast_citations`` (called here, mutating
+    ``citation_items`` in place, same convention as ``eoa.report.tech_watch``) registers each
+    forecast's trigger items into the report's own citation registry so those ``[n]`` markers
+    resolve in the "נספח מקורות" appendix (with a real, clickable source link) exactly like every
+    other cited claim in the report.
+    """
     forecasts = tenders_data.get("new_forecasts") or []
     if not forecasts:
         return None
-    headers = ["פלטפורמה", "צורך/Payload", "סבירות", "חלון", "נימוק"]
+    from eoa.tenders.report_section import attach_forecast_citations
+
+    attach_forecast_citations(citation_items, forecasts)
+    headers = ["פלטפורמה", "צורך/Payload", "סבירות", "חלון", "נימוק", "מקורות"]
     rows: list[list[Any]] = []
     for f in forecasts[:10]:
         likelihood = f.get("likelihood")
@@ -865,7 +959,11 @@ def _tenders_forecast_table(tenders_data: dict[str, list[dict[str, Any]]]) -> di
         rationale = (f.get("rationale_he") or "").strip() or "—"
         if len(rationale) > 200:
             rationale = rationale[:199] + "…"
-        rows.append([f.get("platform") or "—", f.get("payload_need") or "—", pct, window, rationale])
+        citation_ns = f.get("_citation_ns") or []
+        sources_cell = "".join(f"[{n}]" for n in citation_ns) or "—"
+        rows.append(
+            [f.get("platform") or "—", f.get("payload_need") or "—", pct, window, rationale, sources_cell]
+        )
     return {"title_he": "תחזיות מכרזים", "headers": headers, "rows": rows}
 
 
@@ -988,10 +1086,25 @@ def build_daily(
     try:
         from eoa.tenders.report_section import tenders_table
 
-        open_table = tenders_table(tenders_data)
+        # W7 (round 4): a cheap, budget-bounded liveness+staleness probe over every open-tender
+        # link before it renders as "open" -- see eoa.report.link_check module docstring for the
+        # LITENING-2015 motivating example. One cache, built once per report build; a failure here
+        # (network layer entirely unavailable, event loop issue, ...) degrades to no cache at all,
+        # which `tenders_table` treats identically to "not checked" (renders unchanged).
+        link_cache: dict[str, Any] | None = None
+        try:
+            from eoa.report.link_check import check_urls
+
+            tender_urls = [t["url"] for t in (tenders_data.get("open_tenders") or []) if t.get("url")]
+            if tender_urls:
+                link_cache = check_urls(tender_urls)
+        except Exception as exc:
+            log.warning("daily_report_link_check_failed", error=str(exc)[:160])
+
+        open_table = tenders_table(tenders_data, link_cache=link_cache)
         if open_table:
             tender_tables.append(open_table)
-        forecast_table = _tenders_forecast_table(tenders_data)
+        forecast_table = _tenders_forecast_table(tenders_data, citation_items)
         if forecast_table:
             tender_tables.append(forecast_table)
     except Exception as exc:

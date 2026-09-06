@@ -8662,3 +8662,159 @@ truncated-JSON failure mode weekly's round-2 note describes and consider a simil
 market-item reduction. The competitor IP position rendering (`eoa.patents.report_section`) and the
 `is_israeli_industry` watchlist wiring (`eoa.pipeline.israel_focus`) were exercised only through
 their existing `try/except`-guarded call sites, never against a live DB.
+
+## Round 4 reports (2026-09-06, `docs/REVIEW_2026-09-06_evening.md` W1/W5/W6/W7/W9)
+
+Fixes for five findings from the round-4 evening review, all confirmed live against the actual
+`output/reports/daily_2026-09-06.md` before fixing: the tender-forecast table showed the same
+platform+payload topic twice (once per resolved `buyer_country`), forecasts carried no citations at
+all, the business-events table labeled several clearly-non-test events (a funding note, an academic
+paper, a production milestone) as `ניסוי` ("test"), and the same underlying story from more than one
+outlet rendered as separate rows. New modules: `agent/eoa/report/clustering.py`,
+`agent/eoa/report/link_check.py`. Touched: `agent/eoa/tenders/report_section.py`,
+`agent/eoa/report/daily.py`, `agent/eoa/report/weekly.py`, `agent/eoa/report/bd_territory.py`.
+
+### W1 -- duplicate forecast topics
+
+`eoa.tenders.report_section.dedupe_forecasts_by_topic(rows, *, cap=15)` -- collapses
+`tender_forecasts` rows sharing a case/whitespace-insensitive `(platform, payload_need)` topic key
+(the same platform+payload can legitimately get one DB row per resolved `buyer_country`, see
+`eoa.tenders.forecast._resolve_buyer_country` -- a report table that doesn't even show a
+`buyer_country` column then renders this as a bare duplicate), keeping the highest-`likelihood`
+row's own fields but merging every group member's `sources` (`["item:N", ...]`) into it so the
+merged forecast still cites everything that corroborated any of its collapsed rows. Wired into
+`collect_tenders` (fetch limit raised `15 -> 60` so there's enough raw material left to dedupe from
+without starving the final, still-15-row-capped table) and into `bd_territory.collect_tenders_and_forecasts`
+(same guarantee for the per-territory BD forecast table, `cap=limit`).
+
+### W6 -- forecast rows had no source citations
+
+`eoa.tenders.report_section.attach_forecast_citations(citation_items, forecasts)` -- same
+numbering-extension convention as `eoa.report.tech_watch._extend_registry`/`israel_section`:
+registers every forecast's trigger items (parsed from `sources`) into the caller's citation
+registry (one DB fetch, only for ids not already numbered), and stamps each forecast dict with
+`_citation_ns` (the registry numbers a renderer should cite). `daily._tenders_forecast_table` now
+takes `citation_items` as a required second argument, calls this, and renders a new "מקורות"
+column (`"[12][15]"`-style, `"—"` when a forecast has no sources) -- the cited items then get a
+real, clickable link in the report's own "נספח מקורות" appendix, exactly like every other cited
+claim. (`bd_territory.py`'s own forecast rendering already had per-row `[n]` citations via its
+pre-existing `_extend_registry_with_tenders` -- not a round-4 gap, untouched.)
+
+### W5 -- stale event-kind label + old events
+
+`daily.collect_events`'s window filter dropped the `i.fetched_at::date`/`i.created_at::date`
+fallback tail -- it now anchors purely on `COALESCE(e.date, i.published_at::date)`, so an event
+whose underlying item has neither a real event date nor a publish date (a search/deep-search-scraped
+page, the class of item F20 already excludes from the news sections) simply falls outside every
+window instead of appearing via an ingestion-time proxy that says nothing about how old the fact
+itself is. The default (both-`period_start`/`period_end`-`None`) daily window additionally gets a
+small `_EVENT_DAILY_GRACE = timedelta(hours=6)` grace on its start side, since `events.date` is a
+bare `DATE` column being compared against a sharp 24h-ago timestamp cutoff. An explicit period
+(manual rebuild, or `weekly.py`'s own 7-day range) gets no extra grace -- it's already a whole-day
+range.
+
+New deterministic kind-sanity guard, `daily._sanitize_event_kind` (called in `collect_events`
+before dedup): an event tagged `kind='test'` whose own title/summary carries none of a fixed
+trial/demonstration vocabulary (`ניסוי`, `test`, `trial`, `demonstration`, `הדגמה`, `firing`, `ירי`,
+`_TEST_VOCAB_RE`) is rewritten to `'other'` and logged (`event_kind_test_reclassified_other`) --
+verified live against the DB: of 15 `kind='test'` events sampled, at least 7 carried no test
+vocabulary at all (a funding allocation, an academic-paper publication ×3, a production-line cost
+estimate, a competitor's manufacturing-halt note, a competition-launch announcement). `_event_has_signal`
+gained a stricter second check for `kind in ('test', 'other')` specifically: on top of the existing
+parties/customer/program/amount_usd signal requirement, these two kinds also need a genuinely
+concrete anchor (`_has_concrete_anchor`: parties/customer/amount_usd/date -- `program` alone doesn't
+count here) or the row is dropped -- an unclear-kind event with nothing but a bare `program` string
+is exactly the near-empty, unclear-kind row the review flagged.
+
+### W7 -- unchecked/stale links reaching the report
+
+New module `agent/eoa/report/link_check.py`: `check_urls(urls, *, cache=None, per_request_timeout=8.0,
+total_budget=60.0, max_concurrency=6, today=None) -> dict[str, LinkCheckResult]` -- a GET (not HEAD;
+several tender portals reject it) per url through the existing SSRF guard
+(`eoa.fetch.remote.assert_public_http_url`), bounded concurrency (`asyncio.Semaphore`) and a hard
+wall-clock budget for the whole batch (`asyncio.wait(..., timeout=total_budget)`; any task still
+pending when the budget expires is cancelled and comes back `checked=False`, never treated as
+dead). `LinkCheckResult{url, checked, alive, status_code, stale, title, reason}`: `alive` is
+`200 <= status < 400`; `stale` is a cheap heuristic -- a lone old (`> STALE_YEARS=3` years) 4-digit
+year found in the page's own `<title>` with no more-recent year alongside it (the motivating case:
+a still-listed-as-open tender whose notice page title is literally `"... 2015"`). `cache` is
+read/written in place so one cache built per report run can be reused across every table that might
+reference the same url.
+
+Wired into `eoa.tenders.report_section.tenders_table(data, *, link_cache=None)` (backward
+compatible -- `link_cache=None`, the default and every pre-existing caller, renders exactly as
+before): a row whose link came back confirmed dead is dropped outright (returns `None` if every row
+was dropped); a row whose link looks stale is kept but its status cell is relabeled `"ארכיון"`
+regardless of what `tenders.status` still says in the DB; an unchecked row (budget ran out first)
+keeps its normal status label plus a trailing `" (לא אומת)"` marker. `daily.build_daily` builds the
+cache once (`check_urls` over every open tender's `url`) immediately before calling `tenders_table`;
+a failure anywhere in that path (network layer unavailable, event loop issue) degrades to
+`link_cache=None` rather than breaking the report.
+
+### W9 -- the same story from multiple outlets as separate rows
+
+New module `agent/eoa/report/clustering.py`: `cluster_items(items) -> list[ItemCluster]` groups an
+already-`n`-numbered item list into `ItemCluster{primary, extra}` -- two items cluster when they
+share a `dedup_of` target (one points at the other, or both point at the same one) or when their
+normalized titles are `SequenceMatcher`-similar `>= SIMILARITY_THRESHOLD = 0.85`; the richest member
+(most populated fields, then higher `score`) becomes `primary`. Deliberately presentation-only: it
+never mutates, removes, or renumbers anything in the caller's list -- a render step iterates
+clusters instead of raw items, folding a group into one row. `extra_sources_note_he(cluster)` ->
+`" (+2 מקורות נוספים)"` (singular `"מקור נוסף"` for exactly one extra, `""` for none);
+`cluster_extra_ns(cluster)` -> the extra members' own registry `n`s, for appending to a `cites`
+list (the deterministic `Sentence` renderer already turns every `cites` entry into an auto-appended
+`[n]` marker -- see `docx_builder`'s `_sentence_markup`/`add_citation_run` -- so no manual `[n]`
+text is ever embedded).
+
+Wired into the three modules' own `_fallback_top_item_sentences` (`daily.py`/`weekly.py`/
+`bd_territory.py`, the deterministic "top items" synthesis used when the LLM-drafted narrative
+fails citation QA twice): each iterates `cluster_items(items)[:limit]` instead of `items[:limit]`,
+citing `[primary_n, *extra_ns]` with the extra-sources note appended to the sentence text. Scoped
+deliberately to these three deterministic table/fallback builders (not the LLM-facing item lists
+fed into `draft_report`/`draft_weekly`/BD's own drafting prompt) -- lower regression risk against
+the citation-QA machinery, and matches the review's own wording ("group items ... in report
+tables").
+
+### Tests
+
+`tests/unit/test_reports_round4.py` (new, 49 tests, no DB/Ollama; `respx` mocks the one live-HTTP
+surface): `TestDedupeForecastsByTopic` (collapse across buyer_country, source-union merge, distinct
+topics stay separate, case/whitespace-insensitive topic match, cap, empty input);
+`TestAttachForecastCitations` (registers + stamps `_citation_ns`, already-registered items skip the
+DB fetch entirely, no-sources -> `[]`, a DB failure degrades to `[]` rather than raising);
+`TestTendersForecastTableCitations` (new "מקורות" header/column, dash when nothing to cite);
+`TestSanitizeEventKind` (Hebrew/English test vocabulary kept as `'test'`, no-vocabulary rewritten to
+`'other'`, non-`'test'` kinds untouched, never mutates the input dict); `TestEventHasSignalStrictAnchor`
+(bare-`program` `test`/`other` rows dropped, a `date` on the same row survives, non-strict kinds
+keep the old looser rule); `TestCollectEventsWindowSql` (the executed SQL never mentions
+`fetched_at`/`created_at`, the default window's start gets the grace subtracted, an explicit period
+gets none); `TestLinkCheck` (alive/404/stale/SSRF-blocked/network-error/budget-exhausted-via-a-real-
+`asyncio.sleep`-side-effect/cache-hit-skips-the-request); `TestTendersTableLinkFiltering`
+(no-cache-unchanged, dead-drops-the-row, stale-relabels-ארכיון, unchecked-appends-the-marker,
+alive-unchanged); `TestClusterItems`/`TestExtraSourcesNote`/`TestFallbackTopItemSentencesClustering`
+(dedup_of and near-title clustering, singular/plural note wording, `cluster_extra_ns` skips
+unnumbered extras, daily+weekly fallback sentences fold a duplicate into one cited sentence, a
+non-duplicate pair stays two sentences).
+
+`tests/unit/test_report_daily.py` updated: `_tenders_forecast_table` gained a required
+`citation_items` argument at both existing call sites (`test_tenders_forecast_table_none_when_no_forecasts`,
+`test_tenders_forecast_table_shape_and_rationale_cap`), the latter's header assertion extended with
+the new `"מקורות"` column and a `row[5] == "—"` check for a forecast fixture with no `sources`.
+
+`PYTHONPATH=agent python -m pytest tests/unit -q -k "report or daily or weekly or bd or tender or
+forecast"` and `ruff check`/`ruff format --check` on every touched/new file -- see the task's final
+report for the exact pass count from this run.
+
+### Not verifiable without the live stack
+
+No live Postgres/Ollama/network was used for the actual report-build path (`build_daily` itself,
+end to end, with real `tender_forecasts`/`events` rows and a real outbound link check) -- W1/W5/W6
+were root-caused and the *shape* of the fix confirmed against a real (already-generated)
+`output/reports/daily_2026-09-06.md` plus read-only DB `SELECT`s (see the W5 note's live event
+sample), but a fresh end-to-end `build_daily(force=True)` run to confirm the dedup/citation/kind/
+link-check/clustering fixes all compose correctly against a live DB and live tender-notice URLs was
+out of scope for this pass (no pipeline runs / DB writes / service restarts permitted). The next
+round should rebuild `daily_2026-09-06` (or the next available day) and re-check: no repeated
+platform+payload row, every forecast row's "מקורות" column resolves in the sources appendix, no
+`ניסוי` label on a row without trial/test vocabulary, at least one previously-"open" dead/stale
+tender link now shows "ארכיון"/is gone, and no duplicate-outlet row in the events/top-items tables.

@@ -584,15 +584,25 @@ def _fallback_truncate(text: str | None, limit: int = _FALLBACK_TEXT_TRUNC_CHARS
 
 
 def _fallback_top_item_sentences(items: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    """W9 (round 4, docs/qa/loop/round_4_fixes.md): items that are really the same underlying story
+    covered by more than one outlet (shared ``dedup_of``, or a near-identical title -- see
+    ``eoa.report.clustering``) are folded into one sentence citing the richest item plus every
+    other outlet's own registry number, with a "(+N מקורות נוספים)" note."""
+    from eoa.report.clustering import cluster_extra_ns, cluster_items, extra_sources_note_he
+
+    clusters = cluster_items(items)
     sentences: list[Sentence] = []
-    for it in items[:limit]:
+    for cluster in clusters[:limit]:
+        it = cluster.primary
         n = it.get("n")
         if n is None:
             continue
         level = _level_label(it.get("level"))
         title = it.get("title") or "—"
         so_what = _fallback_truncate(it.get("so_what_he") or it.get("summary_he"))
-        sentences.append(Sentence(text_he=f"{title} ({level}): {so_what}", cites=[int(n)]))
+        extra_ns = cluster_extra_ns(cluster)
+        note = extra_sources_note_he(cluster) if extra_ns else ""
+        sentences.append(Sentence(text_he=f"{title} ({level}): {so_what}{note}", cites=[int(n), *extra_ns]))
     return sentences
 
 
