@@ -21,6 +21,12 @@ import type {
   McpPingResponse,
   McpServersResponse,
   MorningResponse,
+  PatentHeatmapResponse,
+  PatentRecord,
+  PatentSurveyCard,
+  PatentSurveyCreateResponse,
+  PatentsResponse,
+  PatentsStatusResponse,
   ReportCitationsResponse,
   ReportDetail,
   RunsCurrentResponse,
@@ -33,7 +39,14 @@ import type {
   TendersResponse,
   TriageLevel,
 } from "@/types/api";
-import type { ApiClient, EntitiesQuery, GraphQuery, ItemsQuery, TendersQuery } from "@/api/types";
+import type {
+  ApiClient,
+  EntitiesQuery,
+  GraphQuery,
+  ItemsQuery,
+  PatentsQuery,
+  TendersQuery,
+} from "@/api/types";
 import type { CountryGroup } from "@/types/api";
 import { normalizeCountryCode } from "@/lib/countries";
 import { mockEntities, type MockEntitySeed } from "./data/entities";
@@ -56,6 +69,79 @@ import { mockSettingsYaml } from "./settingsYaml";
 function delay<T>(value: T, ms = 220): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms));
 }
+
+// A14: פטנטים ו-IP -- a small static sample, good enough for UI dev/preview mode.
+const mockPatents: PatentRecord[] = [
+  {
+    id: 1,
+    pub_number: "US11234567B2",
+    kind: "B2",
+    title: "Digital pixel readout integrated circuit for infrared focal plane array",
+    abstract: "A digital-pixel ROIC with per-pixel ADC for improved dynamic range.",
+    assignees: ["Elbit"],
+    inventors: [],
+    cpc: ["H01L27", "G01J5"],
+    priority_date: "2023-02-01",
+    filing_date: "2023-02-01",
+    publication_date: "2025-06-15",
+    grant_date: "2025-06-15",
+    family_id: null,
+    jurisdictions: ["US", "IL"],
+    forward_citations: 3,
+    backward_citations: 12,
+    url: "https://patents.google.com/patent/US11234567B2/en",
+    source: "google_patents_search",
+    subdomain: "droic_digital_pixel",
+    claims_summary_he: "הפטנט מתאר מעגל קריאה דיגיטלי ברמת פיקסל למערך פיקסלים אינפרה-אדום.",
+    so_what_he: "משפר את הטווח הדינמי של חיישני IR מתקדמים.",
+    israel_relevance: 0.8,
+    value_score: 62,
+    value_reasons: ["הוגש/פורסם ב-2 מדינות/אזורים", "מדד פרוקסי, לא הערכת שווי כספית"],
+    created_at: "2026-09-01T08:00:00+00:00",
+    updated_at: "2026-09-01T08:00:00+00:00",
+  },
+  {
+    id: 2,
+    pub_number: "CN103237180B",
+    kind: "B",
+    title: "High-dynamic-range infrared focal plane readout circuit",
+    abstract: "A readout circuit with a comparator and capacitor bank for HDR imaging.",
+    assignees: [],
+    inventors: [],
+    cpc: ["H01L27"],
+    priority_date: "2013-01-10",
+    filing_date: "2013-01-10",
+    publication_date: "2015-08-20",
+    grant_date: "2015-08-20",
+    family_id: null,
+    jurisdictions: ["CN"],
+    forward_citations: 1,
+    backward_citations: 5,
+    url: "https://patents.google.com/patent/CN103237180B/en",
+    source: "google_patents_search",
+    subdomain: "droic_digital_pixel",
+    claims_summary_he: "הפטנט מתאר מעגל קריאה עם טווח דינמי גבוה עבור מצלמת אינפרה-אדום.",
+    so_what_he: "רלוונטי כמדד השוואה טכנולוגי לפתרונות מתחרים.",
+    israel_relevance: 0,
+    value_score: 18,
+    value_reasons: ["הוגש/פורסם במדינה אחת בלבד", "מדד פרוקסי, לא הערכת שווי כספית"],
+    created_at: "2026-09-01T08:00:00+00:00",
+    updated_at: "2026-09-01T08:00:00+00:00",
+  },
+];
+
+const mockPatentSurveys: PatentSurveyCard[] = [
+  {
+    id: 1,
+    topic: "FPA עם פיקסל דיגיטלי (DROIC)",
+    status: "done",
+    created_at: "2026-09-06T07:23:45+00:00",
+    report_id: 27,
+    path_docx: "output/reports/patent_survey_droic_2026-09-06.docx",
+    path_md: "output/reports/patent_survey_droic_2026-09-06.md",
+    path_html: "output/reports/patent_survey_droic_2026-09-06.html",
+  },
+];
 
 // U7a/U7c mock-mode mirror of `eoa.report.geography.items_by_country`.
 function groupItemsByCountry(rows: ItemCard[]): CountryGroup[] {
@@ -148,6 +234,8 @@ function toEntitySummary(seed: MockEntitySeed): EntitySummary {
     is_watchlist: seed.item_count >= 5,
     mentions_7d: Math.min(seed.item_count, Math.round(seed.item_count * 0.6)),
     mentions_30d: seed.item_count,
+    // A13 (מיקוד תעשייה ישראלית): derived from the fixture's own `country`.
+    is_israeli: seed.country === "IL",
   };
 }
 
@@ -205,6 +293,9 @@ export const mockApi: ApiClient = {
     if (query.country?.length) {
       const wanted = new Set(query.country.map((c) => c.toUpperCase()));
       filtered = filtered.filter((it) => wanted.has(normalizeCountryCode(it.geography)));
+    }
+    if (query.israel) {
+      filtered = filtered.filter((it) => (it.israel_relevance ?? 0) >= 0.5);
     }
     const sort = query.sort ?? "score";
     filtered = filtered.slice().sort((a, b) =>
@@ -273,6 +364,7 @@ export const mockApi: ApiClient = {
     if (query.country) filtered = filtered.filter((e) => e.country === query.country);
     let withRelevance = filtered.map(toEntitySummary);
     if (query.watchlist) withRelevance = withRelevance.filter((e) => e.is_watchlist);
+    if (query.israel) withRelevance = withRelevance.filter((e) => e.is_israeli);
     if (!query.all) withRelevance = withRelevance.filter((e) => e.relevance >= 0.4);
     const sort = query.sort ?? "last_seen";
     withRelevance.sort((a, b) => {
@@ -401,16 +493,32 @@ export const mockApi: ApiClient = {
       body.context_item_ids.length || body.context_entity_ids.length
         ? ` בהתבסס על ${body.context_item_ids.length} פריטים ו-${body.context_entity_ids.length} ישויות בהקשר,`
         : "";
+    // U11 (2026-09-06): mirrors the real synthesized-answer contract (services.ask_build_messages
+    // / ask_answer_format.md) -- one direct-answer lead, key facts as [n]-cited bullets, an
+    // "הערכת האנליסט" section with no citations, and a gaps section -- so the mock/dev UI shows
+    // the same shape the live model is instructed to produce, not the old per-source-dump bug.
     const answer =
-      `לגבי "${question}":${contextNote} הממצא המרכזי הוא ש-Elbit Systems ` +
-      `מציגה יכולות חדשות בתחום פודי הכיוון [1], בעוד Rafael ממשיכה לפתח את ` +
-      `מערך העוקבים האלקטרו-אופטיים למערכות היירוט [2]. מומלץ להמשיך מעקב ` +
-      `אחר התפתחויות נוספות בטווח השבועיים הקרובים [3].`;
+      `לגבי "${question}"${contextNote} — Elbit Systems מציגה יכולות חדשות בתחום פודי הכיוון, ` +
+      `בעוד Rafael ממשיכה לפתח את מערך העוקבים האלקטרו-אופטיים למערכות היירוט.\n\n` +
+      `### עובדות מרכזיות\n\n` +
+      `- Elbit Systems הציגה דור חדש של פוד כיוון EO/IR [1]\n` +
+      `- Rafael ממשיכה בפיתוח עוקבים אלקטרו-אופטיים למערכות יירוט [2]\n` +
+      `- נרשמה עלייה בפעילות בתחום ה-C-UAS ברבעון האחרון [3]\n\n` +
+      `### הערכת האנליסט\n\n` +
+      `המגמה מצביעה על התחרות הגוברת בין שתי החברות בתחום המעקב האלקטרו-אופטי, עם דגש הולך וגובר על שילוב בינה מלאכותית לזיהוי מטרות.\n\n` +
+      `### פערים / מה לא ידוע\n\n` +
+      `- לוחות הזמנים המדויקים לאספקה מסחרית אינם ידועים\n`;
     const citations: AskCitation[] = [
       { n: 1, item_id: 1, title: items[0]?.title ?? "מקור 1", url: items[0]?.url ?? "#" },
       { n: 2, item_id: 2, title: items[1]?.title ?? "מקור 2", url: items[1]?.url ?? "#" },
       { n: 3, item_id: 3, title: items[2]?.title ?? "מקור 3", url: items[2]?.url ?? "#" },
     ];
+    const sources: AskCitation[] = citations.map((c, idx) => ({
+      ...c,
+      level: items[idx]?.level ?? "yellow",
+      source_name: items[idx]?.source_name ?? null,
+      note: ["מתאר ישירות את הפוד החדש", "מזכיר את מערך העוקבים", "רקע כללי על מגמת השוק"][idx] ?? null,
+    }));
     const words = answer.split(" ");
     let i = 0;
     const [kind, model] = (body.provider ?? "ollama").split(":");
@@ -418,7 +526,7 @@ export const mockApi: ApiClient = {
     const tick = () => {
       if (cancelled) return;
       if (i >= words.length) {
-        handlers.onCitations(citations);
+        handlers.onSources?.(sources);
         handlers.onDone();
         return;
       }
@@ -426,6 +534,7 @@ export const mockApi: ApiClient = {
       i += 1;
       setTimeout(tick, 35);
     };
+    handlers.onCitations(citations);
     handlers.onMeta?.(kind || "ollama", mockModel);
     setTimeout(tick, 150);
     return () => {
@@ -474,6 +583,53 @@ export const mockApi: ApiClient = {
   },
   getTenderForecasts: async (limit = 100): Promise<ForecastCard[]> =>
     delay(mockForecasts.slice(0, limit)),
+
+  // A14: פטנטים ו-IP.
+  getPatents: async (query: PatentsQuery): Promise<PatentsResponse> => {
+    let filtered = mockPatents.slice();
+    if (query.assignee) filtered = filtered.filter((p) => p.assignees.includes(query.assignee!));
+    if (query.subdomain) filtered = filtered.filter((p) => p.subdomain === query.subdomain);
+    if (query.israeli) filtered = filtered.filter((p) => (p.israel_relevance ?? 0) >= 0.5);
+    if (query.min_value_score != null) {
+      filtered = filtered.filter((p) => (p.value_score ?? 0) >= query.min_value_score!);
+    }
+    if (query.q) {
+      const q = query.q.toLowerCase();
+      filtered = filtered.filter(
+        (p) => (p.title ?? "").toLowerCase().includes(q) || (p.abstract ?? "").toLowerCase().includes(q),
+      );
+    }
+    return delay({ patents: filtered.slice(0, query.limit ?? 100), total: filtered.length });
+  },
+  getPatentsStatus: async (): Promise<PatentsStatusResponse> =>
+    delay({ structured_sources_configured: false, banner_he: null }),
+  getPatentsHeatmap: async (): Promise<PatentHeatmapResponse> => {
+    const cpc_codes = [...new Set(mockPatents.flatMap((p) => p.cpc))];
+    const assignees = [...new Set(mockPatents.flatMap((p) => p.assignees))];
+    const cells = cpc_codes.flatMap((cpc) =>
+      assignees.map((assignee) => ({
+        cpc,
+        assignee,
+        n: mockPatents.filter((p) => p.cpc.includes(cpc) && p.assignees.includes(assignee)).length,
+      })),
+    );
+    return delay({ cpc_codes, assignees, cells: cells.filter((c) => c.n > 0) });
+  },
+  getPatentSurveys: async (limit = 30): Promise<PatentSurveyCard[]> => delay(mockPatentSurveys.slice(0, limit)),
+  createPatentSurvey: async (topic: string): Promise<PatentSurveyCreateResponse> =>
+    delay({
+      survey: {
+        id: mockPatentSurveys.length + 1,
+        topic,
+        status: "done",
+        created_at: new Date().toISOString(),
+        report_id: null,
+        path_docx: null,
+        path_md: null,
+        path_html: null,
+      },
+      job_id: 999,
+    }),
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
   getTechRadar: async (weeks = 12): Promise<TechRadarResponse> => {

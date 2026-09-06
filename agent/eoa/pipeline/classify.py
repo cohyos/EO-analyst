@@ -131,6 +131,64 @@ def apply_no_eoir_gate(item: dict, out: ClassifyOut) -> ClassifyOut:
     return out
 
 
+# ---------------------------------------------------------------------------------------------
+# Goal 3 (2026-09-06, docs/qa/STATUS.md r3): a 06:27 daily report leaked a generic "AI/hi-tech
+# jobs market" opinion piece (Israel Defense Hebrew: "אילו מקצועות יהפכו מבוקשים בעידן ה-AI") into
+# a report section under a fabricated "תחומים משיקים (Secondary)" heading, with zero genuine
+# EO/IR/CV content. ``apply_no_eoir_gate`` above didn't catch it because the article likely
+# mentioned a watchlist company name or extracted a generic entity in passing -- neither of those
+# signals is a real defense-technical one when the *only* on-topic-looking vocabulary in the text
+# is generic AI/ML/hi-tech-market language (an industry/labor-market trend piece), not an actual
+# EO/IR/CV-for-defense term. This second, narrower gate closes that hole: it demotes such an item
+# to out_of_scope even when it has entities or a watchlist hit, as long as no genuine EO/IR/CV term
+# appears anywhere in the text.
+# ---------------------------------------------------------------------------------------------
+_GENERIC_AI_TECH_KEYWORDS_EN = (
+    "artificial intelligence", "machine learning", "deep learning", "generative ai",
+    "large language model", "llm", "chatgpt", "high-tech", "hi-tech", "high tech",
+    "tech industry", "tech sector", "tech jobs", "ai jobs", "ai market", "ai skills",
+    "labor market", "job market", "startup ecosystem", "venture capital",
+)  # fmt: skip
+_GENERIC_AI_TECH_KEYWORDS_HE = (
+    "בינה מלאכותית", "למידת מכונה", "למידה עמוקה", "היי-טק", "הייטק", "שוק ההיי-טק",
+    "שוק ההייטק", "תעשיית ההייטק", "שוק העבודה", "סטארטאפ", "הון סיכון", "ה-ai",
+)  # fmt: skip
+
+
+def _has_generic_ai_tech_market_vocabulary(text: str) -> bool:
+    """True if ``text`` contains generic AI/ML/hi-tech-*market* vocabulary (jobs, skills, industry
+    trends) -- calibration companion to :func:`_has_eoir_vocabulary`: a piece about the AI jobs
+    market or the broad hi-tech sector is not, by itself, defense EO/IR/CV content, even though a
+    shallow keyword match on bare "AI" might otherwise treat it as in-scope computer-vision
+    signal."""
+    if not text:
+        return False
+    pattern = _word_boundary_pattern(list(_GENERIC_AI_TECH_KEYWORDS_EN) + list(_GENERIC_AI_TECH_KEYWORDS_HE))
+    return bool(pattern and pattern.search(text))
+
+
+def apply_generic_ai_market_gate(item: dict, out: ClassifyOut) -> ClassifyOut:
+    """Goal 3: an item classified in-scope (any domain other than ``out_of_scope``) whose text
+    contains generic AI/ML/hi-tech-*market* vocabulary but **no** genuine EO/IR/CV-for-defense term
+    anywhere (title + clean_text) is forced to ``out_of_scope`` -- regardless of extracted entities
+    or a watchlist alias hit, unlike :func:`apply_no_eoir_gate` above, since a defense company can
+    legitimately appear in a generic labor-market/industry-trends listicle with zero EO/IR content.
+    A no-op when the item already carries a genuine EO/IR/CV term anywhere (that term is real
+    in-scope signal no matter what other vocabulary also appears), or already out_of_scope."""
+    if out.domain == "out_of_scope":
+        return out
+    text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
+    if _has_eoir_vocabulary(text):
+        return out
+    if not _has_generic_ai_tech_market_vocabulary(text):
+        return out
+    log.info("classify_gate_generic_ai_market", item_id=item.get("id"), previous_domain=out.domain)
+    out.domain = "out_of_scope"
+    out.subdomain = ""
+    out.relevance_note = "gate:generic_ai_market_vocabulary"
+    return out
+
+
 @dataclass
 class ClassifyStats:
     done: int = 0
@@ -186,16 +244,47 @@ def classify_batch(items: list[dict], *, role: str = "resident") -> dict[int, Cl
     return chat_structured_batch(role, ClassifyOut, prompts, system=_system(), task="classify")
 
 
-def persist_classification(item_id: int, out: ClassifyOut) -> None:
+def persist_classification(item: dict, out: ClassifyOut) -> None:
     """Write classification fields + entities to the DB."""
+    item_id = item["id"]
     names = []
     for ent in out.entities:
         try:
             entity_id = upsert_entity(name=ent.name, kind=ent.kind, first_seen_item=item_id)
             if entity_id is not None:  # Q3-13: None means rejected (technique-like name), not stored
-                names.append(ent.name)
+                # Q3-13 r4 (root-cause investigation, 2026-09-06): store the CANONICAL name here,
+                # not the raw as-extracted one -- upsert_entity resolves ent.name/ent.kind through
+                # entity_normalize.canonical_name_and_kind internally before writing the entities
+                # row, so a raw alias/Hebrew-country-name (e.g. "ישראל") previously ended up in
+                # items.entities_mentioned even though the row itself landed under "Israel". That
+                # mismatch is exactly what breaks anything doing an exact `entities.name = ...`
+                # lookup against entities_mentioned (e.g. israel_focus.score_and_persist_entity_
+                # israeli), so this mirrors upsert_entity's own resolution here.
+                from eoa.pipeline.entity_normalize import canonical_name_and_kind
+
+                canonical_name, _ = canonical_name_and_kind(ent.name, ent.kind)
+                names.append(canonical_name)
         except Exception as exc:
             log.debug("entity_upsert_failed", name=ent.name, error=str(exc)[:120])
+
+    # --- A13 (מיקוד תעשייה ישראלית, 2026-09-06) -- BEGIN ------------------------------------
+    # Deterministic (no LLM) Israeli-industry relevance score, computed from this item's own
+    # text + the entities just resolved above (before the watchlist-alias backfill that
+    # eoa.pipeline.analyze may still add later -- analyze.py's own "# --- A13" block refreshes
+    # this score once that backfill has landed, so a classify-stage miss self-heals downstream).
+    # See eoa.pipeline.israel_focus module docstring for the four scored signals.
+    israel_score: dict = {"score": 0.0, "reasons": []}
+    try:
+        from eoa.pipeline.israel_focus import israel_relevance, score_and_persist_entity_israeli
+
+        text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
+        israel_score = israel_relevance(text, names, lang=item.get("lang"), geography=out.geography)
+        for name in names:
+            score_and_persist_entity_israeli(name)
+    except Exception as exc:
+        log.debug("israel_relevance_scoring_failed", item_id=item_id, error=str(exc)[:120])
+    # --- A13 -- END --------------------------------------------------------------------------
+
     update_item_fields(
         item_id,
         domain=out.domain,
@@ -207,6 +296,8 @@ def persist_classification(item_id: int, out: ClassifyOut) -> None:
         geography=out.geography,
         entities_mentioned=names,
         summary_he=out.one_line_he,
+        israel_relevance=israel_score["score"],
+        israel_reasons=israel_score["reasons"],
     )
 
 
@@ -249,7 +340,8 @@ def run_classify(
                     continue
                 try:
                     out = apply_no_eoir_gate(it, out)
-                    persist_classification(it["id"], out)
+                    out = apply_generic_ai_market_gate(it, out)
+                    persist_classification(it, out)
                     if out.domain == "out_of_scope":
                         update_item_fields(
                             it["id"], level="archive", score=1, triage_reason=out.relevance_note[:400]
@@ -268,7 +360,8 @@ def run_classify(
         try:
             out = classify_item(it, role=role)
             out = apply_no_eoir_gate(it, out)
-            persist_classification(it["id"], out)
+            out = apply_generic_ai_market_gate(it, out)
+            persist_classification(it, out)
             if out.domain == "out_of_scope":
                 update_item_fields(it["id"], level="archive", score=1, triage_reason=out.relevance_note[:400])
                 stats.out_of_scope += 1

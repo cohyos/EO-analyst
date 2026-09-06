@@ -20,13 +20,32 @@ companies:
   - { name: Saab, aliases: ["Saab AB", Giraffe, "Saab Naval"], country: EU, focus: [air_defense, naval_surveillance, c_uas] }
   - { name: Terma, aliases: [Scanter], country: EU, focus: [naval_surveillance] }
   - { name: Aselsan, aliases: [ASELSAN, ASELFLIR, "İHTAR"], country: TR, focus: [airborne_pods, land_surveillance, naval_surveillance, c_uas] }
-  - { name: Elbit, aliases: ["Elbit Systems", "Elbit Land", "Elbit ISTAR", "אלביט", "אלביט מערכות"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas, computer_vision] }
-  - { name: IAI, aliases: ["Israel Aerospace Industries", "התעשייה האווירית", "תע\"א", ELTA], country: IL, focus: [airborne_pods, air_defense, c_uas] }
-  - { name: Rafael, aliases: ["Rafael Advanced Defense Systems", "רפאל", Litening, "Iron Beam", "Drone Dome", Toplite], country: IL, focus: [airborne_pods, air_defense, c_uas, naval_surveillance] }
+  - { name: Elbit, aliases: ["Elbit Systems", "Elbit Land", "Elbit ISTAR", "אלביט", "אלביט מערכות", Elop, "El-Op", "אלאופ", Elisra, "אלישרא", "Elbit Systems Elisra"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas, computer_vision] }
+  - { name: IAI, aliases: ["Israel Aerospace Industries", "התעשייה האווירית", "תע\"א", ELTA, Tamam, "תמ\"מ", MOSP, POP], country: IL, focus: [airborne_pods, air_defense, c_uas] }
+  - { name: Rafael, aliases: ["Rafael Advanced Defense Systems", "רפאל", Litening, "Iron Beam", "מגן אור", "Drone Dome", Toplite], country: IL, focus: [airborne_pods, air_defense, c_uas, naval_surveillance] }
   - { name: Controp, aliases: ["CONTROP Precision Technologies", "קונטרופ"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance] }
   - { name: "Smart Shooter", aliases: [SMASH, "סמארט שוטר"], country: IL, focus: [c_uas, computer_vision] }
   - { name: Xtend, aliases: ["XTEND"], country: IL, focus: [computer_vision, c_uas] }
   - { name: "D-Fend", aliases: ["D-Fend Solutions", EnforceAir], country: IL, focus: [c_uas] }
+  # A13 (מיקוד תעשייה ישראלית, 2026-09-06): additional Israeli EO/IR/defense companies per
+  # docs/PLAN_WINDOWS_NATIVE.md row A13 -- watchlist expansion for the Israeli-industry focus.
+  - { name: SCD, aliases: ["Semi Conductor Devices", "סמיקונדקטור דיוויסס", "סמיקונדקטור דיווייסס"], country: IL, focus: [secondary, tech_dev] }
+  - { name: "Ophir Optronics", aliases: [Ophir, "Ophir Optics", "MKS Ophir", "אופיר אופטרוניקה"], country: IL, focus: [secondary, tech_dev] }
+  - { name: Opgal, aliases: ["Opgal Optronic Industries", "אופגל"], country: IL, focus: [land_surveillance, naval_surveillance, secondary] }
+  - { name: Nextvision, aliases: ["Nextvision Stabilized Systems", "נקסטויז'ן"], country: IL, focus: [land_surveillance, naval_surveillance, airborne_pods] }
+  - { name: Netline, aliases: ["Netline Communications Technologies", "נטליין"], country: IL, focus: [c_uas] }
+  - { name: UVision, aliases: ["Hero-120", "Hero 120", "יו-ויז'ן"], country: IL, focus: [c_uas, air_defense] }
+  - { name: Aeronautics, aliases: ["Aeronautics Ltd", Orbiter, "אירונאוטיקס"], country: IL, focus: [airborne_pods, c_uas] }
+  - { name: Steadicopter, aliases: ["סטדיקופטר"], country: IL, focus: [airborne_pods, land_surveillance] }
+  - { name: "Third Eye Systems", aliases: ["Third Eye", "תרד איי"], country: IL, focus: [land_surveillance, naval_surveillance] }
+  - { name: Sightec, aliases: ["סייטק"], country: IL, focus: [computer_vision] }
+  - { name: "Camero-Tech", aliases: [Camero, "קמרו טק"], country: IL, focus: [land_surveillance, secondary] }
+  - { name: Meprolight, aliases: ["מפרולייט"], country: IL, focus: [land_surveillance, secondary] }
+  - { name: "Duke Robotics", aliases: ["דיוק רובוטיקס"], country: IL, focus: [c_uas, airborne_pods] }
+  - { name: "BIRD Aerosystems", aliases: [BIRD, "ברד אירוסיסטמס"], country: IL, focus: [airborne_pods, air_defense] }
+  - { name: IWI, aliases: ["Israel Weapon Industries", "רשק\"מ"], country: IL, focus: [secondary] }
+  - { name: Tomer, aliases: ["Tomer - Rafael Group", "תומר"], country: IL, focus: [air_defense] }
+  - { name: RADA, aliases: ["RADA Electronic Industries", "Leonardo DRS RADA", "רדא"], country: IL, focus: [air_defense, c_uas, land_surveillance] }
   - { name: Hanwha, aliases: ["Hanwha Aerospace", "Hanwha Systems"], country: KR, focus: [airborne_pods, air_defense, land_surveillance] }
   - { name: "LIG Nex1", aliases: [], country: KR, focus: [air_defense, airborne_pods] }
   - { name: "Mitsubishi Electric", aliases: [MELCO], country: JP, focus: [air_defense, secondary] }
@@ -46,6 +65,19 @@ programs:
   - { name: "Next-gen targeting pod", aliases: ["NGTP", "advanced targeting pod"], owner: "USAF", focus: [airborne_pods] }
   - { name: "Iron Beam", aliases: ["מגן אור"], owner: IL, focus: [air_defense, c_uas] }
   - { name: "NATO C-UAS", aliases: ["NATO counter-drone"], owner: NATO, focus: [c_uas] }
+
+# A13 (מיקוד תעשייה ישראלית, 2026-09-06): Israeli government/military bodies -- not EO/IR
+# vendors themselves, so kept in their own `agencies` section rather than `companies`/`programs`
+# (loaders that only ever read those two keys off `settings().watchlist` are unaffected by this
+# additive top-level key; `eoa.pipeline.israel_focus` and `eoa.pipeline.entity_normalize` are the
+# only readers of `agencies`).
+agencies:
+  - { name: "משרד הביטחון", aliases: ["Israeli Ministry of Defense", "IMOD", "MoD Israel", "משרד הבטחון"], country: IL }
+  - { name: "מפא\"ת", aliases: ["DDR&D", "Directorate of Defense Research and Development", "מינהל המחקר והפיתוח הבטחוני"], country: IL }
+  - { name: "סיב\"ט", aliases: ["SIBAT", "International Defense Cooperation Directorate"], country: IL }
+  - { name: "צה\"ל", aliases: ["IDF", "Israel Defense Forces", "צבא ההגנה לישראל"], country: IL }
+  - { name: "חיל האוויר", aliases: ["Israeli Air Force", "IAF", "חיל האויר"], country: IL }
+  - { name: "חיל הים", aliases: ["Israeli Navy", "הצי הישראלי"], country: IL }
 
 people: []   # publications-level tracking only; populated dynamically
 

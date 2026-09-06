@@ -25,6 +25,11 @@ import type {
   McpPingResponse,
   McpServersResponse,
   MorningResponse,
+  PatentHeatmapResponse,
+  PatentSurveyCard,
+  PatentSurveyCreateResponse,
+  PatentsResponse,
+  PatentsStatusResponse,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -51,6 +56,8 @@ export interface ItemsQuery {
   page?: number;
   page_size?: number;
   sort?: "score" | "published_at";
+  /** A13 (מיקוד תעשייה ישראלית): filter to items with `israel_relevance >= 0.5`. */
+  israel?: boolean;
 }
 
 export interface ItemsByCountryQuery {
@@ -68,6 +75,8 @@ export interface EntitiesQuery {
   all?: boolean;
   sort?: "last_seen" | "mentions_7d" | "mentions_30d" | "name";
   limit?: number;
+  /** A13 (מיקוד תעשייה ישראלית): filter to `is_israeli = true` entities. */
+  israel?: boolean;
 }
 
 export interface GraphQuery {
@@ -85,6 +94,16 @@ export interface TendersQuery {
   since_days?: number;
   include_closed?: boolean;
   include_archived?: boolean;
+  limit?: number;
+}
+
+/** A14: `GET /api/patents` filters. */
+export interface PatentsQuery {
+  assignee?: string;
+  subdomain?: string;
+  israeli?: boolean;
+  min_value_score?: number;
+  q?: string;
   limit?: number;
 }
 
@@ -141,6 +160,9 @@ export interface ApiClient {
       onCitations: (items: AskCitation[]) => void;
       /** U8: provider/model that will answer — sent once, right after citations. */
       onMeta?: (provider: string, model: string) => void;
+      /** U11: citations enriched with level/source_name/note, sent once after the answer
+       * finishes streaming, for the "מקורות (n)" footer. */
+      onSources?: (items: AskCitation[]) => void;
       onDone: () => void;
       onError: (err: Error) => void;
     },
@@ -174,6 +196,13 @@ export interface ApiClient {
 
   getTenders(query: TendersQuery): Promise<TendersResponse>;
   getTenderForecasts(limit?: number): Promise<ForecastCard[]>;
+
+  /** A14: פטנטים ו-IP (agent/eoa/patents/**). */
+  getPatents(query: PatentsQuery): Promise<PatentsResponse>;
+  getPatentsStatus(): Promise<PatentsStatusResponse>;
+  getPatentsHeatmap(topCpc?: number, topAssignees?: number): Promise<PatentHeatmapResponse>;
+  getPatentSurveys(limit?: number): Promise<PatentSurveyCard[]>;
+  createPatentSurvey(topic: string): Promise<PatentSurveyCreateResponse>;
 
   /** A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי" -- subdomain x maturity matrix. */
   getTechRadar(weeks?: number): Promise<TechRadarResponse>;

@@ -47,6 +47,8 @@ function baseItem(over: Partial<ItemDetail> = {}): ItemDetail {
     tech_maturity: null,
     tech_actor_kind: null,
     tech_readiness_note_he: null,
+    israel_relevance: null,
+    israel_reasons: [],
     clean_text: "",
     events: [],
     edges: [{ src: 100, dst: 101, label: "COMPETITOR_OF", item_id: 3, evidence: "עדות כלשהי" }],
@@ -82,6 +84,7 @@ const ENTITIES: EntitySummary[] = [
     is_watchlist: false,
     mentions_7d: 1,
     mentions_30d: 5,
+    is_israeli: false,
   },
   {
     id: 101,
@@ -96,6 +99,7 @@ const ENTITIES: EntitySummary[] = [
     is_watchlist: false,
     mentions_7d: 0,
     mentions_30d: 2,
+    is_israeli: false,
   },
 ];
 

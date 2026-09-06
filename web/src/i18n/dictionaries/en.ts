@@ -13,6 +13,7 @@ export const en: Dictionary = {
     ask: "Ask the Analyst",
     conferences: "Conference Calendar",
     tenders: "Tenders & Opportunities",
+    patents: "Patents",
     inbox: "Clarifications & Feedback",
     reports: "Reports",
     bd: "Business Development",
@@ -125,6 +126,8 @@ export const en: Dictionary = {
     searchPlaceholder: "Free-text search…",
     searchAria: "Search the feed",
     countryGroupCount: "{count} items",
+    israelFilterLabel: "🇮🇱 Israel",
+    israelBadgeAria: "Relevant to the Israeli defense industry",
     investigateQueuedToast: "Investigation queued · #{jobId}",
     investigateExistingToast: "Found an existing investigation · #{jobId}",
     investigateConflictToast: "An investigation is already running or queued",
@@ -242,6 +245,10 @@ export const en: Dictionary = {
     hiddenClosedArchivedHint: "{count} closed/archived tenders are hidden by the current view.",
     showHiddenClosedArchivedCta: "Show {count} closed tenders",
     whyRelevantPrefix: "Why relevant: ",
+  },
+  entities: {
+    israelFilterLabel: "🇮🇱 Israeli only",
+    israelBadgeAria: "Israeli entity",
   },
   bd: {
     title: "Business Development — Territory Focus Report",

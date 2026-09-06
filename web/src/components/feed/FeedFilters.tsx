@@ -18,6 +18,8 @@ export interface FeedFiltersState {
   countries: string[];
   /** U7b: group the feed rows under per-country headers. */
   groupByCountry: boolean;
+  /** A13 (מיקוד תעשייה ישראלית): filter to items with `israel_relevance >= 0.5`. */
+  israel: boolean;
 }
 
 export function FeedFilters({
@@ -71,6 +73,24 @@ export function FeedFilters({
           );
         })}
       </div>
+
+      {/* A13 (מיקוד תעשייה ישראלית): additive boolean chip, same toggle-button UX as the level
+          chips above — flips `israel` in FeedFiltersState, which FeedPage forwards as
+          `israel=true` to GET /api/items. */}
+      <button
+        type="button"
+        onClick={() => onChange({ ...value, israel: !value.israel })}
+        aria-pressed={value.israel}
+        data-testid="israel-filter-toggle"
+        className={cn(
+          "flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
+          value.israel
+            ? "border-accent bg-accent-muted text-accent-fg"
+            : "border-border-strong text-fg-dim hover:bg-bg-sunken",
+        )}
+      >
+        {t("feed.israelFilterLabel")}
+      </button>
 
       <select
         value={value.domain}

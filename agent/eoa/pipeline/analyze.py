@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import structlog
 
@@ -363,10 +364,34 @@ def _with_partial_content_note(item: dict, uncertainty_he: str | None) -> str | 
 def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     """Write summary/so-what/events/edges. Returns (events_written, edges_written)."""
     entities_backfill = _backfill_entities_from_watchlist(item)
-    extra_fields: dict[str, list[str]] = {}
+    extra_fields: dict[str, Any] = {}
     if entities_backfill:
         log.info("analyze_entities_backfilled", item_id=item["id"], entities=entities_backfill)
         extra_fields["entities_mentioned"] = entities_backfill
+
+    # --- A13 (מיקוד תעשייה ישראלית, 2026-09-06) -- BEGIN ------------------------------------
+    # Refresh eoa.pipeline.israel_focus.israel_relevance() now that entities_mentioned may have
+    # just been backfilled above (classify.py's own "# --- A13" block already scored the item
+    # once, before any watchlist-alias backfill existed) -- never *lowers* a score classify
+    # already set higher (analyze sees strictly more signal: the backfilled entities plus the
+    # full analyzed text), matching triage.py's "never lowering" contract for its own score bump.
+    try:
+        from eoa.pipeline.israel_focus import israel_relevance, score_and_persist_entity_israeli
+
+        entities_for_scoring = extra_fields.get("entities_mentioned") or item.get("entities_mentioned") or []
+        text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
+        refreshed = israel_relevance(
+            text, entities_for_scoring, lang=item.get("lang"), geography=item.get("geography")
+        )
+        if refreshed["score"] > (item.get("israel_relevance") or 0):
+            extra_fields["israel_relevance"] = refreshed["score"]
+            extra_fields["israel_reasons"] = refreshed["reasons"]
+        for name in entities_for_scoring:
+            score_and_persist_entity_israeli(name)
+    except Exception as exc:
+        log.debug("israel_relevance_refresh_failed", item_id=item["id"], error=str(exc)[:120])
+    # --- A13 -- END --------------------------------------------------------------------------
+
     update_item_fields(
         item["id"],
         summary_he=out.summary_he,

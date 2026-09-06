@@ -64,6 +64,8 @@ function makeItem(id: number, title: string): ItemCard {
     tech_maturity: null,
     tech_actor_kind: null,
     tech_readiness_note_he: null,
+    israel_relevance: null,
+    israel_reasons: [],
   };
 }
 
@@ -282,5 +284,51 @@ describe("FeedPage deep-link query params (U2)", () => {
     const lastCall = getItems.mock.calls.at(-1)![0];
     expect(lastCall.since).toBeUndefined();
     expect(lastCall.level).toBeUndefined();
+  });
+});
+
+// A13 (מיקוד תעשייה ישראלית, docs/PLAN_WINDOWS_NATIVE.md): the "🇮🇱 ישראל" filter chip in
+// FeedFilters toggles `israel=true` on GET /api/items, same UX/wiring as the level/country chips.
+describe("FeedPage Israel focus filter (A13)", () => {
+  it("plain /feed passes no israel filter by default", async () => {
+    renderFeedPage("/feed");
+    await waitFor(() => expect(getItems).toHaveBeenCalled());
+    const lastCall = getItems.mock.calls.at(-1)![0];
+    expect(lastCall.israel).toBeUndefined();
+  });
+
+  it("toggling the Israel filter chip adds israel=true to the query, and toggling again removes it", async () => {
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    const chip = screen.getByTestId("israel-filter-toggle");
+    expect(chip).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(chip);
+    expect(chip).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() =>
+      expect(getItems).toHaveBeenCalledWith(expect.objectContaining({ israel: true })),
+    );
+
+    fireEvent.click(chip);
+    expect(chip).toHaveAttribute("aria-pressed", "false");
+    await waitFor(() => {
+      const lastCall = getItems.mock.calls.at(-1)![0];
+      expect(lastCall.israel).toBeUndefined();
+    });
+  });
+
+  it("shows the 🇮🇱 flag badge on a row when israel_relevance >= 0.5, and not otherwise", async () => {
+    const relevant = { ...makeItem(1, "פריט ישראלי"), israel_relevance: 0.8, israel_reasons: ["israeli_company_mentioned"] };
+    const notRelevant = { ...makeItem(2, "פריט אחר"), israel_relevance: 0.2, israel_reasons: [] };
+    const unscored = { ...makeItem(3, "פריט לא מסווג") };
+    getItems.mockResolvedValue({ total: 3, items: [relevant, notRelevant, unscored] });
+
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    expect(screen.getByTestId("feed-row-israel-badge-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("feed-row-israel-badge-2")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("feed-row-israel-badge-3")).not.toBeInTheDocument();
   });
 });

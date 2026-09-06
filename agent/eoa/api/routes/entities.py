@@ -17,12 +17,20 @@ def list_entities(
     kind: str | None = None,
     country: str | None = None,
     watchlist: bool = False,
+    israel: bool = False,
     all: bool = Query(False, description='"הצג הכל" -- bypass the default relevance filter (F15)'),
     sort: str = Query("last_seen", pattern="^(last_seen|mentions_7d|mentions_30d|name)$"),
     limit: int = Query(50, ge=1, le=500),
 ) -> list[dict]:
     return services.list_entities(
-        q=q, kind=kind, country=country, watchlist=watchlist, show_all=all, sort=sort, limit=limit
+        q=q,
+        kind=kind,
+        country=country,
+        watchlist=watchlist,
+        israel=israel,
+        show_all=all,
+        sort=sort,
+        limit=limit,
     )
 
 

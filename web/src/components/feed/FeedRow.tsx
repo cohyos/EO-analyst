@@ -91,6 +91,19 @@ export function FeedRow({
       <span className="hidden shrink-0 rounded-full bg-bg-sunken px-2 py-0.5 text-xs text-fg-muted md:inline">
         {domainLabel(item.domain)}
       </span>
+      {/* A13 (מיקוד תעשייה ישראלית): small flag badge, mirroring the entity "★ watchlist" badge
+          pattern — visible whenever the deterministic scoring pipeline marked this item relevant. */}
+      {(item.israel_relevance ?? 0) >= 0.5 && (
+        <span
+          data-testid={`feed-row-israel-badge-${item.id}`}
+          role="img"
+          aria-label={t("feed.israelBadgeAria")}
+          title={t("feed.israelBadgeAria")}
+          className="shrink-0 text-xs"
+        >
+          🇮🇱
+        </span>
+      )}
       {investigating && (
         <span
           data-testid={`feed-row-investigating-${item.id}`}

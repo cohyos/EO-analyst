@@ -68,6 +68,30 @@ class TestLooksTruncated:
     def test_short_generic_he_field_not_flagged(self) -> None:
         assert oc._looks_truncated_mid_hebrew_acronym("קצר מדי", "summary_he") is False
 
+    # ---------------------------------------------------------------------------------------
+    # Goal 5 (2026-09-06, docs/qa/STATUS.md "Q3-1"): the generic length-based net used to flag a
+    # *complete* acronym (stem + quote + final letter(s)) sitting at the very end of an otherwise
+    # long, unpunctuated sentence -- there is no terminal punctuation right after an acronym, but
+    # nothing is actually missing.
+    # ---------------------------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'החייל שירת שירות משמעותי וארוך מאוד בצה"ל',  # ends on complete צה"ל, ASCII quote
+            "החייל שירת שירות משמעותי וארוך מאוד בצה״ל",  # ends on complete צה״ל, gershayim
+            'המערכת שולבה בהצלחה מלאה ומיידית במטע"ד',  # ends on complete מטע"ד
+            'הפריט עוסק כולו במערכת רדאר מתקדמת מסוג מכ"ם',  # ends on complete מכ"ם (radar)
+        ],
+    )
+    def test_negative_complete_acronym_at_end_no_terminal_punctuation(self, text: str) -> None:
+        assert oc._looks_truncated_mid_hebrew_acronym(text, "summary_he") is False
+
+    def test_positive_truncated_makam_stem(self) -> None:
+        """Goal 5 regression: items 58/155 were found truncated exactly at the מכ"ם (radar) stem
+        -- "מכ" is now a known stem, caught by the fast exact-stem check (not just the generic net)."""
+        assert oc._looks_truncated_mid_hebrew_acronym("הפריט עוסק במערכת חיישן מכ", "summary_he") is True
+
 
 class TestNormalizeHebrewQuotes:
     def test_replaces_ascii_quote_between_hebrew_letters(self) -> None:

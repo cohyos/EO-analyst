@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 import structlog
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 log = structlog.get_logger(__name__)
 
@@ -258,15 +259,132 @@ class ReportSection(BaseModel):
     prose_he: str = Field(description="פרוזה רהוטה עם הפניות [n]")
 
 
-class DailyReportDraft(BaseModel):
-    """Report writer output. [n] refer to the numbered item list given in the prompt."""
+# ---------------------------------------------------------------------------------------------
+# Goal 1 (2026-09-06, citation discipline by construction): the daily report draft moves from
+# free-text prose (with the model expected to type its own "[n]" markers) to a structured
+# sentence-per-claim schema, so an uncited factual claim is a *pydantic validation error* the
+# model must fix (via ``chat_structured``'s existing retry-with-error-message, per
+# docs/CONVENTIONS.md rule 2), not something a post-hoc regex QA pass has to notice and strip.
+# ``eoa.report.qa_citations.check`` still verifies each ``cites`` entry is a *valid* registry
+# number (that part needs the runtime item list, so it stays outside the schema itself) and the
+# executive-summary-copies-a-section-sentence duplicate rule. ``eoa.report.docx_builder`` is what
+# actually emits the "[n]" markers now -- deterministically, from ``cites`` -- so the model never
+# writes citation brackets in its own prose at all.
+#
+# Only ``DailyReportDraft`` moves to this structure. ``ReportSection`` above (free-text
+# ``prose_he``) is kept exactly as-is and continues to serve ``MonthlyReportDraft`` /
+# ``BdTerritoryReportDraft`` (eoa/llm/schemas/reports.py) and the weekly report's
+# ``trend_paragraphs`` -- out of this goal's scope, unchanged.
+# ---------------------------------------------------------------------------------------------
 
-    exec_summary_he: str = Field(
+_INLINE_CITE_RE = re.compile(r"\[\s*\d+\s*\]")
+ASSESSMENT_MARKERS_HE = ("להערכתנו", "נראה ש", "ייתכן")
+
+
+def _reject_inline_citation_markers(text: str, *, field_name: str) -> str:
+    if _INLINE_CITE_RE.search(text or ""):
+        raise ValueError(
+            f'{field_name} must not contain a literal "[n]" marker -- put the reference number(s) '
+            "in the cites field instead; the renderer emits the marker deterministically"
+        )
+    return text
+
+
+class Sentence(BaseModel):
+    """One sourced factual claim. ``cites`` must be non-empty -- an unsourced sentence has no
+    business being a :class:`Sentence` at all; unsourced analyst judgement belongs in
+    :class:`AnalystNote` instead (goal 1). ``eoa.report.qa_citations.check`` additionally verifies
+    every ``cites`` entry is a real registry number for the given report (schema-independent since
+    that range varies per report run)."""
+
+    text_he: str = Field(description='משפט עובדתי בודד בעברית -- בלי "[n]" בטקסט עצמו')
+    cites: list[int] = Field(
+        min_length=1,
+        description="מספרי ההפניה [n] של הפריטים התומכים במשפט -- שדה זה, לא הטקסט, הוא שמוליד את ה-[n] בדוח",
+    )
+
+    @field_validator("text_he")
+    @classmethod
+    def _validate_text(cls, v: str) -> str:
+        v = _reject_inline_citation_markers(v, field_name="text_he")
+        if not v.strip():
+            raise ValueError("text_he must not be empty")
+        return v
+
+
+class AnalystNote(BaseModel):
+    """'הערכת האנליסט' -- the ONE place in the daily report where unsourced analyst judgement is
+    allowed (goal 1): at most 3 short sentences, no citations required. Rendered in italics under
+    an explicit label so it can never be mistaken for a sourced factual claim."""
+
+    sentences_he: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("sentences_he")
+    @classmethod
+    def _validate_sentences(cls, v: list[str]) -> list[str]:
+        return [_reject_inline_citation_markers(s, field_name="analyst_note_he.sentences_he") for s in v]
+
+
+class StructuredSection(BaseModel):
+    """A daily-report domain section as a list of sourced sentences rather than free prose (goal
+    1) -- see the module-level note above for why only ``DailyReportDraft`` uses this."""
+
+    title_he: str
+    domain: str
+    sentences: list[Sentence] = Field(default_factory=list, description="משפטי הסעיף, כל אחד עם cites")
+
+
+class OutlookIndicator(BaseModel):
+    """One forward-looking indicator in 'מבט קדימה' (goal 4): either a sourced claim (``cites``
+    non-empty) or the analyst's own forward assessment (``cites`` may be empty, but only when
+    ``is_assessment=True`` and ``text_he`` opens with an explicit assessment marker) -- every
+    indicator is one or the other, never an uncited claim silently passed off as sourced."""
+
+    text_he: str
+    cites: list[int] = Field(default_factory=list)
+    is_assessment: bool = Field(default=False, description="True אם זו הערכת האנליסט (לא ציטוט ישיר של מקור)")
+
+    @model_validator(mode="after")
+    def _validate(self) -> OutlookIndicator:
+        _reject_inline_citation_markers(self.text_he, field_name="outlook.text_he")
+        if not self.text_he.strip():
+            raise ValueError("outlook indicator text_he must not be empty")
+        if not self.cites and not self.is_assessment:
+            raise ValueError("an outlook indicator with empty cites must set is_assessment=true")
+        if self.is_assessment and not any(self.text_he.startswith(m) for m in ASSESSMENT_MARKERS_HE):
+            raise ValueError(
+                "an analyst-assessment outlook indicator must open with an explicit marker "
+                f"({'/'.join(ASSESSMENT_MARKERS_HE)})"
+            )
+        return self
+
+
+class DailyReportDraft(BaseModel):
+    """Report writer output (goal 1: citation discipline by construction). ``cites``/``sentences``
+    refer to the numbered item list given in the prompt; the model never writes "[n]" itself."""
+
+    exec_summary: list[Sentence] = Field(
+        default_factory=list,
         description=(
             "3-5 משפטים בלבד, המסכמים ומקשרים בין ממצאי הסעיפים (מה השתנה, למה זה חשוב, מה לעקוב "
-            "אחריו), עם [n]; אסור להעתיק משפט כלשונו מגוף אחד הסעיפים"
-        )
+            "אחריו); כל משפט עם cites משלו. אסור שמשפט יהיה זהה (כלשונו) למשפט מתוך גוף אחד הסעיפים"
+        ),
     )
-    sections: list[ReportSection]
-    outlook_he: str = Field(default="", description="מבט קדימה קצר")
+    sections: list[StructuredSection] = Field(default_factory=list)
+    system_note_he: str = Field(
+        default="",
+        description=(
+            "הודעת מערכת דטרמיניסטית (לעולם לא נכתבת ע\"י המודל -- מוזרקת בקוד): למשל 'אין ממצאים "
+            "בתקופה זו' או הודעת כשל אימות אחרי ניסיון תיקון -- מוצגת כפרוזה רגילה, ללא תווית ובלי "
+            "דרישת cites, ומובחנת מ-analyst_note_he (הערכה של האנליסט/המודל)"
+        ),
+    )
+    analyst_note_he: AnalystNote | None = Field(
+        default=None,
+        description='"הערכת האנליסט" -- עד 3 משפטים ללא ציטוט, המקום היחיד בדוח להערכה לא-מבוססת-מקור',
+    )
+    outlook: list[OutlookIndicator] = Field(
+        default_factory=list,
+        description="2-3 אינדיקטורים קונקרטיים למעקב ב'מבט קדימה', כל אחד מצוטט או מסומן כהערכת אנליסט",
+    )
     open_points_he: list[str] = Field(default_factory=list, description="נקודות פתוחות להכרעת המשתמש")

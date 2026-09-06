@@ -326,6 +326,46 @@ def _reconcile_score(
     return retried
 
 
+# --- A13 (מיקוד תעשייה ישראלית, 2026-09-06) -- BEGIN --------------------------------------
+# Deterministic "מעורבות ישראלית" score component, applied *after* the LLM's own score is
+# reconciled against its components (Q3-4, above) -- never lowers `out.score`, only ever raises
+# it (and the derived `level` with it), per docs/PLAN_WINDOWS_NATIVE.md row A13: +1 when the
+# item's own `israel_relevance` (eoa.pipeline.israel_focus, computed in classify.py) is >= 0.6,
+# +2 more when an Israeli watchlist company is itself one of this item's `entities_mentioned`
+# (i.e. directly a party to the story, not just a background export-market/competitor signal).
+def _apply_israel_focus_boost(item: dict, out: TriageOut) -> TriageOut:
+    try:
+        from eoa.pipeline.israel_focus import israel_relevance, israeli_watchlist_names
+
+        entities = item.get("entities_mentioned") or []
+        israel_score = item.get("israel_relevance")
+        if israel_score is None:
+            text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
+            israel_score = israel_relevance(
+                text, entities, lang=item.get("lang"), geography=item.get("geography")
+            )["score"]
+        boost = 0
+        if israel_score >= 0.6:
+            boost += 1
+        israeli_names = {n.casefold() for n in israeli_watchlist_names()}
+        if any((e or "").casefold() in israeli_names for e in entities):
+            boost += 2
+        if boost:
+            new_score = min(10, out.score + boost)
+            log.info(
+                "israel_focus_triage_boost",
+                item_id=item.get("id"),
+                original_score=out.score,
+                boost=boost,
+                new_score=new_score,
+            )
+            out.score = new_score
+    except Exception as exc:
+        log.debug("israel_focus_triage_boost_failed", item_id=item.get("id"), error=str(exc)[:120])
+    return out
+# --- A13 -- END ----------------------------------------------------------------------------
+
+
 def triage_item(item: dict, *, role: str = "resident", interactive: bool = False) -> TriageOut:
     """Score one classified item (does not persist). Level is recomputed from config thresholds."""
     out = chat_structured(
@@ -339,6 +379,7 @@ def triage_item(item: dict, *, role: str = "resident", interactive: bool = False
         interactive=interactive,
     )
     out = _reconcile_score(item, out, role=role, interactive=interactive)
+    out = _apply_israel_focus_boost(item, out)
     out.level = level_for(out.score)  # type: ignore[assignment]
     return out
 
@@ -357,6 +398,7 @@ def triage_batch(items: list[dict], *, role: str = "resident") -> dict[int, Tria
         item = items_by_id.get(item_id)
         if item is not None:
             results[item_id] = _reconcile_score(item, out, role=role)
+            results[item_id] = _apply_israel_focus_boost(item, results[item_id])
         results[item_id].level = level_for(results[item_id].score)  # type: ignore[assignment]
     return results
 
@@ -441,12 +483,26 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
     return stats
 
 
+#: A13 (מיקוד תעשייה ישראלית, 2026-09-06): appended to a deep-search question when the item's
+#: own israel_relevance (eoa.pipeline.israel_focus, computed in classify.py) is >= 0.6 -- per
+#: docs/PLAN_WINDOWS_NATIVE.md row A13 point 6, "מה המשמעות לתעשייה הישראלית / למי מהחברות
+#: הישראליות זה נוגע".
+_ISRAEL_DEEP_SEARCH_SUBQUESTION_HE = (
+    " בנוסף: מה המשמעות לתעשייה הישראלית ולמי מהחברות הישראליות זה נוגע?"
+)
+_ISRAEL_DEEP_SEARCH_THRESHOLD = 0.6
+
+
 def _enqueue_deep_search(item: dict, out: TriageOut) -> None:
     from eoa.memory.relational import enqueue_job
 
     question, seed_en = _ensure_valid_investigation_question(
         item, out.deep_search_question, out.deep_search_seed_en
     )
+    # --- A13 -- BEGIN ------------------------------------------------------------------------
+    if (item.get("israel_relevance") or 0) >= _ISRAEL_DEEP_SEARCH_THRESHOLD:
+        question = f"{question}{_ISRAEL_DEEP_SEARCH_SUBQUESTION_HE}"
+    # --- A13 -- END --------------------------------------------------------------------------
     entities = ", ".join(item.get("entities_mentioned") or []) or "—"
     context_he = (
         f"כותרת הפריט: {item.get('title') or ''}\n"

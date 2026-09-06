@@ -38,6 +38,11 @@ export interface ItemCard {
   tech_maturity: TechMaturity | null;
   tech_actor_kind: TechActorKind | null;
   tech_readiness_note_he: string | null;
+  // A13 (מיקוד תעשייה ישראלית, docs/PLAN_WINDOWS_NATIVE.md): additive deterministic scoring —
+  // relevance to the Israeli defense industry (0..1) and the reason codes behind it. `null` when
+  // the pipeline hasn't scored the item. `GET /api/items?israel=true` filters to >= 0.5.
+  israel_relevance: number | null;
+  israel_reasons: string[];
 }
 
 // A12 (מעקב טכנולוגי): "רדאר טכנולוגי" -- GET /api/tech/radar, GET /api/tech/items.
@@ -122,6 +127,9 @@ export interface EntitySummary {
   is_watchlist: boolean;
   mentions_7d: number;
   mentions_30d: number;
+  // A13 (מיקוד תעשייה ישראלית): whether this entity is classified as Israeli.
+  // `GET /api/entities?israel=true` filters to `is_israeli = true`.
+  is_israeli: boolean;
 }
 
 // U10 (2026-09-05): the entity timeline is items-only now (title links to
@@ -277,6 +285,15 @@ export interface AskCitation {
   item_id: number;
   title: string;
   url: string;
+  // U11 (2026-09-06 answer-format rewrite): present once the final `sources` SSE event has
+  // arrived -- `level`/`source_name` come from the same `items` row the citation was built from
+  // (used for the "מקורות (n)" footer's badge + domain), `note` is the model's optional
+  // per-source relevance line (`source_notes` in the prompt contract) which belongs in that
+  // footer, never inline in the answer body. All three are absent on the earlier `citations`
+  // event, which only carries enough to resolve `[n]` -> item/url for the inline chips.
+  level?: TriageLevel | null;
+  source_name?: string | null;
+  note?: string | null;
 }
 
 export type AskHistoryMessage = { role: "user" | "assistant"; content: string };
@@ -294,6 +311,9 @@ export type AskSseEvent =
   | { type: "token"; text: string }
   | { type: "citations"; items: AskCitation[] }
   | { type: "meta"; provider: string; model: string }
+  // U11: sent once, after the answer finishes streaming -- citations enriched with
+  // level/source_name/note for the sources footer (see AskCitation above).
+  | { type: "sources"; items: AskCitation[] }
   | { type: "done" };
 
 // U8 (docs/adr/005-cloud-llm-cli.md + "Revision 2026-09-06"): local Ollama vs. cloud CLI
@@ -805,4 +825,76 @@ export interface SettingsGetResponse {
 export interface SettingsPutResponse {
   ok: boolean;
   errors: string[];
+}
+
+// A14: patent / IP landscape tracking (agent/eoa/patents/**).
+export interface PatentRecord {
+  id: number;
+  pub_number: string;
+  kind: string | null;
+  title: string | null;
+  abstract: string | null;
+  assignees: string[];
+  inventors: string[];
+  cpc: string[];
+  priority_date: string | null;
+  filing_date: string | null;
+  publication_date: string | null;
+  grant_date: string | null;
+  family_id: string | null;
+  jurisdictions: string[];
+  forward_citations: number | null;
+  backward_citations: number | null;
+  url: string | null;
+  source: string;
+  subdomain: string | null;
+  claims_summary_he: string | null;
+  so_what_he: string | null;
+  israel_relevance: number | null;
+  value_score: number | null;
+  value_reasons: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PatentsResponse {
+  patents: PatentRecord[];
+  total: number;
+}
+
+export interface PatentsStatusResponse {
+  structured_sources_configured: boolean;
+  banner_he: string | null;
+}
+
+export interface PatentHeatmapCell {
+  cpc: string;
+  assignee: string;
+  n: number;
+}
+
+export interface PatentHeatmapResponse {
+  cpc_codes: string[];
+  assignees: string[];
+  cells: PatentHeatmapCell[];
+}
+
+export type PatentSurveyStatus = "running" | "done" | "failed";
+
+export interface PatentSurveyCard {
+  id: number;
+  topic: string;
+  status: PatentSurveyStatus;
+  created_at: string;
+  report_id: number | null;
+  path_docx: string | null;
+  path_md: string | null;
+  path_html: string | null;
+}
+
+export interface PatentSurveyCreateResponse {
+  survey?: PatentSurveyCard;
+  job_id: number;
+  status?: "queued" | "failed";
+  error?: string | null;
 }

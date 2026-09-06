@@ -62,7 +62,19 @@ _INSCOPE_LEVELS = ("red", "orange", "yellow")
 # (m_and_a for acquisitions, test for trials/demonstrations).
 _PROCUREMENT_EVENT_KINDS = ("contract_award", "m_and_a", "deployment", "test")
 
-_ISRAELI_INDUSTRY_NAMES = {"Elbit", "Rafael", "IAI", "Controp"}
+# A13 (מיקוד תעשייה ישראלית, 2026-09-06): additive -- was a hardcoded 4-name set; now derived
+# from every `country: IL` company on `config/watchlist.yaml` (eoa.pipeline.israel_focus), so the
+# BD competitors table's "is_israeli_industry" flag stays in sync with the watchlist without this
+# file needing to be touched again each time an Israeli company is added there. A bare `set()`
+# fallback (never raises) keeps this file's behavior unchanged if the watchlist/settings are
+# unavailable for any reason (e.g. a bare unit test with no config fixture).
+def _israeli_industry_names() -> set[str]:
+    try:
+        from eoa.pipeline.israel_focus import israeli_watchlist_names
+
+        return set(israeli_watchlist_names())
+    except Exception:
+        return {"Elbit", "Rafael", "IAI", "Controp"}
 
 # BD-1 (docs/qa/findings_Q3_r2.md): observed a live truncated-JSON crash (schema validation
 # failed with "EOF while parsing a string") against a busy territory (22 market items) at the
@@ -464,6 +476,7 @@ def collect_active_competitors(
         c for c in companies if normalize_country(c.get("country")) == code or c["name"] in mentions_by_name
     ]
 
+    israeli_names = _israeli_industry_names()
     out: list[dict[str, Any]] = []
     for c in candidates:
         wins: list[dict[str, Any]] = []
@@ -486,7 +499,7 @@ def collect_active_competitors(
                 "country": c.get("country"),
                 "mentions": mentions,
                 "is_watchlist": bool(c.get("is_watchlist")),
-                "is_israeli_industry": c["name"] in _ISRAELI_INDUSTRY_NAMES,
+                "is_israeli_industry": c["name"] in israeli_names,
                 "recent_wins": wins,
             }
         )
@@ -1586,6 +1599,19 @@ def build_bd_territory(
     ):
         if tbl is not None:
             tables.append(tbl)
+
+    # A14 (פטנטים ו-IP, 2026-09-06): competitor IP position in the territory, same additive
+    # mechanism as the tables above. A failure here must never break the BD report.
+    try:
+        from eoa.patents.report_section import collect_patents_bd, patents_bd_extra_section, patents_bd_table
+
+        patents_bd_data = collect_patents_bd(code)
+        extra_sections.append(patents_bd_extra_section(patents_bd_data))
+        patents_bd_tbl = patents_bd_table(patents_bd_data)
+        if patents_bd_tbl:
+            tables.append(patents_bd_tbl)
+    except Exception as exc:
+        log.warning("bd_report_patents_section_failed", error=str(exc)[:160])
 
     title_text = TITLE_TEMPLATE_HE.format(territory=territory_label(code))
     docx_path = _report_path(code, end, "docx")

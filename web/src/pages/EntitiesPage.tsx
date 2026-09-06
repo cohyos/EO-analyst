@@ -15,6 +15,7 @@ import { countryFlagEmoji } from "@/lib/countryFlag";
 import { countryLabel } from "@/lib/countries";
 import { formatDate, timeAgo } from "@/lib/time";
 import type { TriageLevel } from "@/types/api";
+import { useT } from "@/i18n";
 
 const KIND_OPTIONS = ["company", "program", "org", "system", "person", "country"];
 const SORT_OPTIONS: { value: "last_seen" | "mentions_7d" | "mentions_30d" | "name"; label: string }[] = [
@@ -25,6 +26,7 @@ const SORT_OPTIONS: { value: "last_seen" | "mentions_7d" | "mentions_30d" | "nam
 ];
 
 function EntityRow({ entity, active }: { entity: EntitySummary; active: boolean }) {
+  const t = useT();
   return (
     <li
       draggable
@@ -48,6 +50,18 @@ function EntityRow({ entity, active }: { entity: EntitySummary; active: boolean 
           {entity.country && (
             <span className="shrink-0 text-xs" title={countryLabel(entity.country, "he")}>
               {countryFlagEmoji(entity.country)}
+            </span>
+          )}
+          {/* A13 (מיקוד תעשייה ישראלית): small flag badge next to the watchlist star below. */}
+          {entity.is_israeli && (
+            <span
+              data-testid={`entity-row-israel-badge-${entity.id}`}
+              role="img"
+              aria-label={t("entities.israelBadgeAria")}
+              title={t("entities.israelBadgeAria")}
+              className="shrink-0 text-xs"
+            >
+              🇮🇱
             </span>
           )}
           {entity.is_watchlist && (
@@ -85,7 +99,10 @@ function EntityListPanel({
   const country = params.get("country") ?? "";
   const watchlistOnly = params.get("watchlist") === "1";
   const showAll = params.get("all") === "1";
+  // A13 (מיקוד תעשייה ישראלית): same URL-param toggle pattern as `watchlist` above.
+  const israelOnly = params.get("israel") === "1";
   const sort = (params.get("sort") as (typeof SORT_OPTIONS)[number]["value"]) || "last_seen";
+  const t = useT();
 
   function setParam(key: string, value: string | null) {
     const next = new URLSearchParams(params);
@@ -95,7 +112,7 @@ function EntityListPanel({
   }
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ["entities", q, kind, country, watchlistOnly, showAll, sort],
+    queryKey: ["entities", q, kind, country, watchlistOnly, showAll, israelOnly, sort],
     queryFn: () =>
       api.getEntities({
         q: q || undefined,
@@ -103,6 +120,7 @@ function EntityListPanel({
         country: country || undefined,
         watchlist: watchlistOnly || undefined,
         all: showAll || undefined,
+        israel: israelOnly || undefined,
         sort,
         limit: 200,
       }),
@@ -185,6 +203,14 @@ function EntityListPanel({
           />
           רשימת מעקב בלבד
         </label>
+        <label className="flex items-center gap-1.5" data-testid="israel-filter-toggle">
+          <input
+            type="checkbox"
+            checked={israelOnly}
+            onChange={(e) => setParam("israel", e.target.checked ? "1" : null)}
+          />
+          {t("entities.israelFilterLabel")}
+        </label>
         <label className="flex items-center gap-1.5">
           <input
             type="checkbox"
@@ -221,6 +247,7 @@ function EntityListPanel({
 }
 
 function EntityCardPanel({ entityId }: { entityId: number }) {
+  const t = useT();
   const entityQuery = useQuery({
     queryKey: ["entity", entityId],
     queryFn: () => api.getEntity(entityId),
@@ -252,6 +279,18 @@ function EntityCardPanel({ entityId }: { entityId: number }) {
             {entity.country && (
               <span className="text-sm" title={countryLabel(entity.country, "he")}>
                 {countryFlagEmoji(entity.country)}
+              </span>
+            )}
+            {/* A13 (מיקוד תעשייה ישראלית): small flag badge, same slot as the watchlist star below. */}
+            {entity.is_israeli && (
+              <span
+                data-testid="entity-card-israel-badge"
+                role="img"
+                aria-label={t("entities.israelBadgeAria")}
+                title={t("entities.israelBadgeAria")}
+                className="text-sm"
+              >
+                🇮🇱
               </span>
             )}
             {entity.is_watchlist && (

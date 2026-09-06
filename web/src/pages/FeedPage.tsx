@@ -44,6 +44,7 @@ export function FeedPage() {
     sort: "score",
     countries: [],
     groupByCountry: false,
+    israel: false,
   });
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [openItemId, setOpenItemId] = useState<number | null>(null);
@@ -80,6 +81,7 @@ export function FeedPage() {
         sort: filters.sort,
         page: pageParam,
         page_size: PAGE_SIZE,
+        israel: filters.israel || undefined,
       }),
     initialPageParam: 1,
     getNextPageParam: (lastPage: ItemsResponse, allPages: ItemsResponse[]) => {

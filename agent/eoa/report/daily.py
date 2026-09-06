@@ -2,8 +2,9 @@
 
 Pipeline: ``collect_items`` (+ ``collect_events`` / ``collect_deep_search`` / ``collect_open_clarifications``)
 -> ``draft_report`` (resident model) -> ``qa_citations.check`` -> on failure, one corrective LLM retry,
-then (if still failing) strip the offending sentences and mark the report unverified -> render
-docx/md/html -> persist a ``reports`` row.
+then (if still failing) drop the narrative content entirely and render tables + a one-line system
+note instead (goal 1, 2026-09-06 -- see ``_qa_failed_twice_draft``) -> render docx/md/html -> persist
+a ``reports`` row.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from eoa.config import REPO_ROOT, settings
 from eoa.db import connection
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.analysis import DailyReportDraft, ReportSection
+from eoa.llm.schemas.analysis import DailyReportDraft
 from eoa.report.docx_builder import (
     build_docx,
     fmt_date,
@@ -31,7 +32,7 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
-from eoa.report.qa_citations import QAResult, check, citations_in, split_sentences
+from eoa.report.qa_citations import QAResult, check
 
 log = structlog.get_logger(__name__)
 
@@ -408,12 +409,13 @@ def _normalize_section_titles(draft: DailyReportDraft) -> DailyReportDraft:
 
 def _no_items_draft() -> DailyReportDraft:
     return DailyReportDraft(
-        exec_summary_he=(
+        exec_summary=[],
+        sections=[],
+        system_note_he=(
             "לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange (ואף לא ברמת yellow כחלופה). "
             "אין ממצאים לדיווח היום."
         ),
-        sections=[],
-        outlook_he="",
+        outlook=[],
         open_points_he=[],
     )
 
@@ -456,12 +458,33 @@ def _tables_only_draft(counts: TableCounts) -> DailyReportDraft:
     instead of ``_no_items_draft``'s blanket "no findings" (which used to run unconditionally
     whenever the LLM-facing items list was empty, even with full tables right below it)."""
     return DailyReportDraft(
-        exec_summary_he=(
+        exec_summary=[],
+        sections=[],
+        system_note_he=(
             "לא זוהו בתקופה זו פריטי חדשות חדשים ברמת חשיבות red/orange/yellow, אך קיים תוכן "
             f"רלוונטי בטבלאות הדוח: {counts.context_he()} פירוט מלא בטבלאות בהמשך הדוח."
         ),
+        outlook=[],
+        open_points_he=[],
+    )
+
+
+def _qa_failed_twice_draft() -> DailyReportDraft:
+    """Goal 1 (2026-09-06): replaces the old "strip the flagged sentences and show a bold warning
+    banner" behaviour. When the draft still fails citation QA after one corrective retry, the
+    narrative content (exec summary/sections/outlook) is dropped entirely rather than partially
+    kept -- the reader gets the deterministic tables (events, tenders, tech watch) and the sources
+    appendix, plus this one-line note, instead of a document that mixes verified and silently-
+    edited prose behind a banner that is easy to miss."""
+    return DailyReportDraft(
+        exec_summary=[],
         sections=[],
-        outlook_he="",
+        system_note_he=(
+            "הטיוטה הטקסטואלית של הדוח לא עברה את בדיקת האזכורים גם לאחר ניסיון תיקון, ולכן הושמטה "
+            "במלואה מדוח זה כדי לא להציג ניסוח חלקי או לא מאומת. הטבלאות הדטרמיניסטיות (אירועים, "
+            "מכרזים, מעקב טכנולוגי) ונספח המקורות שלהלן אינם מושפעים ומוצגים במלואם."
+        ),
+        outlook=[],
         open_points_he=[],
     )
 
@@ -521,7 +544,8 @@ def _corrective_retry(
     correction = (
         "הטיוטה הקודמת שלך נכשלה בבדיקת האזכורים האוטומטית. תקן את כל הבעיות הבאות והחזר טיוטה מלאה "
         "ותקינה מחדש (JSON לפי הסכמה בלבד, ללא הסברים נוספים), מבלי להמציא עובדות חדשות שלא הופיעו "
-        "ברשימת הפריטים:\n" + errors_text
+        'ברשימת הפריטים. שים לב: אסור לכתוב "[n]" בטקסט עצמו -- מספרי ההפניה שייכים אך ורק לשדה '
+        "cites של כל משפט:\n" + errors_text
     )
     draft = chat_structured(
         role,
@@ -537,36 +561,6 @@ def _corrective_retry(
         options={"temperature": 0.2},
     )
     return _normalize_section_titles(draft)
-
-
-def _strip_uncited(draft: DailyReportDraft, qa: QAResult) -> DailyReportDraft:
-    """Drop the sentences ``qa`` flagged (uncited-factual, out-of-range refs, or an exec-summary
-    sentence duplicated verbatim from a section — F5), keep the rest."""
-    bad_refs = set(qa.bad_refs)
-    uncited = set(qa.uncited_sentences)
-    duplicates = set(qa.duplicate_sentences)
-
-    def _clean(text: str, *, extra_drop: set[str] = frozenset()) -> str:
-        kept = []
-        for sentence in split_sentences(text):
-            if sentence in uncited or sentence in extra_drop:
-                continue
-            if bad_refs and set(citations_in(sentence)) & bad_refs:
-                continue
-            kept.append(sentence)
-        return " ".join(kept)
-
-    new_summary = _clean(draft.exec_summary_he, extra_drop=duplicates)
-    if not new_summary:
-        new_summary = "תקציר המנהלים קוצץ במלואו עקב בדיקת אזכורים שנכשלה; ראו qa_report לפרטים."
-    new_sections: list[ReportSection] = []
-    for section in draft.sections:
-        cleaned = _clean(section.prose_he)
-        if cleaned:
-            new_sections.append(
-                ReportSection(title_he=section.title_he, domain=section.domain, prose_he=cleaned)
-            )
-    return draft.model_copy(update={"exec_summary_he": new_summary, "sections": new_sections})
 
 
 # --------------------------------------------------------------------------
@@ -786,13 +780,13 @@ def build_daily(
         qa = check(draft, items)
 
     if not qa.passed and items:
-        log.error("report_qa_failed_stripping", errors=qa.errors[:10])
+        # Goal 1 (2026-09-06): two failures (initial draft + one corrective retry) drop the
+        # narrative content entirely rather than stripping it sentence-by-sentence behind a
+        # warning banner -- see `_qa_failed_twice_draft`. The original QA errors are kept in
+        # `qa_report` (persisted below) for the analyst to review; `qa.passed` stays False.
+        log.error("report_qa_failed_twice_dropping_narrative", errors=qa.errors[:10])
         original_errors = qa
-        draft = _strip_uncited(draft, qa)
-        # The stripped draft should now be clean, but re-check to be sure nothing else slipped
-        # through; either way the report is marked unverified and the original QA errors are kept
-        # in qa_report for the analyst to review.
-        check(draft, items)
+        draft = _qa_failed_twice_draft()
         qa = QAResult(
             passed=False,
             errors=original_errors.errors,
@@ -835,6 +829,16 @@ def build_daily(
             tender_tables.append(tech_table)
     except Exception as exc:
         log.warning("daily_report_tech_watch_section_failed", error=str(exc)[:160])
+
+    # A13 (מיקוד תעשייה ישראלית, 2026-09-06): "תעשייה ישראלית" section -- deterministic category
+    # tables extending `citation_items` in place, same additive mechanism as the tech-watch table
+    # above. A failure here must never break the daily report.
+    try:
+        from eoa.report.israel_section import daily_israel_tables
+
+        tender_tables.extend(daily_israel_tables(citation_items, start_ts, _end_ts))
+    except Exception as exc:
+        log.warning("daily_report_israel_section_failed", error=str(exc)[:160])
 
     docx_path = _report_path(label, "docx")
     md_path = _report_path(label, "md")

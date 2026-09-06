@@ -139,3 +139,35 @@ class TestMergeDuplicatesReportShape:
         ]
         report = ren._merge_duplicates(entities, dry_run=True)
         assert report == []  # no group has 2+ members once system designations are excluded
+
+
+class TestCanonicalizeItemMentions:
+    """Root-cause investigation (2026-09-06, entity 394 'Israel'/'ישראל' mismatch): the one-off
+    backfill over items.entities_mentioned rows written before the classify.py fix landed."""
+
+    def test_hebrew_country_alias_rewritten_to_canonical_english_name(self) -> None:
+        items = [{"id": 1, "entities_mentioned": ["ישראל", "Elbit"]}]
+        report = ren._canonicalize_item_mentions(items, dry_run=True)
+        assert len(report) == 1
+        assert report[0]["id"] == 1
+        assert report[0]["after"] == ["Israel", "Elbit"]
+
+    def test_watchlist_alias_rewritten_to_canonical_name(self) -> None:
+        items = [{"id": 2, "entities_mentioned": ["Elbit Systems"]}]
+        report = ren._canonicalize_item_mentions(items, dry_run=True)
+        assert report[0]["after"] == ["Elbit"]
+
+    def test_already_canonical_row_produces_no_report_entry(self) -> None:
+        items = [{"id": 3, "entities_mentioned": ["Israel", "Elbit"]}]
+        report = ren._canonicalize_item_mentions(items, dry_run=True)
+        assert report == []
+
+    def test_raw_and_canonical_both_present_dedupes_after_rewrite(self) -> None:
+        items = [{"id": 4, "entities_mentioned": ["ישראל", "Israel"]}]
+        report = ren._canonicalize_item_mentions(items, dry_run=True)
+        assert report[0]["after"] == ["Israel"]
+
+    def test_system_designation_left_unchanged(self) -> None:
+        items = [{"id": 5, "entities_mentioned": ["LOCUST"]}]
+        report = ren._canonicalize_item_mentions(items, dry_run=True)
+        assert report == []

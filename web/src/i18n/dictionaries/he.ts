@@ -13,6 +13,7 @@ export const he = {
     ask: "שאל את האנליסט",
     conferences: "לוח כנסים",
     tenders: "מכרזים והזדמנויות",
+    patents: "פטנטים",
     inbox: "הבהרות ומשוב",
     reports: "דוחות",
     bd: "פיתוח עסקי",
@@ -127,6 +128,10 @@ export const he = {
     searchPlaceholder: "חיפוש טקסט חופשי…",
     searchAria: "חיפוש בפיד",
     countryGroupCount: "{count} פריטים",
+    // A13 (מיקוד תעשייה ישראלית, docs/PLAN_WINDOWS_NATIVE.md): additive boolean chip, same UX as
+    // the country/level chips above — toggles `israel=true` on GET /api/items.
+    israelFilterLabel: "🇮🇱 ישראל",
+    israelBadgeAria: "רלוונטי לתעשייה הישראלית",
     // Q5-3 (docs/qa/findings_Q5_r1.md): the "I" investigate shortcut used to fire silently, allow
     // double-submits, and ignore an investigation that already existed for the item.
     investigateQueuedToast: "חקירה נוספה לתור · #{jobId}",
@@ -248,6 +253,13 @@ export const he = {
     hiddenClosedArchivedHint: "{count} מכרזים סגורים מוסתרים בתצוגה הנוכחית.",
     showHiddenClosedArchivedCta: "הצג {count} מכרזים סגורים",
     whyRelevantPrefix: "למה רלוונטי: ",
+  },
+  // A13 (מיקוד תעשייה ישראלית): the "ישראליות" facet chip + flag badge on EntitiesPage — the page
+  // itself is not otherwise migrated to t() yet (its other strings stay hardcoded Hebrew), so this
+  // namespace holds only what the new chip/badge need.
+  entities: {
+    israelFilterLabel: "🇮🇱 ישראליות בלבד",
+    israelBadgeAria: "ישות ישראלית",
   },
   bd: {
     title: "פיתוח עסקי — דוח מיקוד לפי טריטוריה",

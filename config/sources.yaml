@@ -289,6 +289,117 @@ sources:
     list_selector: "div.article_marker"
     link_selector: "a"
 
+  # A13 (Israeli industry focus, 2026-09-06): additive verification pass over Israeli
+  # general-news and official outlets. Verified live with curl + desktop Chrome UA; see
+  # each entry's notes for exact endpoints tried and why the others failed.
+  - id: ynet_news
+    name: "Ynet (Hebrew, General News)"
+    url: "https://www.ynet.co.il/Integration/StoryRss2.xml"
+    kind: rss
+    lang: he
+    category: israel
+    reliability: 3
+    tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
+    schedule: daily
+    keywords_any: ["אלקטרו אופטי", "אלקטרו-אופטי", "אינפרא אדום", "כטב\"ם", "רחפן", "רחפנים", "טיל", "טילים", "מכ\"ם", "מטע\"ד", "כיפת ברזל", "יירוט", "מל\"ט", "electro-optic", "infrared", "drone", "UAV", "missile", "radar", "air defense"]
+    notes: "No defense/military-specific Ynet RSS could be confirmed live: the site's category pages (e.g. /news/category/184) are client-rendered (no <link rel=alternate rss> in the static HTML, and the homepage's nav categories aren't present as plain hrefs either), and there is no documented military-section feed URL. StoryRss2.xml is Ynet's real site-wide general-news feed (confirmed 200 OK, real RSS 2.0 with CDATA titles/links, 30 <item> entries checked live); keyword-filtered to EO/IR/defense-relevant items per A12 convention since it is broad, not defense-specific."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: maariv_defense
+    name: "Maariv - Army & Security (Hebrew)"
+    url: "https://www.maariv.co.il/rss/rssfeedszavavebetachon"
+    kind: rss
+    lang: he
+    category: israel
+    reliability: 3
+    tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
+    schedule: daily
+    notes: "Maariv's dedicated 'צבא וביטחון' (Army & Security) section feed, found via the site's /rss index page (https://www.maariv.co.il/rss lists ~70 named category feeds). Verified live 2026-09-06: 200 OK, real RSS 2.0, 20 <item> entries, content confirmed defense-specific (Hezbollah drone/IDF response, IDF surprise drill, Arrow weapon-system items). No keywords_any needed -- already section-scoped like israel_defense_he."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: imod_press_room
+    name: "Israel Ministry of Defense - Press Room (English)"
+    url: "https://mod.gov.il/en/press-releases/press-room"
+    kind: html
+    lang: en
+    category: israel
+    reliability: 5
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas]
+    schedule: daily
+    notes: "Official IMOD spokesperson/press-room listing page. robots.txt on mod.gov.il (apex; www.mod.gov.il/Pages/default.aspx 301-redirects to mod.gov.il/en) is 'User-agent: * / Allow: /'. The site is a Next.js app but the press-room listing is server-rendered: the raw HTML (no JS execution) contains real article links matching the confirmed pattern href=\"/en/press-releases/press-room/<slug>\" (4 distinct article links seen in the live fetch, e.g. .../successful-launch-test-of-the-arrow-weapon-system). The Hebrew equivalent (mod.gov.il/he/press-releases/press-room) returned HTTP 500 on live check and is not used."
+    verified: true
+    verified_at: "2026-09-06"
+    list_selector: "a[href*='/en/press-releases/press-room/']"
+    link_selector: "self"
+
+  - id: sibat
+    name: "SIBAT (Israel Defense Exports Directorate)"
+    url: "https://www.sibat.mod.gov.il/Pages/home.aspx"
+    kind: html
+    lang: en
+    category: israel
+    reliability: 3
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas]
+    schedule: daily
+    enabled: false
+    # DISABLED 2026-09-06: this is a B2B exhibitor/contacts directory site (Exhibitions,
+    # Worldwide regional contacts, Industries directory, ContactUs), not a news outlet -- the
+    # homepage's full link list has no news/press/updates section at all. Checked live and
+    # found no usable listing page:
+    #   - /Pages/home.aspx -> 200, real SharePoint page, but zero news-shaped links (only
+    #     Exhibitions/Worldwide/Industries/ContactUs/Signup/termsofuse).
+    #   - /NewsAndEvents/Pages/default.aspx, /Media/Pages/default.aspx,
+    #     /About/Pages/News.aspx, /HE/Pages/home.aspx -> all 404.
+    #   - /sitemap.xml -> 404 (SharePoint "PageNotFoundError" redirect stub).
+    # Disabled rather than left enabled against a page with no article-link pattern to select on.
+    notes: "DISABLED 2026-09-06: no news/press page exists anywhere on the SIBAT site (it's a defense-export exhibitor directory, not a news outlet) -- see comment above for every path tried. Re-enable only if SIBAT ever adds a news/press section."
+    verified: false
+    verified_at: "2026-09-06"
+
+  - id: israel_hayom
+    name: "Israel Hayom (Hebrew, General News)"
+    url: "https://www.israelhayom.co.il/rss.xml"
+    kind: rss
+    lang: he
+    category: israel
+    reliability: 3
+    tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
+    schedule: daily
+    keywords_any: ["אלקטרו אופטי", "אלקטרו-אופטי", "אינפרא אדום", "כטב\"ם", "רחפן", "רחפנים", "טיל", "טילים", "מכ\"ם", "מטע\"ד", "כיפת ברזל", "יירוט", "מל\"ט", "צה\"ל", "electro-optic", "infrared", "drone", "UAV", "missile", "radar"]
+    notes: "No defense-specific section feed found live (/feed -> 403 Akamai Access Denied, /category/defense/feed -> 404). rss.xml is the site's real site-wide feed (confirmed 200 OK, real RSS 2.0, 100 <item> entries checked live, content includes defense items e.g. a Hezbollah-drone/IDF-response headline alongside general news); keyword-filtered per A12 convention since it is broad."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: jpost_israel_news
+    name: "Jerusalem Post - Israel News (Politics/Security/Diplomacy)"
+    url: "https://www.jpost.com/Rss/RssFeedsIsraelNews.aspx"
+    kind: rss
+    lang: en
+    category: israel
+    reliability: 4
+    tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
+    schedule: daily
+    keywords_any: ["electro-optic", "infrared", "drone", "UAV", "missile", "radar", "air defense", "surveillance", "Iron Dome", "Arrow interceptor", "David's Sling", "IDF strike", "Hezbollah", "targeting pod", "thermal imaging", "night vision", "loitering munition"]
+    notes: "JPost's 'Israel News: Politics, Security & Diplomacy' feed -- broader than pure defense (includes general politics/diplomacy) so keyword-filtered per A12 convention. Verified live 2026-09-06: 200 OK, real RSS 2.0, 30 <item> entries, content confirmed to include IDF/Hezbollah strike items."
+    verified: true
+    verified_at: "2026-09-06"
+
+  - id: times_of_israel
+    name: "Times of Israel (Main Feed)"
+    url: "https://www.timesofisrael.com/feed/"
+    kind: rss
+    lang: en
+    category: israel
+    reliability: 4
+    tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
+    schedule: daily
+    keywords_any: ["electro-optic", "infrared", "drone", "UAV", "missile", "radar", "air defense", "surveillance", "Iron Dome", "Arrow interceptor", "David's Sling", "IDF", "Hezbollah", "targeting pod", "thermal imaging", "night vision", "loitering munition"]
+    notes: "Site-wide main feed (confirmed 200 OK, real RSS 2.0, 15 <item> entries checked live); keyword-filtered per A12 convention since it is broad, not defense-specific. A narrower https://www.timesofisrael.com/topic/idf/feed/ also exists and is a real feed (200 OK, confirmed real RSS), but had only 1 <item> at check time -- too low-volume to rely on alone, so the main feed is used instead."
+    verified: true
+    verified_at: "2026-09-06"
+
   - id: dod_contracts
     name: "DoD Contracts (defense.gov)"
     url: "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&max=10"

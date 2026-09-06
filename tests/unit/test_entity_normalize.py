@@ -82,6 +82,69 @@ class TestIsTechniqueLike:
     def test_negative(self, name: str) -> None:
         assert en.is_technique_like(name) is False
 
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Q3-13 r4: singular/unlisted technique-suffix phrases, observed live 2026-09-06.
+            "vehicle detection",
+            "camouflaged military vehicle detection",
+            "infrared vehicle detection",
+            "image classification",
+            "binary wildfire segmentation",
+            "feature-level multimodal fusion",
+            # GenAI/LLM/deep-learning prefix phrases.
+            "GenAI image editing",
+            "LLM-based summarization",
+            "deep learning object recognition",
+            # lowercase-start, no-proper-noun-token descriptive phrases.
+            "potential suppliers",
+            "target behaviors",
+            "proxy-guided placement",
+            "transformer-based architectures",
+            "existing C-UAS approaches",
+            "future uncrewed ground vehicles (UGVs)",
+            "targeted grayscale patch attacks",
+            "binary visual question answering",
+        ],
+    )
+    def test_positive_r4_broadened_patterns(self, name: str) -> None:
+        assert en.is_technique_like(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Real watchlist/curated-org/country/system names that must survive the broadened
+            # patterns (Q3-13 r4 regression -- these must never be rejected).
+            "Iron Beam",
+            "Drone Dome",
+            "Sniper ATP",
+            "LITENING",
+            "US Air Force",
+            "Israel",
+            "LOCUST",
+            # Brand-styled lowercase names that must survive the lowercase-multiword heuristic.
+            "ePlane",
+            "ePlane Company",
+            "e200X",
+            "exMHR",
+        ],
+    )
+    def test_negative_r4_real_entities_survive(self, name: str) -> None:
+        assert en.is_technique_like(name) is False
+
+
+class TestIsSourceLikeName:
+    @pytest.mark.parametrize(
+        "name",
+        ["arXiv", "arxiv", "arXiv cs.CV", "IEEE", "SPIE", "Nature", "Reddit", "Wikipedia", "YouTube", "Google Scholar"],
+    )
+    def test_positive(self, name: str) -> None:
+        assert en.is_source_like_name(name) is True
+
+    @pytest.mark.parametrize("name", ["Elbit", "IAI", "Israel", ""])
+    def test_negative(self, name: str) -> None:
+        assert en.is_source_like_name(name) is False
+
 
 class TestNormalizeKind:
     def test_watchlist_company_kind_wins_over_generic_guess(self) -> None:
@@ -227,6 +290,9 @@ class TestIsJunkEntity:
 
     def test_generic_non_entity_is_junk(self) -> None:
         assert en.is_junk_entity("השוק הביטחוני") is True
+
+    def test_source_like_is_junk(self) -> None:
+        assert en.is_junk_entity("arXiv") is True
 
     def test_real_entity_not_junk(self) -> None:
         assert en.is_junk_entity("Elbit") is False

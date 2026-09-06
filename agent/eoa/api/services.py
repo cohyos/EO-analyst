@@ -304,6 +304,10 @@ def _item_card(row: dict[str, Any]) -> dict[str, Any]:
         "tech_maturity": row.get("tech_maturity"),
         "tech_actor_kind": row.get("tech_actor_kind"),
         "tech_readiness_note_he": row.get("tech_readiness_note_he"),
+        # A13 (מיקוד תעשייה ישראלית, 2026-09-06): additive, see migration 0017 and
+        # eoa.pipeline.israel_focus.
+        "israel_relevance": row.get("israel_relevance"),
+        "israel_reasons": row.get("israel_reasons") or [],
     }
 
 
@@ -314,6 +318,7 @@ def list_items(
     since: str | None = None,
     q: str | None = None,
     country: str | None = None,
+    israel: bool = False,
     page: int = 1,
     page_size: int = 50,
     sort: str = "score",
@@ -357,6 +362,10 @@ def list_items(
                 raws.update(v.upper() for v in geography.raw_values_for_country(code))
             where.append("UPPER(i.geography) = ANY(%(country_raws)s)")
             params["country_raws"] = list(raws)
+    # A13 (מיקוד תעשייה ישראלית, 2026-09-06): additive "🇮🇱 ישראל" feed chip -- items with a
+    # meaningful deterministic Israeli-industry relevance score (eoa.pipeline.israel_focus).
+    if israel:
+        where.append("COALESCE(i.israel_relevance, 0) >= 0.5")
     where_sql = " AND ".join(where)
 
     total_row = _fetchone(f"SELECT count(*) AS n FROM items i WHERE {where_sql}", params)
@@ -572,6 +581,9 @@ def _entity_card(row: dict[str, Any]) -> dict[str, Any]:
         "is_watchlist": bool(row.get("is_watchlist")),
         "mentions_7d": row.get("mentions_7d") or 0,
         "mentions_30d": row.get("mentions_30d") or 0,
+        # A13 (מיקוד תעשייה ישראלית, 2026-09-06): additive, see migration 0017 and
+        # eoa.pipeline.israel_focus.score_and_persist_entity_israeli.
+        "is_israeli": bool(row.get("is_israeli")),
     }
 
 
@@ -581,6 +593,7 @@ def list_entities(
     kind: str | None = None,
     country: str | None = None,
     watchlist: bool = False,
+    israel: bool = False,
     show_all: bool = False,
     sort: str = "last_seen",
     limit: int = 50,
@@ -602,6 +615,8 @@ def list_entities(
         params["country"] = country
     if watchlist:
         where.append("e.is_watchlist = true")
+    if israel:
+        where.append("e.is_israeli = true")
     if not show_all:
         where.append("e.relevance >= %(min_relevance)s")
         params["min_relevance"] = _DEFAULT_MIN_RELEVANCE

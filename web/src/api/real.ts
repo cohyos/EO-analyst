@@ -24,6 +24,11 @@ import type {
   McpPingResponse,
   McpServersResponse,
   MorningResponse,
+  PatentHeatmapResponse,
+  PatentRecord,
+  PatentSurveyCard,
+  PatentSurveyCreateResponse,
+  PatentsStatusResponse,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -42,6 +47,7 @@ import type {
   EntitiesQuery,
   GraphQuery,
   ItemsQuery,
+  PatentsQuery,
   TechItemsQuery,
   TendersQuery,
 } from "./types";
@@ -142,6 +148,8 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     tech_maturity: r.tech_maturity ?? null,
     tech_actor_kind: r.tech_actor_kind ?? null,
     tech_readiness_note_he: r.tech_readiness_note_he ?? null,
+    israel_relevance: typeof r.israel_relevance === "number" ? r.israel_relevance : null,
+    israel_reasons: arr(r.israel_reasons),
   };
 }
 
@@ -186,6 +194,7 @@ function normalizeEntitySummary(raw: Partial<EntitySummary> | null | undefined):
     is_watchlist: bool(r.is_watchlist),
     mentions_7d: num(r.mentions_7d),
     mentions_30d: num(r.mentions_30d),
+    is_israeli: bool(r.is_israeli),
   };
 }
 
@@ -331,6 +340,52 @@ function normalizeTenderCard(raw: Partial<TenderCard> | null | undefined): Tende
   };
 }
 
+function normalizePatentRecord(raw: Partial<PatentRecord> | null | undefined): PatentRecord {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    pub_number: str(r.pub_number),
+    kind: r.kind ?? null,
+    title: r.title ?? null,
+    abstract: r.abstract ?? null,
+    assignees: arr(r.assignees),
+    inventors: arr(r.inventors),
+    cpc: arr(r.cpc),
+    priority_date: r.priority_date ?? null,
+    filing_date: r.filing_date ?? null,
+    publication_date: r.publication_date ?? null,
+    grant_date: r.grant_date ?? null,
+    family_id: r.family_id ?? null,
+    jurisdictions: arr(r.jurisdictions),
+    forward_citations: r.forward_citations ?? null,
+    backward_citations: r.backward_citations ?? null,
+    url: r.url ?? null,
+    source: str(r.source) || "unknown",
+    subdomain: r.subdomain ?? null,
+    claims_summary_he: r.claims_summary_he ?? null,
+    so_what_he: r.so_what_he ?? null,
+    israel_relevance: r.israel_relevance ?? null,
+    value_score: r.value_score ?? null,
+    value_reasons: arr(r.value_reasons),
+    created_at: str(r.created_at),
+    updated_at: str(r.updated_at),
+  };
+}
+
+function normalizePatentSurveyCard(raw: Partial<PatentSurveyCard> | null | undefined): PatentSurveyCard {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    topic: str(r.topic),
+    status: (r.status ?? "running") as PatentSurveyCard["status"],
+    created_at: str(r.created_at),
+    report_id: r.report_id ?? null,
+    path_docx: r.path_docx ?? null,
+    path_md: r.path_md ?? null,
+    path_html: r.path_html ?? null,
+  };
+}
+
 function normalizeForecastCard(raw: Partial<ForecastCard> | null | undefined): ForecastCard {
   const r = raw ?? {};
   return {
@@ -435,6 +490,7 @@ export const realApi: ApiClient = {
         page: query.page,
         page_size: query.page_size,
         sort: query.sort,
+        israel: query.israel || undefined,
       })}`,
     );
     const items = arr(data?.items).map(normalizeItemCard);
@@ -480,6 +536,7 @@ export const realApi: ApiClient = {
         all: query.all || undefined,
         sort: query.sort,
         limit: query.limit,
+        israel: query.israel || undefined,
       })}`,
     );
     return arr(data).map(normalizeEntitySummary);
@@ -564,6 +621,7 @@ export const realApi: ApiClient = {
             if (evt.type === "token") handlers.onToken(str(evt.text));
             else if (evt.type === "citations") handlers.onCitations(arr(evt.items));
             else if (evt.type === "meta") handlers.onMeta?.(str(evt.provider), str(evt.model));
+            else if (evt.type === "sources") handlers.onSources?.(arr(evt.items));
             else if (evt.type === "done") handlers.onDone();
           }
         }
@@ -605,6 +663,36 @@ export const realApi: ApiClient = {
     arr(
       await request<Partial<ForecastCard>[] | null>(`/api/tenders/forecasts${qs({ limit })}`),
     ).map(normalizeForecastCard),
+
+  // A14: פטנטים ו-IP.
+  getPatents: async (query: PatentsQuery) => {
+    const raw = await request<{ patents?: Partial<PatentRecord>[] | null; total?: number }>(
+      `/api/patents${qs({
+        assignee: query.assignee,
+        subdomain: query.subdomain,
+        israeli: query.israeli,
+        min_value_score: query.min_value_score,
+        q: query.q,
+        limit: query.limit,
+      })}`,
+    );
+    return { patents: arr(raw?.patents).map(normalizePatentRecord), total: raw?.total ?? 0 };
+  },
+  getPatentsStatus: async () =>
+    request<PatentsStatusResponse>("/api/patents/status"),
+  getPatentsHeatmap: async (topCpc = 10, topAssignees = 10) =>
+    request<PatentHeatmapResponse>(
+      `/api/patents/heatmap${qs({ top_cpc: topCpc, top_assignees: topAssignees })}`,
+    ),
+  getPatentSurveys: async (limit = 30) =>
+    arr(await request<Partial<PatentSurveyCard>[] | null>(`/api/patents/surveys${qs({ limit })}`)).map(
+      normalizePatentSurveyCard,
+    ),
+  createPatentSurvey: async (topic: string) =>
+    request<PatentSurveyCreateResponse>("/api/patents/surveys", {
+      method: "POST",
+      body: JSON.stringify({ topic }),
+    }),
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
   getTechRadar: async (weeks = 12) =>

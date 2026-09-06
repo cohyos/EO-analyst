@@ -641,6 +641,32 @@ def build_weekly(
     except Exception as exc:
         log.warning("weekly_report_tech_watch_section_failed", error=str(exc)[:160])
 
+    # A13 (מיקוד תעשייה ישראלית, 2026-09-06): "תעשייה ישראלית" section (category tables + the
+    # per-company mentions/wins/competitors summary table), same additive mechanism as the
+    # tech-watch tables above. A failure here must never break the weekly report.
+    try:
+        from eoa.report.israel_section import weekly_israel_tables
+
+        week_start_ts_il = dt.datetime.combine(start, dt.time.min, tzinfo=JERUSALEM).astimezone(dt.UTC)
+        week_end_ts_il = dt.datetime.combine(end, dt.time.max, tzinfo=JERUSALEM).astimezone(dt.UTC)
+        tables.extend(weekly_israel_tables(citation_items, week_start_ts_il, week_end_ts_il))
+    except Exception as exc:
+        log.warning("weekly_report_israel_section_failed", error=str(exc)[:160])
+
+    # A14 (פטנטים ו-IP, 2026-09-06): "פטנטים ו-IP" section (new filings/grants this week +
+    # a value-score table), same additive mechanism as the tech-watch/israel-section tables above.
+    # A failure here must never break the weekly report.
+    try:
+        from eoa.patents.report_section import collect_patents_window, patents_extra_section, patents_table
+
+        patents_data = collect_patents_window(start, end)
+        extra_sections.append(patents_extra_section(patents_data))
+        patents_tbl = patents_table(patents_data)
+        if patents_tbl:
+            tables.append(patents_tbl)
+    except Exception as exc:
+        log.warning("weekly_report_patents_section_failed", error=str(exc)[:160])
+
     docx_path = _report_path(end, "docx")
     md_path = _report_path(end, "md")
     html_path = _report_path(end, "html")

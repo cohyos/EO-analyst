@@ -30,6 +30,8 @@ function makeItem(over: Partial<ItemCard> = {}): ItemCard {
     tech_maturity: null,
     tech_actor_kind: null,
     tech_readiness_note_he: null,
+    israel_relevance: null,
+    israel_reasons: [],
     ...over,
   };
 }

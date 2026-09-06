@@ -170,6 +170,10 @@ function buildItem(i: number): ItemCard {
       domainInfo.domain === "tech_dev"
         ? `להערכתנו, התפתחות זו עשויה לקצר את זמן ההבשלה למוצרי EO/IR בתחום ${domainInfo.label}.`
         : null,
+    // A13 (מיקוד תעשייה ישראלית): deterministic, seed-derived — Israeli-geography rows always
+    // score above the 0.5 threshold, a handful of others score just under it as noise.
+    israel_relevance: geography === "IL" ? Math.round((0.55 + (i % 4) * 0.1) * 100) / 100 : i % 9 === 0 ? 0.35 : null,
+    israel_reasons: geography === "IL" ? ["israeli_company_mentioned", "israeli_agency_or_customer"] : [],
   };
 }
 

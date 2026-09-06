@@ -4,9 +4,11 @@ import type { EntitySummary } from "@/types/api";
 // synthesized at runtime in mockApi.ts (deterministic, derived from `item_count`)
 // rather than hand-authored per row here, so this fixture list doesn't need touching
 // every time a new EntitySummary field is added.
+// A13 (מיקוד תעשייה ישראלית): `is_israeli` is likewise synthesized (from the fixture's own
+// `country`) rather than hand-authored per row, see `toEntitySummary` in mockApi.ts.
 export type MockEntitySeed = Omit<
   EntitySummary,
-  "relevance" | "is_watchlist" | "mentions_7d" | "mentions_30d"
+  "relevance" | "is_watchlist" | "mentions_7d" | "mentions_30d" | "is_israeli"
 >;
 
 export const mockEntities: MockEntitySeed[] = [
