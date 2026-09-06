@@ -332,3 +332,48 @@ describe("FeedPage Israel focus filter (A13)", () => {
     expect(screen.queryByTestId("feed-row-israel-badge-3")).not.toBeInTheDocument();
   });
 });
+
+// W9 (docs/REVIEW_2026-09-06_evening.md round 4, feed side): the same story from several outlets
+// (linked via `dedup_of`) collapses into one row with a "+N מקורות" chip that expands to the
+// outlet list, instead of rendering one near-duplicate row per outlet.
+describe("FeedPage duplicate-outlet grouping (W9)", () => {
+  it("folds items sharing a dedup_of target into one row with a '+N מקורות' chip", async () => {
+    const primary = { ...makeItem(1, "טיל שוגר בהצלחה"), source_name: "Defense News", score: 90 };
+    const dupe = { ...makeItem(2, "אותה ידיעה"), source_name: "Breaking Defense", dedup_of: 1, score: 80 };
+    getItems.mockResolvedValue({ total: 2, items: [primary, dupe] });
+
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    // Only one row rendered for the cluster -- the duplicate doesn't get its own row.
+    expect(screen.queryByTestId("feed-row-2")).not.toBeInTheDocument();
+    expect(screen.getByTestId("duplicate-outlets-toggle")).toHaveTextContent("+1 מקורות");
+  });
+
+  it("expanding the chip lists the other outlet with its own 'פתח מקור' link", async () => {
+    const primary = { ...makeItem(1, "טיל שוגר בהצלחה"), source_name: "Defense News", score: 90 };
+    const dupe = {
+      ...makeItem(2, "אותה ידיעה"),
+      source_name: "Breaking Defense",
+      dedup_of: 1,
+      score: 80,
+      url: "https://breakingdefense.example/x",
+    };
+    getItems.mockResolvedValue({ total: 2, items: [primary, dupe] });
+
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    fireEvent.click(screen.getByTestId("duplicate-outlets-toggle"));
+    expect(await screen.findByText("Breaking Defense")).toBeInTheDocument();
+    const openLink = screen.getByRole("link", { name: "פתח מקור" });
+    expect(openLink).toHaveAttribute("href", "https://breakingdefense.example/x");
+    expect(openLink).toHaveAttribute("target", "_blank");
+  });
+
+  it("does not show the chip for a story with no duplicates", async () => {
+    renderFeedPage(); // default ITEMS have no dedup_of set
+    await screen.findByTestId("feed-row-1");
+    expect(screen.queryByTestId("duplicate-outlets-toggle")).not.toBeInTheDocument();
+  });
+});

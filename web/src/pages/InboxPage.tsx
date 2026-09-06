@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { SecurityReviewBanner } from "@/components/investigations/SecurityReviewBanner";
 import { formatDateTime } from "@/lib/time";
 
 export function InboxPage() {
@@ -19,6 +21,28 @@ export function InboxPage() {
   const lessonsQuery = useQuery({
     queryKey: ["lessons"],
     queryFn: () => api.getLessons(),
+  });
+  // W10 (docs/REVIEW_2026-09-06_evening.md round 4): every deep-search investigation the L2
+  // security guard partially blocked and nobody has approved/dismissed yet.
+  const securityReviewsQuery = useQuery({
+    queryKey: ["security-reviews"],
+    queryFn: () => api.getSecurityReviews(),
+  });
+  // `pending` tracks which single row is mid-action (and which action) so only that row's buttons
+  // disable/relabel -- both mutations are shared across every row in the list.
+  const [pending, setPending] = useState<{
+    jobId: string;
+    action: "approve" | "dismiss";
+  } | null>(null);
+  const approveSecurityReview = useMutation({
+    mutationFn: (jobId: string) => api.postSecurityReviewApprove(jobId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["security-reviews"] }),
+    onSettled: () => setPending(null),
+  });
+  const dismissSecurityReview = useMutation({
+    mutationFn: (jobId: string) => api.postSecurityReviewDismiss(jobId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["security-reviews"] }),
+    onSettled: () => setPending(null),
   });
 
   const answerClarification = useMutation({
@@ -41,10 +65,64 @@ export function InboxPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-8 p-4 md:p-6">
+      <section aria-label="בדיקות אבטחה ממתינות">
+        <h2 className="mb-2 text-sm font-semibold text-fg-dim">בדיקות אבטחה ממתינות</h2>
+        {securityReviewsQuery.isLoading && <LoadingState label="טוען בדיקות אבטחה…" />}
+        {securityReviewsQuery.isError && (
+          <ErrorState
+            error={securityReviewsQuery.error}
+            onRetry={() => securityReviewsQuery.refetch()}
+          />
+        )}
+        {securityReviewsQuery.data && securityReviewsQuery.data.length === 0 && (
+          <EmptyState title="אין בדיקות אבטחה ממתינות" />
+        )}
+        {securityReviewsQuery.data && securityReviewsQuery.data.length > 0 && (
+          <ul className="space-y-3">
+            {securityReviewsQuery.data.map((review) => {
+              const jobId = String(review.job_id);
+              return (
+                <li key={review.job_id}>
+                  <SecurityReviewBanner
+                    reasonHe={review.reason_he}
+                    snippet={review.snippet}
+                    onApprove={() => {
+                      setPending({ jobId, action: "approve" });
+                      approveSecurityReview.mutate(jobId);
+                    }}
+                    onDismiss={() => {
+                      setPending({ jobId, action: "dismiss" });
+                      dismissSecurityReview.mutate(jobId);
+                    }}
+                    approving={pending?.jobId === jobId && pending.action === "approve"}
+                    dismissing={pending?.jobId === jobId && pending.action === "dismiss"}
+                  />
+                  <p className="mt-1 text-xs text-fg-dim">
+                    <bdi>{review.item_title ?? review.question ?? `חקירה #${jobId}`}</bdi>{" "}
+                    ·{" "}
+                    <Link
+                      to={`/investigations/${jobId}`}
+                      className="text-accent hover:underline"
+                    >
+                      פתח חקירה
+                    </Link>
+                  </p>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
       <section aria-label="הבהרות פתוחות">
         <h2 className="mb-2 text-sm font-semibold text-fg-dim">הבהרות פתוחות</h2>
         {clarificationsQuery.isLoading && <LoadingState label="טוען הבהרות…" />}
-        {clarificationsQuery.isError && <ErrorState onRetry={() => clarificationsQuery.refetch()} />}
+        {clarificationsQuery.isError && (
+          <ErrorState
+            error={clarificationsQuery.error}
+            onRetry={() => clarificationsQuery.refetch()}
+          />
+        )}
         {clarificationsQuery.data && clarificationsQuery.data.length === 0 && (
           <EmptyState title="אין הבהרות פתוחות" description="כל השאלות טופלו." />
         )}
@@ -62,7 +140,9 @@ export function InboxPage() {
                     <button
                       key={opt}
                       type="button"
-                      onClick={() => answerClarification.mutate({ id: c.id, answer: opt })}
+                      onClick={() =>
+                        answerClarification.mutate({ id: c.id, answer: opt })
+                      }
                       disabled={answerClarification.isPending}
                       className="rounded-md border border-border-strong px-2.5 py-1 text-xs hover:bg-bg-sunken disabled:opacity-50"
                     >
@@ -117,7 +197,9 @@ export function InboxPage() {
                       <button
                         type="button"
                         key={n}
-                        onClick={() => setSurveyAnswers((prev) => ({ ...prev, [q.id]: n }))}
+                        onClick={() =>
+                          setSurveyAnswers((prev) => ({ ...prev, [q.id]: n }))
+                        }
                         className={`h-8 w-8 rounded-full border text-sm ${
                           surveyAnswers[q.id] === n
                             ? "border-accent bg-accent-muted text-accent-fg"

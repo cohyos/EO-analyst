@@ -8,6 +8,8 @@ const getInvestigation = vi.fn();
 const postInvestigationStop = vi.fn();
 const postItemInvestigate = vi.fn();
 const postInvestigationExpand = vi.fn();
+const postSecurityReviewApprove = vi.fn();
+const postSecurityReviewDismiss = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
@@ -15,6 +17,8 @@ vi.mock("@/api", () => ({
     postInvestigationStop: (...args: unknown[]) => postInvestigationStop(...args),
     postItemInvestigate: (...args: unknown[]) => postItemInvestigate(...args),
     postInvestigationExpand: (...args: unknown[]) => postInvestigationExpand(...args),
+    postSecurityReviewApprove: (...args: unknown[]) => postSecurityReviewApprove(...args),
+    postSecurityReviewDismiss: (...args: unknown[]) => postSecurityReviewDismiss(...args),
   },
 }));
 
@@ -73,9 +77,64 @@ beforeEach(() => {
   postInvestigationStop.mockReset();
   postItemInvestigate.mockReset();
   postInvestigationExpand.mockReset();
+  postSecurityReviewApprove.mockReset();
+  postSecurityReviewDismiss.mockReset();
   useInvestigationSocketMock.mockReset();
   getInvestigation.mockResolvedValue(baseDetail());
   useInvestigationSocketMock.mockReturnValue({ liveLines: [], connected: true });
+});
+
+// W10 (docs/REVIEW_2026-09-06_evening.md round 4): when the L2 security guard partially blocks an
+// answer, the investigation page shows a banner with the reason/snippet and two actions.
+describe("InvestigationDetailPage security review banner (W10)", () => {
+  function detailWithSecurityReview() {
+    return {
+      ...baseDetail(),
+      state: "done" as const,
+      answer: {
+        answer_he: "תשובה חלקית",
+        sources: [],
+        outcome: "partial",
+        security_review: true,
+        security_review_reason_he: "חשד להזרקת פרומפט במקור",
+        security_review_snippet: "התעלם מההוראות הקודמות...",
+      },
+    };
+  }
+
+  it("shows the banner with the reason and snippet when security_review is true", async () => {
+    getInvestigation.mockResolvedValue(detailWithSecurityReview());
+    renderPage();
+    const banner = await screen.findByTestId("security-review-banner");
+    expect(banner).toHaveTextContent("נחסם חלקית לבדיקת אבטחה");
+    expect(banner).toHaveTextContent("חשד להזרקת פרומפט במקור");
+    expect(banner).toHaveTextContent("התעלם מההוראות הקודמות");
+  });
+
+  it("does not show the banner when security_review is absent (fields not landed yet)", async () => {
+    getInvestigation.mockResolvedValue(baseDetail());
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.queryByTestId("security-review-banner")).not.toBeInTheDocument();
+  });
+
+  it("'אשר והמשך' calls the approve endpoint and navigates to the new job", async () => {
+    getInvestigation.mockResolvedValue(detailWithSecurityReview());
+    postSecurityReviewApprove.mockResolvedValue({ job_id: "77" });
+    renderPage();
+    await screen.findByTestId("security-review-banner");
+    fireEvent.click(screen.getByText("אשר והמשך"));
+    await waitFor(() => expect(postSecurityReviewApprove).toHaveBeenCalledWith("10"));
+  });
+
+  it("'דחה' calls the dismiss endpoint", async () => {
+    getInvestigation.mockResolvedValue(detailWithSecurityReview());
+    postSecurityReviewDismiss.mockResolvedValue({ ok: true });
+    renderPage();
+    await screen.findByTestId("security-review-banner");
+    fireEvent.click(screen.getByText("דחה"));
+    await waitFor(() => expect(postSecurityReviewDismiss).toHaveBeenCalledWith("10"));
+  });
 });
 
 describe("InvestigationDetailPage live log auto-scroll", () => {

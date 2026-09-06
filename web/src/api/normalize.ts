@@ -22,6 +22,7 @@ import type {
   ResourceGateStatus,
   RunsCurrentResponse,
   RunStageEntry,
+  SecurityReviewCard,
   StageStatus,
   StatusResponse,
 } from "@/types/api";
@@ -130,7 +131,9 @@ function normalizeLoadedModel(raw: Partial<LoadedModel> | null | undefined): Loa
   };
 }
 
-function normalizeGateDecision(raw: Partial<GateDecision> | null | undefined): GateDecision {
+function normalizeGateDecision(
+  raw: Partial<GateDecision> | null | undefined,
+): GateDecision {
   const r = raw ?? {};
   return {
     at: str(r.at),
@@ -140,7 +143,9 @@ function normalizeGateDecision(raw: Partial<GateDecision> | null | undefined): G
   };
 }
 
-export function normalizeGate(raw: Partial<ResourceGateStatus> | null | undefined): ResourceGateStatus {
+export function normalizeGate(
+  raw: Partial<ResourceGateStatus> | null | undefined,
+): ResourceGateStatus {
   const r = raw ?? {};
   return {
     gpu: {
@@ -162,15 +167,24 @@ export function normalizeGate(raw: Partial<ResourceGateStatus> | null | undefine
   };
 }
 
-const VALID_STAGE_STATUSES: readonly StageStatus[] = ["pending", "running", "done", "failed", "skipped"];
+const VALID_STAGE_STATUSES: readonly StageStatus[] = [
+  "pending",
+  "running",
+  "done",
+  "failed",
+  "skipped",
+];
 
 function normalizeStageStatus(value: unknown): StageStatus {
-  return typeof value === "string" && (VALID_STAGE_STATUSES as readonly string[]).includes(value)
+  return typeof value === "string" &&
+    (VALID_STAGE_STATUSES as readonly string[]).includes(value)
     ? (value as StageStatus)
     : "pending";
 }
 
-function normalizeStageInfo(raw: Partial<PipelineStageInfo> | null | undefined): PipelineStageInfo {
+function normalizeStageInfo(
+  raw: Partial<PipelineStageInfo> | null | undefined,
+): PipelineStageInfo {
   const r = raw ?? {};
   return {
     status: normalizeStageStatus(r.status),
@@ -180,7 +194,9 @@ function normalizeStageInfo(raw: Partial<PipelineStageInfo> | null | undefined):
   };
 }
 
-function normalizeLastRun(raw: Partial<PipelineLastRun> | null | undefined): PipelineLastRun | null {
+function normalizeLastRun(
+  raw: Partial<PipelineLastRun> | null | undefined,
+): PipelineLastRun | null {
   if (!raw) return null;
   const stages: Record<string, PipelineStageInfo> = {};
   for (const [k, v] of Object.entries(raw.stages ?? {})) {
@@ -194,7 +210,9 @@ function normalizeLastRun(raw: Partial<PipelineLastRun> | null | undefined): Pip
   };
 }
 
-export function normalizePipeline(raw: Partial<PipelineStatus> | null | undefined): PipelineStatus {
+export function normalizePipeline(
+  raw: Partial<PipelineStatus> | null | undefined,
+): PipelineStatus {
   const r = raw ?? {};
   return {
     current_job: r.current_job ?? null,
@@ -206,7 +224,9 @@ export function normalizePipeline(raw: Partial<PipelineStatus> | null | undefine
   };
 }
 
-function normalizeRunStageEntry(raw: Partial<RunStageEntry> | null | undefined): RunStageEntry {
+function normalizeRunStageEntry(
+  raw: Partial<RunStageEntry> | null | undefined,
+): RunStageEntry {
   const r = raw ?? {};
   return {
     stage: str(r.stage),
@@ -215,7 +235,9 @@ function normalizeRunStageEntry(raw: Partial<RunStageEntry> | null | undefined):
   };
 }
 
-function normalizeCurrentRun(raw: Partial<CurrentRun> | null | undefined): CurrentRun | null {
+function normalizeCurrentRun(
+  raw: Partial<CurrentRun> | null | undefined,
+): CurrentRun | null {
   if (!raw) return null;
   return {
     job_id: num(raw.job_id),
@@ -229,7 +251,9 @@ function normalizeCurrentRun(raw: Partial<CurrentRun> | null | undefined): Curre
   };
 }
 
-function normalizeOtherRunningJob(raw: Partial<OtherRunningJob> | null | undefined): OtherRunningJob {
+function normalizeOtherRunningJob(
+  raw: Partial<OtherRunningJob> | null | undefined,
+): OtherRunningJob {
   const r = raw ?? {};
   return { job_id: num(r.job_id), kind: str(r.kind), started_at: r.started_at ?? null };
 }
@@ -244,7 +268,9 @@ export function normalizeRunsCurrent(
   };
 }
 
-function normalizeReportCitation(raw: Partial<ReportCitation> | null | undefined): ReportCitation {
+function normalizeReportCitation(
+  raw: Partial<ReportCitation> | null | undefined,
+): ReportCitation {
   const r = raw ?? {};
   return {
     item_id: typeof r.item_id === "number" ? r.item_id : null,
@@ -263,6 +289,22 @@ export function normalizeReportCitations(
     citations[n] = normalizeReportCitation(c);
   }
   return { report_id: num(raw?.report_id), citations };
+}
+
+/** W10: normalizes one `GET /api/security-reviews` row into a guaranteed shape. */
+export function normalizeSecurityReviewCard(
+  raw: Partial<SecurityReviewCard> | null | undefined,
+): SecurityReviewCard {
+  return {
+    job_id: num(raw?.job_id),
+    item_id: raw?.item_id ?? null,
+    question: raw?.question ?? null,
+    item_title: raw?.item_title ?? null,
+    reason_he: raw?.reason_he ?? null,
+    snippet: raw?.snippet ?? null,
+    started_at: raw?.started_at ?? null,
+    finished_at: raw?.finished_at ?? null,
+  };
 }
 
 /** Normalizes a `/api/status` or `/ws/status` push into a guaranteed shape. */
@@ -294,7 +336,10 @@ export function normalizeStatus(
  * frontend's clean `InvestigationLogLine` view model.
  */
 export function normalizeInvestigationLogLine(
-  raw: (Partial<InvestigationLogLine> & { results_n?: number; created_at?: string }) | null | undefined,
+  raw:
+    | (Partial<InvestigationLogLine> & { results_n?: number; created_at?: string })
+    | null
+    | undefined,
 ): InvestigationLogLine {
   const r = raw ?? {};
   return {

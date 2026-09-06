@@ -37,6 +37,7 @@ import type {
   ReportDetail,
   ReportSummary,
   RunsCurrentResponse,
+  SecurityReviewCard,
   SettingsGetResponse,
   SettingsName,
   SettingsPutResponse,
@@ -161,9 +162,19 @@ export interface ApiClient {
   getInvestigation(jobId: string): Promise<InvestigationDetail>;
   postInvestigationStop(jobId: string): Promise<void>;
   /** U12 "חקירה חדשה": start a free-standing investigation from a typed question. */
-  postInvestigationNew(body: { question: string; item_id?: number | null }): Promise<{ job_id: string }>;
+  postInvestigationNew(body: {
+    question: string;
+    item_id?: number | null;
+  }): Promise<{ job_id: string }>;
   /** U12 "הרחב חקירה (תקציב נוסף)": re-run with double budget + prior findings as context. */
   postInvestigationExpand(jobId: string): Promise<{ job_id: string }>;
+
+  // W10 (docs/REVIEW_2026-09-06_evening.md round 4): agent/eoa/api/routes/security_review.py.
+  getSecurityReviews(): Promise<SecurityReviewCard[]>;
+  /** "אשר והמשך": re-runs the flagged investigation with the snippet whitelisted. */
+  postSecurityReviewApprove(jobId: string): Promise<{ job_id: string }>;
+  /** "דחה": marks the flagged investigation reviewed, no re-run. */
+  postSecurityReviewDismiss(jobId: string): Promise<{ ok: boolean }>;
 
   askStream(
     body: AskRequest,
@@ -218,7 +229,10 @@ export interface ApiClient {
   /** A14: פטנטים ו-IP (agent/eoa/patents/**). */
   getPatents(query: PatentsQuery): Promise<PatentsResponse>;
   getPatentsStatus(): Promise<PatentsStatusResponse>;
-  getPatentsHeatmap(topCpc?: number, topAssignees?: number): Promise<PatentHeatmapResponse>;
+  getPatentsHeatmap(
+    topCpc?: number,
+    topAssignees?: number,
+  ): Promise<PatentHeatmapResponse>;
   getPatentSurveys(limit?: number): Promise<PatentSurveyCard[]>;
   createPatentSurvey(topic: string): Promise<PatentSurveyCreateResponse>;
 

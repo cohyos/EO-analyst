@@ -8,9 +8,8 @@ import type { ReportCitation } from "@/types/api";
  * `eoa.report.daily._extend_citation_registry` adds solely because a business event referenced an
  * item outside that list -- those rendered as inert `[n]` text with no link and no tooltip at all.
  * `citations` (from `GET /api/reports/{id}/citations`) covers both, so every `[n]` this report
- * actually contains gets a chip: `data-item-id` when it resolves to a real item (the click handler
- * in `ReportBody` then navigates to `/items/:id`), or just `data-url` when it doesn't (opens the
- * source URL in a new tab instead).
+ * actually contains gets a chip: `data-item-id` when it resolves to a real item and/or `data-url`
+ * when a source URL is known (both can be set at once -- see W4 below).
  *
  * F23: `eoa.report.docx_builder.render_html` now ships every `[n]` pre-wrapped as
  * `<a href="#src-n" class="cite">[n]</a>` (an in-page jump to the sources appendix row), so this
@@ -20,6 +19,17 @@ import type { ReportCitation } from "@/types/api";
  * place (kept as one `<a>`, `href="#src-n"` preserved as the fallback target); only a genuinely
  * bare `[n]` -- as still produced by reports rendered before this fix and stored in the DB -- gets
  * wrapped in a brand-new anchor.
+ *
+ * W4 (docs/REVIEW_2026-09-06_evening.md, round 4): the F23/U3 click behavior above sent every
+ * resolved `[n]` straight to `/items/:id`, an internal page -- so clicking a footnote never
+ * actually opened the cited source, which is exactly what the round-4 finding complained about.
+ * `[n]` now always carries `data-n="<n>"` (so `ReportBody` can find its `#src-n` appendix row
+ * without re-parsing the marker text) and, whenever the citation has a `url` -- even one that also
+ * resolves to a real item -- `data-url` too, so the hover tooltip and the click handler both have
+ * the real source URL regardless of whether an internal item page also exists for it. Clicking the
+ * marker itself now scrolls to and highlights the appendix row (`ReportBody`'s job); opening the
+ * source is a dedicated "פתח מקור" link surfaced both in the hover tooltip and (via
+ * `enhanceSourceAppendixLinks` below) on the appendix row.
  */
 // Either a server-rendered `<a ... class="cite">[n]</a>` anchor (group 1/2/3) or a bare `[n]`
 // marker (group 4) from an older stored report. A single alternation in one global regex, scanned
@@ -36,7 +46,13 @@ export function linkifyReportCitations(
 
   return safeHtml.replace(
     CITATION_RE,
-    (match, pre: string | undefined, post: string | undefined, anchoredN: string | undefined, bareN: string | undefined) => {
+    (
+      match,
+      pre: string | undefined,
+      post: string | undefined,
+      anchoredN: string | undefined,
+      bareN: string | undefined,
+    ) => {
       if (anchoredN !== undefined) {
         // Already anchored to the appendix (`href="#src-n"`, preserved via `pre`/`post`) --
         // augment in place with the eo-citation class + data attributes instead of nesting a
@@ -45,13 +61,14 @@ export function linkifyReportCitations(
         const citation = map[anchoredN];
         if (!citation) return match;
         const titleAttr = citation.title ? ` title="${escapeAttr(citation.title)}"` : "";
-        const dataAttr =
-          citation.item_id != null
-            ? ` data-item-id="${citation.item_id}"`
-            : citation.url
-              ? ` data-url="${escapeAttr(citation.url)}"`
-              : "";
-        return `<a${pre}class="cite eo-citation"${post}${dataAttr}${titleAttr}>[${anchoredN}]</a>`;
+        // W4: item-id and url are independent facts about the same citation -- set both
+        // attributes whenever known, rather than only one or the other, so `ReportBody` always
+        // has the real source URL to offer via "פתח מקור" even when the citation also resolves
+        // to an internal item.
+        const itemAttr =
+          citation.item_id != null ? ` data-item-id="${citation.item_id}"` : "";
+        const urlAttr = citation.url ? ` data-url="${escapeAttr(citation.url)}"` : "";
+        return `<a${pre}class="cite eo-citation"${post} data-n="${anchoredN}"${itemAttr}${urlAttr}${titleAttr}>[${anchoredN}]</a>`;
       }
 
       const nStr = bareN!;
@@ -67,5 +84,42 @@ export function linkifyReportCitations(
 }
 
 function escapeAttr(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// One appendix row, as `docx_builder.render_html` emits it: `<tr id="src-N">...<td>` link column
+// `</td></tr>`, the link column being either "—" (no url) or `_html_link()`'s
+// `<a href="URL"><bdi dir="ltr">URL</bdi></a>` -- the only `<a>` in the row, since the title/source
+// columns are plain (non-linked) `_bidi_html` text.
+const APPENDIX_ROW_RE =
+  /(<tr id="src-\d+">[\s\S]*?)<a href="([^"]+)"([^>]*)>[\s\S]*?<\/a>([\s\S]*?<\/tr>)/g;
+
+/**
+ * W4: the sources-appendix link `eoa.report.docx_builder.render_html` (`agent/eoa/report/**`, out
+ * of scope for this UI-only pass) emits per row has neither `target="_blank"`/`rel="noopener"` nor
+ * a real "פתח מקור" label -- it's just the raw URL as its own link text. Rewritten here at the
+ * frontend boundary instead: same href, opens in a new tab, and reads as an explicit action rather
+ * than a URL to parse. The original URL is kept as the link's `title` (hover) so it's still
+ * inspectable before opening.
+ */
+export function enhanceSourceAppendixLinks(html: string | null | undefined): string {
+  const safeHtml = html ?? "";
+  return safeHtml.replace(
+    APPENDIX_ROW_RE,
+    (_match, before: string, url: string, extraAttrs: string, after: string) => {
+      if (extraAttrs.includes("data-appendix-link")) return _match; // already enhanced, don't double-wrap
+      // `url` was captured straight out of the server's `href="..."` attribute, so it's already
+      // HTML-attribute-escaped (e.g. a literal `&` arrives as `&amp;`) -- reused as-is for both
+      // `href` and `title` below, not re-escaped (which would turn `&amp;` into `&amp;amp;`).
+      return (
+        `${before}<a href="${url}" target="_blank" rel="noopener noreferrer" data-appendix-link="1" ` +
+        `class="source-open-link" title="${url}">` +
+        `<span aria-hidden="true">↗</span> פתח מקור</a>${after}`
+      );
+    },
+  );
 }

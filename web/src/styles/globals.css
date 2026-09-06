@@ -224,6 +224,34 @@ bdi {
   background: var(--accent);
 }
 
+/* W4: the sources-appendix row a `[n]` marker jumps/scrolls to (ReportBody.tsx), briefly
+   highlighted so the analyst can actually see which row just came into view -- a plain
+   `scrollIntoView` with no visual cue is easy to miss in a long table. Transition-based (not a
+   keyframe flash) so it also degrades gracefully for prefers-reduced-motion below. */
+.eo-appendix-highlight {
+  background: var(--accent-muted) !important;
+  transition: background 1.8s ease-out;
+}
+
+.source-open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.source-open-link:hover {
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eo-appendix-highlight {
+    transition: none;
+  }
+}
+
 .report-body h2 {
   font-size: 1.125rem;
   font-weight: 700;

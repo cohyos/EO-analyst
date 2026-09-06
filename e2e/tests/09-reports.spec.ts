@@ -47,11 +47,8 @@ test.describe("Reports screen (/reports)", () => {
   });
 
   // F23 (docs/QA_PROGRAM.md section 4, 2026-09-06): `[n]` citations must be real, single (not
-  // nested) links, and clicking one that resolves to a real item must navigate to /items/:id.
-  test("citation markers are single anchors (no nested <a>) and a resolved one navigates to /items/:id", async ({
-    page,
-    request,
-  }) => {
+  // nested) links.
+  test("citation markers are single anchors (no nested <a>)", async ({ page, request }) => {
     const reports = await (await request.get(`${API_BASE}/api/reports?limit=30`)).json();
     test.skip(!Array.isArray(reports) || reports.length === 0, "No reports exist in this environment");
 
@@ -68,12 +65,54 @@ test.describe("Reports screen (/reports)", () => {
       const nestedAnchors = await citations.nth(i).locator("a").count();
       expect(nestedAnchors, `citation #${i} must not nest another <a>`).toBe(0);
     }
+  });
 
-    const resolvedCitation = article.locator("a.eo-citation[data-item-id]").first();
-    if ((await resolvedCitation.count()) > 0) {
-      const itemId = await resolvedCitation.getAttribute("data-item-id");
-      await resolvedCitation.click();
-      await expect(page).toHaveURL(new RegExp(`/items/${itemId}$`));
+  // W4 (docs/REVIEW_2026-09-06_evening.md round 4): a resolved `[n]` marker used to navigate
+  // straight to /items/:id (F23/U3) -- which never actually opened the cited source. It must now
+  // (a) scroll to and highlight its row in the sources appendix, and (b) both the appendix row and
+  // the [n] marker's own hover tooltip must offer a real "פתח מקור" link that opens the source URL
+  // in a new tab.
+  test("a resolved [n] scrolls to its appendix row (not /items/:id) and exposes a real open-source link", async ({
+    page,
+    request,
+  }) => {
+    const reports = await (await request.get(`${API_BASE}/api/reports?limit=30`)).json();
+    test.skip(!Array.isArray(reports) || reports.length === 0, "No reports exist in this environment");
+
+    await page.goto(`/reports?id=${reports[0].id}`);
+    const article = page.locator("article");
+    await expect(article).toBeVisible({ timeout: 15_000 });
+
+    const marker = article.locator("a.eo-citation[data-n]").first();
+    test.skip((await marker.count()) === 0, "This report has no resolved [n] citation markers");
+
+    const n = await marker.getAttribute("data-n");
+    const beforeUrl = page.url();
+    await marker.click();
+    // Stays on the report page -- no navigation to /items/:id.
+    await expect(page).toHaveURL(beforeUrl);
+
+    const appendixRow = page.locator(`#src-${n}`);
+    await expect(appendixRow).toBeInViewport();
+
+    // The appendix row's own "פתח מקור" link (if this citation has a source URL) opens in a new
+    // tab with noopener.
+    const openLink = appendixRow.getByRole("link", { name: /פתח מקור/ });
+    if ((await openLink.count()) > 0) {
+      await expect(openLink).toHaveAttribute("target", "_blank");
+      await expect(openLink).toHaveAttribute("rel", /noopener/);
+      const href = await openLink.getAttribute("href");
+      expect(href).toMatch(/^https?:\/\//);
+    }
+
+    // Hovering the marker itself surfaces the same open-source action in a tooltip.
+    await marker.hover();
+    const tooltip = page.getByRole("tooltip");
+    await expect(tooltip).toBeVisible();
+    const tooltipOpenLink = tooltip.getByRole("link", { name: /פתח מקור/ });
+    if ((await tooltipOpenLink.count()) > 0) {
+      await expect(tooltipOpenLink).toHaveAttribute("target", "_blank");
+      await expect(tooltipOpenLink).toHaveAttribute("rel", /noopener/);
     }
   });
 });

@@ -5,6 +5,7 @@ import { Pause, Square } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { CitationText } from "@/components/CitationText";
+import { SecurityReviewBanner } from "@/components/investigations/SecurityReviewBanner";
 import { useInvestigationSocket } from "@/hooks/useInvestigationSocket";
 import { formatDateTime } from "@/lib/time";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
@@ -27,7 +28,8 @@ export function InvestigationDetailPage() {
 
   const stop = useMutation({
     mutationFn: () => api.postInvestigationStop(jobId!),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["investigation", jobId] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["investigation", jobId] }),
   });
 
   // U12 (docs/REVIEW_2026-09-05.md): the old "המשך חקירה" button silently re-ran the identical
@@ -39,6 +41,23 @@ export function InvestigationDetailPage() {
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["investigations"] });
       navigate(`/investigations/${res.job_id}`);
+    },
+  });
+
+  // W10: "אשר והמשך" re-runs with the flagged snippet whitelisted and follows straight to the new
+  // job, mirroring "הרחב חקירה" above; "דחה" just marks this one reviewed and stays put.
+  const approveSecurityReview = useMutation({
+    mutationFn: () => api.postSecurityReviewApprove(jobId!),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["security-reviews"] });
+      navigate(`/investigations/${res.job_id}`);
+    },
+  });
+  const dismissSecurityReview = useMutation({
+    mutationFn: () => api.postSecurityReviewDismiss(jobId!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["investigation", jobId] });
+      queryClient.invalidateQueries({ queryKey: ["security-reviews"] });
     },
   });
 
@@ -59,7 +78,8 @@ export function InvestigationDetailPage() {
   }, [allLog.length, paused]);
 
   if (isLoading) return <LoadingState label="טוען חקירה…" />;
-  if (isError || !data) return <ErrorState onRetry={() => refetch()} message="החקירה לא נמצאה" />;
+  if (isError || !data)
+    return <ErrorState onRetry={() => refetch()} message="החקירה לא נמצאה" />;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
@@ -71,13 +91,19 @@ export function InvestigationDetailPage() {
             </h2>
             {isRunning ? (
               <span className="flex items-center gap-1 rounded-full bg-accent-muted px-2 py-0.5 text-xs font-medium text-accent">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" aria-hidden="true" />
+                <span
+                  className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent"
+                  aria-hidden="true"
+                />
                 רץ עכשיו
               </span>
             ) : (
               displayOutcome && (
                 <span
-                  className={cn("rounded-full px-2 py-0.5 text-xs font-medium", outcomeTone(displayOutcome))}
+                  className={cn(
+                    "rounded-full px-2 py-0.5 text-xs font-medium",
+                    outcomeTone(displayOutcome),
+                  )}
                 >
                   {outcomeLabel(displayOutcome)}
                 </span>
@@ -85,14 +111,15 @@ export function InvestigationDetailPage() {
             )}
           </div>
           <p className="mt-1 text-xs text-fg-dim">
-            {formatDateTime(data.started_at)} · {data.rounds} סבבים · {data.pages_read} עמודים ·{" "}
-            {connected ? "מחובר" : "מנותק"}
+            {formatDateTime(data.started_at)} · {data.rounds} סבבים · {data.pages_read}{" "}
+            עמודים · {connected ? "מחובר" : "מנותק"}
           </p>
           {data.answer && (
             <p className="mt-1 text-xs text-fg-dim">
-              תקציב: {data.answer.queries_used ?? data.queries}/{data.answer.max_queries ?? "—"} שאילתות ·{" "}
-              {data.answer.pages_read ?? data.pages_read}/{data.answer.max_pages ?? "—"} עמודים ·{" "}
-              {(data.answer.sources ?? []).length} מקורות נקראו
+              תקציב: {data.answer.queries_used ?? data.queries}/
+              {data.answer.max_queries ?? "—"} שאילתות ·{" "}
+              {data.answer.pages_read ?? data.pages_read}/{data.answer.max_pages ?? "—"}{" "}
+              עמודים · {(data.answer.sources ?? []).length} מקורות נקראו
             </p>
           )}
         </div>
@@ -108,6 +135,17 @@ export function InvestigationDetailPage() {
           </button>
         )}
       </header>
+
+      {data.answer?.security_review && !data.answer?.security_review_resolved && (
+        <SecurityReviewBanner
+          reasonHe={data.answer.security_review_reason_he ?? null}
+          snippet={data.answer.security_review_snippet ?? null}
+          onApprove={() => approveSecurityReview.mutate()}
+          onDismiss={() => dismissSecurityReview.mutate()}
+          approving={approveSecurityReview.isPending}
+          dismissing={dismissSecurityReview.isPending}
+        />
+      )}
 
       <section aria-label="לוג חקירה חי">
         <div className="mb-2 flex items-center gap-2">
@@ -135,7 +173,9 @@ export function InvestigationDetailPage() {
             {allLog.map((line, i) => (
               <li key={i} className="rounded-md border border-border bg-bg-raised p-2">
                 <div className="flex flex-wrap items-center gap-2 text-fg-dim">
-                  <span className="rounded bg-bg-sunken px-1.5 py-0.5">סבב {line.round}</span>
+                  <span className="rounded bg-bg-sunken px-1.5 py-0.5">
+                    סבב {line.round}
+                  </span>
                   <span className="uppercase">{line.lang}</span>
                   <span>{line.results} תוצאות</span>
                   <span className="ms-auto">{formatDateTime(line.at)}</span>
@@ -156,7 +196,10 @@ export function InvestigationDetailPage() {
       </section>
 
       {data.answer && (
-        <section aria-label="תשובה סופית" className="rounded-lg border border-border bg-bg-raised p-4">
+        <section
+          aria-label="תשובה סופית"
+          className="rounded-lg border border-border bg-bg-raised p-4"
+        >
           <h3 className="mb-2 text-sm font-semibold text-fg-dim">תשובה</h3>
           <bdi className="block text-sm leading-relaxed" dir="auto">
             <CitationText
@@ -175,7 +218,10 @@ export function InvestigationDetailPage() {
         </section>
       )}
 
-      {(data.state === "done" || data.state === "stopped" || data.state === "not_found" || data.state === "error") && (
+      {(data.state === "done" ||
+        data.state === "stopped" ||
+        data.state === "not_found" ||
+        data.state === "error") && (
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"

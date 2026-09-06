@@ -234,6 +234,30 @@ test.describe("Feed screen (/feed)", () => {
     await expect(page).toHaveURL(/\/feed/); // stays on the feed, unlike Enter
   });
 
+  // W8 (docs/REVIEW_2026-09-06_evening.md round 4): a single click, not just double-click/Space,
+  // now opens the drawer -- "clicking a row" used to just select it with no visible reaction.
+  test("a single click on a row opens the inline detail drawer", async ({ page }) => {
+    await page.goto("/feed");
+    const firstRow = page.locator('[data-testid^="feed-row-"]').first();
+    await expect(firstRow).toBeVisible({ timeout: 20_000 });
+
+    await firstRow.click({ position: { x: 300, y: 8 } }); // avoid the row's own outbound links
+    const panel = page.locator('[data-testid="feed-detail-panel"]');
+    await expect(panel).toBeVisible({ timeout: 10_000 });
+    await expect(page).toHaveURL(/\/feed/);
+
+    // Level/domain chips and a real "פתח מקור" open-source action, per W8.
+    await expect(panel.locator("[data-level]").first()).toBeVisible();
+    const openSource = panel.getByRole("link", { name: /פתח מקור/ });
+    if ((await openSource.count()) > 0) {
+      await expect(openSource).toHaveAttribute("target", "_blank");
+    }
+
+    // Escape closes it (keyboard accessibility).
+    await page.keyboard.press("Escape");
+    await expect(panel).not.toBeVisible();
+  });
+
   test("keyboard: Space opens the inline quick-preview panel for the selected row (without navigating away)", async ({
     page,
   }) => {

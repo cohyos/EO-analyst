@@ -3,6 +3,7 @@ import type { ItemCard, TriageLevel } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { SecurityStatusIcon } from "./SecurityStatusIcon";
 import { ExplainScorePopover } from "./ExplainScorePopover";
+import { DuplicateOutletsPopover } from "./DuplicateOutletsPopover";
 import { domainLabel } from "@/lib/taxonomy";
 import { timeAgo } from "@/lib/time";
 import { cn } from "@/lib/cn";
@@ -16,6 +17,7 @@ export function FeedRow({
   onRate,
   isRating,
   investigating,
+  duplicates,
   style,
 }: {
   item: ItemCard;
@@ -26,6 +28,9 @@ export function FeedRow({
   isRating?: boolean;
   /** Q5-3 (docs/qa/findings_Q5_r1.md): a deep_search job is queued/running for this item. */
   investigating?: boolean;
+  /** W9 (docs/REVIEW_2026-09-06_evening.md round 4): other outlets covering the same story,
+   * folded into this row by `lib/dedupGroups.ts` -- renders as a "+N מקורות" chip. */
+  duplicates?: ItemCard[];
   style?: React.CSSProperties;
 }) {
   const t = useT();
@@ -50,7 +55,14 @@ export function FeedRow({
         );
         e.dataTransfer.effectAllowed = "copy";
       }}
-      onClick={onSelect}
+      onClick={() => {
+        // W8 (docs/REVIEW_2026-09-06_evening.md round 4): a single click on a row now opens the
+        // inline detail drawer directly (previously only double-click/Space did -- a single click
+        // just selected the row, which read as "clicking a row does nothing"). Keeps updating
+        // selection too, so J/K keyboard nav continues from wherever the mouse last clicked.
+        onSelect();
+        onOpen();
+      }}
       onDoubleClick={onOpen}
       style={style}
       className={cn(
@@ -91,6 +103,9 @@ export function FeedRow({
       <span className="hidden shrink-0 rounded-full bg-bg-sunken px-2 py-0.5 text-xs text-fg-muted md:inline">
         {domainLabel(item.domain)}
       </span>
+      {duplicates && duplicates.length > 0 && (
+        <DuplicateOutletsPopover duplicates={duplicates} size="sm" />
+      )}
       {/* A13 (מיקוד תעשייה ישראלית): small flag badge, mirroring the entity "★ watchlist" badge
           pattern — visible whenever the deterministic scoring pipeline marked this item relevant. */}
       {(item.israel_relevance ?? 0) >= 0.5 && (

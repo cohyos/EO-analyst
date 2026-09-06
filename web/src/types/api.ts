@@ -211,13 +211,7 @@ export interface GraphResponse {
 }
 
 export type InvestigationState =
-  | "queued"
-  | "running"
-  | "done"
-  | "failed"
-  | "stopped"
-  | "error"
-  | "not_found";
+  "queued" | "running" | "done" | "failed" | "stopped" | "error" | "not_found";
 
 // U11/F17/F18 (docs/REVIEW_2026-09-05.md): the granular reason an investigation ended, distinct
 // from the raw job `state` -- lets the UI show "נעצר בגלל תקציב" vs "לא נמצא" vs "נמצא" instead of
@@ -280,11 +274,35 @@ export interface InvestigationOut {
   max_pages?: number;
   rounds?: number;
   stopped_reason?: InvestigationOutcomeReason | string;
+  // W10 (docs/REVIEW_2026-09-06_evening.md round 4): set by the L2 prompt-injection guard when it
+  // has to partially block an answer. Field names as documented by the deep-search engineer
+  // working the same round -- not yet landed on the live backend, so every consumer of these must
+  // treat their absence as the normal case, not an error (`GET /api/security-reviews` -- see
+  // `agent/eoa/api/routes/security_review.py` -- likewise returns `[]` until they exist).
+  security_review?: boolean;
+  security_review_reason_he?: string | null;
+  security_review_snippet?: string | null;
+  /** Set by `POST /api/security-reviews/{job_id}/approve|dismiss` once handled -- the banner
+   * hides once this is true, without needing a fresh page load. */
+  security_review_resolved?: boolean;
 }
 
 export interface InvestigationDetail extends InvestigationSummary {
   log: InvestigationLogLine[];
   answer: InvestigationOut | null;
+}
+
+/** W10: one row of `GET /api/security-reviews` (agent/eoa/api/routes/security_review.py) -- a
+ * `deep_search` job flagged for review and not yet approved/dismissed. */
+export interface SecurityReviewCard {
+  job_id: number;
+  item_id: number | null;
+  question: string | null;
+  item_title: string | null;
+  reason_he: string | null;
+  snippet: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface AskCitation {
@@ -628,7 +646,8 @@ export interface ForecastCard {
 
 // A15 (docs/TENDER_PORTALS.md): per-source status returned by the coverage panel's backing
 // endpoint (`GET /api/tenders/coverage`). Mirrors `_tender_source_status` (agent/eoa/api/services.py).
-export type TenderSourceStatus = "integrated_keyless" | "waiting_for_key" | "not_integrated";
+export type TenderSourceStatus =
+  "integrated_keyless" | "waiting_for_key" | "not_integrated";
 
 // Mirrors one entry of `tender_source_coverage`'s per-region `sources` list.
 export interface TenderSourceCoverageItem {
@@ -738,12 +757,7 @@ export interface LoadedModel {
 
 // Mirrors eoa.resources.gate.Decision (agent/eoa/resources/gate.py)
 export type GateDecisionKind =
-  | "proceed"
-  | "queued"
-  | "deferred"
-  | "swap"
-  | "throttled"
-  | "thermal_pause";
+  "proceed" | "queued" | "deferred" | "swap" | "throttled" | "thermal_pause";
 
 export interface GateDecision {
   at: string;
@@ -947,7 +961,8 @@ export interface PatentSurveyCreateResponse {
 
 // --- A17: מטע"דים -- מפרטים ומחירי ייחוס (eoa.payloads), עם היסטוריית גרסאות ------------------
 
-export type PayloadCategory = "gimbal" | "pod" | "thermal_camera" | "detector_core" | "lrf" | "seeker" | "other";
+export type PayloadCategory =
+  "gimbal" | "pod" | "thermal_camera" | "detector_core" | "lrf" | "seeker" | "other";
 
 export interface PayloadRecord {
   id: number;

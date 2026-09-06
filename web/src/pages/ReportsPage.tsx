@@ -14,7 +14,10 @@ const KIND_LABEL: Record<string, string> = {
   ad_hoc: "אד-הוק",
 };
 
-function addHeadingIds(html: string): { html: string; toc: { id: string; text: string }[] } {
+function addHeadingIds(html: string): {
+  html: string;
+  toc: { id: string; text: string }[];
+} {
   let i = 0;
   const toc: { id: string; text: string }[] = [];
   const withIds = html.replace(/<h([23])>(.*?)<\/h\1>/g, (_m, level, text) => {
@@ -66,7 +69,9 @@ export function ReportsPage() {
           </select>
         </div>
         {listQuery.isLoading && <LoadingState label="טוען דוחות…" />}
-        {listQuery.isError && <ErrorState onRetry={() => listQuery.refetch()} />}
+        {listQuery.isError && (
+          <ErrorState error={listQuery.error} onRetry={() => listQuery.refetch()} />
+        )}
         {listQuery.data && listQuery.data.length === 0 && (
           <EmptyState title="אין דוחות" />
         )}
@@ -96,7 +101,9 @@ export function ReportsPage() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!selectedId && <EmptyState title="בחר דוח מהרשימה" />}
         {selectedId && detailQuery.isLoading && <LoadingState label="טוען דוח…" />}
-        {selectedId && detailQuery.isError && <ErrorState onRetry={() => detailQuery.refetch()} />}
+        {selectedId && detailQuery.isError && (
+          <ErrorState error={detailQuery.error} onRetry={() => detailQuery.refetch()} />
+        )}
         {detailQuery.data && processed && (
           <div className="mx-auto flex max-w-4xl gap-6 p-4 md:p-6">
             <article className="min-w-0 flex-1">

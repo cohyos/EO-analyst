@@ -59,8 +59,12 @@ export function FeedDetailPanel({
             <bdi>{item.source_name}</bdi>
             <span>·</span>
             <span className="font-mono">{formatDateTime(item.published_at)}</span>
-            <span>·</span>
-            <span>{domainLabel(item.domain)}</span>
+            {/* W8: an explicit domain chip (mirroring FeedRow's own pill), not bare text --
+                paired with the LevelBadge chip above so both classification facets read as
+                chips in the drawer, same as the rest of the app's triage conventions. */}
+            <span className="rounded-full bg-bg-sunken px-2 py-0.5 text-fg-muted">
+              {domainLabel(item.domain)}
+            </span>
           </div>
         </div>
         <Link

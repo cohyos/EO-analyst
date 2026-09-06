@@ -36,6 +36,7 @@ import type {
   ReportDetail,
   ReportSummary,
   RunsCurrentResponse,
+  SecurityReviewCard,
   SettingsGetResponse,
   SettingsName,
   SettingsPutResponse,
@@ -64,6 +65,7 @@ import {
   normalizeNightSummary,
   normalizeReportCitations,
   normalizeRunsCurrent,
+  normalizeSecurityReviewCard,
   num,
   str,
 } from "./normalize";
@@ -143,14 +145,41 @@ export async function logoutRemoteAccess(): Promise<void> {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
+// W13 (docs/REVIEW_2026-09-06_evening.md round 4): "טעינת הדוחות איטית... הרבה שעוני חול" -- a
+// request that never resolves (a hung backend, a dead connection) used to leave every page's
+// LoadingState spinning forever, with no way out but a manual reload. Every call through `request`
+// now aborts after `timeoutMs` (default 10s) and surfaces a dedicated `ApiError("timeout", ...)` so
+// `ErrorState` can show "השרת לא הגיב, נסה שוב" with a working retry button instead of an endless
+// spinner. A few endpoints are legitimately synchronous and slow (e.g. `postBdReport`/
+// `createPatentSurvey` build a report inline for up to ~55s before falling back to a job id) --
+// those pass an explicit longer `timeoutMs`.
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+async function request<T>(
+  path: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<T> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchInit } = init ?? {};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...fetchInit,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(fetchInit.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("timeout", "השרת לא הגיב, נסה שוב", null);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   setRemoteSessionActive(res.headers.get("x-eoa-remote-session") === "1");
   if (!res.ok) {
     let body: unknown = null;
@@ -159,7 +188,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // ignore parse failure, fall through to generic error
     }
-    const err = body as { error?: { code: string; message_he: string; detail: unknown } } | null;
+    const err = body as {
+      error?: { code: string; message_he: string; detail: unknown };
+    } | null;
     if (err?.error) {
       if (err.error.code === "auth_required") setAuthRequired(true);
       throw new ApiError(err.error.code, err.error.message_he, err.error.detail);
@@ -223,7 +254,9 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
   };
 }
 
-function normalizeTechRadar(raw: Partial<TechRadarResponse> | null | undefined): TechRadarResponse {
+function normalizeTechRadar(
+  raw: Partial<TechRadarResponse> | null | undefined,
+): TechRadarResponse {
   const r = raw ?? {};
   return {
     weeks: num(r.weeks, 12),
@@ -249,7 +282,9 @@ function normalizeItemDetail(raw: Partial<ItemDetail> | null | undefined): ItemD
   };
 }
 
-function normalizeEntitySummary(raw: Partial<EntitySummary> | null | undefined): EntitySummary {
+function normalizeEntitySummary(
+  raw: Partial<EntitySummary> | null | undefined,
+): EntitySummary {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -268,13 +303,20 @@ function normalizeEntitySummary(raw: Partial<EntitySummary> | null | undefined):
   };
 }
 
-function normalizeEntityDetail(raw: Partial<EntityDetail> | null | undefined): EntityDetail {
+function normalizeEntityDetail(
+  raw: Partial<EntityDetail> | null | undefined,
+): EntityDetail {
   const r = raw ?? {};
   return {
     ...normalizeEntitySummary(r),
     timeline: arr(r.timeline),
     business_events: arr(r.business_events),
-    kpis: r.kpis ?? { mentions_7d: 0, mentions_30d: 0, events_count: 0, related_items_by_level: {} },
+    kpis: r.kpis ?? {
+      mentions_7d: 0,
+      mentions_30d: 0,
+      events_count: 0,
+      related_items_by_level: {},
+    },
     edge_groups: arr(r.edge_groups),
     neighbors: arr(r.neighbors),
   };
@@ -331,7 +373,9 @@ function normalizeInvestigationDetail(
   };
 }
 
-function normalizeReportSummary(raw: Partial<ReportSummary> | null | undefined): ReportSummary {
+function normalizeReportSummary(
+  raw: Partial<ReportSummary> | null | undefined,
+): ReportSummary {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -348,7 +392,9 @@ function normalizeReportSummary(raw: Partial<ReportSummary> | null | undefined):
   };
 }
 
-function normalizeReportDetail(raw: Partial<ReportDetail> | null | undefined): ReportDetail {
+function normalizeReportDetail(
+  raw: Partial<ReportDetail> | null | undefined,
+): ReportDetail {
   const r = raw ?? {};
   return {
     ...normalizeReportSummary(r),
@@ -412,7 +458,9 @@ function normalizeTenderCard(raw: Partial<TenderCard> | null | undefined): Tende
   };
 }
 
-function normalizePatentRecord(raw: Partial<PatentRecord> | null | undefined): PatentRecord {
+function normalizePatentRecord(
+  raw: Partial<PatentRecord> | null | undefined,
+): PatentRecord {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -444,7 +492,9 @@ function normalizePatentRecord(raw: Partial<PatentRecord> | null | undefined): P
   };
 }
 
-function normalizePayloadRecord(raw: Partial<PayloadRecord> | null | undefined): PayloadRecord {
+function normalizePayloadRecord(
+  raw: Partial<PayloadRecord> | null | undefined,
+): PayloadRecord {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -464,7 +514,9 @@ function normalizePayloadRecord(raw: Partial<PayloadRecord> | null | undefined):
   };
 }
 
-function normalizePatentSurveyCard(raw: Partial<PatentSurveyCard> | null | undefined): PatentSurveyCard {
+function normalizePatentSurveyCard(
+  raw: Partial<PatentSurveyCard> | null | undefined,
+): PatentSurveyCard {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -478,7 +530,9 @@ function normalizePatentSurveyCard(raw: Partial<PatentSurveyCard> | null | undef
   };
 }
 
-function normalizeForecastCard(raw: Partial<ForecastCard> | null | undefined): ForecastCard {
+function normalizeForecastCard(
+  raw: Partial<ForecastCard> | null | undefined,
+): ForecastCard {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -498,7 +552,9 @@ function normalizeForecastCard(raw: Partial<ForecastCard> | null | undefined): F
   };
 }
 
-function normalizeClarification(raw: Partial<Clarification> | null | undefined): Clarification {
+function normalizeClarification(
+  raw: Partial<Clarification> | null | undefined,
+): Clarification {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -586,7 +642,11 @@ export const realApi: ApiClient = {
       })}`,
     );
     const items = arr(data?.items).map(normalizeItemCard);
-    return { total: num(data?.total, items.length), items, groups: data?.groups ?? undefined };
+    return {
+      total: num(data?.total, items.length),
+      items,
+      groups: data?.groups ?? undefined,
+    };
   },
   getItemsByCountry: async (query) => {
     const data = await request<Partial<ItemsByCountryResponse>>(
@@ -675,6 +735,23 @@ export const realApi: ApiClient = {
     return { job_id: idStr(data?.job_id) };
   },
 
+  // W10 (docs/REVIEW_2026-09-06_evening.md round 4): agent/eoa/api/routes/security_review.py.
+  getSecurityReviews: async () =>
+    arr(await request<Partial<SecurityReviewCard>[] | null>("/api/security-reviews")).map(
+      normalizeSecurityReviewCard,
+    ),
+  postSecurityReviewApprove: async (jobId: string) => {
+    const data = await request<{ job_id?: string | number }>(
+      `/api/security-reviews/${jobId}/approve`,
+      { method: "POST" },
+    );
+    return { job_id: idStr(data?.job_id) };
+  },
+  postSecurityReviewDismiss: (jobId: string) =>
+    request<{ ok: boolean }>(`/api/security-reviews/${jobId}/dismiss`, {
+      method: "POST",
+    }),
+
   askStream: (body: AskRequest, handlers) => {
     const controller = new AbortController();
     (async () => {
@@ -698,9 +775,7 @@ export const realApi: ApiClient = {
           const lines = buffer.split("\n\n");
           buffer = lines.pop() ?? "";
           for (const chunk of lines) {
-            const dataLine = chunk
-              .split("\n")
-              .find((l) => l.startsWith("data:"));
+            const dataLine = chunk.split("\n").find((l) => l.startsWith("data:"));
             if (!dataLine) continue;
             const json = dataLine.slice(5).trim();
             if (!json) continue;
@@ -712,7 +787,8 @@ export const realApi: ApiClient = {
             }
             if (evt.type === "token") handlers.onToken(str(evt.text));
             else if (evt.type === "citations") handlers.onCitations(arr(evt.items));
-            else if (evt.type === "meta") handlers.onMeta?.(str(evt.provider), str(evt.model));
+            else if (evt.type === "meta")
+              handlers.onMeta?.(str(evt.provider), str(evt.model));
             else if (evt.type === "sources") handlers.onSources?.(arr(evt.items));
             else if (evt.type === "answer_final") handlers.onAnswerFinal?.(str(evt.text));
             else if (evt.type === "done") handlers.onDone();
@@ -727,9 +803,9 @@ export const realApi: ApiClient = {
   },
 
   getConferences: async (from, to) =>
-    arr(await request<Partial<Conference>[] | null>(`/api/conferences${qs({ from, to })}`)).map(
-      normalizeConference,
-    ),
+    arr(
+      await request<Partial<Conference>[] | null>(`/api/conferences${qs({ from, to })}`),
+    ).map(normalizeConference),
   getConferencesIcalUrl: () => "/api/conferences/ical",
 
   getTenders: async (query: TendersQuery) => {
@@ -754,28 +830,31 @@ export const realApi: ApiClient = {
   },
   getTenderForecasts: async (limit = 100) =>
     arr(
-      await request<Partial<ForecastCard>[] | null>(`/api/tenders/forecasts${qs({ limit })}`),
+      await request<Partial<ForecastCard>[] | null>(
+        `/api/tenders/forecasts${qs({ limit })}`,
+      ),
     ).map(normalizeForecastCard),
 
   getTenderSourceCoverage: async () => {
-    type CoverageItem = TenderSourceCoverageResponse["regions"][number]["sources"][number];
-    const raw = await request<Partial<TenderSourceCoverageResponse> | null>("/api/tenders/coverage");
+    type CoverageItem =
+      TenderSourceCoverageResponse["regions"][number]["sources"][number];
+    const raw = await request<Partial<TenderSourceCoverageResponse> | null>(
+      "/api/tenders/coverage",
+    );
     return {
       regions: arr(raw?.regions).map((r) => ({
         region: str(r?.region, "other"),
-        sources: arr(r?.sources).map(
-          (s): CoverageItem => ({
-            id: str(s?.id),
-            name: str(s?.name),
-            kind: (s?.kind ?? "search") as CoverageItem["kind"],
-            country: str(s?.country, "other"),
-            status: (s?.status ?? "not_integrated") as CoverageItem["status"],
-            verified: bool(s?.verified),
-            needs_key_env_var: s?.needs_key_env_var ?? null,
-            notices_stored: num(s?.notices_stored),
-            last_fetch_at: s?.last_fetch_at ?? null,
-          }),
-        ),
+        sources: arr(r?.sources).map((s): CoverageItem => ({
+          id: str(s?.id),
+          name: str(s?.name),
+          kind: (s?.kind ?? "search") as CoverageItem["kind"],
+          country: str(s?.country, "other"),
+          status: (s?.status ?? "not_integrated") as CoverageItem["status"],
+          verified: bool(s?.verified),
+          needs_key_env_var: s?.needs_key_env_var ?? null,
+          notices_stored: num(s?.notices_stored),
+          last_fetch_at: s?.last_fetch_at ?? null,
+        })),
       })),
       totals: raw?.totals ?? {},
       source_count: num(raw?.source_count),
@@ -784,7 +863,10 @@ export const realApi: ApiClient = {
 
   // A14: פטנטים ו-IP.
   getPatents: async (query: PatentsQuery) => {
-    const raw = await request<{ patents?: Partial<PatentRecord>[] | null; total?: number }>(
+    const raw = await request<{
+      patents?: Partial<PatentRecord>[] | null;
+      total?: number;
+    }>(
       `/api/patents${qs({
         assignee: query.assignee,
         subdomain: query.subdomain,
@@ -794,30 +876,43 @@ export const realApi: ApiClient = {
         limit: query.limit,
       })}`,
     );
-    return { patents: arr(raw?.patents).map(normalizePatentRecord), total: raw?.total ?? 0 };
+    return {
+      patents: arr(raw?.patents).map(normalizePatentRecord),
+      total: raw?.total ?? 0,
+    };
   },
-  getPatentsStatus: async () =>
-    request<PatentsStatusResponse>("/api/patents/status"),
+  getPatentsStatus: async () => request<PatentsStatusResponse>("/api/patents/status"),
   getPatentsHeatmap: async (topCpc = 10, topAssignees = 10) =>
     request<PatentHeatmapResponse>(
       `/api/patents/heatmap${qs({ top_cpc: topCpc, top_assignees: topAssignees })}`,
     ),
   getPatentSurveys: async (limit = 30) =>
-    arr(await request<Partial<PatentSurveyCard>[] | null>(`/api/patents/surveys${qs({ limit })}`)).map(
-      normalizePatentSurveyCard,
-    ),
+    arr(
+      await request<Partial<PatentSurveyCard>[] | null>(
+        `/api/patents/surveys${qs({ limit })}`,
+      ),
+    ).map(normalizePatentSurveyCard),
   createPatentSurvey: async (topic: string) =>
+    // Builds synchronously in-request when it finishes quickly enough, else falls back to a
+    // job_id to poll -- needs more than the default 10s before that fallback is a false timeout.
     request<PatentSurveyCreateResponse>("/api/patents/surveys", {
       method: "POST",
       body: JSON.stringify({ topic }),
+      timeoutMs: 65_000,
     }),
 
   // A17: מטע"דים -- מפרטים ומחירי ייחוס, עם היסטוריית גרסאות.
   getPayloads: async (query: PayloadsQuery = {}) => {
-    const raw = await request<{ payloads?: Partial<PayloadRecord>[] | null; total?: number }>(
+    const raw = await request<{
+      payloads?: Partial<PayloadRecord>[] | null;
+      total?: number;
+    }>(
       `/api/payloads${qs({ category: query.category, vendor: query.vendor, q: query.q, limit: query.limit })}`,
     );
-    return { payloads: arr(raw?.payloads).map(normalizePayloadRecord), total: raw?.total ?? 0 };
+    return {
+      payloads: arr(raw?.payloads).map(normalizePayloadRecord),
+      total: raw?.total ?? 0,
+    };
   },
   getPayload: async (id: number) => request<PayloadDetailResponse>(`/api/payloads/${id}`),
   getPayloadDiff: async (id: number, a: number, b: number) =>
@@ -825,7 +920,9 @@ export const realApi: ApiClient = {
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
   getTechRadar: async (weeks = 12) =>
-    normalizeTechRadar(await request<Partial<TechRadarResponse>>(`/api/tech/radar${qs({ weeks })}`)),
+    normalizeTechRadar(
+      await request<Partial<TechRadarResponse>>(`/api/tech/radar${qs({ weeks })}`),
+    ),
   getTechItems: async (query: TechItemsQuery = {}) => {
     const data = await request<{ total?: number; items?: Partial<ItemCard>[] | null }>(
       `/api/tech/items${qs({
@@ -885,11 +982,15 @@ export const realApi: ApiClient = {
   // (`id` is a `jobs.id` integer on the wire — the template literal above
   // coerces either the numeric or string form the caller passes.)
   getRunsCurrent: async () =>
-    normalizeRunsCurrent(await request<Partial<RunsCurrentResponse>>("/api/runs/current")),
+    normalizeRunsCurrent(
+      await request<Partial<RunsCurrentResponse>>("/api/runs/current"),
+    ),
 
   getReports: async (kind, limit = 30) =>
     arr(
-      await request<Partial<ReportSummary>[] | null>(`/api/reports${qs({ kind, limit })}`),
+      await request<Partial<ReportSummary>[] | null>(
+        `/api/reports${qs({ kind, limit })}`,
+      ),
     ).map(normalizeReportSummary),
   getReport: async (id) =>
     normalizeReportDetail(await request<Partial<ReportDetail>>(`/api/reports/${id}`)),
@@ -900,21 +1001,28 @@ export const realApi: ApiClient = {
     ),
 
   getBdTerritories: async () =>
-    arr(await request<Partial<BdTerritoryOption>[] | null>("/api/bd/territories")).map((t) => ({
-      territory: str(t.territory),
-      items: num(t.items),
-      tenders: num(t.tenders),
-      forecasts: num(t.forecasts),
-      configured: bool(t.configured),
-    })),
+    arr(await request<Partial<BdTerritoryOption>[] | null>("/api/bd/territories")).map(
+      (t) => ({
+        territory: str(t.territory),
+        items: num(t.items),
+        tenders: num(t.tenders),
+        forecasts: num(t.forecasts),
+        configured: bool(t.configured),
+      }),
+    ),
   getBdReports: async (territory) =>
     arr(
-      await request<Partial<ReportSummary>[] | null>(`/api/bd/reports${qs({ territory })}`),
+      await request<Partial<ReportSummary>[] | null>(
+        `/api/bd/reports${qs({ territory })}`,
+      ),
     ).map(normalizeReportSummary),
   postBdReport: async (territory, lookbackDays) => {
+    // "Builds synchronously if the underlying bd_report job finishes within ~55s, else enqueues
+    // it" (agent/eoa/api/routes/bd.py) -- same reasoning as createPatentSurvey above.
     const data = await request<Partial<BdReportCreateResponse>>("/api/bd/reports", {
       method: "POST",
       body: JSON.stringify({ territory, lookback_days: lookbackDays }),
+      timeoutMs: 65_000,
     });
     return {
       job_id: idStr(data?.job_id),
@@ -950,12 +1058,16 @@ export const realApi: ApiClient = {
         available: bool(p?.available),
         models: arr(p?.models).map((m) => str(m)),
         key_env: p?.key_env ? str(p.key_env) : undefined,
-        power_levels: p?.power_levels ? arr(p.power_levels).map((lvl) => str(lvl)) : undefined,
+        power_levels: p?.power_levels
+          ? arr(p.power_levels).map((lvl) => str(lvl))
+          : undefined,
       })),
     };
   },
   getLlmCalls: async (since = "24h") => {
-    const data = await request<Partial<LlmCallsSummary>>(`/api/llm/calls${qs({ since })}`);
+    const data = await request<Partial<LlmCallsSummary>>(
+      `/api/llm/calls${qs({ since })}`,
+    );
     return {
       since_hours: Number(data?.since_hours) || 24,
       providers: arr(data?.providers).map((p) => ({
@@ -983,7 +1095,11 @@ export const realApi: ApiClient = {
       method: "PUT",
       body: JSON.stringify(body),
     });
-    return { ok: bool(data?.ok), errors: arr(data?.errors), revision: data?.revision ?? null };
+    return {
+      ok: bool(data?.ok),
+      errors: arr(data?.errors),
+      revision: data?.revision ?? null,
+    };
   },
 
   getMcpServers: async () => {
@@ -996,20 +1112,32 @@ export const realApi: ApiClient = {
         transport: s?.transport === "http" ? "http" : "stdio",
         enabled: bool(s?.enabled),
         inherit_cli_only: bool(s?.inherit_cli_only),
-        key_configured: s?.key_configured === null || s?.key_configured === undefined ? null : bool(s.key_configured),
+        key_configured:
+          s?.key_configured === null || s?.key_configured === undefined
+            ? null
+            : bool(s.key_configured),
         key_env: s?.key_env ? arr(s.key_env).map((k) => str(k)) : null,
-        tool_count: s?.tool_count === null || s?.tool_count === undefined ? null : Number(s.tool_count),
+        tool_count:
+          s?.tool_count === null || s?.tool_count === undefined
+            ? null
+            : Number(s.tool_count),
         ok: s?.ok === null || s?.ok === undefined ? null : bool(s.ok),
         error: s?.error ?? null,
-        latency_ms: s?.latency_ms === null || s?.latency_ms === undefined ? null : Number(s.latency_ms),
+        latency_ms:
+          s?.latency_ms === null || s?.latency_ms === undefined
+            ? null
+            : Number(s.latency_ms),
         tools: arr(s?.tools).map((tName) => str(tName)),
       })),
     };
   },
   postMcpServerPing: async (serverId: string) => {
-    const data = await request<Partial<McpPingResponse>>(`/api/mcp/servers/${encodeURIComponent(serverId)}/ping`, {
-      method: "POST",
-    });
+    const data = await request<Partial<McpPingResponse>>(
+      `/api/mcp/servers/${encodeURIComponent(serverId)}/ping`,
+      {
+        method: "POST",
+      },
+    );
     return {
       id: str(data?.id) || serverId,
       ok: bool(data?.ok),
@@ -1020,7 +1148,9 @@ export const realApi: ApiClient = {
     };
   },
   getMcpCalls: async (since = "24h") => {
-    const data = await request<Partial<McpCallsResponse>>(`/api/mcp/calls${qs({ since })}`);
+    const data = await request<Partial<McpCallsResponse>>(
+      `/api/mcp/calls${qs({ since })}`,
+    );
     return {
       since_hours: Number(data?.since_hours) || 24,
       calls: arr(data?.calls).map((c) => ({

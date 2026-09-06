@@ -37,7 +37,7 @@ export function InvestigationsListPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
-  const { data, isLoading, isError, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["investigations"],
     queryFn: () => api.getInvestigations(30),
     refetchInterval: 5000,
@@ -81,83 +81,99 @@ export function InvestigationsListPage() {
     </div>
   );
 
-  if (isLoading) return <LoadingState label="טוען חקירות…" />;
-  if (isError) return <ErrorState onRetry={() => refetch()} />;
-  if (!data || data.length === 0)
-    return (
-      <div className="p-4 md:p-6">
-        {header}
-        <EmptyState title="אין חקירות עומק" description="חקירה נפתחת מפריט בפיד, משאלה חדשה, או מהצ'אט." />
-        <ToastStack toasts={toasts} onDismiss={dismissToast} />
-      </div>
-    );
-
+  // W13 (docs/REVIEW_2026-09-06_evening.md round 4): the header (title + "חקירה חדשה" + the new-
+  // investigation dialog) used to be hidden behind `if (isLoading) return <LoadingState />` --
+  // rendering nothing else until the list loaded. It now renders immediately every time; only the
+  // table area below it swaps between skeleton/error/empty/data.
   return (
     <div className="p-4 md:p-6">
       {header}
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
-      <div className="overflow-x-auto rounded-lg border border-border">
-        <table className="w-full min-w-[720px] text-sm">
-          <thead className="bg-bg-raised text-xs text-fg-dim">
-            <tr>
-              <th className="p-2 text-start">שאלה</th>
-              <th className="p-2 text-start">מצב</th>
-              <th className="p-2 text-start">סבבים</th>
-              <th className="p-2 text-start">עמודים</th>
-              <th className="p-2 text-start">תוצאה</th>
-              <th className="p-2 text-start">התחיל</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.map((inv) => (
-              <tr key={inv.job_id} className="border-t border-border hover:bg-bg-sunken">
-                <td className="p-2">
-                  <Link to={`/investigations/${inv.job_id}`} className="text-accent hover:underline">
-                    <bdi>
-                      {inv.question?.trim() ||
-                        (inv.item_title ? `אימות והרחבה: ${inv.item_title}` : `חקירה על פריט #${inv.item_id ?? "?"}`)}
-                    </bdi>
-                  </Link>
-                  {inv.state === "error" && inv.error && (
-                    <div className="mt-1 text-xs text-danger" title={inv.error}>
-                      <bdi>שגיאה: {inv.error.length > 90 ? inv.error.slice(0, 90) + "…" : inv.error}</bdi>
-                    </div>
-                  )}
-                </td>
-                <td className="p-2">
-                  <span
-                    className={cn(
-                      "rounded-full px-2 py-0.5 text-xs font-medium",
-                      STATE_TONE[inv.state],
+      {isLoading && <LoadingState label="טוען חקירות…" />}
+      {isError && <ErrorState error={error} onRetry={() => refetch()} />}
+      {!isLoading && !isError && (!data || data.length === 0) && (
+        <EmptyState
+          title="אין חקירות עומק"
+          description="חקירה נפתחת מפריט בפיד, משאלה חדשה, או מהצ'אט."
+        />
+      )}
+      {!isLoading && !isError && data && data.length > 0 && (
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full min-w-[720px] text-sm">
+            <thead className="bg-bg-raised text-xs text-fg-dim">
+              <tr>
+                <th className="p-2 text-start">שאלה</th>
+                <th className="p-2 text-start">מצב</th>
+                <th className="p-2 text-start">סבבים</th>
+                <th className="p-2 text-start">עמודים</th>
+                <th className="p-2 text-start">תוצאה</th>
+                <th className="p-2 text-start">התחיל</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.map((inv) => (
+                <tr
+                  key={inv.job_id}
+                  className="border-t border-border hover:bg-bg-sunken"
+                >
+                  <td className="p-2">
+                    <Link
+                      to={`/investigations/${inv.job_id}`}
+                      className="text-accent hover:underline"
+                    >
+                      <bdi>
+                        {inv.question?.trim() ||
+                          (inv.item_title
+                            ? `אימות והרחבה: ${inv.item_title}`
+                            : `חקירה על פריט #${inv.item_id ?? "?"}`)}
+                      </bdi>
+                    </Link>
+                    {inv.state === "error" && inv.error && (
+                      <div className="mt-1 text-xs text-danger" title={inv.error}>
+                        <bdi>
+                          שגיאה:{" "}
+                          {inv.error.length > 90
+                            ? inv.error.slice(0, 90) + "…"
+                            : inv.error}
+                        </bdi>
+                      </div>
                     )}
-                  >
-                    {STATE_LABEL[inv.state]}
-                  </span>
-                </td>
-                <td className="p-2 font-mono font-tabular">{inv.rounds}</td>
-                <td className="p-2 font-mono font-tabular">{inv.pages_read}</td>
-                <td className="p-2">
-                  {inv.outcome ? (
+                  </td>
+                  <td className="p-2">
                     <span
                       className={cn(
                         "rounded-full px-2 py-0.5 text-xs font-medium",
-                        outcomeTone(inv.outcome),
+                        STATE_TONE[inv.state],
                       )}
                     >
-                      {outcomeLabel(inv.outcome)}
+                      {STATE_LABEL[inv.state]}
                     </span>
-                  ) : (
-                    <span className="text-fg-muted">—</span>
-                  )}
-                </td>
-                <td className="p-2 font-mono text-xs text-fg-dim">
-                  {formatDateTime(inv.started_at)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                  </td>
+                  <td className="p-2 font-mono font-tabular">{inv.rounds}</td>
+                  <td className="p-2 font-mono font-tabular">{inv.pages_read}</td>
+                  <td className="p-2">
+                    {inv.outcome ? (
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-xs font-medium",
+                          outcomeTone(inv.outcome),
+                        )}
+                      >
+                        {outcomeLabel(inv.outcome)}
+                      </span>
+                    ) : (
+                      <span className="text-fg-muted">—</span>
+                    )}
+                  </td>
+                  <td className="p-2 font-mono text-xs text-fg-dim">
+                    {formatDateTime(inv.started_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

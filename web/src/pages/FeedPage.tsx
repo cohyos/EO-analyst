@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { HelpCircle, Map as MapIcon } from "lucide-react";
 import type { ItemCard, ItemsResponse, TriageLevel } from "@/types/api";
 import { api, ApiError } from "@/api";
@@ -16,6 +21,7 @@ import { useVirtualList } from "@/hooks/useVirtualList";
 import { useUiStore } from "@/store/uiStore";
 import { useI18n, useT } from "@/i18n";
 import { countryOption, normalizeCountryCode } from "@/lib/countries";
+import { groupDuplicateItems } from "@/lib/dedupGroups";
 import { cn } from "@/lib/cn";
 
 const ROW_HEIGHT = 64;
@@ -31,7 +37,12 @@ const LEVEL_BY_DIGIT: Record<string, TriageLevel> = {
 function isTypingTarget(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el as HTMLElement).isContentEditable;
+  return (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    (el as HTMLElement).isContentEditable
+  );
 }
 
 export function FeedPage() {
@@ -64,6 +75,7 @@ export function FeedPage() {
     data,
     isLoading,
     isError,
+    error,
     refetch,
     fetchNextPage,
     hasNextPage,
@@ -90,8 +102,17 @@ export function FeedPage() {
     },
   });
 
-  const items = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
-  const total = data?.pages[0]?.total ?? items.length;
+  const rawItems = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
+  const total = data?.pages[0]?.total ?? rawItems.length;
+
+  // W9 (docs/REVIEW_2026-09-06_evening.md round 4, feed side): fold same-story duplicates (shared
+  // `dedup_of`) from different outlets into one card before anything else -- country grouping,
+  // virtualization and keyboard nav all then operate on one row per story, same as they already do
+  // for the raw list; `duplicatesById` is looked up per row by `FeedRow`'s "+N מקורות" chip.
+  const { primaries: items, duplicatesById } = useMemo(
+    () => groupDuplicateItems(rawItems),
+    [rawItems],
+  );
 
   // U7b: grouped display order -- a stable partition by normalized country
   // (preserving each item's relative order within its group), covering
@@ -152,7 +173,8 @@ export function FeedPage() {
   }, [searchParams]);
 
   useEffect(() => {
-    if (selectedIndex >= orderedItems.length) setSelectedIndex(Math.max(0, orderedItems.length - 1));
+    if (selectedIndex >= orderedItems.length)
+      setSelectedIndex(Math.max(0, orderedItems.length - 1));
   }, [orderedItems, selectedIndex]);
 
   const feedback = useMutation({
@@ -166,7 +188,9 @@ export function FeedPage() {
   // investigation already existed for the item. `pendingInvestigateIds` debounces per item while a
   // request is in flight; `activeInvestigationItemIds` (polled from `/api/investigations`) also
   // covers a job started elsewhere (e.g. from /items/:id) and drives the row's "🔎 בחקירה" badge.
-  const [pendingInvestigateIds, setPendingInvestigateIds] = useState<Set<number>>(new Set());
+  const [pendingInvestigateIds, setPendingInvestigateIds] = useState<Set<number>>(
+    new Set(),
+  );
   const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
 
   const activeInvestigationsQuery = useQuery({
@@ -191,7 +215,9 @@ export function FeedPage() {
     },
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["investigations"] });
-      const toastKey = res.existing ? "feed.investigateExistingToast" : "feed.investigateQueuedToast";
+      const toastKey = res.existing
+        ? "feed.investigateExistingToast"
+        : "feed.investigateQueuedToast";
       pushToast(t(toastKey, { jobId: res.job_id }), {
         tone: res.existing ? "info" : "ok",
         linkTo: `/investigations/${res.job_id}`,
@@ -223,6 +249,15 @@ export function FeedPage() {
     function onKeyDown(e: KeyboardEvent) {
       if (isTypingTarget(document.activeElement)) return;
       const selected = orderedItems[selectedIndex];
+
+      // W8: Escape closes the inline detail drawer/bottom-sheet -- checked before the typing-target
+      // guard's early return would matter (it doesn't apply here) so the drawer is dismissible from
+      // the keyboard the same way the shortcuts dialog and score popover already are.
+      if (e.key === "Escape" && openItemId != null) {
+        e.preventDefault();
+        closePanel();
+        return;
+      }
 
       if (e.key === "j" || e.key === "J" || e.key === "ArrowDown") {
         e.preventDefault();
@@ -268,7 +303,10 @@ export function FeedPage() {
         e.preventDefault();
         // Q5-3: skip if this item already has a request in flight (client-side debounce) or is
         // already known to be queued/running server-side -- avoids a redundant 409 round-trip.
-        if (pendingInvestigateIds.has(selected.id) || activeInvestigationItemIds.has(selected.id)) {
+        if (
+          pendingInvestigateIds.has(selected.id) ||
+          activeInvestigationItemIds.has(selected.id)
+        ) {
           return;
         }
         investigate.mutate(selected.id);
@@ -288,6 +326,12 @@ export function FeedPage() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+    // `closePanel` is defined below (it also needs `searchParams`/`setSearchParams`, not otherwise
+    // used by this effect) -- omitted the same way this file already omits other closures from
+    // this list (see the `groupByCountry` scroll effect above); `openItemId` is in the list so this
+    // effect (and its `closePanel` call) still rebinds against the current value whenever the panel
+    // opens/closes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     orderedItems,
     selectedIndex,
@@ -296,6 +340,7 @@ export function FeedPage() {
     pendingInvestigateIds,
     activeInvestigationItemIds,
     addToChatContext,
+    openItemId,
     setChatOpen,
     hasNextPage,
     isFetchingNextPage,
@@ -304,10 +349,11 @@ export function FeedPage() {
     setOpenItemId,
   ]);
 
-  const { containerRef, totalHeight, visibleItems, scrollToIndex } = useVirtualList<ItemCard>({
-    items: orderedItems,
-    rowHeight: ROW_HEIGHT,
-  });
+  const { containerRef, totalHeight, visibleItems, scrollToIndex } =
+    useVirtualList<ItemCard>({
+      items: orderedItems,
+      rowHeight: ROW_HEIGHT,
+    });
 
   useEffect(() => {
     if (filters.groupByCountry) {
@@ -340,7 +386,13 @@ export function FeedPage() {
         <FeedFilters value={filters} onChange={setFilters} />
 
         <div className="flex items-center justify-between gap-2 border-b border-border bg-bg-raised px-3 py-1.5 text-xs text-fg-dim">
-          <span>{data ? t("feed.showingStatus", { shown: items.length, total }) : "…"}</span>
+          {/* `total`/pagination math (here and the two "טען עוד" buttons below) is in terms of raw
+              fetched rows -- what the server counted and what drives `hasNextPage` -- not the
+              post-dedup card count, so it stays accurate regardless of how many rows W9's grouping
+              folds together. */}
+          <span>
+            {data ? t("feed.showingStatus", { shown: rawItems.length, total }) : "…"}
+          </span>
           <div className="flex shrink-0 items-center gap-1.5">
             <button
               type="button"
@@ -391,9 +443,12 @@ export function FeedPage() {
         )}
 
         {isLoading && <LoadingState label={t("feed.loading")} />}
-        {isError && <ErrorState onRetry={() => refetch()} />}
+        {isError && <ErrorState error={error} onRetry={() => refetch()} />}
         {!isLoading && !isError && items.length === 0 && (
-          <EmptyState title={t("feed.emptyTitle")} description={t("feed.emptyDescription")} />
+          <EmptyState
+            title={t("feed.emptyTitle")}
+            description={t("feed.emptyDescription")}
+          />
         )}
 
         {!isLoading && !isError && items.length > 0 && !filters.groupByCountry && (
@@ -416,7 +471,11 @@ export function FeedPage() {
                 container above) so its only children are the FeedRow
                 listitems — the "טען עוד" button below is a sibling, not a
                 list child, which axe's aria-required-children rule forbids. */}
-            <div role="list" aria-label="פיד Triage" style={{ height: totalHeight, position: "relative" }}>
+            <div
+              role="list"
+              aria-label="פיד Triage"
+              style={{ height: totalHeight, position: "relative" }}
+            >
               {visibleItems.map(({ item, index, top }) => (
                 <FeedRow
                   key={item.id}
@@ -426,7 +485,11 @@ export function FeedPage() {
                   onOpen={() => setOpenItemId(item.id)}
                   onRate={(level) => feedback.mutate({ id: item.id, level })}
                   isRating={feedback.isPending}
-                  investigating={pendingInvestigateIds.has(item.id) || activeInvestigationItemIds.has(item.id)}
+                  investigating={
+                    pendingInvestigateIds.has(item.id) ||
+                    activeInvestigationItemIds.has(item.id)
+                  }
+                  duplicates={duplicatesById.get(item.id)}
                   style={{ top }}
                 />
               ))}
@@ -439,7 +502,9 @@ export function FeedPage() {
                   disabled={isFetchingNextPage}
                   className="rounded-md border border-border-strong px-3 py-1.5 text-xs text-fg-dim hover:bg-bg-sunken disabled:opacity-50"
                 >
-                  {isFetchingNextPage ? t("feed.loadingMore") : t("feed.loadMore", { remaining: total - items.length })}
+                  {isFetchingNextPage
+                    ? t("feed.loadingMore")
+                    : t("feed.loadMore", { remaining: total - rawItems.length })}
                 </button>
               </div>
             )}
@@ -478,13 +543,20 @@ export function FeedPage() {
                         className="flex items-center gap-2 border-b border-t border-border bg-bg-sunken px-3 py-1.5 text-xs font-medium text-fg-muted"
                       >
                         <span aria-hidden="true">{countryOption(header.code).flag}</span>
-                        <bdi>{locale === "he" ? countryOption(header.code).nameHe : countryOption(header.code).nameEn}</bdi>
+                        <bdi>
+                          {locale === "he"
+                            ? countryOption(header.code).nameHe
+                            : countryOption(header.code).nameEn}
+                        </bdi>
                         <span className="font-mono font-tabular text-fg-dim">
                           {t("feed.countryGroupCount", { count: header.count })}
                         </span>
                       </div>
                     )}
-                    <div data-row-index={index} style={{ position: "relative", height: ROW_HEIGHT }}>
+                    <div
+                      data-row-index={index}
+                      style={{ position: "relative", height: ROW_HEIGHT }}
+                    >
                       <FeedRow
                         item={item}
                         selected={index === selectedIndex}
@@ -492,7 +564,11 @@ export function FeedPage() {
                         onOpen={() => setOpenItemId(item.id)}
                         onRate={(level) => feedback.mutate({ id: item.id, level })}
                         isRating={feedback.isPending}
-                        investigating={pendingInvestigateIds.has(item.id) || activeInvestigationItemIds.has(item.id)}
+                        investigating={
+                          pendingInvestigateIds.has(item.id) ||
+                          activeInvestigationItemIds.has(item.id)
+                        }
+                        duplicates={duplicatesById.get(item.id)}
                         style={{ top: 0 }}
                       />
                     </div>
@@ -508,7 +584,9 @@ export function FeedPage() {
                   disabled={isFetchingNextPage}
                   className="rounded-md border border-border-strong px-3 py-1.5 text-xs text-fg-dim hover:bg-bg-sunken disabled:opacity-50"
                 >
-                  {isFetchingNextPage ? t("feed.loadingMore") : t("feed.loadMore", { remaining: total - items.length })}
+                  {isFetchingNextPage
+                    ? t("feed.loadingMore")
+                    : t("feed.loadMore", { remaining: total - rawItems.length })}
                 </button>
               </div>
             )}
@@ -517,15 +595,25 @@ export function FeedPage() {
       </div>
 
       {openItemId != null && (
-        // Tablet (768-1279) gets a narrower side panel than desktop's fixed
-        // 26rem — on an 820px-wide iPad portrait, 26rem (416px) would leave
-        // barely a third of the screen for the list itself.
-        <div className="h-80 w-full shrink-0 border-t border-border bg-bg-raised md:h-auto md:w-72 md:border-t-0 md:border-r xl:w-[26rem]">
-          {openItemQuery.isLoading && <LoadingState />}
-          {openItemQuery.data && (
-            <FeedDetailPanel item={openItemQuery.data} onClose={closePanel} />
-          )}
-        </div>
+        <>
+          {/* W8: below `md`, the drawer becomes a true bottom sheet -- fixed to the viewport with
+              a dismissible backdrop, instead of a static block competing for vertical space in an
+              already-cramped phone layout. `md:` and up keeps the previous docked side panel
+              (tablet gets a narrower 18rem than desktop's 26rem -- on an 820px-wide iPad portrait,
+              26rem would leave barely a third of the screen for the list itself). */}
+          <div
+            role="presentation"
+            data-testid="feed-detail-backdrop"
+            onClick={closePanel}
+            className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          />
+          <div className="fixed inset-x-0 bottom-0 z-40 h-[75vh] max-h-[36rem] rounded-t-2xl border-t border-border bg-bg-raised shadow-panel md:static md:z-auto md:h-auto md:max-h-none md:w-72 md:shrink-0 md:rounded-none md:border-t-0 md:border-r xl:w-[26rem]">
+            {openItemQuery.isLoading && <LoadingState />}
+            {openItemQuery.data && (
+              <FeedDetailPanel item={openItemQuery.data} onClose={closePanel} />
+            )}
+          </div>
+        </>
       )}
 
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
