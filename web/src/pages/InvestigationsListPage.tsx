@@ -5,6 +5,8 @@ import { Plus } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { NewInvestigationDialog } from "@/components/investigations/NewInvestigationDialog";
+import { ToastStack } from "@/components/ToastStack";
+import { useToastQueue } from "@/hooks/useToastQueue";
 import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
@@ -34,6 +36,7 @@ export function InvestigationsListPage() {
   const [newOpen, setNewOpen] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["investigations"],
     queryFn: () => api.getInvestigations(30),
@@ -45,7 +48,15 @@ export function InvestigationsListPage() {
     onSuccess: (res) => {
       setNewOpen(false);
       queryClient.invalidateQueries({ queryKey: ["investigations"] });
-      navigate(`/investigations/${res.job_id}`);
+      // Q5-6 (docs/qa/findings_Q5_r1.md): starting a new investigation used to just close the
+      // dialog and navigate with no confirmation that anything actually happened. The navigate is
+      // delayed a beat so the toast is actually visible before this page unmounts -- an instant
+      // navigate would make the toast fire and disappear in the same tick, unseen.
+      pushToast(`חקירה חדשה נפתחה · #${res.job_id}`, { tone: "ok" });
+      window.setTimeout(() => navigate(`/investigations/${res.job_id}`), 600);
+    },
+    onError: () => {
+      pushToast("פתיחת החקירה נכשלה — נסה שוב", { tone: "danger" });
     },
   });
 
@@ -77,12 +88,14 @@ export function InvestigationsListPage() {
       <div className="p-4 md:p-6">
         {header}
         <EmptyState title="אין חקירות עומק" description="חקירה נפתחת מפריט בפיד, משאלה חדשה, או מהצ'אט." />
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
       </div>
     );
 
   return (
     <div className="p-4 md:p-6">
       {header}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <div className="overflow-x-auto rounded-lg border border-border">
         <table className="w-full min-w-[720px] text-sm">
           <thead className="bg-bg-raised text-xs text-fg-dim">

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronUp, WifiOff } from "lucide-react";
+import { ChevronUp, Loader2, WifiOff } from "lucide-react";
 import type { StatusSocketState } from "@/hooks/useStatusSocket";
 import { useResourceHistory } from "@/hooks/useResourceHistory";
 import { ResourceHistoryDrawer } from "./ResourceHistoryDrawer";
@@ -51,14 +51,34 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
   const history = useResourceHistory(status);
   const { t } = useI18n();
 
-  if (!connected || !status) {
+  // Q5-9 (docs/qa/findings_Q5_r1.md): these are two distinct situations that used to render the
+  // identical "מנותק מהשרת" banner -- (a) the WS socket itself is closed/erroring (`!connected`,
+  // real disconnect, actively retrying with backoff -- see `useStatusSocket`), vs. (b) the socket
+  // just opened (`connected` is already true) but hasn't delivered its first status snapshot yet
+  // (`status` is still null), which on a cold page load reliably takes a couple of seconds and is
+  // not a disconnect at all. Showing "מנותק" for (b) reads as a false alarm every single load.
+  if (!connected) {
     return (
       <footer
+        data-testid="status-strip-disconnected"
         className="flex h-9 shrink-0 items-center gap-2 border-t border-border bg-bg-raised px-4 text-xs text-danger"
         role="status"
       >
         <WifiOff size={14} aria-hidden="true" />
         <span>מנותק מהשרת — מנסה להתחבר מחדש…</span>
+      </footer>
+    );
+  }
+
+  if (!status) {
+    return (
+      <footer
+        data-testid="status-strip-connecting"
+        className="flex h-9 shrink-0 items-center gap-2 border-t border-border bg-bg-raised px-4 text-xs text-fg-dim"
+        role="status"
+      >
+        <Loader2 size={14} aria-hidden="true" className="animate-spin" />
+        <span>מתחבר… ממתין לתמונת מצב ראשונה</span>
       </footer>
     );
   }

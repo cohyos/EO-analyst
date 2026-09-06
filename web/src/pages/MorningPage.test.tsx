@@ -43,7 +43,7 @@ beforeEach(() => {
   // Most tests below don't care about the tenders tile -- default it to an
   // empty, non-hanging response so `MorningPage`'s unconditional tenders
   // queries never leave those tests waiting on unresolved promises.
-  getTenders.mockResolvedValue([]);
+  getTenders.mockResolvedValue({ tenders: [], counts: {} });
   getTenderForecasts.mockResolvedValue([]);
 });
 
@@ -228,11 +228,14 @@ describe("MorningPage tenders tile", () => {
     const inDays = (n: number) => new Date(now + n * 86_400_000).toISOString().slice(0, 10);
     const hoursAgo = (n: number) => new Date(now - n * 60 * 60 * 1000).toISOString();
 
-    getTenders.mockResolvedValue([
-      { id: 1, deadline: inDays(5), status: "open" }, // within 30 days -> counted
-      { id: 2, deadline: inDays(45), status: "open" }, // beyond 30 days -> not counted
-      { id: 3, deadline: null, status: "open" }, // no deadline -> not counted
-    ]);
+    getTenders.mockResolvedValue({
+      tenders: [
+        { id: 1, deadline: inDays(5), status: "open" }, // within 30 days -> counted
+        { id: 2, deadline: inDays(45), status: "open" }, // beyond 30 days -> not counted
+        { id: 3, deadline: null, status: "open" }, // no deadline -> not counted
+      ],
+      counts: { open: 3 },
+    });
     getTenderForecasts.mockResolvedValue([
       { id: 10, created_at: hoursAgo(2) }, // within the last week -> counted
       { id: 11, created_at: hoursAgo(24 * 20) }, // 20 days ago -> not counted

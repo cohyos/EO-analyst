@@ -543,41 +543,95 @@ def _max_base64_blob_chars() -> int:
         return _DEFAULT_MAX_BASE64_BLOB_CHARS
 
 
-def _extract_title_from_html(html: str) -> str | None:
-    """Extract title from raw HTML via <title> or og:title meta tag.
-
-    Uses simple regex (no new dependencies). Returns None if neither tag is found.
-    """
-    # Try og:title first (more explicit intent).
-    # Matches meta tags with property="og:title" or property='og:title'
-    # and extracts the content attribute value.
-    og_pattern_1 = r'<meta\s+property="og:title"\s+content="([^"]+)"'
-    og_match = re.search(og_pattern_1, html, re.IGNORECASE)
-    if og_match:
-        return og_match.group(1)
-
-    og_pattern_2 = r"<meta\s+property='og:title'\s+content='([^']+)'"
-    og_match = re.search(og_pattern_2, html, re.IGNORECASE)
-    if og_match:
-        return og_match.group(1)
-
-    # Also try with content before property (HTML attribute order can vary)
-    og_pattern_3 = r'<meta\s+content="([^"]+)"\s+property="og:title"'
-    og_match = re.search(og_pattern_3, html, re.IGNORECASE)
-    if og_match:
-        return og_match.group(1)
-
-    og_pattern_4 = r"<meta\s+content='([^']+)'\s+property='og:title'"
-    og_match = re.search(og_pattern_4, html, re.IGNORECASE)
-    if og_match:
-        return og_match.group(1)
-
-    # Fall back to <title> tag
-    title_match = re.search(r"<title\s*>([^<]+)<\s*/\s*title\s*>", html, re.IGNORECASE)
-    if title_match:
-        return title_match.group(1)
-
+def _extract_og_title(html: str) -> str | None:
+    """Extract `<meta property="og:title" content="...">` (either quote style, either attribute
+    order) from raw HTML. Uses simple regex (no new dependencies). ``None`` if not found."""
+    patterns = (
+        r'<meta\s+property="og:title"\s+content="([^"]+)"',
+        r"<meta\s+property='og:title'\s+content='([^']+)'",
+        r'<meta\s+content="([^"]+)"\s+property="og:title"',
+        r"<meta\s+content='([^']+)'\s+property='og:title'",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match.group(1)
     return None
+
+
+# A real `<title>` almost always ends "<article headline><sep><short site name>" -- e.g. Globes'
+# "German defense exports to Israel soar - Globes". The site-name half is short; the headline half
+# is not, so splitting on the LAST separator and keeping the longer side (when the shorter side is
+# also short in absolute terms) strips the suffix without mangling a headline that legitimately
+# contains " - " or " | " in its own text (there the two halves are usually comparable in length,
+# or the "suffix" half is itself long, and the split is skipped).
+_TITLE_SUFFIX_SEPARATORS = (" - ", " | ", " — ", " – ")
+_TITLE_SUFFIX_MAX_CHARS = 40
+
+
+def _strip_site_suffix(title: str) -> str:
+    """Strip a trailing " - Site Name" / " | Site Name" suffix from a raw `<title>` tag value."""
+    for sep in _TITLE_SUFFIX_SEPARATORS:
+        if sep not in title:
+            continue
+        before, _, after = title.rpartition(sep)
+        if before and after and len(after) <= _TITLE_SUFFIX_MAX_CHARS and len(before) > len(after):
+            return before.strip()
+    return title
+
+
+def _extract_title_tag(html: str) -> str | None:
+    """Extract `<title>...</title>` from raw HTML, with a trailing site-name suffix stripped."""
+    match = re.search(r"<title\s*>([^<]+)<\s*/\s*title\s*>", html, re.IGNORECASE)
+    if not match:
+        return None
+    return _strip_site_suffix(match.group(1).strip())
+
+
+def _extract_h1_title(html: str) -> str | None:
+    """Extract the first `<h1>`'s text content from raw HTML (tags inside it stripped)."""
+    match = re.search(r"<h1\b[^>]*>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    inner = re.sub(r"<[^>]+>", " ", match.group(1))
+    return inner.strip() or None
+
+
+# Q4-9 (docs/qa/findings_Q4_r1.md): a title candidate this long is never a real headline -- it is
+# the article's lead paragraph (Globes' `<title>`/og:title are correct; only `clean_title`, from
+# trafilatura/readability's own title guess, picked up the lead text instead). Checked against
+# every rung, not just `clean_title`, since a mis-templated page could put the same lead text in
+# any of them.
+_TITLE_MAX_PLAUSIBLE_CHARS = 200
+
+# Boilerplate a page's own template reuses on every article -- e.g. Leonardo's press-release pages
+# put a "Financial highlights" sidebar-widget heading into the extracted title on 12 different
+# items, all with otherwise-distinct URLs/content. This is the fixed, literal half of that check;
+# `scripts/repair_titles.py` additionally computes a *per-domain repetition* check (the same exact
+# title string appearing across many different items of one source), which needs DB history this
+# pure function doesn't have.
+_GENERIC_TITLE_PHRASES = frozenset(
+    {
+        "financial highlights",
+        "home",
+        "homepage",
+        "untitled",
+        "news",
+        "news releases",
+        "press release",
+        "press releases",
+        "media hub",
+        "media centre",
+        "media center",
+    }
+)
+
+
+def _is_implausible_title(candidate: str) -> bool:
+    """True if `candidate` is too long to be a real headline, or is known boilerplate."""
+    if len(candidate) > _TITLE_MAX_PLAUSIBLE_CHARS:
+        return True
+    return candidate.strip().lower() in _GENERIC_TITLE_PHRASES
 
 
 def _first_line_of_text(text: str, max_chars: int = 120) -> str | None:
@@ -626,61 +680,133 @@ def choose_title(
 ) -> str:
     """Implement explicit title fallback chain.
 
-    Returns the first non-empty/whitespace-only candidate from:
-    1. clean_title (sanitized page title from extract_clean_text)
-    2. <title> or og:title from raw HTML (regex extraction, article-specific)
-    3. fallback_title (RSS entry title, generic feed title)
-    4. First non-empty line of clean_text (≤ 120 chars)
-    5. Last path segment of URL
+    Returns the first non-empty, plausible candidate from:
+    1. `<meta property="og:title">` from raw HTML
+    2. `<title>` from raw HTML, with a trailing " - Site Name" / " | Site Name" suffix stripped
+    3. `<h1>` from raw HTML
+    4. clean_title (trafilatura/readability's own title guess)
+    5. fallback_title (RSS entry title)
+    6. First non-empty line of clean_text (≤ 120 chars)
+    7. Last path segment of URL
 
-    Note: HTML extraction is prioritized over RSS fallback because when
-    fetching an RSS item's article, the article page's own title metadata
-    (og:title) is more specific/accurate than the RSS feed's generic entry
-    title. RSS fallback is only used if HTML extraction also fails.
+    Q4-9 (docs/qa/findings_Q4_r1.md): `clean_title` used to be rung 1, but trafilatura/readability's
+    title guess is exactly what produced two systematic wrong-title bugs -- Globes' article lead
+    paragraph and Leonardo's "Financial highlights" sidebar widget, both picked up as "the title" on
+    pages whose real `<title>`/og:title tag was correct the whole time. HTML meta/tag extraction is
+    now tried first; `clean_title` is kept as a lower-priority fallback for pages that carry neither
+    an og:title nor a `<title>` tag. Every rung is also rejected if it is longer than 200 characters
+    (never a real headline -- almost always lead-paragraph text) or matches known site-boilerplate
+    (`_GENERIC_TITLE_PHRASES`) before falling through to the next rung.
 
     All results are whitespace-stripped and have internal whitespace collapsed.
     Never returns an empty string; always finds some title.
     """
 
     def _normalize_candidate(text: str | None) -> str | None:
-        """Strip whitespace and collapse internal whitespace."""
+        """Strip whitespace, collapse internal whitespace, and reject implausible candidates."""
         if not text:
             return None
         cleaned = text.strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
-        return cleaned if cleaned else None
+        if not cleaned or _is_implausible_title(cleaned):
+            return None
+        return cleaned
 
-    # Try each rung in order
-    # Rung 1: Sanitized page title (extracted by trafilatura/readability)
+    # Rung 1: og:title meta tag from the fetched article page.
+    normalized = _normalize_candidate(_extract_og_title(html))
+    if normalized:
+        return normalized
+
+    # Rung 2: <title> tag from the fetched article page, site-name suffix stripped.
+    normalized = _normalize_candidate(_extract_title_tag(html))
+    if normalized:
+        return normalized
+
+    # Rung 3: first <h1> from the fetched article page.
+    normalized = _normalize_candidate(_extract_h1_title(html))
+    if normalized:
+        return normalized
+
+    # Rung 4: sanitized page title (trafilatura/readability's own guess) -- only reached when the
+    # page carries none of the structured tags above.
     normalized = _normalize_candidate(clean_title)
     if normalized:
         return normalized
 
-    # Rung 2: HTML extraction (<title> or og:title from fetched article page)
-    html_title = _extract_title_from_html(html)
-    normalized = _normalize_candidate(html_title)
-    if normalized:
-        return normalized
-
-    # Rung 3: RSS entry title (fallback_title, generic feed title)
+    # Rung 5: RSS entry title.
     normalized = _normalize_candidate(fallback_title)
     if normalized:
         return normalized
 
-    # Rung 4: First non-empty line of clean_text
-    text_title = _first_line_of_text(clean_text)
-    normalized = _normalize_candidate(text_title)
+    # Rung 6: first non-empty line of clean_text.
+    normalized = _normalize_candidate(_first_line_of_text(clean_text))
     if normalized:
         return normalized
 
-    # Rung 5: Last path segment of URL
+    # Rung 7: last path segment of URL (never rejected as "implausible" -- it's the last resort).
     url_title = _url_path_as_title(url)
-    normalized = _normalize_candidate(url_title)
+    normalized = url_title.strip() if url_title else None
+    normalized = re.sub(r"\s+", " ", normalized) if normalized else None
     if normalized:
         return normalized
 
-    # Absolute fallback (should never reach this given url_title as last resort)
+    # Absolute fallback (should never reach this given url_title as last resort).
     return "Untitled"
+
+
+# --------------------------------------------------------------------------
+# bot/WAF challenge-page detection (Q4-1, docs/qa/findings_Q4_r1.md)
+# --------------------------------------------------------------------------
+
+# Phrases that appear on Cloudflare/WAF/anti-bot interstitials instead of the real article --
+# e.g. 13 Safran pressroom fetches stored "This website is using a security service..." /
+# "Attention Required! | Cloudflare" verbatim as `clean_text` with no signal anything was wrong.
+# Matched case-insensitively against both the raw HTML and the extracted text, so a challenge
+# page is caught whether or not it also happens to carry a 403/429/503 status (Cloudflare's JS
+# challenge commonly returns 200).
+_BLOCK_PAGE_PHRASES = (
+    "this website is using a security service",
+    "attention required! | cloudflare",
+    "attention required",
+    "just a moment...",
+    "just a moment",
+    "access denied",
+    "enable javascript and cookies to continue",
+    "client challenge",
+    "checking your browser before accessing",
+    "you don't have permission to access",
+    "sorry, you have been blocked",
+    "ray id:",
+    "403 forbidden",
+)
+
+# Status codes a WAF/rate-limiter typically answers a block with. On their own these are not
+# proof of a challenge page (a real 403 "you don't have access" article page exists too), so
+# they only count combined with a tiny body (below) or one of the phrases above.
+_BLOCK_STATUS_CODES = frozenset({403, 429, 503})
+_BLOCK_TINY_BODY_CHARS = 500
+
+
+def detect_block_page(html: str | None, text: str | None, status: int | None) -> bool:
+    """True if a fetched page is a bot-block / security-challenge interstitial, not real content.
+
+    Two independent signals, either sufficient on its own:
+    1. A known Cloudflare/WAF/anti-bot phrase appears in the raw HTML or the extracted text
+       (checked regardless of HTTP status -- a JS challenge commonly answers 200).
+    2. The HTTP status is 403/429/503 *and* the extracted text is tiny (< 500 chars once
+       stripped) -- a real article at those statuses (e.g. a genuinely gone page) is vanishingly
+       rare and would in any case have too little content to be useful.
+    """
+    haystack = f"{html or ''}\n{text or ''}".lower()
+    if any(phrase in haystack for phrase in _BLOCK_PAGE_PHRASES):
+        return True
+    return status in _BLOCK_STATUS_CODES and len((text or "").strip()) < _BLOCK_TINY_BODY_CHARS
+
+
+# Neutral Hebrew note stored as `items.title` for a detected block page -- mirrors the existing
+# convention for a fetch-failure item (e.g. a war.gov "Access Denied" page): never invent content
+# for what was never actually fetched (docs/CONVENTIONS.md rule 5).
+BLOCKED_ITEM_TITLE_HE = "הפריט אינו נגיש: האתר חוסם גישה אוטומטית"
 
 
 def extract_clean_text(html: str, url: str) -> CleanText:

@@ -143,8 +143,11 @@ export function InvestigationDetailPage() {
                 <bdi className="mt-1 block text-fg" dir="auto">
                   {line.query}
                 </bdi>
+                {/* Q5-2 (docs/qa/findings_Q5_r1.md): this per-round outcome ("partial",
+                    "not_found", "stopped_budget"...) used to render the raw English value --
+                    now goes through the same OUTCOME_LABEL map as the outcome chip above. */}
                 <bdi className="block text-fg-muted" dir="auto">
-                  {line.outcome}
+                  {outcomeLabel(line.outcome)}
                 </bdi>
               </li>
             ))}

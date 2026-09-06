@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from eoa.api import services
-from eoa.api.errors import bad_request, not_found
+from eoa.api.errors import bad_request, conflict, not_found
 
 router = APIRouter(tags=["items"])
 
@@ -83,7 +83,17 @@ def submit_feedback(item_id: int, body: FeedbackRequest) -> dict:
 
 @router.post("/items/{item_id}/investigate")
 def investigate(item_id: int, body: InvestigateRequest) -> dict:
-    job_id = services.investigate_item(item_id, body.question)
-    if job_id is None:
+    """Q5-3 (docs/qa/findings_Q5_r1.md): idempotent like `POST /api/run` -- a deep_search job
+    already queued/running for this item responds 409 with its id instead of enqueueing a second
+    one, and a `done` investigation for this item from the last 24h is reused (`existing: true`)
+    instead of re-running work that already has an answer."""
+    try:
+        result = services.investigate_item(item_id, body.question)
+    except services.InvestigationAlreadyActive as exc:
+        raise conflict(
+            "חקירה כבר רצה או ממתינה בתור עבור פריט זה",
+            detail={"job_id": exc.job.get("id"), "state": exc.job.get("state")},
+        ) from exc
+    if result is None:
         raise not_found("הפריט לא נמצא")
-    return {"job_id": job_id}
+    return result

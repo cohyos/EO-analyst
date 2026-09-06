@@ -3,13 +3,15 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { HelpCircle, Map as MapIcon } from "lucide-react";
 import type { ItemCard, ItemsResponse, TriageLevel } from "@/types/api";
-import { api } from "@/api";
+import { api, ApiError } from "@/api";
 import { FeedFilters, type FeedFiltersState } from "@/components/feed/FeedFilters";
 import { FeedRow } from "@/components/feed/FeedRow";
 import { FeedDetailPanel } from "@/components/feed/FeedDetailPanel";
 import { ShortcutsDialog } from "@/components/feed/ShortcutsDialog";
 import { CountryMapPanel } from "@/components/feed/CountryMapPanel";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { ToastStack } from "@/components/ToastStack";
+import { useToastQueue } from "@/hooks/useToastQueue";
 import { useVirtualList } from "@/hooks/useVirtualList";
 import { useUiStore } from "@/store/uiStore";
 import { useI18n, useT } from "@/i18n";
@@ -157,9 +159,62 @@ export function FeedPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["items"] }),
   });
 
+  // Q5-3 (docs/qa/findings_Q5_r1.md): the "I" shortcut used to POST with no feedback at all, allow
+  // double-submits (two clicks/presses queued two overlapping jobs), and never check whether an
+  // investigation already existed for the item. `pendingInvestigateIds` debounces per item while a
+  // request is in flight; `activeInvestigationItemIds` (polled from `/api/investigations`) also
+  // covers a job started elsewhere (e.g. from /items/:id) and drives the row's "🔎 בחקירה" badge.
+  const [pendingInvestigateIds, setPendingInvestigateIds] = useState<Set<number>>(new Set());
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
+
+  const activeInvestigationsQuery = useQuery({
+    queryKey: ["investigations", "feed-active"],
+    queryFn: () => api.getInvestigations(100),
+    refetchInterval: 6000,
+  });
+  const activeInvestigationItemIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const inv of activeInvestigationsQuery.data ?? []) {
+      if ((inv.state === "queued" || inv.state === "running") && inv.item_id != null) {
+        ids.add(inv.item_id);
+      }
+    }
+    return ids;
+  }, [activeInvestigationsQuery.data]);
+
   const investigate = useMutation({
     mutationFn: (id: number) => api.postItemInvestigate(id, { question: null }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["investigations"] }),
+    onMutate: (id: number) => {
+      setPendingInvestigateIds((prev) => new Set(prev).add(id));
+    },
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["investigations"] });
+      const toastKey = res.existing ? "feed.investigateExistingToast" : "feed.investigateQueuedToast";
+      pushToast(t(toastKey, { jobId: res.job_id }), {
+        tone: res.existing ? "info" : "ok",
+        linkTo: `/investigations/${res.job_id}`,
+        linkLabel: t("feed.investigateToastViewLink"),
+      });
+    },
+    onError: (err: unknown) => {
+      if (err instanceof ApiError && err.code === "conflict") {
+        const detail = err.detail as { job_id?: number } | null;
+        pushToast(t("feed.investigateConflictToast"), {
+          tone: "warn",
+          linkTo: detail?.job_id != null ? `/investigations/${detail.job_id}` : undefined,
+          linkLabel: t("feed.investigateToastViewLink"),
+        });
+      } else {
+        pushToast(t("feed.investigateErrorToast"), { tone: "danger" });
+      }
+    },
+    onSettled: (_res, _err, id) => {
+      setPendingInvestigateIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
   });
 
   useEffect(() => {
@@ -209,6 +264,11 @@ export function FeedPage() {
       }
       if (e.key === "i" || e.key === "I") {
         e.preventDefault();
+        // Q5-3: skip if this item already has a request in flight (client-side debounce) or is
+        // already known to be queued/running server-side -- avoids a redundant 409 round-trip.
+        if (pendingInvestigateIds.has(selected.id) || activeInvestigationItemIds.has(selected.id)) {
+          return;
+        }
         investigate.mutate(selected.id);
         return;
       }
@@ -231,6 +291,8 @@ export function FeedPage() {
     selectedIndex,
     feedback,
     investigate,
+    pendingInvestigateIds,
+    activeInvestigationItemIds,
     addToChatContext,
     setChatOpen,
     hasNextPage,
@@ -362,6 +424,7 @@ export function FeedPage() {
                   onOpen={() => setOpenItemId(item.id)}
                   onRate={(level) => feedback.mutate({ id: item.id, level })}
                   isRating={feedback.isPending}
+                  investigating={pendingInvestigateIds.has(item.id) || activeInvestigationItemIds.has(item.id)}
                   style={{ top }}
                 />
               ))}
@@ -427,6 +490,7 @@ export function FeedPage() {
                         onOpen={() => setOpenItemId(item.id)}
                         onRate={(level) => feedback.mutate({ id: item.id, level })}
                         isRating={feedback.isPending}
+                        investigating={pendingInvestigateIds.has(item.id) || activeInvestigationItemIds.has(item.id)}
                         style={{ top: 0 }}
                       />
                     </div>
@@ -460,6 +524,7 @@ export function FeedPage() {
       )}
 
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

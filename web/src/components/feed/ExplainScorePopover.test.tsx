@@ -27,6 +27,9 @@ function makeItem(over: Partial<ItemCard> = {}): ItemCard {
     dedup_of: null,
     key_facts: [],
     uncertainty_he: null,
+    tech_maturity: null,
+    tech_actor_kind: null,
+    tech_readiness_note_he: null,
     ...over,
   };
 }

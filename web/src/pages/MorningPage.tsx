@@ -37,7 +37,7 @@ function TendersTile() {
     queryFn: () => api.getTenderForecasts(),
   });
 
-  const openSoonCount = (tendersQuery.data ?? []).filter((t) => {
+  const openSoonCount = (tendersQuery.data?.tenders ?? []).filter((t) => {
     const days = daysLeft(t.deadline);
     return days != null && days <= DEADLINE_SOON_DAYS;
   }).length;

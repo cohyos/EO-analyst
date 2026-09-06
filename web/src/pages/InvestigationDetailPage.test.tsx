@@ -197,4 +197,22 @@ describe("InvestigationDetailPage expand ('הרחב חקירה')", () => {
     await screen.findByTestId("investigation-log");
     expect(screen.getByText("רץ עכשיו")).toBeInTheDocument();
   });
+
+  it("translates each log line's own outcome into Hebrew instead of showing it raw (Q5-2)", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      log: [
+        { ...makeLine(1), outcome: "partial" },
+        { ...makeLine(2), outcome: "not_found" },
+        { ...makeLine(3), outcome: "stopped_budget" },
+      ],
+    });
+    renderPage();
+    const log = await screen.findByTestId("investigation-log");
+    expect(screen.getByText("נמצא חלקית")).toBeInTheDocument();
+    expect(screen.getByText("לא נמצא")).toBeInTheDocument();
+    expect(screen.getByText("נעצר בגלל תקציב")).toBeInTheDocument();
+    expect(log).not.toHaveTextContent("partial");
+    expect(log).not.toHaveTextContent("stopped_budget");
+  });
 });

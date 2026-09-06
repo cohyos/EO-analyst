@@ -59,6 +59,23 @@ describe("StatusStrip", () => {
     expect(screen.queryByText(/GPU/)).not.toBeInTheDocument();
   });
 
+  it("shows a distinct 'connecting' state (not 'disconnected') when the socket is open but no snapshot has arrived yet (Q5-9)", () => {
+    // connected: true (the WS onopen already fired) but status: null (no push has arrived yet) --
+    // this used to render the identical "מנותק מהשרת" banner as a real socket-closed disconnect.
+    const state: StatusSocketState = { status: null, connected: true, logs: [] };
+    render(<StatusStrip state={state} />);
+    expect(screen.getByText(/מתחבר/)).toBeInTheDocument();
+    expect(screen.queryByText(/מנותק מהשרת/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("status-strip-connecting")).toBeInTheDocument();
+  });
+
+  it("still shows the real disconnected state (not 'connecting') when the socket is closed", () => {
+    const state: StatusSocketState = { status: null, connected: false, logs: [] };
+    render(<StatusStrip state={state} />);
+    expect(screen.getByTestId("status-strip-disconnected")).toBeInTheDocument();
+    expect(screen.queryByTestId("status-strip-connecting")).not.toBeInTheDocument();
+  });
+
   it("renders a service dot per service in the status payload", () => {
     const state: StatusSocketState = { status: baseStatus, connected: true, logs: [] };
     render(<StatusStrip state={state} />);

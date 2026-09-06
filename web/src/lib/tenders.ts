@@ -6,6 +6,7 @@ export const TENDER_STATUS_LABEL: Record<TenderStatus, string> = {
   closed: "סגור",
   awarded: "הוענק",
   unknown: "לא ידוע",
+  archived: "בארכיון",
 };
 
 export const TENDER_STATUS_CHIP_CLASS: Record<TenderStatus, string> = {
@@ -13,7 +14,12 @@ export const TENDER_STATUS_CHIP_CLASS: Record<TenderStatus, string> = {
   closed: "bg-bg-sunken text-fg-dim",
   awarded: "bg-accent-muted text-accent",
   unknown: "bg-warn/15 text-warn",
+  archived: "bg-bg-sunken text-fg-dim",
 };
+
+// F24: the tenders board's default (no explicit status filter) view -- 'open' and recently-seen
+// 'unknown' tenders only. Mirrors eoa.api.services.DEFAULT_STATUSES.
+export const TENDER_DEFAULT_VIEW_STATUSES: TenderStatus[] = ["open", "unknown"];
 
 /** Days-left urgency threshold shared by the tenders table chip and the Morning tile. */
 export const DEADLINE_URGENT_DAYS = 14;

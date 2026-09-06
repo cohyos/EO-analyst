@@ -8,6 +8,20 @@ const getItems = vi.fn();
 const getItem = vi.fn();
 const postItemFeedback = vi.fn();
 const postItemInvestigate = vi.fn();
+const getInvestigations = vi.fn();
+
+const { MockApiError } = vi.hoisted(() => {
+  class MockApiError extends Error {
+    code: string;
+    detail: unknown;
+    constructor(code: string, message: string, detail: unknown) {
+      super(message);
+      this.code = code;
+      this.detail = detail;
+    }
+  }
+  return { MockApiError };
+});
 
 vi.mock("@/api", () => ({
   api: {
@@ -15,7 +29,9 @@ vi.mock("@/api", () => ({
     getItem: (...args: unknown[]) => getItem(...args),
     postItemFeedback: (...args: unknown[]) => postItemFeedback(...args),
     postItemInvestigate: (...args: unknown[]) => postItemInvestigate(...args),
+    getInvestigations: (...args: unknown[]) => getInvestigations(...args),
   },
+  ApiError: MockApiError,
   USE_MOCKS: false,
 }));
 
@@ -45,6 +61,9 @@ function makeItem(id: number, title: string): ItemCard {
     dedup_of: null,
     key_facts: [],
     uncertainty_he: null,
+    tech_maturity: null,
+    tech_actor_kind: null,
+    tech_readiness_note_he: null,
   };
 }
 
@@ -71,9 +90,11 @@ beforeEach(() => {
   getItem.mockReset();
   postItemFeedback.mockReset();
   postItemInvestigate.mockReset();
+  getInvestigations.mockReset();
   getItems.mockResolvedValue({ total: ITEMS.length, items: ITEMS });
   postItemFeedback.mockResolvedValue(ITEMS[0]);
-  postItemInvestigate.mockResolvedValue({ job_id: "inv-1" });
+  postItemInvestigate.mockResolvedValue({ job_id: "inv-1", existing: false });
+  getInvestigations.mockResolvedValue([]);
   const detail: ItemDetail = {
     ...ITEMS[0],
     clean_text: "טקסט מלא",
@@ -167,12 +188,61 @@ describe("FeedPage keyboard behavior", () => {
     expect(screen.queryByTestId("items-page-stub")).not.toBeInTheDocument();
   });
 
-  it("triggers a deep-search investigation with 'i'", async () => {
+  it("triggers a deep-search investigation with 'i' and toasts a success confirmation (Q5-3)", async () => {
     renderFeedPage();
     await screen.findByTestId("feed-row-1");
 
     fireEvent.keyDown(window, { key: "i" });
     await waitFor(() => expect(postItemInvestigate).toHaveBeenCalledWith(1, { question: null }));
+    expect(await screen.findByText(/חקירה נוספה לתור/)).toBeInTheDocument();
+  });
+
+  it("does not double-submit 'i' while the request is still in flight (Q5-3)", async () => {
+    let resolveInvestigate: ((v: { job_id: string; existing: boolean }) => void) | null = null;
+    postItemInvestigate.mockReset();
+    postItemInvestigate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveInvestigate = resolve;
+        }),
+    );
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    fireEvent.keyDown(window, { key: "i" });
+    fireEvent.keyDown(window, { key: "i" });
+    fireEvent.keyDown(window, { key: "i" });
+    await waitFor(() => expect(postItemInvestigate).toHaveBeenCalledTimes(1));
+
+    resolveInvestigate!({ job_id: "inv-9", existing: false });
+    await screen.findByText(/חקירה נוספה לתור/);
+  });
+
+  it("toasts a distinct message when the backend reports an existing recent investigation (Q5-3)", async () => {
+    postItemInvestigate.mockResolvedValue({ job_id: "inv-old", existing: true });
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    fireEvent.keyDown(window, { key: "i" });
+    expect(await screen.findByText(/נמצאה חקירה קיימת/)).toBeInTheDocument();
+  });
+
+  it("toasts a conflict message on a 409 without treating it as a generic error (Q5-3)", async () => {
+    postItemInvestigate.mockRejectedValue(new MockApiError("conflict", "conflict", { job_id: 5 }));
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+
+    fireEvent.keyDown(window, { key: "i" });
+    expect(await screen.findByText(/חקירה כבר רצה/)).toBeInTheDocument();
+  });
+
+  it("shows the 'בחקירה' indicator on a row with an active investigation from /api/investigations (Q5-3)", async () => {
+    getInvestigations.mockResolvedValue([
+      { job_id: "inv-1", item_id: 2, question: "x", state: "running", rounds: 1, queries: 1, pages_read: 1, outcome: null, started_at: null, finished_at: null },
+    ]);
+    renderFeedPage();
+    expect(await screen.findByTestId("feed-row-investigating-2")).toBeInTheDocument();
+    expect(screen.queryByTestId("feed-row-investigating-1")).not.toBeInTheDocument();
   });
 
   it("ignores keyboard shortcuts while typing in the search box", async () => {

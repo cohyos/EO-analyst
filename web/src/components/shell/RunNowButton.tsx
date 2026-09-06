@@ -13,7 +13,7 @@ import {
 import { api, ApiError } from "@/api";
 import { useI18n } from "@/i18n";
 import { useRunsCurrent } from "@/hooks/useRunsCurrent";
-import { STAGE_LABEL_HE } from "@/lib/pipelineTimeline";
+import { stageLabelHe } from "@/lib/pipelineTimeline";
 import { cn } from "@/lib/cn";
 import type { CurrentRun, OtherRunningJob, RunStageEntry, StageStatus } from "@/types/api";
 
@@ -56,7 +56,7 @@ function StageRow({ entry }: { entry: RunStageEntry }) {
   return (
     <li className="flex items-center gap-2 py-0.5 text-xs">
       <Icon size={13} aria-hidden="true" className={cn("shrink-0", STAGE_ICON_CLASS[entry.status])} />
-      <span className="flex-1 truncate">{STAGE_LABEL_HE[entry.stage] ?? entry.stage}</span>
+      <span className="flex-1 truncate">{stageLabelHe(entry.stage)}</span>
       <span className="shrink-0 text-fg-dim">
         {entry.minutes != null ? `${entry.minutes} דק׳` : statusLabel}
       </span>
@@ -98,7 +98,7 @@ function RunProgressPopover({
           {current.current_stage && (
             <p className="mb-2 text-xs text-fg-dim">
               {t("topBar.runNowPopoverStage", {
-                stage: STAGE_LABEL_HE[current.current_stage] ?? current.current_stage,
+                stage: stageLabelHe(current.current_stage),
               })}
             </p>
           )}

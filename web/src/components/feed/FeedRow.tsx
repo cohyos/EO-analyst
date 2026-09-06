@@ -6,6 +6,7 @@ import { ExplainScorePopover } from "./ExplainScorePopover";
 import { domainLabel } from "@/lib/taxonomy";
 import { timeAgo } from "@/lib/time";
 import { cn } from "@/lib/cn";
+import { useT } from "@/i18n";
 
 export function FeedRow({
   item,
@@ -14,6 +15,7 @@ export function FeedRow({
   onOpen,
   onRate,
   isRating,
+  investigating,
   style,
 }: {
   item: ItemCard;
@@ -22,8 +24,11 @@ export function FeedRow({
   onOpen: () => void;
   onRate: (level: TriageLevel) => void;
   isRating?: boolean;
+  /** Q5-3 (docs/qa/findings_Q5_r1.md): a deep_search job is queued/running for this item. */
+  investigating?: boolean;
   style?: React.CSSProperties;
 }) {
+  const t = useT();
   const hasUrl = Boolean(item.url);
   // Real data (2026-09-04 QA against the live backend): a handful of ingested
   // items carry an empty `title` (a fetch/parse gap upstream, out of scope
@@ -86,6 +91,17 @@ export function FeedRow({
       <span className="hidden shrink-0 rounded-full bg-bg-sunken px-2 py-0.5 text-xs text-fg-muted md:inline">
         {domainLabel(item.domain)}
       </span>
+      {investigating && (
+        <span
+          data-testid={`feed-row-investigating-${item.id}`}
+          role="status"
+          aria-label={t("feed.investigatingIndicatorAria")}
+          title={t("feed.investigatingIndicatorAria")}
+          className="hidden shrink-0 rounded-full bg-accent-muted px-2 py-0.5 text-xs text-accent md:inline"
+        >
+          {t("feed.investigatingIndicator")}
+        </span>
+      )}
       {hasUrl && (
         <a
           href={item.url}

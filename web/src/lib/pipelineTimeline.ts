@@ -34,10 +34,26 @@ export const STAGE_LABEL_HE: Record<string, string> = {
   deep_search: "חיפוש עומק",
   analyze: "ניתוח",
   tenders: "מכרזים",
+  // Q5-5 (docs/qa/findings_Q5_r1.md): agent/eoa/orchestrator/jobs.py's STAGE_ORDER runs this stage
+  // between "tenders" and "report" -- it was missing here entirely, so the replay timeline fell
+  // back to the raw English key.
+  post_tenders_catchup: "השלמת מכרזים",
   report: "דוח",
   export_backup: "ייצוא וגיבוי",
   notify: "התראות",
 };
+
+/**
+ * Q5-5: a stage key this map doesn't know yet (new stage added to
+ * agent/eoa/orchestrator/jobs.py's STAGE_ORDER without an update here) used to render as the raw
+ * English/snake_case key verbatim. Falls back to a humanised form instead -- "some_new_stage" ->
+ * "some new stage" -- so the timeline never shows an untranslated identifier.
+ */
+export function stageLabelHe(key: string): string {
+  const known = STAGE_LABEL_HE[key];
+  if (known) return known;
+  return key.replace(/_/g, " ");
+}
 
 export interface StageTimelineEntry {
   key: string;
@@ -65,7 +81,7 @@ export function buildStageTimeline(
     const info: PipelineStageInfo = stages[key];
     return {
       key,
-      label: STAGE_LABEL_HE[key] ?? key,
+      label: stageLabelHe(key),
       status: info.status,
       minutes: info.minutes,
     };

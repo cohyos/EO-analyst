@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import type { ForecastCard, TenderCard } from "@/types/api";
+import type { ForecastCard, TenderCard, TenderStatus, TendersResponse } from "@/types/api";
 
 const getTenders = vi.fn();
 const getTenderForecasts = vi.fn();
@@ -38,6 +38,14 @@ function makeTender(over: Partial<TenderCard> = {}): TenderCard {
     updated_at: "2026-09-01T06:00:00+00:00",
     ...over,
   };
+}
+
+/** F24: `getTenders` now resolves `{tenders, counts}` -- `counts` defaults to a tally of the
+ * given rows by status unless the caller wants to assert a specific header-chip summary. */
+function tendersResponse(tenders: TenderCard[], counts?: Partial<Record<TenderStatus, number>>): TendersResponse {
+  const tally: Partial<Record<TenderStatus, number>> = {};
+  for (const t of tenders) tally[t.status] = (tally[t.status] ?? 0) + 1;
+  return { tenders, counts: counts ?? tally };
 }
 
 function makeForecast(over: Partial<ForecastCard> = {}): ForecastCard {
@@ -78,13 +86,13 @@ beforeEach(() => {
 
 describe("TendersPage — open tenders tab", () => {
   it("shows the Hebrew empty state when there are no tenders at all", async () => {
-    getTenders.mockResolvedValue([]);
+    getTenders.mockResolvedValue(tendersResponse([]));
     renderPage();
     expect(await screen.findByText("אין מכרזים פתוחים כרגע")).toBeInTheDocument();
   });
 
   it("renders a tender row with an outbound link opening in a new tab", async () => {
-    getTenders.mockResolvedValue([makeTender()]);
+    getTenders.mockResolvedValue(tendersResponse([makeTender()]));
     renderPage();
     const link = await screen.findByRole("link", { name: /Targeting Pod Sustainment IDIQ/ });
     expect(link).toHaveAttribute("href", "https://sam.gov/opp/example");
@@ -95,10 +103,12 @@ describe("TendersPage — open tenders tab", () => {
     const now = new Date();
     const soon = new Date(now.getTime() + 5 * 86_400_000).toISOString().slice(0, 10);
     const later = new Date(now.getTime() + 40 * 86_400_000).toISOString().slice(0, 10);
-    getTenders.mockResolvedValue([
-      makeTender({ id: 1, title: "Urgent tender", deadline: soon }),
-      makeTender({ id: 2, title: "Not urgent tender", deadline: later }),
-    ]);
+    getTenders.mockResolvedValue(
+      tendersResponse([
+        makeTender({ id: 1, title: "Urgent tender", deadline: soon }),
+        makeTender({ id: 2, title: "Not urgent tender", deadline: later }),
+      ]),
+    );
     renderPage();
 
     const urgentRow = (await screen.findByText("Urgent tender")).closest("tr")!;
@@ -111,54 +121,82 @@ describe("TendersPage — open tenders tab", () => {
   });
 
   it("shows an em-dash and no days-left title when the tender has no deadline", async () => {
-    getTenders.mockResolvedValue([makeTender({ deadline: null })]);
+    getTenders.mockResolvedValue(tendersResponse([makeTender({ deadline: null })]));
     renderPage();
     await screen.findByText("Targeting Pod Sustainment IDIQ");
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
   it("expands a row on click to show the summary, entities, CPV/NAICS and a link to the linked item", async () => {
-    getTenders.mockResolvedValue([makeTender()]);
+    getTenders.mockResolvedValue(tendersResponse([makeTender()]));
     renderPage();
     const row = (await screen.findByText("Targeting Pod Sustainment IDIQ")).closest("tr")!;
 
-    expect(screen.queryByText("סיכום בעברית של המכרז")).not.toBeInTheDocument();
+    expect(screen.queryByText(/סיכום בעברית של המכרז/)).not.toBeInTheDocument();
     fireEvent.click(row);
-    expect(screen.getByText("סיכום בעברית של המכרז")).toBeInTheDocument();
+    // F24: the detail row's "why relevant" line combines matched_terms + summary_he.
+    expect(screen.getByText(/סיכום בעברית של המכרז/)).toBeInTheDocument();
+    expect(screen.getByText(/targeting pod, EO\/IR/)).toBeInTheDocument();
     expect(screen.getByText("Lockheed Martin")).toBeInTheDocument();
     expect(screen.getByText("336413")).toBeInTheDocument();
     const itemLink = screen.getByRole("link", { name: /פתח פריט מקושר/ });
     expect(itemLink).toHaveAttribute("href", "/items/42");
 
     fireEvent.click(row);
-    expect(screen.queryByText("סיכום בעברית של המכרז")).not.toBeInTheDocument();
+    expect(screen.queryByText(/סיכום בעברית של המכרז/)).not.toBeInTheDocument();
   });
 
-  it("filters the table by status", async () => {
-    getTenders.mockResolvedValue([
-      makeTender({ id: 1, title: "US open tender", status: "open", country: "US" }),
-      makeTender({ id: 2, title: "IL awarded tender", status: "awarded", country: "IL" }),
-    ]);
+  it("shows header count chips summarizing tenders by status", async () => {
+    getTenders.mockResolvedValue(
+      tendersResponse([makeTender({ id: 1, status: "open" })], { open: 5, unknown: 2, closed: 8, archived: 3 }),
+    );
+    renderPage();
+    const chips = await screen.findByRole("list", { name: "ספירת מכרזים לפי סטטוס" });
+    expect(within(chips).getByText("פתוח: 5")).toBeInTheDocument();
+    expect(within(chips).getByText("לא ידוע: 2")).toBeInTheDocument();
+    expect(within(chips).getByText("סגור: 8")).toBeInTheDocument();
+    expect(within(chips).getByText("בארכיון: 3")).toBeInTheDocument();
+  });
+
+  it("re-queries with an explicit status when the status filter changes, bypassing the default view", async () => {
+    getTenders.mockImplementation(async (query: { status?: string }) =>
+      query.status === "awarded"
+        ? tendersResponse([makeTender({ id: 2, title: "IL awarded tender", status: "awarded", country: "IL" })])
+        : tendersResponse([makeTender({ id: 1, title: "US open tender", status: "open", country: "US" })]),
+    );
     renderPage();
     await screen.findByText("US open tender");
-    expect(screen.getByText("IL awarded tender")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("סינון לפי סטטוס"), { target: { value: "awarded" } });
+    expect(await screen.findByText("IL awarded tender")).toBeInTheDocument();
     expect(screen.queryByText("US open tender")).not.toBeInTheDocument();
-    expect(screen.getByText("IL awarded tender")).toBeInTheDocument();
+    expect(getTenders.mock.calls.at(-1)?.[0]).toMatchObject({ status: "awarded" });
+  });
+
+  it("checking 'show closed/archived' re-queries with include_closed and include_archived set", async () => {
+    getTenders.mockResolvedValue(tendersResponse([makeTender()]));
+    renderPage();
+    await screen.findByText("Targeting Pod Sustainment IDIQ");
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    await screen.findByText("Targeting Pod Sustainment IDIQ");
+    expect(getTenders.mock.calls.at(-1)?.[0]).toMatchObject({
+      include_closed: true,
+      include_archived: true,
+    });
   });
 });
 
 describe("TendersPage — forecasts tab", () => {
   it("shows the Hebrew empty state when there are no forecasts", async () => {
-    getTenders.mockResolvedValue([]);
+    getTenders.mockResolvedValue(tendersResponse([]));
     getTenderForecasts.mockResolvedValue([]);
     renderPage(["/tenders?tab=forecast"]);
     expect(await screen.findByText("אין תחזיות מכרזים כרגע")).toBeInTheDocument();
   });
 
   it("sorts forecasts by likelihood descending", async () => {
-    getTenders.mockResolvedValue([]);
+    getTenders.mockResolvedValue(tendersResponse([]));
     getTenderForecasts.mockResolvedValue([
       makeForecast({ id: 1, payload_need: "Low likelihood need", likelihood: 0.2 }),
       makeForecast({ id: 2, payload_need: "High likelihood need", likelihood: 0.9 }),
@@ -172,7 +210,7 @@ describe("TendersPage — forecasts tab", () => {
   });
 
   it("turns [item N] tokens in rationale_he into links to /items/N", async () => {
-    getTenders.mockResolvedValue([]);
+    getTenders.mockResolvedValue(tendersResponse([]));
     getTenderForecasts.mockResolvedValue([makeForecast()]);
     renderPage(["/tenders?tab=forecast"]);
 
@@ -181,7 +219,7 @@ describe("TendersPage — forecasts tab", () => {
   });
 
   it("switching to the forecast tab via the tab button updates the URL and shows forecast content", async () => {
-    getTenders.mockResolvedValue([]);
+    getTenders.mockResolvedValue(tendersResponse([]));
     getTenderForecasts.mockResolvedValue([makeForecast()]);
     renderPage();
 

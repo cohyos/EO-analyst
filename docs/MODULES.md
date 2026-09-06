@@ -5536,6 +5536,163 @@ build output was produced (`npm --prefix web run build`) but not deployed/served
 02-feed, 05-investigations, and 11-status-strip were not re-run against a live 8765/8766 in this
 pass.
 
+## Content/inference QA r1 fixes: Q3-1/Q3-2/Q3-3/Q3-4/Q3-7/Q3-8/Q3-9/Q3-13 (docs/qa/findings_Q3_r1.md, 2026-09-06)
+
+**Q3-1 (P1) -- Hebrew acronyms truncated mid-word before an ASCII quote.** Ollama's schema-
+constrained decoding legally closes a JSON string the instant it emits an ASCII `"` -- exactly the
+character a Hebrew acronym like כטב"ם/מטע"ד/מ"מ needs before its final letter(s), so the model
+silently continues as if the string were finished and the persisted text ends "...נגד כטב".
+
+- `agent/eoa/llm/prompts/system_analyst.md` (rule 5, inherited by every stage via `_system()`):
+  instructs the model to always use the Hebrew gershayim ״ (U+05F4) inside an acronym, never an
+  ASCII `"`, with worked examples (כטב״ם, מטע״ד, תע״א, צה״ל), and to always end a sentence with
+  terminal punctuation.
+- `agent/eoa/llm/ollama_client.py`'s `chat_structured` post-validation (additive, wraps both the
+  plain and the U8 chain-aware dispatch paths): `_find_truncation_suspects` recursively walks
+  every string field of the validated pydantic model (nested models and lists included) via
+  `_iter_model_strings`; a field is suspect if its text contains Hebrew, ends without terminal
+  punctuation (`.!?״)”`), and its last token is a known truncated-acronym stem (כטב/מטע/תע/צה/מ/ק/
+  חמ/אמ) OR the field is named `*_he` and is >=20 chars with no terminal punctuation. One
+  corrective retry via `_guard_hebrew_truncation` (reusing `_structured_once`, so it works
+  identically under a cloud fallback chain); if still suspect afterward, accepted anyway and
+  logged `hebrew_truncation_suspected`. Independently of suspicion, `_normalize_model_hebrew_
+  quotes` always replaces an ASCII `"` sitting directly between two Hebrew letters with ״ before
+  returning (cheap, safe, no LLM involved).
+- `scripts/repair_truncated_hebrew.py` (new): scans `items` (summary_he/so_what_he/uncertainty_he/
+  tech_readiness_note_he -> full `analyze` stage re-run; triage_reason -> full `triage` stage
+  re-run, both going through the guards above) plus `events.summary_he`/`tenders.summary_he`/
+  `tender_forecasts.rationale_he` (no single-row regen path for these -- deterministic ASCII-quote
+  normalisation only, applied when it actually changes the text; a row that's genuinely truncated
+  with no quote to fix is reported under `*_truncated_unrepairable` instead of silently skipped).
+  `--dry-run` first, then a real run against the native DB: 21 items re-analyzed, 17 items
+  re-triaged (incl. ids 93/175/96 from the QA sample), 22 events + 1 tender + 6 tender_forecasts
+  quote-normalized, 0 failures.
+
+**Q3-2/Q3-7 (P1/P2) -- platform-only items classified into a technical EO/IR/CV subdomain with no
+supporting content.** Item 117 (an AI/deepfake interview article, zero EO/IR content) was
+classified `c_uas`/`"c_ua_0"`, score 10, red, with zero extracted entities -- nothing stopped an
+in-scope domain when nothing in the text/entities/watchlist actually tied it to the domain.
+
+- `agent/eoa/pipeline/classify.py`'s `apply_no_eoir_gate` (new, called from both `run_classify`
+  loops right after `classify_item`/`classify_batch`, before persistence): if the LLM's own
+  `entities` list is empty **and** neither a curated bilingual EO/IR/CV term list (`_EOIR_
+  KEYWORDS_EN`/`_HE`, plus terms auto-mined from `taxonomy.yaml` domain/sub-domain labels'
+  parenthesised English glossary, >=4 chars and whole-word/phrase matched to avoid e.g. "SoC"
+  false-positiving inside "social") **nor** a watchlist company/program alias appears anywhere in
+  the item's title/text, `domain` is forced to `out_of_scope` (which the existing "domain ==
+  out_of_scope" branch already turns into `level=archive`/`score=1`), `relevance_note` set to
+  `"gate:no_eoir_vocabulary"`.
+- `agent/eoa/llm/prompts/classify.md`: new calibration example (Q3-7) -- a watchlist company
+  mentioned in an unrelated story (CFO appointment) must classify `out_of_scope`, never a technical
+  subdomain, purely because the company name is on the watchlist.
+- `scripts/repair_classification_guards.py` (new, also covers Q3-3/Q3-4 -- see below): applies the
+  gate to every existing classified item. Run live 2026-09-06: 35 items gated to `out_of_scope`
+  (item 117 included).
+
+**Q3-3 (P2) -- `subdomain` values that don't exist in the taxonomy.** `ClassifyOut` (`agent/eoa/
+llm/schemas/analysis.py`) gained a `model_validator(mode="after")` (`_validate_subdomain_against_
+taxonomy`): if `subdomain` is non-empty but not a sub-key of the chosen `domain` in `config/
+taxonomy.yaml`, it's reset to `""` and `classify_invalid_subdomain` is logged (never raises --
+an invalid subdomain shouldn't fail the whole classification). Guarded against `settings()` being
+unavailable (bare unit-test construction of `ClassifyOut`) via a broad `except`. Repaired
+retroactively by the same `scripts/repair_classification_guards.py`: 6 rows fixed live (matching
+the QA sample's count exactly, item 117 among them).
+
+**Q3-4 (P1) -- triage `score` internally inconsistent with its own stated reasoning.** ids 10/67:
+one had `reason_he` stating an explicit `score=5` while the persisted `score` column was 8; the
+other had a numerically self-consistent score (components really do sum to it) but `reason_he`'s
+own concluding sentence named the wrong level word for that score's threshold ("...רמה orange" for
+score=8, which the config's `red: 8` threshold actually maps to "red").
+
+- `agent/eoa/pipeline/triage.py`: `_expected_score` mirrors triage.md's fixed sum-to-score lookup
+  table exactly (components -> score, never a formula); `_reason_conflicting_level` looks for an
+  explicit "רמה .../level ..." conclusion phrase in `reason_he` and flags it if it names a level
+  other than what the (expected) score maps to. `_reconcile_score` (called from both `triage_item`
+  and, per-mismatched-item, `triage_batch`) checks both conditions; on a mismatch, one corrective
+  retry naming the exact contradiction; if the retry still disagrees, the deterministic
+  component-sum score wins and `triage_score_reconciled` is logged. Never blocks the pipeline.
+- `agent/eoa/llm/prompts/triage.md`: new "כלל ברזל" -- `score` must equal the table's translation
+  of the three components' sum, and must never contradict the level `reason_he` itself narrates.
+- `scripts/repair_classification_guards.py`'s third pass (`triage_inconsistent`/`parse_stated_
+  score`): for existing rows (where the raw components were never persisted), detects either an
+  explicit `score=N` mention in `reason_he` disagreeing with the stored `score`, or a conflicting
+  level-word conclusion, and re-runs the `triage` stage (through the same `_reconcile_score`
+  guard) for flagged rows. Run live 2026-09-06: 9 items re-triaged; ids 10 and 67 both end
+  consistent (10: E-HEL laser contract, score 7/orange, clean reasoning; 67: gated to
+  `out_of_scope`/archive by the Q3-2 gate above -- a submarine-delivery story with no EO/IR content
+  and no entities, correctly out of scope regardless of the triage question).
+
+**Q3-8/Q3-9 (P2) -- empty `entities_mentioned` despite an obvious watchlist mention; duplicated
+`key_facts`.** `agent/eoa/pipeline/analyze.py`:
+
+- `_dedupe_key_facts` drops word-for-word (modulo whitespace/case) duplicate `key_facts` entries
+  before persistence, keeping the first occurrence's original text/order.
+- `_backfill_entities_from_watchlist`: when an item reaches `analyze` with `entities_mentioned`
+  still empty (classify extracted none), a deterministic watchlist alias match
+  (`eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text`, new module -- see Q3-13) over
+  the item's own title+text fills it in when a company/program is plainly named; a no-op when
+  already populated or nothing matches. Investigated the batch-mode correlation mentioned in the
+  finding: no schema-mapping bug found in `chat_structured_batch`'s wrapper-model construction
+  (every `AnalyzeOut`/`ClassifyOut` field round-trips through the batched pydantic model
+  correctly) -- the empty-array skew in batch mode appears to be model behavior under a longer,
+  multi-item context rather than a code defect, so this deterministic fallback is the mitigation
+  rather than a batch-schema fix.
+- `agent/eoa/pipeline/analyze.py`'s edge-writer also now skips (rather than crashing on) an edge
+  whose endpoint `upsert_entity` rejected (see Q3-13's technique-like rejection).
+
+**Q3-13 (P2) -- entity duplicates (case/alias/language), wrong `kind`, technique names stored as
+entities, 91.5% missing `country`.** New module `agent/eoa/pipeline/entity_normalize.py` (pure
+text/config logic, no DB): `normalize_name_key` (casefold + punctuation-stripped comparison key),
+`resolve_canonical`/`canonical_name_and_kind` (watchlist alias -> canonical name/kind, built from
+`config/watchlist.yaml`), `normalize_kind` (weapon/system designations e.g. LOCUST/SMASH ->
+`"system"`; government/military bodies -> `"org"`; a watchlist company's own recorded kind
+otherwise; unknown -> `"org"`), `is_technique_like` (rejects method/algorithm names such as "image
+captioning", "RF-DETR vehicle detectors"), `find_watchlist_aliases_in_text` (Q3-8, above). A known
+system/weapon designation is deliberately **excluded** from being folded into the company it's
+listed as a watchlist alias under (watchlist aliases mix true alternate-spellings of a company
+with the company's own product/program names, used there purely for search-relevance matching) --
+verified against a real bug the repair script's dry run first caught (LOCUST/TITAN almost got
+merged into "BlueHalo").
+
+- `agent/eoa/memory/relational.py`'s `upsert_entity` (return type now `int | None`): resolves
+  name/kind through the module above before writing, backfills `country`/`aliases`/`focus` from a
+  watchlist match when the caller didn't supply them, and does a case-insensitive lookup
+  (`_find_case_insensitive_existing_name`, `lower(name) = lower(...)`) against an existing row
+  before falling back to a fresh `name`-exact `INSERT`, so a same-name-different-case duplicate is
+  never created going forward. Returns `None` (instead of an id) for a technique-like name --
+  **not stored at all**; both call sites (`classify.persist_classification`,
+  `analyze.persist_analysis`'s edge writer) already treat "no id" as "skip this one".
+- Live-verified the `entities.kind` CHECK constraint via `pg_get_constraintdef` before finalising
+  `normalize_kind`: migration `0007_entity_relevance.py` had already widened it to allow
+  `"country"` (matching `ClassifyOut.EntityMention.kind`, which always allowed it) -- so a genuine
+  country name keeps `kind="country"`; only a government/military body mislabeled "country" gets
+  corrected to `"org"`.
+- `scripts/repair_entities_normalize.py` (new, four passes, each idempotent/safe to re-run):
+  (1) delete technique-like entities after stripping their references from `items.
+  entities_mentioned`/`events.parties`/`events.customer`/`events.program`; (2) re-derive every
+  remaining entity's `kind` via `normalize_kind`; (3) backfill `country` from a watchlist match
+  when missing; (4) merge duplicates -- grouped by watchlist-canonical name (aliases/case/language
+  variants) or, for non-watchlist names, by `normalize_name_key` alone; lowest id survives (renamed
+  to the canonical name when applicable), every reference (`graph_edges.src_entity_id`/
+  `dst_entity_id` with pre-merge dedup against a unique-constraint collision, `items.
+  entities_mentioned`, `events.parties`/`customer`/`program`) is repointed onto the survivor before
+  the loser row is deleted. Run live 2026-09-06: entities 428 -> 416 (2 technique-like rejected, 12
+  kind fixes, 9 country backfills, 9 duplicate groups / 10 rows merged away, incl. Elbit Systems /
+  אלביט מערכות -> Elbit, Raytheon -> RTX, KONGSBERG -> Kongsberg); LOCUST/TITAN correctly did NOT
+  merge into BlueHalo.
+
+### Tests
+New: `tests/unit/test_hebrew_truncation_guard.py` (22), `test_classify_guards.py` (18),
+`test_triage_score_reconciliation.py` (28), `test_analyze_key_facts_entities.py` (13),
+`test_entity_normalize.py` (35), `test_upsert_entity_normalization.py` (6),
+`test_repair_classification_guards.py` (15), `test_repair_entities_normalize.py` (8) -- 145 new
+tests, all passing. Existing `test_ollama_client*.py`/`test_persist_analysis.py`/`test_triage_
+*.py`/`test_llm_batch_mode.py` suites re-run clean after these changes (two pre-existing failures
+in `test_persist_analysis.py`, `test_persist_analysis_handles_date_parsing`/`_returns_counts`, are
+caused by a concurrent agent's unrelated Q3-6 `_is_narrative_event_title` guard rejecting the
+tests' own generic fixture titles ("Test"/"e1"/"e2"/"e3") -- not touched here, flagged for that
+guard's owner to reconcile its own test fixtures).
+
 ## Conference tracker verification run: Q4-4/Q4-5 (docs/qa/findings_Q4_r1.md, 2026-09-06)
 
 FR-12.3's monthly scan (`agent/eoa/conferences/tracker.py`) had never actually run against the

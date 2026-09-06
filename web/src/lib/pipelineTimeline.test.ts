@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildStageTimeline } from "./pipelineTimeline";
+import { buildStageTimeline, stageLabelHe, STAGE_ORDER } from "./pipelineTimeline";
 import type { PipelineLastRun, PipelineStageInfo } from "@/types/api";
 
 function stage(overrides: Partial<PipelineStageInfo> = {}): PipelineStageInfo {
@@ -62,7 +62,7 @@ describe("buildStageTimeline", () => {
     expect(entries.map((e) => e.key)).toEqual(["ingest", "aaa_unknown", "zzz_unknown"]);
   });
 
-  it("gives each entry a Hebrew label, falling back to the raw key for unknown stages", () => {
+  it("gives each entry a Hebrew label, falling back to a humanised form for unknown stages", () => {
     const lastRun: PipelineLastRun = {
       started_at: null,
       finished_at: null,
@@ -74,6 +74,27 @@ describe("buildStageTimeline", () => {
     };
     const entries = buildStageTimeline(lastRun);
     expect(entries.find((e) => e.key === "triage")?.label).toBe("מיון (Triage)");
-    expect(entries.find((e) => e.key === "mystery_stage")?.label).toBe("mystery_stage");
+    // Q5-5 (docs/qa/findings_Q5_r1.md): a stage key with no Hebrew label yet used to render
+    // as the raw snake_case key verbatim -- now falls back to a humanised form instead.
+    expect(entries.find((e) => e.key === "mystery_stage")?.label).toBe("mystery stage");
+  });
+
+  it("has a Hebrew label for every stage in the canonical STAGE_ORDER, including post_tenders_catchup", () => {
+    // Q5-5: agent/eoa/orchestrator/jobs.py's STAGE_ORDER runs "post_tenders_catchup" between
+    // "tenders" and "report" -- it was missing from STAGE_LABEL_HE, so the morning replay
+    // timeline showed the raw English key for that stage.
+    for (const key of STAGE_ORDER) {
+      expect(stageLabelHe(key)).not.toBe(key);
+    }
+  });
+});
+
+describe("stageLabelHe", () => {
+  it("returns the known Hebrew label for a canonical stage", () => {
+    expect(stageLabelHe("post_tenders_catchup")).toBe("השלמת מכרזים");
+  });
+
+  it("humanises (replaces underscores with spaces) an unknown stage key instead of returning it raw", () => {
+    expect(stageLabelHe("some_new_stage")).toBe("some new stage");
   });
 });
