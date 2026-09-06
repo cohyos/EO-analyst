@@ -23,6 +23,7 @@ knows what "US"/"USA"/"United States" mean:
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any
 
 from eoa.db import connection
@@ -37,38 +38,38 @@ UNKNOWN_COUNTRY = "other"
 # what a given raw value means.
 _ALIASES: dict[str, str] = {
     "us": "US", "usa": "US", "u.s": "US", "u.s.a": "US",
-    "united states": "US", "united states of america": "US",
+    "united states": "US", "united states of america": "US", 'ארה"ב': "US", "ארצות הברית": "US",
     "israel": "IL", "ישראל": "IL", "il": "IL",
     "uk": "GB", "u.k": "GB", "united kingdom": "GB", "great britain": "GB",
-    "gb": "GB", "britain": "GB",
+    "gb": "GB", "britain": "GB", "בריטניה": "GB",
     "eu": "EU", "european union": "EU",
     "nato": "NATO",
     "un": "UN", "united nations": "UN",
-    "germany": "DE", "deutschland": "DE", "de": "DE",
-    "france": "FR", "fr": "FR",
-    "italy": "IT", "it": "IT",
-    "turkey": "TR", "türkiye": "TR", "turkiye": "TR", "tr": "TR",
-    "south korea": "KR", "korea, south": "KR", "republic of korea": "KR", "kr": "KR",
-    "north korea": "KP", "kp": "KP",
-    "japan": "JP", "jp": "JP",
-    "china": "CN", "prc": "CN", "cn": "CN",
-    "india": "IN", "in": "IN",
-    "russia": "RU", "russian federation": "RU", "ru": "RU",
-    "ukraine": "UA", "ua": "UA",
-    "poland": "PL", "pl": "PL",
-    "spain": "ES", "es": "ES",
-    "netherlands": "NL", "holland": "NL", "nl": "NL",
-    "sweden": "SE", "se": "SE",
-    "norway": "NO", "no": "NO",
-    "finland": "FI", "fi": "FI",
-    "canada": "CA", "ca": "CA",
-    "australia": "AU", "au": "AU",
-    "saudi arabia": "SA", "sa": "SA",
-    "uae": "AE", "united arab emirates": "AE", "ae": "AE",
-    "singapore": "SG", "sg": "SG",
-    "taiwan": "TW", "tw": "TW",
-    "brazil": "BR", "br": "BR",
-    "greece": "GR", "gr": "GR",
+    "germany": "DE", "deutschland": "DE", "de": "DE", "גרמניה": "DE",
+    "france": "FR", "fr": "FR", "צרפת": "FR",
+    "italy": "IT", "it": "IT", "איטליה": "IT",
+    "turkey": "TR", "türkiye": "TR", "turkiye": "TR", "tr": "TR", "טורקיה": "TR", "תורכיה": "TR",
+    "south korea": "KR", "korea, south": "KR", "republic of korea": "KR", "kr": "KR", "דרום קוריאה": "KR",
+    "north korea": "KP", "kp": "KP", "צפון קוריאה": "KP",
+    "japan": "JP", "jp": "JP", "יפן": "JP",
+    "china": "CN", "prc": "CN", "cn": "CN", "סין": "CN",
+    "india": "IN", "in": "IN", "הודו": "IN",
+    "russia": "RU", "russian federation": "RU", "ru": "RU", "רוסיה": "RU",
+    "ukraine": "UA", "ua": "UA", "אוקראינה": "UA",
+    "poland": "PL", "pl": "PL", "פולין": "PL",
+    "spain": "ES", "es": "ES", "ספרד": "ES",
+    "netherlands": "NL", "holland": "NL", "nl": "NL", "הולנד": "NL",
+    "sweden": "SE", "se": "SE", "שוודיה": "SE",
+    "norway": "NO", "no": "NO", "נורווגיה": "NO",
+    "finland": "FI", "fi": "FI", "פינלנד": "FI",
+    "canada": "CA", "ca": "CA", "קנדה": "CA",
+    "australia": "AU", "au": "AU", "אוסטרליה": "AU",
+    "saudi arabia": "SA", "sa": "SA", "ערב הסעודית": "SA",
+    "uae": "AE", "united arab emirates": "AE", "ae": "AE", "איחוד האמירויות": "AE",
+    "singapore": "SG", "sg": "SG", "סינגפור": "SG",
+    "taiwan": "TW", "tw": "TW", "טייוואן": "TW",
+    "brazil": "BR", "br": "BR", "ברזיל": "BR",
+    "greece": "GR", "gr": "GR", "יוון": "GR",
     "other": UNKNOWN_COUNTRY,
     "unknown": UNKNOWN_COUNTRY,
 }
@@ -87,6 +88,37 @@ def normalize_country(raw: str | None) -> str:
     if len(key) == 2 and key.isalpha():
         return key.upper()
     return UNKNOWN_COUNTRY
+
+
+def country_mentions_in_text(text: str) -> list[str]:
+    """Q3-11 (docs/qa/findings_Q3_r1.md): scan free text for known country/region names or
+    aliases (whole-word, case-insensitive) and return the distinct normalized codes found, in
+    order of first appearance. Used by ``eoa.tenders.forecast`` to derive a tender forecast's
+    ``buyer_country`` from the trigger items' text/rationale when ``items.geography``/
+    ``entities.country`` come back unknown (``"other"``) -- never raises, returns `[]` for no
+    match. Built on the same `_ALIASES` vocabulary as :func:`normalize_country`, so a mention this
+    finds is always something that function would also normalize the same way.
+
+    Bare 2-letter ISO codes (``"us"``, ``"in"``, ``"no"``, ...) are excluded even though
+    :func:`normalize_country` accepts them -- in free prose they collide with common English words
+    ("in", "no", "it") far too often to use as a country signal; only names/longer aliases (3+
+    characters, e.g. "USA", "Israel", "PRC") count as a mention here.
+    """
+    if not text:
+        return []
+    low = text.lower()
+    # Longest alias first, so e.g. "united states" is looked for before a shorter alias that
+    # happens to be its substring -- doesn't change the result set here (every alias maps
+    # unambiguously to one code), just avoids redundant matching work.
+    first_pos: dict[str, int] = {}
+    for raw_alias, code in sorted(_ALIASES.items(), key=lambda kv: -len(kv[0])):
+        if raw_alias in ("other", "unknown") or len(raw_alias) < 3:
+            continue
+        pattern = r"(?<!\w)" + re.escape(raw_alias) + r"(?!\w)"
+        m = re.search(pattern, low)
+        if m and (code not in first_pos or m.start() < first_pos[code]):
+            first_pos[code] = m.start()
+    return [code for code, _pos in sorted(first_pos.items(), key=lambda kv: kv[1])]
 
 
 def raw_values_for_country(code: str) -> list[str]:

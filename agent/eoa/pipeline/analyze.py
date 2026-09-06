@@ -39,14 +39,25 @@ _NARRATIVE_TITLE_PREFIXES_HE = ("השלכות", "משמעות", "מגמה", "צ�
 #: Hebrew verbs of *occurrence* -- something concrete happening -- as opposed to a verb of
 #: assessment/expectation. A title with none of these AND no party/customer/amount/date to anchor
 #: it to a concrete fact is treated as narrative, not an event (Q3-6).
+#: Hebrew VERB-form stems and NOUN-form business-event words, plus their common English
+#: equivalents -- a title can legitimately be in either language (this codebase's `events.title`
+#: is not Hebrew-only), and Hebrew business-event phrasing is often a noun construct ("רכישת",
+#: "פתיחת", "שיתוף פעולה") rather than the conjugated verb its triliteral root would suggest
+#: ("רכש"), which a plain substring match against only the verb stem misses entirely. The initial
+#: verb-stems-only list under-matched real events lacking a populated party/customer/amount/date
+#: (Elbit-Serbia UAV partnership, satellite launches, an arms-embargo partial lift -- all
+#: real events, all flagged as narrative before this widening), which would have made
+#: ``_is_narrative_event_title`` reject genuine future events, not just clean up assessment prose.
 _OCCURRENCE_VERBS_HE = (
     "זכ",  # זכה/זכתה/זכייה (won)
-    "חתמ",  # חתם/חתמה (signed)
-    "רכש",  # רכש/רכשה (acquired/purchased)
-    "השיק",  # השיק/השיקה (launched)
+    "חתמ",  # חתם/חתמה/חתימה/חתימת (signed/signing)
+    "רכש",  # רכש/רכשה (acquired/purchased, verb form)
+    "רכיש",  # רכישה/רכישת (acquisition, noun form)
+    "השיק",  # השיק/השיקה (launched, verb form)
+    "השק",  # השקה/השקת (launch, noun form)
     "פרסמ",  # פרסם/פרסמה (published/announced)
-    "מינ",  # מינה/מינתה (appointed)
-    "אישר",  # אישר/אישרה (approved)
+    "מינ",  # מינה/מינתה/מינוי (appointed/appointment)
+    "אישר",  # אישר/אישרה/אישור (approved/approval)
     "העניק",  # העניקה (granted/awarded)
     "גייס",  # גייסה (raised — investment)
     "השלימ",  # השלימה (completed)
@@ -56,6 +67,45 @@ _OCCURRENCE_VERBS_HE = (
     "פיתח",  # פיתח/פיתחה (developed)
     "השתלט",  # השתלטה (acquired/took over)
     "מיזג",  # מיזגה/התמזגה (merged)
+    "שיתוף פעולה",  # cooperation/partnership (noun form)
+    "פתיח",  # פתיחה/פתיחת (opening, e.g. an exhibition/plant)
+    "הסר",  # הסרה/הסרת (removal, e.g. a sanction/embargo)
+    "הקמ",  # הקמה/הקמת (establishment, e.g. a plant/factory)
+    "launch",
+    "signs",
+    "signed",
+    "wins",
+    "won",
+    "awarded",
+    "acquires",
+    "acquired",
+    "acquisition",
+    "announces",
+    "announced",
+    "opens",
+    "opened",
+    "opening",
+    "partners",
+    "partnership",
+    "invests",
+    "invested",
+    "raises",
+    "raised",
+    "completes",
+    "completed",
+    "delivers",
+    "delivered",
+    "tests",
+    "tested",
+    "develops",
+    "developed",
+    "merges",
+    "merged",
+    "orders",
+    "order",
+    "prioritizes",
+    "establishes",
+    "establishment",
 )
 
 

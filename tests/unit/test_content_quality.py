@@ -48,12 +48,15 @@ class TestAssess:
     def test_hebrew_paywall_phrase_detected(self) -> None:
         assert assess("תוכן קצר. רק למנויים.") == "stub"
 
-    def test_large_html_thin_extraction_is_partial(self) -> None:
-        # 50KB of HTML but sanitize.py only pulled out ~1% of real text -- boilerplate-heavy page.
-        text = "a" * 1600  # already > PARTIAL_MAX_CHARS threshold on its own? check below
-        # Use a text length just above STUB but under the html-ratio path's own full threshold
+    def test_html_len_never_demotes_a_comfortably_long_extraction(self) -> None:
+        """Regression: an earlier version used a raw-HTML-to-text ratio heuristic here, which
+        misclassified ordinary complete articles as 'partial' on this project's own real data
+        (modern news pages routinely have a 1.5-2.5% text/HTML ratio with nothing wrong with the
+        extraction) -- html_len must never turn a long, phrase-clean text into anything but
+        'full', regardless of how large it is."""
         text = "a" * (PARTIAL_MAX_CHARS + 100)
-        assert assess(text, html_len=200_000) == "partial"
+        assert assess(text, html_len=200_000) == "full"
+        assert assess(text, html_len=10_000_000) == "full"
 
     def test_normal_long_text_no_html_hint_is_full(self) -> None:
         assert assess("a" * (PARTIAL_MAX_CHARS + 100), html_len=0) == "full"

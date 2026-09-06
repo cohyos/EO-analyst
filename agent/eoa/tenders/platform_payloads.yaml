@@ -28,7 +28,13 @@ platforms:
     lag_months: { min: 6, max: 24 }
 
   - key: attack_helicopter
-    match: ["Apache", "AH-64", "attack helicopter", "Tiger helicopter", "combat helicopter"]
+    # Q3-11 (docs/qa/findings_Q3_r1.md, forecast id 10): bare "Apache"/"AH-64" used to match any
+    # article that so much as *mentions* an Apache in passing (e.g. a drone-company article
+    # noting "the UK Apache teaming concept" as an unrelated aside) -- fired the whole candidate
+    # as attack_helicopter even though the article's actual subject was a cargo drone. Requiring
+    # the qualifying word "helicopter" alongside the model name removes that false-positive class
+    # without losing any genuine Apache-helicopter-deal match (which always says "helicopter" too).
+    match: ["Apache helicopter", "AH-64", "attack helicopter", "Tiger helicopter", "combat helicopter"]
     category_he: "מסוק קרב"
     payload_need_he: "מטע\"ד ג'ימבלי EO/IR לכיוון ותצפית"
     payload_domain: uav_gimbals

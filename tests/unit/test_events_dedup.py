@@ -14,9 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from eoa.llm.schemas.analysis import EventOut
+from eoa.llm.schemas.analysis import AnalyzeOut, EventOut
 from eoa.pipeline.analyze import _is_narrative_event_title, persist_analysis
-from eoa.llm.schemas.analysis import AnalyzeOut
 
 
 class _FakeCursor:
@@ -30,7 +29,7 @@ class _FakeCursor:
     def fetchone(self) -> dict:
         return self._row
 
-    def __enter__(self) -> "_FakeCursor":
+    def __enter__(self) -> _FakeCursor:
         return self
 
     def __exit__(self, *exc: object) -> bool:
@@ -44,7 +43,7 @@ class _FakeConnection:
     def cursor(self) -> _FakeCursor:
         return self._cursor
 
-    def __enter__(self) -> "_FakeConnection":
+    def __enter__(self) -> _FakeConnection:
         return self
 
     def __exit__(self, *exc: object) -> bool:

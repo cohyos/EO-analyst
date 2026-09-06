@@ -41,7 +41,7 @@ def run_dedup(
     items = [
         it
         for it in get_items_for_stage(STAGE, limit, item_ids=item_ids)
-        if it.get("security_status") != "quarantined"
+        if it.get("security_status") not in ("quarantined", "blocked")
     ]
     for i in range(0, len(items), batch_size):
         batch = items[i : i + batch_size]

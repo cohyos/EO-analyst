@@ -262,6 +262,21 @@ def collect_deep_search(
     return out
 
 
+def _filter_deep_search_to_items_included(
+    deep_search: list[dict[str, Any]], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Q3-15 (docs/qa/findings_Q3_r1.md): drop a deep-search entry whose ``trigger_item_id`` is
+    not one of this report's own ``items`` -- the "חקירות עומק" (deep investigations) section
+    must never show an open question the reader has no way to cross-check because its item isn't
+    in the report at all (an "orphaned" open question, per the finding). An entry with no
+    ``trigger_item_id`` (a general question, not about any single item) is always kept -- it
+    isn't orphaned relative to anything."""
+    included_item_ids = {it["id"] for it in items if it.get("id") is not None}
+    return [
+        d for d in deep_search if d.get("trigger_item_id") is None or d.get("trigger_item_id") in included_item_ids
+    ]
+
+
 def collect_open_clarifications() -> list[dict[str, Any]]:
     """Clarifications still awaiting a user answer."""
     sql = """
@@ -280,11 +295,62 @@ def collect_open_clarifications() -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
+#: Q3-15 (docs/qa/findings_Q3_r1.md): a section domain that doesn't resolve to any taxonomy key
+#: (even via a fuzzy match) renders under this Hebrew label instead of the raw, meaningless slug
+#: (e.g. a daily report once rendered the literal heading "naval_eo_ir").
+_UNKNOWN_DOMAIN_LABEL_HE = "תחומים נוספים"
+#: difflib.get_close_matches cutoff for resolving a near-miss domain slug (e.g. the model writing
+#: "naval_eo_ir" for the real key "naval_surveillance") -- conservative enough that an unrelated
+#: domain never gets fuzzy-matched to the wrong one.
+_DOMAIN_FUZZY_CUTOFF = 0.5
+
+
+def _domain_similarity(a: str, b: str) -> float:
+    """difflib's ``SequenceMatcher.ratio()`` is not actually symmetric in practice (its greedy
+    matching-block algorithm can find a different total match length depending on which string is
+    ``a`` vs ``b``, e.g. "naval_eo_ir"/"naval_surveillance" score 0.55 one way and 0.48 the other)
+    -- take the more generous of the two orderings so a real near-miss slug isn't missed on
+    account of comparison order alone."""
+    import difflib
+
+    return max(
+        difflib.SequenceMatcher(None, a, b).ratio(),
+        difflib.SequenceMatcher(None, b, a).ratio(),
+    )
+
+
+def _resolve_domain_key(domain: str | None) -> str | None:
+    """Q3-15: map ``domain`` (as returned by the report-drafting LLM, or an item's own already-
+    validated `domain` column) to a real ``config/taxonomy.yaml`` domain key. An exact match wins
+    outright; otherwise the closest key by string similarity, if any clears
+    :data:`_DOMAIN_FUZZY_CUTOFF`. Returns ``None`` when nothing reasonable matches -- the caller
+    (:func:`_domain_label`) is what decides the fallback label, this function never itself
+    invents or guesses a taxonomy key it isn't reasonably confident about."""
+    if not domain:
+        return None
+    domains = list(settings().taxonomy.get("domains", {}).keys())
+    if domain in domains:
+        return domain
+    best_key, best_score = None, 0.0
+    for key in domains:
+        score = _domain_similarity(domain, key)
+        if score > best_score:
+            best_key, best_score = key, score
+    return best_key if best_score >= _DOMAIN_FUZZY_CUTOFF else None
+
+
 def _domain_label(domain: str | None) -> str:
+    """Hebrew label for ``domain`` -- never the raw slug itself when it isn't (or doesn't fuzzy-
+    match) a real taxonomy key (Q3-15)."""
+    if not domain:
+        return "כללי"
     domains = settings().taxonomy.get("domains", {})
-    entry = domains.get(domain or "", {})
+    resolved = _resolve_domain_key(domain)
+    if resolved is None:
+        return _UNKNOWN_DOMAIN_LABEL_HE
+    entry = domains.get(resolved, {})
     label = entry.get("label")
-    return label if isinstance(label, str) and label else (domain or "כללי")
+    return label if isinstance(label, str) and label else _UNKNOWN_DOMAIN_LABEL_HE
 
 
 def _level_label(level: str | None) -> str:
@@ -350,16 +416,73 @@ def _no_items_draft() -> DailyReportDraft:
     )
 
 
+@dataclass
+class TableCounts:
+    """Q3-14 (docs/qa/findings_Q3_r1.md): counts of report content that is rendered as a table
+    rather than drafted by the LLM (events, open tenders, new tender forecasts, completed deep
+    searches) -- ``draft_report`` needs these to know the exec summary must never claim "no
+    findings" while these tables are non-empty, even when the LLM-facing ``items`` list is empty
+    or thin (A9's own ``collect_items`` filter is unrelated and stays untouched)."""
+
+    events: int = 0
+    open_tenders: int = 0
+    new_forecasts: int = 0
+    deep_search: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.events + self.open_tenders + self.new_forecasts + self.deep_search
+
+    def context_he(self) -> str:
+        if not self.total:
+            return "אין (כל הטבלאות ריקות בתקופה זו)."
+        parts = []
+        if self.events:
+            parts.append(f"{self.events} אירועים עסקיים/מבצעיים")
+        if self.open_tenders:
+            parts.append(f"{self.open_tenders} מכרזים פתוחים")
+        if self.new_forecasts:
+            parts.append(f"{self.new_forecasts} תחזיות מכרזים חדשות/מעודכנות")
+        if self.deep_search:
+            parts.append(f"{self.deep_search} חקירות עומק שהושלמו")
+        return "; ".join(parts) + "."
+
+
+def _tables_only_draft(counts: TableCounts) -> DailyReportDraft:
+    """Q3-14: used when ``items`` is empty but at least one table (events/tenders/forecasts/deep
+    search) is not -- a short, honest, deterministic summary of what the report *does* contain,
+    instead of ``_no_items_draft``'s blanket "no findings" (which used to run unconditionally
+    whenever the LLM-facing items list was empty, even with full tables right below it)."""
+    return DailyReportDraft(
+        exec_summary_he=(
+            "לא זוהו בתקופה זו פריטי חדשות חדשים ברמת חשיבות red/orange/yellow, אך קיים תוכן "
+            f"רלוונטי בטבלאות הדוח: {counts.context_he()} פירוט מלא בטבלאות בהמשך הדוח."
+        ),
+        sections=[],
+        outlook_he="",
+        open_points_he=[],
+    )
+
+
 def draft_report(
-    items: list[dict[str, Any]], *, role: str = "resident", interactive: bool = False
+    items: list[dict[str, Any]],
+    *,
+    role: str = "resident",
+    interactive: bool = False,
+    table_counts: TableCounts | None = None,
 ) -> DailyReportDraft:
-    """Draft the ``DailyReportDraft`` via the resident model; zero items skip the LLM call entirely."""
+    """Draft the ``DailyReportDraft`` via the resident model; zero items skip the LLM call
+    entirely -- Q3-14: falling back to :func:`_tables_only_draft` rather than
+    :func:`_no_items_draft` when ``table_counts`` (events/tenders/forecasts/deep-search) shows
+    there is other report content the exec summary should not contradict."""
+    counts = table_counts or TableCounts()
     if not items:
-        return _no_items_draft()
+        return _tables_only_draft(counts) if counts.total else _no_items_draft()
     prompt = render(
         "report_daily",
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
+        counts_context_he=counts.context_he(),
         items_block=wrap_data(_format_items_block(items), "report_items", "internal"),
     )
     draft = chat_structured(
@@ -377,12 +500,19 @@ def draft_report(
 
 
 def _corrective_retry(
-    items: list[dict[str, Any]], draft: DailyReportDraft, qa: QAResult, *, role: str, interactive: bool
+    items: list[dict[str, Any]],
+    draft: DailyReportDraft,
+    qa: QAResult,
+    *,
+    role: str,
+    interactive: bool,
+    table_counts: TableCounts | None = None,
 ) -> DailyReportDraft:
     prompt = render(
         "report_daily",
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
+        counts_context_he=(table_counts or TableCounts()).context_he(),
         items_block=wrap_data(_format_items_block(items), "report_items", "internal"),
     )
     errors_text = "\n".join(f"- {e}" for e in qa.errors[:30])
@@ -618,12 +748,37 @@ def build_daily(
     deep_search = collect_deep_search(period_start, period_end)
     open_clarifications = collect_open_clarifications()
 
-    draft = draft_report(items, role=role, interactive=interactive)
+    # Q3-15: the "חקירות עומק" section must not show an open question about an item that isn't
+    # actually in this report.
+    deep_search = _filter_deep_search_to_items_included(deep_search, items)
+
+    # Q3-14 (docs/qa/findings_Q3_r1.md): tenders/forecasts are collected here, *before* drafting,
+    # so their counts can be handed to draft_report -- an empty/thin `items` list must not produce
+    # an exec summary claiming "no findings" when these tables (rendered further down, unchanged)
+    # are not empty. Moved up from its previous position right before rendering; the tenders_data
+    # this computes is reused there unchanged (no second `collect_tenders` call).
+    tenders_data: dict[str, list[dict[str, Any]]] = {}
+    try:
+        from eoa.tenders.report_section import collect_tenders
+
+        window_start = start_ts.astimezone(JERUSALEM).date()
+        tenders_data = collect_tenders(window_start, label)
+    except Exception as exc:
+        log.warning("daily_report_tenders_collect_failed", error=str(exc)[:160])
+
+    table_counts = TableCounts(
+        events=len(events),
+        open_tenders=len(tenders_data.get("open_tenders") or []),
+        new_forecasts=len(tenders_data.get("new_forecasts") or []),
+        deep_search=len(deep_search),
+    )
+
+    draft = draft_report(items, role=role, interactive=interactive, table_counts=table_counts)
     qa = check(draft, items)
 
     if not qa.passed and items:
         log.warning("report_qa_failed_retrying", errors=qa.errors[:10])
-        draft = _corrective_retry(items, draft, qa, role=role, interactive=interactive)
+        draft = _corrective_retry(items, draft, qa, role=role, interactive=interactive, table_counts=table_counts)
         qa = check(draft, items)
 
     if not qa.passed and items:
@@ -649,13 +804,12 @@ def build_daily(
     # gate. F6: ONE rendering of tenders (the open-tenders board) plus a compact forecasts
     # sub-table -- the old tenders_extra_section bulleted block (duplicating the same open tenders
     # as prose, and printing the full unbounded forecast rationale) is no longer used here. A
-    # failure here must never break the daily report.
+    # failure here must never break the daily report. (tenders_data itself was already collected
+    # above, before drafting, for Q3-14's table counts -- not re-fetched here.)
     tender_tables: list[dict[str, Any]] = []
     try:
-        from eoa.tenders.report_section import collect_tenders, tenders_table
+        from eoa.tenders.report_section import tenders_table
 
-        window_start = start_ts.astimezone(JERUSALEM).date()
-        tenders_data = collect_tenders(window_start, label)
         open_table = tenders_table(tenders_data)
         if open_table:
             tender_tables.append(open_table)

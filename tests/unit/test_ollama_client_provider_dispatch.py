@@ -7,6 +7,7 @@ monkeypatching `eoa.llm.providers.cli.CliProvider.chat` directly.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 

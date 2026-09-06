@@ -133,6 +133,14 @@ MIN_PAGES_BEFORE_NOT_FOUND = 2
 #: F18: a `not_found` outcome asserting high confidence is meaningless -- confidence measures how
 #: sure the model is of a *finding*, and there is no finding to be sure of.
 NOT_FOUND_MAX_CONFIDENCE = 0.3
+#: Q3-5 (docs/qa/findings_Q3_r1.md): a `partial` outcome resting on a single read source is a
+#: single, unconfirmed data point -- it should not be reported with high confidence. Two or more
+#: independently read sources are required to justify confidence above this cap.
+PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE = 0.7
+PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE = 2
+#: Q3-5: a `partial` answer that cites zero actually-read sources is an unverified claim -- it
+#: must say so plainly rather than read like a sourced finding.
+UNVERIFIED_PREFIX_HE = "לא אומת: "
 
 
 @dataclass
@@ -144,6 +152,12 @@ class Investigation:
     outcome: str = "not_found"
     rounds_done: int = 0
     read_urls: list[str] = field(default_factory=list)  # successfully read + summarised
+    #: Q3-5: (url, title, first read round) for every successfully read page, in read order --
+    #: the ground truth for `sources`, independent of whatever the model's own `finish` call
+    #: claims. Keyed implicitly by `read_urls` order; kept as a separate list of dicts (rather
+    #: than folding into `InvestigationOut.sources`, which stays `list[str]` for existing
+    #: consumers -- UI, docx citations) so a richer record is still available to callers/logging.
+    read_sources: list[dict[str, Any]] = field(default_factory=list)
     attempted_urls: list[str] = field(default_factory=list)
     hits_seen: dict[str, SearchHit] = field(default_factory=dict)
     stop_requested: bool = False
@@ -302,6 +316,7 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
             return json.dumps({"url": url, "error": f"page quarantined by security gate ({verdict.kind})"})
         summary = _summarise_page(inv, text, url)
         inv.read_urls.append(url)  # only successfully read + summarised pages count as sources
+        inv.read_sources.append({"url": url, "title": title[:200], "round": round_no})
         _log(
             inv,
             round_no,
@@ -311,6 +326,8 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
             results_n=0,
             pages_read=1,
             outcome="partial",
+            url=url,
+            title=title[:200],
         )
         return _data_frame(
             json.dumps(
@@ -369,11 +386,13 @@ def _log(
     pages_read: int,
     outcome: str,
     notes: str | None = None,
+    url: str | None = None,
+    title: str | None = None,
 ) -> None:
     try:
         from eoa.memory.relational import insert_investigation_log
 
-        insert_investigation_log(
+        log_id = insert_investigation_log(
             job_id=inv.job_id,
             trigger_item=inv.item_id,
             round=round_no,
@@ -385,8 +404,27 @@ def _log(
             outcome=outcome,
             notes=notes,
         )
+        if url:
+            _log_read_url(log_id, url, title)
     except Exception as exc:
         log.debug("investigation_log_failed", error=str(exc)[:120])
+
+
+def _log_read_url(log_id: int, url: str, title: str | None) -> None:
+    """Q3-5: record the (url, title) of a successfully-read page against its `investigation_log`
+    row, via a direct SQL update rather than adding params to
+    ``eoa.memory.relational.insert_investigation_log`` (out of scope here -- that function is
+    owned elsewhere; see docs/qa/findings_Q3_r1.md coordination notes). Requires the `url`/`title`
+    columns added by ``db/migrations/versions/0015_investigation_log_sources.py``; on a host that
+    hasn't migrated yet this is a no-op failure, swallowed by the caller's own try/except.
+    """
+    from eoa.db import connection
+
+    with connection() as conn:
+        conn.execute(
+            "UPDATE investigation_log SET url=%s, title=%s WHERE id=%s",
+            (url, title, log_id),
+        )
 
 
 def _check_stop(inv: Investigation) -> None:
@@ -437,13 +475,25 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
     """Settle `inv.result`/`inv.outcome` and the budget-accounting fields once the loop stops,
     whether by a model `finish` call or by running out of rounds/budget.
 
-    docs/REVIEW_2026-09-05.md U11/F17/F18:
+    docs/REVIEW_2026-09-05.md U11/F17/F18; Q3-5 (docs/qa/findings_Q3_r1.md):
       - a missing result becomes an honest, low-confidence `not_found` (never invents an answer).
+      - `sources` is unconditionally set to every URL actually fetched via the `read` tool
+        (`inv.read_urls`) -- regardless of outcome (found/partial/not_found/stopped_*) and
+        regardless of what the model's own `finish` call claimed. Previously the `finish` handler
+        kept only the intersection of the model's claimed `sources` with `read_urls`, so a model
+        that read a page but forgot (or mis-formatted the URL) to list it in `finish` produced an
+        empty `sources` list despite a page having actually been read -- 14/18 historical jobs hit
+        this (Q3-5). `read_urls`/`read_sources` are the ground truth; the model's own list is never
+        trusted for this field.
       - a `not_found` outcome is refined into `stopped_budget`/`stopped_timeout` (ran out of
         budget mid-investigation), `insufficient_context` (search returned zero hits -- nothing
         to work with at all), or a plain `not_found` (searched thoroughly, genuinely nothing
         there); any other outcome (`found`/`partial`) is kept as the model reported it.
       - a `not_found` outcome can never claim confidence above :data:`NOT_FOUND_MAX_CONFIDENCE`.
+      - a `partial` outcome resting on fewer than
+        :data:`PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE` sources can never claim confidence above
+        :data:`PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE`; a `partial` answer with zero sources is
+        prefixed :data:`UNVERIFIED_PREFIX_HE` so it never reads like a sourced finding.
       - `queries_used`/`max_queries`/`pages_used`/`max_pages`/`stopped_reason` are populated for
         the API/UI (job result), which previously had no way to show *why* an investigation ended.
     """
@@ -455,8 +505,21 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
             sources=list(inv.read_urls),
             what_was_tried_he=f"{budget.queries} שאילתות, {budget.pages} דפים, {inv.rounds_done} סבבים.",
         )
+
+    # Q3-5: ground truth for `sources` is what was actually read, never the model's own claim.
+    inv.result.sources = list(inv.read_urls)
+
     if inv.result.outcome == "not_found" and inv.result.confidence > NOT_FOUND_MAX_CONFIDENCE:
         inv.result.confidence = NOT_FOUND_MAX_CONFIDENCE
+
+    if inv.result.outcome == "partial":
+        if not inv.result.sources and not inv.result.answer_he.startswith(UNVERIFIED_PREFIX_HE):
+            inv.result.answer_he = f"{UNVERIFIED_PREFIX_HE}{inv.result.answer_he}"
+        if (
+            len(inv.result.sources) < PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE
+            and inv.result.confidence > PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE
+        ):
+            inv.result.confidence = PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE
 
     if inv.result.outcome != "not_found":
         inv.outcome = inv.result.outcome
@@ -673,9 +736,10 @@ def _act(
                     transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
                     continue
                 try:
-                    inv.result = InvestigationOut.model_validate(
-                        {**args, "sources": [u for u in args.get("sources", []) if u in inv.read_urls]}
-                    )
+                    # Q3-5: `sources` here is provisional -- `_finalize_outcome` unconditionally
+                    # overwrites it with `inv.read_urls` (the ground truth of what was actually
+                    # fetched) once the loop ends, regardless of what the model claims below.
+                    inv.result = InvestigationOut.model_validate(args)
                 except Exception as exc:
                     out = json.dumps({"error": f"invalid finish payload: {str(exc)[:200]}"})
                     transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
@@ -986,12 +1050,22 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
                 outcome = "found"
             else:
                 outcome = "partial"
-            confidence = min(screened.confidence, NOT_FOUND_MAX_CONFIDENCE) if outcome == "not_found" else screened.confidence
+            source_urls = [s.url for s in screened.sources]
+            confidence = screened.confidence
+            answer_he = screened.answer_he
+            if outcome == "not_found":
+                confidence = min(confidence, NOT_FOUND_MAX_CONFIDENCE)
+            elif outcome == "partial":
+                # Q3-5: same partial-confidence/unverified-claim rules as the local ReAct path.
+                if not source_urls and not answer_he.startswith(UNVERIFIED_PREFIX_HE):
+                    answer_he = f"{UNVERIFIED_PREFIX_HE}{answer_he}"
+                if len(source_urls) < PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE:
+                    confidence = min(confidence, PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE)
             inv.result = InvestigationOut(
                 outcome=outcome,
-                answer_he=screened.answer_he,
+                answer_he=answer_he,
                 confidence=confidence,
-                sources=[s.url for s in screened.sources],
+                sources=source_urls,
                 what_was_tried_he=screened.what_was_tried_he or "חקירת אצווה בענן עם כלי חיפוש/הבאה מובנים.",
             )
             inv.outcome = outcome

@@ -5756,3 +5756,235 @@ existing, already-tested `tracker.py` functions against the live DB) -- `tests/u
 (pre-existing suite) still passes; not re-run in full here since nothing in `tracker.py` itself
 was modified.
 
+## Deep-search sources/confidence, events dedup, content quality, forecast country/regen, daily
+report exec-summary/domain fixes: Q3-5/Q3-6/Q3-10/Q3-11/Q3-14/Q3-15 + `ollama_client` power-suffix
+bug (docs/qa/findings_Q3_r1.md, 2026-09-06)
+
+**Ollama-client bug fix (flagged separately from the QA findings): `_dispatch_explicit_provider`'s
+`"<model>@<power>"` suffix parse was backwards.** `power, _, model = model.partition("@")` -- when
+`partition` returns `(before, sep, after)`, this assigned the model name to `power` and the
+power/effort level to `model`, so a call like `provider="agy:gemini-3.8-flash-medium@high"` built
+a `CliProvider`/API client with `model="high"` (an invalid model id) and `power="gemini-3.8-flash-
+medium"` (not a valid effort level), silently dropping the real model and effort. Fixed to
+`model, _, power = model.partition("@") if "@" in model else (model, "", None)`. New tests in
+`tests/unit/test_ollama_client_provider_dispatch.py` (`TestDispatchExplicitProviderPowerSuffix`,
+3 cases covering the CLI path, the API path, and the no-suffix case) assert the CLI/API client
+constructor receives `(model, power)` in the correct order.
+
+**Q3-5 (P1) -- `deep_search` jobs persisting `sources: []` despite a page having actually been
+read; `not_found` reporting high confidence.** 14/18 (15/22 live) historical jobs hit this: the
+ReAct loop's `finish` handler kept only the intersection of the model's own claimed `sources` with
+`inv.read_urls`, so a model that read a page but forgot (or mis-formatted the URL) to list it in
+`finish` produced an empty `sources` list despite a page having actually been read (verified live:
+job 3, "Iron Beam", had one successful `fetch` round but `sources: []` and `answer_he` reading like
+a sourced finding).
+
+- `agent/eoa/search/deep_search.py`: `_finalize_outcome` now unconditionally overwrites
+  `inv.result.sources` with `list(inv.read_urls)` -- the ground truth of what was actually fetched
+  via the `read` tool -- regardless of outcome (found/partial/not_found/stopped_*) and regardless
+  of what the model's `finish` call claimed; `_act`'s finish handler no longer filters `sources`
+  itself (kept provisional, always overwritten before the caller sees it). New
+  `PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE` (0.7) / `PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE` (2):
+  a `partial` outcome resting on fewer than 2 read sources is capped at 0.7; a `partial` with zero
+  sources gets `UNVERIFIED_PREFIX_HE` ("לא אומת: ") prepended to `answer_he`. The pre-existing
+  `not_found` cap (`NOT_FOUND_MAX_CONFIDENCE`, 0.3, added by a prior pass) was verified to already
+  apply on every finish path including `stopped_budget`/`stopped_timeout` (it's applied once,
+  unconditionally, in `_finalize_outcome`, before outcome refinement). The same partial-cap/
+  unverified-prefix rules were added to `investigate_batch_cloud` (the cloud-delegated batch path)
+  for consistency.
+- `Investigation.read_sources` (new field): `(url, title, round)` for every successfully-read page,
+  in read order -- kept alongside the existing `read_urls: list[str]` (still the ground truth
+  `sources` gets built from) since `InvestigationOut.sources` stays `list[str]` for existing
+  consumers (job-result JSON, the UI). `_tool_read` populates it and now also calls a new
+  `_log_read_url(log_id, url, title)` right after `insert_investigation_log` -- a direct SQL
+  `UPDATE investigation_log SET url=..., title=... WHERE id=...` (bypassing
+  `eoa.memory.relational.insert_event`'s sibling `insert_investigation_log`, which is out of scope
+  here -- see coordination notes) so a **future** successful read is recorded with its URL/title
+  against the log row, not just "a read happened this round".
+- `db/migrations/versions/0015_investigation_sources_content_status_forecast_regen.py` (new):
+  `investigation_log.url`/`.title` (nullable TEXT) -- the columns `_log_read_url` above writes to.
+  Bundled into the same migration as the two other Q3 fixes below (all additive, same fix pass).
+- `scripts/repair_investigation_sources.py` (new): best-effort backfill for the 15 live jobs with
+  `sources: []`. `investigation_log` never recorded *which* URL a successful read fetched before
+  this migration (only *that* one happened, `engine='fetch', outcome='partial'`), so historical
+  reads' exact URLs are **not recoverable** -- the script never invents one (docs/CONVENTIONS.md
+  rule 5); it still applies the confidence cap and unverified-prefix corrections to every broken
+  job's persisted `jobs.result`, and reports which jobs are "irrecoverable" (a read happened, no
+  URL to show for it) vs. genuinely empty (no read at all, already-correct `sources: []`). Run live
+  2026-09-06 (18 jobs scanned, 15 with `sources: []`): 2 confidence-capped (jobs 2, 46: 0.5/1.0 ->
+  0.3), 2 irrecoverable-but-prefixed (jobs 3, 5: `answer_he` now starts "לא אומת: "), 0 recovered
+  (no job had a post-migration read), 11 unchanged (genuinely zero reads, already-correct).
+
+**Q3-6 (P2) -- events: duplicates from re-processing; narrative/assessment sentences stored as
+events.** Item 70 had the same `investment` event inserted twice (once without `amount_usd`, once
+with).
+
+- `agent/eoa/memory/relational.py`'s `insert_event` is now an upsert: `ON CONFLICT (item_id, kind,
+  (lower(title))) DO UPDATE` merges `date`/`amount_usd`/`currency`/`customer`/`program`/
+  `summary_he` (existing non-null value wins, else the new one), `parties` (existing non-empty
+  array wins), `confidence` (max of the two) -- backed by the new `ux_events_item_kind_title`
+  unique index. A `title=None` row never conflicts with anything (matches NULL-is-distinct
+  semantics), same as before.
+- `agent/eoa/pipeline/analyze.py`'s `persist_analysis` events loop: `_is_narrative_event_title`
+  rejects (skips `insert_event`, logs `event_rejected_narrative_title`) a title starting with
+  `_NARRATIVE_TITLE_PREFIXES_HE` (השלכות/משמעות/מגמה/צפוי/ייתכן) or carrying no
+  `_OCCURRENCE_VERBS_HE` match and no party/customer/amount/date anchor. The occurrence-word list
+  had to be widened past Hebrew VERB stems alone (e.g. "רכש") to also cover Hebrew NOUN-construct
+  forms of the same events ("רכישת"/"רכישה" -- a different root-letter pattern, not a substring of
+  the verb stem) and common English verbs, after the first version's dry run against live data
+  false-positived on genuinely real events with no populated anchor fields (an Elbit-Serbia UAV
+  factory partnership, two satellite launches, a partial arms-embargo lift) -- see repair script
+  run below for the corrected, much smaller flagged set.
+- `db/migrations/versions/0016_events_dedup_unique_index.py` (new): merges each duplicate
+  `(item_id, kind, lower(title))` group into its lowest-id row (via `first_value()` window
+  functions, not `array_agg()` -- an `array_agg()`-of-`text[]` (`parties`) plus `[1]` subscripting
+  does not reliably yield back a plain `text[]`, which the migration's first draft hit as a
+  `DatatypeMismatch` against live data), deletes the rest, then creates the unique index. Applied
+  live 2026-09-06: `events` 119 -> 118 rows (the one known item-70 duplicate merged, amount
+  preserved).
+- `scripts/repair_events_dedup.py` (new): re-runnable/idempotent version of the same dedup (0
+  groups found live, confirming the migration already handled it) plus a narrative-title
+  **report** pass (reuses `analyze._NARRATIVE_TITLE_PREFIXES_HE`/`_OCCURRENCE_VERBS_HE` against a
+  plain DB row) -- 3 rows flagged live, all genuine narrative/speculative text ("השלכות על תעשיות
+  ישראליות", "השלכות על שוק ההגנה האווירית", "אלביט מערכות בוחנת..." [considering, not yet
+  occurring]); **not deleted** (`--delete-narrative` opt-in, off by default) -- removing historical
+  rows on a heuristic is a stronger action than deduping exact duplicates, left for manual review.
+
+**Q3-10 (P2) -- paywall/stub content (e.g. `*-technology.com`, RFI portals) analyzed as if
+complete.** New module `agent/eoa/fetch/content_quality.py` (pure function, no DB/fetch -- kept
+new and self-contained per coordination notes so it needs no changes to `fetch/remote.py`/
+`html.py`/`sanitize.py`, owned elsewhere): `assess(text, html_len, status) -> 'full'|'partial'|
+'stub'` from length thresholds (`STUB_MAX_CHARS=400`, `PARTIAL_MAX_CHARS=1500`) and a
+paywall/boilerplate phrase list (English + Hebrew, incl. the literal "Discover B2B Marketing"
+footer `army-technology.com`/`naval-technology.com` append to every article regardless of length).
+An `html_len`-ratio heuristic ("large raw HTML, thin extraction -> partial") was tried and dropped
+before landing -- it misclassified ordinary complete articles as partial on live data (modern news
+pages routinely run 1.5-2.5% text/HTML ratio from nav/ad/tracking bloat, the same range a naive
+ratio rule would flag); `html_len` is accepted for interface stability but not used in the
+decision.
+
+- `agent/eoa/pipeline/analyze.py`: `_content_status_precheck` (called from `run_analyze`'s
+  eligibility loop, before `analyze_item`/`analyze_batch`) classifies and persists
+  `items.content_status`; `'stub'` items are `mark_stage`d without ever reaching the LLM (never
+  retried, never analyzed). `'partial'` items still get a full analysis pass, but
+  `_analyze_prompt` prepends a Hebrew note to the `{context}` block telling the model the content
+  may be incomplete, and `persist_analysis`'s `_with_partial_content_note` guarantees
+  `items.uncertainty_he` names the condition ("טקסט חלקי (paywall)") regardless of what the model
+  itself wrote -- authoritative, not best-effort. Per coordination notes, `triage.py` (C1-owned)
+  is untouched; there is no score cap here, only the prompt-context flag + the persisted note.
+- `agent/eoa/memory/relational.py`: `content_status` added to `_ITEM_UPDATABLE_FIELDS` (the
+  minimal touch needed on this shared allow-list; no other function in the file was touched beyond
+  the Q3-6 `insert_event` upsert above).
+- `db/migrations/versions/0015_...py`: `items.content_status TEXT NOT NULL DEFAULT 'full'` +
+  CHECK constraint (`'full'|'partial'|'stub'`).
+- `scripts/repair_content_status.py` (new): backfills every existing item (defaults included,
+  since 'full' is exactly the wrong default for a paywalled item stored before this fix). Run live
+  2026-09-06 (376 items): 286 full, 38 partial, 52 stub (90 changed from the 'full' default).
+
+**Q3-11 (P2) -- tender forecasts: ~50% generic-fallback rationale kept forever; `buyer_country`
+`'other'` for every row; no platform-type sanity check.**
+
+- `agent/eoa/report/geography.py`: new `country_mentions_in_text(text) -> list[str]` -- scans free
+  text for a known country/region name or alias (3+ characters only; bare 2-letter ISO codes are
+  excluded because in free prose they collide with common English words -- "in", "no", "it" --
+  far too often) and returns the codes found in order of first appearance (implemented via the max
+  of both `SequenceMatcher` orderings -- see docstring for why `ratio()` isn't actually symmetric
+  in practice, an early version silently mis-ordered multi-country results). `_ALIASES` gained
+  Hebrew country names (גרמניה, צרפת, ישראל already had one, etc.) so this also works against the
+  report's own Hebrew rationale text.
+- `agent/eoa/tenders/forecast.py`: `_build_candidates` now groups events by
+  `normalize_country(geography)` instead of the raw string. `_resolve_buyer_country` (called once
+  per candidate, after the rationale is generated) refines a still-`'other'` value via, in order:
+  `entities.country` for the trigger items (`_country_from_entities`), a country mention in the
+  trigger text itself, then one in the generated rationale. `_platform_type_contradiction` flags a
+  candidate whose trigger text also matches another platform from a contradicting class (the
+  spec's own example: rotary_wing wording alongside a fixed_wing_uas match) -- `forecast_tenders`
+  applies `PLATFORM_SANITY_PENALTY` (-0.2, floored at 0) and appends a Hebrew note to the
+  rationale when this fires. `ForecastStats` gained `needs_regen`/`regenerated`/
+  `platform_sanity_flags` counters.
+- `needs_regen` (new `tender_forecasts` column): set true whenever a row's rationale came from
+  `_fallback_rationale` (LLM unavailable/failed/output-guard-rejected twice) rather than a real
+  LLM call. `_regenerate_flagged_forecasts` (called at the start of every `forecast_tenders` run)
+  retries the LLM for every currently-flagged row using its own stored trigger items; a row that
+  succeeds (passes the same `_rationale_guard_failure` check) gets its `rationale_he` replaced and
+  the flag cleared; a row that still fails is left exactly as-is, to retry again next run.
+- `db/migrations/versions/0015_...py`: `tender_forecasts.needs_regen BOOLEAN NOT NULL DEFAULT
+  false`.
+- `scripts/repair_forecasts_country.py` (new, three passes): (1) recomputes `buyer_country` for
+  existing rows via the same priority order as `_resolve_buyer_country`; (2) flags
+  `needs_regen=true` for any row whose `rationale_he` contains `_fallback_rationale`'s literal
+  template tail; (3) **stale platform match** (`--delete-stale-platform` to actually delete,
+  report-only by default) -- re-checks each row's own trigger-item text against the *current*
+  `platform_payloads.yaml` rules for its own platform label, catching the finding's own named
+  example: forecast id 10 (`'מסוק קרב'`/attack_helicopter, trigger item 309 "Tekever acquires
+  Flowcopter") only ever matched because its article mentions "Apache" once, in passing, as an
+  unrelated "UK Apache teaming concept" aside -- the article's actual subject is a cargo-drone
+  acquisition. `platform_payloads.yaml`'s `attack_helicopter` match list was tightened (bare
+  `"Apache"` -> `"Apache helicopter"`; `"AH-64"` is specific enough on its own to keep) to close
+  this false-positive class going forward -- verified no other match in the codebase or live data
+  relied on the bare term. Run live 2026-09-06: 7/8 rows' `buyer_country` updated away from
+  `'other'` (EU x2, GR x3, US, DE), 5/8 flagged `needs_regen`, forecast id 10 detected stale and
+  deleted (`--delete-stale-platform`). **Caveat found in this run, out of scope to fix here:**
+  forecast id 5 resolved to `buyer_country='GR'` because one of its grouped trigger items is an
+  unrelated Greece air-defense story that happens to also match the `male_uav` keyword list
+  alongside the candidate's real subject (a US Air Force Reaper-replacement story) -- a
+  pre-existing `_build_candidates` grouping issue (two genuinely different-country events sharing
+  a platform keyword, both `buyer_country='other'` before this fix, merged into one candidate)
+  that this fix's per-row country *derivation* doesn't address; flagged for whoever next touches
+  candidate grouping.
+
+**Q3-14 (P3) -- daily report exec summary says "no findings" next to full events/tenders/
+forecasts tables.** `agent/eoa/report/daily.py`'s `draft_report` used to call `_no_items_draft()`
+(hardcoded "no findings") whenever the LLM-facing `items` list was empty, regardless of whether
+`events`/tenders/forecasts/deep-search had content. New `TableCounts` dataclass
+(events/open_tenders/new_forecasts/deep_search counts + `.context_he()`); `build_daily` now
+collects `tenders_data` (`eoa.tenders.report_section.collect_tenders`, A10-owned, called
+read-only, moved earlier in the function so its counts are available before drafting -- no second
+`collect_tenders` call, the same `tenders_data` is reused for the actual table rendering further
+down) before calling `draft_report`. `draft_report`/`_corrective_retry` take a `table_counts:
+TableCounts` parameter: an empty `items` list with `table_counts.total > 0` produces
+`_tables_only_draft` (a short, deterministic, honest summary of what the tables contain) instead
+of the blanket "no findings"; a non-empty `items` list still calls the LLM, but the prompt now
+carries `{counts_context_he}` and a new rule 7 telling the model it must not claim "no findings"
+when these counts are non-zero. `agent/eoa/llm/prompts/report_daily.md` updated accordingly
+(renumbered rule 7 data-guard to rule 8).
+
+**Q3-15 (P3) -- a report section rendered a raw, unrecognized `domain` slug as its Hebrew title
+("naval_eo_ir"); the deep-investigations section could show an open question about an item not in
+the report.**
+
+- `agent/eoa/report/daily.py`'s `_domain_label`/new `_resolve_domain_key`: an exact taxonomy-key
+  match wins outright; otherwise the closest key by string similarity
+  (`_domain_similarity`, the max of both `SequenceMatcher` orderings -- same asymmetry issue as
+  Q3-11's `country_mentions_in_text` above, discovered independently here first) if it clears
+  `_DOMAIN_FUZZY_CUTOFF` (0.5, calibrated against live taxonomy keys so `"naval_eo_ir"` correctly
+  resolves to `"naval_surveillance"` while two synthetic nonsense slugs stay unmatched); otherwise
+  falls back to the literal Hebrew label `_UNKNOWN_DOMAIN_LABEL_HE` ("תחומים נוספים") -- never the
+  raw slug itself, for either a report section's `domain` or an item's own `domain` column
+  (`_domain_label` is shared by both call sites).
+- New `_filter_deep_search_to_items_included(deep_search, items)`: drops a deep-search entry whose
+  `trigger_item_id` isn't one of the report's own `items` (an entry with no `trigger_item_id` --
+  a general question, not about any one item -- is always kept). Wired into `build_daily` right
+  after `collect_deep_search`, so it also feeds Q3-14's `TableCounts.deep_search` count.
+
+### Tests
+New: `TestDispatchExplicitProviderPowerSuffix` in `test_ollama_client_provider_dispatch.py` (3),
+`TestFinalizeOutcomeSourcesGroundTruth`/`TestFinalizeOutcomePartialConfidenceCap` in
+`test_deep_search_outcomes.py` (10), `TestInvestigateBatchCloudPartialConfidenceCap` in
+`test_deep_search_cloud_batch.py` (3), `test_events_dedup.py` (12), `test_content_quality.py` (25,
+incl. `run_analyze` stub-skip integration test), country-mention tests in
+`test_report_geography.py` (6) and forecast tests in `test_tenders_forecast.py` (19, buyer_country
+resolution/platform-sanity/needs_regen), `test_repair_forecasts_country.py` (7, incl. a regression
+test reproducing forecast id 10's exact stale-Apache-mention scenario), `TestTableCounts`/
+`TestDraftReportTablesOnlyFallback`/`TestDomainLabelFuzzyMatch`/
+`TestNormalizeSectionTitlesNeverRawSlug`/`TestDeepSearchOrphanFilter`
+in `test_report_daily.py` (14). One existing test rewritten (`test_act_filters_sources_to_
+read_urls` -> now asserts the ground-truth-overwrite contract via `_finalize_outcome` instead of
+the old `_act`-only intersection, which this fix intentionally replaces); two existing
+`test_persist_analysis.py` fixtures (`test_persist_analysis_handles_date_parsing`/
+`_returns_counts`) given an anchor field (`customer=`) so Q3-6's narrative-title guard doesn't
+reject their generic placeholder titles -- these were the two pre-existing failures the
+Q3-1/.../Q3-13 write-up above flagged as needing this guard's owner to reconcile; reconciled here.
+Full `PYTHONPATH=agent pytest tests/unit -q` re-run clean after every change in this section
+(1565+ passed, 0 failed).
+
