@@ -8,7 +8,7 @@ other configured source is left untouched, and no LLM/classify/analyze/triage st
 sanitize + store only), so this does not touch the resource gate at all.
 
 Usage:
-    DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \\
+    DATABASE_URL=postgresql://eoa:<POSTGRES_PASSWORD>@127.0.0.1:5432/eoanalyst \\
     PYTHONPATH=agent python scripts/ingest_tech_sources.py
 """
 

@@ -21,7 +21,7 @@ def database_url() -> str:
     """PostgreSQL connection URL for the live stack or env override."""
     return os.environ.get(
         "DATABASE_URL",
-        "postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst",
+        "postgresql://eoa@127.0.0.1:5432/eoanalyst",  # no default password; set DATABASE_URL (runtime/eoa.env)
     )
 
 

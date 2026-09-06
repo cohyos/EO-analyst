@@ -324,14 +324,14 @@ def native_status() -> None:
         t.add_row("postgres", "not installed (run scripts/native/install_native.ps1)")
 
     try:
-        r = httpx.get(os.environ.get("NTFY_URL", "http://127.0.0.1:8091").rstrip("/") + "/v1/health", timeout=3)
+        r = httpx.get(os.environ.get("NTFY_URL", "http://127.0.0.1:8091").rstrip("/") + "/v1/health", timeout=10)
         t.add_row("ntfy", "up" if r.status_code == 200 else f"http {r.status_code}")
     except Exception as exc:
         t.add_row("ntfy", f"down ({exc.__class__.__name__})")
 
     try:
         # agent/eoa/api/routes/status.py — this codebase has no separate /api/health route.
-        r = httpx.get("http://127.0.0.1:8765/api/status", timeout=3)
+        r = httpx.get("http://127.0.0.1:8765/api/status", timeout=10)
         t.add_row("api", "up" if r.status_code == 200 else f"http {r.status_code}")
     except Exception as exc:
         t.add_row("api", f"down ({exc.__class__.__name__})")

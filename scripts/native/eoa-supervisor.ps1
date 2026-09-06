@@ -54,6 +54,16 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $runtimeDir = Join-Path $repoRoot "runtime"
 $logDir = Join-Path $runtimeDir "logs"
 $pidDir = Join-Path $runtimeDir "pids"
+# Q6-14 (2026-09-06): prune pidfiles that belong to dead processes or to names this supervisor
+# does not manage (e.g. agent.pid/web.pid written by hand before the supervisor existed).
+if (Test-Path $pidDir) {
+    Get-ChildItem -Path $pidDir -Filter "*.pid" | ForEach-Object {
+        $raw = (Get-Content $_.FullName -ErrorAction SilentlyContinue | Select-Object -First 1)
+        $alive = $false
+        if ($raw -match '^\d+$') { $alive = [bool](Get-Process -Id ([int]$raw) -ErrorAction SilentlyContinue) }
+        if (-not $alive -or $_.BaseName -in @('agent','web')) { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+    }
+}
 $sentinelPath = Join-Path $runtimeDir "supervisor.stop"
 $supervisorPidPath = Join-Path $runtimeDir "supervisor.pid"
 $envFilePath = Join-Path $runtimeDir "eoa.env"

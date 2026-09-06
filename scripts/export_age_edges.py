@@ -37,7 +37,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-DEFAULT_DATABASE_URL = "postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst"
+DEFAULT_DATABASE_URL = "postgresql://eoa:<POSTGRES_PASSWORD>@127.0.0.1:5432/eoanalyst"
 
 # Must match `agent/eoa/memory/graph.py`'s `GRAPH_NAME` / `EDGE_LABELS` -- duplicated
 # here (not imported) since this script intentionally has no dependency on that

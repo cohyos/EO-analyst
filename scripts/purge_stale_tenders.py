@@ -42,7 +42,7 @@ already reference it. Safe to re-run (idempotent -- rows that already pass are l
 
 Run with the same ``DATABASE_URL`` as the app, e.g.:
 
-    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \\
+    PYTHONPATH=agent DATABASE_URL=postgresql://eoa:<POSTGRES_PASSWORD>@127.0.0.1:5432/eoanalyst \\
         python scripts/purge_stale_tenders.py [--dry-run]
 """
 
