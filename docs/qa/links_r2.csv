@@ -1,0 +1,77 @@
+category,ref,url,http_status,note
+Q4-1,item177,https://www.safran-group.com/pressroom/safran-selected-supply-moskito-and-sharpcrow-observation-systems-bundeswehr-2026-09-03,403,"Still Cloudflare 'Attention Required'; DB correctly stores security_status=blocked/content_status=stub/clean_text=NULL"
+Q4-9-globes,item174,https://en.globes.co.il/en/article-matrix-it-buys-laor-energy-to-expand-defense-offering-1001548940,200,title matches page title/h1 exactly
+Q4-9-globes,item172,https://en.globes.co.il/en/article-rafael-to-produce-iron-dome-interceptors-in-india-report-1001548988,200,title matches
+Q4-9-globes,item168,https://en.globes.co.il/en/article-rafael-vw-talks-continue-despite-qatari-opposition-report-1001549554,200,title matches
+Q4-9-globes,item163,https://en.globes.co.il/en/article-elbit-systems-wins-us-orders-worth-370m-1001549857,200,title matches
+Q4-9-globes,item160,https://en.globes.co.il/en/article-elbit-eyes-converting-vessels-into-drone-carriers-1001550268,200,title matches
+Q4-9-globes,item155,https://en.globes.co.il/en/article-greece-approves-4b-israel-air-defense-procurement-1001550329,200,title matches
+Q4-9-globes,item150,https://en.globes.co.il/en/article-huge-greek-air-defense-deal-has-strategic-dimension-1001550498,200,title matches
+Q4-9-globes,item145,https://en.globes.co.il/en/article-as-ai-hits-software-sector-defense-tech-flourishes-1001550869,200,title matches
+Q4-9-globes,item185,https://en.globes.co.il/en/article-privacy-policy-1001251874,200,"MISMATCH: db_title='Last Updated: 23.02.2026' vs page/h1='Privacy Policy'; also non-news boilerplate page ingested as an item"
+Q4-9-globes,item179,https://en.globes.co.il/en/article-terms-of-use-578636,200,"MISMATCH: db_title='Last Update: August 1, 2018' vs page/h1='Terms of Use'; also non-news boilerplate page ingested as an item"
+Q4-9-leonardo,item221,https://www.leonardo.com/en/press-release-detail/-/detail/21-07-2026-leonardo-and-pt-esystem-solutions-and-the-ministry-of-defence-of-the-republic-of-indonesia-sign-letter-of-intent-for-aw149-helicopters-to-meet-naval-rotorcraft-requirements,200,title matches page <title>
+Q4-9-leonardo,item220,https://www.leonardo.com/en/press-release-detail/-/detail/22-07-2026-lockheed-martin-and-leonardo-sign-agreement-to-pursue-strenghtening-mro-services-for-the-c-130j-super-hercules-airlifter-across-europe-and-mena-region,200,title matches
+Q4-9-leonardo,item219,https://www.leonardo.com/en/press-release-detail/-/detail/22-07-2026-cae-and-leonardo-expand-collaboration-to-advance-m-346-training-and-develop-next-generation-integrated-training-capabilities,200,title matches
+Q4-9-leonardo,item218,https://www.leonardo.com/en/press-release-detail/-/detail/27-07-2026-leonardo-has-confirmed-its-position-as-a-leader-in-anti-corruption,200,title matches
+Q4-9-leonardo,item217,https://www.leonardo.com/en/press-release-detail/-/detail/28-07-2026-leonardo-digital-horizon-kicks-off-with-microsoft-italy-to-drive-the-group-s-digital-evolution,200,title matches
+Q4-9-leonardo,item216,https://www.leonardo.com/en/press-release-detail/-/detail/28-07-2026-leonardo-is-expanding-in-the-us-with-the-acquisition-of-raft,200,title matches
+Q4-9-leonardo,item215,https://www.leonardo.com/en/press-release-detail/-/detail/30-07-2026-leonardo-h1-q2-2026-financial-results,200,"MISMATCH: db_title='Navigation' vs page <title>='LEONARDO: BOARD OF DIRECTORS APPROVES H1 2026 RESULTS...' (nav-menu text captured instead of headline; same root cause class as r1's 'Financial highlights', different literal string)"
+Q4-9-leonardo,item214,https://www.leonardo.com/en/press-release-detail/-/detail/03-08-2026-leonardo-filing-notice,200,title matches
+Q4-9-leonardo,item212,https://www.leonardo.com/en/press-release-detail/-/detail/01-09-2026-first-serial-production-contract-for-the-centauro-ii-signed-for-the-brazilian-army,200,title matches
+Q4-9-leonardo,item209,https://www.leonardo.com/en/press-release-detail/-/detail/01-09-2026-stefano-villanti-appointed-managing-director-of-leonardo-helicopters,200,title matches
+Q4-4-conf,AUSA2026,https://meetings.ausa.org/annual/2026/,200,"WebFetch confirms Oct 12-14 2026, WEWCC Washington DC -- matches DB exactly"
+Q4-4-conf,IDEX2027,https://www.idexuae.ae/en,200,"WebFetch confirms Jan 25-29 2027, ADNEC Abu Dhabi -- matches DB exactly"
+Q4-4-conf,DSEI2027,https://www.dsei.co.uk,200,"WebFetch confirms Sep 7-10 2027, organizer Clarion Defence & Security -- matches DB (Clarion Events, minor naming variant)"
+Q4-4-conf,Euronaval2026,https://www.euronaval.com/,200,"WebFetch confirms Nov 3-6 2026, organizer Sogena/event of GICAN -- matches DB exactly"
+Q4-6/7-tender,tender13,https://ted.europa.eu/en/notice/444841-2016/html,200,resolves; agency=Belgium-Brussels country=EU filled; status correctly closed
+Q4-6/7-tender,tender15,https://www.usarfp.com/tender/sniper-advanced-targeting-pod-atp-32f9ae.php,200,resolves; agency/country filled; status correctly closed
+Q4-6/7-tender,tender18,https://www.highergov.com/contract-opportunity/request-for-information-rfi-360-electro-optic-n0016423snb45-s-89b76/,200,resolves; agency/country filled; status correctly closed
+Q4-6/7-tender,tender20,https://www.usarfp.com/tender/litening-advanced-targeting-pod-3526dc.php,200,resolves; agency/country filled; status correctly closed
+Q4-6/7-tender,tender30,https://www.globaltenders.com/tender-detail/request-for-information-electro-optical-i-111593277,200,resolves; agency/country filled; status correctly closed
+tech_dev,arxiv_eess_iv_tech,https://rss.arxiv.org/rss/eess.IV,200,"0 entries at check time (Sun; arXiv skipDays Sat/Sun) -- keyword filter unconfirmed with live entries, as already documented in sources.yaml"
+tech_dev,arxiv_cs_cv_tech,https://rss.arxiv.org/rss/cs.CV,200,0 entries (weekend skipDays) -- same caveat
+tech_dev,arxiv_physics_optics_tech,https://rss.arxiv.org/rss/physics.optics,200,0 entries (weekend skipDays) -- same caveat
+tech_dev,arxiv_physics_ins_det_tech,https://rss.arxiv.org/rss/physics.ins-det,200,0 entries (weekend skipDays) -- same caveat
+tech_dev,ieee_sensors_journal_toc,https://ieeexplore.ieee.org/rss/TOC7361.XML,200,"50 entries, newest 2026-09-02, 11 keyword matches -- PASS"
+tech_dev,ieee_tgrs_toc,https://ieeexplore.ieee.org/rss/TOC36.XML,200,"50 entries, newest 2026-08-26, 22 keyword matches -- PASS"
+tech_dev,laser_focus_world_tech,"https://www.laserfocusworld.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",200,"25 entries, newest 2026-08-31, 18 keyword matches -- PASS"
+tech_dev,vision_systems_design_tech,"https://www.vision-systems.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",200,"25 entries, newest 2026-09-02, 18 keyword matches -- PASS"
+tech_dev,nature_photonics_tech,https://www.nature.com/nphoton.rss,200,"8 entries, newest 2026-08-28, 0 keyword matches this issue -- FILTER YIELDS 0 CURRENTLY (weekly journal, may vary by issue)"
+report-daily,src-1,https://www.suasnews.com/2026/02/navair-issues-rfi-for-marine-corps-medium-range-tactical-uas/,200,"cited [1] in daily_2026-09-06, maps to appendix row 1 with working #src-1 anchor+link"
+report-bd_us,src-1,https://www.twz.com/sponsored-content/how-drone-detection-is-evolving-to-counter-smaller-faster-and-swarm-threats,200,"cited [1] in bd_us_2026-09-06, maps to appendix + anchor"
+report-bd_us,src-2,https://www.defenseone.com/business/2026/09/back-life-how-shield-ais-future-unmanned-fighter-made-decades-old-tech-new-again/415821/,200,"cited [2] in bd_us_2026-09-06, maps to appendix + anchor"
+report-bd_il,conf1,https://www.isdefexpo.com,200,ISDEF appendix row (conference table cross-reference)
+report-bd_il,conf2,http://spie.org/x6776.xml,503,"BROKEN as stored (plain http://): https://spie.org/x6776.xml returns 200. registration_url for SPIE conference (id 8/23) needs https:// scheme"
+report-bd_il,conf3,https://www.dsei.co.uk,200,appendix row
+report-bd_il,conf4,https://meetings.ausa.org/annual/2026/,200,appendix row
+report-bd_il,conf5,https://www.euronaval.com/,200,appendix row
+report-bd_il,conf6,https://www.idexuae.ae/en,200,appendix row
+report-weekly,src-1,https://www.israeldefense.co.il/node/70552,200,cited [1]
+report-weekly,src-2,https://www.defensenews.com/industry/techwatch/2026/09/03/us-army-launches-laser-production-with-465m-contract-award/,200,cited [2]
+report-weekly,src-3,https://www.israeldefense.co.il/node/70544,200,cited [3]
+report-weekly,src-5,https://www.navalnews.com/naval-news/2026/09/kongsberg-strikemaster-jan-mayen-nato-exercise/,200,cited [5]
+report-weekly,src-6,https://www.twz.com/air/usaf-wants-mq-9-reaper-successor-at-a-fraction-of-the-cost-at-10m-each,200,cited [6]
+report-weekly,src-7,https://www.defensenews.com/news/your-military/2026/09/04/us-air-force-speeds-reaper-successor-timeline-after-iran-losses/,200,cited [7]
+report-weekly,src-8,https://www.army-technology.com/news/leonardo-set-to-deliver-seven-centauro-ii-vehicles-to-brazil/,403,cited [8] -- QA-network 403 artefact (GlobalData site blocks QA IP; documented in r1)
+report-weekly,src-9,https://breakingdefense.com/2026/09/three-exercises-that-pushed-counter-uas-from-prototype-to-proven/,403,cited [9] -- QA-network 403 artefact
+report-weekly,src-11,https://www.army-technology.com/news/anduril-us-army-titan-programme/,403,cited [11] -- QA-network 403 artefact
+report-weekly,src-12,https://www.naval-technology.com/news/ultra-maritime-sonobuoy-production/,403,cited [12] -- QA-network 403 artefact
+report-weekly,src-13,https://breakingdefense.com/2026/09/hermeus-picks-anduril-autonomy-for-quarterhorse-drone/,403,cited [13] -- QA-network 403 artefact
+report-weekly,src-14,https://www.israeldefense.co.il/node/70526,200,cited [14]
+report-weekly,src-15,https://arxiv.org/abs/2609.03585v1,200,cited [15]
+report-weekly,src-16,https://www.edrmagazine.eu/us-army-selects-aerovironment-locust-x3-for-its-enduring-high-energy-laser-programme,200,cited [16]
+report-weekly,src-17,https://www.navalnews.com/naval-news/2026/09/japan-aargm-er-warship-air-defense-anti-ship/,200,cited [17]
+report-weekly,src-18,https://www.defensenews.com/industry/techwatch/2026/09/02/us-army-awards-192m-to-palantir-anduril-for-titan-production/,200,cited [18]
+report-weekly,src-23,https://www.israeldefense.co.il/en/node/70529,200,cited [23]
+report-weekly,src-26,https://arxiv.org/abs/2609.02085v1,200,cited [26]
+report-weekly,src-44,https://breakingdefense.com/2026/09/after-concerning-losses-air-force-pushes-to-replace-reaper-faster/,403,cited [44] -- QA-network 403 artefact
+report-weekly,src-47,https://www.defenseone.com/business/2026/09/back-life-how-shield-ais-future-unmanned-fighter-made-decades-old-tech-new-again/415821/,200,cited [47]
+report-weekly,src-51,https://breakingdefense.com/2026/09/to-counter-china-americas-next-cca-needs-a-different-mission/,403,cited [51] -- QA-network 403 artefact
+report-weekly,src-52,https://www.navalnews.com/naval-news/2026/09/us-navy-certifies-rolls-royce-mtu-engines-for-autonomous-ships/,200,cited [52]
+report-weekly,src-83,https://www.navalnews.com/naval-news/2026/09/us-navy-rfi-carrier-based-collaborative-combat-aircraft-cca/,200,cited [83]
+report-weekly,src-91,https://www.israeldefense.co.il/en/node/70549,200,cited [91]
+report-weekly,src-95,https://www.war.gov/News/News-Stories/Article/Article/4590448/naval-warfare-center-showcases-unmanned-refueling-at-sea/,403,cited [95] -- QA-network 403 artefact (war.gov blocks QA IP; documented in r1)
+report-weekly,src-139,https://www.dvidshub.net/news/574004/blue-list-makes-waves-pacific,200,cited [139]
+report-weekly,src-140,https://www.naval-technology.com/news/kongsberg-sonatech-acquisition-us/,403,cited [140] -- QA-network 403 artefact
+report-weekly,src-141,https://www.army-technology.com/news/rheinmetall-gdls-xm30-us-army/,403,cited [141] -- QA-network 403 artefact

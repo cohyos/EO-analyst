@@ -122,10 +122,34 @@ def _extract_links(
     seen: set[str] = set()
     deduped: list[str] = []
     for link in links:
-        if link not in seen:
+        if link not in seen and not _is_boilerplate_url(link):
             seen.add(link)
             deduped.append(link)
     return deduped
+
+
+_BOILERPLATE_PATH_MARKERS = (
+    "/privacy",
+    "/terms",
+    "/cookie",
+    "/legal",
+    "/accessibility",
+    "/sitemap",
+    "/newsletter",
+    "/subscribe",
+    "/login",
+    "/signin",
+    "/register",
+    "/about-us",
+    "/contact",
+)
+
+
+def _is_boilerplate_url(url: str) -> bool:
+    """Q4-9 r2: site boilerplate pages (privacy policy, terms of use, cookie notice, login...) that a
+    listing-page selector can sweep up are never articles -- skip them before fetching."""
+    path = url.split("?", 1)[0].lower()
+    return any(marker in path for marker in _BOILERPLATE_PATH_MARKERS)
 
 
 def _url_already_seen(url: str) -> bool:

@@ -613,6 +613,10 @@ _TITLE_MAX_PLAUSIBLE_CHARS = 200
 _GENERIC_TITLE_PHRASES = frozenset(
     {
         "financial highlights",
+        "navigation",
+        "menu",
+        "main menu",
+        "skip to main content",
         "home",
         "homepage",
         "untitled",

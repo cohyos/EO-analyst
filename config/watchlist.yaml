@@ -58,7 +58,7 @@ conferences_seed:
   - { name: "Farnborough Air Show", month: 7, city: Farnborough, cadence: biennial_even, relevance: 4, url: "https://www.farnboroughairshow.com", organizer: "Farnborough International Limited" }
   - { name: "SOF Week", month: 5, city: Tampa, relevance: 4, url: "https://www.sofweek.org", organizer: "SOFWERX" }
   - { name: Xponential, month: 5, city: Miami, relevance: 4, url: "https://www.xponential.org", organizer: "AUVSI (Association for Unmanned Vehicle Systems International)" }
-  - { name: "SPIE Defense + Commercial Sensing", month: 4, city: "Orlando/Kissimmee", relevance: 5, url: "https://www.spie.org/conferences-and-exhibitions/defense-and-commercial-sensing", organizer: "SPIE (Society of Photo-Optical Instrumentation Engineers)" }
+  - { name: "SPIE Defense + Commercial Sensing", month: 4, city: "Orlando/Kissimmee", relevance: 5, url: "https://spie.org/conferences-and-exhibitions/defense-and-commercial-sensing", organizer: "SPIE (Society of Photo-Optical Instrumentation Engineers)" }
   - { name: "ISDEF", month: 5, city: "Tel Aviv", cadence: biennial_odd, relevance: 4, url: "https://www.isdefexpo.com", organizer: "ISDEF Ltd. / CorpoRate Ltd.", source_note: "2027 edition date TBC as of 2026-09-06; month corrected 6->5 per historical May scheduling (2023/2025 editions), re-verify closer to the date." }
   - { name: "Euronaval", month: 11, city: Paris, cadence: biennial_even, relevance: 4, url: "https://www.euronaval.fr", organizer: "GICAN / SOGENA (Groupement des Industries de Construction et Activités Navales)" }
   - { name: "IDEX / NAVDEX", month: 1, city: "Abu Dhabi", cadence: biennial_odd, relevance: 4, url: "https://www.idexuae.ae", organizer: "ADNEC Group / UAE Ministry of Defence" }
