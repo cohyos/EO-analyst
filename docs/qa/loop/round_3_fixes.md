@@ -141,3 +141,9 @@ that calls it. Gone after the 15:15 restart (job 95 re-run queued to confirm).
 - **Cloud chain throughput:** weekly = ~30 claude CLI calls at 25–37 s; BD ≈ 5 calls. Nightly
   pipeline on 200 items in batches of 8 → ~25 classify/triage/analyze batch calls; measure the
   first night (2026-09-07 01:00) and compare with the 4 h local baseline.
+- **Search provider throttling (evening 2026-09-06):** the day's tender/patent/deep-search
+  queries pushed DuckDuckGo into timeouts and Google into "sorry" captcha pages, so the `kind:
+  search` tender sources and the patent live search return nothing for hours. Round 4: per-query
+  daily cache, exponential backoff per provider, a second keyless provider in rotation
+  (Brave/Bing via SearXNG or Startpage), and a per-run query budget so one stage cannot exhaust
+  the quota for the rest of the night.
