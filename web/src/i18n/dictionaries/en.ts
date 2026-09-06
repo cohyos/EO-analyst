@@ -267,6 +267,20 @@ export const en: Dictionary = {
       colStatus: "Status",
       colNotices: "Notices",
       colLastFetch: "Last fetch",
+      priorityLowered: "Lower priority",
+      priorityLoweredTitle: "This source hasn't drawn a single 👍 recently -- scanned later, not disabled",
+    },
+    // W2b ("be open" requirement, 2026-09-06 evening): open intake + relevance feedback.
+    candidateBadge: "Candidate",
+    relevanceScoreAria: "Relevance score: {score}",
+    feedback: {
+      thumbsUpAria: "Mark relevant",
+      thumbsDownAria: "Mark irrelevant",
+      reasonPlaceholder: "Reason (optional)",
+      submitReason: "Submit reason",
+      recordedRelevant: "Marked relevant",
+      recordedIrrelevant: "Marked irrelevant",
+      failed: "Failed to save feedback",
     },
   },
   entities: {

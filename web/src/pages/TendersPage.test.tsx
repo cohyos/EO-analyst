@@ -13,12 +13,16 @@ import type {
 const getTenders = vi.fn();
 const getTenderForecasts = vi.fn();
 const getTenderSourceCoverage = vi.fn();
+const postTenderFeedback = vi.fn();
+const getTenderFeedback = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
     getTenders: (...args: unknown[]) => getTenders(...args),
     getTenderForecasts: (...args: unknown[]) => getTenderForecasts(...args),
     getTenderSourceCoverage: (...args: unknown[]) => getTenderSourceCoverage(...args),
+    postTenderFeedback: (...args: unknown[]) => postTenderFeedback(...args),
+    getTenderFeedback: (...args: unknown[]) => getTenderFeedback(...args),
   },
 }));
 
@@ -38,6 +42,8 @@ function makeTender(over: Partial<TenderCard> = {}): TenderCard {
     cpv_naics: ["336413"],
     summary_he: "סיכום בעברית של המכרז",
     relevance: 4,
+    relevance_score: 0.8,
+    intake: "accepted",
     matched_terms: ["targeting pod", "EO/IR"],
     entities: ["Lockheed Martin"],
     status: "open",
@@ -105,6 +111,7 @@ function coverageResponse(
             needs_key_env_var: null,
             notices_stored: 12,
             last_fetch_at: "2026-09-06T04:00:00Z",
+            priority_decrement: 0,
           },
         ],
       },
@@ -121,6 +128,7 @@ function coverageResponse(
             needs_key_env_var: "SAM_GOV_API_KEY",
             notices_stored: 0,
             last_fetch_at: null,
+            priority_decrement: 0,
           },
         ],
       },

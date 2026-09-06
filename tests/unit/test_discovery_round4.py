@@ -217,6 +217,11 @@ def _common_patches(notice: NoticeRaw) -> ExitStack:
     stack.enter_context(patch("eoa.tenders.scan._transition_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan._archive_stale_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0))
+    # W2b: get_relevance_threshold/get_source_priorities are DB-backed (eoa.tenders.feedback),
+    # imported into eoa.tenders.scan's own namespace -- stub them so no test here ever touches a
+    # real connection pool (mirrors tests/unit/test_tenders_scan.py's own _common_patches).
+    stack.enter_context(patch("eoa.tenders.scan.get_relevance_threshold", return_value=0.6))
+    stack.enter_context(patch("eoa.tenders.scan.get_source_priorities", return_value={}))
     return stack
 
 
@@ -235,12 +240,14 @@ def _search_source(**overrides) -> TenderSource:
 
 
 class TestScanTendersEndToEndRescue:
-    """Full scan_tenders() integration: the rescue must not just relabel the rejection reason --
-    it must actually clear F24's own "unverified + undated -> reject" rule too (both checks fire
-    off the same `page_verified=False` signal), otherwise the notice is rescued on relevance only
-    to be immediately re-rejected as `unverified_undated`, still inserting nothing."""
+    """Full scan_tenders() integration: the rescue must promote the notice to a proper
+    relevance_score/intake pair, not just relabel a rejection reason -- W2b (2026-09-06 evening)
+    replaced the old F24 "unverified + undated -> reject" gate entirely (open intake: everything
+    that clears the two-signal vocabulary gate is now stored regardless), so what the rescue still
+    uniquely buys a trusted-tracker notice is a proper accepted-quality relevance_score/intake
+    instead of languishing as a low-score candidate forever."""
 
-    def test_govtribe_thin_snippet_notice_gets_inserted(self):
+    def test_govtribe_thin_snippet_notice_gets_inserted_as_accepted(self):
         notice = _govtribe_notice()
         src = _search_source()
         with (
@@ -255,13 +262,17 @@ class TestScanTendersEndToEndRescue:
         mock_insert.assert_called_once()
         _, kwargs = mock_insert.call_args
         assert kwargs["relevance"] >= RELEVANCE_MIN_ACCEPT
+        assert kwargs["relevance_score"] >= 0.6  # RELEVANCE_MIN_ACCEPT/10 -- crosses the (stubbed) threshold
+        assert kwargs["intake"] == "accepted"
         assert stats.inserted == 1
-        assert stats.llm_rejected == 0
+        assert stats.accepted == 1
         assert stats.gate_rejected == 0
 
-    def test_untrusted_domain_thin_snippet_still_rejected(self):
+    def test_untrusted_domain_thin_snippet_stored_as_low_score_candidate(self):
         """Same shape (LLM says not-relevant on an unfetchable page), but the domain is not on the
-        trusted-tracker list -- must still be rejected exactly as before this round's fix."""
+        trusted-tracker list -- no longer rescued, but also no longer a hard rejection (W2b, open
+        intake): it is still stored, just as a 'candidate' with the LLM's own low relevance_score,
+        instead of the pre-W2b behavior of dropping it outright."""
         notice = _govtribe_notice(
             external_ref="rfi_rfp_news:https://random-blog.example/x",
             url="https://random-blog.example/x",
@@ -270,12 +281,16 @@ class TestScanTendersEndToEndRescue:
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", return_value=(_thin_extract(), False)),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
-        assert stats.llm_rejected == 1
-        assert stats.inserted == 0
+        mock_insert.assert_called_once()
+        _, kwargs = mock_insert.call_args
+        assert kwargs["relevance_score"] == 0.0  # _thin_extract()'s relevance=0, never rescued
+        assert kwargs["intake"] == "candidate"
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
+        assert stats.candidates == 1
 
 
 # --------------------------------------------------------------------------

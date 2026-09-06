@@ -9626,3 +9626,230 @@ itself was not restarted (per instructions), so the live-server screenshot still
 pre-existing title format -- confirmed as the intended fallback path: `normalizeReportSummary`'s
 `title_he`/`group_key`/`is_latest` defaults reproduce the exact old "`<kind> — <date>`" shape when
 talking to a backend that hasn't rolled out the new `_report_card` fields yet.
+
+## W2b -- open tender intake + relevance feedback / self-tuning (2026-09-06, docs/REVIEW_2026-09-06_evening.md W2b, user requirement 2026-09-06 18:55, verbatim: "be open -- and through the relevance feedback given to each tender, the system tunes itself")
+
+Follow-up to W2/"Round 4 discovery" above: that round's own audit (job 102, 2026-09-06 morning)
+found the F24 gate dropping genuine on-topic notices whenever a trusted tracker domain 403'd the
+page fetch, and the thin-snippet rescue fixed the narrow trusted-domain case. The user's own
+follow-up requirement goes further: **every** notice that clears the two-signal vocabulary gate
+should be stored, carrying a relevance signal the operator's own 👍/👎 feedback corrects over
+time, instead of any single LLM verdict being able to discard it outright. Files touched:
+`db/migrations/versions/0021_tender_feedback.py` (new), `agent/eoa/tenders/scan.py`,
+`agent/eoa/tenders/feedback.py` (new), `agent/eoa/tenders/report_section.py`,
+`agent/eoa/llm/prompts/tender_extract.md`, `agent/eoa/api/routes/tenders.py`,
+`agent/eoa/api/services.py` (tender functions only), `web/src/pages/TendersPage.tsx`,
+`web/src/components/tenders/TenderTable.tsx`, `web/src/components/tenders/SourceCoveragePanel.tsx`,
+`web/src/lib/tenders.ts`, `web/src/api/real.ts`, `web/src/api/types.ts`, `web/src/types/api.ts`,
+`web/src/i18n/dictionaries/{he,en}.ts`, `web/src/mocks/mockApi.ts`, `web/src/mocks/data/tenders.ts`.
+
+### Migration 0021 (`db/migrations/versions/0021_tender_feedback.py`)
+
+Additive only, applied live against the real Postgres DB this round (`alembic current` verified
+`0021 (head)` afterward):
+
+- `tenders.relevance_score` (REAL, 0-1) + `tenders.intake` (TEXT, default `'candidate'`, CHECK IN
+  `('candidate', 'accepted', 'rejected-by-user')`, indexed). Backfilled from the existing
+  `relevance` SMALLINT (`relevance_score = LEAST(1, GREATEST(0, relevance/10))`, `intake='accepted'`
+  where that already met the seeded 0.6 threshold, else `'candidate'`) -- no pre-migration row
+  regresses.
+- `tender_feedback` (append-only): `tender_id` FK, `verdict` IN (`relevant`, `irrelevant`), optional
+  `reason`, plus a `source`/`territory`/`matched_terms` snapshot taken at feedback time (so a later
+  correction to the tender row never rewrites feedback history). Never updated/deleted.
+- `tender_relevance_state`: a single-row (`id=1`) table holding the current learned
+  `relevance_threshold` (seeded 0.6).
+- `tender_source_priority`: one row per source id that has earned a scan-priority decrement.
+
+Live verification after `alembic upgrade head`: `information_schema.columns`/`.tables` confirm both
+new `tenders` columns and all three new tables exist with the expected types/defaults; the live DB
+had exactly 5 pre-existing `tenders` rows (all `status='archived'`, pre-dating this round), all
+backfilled to `intake='accepted'` (their `relevance` was already >= 6, i.e. `relevance_score >=
+0.6`); `tender_relevance_state` holds the seeded `0.6`; `tender_feedback`/`tender_source_priority`
+are empty (no feedback has been given yet).
+
+### `agent/eoa/tenders/scan.py` -- open intake
+
+`_gate_reject_reason` (previously the F24 "strict quality gate") is rewritten down to **four hard
+reasons only**, none of which any amount of relevance feedback should override: an explicit
+awarded/closed `status_hint`, a denylisted document-hosting/aggregator domain, a **dead link** (no
+URL at all -- the one genuinely new hard case, since an analyst needs something to open/verify),
+and an exact duplicate (already handled earlier via `_tender_exists`, before this gate runs). Every
+other case the old gate used to reject on -- a low/absent LLM relevance verdict, an unrecognised
+`notice_type`, a passed `deadline`, a stale `published_at`, an unverified+undated snippet -- no
+longer rejects anything; it only shapes the new `relevance_score`/`intake` pair:
+
+- `_relevance_score_for(extract)`: `extract.relevance / 10` when the LLM actually classified the
+  notice, else the neutral **0.5** default (deferred/unavailable/failed -- "unknown, don't presume
+  either way"), never itself a rejection.
+- `_intake_for_score(score)`: `'accepted'` when `score >= eoa.tenders.feedback.get_relevance_threshold()`
+  (self-tuned, starts at 0.6, degrades to the same 0.6 default on a threshold-read failure), else
+  `'candidate'`. `status` is computed exactly as before (`_initial_status`) -- intake and status are
+  orthogonal; a low-relevance `'candidate'` can still be `status='open'` if its dates say so.
+- The thin-snippet rescue (`_rescue_thin_snippet_from_trusted_tracker`, unchanged in its own logic)
+  still matters under open intake: it is what pushes a rescued GovTribe/SAM.gov notice's
+  `relevance_score` up to >=0.6 (crossing the default threshold into `'accepted'` immediately)
+  instead of it merely becoming a low-score `'candidate'` like an ordinary unrescued thin snippet.
+- Source scan order is nudged (never gated) by `eoa.tenders.feedback.get_source_priorities()`
+  (`_order_sources_by_priority`, a stable sort on `-decrement`) -- a source that has earned a
+  decrement is scanned later in the pass, never skipped.
+- `_llm_classify` now also injects `eoa.tenders.feedback.tender_lessons_text()` into the
+  `tender_extract` prompt's new `{lessons}` placeholder (added to
+  `agent/eoa/llm/prompts/tender_extract.md`, mirroring `pipeline.triage`'s own lessons mechanism) --
+  up to 8 recent 👍/👎 examples (title + one-line reason) so operator feedback reshapes future LLM
+  classifications, not just the stored `intake`.
+- `TenderStats` dropped `llm_rejected` (no longer a meaningful concept -- nothing is rejected for
+  relevance any more) and gained `accepted`/`candidates` (counts of inserted rows by `intake`);
+  `gate_rejected` now only counts the four hard reasons.
+
+### `agent/eoa/tenders/feedback.py` (new)
+
+Mirrors the pre-existing triage lessons/calibration design (`pipeline.triage._lessons_text`,
+`feedback/calibration.py`) but scoped entirely to `tenders`/`tender_feedback`:
+
+- `record_feedback(tender_id, verdict, reason=None)`: inserts one `tender_feedback` row (snapshotting
+  `source`/`territory`/`matched_terms`), flips the tender's own `intake` (👍 -> `'accepted'`, 👎 ->
+  `'rejected-by-user'`), then best-effort recomputes the learned threshold + this tender's source's
+  scan priority (a DB hiccup in the *self-tuning* step never fails the feedback write itself).
+- `recompute_relevance_threshold(min_samples=10)`: a 1-D threshold search over recent feedback
+  (`tenders.relevance_score` vs. `tender_feedback.verdict`) -- tries every midpoint between
+  consecutive distinct scores plus the two extremes, keeps whichever separates 👍 from 👎 best (ties
+  keep the lowest/most-permissive threshold), clamped to `[0.3, 0.8]`. A no-op below 10 samples
+  (too noisy to trust over the seeded 0.6).
+- `recompute_source_priority(source_id, lookback=20)`: a source earns a flat `-1` decrement (never
+  escalating, never disables the source) once its last 20 stored tenders have drawn *some* feedback
+  but *never* a single 👍; zero feedback at all stays at baseline `0` (no evidence either way yet).
+- `get_relevance_threshold()`/`get_source_priorities()`: read-only, never raise (fall back to the
+  0.6 default / `{}` respectively) on any DB hiccup.
+- `tender_lessons_text()`/`recent_feedback_examples()`: up to 4 👍 + 4 👎 most-recent examples,
+  formatted as a Hebrew bullet list for the prompt.
+
+### `agent/eoa/tenders/report_section.py` -- reports keep showing only accepted
+
+Two one-line additive `WHERE` clauses in `collect_tenders` (not otherwise this round's file --
+touched narrowly to satisfy the user's own explicit "daily/BD reports keep showing only accepted"
+requirement, since leaving it undone would silently leak `'candidate'` rows into the daily/BD
+report body): `open_tenders` now also requires `intake = 'accepted'`, and so does the
+`unknown_count` tally (an undated-but-verified notice count that would otherwise be inflated by
+low-score candidates). `tests/unit/test_tenders_report_section.py` (16 tests, unowned by this round
+otherwise) still passes unchanged.
+
+### API (`agent/eoa/api/routes/tenders.py` + `services.py`)
+
+- `_tender_card` gained `relevance_score`/`intake` (additive).
+- `list_tenders`: always excludes `intake = 'rejected-by-user'` (hidden by default, per the user's
+  own requirement -- an explicit 👎 rejection is never shown, there is no toggle to reveal it this
+  round); within each status tier, `intake = 'accepted'` rows now sort before `'candidate'` ones.
+  `min_relevance` (the pre-existing 1-10 `relevance` filter) is untouched -- additive, not a
+  replacement.
+- `tender_source_coverage()` gained a `priority_decrement` field per source (from
+  `eoa.tenders.feedback.get_source_priorities()`).
+- New: `POST /api/tenders/{id}/feedback` (`{"verdict": "relevant"|"irrelevant", "reason": str|null}`,
+  404 via `not_found()` for an unknown id) and `GET /api/tenders/{id}/feedback` (full history, most
+  recent first) -- thin pass-throughs to `eoa.tenders.feedback`.
+
+### Frontend (`web/src/**`)
+
+`TenderCard` gained `relevance_score: number | null` + `intake: TenderIntake` (`'candidate' |
+'accepted' | 'rejected-by-user'`); new `TenderFeedback`/`TenderFeedbackVerdict` types;
+`TenderSourceCoverageItem` gained `priority_decrement: number`. `ApiClient` gained
+`postTenderFeedback(tenderId, verdict, reason?)`/`getTenderFeedback(tenderId)`, implemented in
+`api/real.ts` and (in-memory, mutates the matching `mockTenders` row's `intake` in place) in
+`mocks/mockApi.ts` -- `mocks/data/tenders.ts` gained a 13th mock row (`intake: 'candidate'`,
+`relevance_score: 0.4`, an unverified GovTribe-style thin-snippet notice) so mock mode exercises
+the new UI without a live backend.
+
+`TenderTable.tsx`: a new "משוב" column with one-click 👍/👎 (`FeedbackButtons`, calls the new
+`onFeedback` prop the table now requires); the expanded detail row gained a second
+`FeedbackButtons` + an optional reason `<input>` so a reason-carrying vote is a distinct action from
+the compact row's quick vote; the relevance-score cell now shows both the existing 1-10 dot scale
+and the new 0-1 `relevance_score` as a percentage (`lib/tenders.ts`'s `relevanceScorePercent`); a
+`'candidate'` row's title cell carries a small "מועמד" badge (`TENDER_CANDIDATE_BADGE_LABEL`).
+`TendersPage.tsx` wires a `useMutation`/`queryClient.invalidateQueries(["tenders"])` feedback
+handler (mirrors `FeedDetailPanel.tsx`'s existing triage-feedback mutation pattern) and re-sorts
+`filteredTenders` by `intake` (`'accepted'` before `'candidate'`) before the existing
+deadline/published-date tiebreakers, since the client-side country/`q` filtering already leaves the
+server's own intake-ordered `ORDER BY` behind. `SourceCoveragePanel.tsx` shows a small "עדיפות
+מופחתת" chip next to any source with `priority_decrement < 0`. New i18n keys under `tenders.*`
+(`candidateBadge`, `relevanceScoreAria`, `feedback.*`, `coverage.priorityLowered*`) added to both
+`he.ts`/`en.ts` (the dictionary type derives from `he.ts` and requires an exact key match, so both
+were updated together).
+
+### Tests
+
+`tests/unit/test_tender_feedback_round4.py` (new, 25 tests, no DB/LLM/network): open intake stores
+an LLM-rejected notice as a `'candidate'` with its own `relevance_score`; the three remaining hard
+rejections (denylisted domain, awarded `status_hint`, no-URL dead link) still drop a notice
+outright; `record_feedback` updates `intake` correctly for both verdicts and returns `None` for an
+unknown tender id; `recompute_relevance_threshold` on a synthetic separable feedback set (finds the
+midpoint threshold) and on pathological all-👍/all-👎 batches (clamps to `[0.3, 0.8]`);
+`recompute_source_priority` (decrements only when feedback exists but never included a 👍; stays at
+baseline with zero feedback or at least one 👍); `tender_lessons_text` formatting +
+`_llm_classify`'s prompt actually receiving the lessons text (spies on `render()`) + the template
+file itself declaring `{lessons}`. Fake DB layer: a rule-based `_FakeCursor` matching each
+`execute()` call by SQL-substring/param predicate, mirroring `test_tenders_scan.py`'s own
+monkeypatch style but flexible enough for `feedback.py`'s multi-statement functions.
+
+`tests/unit/test_tenders_scan.py`: the old `TestScanTendersLlmRelevanceGate` class (which asserted
+the now-superseded F24 behavior) is replaced by `TestScanTendersOpenIntake` (every previously-
+rejected case now asserted as stored, with the right `relevance_score`/`intake`); `TestGateRejectReason`
+rewritten for the new four-reason-only signature (`_gate_reject_reason(notice, *, deny_domains)`,
+dropped `extract`/`page_verified`/`today`); `_common_patches` gained stubs for
+`get_relevance_threshold`/`get_source_priorities`/`tender_lessons_text` (DB-backed functions
+`eoa.tenders.scan` now imports from `eoa.tenders.feedback`). 111 tests, all green.
+
+`tests/unit/test_discovery_round4.py`: `TestScanTendersEndToEndRescue`'s two tests updated for open
+intake -- the govtribe rescue case now asserts `intake='accepted'` (not just "inserted"), and the
+untrusted-domain case (previously asserted as rejected) now asserts it is stored as a low-score
+`'candidate'` instead. `_common_patches` gained the same two new stubs. (One pre-existing,
+unrelated hang in this same file --
+`TestToolReadUsesL2Arbitration::test_tool_read_passes_use_l2_true` -- was found and confirmed via
+`git stash` to reproduce on unmodified `main` too; not touched, not this round's file, flagged
+separately.)
+
+`tests/unit/test_api_tenders_service.py`: `TestTenderSourceCoverage`'s five tests gained a
+`eoa.tenders.feedback.get_source_priorities` stub (this module now calls it, and none of these
+tests previously mocked anything beyond `_fetchall` -- without the stub, `tender_source_coverage()`
+would try a real DB connection and hang for the pool's full connect timeout); one new test asserts
+`priority_decrement` is surfaced per source; new `TestTenderFeedbackService` class (3 tests) verifies
+`services.record_tender_feedback`/`list_tender_feedback` correctly delegate to
+`eoa.tenders.feedback`. 28 tests, all green.
+
+`web/src/pages/TendersPage.test.tsx`: `makeTender()`'s defaults gained `relevance_score`/`intake`;
+the coverage-response fixtures gained `priority_decrement`; the `@/api` mock gained
+`postTenderFeedback`/`getTenderFeedback` stubs. 19 tests (pre-existing, none added this round --
+feedback-button interaction wasn't given its own new test file, covered instead at the
+`lib/tenders.ts`/component-prop level).
+
+**Verification**: `PYTHONPATH=agent python -m pytest tests/unit -q -k "tender"` -- 309 passed (5
+deselected as pre-existing, confirmed-on-`main` hangs unrelated to this round: 2 in
+`test_discovery_round4.py`'s `TestToolReadUsesL2Arbitration`, 2 in `test_bd_tenders_round3.py`'s
+`TestNoActivityMarkerEndToEnd` -- root-caused via `faulthandler.dump_traceback_later` to a real,
+un-timeout-bounded `eoa.db.connection()` call inside `agent/eoa/report/bd_territory.py`'s optional
+A16 acquisition-watch section, wrapped in a `try/except` that can't catch a call that never returns
+-- and 1 in `test_tenders_forecast.py`'s `TestForecastTendersOrchestration`, same class of DB-pool-
+timeout root cause; all three confirmed via `git stash` to reproduce identically on unmodified
+`main`, none touched, both distinct root causes flagged for separate follow-up). `ruff check`/`ruff
+format --check` clean on every `.py` file this round touched. `npm run lint` -- 0 errors (same
+pre-existing warnings noted in prior rounds, plus one new `react-hooks/exhaustive-deps` warning on
+`TendersPage.tsx`'s pre-existing `tenders = tendersQuery.data?.tenders ?? []` pattern, matching the
+same warning already present on `PatentsPage.tsx`/`PayloadsPage.tsx` -- not a regression this round
+introduced, an existing pattern this round's file happens to share). `npx tsc -b` clean. `npx
+vitest run` -- 34 files / 225 tests, all green. `npm run build` succeeds. Migration applied live
+(`alembic upgrade head`, `alembic current` = `0021 (head)`) and verified via read-only `SELECT`s
+against `information_schema` and the live tables (see above). e2e (`e2e/tests/14-tenders.spec.ts`,
+`--project=desktop-1440x900`, against the live app + `web/dist` rebuilt via `npm run build`, no
+service restart): 7 passed, 3 skipped (no open-tender rows exist in the live DB right now to check
+title-links/deadline-chips/row-expansion on -- see below), 0 failed.
+
+**What today's 15 previously-rejected notices look like now**: unverifiable retroactively without
+re-running the scan (a pipeline job, explicitly out of scope for this task) -- a rejected notice's
+raw payload was never persisted under the old gate (nothing to backfill), and the live DB's only 5
+`tenders` rows all pre-date this round (`status='archived'`, backfilled to `intake='accepted'`
+since their `relevance` was already >= 6). The fix is verified structurally instead: every one of
+the 9 LLM-relevance rejections and 5 gate rejections from job 102's audit table (docs/MODULES.md's
+own "Round 4 discovery" section above) would, under the new `_gate_reject_reason`, no longer be a
+hard rejection (none of them were `status_hint`-awarded/closed, denylisted-domain, or no-URL) --
+they would all be stored, most as `'candidate'` (the two govtribe.com cases already rescued to
+`'accepted'`, unchanged from the existing rescue fixture test). The next real `tender_scan` run is
+what will actually demonstrate this against live data; docs/REVIEW_2026-09-06_evening.md's W2 note
+about "0 inserted" every day should stop being true from that run onward.

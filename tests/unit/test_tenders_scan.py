@@ -17,7 +17,6 @@ from eoa.llm.schemas.tenders import TenderExtract
 from eoa.tenders.scan import (
     NOTICE_MAX_AGE_DAYS,
     RELEVANCE_MIN_ACCEPT,
-    VALID_NOTICE_TYPES,
     NoticeRaw,
     TenderSource,
     TenderStats,
@@ -922,11 +921,12 @@ class TestArchiveStaleClosedSql:
 
 
 class TestScanTendersGateAndDedup:
-    def test_matched_but_llm_deferred_is_gate_rejected_not_inserted(self):
-        """F24: with the LLM budget exhausted (llm_budget_s=0), notice 0 (the only one that both
-        matches the two-signal gate AND is new) never gets a classification -- the strict gate
-        rejects it outright (``no_llm_classification``) rather than falling back to inserting it on
-        the deterministic gate's own strength, as it used to before this fix."""
+    def test_matched_but_llm_deferred_is_stored_as_candidate_with_neutral_score(self):
+        """W2b (open intake): with the LLM budget exhausted (llm_budget_s=0), notice 0 (the only one
+        that both matches the two-signal gate AND is new) never gets a classification -- unlike the
+        old F24 gate (which rejected outright, ``no_llm_classification``), this is no longer a
+        rejection: the notice is still stored, with the neutral 0.5 relevance_score and
+        intake='candidate' (below the 0.6 threshold stubbed in this test)."""
         src = _ted_source()
 
         with (
@@ -936,6 +936,8 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
             patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
+            patch("eoa.tenders.scan.get_relevance_threshold", return_value=0.6),
+            patch("eoa.tenders.scan.get_source_priorities", return_value={}),
         ):
             notices = _parse_ted_notices(json.loads((FIXTURES / "ted_sample.json").read_text()), src)
             mock_collect.return_value = notices
@@ -946,13 +948,18 @@ class TestScanTendersGateAndDedup:
             stats = scan_tenders(since_days=4000, sources=[src], llm_budget_s=0)
 
         assert isinstance(stats, TenderStats)
-        mock_insert.assert_not_called()
+        mock_insert.assert_called_once()
+        _, kwargs = mock_insert.call_args
+        assert kwargs["relevance_score"] == 0.5
+        assert kwargs["intake"] == "candidate"
         assert stats.sources_scanned == 1
         assert stats.notices_fetched == 3
         assert stats.matched == 2  # notice 0 and notice 2 match the two-signal gate; notice 1 does not
         assert stats.duplicates == 1  # notice 2, already in the DB
-        assert stats.inserted == 0
-        assert stats.gate_rejected == 1  # notice 0: matched, but no LLM classification available
+        assert stats.inserted == 1
+        assert stats.candidates == 1
+        assert stats.accepted == 0
+        assert stats.gate_rejected == 0  # W2b: a deferred LLM is no longer a hard-reject reason
         assert stats.llm_deferred == 1  # llm_budget_s=0 -> deferred, not called
 
     def test_html_sources_are_skipped(self):
@@ -963,6 +970,7 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
             patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
+            patch("eoa.tenders.scan.get_source_priorities", return_value={}),
         ):
             stats = scan_tenders(sources=[src])
         assert stats.sources_scanned == 0
@@ -981,6 +989,7 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
             patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
+            patch("eoa.tenders.scan.get_source_priorities", return_value={}),
         ):
             stats = scan_tenders(sources=[src])
         assert stats.sources_scanned == 0
@@ -1001,6 +1010,7 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
             patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
+            patch("eoa.tenders.scan.get_source_priorities", return_value={}),
         ):
 
             def side_effect(src, deny_domains):
@@ -1015,7 +1025,9 @@ class TestScanTendersGateAndDedup:
         assert stats.sources_scanned == 1
 
     def test_search_source_notice_without_procurement_signal_never_reaches_insert(self):
-        """The Wikipedia/NASA-style junk case: domain term present, no procurement signal."""
+        """The Wikipedia/NASA-style junk case: domain term present, no procurement signal -- still
+        dropped before the (now much narrower) hard-rejection gate ever runs, since it never
+        clears the two-signal vocabulary gate in the first place."""
         src = _search_source()
         notice = NoticeRaw(
             source_id=src.id, external_ref="rfi_rfp_news:https://x/infrared", title="What Is Infrared Light?"
@@ -1026,6 +1038,7 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
             patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
+            patch("eoa.tenders.scan.get_source_priorities", return_value={}),
         ):
             stats = scan_tenders(sources=[src])
         mock_insert.assert_not_called()
@@ -1034,45 +1047,62 @@ class TestScanTendersGateAndDedup:
 
 
 def _common_patches(notice: NoticeRaw) -> ExitStack:
-    """A single combined context manager for the three DB stubs every LLM-relevance-gate test
-    needs (avoids the parenthesized-`with` star-unpacking trick, which is not valid syntax when
-    mixed with `as` clauses -- see CPython's PEG grammar for `with_stmt`)."""
+    """A single combined context manager for the DB stubs every scan_tenders() test needs (avoids
+    the parenthesized-`with` star-unpacking trick, which is not valid syntax when mixed with `as`
+    clauses -- see CPython's PEG grammar for `with_stmt`). Includes the W2b self-tuning reads
+    (threshold/source-priority/lessons) so no test here ever touches a real connection pool."""
     stack = ExitStack()
     stack.enter_context(patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]))
     stack.enter_context(patch("eoa.tenders.scan._tender_exists", return_value=False))
     stack.enter_context(patch("eoa.tenders.scan._transition_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan._archive_stale_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0))
+    stack.enter_context(patch("eoa.tenders.scan.get_relevance_threshold", return_value=0.6))
+    stack.enter_context(patch("eoa.tenders.scan.get_source_priorities", return_value={}))
+    stack.enter_context(patch("eoa.tenders.scan.tender_lessons_text", return_value="אין עדיין משוב."))
     return stack
 
 
-class TestScanTendersLlmRelevanceGate:
-    """F24: the strict post-classification gate (_gate_reject_reason) replaces the old three-tier
-    relevance rubric (<=2 reject / ==3 unknown / >=4 store). Nothing is inserted without an actual
-    LLM classification that clears every check -- see the module's own updated docstring."""
+class TestScanTendersOpenIntake:
+    """W2b (docs/REVIEW_2026-09-06_evening.md, user requirement 2026-09-06 18:55): a low/absent LLM
+    relevance verdict, an unrecognised notice_type, a passed deadline, or a stale published_at are
+    no longer rejection grounds -- everything that clears the two-signal vocabulary gate is stored,
+    carrying a relevance_score/intake pair instead. Only the four hard reasons documented on
+    _gate_reject_reason still drop a notice outright (covered by TestGateRejectReason below)."""
 
-    def test_relevance_below_floor_rejected(self):
+    def test_low_relevance_stored_as_candidate_not_rejected(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
             patch(
                 "eoa.tenders.scan._llm_classify", return_value=(_extract(relevant=False, relevance=1), True)
             ),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
-        assert stats.llm_rejected == 1
-        assert stats.inserted == 0
+        mock_insert.assert_called_once()
+        _, kwargs = mock_insert.call_args
+        assert kwargs["relevance_score"] == 0.1
+        assert kwargs["intake"] == "candidate"
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
+        assert stats.candidates == 1
+        assert stats.accepted == 0
         assert stats.matched == 1
 
-    def test_relevance_one_below_floor_rejected(self):
+    def test_relevance_one_below_floor_stored_as_candidate(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
@@ -1080,16 +1110,20 @@ class TestScanTendersLlmRelevanceGate:
                 "eoa.tenders.scan._llm_classify",
                 return_value=(_extract(relevant=True, relevance=RELEVANCE_MIN_ACCEPT - 1), True),
             ),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
-        assert stats.llm_rejected == 1
+        mock_insert.assert_called_once()
+        assert stats.inserted == 1
+        assert stats.candidates == 1
 
-    def test_relevance_at_floor_stored_normally(self):
+    def test_relevance_at_floor_stored_accepted(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
@@ -1103,64 +1137,77 @@ class TestScanTendersLlmRelevanceGate:
         mock_insert.assert_called_once()
         _, kwargs = mock_insert.call_args
         assert kwargs["relevance"] == RELEVANCE_MIN_ACCEPT
+        assert kwargs["intake"] == "accepted"  # 6/10 = 0.6, at the (stubbed) 0.6 threshold
         assert stats.inserted == 1
-        assert stats.llm_rejected == 0
+        assert stats.accepted == 1
         assert stats.gate_rejected == 0
 
-    def test_invalid_notice_type_gate_rejected(self):
-        """F24: an 'award' notice_type is no longer stored as status='awarded' -- it's dropped
-        outright, since the tenders board is for open solicitations, not already-decided
-        contracts. Same for 'other' (the model couldn't place it as a real solicitation type)."""
+    def test_invalid_notice_type_no_longer_rejected(self):
+        """W2b: an 'award'/'other' notice_type is no longer a rejection reason -- it's still
+        stored (as a candidate/accepted per its relevance_score); _initial_status still maps a
+        genuine 'award' verdict to status='awarded' rather than 'open', so it simply never shows
+        as an open opportunity."""
         for bad_type in ("award", "other"):
             src = _ted_source()
             notice = NoticeRaw(
-                source_id=src.id, external_ref=f"ted_eu:{bad_type}", title="Supply of electro-optical widgets"
+                source_id=src.id,
+                external_ref=f"ted_eu:{bad_type}",
+                title="Supply of electro-optical widgets",
+                url="https://api.ted.europa.eu/notice/1",
             )
             with (
                 _common_patches(notice),
                 patch("eoa.tenders.scan._llm_classify", return_value=(_extract(notice_type=bad_type), True)),
-                patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+                patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
             ):
                 stats = scan_tenders(sources=[src])
-            mock_insert.assert_not_called()
-            assert stats.gate_rejected == 1
-            assert stats.llm_rejected == 0
+            mock_insert.assert_called_once()
+            assert stats.gate_rejected == 0
+            assert stats.inserted == 1
 
-    def test_expired_deadline_gate_rejected(self):
+    def test_expired_deadline_no_longer_rejected(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
             patch(
                 "eoa.tenders.scan._llm_classify", return_value=(_extract(deadline=dt.date(2020, 1, 1)), True)
             ),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
-        assert stats.gate_rejected == 1
+        mock_insert.assert_called_once()
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
 
-    def test_stale_published_at_gate_rejected(self):
+    def test_stale_published_at_no_longer_rejected(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         stale = dt.date.today() - dt.timedelta(days=NOTICE_MAX_AGE_DAYS + 1)
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", return_value=(_extract(published_at=stale), True)),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
-        assert stats.gate_rejected == 1
+        mock_insert.assert_called_once()
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
 
     def test_denylisted_domain_gate_rejected(self):
-        """F24: a document-hosting/aggregator reupload (e.g. a Scribd PDF) is rejected even if the
-        LLM itself would have scored it as relevant -- the review's "RFP for EO/IR Pods for Heron
-        UAV | PDF | Infrared - Scribd" case."""
+        """A document-hosting/aggregator reupload (e.g. a Scribd PDF) is still a hard rejection
+        even if the LLM itself would have scored it as relevant -- one of the four remaining hard
+        cases (see _gate_reject_reason)."""
         src = _search_source()
         notice = NoticeRaw(
             source_id=src.id,
@@ -1177,26 +1224,36 @@ class TestScanTendersLlmRelevanceGate:
         mock_insert.assert_not_called()
         assert stats.gate_rejected == 1
 
-    def test_unverified_undated_snippet_gate_rejected(self):
-        """F24: only a search snippet (the actual notice page was never fetched) and no date at
-        all -- the 13-undated-'unknown'-rows case from the review -- is rejected outright, not
-        stored as 'unknown'."""
+    def test_unverified_undated_snippet_now_stored_as_candidate(self):
+        """W2b: only a search snippet (the actual notice page was never fetched) and no date at
+        all is no longer a hard rejection (this was exactly the failure mode that discarded real
+        GovTribe/SAM.gov Navy sources-sought notices per docs/MODULES.md 'Round 4 discovery' W2) --
+        it's stored, with whatever relevance_score the LLM verdict implies."""
         src = _search_source()
-        notice = NoticeRaw(source_id=src.id, external_ref=f"{src.id}:1", title="RFI for infrared sensor")
+        notice = NoticeRaw(
+            source_id=src.id,
+            external_ref=f"{src.id}:1",
+            title="RFI for infrared sensor",
+            url="https://example.gov/rfi/1",
+        )
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", return_value=(_extract(), False)),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
-        assert stats.gate_rejected == 1
+        mock_insert.assert_called_once()
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
 
     def test_verified_undated_notice_stored_as_unknown(self):
-        """F24: 'unknown' remains possible, but only once the gate has confirmed the page really
-        was fetched (page_verified=True) and everything else about the notice checks out."""
         src = _search_source()
-        notice = NoticeRaw(source_id=src.id, external_ref=f"{src.id}:1", title="RFI for infrared sensor")
+        notice = NoticeRaw(
+            source_id=src.id,
+            external_ref=f"{src.id}:1",
+            title="RFI for infrared sensor",
+            url="https://example.gov/rfi/1",
+        )
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", return_value=(_extract(), True)),
@@ -1207,63 +1264,76 @@ class TestScanTendersLlmRelevanceGate:
         assert stats.inserted == 1
         assert stats.gate_rejected == 0
 
-    def test_no_llm_classification_gate_rejected(self):
-        """F24: a deferred/unavailable LLM call is itself a rejection now -- no more "insert on
-        the deterministic two-signal gate's own strength alone" degrade path."""
+    def test_no_llm_classification_stored_with_neutral_score(self):
+        """W2b: a deferred/unavailable LLM call is no longer a rejection -- the notice is stored
+        with the neutral 0.5 relevance_score (see _relevance_score_for)."""
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", side_effect=ResourceUnavailable("no vram")),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
+        mock_insert.assert_called_once()
+        _, kwargs = mock_insert.call_args
+        assert kwargs["relevance_score"] == 0.5
         assert stats.llm_deferred == 1
-        assert stats.gate_rejected == 1
-        assert stats.inserted == 0
-        assert stats.llm_rejected == 0
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
 
-    def test_llm_output_error_gate_rejected(self):
+    def test_llm_output_error_stored_with_neutral_score(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", side_effect=LLMOutputError("bad json")),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
+        mock_insert.assert_called_once()
         assert stats.llm_failed == 1
-        assert stats.gate_rejected == 1
-        assert stats.inserted == 0
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
 
-    def test_unexpected_llm_exception_gate_rejected(self):
+    def test_unexpected_llm_exception_stored_with_neutral_score(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
             patch(
                 "eoa.tenders.scan._llm_classify", side_effect=UnicodeEncodeError("cp1252", "x", 0, 1, "boom")
             ),
-            patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
-        mock_insert.assert_not_called()
+        mock_insert.assert_called_once()
         assert stats.llm_failed == 1
-        assert stats.gate_rejected == 1
-        assert stats.inserted == 0
+        assert stats.gate_rejected == 0
+        assert stats.inserted == 1
 
     def test_llm_matched_terms_override_deterministic_ones_when_present(self):
         src = _ted_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+            source_id=src.id,
+            external_ref="ted_eu:1",
+            title="Supply of electro-optical widgets",
+            url="https://api.ted.europa.eu/notice/1",
         )
         with (
             _common_patches(notice),
@@ -1301,7 +1371,11 @@ class TestScanTendersLlmRelevanceGate:
         notice actually passed to _insert_tender_and_item (it reads them off notice.*)."""
         src = _search_source()
         notice = NoticeRaw(
-            source_id=src.id, external_ref=f"{src.id}:1", title="RFI for infrared sensor", country="other"
+            source_id=src.id,
+            external_ref=f"{src.id}:1",
+            title="RFI for infrared sensor",
+            country="other",
+            url="https://example.gov/rfi/1",
         )
         extract = _extract(
             published_at=dt.date(2026, 8, 1),
@@ -1344,143 +1418,69 @@ class TestScanTendersLlmRelevanceGate:
 
 
 class TestGateRejectReason:
-    """Direct unit tests for _gate_reject_reason (F24) -- the exact matrix from
-    docs/QA_PROGRAM.md section 4."""
+    """W2b (open intake): direct unit tests for _gate_reject_reason -- only the four HARD reasons
+    documented on its own docstring remain (status_hint awarded/closed, a denylisted domain, a
+    dead link/no URL). Everything the old F24 gate used to reject on (low/absent relevance, an
+    invalid notice_type, a passed deadline, a stale published_at, an unverified+undated snippet)
+    must now pass through untouched -- see TestScanTendersOpenIntake for the end-to-end coverage
+    of what happens to those notices once they're stored instead."""
 
     def _notice(self, **overrides) -> NoticeRaw:
-        base = dict(source_id="x", external_ref="x:1", title="t")
+        base = dict(source_id="x", external_ref="x:1", title="t", url="https://example.gov/n/1")
         base.update(overrides)
         return NoticeRaw(**base)
 
     def test_clean_notice_passes(self):
         notice = self._notice(deadline=dt.date(2099, 1, 1))
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason is None
+        assert _gate_reject_reason(notice, deny_domains=[]) is None
 
-    def test_no_extract_rejected(self):
+    def test_low_relevance_no_longer_rejected(self):
+        """Relevance is no longer this gate's concern at all -- _gate_reject_reason doesn't even
+        take an `extract` any more (see TestScanTendersOpenIntake for where relevance now goes:
+        relevance_score/intake)."""
         notice = self._notice()
-        reason = _gate_reject_reason(
-            notice, None, page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason == "no_llm_classification"
+        assert _gate_reject_reason(notice, deny_domains=[]) is None
 
-    def test_low_relevance_rejected(self):
+    def test_invalid_notice_type_no_longer_rejected(self):
+        """notice_type isn't a _gate_reject_reason input any more -- it only affects
+        _initial_status (via scan_tenders), never whether the notice is stored at all."""
         notice = self._notice()
-        reason = _gate_reject_reason(
-            notice,
-            _extract(relevance=RELEVANCE_MIN_ACCEPT - 1),
-            page_verified=True,
-            today=dt.date(2026, 9, 6),
-            deny_domains=[],
-        )
-        assert reason is not None and reason.startswith("relevance_")
+        assert _gate_reject_reason(notice, deny_domains=[]) is None
 
-    def test_not_relevant_flag_rejected_even_at_high_relevance(self):
-        notice = self._notice()
-        reason = _gate_reject_reason(
-            notice,
-            _extract(relevant=False, relevance=9),
-            page_verified=True,
-            today=dt.date(2026, 9, 6),
-            deny_domains=[],
-        )
-        assert reason is not None and reason.startswith("relevance_")
-
-    def test_invalid_notice_type_rejected(self):
-        for bad_type in ("award", "other"):
-            notice = self._notice()
-            reason = _gate_reject_reason(
-                notice,
-                _extract(notice_type=bad_type),
-                page_verified=True,
-                today=dt.date(2026, 9, 6),
-                deny_domains=[],
-            )
-            assert reason == f"notice_type_{bad_type}"
-
-    def test_every_valid_notice_type_accepted(self):
-        for good_type in VALID_NOTICE_TYPES:
-            notice = self._notice()
-            reason = _gate_reject_reason(
-                notice,
-                _extract(notice_type=good_type),
-                page_verified=True,
-                today=dt.date(2026, 9, 6),
-                deny_domains=[],
-            )
-            assert reason is None
-
-    def test_past_deadline_rejected(self):
+    def test_past_deadline_no_longer_rejected(self):
         notice = self._notice(deadline=dt.date(2020, 1, 1))
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason == "deadline_passed"
+        assert _gate_reject_reason(notice, deny_domains=[]) is None
 
-    def test_deadline_today_not_yet_passed(self):
-        notice = self._notice(deadline=dt.date(2026, 9, 6))
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason is None
-
-    def test_published_over_90_days_rejected(self):
+    def test_published_over_90_days_no_longer_rejected(self):
         notice = self._notice(published_at=dt.date(2026, 9, 6) - dt.timedelta(days=NOTICE_MAX_AGE_DAYS + 1))
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason == "published_over_90_days"
-
-    def test_published_exactly_90_days_accepted(self):
-        notice = self._notice(published_at=dt.date(2026, 9, 6) - dt.timedelta(days=NOTICE_MAX_AGE_DAYS))
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason is None
+        assert _gate_reject_reason(notice, deny_domains=[]) is None
 
     def test_denylisted_domain_rejected(self):
         notice = self._notice(url="https://www.scribd.com/document/1/x")
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=["scribd.com"]
-        )
+        reason = _gate_reject_reason(notice, deny_domains=["scribd.com"])
         assert reason == "denylisted_domain"
 
-    def test_unverified_and_undated_rejected(self):
+    def test_unverified_undated_no_longer_rejected(self):
+        """The exact case that used to be 'unverified_undated' under F24 -- a search-snippet-only
+        notice, no URL fetch, no date at all -- is no longer a hard rejection: it has a URL, isn't
+        denylisted, and carries no awarded/closed status_hint, so it clears the gate and is stored
+        (see TestScanTendersOpenIntake.test_unverified_undated_snippet_now_stored_as_candidate)."""
         notice = self._notice()
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=False, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason == "unverified_undated"
+        assert _gate_reject_reason(notice, deny_domains=[]) is None
 
-    def test_unverified_but_dated_accepted(self):
-        """A search-snippet-derived notice with no page fetch but a real deadline (e.g. the search
-        snippet or an RSS pubDate already carried a date) is not penalized by 'unverified_undated'
-        -- that rule only fires when there is no date at all to fall back on."""
-        notice = self._notice(deadline=dt.date(2099, 1, 1))
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=False, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason is None
-
-    def test_verified_and_undated_accepted(self):
-        notice = self._notice()
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
-        assert reason is None
+    def test_dead_link_no_url_rejected(self):
+        """The one genuinely new hard case: a notice with no URL at all -- nothing for an analyst
+        to open or verify -- is still rejected outright."""
+        notice = self._notice(url=None)
+        reason = _gate_reject_reason(notice, deny_domains=[])
+        assert reason == "dead_link"
 
     def test_status_hint_awarded_rejected(self):
         notice = self._notice(status_hint="awarded")
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
+        reason = _gate_reject_reason(notice, deny_domains=[])
         assert reason == "status_hint_awarded"
 
     def test_status_hint_closed_rejected(self):
         notice = self._notice(status_hint="closed")
-        reason = _gate_reject_reason(
-            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
-        )
+        reason = _gate_reject_reason(notice, deny_domains=[])
         assert reason == "status_hint_closed"

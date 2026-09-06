@@ -1,5 +1,5 @@
 // Shared display helpers for the /tenders screen (section 5.2 / FR-5.2).
-import type { TenderStatus } from "@/types/api";
+import type { TenderIntake, TenderStatus } from "@/types/api";
 
 export const TENDER_STATUS_LABEL: Record<TenderStatus, string> = {
   open: "פתוח",
@@ -20,6 +20,24 @@ export const TENDER_STATUS_CHIP_CLASS: Record<TenderStatus, string> = {
 // F24: the tenders board's default (no explicit status filter) view -- 'open' and recently-seen
 // 'unknown' tenders only. Mirrors eoa.api.services.DEFAULT_STATUSES.
 export const TENDER_DEFAULT_VIEW_STATUSES: TenderStatus[] = ["open", "unknown"];
+
+// W2b (open intake, 2026-09-06 evening): only 'candidate' gets its own visible badge -- 'accepted'
+// is the normal/expected state (no badge needed) and 'rejected-by-user' is hidden by default
+// (services.list_tenders never returns it), so there is no row to badge in the first place.
+export const TENDER_CANDIDATE_BADGE_LABEL = "מועמד";
+export const TENDER_INTAKE_CHIP_CLASS: Record<TenderIntake, string> = {
+  candidate: "bg-warn/15 text-warn",
+  accepted: "bg-ok/15 text-ok",
+  "rejected-by-user": "bg-bg-sunken text-fg-dim",
+};
+
+/** 0-1 relevance_score as a rounded percentage string, e.g. 0.62 -> "62%". Returns "—" for null
+ * (an LLM-unclassified notice's score should never actually be null post-migration-0021, but the
+ * API type allows it defensively). */
+export function relevanceScorePercent(score: number | null | undefined): string {
+  if (score == null || Number.isNaN(score)) return "—";
+  return `${Math.round(score * 100)}%`;
+}
 
 /** Days-left urgency threshold shared by the tenders table chip and the Morning tile. */
 export const DEADLINE_URGENT_DAYS = 14;

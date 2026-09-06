@@ -40,6 +40,16 @@ function SourceRow({ source }: { source: TenderSourceCoverageItem }) {
     <tr className="border-t border-border">
       <td className="max-w-[16rem] truncate px-2 py-1.5 text-xs text-fg" title={source.name}>
         <bdi dir="auto">{source.name}</bdi>
+        {/* W2b: a source whose recent notices drew feedback but never a single 👍 is nudged
+            later in the scan pass -- never disabled, just a visible hint on the panel. */}
+        {source.priority_decrement < 0 && (
+          <span
+            className="ms-1 rounded-full bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-warn"
+            title={t("tenders.coverage.priorityLoweredTitle")}
+          >
+            {t("tenders.coverage.priorityLowered")}
+          </span>
+        )}
       </td>
       <td className="px-2 py-1.5 text-xs text-fg-dim">{KIND_LABEL[source.kind]}</td>
       <td className="px-2 py-1.5">

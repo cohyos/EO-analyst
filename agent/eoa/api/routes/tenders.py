@@ -1,10 +1,17 @@
-"""`GET /api/tenders`, `/api/tenders/forecasts` -- section 5.2 / FR-5.2 tender/RFI/RFP tracking (eoa.tenders)."""
+"""`GET /api/tenders`, `/api/tenders/forecasts` -- section 5.2 / FR-5.2 tender/RFI/RFP tracking
+(eoa.tenders). Also W2b: `POST`/`GET /api/tenders/{id}/feedback` -- the operator 👍/👎 relevance
+feedback loop (eoa.tenders.feedback) that self-tunes the intake threshold and per-source scan
+priority."""
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from eoa.api import services
+from eoa.api.errors import not_found
 
 router = APIRouter(tags=["tenders"])
 
@@ -48,3 +55,25 @@ def get_tender_source_coverage() -> dict:
     """A15: read-only per-region tender-source coverage (config/tenders.yaml + the `tenders`
     table) for the tenders page's "כיסוי מקורות" panel -- see services.tender_source_coverage."""
     return services.tender_source_coverage()
+
+
+class TenderFeedbackCreate(BaseModel):
+    verdict: Literal["relevant", "irrelevant"]
+    reason: str | None = None
+
+
+@router.post("/tenders/{tender_id}/feedback")
+def create_tender_feedback(tender_id: int, body: TenderFeedbackCreate) -> dict:
+    """W2b: one-click 👍/👎 (+ optional free-text reason) on a tenders row. Immediately flips the
+    tender's own `intake` (👍 -> 'accepted', 👎 -> 'rejected-by-user', hidden by default) and
+    recomputes the self-tuning relevance threshold + this source's scan priority -- see
+    eoa.tenders.feedback."""
+    result = services.record_tender_feedback(tender_id, body.verdict, body.reason)
+    if result is None:
+        raise not_found("המכרז לא נמצא")
+    return result
+
+
+@router.get("/tenders/{tender_id}/feedback")
+def get_tender_feedback(tender_id: int) -> list[dict]:
+    return services.list_tender_feedback(tender_id)

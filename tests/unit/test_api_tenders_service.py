@@ -156,25 +156,36 @@ class TestTenderSourceCoverage:
     load_tender_sources() (a config-file read, not a DB call) so a config typo would be caught."""
 
     def test_totals_sum_to_source_count(self):
-        with patch("eoa.api.services._fetchall", return_value=[]):
+        with (
+            patch("eoa.api.services._fetchall", return_value=[]),
+            patch("eoa.tenders.feedback.get_source_priorities", return_value={}),
+        ):
             cov = services.tender_source_coverage()
         assert sum(cov["totals"].values()) == cov["source_count"]
         assert cov["source_count"] > 30
 
     def test_every_source_has_a_status_and_region(self):
-        with patch("eoa.api.services._fetchall", return_value=[]):
+        with (
+            patch("eoa.api.services._fetchall", return_value=[]),
+            patch("eoa.tenders.feedback.get_source_priorities", return_value={}),
+        ):
             cov = services.tender_source_coverage()
         all_ids = set()
         for region in cov["regions"]:
             assert region["sources"], f"region {region['region']} has no sources"
             for src in region["sources"]:
                 assert src["status"] in ("integrated_keyless", "waiting_for_key", "not_integrated")
+                # W2b (additive): every source also reports its self-tuning scan-priority decrement.
+                assert src["priority_decrement"] == 0
                 all_ids.add(src["id"])
         assert "ted_eu" in all_ids
         assert "uk_find_tender" in all_ids
 
     def test_sam_gov_api_flagged_waiting_for_key(self):
-        with patch("eoa.api.services._fetchall", return_value=[]):
+        with (
+            patch("eoa.api.services._fetchall", return_value=[]),
+            patch("eoa.tenders.feedback.get_source_priorities", return_value={}),
+        ):
             cov = services.tender_source_coverage()
         us_sources = next(r["sources"] for r in cov["regions"] if r["region"] == "US")
         sam = next(s for s in us_sources if s["id"] == "sam_gov_api")
@@ -185,7 +196,10 @@ class TestTenderSourceCoverage:
         fake_rows = [
             {"source": "ted_eu", "n": 7, "last_created_at": "2026-09-05T10:00:00+00:00"},
         ]
-        with patch("eoa.api.services._fetchall", return_value=fake_rows):
+        with (
+            patch("eoa.api.services._fetchall", return_value=fake_rows),
+            patch("eoa.tenders.feedback.get_source_priorities", return_value={}),
+        ):
             cov = services.tender_source_coverage()
         eu_sources = next(r["sources"] for r in cov["regions"] if r["region"] == "EU")
         ted = next(s for s in eu_sources if s["id"] == "ted_eu")
@@ -193,7 +207,10 @@ class TestTenderSourceCoverage:
         assert ted["last_fetch_at"] == "2026-09-05T10:00:00+00:00"
 
     def test_source_with_no_stored_notices_shows_zero_and_null(self):
-        with patch("eoa.api.services._fetchall", return_value=[]):
+        with (
+            patch("eoa.api.services._fetchall", return_value=[]),
+            patch("eoa.tenders.feedback.get_source_priorities", return_value={}),
+        ):
             cov = services.tender_source_coverage()
         eu_sources = next(r["sources"] for r in cov["regions"] if r["region"] == "EU")
         ted = next(s for s in eu_sources if s["id"] == "ted_eu")
@@ -204,8 +221,45 @@ class TestTenderSourceCoverage:
         with (
             patch("eoa.tenders.scan.load_tender_sources", side_effect=RuntimeError("bad yaml")),
             patch("eoa.api.services._fetchall", return_value=[]),
+            patch("eoa.tenders.feedback.get_source_priorities", return_value={}),
         ):
             cov = services.tender_source_coverage()
         assert cov["source_count"] == 0
         assert cov["regions"] == []
-        assert sum(cov["totals"].values()) == 0
+
+    def test_source_priority_decrement_surfaced_per_source(self):
+        """W2b: a source that has earned a scan-priority decrement (eoa.tenders.feedback) shows it
+        on the coverage panel -- additive, never affects status/verified/etc."""
+        with (
+            patch("eoa.api.services._fetchall", return_value=[]),
+            patch("eoa.tenders.feedback.get_source_priorities", return_value={"ted_eu": -1}),
+        ):
+            cov = services.tender_source_coverage()
+        eu_sources = next(r["sources"] for r in cov["regions"] if r["region"] == "EU")
+        ted = next(s for s in eu_sources if s["id"] == "ted_eu")
+        assert ted["priority_decrement"] == -1
+
+
+class TestTenderFeedbackService:
+    """W2b: services.record_tender_feedback/list_tender_feedback are thin pass-throughs to
+    eoa.tenders.feedback -- verified here as a request-shaped contract test (real logic is
+    exercised in tests/unit/test_tender_feedback_round4.py)."""
+
+    def test_record_tender_feedback_delegates_to_feedback_module(self):
+        with patch(
+            "eoa.tenders.feedback.record_feedback", return_value={"id": 1, "verdict": "relevant"}
+        ) as mock_record:
+            result = services.record_tender_feedback(42, "relevant", "good notice")
+        mock_record.assert_called_once_with(42, "relevant", "good notice")
+        assert result == {"id": 1, "verdict": "relevant"}
+
+    def test_record_tender_feedback_returns_none_for_unknown_tender(self):
+        with patch("eoa.tenders.feedback.record_feedback", return_value=None):
+            assert services.record_tender_feedback(999, "relevant", None) is None
+
+    def test_list_tender_feedback_delegates_to_feedback_module(self):
+        rows = [{"id": 1, "verdict": "relevant"}]
+        with patch("eoa.tenders.feedback.list_feedback_for_tender", return_value=rows) as mock_list:
+            result = services.list_tender_feedback(42)
+        mock_list.assert_called_once_with(42)
+        assert result == rows

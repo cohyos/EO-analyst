@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
@@ -10,7 +10,7 @@ import { SourceCoveragePanel } from "@/components/tenders/SourceCoveragePanel";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
 import { TENDER_STATUS_CHIP_CLASS, TENDER_STATUS_LABEL } from "@/lib/tenders";
-import type { TenderStatus } from "@/types/api";
+import type { TenderFeedbackVerdict, TenderStatus } from "@/types/api";
 
 type Tab = "open" | "forecast";
 
@@ -39,6 +39,7 @@ function TenderCountChips({ counts }: { counts: Partial<Record<TenderStatus, num
 
 export function TendersPage() {
   const t = useT();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab: Tab = searchParams.get("tab") === "forecast" ? "forecast" : "open";
   const [filters, setFilters] = useState<TenderFiltersState>({ status: "", country: "", q: "" });
@@ -54,6 +55,27 @@ export function TendersPage() {
         include_archived: showClosedArchived,
       }),
   });
+
+  // W2b ("be open" requirement, 2026-09-06 evening): one-click 👍/👎 (+ optional reason) --
+  // updates the tender's intake server-side and self-tunes the relevance threshold + source
+  // priority (eoa.tenders.feedback); refetch so the row's badge/score/sort position update.
+  const feedbackMutation = useMutation({
+    mutationFn: ({
+      tenderId,
+      verdict,
+      reason,
+    }: {
+      tenderId: number;
+      verdict: TenderFeedbackVerdict;
+      reason?: string;
+    }) => api.postTenderFeedback(tenderId, verdict, reason ?? null),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tenders"] });
+    },
+  });
+  function handleFeedback(tenderId: number, verdict: TenderFeedbackVerdict, reason?: string) {
+    feedbackMutation.mutate({ tenderId, verdict, reason });
+  }
   const forecastsQuery = useQuery({
     queryKey: ["tender-forecasts"],
     queryFn: () => api.getTenderForecasts(),
@@ -95,8 +117,12 @@ export function TendersPage() {
           tender.matched_terms.some((m) => m.toLowerCase().includes(needle)),
       );
     }
-    // Sort by deadline then published date (F24) — undated rows ("unknown" status) sort last.
+    // Sort by intake (W2b: 'accepted' before 'candidate' — mirrors services.list_tenders' own
+    // ordering, re-applied here since the country/q filters above already left the server's own
+    // order behind), then by deadline, then published date (F24) — undated rows ("unknown"
+    // status) sort last.
     return [...list].sort((a, b) => {
+      if (a.intake !== b.intake) return a.intake === "accepted" ? -1 : 1;
       const ad = a.deadline ?? "";
       const bd = b.deadline ?? "";
       if (ad !== bd) return ad === "" ? 1 : bd === "" ? -1 : ad.localeCompare(bd);
@@ -207,6 +233,7 @@ export function TendersPage() {
                       tenders={filteredTenders}
                       expandedId={expandedId}
                       onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
+                      onFeedback={handleFeedback}
                     />
                   )}
                 </>

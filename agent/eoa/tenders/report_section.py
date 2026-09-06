@@ -169,9 +169,16 @@ def collect_tenders(
     wrap this in a try/except anyway (a report section is never allowed to break the whole daily
     report). Returns ``{"open_tenders": [...], "new_forecasts": [...], "unknown_count": int}`` --
     the new ``unknown_count`` key is additive; existing callers reading only the first two keys are
-    unaffected."""
+    unaffected.
+
+    W2b (docs/REVIEW_2026-09-06_evening.md, open intake): ``eoa.tenders.scan`` now stores every
+    notice that clears the two-signal vocabulary gate, not just LLM-confirmed-relevant ones --
+    carrying ``intake`` (``'candidate'`` below the self-tuning threshold, ``'accepted'`` at/above
+    it). The report keeps showing only ``intake = 'accepted'`` rows, per the user's own
+    requirement -- a ``'candidate'`` is an unconfirmed lead the tenders screen surfaces for an
+    operator to 👍/👎, not something to hand the reader as a decided opportunity."""
     open_tenders = _fetchall(
-        "SELECT * FROM tenders WHERE status = 'open' "
+        "SELECT * FROM tenders WHERE status = 'open' AND intake = 'accepted' "
         "ORDER BY deadline ASC NULLS LAST, relevance DESC NULLS LAST, id DESC LIMIT %(limit)s",
         {"limit": open_limit},
     )
@@ -189,7 +196,9 @@ def collect_tenders(
     # W1 (round 4): the same platform+payload topic can appear as more than one row (typically one
     # per resolved buyer_country) -- collapse before this ever reaches a report table.
     new_forecasts = dedupe_forecasts_by_topic(new_forecasts)
-    unknown_rows = _fetchall("SELECT count(*) AS c FROM tenders WHERE status = 'unknown'")
+    unknown_rows = _fetchall(
+        "SELECT count(*) AS c FROM tenders WHERE status = 'unknown' AND intake = 'accepted'"
+    )
     unknown_count = unknown_rows[0]["c"] if unknown_rows else 0
     return {"open_tenders": open_tenders, "new_forecasts": new_forecasts, "unknown_count": unknown_count}
 

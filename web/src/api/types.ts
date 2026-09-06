@@ -43,6 +43,8 @@ import type {
   SettingsPutResponse,
   Survey,
   TechRadarResponse,
+  TenderFeedback,
+  TenderFeedbackVerdict,
   TenderSourceCoverageResponse,
   TenderStatus,
   TendersResponse,
@@ -225,6 +227,14 @@ export interface ApiClient {
   getTenderForecasts(limit?: number): Promise<ForecastCard[]>;
   /** A15 (docs/TENDER_PORTALS.md): per-region tender-source coverage for the "כיסוי מקורות" panel. */
   getTenderSourceCoverage(): Promise<TenderSourceCoverageResponse>;
+  /** W2b: one-click 👍/👎 (+ optional free-text reason) on a tenders row -- self-tunes the
+   * relevance threshold + this source's scan priority (eoa.tenders.feedback). */
+  postTenderFeedback(
+    tenderId: number,
+    verdict: TenderFeedbackVerdict,
+    reason?: string | null,
+  ): Promise<TenderFeedback>;
+  getTenderFeedback(tenderId: number): Promise<TenderFeedback[]>;
 
   /** A14: פטנטים ו-IP (agent/eoa/patents/**). */
   getPatents(query: PatentsQuery): Promise<PatentsResponse>;

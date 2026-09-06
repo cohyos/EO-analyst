@@ -277,6 +277,23 @@ export const he = {
       colStatus: "סטטוס",
       colNotices: "הודעות",
       colLastFetch: "שליפה אחרונה",
+      priorityLowered: "עדיפות מופחתת",
+      priorityLoweredTitle: "המקור לא קיבל אף משוב 👍 לאחרונה -- נסרק מאוחר יותר, לא הושבת",
+    },
+    // W2b (docs/REVIEW_2026-09-06_evening.md, "be open" requirement, 2026-09-06 evening): open
+    // intake + relevance feedback -- the tenders screen now shows 'candidate' rows too (below the
+    // learned threshold) with a 👍/👎 + optional reason so the operator's own feedback tunes the
+    // system (eoa.tenders.feedback).
+    candidateBadge: "מועמד",
+    relevanceScoreAria: "ציון רלוונטיות: {score}",
+    feedback: {
+      thumbsUpAria: "סמן כרלוונטי",
+      thumbsDownAria: "סמן כלא רלוונטי",
+      reasonPlaceholder: "סיבה (לא חובה)",
+      submitReason: "שלח נימוק",
+      recordedRelevant: "סומן כרלוונטי",
+      recordedIrrelevant: "סומן כלא רלוונטי",
+      failed: "שמירת המשוב נכשלה",
     },
   },
   // A13 (מיקוד תעשייה ישראלית): the "ישראליות" facet chip + flag badge on EntitiesPage — the page

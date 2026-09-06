@@ -1,15 +1,18 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ExternalLink } from "lucide-react";
-import type { TenderCard } from "@/types/api";
+import { ChevronDown, ExternalLink, ThumbsDown, ThumbsUp } from "lucide-react";
+import type { TenderCard, TenderFeedbackVerdict } from "@/types/api";
 import { countryFlagEmoji } from "@/lib/countryFlag";
 import { formatDate } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import {
   DEADLINE_URGENT_DAYS,
+  TENDER_CANDIDATE_BADGE_LABEL,
+  TENDER_INTAKE_CHIP_CLASS,
   TENDER_STATUS_CHIP_CLASS,
   TENDER_STATUS_LABEL,
   daysLeft,
+  relevanceScorePercent,
 } from "@/lib/tenders";
 import { EmptyState } from "@/components/states";
 import { useT } from "@/i18n";
@@ -53,12 +56,61 @@ function RelevanceDots({ value }: { value: number | null }) {
   );
 }
 
-function TenderDetailRow({ t }: { t: TenderCard }) {
+// W2b: quick one-click 👍/👎 shared by both the compact row control and the expanded detail row's
+// reason-carrying variant.
+function FeedbackButtons({
+  onVote,
+  disabled,
+}: {
+  onVote: (verdict: TenderFeedbackVerdict) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  return (
+    <span className="inline-flex items-center gap-1">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={(e) => {
+          e.stopPropagation();
+          onVote("relevant");
+        }}
+        aria-label={t("tenders.feedback.thumbsUpAria")}
+        title={t("tenders.feedback.thumbsUpAria")}
+        className="tap-target inline-flex items-center justify-center rounded p-1 text-fg-muted hover:bg-ok/15 hover:text-ok disabled:opacity-50"
+      >
+        <ThumbsUp size={14} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={(e) => {
+          e.stopPropagation();
+          onVote("irrelevant");
+        }}
+        aria-label={t("tenders.feedback.thumbsDownAria")}
+        title={t("tenders.feedback.thumbsDownAria")}
+        className="tap-target inline-flex items-center justify-center rounded p-1 text-fg-muted hover:bg-danger/15 hover:text-danger disabled:opacity-50"
+      >
+        <ThumbsDown size={14} aria-hidden="true" />
+      </button>
+    </span>
+  );
+}
+
+function TenderDetailRow({
+  t,
+  onFeedback,
+}: {
+  t: TenderCard;
+  onFeedback: (tenderId: number, verdict: TenderFeedbackVerdict, reason?: string) => void;
+}) {
   const translate = useT();
+  const [reason, setReason] = useState("");
   const whyRelevant = [t.matched_terms.join(", "), t.summary_he].filter(Boolean).join(" — ");
   return (
     <tr className="border-t border-border bg-bg-sunken/60">
-      <td colSpan={8} className="p-3 text-xs">
+      <td colSpan={9} className="p-3 text-xs">
         {whyRelevant && (
           <p className="mb-2">
             <span className="text-fg-dim">{translate("tenders.whyRelevantPrefix")}</span>
@@ -74,6 +126,10 @@ function TenderDetailRow({ t }: { t: TenderCard }) {
           </span>
           <span>
             מדינה: <span className="font-mono text-fg">{t.country ?? "—"}</span>
+          </span>
+          <span>
+            ציון רלוונטיות:{" "}
+            <span className="font-mono text-fg">{relevanceScorePercent(t.relevance_score)}</span>
           </span>
         </div>
         <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2">
@@ -104,6 +160,21 @@ function TenderDetailRow({ t }: { t: TenderCard }) {
             פתח פריט מקושר ←
           </Link>
         )}
+        {/* W2b: a reason-carrying feedback control, separate from the compact row's one-click
+            vote -- filling in a reason here and clicking a verdict submits both together. */}
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-2">
+          <FeedbackButtons
+            onVote={(verdict) => onFeedback(t.id, verdict, reason.trim() || undefined)}
+          />
+          <input
+            type="text"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            placeholder={translate("tenders.feedback.reasonPlaceholder")}
+            className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2 py-1 text-xs text-fg placeholder:text-fg-dim"
+          />
+        </div>
       </td>
     </tr>
   );
@@ -113,10 +184,12 @@ export function TenderTable({
   tenders,
   expandedId,
   onToggleExpand,
+  onFeedback,
 }: {
   tenders: TenderCard[];
   expandedId: number | null;
   onToggleExpand: (id: number) => void;
+  onFeedback: (tenderId: number, verdict: TenderFeedbackVerdict, reason?: string) => void;
 }) {
   const t = useT();
   if (tenders.length === 0) {
@@ -127,10 +200,13 @@ export function TenderTable({
       />
     );
   }
+  // Computed here (not inside the `tenders.map((t) => ...)` below, where `t` is shadowed by each
+  // row's TenderCard) so the relevance-score cell can still reach the translate function.
+  const relevanceScoreAriaLabel = (score: string) => t("tenders.relevanceScoreAria", { score });
 
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="w-full min-w-[900px] text-sm">
+      <table className="w-full min-w-[960px] text-sm">
         <thead className="bg-bg-raised text-xs text-fg-dim">
           <tr>
             <th className="p-2 text-start"></th>
@@ -141,6 +217,7 @@ export function TenderTable({
             <th className="p-2 text-start">רלוונטיות</th>
             <th className="p-2 text-start">מונחים תואמים</th>
             <th className="p-2 text-start">סטטוס</th>
+            <th className="p-2 text-start">משוב</th>
           </tr>
         </thead>
         <tbody>
@@ -164,20 +241,34 @@ export function TenderTable({
                     <DeadlineChip deadline={t.deadline} />
                   </td>
                   <td className="p-2">
-                    {t.url ? (
-                      <a
-                        href={t.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        className="inline-flex items-start gap-1 text-fg hover:text-accent hover:underline"
-                      >
+                    <div className="flex items-start gap-1.5">
+                      {t.url ? (
+                        <a
+                          href={t.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="inline-flex items-start gap-1 text-fg hover:text-accent hover:underline"
+                        >
+                          <bdi>{t.title || "(ללא כותרת)"}</bdi>
+                          <ExternalLink size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
+                        </a>
+                      ) : (
                         <bdi>{t.title || "(ללא כותרת)"}</bdi>
-                        <ExternalLink size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
-                      </a>
-                    ) : (
-                      <bdi>{t.title || "(ללא כותרת)"}</bdi>
-                    )}
+                      )}
+                      {/* W2b: a 'candidate' (below the learned threshold) is shown but visually
+                          distinguished from a confirmed/accepted tender. */}
+                      {t.intake === "candidate" && (
+                        <span
+                          className={cn(
+                            "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                            TENDER_INTAKE_CHIP_CLASS.candidate,
+                          )}
+                        >
+                          {TENDER_CANDIDATE_BADGE_LABEL}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="p-2 text-fg-muted">
                     <div className="flex items-center gap-1.5">
@@ -190,7 +281,18 @@ export function TenderTable({
                     <bdi>{t.source ?? "—"}</bdi>
                   </td>
                   <td className="p-2">
-                    <RelevanceDots value={t.relevance} />
+                    <div className="flex flex-col gap-0.5">
+                      <RelevanceDots value={t.relevance} />
+                      {/* W2b: the 0-1 self-tuning relevance_score, visible alongside the older
+                          1-10 relevance dots so an operator can see exactly what the learned
+                          threshold is comparing against. */}
+                      <span
+                        className="font-mono text-[10px] text-fg-dim"
+                        aria-label={relevanceScoreAriaLabel(relevanceScorePercent(t.relevance_score))}
+                      >
+                        {relevanceScorePercent(t.relevance_score)}
+                      </span>
+                    </div>
                   </td>
                   <td className="p-2">
                     <div className="flex flex-wrap gap-1">
@@ -217,8 +319,11 @@ export function TenderTable({
                       {TENDER_STATUS_LABEL[t.status]}
                     </span>
                   </td>
+                  <td className="p-2">
+                    <FeedbackButtons onVote={(verdict) => onFeedback(t.id, verdict)} />
+                  </td>
                 </tr>
-                {expanded && <TenderDetailRow t={t} />}
+                {expanded && <TenderDetailRow t={t} onFeedback={onFeedback} />}
               </Fragment>
             );
           })}

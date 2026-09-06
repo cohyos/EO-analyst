@@ -530,7 +530,7 @@ def default_investigation_question(title: str, so_what_he: str | None = None) ->
     hint = (so_what_he or "").strip()
     hint_part = f" בהקשר: {hint[:160]}" if hint else ""
     return (
-        f"אמת והרחב את הדיווח \"{base}\": מי הצדדים, הלקוח, היקף/סכום, לוח זמנים ומתחרים, "
+        f'אמת והרחב את הדיווח "{base}": מי הצדדים, הלקוח, היקף/סכום, לוח זמנים ומתחרים, '
         f"ומה המשמעות למוצרי EO/IR.{hint_part} ובנוסף, בקצרה: מה המשמעות לתעשייה הישראלית?"
     )
 
@@ -869,21 +869,232 @@ def run_named_graph_query(name: str, arg: str | None) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
+def _resolve_repo_path(raw: str) -> Path:
+    """Resolve a stored report path. Rows written while the app ran in Docker carry the container
+    prefix ``/app/...`` (ADR-004: the same tree is now ``REPO_ROOT``), so that prefix is remapped."""
+    text = str(raw).replace("\\", "/")
+    if text.startswith("/app/"):
+        return REPO_ROOT / text[len("/app/") :]
+    p = Path(raw)
+    return p if p.is_absolute() else REPO_ROOT / p
+
+
+# W14 (docs/REVIEW_2026-09-06_evening.md, user finding 2026-09-06 19:10): the reports list used to
+# show nothing but "<kind> — <date>" -- e.g. "patent_survey — 06.09.2026" x7 for two different
+# survey topics -- with no way to tell rows apart or preview what's inside before opening one.
+# `_report_card` below adds, additively (every pre-existing field is unchanged):
+#   - title_he / subject_he / built_at: a descriptive Hebrew title built from kind + subject
+#     (territory for bd_territory, the survey topic for patent_survey -- never invented; daily/
+#     weekly/monthly have no subject, so subject_he is None there) + build time, verified below
+#     against every kind actually present in the live `reports` table.
+#   - preview_he / source_count / qa_issues: a short content preview and counters read from the
+#     already-rendered `path_md` file -- never re-derived from the LLM (docs/CONVENTIONS.md rule
+#     5: never invent).
+#   - group_key: kind+subject (kind+period for daily/weekly/monthly) so `list_reports` can mark
+#     only the newest row per group as `is_latest`, letting the UI fold older re-runs of the same
+#     survey/territory/period behind a "גרסאות קודמות" expander instead of listing all of them flat.
+_REPORT_KIND_LABEL_HE = {
+    "daily": "דוח יומי",
+    "weekly": "דוח שבועי",
+    "monthly": "דוח חודשי",
+    "adhoc": "דוח אד-הוק",
+    "bd_territory": "דוח פיתוח עסקי",
+    "patent_survey": "סקר פטנטים",
+}
+
+# A small local Hebrew country-name table for `bd_territory`'s `subject_he`/`title_he`
+# (docs/CONVENTIONS.md rule 6: a local copy, not `eoa.report.geography`'s private `_ALIASES`) --
+# covers every territory code actually seen in the live `reports` table (US/IL/EU/GB/IN/KR/GR) plus
+# a few obvious others. An unrecognized code falls back to the raw code itself -- never guessed.
+_TERRITORY_LABEL_HE = {
+    "US": 'ארה"ב',
+    "IL": "ישראל",
+    "GB": "בריטניה",
+    "EU": "האיחוד האירופי",
+    "DE": "גרמניה",
+    "FR": "צרפת",
+    "IT": "איטליה",
+    "TR": "טורקיה",
+    "KR": "קוריאה הדרומית",
+    "IN": "הודו",
+    "GR": "יוון",
+    "JP": "יפן",
+    "AU": "אוסטרליה",
+    "CA": "קנדה",
+    "NATO": 'נאט"ו',
+    "UN": 'האו"ם',
+}
+
+
+def _territory_label_he(territory: str | None) -> str | None:
+    if not territory:
+        return None
+    return _TERRITORY_LABEL_HE.get(territory.upper(), territory)
+
+
+def _report_subject_he(kind: str | None, territory: str | None, qa_report: dict[str, Any]) -> str | None:
+    if kind == "patent_survey":
+        topic = qa_report.get("topic")
+        return topic.strip() if isinstance(topic, str) and topic.strip() else None
+    if kind == "bd_territory":
+        return _territory_label_he(territory)
+    return None
+
+
+def _report_title_he(
+    kind: str | None,
+    subject_he: str | None,
+    territory: str | None,
+    period_start: Any,
+    period_end: Any,
+    created_at: Any,
+) -> str:
+    label = _REPORT_KIND_LABEL_HE.get(kind or "", kind or "דוח")
+    built = created_at.strftime("%d.%m %H:%M") if hasattr(created_at, "strftime") else None
+    if kind == "daily":
+        anchor = period_end if hasattr(period_end, "strftime") else period_start
+        date_str = anchor.strftime("%d.%m") if hasattr(anchor, "strftime") else None
+        return f"{label} — {date_str}" if date_str else label
+    if kind == "weekly":
+        anchor = period_end if hasattr(period_end, "isocalendar") else period_start
+        week_no = anchor.isocalendar()[1] if hasattr(anchor, "isocalendar") else None
+        start_str = period_start.strftime("%d.%m") if hasattr(period_start, "strftime") else "?"
+        end_str = period_end.strftime("%d.%m") if hasattr(period_end, "strftime") else "?"
+        week_part = f"שבוע {week_no} " if week_no else ""
+        return f"{label} — {week_part}({start_str}–{end_str})"
+    if kind == "monthly":
+        anchor = period_end if hasattr(period_end, "strftime") else period_start
+        month_str = anchor.strftime("%m.%Y") if hasattr(anchor, "strftime") else None
+        return f"{label} — {month_str}" if month_str else label
+    if kind == "bd_territory":
+        subject = subject_he or _territory_label_he(territory) or "—"
+        return f"{label} — {subject} — {built}" if built else f"{label} — {subject}"
+    if kind == "patent_survey":
+        subject = subject_he or "נושא לא ידוע"
+        return f"{label}: {subject} — {built}" if built else f"{label}: {subject}"
+    # adhoc / any future kind -- still descriptive rather than a bare kind string.
+    return f"{label} — {built}" if built else label
+
+
+def _report_group_key(row: dict[str, Any], subject_he: str | None) -> str:
+    kind = row.get("kind") or ""
+    if kind == "patent_survey":
+        return f"patent_survey:{(subject_he or '').strip().lower()}"
+    if kind == "bd_territory":
+        return f"bd_territory:{(row.get('territory') or '').strip().upper()}"
+    start, end = row.get("period_start"), row.get("period_end")
+    start_s = start.isoformat() if hasattr(start, "isoformat") else str(start)
+    end_s = end.isoformat() if hasattr(end, "isoformat") else str(end)
+    return f"{kind}:{start_s}_{end_s}"
+
+
+# --- content preview / counters, read from the rendered report file ------------------------
+
+# The executive summary always sits in the file's first heading section (right after the title/
+# date lines) -- 6 KB comfortably covers it even for a verbose patent-survey exec summary, without
+# reading the whole (sometimes tens-of-KB) report just to show two sentences in a list row.
+_REPORT_PREVIEW_READ_BYTES = 6 * 1024
+# `source_count` needs the sources appendix, which sits at the *end* of the file. Every report this
+# project renders is a few KB to low tens-of-KB of Markdown (the largest observed live is ~42 KB),
+# so this cap is generous enough to reach the appendix in practice while still bounding worst-case
+# I/O -- and it is only ever paid once per report *version*, see `_REPORT_PREVIEW_CACHE` below.
+_REPORT_FILE_READ_CAP = 128 * 1024
+
+_MD_HEADING_RE = re.compile(r"^##\s+.+$", re.MULTILINE)
+_MD_CITED_MARKER_RE = re.compile(r"\[\d+\](?:\(#src-\d+\))?")
+_MD_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MD_APPENDIX_ROW_RE = re.compile(r'<a id="src-\d+">')
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_EXEC_SUMMARY_HEADING_RE = re.compile(r"^##\s*תקציר מנהלים\s*$", re.MULTILINE)
+
+# Keyed by (report_id, created_at.isoformat()) -- a `reports` row is immutable once written (a
+# re-run always inserts a brand new row, never an UPDATE), so this cache never goes stale.
+_REPORT_PREVIEW_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
+
+
+def _clean_md_inline(text: str) -> str:
+    """Strip citation markers / bold / link syntax from a chunk of report Markdown, leaving plain
+    Hebrew prose. Used only for the reports list's short content preview -- the actual report body
+    (`ReportBody.tsx`) always renders from `path_html`'s real, clickable citation chips."""
+    text = _MD_CITED_MARKER_RE.sub("", text)
+    text = _MD_BOLD_RE.sub(r"\1", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def _report_preview_from_text(md_text: str) -> str | None:
+    """First two sentences of the "תקציר מנהלים" (executive summary) section, as plain Hebrew
+    text. Blockquoted asides (e.g. a patent survey's per-patent "התקדמות פטנט [n]" lines) are
+    dropped -- they are supplementary detail, not the summary itself."""
+    m = _EXEC_SUMMARY_HEADING_RE.search(md_text)
+    if not m:
+        return None
+    rest = md_text[m.end() :]
+    next_heading = _MD_HEADING_RE.search(rest)
+    section = rest[: next_heading.start()] if next_heading else rest
+    lines = [ln for ln in section.splitlines() if ln.strip() and not ln.strip().startswith(">")]
+    text = _clean_md_inline(" ".join(lines))
+    if not text:
+        return None
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    return " ".join(sentences[:2]) or None
+
+
+def _report_file_stats(report_id: int, created_at: Any, path_md: str | None) -> dict[str, Any]:
+    """``{"preview_he", "source_count"}`` for one report, cached per ``(id, created_at)``."""
+    cache_key = (report_id, created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at))
+    cached = _REPORT_PREVIEW_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    result: dict[str, Any] = {"preview_he": None, "source_count": 0}
+    if path_md:
+        try:
+            p = _resolve_repo_path(path_md)
+            if p.exists():
+                with p.open(encoding="utf-8", errors="replace") as f:
+                    text = f.read(_REPORT_FILE_READ_CAP)
+                preview = _report_preview_from_text(text[:_REPORT_PREVIEW_READ_BYTES])
+                result["preview_he"] = preview if preview is not None else _report_preview_from_text(text)
+                result["source_count"] = len(_MD_APPENDIX_ROW_RE.findall(text))
+        except OSError as exc:
+            log.warning("report.preview_read_failed", report_id=report_id, error=str(exc))
+    _REPORT_PREVIEW_CACHE[cache_key] = result
+    return result
+
+
 def _report_card(row: dict[str, Any]) -> dict[str, Any]:
     included = row.get("items_included") or []
+    kind = row.get("kind")
+    territory = row.get("territory")
+    qa_report = row.get("qa_report") or {}
+    subject_he = _report_subject_he(kind, territory, qa_report)
+    created_at = row.get("created_at")
+    stats = _report_file_stats(row["id"], created_at, row.get("path_md"))
+    errors = qa_report.get("errors") or []
     return {
         "id": row["id"],
-        "kind": row.get("kind"),
+        "kind": kind,
         "period_start": row.get("period_start"),
         "period_end": row.get("period_end"),
         "path_docx": row.get("path_docx"),
         "path_md": row.get("path_md"),
         "path_html": row.get("path_html"),
         "qa_passed": row.get("qa_passed"),
-        "created_at": row.get("created_at"),
+        "created_at": created_at,
         "headline_count": len(included),
         # A11: only populated for kind='bd_territory' -- None for every other report kind.
-        "territory": row.get("territory"),
+        "territory": territory,
+        # W14 additive fields (see module note above _REPORT_KIND_LABEL_HE).
+        "title_he": _report_title_he(
+            kind, subject_he, territory, row.get("period_start"), row.get("period_end"), created_at
+        ),
+        "subject_he": subject_he,
+        "built_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+        "preview_he": stats["preview_he"],
+        "source_count": stats["source_count"],
+        "qa_issues": len(errors),
+        "group_key": _report_group_key(row, subject_he),
     }
 
 
@@ -893,17 +1104,43 @@ def list_reports(*, kind: str | None = None, limit: int = 30) -> list[dict[str, 
     if kind:
         params["kind"] = kind
     rows = _fetchall(f"SELECT * FROM reports WHERE {where} ORDER BY created_at DESC LIMIT %(limit)s", params)
-    return [_report_card(r) for r in rows]
+    cards = [_report_card(r) for r in rows]
+    # W14 point 3: the newest row per group_key (rows already arrive created_at DESC) is the one
+    # the UI shows by default; every older row in the same group is folded behind its expander.
+    seen_groups: set[str] = set()
+    for card in cards:
+        key = card["group_key"]
+        card["is_latest"] = key not in seen_groups
+        seen_groups.add(key)
+    return cards
 
 
-def _resolve_repo_path(raw: str) -> Path:
-    """Resolve a stored report path. Rows written while the app ran in Docker carry the container
-    prefix ``/app/...`` (ADR-004: the same tree is now ``REPO_ROOT``), so that prefix is remapped."""
-    text = str(raw).replace("\\", "/")
-    if text.startswith("/app/"):
-        return REPO_ROOT / text[len("/app/") :]
-    p = Path(raw)
-    return p if p.is_absolute() else REPO_ROOT / p
+def _report_group_where(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """SQL predicate (without the ``created_at`` bound) matching every row in ``row``'s own
+    version group -- used by :func:`get_report` to answer "is this the latest version" for a
+    single report, mirroring :func:`_report_group_key`'s own grouping rules."""
+    kind = row.get("kind")
+    if kind == "patent_survey":
+        topic = (row.get("qa_report") or {}).get("topic") or ""
+        return "kind = 'patent_survey' AND COALESCE(qa_report->>'topic', '') = %(topic)s", {"topic": topic}
+    if kind == "bd_territory":
+        return "kind = 'bd_territory' AND COALESCE(territory, '') = %(territory)s", {
+            "territory": row.get("territory") or ""
+        }
+    return (
+        "kind = %(kind)s AND period_start IS NOT DISTINCT FROM %(start)s "
+        "AND period_end IS NOT DISTINCT FROM %(end)s",
+        {"kind": kind, "start": row.get("period_start"), "end": row.get("period_end")},
+    )
+
+
+def _is_latest_report(row: dict[str, Any]) -> bool:
+    where_sql, params = _report_group_where(row)
+    params["created_at"] = row["created_at"]
+    newer = _fetchone(
+        f"SELECT 1 AS x FROM reports WHERE {where_sql} AND created_at > %(created_at)s LIMIT 1", params
+    )
+    return newer is None
 
 
 def get_report(report_id: int) -> dict[str, Any] | None:
@@ -925,6 +1162,7 @@ def get_report(report_id: int) -> dict[str, Any] | None:
         "SELECT * FROM clarifications WHERE kind = 'report_open_point' AND answer IS NULL ORDER BY asked_at DESC"
     )
     card["items_included"] = row.get("items_included") or []
+    card["is_latest"] = _is_latest_report(row)
     return card
 
 
@@ -1317,6 +1555,7 @@ def _report_kind_label(report_kind: str | None) -> str:
         return "לא מסווג"
     return _REPORT_KIND_LABELS.get(report_kind, report_kind)
 
+
 # U9 (docs/REVIEW_2026-09-05.md): tokens that mix letters and digits (program/model names like
 # "XM30", "F-35") are exactly the kind of rare, specific term vector similarity blurs past --
 # hybrid retrieval boosts them with a plain ILIKE match so a question like "מה זה XM30?" can't come
@@ -1489,7 +1728,7 @@ def ask_build_messages(
         system += (
             "\n\nשמות הישויות/המערכות הבאים מופיעים במפורש במקורות שסופקו לך בשיחה זו -- "
             "השתמש בשמות הישויות **בדיוק** כפי שהם מופיעים במקורות; אסור להחליף מערכת במערכת "
-            'דומה (למשל מגן אור ≠ כיפת ברזל; Iron Beam ≠ Iron Dome/Tamir). רשימת השמות: '
+            "דומה (למשל מגן אור ≠ כיפת ברזל; Iron Beam ≠ Iron Dome/Tamir). רשימת השמות: "
             + ", ".join(canonical_entities)
         )
 
@@ -1507,8 +1746,7 @@ def ask_build_messages(
         "המונחים מופיעים רק במקורות נפרדים ובלתי-קשורים (למשל מקור אחד עוסק במערכת X מול מדינה "
         "א', ומקור אחר עוסק בעסקה שונה לגמרי מול מדינה ב') -- אסור לשלב אותם לכדי סיפור אחד "
         "מומצא; יש לציין זאת במפורש כפער ('לא נמצא מקור המקשר בין X למדינה ב'; נמצאו בנפרד: ...') "
-        "ולפרט מה כן נמצא בכל מקור בנפרד.\n\n"
-        + prompts.render("ask_answer_format")
+        "ולפרט מה כן נמצא בכל מקור בנפרד.\n\n" + prompts.render("ask_answer_format")
     )
 
     citations: list[dict[str, Any]] = []
@@ -1568,9 +1806,7 @@ _CITATION_REPAIR_INSTRUCTION = (
 )
 
 
-def ask_citation_repair_messages(
-    messages: list[dict[str, Any]], answer_text: str
-) -> list[dict[str, Any]]:
+def ask_citation_repair_messages(messages: list[dict[str, Any]], answer_text: str) -> list[dict[str, Any]]:
     """Build the one-shot corrective-pass messages for the zero-citation guard above: the exact
     system+history+sources messages the original answer was built from, plus that answer as an
     assistant turn, plus an instruction to rewrite it with `[n]` citations attached."""
@@ -1635,6 +1871,10 @@ def _tender_card(row: dict[str, Any]) -> dict[str, Any]:
         "cpv_naics": row.get("cpv_naics") or [],
         "summary_he": row.get("summary_he"),
         "relevance": row.get("relevance"),
+        # W2b (additive): relevance_score (0-1, self-tuning signal) + intake
+        # ('candidate'/'accepted'/'rejected-by-user') -- see eoa.tenders.scan/feedback.
+        "relevance_score": row.get("relevance_score"),
+        "intake": row.get("intake"),
         "matched_terms": row.get("matched_terms") or [],
         "entities": row.get("entities") or [],
         "status": row.get("status"),
@@ -1687,8 +1927,15 @@ def list_tenders(
 
     Returns both the (possibly capped) tender list AND a status -> count summary (honoring
     ``country``/``q`` but not the status/since_days/include_* narrowing) for the UI's header chips,
-    since those need the true totals regardless of what the list itself shows."""
-    where = ["1 = 1"]
+    since those need the true totals regardless of what the list itself shows.
+
+    W2b: every notice that clears the two-signal vocabulary gate is now stored (open intake, see
+    ``eoa.tenders.scan``), carrying ``intake`` -- ``'candidate'`` (below the learned relevance
+    threshold) or ``'accepted'`` (at/above it) both show here, ``'accepted'`` sorted first within
+    each status tier, so an operator scanning the board sees the confident rows before the
+    uncertain ones; only ``'rejected-by-user'`` (an explicit 👎) is hidden, always, per the user's
+    own requirement."""
+    where = ["intake != 'rejected-by-user'"]
     params: dict[str, Any] = {"limit": min(max(limit, 1), 500)}
 
     if status:
@@ -1730,13 +1977,14 @@ def list_tenders(
         f"SELECT * FROM tenders WHERE {where_sql} "
         "ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'unknown' THEN 1 "
         "WHEN 'awarded' THEN 2 WHEN 'closed' THEN 3 WHEN 'archived' THEN 4 ELSE 5 END, "
+        "CASE WHEN intake = 'accepted' THEN 0 ELSE 1 END, "
         "CASE WHEN status = 'open' THEN deadline END ASC NULLS LAST, "
         "CASE WHEN status = 'unknown' THEN published_at END DESC NULLS LAST, "
         "relevance DESC NULLS LAST, id DESC LIMIT %(limit)s",
         params,
     )
 
-    count_where = ["1 = 1"]
+    count_where = ["intake != 'rejected-by-user'"]
     count_params: dict[str, Any] = {}
     if country:
         count_where.append("country = %(country)s")
@@ -1820,7 +2068,12 @@ def tender_source_coverage() -> dict[str, Any]:
     "a broken section never breaks the page" spirit as the rest of this module) -- the DB query
     itself is allowed to raise (a genuine DB outage should surface as a 500, same as every other
     endpoint in this module).
+
+    W2b (additive): each source also carries ``priority_decrement`` -- the self-tuning scan-order
+    hint from ``eoa.tenders.feedback.get_source_priorities`` (0 for a source that hasn't earned
+    one; never disables a source, only nudges ``scan_tenders``'s pass order later for it).
     """
+    from eoa.tenders.feedback import get_source_priorities
     from eoa.tenders.scan import TenderSource, load_tender_sources
 
     try:
@@ -1833,6 +2086,11 @@ def tender_source_coverage() -> dict[str, Any]:
         "SELECT source, count(*) AS n, max(created_at) AS last_created_at FROM tenders GROUP BY source"
     )
     stats_by_source = {r["source"]: r for r in stats_rows}
+    try:
+        priorities = get_source_priorities()
+    except Exception as exc:  # pragma: no cover -- defensive, get_source_priorities already catches
+        log.debug("tender_source_priorities_unavailable", error=str(exc)[:200])
+        priorities = {}
 
     by_region: dict[str, list[dict[str, Any]]] = {}
     totals = {"integrated_keyless": 0, "waiting_for_key": 0, "search_only": 0, "not_integrated": 0}
@@ -1855,6 +2113,7 @@ def tender_source_coverage() -> dict[str, Any]:
                 "needs_key_env_var": s.needs_key_env_var,
                 "notices_stored": (row["n"] if row else 0),
                 "last_fetch_at": (row["last_created_at"] if row else None),
+                "priority_decrement": priorities.get(s.id, 0),
             }
         )
 
@@ -1863,6 +2122,28 @@ def tender_source_coverage() -> dict[str, Any]:
         for region, rows in sorted(by_region.items())
     ]
     return {"regions": regions, "totals": totals, "source_count": len(sources)}
+
+
+# --------------------------------------------------------------------------
+# W2b: tender relevance feedback (eoa.tenders.feedback) -- the self-tuning loop
+# --------------------------------------------------------------------------
+
+
+def record_tender_feedback(tender_id: int, verdict: str, reason: str | None) -> dict[str, Any] | None:
+    """``POST /api/tenders/{id}/feedback``: records one 👍/👎, flips the tender's own ``intake``,
+    and (best-effort, inside ``eoa.tenders.feedback.record_feedback`` itself) recomputes the
+    learned relevance threshold + this tender's source's scan priority. Returns ``None`` when
+    ``tender_id`` doesn't exist (the route turns that into a 404)."""
+    from eoa.tenders.feedback import record_feedback
+
+    return record_feedback(tender_id, verdict, reason)  # type: ignore[arg-type]
+
+
+def list_tender_feedback(tender_id: int) -> list[dict[str, Any]]:
+    """``GET /api/tenders/{id}/feedback``: the full 👍/👎 history for one tender, most recent first."""
+    from eoa.tenders.feedback import list_feedback_for_tender
+
+    return list_feedback_for_tender(tender_id)
 
 
 # --------------------------------------------------------------------------
