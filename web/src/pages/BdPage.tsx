@@ -10,6 +10,7 @@ import { ReportBody } from "@/components/reports/ReportBody";
 import { TerritorySelector } from "@/components/bd/TerritorySelector";
 import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
+import { countryOption } from "@/lib/countries";
 
 const LOOKBACK_OPTIONS = [30, 60, 90, 180] as const;
 
@@ -34,10 +35,12 @@ export function BdPage() {
     queryKey: ["bd-territories"],
     queryFn: () => api.getBdTerritories(),
   });
+  // W15 (docs/REVIEW_2026-09-06_evening.md round 4b): `territory === ""` means "הכל" (all
+  // territories) -- always fetch, never gated on a territory being picked, so there is always a
+  // list to browse and a real way back to it after picking a specific one.
   const reportsQuery = useQuery({
     queryKey: ["bd-reports", territory],
     queryFn: () => api.getBdReports(territory),
-    enabled: !!territory,
   });
   const detailQuery = useQuery({
     queryKey: ["bd-report", selectedId],
@@ -136,53 +139,62 @@ export function BdPage() {
           )}
         </div>
 
-        {territory && (
-          <>
-            <p className="px-3 pt-3 text-xs font-semibold text-fg-dim">{t("bd.pastReportsTitle")}</p>
-            {reportsQuery.isLoading && <LoadingState label={t("common.loading")} />}
-            {reportsQuery.isError && <ErrorState onRetry={() => reportsQuery.refetch()} />}
-            {reportsQuery.data && reportsQuery.data.length === 0 && (
-              <EmptyState title={t("bd.emptyReports")} description={t("bd.emptyReportsDescription")} />
-            )}
-            <ul className="max-h-[50vh] overflow-y-auto">
-              {reportsQuery.data?.map((r) => (
-                <li key={r.id}>
-                  <button
-                    type="button"
-                    onClick={() => selectReport(r.id)}
-                    className={cn(
-                      "flex w-full flex-col items-start gap-0.5 border-b border-border px-3 py-2 text-start hover:bg-bg-sunken",
-                      selectedId === String(r.id) && "bg-accent-muted/60",
-                    )}
-                  >
-                    <span className="text-sm font-medium">{formatDateTime(r.created_at)}</span>
-                    <span className="text-xs text-fg-dim">
-                      {t("bd.itemsCount", { n: r.headline_count })} · {r.qa_passed ? "QA ✓" : "QA ✗"}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </>
+        {/* W15: this list (and its loading/empty states) is no longer gated on a territory being
+            picked -- with the "הכל" option (territory === "") it shows every territory's past
+            reports, unfiltered, exactly like it does for one specific territory. */}
+        <p className="px-3 pt-3 text-xs font-semibold text-fg-dim">{t("bd.pastReportsTitle")}</p>
+        {reportsQuery.isLoading && <LoadingState label={t("common.loading")} />}
+        {reportsQuery.isError && <ErrorState onRetry={() => reportsQuery.refetch()} />}
+        {reportsQuery.data && reportsQuery.data.length === 0 && (
+          <EmptyState
+            title={t("bd.emptyReports")}
+            description={territory ? t("bd.emptyReportsDescription") : undefined}
+          />
         )}
+        <ul className="max-h-[50vh] overflow-y-auto">
+          {reportsQuery.data?.map((r) => {
+            const country = !territory && r.territory ? countryOption(r.territory) : null;
+            return (
+              <li key={r.id}>
+                <button
+                  type="button"
+                  onClick={() => selectReport(r.id)}
+                  className={cn(
+                    "flex w-full flex-col items-start gap-0.5 border-b border-border px-3 py-2 text-start hover:bg-bg-sunken",
+                    selectedId === String(r.id) && "bg-accent-muted/60",
+                  )}
+                >
+                  <span className="text-sm font-medium">
+                    {country && (
+                      <span aria-hidden="true" className="me-1">
+                        {country.flag}
+                      </span>
+                    )}
+                    {formatDateTime(r.created_at)}
+                  </span>
+                  <span className="text-xs text-fg-dim">
+                    {t("bd.itemsCount", { n: r.headline_count })} · {r.qa_passed ? "QA ✓" : "QA ✗"}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {/* Q5-15 (docs/qa/findings_Q5_r2.md): "no active territories" used to show any time no
-            territory was selected, even with a fully populated selector -- that label is only
-            true when the territories list itself is empty. A neutral "pick one" prompt otherwise;
-            nothing renders here while the territories query is still loading, to avoid flashing
-            either message before we actually know which one applies. */}
-        {!territory && !territoriesQuery.isLoading && (
-          <EmptyState
-            title={
-              (territoriesQuery.data?.length ?? 0) === 0
-                ? t("bd.emptyTerritories")
-                : t("bd.selectTerritoryPrompt")
-            }
-          />
-        )}
-        {territory && !selectedId && <EmptyState title={t("bd.selectReportPrompt")} />}
+        {/* Q5-15 (docs/qa/findings_Q5_r2.md): "no active territories" is only true when the
+            territories list itself is empty -- kept as the one case where the right pane still
+            reads as genuinely empty rather than "pick a report" (W15 removed the old
+            "pick a territory first" prompt entirely: "הכל" is now the default view). */}
+        {!territoriesQuery.isLoading &&
+          (territoriesQuery.data?.length ?? 0) === 0 &&
+          !reportsQuery.isLoading &&
+          (reportsQuery.data?.length ?? 0) === 0 && <EmptyState title={t("bd.emptyTerritories")} />}
+        {!selectedId &&
+          !((territoriesQuery.data?.length ?? 0) === 0 && (reportsQuery.data?.length ?? 0) === 0) && (
+            <EmptyState title={t("bd.selectReportPrompt")} />
+          )}
         {selectedId && detailQuery.isLoading && <LoadingState label={t("common.loading")} />}
         {selectedId && detailQuery.isError && <ErrorState onRetry={() => detailQuery.refetch()} />}
         {detailQuery.data && (

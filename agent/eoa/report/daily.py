@@ -1008,7 +1008,7 @@ def _tenders_forecast_table(
         rows.append(
             [f.get("platform") or "—", f.get("payload_need") or "—", pct, window, rationale, sources_cell]
         )
-    return {"title_he": "תחזיות מכרזים", "headers": headers, "rows": rows}
+    return {"title_he": "תחזיות מכרזים", "headers": headers, "rows": rows, "no_dedupe": True}
 
 
 # --------------------------------------------------------------------------

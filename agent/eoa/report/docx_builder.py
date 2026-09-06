@@ -181,6 +181,10 @@ def dedupe_rows_across_tables(tables: list[dict[str, Any]] | None) -> list[dict[
     out: list[dict[str, Any]] = []
     for tbl in tables or []:
         rows = list(tbl.get("rows") or [])
+        if tbl.get("no_dedupe"):
+            # actions / forecasts cite the items already shown above by design
+            out.append(tbl)
+            continue
         if not rows or any(len(r) < 2 for r in rows if isinstance(r, list)):
             out.append(tbl)
             for r in rows:
@@ -1118,11 +1122,13 @@ def _extra_sections_md(lines: list[str], sections: list[dict[str, Any]], positio
 
 def _md_cell(value: Any) -> str:
     """A markdown table cell: a bare URL becomes a real ``[url](url)`` link (never a raw URL
-    string sitting in running text), per F10."""
+    string sitting in running text), per F10. W17 (round 4b, docs/REVIEW_2026-09-06_evening.md):
+    a non-URL cell still gets its ``[n]`` citation markers turned into real links to the sources
+    appendix (``_md_citations``), same as prose -- a cell that was previously plain "[10]" text."""
     if value is None:
         return "—"
     text = str(value)
-    return f"[{text}]({text})" if _looks_like_url(text) else text
+    return f"[{text}]({text})" if _looks_like_url(text) else _md_citations(text)
 
 
 def _md_citations(text: str) -> str:
@@ -1275,11 +1281,30 @@ def _html_link(url: str, text: str | None = None) -> str:
     return f'<a href="{html.escape(url)}"><bdi dir="ltr">{html.escape(label)}</bdi></a>'
 
 
+def _bidi_html_with_citations(text: str) -> str:
+    """Like :func:`_bidi_html`, but every ``[n]`` citation marker is first turned into a real
+    anchor link to its row in the sources appendix (``#src-n``) -- same convention as
+    :func:`_md_citations` (markdown) and the prose ``cite_links`` closure inside
+    :func:`render_html`, extended here to table cells (W17, round 4b,
+    docs/REVIEW_2026-09-06_evening.md): a table cell whose value is exactly (or contains) a
+    ``[n]`` marker -- e.g. the acquisition-watch/procurement-events "מקור" column -- used to render
+    as inert bracketed text instead of a clickable link."""
+    parts = []
+    pos = 0
+    for m in _CITATION_RE.finditer(text):
+        parts.append(_bidi_html(text[pos : m.start()]))
+        n = m.group(1)
+        parts.append(f'<a href="#src-{n}" class="cite">[{n}]</a>')
+        pos = m.end()
+    parts.append(_bidi_html(text[pos:]))
+    return "".join(parts)
+
+
 def _html_cell(value: Any) -> str:
     if value is None:
         return "—"
     text = str(value)
-    return _html_link(text) if _looks_like_url(text) else _bidi_html(text)
+    return _html_link(text) if _looks_like_url(text) else _bidi_html_with_citations(text)
 
 
 def _extra_sections_html(parts: list[str], sections: list[dict[str, Any]], position: str, h2) -> None:

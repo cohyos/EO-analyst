@@ -265,7 +265,9 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
 
-def _run_citation_repair(messages: list[dict[str, Any]], answer_text: str, provider: str | None) -> str | None:
+def _run_citation_repair(
+    messages: list[dict[str, Any]], answer_text: str, provider: str | None
+) -> str | None:
     """Round 2 P2 (docs/qa/loop/round_2_chat_fixes.md): one short, non-streamed corrective pass
     that asks the model to rewrite ``answer_text`` with `[n]` citations attached, reusing the
     exact same system+sources context the original (uncited) answer saw. Returns ``None`` on any
@@ -444,22 +446,51 @@ async def ask(body: AskRequest) -> StreamingResponse:
             #       `eoa.api.ask_grounding` for the full rationale and precision/recall trade-offs.
             answer_text, _leak_removed = ask_grounding.sanitize_citation_markers(answer_text)
             ungrounded_removed = 0
+            _removed_by_guard: dict[str, int] = {}
             if citations:
-                answer_text, ungrounded_removed = ask_grounding.ground_and_filter_answer(
+                answer_text, _grounding_removed = ask_grounding.ground_and_filter_answer(
                     answer_text, body.question, retrieved
                 )
+                ungrounded_removed += _grounding_removed
+                if _grounding_removed:
+                    _removed_by_guard["grounded_entity"] = _grounding_removed
+                # Round 5 (docs/qa/loop/round_3_judge.md, worst-list items 3/8 and its own
+                # ranked-item-6 follow-up): three more deterministic, additive guards, all
+                # documented in full in `eoa.api.ask_grounding` -- an entity-equivalence guard (the
+                # live Q5 David's Sling/Skynex conflation), an attribution-consistency guard (the
+                # live Q7 Finnish-RFI/"US government" mismatch), and a cross-sentence
+                # self-contradiction pass. Chained after the round-3 guard above so each reasons
+                # about the already-cleaned text, same as round 3 chained after round 2.
+                answer_text, _equiv_removed = ask_grounding.filter_entity_equivalence(answer_text, retrieved)
+                ungrounded_removed += _equiv_removed
+                if _equiv_removed:
+                    _removed_by_guard["entity_equivalence"] = _equiv_removed
+                answer_text, _attrib_removed = ask_grounding.filter_attribution_mismatches(
+                    answer_text, retrieved
+                )
+                ungrounded_removed += _attrib_removed
+                if _attrib_removed:
+                    _removed_by_guard["attribution_mismatch"] = _attrib_removed
+                answer_text, _contradiction_removed = ask_grounding.filter_self_contradictions(
+                    answer_text, retrieved
+                )
+                ungrounded_removed += _contradiction_removed
+                if _contradiction_removed:
+                    _removed_by_guard["self_contradiction"] = _contradiction_removed
             if _leak_removed or ungrounded_removed:
                 log.warning(
                     "ask.grounding_repair",
                     question_hash=_question_hash(body.question),
                     template_leaks_removed=_leak_removed,
                     ungrounded_removed=ungrounded_removed,
+                    removed_by_guard=_removed_by_guard,
                 )
                 yield _sse(
                     {
                         "type": "answer_final",
                         "text": answer_text,
                         "ungrounded_removed": ungrounded_removed,
+                        "removed_by_guard": _removed_by_guard,
                     }
                 )
 

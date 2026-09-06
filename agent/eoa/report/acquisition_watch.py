@@ -44,6 +44,7 @@ from eoa.pipeline.acquisition import (
     watch_or_peer_hit,
 )
 from eoa.report.docx_builder import fmt_amount, fmt_date
+from eoa.report.geography import normalize_country
 
 log = structlog.get_logger(__name__)
 
@@ -60,6 +61,12 @@ _EVENT_KIND_LABELS_HE: dict[str, str] = {
     "acquisition": "רכישה",
     "investment": "השקעה",
     "partnership": "שותפות",
+    # W18 (round 4b, docs/REVIEW_2026-09-06_evening.md): defensive -- a row reclassified by
+    # :func:`_reclassified_kind` never actually reaches this section (it is filtered out of
+    # :func:`_fetch_watch_events` entirely, since a contract award isn't an M&A/investment
+    # signal), but the label is kept in sync with ``eoa.report.docx_builder``'s own map in case
+    # this function is ever reused somewhere that doesn't filter first.
+    "contract_award": "זכייה בחוזה",
 }
 
 _NO_EVENTS_LINE_HE = "לא זוהו אירועי רכישה/השקעה/שותפות בשבוע זה בחברות המעקב ומתחרותיהן."
@@ -90,20 +97,40 @@ def _extend_registry_for_item(registry: list[dict[str, Any]], ev: dict[str, Any]
     return entry["n"]
 
 
+def _reclassified_kind(ev: dict[str, Any]) -> str:
+    """W18 (round 4b, docs/REVIEW_2026-09-06_evening.md): a contract/order carrying both an
+    amount and a customer is a ``contract_award`` signal, never an ``investment`` one -- observed
+    live: "Elbit Systems wins US orders worth $370m" (a $370M order with a named customer) stored
+    as ``events.kind = 'investment'`` and rendered here as "השקעה". Deterministic, code-level rule
+    applied regardless of what ``events.kind`` says (the events-extraction pipeline's own kind
+    classification is owned elsewhere and not touched here); every other kind passes through
+    unchanged."""
+    kind = ev.get("kind")
+    if kind == "investment" and ev.get("amount_usd") is not None and ev.get("customer"):
+        return "contract_award"
+    return kind
+
+
 def _fetch_watch_events(
     conn: Any, watch_names: list[str], since: dt.date, until: dt.date
 ) -> list[dict[str, Any]]:
     """Never raises: a query problem must not break the section (mirrors
     :func:`_patent_proxy_lines`'s own defensiveness) -- the caller (``eoa.report.weekly``) also
     wraps its whole call in ``try``/``except``, but ``eoa.report.bd_territory`` calling this
-    directly should get the same guarantee without needing its own wrapper."""
+    directly should get the same guarantee without needing its own wrapper.
+
+    W18: every row is passed through :func:`_reclassified_kind` first; a row reclassified away
+    from the M&A/investment/partnership set (e.g. a contract award mislabeled ``investment``) is
+    dropped here entirely -- it isn't an acquisition/investment/partnership signal at all, so it
+    has no place in this section (a real procurement contract belongs in the BD report's own
+    procurement/platform-events table, not here)."""
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT e.id, e.item_id, e.kind, e.date, e.amount_usd, e.currency, e.parties,
-                       i.url AS item_url, i.title AS item_title, i.published_at,
-                       COALESCE(src.name, i.url) AS source_name
+                       e.customer, i.url AS item_url, i.title AS item_title, i.published_at,
+                       i.geography, COALESCE(src.name, i.url) AS source_name
                 FROM events e
                 JOIN items i ON i.id = e.item_id
                 LEFT JOIN sources src ON src.id = i.source_id
@@ -120,10 +147,86 @@ def _fetch_watch_events(
                     "end": until,
                 },
             )
-            return cur.fetchall()
+            rows = cur.fetchall()
     except Exception as exc:
         log.warning("acquisition_watch_events_fetch_failed", error=str(exc)[:160])
         return []
+    kept: list[dict[str, Any]] = []
+    for ev in rows:
+        kind = _reclassified_kind(ev)
+        if kind not in _MA_SIGNAL_EVENT_KINDS:
+            continue
+        ev = dict(ev)
+        ev["kind"] = kind
+        kept.append(ev)
+    return kept
+
+
+def _event_party_names(ev: dict[str, Any]) -> list[str]:
+    names = list(ev.get("parties") or [])
+    if ev.get("customer"):
+        names.append(ev["customer"])
+    return names
+
+
+def _entity_countries(conn: Any, names: list[str]) -> dict[str, str]:
+    """``{entity name -> normalized country code}`` for every name in ``names`` that has an
+    ``entities`` row with a non-null ``country`` -- used by :func:`_split_events_by_territory` to
+    tell whether an event's customer/parties are actually from the territory. Never raises; an
+    empty ``names`` list skips the query entirely (no cursor call), which keeps this a no-op for
+    every caller that doesn't pass ``territory=`` to :func:`acquisition_watch_section_md`."""
+    if not names:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, country FROM entities WHERE name = ANY(%(names)s) AND country IS NOT NULL",
+                {"names": names},
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        log.warning("acquisition_watch_entity_countries_failed", error=str(exc)[:160])
+        return {}
+    return {r["name"]: normalize_country(r.get("country")) for r in rows if r.get("name")}
+
+
+def _split_events_by_territory(
+    conn: Any, events_rows: list[dict[str, Any]], code: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """W18: this section used to show every M&A-signal event for every watch/peer company
+    regardless of the report's own territory (observed live: an Elbit-India order appeared,
+    identically, in both the Germany and the Greece BD reports). An event belongs to the
+    territory's report when the source item's own ``geography`` normalizes to it, or one of the
+    event's customer/parties is headquartered there (:func:`_entity_countries`). An event that
+    instead belongs to a watch/peer company's *own* home territory (but not this one) is reported
+    separately, as global context, only for that company's own territory report -- everything
+    else (e.g. the Elbit/India order under Germany) is dropped from this territory's report
+    entirely, never shown as a local signal it isn't."""
+    all_names: set[str] = set()
+    for ev in events_rows:
+        all_names.update(_event_party_names(ev))
+        # A raw party string is often a `companies:` alias (e.g. "Elbit Systems") rather than the
+        # canonical name the `entities` table itself uses ("Elbit") -- without also looking up the
+        # canonical name directly, a watch/peer company with no `entities` row under its exact
+        # alias spelling would never resolve via `countries.get(company)` below.
+        canonical = watch_or_peer_hit(ev.get("parties") or [])
+        if canonical:
+            all_names.add(canonical)
+    countries = _entity_countries(conn, sorted(all_names))
+    territory_events: list[dict[str, Any]] = []
+    global_events: list[dict[str, Any]] = []
+    for ev in events_rows:
+        if normalize_country(ev.get("geography")) == code:
+            territory_events.append(ev)
+            continue
+        party_countries = {countries[n] for n in _event_party_names(ev) if n in countries}
+        if code in party_countries:
+            territory_events.append(ev)
+            continue
+        company = watch_or_peer_hit(ev.get("parties") or [])
+        if company and countries.get(company) == code:
+            global_events.append(ev)
+    return territory_events, global_events
 
 
 def _events_table_rows(
@@ -194,7 +297,12 @@ def _patent_proxy_lines(conn: Any, watch_names: list[str]) -> list[str]:
 
 
 def acquisition_watch_section_md(
-    conn: Any, since: dt.date, until: dt.date, registry: list[dict[str, Any]]
+    conn: Any,
+    since: dt.date,
+    until: dt.date,
+    registry: list[dict[str, Any]],
+    *,
+    territory: str | None = None,
 ) -> str:
     """The full "מעקב רכישות ושותפויות" section body for the window ``[since, until]`` (inclusive)
     -- a Markdown string (see module docstring). ``registry`` (the report's citation-item list) is
@@ -202,7 +310,13 @@ def acquisition_watch_section_md(
     source appendix. Returns ``""`` when the feature is disabled
     (``config.acquisition_watch.enabled``) or no ``acquisition_watch`` companies are configured --
     the caller should skip adding the section entirely in that case, same convention as every other
-    ``[]``-returning deterministic section in this codebase."""
+    ``[]``-returning deterministic section in this codebase.
+
+    ``territory`` (W18, round 4b): when given (``eoa.report.bd_territory``'s own territory-report
+    call site), every event is filtered to that territory first (:func:`_split_events_by_territory`)
+    -- a company's activity elsewhere no longer leaks into an unrelated territory's report. Left
+    ``None`` (``eoa.report.weekly``'s existing, global call site) reproduces the prior, unfiltered
+    behavior exactly."""
     if not settings().acquisition_watch.enabled:
         return ""
     watch_names = all_watch_and_peer_names()
@@ -210,7 +324,13 @@ def acquisition_watch_section_md(
         return ""
 
     events_rows = _fetch_watch_events(conn, watch_names, since, until)
-    table_lines, active_companies = _events_table_rows(registry, events_rows)
+    if territory:
+        code = normalize_country(territory)
+        territory_events, global_events = _split_events_by_territory(conn, events_rows, code)
+    else:
+        code, territory_events, global_events = "", events_rows, []
+
+    table_lines, active_companies = _events_table_rows(registry, territory_events)
 
     lines: list[str] = []
     if table_lines:
@@ -219,6 +339,18 @@ def acquisition_watch_section_md(
         lines.extend(table_lines)
     else:
         lines.append(_NO_EVENTS_LINE_HE)
+
+    if global_events:
+        global_lines, global_active = _events_table_rows(registry, global_events)
+        if global_lines:
+            lines.append("")
+            lines.append(
+                f"פעילות גלובלית של חברות מעקב שמקורן ב-{code} (הקשר בלבד, לא ממוקדת בטריטוריה זו):"
+            )
+            lines.append(_TABLE_HEADER_HE)
+            lines.append(_TABLE_SEP)
+            lines.extend(global_lines)
+            active_companies = active_companies | global_active
 
     inactive = [name for name in acquisition_watch_names() if name not in active_companies]
     if inactive:

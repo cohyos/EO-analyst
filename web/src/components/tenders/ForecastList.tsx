@@ -1,6 +1,8 @@
-import { Link } from "react-router-dom";
-import { ExternalLink } from "lucide-react";
-import type { ForecastCard } from "@/types/api";
+import { Link, useNavigate } from "react-router-dom";
+import { ExternalLink, Search } from "lucide-react";
+import { useMutation, useQueries } from "@tanstack/react-query";
+import { api } from "@/api";
+import type { ForecastCard, ItemDetail } from "@/types/api";
 import { countryFlagEmoji } from "@/lib/countryFlag";
 import { formatDate } from "@/lib/time";
 import { cn } from "@/lib/cn";
@@ -13,6 +15,67 @@ import { EmptyState } from "@/components/states";
 
 const RATIONALE_ITEM_RE = /(\[item \d+\])/g;
 const RATIONALE_ITEM_MATCH_RE = /^\[item (\d+)\]$/;
+
+// W22 (docs/REVIEW_2026-09-06_evening.md round 4b): `tender_forecasts.sources` stores
+// `["item:123", ...]` tokens (agent/eoa/tenders/forecast.py's `_upsert_forecast`), not the plain
+// URLs the old "מקור 1/2…" chip assumed -- each chip's `href` was literally the string "item:123",
+// a dead link to nowhere. A source is resolved to the item it names (real URL, outlet name, date)
+// via `api.getItem`; anything that isn't an `item:N` token (an older/legacy row, or a real URL
+// already) is rendered as a direct link instead.
+const ITEM_SOURCE_RE = /^item:(\d+)$/;
+
+interface ResolvedSource {
+  key: string;
+  url: string | null;
+  label: string;
+  title: string | undefined;
+}
+
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/** Resolves every `f.sources` entry to a real, labeled link -- `item:N` tokens via `api.getItem`
+ * (cached/deduplicated across cards by react-query), anything else rendered as-is. */
+function useResolvedSources(sources: string[]): ResolvedSource[] {
+  const itemIds = Array.from(
+    new Set(
+      sources
+        .map((s) => s.match(ITEM_SOURCE_RE)?.[1])
+        .filter((v): v is string => v !== undefined)
+        .map(Number),
+    ),
+  );
+  const results = useQueries({
+    queries: itemIds.map((id) => ({
+      queryKey: ["item", id],
+      queryFn: () => api.getItem(id),
+      staleTime: 5 * 60_000,
+    })),
+  });
+  const byId = new Map<number, ItemDetail>();
+  itemIds.forEach((id, i) => {
+    const data = results[i]?.data;
+    if (data) byId.set(id, data);
+  });
+  return sources.map((s) => {
+    const itemId = s.match(ITEM_SOURCE_RE)?.[1];
+    if (itemId !== undefined) {
+      const item = byId.get(Number(itemId));
+      return {
+        key: s,
+        url: item?.url ?? null,
+        label: item ? `${item.source_name} · ${formatDate(item.published_at)}` : `פריט ${itemId}`,
+        title: item?.title,
+      };
+    }
+    return { key: s, url: s, label: domainOf(s), title: s };
+  });
+}
 
 /** Renders `rationale_he`, turning every `[item N]` token into a link to /items/N. */
 function ForecastRationale({ text }: { text: string | null }) {
@@ -60,6 +123,73 @@ function LikelihoodMeter({ value }: { value: number | null }) {
   );
 }
 
+/** The forecast's own research question, prefilled into a new deep-search investigation --
+ * self-contained (no reference to "this forecast") since the investigation carries no link back
+ * to it. */
+function forecastInvestigationQuestion(f: ForecastCard): string {
+  const buyer = f.buyer_country ? ` ב-${f.buyer_country}` : "";
+  const window =
+    f.window_from && f.window_to ? ` בחלון ${formatDate(f.window_from)}–${formatDate(f.window_to)}` : "";
+  return (
+    `מה ההתקדמות בפועל בתחזית הרכש עבור ${f.platform || "הפלטפורמה"} ` +
+    `(${f.payload_need || "הצורך שזוהה"})${buyer}${window}? בדוק מכרזים/RFI/RFP חדשים, אירועי חוזה ` +
+    "או פריסה, והאם התחזית עדיין תקפה נכון להיום."
+  );
+}
+
+/** W22: the "חפירה" (deep-dive) affordance -- states plainly what it does (title/aria-label) and
+ * opens a new deep-search investigation with the forecast's own question prefilled, instead of an
+ * unlabeled icon whose destination was unclear. */
+function DeepDiveButton({ f }: { f: ForecastCard }) {
+  const navigate = useNavigate();
+  const mutation = useMutation({
+    mutationFn: () => api.postInvestigationNew({ question: forecastInvestigationQuestion(f) }),
+    onSuccess: (res) => navigate(`/investigations/${res.job_id}`),
+  });
+  return (
+    <button
+      type="button"
+      onClick={() => mutation.mutate()}
+      disabled={mutation.isPending}
+      title="פתח חקירת עומק על תחזית זו"
+      aria-label="פתח חקירת עומק על תחזית זו"
+      className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2 py-1 text-xs text-fg-muted hover:bg-bg-sunken disabled:opacity-60"
+    >
+      <Search size={12} aria-hidden="true" />
+      {mutation.isPending ? "פותח…" : "חפירה"}
+    </button>
+  );
+}
+
+function ForecastSources({ sources }: { sources: string[] }) {
+  const resolved = useResolvedSources(sources);
+  if (resolved.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-3 border-t border-border pt-2 text-xs">
+      {resolved.map((r, i) =>
+        r.url ? (
+          <a
+            key={r.key + i}
+            href={r.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={r.title}
+            className="flex items-center gap-1 text-accent hover:underline"
+            dir="ltr"
+          >
+            <bdi dir="auto">{r.label}</bdi>
+            <ExternalLink size={11} aria-hidden="true" />
+          </a>
+        ) : (
+          <span key={r.key + i} title={r.title} className="text-fg-dim">
+            <bdi dir="auto">{r.label}</bdi>
+          </span>
+        ),
+      )}
+    </div>
+  );
+}
+
 function ForecastCardView({ f }: { f: ForecastCard }) {
   return (
     <div className="space-y-2.5 rounded-lg border border-border bg-bg-raised p-4 shadow-panel">
@@ -72,12 +202,15 @@ function ForecastCardView({ f }: { f: ForecastCard }) {
             {f.payload_need}
           </bdi>
         </div>
-        {f.buyer_country && (
-          <span className="flex shrink-0 items-center gap-1 rounded-md bg-bg-sunken px-2 py-0.5 text-xs text-fg-muted">
-            <span aria-hidden="true">{countryFlagEmoji(f.buyer_country)}</span>
-            <span className="font-mono">{f.buyer_country}</span>
-          </span>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {f.buyer_country && (
+            <span className="flex items-center gap-1 rounded-md bg-bg-sunken px-2 py-0.5 text-xs text-fg-muted">
+              <span aria-hidden="true">{countryFlagEmoji(f.buyer_country)}</span>
+              <span className="font-mono">{f.buyer_country}</span>
+            </span>
+          )}
+          <DeepDiveButton f={f} />
+        </div>
       </div>
 
       <LikelihoodMeter value={f.likelihood} />
@@ -99,23 +232,7 @@ function ForecastCardView({ f }: { f: ForecastCard }) {
 
       <ForecastRationale text={f.rationale_he} />
 
-      {f.sources.length > 0 && (
-        <div className="flex flex-wrap gap-3 border-t border-border pt-2 text-xs">
-          {f.sources.map((s, i) => (
-            <a
-              key={i}
-              href={s}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-accent hover:underline"
-              dir="ltr"
-            >
-              מקור {i + 1}
-              <ExternalLink size={11} aria-hidden="true" />
-            </a>
-          ))}
-        </div>
-      )}
+      <ForecastSources sources={f.sources} />
     </div>
   );
 }

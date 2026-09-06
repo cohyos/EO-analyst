@@ -10742,3 +10742,61 @@ honestly reports "Google Patents (חיפוש חסר-מפתחות)" whenever `EPO
 under the keyless fallback since it rarely surfaces either field; nothing in this package hides or
 fabricates that gap, it is only ever disclosed (consistent with the module's existing
 never-invent discipline).
+
+## Round 5 P8 — D5 chat acronym/equivalence/attribution/contradiction guards (docs/qa/loop/round_3_judge.md D5 section, worst-list items 3/8, docs/qa/loop/round_5_chat_fixes.md, 2026-09-06)
+
+Round 3's grounding guards (`agent/eoa/api/ask_grounding.py`) closed the round-2 fabrication shapes (an
+invented multi-word proper noun, a real entity cited to the wrong source), but the round-3 judge,
+re-sampling the same 8 golden questions a third time, found three more hallucination shapes that still
+slip past every existing guard, all because the individual pieces involved are each independently real:
+a single-word invented ML acronym ("MAEC"/"RSPEOT") attributed to Leonardo DRS; a Finnish MoD RFI
+mislabelled "published by the US government"; and Israel's David's Sling wrongly equated with Germany's
+unrelated Skynex. Four additive, pure, deterministic functions in `ask_grounding.py` close these, all
+sharing the module's existing precision-first design (an exact-phrase/whole-word check, never a
+semantic one):
+
+1. **Single-token ALL-CAPS/CamelCase jargon check** — extends the existing `_grounding_violation`
+   (same public `ground_and_filter_answer` entry point as round 3) to also flag a 3-8 char ALL-CAPS
+   token (digits/hyphen allowed) or a CamelCase product-like single token grounded in none of: the
+   question, the retrieved sources, the canonical watchlist, `config/taxonomy.yaml`'s own vocabulary,
+   or a small allowlist of common defense/EO-IR acronyms (`_COMMON_DEFENSE_ACRONYMS`) that are ordinary
+   domain vocabulary, not a claim about a specific source.
+2. **`filter_entity_equivalence`** — replaces a sentence asserting false identity between two distinct,
+   real-looking named systems/companies ("X הוא Y", "X, הידוע גם כ-Y", "X (Y)") with an explicit gap
+   sentence, unless a retrieved source's own text mentions both names together, or both resolve to the
+   *same* canonical watchlist record (a legitimate alias gloss).
+3. **`filter_attribution_mismatches`** — drops just the publisher/country attribution clause of a
+   sentence about a document (RFI/RFP/tender/contract) when that publisher/country is absent from the
+   sentence's own cited source(s), keeping the underlying "a document exists" fact intact. Inert on an
+   unverifiable claim (resolves to neither a country nor a canonical org).
+4. **`filter_self_contradictions`** — a cross-sentence pass: when two units assign the same figure/year
+   to two disjoint entity/country sets, keeps whichever unit's own citation actually contains that
+   figure and drops the other; no-ops when neither/both sides are grounded.
+
+All four are wired into `agent/eoa/api/routes/ask.py`'s SSE generator immediately after round 3's guard,
+accumulating into the existing `ungrounded_removed` counter plus a new `removed_by_guard: dict[str,
+int]` breakdown on the `answer_final` event (additive field, same logging convention as every other
+guard in this file — question hash only). `agent/eoa/llm/prompts/ask_answer_format.md` gained a fourth
+explicit rule (self-contradiction) alongside the three pre-existing ones already covering guards 1-3.
+
+**Live verification (8 golden questions x 2 samples, throwaway 8768, local resident model, 16/16
+completed, no errors/timeouts):** confirmed the four targeted worst-list-#3/#8 shapes are fixed (e.g.
+Q7 both samples now correctly identify the RFI as Finnish, not American, without needing the guard to
+intervene at all) and surfaced five new, honestly-documented residual findings not previously known:
+single-digit money figures bypass `_digits_grounded`'s 2-digit floor (Q1, "$5bn" vs. the real $1.53bn);
+the entity-equivalence guard false-positives on a non-watchlist acronym/expansion gloss ("DROIC" /
+"Digital Read-Out Integrated Circuit" — the question's own pairing, incorrectly flagged since DROIC
+never resolves via `entity_normalize.resolve_canonical`); every guard in this module is Latin-script
+only, so a fabricated Hebrew entity name ("אוניברסיטת אריזונה סטייט", invented for an anonymous arXiv
+paper) is invisible to all six checks; the anchor-echo topic-conflation failure mode (previously only
+seen on Q3/LORA) recurs on Q6/AUSA, where the model discusses an unrelated Commercial-UAV-Expo/DJI
+story as if it were about AUSA 2026, passing the literal-anchor check by repeating "AUSA" throughout the
+body rather than just the heading/opening sentence round 3's fix targets; and unit-based removal
+truncates a numbered list mid-item (previously only documented for markdown tables). Full table (per
+question/sample: seconds, chars, guard breakdown, on-topic, and manually-verified fabrication findings)
+in `docs/qa/loop/round_5_chat_fixes.md`.
+
+**Verification:** `tests/unit/test_ask_round5.py` (new, 21 tests) + full `pytest tests/unit -q -k
+"ask"` (138 passed) all green. `ruff check`/`ruff format --check` clean on `ask_grounding.py`, `ask.py`
+(both had drifted out of format from manually-collapsed lines, reformatted in place this round) and the
+new test file.

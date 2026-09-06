@@ -63,7 +63,7 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
-from eoa.report.geography import normalize_country
+from eoa.report.geography import country_mentions_in_text, normalize_country
 from eoa.report.qa_citations import QAResult, check
 from eoa.report.textnorm import normalize_hebrew_punctuation
 
@@ -250,12 +250,69 @@ def _territory_entity_names(code: str) -> set[str]:
     return {r["name"] for r in rows if normalize_country(r.get("country")) == code}
 
 
+# W16(c) (round 4b, docs/REVIEW_2026-09-06_evening.md): a live read-only check against Germany
+# found 17 items in the last 90 days that unambiguously concern the DE market (Bundeswehr/
+# Hensoldt/Rheinmetall coverage, one literally titled "Germany Leans Toward...") yet every single
+# one carries ``items.geography = 'other'`` -- the extraction pipeline only tags a single dominant
+# country and falls back to "other" when it can't pick one confidently. Compounding this,
+# ``entities.country`` for Rheinmetall/Hensoldt is the broader region code ``'EU'`` rather than
+# ``'DE'``, so ``_territory_entity_names("DE")`` never matches them either -- ``collect_market_items``
+# undercounts Germany (and any other EU member territory) by design, not by bug alone. A direct
+# textual mention of the territory in the item's own title/summary is a real, code-verifiable
+# signal this codebase already extracts for tender forecasts
+# (``eoa.report.geography.country_mentions_in_text``) -- reused here as an additional match,
+# alongside a small local table of English/Hebrew *adjective* forms ("German"/"גרמני") that
+# ``country_mentions_in_text``'s noun-only alias vocabulary doesn't cover (deliberately kept local
+# per docs/CONVENTIONS.md rule 6 rather than widening the shared geography module's alias table,
+# which other report kinds also depend on).
+_TERRITORY_ADJECTIVE_RE: dict[str, re.Pattern[str]] = {
+    "DE": re.compile(r"\bgerman(?:y)?\b|בונדסוור|גרמני", re.IGNORECASE),
+    "FR": re.compile(r"\bfrench\b|צרפתי", re.IGNORECASE),
+    "GB": re.compile(r"\bbritish\b|בריטי", re.IGNORECASE),
+    "IL": re.compile(r"\bisraeli\b|ישראלי", re.IGNORECASE),
+    "US": re.compile(r"\bamerican\b|אמריקאי", re.IGNORECASE),
+    "IN": re.compile(r"\bindian\b|הודי", re.IGNORECASE),
+    "KR": re.compile(r"\bkorean\b|קוריאני", re.IGNORECASE),
+    "JP": re.compile(r"\bjapanese\b|יפני", re.IGNORECASE),
+    "AU": re.compile(r"\baustralian\b|אוסטרלי", re.IGNORECASE),
+    "PL": re.compile(r"\bpolish\b|פולני", re.IGNORECASE),
+    "GR": re.compile(r"\bgreek\b|יווני", re.IGNORECASE),
+    "AE": re.compile(r"\bemirati\b", re.IGNORECASE),
+    "SA": re.compile(r"\bsaudi\b|סעודי", re.IGNORECASE),
+}
+
+
+def _text_mentions_territory(text: str, code: str) -> bool:
+    """True if ``text`` names ``code`` -- either a country noun
+    (``eoa.report.geography.country_mentions_in_text``) or, for the territories this report
+    supports, its adjective form (see :data:`_TERRITORY_ADJECTIVE_RE`)."""
+    if not text:
+        return False
+    if code in country_mentions_in_text(text):
+        return True
+    pattern = _TERRITORY_ADJECTIVE_RE.get(code)
+    return bool(pattern and pattern.search(text))
+
+
+def _item_text_mentions_territory(row: dict[str, Any], code: str) -> bool:
+    """Deliberately checks only ``title``/``summary_he`` -- what the item is actually *about* --
+    not ``so_what_he`` (the analyst's own "why this matters" commentary), which routinely draws
+    comparisons to other markets/deals (observed live: a Serbia-Elbit item's ``so_what_he`` noted
+    "לצד ... מכירת מערכת Arrow 3 לגרמניה" in passing) and would otherwise false-positive-match a
+    territory the item isn't actually about."""
+    text = " ".join(str(x) for x in (row.get("title"), row.get("summary_he")) if x)
+    return _text_mentions_territory(text, code)
+
+
 def collect_market_items(
     territory: str, period_start: dt.date, period_end: dt.date, *, max_items: int = 250
 ) -> list[dict[str, Any]]:
     """In-scope items (level >= yellow, i.e. not archived) whose ``geography`` normalizes to the
-    territory, or whose ``entities_mentioned`` includes a territory-local entity, published in the
-    window. Ordered by score desc, each carrying a stable 1-based ``n``."""
+    territory, whose ``entities_mentioned`` includes a territory-local entity, or whose own
+    title/summary textually names the territory (W16(c): ``_item_text_mentions_territory`` --
+    ``items.geography`` alone significantly undercounts a territory like Germany, see that
+    function's docstring), published in the window. Ordered by score desc, each carrying a stable
+    1-based ``n``."""
     code = normalize_country(territory)
     territory_entities = _territory_entity_names(code)
     rows = _fetchall(
@@ -281,6 +338,9 @@ def collect_market_items(
             continue
         mentioned = set(row.get("entities_mentioned") or [])
         if mentioned & territory_entities:
+            matched.append(row)
+            continue
+        if _item_text_mentions_territory(row, code):
             matched.append(row)
     matched = matched[:max_items]
     for idx, row in enumerate(matched, start=1):
@@ -318,6 +378,15 @@ def format_market_items_block(items: list[dict[str, Any]]) -> str:
 # --------------------------------------------------------------------------
 
 
+def _event_mentions_territory(ev: dict[str, Any], code: str) -> bool:
+    """W16(c): a procurement/platform event whose customer or a listed party names the territory
+    (e.g. a ``customer`` of "German Navy") even though the underlying item's ``geography`` field
+    didn't resolve to it -- mirrors :func:`_item_text_mentions_territory` for events."""
+    parties_text = " ".join(str(p) for p in (ev.get("parties") or []) if p)
+    text = " ".join(str(x) for x in (ev.get("customer"), parties_text) if x)
+    return _text_mentions_territory(text, code)
+
+
 def collect_platform_events(
     territory: str, period_start: dt.date, period_end: dt.date, *, limit: int = 25
 ) -> list[dict[str, Any]]:
@@ -325,7 +394,11 @@ def collect_platform_events(
     "contract/award/acquisition/deployment/trial" using the real ``events.kind`` enum --
     ``contract_award``/``m_and_a``/``deployment``/``test``), matched against
     ``eoa.tenders.platform_payloads.yaml`` (via ``eoa.tenders.forecast.load_platform_payloads``)
-    to attach the typical EO/IR payload need those platforms imply."""
+    to attach the typical EO/IR payload need those platforms imply.
+
+    W16(c): an event whose ``customer``/``parties`` textually names the territory (e.g. "German
+    Navy") is included even when the underlying item's ``geography`` didn't resolve to it -- same
+    defense as :func:`collect_market_items`'s own text-mention fallback."""
     code = normalize_country(territory)
     rows = _fetchall(
         """
@@ -343,7 +416,9 @@ def collect_platform_events(
         """,
         {"kinds": list(_PROCUREMENT_EVENT_KINDS), "start": period_start, "end": period_end},
     )
-    rows = [r for r in rows if normalize_country(r.get("geography")) == code]
+    rows = [
+        r for r in rows if normalize_country(r.get("geography")) == code or _event_mentions_territory(r, code)
+    ]
 
     try:
         from eoa.tenders.forecast import load_platform_payloads
@@ -495,6 +570,35 @@ def tenders_table(data: dict[str, Any]) -> dict[str, Any] | None:
         for t in tenders
     ]
     return {"title_he": "מכרזים בטריטוריה", "headers": headers, "rows": rows}
+
+
+def forecasts_table(data: dict[str, Any]) -> dict[str, Any] | None:
+    """W22 (round 4b, docs/REVIEW_2026-09-06_evening.md): a territory's procurement forecasts had
+    no deterministic table of their own -- only a per-forecast count folded into the exec-summary
+    system note (a genuinely empty territory) or the LLM prompt's own data block, never actually
+    rendered when there *were* market items too. Every row's "מקור" cell carries the same ``[n]``
+    :func:`_extend_registry_with_tenders` already assigned, rendered as a real link by
+    ``docx_builder``'s citation-aware cell renderers (W17) exactly like every other cited table."""
+    forecasts = data.get("forecasts") or []
+    if not forecasts:
+        return None
+    headers = ["פלטפורמה", "צורך/Payload", "סבירות", "חלון", "מקור"]
+    rows = []
+    for f in forecasts:
+        likelihood = f.get("likelihood")
+        pct = f"{likelihood:.0%}" if isinstance(likelihood, int | float) else "—"
+        window = f"{fmt_date(f.get('window_from'))} - {fmt_date(f.get('window_to'))}"
+        n = f.get("n")
+        rows.append(
+            [
+                f.get("platform") or "—",
+                f.get("payload_need") or "—",
+                pct,
+                window,
+                f"[{n}]" if n is not None else "—",
+            ]
+        )
+    return {"title_he": "תחזיות רכש בטריטוריה", "headers": headers, "rows": rows}
 
 
 # --------------------------------------------------------------------------
@@ -917,6 +1021,13 @@ def _sentences_bullets_text(sentences: list[Sentence]) -> str:
 
 
 def _no_items_draft() -> BdTerritoryReportDraft:
+    """W16(a) (round 4b, docs/REVIEW_2026-09-06_evening.md): a genuinely empty territory (no
+    market items AND every deterministic table empty) used to repeat the same "nothing found"
+    fact three times -- the docx/md/html renderers' own "אין תקציר לתקופה זו." fallback (triggered
+    by an empty ``exec_summary``), this ``system_note_he``, and a near-identical
+    ``risks_assumptions_he`` right below it in its own "סיכונים והנחות" section. Only the one
+    ``system_note_he`` line remains; ``risks_assumptions_he`` stays empty so that (redundant)
+    section is skipped entirely (``build_bd_territory`` only adds it when non-empty)."""
     return BdTerritoryReportDraft(
         exec_summary=[],
         market_bullets=[],
@@ -924,7 +1035,7 @@ def _no_items_draft() -> BdTerritoryReportDraft:
         sections=[],
         recommended_actions=[],
         analyst_note_he=None,
-        risks_assumptions_he="לא נמצא מספיק מידע בטריטוריה זו כדי לבסס המלצות פעולה.",
+        risks_assumptions_he="",
         system_note_he="לא זוהו בטריטוריה זו פריטים חדשים בחלון הזמן שנבדק. אין ממצאים לדוח המיקוד.",
         open_points_he=[],
     )
@@ -969,7 +1080,14 @@ def _tables_only_draft(territory: str, counts: BdTableCounts) -> BdTerritoryRepo
     """BD-1 / Q3-14: used when ``items`` (market items) is empty but at least one other table
     (events/tenders/forecasts/competitors/conferences) is not -- a short, honest, deterministic
     summary of what the report *does* contain, instead of :func:`_no_items_draft`'s blanket "no
-    findings" claim contradicting the non-empty tables rendered right below it."""
+    findings" claim contradicting the non-empty tables rendered right below it.
+
+    W16(a) (round 4b): ``risks_assumptions_he`` stays empty (no "סיכונים והנחות" section at all --
+    ``build_bd_territory`` only adds it when non-empty) -- it used to repeat the same "no market
+    items, so no reasoned actions" fact the ``system_note_he`` below already states, and
+    ``build_bd_territory`` now also fills ``exec_summary`` itself from the very tables this note
+    points to (:func:`_tables_summary_sentences`), so a third repetition (the empty-exec-summary
+    "אין תקציר לתקופה זו." fallback) no longer triggers either."""
     return BdTerritoryReportDraft(
         exec_summary=[],
         market_bullets=[],
@@ -977,13 +1095,10 @@ def _tables_only_draft(territory: str, counts: BdTableCounts) -> BdTerritoryRepo
         sections=[],
         recommended_actions=[],
         analyst_note_he=None,
-        risks_assumptions_he=(
-            "לא נמצאו פריטי שוק חדשים בחלון הזמן שנבדק, כך שלא ניתן היה לבסס המלצות פעולה מנומקות; "
-            "ראו את הטבלאות הדטרמיניסטיות בדוח (רכש/מכרזים/מתחרים/כנסים) לפירוט המלא."
-        ),
+        risks_assumptions_he="",
         system_note_he=(
             f"לא זוהו פריטי שוק חדשים בטריטוריה {territory_label(territory)} בחלון הזמן שנבדק, אך "
-            f"קיים תוכן רלוונטי בטבלאות הדוח: {counts.context_he()} פירוט מלא בטבלאות בהמשך הדוח."
+            f"קיים תוכן רלוונטי בטבלאות הדוח: {counts.context_he()} פירוט מלא בטבלאות ובתקציר לעיל."
         ),
         open_points_he=[],
     )
@@ -1629,6 +1744,93 @@ def _fallback_event_sentences(events: list[dict[str, Any]], *, limit: int) -> li
     return sentences
 
 
+def _fallback_tender_sentences(tenders: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    sentences: list[Sentence] = []
+    for t in tenders[:limit]:
+        n = t.get("n")
+        if n is None:
+            continue
+        status_he = {"open": "פתוח", "unknown": "לא ידוע"}.get(t.get("status"), t.get("status") or "—")
+        sentences.append(
+            Sentence(
+                text_he=(
+                    f"מכרז {status_he}: {t.get('title') or '—'} ({t.get('agency') or '—'}), דדליין "
+                    f"{fmt_date(t.get('deadline'))}."
+                ),
+                cites=[int(n)],
+            )
+        )
+    return sentences
+
+
+def _fallback_forecast_sentences(forecasts: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    sentences: list[Sentence] = []
+    for f in forecasts[:limit]:
+        n = f.get("n")
+        if n is None:
+            continue
+        likelihood = f.get("likelihood")
+        pct = f"{likelihood:.0%}" if isinstance(likelihood, int | float) else "—"
+        sentences.append(
+            Sentence(
+                text_he=f"תחזית רכש: {f.get('platform') or '—'} — {f.get('payload_need') or '—'}, סבירות {pct}.",
+                cites=[int(n)],
+            )
+        )
+    return sentences
+
+
+def _fallback_conference_sentences(conferences: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    sentences: list[Sentence] = []
+    for c in conferences[:limit]:
+        n = c.get("n")
+        if n is None:
+            continue
+        sentences.append(
+            Sentence(
+                text_he=f"כנס קרוב בטריטוריה: {c.get('name') or '—'} ({fmt_date(c.get('start_date'))}).",
+                cites=[int(n)],
+            )
+        )
+    return sentences
+
+
+_TABLES_SUMMARY_MAX_SENTENCES = 4
+
+
+def _tables_summary_sentences(
+    events: list[dict[str, Any]],
+    tenders_data: dict[str, Any],
+    conferences_data: dict[str, Any],
+    *,
+    limit: int = _TABLES_SUMMARY_MAX_SENTENCES,
+) -> list[Sentence]:
+    """W16(a) (round 4b, docs/REVIEW_2026-09-06_evening.md): when there are no new market items but
+    at least one deterministic table has content (:func:`_tables_only_draft`'s case), leaving
+    ``exec_summary`` empty makes the rendered report show ``docx_builder``'s generic "אין תקציר
+    לתקופה זו." fallback line sitting right above the ``system_note_he`` that then explains exactly
+    what tables *do* have content -- the same fact stated twice. This builds a short, real, cited
+    exec-summary straight from whichever of those tables actually has rows, in the same priority
+    order the tables themselves render (procurement events, then tenders, then forecasts, then
+    upcoming territory conferences), so the report leads with real content instead of an empty
+    placeholder. Returns ``[]`` when every table is also empty (the genuinely-empty
+    ``_no_items_draft`` case) -- ``exec_summary`` then correctly stays empty."""
+    sentences = _fallback_event_sentences(events, limit=limit)
+    if len(sentences) < limit:
+        sentences += _fallback_tender_sentences(
+            tenders_data.get("tenders") or [], limit=limit - len(sentences)
+        )
+    if len(sentences) < limit:
+        sentences += _fallback_forecast_sentences(
+            tenders_data.get("forecasts") or [], limit=limit - len(sentences)
+        )
+    if len(sentences) < limit:
+        sentences += _fallback_conference_sentences(
+            conferences_data.get("territory") or [], limit=limit - len(sentences)
+        )
+    return sentences
+
+
 def _deterministic_fallback_draft(
     territory: str,
     items: list[dict[str, Any]],
@@ -1807,7 +2009,7 @@ def recommended_actions_table(
         for a in actions
     ]
     title_he = _DETERMINISTIC_ACTIONS_TITLE_HE if deterministic else "נקודות כניסה ופעולות מומלצות"
-    table: dict[str, Any] = {"title_he": title_he, "headers": headers, "rows": rows}
+    table: dict[str, Any] = {"title_he": title_he, "headers": headers, "rows": rows, "no_dedupe": True}
     if deterministic:
         table["note_he"] = _DETERMINISTIC_ACTIONS_NOTE_HE
     return table
@@ -1872,6 +2074,56 @@ def _persist_report(
 
 
 # --------------------------------------------------------------------------
+# W16(b) (round 4b, docs/REVIEW_2026-09-06_evening.md): a territory with configured watchlist
+# competitors that nonetheless comes back with zero market items is a coverage gap, not a
+# conclusion -- enqueue a targeted deep-search job (the existing ``deep_search`` job kind, picked
+# up by the orchestrator's Worker like any other) asking what actually happened in the territory,
+# tagged ``expanded_from=bd:<territory>`` so a future report build can tell it apart from an
+# item-triggered or free-standing investigation. Never blocks or fails the report build itself.
+# --------------------------------------------------------------------------
+
+EXPANDED_SEARCH_NOTE_HE = "הופעל חיפוש ממוקד בטריטוריה; הדוח ייבנה מחדש כשיושלם."
+
+
+def _expansion_search_tag(code: str) -> str:
+    return f"bd:{code}"
+
+
+def _has_pending_expansion_search(code: str) -> bool:
+    """Avoid enqueueing a duplicate targeted deep-search job every time this territory's report is
+    rebuilt while a previous expansion search is still queued/running."""
+    rows = _fetchall(
+        "SELECT 1 FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
+        "AND payload ->> 'expanded_from' = %(tag)s LIMIT 1",
+        {"tag": _expansion_search_tag(code)},
+    )
+    return bool(rows)
+
+
+def _enqueue_territory_expansion_search(code: str) -> None:
+    """Never raises: a queueing failure must not break the report build itself (same defensive
+    convention as this module's own acquisition-watch/payload-price optional sections)."""
+    try:
+        if _has_pending_expansion_search(code):
+            return
+        from eoa.memory.relational import enqueue_job
+
+        question = (
+            f"מה קרה בטריטוריה {territory_label(code)} בתחומי אלקטרואופטיקה/אינפרא-אדום (EO/IR), "
+            'הגנה מול כטב"מים (C-UAS) ולייזר רב-עוצמה (HEL) ב-90 הימים האחרונים? אילו חברות, '
+            "תוכניות ומכרזים/RFI רלוונטיים ניתן לזהות?"
+        )
+        job_id = enqueue_job(
+            "deep_search",
+            {"question": question, "expanded_from": _expansion_search_tag(code), "territory": code},
+            priority=3,
+        )
+        log.info("bd_territory_expansion_search_enqueued", territory=code, job_id=job_id)
+    except Exception as exc:  # pragma: no cover -- defensive, see docstring
+        log.warning("bd_territory_expansion_search_enqueue_failed", territory=code, error=str(exc)[:160])
+
+
+# --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
 
@@ -1896,6 +2148,14 @@ def build_bd_territory(
     competitors = collect_active_competitors(code, [it["id"] for it in items], start, end)
     conferences_data = collect_conferences_for_territory(code)
     dormant_competitors = collect_dormant_watchlist_competitors(code, {c["name"] for c in competitors})
+
+    # W16(b): trigger a targeted expansion search only when the territory is otherwise known to
+    # matter (it has at least one configured watchlist competitor, active or dormant) yet
+    # `collect_market_items` came back with nothing at all.
+    has_watchlist_here = bool(dormant_competitors) or any(c.get("is_watchlist") for c in competitors)
+    expansion_triggered = not items and has_watchlist_here
+    if expansion_triggered:
+        _enqueue_territory_expansion_search(code)
 
     citation_items = list(items)
     _extend_registry_with_source_items(citation_items, events)
@@ -1955,6 +2215,26 @@ def build_bd_territory(
         )
         llm_draft_failed = True
     draft = _cap_draft_lengths(_strip_placeholder_echoes(draft))
+
+    # W16(a): the tables-only/no-items drafts leave `exec_summary` empty by construction -- fill it
+    # from whatever deterministic tables do have content instead of letting the renderers' own "אין
+    # תקציר לתקופה זו." fallback sit right above a system note explaining the very same tables.
+    if not items and not draft.exec_summary:
+        filled_summary = _tables_summary_sentences(events, tenders_data, conferences_data)
+        if filled_summary:
+            draft = draft.model_copy(update={"exec_summary": filled_summary})
+
+    # W16(b): tell the analyst a targeted search was activated instead of silently leaving an
+    # unexplained empty territory.
+    if expansion_triggered:
+        note = (draft.system_note_he or "").rstrip()
+        draft = draft.model_copy(
+            update={
+                "system_note_he": f"{note} {EXPANDED_SEARCH_NOTE_HE}".strip()
+                if note
+                else EXPANDED_SEARCH_NOTE_HE
+            }
+        )
 
     if items and not llm_draft_failed:
         violations = _perspective_violations(draft, competitors)
@@ -2094,7 +2374,7 @@ def build_bd_territory(
         from eoa.report.acquisition_watch import acquisition_watch_section_md
 
         with connection(timeout=5) as conn:
-            acq_body = acquisition_watch_section_md(conn, start, end, citation_items)
+            acq_body = acquisition_watch_section_md(conn, start, end, citation_items, territory=code)
         if acq_body.strip():
             extra_sections.append(
                 {"title_he": _ACQ_TITLE_HE, "body_he": acq_body, "position": "after_outlook"}
@@ -2164,6 +2444,7 @@ def build_bd_territory(
     for tbl in (
         platform_events_table(events),
         tenders_table(tenders_data),
+        forecasts_table(tenders_data),
         competitors_table(competitors),
         conferences_table(conferences_data),
         recommended_actions_table(draft, deterministic=used_deterministic_actions),
