@@ -4,10 +4,11 @@ import json
 import logging
 import pathlib
 import re
+import statistics
 import subprocess
 import threading
 import time
-import statistics
+
 import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -205,20 +206,20 @@ def task_classify(client, model, num_ctx):
             dur = time.perf_counter() - start
             msg = data.get("message", {}).get("content", "")
             tok_s = get_tok_s(data)
-            
+
             is_valid_json = False
             has_schema = False
             domain_match = False
-            
+
             try:
                 parsed = json.loads(msg)
                 is_valid_json = True
                 has_schema = all(k in parsed for k in SCHEMA_CLASSIFY["required"])
                 if parsed.get("domain") == snippet["expected_domain"]:
                     domain_match = True
-            except:
+            except Exception:
                 pass
-                
+
             results.append({
                 "latency": dur,
                 "tok_s": tok_s,
@@ -229,10 +230,10 @@ def task_classify(client, model, num_ctx):
             })
         except Exception as e:
             logging.error(f"Classify error for {model}: {e}")
-            
+
     if not results:
         return None
-    
+
     return {
         "json_valid_rate": statistics.mean([1 if r["json_valid"] else 0 for r in results]),
         "schema_valid_rate": statistics.mean([1 if r["schema_valid"] else 0 for r in results]),
@@ -265,17 +266,17 @@ def task_summarize_he(client, model, num_ctx):
             dur = time.perf_counter() - start
             msg = data.get("message", {}).get("content", "")
             tok_s = get_tok_s(data)
-            
+
             heb_chars = sum(1 for c in msg if '\u0590' <= c <= '\u05FF')
             letters = sum(1 for c in msg if c.isalpha())
             heb_ratio = heb_chars / letters if letters > 0 else 0.0
-            
+
             nums = re.findall(r'\b\d+(?:[.,]\d+)?\b', snippet['text'])
             nums_preserved = 1.0
             if nums:
                 preserved = sum(1 for n in nums if n in msg)
                 nums_preserved = preserved / len(nums)
-                
+
             results.append({
                 "latency": dur,
                 "tok_s": tok_s,
@@ -285,10 +286,10 @@ def task_summarize_he(client, model, num_ctx):
             })
         except Exception as e:
             logging.error(f"Summarize error for {model}: {e}")
-            
+
     if not results:
         return None
-    
+
     return {
         "mean_tok_s": statistics.mean([r["tok_s"] for r in results]),
         "mean_latency": statistics.mean([r["latency"] for r in results]),
@@ -305,7 +306,7 @@ def run_react_scenario(client, model, num_ctx, query, is_found):
     honest = 0
     called_search = False
     finished = False
-    
+
     start = time.perf_counter()
     for _ in range(6):
         turns += 1
@@ -324,17 +325,17 @@ def run_react_scenario(client, model, num_ctx, query, is_found):
         except Exception as e:
             logging.error(f"ReAct error for {model}: {e}")
             break
-            
+
         msg = data.get("message", {})
         messages.append(msg)
-        
+
         if msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 name = tc.get("function", {}).get("name")
                 args_dict = tc.get("function", {}).get("arguments", {})
-                
+
                 tool_msg = {"role": "tool", "name": name}
-                
+
                 if name == "search":
                     called_search = True
                     if is_found:
@@ -361,7 +362,7 @@ def run_react_scenario(client, model, num_ctx, query, is_found):
                 break
         else:
             break
-            
+
     latency_total = time.perf_counter() - start
     return {
         "turns": turns,
@@ -374,10 +375,10 @@ def run_react_scenario(client, model, num_ctx, query, is_found):
 def task_react_tools(client, model, num_ctx):
     q1 = "Find who won the 2025 US Army next-generation targeting pod contract"
     res1 = run_react_scenario(client, model, num_ctx, q1, True)
-    
+
     q2 = "Find information about the 2026 Elbit acquisition of Fortem Technologies for $2.1B"
     res2 = run_react_scenario(client, model, num_ctx, q2, False)
-    
+
     return {
         "react_ok": res1["react_ok"],
         "not_found_honest": res2["honest"],
@@ -408,9 +409,9 @@ def task_hebrew_edit(client, model, num_ctx):
         dur = time.perf_counter() - start
         msg = data.get("message", {}).get("content", "")
         tok_s = get_tok_s(data)
-        
+
         len_ratio = len(msg) / len(HEBREW_CLUNKY) if len(HEBREW_CLUNKY) > 0 else 0
-        
+
         return {
             "tok_s": tok_s,
             "latency": dur,
@@ -434,21 +435,21 @@ def main():
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-    
+
     client = httpx.Client()
-    
+
     full_results = {}
-    
+
     for model in models:
         logging.info(f"Evaluating model: {model}")
         poller = GPUPoller()
         poller.start()
-        
+
         cpu_offload = "Unknown"
         model_res = {}
-        
+
         for task in tasks:
             logging.info(f"Running task: {task} for {model}")
             res = None
@@ -460,12 +461,12 @@ def main():
                 res = task_react_tools(client, model, args.num_ctx)
             elif task == "hebrew_edit":
                 res = task_hebrew_edit(client, model, args.num_ctx)
-                
+
             model_res[task] = res
-            
+
             if cpu_offload == "Unknown":
                 cpu_offload = check_cpu_offload(client, model)
-                
+
         poller.stop()
         model_res["gpu"] = {
             "peak_vram_mb": poller.peak_mem,
@@ -473,7 +474,7 @@ def main():
             "cpu_offload": cpu_offload
         }
         full_results[model] = model_res
-        
+
         try:
             logging.info(f"Unloading model {model}")
             client.post("http://127.0.0.1:11434/api/generate", json={"model": model,
@@ -485,41 +486,41 @@ def main():
     json_path = out_dir / f"bakeoff_{timestamp}.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(full_results, f, indent=2, ensure_ascii=False)
-        
+
     md_lines = []
     md_lines.append(f"# Ollama Bakeoff Results ({timestamp})")
     md_lines.append("")
     md_lines.append("| model | tok/s classify | JSON valid % | domain acc % | tok/s he | hebrew ratio | react ok | not-found honest | peak VRAM MB | max temp | CPU offload? |")
     md_lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
-    
+
     for model, res in full_results.items():
         c = res.get("classify") or {}
         s = res.get("summarize_he") or {}
         r = res.get("react_tools") or {}
         g = res.get("gpu") or {}
-        
+
         c_tok = f"{c.get('mean_tok_s', 0):.1f}"
         c_json = f"{c.get('json_valid_rate', 0)*100:.0f}%"
         c_acc = f"{c.get('domain_acc', 0)*100:.0f}%"
-        
+
         s_tok = f"{s.get('mean_tok_s', 0):.1f}"
         s_heb = f"{s.get('mean_heb_ratio', 0)*100:.0f}%"
-        
+
         r_ok = str(r.get('react_ok', 0))
         r_hon = str(r.get('not_found_honest', 0))
-        
+
         vram = str(g.get('peak_vram_mb', 0))
         temp = str(g.get('max_temp', 0))
         offload = str(g.get('cpu_offload', 'Unknown'))
-        
+
         row = f"| {model} | {c_tok} | {c_json} | {c_acc} | {s_tok} | {s_heb} | {r_ok} | {r_hon} | {vram} | {temp} | {offload} |"
         md_lines.append(row)
-        
+
     md_content = "\n".join(md_lines)
     md_path = out_dir / f"bakeoff_{timestamp}.md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md_content)
-        
+
     print(md_content)
 
 if __name__ == "__main__":

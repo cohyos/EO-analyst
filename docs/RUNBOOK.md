@@ -233,61 +233,65 @@ The report stage reads items from `items` table and their analyses from `items.a
 
 ## Restoring from Backup
 
-Backups are created nightly in `output/backups/`:
+> **Updated 2026-09-06 (ADR-004 / native stack).** This section used to describe SQLite-format
+> nightly dumps restored via `sqlite3 .dump | psql` against a Docker Postgres on port 5433. That
+> stack is retired. The nightly backup (see "### Backup" above) is a plain PostgreSQL **custom-
+> format** dump (`pg_dump -Fc`) of the native cluster on **port 5432**, written to
+> `output\backups\eoanalyst_<date>.dump` by `agent/eoa/orchestrator/jobs.py`'s backup step
+> (`runtime\pgsql\bin\pg_dump.exe`, falling back to a plain `COPY`-based export if `pg_dump` isn't
+> reachable — see that module for the fallback's exact shape). Restore with `pg_restore`, not
+> `psql`/`sqlite3`.
 
-```bash
-ls -la output/backups/
-# eo-analyst_2026-09-05.sqlite
-# eo-analyst_2026-09-04.sqlite
+Backups are created nightly in `output\backups\`:
+
+```powershell
+Get-ChildItem output\backups\
+# eoanalyst_20260905_010512.dump
+# eoanalyst_20260904_010488.dump
 # ...
 ```
 
-Each is a full database snapshot (sqlite format).
+Each `.dump` file is a full, custom-format `pg_dump` snapshot of the `eoanalyst` database
+(schema + data, including `graph_edges` and every other table — there is no separate graph
+export/import step now that the graph is a plain table, unlike the old Apache AGE setup).
 
 ### Full Restore
 
-```bash
-# Stop the agent (do NOT stop postgres mid-restore)
-docker compose down agent fetcher web
+```powershell
+# Stop the app processes so nothing writes to the DB mid-restore (postgres itself keeps running --
+# pg_restore connects to it directly, same as pg_dump does for the backup).
+eo native stop
 
-# Dump current postgres
-pg_dump -h 127.0.0.1 -p 5433 -U eoa eoanalyst > /tmp/pre-restore.sql
+# Optional safety net: dump the CURRENT (pre-restore) state first, in case the restore target
+# turns out to be wrong.
+runtime\pgsql\bin\pg_dump -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -Fc -f output\backups\pre-restore-safety.dump
 
-# Restore from backup
-# (Convert sqlite to SQL or restore via SQLite's CLI — easier if you have sqlite3)
-sqlite3 output/backups/eo-analyst_2026-09-05.sqlite .dump | psql -h 127.0.0.1 -p 5433 -U eoa eoanalyst
+# Restore: -c drops existing objects first, --if-exists silences "does not exist" noise on a
+# clean/partial target DB, -1 wraps the whole restore in a single transaction (all-or-nothing).
+$env:PGPASSWORD = "change-me-local-only"  # from runtime\eoa.env / .env
+runtime\pgsql\bin\pg_restore -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -c --if-exists -1 output\backups\eoanalyst_20260905_010512.dump
 
 # Verify
-eo status
-
-# Restart
-docker compose up -d agent fetcher web
+eo native start
+eo native status
+runtime\pgsql\bin\psql -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -c "select count(*) from items;"
 ```
 
 ### Restore a Single Table
 
-If you only want to restore one table (e.g., items, entities):
+`pg_restore` can filter to one table without touching the rest of the database:
 
-```bash
-sqlite3 output/backups/eo-analyst_2026-09-05.sqlite ".dump items" | psql -h 127.0.0.1 -p 5433 -U eoa eoanalyst
+```powershell
+runtime\pgsql\bin\pg_restore -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -t items -c --if-exists output\backups\eoanalyst_20260905_010512.dump
 ```
 
-### Restore Graph Vertices/Edges
+### Restoring the graph (`graph_edges`)
 
-If you need to rebuild the knowledge graph from an older snapshot:
-
-```bash
-# Drop and re-init the graph
-psql -h 127.0.0.1 -p 5433 -U eoa eoanalyst << 'EOF'
-SELECT * FROM ag_catalog.drop_graph('eo_graph', true);
-EOF
-
-# Re-apply graph_init
-docker compose exec -T postgres psql -U eoa -d eoanalyst -f - < db/graph_init.sql
-
-# Re-populate from restored entities table
-python3 db/seed/seed_watchlist.py
-```
+No separate step: `graph_edges` (migration 0006, ADR-004 -- the plain-SQL replacement for Apache
+AGE) is an ordinary table in the same database, so it comes back automatically with the full
+restore above (or on its own via `-t graph_edges`, same syntax as any other table). There is no
+`ag_catalog.drop_graph`/`graph_init.sql` step to run anymore -- that was the old Apache AGE
+procedure and no longer applies to this schema.
 
 ---
 

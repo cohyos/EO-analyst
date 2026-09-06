@@ -34,13 +34,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-guard = ["torch>=2.3", "transformers>=4.44", "onnxruntime>=1.18", "optimum>=1.21"]
+# 2026-09-06 (Q1-6): pinned to the highest 4.x release, not the >=5.10 originally targeted --
+# `optimum-onnx` (currently 0.1.0, the newest release on PyPI) hard-caps `transformers<4.58.0`,
+# and no `optimum-onnx` release compatible with transformers 5.x exists yet. `pip install -U
+# "transformers>=5.10" optimum-onnx onnxruntime` fails to resolve for exactly this reason
+# (ResolutionImpossible: optimum-onnx 0.1.0 depends on transformers<4.58.0,>=4.36). 4.57.6 is
+# itself the latest 4.x release, so this is the most current, most-patched version installable
+# alongside optimum-onnx today; re-attempt >=5.10 once optimum-onnx catches up.
+guard = ["torch>=2.3", "transformers>=4.57.6,<4.58", "onnxruntime>=1.18", "optimum>=1.21"]
 # CPU-only path for the L1 prompt-injection classifier (Protect AI DeBERTa v2):
 # no torch/CUDA wheel, just ONNX Runtime + optimum's ORTModel wrapper. This is
 # what docker/agent/Dockerfile installs into the (internet-isolated at runtime)
 # `agent` image; the model itself is baked into the image at build time under
 # /opt/models/prompt-guard (see EOA_GUARD_L1_DIR in agent/eoa/security/guard.py).
-guard-onnx = ["optimum[onnxruntime]>=1.21", "transformers>=4.44", "tokenizers", "onnxruntime>=1.18"]
+guard-onnx = ["optimum[onnxruntime]>=1.21", "transformers>=4.57.6,<4.58", "tokenizers", "onnxruntime>=1.18"]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

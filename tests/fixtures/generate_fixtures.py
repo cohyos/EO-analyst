@@ -3,8 +3,9 @@
 Generate prompt-injection test fixtures for the EO-analyst security module.
 Covers 13 attack vectors with ~5 samples each + 20 clean samples.
 """
-import yaml
 from pathlib import Path
+
+import yaml
 
 BASE_DIR = Path(__file__).parent
 INJECTION_DIR = BASE_DIR / "injection_samples"
@@ -153,7 +154,7 @@ Budget allocations for FY2025 show sustained commitment to optical system modern
 # (g) Hidden via HTML - 5 samples (HTML files)
 for i in range(5):
     file_num += 1
-    text = f"""<!DOCTYPE html>
+    text = """<!DOCTYPE html>
 <html>
 <head><title>Defense EO News</title></head>
 <body>

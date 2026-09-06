@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from eoa.report.geography import (
     collect_by_country,
+    country_mentions_in_text,
     format_country_section,
     items_by_country,
     normalize_country,
@@ -144,3 +145,29 @@ class TestFormatCountrySection:
         assert "US" in section["body_he"]
         assert "EO/IR sensor deal" in section["body_he"]
         assert "[7]" in section["body_he"]
+
+
+class TestCountryMentionsInText:
+    """Q3-11 (docs/qa/findings_Q3_r1.md): eoa.tenders.forecast uses this to derive buyer_country
+    from free text when items.geography/entities.country come back unknown."""
+
+    def test_empty_text_returns_empty(self):
+        assert country_mentions_in_text("") == []
+        assert country_mentions_in_text(None) == []  # type: ignore[arg-type]
+
+    def test_finds_english_country_name(self):
+        assert country_mentions_in_text("Air Force of Israel selects new gimbal") == ["IL"]
+
+    def test_finds_hebrew_country_name(self):
+        assert country_mentions_in_text("החוזה נחתם עבור חיל האוויר של גרמניה") == ["DE"]
+
+    def test_bare_two_letter_iso_codes_never_match(self):
+        """'it', 'in', 'no', 'us' as ordinary English words must never be mistaken for a country
+        mention -- only longer names/aliases count."""
+        assert country_mentions_in_text("It is in no way clear if we can do it") == []
+
+    def test_multiple_distinct_countries_in_order_of_appearance(self):
+        assert country_mentions_in_text("A deal between Israel and Germany was announced") == ["IL", "DE"]
+
+    def test_no_match_returns_empty(self):
+        assert country_mentions_in_text("a generic sentence with no country name") == []

@@ -35,39 +35,52 @@ class TestDatabaseSchema:
     """Tests for DB migrations, core tables, and AGE graph."""
 
     def test_alembic_migration_at_head(self, db_conn, database_url: str):
-        """Verify alembic current revision matches the latest migration file."""
-        import subprocess
+        """Verify the DB's current alembic revision is one of the repo's actual heads.
 
+        The literal "latest migration file" comparison this test used to do goes stale the
+        moment a second agent adds a migration in parallel (and briefly wrong the moment two
+        agents both branch off the same down_revision, producing more than one head) -- so
+        compare `alembic current` against the dynamic `alembic heads` output instead of any
+        hardcoded revision id.
+        """
         env = os.environ.copy()
         env["DATABASE_URL"] = database_url
-        result = subprocess.run(
+
+        current_result = subprocess.run(
             ["alembic", "current"],
             cwd=str(REPO_ROOT),
             env=env,
             capture_output=True,
             text=True,
         )
-        if result.returncode != 0:
-            pytest.skip(f"alembic current failed: {result.stderr[:200]}")
+        if current_result.returncode != 0:
+            pytest.skip(f"alembic current failed: {current_result.stderr[:200]}")
 
-        tokens = [t for t in result.stdout.strip().replace("(head)", " ").split() if t]
+        tokens = [t for t in current_result.stdout.strip().replace("(head)", " ").split() if t]
         current_revision = tokens[-1] if tokens else None
+        if not current_revision:
+            pytest.skip("Could not parse `alembic current` output")
 
-        # Get the latest revision from migration files
-        migrations_dir = REPO_ROOT / "db" / "migrations" / "versions"
-        if not migrations_dir.exists():
-            pytest.skip("Migrations directory not found")
+        heads_result = subprocess.run(
+            ["alembic", "heads"],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if heads_result.returncode != 0:
+            pytest.skip(f"alembic heads failed: {heads_result.stderr[:200]}")
 
-        migration_files = sorted(migrations_dir.glob("*.py"))
-        if not migration_files:
-            pytest.skip("No migration files found")
-
-        latest_file = migration_files[-1].stem
-        # Extract the revision ID from filename (format: <rev>_*.py)
-        latest_revision = latest_file.split("_")[0] if "_" in latest_file else latest_file
-
-        current_clean = str(current_revision).replace("(head)", "").strip()
-        assert current_clean == latest_revision, f"Current revision {current_revision} != latest {latest_revision}"
+        head_revisions = {
+            line.replace("(head)", "").strip()
+            for line in heads_result.stdout.splitlines()
+            if line.strip()
+        }
+        assert head_revisions, "alembic heads returned no revisions"
+        assert current_revision in head_revisions, (
+            f"DB is at revision {current_revision}, which is not among the repo's current "
+            f"heads {sorted(head_revisions)} -- run `alembic upgrade head`"
+        )
 
     def test_core_tables_exist(self, db_conn):
         """Verify all core tables are present."""
@@ -103,11 +116,15 @@ class TestDatabaseSchema:
         assert not missing, f"Missing tables: {missing}"
 
     def test_items_table_has_embedding_column(self, db_conn):
-        """Verify items table has pgvector embedding column."""
+        """Verify items table has the plain REAL[] embedding column (ADR-004: no pgvector).
+
+        Migration 0006 dropped the `vector` extension; `items.embedding` is a bare
+        PostgreSQL array column, similarity computed in numpy by `eoa.memory.vector`.
+        """
         with db_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT column_name, data_type
+                SELECT column_name, data_type, udt_name
                 FROM information_schema.columns
                 WHERE table_name = 'items' AND column_name = 'embedding'
                 """
@@ -115,8 +132,10 @@ class TestDatabaseSchema:
             row = cur.fetchone()
 
         assert row is not None, "items.embedding column not found"
-        # pgvector type is reported as 'USER-DEFINED'
-        assert row["data_type"] in ("USER-DEFINED", "vector"), f"Unexpected type: {row['data_type']}"
+        # A `real[]` (aka `float4[]`) column is reported by information_schema as data_type
+        # 'ARRAY' with udt_name '_float4' (the internal array-of-real type name).
+        assert row["data_type"] == "ARRAY", f"Unexpected type: {row['data_type']}"
+        assert row["udt_name"] == "_float4", f"Unexpected element type: {row['udt_name']}"
 
     def test_age_graph_exists_and_has_entity_vertices(self, db_conn):
         """Verify AGE graph 'eo_graph' exists and Entity vertex count matches entities table."""
