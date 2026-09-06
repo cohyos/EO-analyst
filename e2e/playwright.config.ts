@@ -35,6 +35,9 @@ export default defineConfig({
   ],
   outputDir: "test-results",
   use: {
+    // The PWA service worker (web/public/sw.js) would otherwise answer fetches before
+    // page.route() can intercept them in WebKit (19-remote-access on iPad/iPhone projects).
+    serviceWorkers: "block",
     baseURL: BASE_URL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
