@@ -568,6 +568,51 @@ def test_drop_perspective_violations_removes_only_offending_action():
     assert cleaned.recommended_actions == [keep]
 
 
+def test_strip_placeholder_echoes_removes_summary_sentence_with_fictional_tender():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he=(
+            'צבא ארה"ב מתמודד עם איומי רחפנים קטנים [1]. הפעולה הדחופה ביותר המומלצת היא ליזום '
+            "פגישת היכרות עם גורם מזמין לקראת מכרז X."
+        ),
+    )
+    cleaned = bdt._strip_placeholder_echoes(draft)
+    assert "מכרז X" not in cleaned.exec_summary_he
+    assert 'צבא ארה"ב מתמודד עם איומי רחפנים קטנים [1].' in cleaned.exec_summary_he
+
+
+def test_strip_placeholder_echoes_removes_bullet_and_action_with_generic_names():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר [1].",
+        market_bullets_he=["התפתחות אמיתית [1].", "התפתחות בכנס Z הקרוב [2]."],
+        recommended_actions=[
+            BdAction(
+                action_he="להציג יכולת Y בכנס Z הקרוב", priority="M", rationale_he="נימוק [1].",
+                owner_role_he="שיווק", timing_he="מיידי",
+            ),
+            BdAction(
+                action_he="ליזום פגישה עם US Army", priority="H", rationale_he="נימוק אמיתי [1].",
+                owner_role_he="פיתוח עסקי", timing_he="מיידי",
+            ),
+        ],
+    )
+    cleaned = bdt._strip_placeholder_echoes(draft)
+    assert cleaned.market_bullets_he == ["התפתחות אמיתית [1]."]
+    assert len(cleaned.recommended_actions) == 1
+    assert cleaned.recommended_actions[0].action_he == "ליזום פגישה עם US Army"
+
+
+def test_strip_placeholder_echoes_noop_when_clean():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר אמיתי [1].",
+        market_bullets_he=["בולט אמיתי [1]."],
+        recommended_actions=[
+            BdAction(action_he="פעולה", priority="M", rationale_he="נימוק [1].", owner_role_he="מכירות", timing_he="מיידי")
+        ],
+    )
+    cleaned = bdt._strip_placeholder_echoes(draft)
+    assert cleaned is draft
+
+
 def test_cap_draft_lengths_truncates_runaway_bullets_and_actions():
     bullets = [f"בולט מספר {i} [1]." for i in range(15)]
     actions = [

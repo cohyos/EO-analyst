@@ -6056,9 +6056,55 @@ unconditionally-dropped conjunction fragment" case), the perspective helpers
 mocked retry still violates and the fallback drop is exercised, `collect_active_competitors`'s
 zero-activity exclusion and `collect_dormant_watchlist_competitors` (both via a monkeypatched
 `_fetchall`), `BdTableCounts`/`_tables_only_draft`/`_no_items_draft` selection, and the dormant-note
-extra-section's `<3`-competitors gate (both branches). `ruff check` clean on all changed files;
+extra-section's `<3`-competitors gate (both branches), plus `_strip_placeholder_echoes` and
+`_cap_draft_lengths` below. `ruff check` clean on all changed files;
 `PYTHONPATH=agent pytest tests/unit/test_report_bd_territory.py tests/unit/test_config.py -q`
-green (41 + 30 passed).
+green (46 + 30 passed).
+
+### Additional defects found and fixed against the live DB/Ollama during this pass
+
+Rebuilding `bd_us`/`bd_il` for real (`eo run bd --territory US/IL`, resident model
+`dictalm3_12b`) surfaced three more real defects beyond the six above, all fixed in
+`agent/eoa/report/bd_territory.py` (and one prompt line):
+
+1. **Runaway `recommended_actions`/`market_bullets_he`.** A live US build (22 market items)
+   returned 20-30 recommended actions in one response, several literal copies of the prompt's own
+   illustrative examples ("להציג יכולת Y בכנס Z הקרוב") -- new `_cap_draft_lengths` truncates both
+   lists to 8 after every draft/retry regardless of what the model returns; the prompt's field
+   instructions were also hardened ("לכל היותר 8 ... לעולם לא יותר").
+2. **`num_predict` truncation crash.** With the added perspective/our-company framing plus five
+   DATA blocks, a busy territory's completion exceeded the shared
+   `ollama.num_predict.report` config default (6000 tokens), producing invalid truncated JSON
+   (`pydantic.ValidationError: Invalid JSON: EOF while parsing a string`) that `chat_structured`
+   could not recover from even after its one retry -- a hard crash, not a graceful QA failure.
+   Fixed by overriding `num_predict` (16000) via the `options` dict on `bd_territory.py`'s own
+   `chat_structured` calls (merged over the shared config default inside
+   `eoa.llm.ollama_client._ollama_chat`) rather than raising the shared default -- daily/weekly/
+   monthly are unaffected.
+3. **Placeholder-echo hallucination.** Independent of citation compliance, the model was observed
+   copying the prompt's own illustrative placeholders verbatim into real content -- e.g.
+   `exec_summary_he` ending "...ליזום פגישת היכרות עם גורם מזמין לקראת **מכרז X**" (a fictional
+   "מכרז X" matching nothing in the data) -- undetected by the citation QA gate because a bare
+   single Latin letter doesn't match its "factual sentence" regex. New `_strip_placeholder_echoes`
+   (regex `(מכרז|כנס|לקוח|יכולת|תוכנית|גורם מזמין|שותף)\s+[A-Z]\b`) drops any sentence/bullet/action
+   matching this pattern, applied after every draft/retry; the prompt's inline examples were also
+   replaced with abstract (non-copyable) descriptions and an explicit rule 9 added.
+
+Live evidence: `bd_il` (18 market items, 1 in-territory conference) reached `qa_passed: true` on
+its second attempt (report id 18) after these fixes; `bd_us` (22 market items, 3 conferences)
+consistently failed the citation gate specifically on `market_bullets_he`/action rationale across
+multiple attempts even after a corrective retry quoting the exact offending sentences -- the
+retry-then-strip fallback worked as designed each time (never crashed, always persisted a
+QA-flagged-but-valid docx with a visible warning banner), but did not converge to `qa_passed:
+true` for this denser territory within the session's attempts. This appears to be a genuine
+capacity/attention limit of the 12B resident model given the combined data volume (5 DATA blocks:
+market items + events + tenders/forecasts + competitors + conferences) for busier territories,
+compounded by observed concurrent GPU contention from an unrelated user process during this
+session (`nvidia-smi` showed 94-96% utilization from a separate training job even when idle from
+this pipeline's perspective) -- not a defect in the six BD-1 items themselves, each of which is
+independently unit-tested and verified working (conference status/organizer, dormant-competitor
+note, and no-placeholder-echo content are all directly visible in the persisted `bd_us` docx/md
+despite the overall QA gate not passing).
 
 ## Security QA r2 fixes: Q2-14/Q2-15/Q2-16 (`docs/qa/findings_Q2_r2.md`, 2026-09-06)
 

@@ -185,6 +185,43 @@ describe("TendersPage — open tenders tab", () => {
       include_archived: true,
     });
   });
+
+  // Q5-11 (docs/qa/findings_Q5_r2.md): the default (open/unknown) view is empty but closed tenders
+  // exist -- an inline hint + action must appear instead of a dead-end "no matches" message, and
+  // clicking it must reveal them (re-query with include_closed/include_archived).
+  it("shows an inline hint with a count when closed/archived rows are hidden by the default view", async () => {
+    getTenders.mockResolvedValue(tendersResponse([], { closed: 5 }));
+    renderPage();
+
+    expect(await screen.findByText(/5 מכרזים סגורים מוסתרים בתצוגה הנוכחית/)).toBeInTheDocument();
+    expect(screen.queryByText("אין מכרזים תואמים")).not.toBeInTheDocument();
+  });
+
+  it("clicking the inline hidden-closed-tenders action reveals them", async () => {
+    getTenders.mockImplementation(async (query: { include_closed?: boolean }) =>
+      query.include_closed
+        ? tendersResponse([makeTender({ status: "closed" })], { closed: 5 })
+        : tendersResponse([], { closed: 5 }),
+    );
+    renderPage();
+
+    const cta = await screen.findByRole("button", { name: /הצג 5 מכרזים סגורים/ });
+    fireEvent.click(cta);
+
+    expect(await screen.findByText("Targeting Pod Sustainment IDIQ")).toBeInTheDocument();
+    expect(getTenders.mock.calls.at(-1)?.[0]).toMatchObject({
+      include_closed: true,
+      include_archived: true,
+    });
+  });
+
+  it("shows the plain 'no open tenders' empty state when there are no hidden closed/archived rows either", async () => {
+    getTenders.mockResolvedValue(tendersResponse([]));
+    renderPage();
+
+    expect(await screen.findByText("אין מכרזים פתוחים כרגע")).toBeInTheDocument();
+    expect(screen.queryByText(/מכרזים סגורים מוסתרים/)).not.toBeInTheDocument();
+  });
 });
 
 describe("TendersPage — forecasts tab", () => {

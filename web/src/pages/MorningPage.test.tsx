@@ -165,13 +165,15 @@ describe("MorningPage KPI cards (U2)", () => {
       "href",
       "/feed?since=24h",
     );
+    // Q5-10 (docs/qa/findings_Q5_r2.md): red/orange also carry `since=24h` so the feed the
+    // analyst lands on is scoped to the same rolling last-24h window as the KPI card's own count.
     expect(screen.getByRole("link", { name: /פריטים קריטיים/ })).toHaveAttribute(
       "href",
-      "/feed?level=red",
+      "/feed?level=red&since=24h",
     );
     expect(screen.getByRole("link", { name: /פריטים חשובים/ })).toHaveAttribute(
       "href",
-      "/feed?level=orange",
+      "/feed?level=orange&since=24h",
     );
     expect(screen.getByRole("link", { name: /חקירות עומק/ })).toHaveAttribute(
       "href",

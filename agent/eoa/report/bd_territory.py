@@ -23,6 +23,7 @@ row (``kind='bd_territory'``, ``territory=<code>``).
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,16 @@ _INSCOPE_LEVELS = ("red", "orange", "yellow")
 _PROCUREMENT_EVENT_KINDS = ("contract_award", "m_and_a", "deployment", "test")
 
 _ISRAELI_INDUSTRY_NAMES = {"Elbit", "Rafael", "IAI", "Controp"}
+
+# BD-1 (docs/qa/findings_Q3_r2.md): observed a live truncated-JSON crash (schema validation
+# failed with "EOF while parsing a string") against a busy territory (22 market items) at the
+# shared config default (``ollama.num_predict.report`` = 6000) -- five DATA blocks plus the
+# perspective framing produce a longer completion (exec summary + up to 8 bullets + up to 8
+# structured actions) than the other report types this default was tuned for. Overridden here via
+# ``chat_structured``'s per-call ``options`` (merged over the config default in
+# ``eoa.llm.ollama_client._ollama_chat``) rather than raising the shared config default, so
+# daily/weekly/monthly are unaffected.
+_BD_NUM_PREDICT = 16000
 
 # Best-effort conference-city -> territory-code heuristic (conferences has no country column --
 # see docs/adr, ``eoa.conferences.tracker``). Deliberately small: only the handful of cities that
@@ -388,6 +399,20 @@ def tenders_table(data: dict[str, Any]) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------
 
 
+def _entity_edge_activity(entity_id: int, market_item_ids: list[int]) -> int:
+    """Count of ``graph_edges`` rows touching ``entity_id`` and evidenced by one of the window's
+    market items -- part of BD-1's "active in the window" test (mention/edge/event), alongside
+    ``entities_mentioned`` and ``contract_award`` events."""
+    if not market_item_ids:
+        return 0
+    rows = _fetchall(
+        "SELECT count(*) AS n FROM graph_edges WHERE item_id = ANY(%(ids)s) "
+        "AND (src_entity_id = %(id)s OR dst_entity_id = %(id)s)",
+        {"ids": market_item_ids, "id": entity_id},
+    )
+    return int(rows[0]["n"]) if rows else 0
+
+
 def collect_active_competitors(
     territory: str, market_item_ids: list[int], period_start: dt.date, period_end: dt.date, *, limit: int = 15
 ) -> list[dict[str, Any]]:
@@ -395,7 +420,12 @@ def collect_active_competitors(
     (``entities.country``) or mentioned by one of the territory's market items in the window --
     with their recent wins (``contract_award`` events among those same items) and an
     ``is_israeli_industry`` flag (Elbit/Rafael/IAI/Controp, per config/watchlist.yaml canonical
-    names) for the "זווית התעשייה הישראלית" angle."""
+    names) for the "זווית התעשייה הישראלית" angle.
+
+    BD-1 (docs/qa/findings_Q3_r2.md): a company merely headquartered in the territory but with no
+    activity in the window (no mention, no graph edge, no event) is noise, not a "competitor
+    active in the territory" -- excluded here. ``collect_dormant_watchlist_competitors`` reports
+    the watchlist names this filter drops, for the report's one-line dormant-competitors note."""
     code = normalize_country(territory)
     companies = _fetchall(
         "SELECT id, name, country, relevance, is_watchlist FROM entities "
@@ -413,14 +443,12 @@ def collect_active_competitors(
         )
         mentions_by_name = {r["name"]: r["n"] for r in mention_rows}
 
-    active = [
+    candidates = [
         c for c in companies if normalize_country(c.get("country")) == code or c["name"] in mentions_by_name
     ]
-    active.sort(key=lambda c: mentions_by_name.get(c["name"], 0), reverse=True)
-    active = active[:limit]
 
     out: list[dict[str, Any]] = []
-    for c in active:
+    for c in candidates:
         wins: list[dict[str, Any]] = []
         if market_item_ids:
             wins = _fetchall(
@@ -430,18 +458,35 @@ def collect_active_competitors(
                 "ORDER BY date DESC NULLS LAST LIMIT 5",
                 {"ids": market_item_ids, "name": c["name"]},
             )
+        mentions = mentions_by_name.get(c["name"], 0)
+        edges = 0 if (mentions or wins) else _entity_edge_activity(c["id"], market_item_ids)
+        if mentions < 1 and not wins and edges < 1:
+            continue  # BD-1: no activity in the window -- excluded as noise, not a real signal
         out.append(
             {
                 "entity_id": c["id"],
                 "name": c["name"],
                 "country": c.get("country"),
-                "mentions": mentions_by_name.get(c["name"], 0),
+                "mentions": mentions,
                 "is_watchlist": bool(c.get("is_watchlist")),
                 "is_israeli_industry": c["name"] in _ISRAELI_INDUSTRY_NAMES,
                 "recent_wins": wins,
             }
         )
-    return out
+    out.sort(key=lambda c: c["mentions"], reverse=True)
+    return out[:limit]
+
+
+def collect_dormant_watchlist_competitors(
+    territory: str, active_names: set[str], *, limit: int = 20
+) -> list[str]:
+    """BD-1: watchlist company names headquartered in the territory that ``collect_active_competitors``
+    excluded for having zero activity in the window -- surfaced as a one-line note rather than
+    silently dropped, so the analyst knows they were checked and simply had nothing to report."""
+    code = normalize_country(territory)
+    rows = _fetchall("SELECT name, country FROM entities WHERE kind = 'company' AND is_watchlist = true")
+    dormant = [r["name"] for r in rows if normalize_country(r.get("country")) == code and r["name"] not in active_names]
+    return dormant[:limit]
 
 
 def format_competitors_block(competitors: list[dict[str, Any]]) -> str:
@@ -453,7 +498,7 @@ def format_competitors_block(competitors: list[dict[str, Any]]) -> str:
         return "לא זוהו מתחרים פעילים בטריטוריה זו בחלון הזמן שנבדק."
     lines: list[str] = []
     for c in competitors:
-        tag = " (תעשייה ישראלית)" if c["is_israeli_industry"] else ""
+        tag = " (תעשייה ישראלית)" if c["is_israeli_industry"] else " (מתחרה ברשימת המעקב)" if c.get("is_watchlist") else " (מתחרה)"
         lines.append(f"- {c['name']}{tag} | מדינה: {c.get('country') or '—'} | אזכורים: {c['mentions']}")
         for w in c.get("recent_wins") or []:
             amount = f"{w['amount_usd']:,.0f} {w.get('currency') or 'USD'}" if w.get("amount_usd") else "—"
@@ -536,9 +581,24 @@ def collect_conferences_for_territory(
     return {"territory": territory_rows, "international": international_rows}
 
 
+_CONFERENCE_STATUS_HE = {"confirmed": "מאושר", "estimated": "משוער"}
+
+
+def _conference_status_he(conf: dict[str, Any]) -> str:
+    """BD-1 (docs/qa/findings_Q3_r2.md): the real ``conferences.status`` value -- never a
+    synthesized/placeholder date or status. Anything other than the two known statuses (e.g. a
+    future status value this code doesn't know about yet) is shown as-is rather than hidden."""
+    status = conf.get("status")
+    return _CONFERENCE_STATUS_HE.get(status, status or "—")
+
+
 def format_conferences_block(data: dict[str, Any]) -> str:
     """Each line carries the ``[n]`` ``_extend_registry_with_conferences`` assigned -- see
-    ``format_tenders_block``'s docstring for why this matters."""
+    ``format_tenders_block``'s docstring for why this matters. Dates, status (confirmed/estimated)
+    and organizer are read straight off the ``conferences`` row (``eoa.conferences.tracker``,
+    ``conferences.start_date``/``end_date``/``status``/``organizer``) -- never synthesized here
+    (BD-1: a previous build showed a placeholder date derived from list position rather than the
+    real, now-verified, row)."""
     territory_rows = data.get("territory") or []
     international_rows = data.get("international") or []
     lines: list[str] = []
@@ -546,7 +606,11 @@ def format_conferences_block(data: dict[str, Any]) -> str:
         lines.append("כנסים בטריטוריה:")
         for c in territory_rows:
             n = f"[{c['n']}] " if c.get("n") is not None else ""
-            lines.append(f"- {n}{c.get('name') or '—'} | {fmt_date(c.get('start_date'))} | {c.get('city') or '—'}")
+            lines.append(
+                f"- {n}{c.get('name') or '—'} | {fmt_date(c.get('start_date'))} עד "
+                f"{fmt_date(c.get('end_date'))} | {c.get('city') or '—'} | סטטוס: {_conference_status_he(c)} "
+                f"| מארגן: {c.get('organizer') or '—'}"
+            )
     else:
         lines.append("לא זוהו כנסים מתוכננים בטריטוריה זו ב-12 החודשים הקרובים.")
     lines.append("")
@@ -554,7 +618,11 @@ def format_conferences_block(data: dict[str, Any]) -> str:
         lines.append("כנסים בינלאומיים רלוונטיים (הקשר בלבד):")
         for c in international_rows:
             n = f"[{c['n']}] " if c.get("n") is not None else ""
-            lines.append(f"- {n}{c.get('name') or '—'} | {fmt_date(c.get('start_date'))} | {c.get('city') or '—'}")
+            lines.append(
+                f"- {n}{c.get('name') or '—'} | {fmt_date(c.get('start_date'))} עד "
+                f"{fmt_date(c.get('end_date'))} | {c.get('city') or '—'} | סטטוס: {_conference_status_he(c)} "
+                f"| מארגן: {c.get('organizer') or '—'}"
+            )
     return "\n".join(lines)
 
 
@@ -562,12 +630,14 @@ def conferences_table(data: dict[str, Any]) -> dict[str, Any] | None:
     territory_rows = data.get("territory") or []
     if not territory_rows:
         return None
-    headers = ["שם", "תאריכים", "עיר", "רלוונטיות"]
+    headers = ["שם", "תאריכים", "עיר", "סטטוס", "מארגן", "רלוונטיות"]
     rows = [
         [
             c.get("name") or "—",
             f"{fmt_date(c.get('start_date'))} - {fmt_date(c.get('end_date'))}",
             c.get("city") or "—",
+            _conference_status_he(c),
+            c.get("organizer") or "—",
             c.get("relevance") if c.get("relevance") is not None else "—",
         ]
         for c in territory_rows
@@ -704,6 +774,76 @@ def _no_items_draft() -> BdTerritoryReportDraft:
     )
 
 
+@dataclass
+class BdTableCounts:
+    """BD-1 / Q3-14 (docs/qa/findings_Q3_r2.md, mirrors ``eoa.report.daily.TableCounts``): counts
+    of report content that is rendered as a deterministic table rather than drafted by the LLM
+    (procurement events, tenders, forecasts, competitors, conferences) -- ``draft_bd_territory``
+    needs these so the exec summary never claims "no findings" while these tables are non-empty,
+    even when the LLM-facing ``items`` (market items) list is empty."""
+
+    events: int = 0
+    tenders: int = 0
+    forecasts: int = 0
+    competitors: int = 0
+    conferences: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.events + self.tenders + self.forecasts + self.competitors + self.conferences
+
+    def context_he(self) -> str:
+        if not self.total:
+            return "אין (כל הטבלאות ריקות בתקופה זו)."
+        parts = []
+        if self.events:
+            parts.append(f"{self.events} אירועי רכש/פלטפורמות")
+        if self.tenders:
+            parts.append(f"{self.tenders} מכרזים פתוחים/לא ידועים")
+        if self.forecasts:
+            parts.append(f"{self.forecasts} תחזיות רכש")
+        if self.competitors:
+            parts.append(f"{self.competitors} מתחרים פעילים")
+        if self.conferences:
+            parts.append(f"{self.conferences} כנסים קרובים בטריטוריה")
+        return "; ".join(parts) + "."
+
+
+def _tables_only_draft(territory: str, counts: BdTableCounts) -> BdTerritoryReportDraft:
+    """BD-1 / Q3-14: used when ``items`` (market items) is empty but at least one other table
+    (events/tenders/forecasts/competitors/conferences) is not -- a short, honest, deterministic
+    summary of what the report *does* contain, instead of :func:`_no_items_draft`'s blanket "no
+    findings" claim contradicting the non-empty tables rendered right below it."""
+    return BdTerritoryReportDraft(
+        exec_summary_he=(
+            f"לא זוהו פריטי שוק חדשים בטריטוריה {territory_label(territory)} בחלון הזמן שנבדק, אך "
+            f"קיים תוכן רלוונטי בטבלאות הדוח: {counts.context_he()} פירוט מלא בטבלאות בהמשך הדוח."
+        ),
+        market_bullets_he=[],
+        sections=[],
+        recommended_actions=[],
+        risks_assumptions_he=(
+            "לא נמצאו פריטי שוק חדשים בחלון הזמן שנבדק, כך שלא ניתן היה לבסס המלצות פעולה מנומקות; "
+            "ראו את הטבלאות הדטרמיניסטיות בדוח (רכש/מכרזים/מתחרים/כנסים) לפירוט המלא."
+        ),
+        outlook_he="",
+        open_points_he=[],
+    )
+
+
+def _our_company_block_he() -> str:
+    """Render ``bd_report.our_company`` (BD-1) into the one line the prompt embeds so the model
+    always knows which entity it is writing *for*."""
+    company = settings().bd_report.our_company
+    aliases = f" (גם: {', '.join(company.aliases)})" if company.aliases else ""
+    industry = "כן" if company.is_israeli_industry else "לא"
+    return f"{company.name}{aliases} | מדינה: {company.country} | תעשייה ביטחונית ישראלית: {industry}"
+
+
+def _perspective_he() -> str:
+    return settings().bd_report.perspective_he
+
+
 def draft_bd_territory(
     territory: str,
     lookback_days: int,
@@ -714,17 +854,21 @@ def draft_bd_territory(
     conferences_block: str,
     *,
     has_items: bool,
+    table_counts: BdTableCounts | None = None,
     role: str = "resident",
     interactive: bool = False,
 ) -> BdTerritoryReportDraft:
+    counts = table_counts or BdTableCounts()
     if not has_items:
-        return _no_items_draft()
+        return _tables_only_draft(territory, counts) if counts.total else _no_items_draft()
     prompt = render(
         "report_bd_territory",
         territory_label=territory_label(territory),
         lookback_days=lookback_days,
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
+        our_company_block=_our_company_block_he(),
+        perspective_he=_perspective_he(),
         items_block=wrap_data(items_block, "bd_items", "internal"),
         events_block=wrap_data(events_block, "bd_events", "internal"),
         tenders_block=wrap_data(tenders_block, "bd_tenders", "internal"),
@@ -740,7 +884,7 @@ def draft_bd_territory(
         ],
         task="report",
         interactive=interactive,
-        options={"temperature": 0.3},
+        options={"temperature": 0.3, "num_predict": _BD_NUM_PREDICT},
     )
 
 
@@ -764,6 +908,8 @@ def _corrective_retry(
         lookback_days=lookback_days,
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
+        our_company_block=_our_company_block_he(),
+        perspective_he=_perspective_he(),
         items_block=wrap_data(items_block, "bd_items", "internal"),
         events_block=wrap_data(events_block, "bd_events", "internal"),
         tenders_block=wrap_data(tenders_block, "bd_tenders", "internal"),
@@ -787,8 +933,116 @@ def _corrective_retry(
         ],
         task="report",
         interactive=interactive,
-        options={"temperature": 0.2},
+        options={"temperature": 0.2, "num_predict": _BD_NUM_PREDICT},
     )
+
+
+# --------------------------------------------------------------------------
+# perspective validation (BD-1: recommendations must be ours, never a competitor's)
+# --------------------------------------------------------------------------
+
+_COMPETITOR_PROMOTION_VERBS = ("להציג", "לקדם", "לשווק", "מציג", "מקדם", "משווק", "הצגת", "קידום", "שיווק")
+
+
+def _watchlist_competitor_names(competitors: list[dict[str, Any]]) -> set[str]:
+    return {c["name"] for c in competitors if c.get("is_watchlist") and c.get("name")}
+
+
+def _action_promoted_competitor(action: BdAction, watchlist_names: set[str]) -> str | None:
+    """The watchlist competitor name an action illegitimately promotes, or ``None``. An action
+    "promotes" a competitor when it both names one of the territory's watchlist competitors *and*
+    uses a promotion verb (להציג/לקדם/לשווק and inflections) -- e.g. "להציג יכולת של Shield AI
+    בכנס AUSA" when Shield AI is a tracked competitor, not our company."""
+    text = f"{action.action_he} {action.rationale_he}"
+    if not any(verb in text for verb in _COMPETITOR_PROMOTION_VERBS):
+        return None
+    for name in watchlist_names:
+        if name and name in text:
+            return name
+    return None
+
+
+def _perspective_violations(
+    draft: BdTerritoryReportDraft, competitors: list[dict[str, Any]]
+) -> list[tuple[BdAction, str]]:
+    watchlist_names = _watchlist_competitor_names(competitors)
+    if not watchlist_names:
+        return []
+    violations = []
+    for action in draft.recommended_actions:
+        competitor = _action_promoted_competitor(action, watchlist_names)
+        if competitor:
+            violations.append((action, competitor))
+    return violations
+
+
+def _perspective_corrective_retry(
+    territory: str,
+    lookback_days: int,
+    items_block: str,
+    events_block: str,
+    tenders_block: str,
+    competitors_block: str,
+    conferences_block: str,
+    draft: BdTerritoryReportDraft,
+    violations: list[tuple[BdAction, str]],
+    *,
+    role: str,
+    interactive: bool,
+) -> BdTerritoryReportDraft:
+    """BD-1: one regeneration attempt naming the exact offending action(s) and competitor(s) --
+    mirrors the citation ``_corrective_retry``'s "quote the specific problem, ask for a full valid
+    draft back" shape."""
+    prompt = render(
+        "report_bd_territory",
+        territory_label=territory_label(territory),
+        lookback_days=lookback_days,
+        date_he=hebrew_date_str(_today_jerusalem()),
+        data_guard=DATA_GUARD_SYSTEM,
+        our_company_block=_our_company_block_he(),
+        perspective_he=_perspective_he(),
+        items_block=wrap_data(items_block, "bd_items", "internal"),
+        events_block=wrap_data(events_block, "bd_events", "internal"),
+        tenders_block=wrap_data(tenders_block, "bd_tenders", "internal"),
+        competitors_block=wrap_data(competitors_block, "bd_competitors", "internal"),
+        conferences_block=wrap_data(conferences_block, "bd_conferences", "internal"),
+    )
+    company = settings().bd_report.our_company
+    offending = "\n".join(
+        f'- "{action.action_he}" — מקדמת/מציגה את המתחרה {competitor} במקום את {company.name}'
+        for action, competitor in violations
+    )
+    correction = (
+        "הטיוטה הקודמת שלך הפרה את כלל נקודת המבט: פעולה מומלצת אסור שתקדם, תציג או תשווק מתחרה. "
+        f"הפעולות הבאות שגויות (המתחרה מוזכר ככזה שאנחנו מקדמים אותו, לא כמתחרה שלנו):\n{offending}\n"
+        f"כתוב טיוטה מלאה ותקינה מחדש (JSON לפי הסכמה בלבד) שבה כל פעולה היא פעולה של {company.name} "
+        "כלפי השוק/המתחרה (לפנות, להגיב למכרז, להשתתף/להציג בכנס בעצמנו, לנטר את המתחרה) — לעולם לא "
+        "פעולה המקדמת את המתחרה עצמו."
+    )
+    return chat_structured(
+        role,
+        BdTerritoryReportDraft,
+        [
+            {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": draft.model_dump_json()},
+            {"role": "user", "content": correction},
+        ],
+        task="report",
+        interactive=interactive,
+        options={"temperature": 0.2, "num_predict": _BD_NUM_PREDICT},
+    )
+
+
+def _drop_perspective_violations(
+    draft: BdTerritoryReportDraft, violations: list[tuple[BdAction, str]]
+) -> BdTerritoryReportDraft:
+    """Fallback when the regeneration retry still violates the perspective rule: drop exactly the
+    still-offending actions rather than render a recommendation that promotes a competitor (a
+    missing recommendation is safer than a wrong one, per docs/CONVENTIONS.md rule 5)."""
+    bad = {id(action) for action, _competitor in violations}
+    kept = [a for a in draft.recommended_actions if id(a) not in bad]
+    return draft.model_copy(update={"recommended_actions": kept})
 
 
 def _bullets_text(bullets: list[str]) -> str:
@@ -813,22 +1067,177 @@ def _run_qa(draft: BdTerritoryReportDraft, citation_items: list[dict[str, Any]])
     )
 
 
+def _drop_empty_sections(draft: BdTerritoryReportDraft) -> BdTerritoryReportDraft:
+    """BD-1: ``sections`` is documented as unused by this report's prompt/schema (kept only for
+    type-compatibility with ``build_docx``/``qa_citations``), but nothing stops a model from
+    returning one anyway with a domain heading and blank/whitespace-only prose -- rendered
+    verbatim by ``docx_builder`` as an empty sub-heading ("בינה חזותית:" with nothing under it).
+    Applied after every draft/retry so an empty heading never reaches the renderer."""
+    kept = [s for s in draft.sections if (s.prose_he or "").strip()]
+    if len(kept) == len(draft.sections):
+        return draft
+    return draft.model_copy(update={"sections": kept})
+
+
+# BD-1: observed a live model echo the prompt's own illustrative placeholders ("מכרז X", "להציג
+# יכולת Y בכנס Z הקרוב") verbatim into real report content (e.g. exec_summary_he ending "...ליזום
+# פגישת היכרות עם גורם מזמין לקראת מכרז X" -- a fictional "מכרז X" that matches no real tender)
+# even after the prompt explicitly told it not to (``report_bd_territory.md``'s field
+# instructions/rule 9) -- this defensive, code-level check is a second line of defense that does
+# not depend on model compliance. A bare single capital letter right after a
+# tender/conference/client/capability noun is never a real name in this report's data (every real
+# entity/tender/conference name from the DB is either Hebrew or a multi-character Latin name).
+_PLACEHOLDER_ECHO_RE = re.compile(r"(מכרז|כנס|לקוח|יכולת|תוכנית|גורם מזמין|שותף)\s+[A-Z]\b")
+
+
+def _contains_placeholder_echo(text: str | None) -> bool:
+    return bool(text) and bool(_PLACEHOLDER_ECHO_RE.search(text))
+
+
+def _strip_placeholder_echoes(draft: BdTerritoryReportDraft) -> BdTerritoryReportDraft:
+    """Drop any sentence/bullet/action that echoes one of the prompt's own illustrative
+    placeholders (see module note above) -- applied after every draft/retry, before both the
+    perspective gate and the citation QA gate (a placeholder-echo sentence is neither a real
+    perspective violation nor necessarily an uncited one, so neither gate would otherwise catch
+    it)."""
+    updates: dict[str, Any] = {}
+
+    kept_summary = [s for s in split_sentences(draft.exec_summary_he) if not _contains_placeholder_echo(s)]
+    new_summary = " ".join(kept_summary)
+    if new_summary != draft.exec_summary_he:
+        updates["exec_summary_he"] = new_summary or draft.exec_summary_he
+
+    kept_bullets = [b for b in draft.market_bullets_he if not _contains_placeholder_echo(b)]
+    if len(kept_bullets) != len(draft.market_bullets_he):
+        updates["market_bullets_he"] = kept_bullets
+
+    kept_actions = [
+        a
+        for a in draft.recommended_actions
+        if not (_contains_placeholder_echo(a.action_he) or _contains_placeholder_echo(a.rationale_he))
+    ]
+    if len(kept_actions) != len(draft.recommended_actions):
+        updates["recommended_actions"] = kept_actions
+
+    return draft.model_copy(update=updates) if updates else draft
+
+
+_MAX_MARKET_BULLETS = 8
+_MAX_RECOMMENDED_ACTIONS = 8
+
+
+def _cap_draft_lengths(draft: BdTerritoryReportDraft) -> BdTerritoryReportDraft:
+    """BD-1 defense-in-depth: the prompt asks for "5-8 בולטים בדיוק"/"5-8 פעולות בדיוק", but
+    nothing enforced it -- observed live runs of the resident model occasionally ran away to
+    20-30 recommended actions (several literal copies of the prompt's own illustrative examples),
+    which both defeats the report's purpose (an unusable wall of near-duplicate actions) and makes
+    the citation QA gate's job much harder (more prose = more chances for an uncited sentence).
+    Truncates to the first ``_MAX_MARKET_BULLETS``/``_MAX_RECOMMENDED_ACTIONS`` items -- applied
+    after every draft/retry, before both the perspective gate and the citation QA gate."""
+    updates: dict[str, Any] = {}
+    if len(draft.market_bullets_he) > _MAX_MARKET_BULLETS:
+        updates["market_bullets_he"] = draft.market_bullets_he[:_MAX_MARKET_BULLETS]
+    if len(draft.recommended_actions) > _MAX_RECOMMENDED_ACTIONS:
+        updates["recommended_actions"] = draft.recommended_actions[:_MAX_RECOMMENDED_ACTIONS]
+    return draft.model_copy(update=updates) if updates else draft
+
+
+# --------------------------------------------------------------------------
+# uncited-sentence stripping (with dependent-fragment cleanup, BD-1)
+# --------------------------------------------------------------------------
+
+
+# "ו" is a bound prefix glued directly onto the next word (e.g. "ובפרט") -- matched by
+# startswith + a longer word; "או"/"אך"/"כי" are standalone conjunction words, matched by exact
+# equality (checking startswith there too would wrongly match unrelated words that merely begin
+# with the same two letters).
+_FRAGMENT_BOUND_CONJUNCTION_PREFIXES = ("ו",)
+_FRAGMENT_STANDALONE_CONJUNCTIONS = ("או", "אך", "כי")
+_MIN_FRAGMENT_WORDS = 6
+_FRAGMENT_TRAILING_PUNCT = ".,!?:;\"'׳״)"
+# Small, local heuristic verb list for the "fragment has no verb" test -- reuses the same idea as
+# ``eoa.report.qa_citations._FACTUAL_VERBS`` (a closed, non-exhaustive list is fine here: this is
+# a "does this look like a self-contained clause" heuristic, not a citation-correctness gate).
+# Matched as a whole word (after stripping trailing punctuation), never as a bare substring --
+# short entries like "יש" would otherwise false-match inside unrelated words (e.g. "ישירה").
+_FRAGMENT_VERB_HINTS = frozenset(
+    {
+        "זכתה", "חתמה", "רכשה", "הודיעה", "השיקה", "נבחרה", "קיבלה", "סיפקה", "נחתם", "הוענק",
+        "צפויה", "מתכננת", "מפתחת", "מייצרת", "מספקת", "פועלת", "משתתפת", "מתמודדת", "ממליצים",
+        "מומלץ", "יש", "ניתן", "נדרש", "נמצא", "נמצאה", "קיים", "קיימת",
+    }
+)
+
+
+def _fragment_first_word(sentence: str) -> str:
+    stripped = sentence.strip().lstrip("\"'“”׳״(")
+    return stripped.split(" ", 1)[0] if stripped else ""
+
+
+def _starts_with_conjunction(sentence: str) -> bool:
+    word = _fragment_first_word(sentence)
+    if not word:
+        return False
+    if word in _FRAGMENT_STANDALONE_CONJUNCTIONS:
+        return True
+    return any(word.startswith(prefix) and len(word) > len(prefix) for prefix in _FRAGMENT_BOUND_CONJUNCTION_PREFIXES)
+
+
+def _has_verb_hint(sentence: str) -> bool:
+    words = {w.strip(_FRAGMENT_TRAILING_PUNCT) for w in sentence.split()}
+    return bool(words & _FRAGMENT_VERB_HINTS)
+
+
+def _starts_lowercase(sentence: str) -> bool:
+    word = _fragment_first_word(sentence)
+    return bool(word) and word[0].isalpha() and word[0].islower()
+
+
+def _is_dependent_fragment(sentence: str) -> bool:
+    """A sentence that cannot plausibly stand on its own -- the leftover half of a compound
+    sentence once its main clause was stripped for being uncited (BD-1: "...ובפרט לאיומי רחפנים
+    קטנים ומשימות. [1] [2]" surviving alone after the sentence that introduced it was removed)."""
+    if not sentence.strip():
+        return False
+    if _starts_with_conjunction(sentence) or _starts_lowercase(sentence):
+        return True
+    words = sentence.split()
+    return len(words) < _MIN_FRAGMENT_WORDS and not _has_verb_hint(sentence)
+
+
 def _strip_uncited(draft: BdTerritoryReportDraft, qa: QAResult) -> BdTerritoryReportDraft:
     """Drop the sentences ``qa`` flagged from the exec summary, market bullets, and every action's
     rationale -- mirrors ``eoa.report.weekly._strip_uncited``. An action whose rationale becomes
     empty after stripping is dropped entirely (a recommendation with no surviving grounding is
-    worse than no recommendation, per docs/CONVENTIONS.md rule 5)."""
+    worse than no recommendation, per docs/CONVENTIONS.md rule 5).
+
+    BD-1: also cascades the drop onto any *dependent fragment* immediately following a dropped
+    sentence (``_is_dependent_fragment``) -- otherwise the leftover half of a compound sentence
+    survives as a truncated, conjunction-led fragment. A sentence starting with a conjunction
+    (ו/או/אך/כי) is dropped unconditionally: such a "sentence" is always the tail of a compound
+    sentence that ``split_sentences`` over-split, never a valid standalone claim on its own."""
     bad_refs = set(qa.bad_refs)
     uncited = set(qa.uncited_sentences)
     duplicates = set(qa.duplicate_sentences)
 
     def _clean(text: str, *, extra_drop: set[str] = frozenset()) -> str:
-        kept = []
+        kept: list[str] = []
+        prev_dropped = False
         for sentence in split_sentences(text):
-            if sentence in uncited or sentence in extra_drop:
+            # Absolute invariant (BD-1): a sentence starting with a conjunction is always dropped,
+            # regardless of what precedes it -- it is always the tail of a compound sentence that
+            # ``split_sentences`` over-split, never a valid standalone claim on its own.
+            drop = (
+                sentence in uncited
+                or sentence in extra_drop
+                or bool(bad_refs and set(citations_in(sentence)) & bad_refs)
+                or _starts_with_conjunction(sentence)
+                or (prev_dropped and _is_dependent_fragment(sentence))
+            )
+            if drop:
+                prev_dropped = True
                 continue
-            if bad_refs and set(citations_in(sentence)) & bad_refs:
-                continue
+            prev_dropped = False
             kept.append(sentence)
         return " ".join(kept)
 
@@ -946,7 +1355,9 @@ def build_bd_territory(
     territory: str, lookback_days: int = 90, *, period_end: dt.date | None = None,
     role: str = "resident", interactive: bool = False,
 ) -> ReportPaths:
-    """Collect -> draft -> QA-gate -> render docx/md/html -> persist, for one territory."""
+    """Collect -> draft -> perspective-gate -> QA-gate -> render docx/md/html -> persist, for one
+    territory. BD-1 (docs/qa/findings_Q3_r2.md): the perspective gate runs *before* the citation
+    QA gate, since a regenerated/edited draft still needs the normal citation check afterward."""
     code = normalize_country(territory)
     start, end = lookback_range(lookback_days, period_end)
 
@@ -955,6 +1366,7 @@ def build_bd_territory(
     tenders_data = collect_tenders_and_forecasts(code)
     competitors = collect_active_competitors(code, [it["id"] for it in items], start, end)
     conferences_data = collect_conferences_for_territory(code)
+    dormant_competitors = collect_dormant_watchlist_competitors(code, {c["name"] for c in competitors})
 
     citation_items = list(items)
     _extend_registry_with_source_items(citation_items, events)
@@ -972,10 +1384,42 @@ def build_bd_territory(
     competitors_block = format_competitors_block(competitors)
     conferences_block = format_conferences_block(conferences_data)
 
+    table_counts = BdTableCounts(
+        events=len(events),
+        tenders=len(tenders_data.get("tenders") or []),
+        forecasts=len(tenders_data.get("forecasts") or []),
+        competitors=len(competitors),
+        conferences=len(conferences_data.get("territory") or []),
+    )
+
     draft = draft_bd_territory(
         code, lookback_days, items_block, events_block, tenders_block, competitors_block, conferences_block,
-        has_items=bool(items), role=role, interactive=interactive,
+        has_items=bool(items), table_counts=table_counts, role=role, interactive=interactive,
     )
+    draft = _cap_draft_lengths(_strip_placeholder_echoes(_drop_empty_sections(draft)))
+
+    if items:
+        violations = _perspective_violations(draft, competitors)
+        if violations:
+            log.warning(
+                "bd_territory_perspective_violation_retrying",
+                territory=code,
+                actions=[a.action_he for a, _competitor in violations],
+            )
+            draft = _perspective_corrective_retry(
+                code, lookback_days, items_block, events_block, tenders_block, competitors_block,
+                conferences_block, draft, violations, role=role, interactive=interactive,
+            )
+            draft = _cap_draft_lengths(_strip_placeholder_echoes(_drop_empty_sections(draft)))
+            violations = _perspective_violations(draft, competitors)
+            if violations:
+                log.error(
+                    "bd_territory_perspective_violation_dropping",
+                    territory=code,
+                    actions=[a.action_he for a, _competitor in violations],
+                )
+                draft = _drop_perspective_violations(draft, violations)
+
     qa = _run_qa(draft, citation_items)
 
     if not qa.passed and items:
@@ -984,6 +1428,7 @@ def build_bd_territory(
             code, lookback_days, items_block, events_block, tenders_block, competitors_block, conferences_block,
             draft, qa, role=role, interactive=interactive,
         )
+        draft = _cap_draft_lengths(_strip_placeholder_echoes(_drop_empty_sections(draft)))
         qa = _run_qa(draft, citation_items)
 
     if not qa.passed and items:
@@ -1005,6 +1450,17 @@ def build_bd_territory(
             {
                 "title_he": "תמונת שוק בטריטוריה",
                 "body_he": _bullets_text(draft.market_bullets_he),
+                "position": "after_summary",
+            }
+        )
+    if len(competitors) < 3 and dormant_competitors:
+        extra_sections.append(
+            {
+                "title_he": "מתחרי מעקב ללא פעילות בחלון הזמן",
+                "body_he": (
+                    "לא נמצאה פעילות (אזכור, קשר גרפי או אירוע) בחלון הזמן שנבדק עבור מתחרי רשימת "
+                    f"המעקב הבאים: {', '.join(dormant_competitors)}."
+                ),
                 "position": "after_summary",
             }
         )

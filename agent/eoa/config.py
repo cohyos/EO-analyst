@@ -132,6 +132,22 @@ class ReportCfg(BaseModel):
     require_citations: bool = True
 
 
+class OurCompanyCfg(BaseModel):
+    """BD-1 (docs/qa/findings_Q3_r2.md): identifies "our" company for
+    ``eoa.report.bd_territory`` so the recommended-actions prompt (and its post-hoc validator)
+    can tell "our company" apart from watchlist competitors and frame every action from our own
+    point of view (approach buyers/partners, counter competitors, attend conferences ourselves,
+    respond to RFIs -- never promote a competitor). ``name``/``aliases`` are matched against
+    ``entities.name`` and free text the same way competitor names are; leaving the default name
+    unset is a visible signal (not a silent no-op) that the operator has not configured this yet.
+    """
+
+    name: str = "החברה שלנו (הגדר ב-config: bd_report.our_company)"
+    aliases: list[str] = Field(default_factory=list)
+    country: str = "IL"
+    is_israeli_industry: bool = True
+
+
 class BdReportCfg(BaseModel):
     """A11 "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (``eoa.report.bd_territory``).
 
@@ -139,10 +155,20 @@ class BdReportCfg(BaseModel):
     in its payload) builds a report for -- ISO-2 country codes or a recognized region code (EU),
     normalized via ``eoa.report.geography.normalize_country``. An on-demand report (``POST
     /api/bd/reports``) is never limited to this list -- it accepts any territory the caller asks
-    for."""
+    for.
+
+    ``our_company``/``perspective_he`` are BD-1's perspective fix: every recommended action must
+    be framed from ``our_company``'s point of view, never from a watchlist competitor's."""
 
     territories: list[str] = Field(default_factory=lambda: ["US", "IL", "EU", "GB", "IN", "KR"])
     lookback_days: int = 90
+    our_company: OurCompanyCfg = Field(default_factory=OurCompanyCfg)
+    perspective_he: str = (
+        "כתוב את כל סעיף הפעולות המומלצות מנקודת המבט של החברה שלנו בלבד (ראו our_company): "
+        "יזום פנייה לגורמים מזמינים/שותפים, מענה למכרזים/RFI, נוכחות שלנו בכנסים, ומעקב/התמודדות "
+        "מול מתחרים. מתחרה ברשימת המעקב (watchlist) מוזכר תמיד ככזה — אסור בשום פנים ואופן להמליץ "
+        "להציג, לקדם או לשווק את היכולות/המוצרים של מתחרה."
+    )
 
 
 class NotifyCfg(BaseModel):

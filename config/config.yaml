@@ -111,6 +111,19 @@ report:
 bd_report:   # A11: "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (eoa.report.bd_territory)
   territories: [US, IL, EU, GB, IN, KR]   # weekly scheduler default set; on-demand accepts any territory
   lookback_days: 90
+  # BD-1 (docs/qa/findings_Q3_r2.md): who "we" are, so recommended actions are always framed from
+  # our own point of view and never recommend promoting a watchlist competitor. EDIT `name` before
+  # relying on the BD report's recommended-actions section.
+  our_company:
+    name: "החברה שלנו (הגדר ב-config: bd_report.our_company)"
+    aliases: []
+    country: IL
+    is_israeli_industry: true
+  perspective_he: >
+    כתוב את כל סעיף הפעולות המומלצות מנקודת המבט של החברה שלנו בלבד (ראו our_company): יזום פנייה
+    לגורמים מזמינים/שותפים, מענה למכרזים/RFI, נוכחות שלנו בכנסים, ומעקב/התמודדות מול מתחרים. מתחרה
+    ברשימת המעקב (watchlist) מוזכר תמיד ככזה — אסור בשום פנים ואופן להמליץ להציג, לקדם או לשווק את
+    היכולות/המוצרים של מתחרה.
 
 notify:
   url: http://127.0.0.1:8091      # native ntfy (ADR-004); NTFY_URL env overrides
