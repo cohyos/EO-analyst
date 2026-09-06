@@ -1,0 +1,130 @@
+[
+  {
+    "vp": "desktop",
+    "theme": "dark",
+    "locale": "he",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "desktop",
+    "theme": "dark",
+    "locale": "he",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "desktop",
+    "theme": "dark",
+    "locale": "en",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "desktop",
+    "theme": "dark",
+    "locale": "en",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "desktop",
+    "theme": "light",
+    "locale": "he",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "desktop",
+    "theme": "light",
+    "locale": "he",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "desktop",
+    "theme": "light",
+    "locale": "en",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "desktop",
+    "theme": "light",
+    "locale": "en",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "dark",
+    "locale": "he",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "dark",
+    "locale": "he",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "dark",
+    "locale": "en",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "dark",
+    "locale": "en",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "light",
+    "locale": "he",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "light",
+    "locale": "he",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "light",
+    "locale": "en",
+    "screen": "morning",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  },
+  {
+    "vp": "mobile",
+    "theme": "light",
+    "locale": "en",
+    "screen": "report_open",
+    "type": "raw_literal",
+    "detail": "naval_eo_ir"
+  }
+]
