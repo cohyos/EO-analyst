@@ -9,4 +9,4 @@ applied for that round (0.5 auto / 0.5 judge blend per docs/QA_CONTINUOUS_LOOP.m
 | round | date | D1 | D2 | D3 | D4 | D5 | D6 | D7 | D8 | D9 | D10 | judge_merged | total |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 0 | 2026-09-06 | 33.3 | 100.0 | 100.0 | 81.2 | manual | 82.4 | 71.4 | 100.0 | 80.0 | manual | yes | 56.9 |
-| 1 | 2026-09-06 | 54.2 | 85.7 | 75.0 | 68.8 | manual | 82.4 | 50.0 | 100.0 | 80.0 | manual | no | 73.6 |
+| 1 | 2026-09-06 | 33.3 | 85.7 | 100.0 | 81.2 | manual | 82.4 | 50.0 | 100.0 | 80.0 | manual | yes | 56.3 |

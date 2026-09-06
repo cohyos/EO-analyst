@@ -53,16 +53,16 @@
     46,
     1442,
     191,
+    6285,
     1095,
     707,
     202,
     309,
+    6206,
     22,
     52,
     102,
-    3777,
-    5122,
-    596
+    3777
   ],
   "investigation_job_ids": [
     91,
@@ -75,21 +75,21 @@
   "domains": {
     "D1": {
       "domain": "D1",
-      "score_0_100": 54.2,
+      "score_0_100": 33.3,
       "n": 60,
       "note": "",
       "checks": [
         {
           "name": "subdomain_valid_vs_taxonomy",
-          "passed": true,
+          "passed": false,
           "weight": 2.0,
-          "evidence": "60/60 valid; bad ids: []"
+          "evidence": "59/60 valid; bad ids: [24]"
         },
         {
           "name": "no_eoir_gate_agreement",
-          "passed": false,
+          "passed": true,
           "weight": 2.0,
-          "evidence": "56/60 agree; disagreeing ids: [13, 16, 309, 102]"
+          "evidence": "60/60 agree; disagreeing ids: []"
         },
         {
           "name": "reason_score_level_consistency",
@@ -101,83 +101,83 @@
           "name": "hebrew_truncation_zero_hits",
           "passed": false,
           "weight": 2.0,
-          "evidence": "4 hits: ['item 15.triage_reason', 'item 17.summary_he', 'item 295.triage_reason', 'item 3777.triage_reason']"
+          "evidence": "5 hits: ['item 8.triage_reason', 'item 33.triage_reason', 'item 39.triage_reason', 'item 295.triage_reason', 'item 3777.triage_reason']"
         },
         {
           "name": "gershayim_no_ascii_quote",
-          "passed": true,
+          "passed": false,
           "weight": 1.5,
-          "evidence": "0 hits: []"
+          "evidence": "41 hits: ['item 1.summary_he', 'item 2.summary_he', 'item 3.so_what_he', 'item 5.summary_he', 'item 5.so_what_he', 'item 5.triage_reason', 'item 5.uncertainty_he', 'item 5.key_facts', 'item 5.key_facts', 'item 5.key_facts']"
         },
         {
           "name": "key_facts_no_duplicates",
-          "passed": true,
+          "passed": false,
           "weight": 1.0,
-          "evidence": "60/60 clean; bad ids: []"
+          "evidence": "58/60 clean; bad ids: [5, 10]"
         },
         {
           "name": "entities_mentioned_nonempty_in_scope",
           "passed": false,
           "weight": 1.5,
-          "evidence": "21/36 in-scope items have entities or key_facts; empty ids: [8, 16, 32, 35, 36, 37, 43, 58, 61, 71]"
+          "evidence": "29/31 in-scope items have entities or key_facts; empty ids: [22, 22]"
         }
       ]
     },
     "D2": {
       "domain": "D2",
       "score_0_100": 85.7,
-      "n": 36,
+      "n": 31,
       "note": "",
       "checks": [
         {
           "name": "summary_length_bounds",
           "passed": true,
           "weight": 1.5,
-          "evidence": "35/36 within [40,900] chars; bad: [71]"
+          "evidence": "30/31 within [40,900] chars; bad: [39]"
         },
         {
           "name": "hebrew_dominant",
           "passed": true,
           "weight": 2.0,
-          "evidence": "36/36 Hebrew-dominant; bad ids: []"
+          "evidence": "31/31 Hebrew-dominant; bad ids: []"
         },
         {
           "name": "no_model_chatter",
           "passed": true,
           "weight": 2.5,
-          "evidence": "36/36 clean; bad ids: []"
+          "evidence": "31/31 clean; bad ids: []"
         },
         {
           "name": "terminology_in_parens_when_relevant",
           "passed": false,
           "weight": 1.0,
-          "evidence": "19/36 carry a parenthesised term; missing ids (informational, high false-positive rate): [8, 11, 22, 24, 27, 32, 33, 37, 44, 58]"
+          "evidence": "18/31 carry a parenthesised term; missing ids (informational, high false-positive rate): [8, 11, 22, 27, 32, 33, 37, 44, 61, 62]"
         }
       ]
     },
     "D3": {
       "domain": "D3",
-      "score_0_100": 75.0,
-      "n": 453,
+      "score_0_100": 100.0,
+      "n": 480,
       "note": "",
       "checks": [
         {
           "name": "events_duplicate_groups_zero",
           "passed": true,
           "weight": 2.0,
-          "evidence": "36 events, 0 duplicate (item_id,kind,title) groups: []"
+          "evidence": "53 events, 0 duplicate (item_id,kind,title) groups: []"
         },
         {
           "name": "no_narrative_events",
           "passed": true,
           "weight": 2.0,
-          "evidence": "36/36 concrete; narrative event ids: []"
+          "evidence": "53/53 concrete; narrative event ids: []"
         },
         {
           "name": "entity_junk_gate",
-          "passed": false,
+          "passed": true,
           "weight": 2.0,
-          "evidence": "377/417 clean; junk entity ids: [527, 513, 519, 504, 804, 807, 806, 455, 303, 517]"
+          "evidence": "427/427 clean; junk entity ids: []"
         },
         {
           "name": "entity_kind_valid",
@@ -195,8 +195,8 @@
     },
     "D4": {
       "domain": "D4",
-      "score_0_100": 68.8,
-      "n": 4,
+      "score_0_100": 81.2,
+      "n": 6,
       "note": "",
       "checks": [
         {
@@ -207,9 +207,9 @@
         },
         {
           "name": "confidence_capped_by_outcome",
-          "passed": false,
+          "passed": true,
           "weight": 2.5,
-          "evidence": "job ids violating confidence caps: [46]"
+          "evidence": "job ids violating confidence caps: []"
         },
         {
           "name": "relevance_check_present_consistent",
@@ -219,9 +219,9 @@
         },
         {
           "name": "queries_anchored_to_question",
-          "passed": true,
+          "passed": false,
           "weight": 1.5,
-          "evidence": "job ids with at least one unanchored logged query: []"
+          "evidence": "job ids with at least one unanchored logged query: [46, 47, 86, 91]"
         }
       ]
     },
@@ -338,14 +338,14 @@
     "D9": {
       "domain": "D9",
       "score_0_100": 80.0,
-      "n": 64,
+      "n": 80,
       "note": "",
       "checks": [
         {
           "name": "tenders_open_rows_have_dates",
           "passed": true,
           "weight": 2.0,
-          "evidence": "9 tenders; open-with-no-dates ids: []"
+          "evidence": "5 tenders; open-with-no-dates ids: []"
         },
         {
           "name": "conferences_status_and_dates_real",
@@ -357,7 +357,7 @@
           "name": "sources_enabled_fetched_recently",
           "passed": false,
           "weight": 1.0,
-          "evidence": "23/40 fetched within 7d; stale ids: [14, 27, 39, 35, 40, 5, 29, 24, 25, 26]"
+          "evidence": "0/60 fetched within 7d; stale ids: [16, 17, 32, 22, 23, 9, 24, 26, 27, 18]"
         }
       ]
     },
@@ -369,6 +369,16 @@
       "checks": []
     }
   },
-  "judge_scores": {},
-  "weighted_total": 73.6
+  "judge_scores": {
+    "D1": 40.0,
+    "D2": 55.0,
+    "D3": 38.0,
+    "D4": 48.0,
+    "D5": 28.0,
+    "D6": 35.0,
+    "D7": 62.0,
+    "D8": 45.0,
+    "D9": 42.0
+  },
+  "weighted_total": 56.3
 }
