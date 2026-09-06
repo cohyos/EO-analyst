@@ -87,6 +87,7 @@ class TestClassifyBatchWiring:
 
         monkeypatch.setattr(classify, "is_cloud_batch_mode", lambda: False)
         monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit, item_ids=None: [])
+        monkeypatch.setattr(classify, "get_items_stuck_unclassified", lambda limit: [])
 
         def boom(*a, **k):
             raise AssertionError("classify_batch must not run in local mode")
@@ -105,6 +106,7 @@ class TestClassifyBatchWiring:
         ]
         monkeypatch.setattr(classify, "is_cloud_batch_mode", lambda: True)
         monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
+        monkeypatch.setattr(classify, "get_items_stuck_unclassified", lambda limit: [])
         marked = []
         monkeypatch.setattr(classify, "mark_stage", lambda item_id, stage: marked.append(item_id))
         persisted = []
@@ -145,6 +147,7 @@ class TestClassifyBatchWiring:
         items = [{"id": i, "title": "x", "clean_text": "y", "url": "http://x"} for i in range(1, 3)]
         monkeypatch.setattr(classify, "is_cloud_batch_mode", lambda: True)
         monkeypatch.setattr(classify, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
+        monkeypatch.setattr(classify, "get_items_stuck_unclassified", lambda limit: [])
         monkeypatch.setattr(classify, "mark_stage", lambda *a, **k: None)
 
         def fail_batch(chunk, *, role):

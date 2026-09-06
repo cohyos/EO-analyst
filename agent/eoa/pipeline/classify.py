@@ -354,7 +354,11 @@ def run_classify(
         # reach triage (it skips domain NULL) and never come back here (stage done) -- append
         # them so a persist failure is retried instead of stranding the item forever.
         seen = {it["id"] for it in items}
-        stuck = [it for it in get_items_stuck_unclassified(limit) if it["id"] not in seen]
+        try:
+            stuck = [it for it in get_items_stuck_unclassified(limit) if it["id"] not in seen]
+        except Exception as exc:  # a maintenance tail must never abort the main batch
+            log.warning("classify_stuck_lookup_failed", error=str(exc)[:160])
+            stuck = []
         if stuck:
             log.info("classify_reclassifying_stuck_items", n=len(stuck), ids=[it["id"] for it in stuck][:20])
             items = [*items, *stuck][:limit]
