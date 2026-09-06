@@ -321,6 +321,12 @@ export type AskSseEvent =
   // U11: sent once, after the answer finishes streaming -- citations enriched with
   // level/source_name/note for the sources footer (see AskCitation above).
   | { type: "sources"; items: AskCitation[] }
+  // Round 2 (docs/qa/loop/round_2_chat_fixes.md, D5 P2): sent 0-2 times, after streaming ends
+  // and before `sources`, when the server wholesale-replaces the streamed answer -- a citation
+  // repair pass that attached [n] markers, an "⚠ ללא ציטוטים" prefix when repair still couldn't,
+  // or an "⚠ ייתכן שהתשובה אינה עוסקת בשאלה" prefix from the topic-anchor guard. The UI must
+  // replace the message's whole `content` with `text`, not append it.
+  | { type: "answer_final"; text: string }
   | { type: "done" };
 
 // U8 (docs/adr/005-cloud-llm-cli.md + "Revision 2026-09-06"): local Ollama vs. cloud CLI

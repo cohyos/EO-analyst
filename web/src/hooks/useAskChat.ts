@@ -113,6 +113,14 @@ export function useAskChat() {
               prev.map((m) => (m.id === assistantId ? { ...m, sources: items } : m)),
             );
           },
+          // Round 2 (docs/qa/loop/round_2_chat_fixes.md): server-side citation repair / no-
+          // citations / off-topic-anchor guard wholesale-replaces the answer — overwrite, don't
+          // append, so the corrected text (or warning-prefixed text) is what's shown.
+          onAnswerFinal: (text) => {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, content: text } : m)),
+            );
+          },
           onMeta: (providerKind, providerModel) => {
             setMessages((prev) =>
               prev.map((m) =>

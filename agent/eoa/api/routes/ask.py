@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -29,6 +31,185 @@ router = APIRouter(tags=["ask"])
 # and only text at/after a confirmed sentinel match is diverted into `sources_buf` instead of a
 # `token` event.
 _SOURCES_SENTINEL = "===SOURCES_JSON==="
+
+# ---------------------------------------------------------------------------------------------
+# Round 2 (docs/qa/loop/round_2_chat_fixes.md, D5 P1): infinite-repetition-decoding loop guard.
+# Round 1's judge report (docs/qa/loop/round_1_judge.md) live-found two golden questions entering
+# an infinite repetition loop inside the "## פערים / מה לא ידוע" section -- 300-537s wall-clock,
+# 30-49K chars of near-identical bullets, only stopped by the client's own timeout. Three
+# independent, additive defenses:
+#   (a) Ollama sampling options on the chat call itself (`repeat_penalty`/`repeat_last_n` make the
+#       decoder itself less prone to looping; `num_predict` is a hard token-count backstop).
+#   (b) a streaming n-gram/line repetition detector over the last ~600 chars of *answer* text
+#       (never the trailing sources-JSON block) -- stops the generation the moment a loop starts,
+#       instead of waiting for a token or wall-clock ceiling to (eventually) end it.
+#   (c) a hard wall-clock ceiling per answer, independent of (b), for a degenerate pattern the
+#       n-gram heuristic doesn't happen to catch.
+# All three funnel into the same graceful-cut path: close the Ollama stream, truncate the answer
+# at its last clean sentence boundary, append a one-line system note, and still emit `sources`.
+# ---------------------------------------------------------------------------------------------
+
+_CHAT_REPEAT_PENALTY = 1.15
+_CHAT_REPEAT_LAST_N = 256
+# Budget split: ~1800 tokens for the visible analyst answer, plus a small ~300-token allowance so
+# the model still has room to emit the `===SOURCES_JSON===` tail after a full-length answer (the
+# streaming contract is one continuous generation, so this is one `num_predict` covering both).
+_CHAT_NUM_PREDICT_ANSWER = 1800
+_CHAT_NUM_PREDICT_SOURCES_TAIL = 300
+_CHAT_NUM_PREDICT = _CHAT_NUM_PREDICT_ANSWER + _CHAT_NUM_PREDICT_SOURCES_TAIL
+
+_MAX_ANSWER_SECONDS = 240.0
+
+_REPEAT_TAIL_CHARS = 600
+_REPEAT_MIN_PATTERN_CHARS = 40
+_REPEAT_MIN_COUNT = 3
+
+_REPETITION_NOTE = "\n\n---\n_(התשובה קוצרה: המודל נכנס ללולאת חזרה.)_"
+_TIMEOUT_NOTE = "\n\n---\n_(התשובה קוצרה: חריגה ממגבלת הזמן.)_"
+
+_NO_CITATION_PREFIX = "⚠ ללא ציטוטים: "
+_OFF_TOPIC_PREFIX = "⚠ ייתכן שהתשובה אינה עוסקת בשאלה: "
+
+_SENTENCE_END_RE = re.compile(r"[.!?״]")
+
+
+def _repetition_detected(tail: str) -> bool:
+    """Best-effort loop detector over ``tail`` (the trailing ``_REPEAT_TAIL_CHARS`` of streamed
+    *answer* text -- never the sources-JSON tail). Either signal triggers:
+
+    (a) a substring of >= ``_REPEAT_MIN_PATTERN_CHARS`` chars (the tail's own ending) occurs
+        >= ``_REPEAT_MIN_COUNT`` times within ``tail``;
+    (b) the same non-blank line occurs >= ``_REPEAT_MIN_COUNT`` times among the recent lines.
+
+    Deliberately simple/cheap (called after every streamed chunk): no false-negative tolerance
+    for "close but not exact" repeats is attempted -- round 1's finding was a verbatim-cycling
+    loop, not a paraphrase loop.
+    """
+    if not tail:
+        return False
+    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    if len(lines) >= _REPEAT_MIN_COUNT:
+        counts: dict[str, int] = {}
+        for ln in lines[-12:]:
+            counts[ln] = counts.get(ln, 0) + 1
+            if counts[ln] >= _REPEAT_MIN_COUNT:
+                return True
+    n = len(tail)
+    if n >= _REPEAT_MIN_PATTERN_CHARS * _REPEAT_MIN_COUNT:
+        pattern = tail[n - _REPEAT_MIN_PATTERN_CHARS :]
+        if tail.count(pattern) >= _REPEAT_MIN_COUNT:
+            return True
+    return False
+
+
+def _truncate_at_sentence(text: str) -> str:
+    """Cut ``text`` at its last clean sentence boundary (``.``/``!``/``?``/``״``), dropping a
+    trailing partial sentence left mid-word by an aborted generation. Returns ``text`` unchanged
+    (just whitespace-trimmed) if no boundary is found at all."""
+    matches = list(_SENTENCE_END_RE.finditer(text))
+    if not matches:
+        return text.rstrip()
+    return text[: matches[-1].end()].rstrip()
+
+
+def _question_hash(question: str) -> str:
+    """Short, non-reversible correlation id for logging -- never the question text itself."""
+    return hashlib.sha256(question.encode("utf-8")).hexdigest()[:12]
+
+
+# Live-verified 2026-09-06 against docs/qa/loop/golden_questions.json Q3 (Greece/LORA): raw
+# `extract_anchors()` output for that question is
+# `['עסקת', 'ה-LORA', 'היוונית', 'Greece', 'עבור', 'התעשייה', 'הביטחונית']` -- generic Hebrew
+# words ("עבור"/"התעשייה"/"הביטחונית") trivially appear in *any* EO/IR analyst answer regardless
+# of topic, so the plain "any anchor present" check below never fired even though the answer
+# never once mentioned LORA (round 1's exact D5 finding, still reproduced live before this fix).
+# `docs/CONVENTIONS.md` rule 3 keeps technical/product terms and proper nouns in English inside
+# Hebrew prose ("מונחים מקצועיים באנגלית בסוגריים בהופעה הראשונה") -- so the embedded Latin-script
+# run inside a raw anchor (e.g. "ה-LORA" -> "LORA") is both the strongest topic-drift signal and
+# reliably present in a genuinely on-topic answer; generic Hebrew anchors are the fallback only
+# when a question has no Latin anchor at all (e.g. a fully Hebrew-named program).
+_LATIN_ANCHOR_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+
+
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}[ \t].*$", re.MULTILINE)
+
+
+def _strip_markdown_headings(text: str) -> str:
+    """Drop markdown heading lines (``# ...``/``## ...``) before the anchor check below.
+
+    Live-verified 2026-09-06 (docs/qa/loop/golden_questions.json Q3, Greece/LORA): a model can
+    "pass" a naive substring anchor check by echoing the anchor in a heading it generated by
+    lightly rephrasing the question (e.g. a spurious ``# עסקת ה-LORA היוונית...`` H1 -- itself
+    already against `ask_answer_format.md`'s own rule that the direct-answer section carries no
+    heading at all) while the entire substantive body discusses something else completely. This
+    reproduced round 1's Q3 finding again, unchanged, even after `_strong_anchors` fixed the
+    generic-Hebrew-anchor false negative: "LORA" appeared exactly once, only in that echoed
+    heading, while the rest of the answer stayed on an unrelated Greek air-defense deal.
+    """
+    return _MARKDOWN_HEADING_RE.sub("", text)
+
+
+_FIRST_SECTION_HEADING_RE = re.compile(r"^###\s", re.MULTILINE)
+
+
+def _answer_body_for_anchor_check(text: str) -> str:
+    """The answer's substantive part -- ``### עובדות מרכזיות`` / ``### הערכת האנליסט`` / ``###
+    פערים`` -- with markdown headings stripped, excluding the leading "תשובה ישירה" paragraph.
+
+    Live-verified 2026-09-06 (docs/qa/loop/golden_questions.json Q3, Greece/LORA): stripping
+    headings alone (``_strip_markdown_headings``) was not enough -- on a second live run, the
+    model instead echoed "LORA" once in the *opening sentence itself* ("עסקת ה-LORA היוונית היא
+    אירוע אסטרטגי...") and then spent the entire rest of the answer, including every "עובדות
+    מרכזיות"/"הערכת האנליסט" bullet, on an unrelated Greek air-defense deal that never mentions
+    LORA again. `ask_answer_format.md` mandates a direct-answer paragraph with no heading before
+    the first ``###`` section, which is exactly where a model can trivially restate the question's
+    own subject without engaging with it -- so the anchor check below looks only at what follows
+    the first ``###``, falling back to the full (heading-stripped) text when no section marker is
+    present at all (e.g. a very short answer with no sections).
+    """
+    m = _FIRST_SECTION_HEADING_RE.search(text)
+    body = text[m.start() :] if m else text
+    return _strip_markdown_headings(body)
+
+
+def _strong_anchors(anchors: list[str]) -> list[str]:
+    """Embedded Latin-script tokens (len >= 2) pulled out of each raw ``extract_anchors`` anchor,
+    deduplicated case-insensitively, in order of first appearance."""
+    strong: list[str] = []
+    seen: set[str] = set()
+    for anchor in anchors:
+        for m in _LATIN_ANCHOR_RE.finditer(anchor):
+            token = m.group(0)
+            if len(token) < 2:
+                continue
+            key = token.casefold()
+            if key not in seen:
+                seen.add(key)
+                strong.append(token)
+    return strong
+
+
+_PAREN_SPAN_RE = re.compile(r"\(([^()]*)\)")
+
+
+def _primary_anchors(question: str, strong_anchors: list[str]) -> list[str]:
+    """``strong_anchors`` that do NOT come from a parenthetical gloss in ``question`` (e.g. the
+    "(Greece)"/"(Elbit)"/"(C-UAS)" English translations glossing a preceding Hebrew term) --
+    falls back to every strong anchor when none of them is primary (e.g. the subject itself is
+    what's glossed, as in "מגן אור (Iron Beam)").
+
+    Live-verified 2026-09-06 (docs/qa/loop/golden_questions.json, all 8 questions): a parenthetical
+    gloss is optional/interchangeable with its Hebrew equivalent in a genuinely good answer --
+    Q1/Q5/Q8's correct, on-topic answers never bothered to also say "Bradley"/"C-UAS"/"Elbit" in
+    Latin script, only the Hebrew term. The non-parenthetical anchor, by contrast, is the one
+    genuinely diagnostic of topic drift: Q3's answer stayed on an unrelated Greek air-defense deal
+    and happened to quote an English source sentence containing "Greece" (the glossed anchor),
+    which let it slip past a plain "any strong anchor" check even though "LORA" -- the actual,
+    non-parenthetical subject of the question -- never appeared anywhere in the answer body.
+    """
+    gloss_text = " ".join(m.group(1) for m in _PAREN_SPAN_RE.finditer(question)).casefold()
+    primary = [a for a in strong_anchors if a.casefold() not in gloss_text]
+    return primary or strong_anchors
 
 
 def _parse_source_notes(buf: str) -> dict[int, str]:
@@ -72,6 +253,36 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
 
+def _run_citation_repair(messages: list[dict[str, Any]], answer_text: str, provider: str | None) -> str | None:
+    """Round 2 P2 (docs/qa/loop/round_2_chat_fixes.md): one short, non-streamed corrective pass
+    that asks the model to rewrite ``answer_text`` with `[n]` citations attached, reusing the
+    exact same system+sources context the original (uncited) answer saw. Returns ``None`` on any
+    failure (LLM error, resource unavailable, ...) -- the caller falls back to a visible
+    "no citations" prefix rather than ever raising out of the guard.
+
+    Role: always ``resident`` -- the same model that just produced ``answer_text`` and is still
+    warm from that call (``ollama.keep_alive``). Live-verified 2026-09-06 (docs/CONVENTIONS.md's
+    12 GB VRAM card): resident (~7.5 GB) and ``light`` (~6.7 GB) don't fit together, so routing
+    this corrective pass through ``light`` forces an unload+reload swap that queued for minutes
+    behind the resource gate -- exactly the wrong trade for a pass meant to be short and cheap.
+    """
+    role = "resident"
+    try:
+        repair_messages = services.ask_citation_repair_messages(messages, answer_text)
+        result = ollama_client.chat(
+            role,
+            repair_messages,
+            task="react",
+            options={"num_predict": 900},
+            interactive=True,
+            provider=provider,
+        )
+        return result.content.strip() or None
+    except Exception as exc:  # a failed repair pass must never break the answer itself
+        log.warning("ask.citation_repair_failed", error=str(exc))
+        return None
+
+
 @router.post("/ask")
 async def ask(body: AskRequest) -> StreamingResponse:
     async def gen() -> AsyncIterator[str]:
@@ -89,6 +300,9 @@ async def ask(body: AskRequest) -> StreamingResponse:
             # local, single-user deployment (see docs/CONVENTIONS.md), so driving it directly
             # inside the async generator (rather than off-loading to a thread) is an accepted
             # trade-off -- it blocks the event loop only for the duration of this one request.
+            # (This also means the wall-clock guard below can only observe elapsed time between
+            # chunks Ollama actually sends -- a total hang with zero output isn't preemptable
+            # without a separate thread, which this single-user deployment doesn't need.)
             # U11: hold back at most `len(_SOURCES_SENTINEL) - 1` trailing characters of `pending`
             # at any time -- that's the most that could still turn into the sentinel once the next
             # chunk arrives, so ordinary text streams through with no perceptible delay. Once the
@@ -97,27 +311,122 @@ async def ask(body: AskRequest) -> StreamingResponse:
             pending = ""
             in_sources = False
             sources_buf = ""
-            for chunk in ollama_client.chat_stream(
-                "resident", messages, task="react", interactive=True, provider=body.provider
-            ):
-                if in_sources:
-                    sources_buf += chunk
-                    continue
-                pending += chunk
-                idx = pending.find(_SOURCES_SENTINEL)
-                if idx != -1:
-                    if idx > 0:
-                        yield _sse({"type": "token", "text": pending[:idx]})
-                    in_sources = True
-                    sources_buf = pending[idx + len(_SOURCES_SENTINEL) :]
+            answer_text = ""
+            tail_buf = ""
+            abort_note: str | None = None
+            t_answer_start = time.monotonic()
+
+            stream_gen = ollama_client.chat_stream(
+                "resident",
+                messages,
+                task="react",
+                interactive=True,
+                provider=body.provider,
+                options={
+                    "repeat_penalty": _CHAT_REPEAT_PENALTY,
+                    "repeat_last_n": _CHAT_REPEAT_LAST_N,
+                    "num_predict": _CHAT_NUM_PREDICT,
+                },
+            )
+            try:
+                for chunk in stream_gen:
+                    if time.monotonic() - t_answer_start > _MAX_ANSWER_SECONDS:
+                        log.warning(
+                            "ask.wallclock_abort",
+                            question_hash=_question_hash(body.question),
+                            seconds=_MAX_ANSWER_SECONDS,
+                        )
+                        abort_note = _TIMEOUT_NOTE
+                        break
+                    if in_sources:
+                        sources_buf += chunk
+                        continue
+                    pending += chunk
+                    idx = pending.find(_SOURCES_SENTINEL)
+                    if idx != -1:
+                        if idx > 0:
+                            emitted = pending[:idx]
+                            yield _sse({"type": "token", "text": emitted})
+                            answer_text += emitted
+                        in_sources = True
+                        sources_buf = pending[idx + len(_SOURCES_SENTINEL) :]
+                        pending = ""
+                        continue
+                    safe_len = max(0, len(pending) - (len(_SOURCES_SENTINEL) - 1))
+                    if safe_len > 0:
+                        emitted = pending[:safe_len]
+                        yield _sse({"type": "token", "text": emitted})
+                        answer_text += emitted
+                        pending = pending[safe_len:]
+                        tail_buf = (tail_buf + emitted)[-_REPEAT_TAIL_CHARS:]
+                        if _repetition_detected(tail_buf):
+                            log.warning(
+                                "ask_repetition_abort",
+                                question_hash=_question_hash(body.question),
+                                chars=len(answer_text),
+                            )
+                            abort_note = _REPETITION_NOTE
+                            break
+            finally:
+                # `chat_stream` is a generator (has `.close()`, which propagates `GeneratorExit`
+                # through its `with c.stream(...)` and actually tears down the HTTP connection on
+                # an abort); a test double or a plain-iterator stand-in may not be -- best-effort.
+                close = getattr(stream_gen, "close", None)
+                if callable(close):
+                    close()
+
+            if abort_note is not None:
+                # `pending` may still hold up to `len(_SOURCES_SENTINEL) - 1` real answer chars
+                # held back only in case they turned out to be the start of the sentinel -- on
+                # abort they never will, so flush them like a normal end-of-stream would before
+                # truncating (for the guards below / a later full-replace) and appending the note.
+                if pending and not in_sources:
+                    yield _sse({"type": "token", "text": pending})
+                    answer_text += pending
                     pending = ""
-                    continue
-                safe_len = max(0, len(pending) - (len(_SOURCES_SENTINEL) - 1))
-                if safe_len > 0:
-                    yield _sse({"type": "token", "text": pending[:safe_len]})
-                    pending = pending[safe_len:]
-            if pending:
+                answer_text = _truncate_at_sentence(answer_text)
+                yield _sse({"type": "token", "text": abort_note})
+                answer_text += abort_note
+            elif pending and not in_sources:
                 yield _sse({"type": "token", "text": pending})
+                answer_text += pending
+
+            # Round 2 P2 (docs/qa/loop/round_2_chat_fixes.md): live-verified 2026-09-06 that 3/5
+            # cleanly-completed answers had zero inline [n] despite a populated sources array.
+            if citations and not re.search(r"\[\d+\]", answer_text):
+                corrected = await run_in_threadpool(
+                    _run_citation_repair, messages, answer_text, body.provider
+                )
+                if corrected and re.search(r"\[\d+\]", corrected):
+                    answer_text = corrected
+                else:
+                    answer_text = _NO_CITATION_PREFIX + answer_text
+                yield _sse({"type": "answer_final", "text": answer_text})
+
+            # Round 2 P2 topic-substitution guard (docs/qa/loop/round_2_chat_fixes.md, D5 Q3
+            # Greece/LORA finding): the answer must mention at least one deterministic anchor
+            # (proper noun/acronym/number) pulled from the question itself, reusing
+            # `eoa.search.deep_search.extract_anchors` (same anchoring already used to gate deep
+            # investigations) -- an answer that never touches any anchor almost certainly drifted
+            # onto an unrelated but superficially similar topic. `_strong_anchors` narrows to the
+            # Latin-script tokens among them (generic Hebrew anchors are too weak a signal on their
+            # own); `_primary_anchors` further narrows to the non-parenthetical ones when any exist
+            # (a "(Greece)"/"(Elbit)"-style gloss is too easy to satisfy by incidental quotation --
+            # see its docstring for the live Q3 repro this closes).
+            from eoa.search.deep_search import extract_anchors
+
+            anchors = extract_anchors(body.question)
+            strong_anchors = _strong_anchors(anchors)
+            check_anchors = _primary_anchors(body.question, strong_anchors) if strong_anchors else anchors
+            anchor_search_text = _answer_body_for_anchor_check(answer_text).casefold()
+            if check_anchors and not any(a.casefold() in anchor_search_text for a in check_anchors):
+                log.warning(
+                    "ask.anchor_miss",
+                    question_hash=_question_hash(body.question),
+                    anchors=check_anchors,
+                )
+                answer_text = _OFF_TOPIC_PREFIX + answer_text
+                yield _sse({"type": "answer_final", "text": answer_text})
 
             notes = _parse_source_notes(sources_buf) if in_sources else {}
             sources: list[dict[str, Any]] = [{**c, "note": notes.get(c["n"])} for c in citations]

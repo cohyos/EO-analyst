@@ -689,6 +689,7 @@ export const realApi: ApiClient = {
             else if (evt.type === "citations") handlers.onCitations(arr(evt.items));
             else if (evt.type === "meta") handlers.onMeta?.(str(evt.provider), str(evt.model));
             else if (evt.type === "sources") handlers.onSources?.(arr(evt.items));
+            else if (evt.type === "answer_final") handlers.onAnswerFinal?.(str(evt.text));
             else if (evt.type === "done") handlers.onDone();
           }
         }

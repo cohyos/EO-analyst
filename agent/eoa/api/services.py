@@ -1283,12 +1283,39 @@ def investigation_log_since(job_id: int, last_id: int) -> tuple[list[dict[str, A
 
 _ASK_ITEM_FIELDS = (
     "i.id, i.title, i.url, i.clean_text, i.summary_he, i.key_facts, i.security_status, "
-    "i.domain, i.level, s.name AS source_name"
+    "i.domain, i.level, i.report_kind, i.entities_mentioned, s.name AS source_name"
 )
 # U11 (2026-09-06 answer-format rewrite): the sources footer needs a triage level + a
 # human-readable source name (not just the item's own scope-taxonomy `domain`), so every
 # `_ASK_ITEM_FIELDS` query now joins `sources` the same way `services.get_item`/`list_items` do.
+# Round 2 (docs/qa/loop/round_2_chat_fixes.md): also carries `report_kind` (verified_report /
+# company_pr / academic / tender / patent / regulatory / science, config/taxonomy.yaml) and
+# `entities_mentioned` so `ask_build_messages` can (a) label each source's kind for the model --
+# an arXiv paper must never be presented as a government RFI, D5 finding Q4/Q7 -- and (b) inject
+# the canonical entity names actually present in the retrieved corpus, to guard against the model
+# substituting a similar-sounding system for the real one (D5 Q2: Iron Beam <-> Iron Dome/Tamir).
 _ASK_ITEM_JOIN = "items i LEFT JOIN sources s ON s.id = i.source_id"
+
+# Round 2 D5 fix (docs/qa/loop/round_2_chat_fixes.md): human-readable Hebrew/English source-type
+# labels for `items.report_kind` (config/taxonomy.yaml `report_kinds`), shown in the `[n]` source
+# header the model sees -- so it states plainly whether a source is a verified report, a company
+# PR, an academic paper, a tender/RFI, a patent, etc., rather than presenting one as another.
+_REPORT_KIND_LABELS: dict[str, str] = {
+    "verified_report": "דיווח מאומת",
+    "company_pr": "הודעת חברה (PR)",
+    "rumor_speculation": "שמועה/ספקולציה",
+    "academic": "מאמר אקדמי/arXiv",
+    "tender": "מכרז/RFI ממשלתי",
+    "patent": "פטנט",
+    "regulatory": "רגולציה",
+    "science": "מדע/מחקר",
+}
+
+
+def _report_kind_label(report_kind: str | None) -> str:
+    if not report_kind:
+        return "לא מסווג"
+    return _REPORT_KIND_LABELS.get(report_kind, report_kind)
 
 # U9 (docs/REVIEW_2026-09-05.md): tokens that mix letters and digits (program/model names like
 # "XM30", "F-35") are exactly the kind of rare, specific term vector similarity blurs past --
@@ -1426,11 +1453,46 @@ def ask_build_messages(
     before it ever reaches the client, see `_split_sources_json`/`_parse_source_notes` there).
     Citations here additionally carry `level`/`source_name` (now selected by `ask_retrieve`) so
     the UI's sources footer never needs a second round-trip just to render a badge.
+
+    Round 2 (docs/qa/loop/round_2_chat_fixes.md, D5 conflation/hallucination fixes): the system
+    prompt is further extended with (a) the canonical entity names actually present in the
+    retrieved corpus -- so the model cannot silently substitute a similar-sounding system for the
+    real one (e.g. מגן אור/Iron Beam vs כיפת ברזל/Iron Dome, live-found in Q2) -- (b) each `[n]`
+    source block now states its `report_kind` in plain Hebrew (verified report / company PR /
+    academic paper / tender-RFI / ...), so an arXiv paper can never be read back as a government
+    RFI (live-found in Q4/Q7) -- and (c) an explicit compound-premise-verification rule: root-caused
+    live against golden Q3 ("עסקת ה-LORA היוונית (Greece)") after `ask.py`'s deterministic
+    anchor guard (see its own docstrings) still couldn't reliably catch this case -- the DB
+    genuinely holds real LORA items (about Germany) AND a real Greek air-defense item (unrelated to
+    LORA) side by side in the same retrieval; the model was never missing LORA context, it just
+    silently answered only from the more prominent Greek item and synthesized a "LORA deal with
+    Greece" story neither source actually supports. (c) tells the model to verify that a source
+    actually connects the question's combined terms before answering them as one story, and to
+    name the gap explicitly (what was found separately) instead of merging unrelated sources.
     """
     from eoa.llm import prompts
     from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, wrap_data
 
     system = prompts.render("system_analyst", data_guard=DATA_GUARD_SYSTEM)
+
+    ordered = sorted(retrieved, key=lambda r: 0 if r.get("_is_context") else 1)
+
+    canonical_entities: list[str] = []
+    seen_entities: set[str] = set()
+    for row in ordered:
+        for name in row.get("entities_mentioned") or []:
+            key = (name or "").strip()
+            if key and key.casefold() not in seen_entities:
+                seen_entities.add(key.casefold())
+                canonical_entities.append(key)
+    if canonical_entities:
+        system += (
+            "\n\nשמות הישויות/המערכות הבאים מופיעים במפורש במקורות שסופקו לך בשיחה זו -- "
+            "השתמש בשמות הישויות **בדיוק** כפי שהם מופיעים במקורות; אסור להחליף מערכת במערכת "
+            'דומה (למשל מגן אור ≠ כיפת ברזל; Iron Beam ≠ Iron Dome/Tamir). רשימת השמות: '
+            + ", ".join(canonical_entities)
+        )
+
     system += (
         "\n\nענה על שאלת המשתמש. סדר עדיפויות: (1) פריטים המסומנים 'הקשר מצורף' -- אלה צורפו "
         "לשיחה במפורש על ידי המשתמש; אם הם רלוונטיים לשאלה, חובה להתבסס עליהם ולצטט אותם ראשונים, "
@@ -1438,16 +1500,22 @@ def ask_build_messages(
         "על ידי חיפוש ויש להשתמש בהם כתמיכה נוספת. כל משפט עובדתי המבוסס על פריט חייב לסמן אותו "
         "ב-[n]. אם התשובה אינה נמצאת באף פריט מסופק, מותר להיעזר בידע כללי -- אך יש לציין זאת "
         "במפורש ('בהתבסס על ידע כללי, לא מהמאגר'), ולעולם לא להציג ידע כללי כאילו מקורו בפריטים. "
-        "אם גם בפריטים וגם בידע הכללי אין מענה -- כתוב זאת בפירוש ואל תמציא.\n\n"
+        "אם גם בפריטים וגם בידע הכללי אין מענה -- כתוב זאת בפירוש ואל תמציא. שים לב לסוג כל מקור "
+        "(מצוין ליד מספרו) -- לעולם אל תציג מאמר אקדמי כאילו הוא מכרז/RFI ממשלתי או להיפך. "
+        "אם השאלה משלבת כמה מונחים ספציפיים יחד (למשל שם מערכת/תוכנית מסוימת יחד עם מדינה או "
+        "גורם מסוים) -- ודא שקיים מקור המקשר ביניהם בפועל לפני שאתה עונה עליהם כסיפור אחד. אם "
+        "המונחים מופיעים רק במקורות נפרדים ובלתי-קשורים (למשל מקור אחד עוסק במערכת X מול מדינה "
+        "א', ומקור אחר עוסק בעסקה שונה לגמרי מול מדינה ב') -- אסור לשלב אותם לכדי סיפור אחד "
+        "מומצא; יש לציין זאת במפורש כפער ('לא נמצא מקור המקשר בין X למדינה ב'; נמצאו בנפרד: ...') "
+        "ולפרט מה כן נמצא בכל מקור בנפרד.\n\n"
         + prompts.render("ask_answer_format")
     )
-
-    ordered = sorted(retrieved, key=lambda r: 0 if r.get("_is_context") else 1)
 
     citations: list[dict[str, Any]] = []
     blocks: list[str] = []
     for i, row in enumerate(ordered, start=1):
         is_context = bool(row.get("_is_context"))
+        kind_label = _report_kind_label(row.get("report_kind"))
         if is_context:
             key_facts = row.get("key_facts") or []
             facts_block = "\nעובדות מפתח:\n" + "\n".join(f"- {f}" for f in key_facts) if key_facts else ""
@@ -1455,10 +1523,10 @@ def ask_build_messages(
                 f"תקציר: {row.get('summary_he') or ''}{facts_block}\n\n"
                 f"טקסט מלא (קטע):\n{(row.get('clean_text') or '')[:1500]}"
             )
-            label = 'הקשר מצורף (צוין ע"י המשתמש)'
+            label = f'הקשר מצורף (צוין ע"י המשתמש) | סוג מקור: {kind_label}'
         else:
             body = (row.get("clean_text") or row.get("summary_he") or "")[:4000]
-            label = "מהמאגר (אוחזר לפי השאלה)"
+            label = f"מהמאגר (אוחזר לפי השאלה) | סוג מקור: {kind_label}"
         blocks.append(
             f"[{i}] ({label}) {row.get('title') or ''}\n{wrap_data(body, row['id'], src=row.get('url') or '')}"
         )
@@ -1470,6 +1538,7 @@ def ask_build_messages(
                 "url": row.get("url"),
                 "level": row.get("level"),
                 "source_name": row.get("source_name"),
+                "report_kind": row.get("report_kind"),
             }
         )
     context_block = "\n\n".join(blocks) if blocks else "(לא נמצאו פריטים רלוונטיים)"
@@ -1481,6 +1550,34 @@ def ask_build_messages(
             messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": f"שאלה: {question}\n\nמקורות:\n{context_block}"})
     return messages, citations
+
+
+# Round 2 (docs/qa/loop/round_2_chat_fixes.md, D5 P2 citation fix): live-verified 2026-09-06 that
+# 3 of 5 cleanly-completed chat answers carried zero inline `[n]` citations despite a populated
+# sources array. `ask.py`'s SSE generator runs this as a one-shot, non-streamed corrective pass
+# (short `num_predict`) when the finished answer has no `[n]` at all but at least one source was
+# retrieved -- reusing the exact same system+sources context the original answer saw, so the
+# rewrite has everything it needs to attach citations without re-retrieving anything.
+_CITATION_REPAIR_INSTRUCTION = (
+    "התשובה שכתבת למעלה אינה מכילה אף סימון [n] אחד, למרות שסופקו לך מקורות ממוספרים. כתוב "
+    "מחדש בדיוק את אותה תשובה -- זהה בתוכן, במבנה ובאורך -- אך הוסף סימון [n] בסוף כל משפט "
+    "עובדתי המבוסס על אחד המקורות שסופקו למעלה (לפי מספורם [1]/[2]/וכו'). אם משפט מסוים אינו "
+    "מבוסס על אף מקור (למשל פרשנות אנליטית), השאר אותו ללא [n]. אל תוסיף הקדמות, הערות או הסברים "
+    "-- החזר אך ורק את גוף התשובה המתוקן."
+)
+
+
+def ask_citation_repair_messages(
+    messages: list[dict[str, Any]], answer_text: str
+) -> list[dict[str, Any]]:
+    """Build the one-shot corrective-pass messages for the zero-citation guard above: the exact
+    system+history+sources messages the original answer was built from, plus that answer as an
+    assistant turn, plus an instruction to rewrite it with `[n]` citations attached."""
+    return [
+        *messages,
+        {"role": "assistant", "content": answer_text},
+        {"role": "user", "content": _CITATION_REPAIR_INSTRUCTION},
+    ]
 
 
 # --------------------------------------------------------------------------

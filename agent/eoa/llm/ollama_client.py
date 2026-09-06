@@ -921,6 +921,13 @@ def chat_stream(
     ``chat()`` call and yields the full answer back in small chunks -- the SSE
     contract (a sequence of ``{"type": "token", "text": ...}`` deltas) stays identical
     for the UI either way.
+
+    Round 2 (docs/qa/loop/round_2_chat_fixes.md, D5 P1): unlike ``chat()``/``_ollama_chat``, this
+    path previously sent no ``num_predict`` at all -- a real contributing factor to round 1's
+    infinite-repetition-loop finding (nothing capped total output length once a loop started).
+    It now falls back to the same ``ollama.num_predict[task]`` config default ``chat()`` uses,
+    same as ``num_ctx`` already did; a caller's own ``options["num_predict"]`` (e.g. ``/api/ask``'s
+    tighter interactive-chat budget) still wins via the merge order below.
     """
     resolved = _resolve_provider(provider)
     if resolved != "ollama":
@@ -938,7 +945,12 @@ def chat_stream(
         "messages": messages,
         "stream": True,
         "keep_alive": keep_alive or s.ollama.keep_alive,
-        "options": {**s.ollama.options, "num_ctx": _num_ctx(task, spec), **(options or {})},
+        "options": {
+            **s.ollama.options,
+            "num_ctx": _num_ctx(task, spec),
+            "num_predict": s.ollama.num_predict.get(task, 2000),
+            **(options or {}),
+        },
     }
     if think is not None:
         payload["think"] = think

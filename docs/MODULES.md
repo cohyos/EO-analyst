@@ -7590,3 +7590,172 @@ D3 כבר 100.0 (הממצאים הסמנטיים של השופט לא נתפסי
 `test_report_qa.py`+`test_docx_builder.py` (דוגמת-שכבה-legacy עברה מ-`WeeklyReportDraft` ל-
 `MonthlyReportDraft`), `test_report_weekly_monthly.py` (fixture שבועי משוחזר במבנה המובנה החדש).
 כל הקבצים החדשים/מורחבים ירוקים.
+
+## Model bake-off harness (D1/D2 quality-gap measurement, docs/qa/loop/BAKEOFF.md)
+
+Files: `agent/eoa/qa/bakeoff.py`, `scripts/bakeoff_golden.py`, `tests/unit/test_bakeoff.py`,
+`docs/qa/loop/bakeoff/*.json`, `docs/qa/loop/BAKEOFF.md`.
+
+### Purpose
+
+Answers "how much of the D1/D2 content-quality gap (`docs/qa/loop/round_1_judge.md`: D1=40,
+D2=55) is the *resident model itself*, versus the prompts/schemas around it" by re-running the
+exact same classify/triage/analyze stage functions and the "ask the analyst" chat builder against
+a swappable set of candidate LLMs — local Ollama models substituted into the `resident` role, or
+cloud CLI providers (`agy`/`claude`, `docs/adr/005-cloud-llm-cli.md`) already installed and
+authenticated on this machine — at zero incremental cost (local weights or an existing
+subscription CLI, never a paid per-token API key). This is a measurement tool only: it never
+persists to `items`/`entities`/`events`, never writes to `config/*.yaml`, and never sets
+`EOA_PIPELINE`.
+
+### `eoa.qa.bakeoff` (core harness)
+
+- `Candidate` — one entrant: `kind="ollama"` (a `config/models.yaml` key, substituted into a
+  config role) or `kind="cloud"` (a `chat()`/`chat_structured()` provider string, e.g.
+  `"claude:claude-sonnet-5"`). `CANDIDATES` holds the task's A-F list; availability (installed /
+  authenticated) is checked at run time by the CLI script, not hardcoded here.
+- `candidate_context(candidate, role="resident")` — a context manager that routes every
+  `classify_item`/`triage_item`/`analyze_item` call made inside the `with` block to `candidate`,
+  then restores exactly what it changed:
+  - **ollama**: temporarily repoints the in-process `settings().models[role]` singleton dict at
+    `candidate.model_key` (never written to `config/config.yaml` on disk — restored on exit even
+    on an exception) so the stage functions' own `chat_structured(role, ...)` calls resolve to
+    that model through the unmodified `gate().acquire(role)` path.
+  - **cloud**: monkeypatches the `chat_structured` NAME each of `eoa.pipeline.{classify,triage,
+    analyze}` bound at import time, wrapping it to inject `provider=candidate.provider` whenever
+    the caller didn't pass one explicitly — this also covers `triage_item`'s internal
+    score-reconciliation retry, since that calls the same bound name.
+- `run_pipeline_for_item(item, candidate)` — classify → triage → analyze on one item dict
+  (DB row shape or synthetic), feeding each stage's output into the next exactly like the real
+  pipeline, never persisting; a stage failure is recorded (`StageResult.ok=False`) without
+  aborting later stages (docs/CONVENTIONS.md rule 9).
+- `run_chat_for_question(question, candidate)` — builds the real RAG prompt via
+  `eoa.api.services.ask_build_messages` (unchanged) and sends one non-streamed `chat()` call.
+- `deterministic_checks_for_candidate(merged_items)` — D1/D2 scores via the exact scorers the
+  live QA loop already uses (`eoa.qa.d1_classify.score_D1` / `d2_summary.score_D2`); no LLM call,
+  no DB, reused rather than reimplemented.
+- `blind_judge_item(item, candidate_outputs, judge_provider=...)` — an anonymised rubric judge:
+  shuffles `{candidate_name: output}` behind `CANDIDATE_n` labels (a real candidate name never
+  appears in the judge's prompt), scores each against the Q3 rubric
+  (`docs/QA_CONTINUOUS_LOOP.md` sec 1), then unshuffles the verdict back to real names.
+
+### `scripts/bakeoff_golden.py` (CLI driver)
+
+Loads the golden item ids (`docs/qa/loop/golden_items.json`), builds a **stratified** subset
+(`_stratify_golden_ids`: all red, up to 6 orange, up to 4 yellow, up to 4 archive/out_of_scope,
+backfilled to guarantee ≥3 Israel-relevant items) from a single read-only `SELECT` over an
+explicit, JSON-safe column list (`_ITEM_COLUMNS` — excludes `embedding`, casts timestamps to
+text). If the DB is unreachable, falls back to a hand-written, clearly-labelled **synthetic**
+fixture (`docs/qa/loop/bakeoff/synthetic_items.json`, generated once) covering the same
+red/orange/yellow/archive + Israeli-relevant strata with realistic EO/IR-shaped text — every
+output file is tagged `item_source: "db" | "synthetic_fixture"` so a synthetic run can never be
+mistaken for a real one. Runs the full sweep (classify/triage/analyze per item, chat per
+question, GPU VRAM sampled via `nvidia-smi` during ollama candidates), writes one JSON per
+candidate plus `docs/qa/loop/bakeoff/summary.json` and an auto-generated table
+(`docs/qa/loop/bakeoff/AUTO_TABLE.md`).
+
+```
+PYTHONPATH=agent python scripts/bakeoff_golden.py --items-limit 20 --candidates all --questions-limit 4
+PYTHONPATH=agent python scripts/bakeoff_golden.py --items-limit 8 --candidates dictalm3_12b,gemma4_e4b,claude_sonnet5,agy_gemini31_pro_high
+```
+
+### Tests
+
+`tests/unit/test_bakeoff.py` (16 tests, all LLM calls mocked): `candidate_context`'s ollama
+role-swap-and-restore (including restore-on-exception), cloud provider-injection (verifies an
+explicit caller-supplied `provider` is never overridden, and that all three pipeline modules are
+patched/restored together), `deterministic_checks_for_candidate` against hand-crafted clean /
+gershayim-violating / invalid-subdomain item dicts, and the blind-judge shuffle/unshuffle
+round-trip (asserts a real candidate name never appears in the judge prompt, an unrecognised
+label from the judge is dropped rather than raised, and the shuffle order actually depends on the
+seed). Ruff-clean.
+
+### Known limitation
+
+`run_judge` (script-level) currently loads only the *first* `judge_provider` given on the CLI —
+no automatic claude→agy fallback is wired in if the preferred judge CLI is unavailable at run
+time; pass `--judge-provider` explicitly if `claude` isn't authenticated on a given machine. See
+`docs/qa/loop/BAKEOFF.md` for the actual bake-off results and recommendation.
+
+## Round 2 D5 chat fixes — repetition loop, citations, conflation (docs/qa/loop/round_2_chat_fixes.md, 2026-09-06)
+
+Full detail (including four live-iteration write-ups for the hardest fix) lives in
+`docs/qa/loop/round_2_chat_fixes.md`; this is the module-API summary.
+
+**`agent/eoa/api/routes/ask.py`** (SSE generator, `/api/ask`):
+- `_repetition_detected(tail)` / `_truncate_at_sentence(text)`: streaming n-gram/line repetition
+  detector (40+ char window or same line, either recurring >= 3x in the trailing ~600 chars of
+  *answer* text) with a clean-sentence-boundary cutoff. Round 1's two infinite-loop golden
+  questions (Q1 XM30, Q8 SPECTRO ISR: 537s/49K chars and 300s/29K chars respectively) both now
+  complete in 30-125s with no loop, live-verified.
+- `_MAX_ANSWER_SECONDS = 240.0`: independent hard wall-clock ceiling, same graceful-cut path.
+- `chat_stream(...)` call now passes `repeat_penalty=1.15`, `repeat_last_n=256`,
+  `num_predict=2100` (1800 answer + 300 sources-JSON tail); `_run_citation_repair` (role always
+  `resident`, never `light` — see live VRAM-swap finding below) runs one short non-streamed
+  corrective pass when a finished answer has sources but zero `[n]`, replacing the answer via a
+  new `answer_final` SSE event on success or prefixing `"⚠ ללא ציטוטים: "` on failure.
+- `_strong_anchors` / `_primary_anchors` / `_strip_markdown_headings` /
+  `_answer_body_for_anchor_check`: the topic-substitution ("anchor") guard, reusing
+  `eoa.search.deep_search.extract_anchors`. Prefixes `"⚠ ייתכן שהתשובה אינה עוסקת בשאלה: "` when
+  the answer's substantive body (headings and the direct-answer paragraph excluded) never mentions
+  any non-parenthetical Latin-script anchor from the question. Went through 4 live-reproduced
+  bypasses against golden Q3 before the current shape (generic-Hebrew-anchor false negative →
+  heading-echo → opening-sentence-echo → incidental-gloss-quote); each is a named regression test.
+- New SSE event `answer_final` (full contract change, plumbed through
+  `web/src/types/api.ts`'s `AskSseEvent`, `web/src/api/real.ts`'s dispatch,
+  `web/src/api/types.ts`'s `askStream` handler type, and `web/src/hooks/useAskChat.ts`'s
+  `onAnswerFinal` — replaces the message's whole `content`, never appends).
+
+**`agent/eoa/api/services.py`**:
+- `_ASK_ITEM_FIELDS` now also selects `report_kind`, `entities_mentioned`.
+- `_report_kind_label`/`_REPORT_KIND_LABELS`: Hebrew source-type labels
+  (verified report / company PR / academic-arXiv / tender-RFI / patent / regulatory / science)
+  injected into each `[n]` source block `ask_build_messages` renders, plus forwarded on the
+  citation dict for the UI's sources footer. Live-verified fix: item 127 (an arXiv IR/visible
+  object-detection paper round 1 found cited as both a DROIC hardware trend AND a government RFI)
+  is now correctly labelled "מאמר מחקר"/academic in Q7's re-run, with an explicit self-correction
+  in the answer ("ה-RFI... הוא **לא הודעת RFI** אלא **הכרזה על מוצר חדש**").
+- `ask_build_messages` system prompt additions: (a) the deduplicated canonical entity names from
+  every retrieved item, with an explicit anti-conflation rule (e.g. מגן אור ≠ כיפת ברזל) —
+  live-verified against Q2 (Iron Beam), which now correctly lists Iron Dome as a separate system
+  in the same sentence rather than conflating them; (b) a compound-premise-verification rule
+  (root-caused live against Q3 — the DB genuinely holds real LORA/Germany items *and* a real,
+  unrelated Greek air-defense item side by side in the same retrieval; the model wasn't missing
+  LORA context, it silently merged the more prominent unrelated item into a story neither source
+  supports) telling the model to verify a source actually connects the question's combined terms
+  before answering them as one story, and to name the gap explicitly otherwise.
+- `ask_citation_repair_messages(messages, answer_text)`: builds the citation-repair corrective
+  pass's message list (system+history+sources +the draft answer +a rewrite instruction) — the
+  testable unit behind `ask.py`'s `_run_citation_repair`.
+
+**`agent/eoa/llm/ollama_client.py`**: `chat_stream` previously sent **no** `num_predict` at all
+(unlike `chat()`), a real contributing factor to the original loop having no token ceiling once
+started — now falls back to the same `ollama.num_predict[task]` config default `chat()` uses, with
+a caller's `options["num_predict"]` still winning via the existing merge order (additive; `ask.py`
+is `chat_stream`'s only caller today).
+
+### Live findings worth flagging separately (not this round's fix, honesty over scope-creep)
+
+- **Citation-repair role, VRAM-swap pitfall (fixed during this round, not left as a landmine):**
+  routing the corrective pass through `light` (as first implemented, matching a literal reading of
+  the task brief's "light/resident role") forced an unload+reload swap on this 12 GB card
+  (`resident` ~7.5 GB + `light` ~6.7 GB don't fit together) that queued for minutes behind the
+  resource gate, live-observed (`gate_decision decision=queued ... retry in 60s`, `wait_ms=105000`
+  and climbing) before being caught and switched to always-`resident`. Recorded here in case a
+  future change reintroduces a second role into this specific call path.
+- **Q4 (DROIC) residual gap, explicitly not claimed fixed:** the arXiv item's mislabeling-as-RFI
+  is fixed (3c above), but the answer still treats one low-TRL academic paper as *the* DROIC
+  industry trend without a TRL caveat. Would need a synthesis-level instruction (e.g. "an academic
+  finding is not an industry trend without corroborating verified/company-PR sources"), not a
+  citation-labelling fix — out of this round's scope.
+- **Q3 (Greece/LORA), five live iterations, final status:** see
+  `docs/qa/loop/round_2_chat_fixes.md` sections 3b/3d/4 for the full live investigation. Both the
+  real LORA items (German Navy firing trials) and a real, unrelated Greek air-defense item are
+  retrieved together every time — not a retrieval failure — and the model consistently chose to
+  write only about the Greek item across all five live re-runs, un-moved by the added
+  compound-premise prompt rule on the one re-run it was tested against. What the anchor-guard fix
+  chain (3b) does reliably change: the guard fired on the final live check and the answer was
+  visibly prefixed `"⚠ ייתכן שהתשובה אינה עוסקת בשאלה: "` instead of presented as confident fact —
+  round 1's Q3 *silence* is fixed even though its substance is not. A real substance fix needs
+  either different retrieval ranking for compound two-entity queries or a semantic verification
+  pass; both are flagged as follow-ups, out of this round's chat-layer-only scope.

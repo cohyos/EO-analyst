@@ -163,6 +163,10 @@ export interface ApiClient {
       /** U11: citations enriched with level/source_name/note, sent once after the answer
        * finishes streaming, for the "מקורות (n)" footer. */
       onSources?: (items: AskCitation[]) => void;
+      /** Round 2 (docs/qa/loop/round_2_chat_fixes.md): the server wholesale-replaced the
+       * streamed answer (citation repair, or a no-citations/off-topic warning prefix) — the
+       * caller must replace the message content with `text`, not append it. */
+      onAnswerFinal?: (text: string) => void;
       onDone: () => void;
       onError: (err: Error) => void;
     },

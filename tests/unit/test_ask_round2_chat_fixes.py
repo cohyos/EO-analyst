@@ -78,6 +78,108 @@ class TestRepetitionDetected:
         assert ask_route._repetition_detected(tail) is False
 
 
+class TestStrongAnchors:
+    def test_live_repro_lora_greece_question_yields_only_the_two_latin_anchors(self) -> None:
+        """Live-verified 2026-09-06: `extract_anchors` on golden Q3 ('עסקת ה-LORA היוונית
+        (Greece) -- מה המשמעות...') returns
+        ['עסקת', 'ה-LORA', 'היוונית', 'Greece', 'עבור', 'התעשייה', 'הביטחונית'] -- the generic
+        Hebrew words in that list trivially match almost any EO/IR analyst answer, which is
+        exactly why the plain any-anchor check missed round 1's topic-substitution bug live
+        (the answer discussed an unrelated Greek air-defense deal and never mentioned LORA)."""
+        raw = ["עסקת", "ה-LORA", "היוונית", "Greece", "עבור", "התעשייה", "הביטחונית"]
+        assert ask_route._strong_anchors(raw) == ["LORA", "Greece"]
+
+    def test_hyphenated_hebrew_prefix_is_stripped(self) -> None:
+        assert ask_route._strong_anchors(["ה-XM30"]) == ["XM30"]
+
+    def test_pure_hebrew_anchors_yield_no_strong_anchor(self) -> None:
+        assert ask_route._strong_anchors(["התעשייה", "הביטחונית"]) == []
+
+    def test_deduplicates_case_insensitively_in_order(self) -> None:
+        assert ask_route._strong_anchors(["Rafael", "ה-rafael", "Elbit"]) == ["Rafael", "Elbit"]
+
+    def test_single_latin_letter_is_not_a_strong_anchor(self) -> None:
+        assert ask_route._strong_anchors(["ה-X"]) == []
+
+
+class TestPrimaryAnchors:
+    def test_live_repro_lora_is_primary_greece_is_a_gloss(self) -> None:
+        """Live-verified 2026-09-06, third reproduction: even after both prior fixes, golden Q3
+        STILL slipped past the guard -- the model's answer quoted an English source sentence
+        containing 'Turkey threatens Greece...', satisfying the OR check via the glossed anchor
+        'Greece' (from '(Greece)' in the question) while never once mentioning 'LORA', the
+        question's actual non-parenthetical subject."""
+        question = "עסקת ה-LORA היוונית (Greece) -- מה המשמעות עבור התעשייה הביטחונית הישראלית?"
+        assert ask_route._primary_anchors(question, ["LORA", "Greece"]) == ["LORA"]
+
+    def test_falls_back_to_all_strong_anchors_when_the_subject_itself_is_glossed(self) -> None:
+        """'מגן אור (Iron Beam)' -- the only Latin anchors ARE the gloss; there is no
+        non-parenthetical Latin anchor to prefer, so both are kept."""
+        question = 'מהם פרטי חוזה מגן אור (Iron Beam) העדכני ביותר של רפאל?'
+        assert ask_route._primary_anchors(question, ["Iron", "Beam"]) == ["Iron", "Beam"]
+
+    def test_no_parens_at_all_keeps_every_strong_anchor(self) -> None:
+        question = "מהו ה-RFI העדכני ביותר בתחום EO/IR שפורסם בארה\"ב?"
+        assert ask_route._primary_anchors(question, ["RFI", "EO", "IR"]) == ["RFI", "EO", "IR"]
+
+    def test_mixed_primary_and_gloss_keeps_only_primary(self) -> None:
+        question = 'כיצד משתווה ה-Skyranger של Rheinmetall למערכות נגד כטב"ם (C-UAS) ישראליות?'
+        assert ask_route._primary_anchors(question, ["Skyranger", "Rheinmetall", "C-UAS"]) == [
+            "Skyranger",
+            "Rheinmetall",
+        ]
+
+
+class TestStripMarkdownHeadings:
+    def test_removes_h1_and_h2_lines(self) -> None:
+        text = "# כותרת ראשית\n## תשובה ישירה\nגוף התשובה כאן."
+        assert ask_route._strip_markdown_headings(text) == "\n\nגוף התשובה כאן."
+
+    def test_leaves_non_heading_hash_usage_alone(self) -> None:
+        text = "מחיר #1 בשוק."
+        assert ask_route._strip_markdown_headings(text) == text
+
+    def test_live_repro_heading_only_mention_is_not_counted_as_body_content(self) -> None:
+        """Live-verified 2026-09-06: even after the `_strong_anchors` fix, golden Q3 still slipped
+        the anchor check by echoing 'LORA' only in a spurious H1 title mirroring the question,
+        while the entire body discussed an unrelated topic -- stripping headings before the
+        containment check closes that gap."""
+        text = (
+            "# עסקת ה-LORA היוונית: המשמעות עבור התעשייה הביטחונית הישראלית\n\n"
+            "## תשובה ישירה\nהעסקה הגדולה של יוון בתחום ההגנה האווירית היא ציון דרך."
+        )
+        stripped = ask_route._strip_markdown_headings(text)
+        assert "LORA" not in stripped
+
+
+class TestAnswerBodyForAnchorCheck:
+    def test_live_repro_anchor_echoed_only_in_the_opening_sentence_is_excluded(self) -> None:
+        """Live-verified 2026-09-06, second reproduction: heading-stripping alone was not enough
+        -- the model instead echoed 'LORA' once in the direct-answer paragraph itself ('עסקת
+        ה-LORA היוונית היא אירוע אסטרטגי...') and then discussed an unrelated Greek deal in every
+        '### עובדות מרכזיות'/'### הערכת האנליסט' bullet, never mentioning LORA again. The check
+        must look only at what follows the first '###' section."""
+        text = (
+            "## תשובה ישירה\nעסקת ה-LORA היוונית היא אירוע אסטרטגי משמעותי.\n\n"
+            "### עובדות מרכזיות\n* יוון אישרה עסקת נשק ענקית עם ישראל [1].\n\n"
+            "### הערכת האנליסט\nהעסקה מחזקת את התעשייה הביטחונית הישראלית."
+        )
+        body = ask_route._answer_body_for_anchor_check(text)
+        assert "LORA" not in body
+
+    def test_anchor_present_in_the_facts_section_is_kept(self) -> None:
+        text = (
+            "## תשובה ישירה\nתשובה קצרה.\n\n"
+            "### עובדות מרכזיות\n* פרטים על XM30 ותוכנית הפיתוח שלו [1].\n"
+        )
+        body = ask_route._answer_body_for_anchor_check(text)
+        assert "XM30" in body
+
+    def test_falls_back_to_full_text_when_no_section_heading_exists(self) -> None:
+        text = "תשובה קצרה בלי סעיפים כלל, מזכירה XM30 בתוכה."
+        assert ask_route._answer_body_for_anchor_check(text) == text
+
+
 class TestTruncateAtSentence:
     def test_cuts_trailing_partial_sentence(self) -> None:
         text = "המשפט הראשון הושלם. המשפט השני נקטע באמצע המ"
@@ -270,6 +372,110 @@ class TestAnchorGuard:
         finals = [e for e in events if e["type"] == "answer_final"]
         assert not any(e["text"].startswith(ask_route._OFF_TOPIC_PREFIX) for e in finals)
 
+    def test_live_repro_generic_hebrew_words_do_not_mask_a_missing_latin_anchor(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end reproduction of the live D5 Q3 finding: an answer that stays entirely on
+        generic Hebrew industry vocabulary (which trivially overlaps the question's own generic
+        Hebrew anchors) but never mentions the question's real subject (LORA) must still be
+        flagged -- this is exactly what a plain 'any anchor' check missed live."""
+        question = _mock_ask(
+            monkeypatch,
+            [
+                "התעשייה הביטחונית הישראלית ממשיכה לפתח מערכות הגנה אוויריות מתקדמות "
+                "עבור לקוחות בחו\"ל [1], עם דגש על שיתופי פעולה אסטרטגיים."
+            ],
+            question="עסקת ה-LORA היוונית (Greece) -- מה המשמעות עבור התעשייה הביטחונית הישראלית?",
+        )
+        r = client.post("/api/ask", json={"question": question})
+        events = _sse_events(r.text)
+        finals = [e for e in events if e["type"] == "answer_final"]
+        assert any(e["text"].startswith(ask_route._OFF_TOPIC_PREFIX) for e in finals)
+
+    def test_live_repro_anchor_echoed_only_in_a_heading_still_gets_flagged(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live-verified 2026-09-06: after the `_strong_anchors` fix above, golden Q3 STILL
+        slipped past the guard -- the model emitted a spurious H1 title lightly rephrasing the
+        question ('# עסקת ה-LORA היוונית: ...'), satisfying the literal 'LORA' substring check,
+        while every substantive line discussed an unrelated Greek air-defense deal. The guard must
+        look past headings to the actual body."""
+        question = _mock_ask(
+            monkeypatch,
+            [
+                "# עסקת ה-LORA היוונית: המשמעות עבור התעשייה הביטחונית הישראלית\n\n"
+                "## תשובה ישירה\nהעסקה הגדולה של יוון בתחום ההגנה האווירית בשווי מיליארדים "
+                "היא ציון דרך אסטרטגי [1] הכולל את David's Sling, Barak MX ו-Spyder."
+            ],
+            question="עסקת ה-LORA היוונית (Greece) -- מה המשמעות עבור התעשייה הביטחונית הישראלית?",
+        )
+        r = client.post("/api/ask", json={"question": question})
+        events = _sse_events(r.text)
+        finals = [e for e in events if e["type"] == "answer_final"]
+        assert any(e["text"].startswith(ask_route._OFF_TOPIC_PREFIX) for e in finals)
+
+    def test_live_repro_anchor_echoed_only_in_the_opening_sentence_still_gets_flagged(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live-verified 2026-09-06, second reproduction against the running throwaway 8766
+        instance: after the heading-strip fix above, golden Q3 slipped past the guard a THIRD way
+        -- no heading at all this time, just 'LORA' named once in the direct-answer paragraph's
+        opening sentence, then every '### עובדות מרכזיות'/'### הערכת האנליסט' bullet on the same
+        unrelated Greek deal, never mentioning LORA again. The check must look only at what
+        follows the first '###' section, not the direct-answer paragraph."""
+        question = _mock_ask(
+            monkeypatch,
+            [
+                "## תשובה ישירה\nעסקת ה-LORA היוונית היא אירוע אסטרטגי משמעותי עבור "
+                "התעשייה הביטחונית הישראלית.\n\n"
+                "### עובדות מרכזיות\n* יוון אישרה עסקת נשק ענקית עם ישראל, כולל David's "
+                "Sling, Barak MX ו-Spyder [1].\n\n"
+                "### הערכת האנליסט\nהעסקה מחזקת את קשרי ישראל ויוון מול איום טורקיה."
+            ],
+            question="עסקת ה-LORA היוונית (Greece) -- מה המשמעות עבור התעשייה הביטחונית הישראלית?",
+        )
+        r = client.post("/api/ask", json={"question": question})
+        events = _sse_events(r.text)
+        finals = [e for e in events if e["type"] == "answer_final"]
+        assert any(e["text"].startswith(ask_route._OFF_TOPIC_PREFIX) for e in finals)
+
+    def test_live_repro_incidental_gloss_quote_no_longer_masks_a_missing_primary_anchor(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live-verified 2026-09-06, THIRD reproduction: after both prior fixes, golden Q3 still
+        slipped past the guard -- the answer quoted an English source sentence containing
+        'Turkey threatens Greece...', and 'Greece' (from the question's '(Greece)' gloss)
+        satisfied the OR check on its own even though 'LORA', the real non-parenthetical subject,
+        never appeared anywhere in the answer body. The guard must prefer the non-parenthetical
+        anchor over an incidentally-quoted gloss term."""
+        question = _mock_ask(
+            monkeypatch,
+            [
+                "### עובדות מרכזיות\n* יוון חתמה על עסקת נשק ענקית עם ישראל, כולל David's "
+                'Sling, Barak MX ו-Spyder [1]. כפי שדווח, "Turkey threatens Greece no less '
+                'than it does Israel" [1].\n\n'
+                "### הערכת האנליסט\nהעסקה מחזקת את קשרי ישראל ויוון מול איום טורקיה."
+            ],
+            question="עסקת ה-LORA היוונית (Greece) -- מה המשמעות עבור התעשייה הביטחונית הישראלית?",
+        )
+        r = client.post("/api/ask", json={"question": question})
+        events = _sse_events(r.text)
+        finals = [e for e in events if e["type"] == "answer_final"]
+        assert any(e["text"].startswith(ask_route._OFF_TOPIC_PREFIX) for e in finals)
+
+    def test_gloss_anchor_present_does_not_prevent_flagging_when_primary_anchor_is_missing(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        question = _mock_ask(
+            monkeypatch,
+            ["מידע מפורט על XM30 (Bradley) [1] ומצב הפיתוח שלו."],
+            question="מה קורה עם XM30 (Bradley הבא)?",
+        )
+        r = client.post("/api/ask", json={"question": question})
+        events = _sse_events(r.text)
+        finals = [e for e in events if e["type"] == "answer_final"]
+        assert not any(e["text"].startswith(ask_route._OFF_TOPIC_PREFIX) for e in finals)
+
 
 # ---------------------------------------------------------------------------------------------
 # 5. Source-type labels + canonical-entity injection (eoa.api.services.ask_build_messages)
@@ -344,6 +550,19 @@ class TestCanonicalEntityInjection:
         system = messages[0]["content"]
         assert system.count("Rafael") + system.count("rafael") == 1
         assert "Elbit" in system
+
+
+class TestCompoundPremiseVerificationRule:
+    def test_system_prompt_forbids_merging_unrelated_sources_into_one_story(self) -> None:
+        """Root-caused live against golden Q3 (docs/qa/loop/round_2_chat_fixes.md): the DB holds
+        real LORA items (about Germany) and a real, separate Greek air-defense item side by side
+        in the same retrieval for 'עסקת ה-LORA היוונית (Greece)' -- the model wasn't missing
+        context, it silently synthesized a 'LORA deal with Greece' story neither source supports.
+        The prompt must tell it to verify a source actually connects the question's combined
+        terms before answering them as one story."""
+        messages, _ = services.ask_build_messages("שאלה", [], [])
+        system = messages[0]["content"]
+        assert "לשלב אותם לכדי סיפור אחד" in system
 
 
 class TestAskCitationRepairMessages:
