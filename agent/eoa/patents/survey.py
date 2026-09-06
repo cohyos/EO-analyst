@@ -345,12 +345,10 @@ def _stored_patent_ids_for_topic(
         if distinctive
         else "0"
     )
-    if distinctive:
-        # one distinctive term is enough ("droic", "anduril"); generic terms and an assignee
-        # match only rank the result higher -- they never admit a patent on their own
-        where = "d_hits >= 1"
-    else:
-        where = f"g_hits >= {max(2, (len(generic) + 1) // 2 + 1)}"
+    # one distinctive term is enough ("droic", "anduril"); generic terms and an assignee match only
+    # rank the result higher -- they never admit a patent on their own. Without any distinctive
+    # keyword a patent must match most of the generic ones.
+    where = "d_hits >= 1" if distinctive else f"g_hits >= {max(2, (len(generic) + 1) // 2 + 1)}"
     sql = f"""
         SELECT id, d_hits, g_hits, publication_date FROM (
             SELECT id, value_score, publication_date,
