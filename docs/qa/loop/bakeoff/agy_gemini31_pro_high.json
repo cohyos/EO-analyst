@@ -1,0 +1,1929 @@
+{
+  "candidate": "agy_gemini31_pro_high",
+  "label": "Gemini 3.1 Pro (High) via agy CLI",
+  "item_source": "db",
+  "items": [
+    {
+      "item_id": 3,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "out_of_scope",
+          "subdomain": "",
+          "dimensions": [
+            "business",
+            "operational"
+          ],
+          "tags": [
+            "UAV",
+            "Acquisition",
+            "MMA",
+            "Reaper"
+          ],
+          "report_kind": "verified_report",
+          "trl": "unknown",
+          "geography": "US",
+          "entities": [
+            {
+              "name": "US Air Force",
+              "kind": "org"
+            },
+            {
+              "name": "General Atomics",
+              "kind": "company"
+            },
+            {
+              "name": "MQ-9A Reaper",
+              "kind": "system"
+            },
+            {
+              "name": "Mass Modular Aircraft",
+              "kind": "program"
+            },
+            {
+              "name": "MQ-9B SkyGuardian",
+              "kind": "system"
+            },
+            {
+              "name": "Defense Innovation Unit",
+              "kind": "org"
+            },
+            {
+              "name": "Collaborative Combat Aircraft",
+              "kind": "program"
+            },
+            {
+              "name": "Anduril",
+              "kind": "company"
+            },
+            {
+              "name": "Iran",
+              "kind": "country"
+            }
+          ],
+          "amounts_usd": [
+            10000000.0,
+            50000000.0,
+            20000000.0
+          ],
+          "dates": [],
+          "one_line_he": "חיל האוויר האמריקאי מאיץ את פיתוח הכטב״ם MMA כתחליף זול ל-MQ-9A Reaper, בעקבות אובדן כלים רבים מול איראן.",
+          "relevance_note": "Platform-only content with no EO/IR or CV payload substance."
+        },
+        "error": null,
+        "latency_ms": 51765
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 2,
+          "level": "archive",
+          "novelty": 2,
+          "magnitude": 3,
+          "core_relevance": 1,
+          "reason_he": "הכתבה עוסקת בהאצת תוכנית הפלטפורמות לכטב״ם MMA כמחליף ל-MQ-9, ללא התייחסות למטע״דים או למערכות תצפית. למרות אזכור אגבי של חברת Anduril, הפריט חורג מתחומי הליבה שכן הוא מתמקד בפלטפורמה עצמה ולא בחיישנים אלקטרו-אופטיים.",
+          "needs_deep_search": false,
+          "deep_search_question": "",
+          "deep_search_seed_en": ""
+        },
+        "error": null,
+        "latency_ms": 62385
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "חיל האוויר של ארה״ב מאיץ את פיתוח כטב״ם ה-Massed Modular Aircraft (MMA), שנועד להחליף את ה-MQ-9A Reaper בעלות של כ-10 מיליון דולר ליחידה. ההאצה נובעת מאובדן של לפחות 45 כטב״מי Reaper, בשווי של עד 50 מיליון דולר כל אחד, במסגרת פעילות קרבית. חיל האוויר שואף לכלים מודולריים המבוססים על טכנולוגיה קיימת ומוכחת, תוך ויתור על יכולות קצה (cutting-edge), כדי לאפשר עמידה כלכלית באובדן כלים.",
+          "so_what_he": "להערכתנו, הדרישה לפלטפורמות זולות ובנות-החלפה על חשבון ביצועי קצה מבטאת שינוי פרדיגמה עמוק בחיל האוויר האמריקאי כלפי התמודדות בסביבות רוויות איומים. המעבר מתבסס על ארכיטקטורה פתוחה, מודולריות ושליטה אוטומטית מממשק משותף לניהול מספר כלים במקביל, מה שמהווה פוטנציאל עבור תעשיית התוכנה וספקי מטע״דים (Payloads). ההתמקדות בפשטות טכנולוגית צפויה לפתוח את השוק ליצרנים חדשים, שעשויים לאתגר את שליטתה המסורתית של General Atomics בתחום.",
+          "key_facts": [
+            "45 כטב״מי MQ-9A, המהווים כרבע ממלאי הפנטגון, אבדו מאז חודש פברואר.",
+            "מחיר כטב״ם MQ-9A יכול להגיע לעד 50 מיליון דולר, בהתאם למטע״ד (payload) המותקן עליו.",
+            "תוכנית ה-MMA שואפת להגיע לעלות של כ-10 מיליון דולר לכלי, מחצית מהעלות המתוכננת של כטב״מי CCA שעומדת על 20 מיליון דולר.",
+            "מטרת יחידת DIU היא להגיע לאב-טיפוס של ה-MMA תוך שנה, ולפרוס אותו בהיקף רחב (fielded at scale) תוך 3 שנים.",
+            "חיל האוויר של ארה״ב מתכנן לרכוש לפחות 180 כטב״מי MMA.",
+            "דרישות ה-MMA כוללות טווח של 8,000 מייל ימי, רמת מודולריות גבוהה, ויכולת ייצור ועלות המאפשרים עמידה באובדנים.",
+            "חברת General Atomics מתמודדת במכרז ה-MMA עם תכנון חדש בשם Wildfire.",
+            "ייצור דגם ה-MQ-9A הופסק לחלוטין בשנה שעברה."
+          ],
+          "events": [
+            {
+              "kind": "launch",
+              "title": "פתיחת תוכנית ה-MMA והזמנת הצעות (Bids)",
+              "date": "2026-07-01",
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "US Air Force",
+                "Defense Innovation Unit",
+                "General Atomics"
+              ],
+              "customer": "US Air Force",
+              "program": "Massed Modular Aircraft (MMA)",
+              "summary_he": "משרד ההגנה ויחידת DIU פנו בחודש יולי לתעשייה בבקשה להצעות לפיתוח כטב״ם ה-MMA, עם יעד מקורי לקבלת 20 כלים מבצעיים עד שנת הכספים 2031.",
+              "confidence": 0.95
+            }
+          ],
+          "edges": [
+            {
+              "src": "Anduril",
+              "dst": "General Atomics",
+              "label": "COMPETITOR_OF",
+              "evidence_he": "בדומה לתוכנית ה-CCA שבה נבחרו Anduril ו-General Atomics, חיל האוויר מעוניין לשמור על מספר חברות במשחק כדי לעודד תחרות."
+            },
+            {
+              "src": "General Atomics",
+              "dst": "US Air Force",
+              "label": "SUPPLIER_OF",
+              "evidence_he": "דובר חברת General Atomics ציין כי החברה עבדה עם חיל האוויר של ארה״ב ולקוחות נוספים לעמידה ביעדי עלויות במשך שלושה עשורים."
+            }
+          ],
+          "uncertainty_he": "לא מפורט בכתבה אילו חברות נוספות, מלבד General Atomics, הגישו הצעות להתמודד על פיתוח כטב״ם ה-MMA, וכן טרם נקבע אופן ההאצה המדויק של לוחות הזמנים ביחס ליעד המקורי (שנת 2031).",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 76935
+      },
+      "merged_item": {
+        "id": 3,
+        "url": "https://breakingdefense.com/2026/09/after-concerning-losses-air-force-pushes-to-replace-reaper-faster/",
+        "title": "After ‘concerning’ losses, Air Force pushes to replace Reaper faster",
+        "lang": "en",
+        "published_at": "2026-09-03 23:54:38+03",
+        "clean_text": "WASHINGTON — Following steep losses of the General Atomics MQ-9A Reaper in recent combat operations against Iran, Air Force officials are accelerating efforts to replace the venerable drone with a new unmanned aircraft at a price of $10 million each.\n“As we get to the end of the MQ-9 life, there was some early talk of where do we want to go afterwards, and candidly, as a result of some of the losses that we’ve experienced in combat operations, that discussion sort of got accelerated,” Lt. Gen. Christopher Niemi, the Air Force’s chief modernization officer, said in a briefing with reporters at the Pentagon today.\n“So we want to bring this thing forward because of the fact that, although we have plenty of MQ-9As today, we are going through them at a rate that is concerning to us,” he added.\nAt least 45 Reapers, a quarter of the Pentagon’s inventory, have been lost since the launch of Operation Epic Fury in February, the Washington Post reported in August. The Reaper’s depletion has also left the Pentagon with few good, short-term options to quickly backfill losses.\nThe considerable exhaustion of the drone, which Air Force officials say can cost up to $50 million a piece depending on its payload, prompted the Pentagon to kickstart a new program in July, dubbed the Mass Modular Aircraft (MMA).\n“I can’t buy an MMA today. The reality is, based on the budget and other constraints, that I’m not going to buy a whole lot of MQ-9Bs today either,” Niemi said, referring to an upgraded version of the Reaper known as the SkyGuardian. The MQ-9A ceased production last year.\n“There’s a, I think, sort of a misconception that because the MQ-9B is in production, we can walk down there with a big fat check and have 100 of them this year. That’s not reality,” he added.\nAir Force officials today laid out their vision for the new MMA drone after inviting bids from industry in July. That notice, posted by the Pentagon’s Defense Innovation Unit, included targets like a one-way range of 8,000 nautical miles (about 9,206 miles), high degrees of modularity and both a producibility and price point that permits the Defense Department to tolerate losses. The goal, DIU said at the time, was to get 20 mission-ready drones by fiscal 2031.\nToday, however, officials said they’ve been instructed to move faster and are “looking at options to do that,” Niemi said, without specifying exactly how quickly the new drone could be fielded. But “generally” speaking, according to Maj. Gen. Joseph Kunkel, who serves as DIU’s military deputy, the DIU “intend[s] to get to a prototype within a year, [and] fielded at scale within three years.”\nNiemi said the Air Force will probably field “at least 180” of the MMA drones.\nAdditionally, Niemi noted some ambitious cost targets: The Air Force is aiming to get the cost of its Collaborative Combat Aircraft (CCA) drones to $20 million a piece, and MMA drones “closer to half of that,” he said. (The estimate includes only the cost of the air vehicle, without being fully missionized, according to an Air Force spokesperson.)\nMaking Trade-offs\nWhile noting that combatant commanders “love” the Reaper for features like long endurance and the ability to execute multiple missions such as reconnaissance and strike, Niemi emphasized that the drone itself isn’t necessarily all that unique.\n“What makes the MQ-9 special has nothing to do with the aircraft itself. Like there is no cutting-edge technology for how fast it flies, how high it flies, how far it flies, all that is proven, decades-old technology. So, if you’re focusing on the truck, and you do it in a way where you’re able to make some smart design compromises … we do think you can drive the cost down,” Niemi said.\n“You’re going to have to certainly give up something,” Niemi continued. “There’s no doubt if we try and pursue the exact same approach that we had with things like the MQ-9, we’re going to get something that costs about the same as an MQ-9.”\nGeneral Atomics spokesman C. Mark Brinkley in a statement to Breaking Defense said the Reaper’s “unique combination of endurance, payload, range, sensors, weapons, connectivity, adaptability and reliability is precisely what enables mission effects that others struggle to replicate.”\nThe company has “worked with the U.S. Air Force and other customers to hit cost targets for three decades and that won’t change, for any of our programs,” Brinkley added.\nGeneral Atomics is competing for the MMA program with a new design the company dubs Wildfire, which Brinkley said “addresses all of the concerns posed by the MMA solicitation. We can deliver years earlier and maintain the same high quality. You can have everything that makes Reaper special, plus more, at a price that doesn’t break the bank.”\nNiemi emphasized that at least the initial versions of MMA largely won’t have “cutting-edge” technology. “I think it’s all going to be proven stuff, because that’s how I’m going to drive down the cost so I can get to that goal that I laid out,” he said.\nSpecifically, the MMA drone “is going to be an aircraft that has a long aspect wing, probably a turboprop, flies a very long way and carries a heavy weight.” The drone will likely be in the “4,000 miles-type class, so it’s going to fly much farther than CCA, but it’s going to fly slower and carry more weight,” Niemi said.\nLt. Gen. Luke Cropsey, the Air Force’s military deputy for acquisitions, said the MMA effort will in many ways mirror the ongoing CCA program. Air Force officials envision aircraft being developed in successive “increments,” for example, while using government reference architectures for hardware and software — enabling them to rapidly add new features instead of having to undergo more extensive block upgrades. Cropsey said the aircraft also needs to be designed so that its production can be scaled up fairly quickly if the moment demands.\nLike the CCA program, where Anduril and General Atomics were both picked to produce drones for the effort’s first round, Niemi said officials “want to keep multiple companies in the game” to foster competition. He also said that officials are striving for the MMA drones to have higher levels of automation than the Reaper, with features like one operator being able to simultaneously control several of them.\n“What I would like to have is multiple aircraft designs that go into production that can be operated with a common interface that’s more like mouse clicks and keyboard as opposed to stick and throttle, and I can have, whatever an MMA operator ends up looking like, fly all of them. That’s where I would like to go to,” Niemi said.",
+        "source_name": "Breaking Defense",
+        "domain": "out_of_scope",
+        "subdomain": "",
+        "geography": "US",
+        "report_kind": "verified_report",
+        "trl": "unknown",
+        "entities_mentioned": [
+          "US Air Force",
+          "General Atomics",
+          "MQ-9A Reaper",
+          "Mass Modular Aircraft",
+          "MQ-9B SkyGuardian",
+          "Defense Innovation Unit",
+          "Collaborative Combat Aircraft",
+          "Anduril",
+          "Iran"
+        ],
+        "score": 2,
+        "level": "archive",
+        "triage_reason": "הכתבה עוסקת בהאצת תוכנית הפלטפורמות לכטב״ם MMA כמחליף ל-MQ-9, ללא התייחסות למטע״דים או למערכות תצפית. למרות אזכור אגבי של חברת Anduril, הפריט חורג מתחומי הליבה שכן הוא מתמקד בפלטפורמה עצמה ולא בחיישנים אלקטרו-אופטיים.",
+        "summary_he": "חיל האוויר של ארה״ב מאיץ את פיתוח כטב״ם ה-Massed Modular Aircraft (MMA), שנועד להחליף את ה-MQ-9A Reaper בעלות של כ-10 מיליון דולר ליחידה. ההאצה נובעת מאובדן של לפחות 45 כטב״מי Reaper, בשווי של עד 50 מיליון דולר כל אחד, במסגרת פעילות קרבית. חיל האוויר שואף לכלים מודולריים המבוססים על טכנולוגיה קיימת ומוכחת, תוך ויתור על יכולות קצה (cutting-edge), כדי לאפשר עמידה כלכלית באובדן כלים.",
+        "so_what_he": "להערכתנו, הדרישה לפלטפורמות זולות ובנות-החלפה על חשבון ביצועי קצה מבטאת שינוי פרדיגמה עמוק בחיל האוויר האמריקאי כלפי התמודדות בסביבות רוויות איומים. המעבר מתבסס על ארכיטקטורה פתוחה, מודולריות ושליטה אוטומטית מממשק משותף לניהול מספר כלים במקביל, מה שמהווה פוטנציאל עבור תעשיית התוכנה וספקי מטע״דים (Payloads). ההתמקדות בפשטות טכנולוגית צפויה לפתוח את השוק ליצרנים חדשים, שעשויים לאתגר את שליטתה המסורתית של General Atomics בתחום.",
+        "key_facts": [
+          "45 כטב״מי MQ-9A, המהווים כרבע ממלאי הפנטגון, אבדו מאז חודש פברואר.",
+          "מחיר כטב״ם MQ-9A יכול להגיע לעד 50 מיליון דולר, בהתאם למטע״ד (payload) המותקן עליו.",
+          "תוכנית ה-MMA שואפת להגיע לעלות של כ-10 מיליון דולר לכלי, מחצית מהעלות המתוכננת של כטב״מי CCA שעומדת על 20 מיליון דולר.",
+          "מטרת יחידת DIU היא להגיע לאב-טיפוס של ה-MMA תוך שנה, ולפרוס אותו בהיקף רחב (fielded at scale) תוך 3 שנים.",
+          "חיל האוויר של ארה״ב מתכנן לרכוש לפחות 180 כטב״מי MMA.",
+          "דרישות ה-MMA כוללות טווח של 8,000 מייל ימי, רמת מודולריות גבוהה, ויכולת ייצור ועלות המאפשרים עמידה באובדנים.",
+          "חברת General Atomics מתמודדת במכרז ה-MMA עם תכנון חדש בשם Wildfire.",
+          "ייצור דגם ה-MQ-9A הופסק לחלוטין בשנה שעברה."
+        ],
+        "uncertainty_he": "לא מפורט בכתבה אילו חברות נוספות, מלבד General Atomics, הגישו הצעות להתמודד על פיתוח כטב״ם ה-MMA, וכן טרם נקבע אופן ההאצה המדויק של לוחות הזמנים ביחס ליעד המקורי (שנת 2031).",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "full",
+        "israel_relevance": 0.0,
+        "israel_reasons": [],
+        "events": [
+          {
+            "kind": "launch",
+            "title": "פתיחת תוכנית ה-MMA והזמנת הצעות (Bids)",
+            "date": "2026-07-01",
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "US Air Force",
+              "Defense Innovation Unit",
+              "General Atomics"
+            ],
+            "customer": "US Air Force",
+            "program": "Massed Modular Aircraft (MMA)",
+            "summary_he": "משרד ההגנה ויחידת DIU פנו בחודש יולי לתעשייה בבקשה להצעות לפיתוח כטב״ם ה-MMA, עם יעד מקורי לקבלת 20 כלים מבצעיים עד שנת הכספים 2031.",
+            "confidence": 0.95
+          }
+        ]
+      }
+    },
+    {
+      "item_id": 9,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "c_uas",
+          "subdomain": "multi_sensor",
+          "dimensions": [
+            "technology",
+            "operational"
+          ],
+          "tags": [
+            "C-UAS",
+            "Sensor Fusion",
+            "HEL",
+            "Command and Control",
+            "Airspace Defense"
+          ],
+          "report_kind": "company_pr",
+          "trl": "demo",
+          "geography": "US",
+          "entities": [
+            {
+              "name": "AV",
+              "kind": "company"
+            },
+            {
+              "name": "Halo_Shield",
+              "kind": "system"
+            },
+            {
+              "name": "LOCUST",
+              "kind": "system"
+            },
+            {
+              "name": "Walaris",
+              "kind": "company"
+            },
+            {
+              "name": "Squarehead",
+              "kind": "company"
+            },
+            {
+              "name": "Axis",
+              "kind": "company"
+            },
+            {
+              "name": "SRC",
+              "kind": "company"
+            },
+            {
+              "name": "U.S. Air Force",
+              "kind": "org"
+            },
+            {
+              "name": "National Guard",
+              "kind": "org"
+            },
+            {
+              "name": "MITRE",
+              "kind": "org"
+            },
+            {
+              "name": "Stephen Lloyd",
+              "kind": "person"
+            }
+          ],
+          "amounts_usd": [],
+          "dates": [],
+          "one_line_he": "חברת AV הדגימה את מערכת ההגנה נגד כטב״מים (C-UAS) שלה, התומכת בהיתוך חיישנים אלקטרו-אופטיים ואחרים ושילוב מערכת לייזר (HEL), בסדרת תרגילי שטח בארה״ב.",
+          "relevance_note": "Details AV's Halo_Shield C-UAS multi-sensor fusion platform integrating EO/IR cameras and HEL effectors."
+        },
+        "error": null,
+        "latency_ms": 61892
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 5,
+          "level": "yellow",
+          "novelty": 2,
+          "magnitude": 2,
+          "core_relevance": 5,
+          "reason_he": "המאמר סוקר את הצלחת פלטפורמת Halo_Shield ומערכת הלייזר LOCUST (הנמצאות במעקב) בשלושה תרגילי הגנה אווירית של צבא ארה״ב. הדיווח מעיד על התקדמותן של המערכות מאב-טיפוס למערכת מבצעית מוכחת, אך אינו כולל דיווח על זכייה בחוזה או פריצת דרך תקדימית.",
+          "needs_deep_search": false,
+          "deep_search_question": "",
+          "deep_search_seed_en": ""
+        },
+        "error": null,
+        "latency_ms": 54734
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "חברת AV מדווחת כי מערכת ה־C-UAS מתוצרתה, Halo_Shield, השלימה בהצלחה שלושה ניסויים של משרד ההגנה האמריקאי. המערכת, המשמשת פלטפורמת שו״ב (C2) והיתוך מידע מסנסורים פסיביים ואקטיביים, הודגמה בתצורות שונות תוך שילוב מכ״מים, מצלמות אלקטרו־אופטיות (EO/IR), גלאים אקוסטיים ולייזר רב־עוצמה (HEL). בניסוי T-REX 2026, המערכת ניהלה שרשרת הרג שלמה שכללה יירוט להקת כטב״מים באמצעות מערכת הלייזר LOCUST.",
+          "so_what_he": "להערכתנו, הצלחת ניסויי AV ממצבת את Halo_Shield כפלטפורמת שו״ב מרכזית לניהול מערכי C-UAS פתוחים, באופן המצמצם תלות ביצרן בודד (Vendor Lock-in). השילוב של היתוך מידע רב־סנסורי יחד עם ניהול אש של מערכת נשק לייזר מעיד על בשלות גבוהה של הארכיטקטורה ויכולות סגירת מעגל מתקדמות. בנוסף, הדגש המבצעי על פריסה מהירה ותאימות לתקנים מחזק את המעבר מצד צבא ארה״ב למערכות הגנה מודולריות ומבוזרות.",
+          "key_facts": [
+            "מערכת Halo_Shield שילבה במהלך הניסויים סנסורים ומערכות של Walaris, Squarehead, Axis, SRC, וכן את הלייזר LOCUST.",
+            "המערכת הופעלה מול כטב״מים מקבוצות 1 ו־2, והצליחה לנטרל להקה של חמישה כלים בזמן קצר.",
+            "זמן ההפעלה של המערכת ממצב כבוי לפעולה מבצעית אורך כ־15 דקות.",
+            "במהלך T-REX 2026 נרשם הירי הראשון אי פעם של לייזר רב־עוצמה (HEL) בבסיס חיל האוויר Grand Forks, תחת ניהול השו״ב של המערכת.",
+            "מערכת Halo_Shield הפגינה תאימות לתצורת ההודעות OMNI והשתלבה בסביבות PMASKC ו־Ninja Fusion/TRAX."
+          ],
+          "events": [
+            {
+              "kind": "test",
+              "title": "ניסוי T-REX 2026",
+              "date": null,
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "AV",
+                "Department of Defense",
+                "Argus",
+                "Squarehead",
+                "Axis",
+                "Walaris",
+                "SRC"
+              ],
+              "customer": "Department of Defense",
+              "program": "T-REX 2026",
+              "summary_he": "המערכת ניהלה שרשרת הרג שלמה נגד איומי כטב״מים מקבוצות 1 ו־2 ולהקת כלים, תוך שילוב שו״ב לירי לייזר של מערכת LOCUST.",
+              "confidence": 0.8
+            },
+            {
+              "kind": "test",
+              "title": "ניסוי T-REX 25-2",
+              "date": null,
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "AV",
+                "Department of Defense",
+                "National Guard",
+                "Task Force RAPTR"
+              ],
+              "customer": "Department of Defense",
+              "program": "T-REX 25-2",
+              "summary_he": "הדגמת ארכיטקטורת המערכת והיתוך סנסורים פסיביים ואקטיביים במסגרת הגנת בסיסים מול טיסות הדמיית אויב.",
+              "confidence": 0.8
+            },
+            {
+              "kind": "test",
+              "title": "ניסוי TWIX 2026",
+              "date": null,
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "AV",
+                "U.S. Air Force",
+                "MITRE",
+                "DHS",
+                "National Guard"
+              ],
+              "customer": "U.S. Air Force",
+              "program": "TWIX 2026",
+              "summary_he": "מבחן תאימות ופעולה רב־סוכנותית לבדיקת פריסה מהירה ושיתוף נתונים של המערכת בסביבות מורכבות ומשתנות.",
+              "confidence": 0.8
+            }
+          ],
+          "edges": [
+            {
+              "src": "Halo_Shield",
+              "dst": "Walaris AirScout",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "Halo_Shield... combined Walaris AirScout (acoustic, optical)... fusing them into tracks displayed in the COP."
+            },
+            {
+              "src": "Halo_Shield",
+              "dst": "LOCUST",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "Halo_Shield served as the C2 for LOCUST laser engagements, performing cue from fused track, weapons pairing and scheduling assignment"
+            },
+            {
+              "src": "Halo_Shield",
+              "dst": "Axis",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "we integrated... Axis EO/IR cameras... into an operational C-UAS defense architecture."
+            },
+            {
+              "src": "Halo_Shield",
+              "dst": "SRC Gryphon",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "we integrated... SRC Gryphon active radars into an operational C-UAS defense architecture."
+            },
+            {
+              "src": "Halo_Shield",
+              "dst": "Squarehead Discovair",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "Halo_Shield... combined... Squarehead Discovair (acoustic)... fusing them into tracks"
+            }
+          ],
+          "uncertainty_he": "הפרסום הוא מטעמה של החברה (PR) ומציג את נתוני הניסויים באופן תיאורי ללא מספוק נתונים מדויקים (כגון אחוזי הצלחה וטווחי יירוט). כמו כן, אופן הפעולה המדויק של המערכת לזיהוי מוקדם (Left-of-launch) של מטיסי כטב״מים טרם שיגור נותר עמום.",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 102452
+      },
+      "merged_item": {
+        "id": 9,
+        "url": "https://breakingdefense.com/2026/09/three-exercises-that-pushed-counter-uas-from-prototype-to-proven/",
+        "title": "Three exercises that pushed counter–UAS from prototype to proven",
+        "lang": "en",
+        "published_at": "2026-09-03 19:03:00+03",
+        "clean_text": "Modern uncrewed aerial systems (UAS) have turned airspace defense into a fast-moving, asymmetric contest. Low-cost, high-impact options for attacking critical infrastructure and high-value assets have shown that traditional, radar-centric point defenses struggle to keep pace. Protecting our defense infrastructure and assets has evolved into an asymmetric warfare exercise, where sub-$1,000 systems collapse traditional air superiority and create vulnerabilities to our sensor networks, bases, and personnel.\nAV’s Halo_Shield is designed for this environment: a modular, distributed counter-UAS (C-UAS) architecture that fuses passive and active sensor data, and distills them into a coherent command-and-control (C2) picture in AV_Halo software. Halo_Shield is installed as Tiles – integrated, resilient kill chains across domains, incorporating tactical effectors and sensors. The architecture offers earlier detection and reduces risk versus point defenses reliant on single modes. LOCUST High Energy Laser System.\nOver three major Defense Department exercises: T-REX 25-2, TWIX 2026, and T-REX 2026, Halo_Shield has moved from promising prototype to proven warfighting system, demonstrating complete kill-chain performance in demanding, operationally realistic environments.\nT-REX 25-2: Proving Halo_Shield in the field\nThe T‑REX 25‑2 Technology Readiness Experimentation event at Camp Atterbury, Indiana, evaluated how ready the Halo_Shield architecture was for real‑world base defense against UAS threats. T‑REX is a DoW and National Guard campaign run with Task Force RAPTR to rapidly assess emerging systems in realistic conditions.\nIt focused on four questions: whether Halo_Shield could fuse multiple, passive sensors into a single common operating picture (COP), operate in contested environments, contribute to multilayer base defense, and be produced and sustained realistically.\nHalo_Shield served as a software‑driven, multi‑sensor tracking and fusion platform that combined Walaris AirScout (acoustic, optical), Squarehead Discovair (acoustic), AV Titan SV (passive RF), and cooperative feeds, fusing them into tracks displayed in the COP. For T‑REX 25‑2 it was deployed as a vehicle‑mounted, multi‑server Terrestrial Tile. The event challenged Halo_Shield using exercises from simple “red air” – simulated enemies – flights, to more complex maneuvers and limited swarm activities. This combined live Group 1–3 UAS flights with suitability measurements and operator feedback mapped to detailed objectives.\nHalo_Shield successfully fused multiple inputs, enabling passive detection of small drones and fast visual confirmation without heavy manual effort. It could be powered on and operational in about 15 minutes, with more complex configurations adding only 15–20 minutes including software setup. The system ran with near‑100 percent uptime, with no software crashes or hardware failures.\nWe demonstrated interoperability via rapid integration of the exercise’s OMNI messaging format, enabling participation in the Passive Multi‑Spectral Air Surveillance Kill Chains (PMASKC) architecture and Ninja Fusion/TRAX environment. Overall, T‑REX 25‑2 showed Halo_Shield to be a technically solid, highly interoperable fusion and C2 platform with a strong early concept for distributed base defense.\nTWIX 2026: Interoperability and agility\nTWIX 2026 at Sumter, SC, was an event uniting the U.S. Air Force, MITRE, DHS, the National Guard, and industry including AV. We undertook TWIX as an interoperability trial: pre‑deploying Halo_Shield, defining deployment requirements, collecting real‑world sensor data, demonstrating layered multi‑sensor/multi‑effector defense, and validating interoperability.\nAt TWIX, Halo_Shield delivered layered defense through overlapping sensors, central control of offensive and defensive tools with clear status and threat views (using AV’s PUMA LE ISR), robust communications, integrated acoustic, radar and RF sensors with built‑in health checks, and secure, standards‑aligned data sharing via UDL and partner specifications. It did not operate in isolation; it contributed to a broader C2 picture and showed it can be dropped into complex environments and “speak the same language” as other systems.\nPre‑integration allowed full deployment, networking, configuration, and operation by day one. Remote nodes were repositioned and reconfigured with minimal downtime, demonstrating agility essential for expeditionary operations and rapid base defense. TWIX also tested human and system resilience: range outages, weather and changing coordination demands forced rapid adaptation.\nTWIX also surfaced actionable improvements: making Halo_Shield more plug‑and‑play, reducing setup variability, improving tuning and fusion, and refining displays and user flows so new operators can understand and act quickly under pressure. These lessons directly inform how AV now designs, deploys, and operates Halo_Shield.\nT-REX 2026: Full kill-chain performance at Grand Forks\nT-REX 2026 at Grand Forks AFB was the most demanding Halo_Shield test to date. In addition to AV’s own AV_Halo, Argus Perimeter Security, Titan RF C-UAS and Locust high-energy laser (HEL) platforms, we integrated Squarehead Acoustic Sensors, Axis EO/IR cameras, Walaris AirScout, and SRC Gryphon active radars into an operational C-UAS defense architecture.\nAcross multiple days of vignettes, the AV team combined RF effects and HEL engagements against Group 1 and Group 2 UAS, measuring full kill-chain performance under real-world network, safety, and operational constraints.\nLaunch-to-detection time in trials was less than a minute, detection-to-ID and cue to kill a few seconds each. Halo_Shield defeated “easy” UAS quickly, achieved repeated kills against Group 2 platforms, neutralized a five-ship swarm in short order, and even defeated a hovering UAS before its formal release. These proved Halo_Shield’s Terrestrial and Sentinel tile operations.\nCelestial and Aerial Tiles were tested live. AV_Halo CORTEX and Puma ISR supported left-of-launch detection by identifying potential launch sites and pilot teams, and monitoring runway sectors for pre-launch activity.\nA major highlight was the first ever high-energy laser firing at Grand Forks AFB. Halo_Shield served as the C2 for LOCUST laser engagements, performing cue from fused track, weapons pairing and scheduling assignment, and commander confirmation under strict safety oversight. Historically, laser firings had required external support. At T-REX 2026, AV_Halo COMMAND successfully took that role.\nQualitative feedback matched the technical results: evaluators concluded Halo_Shield did well and delivered on its promise. This sets up the opportunity to continue to develop scenarios and strengthen future installs and exercises.\nSee Halo_Shield in action\nAcross T-REX 25-2, TWIX 2026, and T-REX 2026, Halo_Shield proved itself as a robust, interoperable, multi-sensor fusion and C2 platform for modern airspace defense. It delivered rapid deployment, near-continuous uptime, scalable architecture, deep interoperability, and a modular tile-based concept that supports distributed, resilient kill chains across domains.\nFor acquisition leaders and operators seeking a field-proven, near-term solution for integrated C-UAS and airspace defense, we invite you to see Halo_Shield operate live at Grand Forks on our website. You can sit in front of the multi-screen COP, watch detections stream in, tracks fuse, and decisions accelerate, and see how modular tiles, passive sensors, and advanced C2 can redefine airspace defense. Engage with the AV team, and help shape what comes next.\nAbout the Author\nStephen Lloyd is a senior aerospace and defense leader with nearly four decades of federal service, including 33+ years with the Federal Aviation Administration supporting the National Airspace System and defense-adjacent missions. He served in critical roles such as Director for Safety within the FAA Air Traffic Organization, where he led enterprise Safety Management System initiatives spanning risk management, assurance, and operational response. Following federal service, Lloyd transitioned to industry, advising government and private-sector UAS and aviation programs before joining AV. As Senior Director, he leads advanced transportation and airspace solutions teams supporting defense and civilian applications, bringing deep expertise in air traffic systems, safety, and mission-critical operations to AV initiatives.",
+        "source_name": "Breaking Defense",
+        "domain": "c_uas",
+        "subdomain": "multi_sensor",
+        "geography": "US",
+        "report_kind": "company_pr",
+        "trl": "demo",
+        "entities_mentioned": [
+          "AV",
+          "Halo_Shield",
+          "LOCUST",
+          "Walaris",
+          "Squarehead",
+          "Axis",
+          "SRC",
+          "U.S. Air Force",
+          "National Guard",
+          "MITRE",
+          "Stephen Lloyd"
+        ],
+        "score": 5,
+        "level": "yellow",
+        "triage_reason": "המאמר סוקר את הצלחת פלטפורמת Halo_Shield ומערכת הלייזר LOCUST (הנמצאות במעקב) בשלושה תרגילי הגנה אווירית של צבא ארה״ב. הדיווח מעיד על התקדמותן של המערכות מאב-טיפוס למערכת מבצעית מוכחת, אך אינו כולל דיווח על זכייה בחוזה או פריצת דרך תקדימית.",
+        "summary_he": "חברת AV מדווחת כי מערכת ה־C-UAS מתוצרתה, Halo_Shield, השלימה בהצלחה שלושה ניסויים של משרד ההגנה האמריקאי. המערכת, המשמשת פלטפורמת שו״ב (C2) והיתוך מידע מסנסורים פסיביים ואקטיביים, הודגמה בתצורות שונות תוך שילוב מכ״מים, מצלמות אלקטרו־אופטיות (EO/IR), גלאים אקוסטיים ולייזר רב־עוצמה (HEL). בניסוי T-REX 2026, המערכת ניהלה שרשרת הרג שלמה שכללה יירוט להקת כטב״מים באמצעות מערכת הלייזר LOCUST.",
+        "so_what_he": "להערכתנו, הצלחת ניסויי AV ממצבת את Halo_Shield כפלטפורמת שו״ב מרכזית לניהול מערכי C-UAS פתוחים, באופן המצמצם תלות ביצרן בודד (Vendor Lock-in). השילוב של היתוך מידע רב־סנסורי יחד עם ניהול אש של מערכת נשק לייזר מעיד על בשלות גבוהה של הארכיטקטורה ויכולות סגירת מעגל מתקדמות. בנוסף, הדגש המבצעי על פריסה מהירה ותאימות לתקנים מחזק את המעבר מצד צבא ארה״ב למערכות הגנה מודולריות ומבוזרות.",
+        "key_facts": [
+          "מערכת Halo_Shield שילבה במהלך הניסויים סנסורים ומערכות של Walaris, Squarehead, Axis, SRC, וכן את הלייזר LOCUST.",
+          "המערכת הופעלה מול כטב״מים מקבוצות 1 ו־2, והצליחה לנטרל להקה של חמישה כלים בזמן קצר.",
+          "זמן ההפעלה של המערכת ממצב כבוי לפעולה מבצעית אורך כ־15 דקות.",
+          "במהלך T-REX 2026 נרשם הירי הראשון אי פעם של לייזר רב־עוצמה (HEL) בבסיס חיל האוויר Grand Forks, תחת ניהול השו״ב של המערכת.",
+          "מערכת Halo_Shield הפגינה תאימות לתצורת ההודעות OMNI והשתלבה בסביבות PMASKC ו־Ninja Fusion/TRAX."
+        ],
+        "uncertainty_he": "הפרסום הוא מטעמה של החברה (PR) ומציג את נתוני הניסויים באופן תיאורי ללא מספוק נתונים מדויקים (כגון אחוזי הצלחה וטווחי יירוט). כמו כן, אופן הפעולה המדויק של המערכת לזיהוי מוקדם (Left-of-launch) של מטיסי כטב״מים טרם שיגור נותר עמום.",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "full",
+        "israel_relevance": 0.3,
+        "israel_reasons": [
+          "competitor_to_israeli_company"
+        ],
+        "events": [
+          {
+            "kind": "test",
+            "title": "ניסוי T-REX 2026",
+            "date": null,
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "AV",
+              "Department of Defense",
+              "Argus",
+              "Squarehead",
+              "Axis",
+              "Walaris",
+              "SRC"
+            ],
+            "customer": "Department of Defense",
+            "program": "T-REX 2026",
+            "summary_he": "המערכת ניהלה שרשרת הרג שלמה נגד איומי כטב״מים מקבוצות 1 ו־2 ולהקת כלים, תוך שילוב שו״ב לירי לייזר של מערכת LOCUST.",
+            "confidence": 0.8
+          },
+          {
+            "kind": "test",
+            "title": "ניסוי T-REX 25-2",
+            "date": null,
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "AV",
+              "Department of Defense",
+              "National Guard",
+              "Task Force RAPTR"
+            ],
+            "customer": "Department of Defense",
+            "program": "T-REX 25-2",
+            "summary_he": "הדגמת ארכיטקטורת המערכת והיתוך סנסורים פסיביים ואקטיביים במסגרת הגנת בסיסים מול טיסות הדמיית אויב.",
+            "confidence": 0.8
+          },
+          {
+            "kind": "test",
+            "title": "ניסוי TWIX 2026",
+            "date": null,
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "AV",
+              "U.S. Air Force",
+              "MITRE",
+              "DHS",
+              "National Guard"
+            ],
+            "customer": "U.S. Air Force",
+            "program": "TWIX 2026",
+            "summary_he": "מבחן תאימות ופעולה רב־סוכנותית לבדיקת פריסה מהירה ושיתוף נתונים של המערכת בסביבות מורכבות ומשתנות.",
+            "confidence": 0.8
+          }
+        ]
+      }
+    },
+    {
+      "item_id": 10,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "air_defense",
+          "subdomain": "hel",
+          "dimensions": [
+            "business",
+            "technology",
+            "operational"
+          ],
+          "tags": [
+            "E-HEL",
+            "LOCUST",
+            "Directed Energy",
+            "C-UAS",
+            "Laser"
+          ],
+          "report_kind": "verified_report",
+          "trl": "operational",
+          "geography": "US",
+          "entities": [
+            {
+              "name": "US Army",
+              "kind": "org"
+            },
+            {
+              "name": "AeroVironment",
+              "kind": "company"
+            },
+            {
+              "name": "E-HEL",
+              "kind": "program"
+            },
+            {
+              "name": "Christopher LaNeve",
+              "kind": "person"
+            },
+            {
+              "name": "LOCUST",
+              "kind": "system"
+            },
+            {
+              "name": "DE M-SHORAD",
+              "kind": "program"
+            },
+            {
+              "name": "AMP-HEL",
+              "kind": "program"
+            },
+            {
+              "name": "FAA",
+              "kind": "org"
+            }
+          ],
+          "amounts_usd": [
+            464800000.0,
+            465000000.0
+          ],
+          "dates": [],
+          "one_line_he": "צבא ארה״ב העניק לחברת AeroVironment חוזה ייצור בשווי 464.8 מיליון דולר למערכות לייזר (LOCUST) נגד כטב״מים.",
+          "relevance_note": "Details a $464.8M US Army production contract for the 30kW LOCUST laser weapon system."
+        },
+        "error": null,
+        "latency_ms": 66047
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 10,
+          "level": "red",
+          "novelty": 5,
+          "magnitude": 5,
+          "core_relevance": 5,
+          "reason_he": "זכייה היסטורית בסך 465 מיליון דולר של חברת AeroVironment לאספקת מערכות לייזר מסוג LOCUST ליירוט כטב״מים עבור צבא ארה״ב. זהו חוזה הייצור הראשון אי פעם למערכות נשק לייזר בצבא האמריקאי, המהווה פריצת דרך בשוק ומצדיק התראה מיידית.",
+          "needs_deep_search": true,
+          "deep_search_question": "מהם לוחות הזמנים לאספקה ומי היו המתחרות של חברת AeroVironment על חוזה ייצור מערכות הלייזר מסוג LOCUST עבור תוכנית E-HEL של צבא ארה״ב?",
+          "deep_search_seed_en": "AeroVironment LOCUST E-HEL US Army competitors delivery schedule"
+        },
+        "error": null,
+        "latency_ms": 56645
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "צבא ארה״ב (U.S. Army) העניק לחברת אירוויירונמנט (AeroVironment) חוזה ייצור בסך 464.8 מיליון דולר עבור תוכנית הלייזר E-HEL. זהו חוזה הייצור הראשון אי פעם למערכת נשק באנרגיה מכוונת (Directed Energy) בצבא ארה״ב. במסגרת ההסכם יסופקו עשרות מערכות לייזר מסוג LOCUST בהספק 30 קילו-וואט (kW) ליירוט כטב״מים מקבוצות 1 עד 3, המיועדות להתקנה על רכבים טקטיים קלים (JLTV).",
+          "so_what_he": "להערכתנו, המעבר של צבא ארה״ב לרכש סדרתי של מערכות לייזר מסמן אבן דרך קריטית בבשלות טכנולוגיית הלייזר (HEL) להגנה אווירית וליירוט כטב״מים בפרט. הבחירה בפתרון של אירוויירונמנט (LOCUST X3), המאופיין בגמישות פלטפורמטית ומשתלב על רכבי JLTV, מגיעה על חשבון מערכות מגושמות יותר כמו DE M-SHORAD, ומעידה על העדפה לניידות ופשטות אינטגרציה. בנוסף, אישור הבטיחות של ה-FAA יאפשר פריסה של יכולות אלו גם בתוך המרחב האווירי האזרחי של ארה״ב להגנה על מתקנים אסטרטגיים.",
+          "key_facts": [
+            "צבא ארה״ב העניק לאירוויירונמנט חוזה ייצור בסך 464.8 מיליון דולר עבור תוכנית E-HEL.",
+            "זהו חוזה הייצור הראשון למערכת נשק באנרגיה מכוונת בהיסטוריה של צבא ארה״ב.",
+            "החוזה כולל אספקת עשרות מערכות לייזר מסוג LOCUST בהספק 30 קילו-וואט (kW).",
+            "המערכות מיועדות ליירוט כטב״מים מקבוצות 1 עד 3, מ-Wasp III ועד RQ-7B Shadow.",
+            "מערכת הלייזר LOCUST X3 היא אגנוסטית לפלטפורמה ויכולה להיות מותקנת על רכבי JLTV.",
+            "ההכרזה מגיעה לאחר משוב מאכזב מחיילים על ביצועי מערכת הלייזר DE M-SHORAD במזרח התיכון.",
+            "תוכנית E-HEL מתבססת על אבות-הטיפוס מסדרת AMP-HEL שנמצאים כיום בשימוש מבצעי.",
+            "המערכת קיבלה אישור בטיחות DOW-FAA לשימוש בארה״ב בעקבות סדרת ניסויים מוצלחת במטווח ווייט סנדס."
+          ],
+          "events": [
+            {
+              "kind": "contract_award",
+              "title": "$464.8M Contract Award for E-HEL Laser Production",
+              "date": null,
+              "amount_usd": 464800000.0,
+              "currency": "USD",
+              "parties": [
+                "U.S. Army",
+                "AeroVironment, Inc."
+              ],
+              "customer": "U.S. Army",
+              "program": "Enduring-High Energy Laser (E-HEL)",
+              "summary_he": "צבא ארה״ב חתם על חוזה היסטורי עם אירוויירונמנט לייצור סדרתי של מערכות לייזר נגד כטב״מים מסוג LOCUST, בעלות של 464.8 מיליון דולר.",
+              "confidence": 0.95
+            }
+          ],
+          "edges": [
+            {
+              "src": "AeroVironment, Inc.",
+              "dst": "U.S. Army",
+              "label": "SUPPLIER_OF",
+              "evidence_he": "The U.S. Army awarded a $464.8 million production contract to AeroVironment, Inc."
+            },
+            {
+              "src": "E-HEL",
+              "dst": "AMP-HEL",
+              "label": "DERIVED_FROM",
+              "evidence_he": "The E-HEL program builds on the success of the Army Multi-Purpose High Energy Laser (AMP-HEL) prototypes currently in use by U.S. soldiers."
+            },
+            {
+              "src": "LOCUST X3",
+              "dst": "JLTV",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "AV’s LOCUST X3 laser weapon is platform-agnostic and can fit on the Army’s Joint Light Tactical Vehicle (JLTV)."
+            }
+          ],
+          "uncertainty_he": "הטקסט אינו מציין את מועד האספקה המדויק של המערכות או את מספרן המדויק, מלבד הציון כי יסופקו עשרות מערכות.",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 94201
+      },
+      "merged_item": {
+        "id": 10,
+        "url": "https://www.defensenews.com/industry/techwatch/2026/09/03/us-army-launches-laser-production-with-465m-contract-award/",
+        "title": "US Army launches laser production with $465M contract award",
+        "lang": "en",
+        "published_at": "2026-09-03 20:54:51+03",
+        "clean_text": "The U.S. Army awarded a $464.8 million production contract to AeroVironment, Inc., this week for the Enduring-High Energy Laser program (E-HEL), marking the first production contract for a directed energy system in the U.S. military’s history, the company stated in a release Wednesday.\nRather than deploying missiles to shoot down unmanned aircraft, the E-HEL fires a laser beam at its targets and can reload its magazine through the system’s power supply, according to the Army.\n“This first-of-its-kind directed energy program will enable our formations to defeat unmanned systems and dominate from the outset,” Vice Chief of Staff of the Army General Christopher LaNeve said in an Army statement. “Pairing human ingenuity with advanced technology is what ensures our Army will continue to outpace America’s adversaries.”\nUnder the Other Transaction Agreement, AV will deliver dozens of 30 kW LOCUST laser weapons capable of taking down smaller drones that fit within what the Defense Department characterizes as groups one through three. Those include miniature UAVs comparable to the Air Force’s Wasp III to the Army’s RQ-7B Shadow in the larger class.\nThe E-HEL production announcement also notches a much-needed win for the service’s laser program, following soldiers’ disappointing feedback on the Army’s Directed Energy Maneuver Short-Range Air Defense (DE M-SHORAD) performance in the Middle East.\nWhile those prototypes were tailored for the Stryker combat vehicle, AV’s LOCUST X3 laser weapon is platform-agnostic and can fit on the Army’s Joint Light Tactical Vehicle (JLTV).\nThe E-HEL program builds on the success of the Army Multi-Purpose High Energy Laser (AMP-HEL) prototypes currently in use by U.S. soldiers.\nThe contract follows LOCUST’s successful testing at White Sands Missile Range, led by Joint Interagency Task Force 401 (JIATF-401) and PAE Fires, which demonstrated safe, effective counter-drone operations in U.S. airspace and directly enabled a DOW–FAA safety agreement validating the system for domestic use.",
+        "source_name": "Defense News",
+        "domain": "air_defense",
+        "subdomain": "hel",
+        "geography": "US",
+        "report_kind": "verified_report",
+        "trl": "operational",
+        "entities_mentioned": [
+          "US Army",
+          "AeroVironment",
+          "E-HEL",
+          "Christopher LaNeve",
+          "LOCUST",
+          "DE M-SHORAD",
+          "AMP-HEL",
+          "FAA"
+        ],
+        "score": 10,
+        "level": "red",
+        "triage_reason": "זכייה היסטורית בסך 465 מיליון דולר של חברת AeroVironment לאספקת מערכות לייזר מסוג LOCUST ליירוט כטב״מים עבור צבא ארה״ב. זהו חוזה הייצור הראשון אי פעם למערכות נשק לייזר בצבא האמריקאי, המהווה פריצת דרך בשוק ומצדיק התראה מיידית.",
+        "summary_he": "צבא ארה״ב (U.S. Army) העניק לחברת אירוויירונמנט (AeroVironment) חוזה ייצור בסך 464.8 מיליון דולר עבור תוכנית הלייזר E-HEL. זהו חוזה הייצור הראשון אי פעם למערכת נשק באנרגיה מכוונת (Directed Energy) בצבא ארה״ב. במסגרת ההסכם יסופקו עשרות מערכות לייזר מסוג LOCUST בהספק 30 קילו-וואט (kW) ליירוט כטב״מים מקבוצות 1 עד 3, המיועדות להתקנה על רכבים טקטיים קלים (JLTV).",
+        "so_what_he": "להערכתנו, המעבר של צבא ארה״ב לרכש סדרתי של מערכות לייזר מסמן אבן דרך קריטית בבשלות טכנולוגיית הלייזר (HEL) להגנה אווירית וליירוט כטב״מים בפרט. הבחירה בפתרון של אירוויירונמנט (LOCUST X3), המאופיין בגמישות פלטפורמטית ומשתלב על רכבי JLTV, מגיעה על חשבון מערכות מגושמות יותר כמו DE M-SHORAD, ומעידה על העדפה לניידות ופשטות אינטגרציה. בנוסף, אישור הבטיחות של ה-FAA יאפשר פריסה של יכולות אלו גם בתוך המרחב האווירי האזרחי של ארה״ב להגנה על מתקנים אסטרטגיים.",
+        "key_facts": [
+          "צבא ארה״ב העניק לאירוויירונמנט חוזה ייצור בסך 464.8 מיליון דולר עבור תוכנית E-HEL.",
+          "זהו חוזה הייצור הראשון למערכת נשק באנרגיה מכוונת בהיסטוריה של צבא ארה״ב.",
+          "החוזה כולל אספקת עשרות מערכות לייזר מסוג LOCUST בהספק 30 קילו-וואט (kW).",
+          "המערכות מיועדות ליירוט כטב״מים מקבוצות 1 עד 3, מ-Wasp III ועד RQ-7B Shadow.",
+          "מערכת הלייזר LOCUST X3 היא אגנוסטית לפלטפורמה ויכולה להיות מותקנת על רכבי JLTV.",
+          "ההכרזה מגיעה לאחר משוב מאכזב מחיילים על ביצועי מערכת הלייזר DE M-SHORAD במזרח התיכון.",
+          "תוכנית E-HEL מתבססת על אבות-הטיפוס מסדרת AMP-HEL שנמצאים כיום בשימוש מבצעי.",
+          "המערכת קיבלה אישור בטיחות DOW-FAA לשימוש בארה״ב בעקבות סדרת ניסויים מוצלחת במטווח ווייט סנדס."
+        ],
+        "uncertainty_he": "הטקסט אינו מציין את מועד האספקה המדויק של המערכות או את מספרן המדויק, מלבד הציון כי יסופקו עשרות מערכות.",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "full",
+        "israel_relevance": 0.3,
+        "israel_reasons": [
+          "competitor_to_israeli_company"
+        ],
+        "events": [
+          {
+            "kind": "contract_award",
+            "title": "$464.8M Contract Award for E-HEL Laser Production",
+            "date": null,
+            "amount_usd": 464800000.0,
+            "currency": "USD",
+            "parties": [
+              "U.S. Army",
+              "AeroVironment, Inc."
+            ],
+            "customer": "U.S. Army",
+            "program": "Enduring-High Energy Laser (E-HEL)",
+            "summary_he": "צבא ארה״ב חתם על חוזה היסטורי עם אירוויירונמנט לייצור סדרתי של מערכות לייזר נגד כטב״מים מסוג LOCUST, בעלות של 464.8 מיליון דולר.",
+            "confidence": 0.95
+          }
+        ]
+      }
+    },
+    {
+      "item_id": 33,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "out_of_scope",
+          "subdomain": "",
+          "dimensions": [
+            "business",
+            "technology"
+          ],
+          "tags": [
+            "UAV",
+            "Autonomy",
+            "Flight Controls",
+            "Hermeus",
+            "Anduril"
+          ],
+          "report_kind": "verified_report",
+          "trl": "prototype",
+          "geography": "US",
+          "entities": [
+            {
+              "name": "Hermeus",
+              "kind": "company"
+            },
+            {
+              "name": "Anduril",
+              "kind": "company"
+            },
+            {
+              "name": "Quarterhorse",
+              "kind": "system"
+            },
+            {
+              "name": "Lattice",
+              "kind": "system"
+            },
+            {
+              "name": "Defense Innovation Unit",
+              "kind": "org"
+            },
+            {
+              "name": "Pentagon",
+              "kind": "org"
+            },
+            {
+              "name": "Zach Shore",
+              "kind": "person"
+            },
+            {
+              "name": "Brett Darcey",
+              "kind": "person"
+            },
+            {
+              "name": "Air Force",
+              "kind": "org"
+            },
+            {
+              "name": "Collaborative Combat Aircraft",
+              "kind": "program"
+            }
+          ],
+          "amounts_usd": [],
+          "dates": [],
+          "one_line_he": "חברת הרמיאוס (Hermeus) בחרה במערכת האוטונומיה לאטיס (Lattice) של אנדוריל (Anduril) לשליטה ובקרה בכטב״ם מתוצרתה.",
+          "relevance_note": "Platform flight autonomy and C2 only; no EO/IR or computer vision payload substance mentioned."
+        },
+        "error": null,
+        "latency_ms": 51752
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 2,
+          "level": "archive",
+          "novelty": 2,
+          "magnitude": 2,
+          "core_relevance": 1,
+          "reason_he": "על אף שהתקציר מגדיר בטעות את Quarterhorse כמטע״ד, המקור מבהיר כי מדובר בפלטפורמת כטב״ם מהירה שבה תשולב מערכת Lattice של Anduril לאוטונומיית טיסה, ללא שום אזכור לתצפית או בינה חזותית (רלוונטיות 1). זהו הסכם שת״פ טכנולוגי ללא סכום פומבי במטרה לבחון את המערכת, המהווה התקדמות מצומצמת ללא השפעת שוק חריגה (היקף 2, חידוש 2).",
+          "needs_deep_search": false,
+          "deep_search_question": "",
+          "deep_search_seed_en": ""
+        },
+        "error": null,
+        "latency_ms": 64245
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "חברת הסטארט-אפ Hermeus בחרה בחברת Anduril לאספקת תוכנת אוטונומיה משימתית (Mission Autonomy) עבור הכטב״ם המהיר שלה, Mk 2 Quarterhorse. במסגרת השותפות, המערכת Lattice של Anduril תשולב בכלי הטיס המפותח במימון ה-DIU של הפנטגון במטרה להגיע למהירות מאך 3. ניסויי הטיסה של המערכת המשולבת, שתספק פתרון אוטונומיה מקצה לקצה משלב התוכנה ועד מערכות השליטה הקרקעיות, צפויים להתחיל בשנה הבאה.",
+          "so_what_he": "להערכתנו, שילוב מערכת Lattice על פלטפורמה מהירה במיוחד דוגמת ה-Quarterhorse מהווה אבן דרך משמעותית עבור Anduril, שכן היא מאפשרת להוכיח את בשלות המערכת מחוץ לפלטפורמות איטיות או קטנות יותר. הצלחת האינטגרציה צפויה לחזק את מעמדה של Anduril בתחרות על תוכנית ה-CCA של חיל האוויר האמריקאי, ולהדגים יכולת שילוב מהירה של מערכות ליבה אוטונומיות בכלים המפותחים על ידי חברות אחרות.",
+          "key_facts": [
+            "חברת Hermeus מפתחת את כלי הטיס Quarterhorse במטרה להגיע למהירות של מאך 3 במימון ה-DIU של הפנטגון.",
+            "המערכת Lattice של Anduril נבחרה לספק את האוטונומיה המשימתית לכלי הטיס Mk 2 Quarterhorse.",
+            "ניסויי הטיסה של המערכת המשולבת צפויים להתחיל בשנה הבאה.",
+            "מנכ״ל Hermeus ציין כי ההסכם בין החברות כולל חוזה שבו הועברו כספים, אך סכומי העסקה לא נחשפו.",
+            "מערכת Lattice מתמודדת במקביל גם בתוכנית ה-CCA של חיל האוויר האמריקאי."
+          ],
+          "events": [
+            {
+              "kind": "partnership",
+              "title": "הסכם שותפות בין Hermeus ל-Anduril",
+              "date": null,
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "Hermeus",
+                "Anduril"
+              ],
+              "customer": null,
+              "program": "Quarterhorse",
+              "summary_he": "חברת Hermeus תשלב את תוכנת האוטונומיה Lattice של חברת Anduril בכטב״ם מתוצרתה, Mk 2 Quarterhorse, לקראת ניסויי טיסה שיחלו בשנה הבאה.",
+              "confidence": 0.9
+            }
+          ],
+          "edges": [
+            {
+              "src": "Hermeus",
+              "dst": "Anduril",
+              "label": "PARTNER_OF",
+              "evidence_he": "החברות יצרו שותפות חדשה במסגרתה יבוצעו ניסויי טיסה למערכת המשולבת בשנה הבאה."
+            },
+            {
+              "src": "Anduril",
+              "dst": "Quarterhorse",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "מערכת האוטונומיה המשימתית של Anduril, Lattice, תשולב יחד עם ה-Quarterhorse לקראת ניסויי הטיסה."
+            }
+          ],
+          "uncertainty_he": "סכום העסקה והיקפה המדויק לא נחשפו על ידי החברות המעורבות.",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 80057
+      },
+      "merged_item": {
+        "id": 33,
+        "url": "https://breakingdefense.com/2026/09/hermeus-picks-anduril-autonomy-for-quarterhorse-drone/",
+        "title": "Hermeus picks Anduril autonomy for Quarterhorse drone",
+        "lang": "en",
+        "published_at": "2026-09-03 14:00:00+03",
+        "clean_text": "WASHINGTON — Aircraft startup Hermeus’s Mk 2 Quarterhorse high-speed drone will be equipped with autonomy software provided by defense tech firm Anduril, the two companies exclusively told Breaking Defense.\nUnder the new teaming arrangement, Anduril’s mission autonomy suite, Lattice, will be paired with the Quarterhorse for flight testing that will kickoff next year. The Quarterhorse is being developed with funding from the Pentagon’s Defense Innovation Unit, with a goal to fly the aircraft at speeds as fast as Mach 3.\n“As we evaluated a bunch of solutions, we viewed Anduril as the natural partner,” Hermeus CEO Zach Shore said in an interview ahead of the announcement.\nHermeus is developing the Quarterhorse iteratively through a series of flight tests, which to this point have been remotely controlled. “We now need to automate a lot of those flight controls,” Shore explained. “I want to be able to push a button, have the aircraft spin up, have the aircraft auto takeoff, all those basic features that allow one person to manage multiple platforms. Irrespective of the mission, just that level of command-and-control and scalability, we needed a partner to help us do that.”\nBrett Darcey, Anduril’s general manager and vice president for mission autonomy in air dominance and strike, told Breaking Defense that Anduril will provide an “end-to-end” solution for autonomous operations, from the software needed for flying to the ground control systems used by operators.\n“We really want to emphasize the fullness of the stack,” Darcey said during the interview. “This isn’t just a mission autonomy science project. This is really readying the Quarterhorse for live operations in a way that really accelerates here.”\nThe partnership will carry benefits for Anduril too. While the company’s Lattice solution is currently in the mix for the Air Force’s Collaborative Combat Aircraft program, partnering with Hermeus offers a chance to test out the technology’s performance on a large, high-speed speed platform.\n“It’s really about the mission envelope that opens up there,” Darcey said. “This is expanding the addressable market for our mission autonomy solution,” a partnership that Darcey later observed can “increase the diversity of our experience, so that our product is better.”\nThe two executives declined to comment specifically on dollar amounts associated with the teaming arrangement. “This is a partnership with a contract, with funds exchanged,” Shore said. Darcey, for his part, described the partnership as one “of mutual economic and probably future economic benefit.”\nShore also noted that the partnership can dovetail with ongoing work for the government to develop the Quarterhorse, particularly as it relates to integrating an autonomous solution using a government reference architecture. However, he declined to comment specifically on discussions with government contracts.\n“There is tremendous alignment, support, and backing for this effort within the government,” he said.\nShore said there’s “really no horizon” on the partnership, while noting that customers like the Pentagon reserve the ability to integrate the autonomy vendors they want if they decide to acquire the Quarterhorse as a weapon system.\n“In a dream scenario, as these aircraft become more real and higher volume, and they’re out there in the world, there’s all sorts of go-to-market opportunities together to team and say, you know, ‘This airplane and this brain,’” he said.",
+        "source_name": "Breaking Defense",
+        "domain": "out_of_scope",
+        "subdomain": "",
+        "geography": "US",
+        "report_kind": "verified_report",
+        "trl": "prototype",
+        "entities_mentioned": [
+          "Hermeus",
+          "Anduril",
+          "Quarterhorse",
+          "Lattice",
+          "Defense Innovation Unit",
+          "Pentagon",
+          "Zach Shore",
+          "Brett Darcey",
+          "Air Force",
+          "Collaborative Combat Aircraft"
+        ],
+        "score": 2,
+        "level": "archive",
+        "triage_reason": "על אף שהתקציר מגדיר בטעות את Quarterhorse כמטע״ד, המקור מבהיר כי מדובר בפלטפורמת כטב״ם מהירה שבה תשולב מערכת Lattice של Anduril לאוטונומיית טיסה, ללא שום אזכור לתצפית או בינה חזותית (רלוונטיות 1). זהו הסכם שת״פ טכנולוגי ללא סכום פומבי במטרה לבחון את המערכת, המהווה התקדמות מצומצמת ללא השפעת שוק חריגה (היקף 2, חידוש 2).",
+        "summary_he": "חברת הסטארט-אפ Hermeus בחרה בחברת Anduril לאספקת תוכנת אוטונומיה משימתית (Mission Autonomy) עבור הכטב״ם המהיר שלה, Mk 2 Quarterhorse. במסגרת השותפות, המערכת Lattice של Anduril תשולב בכלי הטיס המפותח במימון ה-DIU של הפנטגון במטרה להגיע למהירות מאך 3. ניסויי הטיסה של המערכת המשולבת, שתספק פתרון אוטונומיה מקצה לקצה משלב התוכנה ועד מערכות השליטה הקרקעיות, צפויים להתחיל בשנה הבאה.",
+        "so_what_he": "להערכתנו, שילוב מערכת Lattice על פלטפורמה מהירה במיוחד דוגמת ה-Quarterhorse מהווה אבן דרך משמעותית עבור Anduril, שכן היא מאפשרת להוכיח את בשלות המערכת מחוץ לפלטפורמות איטיות או קטנות יותר. הצלחת האינטגרציה צפויה לחזק את מעמדה של Anduril בתחרות על תוכנית ה-CCA של חיל האוויר האמריקאי, ולהדגים יכולת שילוב מהירה של מערכות ליבה אוטונומיות בכלים המפותחים על ידי חברות אחרות.",
+        "key_facts": [
+          "חברת Hermeus מפתחת את כלי הטיס Quarterhorse במטרה להגיע למהירות של מאך 3 במימון ה-DIU של הפנטגון.",
+          "המערכת Lattice של Anduril נבחרה לספק את האוטונומיה המשימתית לכלי הטיס Mk 2 Quarterhorse.",
+          "ניסויי הטיסה של המערכת המשולבת צפויים להתחיל בשנה הבאה.",
+          "מנכ״ל Hermeus ציין כי ההסכם בין החברות כולל חוזה שבו הועברו כספים, אך סכומי העסקה לא נחשפו.",
+          "מערכת Lattice מתמודדת במקביל גם בתוכנית ה-CCA של חיל האוויר האמריקאי."
+        ],
+        "uncertainty_he": "סכום העסקה והיקפה המדויק לא נחשפו על ידי החברות המעורבות.",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "full",
+        "israel_relevance": 0.3,
+        "israel_reasons": [
+          "competitor_to_israeli_company"
+        ],
+        "events": [
+          {
+            "kind": "partnership",
+            "title": "הסכם שותפות בין Hermeus ל-Anduril",
+            "date": null,
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "Hermeus",
+              "Anduril"
+            ],
+            "customer": null,
+            "program": "Quarterhorse",
+            "summary_he": "חברת Hermeus תשלב את תוכנת האוטונומיה Lattice של חברת Anduril בכטב״ם מתוצרתה, Mk 2 Quarterhorse, לקראת ניסויי טיסה שיחלו בשנה הבאה.",
+            "confidence": 0.9
+          }
+        ]
+      }
+    },
+    {
+      "item_id": 39,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "secondary",
+          "subdomain": "detectors_fpa",
+          "dimensions": [
+            "technology",
+            "business"
+          ],
+          "tags": [
+            "MWIR",
+            "Zoom Lens",
+            "Optics",
+            "ISR"
+          ],
+          "report_kind": "company_pr",
+          "trl": "operational",
+          "geography": "other",
+          "entities": [
+            {
+              "name": "Ophir",
+              "kind": "company"
+            },
+            {
+              "name": "MKS",
+              "kind": "company"
+            },
+            {
+              "name": "SupIR-X",
+              "kind": "system"
+            }
+          ],
+          "amounts_usd": [],
+          "dates": [],
+          "one_line_he": "חברת אופיר (Ophir) מבית MKS מציגה את עדשת הזום הרציף SupIR-X המיועדת למערכות תצפית מבוססות גלאי MWIR.",
+          "relevance_note": "Company PR announcing Ophir's new MWIR zoom lens for multi-domain EO/IR systems."
+        },
+        "error": null,
+        "latency_ms": 59839
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 7,
+          "level": "orange",
+          "novelty": 2,
+          "magnitude": 3,
+          "core_relevance": 5,
+          "reason_he": "הודעת חברה של אופיר (Ophir) מהמעקב על השקת עדשת זום רציף חדשה (SupIR-X) למטע״די תצפית. זוהי השקת מוצר סטנדרטית המותאמת לגלאי MWIR ברזולוציית SXGA, המהווה עדכון חשוב לפורטפוליו אך לא פריצת דרך טכנולוגית.",
+          "needs_deep_search": false,
+          "deep_search_question": "",
+          "deep_search_seed_en": ""
+        },
+        "error": null,
+        "latency_ms": 58934
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "חברת אופיר (Ophir) הציגה את עדשת הזום הרציף הממונעת החדשה SupIR-X 15-300 mm f/4, המיועדת לגלאי MWIR בפורמט SXGA ופיקסל של 10 מיקרון. העדשה, השוקלת כ-1 ק״ג, מיועדת למערכות תצפית (ISR) אוויריות, יבשתיות וימיות ארוכות טווח. ניתן לשלב את העדשה עם משפחת המכפילים של החברה, וכך להגיע לאורך מוקד של 1200 מ״מ לטובת גילוי רכבים ממרחק של מעל ל-26 ק״מ.",
+          "so_what_he": "להערכתנו, המוצר החדש מספק מענה לדרישה הגוברת בשוק המטע״דים להקטנת משקל ונפח, מגמה הנתמכת על ידי המעבר לגלאים בעלי פיקסל קטן של 10 מיקרון. השמירה על מפתח f/4 קבוע לאורך כל מהלך הזום והתאימות למכפילים חיצוניים מאפשרות ליצרני מערכות EO/IR גמישות תכנונית משמעותית, תוך שימוש ברכיב אופטי בסיסי וקומפקטי שמסוגל לתמוך גם במשימות טקטיות וגם בתצפית ארוכת טווח במיוחד.",
+          "key_facts": [
+            "העדשה החדשה SupIR-X מספקת אורך מוקד של 15-300 מ״מ ומפתח קבוע של f/4.",
+            "העדשה מותאמת לגלאי MWIR ברזולוציית SXGA ופיקסל של 10 מיקרון בתחומי התדר 3.6-4.2 ו-3.6-4.9 מיקרון.",
+            "שדה הראייה האופקי (HFOV) של המערכת נע מ-45 מעלות ועד ל-2.4 מעלות.",
+            "משקל העדשה עומד על כ-1 ק״ג וממדיה הם 93.4 מ״מ קוטר ו-132 מ״מ אורך.",
+            "העדשה פועלת בטווח טמפרטורות של מינוס 32 מעלות צלזיוס ועד פלוס 80 מעלות צלזיוס, וכוללת אטימות IP67 לאלמנט הקדמי.",
+            "זמן המיקוד (Focus) הוא פחות משנייה אחת, וזמן שינוי הזום מקצה לקצה הוא 8 שניות או פחות.",
+            "המערכת כוללת תריס מכני מובנה לביצוע תיקון אחידות (NUC).",
+            "חיבור העדשה למכפילים מאפשר אורך מוקד של עד 1200 מ״מ תוך שמירת מפתח f/4, לטובת גילוי מטרת רכב ממרחק העולה על 26 ק״מ."
+          ],
+          "events": [
+            {
+              "kind": "launch",
+              "title": "חשיפת עדשת SupIR-X 15-300 mm f/4 של חברת אופיר",
+              "date": "2026-09-03",
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "Ophir",
+                "MKS"
+              ],
+              "customer": null,
+              "program": null,
+              "summary_he": "חברת אופיר השיקה עדשת זום רציף קומפקטית למערכות אלקטרואופטיות ארוכות טווח המותאמת לגלאי 10 מיקרון.",
+              "confidence": 0.8
+            }
+          ],
+          "edges": [],
+          "uncertainty_he": "הדיווח מבוסס על הודעת יחסי ציבור של החברה (PR) ואינו כולל מידע אודות לקוחות ראשוניים, מועד זמינות מסחרית או סטטוס מבצעי (TRL).",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 69478
+      },
+      "merged_item": {
+        "id": 39,
+        "url": "https://www.edrmagazine.eu/the-all-new-15-300-mm-f-4-mwir-zoom-engineered-for-10-%c2%b5m-sxga-detectors",
+        "title": "The all-new 15-300 mm f/4 MWIR zoom engineered for 10 µm SXGA detectors",
+        "lang": "en",
+        "published_at": "2026-09-03 11:12:28+03",
+        "clean_text": "The all-new 15-300 mm f/4 MWIR zoom engineered for 10 µm SXGA detectors\nThe Ophir® SupIR-X 15-300 mm f/4 motorized continuous zoom lens is purpose-built to fully leverage the performance of 10 µm SXGA MWIR detectors for demanding long-range ISR and surveillance missions.\nCombining a 45° to 2.4° horizontal field of view, high-resolution imaging, and a compact ~1 kg design, SupIR-X delivers the clarity, stability, and reach required for advanced airborne, land, and maritime EO/IR systems.\nWhen greater range is needed, SupIR-X integrates seamlessly with the Ophir extender ecosystem, scaling up to 1200 mm focal length while maintaining a constant f/4 aperture, enabling vehicle target detection beyond 26 km under standard operational conditions.\nKey Features\n- Optimized for 10 µm SXGA MWIR detectors in 3.6–4.2 µm and 3.6–4.9 µm bands\n- 45° to 2.4° HFOV for wide-area surveillance through long-range identification\n- Integrated mechanical shutter for Non-Uniformity Correction (NUC)\n- Scalable extender configurations: 21-420mm, 30–600mm, 35–690mm, 45–900mm, 60–1200m\n- Constant f/4 aperture across the zoom range\n- Dimensions Ø93.4 × 132 mm, weight ~1 kg\n- Ruggedized for demanding environments: –32°C to +80°C, IP67 front-element sealing\n- Fast motorized operation: <1 sec focus and ≤8 sec zoom\n- Ideal for: ISR , border & homeland security, coastal & maritime surveillance, critical infrastructure protection\nphoto courtesy MKS",
+        "source_name": "European Defence Review / EDR Online",
+        "domain": "secondary",
+        "subdomain": "detectors_fpa",
+        "geography": "other",
+        "report_kind": "company_pr",
+        "trl": "operational",
+        "entities_mentioned": [
+          "Ophir",
+          "MKS",
+          "SupIR-X"
+        ],
+        "score": 7,
+        "level": "orange",
+        "triage_reason": "הודעת חברה של אופיר (Ophir) מהמעקב על השקת עדשת זום רציף חדשה (SupIR-X) למטע״די תצפית. זוהי השקת מוצר סטנדרטית המותאמת לגלאי MWIR ברזולוציית SXGA, המהווה עדכון חשוב לפורטפוליו אך לא פריצת דרך טכנולוגית.",
+        "summary_he": "חברת אופיר (Ophir) הציגה את עדשת הזום הרציף הממונעת החדשה SupIR-X 15-300 mm f/4, המיועדת לגלאי MWIR בפורמט SXGA ופיקסל של 10 מיקרון. העדשה, השוקלת כ-1 ק״ג, מיועדת למערכות תצפית (ISR) אוויריות, יבשתיות וימיות ארוכות טווח. ניתן לשלב את העדשה עם משפחת המכפילים של החברה, וכך להגיע לאורך מוקד של 1200 מ״מ לטובת גילוי רכבים ממרחק של מעל ל-26 ק״מ.",
+        "so_what_he": "להערכתנו, המוצר החדש מספק מענה לדרישה הגוברת בשוק המטע״דים להקטנת משקל ונפח, מגמה הנתמכת על ידי המעבר לגלאים בעלי פיקסל קטן של 10 מיקרון. השמירה על מפתח f/4 קבוע לאורך כל מהלך הזום והתאימות למכפילים חיצוניים מאפשרות ליצרני מערכות EO/IR גמישות תכנונית משמעותית, תוך שימוש ברכיב אופטי בסיסי וקומפקטי שמסוגל לתמוך גם במשימות טקטיות וגם בתצפית ארוכת טווח במיוחד.",
+        "key_facts": [
+          "העדשה החדשה SupIR-X מספקת אורך מוקד של 15-300 מ״מ ומפתח קבוע של f/4.",
+          "העדשה מותאמת לגלאי MWIR ברזולוציית SXGA ופיקסל של 10 מיקרון בתחומי התדר 3.6-4.2 ו-3.6-4.9 מיקרון.",
+          "שדה הראייה האופקי (HFOV) של המערכת נע מ-45 מעלות ועד ל-2.4 מעלות.",
+          "משקל העדשה עומד על כ-1 ק״ג וממדיה הם 93.4 מ״מ קוטר ו-132 מ״מ אורך.",
+          "העדשה פועלת בטווח טמפרטורות של מינוס 32 מעלות צלזיוס ועד פלוס 80 מעלות צלזיוס, וכוללת אטימות IP67 לאלמנט הקדמי.",
+          "זמן המיקוד (Focus) הוא פחות משנייה אחת, וזמן שינוי הזום מקצה לקצה הוא 8 שניות או פחות.",
+          "המערכת כוללת תריס מכני מובנה לביצוע תיקון אחידות (NUC).",
+          "חיבור העדשה למכפילים מאפשר אורך מוקד של עד 1200 מ״מ תוך שמירת מפתח f/4, לטובת גילוי מטרת רכב ממרחק העולה על 26 ק״מ."
+        ],
+        "uncertainty_he": "הדיווח מבוסס על הודעת יחסי ציבור של החברה (PR) ואינו כולל מידע אודות לקוחות ראשוניים, מועד זמינות מסחרית או סטטוס מבצעי (TRL).",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "partial",
+        "israel_relevance": 0.6,
+        "israel_reasons": [
+          "israeli_company_mentioned"
+        ],
+        "events": [
+          {
+            "kind": "launch",
+            "title": "חשיפת עדשת SupIR-X 15-300 mm f/4 של חברת אופיר",
+            "date": "2026-09-03",
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "Ophir",
+              "MKS"
+            ],
+            "customer": null,
+            "program": null,
+            "summary_he": "חברת אופיר השיקה עדשת זום רציף קומפקטית למערכות אלקטרואופטיות ארוכות טווח המותאמת לגלאי 10 מיקרון.",
+            "confidence": 0.8
+          }
+        ]
+      }
+    },
+    {
+      "item_id": 44,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "out_of_scope",
+          "subdomain": "",
+          "dimensions": [
+            "operational",
+            "technology"
+          ],
+          "tags": [
+            "AARGM-ER",
+            "Anti-Radiation",
+            "Missile",
+            "Japan"
+          ],
+          "report_kind": "verified_report",
+          "trl": "operational",
+          "geography": "JP",
+          "entities": [
+            {
+              "name": "Japan",
+              "kind": "country"
+            },
+            {
+              "name": "AARGM-ER",
+              "kind": "system"
+            },
+            {
+              "name": "ASM-3 Kai",
+              "kind": "system"
+            },
+            {
+              "name": "JASDF",
+              "kind": "org"
+            },
+            {
+              "name": "Japanese Ministry of Defense",
+              "kind": "org"
+            },
+            {
+              "name": "Takehiro Morita",
+              "kind": "person"
+            },
+            {
+              "name": "Northrop Grumman",
+              "kind": "company"
+            },
+            {
+              "name": "U.S. Navy",
+              "kind": "org"
+            },
+            {
+              "name": "Pentagon",
+              "kind": "org"
+            },
+            {
+              "name": "Alex Dutko",
+              "kind": "person"
+            }
+          ],
+          "amounts_usd": [],
+          "dates": [
+            "2026-08-31",
+            "2026-09-01",
+            "2022-11-30"
+          ],
+          "one_line_he": "יפן מתכננת לרכוש טילי AARGM-ER נגד קרינה מארה״ב לדיכוי הגנה אווירית של ספינות.",
+          "relevance_note": "Out of scope: Focuses on RF anti-radiation missiles, lacking EO/IR/CV content."
+        },
+        "error": null,
+        "latency_ms": 52345
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 2,
+          "level": "archive",
+          "novelty": 2,
+          "magnitude": 2,
+          "core_relevance": 1,
+          "reason_he": "הדיווח עוסק בבקשת יפן לרכוש טילי AARGM-ER נגד קרינה מתוצרת חברת Northrop Grumman. מאחר שמדובר באמצעי ביות RF ללא כל התייחסות למערכות EO/IR, למטע״דים או לבינה חזותית, הפריט חסר רלוונטיות לתחומי הליבה.",
+          "needs_deep_search": false,
+          "deep_search_question": "",
+          "deep_search_seed_en": ""
+        },
+        "error": null,
+        "latency_ms": 56660
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "יפן מבקשת לרכוש את טיל הנגד-קרינה האמריקאי AGM-88G AARGM-ER במסגרת בקשת תקציב הביטחון לשנת 2027, במטרה לדכא מערכות הגנה אווירית של ספינות מלחמה ולסייע בתקיפות ימיות ארוכות טווח. הטיל, המיוצר על ידי נורת׳רופ גראמן (Northrop Grumman), צפוי להינשא על ידי מטוסי F-35A ו-F-35B של חיל האוויר היפני. במקביל, יפן פועלת להוסיף יכולת אוויר-אוויר לטיל הנגד-ספינות העל-קולי ASM-3 Kai, כדי לפגוע במטרות אוויריות ערכיות כגון מטוסי שליטה ובקרה ומטוסי תדלוק.",
+          "so_what_he": "להערכתנו, בקשת הרכש לטילי AARGM-ER משקפת את המעבר של יפן לגישה התקפית יותר בזירה הימית, תוך בניית יכולות דיכוי והשמדת הגנה אווירית (SEAD/DEAD) נגד ספינות מלחמה. השילוב של טילים נגד-קרינה המנטרלים את מכ״מי האויב יחד עם טילי נגד-ספינות ארוכי טווח יעניק ליפן יתרון מבצעי ויקשה משמעותית על יכולתן של ספינות אויב להתגונן מפני מטחי תקיפה מתואמים.",
+          "key_facts": [
+            "יפן מבקשת לרכוש טילי AGM-88G AARGM-ER במסגרת תקציב משרד ההגנה לשנת 2027 שהוגשה כבקשה ללא תמחור או כמות ידועה.",
+            "יפן מתכננת להוסיף יכולת אוויר-אוויר לטיל הנגד-ספינות העל-קולי ASM-3 Kai נגד מטרות אוויריות ערכיות.",
+            "טילי ה-AARGM-ER מפותחים ומיוצרים על ידי נורת׳רופ גראמן (Northrop Grumman) עבור הצי של ארה״ב.",
+            "רמטכ״ל חיל האוויר היפני ציין ב-1 בספטמבר כי ה-AARGM-ER יינשא על ידי מטוסי F-35A ו-F-35B.",
+            "בניסוי של הצי של ארה״ב ב-30 בנובמבר 2022, טיל AARGM-ER ששוגר ממטוס F/A-18 פגע במטרה ימית נעה.",
+            "צי ארה״ב מתכנן הפסקה אסטרטגית זמנית ברכש טילי AARGM-ER משלו, שצפויה להתחדש בשנת 2028."
+          ],
+          "events": [
+            {
+              "kind": "other",
+              "title": "פרסום בקשת תקציב משרד ההגנה היפני לשנת 2027",
+              "date": "2026-08-31",
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "Japan Ministry of Defense"
+              ],
+              "customer": null,
+              "program": null,
+              "summary_he": "משרד ההגנה היפני פרסם את בקשת התקציב לשנת 2027 הכוללת רכש של טילי AARGM-ER ופיתוח יכולות חדשות לטיל ה-ASM-3 Kai.",
+              "confidence": 0.95
+            },
+            {
+              "kind": "test",
+              "title": "ניסוי ימי מוצלח בטיל AARGM-ER על ידי צי ארה״ב",
+              "date": "2022-11-30",
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "U.S. Navy"
+              ],
+              "customer": null,
+              "program": "AARGM-ER",
+              "summary_he": "הצי של ארה״ב ביצע ניסוי שבו טיל AARGM-ER ששוגר ממטוס F/A-18 פגע בהצלחה במטרה ימית נעה מול חופי קליפורניה.",
+              "confidence": 0.95
+            }
+          ],
+          "edges": [
+            {
+              "src": "Northrop Grumman",
+              "dst": "U.S. Navy",
+              "label": "SUPPLIER_OF",
+              "evidence_he": "ה-AARGM-ER מפותח ומיוצר על ידי נורת׳רופ גראמן עבור הצי של ארה״ב."
+            },
+            {
+              "src": "AGM-88G AARGM-ER",
+              "dst": "AGM-88E AARGM",
+              "label": "DERIVED_FROM",
+              "evidence_he": "הטיל הוא פיתוח טווח מוגדל של טיל ה-AGM-88E AARGM."
+            },
+            {
+              "src": "AGM-88G AARGM-ER",
+              "dst": "F-35A",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "רמטכ״ל חיל האוויר היפני ציין שהטיל יכול להינשא על ידי מטוסי F-35A."
+            },
+            {
+              "src": "AGM-88G AARGM-ER",
+              "dst": "F-35B",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "רמטכ״ל חיל האוויר היפני ציין שהטיל יכול להינשא על ידי מטוסי F-35B."
+            },
+            {
+              "src": "AGM-88G AARGM-ER",
+              "dst": "F/A-18 Super Hornet",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "טיל AARGM-ER שוגר בהצלחה ממטוס F/A-18 סופר הורנט של הצי של ארה״ב במהלך ניסוי."
+            }
+          ],
+          "uncertainty_he": "הכמות, התמחור והעלות המדויקת של טילי ה-AARGM-ER שמבקשת יפן לרכוש אינם ידועים, כיוון שהוגשו כבקשת פריט ללא תמחור. בנוסף, חיל האוויר היפני סירב לפרט באילו תרחישי פעולה מבצעיים ספציפיים ייעשה שימוש בטילים אלו מטעמי ביטחון מידע.",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 93387
+      },
+      "merged_item": {
+        "id": 44,
+        "url": "https://www.navalnews.com/naval-news/2026/09/japan-aargm-er-warship-air-defense-anti-ship/",
+        "title": "Japan Seeks AARGM-ER to Suppress Enemy Warship Air Defenses",
+        "lang": "en",
+        "published_at": "2026-09-03 08:08:11+03",
+        "clean_text": "Japan is seeking to acquire the U.S.-made AGM-88G Advanced Anti-Radiation Guided Missile-Extended Range (AARGM-ER) under its fiscal year 2027 defense budget request to suppress enemy warship air defenses and enable long-range anti-ship strikes.\nIn a separate move outlined in the same budget request, Tokyo is also moving to add a new air-to-air role to its extended-range ASM-3 Kai supersonic anti-ship missile. Naval News previously reported on the JASDF’s plan to employ the ASM-3ER against high-value airborne targets, leveraging its supersonic speed and extended range to engage enemy AWACS and aerial refueling tankers.\nBoth procurement efforts were included among the new acquisition initiatives in the Japanese Ministry of Defense’s (MoD) FY2027 budget request, released on August 31. For AARGM-ER, no quantity or cost was disclosed, with funding submitted as an unpriced “item request.”\nSpeaking at a press conference in Tokyo on September 1, Gen. Takehiro Morita, Chief of Staff of the Japan Air Self-Defense Force (JASDF), provided further details on the intended maritime role of AARGM-ER. Morita described AARGM-ER as a supersonic, air-launched anti-radiation missile that can be carried by both the F-35A and F-35B and is capable of degrading the air-defense capabilities of adversary warships. The missile would be “an asset that contributes to the effective conduct of anti-ship attacks,” Morita said.\nHis comments provide new insight into how the JASDF intends to employ AARGM-ER in maritime strike operations. While the weapon is not itself an anti-ship missile, it can attack elements of an adversary’s air-defense system—potentially degrading a warship’s ability to defend itself against follow-on anti-ship strikes.\nAARGM-ER is being developed and produced by Northrop Grumman for the U.S. Navy. It is an extended-range evolution of the AGM-88E AARGM and incorporates a new high-performance airframe, propulsion system, and advanced warhead. Northrop Grumman describes AARGM-ER as a supersonic, air-launched tactical missile designed to counter modern surface-to-air threats, capable of rapidly detecting and defeating distant land- or sea-based air-defense systems.\nThe Pentagon’s Director, Operational Test and Evaluation (DOT&E) says AARGM-ER is intended to suppress or destroy enemy air defenses. The missile is designed to detect, track, and suppress or destroy radio-frequency-enabled surface-to-air missile systems that employ shutdown tactics.\nAt the September 1 press conference, Naval News asked Morita why the JASDF is seeking the missile and whether its acquisition signals a greater emphasis on SEAD (Suppression of Enemy Air Defenses) and DEAD (Destruction of Enemy Air Defenses) capabilities in future air operations. Morita declined to elaborate on specific operational scenarios, citing security concerns regarding actual weapon employment.\nThe maritime relevance of AARGM-ER has already been demonstrated in U.S. testing. On November 30, 2022, an AARGM-ER launched from a U.S. Navy F/A-18 Super Hornet successfully engaged an operationally representative moving maritime target at the Point Mugu Sea Range off Southern California. Capt. Alex Dutko, the U.S. Navy’s PMA-242 program manager, said at the time that the test demonstrated the missile’s ability to engage moving maritime targets, a capability he described as vital to the Navy’s ability to control sea lanes during conflict.\nFor Japan, Morita’s explicit reference to degrading warship air defenses comes as Tokyo rapidly expands its maritime strike posture. Japan is developing and acquiring a growing family of long-range stand-off weapons, including improved variants of the Type 12 surface-to-ship missile, to engage hostile forces outside their threat envelopes.\nIn a maritime strike scenario, AARGM-ER could be deployed ahead of or alongside dedicated anti-ship missiles to neutralize enemy radars and defensive sensors, severely complicating an adversary warship’s ability to track and intercept incoming salvos.\nMorita said at the same press conference that software modifications would allow the missile to retain its long-range characteristics while also being used in an air-to-air role.\nAsked by Naval News whether the planned acquisition of AARGM-ER and the addition of an air-to-air capability to the ASM-3 Kai reflected a broader change in JASDF air operations, Morita said the service is examining various capabilities in light of what Japan calls “new ways of warfare,” but declined to discuss specific operational concepts.\nIn a maritime strike scenario, AARGM-ER could potentially be used to suppress or destroy radars and other elements of a warship’s air-defense system before or alongside attacks by dedicated anti-ship missiles. Such an approach could complicate an adversary warship’s ability to detect, track and intercept incoming weapons.\nJapan’s planned acquisition comes as the U.S. Navy is planning a temporary “strategic pause” in its own AARGM-ER procurement. which Naval News reported in April is expected to resume in FY2028. Tokyo’s initiative highlights a broader push to acquire not only longer-range strike weapons, but also the specialized suppression assets needed to penetrate increasingly dense naval air-defense networks.",
+        "source_name": "Naval News",
+        "domain": "out_of_scope",
+        "subdomain": "",
+        "geography": "JP",
+        "report_kind": "verified_report",
+        "trl": "operational",
+        "entities_mentioned": [
+          "Japan",
+          "AARGM-ER",
+          "ASM-3 Kai",
+          "JASDF",
+          "Japanese Ministry of Defense",
+          "Takehiro Morita",
+          "Northrop Grumman",
+          "U.S. Navy",
+          "Pentagon",
+          "Alex Dutko"
+        ],
+        "score": 2,
+        "level": "archive",
+        "triage_reason": "הדיווח עוסק בבקשת יפן לרכוש טילי AARGM-ER נגד קרינה מתוצרת חברת Northrop Grumman. מאחר שמדובר באמצעי ביות RF ללא כל התייחסות למערכות EO/IR, למטע״דים או לבינה חזותית, הפריט חסר רלוונטיות לתחומי הליבה.",
+        "summary_he": "יפן מבקשת לרכוש את טיל הנגד-קרינה האמריקאי AGM-88G AARGM-ER במסגרת בקשת תקציב הביטחון לשנת 2027, במטרה לדכא מערכות הגנה אווירית של ספינות מלחמה ולסייע בתקיפות ימיות ארוכות טווח. הטיל, המיוצר על ידי נורת׳רופ גראמן (Northrop Grumman), צפוי להינשא על ידי מטוסי F-35A ו-F-35B של חיל האוויר היפני. במקביל, יפן פועלת להוסיף יכולת אוויר-אוויר לטיל הנגד-ספינות העל-קולי ASM-3 Kai, כדי לפגוע במטרות אוויריות ערכיות כגון מטוסי שליטה ובקרה ומטוסי תדלוק.",
+        "so_what_he": "להערכתנו, בקשת הרכש לטילי AARGM-ER משקפת את המעבר של יפן לגישה התקפית יותר בזירה הימית, תוך בניית יכולות דיכוי והשמדת הגנה אווירית (SEAD/DEAD) נגד ספינות מלחמה. השילוב של טילים נגד-קרינה המנטרלים את מכ״מי האויב יחד עם טילי נגד-ספינות ארוכי טווח יעניק ליפן יתרון מבצעי ויקשה משמעותית על יכולתן של ספינות אויב להתגונן מפני מטחי תקיפה מתואמים.",
+        "key_facts": [
+          "יפן מבקשת לרכוש טילי AGM-88G AARGM-ER במסגרת תקציב משרד ההגנה לשנת 2027 שהוגשה כבקשה ללא תמחור או כמות ידועה.",
+          "יפן מתכננת להוסיף יכולת אוויר-אוויר לטיל הנגד-ספינות העל-קולי ASM-3 Kai נגד מטרות אוויריות ערכיות.",
+          "טילי ה-AARGM-ER מפותחים ומיוצרים על ידי נורת׳רופ גראמן (Northrop Grumman) עבור הצי של ארה״ב.",
+          "רמטכ״ל חיל האוויר היפני ציין ב-1 בספטמבר כי ה-AARGM-ER יינשא על ידי מטוסי F-35A ו-F-35B.",
+          "בניסוי של הצי של ארה״ב ב-30 בנובמבר 2022, טיל AARGM-ER ששוגר ממטוס F/A-18 פגע במטרה ימית נעה.",
+          "צי ארה״ב מתכנן הפסקה אסטרטגית זמנית ברכש טילי AARGM-ER משלו, שצפויה להתחדש בשנת 2028."
+        ],
+        "uncertainty_he": "הכמות, התמחור והעלות המדויקת של טילי ה-AARGM-ER שמבקשת יפן לרכוש אינם ידועים, כיוון שהוגשו כבקשת פריט ללא תמחור. בנוסף, חיל האוויר היפני סירב לפרט באילו תרחישי פעולה מבצעיים ספציפיים ייעשה שימוש בטילים אלו מטעמי ביטחון מידע.",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "full",
+        "israel_relevance": 0.3,
+        "israel_reasons": [
+          "competitor_to_israeli_company"
+        ],
+        "events": [
+          {
+            "kind": "other",
+            "title": "פרסום בקשת תקציב משרד ההגנה היפני לשנת 2027",
+            "date": "2026-08-31",
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "Japan Ministry of Defense"
+            ],
+            "customer": null,
+            "program": null,
+            "summary_he": "משרד ההגנה היפני פרסם את בקשת התקציב לשנת 2027 הכוללת רכש של טילי AARGM-ER ופיתוח יכולות חדשות לטיל ה-ASM-3 Kai.",
+            "confidence": 0.95
+          },
+          {
+            "kind": "test",
+            "title": "ניסוי ימי מוצלח בטיל AARGM-ER על ידי צי ארה״ב",
+            "date": "2022-11-30",
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "U.S. Navy"
+            ],
+            "customer": null,
+            "program": "AARGM-ER",
+            "summary_he": "הצי של ארה״ב ביצע ניסוי שבו טיל AARGM-ER ששוגר ממטוס F/A-18 פגע בהצלחה במטרה ימית נעה מול חופי קליפורניה.",
+            "confidence": 0.95
+          }
+        ]
+      }
+    },
+    {
+      "item_id": 47,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "air_defense",
+          "subdomain": "hel",
+          "dimensions": [
+            "technology",
+            "operational",
+            "business"
+          ],
+          "tags": [
+            "HEL",
+            "C-UAS",
+            "Locust X3",
+            "Directed Energy",
+            "Laser"
+          ],
+          "report_kind": "verified_report",
+          "trl": "operational",
+          "geography": "US",
+          "entities": [
+            {
+              "name": "US Army",
+              "kind": "org"
+            },
+            {
+              "name": "AeroVironment",
+              "kind": "company"
+            },
+            {
+              "name": "Locust X3",
+              "kind": "system"
+            },
+            {
+              "name": "E-HEL",
+              "kind": "program"
+            },
+            {
+              "name": "Halo PINPOINT",
+              "kind": "system"
+            },
+            {
+              "name": "Anduril",
+              "kind": "company"
+            },
+            {
+              "name": "Northrop Grumman",
+              "kind": "company"
+            },
+            {
+              "name": "US Navy",
+              "kind": "org"
+            }
+          ],
+          "amounts_usd": [
+            464800000.0
+          ],
+          "dates": [
+            "2026-09-02"
+          ],
+          "one_line_he": "צבא ארה״ב העניק לחברת AeroVironment חוזה בשווי 464.8 מיליון דולר לאספקת מערכות נשק לייזר (HEL) מדגם Locust X3 נגד כטב״מים.",
+          "relevance_note": "Details US Army E-HEL contract for Locust X3 laser weapon featuring EO/IR tracking."
+        },
+        "error": null,
+        "latency_ms": 62758
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 8,
+          "level": "red",
+          "novelty": 3,
+          "magnitude": 4,
+          "core_relevance": 5,
+          "reason_he": "חברת AeroVironment זכתה בחוזה מרכזי בשווי 464.8 מיליון דולר לאספקת מערכות יירוט בלייזר מסוג Locust X3, המשלבות את מערכת המעקב העוקבת Halo PINPOINT, עבור תוכנית E-HEL של צבא ארה״ב. זהו חוזה ענק המשלב טכנולוגיות וישויות ליבה מהרשימה לשילוב קבוע של לייזר במערך ההגנה.",
+          "needs_deep_search": true,
+          "deep_search_question": "כמה מערכות לייזר מסוג Locust X3 תספק חברת AeroVironment לצבא ארה״ב, ומהו מחיר יחידה משוער, במסגרת חוזה הפיתוח וההצטיידות בשווי 464.8 מיליון דולר עבור תוכנית ה-E-HEL?",
+          "deep_search_seed_en": "AeroVironment Locust X3 E-HEL US Army contract number of systems unit cost"
+        },
+        "error": null,
+        "latency_ms": 65207
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "צבא ארה״ב בחר במערכת הלייזר Locust X3 של חברת AeroVironment לתוכנית ההגנה האווירית E-HEL (Enduring-High Energy Laser). במסגרת חוזה בשווי 464.8 מיליון דולר, תספק החברה מערכות לייזר בהספק של 30 קילוואט ליירוט כטב״מים. המערכת כוללת ארכיטקטורה פתוחה, יחידת תצפית אלקטרו-אופטית מתקדמת ומערכת AI, וניתנת לשילוב במגוון פלטפורמות ומערכות שו״ב.",
+          "so_what_he": "להערכתנו, החוזה מסמן מעבר דרמטי של מערכות אנרגיה מכוונת (HEL) משלב של אבות-טיפוס ניסיוניים להצטיידות ופריסה מבצעית רחבת-היקף בשורות הצבא. המגמה של יירוט כטב״מים באמצעות לייזר מבוססת על יחס עלות-תועלת גבוה המאפשר לחסוך מיירטים קינטיים יקרים לאיומים מורכבים יותר, בעוד שהתאימות למערכות שו״ב קיימות (MOSA) מאפשרת שילוב מהיר ויעיל במערך ההגנה הרב-שכבתי.",
+          "key_facts": [
+            "חוזה בסך 464.8 מיליון דולר הוענק לחברת AeroVironment לאספקת מערכות הלייזר Locust X3.",
+            "תוכנית E-HEL של צבא ארה״ב שואפת לייצר ולפרוס במהירות עד 24 מערכות לייזר.",
+            "מערכת Locust X3 הנוכחית היא בעלת הספק של 30 קילוואט, עם תכנון להגדלת ההספק בעתיד.",
+            "המערכת מיועדת לנטרל כטב״מים מקבוצה 3 (Group 3) בטווח של מספר קילומטרים.",
+            "הפעלת המערכת דורשת שקרן הלייזר תישאר על המטרה למשך מספר שניות בודדות.",
+            "קצב הייצור הנוכחי עלה לכ-20 מערכות בשנה, והחברה מתכננת להגדיל אותו משמעותית בשנתיים הקרובות.",
+            "בניסוי שנערך באוקטובר 2025 על נושאת המטוסים USS George H.W. Bush, מערכת ממשפחת Locust רשמה שיעור הצלחה של כ-100% ביירוט.",
+            "ממשק ההפעלה (HMI) של המערכת מבוסס על בקר דמוי שלט קונסולת XBOX להפעלה אינטואיטיבית."
+          ],
+          "events": [
+            {
+              "kind": "contract_award",
+              "title": "AeroVironment E-HEL Contract Award",
+              "date": "2026-09-02",
+              "amount_usd": 464800000.0,
+              "currency": "USD",
+              "parties": [
+                "AeroVironment",
+                "US Army"
+              ],
+              "customer": "US Army",
+              "program": "Enduring-High Energy Laser (E-HEL)",
+              "summary_he": "צבא ארה״ב העניק לחברת AeroVironment חוזה לאספקת מספר לא ידוע של מערכות נשק לייזר מסוג Locust X3.",
+              "confidence": 0.95
+            },
+            {
+              "kind": "test",
+              "title": "Locust System Naval Demonstration",
+              "date": "2025-10-01",
+              "amount_usd": null,
+              "currency": null,
+              "parties": [
+                "AeroVironment",
+                "US Navy",
+                "US Army Rapid Capabilities and Critical Technologies Office"
+              ],
+              "customer": "US Navy",
+              "program": null,
+              "summary_he": "הדגמה מוצלחת של מערכת ממשפחת Locust נערכה על סיפון נושאת המטוסים USS George H.W. Bush, והסתיימה ביירוט כלל הכטב״מים שהשתתפו בתקיפה.",
+              "confidence": 0.95
+            }
+          ],
+          "edges": [
+            {
+              "src": "AeroVironment",
+              "dst": "US Army",
+              "label": "SUPPLIER_OF",
+              "evidence_he": "AeroVironment זכתה בחוזה לאספקת מערכות הלייזר Locust X3 לצבא ארה״ב."
+            },
+            {
+              "src": "AeroVironment",
+              "dst": "Anduril",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "מערכות Locust X3 תואמות למערכת השליטה והבקרה Lattice של Anduril."
+            },
+            {
+              "src": "AeroVironment",
+              "dst": "Northrop Grumman",
+              "label": "INTEGRATES_WITH",
+              "evidence_he": "מערכות Locust X3 תואמות למערכת השו״ב FAAD C2 של Northrop Grumman."
+            }
+          ],
+          "uncertainty_he": "במקור לא צוין במפורש מספר מערכות ה-Locust X3 שיסופקו במסגרת החוזה, אין נתונים על קצב האש (Rate of fire) של המערכת, ולא סופק פירוט אודות ההספק המדויק של כל מודול לייזר בודד בתוך המערכת.",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 81303
+      },
+      "merged_item": {
+        "id": 47,
+        "url": "https://www.edrmagazine.eu/us-army-selects-aerovironment-locust-x3-for-its-enduring-high-energy-laser-programme",
+        "title": "US Army selects AeroVironment Locust® X3 for its Enduring-High Energy Laser programme",
+        "lang": "en",
+        "published_at": "2026-09-03 09:54:59+03",
+        "clean_text": "US Army selects AeroVironment Locust® X3 for its Enduring-High Energy Laser programme\nThe draft Request for Proposal RFP for the US Army Portfolio Acquisition Executive for Fires (PAE Fires) Enduring-High Energy Laser (E-HEL) requirement issued in January 2026 aimed at producing and rapidly field up to 24 E-HEL systems. On 2 September, 2026, PAE Fires announced that AeroVironment was awarded a landmark contract valued at US$ 464.8 million under which the company will provide an undisclosed number of Locust X3 laser weapon systems\n“The Enduring High Energy Laser Program, is historically significant. It’s not simply about lasers defeating a drone. It is the transition of directed energy toward an enduring place in the Army’s force structure, Mary Klum, president of AeroVironment Space Cyber and Directed Energy Segment, told a selected group of media during a conference call. “When you think of Locust, our system, it is adding an entirely new class of defensive effect and changing how we can protect the warfighter against the threats of today and tomorrow,” she added.\nThe Locust X3 builds on the experience gained with previous generation Locust systems, known as Locust X2, developed to answer the AMP-HEL (Army Multi-Purpose High Energy Laser) and P-HEL (Palletized-High Energy Laser) programmes, which prototypes are being successfully used by the US Army. The Locust X2 is a 20 to 25-kilowatt class HEL weapon system engineered for C-UAS.\nThe new Locust X3 is a 20–35+ kW class HEL, the current version power being 30 kW; no details were provided about the actual power of the single module, the AeroVironment system combining multiple high-power laser beams into one. As the name indicates, the Locust X3 was designed to be a Group 3 killer, Group 3 UAVs having a take-off mass between 25 and 600 kg, an operating altitude up to 18,000 ft and an operating speed under 250 kts (463 km/h). To neutralise such threats at “several kilometres” the laser beam must remain on target for a “single digit” seconds, according to information provided. The Locust X3 is fitted with an advanced AI-enabled detection, tracking, and target prioritization system, and with the company Halo PINPOINT precision fire control.\nThe Locust X3 open architecture allows to plug-and-play a wide variety of radars and other types of sensors which ensure surveillance and acquisition, passing data to the Locust advanced gimballed electro-optical tracking system, the system ISR unit featuring a fine tracking system (FTS), powerful telescope, laser rangefinder, acquisition tracking system (ATS), and targeting laser. Multiple camera payload options provide a wide field of view, aiding in early target identification and tracking which, EDR On-Line understood, can be used not only for the company HEL but also for other effectors, the C-UAS mission being typically assigned to a layer of defensive systems.\nNo data were given on the “rate of fire” although laser weapon systems are designed to successively engage several incoming targets in sequence, providing the energy source is capable to power the system.\nThe Locust X3 human-machine interface is based on an XBOX-like intuitive gaming controller which makes it easier, especially for young soldiers, to operate the system.\nThe Locust X3 was designed as a modular and platform agnostic system. “I expect some of these initial deliveries will be on Joint Light Tactical Vehicle (JLTVs) and then on Infantry Squad Vehicles (ISVs) as well,” John Garrity, Vice President of Directed Energy Systems at AeroVironment said, adding that “ I wouldn’t be surprised if we’re on every platform in the Army fleet here in the coming years.”\nOf course the Locust X3 will not operate alone; “For current UAS, a layered defence is required. A lot of that stems from the fact that drones are very diverse in types and uses. You have fixed wing, you have rotary wing, you have Group 1, 2, and 3. And so there is no one kind of magic silver bullet. In that layered defence we like to call the laser the apex predator in that it is out there because it is so cheap to engage with, because it is so fast with the speed of light engagements, it can really kill a lot of threats. It is able to kill high volumes of threats so that you can save your more expensive effectors for more exquisite threats and your layered defence system does not run out of bullets as fast,” Aaron Westman, Senior Director of Army/MDA Business Development Domestic Sales – Directed Energy explained.\nAeroVironment systems, including Locust X3, are natively built as part of the Modular Open Systems Approach ecosystem, and are interoperable with every command and control (C2) system, EDR On-Line understood, including Anduril’s Lattice and IBCS-M (Integrated Battle Command System Maneuver (IBCS-M) , Northrop Grumman’s Forward Area Air Defense Command and Control FAAD C2, MEDUSA (Multi-Environmental Domain Unmanned Systems Application) C-UAS C2 application.\nNo information on Locust X3 deployment operationally relevant details were provided, the company leaving that to the Army. However the speakers underlined that “one of the most important things about this particular program, E-HEL, is that it is purpose built to be ready for all types of warfare around the globe in all types of environments, and so we expect that as we start delivering these Locust X-3s at scale, they will be everywhere, in all Combatant Commands across the globe, because that is how needed this capability is.”\n“We are going to start off with a 30 kilowatt laser weapons system, but it affords us the opportunity to continue to right size and scale our power levels up and down, for wherever the threat needs to be. So we will start off with that 30 kilowatt class that we’ll be initially delivering. And then the big part of the construct that the Army is building here is that ecosystem of continued improvement. So you’ll likely see higher power systems rolling off that we will be working on here in short term, along with lower cost, more attritable or at a higher proliferation rate systems.” Detailing on current production capability John Garrity said that “we have been in the tens of systems per year, now we are scaling into the twenties per year, and we will be scaling well beyond that here in the coming 12 to 24 months.” AeroVironment is investing in new production lines and the optimisation of the supply chain, setting up a coalition of partners across the US to multi-source components.\nWhile the E-HEL programme is an Army one, this does not mean that the Locust X3 will remain a land-only system. “The Navy has to provide the same level of protection and needs to be able to kill drones at the speed of light,” and in October 2025 one of the previous members of the Locust family successfully demonstrated its capacity in a test conducted aboard the USS George H.W. Bush (CVN-77) in collaboration with the US Navy and the US Army Rapid Capabilities and Critical Technologies Office. “During that recent event on the USS George Bush where we were able to kill essentially 100% of the drones that flew at us, so the system is quite highly effective. With a laser, as long as you can see something, you can hit it. So it is extremely effective at these types of engagements,” Aaron Westman added.\nAeroVironment proposes its Locust X3 in different configurations: fixed and semi-fixed, mobile, containerised and maritime.\nPhotos and graphics courtesy AeroVironment",
+        "source_name": "European Defence Review / EDR Online",
+        "domain": "air_defense",
+        "subdomain": "hel",
+        "geography": "US",
+        "report_kind": "verified_report",
+        "trl": "operational",
+        "entities_mentioned": [
+          "US Army",
+          "AeroVironment",
+          "Locust X3",
+          "E-HEL",
+          "Halo PINPOINT",
+          "Anduril",
+          "Northrop Grumman",
+          "US Navy"
+        ],
+        "score": 8,
+        "level": "red",
+        "triage_reason": "חברת AeroVironment זכתה בחוזה מרכזי בשווי 464.8 מיליון דולר לאספקת מערכות יירוט בלייזר מסוג Locust X3, המשלבות את מערכת המעקב העוקבת Halo PINPOINT, עבור תוכנית E-HEL של צבא ארה״ב. זהו חוזה ענק המשלב טכנולוגיות וישויות ליבה מהרשימה לשילוב קבוע של לייזר במערך ההגנה.",
+        "summary_he": "צבא ארה״ב בחר במערכת הלייזר Locust X3 של חברת AeroVironment לתוכנית ההגנה האווירית E-HEL (Enduring-High Energy Laser). במסגרת חוזה בשווי 464.8 מיליון דולר, תספק החברה מערכות לייזר בהספק של 30 קילוואט ליירוט כטב״מים. המערכת כוללת ארכיטקטורה פתוחה, יחידת תצפית אלקטרו-אופטית מתקדמת ומערכת AI, וניתנת לשילוב במגוון פלטפורמות ומערכות שו״ב.",
+        "so_what_he": "להערכתנו, החוזה מסמן מעבר דרמטי של מערכות אנרגיה מכוונת (HEL) משלב של אבות-טיפוס ניסיוניים להצטיידות ופריסה מבצעית רחבת-היקף בשורות הצבא. המגמה של יירוט כטב״מים באמצעות לייזר מבוססת על יחס עלות-תועלת גבוה המאפשר לחסוך מיירטים קינטיים יקרים לאיומים מורכבים יותר, בעוד שהתאימות למערכות שו״ב קיימות (MOSA) מאפשרת שילוב מהיר ויעיל במערך ההגנה הרב-שכבתי.",
+        "key_facts": [
+          "חוזה בסך 464.8 מיליון דולר הוענק לחברת AeroVironment לאספקת מערכות הלייזר Locust X3.",
+          "תוכנית E-HEL של צבא ארה״ב שואפת לייצר ולפרוס במהירות עד 24 מערכות לייזר.",
+          "מערכת Locust X3 הנוכחית היא בעלת הספק של 30 קילוואט, עם תכנון להגדלת ההספק בעתיד.",
+          "המערכת מיועדת לנטרל כטב״מים מקבוצה 3 (Group 3) בטווח של מספר קילומטרים.",
+          "הפעלת המערכת דורשת שקרן הלייזר תישאר על המטרה למשך מספר שניות בודדות.",
+          "קצב הייצור הנוכחי עלה לכ-20 מערכות בשנה, והחברה מתכננת להגדיל אותו משמעותית בשנתיים הקרובות.",
+          "בניסוי שנערך באוקטובר 2025 על נושאת המטוסים USS George H.W. Bush, מערכת ממשפחת Locust רשמה שיעור הצלחה של כ-100% ביירוט.",
+          "ממשק ההפעלה (HMI) של המערכת מבוסס על בקר דמוי שלט קונסולת XBOX להפעלה אינטואיטיבית."
+        ],
+        "uncertainty_he": "במקור לא צוין במפורש מספר מערכות ה-Locust X3 שיסופקו במסגרת החוזה, אין נתונים על קצב האש (Rate of fire) של המערכת, ולא סופק פירוט אודות ההספק המדויק של כל מודול לייזר בודד בתוך המערכת.",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "full",
+        "israel_relevance": 0.3,
+        "israel_reasons": [
+          "competitor_to_israeli_company"
+        ],
+        "events": [
+          {
+            "kind": "contract_award",
+            "title": "AeroVironment E-HEL Contract Award",
+            "date": "2026-09-02",
+            "amount_usd": 464800000.0,
+            "currency": "USD",
+            "parties": [
+              "AeroVironment",
+              "US Army"
+            ],
+            "customer": "US Army",
+            "program": "Enduring-High Energy Laser (E-HEL)",
+            "summary_he": "צבא ארה״ב העניק לחברת AeroVironment חוזה לאספקת מספר לא ידוע של מערכות נשק לייזר מסוג Locust X3.",
+            "confidence": 0.95
+          },
+          {
+            "kind": "test",
+            "title": "Locust System Naval Demonstration",
+            "date": "2025-10-01",
+            "amount_usd": null,
+            "currency": null,
+            "parties": [
+              "AeroVironment",
+              "US Navy",
+              "US Army Rapid Capabilities and Critical Technologies Office"
+            ],
+            "customer": "US Navy",
+            "program": null,
+            "summary_he": "הדגמה מוצלחת של מערכת ממשפחת Locust נערכה על סיפון נושאת המטוסים USS George H.W. Bush, והסתיימה ביירוט כלל הכטב״מים שהשתתפו בתקיפה.",
+            "confidence": 0.95
+          }
+        ]
+      }
+    },
+    {
+      "item_id": 50,
+      "candidate": "agy_gemini31_pro_high",
+      "classify": {
+        "ok": true,
+        "output": {
+          "domain": "secondary",
+          "subdomain": "defense_ai_infra",
+          "dimensions": [
+            "business",
+            "operational"
+          ],
+          "tags": [
+            "TITAN",
+            "Palantir",
+            "Anduril",
+            "Ground Station",
+            "Targeting"
+          ],
+          "report_kind": "verified_report",
+          "trl": "operational",
+          "geography": "US",
+          "entities": [
+            {
+              "name": "US Army",
+              "kind": "org"
+            },
+            {
+              "name": "Palantir Technologies",
+              "kind": "company"
+            },
+            {
+              "name": "Anduril Industries",
+              "kind": "company"
+            },
+            {
+              "name": "TITAN",
+              "kind": "program"
+            },
+            {
+              "name": "L3 Harris Technologies",
+              "kind": "company"
+            },
+            {
+              "name": "Sierra Nevada Corporation",
+              "kind": "company"
+            },
+            {
+              "name": "Strategic Technology Consulting",
+              "kind": "company"
+            },
+            {
+              "name": "World Wide Technology",
+              "kind": "company"
+            }
+          ],
+          "amounts_usd": [
+            192000000.0,
+            127000000.0,
+            65000000.0
+          ],
+          "dates": [],
+          "one_line_he": "צבא ארה״ב העניק חוזי ייצור בשווי 192 מיליון דולר לחברות Palantir ו-Anduril עבור מערכת המודיעין והרכשת המטרות TITAN.",
+          "relevance_note": "TITAN is a key defense AI infrastructure program for sensor data integration and targeting."
+        },
+        "error": null,
+        "latency_ms": 57519
+      },
+      "triage": {
+        "ok": true,
+        "output": {
+          "score": 7,
+          "level": "orange",
+          "novelty": 2,
+          "magnitude": 4,
+          "core_relevance": 5,
+          "reason_he": "מעבר תוכנית TITAN (הנמצאת ב-watchlist יחד עם Palantir ו-Anduril) לשלב הייצור בחוזה של 192 מיליון דולר עבור צבא ארה״ב. מדובר בהתקדמות טבעית וידועה של המערכת מ-2024, אך בסכום משמעותי המהווה ציון דרך מבצעי מרכזי להנגשת נתוני איסוף ומטרות.",
+          "needs_deep_search": false,
+          "deep_search_question": "",
+          "deep_search_seed_en": ""
+        },
+        "error": null,
+        "latency_ms": 62747
+      },
+      "analyze": {
+        "ok": true,
+        "output": {
+          "summary_he": "צבא ארה״ב העניק חוזי ייצור בשווי כולל של 192 מיליון דולר לחברות פלנטיר (Palantir) ואנדוריל (Anduril) עבור מעבר לשלב הייצור של תוכנית הגישה למודיעין טקטי והכוונת מטרות (TITAN). פלנטיר תוביל את הייצור בשיתוף פעולה עם מספר חברות נוספות ותקבל 127 מיליון דולר מתוך הסכום הכולל, בעוד אנדוריל תייצר מערכות חומרה מוקשחות המותקנות על כלי רכב תמורת 65 מיליון דולר. במסגרת החוזה הנוכחי יסופקו שמונה מערכות, מחציתן מתקדמות ומחציתן בסיסיות, במהלך 18 החודשים הקרובים.",
+          "so_what_he": "להערכתנו, מעבר תוכנית ה-TITAN לשלב הייצור מהווה אבן דרך מרכזית בטרנספורמציה הדיגיטלית של צבא ארה״ב, וממחיש את השאיפה להנגיש מידע ממגוון סנסורים (כולל חיישני חלל אופטיים ואחרים) ישירות לכוחות הטקטיים בשטח לטובת סגירת מעגלי אש מהירה. חלוקת החוזה בין פלנטיר לאנדוריל מדגישה את המגמה הגוברת של שילוב חברות טכנולוגיה חדשניות כספקיות חומרה ותוכנה מרכזיות במערכות ליבה ביטחוניות, לצד תעשיות מסורתיות יותר המשולבות כקבלניות משנה בפרויקט.",
+          "key_facts": [
+            "צבא ארה״ב אישר תקציב של 192 מיליון דולר עבור מעבר תוכנית ה-TITAN משלב אב-טיפוס לשלב הייצור.",
+            "חברת פלנטיר תקבל 127 מיליון דולר להובלת ייצור המערכת.",
+            "חברת אנדוריל תקבל 65 מיליון דולר לייצור מערכות מוקשחות המורכבות על כלי רכב, ולשילוב תת-מערכות כוח וקירור.",
+            "פלנטיר נבחרה כקבלן ראשי לפיתוח מערכת ההכוונה של הדור הבא עוד בשנת 2024.",
+            "החוזה כולל רכש ושילוב של ארבע מערכות מתקדמות וארבע מערכות בסיסיות המתוכננות למסירה במהלך 18 החודשים הבאים.",
+            "המערכות החדשות יתגברו תשע יחידות אב-טיפוס הקיימות כיום בשימוש צבא ארה״ב.",
+            "הגרסה המתקדמת של המערכת תותקן על משאיות טקטיות ותכלול יכולת איסוף נתונים מחיישני חלל, בעוד הגרסה הבסיסית תותקן על רכבי JLTV.",
+            "צבא ארה״ב מתכנן להעניק הזמנות ייצור נוספות בשנת הכספים 2027."
+          ],
+          "events": [
+            {
+              "kind": "contract_award",
+              "title": "TITAN Program Production Contract Award",
+              "date": null,
+              "amount_usd": 192000000.0,
+              "currency": "USD",
+              "parties": [
+                "U.S. Army",
+                "Palantir Technologies",
+                "Anduril Industries"
+              ],
+              "customer": "U.S. Army",
+              "program": "TITAN",
+              "summary_he": "צבא ארה״ב העניק חוזה ייצור בסך 192 מיליון דולר לחברות פלנטיר ואנדוריל.",
+              "confidence": 0.9
+            }
+          ],
+          "edges": [
+            {
+              "src": "Palantir Technologies",
+              "dst": "L3 Harris Technologies",
+              "label": "PARTNER_OF",
+              "evidence_he": "המקור מציין כי פלנטיר תוביל את הייצור של TITAN לצד חברת L3 Harris Technologies."
+            },
+            {
+              "src": "Palantir Technologies",
+              "dst": "Sierra Nevada Corporation",
+              "label": "PARTNER_OF",
+              "evidence_he": "המקור מציין כי פלנטיר תוביל את הייצור של TITAN לצד חברת Sierra Nevada Corporation."
+            },
+            {
+              "src": "Palantir Technologies",
+              "dst": "Strategic Technology Consulting",
+              "label": "PARTNER_OF",
+              "evidence_he": "המקור מציין כי פלנטיר תוביל את הייצור של TITAN לצד חברת Strategic Technology Consulting."
+            },
+            {
+              "src": "Palantir Technologies",
+              "dst": "World Wide Technology",
+              "label": "PARTNER_OF",
+              "evidence_he": "המקור מציין כי פלנטיר תוביל את הייצור של TITAN לצד חברת World Wide Technology."
+            },
+            {
+              "src": "Palantir Technologies",
+              "dst": "U.S. Army",
+              "label": "SUPPLIER_OF",
+              "evidence_he": "הצבא האמריקאי בחר בפלנטיר כקבלן ראשי לפיתוח מערכת ההכוונה של הדור הבא בשנת 2024."
+            },
+            {
+              "src": "Anduril Industries",
+              "dst": "U.S. Army",
+              "label": "SUPPLIER_OF",
+              "evidence_he": "צבא ארה״ב העניק לאנדוריל ולפלנטיר חוזה משולב להעברת תוכנית ה-TITAN לשלב הייצור."
+            }
+          ],
+          "uncertainty_he": "הטקסט אינו מפרט אילו סוגי חיישני חלל או מטע״דים ספציפיים (כגון יכולות EO/IR או מכ״ם) ישולבו ויונגשו למערכת המוגמרת בשלב הייצור, ומסתפק בציון כללי של היכולת לאסוף נתונים מחיישני חלל.",
+          "tech_maturity": null,
+          "tech_actor_kind": null,
+          "tech_readiness_note_he": ""
+        },
+        "error": null,
+        "latency_ms": 88601
+      },
+      "merged_item": {
+        "id": 50,
+        "url": "https://www.defensenews.com/industry/techwatch/2026/09/02/us-army-awards-192m-to-palantir-anduril-for-titan-production/",
+        "title": "US Army awards $192M to Palantir, Anduril for TITAN production",
+        "lang": "en",
+        "published_at": "2026-09-02 22:43:17+03",
+        "clean_text": "The U.S. Army moved its Tactical Intelligence Targeting Access Node (TITAN) program from prototyping to production earlier this week with a combined $192 million award to Palantir Technologies and Anduril Industries.\nA cornerstone of the Army’s ground system modernization effort, TITAN was designed to simplify the data-gathering process for soldiers aiming at far-off targets.\nThe Army chose Palantir as the prime contractor to develop the next-generation targeting system in 2024.\nPalantir, which received $127 million, will lead TITAN’s production, alongside L3 Harris Technologies, Sierra Nevada Corporation, Strategic Technology Consulting and World Wide Technology.\nAnduril, which received $65 million under the award, will manufacture the ruggedized, vehicle-mounted systems and integrate the power and thermal subsystems that allow TITAN to operate in austere environments.\nThe TITAN program will create an advanced variant of the system to be mounted on the Army’s tactical trucks and have the ability to gather data from space sensors, as well as a basic variant for the service’s Joint Light Tactical Vehicle.\nThe award covers procurement and integration of four advanced and four basic variants, which are slated for delivery over the next 18 months. Those will buttress the Army’s nine existing prototype units that the service uses today.\nThe Army expects to award additional production orders in fiscal 2027.",
+        "source_name": "Defense News",
+        "domain": "secondary",
+        "subdomain": "defense_ai_infra",
+        "geography": "US",
+        "report_kind": "verified_report",
+        "trl": "operational",
+        "entities_mentioned": [
+          "US Army",
+          "Palantir Technologies",
+          "Anduril Industries",
+          "TITAN",
+          "L3 Harris Technologies",
+          "Sierra Nevada Corporation",
+          "Strategic Technology Consulting",
+          "World Wide Technology"
+        ],
+        "score": 7,
+        "level": "orange",
+        "triage_reason": "מעבר תוכנית TITAN (הנמצאת ב-watchlist יחד עם Palantir ו-Anduril) לשלב הייצור בחוזה של 192 מיליון דולר עבור צבא ארה״ב. מדובר בהתקדמות טבעית וידועה של המערכת מ-2024, אך בסכום משמעותי המהווה ציון דרך מבצעי מרכזי להנגשת נתוני איסוף ומטרות.",
+        "summary_he": "צבא ארה״ב העניק חוזי ייצור בשווי כולל של 192 מיליון דולר לחברות פלנטיר (Palantir) ואנדוריל (Anduril) עבור מעבר לשלב הייצור של תוכנית הגישה למודיעין טקטי והכוונת מטרות (TITAN). פלנטיר תוביל את הייצור בשיתוף פעולה עם מספר חברות נוספות ותקבל 127 מיליון דולר מתוך הסכום הכולל, בעוד אנדוריל תייצר מערכות חומרה מוקשחות המותקנות על כלי רכב תמורת 65 מיליון דולר. במסגרת החוזה הנוכחי יסופקו שמונה מערכות, מחציתן מתקדמות ומחציתן בסיסיות, במהלך 18 החודשים הקרובים.",
+        "so_what_he": "להערכתנו, מעבר תוכנית ה-TITAN לשלב הייצור מהווה אבן דרך מרכזית בטרנספורמציה הדיגיטלית של צבא ארה״ב, וממחיש את השאיפה להנגיש מידע ממגוון סנסורים (כולל חיישני חלל אופטיים ואחרים) ישירות לכוחות הטקטיים בשטח לטובת סגירת מעגלי אש מהירה. חלוקת החוזה בין פלנטיר לאנדוריל מדגישה את המגמה הגוברת של שילוב חברות טכנולוגיה חדשניות כספקיות חומרה ותוכנה מרכזיות במערכות ליבה ביטחוניות, לצד תעשיות מסורתיות יותר המשולבות כקבלניות משנה בפרויקט.",
+        "key_facts": [
+          "צבא ארה״ב אישר תקציב של 192 מיליון דולר עבור מעבר תוכנית ה-TITAN משלב אב-טיפוס לשלב הייצור.",
+          "חברת פלנטיר תקבל 127 מיליון דולר להובלת ייצור המערכת.",
+          "חברת אנדוריל תקבל 65 מיליון דולר לייצור מערכות מוקשחות המורכבות על כלי רכב, ולשילוב תת-מערכות כוח וקירור.",
+          "פלנטיר נבחרה כקבלן ראשי לפיתוח מערכת ההכוונה של הדור הבא עוד בשנת 2024.",
+          "החוזה כולל רכש ושילוב של ארבע מערכות מתקדמות וארבע מערכות בסיסיות המתוכננות למסירה במהלך 18 החודשים הבאים.",
+          "המערכות החדשות יתגברו תשע יחידות אב-טיפוס הקיימות כיום בשימוש צבא ארה״ב.",
+          "הגרסה המתקדמת של המערכת תותקן על משאיות טקטיות ותכלול יכולת איסוף נתונים מחיישני חלל, בעוד הגרסה הבסיסית תותקן על רכבי JLTV.",
+          "צבא ארה״ב מתכנן להעניק הזמנות ייצור נוספות בשנת הכספים 2027."
+        ],
+        "uncertainty_he": "הטקסט אינו מפרט אילו סוגי חיישני חלל או מטע״דים ספציפיים (כגון יכולות EO/IR או מכ״ם) ישולבו ויונגשו למערכת המוגמרת בשלב הייצור, ומסתפק בציון כללי של היכולת לאסוף נתונים מחיישני חלל.",
+        "tech_maturity": null,
+        "tech_actor_kind": null,
+        "tech_readiness_note_he": "",
+        "content_status": "partial",
+        "israel_relevance": 0.3,
+        "israel_reasons": [
+          "competitor_to_israeli_company"
+        ],
+        "events": [
+          {
+            "kind": "contract_award",
+            "title": "TITAN Program Production Contract Award",
+            "date": null,
+            "amount_usd": 192000000.0,
+            "currency": "USD",
+            "parties": [
+              "U.S. Army",
+              "Palantir Technologies",
+              "Anduril Industries"
+            ],
+            "customer": "U.S. Army",
+            "program": "TITAN",
+            "summary_he": "צבא ארה״ב העניק חוזה ייצור בסך 192 מיליון דולר לחברות פלנטיר ואנדוריל.",
+            "confidence": 0.9
+          }
+        ]
+      }
+    }
+  ],
+  "chat": [
+    {
+      "ok": true,
+      "question": "מה המצב העדכני של תוכנית ה-XM30 (Bradley הבא) מבחינת מטע\"די EO/IR, ומי הספקים המובילים?",
+      "candidate": "agy_gemini31_pro_high",
+      "content": "בהתבסס על ידע כללי, לא מהמאגר: תוכנית ה-XM30 של צבא ארה״ב (לשעבר OMFV), שנועדה להחליף את נגמ״ש הברדלי, נמצאת כיום בשלב התכנון המפורט וייצור אבות-הטיפוס. שתי הקבוצות המובילות שזכו במכרז לפיתוח אבות-הטיפוס הן ג'נרל דינמיקס (GDLS) ואמריקן ריינמטאל (ARV). מטע״די ה-EO/IR בתוכנית זו אינם מתפקדים רק כאמצעי תצפית קלאסיים, אלא מהווים מערך סנסורים היקפי המבוסס על חיישני דור שלישי (3rd Gen FLIR), אשר משולב עמוקות עם בינה מלאכותית בקצה (Edge AI) לטובת זיהוי מטרות אוטומטי (ATR) והפחתת העומס הקוגניטיבי על הצוות המצומצם של הכלי.\n\n### עובדות מרכזיות\n- שתי המתמודדות, GDLS ו-ARV, בונות בימים אלה אבות-טיפוס, לקראת בחירת מנצח יחיד ותחילת הצטיידות במחצית השנייה של העשור הנוכחי.\n- דרישות הליבה למערך התצפית של ה-XM30 כוללות מצלמות תרמיות מבוססות 3rd Gen FLIR (המספקות רזולוציה גבוהה וזיהוי מטרות רק״ם בטווחים ארוכים), ומערכת ראייה היקפית (360 מעלות) המעניקה לצוות תודעת מצב (Situational Awareness) גם כשהמדפים סגורים לחלוטין.\n- קבוצת ARV מציגה נבחרת ספקים בולטת בתחום זה, הכוללת את L3Harris ו-Raytheon (שתיהן ספקיות מרכזיות של תוכנית 3rd Gen FLIR של הצבא) לאספקת הסנסורים ומערכות ההכוונת, וכן את חברת Anduril Industries האחראית על שילוב התוכנה, היתוך המידע (Sensor Fusion) ומערכות ה-AI.\n- קבוצת GDLS משלבת ספקיות כמו Applied Intuition לטובת תשתיות התוכנה, הסימולציה והאוטונומיה, לצד שימוש במטע״די תצפית וסנסורים פנימיים מחטיבותיה השונות וספקיה המסורתיים.\n\n### הערכת האנליסט\nתוכנית ה-XM30 משקפת שינוי פרדיגמה דרמטי בעולם הרק״ם: המעבר ממטע״ד תצפית פדרטיבי ומופרד לארכיטקטורה עתירת סנסורים מבוססת-תוכנה (Software-Defined), שבה הווידאו האופטי והתרמי מוזן ישירות לרשת מחשוב מרכזית בכלי. הנוכחות של חברות טכנולוגיה צעירות כמו Anduril ו-Applied Intuition כקבלניות משנה מרכזיות מדגישה כי ההתמודדות הנוכחית אינה רק על אופטיקה נטו, אלא על היכולת להתיך וידאו בזמן אמת, להפעיל עליו אלגוריתמי ATR ברמת קצה (Edge), ולסגור מעגלי אש (\"Hunter-Killer\") באופן כמעט אוטונומי. בעוד שהחברות הביטחוניות המסורתיות מבטיחות אמינות בייצור גלאי ה-MWIR/LWIR, חברות התוכנה אמורות לספק את קפיצת המדרגה הקוגניטיבית שתאפשר לצוות של שניים בלבד לתפעל רק״ם מודרני בשדה קרב רווי איומים.\n\n### פערים / מה לא ידוע\n- אילו דגמים ספציפיים של מטע״דים וגלאים יותקנו בפועל ברכבי הייצור, משום שהתצורה הסופית תלויה בתוצאות הניסויים של אבות-הטיפוס שטרם הושלמו.\n- מידת הבשלות המבצעית של אלגוריתמי ה-ATR בסביבות עתירות הסתרה (Clutter) ואורבניות, ותפקודם תחת לוחמה אלקטרונית (EW).\n- האם ובאיזו מידה ישולבו אמצעי תצפית ייעודיים נגד רחפנים (C-UAS) בתוך מטע״ד ההכוונת הראשי, לעומת פריסתם כמטע״דים נפרדים על גג הכלי.",
+      "citations": [],
+      "error": null,
+      "latency_ms": 82955,
+      "model": "agy:gemini-3.1-pro-high"
+    },
+    {
+      "ok": true,
+      "question": "מהם פרטי חוזה מגן אור (Iron Beam) העדכני ביותר של רפאל, כולל היקף כספי וגורמים מעורבים?",
+      "candidate": "agy_gemini31_pro_high",
+      "content": "בהתבסס על ידע כללי בלבד (ולא על מקורות מהמאגר), החוזה המשמעותי והעדכני ביותר עבור מערכת ״מגן אור״ (Iron Beam) נחתם בסוף חודש אוקטובר 2024. מדובר בעסקת ענק שהוביל משרד הביטחון הישראלי מול חברת רפאל כקבלן ראשי, במטרה להאיץ את ההצטיידות ולשלב את המערכת במהירות במערך ההגנה האווירית של צה״ל. העסקה מהווה מעבר רשמי משלב הפיתוח וההדגמה לשלב הייצור הסדרתי וההצטיידות המבצעית.\n\n### עובדות מרכזיות\n- היקף כספי: העסקה נחתמה בסכום של כ-2 מיליארד שקלים (כ-535 מיליון דולר).\n- גורמים מעורבים: משרד הביטחון (מנהל הרכש ומפא״ת), רפאל כקבלן ראשי (אחראית על ניהול הפרויקט, השילוב המערכתי ועוקבי ההכוונה), ואלביט מערכות כספקית משמעותית (נבחרה לספק את מקור הלייזר עצמו בעסקה נגזרת של כ-200 מיליון דולר מול משרד הביטחון).\n- מטרת הפרויקט: ייצור והצטיידות במערכות לייזר רב-עוצמה (HEL) ליירוט איומים לטווח קצר, הכוללים רקטות, פצמ״רים וכטב״מים, כהשלמה למערכת ״כיפת ברזל״.\n\n### הערכת האנליסט\nההשקעה הממשלתית חסרת התקדים במערכת ״מגן אור״ מסמנת נקודת אל-חזור בבשלות של טכנולוגיית הלייזר המוצק (Solid-State HEL) ושל המערכות האופטרוניות התומכות בה. כדי שלייזר בהספק של למעלה מ-100 קילוואט יהיה אפקטיבי, נדרשת יכולת עקיבה (EO/IR Tracker) ומיקוד קרן (Beam Director) חסרת תקדים, המסוגלת להחזיק נקודת אנרגיה זעירה על מטרה מתמרנת במהירות גבוהה (כגון כטב״ם מתקדם או פצמ״ר) למשך מספר שניות, חרף הפרעות אטמוספריות. רכש זה מצביע על ביטחון מלא של מפא״ת בבשלות האלגוריתמיקה של הבינה החזותית (Computer Vision) האחראית לנעילה הקינמטית ופיצוי הריצוד האופטי. אסטרטגית, המערכת עתידה לשנות את ״כלכלת היירוט״, ולהוריד דרסטית את העלות להשמדת מטרה (Cost per Kill) בהתמודדות מול נחילי איומים זולים וא-סימטריים.\n\n### פערים / מה לא ידוע\n- לוח הזמנים המדויק והרשמי למסירת הסוללות המבצעיות הראשונות ופריסתן בשטח.\n- קצב הייצור השנתי (Rate of Production) המתוכנן של המערכות והמטע״דים הנלווים, לנוכח צווארי הבקבוק המוכרים בשרשרת האספקה העולמית של רכיבי אופטיקה ולייזר.\n- רמת ההספק (kW) הסופית והמלאה של מקור הלייזר מתוצרת אלביט שישולב בגרסאות הייצור הסדרתי, והאם הוא כולל ארכיטקטורה מודולרית להגדלת הספק עתידית.",
+      "citations": [],
+      "error": null,
+      "latency_ms": 65655,
+      "model": "agy:gemini-3.1-pro-high"
+    }
+  ],
+  "deterministic": {
+    "D1": {
+      "domain": "D1",
+      "score_0_100": 100.0,
+      "n": 8,
+      "note": "",
+      "checks": [
+        {
+          "name": "subdomain_valid_vs_taxonomy",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "8/8 valid; bad ids: []"
+        },
+        {
+          "name": "no_eoir_gate_agreement",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "8/8 agree; disagreeing ids: []"
+        },
+        {
+          "name": "reason_score_level_consistency",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "8/8 consistent; bad ids: []"
+        },
+        {
+          "name": "hebrew_truncation_zero_hits",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "0 hits: []"
+        },
+        {
+          "name": "gershayim_no_ascii_quote",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "0 hits: []"
+        },
+        {
+          "name": "key_facts_no_duplicates",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "8/8 clean; bad ids: []"
+        },
+        {
+          "name": "entities_mentioned_nonempty_in_scope",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "5/5 in-scope items have entities or key_facts; empty ids: []"
+        }
+      ]
+    },
+    "D2": {
+      "domain": "D2",
+      "score_0_100": 100.0,
+      "n": 5,
+      "note": "",
+      "checks": [
+        {
+          "name": "summary_length_bounds",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "5/5 within [40,900] chars; bad: []"
+        },
+        {
+          "name": "hebrew_dominant",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "5/5 Hebrew-dominant; bad ids: []"
+        },
+        {
+          "name": "no_model_chatter",
+          "passed": true,
+          "weight": 2.5,
+          "evidence": "5/5 clean; bad ids: []"
+        },
+        {
+          "name": "terminology_in_parens_when_relevant",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "5/5 carry a parenthesised term; missing ids (informational, high false-positive rate): []"
+        }
+      ]
+    }
+  }
+}

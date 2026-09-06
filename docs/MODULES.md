@@ -7670,12 +7670,21 @@ round-trip (asserts a real candidate name never appears in the judge prompt, an 
 label from the judge is dropped rather than raised, and the shuffle order actually depends on the
 seed). Ruff-clean.
 
-### Known limitation
+### Known limitations
 
-`run_judge` (script-level) currently loads only the *first* `judge_provider` given on the CLI —
-no automatic claude→agy fallback is wired in if the preferred judge CLI is unavailable at run
-time; pass `--judge-provider` explicitly if `claude` isn't authenticated on a given machine. See
-`docs/qa/loop/BAKEOFF.md` for the actual bake-off results and recommendation.
+- `run_judge` (script-level) currently loads only the *first* `judge_provider` given on the CLI —
+  no automatic claude→agy fallback is wired in if the preferred judge CLI is unavailable at run
+  time; pass `--judge-provider` explicitly if `claude` isn't authenticated on a given machine.
+- `_source_text_for_item`'s judge-facing source excerpt was found live (first real run,
+  2026-09-06) to be capped shorter (4,000 chars) than what `analyze_item` actually shows the
+  model (`analyze.py`'s `MAX_CHARS=12000`) -- the judge penalised two candidates for
+  "hallucinating" facts that were verifiably present in the source past its own cutoff. Fixed
+  (`_JUDGE_SOURCE_TEXT_MAX_CHARS = 12000`, matching analyze's own limit) but the first run's
+  numeric judge scores predate the fix -- see `docs/qa/loop/BAKEOFF.md`'s "Judge source-text
+  truncation bug" section for the confirmed character-offset evidence and what it implies about
+  that run's scores (likely an *understatement* of the cloud-vs-local gap, not an overstatement).
+
+See `docs/qa/loop/BAKEOFF.md` for the actual bake-off results and recommendation.
 
 ## Round 2 D5 chat fixes — repetition loop, citations, conflation (docs/qa/loop/round_2_chat_fixes.md, 2026-09-06)
 
@@ -7759,3 +7768,336 @@ is `chat_stream`'s only caller today).
   round 1's Q3 *silence* is fixed even though its substance is not. A real substance fix needs
   either different retrieval ranking for compound two-entity queries or a semantic verification
   pass; both are flagged as follow-ups, out of this round's chat-layer-only scope.
+
+## Round 3 D8 (patent survey) -- docs/qa/loop/round_1_judge.md findings, fixed in `eoa.patents.survey` / `eoa.qa.d8_patent_survey`
+
+Four findings, all fixed in `agent/eoa/patents/survey.py` and `agent/eoa/qa/d8_patent_survey.py`
+(plus `tests/unit/test_patents_round3.py`); no live LLM/DB calls made during this repair, no
+existing report rows in the DB were rewritten (out of scope for a repair pass that must not touch
+the database) -- the fixes apply to every *future* survey build.
+
+1. **Exclusivity/market-share overclaim from a data gap** (the Anduril survey's executive summary
+   asserted Anduril was "the exclusive player" when only 1 of 6 patents had assignee data). New
+   `_assignee_coverage(rows)` computes `(missing, total, coverage)`; below
+   `_ASSIGNEE_COVERAGE_THRESHOLD` (0.70), `_scrub_exclusivity_claims` replaces any sentence/action
+   matching `_EXCLUSIVITY_CLAIM_RE` (בלעדי/השחקן היחיד/שולט בשוק/exclusive/only player) with the
+   deterministic caveat (`_coverage_caveat_he`: "ל-N מתוך M הפטנטים אין נתוני מקצה — לא ניתן
+   להסיק בלעדיות או נתח שוק."), and `_enforce_coverage_caveat` guarantees that same caveat sentence
+   is present in the executive summary and every assignee-profile section regardless of whether a
+   violation was actually found. `agent/eoa/llm/prompts/patent_survey.md` gained a new rule 8
+   instructing the model directly (mirroring rule 7's phrasing/placement) not to write
+   exclusivity/market-domination language unless the new "כיסוי נתוני מקצה" data-block line (added
+   to `_synthesis_data_block`, computed from the same `_assignee_coverage` call) shows >=70%
+   coverage -- the scrub above remains the deterministic backstop for whenever the model doesn't
+   comply.
+2. **Hallucinated relationship row** ("Anduril <-> Elbit Systems | מיזוג/רכישה | Sigma 155
+   howitzer" cited a source that never mentioned Elbit at all). Every
+   `eoa.patents.cluster.relationship_edges_from_events` edge already carries the registry number of
+   the one DB event it came from; new `_verify_relationship_edges` (using `_name_in_text` /
+   `_alias_candidates`, the latter via `eoa.pipeline.entity_normalize.resolve_canonical` for
+   watchlist aliases) drops any edge whose cited source's own text (event title + parent item title
+   + parent item body, `_assignee_events`'s query now also selects `i.summary_he`) does not name
+   *both* parties -- the drop is logged (`patent_survey_relationship_edges_dropped`) and counted in
+   the open-questions section ("N קשרים הוסרו כי המקורות לא תומכים בהם."). Scoped to the
+   event-derived relationship edges only, not the purely structural co-assignment/same-family rows
+   (those cite patent registry facts directly, not a news-article claim).
+3. **Timeline/CPC tables scored 100% on heading presence alone.** `agent/eoa/patents/survey.py`
+   already renders a real per-patent timeline table and CPC/timeline-yearly tables (added in the
+   prior A14b round) -- the remaining gap was that a *genuinely* CPC-less or date-less sample (the
+   keyless Google-Patents-search fallback often supplies neither) still rendered a silently-empty
+   table. `build_patent_survey` now checks `if top_cpc` / `if timeline` before appending those two
+   tables; when empty, it appends a `_RenderSection` with the explicit disclosure sentence
+   (`_TIMELINE_DISCLOSURE_HE` / `_CPC_DISCLOSURE_HE`) instead, mirrored into `open_points_he`.
+   `eoa.qa.d8_patent_survey.score_D8` was strengthened to match: `timeline_section_present` is now
+   `timeline_present`, and a new `cpc_present` check was added; both require a real markdown-table
+   data row (`_section_has_data_row`, header + separator + >=1 non-blank row) *or* the disclosure
+   sentence text under a matching heading -- a bare heading (the exact round-1 bug) now fails both
+   checks. `DomainScore`/`Check`'s own shape is untouched.
+4. **FPA/DROIC survey (report 35) delivered no synthesis** after the local LLM was unreachable,
+   with no path back to a real narrative. `_run_synthesis` is now wrapped by
+   `_run_synthesis_with_retries` (up to 3 attempts, 5s apart, `sleep` injectable for tests) before
+   falling back. On exhaustion, the fallback draft's executive summary becomes
+   `NARRATIVE_PENDING_MARKER_HE` (distinct from the unrelated "no real assignee data at all"
+   fallback text, which retrying the LLM could never fix) and `_persist_report` writes
+   `qa_report["narrative_pending"] = true` for machine detection. Two new functions --
+   `find_surveys_pending_narrative(limit)` (reads `reports`/`patent_surveys` for that flag) and
+   `regenerate_pending_narrative(survey_id, ...)` (looks up the original topic and calls
+   `build_patent_survey` again) -- are the nightly-maintenance hook the finding asked for; **no
+   scheduler wiring was added** (out of `agent/eoa/patents/**`'s ownership for this task). To wire
+   it: add a job kind (mirroring `run_patent_survey` in `agent/eoa/orchestrator/jobs.py`) that calls
+   `find_surveys_pending_narrative()` then `regenerate_pending_narrative(survey_id)` per row found,
+   and register it on the night pipeline's own job list the same way `patent_survey` itself is
+   registered. Territory scoping is not persisted on `patent_surveys` today, so a regeneration
+   always re-runs unscoped -- a real follow-up if a territory-scoped survey ever needs this hook.
+
+**What remains data-starved without API keys** (unchanged by this round, `EPO_OPS_KEY` /
+`PATENTSVIEW_API_KEY` still unset in `.env`): the keyless Google-Patents-search fallback
+(`eoa.patents.scan`) still cannot supply structured CPC codes, filing/priority/grant dates, or
+assignee names for the large majority of gathered records -- this is exactly why finding 3's
+disclosure path and finding 1's coverage-gated caveat exist as permanent, not one-off, guards
+rather than being "fixed" by better-classifying the existing sample. A real fix for both is
+configuring either key.
+
+**Regression note:** `tests/unit/test_patents_scan.py::TestScanPatentsOrchestration::
+test_duplicate_pub_number_across_queries_counted_once` fails in this environment with a DB
+`PoolTimeout`/auth error -- confirmed pre-existing and unrelated to this round (identical failure
+reproduces on a clean checkout with none of this round's changes applied; the test does not mock
+`_patent_exists` and needs a reachable, authenticated DB connection this sandboxed run doesn't
+have).
+
+## Round 3 D5 chat grounding — entity/conflation guard, template-leak sanitiser (docs/qa/loop/round_2_judge.md's D5 new-findings section, docs/qa/loop/round_3_chat_fixes.md, 2026-09-06)
+
+Round 2 (previous section) fixed the repetition loop, zero-citation answers, and made the topic
+anchor guard fire reliably -- but an independent judge's *second* live sample of the same 8 golden
+questions found two severe fabrications neither guard catches, because both keep a real `[n]`
+marker and the question's own topic word: **Q2** attributed a Rafael "Iron Beam" contract to a
+source that is actually AeroVironment's own, unrelated laser programme; **Q4** invented a named
+professor, university and project by conflating two unrelated retrieved arXiv papers. **Q3** also
+leaked a literal, unsubstituted `[n=5]` template token into a rendered heading. Full rationale and
+the live 16-sample (8 questions x 2 runs) verification table are in
+`docs/qa/loop/round_3_chat_fixes.md`; this is the module-API summary.
+
+**New module `agent/eoa/api/ask_grounding.py`** (pure text functions, no DB/LLM calls):
+- `sanitize_citation_markers(text)`: strips a literal `[n]`/`[n=5]`/`{n}` placeholder (any case) --
+  never a valid citation, which is always a bare `[<digits>]` -- and returns `(cleaned_text,
+  count_removed)`. Applied to the assembled answer text immediately after streaming ends and again
+  to the citation-repair pass's output, before either reaches the client.
+- `ground_and_filter_answer(answer_text, question, retrieved)`: the grounded-entity check +
+  cross-source conflation guard, combined into one pass over the answer's sentences/bullets
+  ("units", `_iter_units` -- a heading line is never touched, a bullet line is one unit, other
+  lines are split on sentence terminators):
+  - **grounded-entity check** (`_grounding_violation`): every multi-word Latin proper noun
+    (`_PROPER_NOUN_RE`, catches both space-separated names like "Kunat Pipatanakul" and
+    hyphen-joined compounds like "Wayu-Paxa-OCR-Zero"), ASCII-quoted multi-word phrase, money
+    figure, and year in a unit must appear in the question, in some retrieved source's title/text,
+    or resolve to a canonical watchlist/curated-org record
+    (`eoa.pipeline.entity_normalize.resolve_canonical`) -- `_proper_noun_grounded` also accepts a
+    paraphrased/reordered restatement of a real fact (every individual word of the candidate,
+    >= 3 chars, appears *somewhere* in the corpus) so a real fact restated in different word order
+    ("GDLS-built ... Lynx XM30" -> "GDLS Lynx") is not flagged, while a wholesale-invented name
+    (none of its words appear anywhere) still is -- a deliberate precision-over-recall trade-off,
+    see the function's own docstring;
+  - **cross-source conflation guard** (`_conflation_violation`): a unit that cites `[n]` and names
+    a watchlist-recognised company/system
+    (`eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text`) must have that same entity
+    actually present in at least one of *its own* cited sources' text -- this is what catches Q2:
+    "Iron Beam"/"רפאל" resolve to the real, known entity "Rafael", so the grounded-entity check
+    alone would never flag them, but the specific source `[1]` cited alongside them is
+    AeroVironment's laser item and never mentions Rafael at all.
+  A flagged unit is dropped outright; if the only flagged unit(s) fell inside the leading
+  "direct answer" paragraph (before the first `###` section) and removing them leaves it blank, an
+  explicit Hebrew gap sentence naming the missing entity is inserted instead of a blank answer
+  (`"המקורות שנשלפו אינם מזכירים {entity} — לא ניתן לאשר."`). Returns `(new_text, removed_count)`;
+  a no-op (unchanged text, `removed_count=0`) when `answer_text` is blank or `retrieved` is empty
+  (zero sources retrieved is the disclosed-general-knowledge path, which this guard must not
+  penalise -- see the function's own docstring).
+
+**`agent/eoa/api/routes/ask.py`**: the two `ask_grounding` passes run right after the streamed
+answer is fully assembled (post repetition/wall-clock abort handling), *before* the round-2
+citation-repair and anchor guards so those reason about the already-cleaned text. When either pass
+changes the text, a new `answer_final` SSE event carries the additive `"ungrounded_removed": N`
+field (SSE contract stays backward compatible -- a field addition, no rename) and
+`ask.grounding_repair` is logged (question hash only, never the question text) with
+`template_leaks_removed`/`ungrounded_removed` counts. The citation-repair pass's own output is now
+also run through `sanitize_citation_markers` before being accepted, so a leak introduced by that
+corrective rewrite itself cannot slip through either. The topic-anchor guard (round 2) is
+strengthened per this round's brief: on a miss, the existing `"⚠ ייתכן שהתשובה אינה עוסקת בשאלה: "`
+prefix (kept byte-for-byte -- round 2's tests assert `.startswith` on it) is now immediately
+followed by an explicit gap statement naming the missing anchor(s)
+(`"המקורות שנשלפו אינם מזכירים ... — לא ניתן לאשר תשובה ישירה."`), and the substitute (off-topic)
+content that follows is demoted under its own `### הקשר קרוב (לא התשובה)` heading rather than
+reading as if it were the direct answer.
+
+**`agent/eoa/api/services.py`** / **`agent/eoa/llm/prompts/ask_answer_format.md`**: strengthened
+"at the source" against the Q3 `[n=5]` template leak (the sanitiser above is the backstop, not the
+only fix) -- `ask_answer_format.md` gained an explicit rule that the only permitted citation shape
+is a bare `[<digits>]` matching a real supplied source, with `[n]`/`[n=5]`/`{n}` named and forbidden
+outright (including as a fact-count annotation on a section heading, the live-observed shape of the
+leak); `_CITATION_REPAIR_INSTRUCTION` gained the identical constraint so the corrective rewrite
+pass cannot reintroduce the same leak.
+
+**Known limitation, stated plainly (same honesty standard as round 2's Q3 write-up):** both
+grounding checks are precision-first, exact/whole-word heuristics over the answer's own surface
+text, not a semantic verifier -- `_proper_noun_grounded`'s per-word fallback specifically accepts
+some recall loss (a fabricated name built entirely out of otherwise-common corpus words could in
+principle slip through) to avoid the much more damaging failure mode of gutting a real, correctly-
+paraphrased fact. Live verification (`docs/qa/loop/round_3_chat_fixes.md` section 5) is the
+evidence for where this trade-off actually landed across the 8 golden questions, not just the
+synthetic Q2/Q4 reproductions in `tests/unit/test_ask_round3_grounding.py`.
+
+## Round 3 D7/D9 (2026-09-06, `docs/qa/loop/round_1_judge.md`)
+
+Five findings against the BD territory report (D7) and tenders/conferences/sources (D9). Tests:
+`tests/unit/test_bd_tenders_round3.py` (plus companion patches to
+`tests/unit/test_tenders_scan.py` -- see below). Everything here is offline: fake DB
+connections/cursors, no LLM call, no live fetch.
+
+**Finding 1 -- BD-report conference dates must be deterministic
+(`agent/eoa/report/bd_territory.py`).** The rendered conferences table was already 100% DB-sourced
+by construction (`conferences_table`/`format_conferences_block` read `start_date`/`end_date`
+straight off the `conferences` row, never synthesized) -- the observed drift (AUSA 2026 cited as
+2026-10-01..10-18 in a report vs. the DB's 2026-10-12..10-14) came from free *prose* (exec
+summary/market bullets), which the model can still paraphrase incorrectly. Added defense-in-depth:
+`_conferences_date_lookup` builds a `{name: real start_date}` map from the same
+`collect_conferences_for_territory` result already used for the table; `_correct_conference_date_
+mentions` scans a text for a tracked conference name followed within a short window by an ISO
+date and replaces a mismatching date with the real one (corrected, never merely dropped); `_correct
+_draft_conference_dates` applies this to `exec_summary_he`/`market_bullets_he` and logs every
+correction (`bd_territory_conference_date_corrected`). Wired into `build_bd_territory` right after
+the punctuation-normalization pass (finding 2, below).
+
+**Finding 2 -- doubled ASCII quotes in Hebrew abbreviations
+(`agent/eoa/report/textnorm.py`, new file).** `normalize_hebrew_punctuation` (+ its three passes,
+`collapse_doubled_quotes`/`ascii_quote_to_gershayim`/`ascii_apostrophe_to_geresh`) collapses
+`'ארה""ב'` to a single gershayim (`'ארה״ב'`) and an ASCII apostrophe after a Hebrew letter to
+a geresh (`׳`) -- pure, idempotent, `None`/falsy-safe. `eoa.report.bd_territory` applies it via
+`_normalize_draft_text` (every LLM-authored field: exec summary, market bullets, each recommended
+action's four text fields, risks/assumptions, open points) and `_normalize_table` (every string
+table cell + `note_he`, non-string cells like numbers pass through untouched) -- called twice in
+`build_bd_territory`: once right after the citation-QA/uncited-stripping stage resolves (so the
+extra-section bodies built from `draft.market_bullets_he`/`risks_assumptions_he` are already clean)
+and again after the deterministic-actions fallback merges in new text. This module is shared: a
+concurrent D6 fix (`normalize_draft`, same file) reuses these exact functions unchanged for the
+daily/weekly/monthly report drafts rather than duplicating the logic -- one normalization
+implementation for both report families.
+
+**Finding 3 -- an honest "no activity this window" BD report must not fail
+`actions_table_nonempty` (`agent/eoa/report/bd_territory.py`,
+`agent/eoa/qa/d7_bd_report.py`).** When market-item collection AND every deterministic table
+(procurement events, tenders, forecasts, competitors, conferences) all come back empty for the
+lookback window (`not items and table_counts.total == 0`, the bd_kr case) -- after the existing
+deterministic-actions fallback also has nothing to build from -- `build_bd_territory` now renders
+an explicit `NO_ACTIVITY_MARKER_HE` sentence ("לא זוהתה פעילות רלוונטית בטריטוריה בחלון זה — אין
+פעולות מומלצות") under the normal "נקודות כניסה ופעולות מומלצות" heading, naming every watchlist
+competitor that was actually checked (`dormant_competitors`, which resolves to the *full* territory
+watchlist when there are zero active competitors). `eoa.qa.d7_bd_report.score_D7` imports
+`NO_ACTIVITY_MARKER_HE` from the report builder itself (same single-source-of-truth convention as
+`_COMPETITOR_PROMOTION_VERBS`) and treats its presence as a populated actions section --
+`_is_no_activity_actions_text`/`_actions_text_has_populated_rows` also catch and fail the
+self-contradictory case (marker text *and* a real populated actions table both present), so the
+check stays strict about fabricated actions while no longer penalising an honest empty result.
+
+**Finding 4 -- tenders discovery/persistence unification (`agent/eoa/tenders/scan.py`,
+`agent/eoa/api/services.py`, `agent/eoa/report/bd_territory.py`).** (a) Every notice the discovery
+path (`scan_tenders`) surfaces was already upserted into `tenders` deduped on `external_ref`
+(`"<source_id>:<notice id>"`, effectively a normalized url/notice-id key) with a deterministic
+status (`_initial_status`) -- pre-existing F2/F13/F24 work, unchanged here. (b) Added
+`redrive_all_tender_statuses(today=None)`: a whole-table maintenance sweep, idempotent, called at
+the end of every `scan_tenders` run (`stats.statuses_redriven`) -- closes any `'open'`/`'unknown'`
+row whose `deadline` has now passed, and (re-)opens an `'unknown'` row that has since acquired a
+still-future deadline (the one direction the pre-existing `_transition_closed` never covered).
+(c) `eoa.api.services.list_tenders` and `eoa.report.bd_territory.collect_tenders_and_forecasts`
+both already hid closed/archived rows from the default view; their `ORDER BY` is now an explicit
+`CASE status ...` so open rows always sort before unknown ones (open: earliest deadline first;
+unknown: most-recently-published first -- "unknown-recent"), instead of an incidental ordering that
+happened to work only when open rows always had a deadline and unknown ones never did. (d) A
+keyless public discovery source was already feasible without new dependencies and already present,
+config-driven, respx-fixture-tested with no live fetch: `ted_eu` (TED's public notices API) and
+`uk_contracts_finder` (UK Contracts Finder's public OCDS API), both `verified: true` in
+`config/tenders.yaml`, parsed by `_parse_ted_notices`/`_parse_contracts_finder` -- no new source
+needed to satisfy this finding.
+
+**Finding 5 -- 30/60 stale sources, root-caused (`agent/eoa/memory/relational.py`,
+`agent/eoa/fetch/sources_loader.py`, `agent/eoa/fetch/service.py`).** Live DB investigation (read-
+only, `runtime/eoa.env`, port 5432) found 7/60 active sources with `last_fetched_at` still `NULL`
+(the 30/60 figure in the finding brief had already partly self-healed by the time this round ran;
+7 remained, all genuinely explained by one of two code-path bugs, not a scheduler gap):
+- **3 sources** (`aviation_week_defense`, `shephard_media`, `janes_news`, all with `enabled: false`
+  in `config/sources.yaml` per documented Q4-2/Q4-3 dead-feed/robots.txt findings) had DB rows
+  stuck at `active=true` forever. Root cause: `run_ingest` filtered disabled sources out of the
+  list *before* ever calling `upsert_sources_to_db`, so `upsert_source`'s `active` argument was
+  simply never invoked for them -- a source's DB `active` flag never tracked its config `enabled`
+  flag at all, only ever defaulting to `True` on first insert.
+- **4 sources** (`arxiv_eess_iv_tech`/`arxiv_cs_cv_tech`/`arxiv_physics_optics_tech`/
+  `arxiv_physics_ins_det_tech`, ids 1562-1565, `"... (keyword query)"`) were orphaned rows from a
+  prior config rename to `"... (keyword-filtered)"` (now ids 1657-1660, healthy, fetched
+  successfully every run) -- confirmed live: the new-named rows fetch fine daily, the old-named
+  rows sit at `active=true`/`last_fetched_at=NULL` forever, because `upsert_source` is keyed by
+  `name` and a rename creates a brand-new row rather than updating the old one.
+  Fix: `relational.deactivate_orphaned_sources(current_names)` marks `active=false` on every
+  `sources` row whose `name` isn't in the given set (guarded against an empty set -- never wipes
+  every source on a bad config load); `sources_loader.upsert_sources_to_db` now (1) upserts *every*
+  configured source, enabled or not, passing `active=source.enabled` (previously always `True`),
+  and (2) calls `deactivate_orphaned_sources` with the full current name set right after. `eoa.
+  fetch.service.run_ingest` now calls `upsert_sources_to_db` with the *unfiltered* `load_sources()`
+  result (so disabled/renamed sources actually get synced), then filters to `enabled` sources only
+  for the fetch loop itself -- fetch behavior is unchanged, only the bookkeeping is fixed. Net
+  effect: `eoa.qa.d9_tenders_conferences`'s `sources_enabled_fetched_recently` check's denominator
+  (`WHERE active = true`) now excludes sources that will genuinely never be fetched again, instead
+  of counting them against the ratio forever.
+
+## Round 3 D6 (2026-09-06)
+
+Continuous QA loop round 3, D6 (daily/weekly reports, docs/QA_CONTINUOUS_LOOP.md) -- five judge
+findings against `output/reports/daily_2026-09-06.md`.
+
+- **Deterministic fallback synthesis on double citation-QA failure** (`agent/eoa/report/daily.py`,
+  `agent/eoa/report/weekly.py`): when the LLM-drafted narrative still fails
+  `eoa.report.qa_citations.check` after one corrective retry, the report used to drop the executive
+  summary entirely (tables-only + a one-line apology, `_qa_failed_twice_draft`). Both modules now
+  call a new `_deterministic_fallback_draft(items, events_with_n, israel_items)` instead: a
+  no-LLM executive summary built straight from already-numbered data -- the top red/orange items
+  (title + level + `so_what_he`), the period's notable business events (kind/parties/amount/date),
+  and the Israel-relevant items for the period -- every `Sentence` cites a real registry `n`, so it
+  cannot itself fail the citation gate (`build_daily`/`build_weekly` still run `check()` on it once,
+  defensively). `system_note_he` opens with an explicit label ("תקציר מובנה אוטומטית (ללא ניסוח
+  מודל)") and keeps the honest explanation of why the model's own draft was dropped; `qa.passed`
+  still reports `False`, since the model draft genuinely did fail. New small local helpers per
+  module: `_extend_registry_with_rows` (folds Israel-relevant items into the citation registry
+  before this runs), `_fallback_top_item_sentences`, `_fallback_event_sentences`,
+  `_fallback_israel_item_sentences`. `daily.py`'s citation-registry extension
+  (`_extend_citation_registry`) was moved earlier in `build_daily` (before drafting, not after) so
+  the fallback has `events_with_n` available; no behavior change for the normal (non-fallback)
+  path. `_qa_failed_twice_draft` is kept in both modules only for the (should-not-happen)
+  items-somehow-empty edge case.
+- **"תעשייה ישראלית" eligibility tightened** (`agent/eoa/report/israel_section.py`): the
+  uncategorized-item default bucket (`_categorize`'s `if not cats: cats.add(_CATEGORY_COMPETITION)`)
+  used to catch *every* Israel-relevant-but-uncategorized item unconditionally -- verified live to
+  let two political op-eds (an IDF-as-scapegoat opinion piece, a Lebanon-ridge sovereignty piece)
+  into "תחרות ומתחרים", both tagged only with the generic government/military entity "IDF". New
+  `_has_israeli_company_entity` (checks `entities_mentioned` against
+  `eoa.pipeline.israel_focus.israeli_watchlist_names()`, i.e. `config/watchlist.yaml` `country: IL`
+  companies) and `_DEFAULT_BUCKET_EVENT_KINDS` (`contract_award`/`m_and_a`/`partnership`/
+  `investment`/`deployment`/`test`/`launch`) gate the default bucket now: an uncategorized item is
+  only admitted to "תחרות ומתחרים" if it carries an Israeli company entity or one of those event
+  kinds; an item whose only Israeli hook is a government/military org mention is excluded from the
+  section entirely instead.
+- **D6 scorer appendix/table duplicate-title false positive fixed** (`agent/eoa/qa/d6_daily_report.py`):
+  `score_D6`'s `no_duplicate_sentences` check used to scan every heading section including "נספח
+  מקורות" (the sources appendix) -- but the appendix is a citation registry, not narrative prose:
+  it deliberately re-renders a table row's own item title once, by design. `all_sentences` now
+  excludes the appendix heading from the scan (see the module docstring for the two options
+  considered and why this one was chosen); two genuinely duplicated *narrative* sections are still
+  caught exactly as before.
+- **Shared Hebrew-quote normaliser wired into daily/weekly/monthly**
+  (`agent/eoa/report/textnorm.py`): this module already existed (landed concurrently for the BD
+  territory report, a D7 fix -- `normalize_hebrew_punctuation`/`collapse_doubled_quotes`/
+  `ascii_quote_to_gershayim`/`ascii_apostrophe_to_geresh`) by the time this round started; rather
+  than duplicate it, a new `normalize_draft(draft)` was added to the same module -- a duck-typed
+  walker that applies `normalize_hebrew_punctuation` to every text field of a report draft
+  (structured `DailyReportDraft`/`WeeklyReportDraft`: `Sentence`/`StructuredSection`/
+  `OutlookIndicator`/`AnalystNote`, or legacy free-prose `MonthlyReportDraft`: plain `*_he`
+  strings), without importing `eoa.llm.schemas.*`. `eoa.report.daily`/`eoa.report.weekly`/
+  `eoa.report.monthly` each now call `draft = normalize_draft(draft)` once, right after their
+  QA-gate loop resolves and before the draft reaches `eoa.report.docx_builder`.
+  **`eoa.report.bd_territory` is NOT wired to `normalize_draft`** -- it already normalizes its own
+  draft inline (`_normalize_draft_text`, landed as part of the same concurrent D7 fix) and needs no
+  change; flagged here only so the BD engineer knows `normalize_draft` now also exists in this
+  shared module in case a future BD refactor wants to switch to it instead of its own inline
+  helper.
+- **Weekly-report-after-quarantine regression test** (`tests/unit/test_report_round3_d6.py`):
+  round 2 quarantined a contaminated `weekly_2026-09-05.md` to
+  `weekly_2026-09-05.contaminated.md.bak` without independently re-verifying the next scheduled
+  run produces a fresh file. Reading `agent/eoa/report/weekly.py` end to end confirms nothing ever
+  checks for an existing file at `_report_path`'s computed location (unlike `eoa.report.daily`'s
+  `_recent_daily_report` idempotency guard, which is DB-row-based, not file-based, and applies only
+  to the daily report) -- `build_weekly()` always collects/drafts/renders/writes unconditionally.
+  A new test exercises this with the real (non-monkeypatched) `_report_path`, planting a
+  `.contaminated.md.bak` file at the exact stem `build_weekly()` targets and asserting a fresh
+  `weekly_<date>.md` is written regardless, with the stale backup left untouched.
+
+Tests: `tests/unit/test_report_round3_d6.py` (new, 35 cases) plus a corrected pre-existing case in
+`tests/unit/test_israel_section.py` (`test_uncategorized_item_defaults_to_competition` renamed to
+`test_uncategorized_item_with_no_company_or_event_is_excluded` and its assertion flipped, since
+that was the exact behaviour this round's second finding fixes) and two new cases in the same file
+covering the two new admission paths.

@@ -393,9 +393,17 @@ label, no extra commentary outside the schema.
 """
 
 
+#: Must be >= the largest MAX_CHARS any stage feeds the model (analyze.py's is the largest,
+#: 12000) -- a smaller judge excerpt than what a candidate actually saw makes a correct,
+#: detailed extraction from later in the article look like a "hallucination" to the judge (found
+#: live in this harness's first real run: docs/qa/loop/BAKEOFF.md's "judge source-text truncation
+#: bug" note -- claude/agy's most detailed, most complete answers were the ones penalised).
+_JUDGE_SOURCE_TEXT_MAX_CHARS = 12000
+
+
 def _source_text_for_item(item: dict[str, Any]) -> str:
     title = item.get("title") or ""
-    text = (item.get("clean_text") or "")[:4000]
+    text = (item.get("clean_text") or "")[:_JUDGE_SOURCE_TEXT_MAX_CHARS]
     return f"Title: {title}\n\n{text}"
 
 
