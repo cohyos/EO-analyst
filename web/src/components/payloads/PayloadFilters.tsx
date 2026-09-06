@@ -1,5 +1,7 @@
 import { Search } from "lucide-react";
 import type { PayloadCategory } from "@/types/api";
+import { useT } from "@/i18n";
+import type { TranslationKey } from "@/i18n/types";
 
 export interface PayloadFiltersState {
   category: PayloadCategory | "";
@@ -7,15 +9,30 @@ export interface PayloadFiltersState {
   q: string;
 }
 
-const CATEGORY_LABELS_HE: Record<PayloadCategory, string> = {
-  gimbal: "גימבל",
-  pod: "פוד",
-  thermal_camera: "מצלמה תרמית",
-  detector_core: "גלעין גלאי",
-  lrf: "LRF",
-  seeker: "ראש ביות",
-  other: "אחר",
+const CATEGORY_KEYS: Record<PayloadCategory, TranslationKey> = {
+  gimbal: "payloads.categories.gimbal",
+  pod: "payloads.categories.pod",
+  thermal_camera: "payloads.categories.thermal_camera",
+  detector_core: "payloads.categories.detector_core",
+  lrf: "payloads.categories.lrf",
+  seeker: "payloads.categories.seeker",
+  other: "payloads.categories.other",
 };
+
+/** W25 (docs/REVIEW_2026-09-06_evening.md): category labels resolved through `t()` so they
+ * follow the active locale -- used by `PayloadFilters`, `PayloadTable` and `PayloadDetailDrawer`. */
+export function useCategoryLabels(): Record<PayloadCategory, string> {
+  const t = useT();
+  return {
+    gimbal: t(CATEGORY_KEYS.gimbal),
+    pod: t(CATEGORY_KEYS.pod),
+    thermal_camera: t(CATEGORY_KEYS.thermal_camera),
+    detector_core: t(CATEGORY_KEYS.detector_core),
+    lrf: t(CATEGORY_KEYS.lrf),
+    seeker: t(CATEGORY_KEYS.seeker),
+    other: t(CATEGORY_KEYS.other),
+  };
+}
 
 export function PayloadFilters({
   value,
@@ -26,18 +43,20 @@ export function PayloadFilters({
   onChange: (next: PayloadFiltersState) => void;
   vendors: string[];
 }) {
+  const t = useT();
+  const categoryLabels = useCategoryLabels();
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border bg-bg-raised p-3">
       <select
         value={value.category}
         onChange={(e) => onChange({ ...value, category: e.target.value as PayloadFiltersState["category"] })}
         className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
-        aria-label="סינון לפי קטגוריה"
+        aria-label={t("payloads.filterByCategoryAria")}
       >
-        <option value="">כל הקטגוריות</option>
-        {(Object.keys(CATEGORY_LABELS_HE) as PayloadCategory[]).map((c) => (
+        <option value="">{t("payloads.categoryAll")}</option>
+        {(Object.keys(categoryLabels) as PayloadCategory[]).map((c) => (
           <option key={c} value={c}>
-            {CATEGORY_LABELS_HE[c]}
+            {categoryLabels[c]}
           </option>
         ))}
       </select>
@@ -46,9 +65,9 @@ export function PayloadFilters({
         value={value.vendor}
         onChange={(e) => onChange({ ...value, vendor: e.target.value })}
         className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
-        aria-label="סינון לפי יצרן"
+        aria-label={t("payloads.filterByVendorAria")}
       >
-        <option value="">כל היצרנים</option>
+        <option value="">{t("payloads.vendorAll")}</option>
         {vendors.map((v) => (
           <option key={v} value={v}>
             {v}
@@ -67,10 +86,10 @@ export function PayloadFilters({
           type="search"
           value={value.q}
           onChange={(e) => onChange({ ...value, q: e.target.value })}
-          placeholder="חיפוש שם/משפחת מוצרים…"
+          placeholder={t("payloads.searchPlaceholder")}
           className="w-full rounded-md border border-border-strong bg-bg py-1.5 text-sm text-fg placeholder:text-fg-dim"
           style={{ paddingInlineStart: "1.75rem", paddingInlineEnd: "0.5rem" }}
-          aria-label={'חיפוש במטע"דים'}
+          aria-label={t("payloads.searchLabel")}
         />
       </div>
 
@@ -80,10 +99,8 @@ export function PayloadFilters({
         rel="noreferrer"
         className="rounded-md border border-border-strong px-3 py-1.5 text-sm text-fg hover:bg-bg-sunken"
       >
-        ייצוא CSV
+        {t("payloads.exportCsv")}
       </a>
     </div>
   );
 }
-
-export { CATEGORY_LABELS_HE };

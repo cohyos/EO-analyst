@@ -166,6 +166,9 @@ const mockPayloads: PayloadRecord[] = [
     first_seen: "2026-08-01",
     last_seen: "2026-09-05",
     notes: null,
+    image_url: "https://www.l3harris.com/sites/default/files/2021-05/mx-15.jpg",
+    spec_url: "https://www.l3harris.com/all-capabilities/mx-series-imaging-turrets",
+    spec_source: "l3harris.com",
     spec_version_count: 2,
     price_ref_count: 1,
     latest_spec_date: "2026-09-05",
@@ -1073,6 +1076,7 @@ export const mockApi: ApiClient = {
       result: null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      subject_he: new Date().toLocaleDateString("he-IL"),
     };
     jobs.unshift(job);
     return delay({ job_id: String(id) }, 300);

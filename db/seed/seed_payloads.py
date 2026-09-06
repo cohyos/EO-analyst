@@ -54,14 +54,28 @@ def _upsert_payload(entry: dict[str, Any], today: dt.date) -> int:
     if category not in CATEGORIES:
         log.warning("seed_payloads_invalid_category", canonical_name=canonical_name, category=category)
         category = "other"
+    # W19 (migration 0022): image/spec-sheet reference -- identity-level, never versioned (see
+    # the migration's docstring). Blank/missing stays NULL, never an empty string, and an
+    # already-set value is never overwritten by a blank one (same COALESCE convention as
+    # vendor/family above) so a later manual correction in the DB is never clobbered by re-seeding.
+    image_url = (entry.get("image_url") or "").strip() or None
+    spec_url = (entry.get("spec_url") or "").strip() or None
+    spec_source = (entry.get("spec_source") or "").strip() or None
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO payloads (canonical_name, vendor_entity_name, family, category, first_seen, last_seen)
-            VALUES (%(name)s, %(vendor)s, %(family)s, %(category)s, %(today)s, %(today)s)
+            INSERT INTO payloads
+                (canonical_name, vendor_entity_name, family, category, image_url, spec_url, spec_source,
+                 first_seen, last_seen)
+            VALUES
+                (%(name)s, %(vendor)s, %(family)s, %(category)s, %(image_url)s, %(spec_url)s, %(spec_source)s,
+                 %(today)s, %(today)s)
             ON CONFLICT (canonical_name) DO UPDATE SET
                 vendor_entity_name = COALESCE(payloads.vendor_entity_name, EXCLUDED.vendor_entity_name),
                 family = COALESCE(payloads.family, EXCLUDED.family),
+                image_url = COALESCE(payloads.image_url, EXCLUDED.image_url),
+                spec_url = COALESCE(payloads.spec_url, EXCLUDED.spec_url),
+                spec_source = COALESCE(payloads.spec_source, EXCLUDED.spec_source),
                 last_seen = EXCLUDED.last_seen
             RETURNING id
             """,
@@ -70,6 +84,9 @@ def _upsert_payload(entry: dict[str, Any], today: dt.date) -> int:
                 "vendor": vendor,
                 "family": family,
                 "category": category,
+                "image_url": image_url,
+                "spec_url": spec_url,
+                "spec_source": spec_source,
                 "today": today,
             },
         )

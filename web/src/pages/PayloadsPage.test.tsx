@@ -28,6 +28,9 @@ function makePayload(over: Partial<PayloadRecord> = {}): PayloadRecord {
     first_seen: "2026-08-01",
     last_seen: "2026-09-05",
     notes: null,
+    image_url: null,
+    spec_url: "https://wescam.com/products/mx-series/",
+    spec_source: "wescam.com",
     spec_version_count: 2,
     price_ref_count: 1,
     latest_spec_date: "2026-09-05",
@@ -99,5 +102,23 @@ describe("PayloadsPage", () => {
     fireEvent.change(search, { target: { value: "Toplite" } });
     expect(await screen.findByText("Rafael Toplite")).toBeInTheDocument();
     expect(screen.queryByText("WESCAM MX-15")).not.toBeInTheDocument();
+  });
+
+  // W19 (docs/REVIEW_2026-09-06_evening.md): manufacturer spec link + honest "not yet
+  // documented" state -- image_url/spec_url/spec_source are identity-level (migration 0022).
+  it("shows a manufacturer spec link when spec_url is set", async () => {
+    getPayloads.mockResolvedValue(payloadsResponse([makePayload()]));
+    renderPage();
+    await screen.findByText("WESCAM MX-15");
+    const link = screen.getByRole("link", { name: "מפרט יצרן" });
+    expect(link).toHaveAttribute("href", "https://wescam.com/products/mx-series/");
+  });
+
+  it('shows the honest "not yet documented" state when spec_url is null', async () => {
+    getPayloads.mockResolvedValue(payloadsResponse([makePayload({ spec_url: null, spec_source: null })]));
+    renderPage();
+    await screen.findByText("WESCAM MX-15");
+    expect(screen.getByText("מפרט/מחיר טרם תועדו")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "מפרט יצרן" })).not.toBeInTheDocument();
   });
 });

@@ -532,6 +532,10 @@ function normalizePayloadRecord(
     first_seen: r.first_seen ?? null,
     last_seen: r.last_seen ?? null,
     notes: r.notes ?? null,
+    // W19 (migration 0022): identity-level image/spec-sheet reference, nullable.
+    image_url: r.image_url ?? null,
+    spec_url: r.spec_url ?? null,
+    spec_source: r.spec_source ?? null,
     spec_version_count: num(r.spec_version_count),
     price_ref_count: num(r.price_ref_count),
     latest_spec_date: r.latest_spec_date ?? null,
@@ -632,6 +636,9 @@ function normalizeJob(raw: Partial<Job> | null | undefined): Job {
     result: r.result ?? null,
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
+    // W20 (docs/REVIEW_2026-09-06_evening.md): server-derived per-kind subject, see
+    // `_job_subject_he` in `eoa.api.services`.
+    subject_he: r.subject_he ?? null,
   };
 }
 

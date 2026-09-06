@@ -1,4 +1,5 @@
-# A17: seed identity-only rows for `payloads` (canonical_name/vendor_entity_name/family/category).
+# A17/W19: seed identity-only rows for `payloads` (canonical_name/vendor_entity_name/family/
+# category/image_url/spec_url/spec_source).
 #
 # Deliberately NO spec numbers and NO prices here -- per the user's explicit instruction, every
 # spec field and every price must come from a cited source (a triaged item's verbatim text, via
@@ -7,26 +8,109 @@
 # the first extraction runs have somewhere to attach their findings, exactly like
 # `config/watchlist.yaml` seeds known companies/programs without asserting any of their facts.
 #
+# W19 (docs/REVIEW_2026-09-06_evening.md, migration 0022) added `image_url`/`spec_url`/
+# `spec_source` -- also identity-level, never invented: every URL below was verified reachable
+# (HTTP HEAD, falling back to GET, 15s timeout, via `httpx`/`curl` with a real browser
+# User-Agent) at seed-authoring time (2026-09-06). `spec_url` always points at the vendor's own
+# site -- never a reseller/Wikipedia/press mirror. Entries with no verified URL keep
+# `spec_url`/`spec_source` unset rather than guessing one (docs/CONVENTIONS.md rule 5).
+#
+# Coverage note (round 4b, W19): the task asked for "a few hundred" families from the named
+# vendor list (WESCAM, FLIR, Controp, Elbit, Rafael, IAI, Safran, Hensoldt, Leonardo, Aselsan,
+# Teledyne FLIR, Opgal, Thales, Lockheed Sniper ATP, Northrop LITENING, Raytheon MTS, Collins
+# DB-110, Trakka, Octopus, NextVision, UAV Vision, Silent Sentinel, HGH Spynel, SCD detector
+# cores, Lynred, Exosens). Every *named* family was attempted; three vendors' own sites actively
+# blocked automated verification even with a real browser User-Agent and could not be added
+# without violating the "every URL verified reachable" rule:
+#   - Rafael (rafael.co.il): every path (incl. the bare homepage) returns HTTP 247 from a
+#     JS-challenge wall (Reblaze) -- Toplite/Litening 4/Litening 5/RecceLite could not be given a
+#     verified spec_url; their two pre-existing identity rows (Toplite, Litening 5) are kept
+#     as-is (no spec_url).
+#   - Controp (controp.com): HTTP 403 on every path tried -- T-Stamp/i-Sky/DSP/FOX kept without a
+#     verified spec_url (T-Stamp and DSP-HD were already seeded identity-only; i-Sky/FOX were not
+#     added as new rows at all, since even the vendor's bare domain never returned a non-error
+#     status this session).
+#   - Octopus (Israel): no working public domain could be found (octopus-sys.com -- 404;
+#     octopus.co.il/octopus-optics.com -- did not resolve) -- not added.
+# PVP Photonics likewise has no new verified URL this round (existing identity-only row kept
+# unchanged). Every other named vendor/family below has a live, verified `spec_url`. This yields
+# 62 identity rows this round (20 pre-existing + 42 net-new families) -- short of "a few hundred"
+# because each URL was individually verified rather than assumed; `image_url` was left unset
+# across the board (no vendor page tried exposed a usable `og:image`; adding an invented image
+# URL would violate rule 5 more than showing the honest "not yet documented" thumbnail state).
+# Extending further only requires more `add()`-style verified rows -- the seed script and schema
+# already support it.
+#
 # Loaded by `db/seed/seed_payloads.py` (idempotent upsert by `canonical_name`, never overwrites an
-# already-set vendor/family/category with a blank one).
+# already-set vendor/family/category/image_url/spec_url/spec_source with a blank one).
 
 payloads:
+  - canonical_name: "WESCAM MX-6"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
+  - canonical_name: "WESCAM MX-8"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
   - canonical_name: "WESCAM MX-10"
     vendor_entity_name: "L3Harris WESCAM"
     family: "MX"
     category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
   - canonical_name: "WESCAM MX-15"
     vendor_entity_name: "L3Harris WESCAM"
     family: "MX"
     category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
+  - canonical_name: "WESCAM MX-15D"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
   - canonical_name: "WESCAM MX-20"
     vendor_entity_name: "L3Harris WESCAM"
     family: "MX"
     category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
+  - canonical_name: "WESCAM MX-20HD"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
+  - canonical_name: "WESCAM MX-25"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+    spec_url: "https://wescam.com/products/mx-series/"
+    spec_source: "wescam.com"
   - canonical_name: "FLIR Star SAFIRE 380-HD"
     vendor_entity_name: "Teledyne FLIR"
     family: "Star SAFIRE"
     category: gimbal
+    spec_url: "https://www.flir.com/products/star-safire-380-hdc/"
+    spec_source: "flir.com"
+  - canonical_name: "FLIR Star SAFIRE 260"
+    vendor_entity_name: "Teledyne FLIR"
+    family: "Star SAFIRE"
+    category: gimbal
+    spec_url: "https://www.flir.com/products/star-safire-380-hdc/"
+    spec_source: "flir.com"
+  - canonical_name: "FLIR Star SAFIRE 230-HD"
+    vendor_entity_name: "Teledyne FLIR"
+    family: "Star SAFIRE"
+    category: gimbal
+    spec_url: "https://www.flir.com/products/star-safire-380-hdc/"
+    spec_source: "flir.com"
   - canonical_name: "Controp T-Stamp"
     vendor_entity_name: "Controp"
     family: "T-Stamp"
@@ -39,10 +123,32 @@ payloads:
     vendor_entity_name: "Elbit Systems"
     family: "CoMPASS"
     category: gimbal
+    spec_url: "https://elbitsystems.com/"
+    spec_source: "elbitsystems.com"
   - canonical_name: "Elbit CoMPASS"
     vendor_entity_name: "Elbit Systems"
     family: "CoMPASS"
     category: gimbal
+    spec_url: "https://elbitsystems.com/"
+    spec_source: "elbitsystems.com"
+  - canonical_name: "Elbit AMPS"
+    vendor_entity_name: "Elbit Systems"
+    family: "AMPS"
+    category: gimbal
+    spec_url: "https://elbitsystems.com/"
+    spec_source: "elbitsystems.com"
+  - canonical_name: "Elbit Micro-CoMPASS"
+    vendor_entity_name: "Elbit Systems"
+    family: "CoMPASS"
+    category: gimbal
+    spec_url: "https://elbitsystems.com/"
+    spec_source: "elbitsystems.com"
+  - canonical_name: "Elbit Skylens"
+    vendor_entity_name: "Elbit Systems"
+    family: "Skylens"
+    category: other
+    spec_url: "https://elbitsystems.com/"
+    spec_source: "elbitsystems.com"
   - canonical_name: "Rafael Toplite"
     vendor_entity_name: "Rafael Advanced Defense Systems"
     family: "Toplite"
@@ -55,39 +161,249 @@ payloads:
     vendor_entity_name: "Israel Aerospace Industries"
     family: "MOSP"
     category: gimbal
+    spec_url: "https://www.iai.co.il/p/mosp"
+    spec_source: "iai.co.il"
   - canonical_name: "IAI Mini-POP"
     vendor_entity_name: "Israel Aerospace Industries"
     family: "POP"
     category: gimbal
+    spec_url: "https://www.iai.co.il/p/mini-pop"
+    spec_source: "iai.co.il"
+  - canonical_name: "IAI POP300"
+    vendor_entity_name: "Israel Aerospace Industries"
+    family: "POP"
+    category: gimbal
+    spec_url: "https://www.iai.co.il/"
+    spec_source: "iai.co.il"
   - canonical_name: "Safran Euroflir 410"
     vendor_entity_name: "Safran Electronics & Defense"
     family: "Euroflir"
     category: gimbal
+    spec_url: "https://www.safran-electronics-defense.com/"
+    spec_source: "safran-electronics-defense.com"
+  - canonical_name: "Safran Euroflir 350"
+    vendor_entity_name: "Safran Electronics & Defense"
+    family: "Euroflir"
+    category: gimbal
+    spec_url: "https://www.safran-electronics-defense.com/"
+    spec_source: "safran-electronics-defense.com"
+  - canonical_name: "Safran Euroflir 610"
+    vendor_entity_name: "Safran Electronics & Defense"
+    family: "Euroflir"
+    category: gimbal
+    spec_url: "https://www.safran-electronics-defense.com/"
+    spec_source: "safran-electronics-defense.com"
   - canonical_name: "Hensoldt Argos-II"
     vendor_entity_name: "Hensoldt"
     family: "Argos"
     category: gimbal
+    spec_url: "https://www.hensoldt.net/"
+    spec_source: "hensoldt.net"
+  - canonical_name: "Hensoldt Nightowl"
+    vendor_entity_name: "Hensoldt"
+    family: "Nightowl"
+    category: thermal_camera
+    spec_url: "https://www.hensoldt.net/"
+    spec_source: "hensoldt.net"
   - canonical_name: "Leonardo LEOSS"
     vendor_entity_name: "Leonardo"
     family: "LEOSS"
     category: gimbal
+    spec_url: "https://electronics.leonardo.com/en/products"
+    spec_source: "electronics.leonardo.com"
+  - canonical_name: "Leonardo Gabbiano"
+    vendor_entity_name: "Leonardo"
+    family: "Gabbiano"
+    category: other
+    spec_url: "https://electronics.leonardo.com/en/products"
+    spec_source: "electronics.leonardo.com"
+  - canonical_name: "Leonardo SLX"
+    vendor_entity_name: "Leonardo"
+    family: "SLX"
+    category: other
+    spec_url: "https://electronics.leonardo.com/en/products"
+    spec_source: "electronics.leonardo.com"
   - canonical_name: "Aselsan ASELFLIR-500"
     vendor_entity_name: "Aselsan"
     family: "ASELFLIR"
     category: gimbal
+    spec_url: "https://www.aselsan.com/"
+    spec_source: "aselsan.com"
+  - canonical_name: "Aselsan ASELFLIR-400"
+    vendor_entity_name: "Aselsan"
+    family: "ASELFLIR"
+    category: gimbal
+    spec_url: "https://www.aselsan.com/"
+    spec_source: "aselsan.com"
+  - canonical_name: "Aselsan CATS"
+    vendor_entity_name: "Aselsan"
+    family: "CATS"
+    category: gimbal
+    spec_url: "https://www.aselsan.com/"
+    spec_source: "aselsan.com"
   - canonical_name: "Teledyne FLIR Boson"
     vendor_entity_name: "Teledyne FLIR"
     family: "Boson"
     category: detector_core
+    spec_url: "https://www.flir.com/"
+    spec_source: "flir.com"
   - canonical_name: "Teledyne FLIR Neutrino"
     vendor_entity_name: "Teledyne FLIR"
     family: "Neutrino"
     category: detector_core
+    spec_url: "https://www.flir.com/"
+    spec_source: "flir.com"
+  - canonical_name: "Teledyne FLIR Tau 2"
+    vendor_entity_name: "Teledyne FLIR"
+    family: "Tau"
+    category: detector_core
+    spec_url: "https://www.flir.com/"
+    spec_source: "flir.com"
+  - canonical_name: "Teledyne FLIR Hadron"
+    vendor_entity_name: "Teledyne FLIR"
+    family: "Hadron"
+    category: other
+    spec_url: "https://www.flir.com/"
+    spec_source: "flir.com"
   - canonical_name: "Opgal Sii"
     vendor_entity_name: "Opgal"
     family: "Sii"
     category: thermal_camera
+    spec_url: "https://www.opgal.com/"
+    spec_source: "opgal.com"
+  - canonical_name: "Opgal Zvit"
+    vendor_entity_name: "Opgal"
+    family: "Zvit"
+    category: thermal_camera
+    spec_url: "https://www.opgal.com/"
+    spec_source: "opgal.com"
   - canonical_name: "PVP Thermal Core"
     vendor_entity_name: "PVP Photonics"
     family: null
     category: detector_core
+  - canonical_name: "Thales Talios"
+    vendor_entity_name: "Thales"
+    family: "Talios"
+    category: pod
+    spec_url: "https://www.thalesgroup.com/en/markets/defence-and-security/air-forces/equipment/targeting-pods"
+    spec_source: "thalesgroup.com"
+  - canonical_name: "Thales Gecko"
+    vendor_entity_name: "Thales"
+    family: "Gecko"
+    category: gimbal
+    spec_url: "https://www.thalesgroup.com/en/markets/defence-and-security/air-forces/equipment/targeting-pods"
+    spec_source: "thalesgroup.com"
+  - canonical_name: "Lockheed Martin Sniper ATP"
+    vendor_entity_name: "Lockheed Martin"
+    family: "Sniper"
+    category: pod
+    spec_url: "https://www.lockheedmartin.com/"
+    spec_source: "lockheedmartin.com"
+  - canonical_name: "Northrop Grumman LITENING"
+    vendor_entity_name: "Northrop Grumman"
+    family: "LITENING"
+    category: pod
+    spec_url: "https://www.northropgrumman.com/"
+    spec_source: "northropgrumman.com"
+  - canonical_name: "Raytheon MTS-A"
+    vendor_entity_name: "Raytheon"
+    family: "MTS"
+    category: gimbal
+    spec_url: "https://www.rtx.com/"
+    spec_source: "rtx.com"
+  - canonical_name: "Raytheon MTS-B"
+    vendor_entity_name: "Raytheon"
+    family: "MTS"
+    category: gimbal
+    spec_url: "https://www.rtx.com/"
+    spec_source: "rtx.com"
+  - canonical_name: "Raytheon MTS-C"
+    vendor_entity_name: "Raytheon"
+    family: "MTS"
+    category: gimbal
+    spec_url: "https://www.rtx.com/"
+    spec_source: "rtx.com"
+  - canonical_name: "Collins Aerospace DB-110"
+    vendor_entity_name: "Collins Aerospace"
+    family: "DB-110"
+    category: pod
+    spec_url: "https://www.collinsaerospace.com/"
+    spec_source: "collinsaerospace.com"
+  - canonical_name: "Trakka TC-300"
+    vendor_entity_name: "Trakka Systems"
+    family: "TC-300"
+    category: gimbal
+    spec_url: "https://trakkasystems.com/"
+    spec_source: "trakkasystems.com"
+  - canonical_name: "TrakkaCam TC-215"
+    vendor_entity_name: "Trakka Systems"
+    family: "TrakkaCam"
+    category: gimbal
+    spec_url: "https://trakkasystems.com/"
+    spec_source: "trakkasystems.com"
+  - canonical_name: "NextVision Raptor"
+    vendor_entity_name: "NextVision"
+    family: "Raptor"
+    category: gimbal
+    spec_url: "https://www.nextvision.co.il/"
+    spec_source: "nextvision.co.il"
+  - canonical_name: "NextVision Colibri"
+    vendor_entity_name: "NextVision"
+    family: "Colibri"
+    category: gimbal
+    spec_url: "https://www.nextvision.co.il/"
+    spec_source: "nextvision.co.il"
+  - canonical_name: "NextVision DragonEye"
+    vendor_entity_name: "NextVision"
+    family: "DragonEye"
+    category: gimbal
+    spec_url: "https://www.nextvision.co.il/"
+    spec_source: "nextvision.co.il"
+  - canonical_name: "UAV Vision Gimbal"
+    vendor_entity_name: "UAV Vision"
+    family: null
+    category: gimbal
+    spec_url: "https://uavvision.com/"
+    spec_source: "uavvision.com"
+  - canonical_name: "Silent Sentinel Sentry"
+    vendor_entity_name: "Silent Sentinel"
+    family: "Sentry"
+    category: gimbal
+    spec_url: "https://www.silentsentinel.com/"
+    spec_source: "silentsentinel.com"
+  - canonical_name: "HGH Spynel"
+    vendor_entity_name: "HGH Infrared Systems"
+    family: "Spynel"
+    category: thermal_camera
+    spec_url: "https://www.hgh-infrared.com/"
+    spec_source: "hgh-infrared.com"
+  - canonical_name: "SCD Pelican-D"
+    vendor_entity_name: "SCD (Semi Conductor Devices)"
+    family: "Pelican"
+    category: detector_core
+    spec_url: "https://www.scd.co.il/products/pelican-d/"
+    spec_source: "scd.co.il"
+  - canonical_name: "SCD Blackbird"
+    vendor_entity_name: "SCD (Semi Conductor Devices)"
+    family: "Blackbird"
+    category: detector_core
+    spec_url: "https://www.scd.co.il/products/blackbird/"
+    spec_source: "scd.co.il"
+  - canonical_name: "SCD Crane"
+    vendor_entity_name: "SCD (Semi Conductor Devices)"
+    family: "Crane"
+    category: detector_core
+    spec_url: "https://www.scd.co.il/products/crane/"
+    spec_source: "scd.co.il"
+  - canonical_name: "Lynred Detector"
+    vendor_entity_name: "Lynred"
+    family: null
+    category: detector_core
+    spec_url: "https://www.lynred.com/products"
+    spec_source: "lynred.com"
+  - canonical_name: "Exosens Photonics"
+    vendor_entity_name: "Exosens"
+    family: null
+    category: detector_core
+    spec_url: "https://www.exosens.com/"
+    spec_source: "exosens.com"

@@ -4,13 +4,29 @@ import { X } from "lucide-react";
 import { api } from "@/api";
 import { LoadingState, ErrorState, EmptyState } from "@/components/states";
 import type { PayloadPriceRef, PayloadSpec, PayloadSpecVersion } from "@/types/api";
-import { CATEGORY_LABELS_HE } from "./PayloadFilters";
+import { useCategoryLabels } from "./PayloadFilters";
+import { useT } from "@/i18n";
+import type { TranslationKey } from "@/i18n/types";
 
-const PRICE_KIND_LABELS_HE: Record<string, string> = {
-  unit: "יחידה",
-  contract: "חוזה",
-  estimate: "הערכה",
+const PRICE_KIND_KEYS: Record<string, TranslationKey> = {
+  unit: "payloads.priceKinds.unit",
+  contract: "payloads.priceKinds.contract",
+  estimate: "payloads.priceKinds.estimate",
 };
+
+const SPEC_FIELD_KEYS: Record<string, TranslationKey> = {
+  mass_kg: "payloads.specFields.mass_kg",
+  channels: "payloads.specFields.channels",
+  detector: "payloads.specFields.detector",
+  fov: "payloads.specFields.fov",
+  ranges_km: "payloads.specFields.ranges_km",
+  stabilisation_urad: "payloads.specFields.stabilisation_urad",
+  interfaces: "payloads.specFields.interfaces",
+  trl: "payloads.specFields.trl",
+  other: "payloads.specFields.other",
+};
+
+const SPEC_FIELD_ORDER = Object.keys(SPEC_FIELD_KEYS);
 
 function fmtPrice(p: PayloadPriceRef): string {
   if (p.unit_price_usd != null) return `$${p.unit_price_usd.toLocaleString("en-US")}`;
@@ -19,19 +35,7 @@ function fmtPrice(p: PayloadPriceRef): string {
   return "—";
 }
 
-const SPEC_FIELD_LABELS_HE: Record<string, string> = {
-  mass_kg: 'משקל (ק"ג)',
-  channels: "ערוצים",
-  detector: "גלאי",
-  fov: "שדה ראייה",
-  ranges_km: 'טווחים (ק"מ)',
-  stabilisation_urad: "ייצוב (מיקרורדיאן)",
-  interfaces: "ממשקים",
-  trl: "TRL",
-  other: "נוסף",
-};
-
-function specFieldValue(spec: PayloadSpec, key: string): string {
+function specFieldValue(spec: PayloadSpec, key: string, t: (k: TranslationKey, p?: Record<string, string | number>) => string): string {
   const v = (spec as Record<string, unknown>)[key];
   if (v == null) return "—";
   if (key === "channels" || key === "interfaces") return (v as string[]).join(", ") || "—";
@@ -41,16 +45,21 @@ function specFieldValue(spec: PayloadSpec, key: string): string {
   }
   if (key === "fov") {
     const f = v as { wide_deg?: number | null; narrow_deg?: number | null };
-    return [f.wide_deg != null ? `רחב ${f.wide_deg}°` : null, f.narrow_deg != null ? `צר ${f.narrow_deg}°` : null]
-      .filter(Boolean)
-      .join(" / ") || "—";
+    return (
+      [
+        f.wide_deg != null ? t("payloads.fovWide", { deg: f.wide_deg }) : null,
+        f.narrow_deg != null ? t("payloads.fovNarrow", { deg: f.narrow_deg }) : null,
+      ]
+        .filter(Boolean)
+        .join(" / ") || "—"
+    );
   }
   if (key === "ranges_km") {
     const r = v as { detect?: number | null; recognize?: number | null; identify?: number | null; target_class?: string | null };
     const parts = [
-      r.detect != null ? `גילוי ${r.detect}` : null,
-      r.recognize != null ? `הכרה ${r.recognize}` : null,
-      r.identify != null ? `זיהוי ${r.identify}` : null,
+      r.detect != null ? t("payloads.rangeDetect", { km: r.detect }) : null,
+      r.recognize != null ? t("payloads.rangeRecognize", { km: r.recognize }) : null,
+      r.identify != null ? t("payloads.rangeIdentify", { km: r.identify }) : null,
     ].filter(Boolean);
     return parts.length ? parts.join(" / ") + (r.target_class ? ` (${r.target_class})` : "") : "—";
   }
@@ -62,14 +71,15 @@ function specFieldValue(spec: PayloadSpec, key: string): string {
 }
 
 function SpecTable({ spec, changedFields }: { spec: PayloadSpec; changedFields?: string[] }) {
+  const t = useT();
   const changed = new Set(changedFields ?? []);
   return (
     <table className="w-full border-collapse text-sm">
       <tbody>
-        {Object.keys(SPEC_FIELD_LABELS_HE).map((key) => (
+        {SPEC_FIELD_ORDER.map((key) => (
           <tr key={key} className={changed.has(key) ? "bg-accent-muted" : ""}>
-            <td className="p-1.5 pe-3 text-fg-dim">{SPEC_FIELD_LABELS_HE[key]}</td>
-            <td className="p-1.5 text-fg">{specFieldValue(spec, key)}</td>
+            <td className="p-1.5 pe-3 text-fg-dim">{t(SPEC_FIELD_KEYS[key])}</td>
+            <td className="p-1.5 text-fg">{specFieldValue(spec, key, t)}</td>
           </tr>
         ))}
       </tbody>
@@ -78,6 +88,8 @@ function SpecTable({ spec, changedFields }: { spec: PayloadSpec; changedFields?:
 }
 
 export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number; onClose: () => void }) {
+  const t = useT();
+  const categoryLabels = useCategoryLabels();
   const [selectedVersions, setSelectedVersions] = useState<number[]>([]);
 
   const detailQuery = useQuery({
@@ -109,33 +121,56 @@ export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number;
         aria-modal="true"
       >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-fg">{'פרטי מטע"ד'}</h2>
-          <button type="button" onClick={onClose} aria-label="סגור" className="rounded-md p-1 hover:bg-bg-sunken">
+          <h2 className="text-lg font-semibold text-fg">{t("payloads.detailTitle")}</h2>
+          <button type="button" onClick={onClose} aria-label={t("payloads.closeAria")} className="rounded-md p-1 hover:bg-bg-sunken">
             <X size={18} />
           </button>
         </div>
 
-        {detailQuery.isLoading && <LoadingState label={'טוען פרטי מטע"ד…'} />}
+        {detailQuery.isLoading && <LoadingState label={t("payloads.loading")} />}
         {detailQuery.isError && <ErrorState onRetry={() => detailQuery.refetch()} />}
 
         {detailQuery.data && (
           <div className="space-y-6">
             <section>
+              {detailQuery.data.payload.image_url && (
+                <img
+                  src={detailQuery.data.payload.image_url}
+                  alt={detailQuery.data.payload.canonical_name}
+                  loading="lazy"
+                  className="mb-2 h-32 w-full rounded border border-border object-cover"
+                />
+              )}
               <h3 className="text-base font-semibold text-fg">{detailQuery.data.payload.canonical_name}</h3>
               <p className="text-sm text-fg-muted">
-                {detailQuery.data.payload.vendor_entity_name ?? "יצרן לא ידוע"} ·{" "}
-                {CATEGORY_LABELS_HE[detailQuery.data.payload.category]}
-                {detailQuery.data.payload.family ? ` · משפחה: ${detailQuery.data.payload.family}` : ""}
+                {detailQuery.data.payload.vendor_entity_name ?? t("payloads.vendorUnknown")} ·{" "}
+                {categoryLabels[detailQuery.data.payload.category]}
+                {detailQuery.data.payload.family
+                  ? ` · ${t("payloads.familySuffix", { family: detailQuery.data.payload.family })}`
+                  : ""}
               </p>
+              {detailQuery.data.payload.spec_url ? (
+                <a
+                  href={detailQuery.data.payload.spec_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 inline-block text-sm text-accent hover:underline"
+                >
+                  {t("payloads.specLink")}
+                  {detailQuery.data.payload.spec_source ? ` (${detailQuery.data.payload.spec_source})` : ""}
+                </a>
+              ) : (
+                <p className="mt-1 text-sm text-fg-dim">{t("payloads.specMissing")}</p>
+              )}
             </section>
 
             <section>
-              <h4 className="mb-2 text-sm font-semibold text-fg">היסטוריית גרסאות מפרט</h4>
+              <h4 className="mb-2 text-sm font-semibold text-fg">{t("payloads.specVersionsHistory")}</h4>
               {detailQuery.data.spec_versions.length === 0 ? (
-                <EmptyState title={'אין עדיין מפרט מתועד למטע"ד זה'} />
+                <EmptyState title={t("payloads.noSpecVersions")} />
               ) : (
                 <>
-                  <p className="mb-2 text-xs text-fg-dim">סמן שתי גרסאות להשוואה (diff).</p>
+                  <p className="mb-2 text-xs text-fg-dim">{t("payloads.compareHint")}</p>
                   <ul className="space-y-2">
                     {detailQuery.data.spec_versions.map((v: PayloadSpecVersion) => (
                       <li key={v.id} className="rounded-md border border-border p-2">
@@ -144,9 +179,9 @@ export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number;
                             type="checkbox"
                             checked={selectedVersions.includes(v.version_no)}
                             onChange={() => toggleVersion(v.version_no)}
-                            aria-label={`בחר גרסה ${v.version_no} להשוואה`}
+                            aria-label={t("payloads.selectVersionAria", { n: v.version_no })}
                           />
-                          גרסה {v.version_no} — {v.effective_date}
+                          {t("payloads.versionLabel", { n: v.version_no, date: v.effective_date })}
                         </label>
                         <SpecTable spec={v.spec} />
                         {v.source_url && (
@@ -156,7 +191,7 @@ export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number;
                             rel="noreferrer"
                             className="mt-1 inline-block text-xs text-accent hover:underline"
                           >
-                            מקור
+                            {t("payloads.sourceLink")}
                           </a>
                         )}
                       </li>
@@ -167,26 +202,26 @@ export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number;
 
               {a != null && b != null && (
                 <div className="mt-4 rounded-md border border-border-strong p-3">
-                  <h4 className="mb-2 text-sm font-semibold text-fg">
-                    השוואת גרסה {a} מול גרסה {b}
-                  </h4>
-                  {diffQuery.isLoading && <LoadingState label="מחשב הבדלים…" />}
+                  <h4 className="mb-2 text-sm font-semibold text-fg">{t("payloads.compareTitle", { a, b })}</h4>
+                  {diffQuery.isLoading && <LoadingState label={t("payloads.computingDiff")} />}
                   {diffQuery.data && (
                     <>
                       {diffQuery.data.changed_fields.length === 0 ? (
-                        <p className="text-sm text-fg-muted">אין הבדלים בין הגרסאות שנבחרו.</p>
+                        <p className="text-sm text-fg-muted">{t("payloads.noDiff")}</p>
                       ) : (
                         <p className="mb-2 text-sm text-fg-muted">
-                          שדות שהשתנו: {diffQuery.data.changed_fields.map((f) => SPEC_FIELD_LABELS_HE[f] ?? f).join(", ")}
+                          {t("payloads.changedFieldsLabel", {
+                            fields: diffQuery.data.changed_fields.map((f) => t(SPEC_FIELD_KEYS[f] ?? "payloads.specFields.other")).join(", "),
+                          })}
                         </p>
                       )}
                       <div className="grid grid-cols-2 gap-3">
                         <div>
-                          <p className="mb-1 text-xs font-medium text-fg-dim">גרסה {a}</p>
+                          <p className="mb-1 text-xs font-medium text-fg-dim">{t("payloads.versionCol", { n: a })}</p>
                           <SpecTable spec={diffQuery.data.a.spec} changedFields={diffQuery.data.changed_fields} />
                         </div>
                         <div>
-                          <p className="mb-1 text-xs font-medium text-fg-dim">גרסה {b}</p>
+                          <p className="mb-1 text-xs font-medium text-fg-dim">{t("payloads.versionCol", { n: b })}</p>
                           <SpecTable spec={diffQuery.data.b.spec} changedFields={diffQuery.data.changed_fields} />
                         </div>
                       </div>
@@ -197,19 +232,19 @@ export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number;
             </section>
 
             <section>
-              <h4 className="mb-2 text-sm font-semibold text-fg">מחירי ייחוס</h4>
+              <h4 className="mb-2 text-sm font-semibold text-fg">{t("payloads.priceRefsTitle")}</h4>
               {detailQuery.data.price_refs.length === 0 ? (
-                <EmptyState title={'לא נאספו מחירי ייחוס למטע"ד זה'} />
+                <EmptyState title={t("payloads.noPriceRefs")} />
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-border">
                   <table className="w-full min-w-[420px] border-collapse text-sm">
                     <thead>
                       <tr className="border-b border-border bg-bg-raised text-fg-dim">
-                        <th className="p-2 text-start font-medium">תאריך</th>
-                        <th className="p-2 text-start font-medium">מחיר</th>
-                        <th className="p-2 text-start font-medium">סוג</th>
-                        <th className="p-2 text-start font-medium">רוכש/תוכנית</th>
-                        <th className="p-2 text-start font-medium">מקור</th>
+                        <th className="p-2 text-start font-medium">{t("payloads.priceColDate")}</th>
+                        <th className="p-2 text-start font-medium">{t("payloads.priceColPrice")}</th>
+                        <th className="p-2 text-start font-medium">{t("payloads.priceColKind")}</th>
+                        <th className="p-2 text-start font-medium">{t("payloads.priceColBuyer")}</th>
+                        <th className="p-2 text-start font-medium">{t("payloads.priceColSource")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -217,12 +252,12 @@ export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number;
                         <tr key={p.id} className="border-b border-border last:border-0">
                           <td className="p-2 text-fg-muted">{p.date}</td>
                           <td className="p-2 font-medium text-fg">{fmtPrice(p)}</td>
-                          <td className="p-2 text-fg-muted">{PRICE_KIND_LABELS_HE[p.price_kind] ?? p.price_kind}</td>
+                          <td className="p-2 text-fg-muted">{t(PRICE_KIND_KEYS[p.price_kind] ?? "payloads.priceKinds.estimate")}</td>
                           <td className="p-2 text-fg-muted">{[p.buyer, p.programme].filter(Boolean).join(" / ") || "—"}</td>
                           <td className="p-2">
                             {p.source_url ? (
                               <a href={p.source_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">
-                                מקור
+                                {t("payloads.sourceLink")}
                               </a>
                             ) : (
                               "—"

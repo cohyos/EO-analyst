@@ -4,6 +4,7 @@ import { useAskChat } from "@/hooks/useAskChat";
 import { ChatThread } from "@/components/ask/ChatThread";
 import { useUiStore, type ChatContextItem } from "@/store/uiStore";
 import { cn } from "@/lib/cn";
+import { useT } from "@/i18n";
 
 function parseDropPayload(dt: DataTransfer): ChatContextItem | null {
   try {
@@ -20,6 +21,7 @@ function parseDropPayload(dt: DataTransfer): ChatContextItem | null {
 }
 
 export function ChatPanel() {
+  const t = useT();
   const chatOpen = useUiStore((s) => s.chatOpen);
   const setChatOpen = useUiStore((s) => s.setChatOpen);
   const addToChatContext = useUiStore((s) => s.addToChatContext);
@@ -64,10 +66,10 @@ export function ChatPanel() {
           "fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] start-20 z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90 xl:start-4",
           dragOver && "ring-2 ring-accent-fg ring-offset-2 ring-offset-bg",
         )}
-        aria-label="פתח את פאנל שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"
+        aria-label={t("shell.chatFabAria")}
       >
         <MessageSquareText size={16} aria-hidden="true" />
-        שאל את האנליסט
+        {t("shell.chatFabLabel")}
       </button>
     );
   }
@@ -85,17 +87,17 @@ export function ChatPanel() {
         "fixed inset-0 z-40 flex w-full shrink-0 flex-col border-border bg-bg-raised sm:static sm:inset-auto sm:z-auto sm:w-96 sm:border-r",
         dragOver && "outline outline-2 -outline-offset-2 outline-accent",
       )}
-      aria-label="שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"
+      aria-label={t("shell.chatPanelAria")}
     >
       <div className="pt-safe flex min-h-12 shrink-0 items-center gap-2 border-b border-border px-3">
         <MessageSquareText size={16} className="text-accent" aria-hidden="true" />
-        <h2 className="text-sm font-semibold">שאל את האנליסט</h2>
+        <h2 className="text-sm font-semibold">{t("shell.chatPanelTitle")}</h2>
         <div className="flex-1" />
         <button
           type="button"
           onClick={() => setChatOpen(false)}
           className="tap-target inline-flex items-center justify-center rounded p-1 text-fg-muted hover:bg-bg-sunken hover:text-fg"
-          aria-label="כווץ פאנל"
+          aria-label={t("shell.collapsePanelAria")}
         >
           <PanelRightClose size={16} aria-hidden="true" />
         </button>
@@ -103,7 +105,7 @@ export function ChatPanel() {
           type="button"
           onClick={() => setChatOpen(false)}
           className="tap-target inline-flex items-center justify-center rounded p-1 text-fg-muted hover:bg-bg-sunken hover:text-fg md:hidden"
-          aria-label="סגור"
+          aria-label={t("shell.closeAria")}
         >
           <X size={16} aria-hidden="true" />
         </button>

@@ -9853,3 +9853,299 @@ they would all be stored, most as `'candidate'` (the two govtribe.com cases alre
 `'accepted'`, unchanged from the existing rescue fixture test). The next real `tender_scan` run is
 what will actually demonstrate this against live data; docs/REVIEW_2026-09-06_evening.md's W2 note
 about "0 inserted" every day should stop being true from that run onward.
+
+## Round 4b BD (2026-09-06, docs/REVIEW_2026-09-06_evening.md W15-W18, W22)
+
+Five findings from the round-4b BD walkthrough (territory reports + tenders forecasts), all fixed
+within this round's file scope (`eoa.report.bd_territory`, `eoa.report.acquisition_watch`,
+`eoa.report.docx_builder` table-cell rendering, `eoa.tenders.forecast`/`report_section`, the BD
+API surface, `BdPage.tsx`/`web/src/components/bd/**`, and the tenders forecast card).
+
+**W15 (BD page: no way back to "all")** -- `TerritorySelector`'s first `<option>` was
+`value="" disabled`, a placeholder never meant to be re-selected; once a real territory was picked
+there was no control to clear it. Fixed the same way `ReportsPage.tsx`'s own kind filter already
+works: `value=""` is now a real, selectable "הכל (כל הטריטוריות)" option (a native `<select>`, so
+Home/Up-Arrow/click all reach it -- no bespoke keyboard handling needed), and `BdPage.tsx` no
+longer gates `reportsQuery`/the past-reports list on `!!territory` -- it always fetches
+`GET /api/bd/reports` (server-side, `territory=` omitted means every territory, already supported
+by `eoa.api.services.list_bd_reports`), and a row shows its own territory's flag when browsing "כל
+הטריטוריות". The lookback selector and "צור דוח" button stay gated on one specific territory being
+picked (creating a report needs exactly one). `web/src/pages/BdPage.test.tsx` (new): default-all
+fetch, the all-option is non-disabled, filtering to one territory, re-selecting "הכל" restores the
+unfiltered list and hides the create controls, and the per-row territory flag.
+
+**W16 (empty Germany/Greece report)** -- three independent problems in the same finding:
+
+- *(a) repeated "no findings" messaging.* `_no_items_draft`/`_tables_only_draft` both used to set a
+  `risks_assumptions_he` restating the same "no market items" fact the `system_note_he` right below
+  it already said, on top of `docx_builder`'s own generic "אין תקציר לתקופה זו." fallback triggered
+  by an empty `exec_summary` -- the same fact, three times, one above the other. Both drafts'
+  `risks_assumptions_he` is now `""` (the "סיכונים והנחות" section is skipped entirely --
+  `build_bd_territory` only adds it when non-empty), and when there ARE no items but at least one
+  deterministic table does have content, `build_bd_territory` fills `exec_summary` itself from that
+  data (`_tables_summary_sentences`: procurement events, then open/unknown tenders, then forecasts,
+  then upcoming territory conferences, in the same priority order those tables render, up to 4
+  cited sentences) -- so the report leads with real, cited content instead of an empty placeholder
+  sitting above a note that lists exactly what it's missing.
+- *(b) an empty territory report is a signal, not a conclusion.* When `collect_market_items` returns
+  zero for a territory that has at least one configured `acquisition_watch`/watchlist competitor
+  (active or dormant), `build_bd_territory` enqueues a `deep_search` job via the existing
+  `eoa.memory.relational.enqueue_job` helper, tagged `payload.expanded_from = "bd:<territory>"`
+  (`_enqueue_territory_expansion_search`) -- deduped against any already `queued`/`running` job
+  carrying the same tag (`_has_pending_expansion_search`, one extra `SELECT` against `jobs`), and
+  the report's `system_note_he` gets `bdt.EXPANDED_SEARCH_NOTE_HE` ("הופעל חיפוש ממוקד בטריטוריה;
+  הדוח ייבנה מחדש כשיושלם.") appended. The enqueue call is wrapped in a defensive `try`/`except`
+  (mirrors this module's own acquisition-watch/payload-price optional sections) -- a queueing
+  failure never breaks the report build. The job itself is a normal `deep_search` job the
+  orchestrator's existing `Worker`/`run_deep_search_job` picks up unchanged; nothing about that
+  handler needed to change (it already tolerates unknown extra payload keys).
+- *(c) the Germany collector finding.* A read-only, live-DB check (`SELECT` only, port 5432) found
+  17 items in the last 90 days unambiguously about the German EO/IR/defense market (Bundeswehr,
+  Hensoldt, Rheinmetall coverage; one literally titled "Germany Leans Toward Watercat M18...") --
+  **every single one** carries `items.geography = 'other'` (the extraction pipeline tags one
+  dominant country and falls back to "other" when it can't pick one confidently), and
+  `entities.country` for Rheinmetall/Hensoldt is the broader region code `'EU'`, not `'DE'`, so
+  `_territory_entity_names("DE")` never matched them either. Root cause: `collect_market_items`
+  undercounts a territory like Germany by construction, not by an isolated bug. Fix:
+  `collect_market_items`/`collect_platform_events` now also match when the item's own
+  `title`/`summary_he` (items) or an event's `customer`/`parties` (events) textually names the
+  territory -- reusing `eoa.report.geography.country_mentions_in_text` for the country-noun form
+  (already used by `eoa.tenders.forecast` for the same purpose) plus a small local
+  `_TERRITORY_ADJECTIVE_RE` table (English/Hebrew adjective forms -- "German"/"גרמני" -- that
+  `country_mentions_in_text`'s noun-only alias vocabulary doesn't cover; kept local per
+  docs/CONVENTIONS.md rule 6 rather than widening the shared `geography.py` alias table other
+  report kinds also depend on). Deliberately checks only `title`/`summary_he`, never `so_what_he`
+  (the analyst's own downstream commentary, which routinely draws comparisons to other
+  markets/deals and would otherwise false-positive-match a territory the item isn't actually
+  about -- observed live: a Serbia/Elbit item's `so_what_he` mentioning, in passing, "מכירת מערכת
+  Arrow 3 לגרמניה"). Verified live (read-only): `collect_market_items("DE", ...)` went from 0 to 4
+  items (Watercat/Germany title match, two Hensoldt-in-German-context summary matches, the "German
+  Navy" title match); Greece went from 0 to 4; US/IL unaffected in scale (32/25).
+
+**W17 ([n] in table cells not links)** -- `docx_builder._html_cell` ran every non-URL cell value
+through `_bidi_html` alone, so a cell whose value was exactly (or contained) a `[n]` marker --
+e.g. the acquisition-watch events table's "מקור" column, or `bd_territory`'s own deterministic
+tables -- rendered as inert bracketed text in the HTML/embedded-report output. New
+`_bidi_html_with_citations` (mirrors `_md_citations`'s markdown-side "[n]" -> `[n](#src-n)"`
+convention, and the prose `cite_links` closure inside `render_html`) turns every `[n]` token in a
+cell into a real `<a href="#src-n" class="cite">[n]</a>` anchor into the sources appendix, wrapping
+everything else in the usual bidi-safe span; `_html_cell` now calls it instead of `_bidi_html`
+directly. `_md_cell` gets the same treatment via `_md_citations` for the `.md` output. **The docx
+cell writer needed no change** -- `_add_generic_table_body`'s non-URL branch already calls
+`_fill_cell` -> `_emit_mixed_runs`, which already special-cased a `[n]` token via
+`split_runs_with_citations`/`add_citation_run` (the same machinery prose citations use) -- so a
+docx table cell already rendered `[n]` as a real internal-hyperlink run before this round; only
+HTML/Markdown were actually broken.
+
+**W18 (Elbit India order shown as "investment" under Germany)** -- two independent bugs in
+`eoa.report.acquisition_watch`, both confirmed against the live `bd_de_2026-09-06.md`/
+`bd_gr_2026-09-06.md` reports (identical acquisition-watch table content in both, India-buyer
+events included in both):
+
+- The section was never territory-scoped at all -- every `acquisition_watch`/peer company's M&A-
+  signal events rendered in every territory's report. `acquisition_watch_section_md` gains an
+  optional `territory=` keyword (default `None` reproduces the prior, unfiltered behavior exactly
+  -- `eoa.report.weekly`'s existing global call site is untouched); when given,
+  `_split_events_by_territory` keeps an event only when the source item's `geography` normalizes to
+  the territory, or a customer/party is headquartered there (`_entity_countries`, one extra
+  `entities` lookup keyed by every customer/party name seen); an event that instead belongs to a
+  watch/peer company's *own* home territory (but not this one) surfaces separately as a small
+  "פעילות גלובלית של חברות מעקב שמקורן ב-<code>" sub-table (e.g. an Elbit/India event still
+  appears, correctly, in Israel's own BD report as global context) -- everything else (Elbit/India
+  under Germany or Greece) is dropped entirely, not just relabeled. `eoa.report.bd_territory`'s one
+  call site now passes `territory=code`.
+- "Elbit Systems wins US orders worth $370m" -- a $370M order with a named customer -- was stored
+  as `events.kind = 'investment'` and rendered "השקעה". New `_reclassified_kind`: any event with
+  `kind == 'investment'` that also carries both `amount_usd` and `customer` is treated as
+  `contract_award` instead (a deterministic, code-level rule; the events-extraction pipeline's own
+  classification is untouched) -- and since `contract_award` isn't in `_MA_SIGNAL_EVENT_KINDS`,
+  `_fetch_watch_events` drops the row from this section entirely (a contract award isn't an
+  acquisition/investment/partnership signal; it belongs in the BD report's own procurement/
+  platform-events table, not here). `_EVENT_KIND_LABELS_HE` gained a defensive `contract_award`
+  entry matching `docx_builder`'s own map, in case this function is ever reused somewhere that
+  doesn't filter first.
+
+**W22 (tender forecast sources unlinked; "חפירה" unclear)** -- root cause:
+`tender_forecasts.sources` stores `["item:123", ...]` tokens (`eoa.tenders.forecast
+._upsert_forecast`), not the plain URLs `ForecastCard`'s own type comment claimed -- the "מקור 1"
+chip's `href` was literally the string `"item:123"`, a dead link to nowhere. Fixed entirely on the
+frontend (no backend/API-shape change needed, so nothing outside this round's BD file scope was
+touched): `ForecastList.tsx`'s new `useResolvedSources` parses each `item:N` token and resolves it
+via the existing `GET /api/items/{id}` (`api.getItem`, batched/deduplicated across cards by
+react-query's cache) into a real link labeled "<outlet> · <date>" with the item's title as a hover
+tooltip; a source that isn't an `item:N` token (a legacy row, or a real URL already) still renders
+as a direct link, labeled by its domain. The "חפירה" button gained an explicit
+`title`/`aria-label` ("פתח חקירת עומק על תחזית זו") and now actually does something: it calls the
+existing `POST` free-standing-investigation endpoint (`api.postInvestigationNew`) with a
+self-contained question built from the forecast's own platform/payload/buyer/window fields, and
+navigates to the new investigation on success (same pattern `InvestigationsListPage.tsx`'s own "חקירה
+חדשה" dialog already uses). On the report side, `eoa.report.bd_territory` gained a
+`forecasts_table` (mirrors the existing `tenders_table`) -- forecasts previously had no
+deterministic table of their own in a territory report (only a bare count folded into the
+tables-only system note), so they're now always rendered with a real `[n]` citation per row,
+benefiting from the W17 fix above.
+
+**Verification**: `pytest tests/unit -q -k "bd or territory or forecast or acquisition"`, ruff,
+`npm run lint`/`npx vitest run`/`npm run build`, and the `12-bd`/`14-tenders` Playwright specs --
+see this round's status report for exact counts.
+
+## Round 4b UI (docs/REVIEW_2026-09-06_evening.md W19/W20/W23/W25, `web/src/pages/PayloadsPage.tsx`
+## + `web/src/components/payloads/**`, `web/src/pages/SettingsPage.tsx` (jobs table only),
+## `web/src/i18n/**`, `web/src/components/shell/**`, `config/payloads_seed.yaml`,
+## `db/seed/seed_payloads.py`, `agent/eoa/api/routes/jobs.py`, `scripts/link_audit.py` (new))
+
+### W19 -- payload image/spec-link + a real seed expansion (migration 0022)
+
+**Schema**: `payloads` gained three nullable, additive columns -- `image_url`, `spec_url`,
+`spec_source` (migration `0022_payloads_image_spec_url.py`, applied to the live DB). Identity-level
+(same mutability tier as `vendor_entity_name`/`family`), never part of the append-only
+`payload_spec_versions` history -- a product-page URL isn't a dated technical measurement.
+`db/seed/seed_payloads.py`'s upsert gained the same non-destructive-backfill COALESCE treatment for
+all three (never overwrites an already-set value with a blank one).
+
+**Seed expansion** (`config/payloads_seed.yaml`): every named vendor/family from the task brief was
+attempted; each `spec_url` was individually verified reachable (HTTP HEAD, falling back to GET, a
+real browser User-Agent, 15s timeout -- `httpx`, cross-checked with `curl` where `httpx`'s
+fingerprint got WAF-blocked but `curl`'s didn't, e.g. `elbitsystems.com`/`lockheedmartin.com`/
+`collinsaerospace.com`/`safran-electronics-defense.com`) before being written -- no invented URL,
+no invented spec number or price (per docs/CONVENTIONS.md rule 5, this file only ever seeds
+identity: name/vendor/family/category/image_url/spec_url/spec_source). Result: **62 payload
+identity rows** (20 pre-existing + 42 net-new families), **57 with a verified `spec_url`**, **0
+with `image_url`** (no vendor page tried exposed a usable `og:image`; left honestly null rather
+than guessed). Three named vendors could not be given a verified URL at all and are documented
+in the seed file's own header comment as a real finding, not silently dropped: Rafael
+(rafael.co.il returns HTTP 247 from a Reblaze JS-challenge wall on every path, including the bare
+homepage), Controp (controp.com returns HTTP 403 on every path), and Octopus Israel (no working
+public domain found). Two vendors (Safran, Collins Aerospace) intermittently 403 even with a
+browser User-Agent depending on request timing/fingerprint -- their `spec_url` was kept since it
+verified successfully in this session, but a future re-check may need to retry.
+
+**UI** (`PayloadsPage.tsx`, `components/payloads/PayloadTable.tsx`,
+`components/payloads/PayloadDetailDrawer.tsx`, `components/payloads/PayloadFilters.tsx`): the
+table gained an image column (lazy `<img loading="lazy">` with the payload's `canonical_name` as
+`alt`, a neutral dashed placeholder when `image_url` is null -- never a broken `<img>`) and a
+manufacturer-spec-link column ("מפרט יצרן" opening `spec_url` in a new tab, titled with
+`spec_source`; an honest "מפרט/מחיר טרם תועדו" chip when `spec_url` is null). The detail drawer
+shows the same image (larger) and link at the top of the identity section. All four payloads
+components were also migrated to `t()` as part of W25 (below) -- `CATEGORY_LABELS_HE` became the
+exported `useCategoryLabels()` hook.
+
+**Tests**: `PayloadsPage.test.tsx` (+2: manufacturer link renders with the right `href`, honest
+missing-state renders with no link). `types/api.ts` `PayloadRecord` gained the three fields;
+`api/real.ts`'s `normalizePayloadRecord` passes them through.
+
+### W20 -- Settings -> Jobs: a real per-job subject, duration, and status colour
+
+**Backend** (`agent/eoa/api/services.py`, `list_jobs` + new `_job_subject_he`/`_job_card`): every
+job row returned by `GET /api/jobs` now carries `subject_he`, derived *only* from the job's own
+`payload`/`created_at` (never invented) per its `kind`: `deep_search` -> its `question` (first 80
+chars), `bd_report` -> its `territory` rendered through the same `_territory_label_he` table
+`_report_card` already uses (so "DE" reads "גרמניה", matching the reports list's own convention),
+`patent_survey` -> its `topic` verbatim, and the period-based runs with no per-job subject field at
+all (`daily_run`/`weekly_run`/`monthly_run`/`ingest`/`report`) -> their own `created_at` date
+(`%d.%m.%Y`). Any other kind (`tender_scan`, `conference_scan`, ...) stays `null` rather than
+guessing from an unrelated field. `_job_card` is a pure dict-in/dict-out function (no DB access of
+its own), so it's unit-tested directly with synthetic payloads.
+
+**Frontend**: `types/api.ts`'s `Job` gained `subject_he`; `api/real.ts`'s `normalizeJob` passes it
+through; `mocks/data/misc.ts`'s three fixture jobs and `mockApi.ts`'s `postRun`-created job all got
+one. `SettingsPage.tsx`'s jobs table (only the jobs table -- the rest of the file's many other
+sections are untouched this round) gained a "נושא" column (the new `subject_he`, `bdi`-wrapped),
+a "משך" column (`lib/time.ts`'s new locale-agnostic `formatDuration(started_at, finished_at)` --
+`m:ss`/`h:mm:ss`, digits-and-colons only so it needs no per-locale translation, measured against
+`Date.now()` while a job is still running), and a state cell coloured per state (`text-ok` done,
+`text-danger` failed, `text-accent` running, `text-warn` partial, `text-fg-dim`
+queued/deferred) instead of plain flat text. The whole jobs table section (headers, empty/loading
+state, cancel button, state labels) was also migrated to `t()` under a new `settingsJobs`
+dictionary namespace as part of W25.
+
+**Tests**: `tests/unit/test_ui_round4b.py` (17: `_job_subject_he`'s per-kind rules incl. the
+80-char truncation/blank-is-none/unrecognized-kind-is-none cases, `_job_card`'s
+non-mutation-of-the-source-row behavior). `SettingsPage.test.tsx` (new, 5: empty state, derived
+subject rendered next to the kind, `—` fallback when a job has no subject, a computed duration
+string, done vs. failed state colour). Verified against the live app: the settings e2e spec
+(`e2e/tests/10-settings.spec.ts`, unmodified) still passes against the live 8765 instance --
+including its jobs-table test, which locates the section by its (now-translated-but-Hebrew-by-
+default) `aria-label`.
+
+### W23 -- link audit (`scripts/link_audit.py`, new)
+
+Read-only crawler: GET-only, no job enqueued, no DB write, reuses the ingestion pipeline's own SSRF
+guard (`eoa.fetch.remote.assert_public_http_url`) before ever opening a socket to an external URL,
+so a link this audit would refuse to fetch for real ingestion is reported as
+`blocked (ssrf-guard)`, never silently skipped or fetched anyway.
+
+Two link populations, collected separately then checked the same way:
+1. **The live API** -- a fixed endpoint list (`items`, `investigations`, `reports` + each report's
+   own `/citations` appendix, `tenders` + `/tenders/forecasts`, `conferences`, `payloads`). Every
+   JSON response is walked recursively; any string value starting `http(s)://` is collected,
+   tagged with its JSON path (e.g. `items[6].url`, `payloads[3].spec_url`).
+2. **The built report HTML** in `output/reports/*.html` (`lxml.html`) -- every `<a href>`,
+   including same-document `#anchor` footnote markers, which are checked against that file's own
+   `id="..."` attributes instead of being treated as external (catches the W4/W17-style "the [n]
+   marker doesn't actually link to anything" class of bug at the artifact level, not just in the
+   live-rendered UI).
+
+External links: HEAD (falling back to GET on 4xx/405/timeout), 8s timeout, a real browser
+User-Agent, deduplicated by URL across all occurrences (the same `source_url` legitimately repeats
+across many items/citations) so each unique URL is only fetched once. Internal links (a same-app
+path, or a bare `#anchor`) are resolved against what the API/HTML file itself already returned --
+never assumed valid from the string's shape alone.
+
+Writes `docs/qa/link_audit_<date>.md` (per-source total/OK/broken counts + the full broken-link
+table) and prints a one-line-per-source summary. Run once against the live app (8765) + the 16
+files in `output/reports/` on 2026-09-06: **2928/3293 links OK across 69 sources** (69 = 7 fixed
+API endpoints + one `/citations` appendix per report [50 reports] + 16 report HTML files). The
+large majority of the 365 broken links are `403`s from a handful of sites' bot-protection
+(army-technology.com/airforce-technology.com/naval-technology.com and similar Global Data
+publications block this script's automated fetch entirely) -- a real reachability finding, not an
+audit bug: the same URLs return 403 to a plain scripted `curl`/`httpx` request but were reachable
+in a real browser at authoring time. See the dated report file for the exact broken-link list per
+source.
+
+### W25 -- English UI mode: hardcoded Hebrew audit (scoped to this round's file ownership)
+
+**Audit method**: `grep`-for-Hebrew-letters across every non-test, non-mock, non-dictionary `.tsx`
+file found ~90 files with at least one hardcoded Hebrew string -- the large majority in pages/
+components other engineers were actively editing this round (`BdPage.tsx`, `TendersPage.tsx`,
+`ReportsPage.tsx`, `FeedPage.tsx`, and their component trees), out of scope for this file's edits
+per the round's concurrency rules. **Fixed this round** (this file's actual ownership): all four
+`components/payloads/**` files + `PayloadsPage.tsx` (new `payloads` dictionary namespace, ~50
+keys), `SettingsPage.tsx`'s jobs table only (new `settingsJobs` namespace), and three
+`components/shell/**` files that had *zero* `t()` usage before this round -- `ChatPanel.tsx`,
+`CommandPalette.tsx`, `ResourceHistoryDrawer.tsx` (new `shell` namespace; `common.searchGlobal`
+reused for the command palette's own aria-label rather than duplicated). `NavRail.tsx`/`TopBar.tsx`
+were already fully `t()`-driven from an earlier round (verified, not re-touched) -- nav labels and
+the page-title heading already follow the active locale.
+
+**Other fixes**: `lib/time.ts`'s `formatDateTime`/`formatDate`/`formatTime` hardcoded the `he-IL`
+`Intl` locale regardless of the active app locale -- a real English-mode date-format bug. Given an
+optional `locale?: "he" | "en"` param (default unchanged, so every existing call site is
+unaffected) mapping `"en"` to `en-GB` (day-month-year, matching the existing field order rather
+than switching to `en-US`'s month-first order) -- wired up in `SettingsPage.tsx`'s jobs table
+(`created` column) as this round's one live example; every other call site keeps its current
+(Hebrew-only) behavior until whichever engineer owns that screen adopts the param. `useI18n()`'s
+`locale`/`dir`/`toggleLocale` already persist via `useUiStore`'s `zustand/persist` (verified,
+pre-existing -- not new this round) and already set `<html dir lang>` globally.
+
+**Tests**: `web/src/i18n/englishMode.test.tsx` (new, 4) -- renders `NavRail`, `PayloadsPage`'s
+empty state, its populated table (manufacturer-spec-link text), and its honest
+"not-yet-documented" state with `useUiStore`'s locale forced to `"en"`, asserting zero Hebrew
+letters anywhere in the rendered DOM (a `TreeWalker` over text nodes against `/[֐-׿]/`).
+Deliberately scoped to this round's own files rather than every page, since most other screens
+still have real, un-migrated Hebrew strings owned by other engineers -- documented above as the
+audit's honest remaining-work list, not swept under a passing-but-misleading whole-app test.
+
+**Not done this round** (explicitly out of scope, for whoever picks up W25 next): the ~90-file
+Hebrew-string inventory above, `lib/time.ts`'s three formatters' locale param is not yet wired into
+any screen besides `SettingsPage.tsx`'s jobs table, and no app-wide "switch to `en`, walk every
+route, assert no Hebrew" e2e test exists yet (would need to be added once more pages are migrated,
+otherwise it fails on day one for reasons unrelated to any single engineer's change).
+
+**Verification**: `npm run lint` (0 errors, only pre-existing warnings unrelated to this round's
+files), `npx vitest run` (full suite: only `BdPage.test.tsx` fails -- pre-existing, mid-edit by the
+concurrent BD engineer, confirmed via `git status`/`git diff` showing `BdPage.tsx`/
+`TerritorySelector.tsx` uncommitted and modified by another process before this round started;
+untouched by this round's changes), `npm run build`, `e2e/tests/10-settings.spec.ts` against the
+live app (8765) on both `desktop-1440x900` and `iphone-safari`, `ruff check` on every touched
+Python file, `pytest tests/unit -q -k "jobs or payload or ui_round4b"` (116 passed).

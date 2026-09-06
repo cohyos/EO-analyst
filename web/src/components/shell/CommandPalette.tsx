@@ -5,8 +5,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useUiStore } from "@/store/uiStore";
 import { api } from "@/api";
 import { LevelBadge } from "@/components/LevelBadge";
+import { useT } from "@/i18n";
 
 export function CommandPalette() {
+  const t = useT();
   const open = useUiStore((s) => s.commandPaletteOpen);
   const setOpen = useUiStore((s) => s.setCommandPaletteOpen);
   const [q, setQ] = useState("");
@@ -47,7 +49,7 @@ export function CommandPalette() {
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="חיפוש גלובלי"
+        aria-label={t("common.searchGlobal")}
       >
         <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
           <Search size={16} className="text-fg-dim" aria-hidden="true" />
@@ -55,7 +57,7 @@ export function CommandPalette() {
             autoFocus
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="חפש פריטים, ישויות…"
+            placeholder={t("shell.commandPalettePlaceholder")}
             className="flex-1 bg-transparent text-sm text-fg outline-none placeholder:text-fg-dim"
           />
           <kbd className="rounded border border-border-strong px-1.5 py-0.5 text-xs text-fg-dim">
@@ -64,11 +66,11 @@ export function CommandPalette() {
         </div>
         <div className="max-h-96 overflow-y-auto p-2">
           {q.length <= 1 && (
-            <p className="p-3 text-sm text-fg-dim">הקלד לפחות 2 תווים לחיפוש</p>
+            <p className="p-3 text-sm text-fg-dim">{t("shell.commandPaletteTypeHint")}</p>
           )}
           {itemsQuery.data && itemsQuery.data.items.length > 0 && (
             <div className="mb-2">
-              <p className="px-2 py-1 text-xs font-medium text-fg-dim">פריטים</p>
+              <p className="px-2 py-1 text-xs font-medium text-fg-dim">{t("shell.commandPaletteItemsGroup")}</p>
               {itemsQuery.data.items.map((it) => (
                 <button
                   key={it.id}
@@ -87,7 +89,7 @@ export function CommandPalette() {
           )}
           {entitiesQuery.data && entitiesQuery.data.length > 0 && (
             <div>
-              <p className="px-2 py-1 text-xs font-medium text-fg-dim">ישויות</p>
+              <p className="px-2 py-1 text-xs font-medium text-fg-dim">{t("shell.commandPaletteEntitiesGroup")}</p>
               {entitiesQuery.data.map((e) => (
                 <button
                   key={e.id}
@@ -107,7 +109,7 @@ export function CommandPalette() {
           {q.length > 1 &&
             itemsQuery.data?.items.length === 0 &&
             entitiesQuery.data?.length === 0 && (
-              <p className="p-3 text-sm text-fg-dim">אין תוצאות</p>
+              <p className="p-3 text-sm text-fg-dim">{t("shell.commandPaletteNoResults")}</p>
             )}
         </div>
       </div>

@@ -3,11 +3,22 @@
 
 const TZ = "Asia/Jerusalem";
 
-export function formatDateTime(iso: string | null | undefined): string {
+// W25 (docs/REVIEW_2026-09-06_evening.md): these three formatters always rendered dates with the
+// `he-IL` `Intl` locale regardless of the active app locale (English mode audit finding — dates
+// stayed in Hebrew locale numeral/ordering conventions even with `en` selected). Every call site
+// still works unchanged (the param is optional, defaulting to the original `he-IL` behavior);
+// pass the app's active locale (`useI18n().locale`, `"he" | "en"`) from a component that has
+// been migrated to respect it. `"en"` maps to `en-GB` (day-month-year, like the existing he-IL
+// ordering) rather than `en-US`, so switching locale only changes language, not field order.
+function _intlLocale(locale?: "he" | "en"): string {
+  return locale === "en" ? "en-GB" : "he-IL";
+}
+
+export function formatDateTime(iso: string | null | undefined, locale?: "he" | "en"): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("he-IL", {
+  return new Intl.DateTimeFormat(_intlLocale(locale), {
     timeZone: TZ,
     year: "numeric",
     month: "2-digit",
@@ -17,11 +28,11 @@ export function formatDateTime(iso: string | null | undefined): string {
   }).format(d);
 }
 
-export function formatDate(iso: string | null | undefined): string {
+export function formatDate(iso: string | null | undefined, locale?: "he" | "en"): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("he-IL", {
+  return new Intl.DateTimeFormat(_intlLocale(locale), {
     timeZone: TZ,
     year: "numeric",
     month: "2-digit",
@@ -29,15 +40,37 @@ export function formatDate(iso: string | null | undefined): string {
   }).format(d);
 }
 
-export function formatTime(iso: string | null | undefined): string {
+export function formatTime(iso: string | null | undefined, locale?: "he" | "en"): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return new Intl.DateTimeFormat("he-IL", {
+  return new Intl.DateTimeFormat(_intlLocale(locale), {
     timeZone: TZ,
     hour: "2-digit",
     minute: "2-digit",
   }).format(d);
+}
+
+/** `m:ss` (or `h:mm:ss` past an hour) duration between two ISO timestamps -- deliberately
+ * locale-agnostic (digits + colons only, no unit words) so the jobs table (W20) can show how
+ * long a job took/has been running without needing per-locale translation. `finishedAt` absent
+ * means "still running" -- duration is measured against `Date.now()` instead. */
+export function formatDuration(
+  startedAt: string | null | undefined,
+  finishedAt: string | null | undefined,
+): string | null {
+  if (!startedAt) return null;
+  const start = new Date(startedAt).getTime();
+  if (Number.isNaN(start)) return null;
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  if (Number.isNaN(end)) return null;
+  const totalSec = Math.max(0, Math.floor((end - start) / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
 /** Relative "time ago" in Hebrew, e.g. "לפני 5 דק'" / "לפני 3 שע'". */

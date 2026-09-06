@@ -152,6 +152,7 @@ export const mockJobs: Job[] = [
     error: null,
     result: null,
     updated_at: "2026-09-04T06:05:00+03:00",
+    subject_he: "03.09.2026",
   },
   {
     id: 8842,
@@ -167,6 +168,7 @@ export const mockJobs: Job[] = [
     error: null,
     result: null,
     updated_at: "2026-09-04T09:05:02+03:00",
+    subject_he: "מדומה",
   },
   {
     id: 3002,
@@ -182,6 +184,7 @@ export const mockJobs: Job[] = [
     error: null,
     result: null,
     updated_at: "2026-09-04T10:00:00+03:00",
+    subject_he: "04.09.2026",
   },
 ];
 

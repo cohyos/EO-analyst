@@ -6,9 +6,9 @@ import { SETTINGS_NAMES, type LlmChainEntry, type SettingsName } from "@/types/a
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ChainsEditor } from "@/components/settings/ChainsEditor";
 import { MCPCard } from "@/components/settings/MCPCard";
-import { formatDateTime } from "@/lib/time";
+import { formatDateTime, formatDuration } from "@/lib/time";
 import { cn } from "@/lib/cn";
-import { useT } from "@/i18n";
+import { useI18n } from "@/i18n";
 import type { TranslationKey } from "@/i18n/types";
 
 const PROVIDER_KIND_KEY: Record<"local" | "cloud" | "api", TranslationKey> = {
@@ -25,17 +25,28 @@ const TAB_LABEL: Record<SettingsName, string> = {
   models: "models",
 };
 
-const JOB_STATE_LABEL: Record<string, string> = {
-  queued: "בתור",
-  running: "רץ",
-  done: "הושלם",
-  failed: "נכשל",
-  deferred: "נדחה",
-  partial: "חלקי",
+// W20 (docs/REVIEW_2026-09-06_evening.md): state label + colour, resolved through `t()`/a fixed
+// Tailwind token per state rather than the plain flat string the table used to render.
+const JOB_STATE_LABEL_KEY: Record<string, TranslationKey> = {
+  queued: "settingsJobs.stateQueued",
+  running: "settingsJobs.stateRunning",
+  done: "settingsJobs.stateDone",
+  failed: "settingsJobs.stateFailed",
+  deferred: "settingsJobs.stateDeferred",
+  partial: "settingsJobs.statePartial",
+};
+
+const JOB_STATE_COLOR: Record<string, string> = {
+  queued: "text-fg-dim",
+  running: "text-accent",
+  done: "text-ok",
+  failed: "text-danger",
+  deferred: "text-fg-dim",
+  partial: "text-warn",
 };
 
 export function SettingsPage() {
-  const t = useT();
+  const { t, locale } = useI18n();
   const [tab, setTab] = useState<SettingsName>("config");
   const [draft, setDraft] = useState("");
   const [saveResult, setSaveResult] = useState<{ ok: boolean; errors: string[] } | null>(null);
@@ -371,20 +382,22 @@ export function SettingsPage() {
         )}
       </section>
 
-      <section aria-label="עבודות (Jobs)">
-        <h2 className="mb-2 text-sm font-semibold text-fg-dim">עבודות</h2>
-        {jobsQuery.isLoading && <LoadingState label="טוען עבודות…" />}
-        {jobsQuery.data && jobsQuery.data.length === 0 && <EmptyState title="אין עבודות" />}
+      <section aria-label={t("settingsJobs.ariaLabel")}>
+        <h2 className="mb-2 text-sm font-semibold text-fg-dim">{t("settingsJobs.sectionTitle")}</h2>
+        {jobsQuery.isLoading && <LoadingState label={t("settingsJobs.loading")} />}
+        {jobsQuery.data && jobsQuery.data.length === 0 && <EmptyState title={t("settingsJobs.empty")} />}
         {jobsQuery.data && jobsQuery.data.length > 0 && (
           <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full min-w-[600px] text-sm">
+            <table className="w-full min-w-[760px] text-sm">
               <thead className="bg-bg-raised text-xs text-fg-dim">
                 <tr>
-                  <th className="p-2 text-start">מזהה</th>
-                  <th className="p-2 text-start">סוג</th>
-                  <th className="p-2 text-start">מצב</th>
-                  <th className="p-2 text-start">נוצר</th>
-                  <th className="p-2 text-start">פעולה</th>
+                  <th className="p-2 text-start">{t("settingsJobs.colId")}</th>
+                  <th className="p-2 text-start">{t("settingsJobs.colKind")}</th>
+                  <th className="p-2 text-start">{t("settingsJobs.colSubject")}</th>
+                  <th className="p-2 text-start">{t("settingsJobs.colState")}</th>
+                  <th className="p-2 text-start">{t("settingsJobs.colDuration")}</th>
+                  <th className="p-2 text-start">{t("settingsJobs.colCreated")}</th>
+                  <th className="p-2 text-start">{t("settingsJobs.colAction")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -395,15 +408,21 @@ export function SettingsPage() {
                       <bdi>{j.kind}</bdi>
                       {typeof j.payload?.mode === "string" && ` · ${j.payload.mode}`}
                     </td>
-                    <td className="p-2">
-                      {JOB_STATE_LABEL[j.state] ?? j.state}
+                    <td className="p-2 text-fg-muted">
+                      <bdi>{j.subject_he ?? "—"}</bdi>
+                    </td>
+                    <td className={cn("p-2 font-medium", JOB_STATE_COLOR[j.state] ?? "text-fg")}>
+                      {JOB_STATE_LABEL_KEY[j.state] ? t(JOB_STATE_LABEL_KEY[j.state]) : j.state}
                       {j.state === "failed" && j.error && (
-                        <span className="ms-1 text-xs text-fg-dim" title={j.error}>
+                        <span className="ms-1 text-xs font-normal text-fg-dim" title={j.error}>
                           ({j.error})
                         </span>
                       )}
                     </td>
-                    <td className="p-2 font-mono text-xs">{formatDateTime(j.created_at)}</td>
+                    <td className="p-2 font-mono text-xs text-fg-muted">
+                      {formatDuration(j.started_at, j.finished_at) ?? "—"}
+                    </td>
+                    <td className="p-2 font-mono text-xs">{formatDateTime(j.created_at, locale)}</td>
                     <td className="p-2">
                       {(j.state === "queued" || j.state === "running") && (
                         <button
@@ -412,7 +431,7 @@ export function SettingsPage() {
                           className="flex items-center gap-1 rounded-md border border-border-strong px-2 py-1 text-xs text-danger hover:bg-bg-sunken"
                         >
                           <Ban size={12} aria-hidden="true" />
-                          בטל
+                          {t("settingsJobs.cancel")}
                         </button>
                       )}
                     </td>

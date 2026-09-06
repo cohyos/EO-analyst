@@ -5,10 +5,12 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { PayloadFilters, type PayloadFiltersState } from "@/components/payloads/PayloadFilters";
 import { PayloadTable } from "@/components/payloads/PayloadTable";
 import { PayloadDetailDrawer } from "@/components/payloads/PayloadDetailDrawer";
+import { useT } from "@/i18n";
 
 const EMPTY_FILTERS: PayloadFiltersState = { category: "", vendor: "", q: "" };
 
 export function PayloadsPage() {
+  const t = useT();
   const [filters, setFilters] = useState<PayloadFiltersState>(EMPTY_FILTERS);
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
@@ -40,24 +42,21 @@ export function PayloadsPage() {
   return (
     <div className="space-y-4 p-4 md:p-6">
       <div className="rounded-md border border-border-strong bg-bg-raised px-3 py-2 text-sm text-fg-dim" dir="auto">
-        {'תיעוד מפרטים ומחירי ייחוס של מטע"דים אלקטרו-אופטיים -- כל שינוי נשמר כגרסה נפרדת עם מקור מצוטט, ולעולם לא נדרס.'}
+        {t("payloads.intro")}
       </div>
 
-      {payloadsQuery.isLoading && <LoadingState label={'טוען מטע"דים…'} />}
+      {payloadsQuery.isLoading && <LoadingState label={t("payloads.loading")} />}
       {payloadsQuery.isError && <ErrorState onRetry={() => payloadsQuery.refetch()} />}
 
       {!payloadsQuery.isLoading && !payloadsQuery.isError && (
         <>
           {payloads.length === 0 ? (
-            <EmptyState
-              title={'לא זוהו מטע"דים עדיין'}
-              description={'הסריקה הלילית (payload_extract) עדיין לא מצאה מפרט/מחיר מצוטט בפריטים שנאספו, או שהיא כבויה. ראו config/config.yaml: payloads.enabled.'}
-            />
+            <EmptyState title={t("payloads.emptyTitle")} description={t("payloads.emptyDescription")} />
           ) : (
             <>
               <PayloadFilters value={filters} onChange={setFilters} vendors={vendors} />
               {filteredPayloads.length === 0 ? (
-                <EmptyState title="אין תוצאות תואמות" description="נסה לשנות את הסינון." />
+                <EmptyState title={t("payloads.noMatchesTitle")} description={t("payloads.noMatchesDescription")} />
               ) : (
                 <PayloadTable payloads={filteredPayloads} selectedId={selectedId} onSelect={setSelectedId} />
               )}

@@ -784,6 +784,11 @@ export interface Job {
   result: unknown;
   created_at: string;
   updated_at: string;
+  // W20 (docs/REVIEW_2026-09-06_evening.md): per-kind identifying subject derived server-side
+  // from the job's own `payload` (deep_search's question, bd_report's territory, patent_survey's
+  // topic) or `created_at` for the period-based runs that carry no per-job subject at all — null
+  // when the kind has no defined subject rule. See `_job_subject_he` in `eoa.api.services`.
+  subject_he: string | null;
 }
 
 export interface ResourceGateGpu {
@@ -1025,6 +1030,13 @@ export interface PayloadRecord {
   first_seen: string | null;
   last_seen: string | null;
   notes: string | null;
+  // W19 (docs/REVIEW_2026-09-06_evening.md, migration 0022): identity-level image/spec-sheet
+  // reference -- vendor's own product page, never invented (spec_source is a short label, e.g.
+  // "l3harris.com"). All three are nullable; the UI shows an honest "spec/price not yet
+  // documented" state when spec_url is null.
+  image_url: string | null;
+  spec_url: string | null;
+  spec_source: string | null;
   spec_version_count: number;
   price_ref_count: number;
   latest_spec_date: string | null;

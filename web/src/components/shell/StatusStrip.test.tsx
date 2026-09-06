@@ -117,6 +117,7 @@ describe("StatusStrip", () => {
           result: null,
           created_at: "2026-09-04T09:59:00+03:00",
           updated_at: "2026-09-04T09:59:00+03:00",
+          subject_he: null,
         },
       },
     };
