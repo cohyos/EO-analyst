@@ -82,7 +82,7 @@ class ClassifyOut(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_subdomain_against_taxonomy(self) -> "ClassifyOut":
+    def _validate_subdomain_against_taxonomy(self) -> ClassifyOut:
         """Q3-3 (docs/qa/findings_Q3_r1.md): ``subdomain`` must be one of the chosen ``domain``'s
         sub-keys in ``config/taxonomy.yaml`` -- the LLM otherwise sometimes invents a value (6
         rows in the QA sample had a subdomain that doesn't exist in the taxonomy at all). An

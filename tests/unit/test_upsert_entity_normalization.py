@@ -65,7 +65,7 @@ def test_watchlist_alias_resolves_to_canonical_name_before_insert(monkeypatch):
     entity_id = relational.upsert_entity(name="Elbit Systems", kind="company")
 
     assert entity_id == 42
-    insert_sql, insert_params = cursor.queries[-1]
+    _insert_sql, insert_params = cursor.queries[-1]
     assert insert_params["name"] == "Elbit"  # canonicalized from the alias
     assert insert_params["kind"] == "company"
     assert insert_params["country"] == "IL"  # backfilled from the watchlist record

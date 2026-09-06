@@ -141,6 +141,125 @@ def test_tenders_forecast_table_none_when_no_forecasts():
     assert daily._tenders_forecast_table({"open_tenders": [], "new_forecasts": []}) is None
 
 
+# --------------------------------------------------------------------------
+# Q3-14 (docs/qa/findings_Q3_r1.md): exec summary must not say "no findings" next to full tables
+# --------------------------------------------------------------------------
+
+
+class TestTableCounts:
+    def test_total_sums_all_fields(self):
+        counts = daily.TableCounts(events=2, open_tenders=1, new_forecasts=3, deep_search=0)
+        assert counts.total == 6
+
+    def test_context_he_empty_when_all_zero(self):
+        assert daily.TableCounts().context_he() == "אין (כל הטבלאות ריקות בתקופה זו)."
+
+    def test_context_he_lists_only_nonzero_fields(self):
+        text = daily.TableCounts(events=2, open_tenders=0, new_forecasts=1, deep_search=0).context_he()
+        assert "2 אירועים" in text
+        assert "1 תחזיות" in text
+        assert "מכרזים פתוחים" not in text
+
+
+class TestDraftReportTablesOnlyFallback:
+    def test_empty_items_and_empty_tables_uses_no_items_draft(self, monkeypatch):
+        def boom(*a, **k):
+            raise AssertionError("chat_structured must not be called with zero items and zero tables")
+
+        monkeypatch.setattr(daily, "chat_structured", boom)
+        draft = daily.draft_report([], table_counts=daily.TableCounts())
+        assert "אין ממצאים" in draft.exec_summary_he
+        assert draft.sections == []
+
+    def test_empty_items_but_nonempty_tables_summarizes_tables_instead(self, monkeypatch):
+        def boom(*a, **k):
+            raise AssertionError("chat_structured must not be called with zero items")
+
+        monkeypatch.setattr(daily, "chat_structured", boom)
+        counts = daily.TableCounts(events=3, open_tenders=2, new_forecasts=0, deep_search=1)
+        draft = daily.draft_report([], table_counts=counts)
+        assert "אין ממצאים" not in draft.exec_summary_he
+        assert "3 אירועים" in draft.exec_summary_he
+        assert "2 מכרזים פתוחים" in draft.exec_summary_he
+        assert "1 חקירות עומק" in draft.exec_summary_he
+
+    def test_nonempty_items_still_calls_llm_with_counts_in_prompt(self, monkeypatch):
+        captured_messages = []
+
+        def fake_chat_structured(role, schema, messages, **kw):
+            captured_messages.append(messages)
+            return DailyReportDraft(exec_summary_he="תקציר [1].", sections=[], outlook_he="", open_points_he=[])
+
+        monkeypatch.setattr(daily, "chat_structured", fake_chat_structured)
+        items = [{"n": 1, "id": 1, "title": "t", "domain": "c_uas", "summary_he": "s", "so_what_he": "so"}]
+        counts = daily.TableCounts(events=5)
+        daily.draft_report(items, table_counts=counts)
+        prompt = captured_messages[0][1]["content"]
+        assert "5 אירועים" in prompt
+
+
+# --------------------------------------------------------------------------
+# Q3-15 (docs/qa/findings_Q3_r1.md): section domain validation -- never render a raw slug
+# --------------------------------------------------------------------------
+
+
+class TestDomainLabelFuzzyMatch:
+    def test_exact_taxonomy_key_resolves_normally(self):
+        assert daily._domain_label("c_uas") != daily._UNKNOWN_DOMAIN_LABEL_HE
+
+    def test_near_miss_slug_fuzzy_matches_real_key(self):
+        # "naval_eo_ir" is not a real taxonomy key, but is close to "naval_surveillance".
+        label = daily._domain_label("naval_eo_ir")
+        assert label == daily._domain_label("naval_surveillance")
+        assert label != "naval_eo_ir"
+
+    def test_completely_unrelated_slug_falls_back_to_unknown_label(self):
+        assert daily._domain_label("xyz_totally_made_up_123") == daily._UNKNOWN_DOMAIN_LABEL_HE
+
+    def test_raw_slug_never_rendered(self):
+        for domain in ("naval_eo_ir", "xyz_totally_made_up_123", "some_other_bogus_domain"):
+            assert daily._domain_label(domain) != domain
+
+    def test_empty_domain_is_general(self):
+        assert daily._domain_label(None) == "כללי"
+        assert daily._domain_label("") == "כללי"
+
+
+class TestNormalizeSectionTitlesNeverRawSlug:
+    def test_unknown_domain_gets_fallback_label_not_raw_slug(self):
+        draft = DailyReportDraft(
+            exec_summary_he="תקציר.",
+            sections=[ReportSection(title_he="naval_eo_ir", domain="naval_eo_ir", prose_he="פרוזה [1].")],
+            outlook_he="",
+            open_points_he=[],
+        )
+        normalized = daily._normalize_section_titles(draft)
+        assert normalized.sections[0].title_he != "naval_eo_ir"
+
+
+class TestDeepSearchOrphanFilter:
+    """Q3-15: the deep-investigations section must not include an open question about an item
+    that isn't in this report's own item list."""
+
+    def test_filters_entries_whose_item_is_not_in_report(self):
+        items = [{"id": 1}, {"id": 2}]
+        deep_search = [
+            {"job_id": 1, "trigger_item_id": 1, "question": "in report"},
+            {"job_id": 2, "trigger_item_id": 99, "question": "orphaned"},
+            {"job_id": 3, "trigger_item_id": None, "question": "not item-specific"},
+        ]
+        filtered = daily._filter_deep_search_to_items_included(deep_search, items)
+        assert {d["job_id"] for d in filtered} == {1, 3}
+
+    def test_no_items_drops_every_item_specific_entry(self):
+        deep_search = [
+            {"job_id": 1, "trigger_item_id": 1, "question": "orphaned, no items at all"},
+            {"job_id": 2, "trigger_item_id": None, "question": "still kept"},
+        ]
+        filtered = daily._filter_deep_search_to_items_included(deep_search, [])
+        assert {d["job_id"] for d in filtered} == {2}
+
+
 class _FakeCursor:
     """Records the executed SQL/params and returns a fixed row set, regardless of the query --
     good enough to characterize the WHERE clause `collect_items` builds without a live DB."""

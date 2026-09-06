@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -158,7 +159,7 @@ def _dispatch_explicit_provider(
     # U8-ג: an explicit "<model>@<power>" suffix picks a power/effort level for this one call,
     # for either an API provider or a CLI provider (agy/claude get `--effort`, codex gets
     # `-c model_reasoning_effort=`, see eoa.llm.providers.cli.CliProvider._build_args).
-    power, _, model = model.partition("@") if "@" in model else (None, "", model)
+    model, _, power = model.partition("@") if "@" in model else (model, "", None)
     if kind in ("anthropic", "gemini", "openai"):
         from eoa.llm.providers.api import get_api_provider
 
@@ -442,6 +443,154 @@ def _structured_once(
     raise LLMOutputError(f"schema validation failed for {schema.__name__}: {last_err}") from last_err
 
 
+# ---------------------------------------------------------------------------------------------
+# Q3-1 (docs/qa/findings_Q3_r1.md): Hebrew-acronym truncation guard.
+#
+# Ollama's schema-constrained decoding legally closes a JSON string the instant it emits an ASCII
+# `"` -- which is exactly the character a Hebrew acronym like כטב"ם/מטע"ד/מ"מ needs before its
+# final letter(s). The model then silently continues as if the string were finished, so the
+# persisted text ends mid-word ("...נגד כטב"). The prompts (system_analyst.md) now instruct the
+# model to use the Hebrew gershayim ״ (U+05F4) instead of an ASCII quote inside such acronyms, but
+# a small local model does not always comply -- so this is an additive, best-effort net in
+# `chat_structured` itself: after schema validation succeeds, walk every string field of the
+# result looking for a suspiciously-truncated one; if found, ask for one corrective rewrite
+# (mirroring the schema-validation retry's own "one corrective retry" contract) and, whether or
+# not the retry actually fixed it, normalise any remaining ASCII `"` sitting between two Hebrew
+# letters into ״ before returning.
+# ---------------------------------------------------------------------------------------------
+
+_HEBREW_RANGE_RE = re.compile(r"[֐-׿]")
+_ASCII_QUOTE_BETWEEN_HEBREW_RE = re.compile(r"([֐-׿])\"([֐-׿])")
+_GERSHAYIM = "״"  # ״
+# Common Hebrew acronym stems -- the part of the acronym that precedes the (ASCII-quote-vulnerable)
+# gershayim, e.g. כטב"ם -> stem "כטב", מטע"ד -> stem "מטע", תע"א -> stem "תע", צה"ל -> stem "צה",
+# מ"מ -> stem "מ", חמ"ל -> stem "חמ", אמ"ן -> stem "אמ". A field whose text ends -- as its very
+# last token, with no trailing punctuation -- on exactly one of these stems is almost certainly a
+# truncated acronym, not a real word (these stems are not standalone Hebrew words on their own).
+_HEBREW_ACRONYM_STEMS = frozenset({"כטב", "מטע", "תע", "צה", "מ", "ק", "חמ", "אמ"})
+# A field ending in one of these (.!?)”) is a complete sentence -- never flagged as truncated.
+_TERMINAL_PUNCTUATION = (".", "!", "?", _GERSHAYIM, ")", "”")
+_MIN_HE_FIELD_LEN_FOR_GENERIC_CHECK = 20
+
+
+def _normalize_hebrew_quotes(text: str) -> str:
+    """Replace an ASCII `"` sitting directly between two Hebrew letters with the Hebrew gershayim
+    ״ (U+05F4) -- cheap, safe post-processing for the common case the model didn't follow the
+    prompt's instruction to use ״ itself."""
+    return _ASCII_QUOTE_BETWEEN_HEBREW_RE.sub(rf"\1{_GERSHAYIM}\2", text)
+
+
+def _looks_truncated_mid_hebrew_acronym(text: str, field_name: str) -> bool:
+    """True if ``text`` (the value of a field named ``field_name``) looks like it was cut off
+    mid-word right before a Hebrew acronym's closing gershayim/quote -- see the module note above."""
+    if not text or not _HEBREW_RANGE_RE.search(text):
+        return False
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    if stripped[-1] in _TERMINAL_PUNCTUATION:
+        return False
+    last_token = stripped.split()[-1].strip("\"'" + _GERSHAYIM) if stripped.split() else ""
+    if last_token in _HEBREW_ACRONYM_STEMS:
+        return True
+    # Broader net: any `*_he` free-text sentence field that ends without terminal punctuation and
+    # is long enough to be a real sentence (rather than e.g. a short label) is also suspect.
+    return field_name.endswith("_he") and len(stripped) >= _MIN_HE_FIELD_LEN_FOR_GENERIC_CHECK
+
+
+def _iter_model_strings(obj: Any, field_name: str = "") -> Iterator[tuple[str, str, Callable[[str], None]]]:
+    """Recursively yield ``(value, field_name, setter)`` for every string leaf reachable from
+    ``obj`` (a pydantic model, or a list of models/strings) -- covers every field of every stage's
+    schema (``ClassifyOut``, ``TriageOut``, ``AnalyzeOut`` incl. nested ``EventOut``/``EdgeOut``
+    lists, etc.) without hardcoding any of their field names."""
+    if isinstance(obj, BaseModel):
+        for name in type(obj).model_fields:
+            value = getattr(obj, name)
+            if isinstance(value, str):
+
+                def _model_setter(new_value: str, _obj: BaseModel = obj, _name: str = name) -> None:
+                    setattr(_obj, _name, new_value)
+
+                yield value, name, _model_setter
+            else:
+                yield from _iter_model_strings(value, name)
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            if isinstance(item, str):
+
+                def _list_setter(new_value: str, _obj: list = obj, _i: int = i) -> None:
+                    _obj[_i] = new_value
+
+                yield item, field_name, _list_setter
+            else:
+                yield from _iter_model_strings(item, field_name)
+
+
+def _find_truncation_suspects(model: BaseModel) -> list[str]:
+    """Field names (not full paths -- good enough for logging) whose text looks truncated
+    mid-Hebrew-acronym, per :func:`_looks_truncated_mid_hebrew_acronym`."""
+    return [
+        name for value, name, _setter in _iter_model_strings(model) if _looks_truncated_mid_hebrew_acronym(value, name)
+    ]
+
+
+def _normalize_model_hebrew_quotes(model: T) -> T:
+    """Mutate every string field of ``model`` in place, normalising ASCII quotes between Hebrew
+    letters into gershayim; returns ``model`` for convenience."""
+    for value, _name, setter in _iter_model_strings(model):
+        fixed = _normalize_hebrew_quotes(value)
+        if fixed != value:
+            setter(fixed)
+    return model
+
+
+_HEBREW_TRUNCATION_RETRY_MESSAGE_HE = (
+    "שים לב: השדות הבאים בתשובה הקודמת שלך נראים חתוכים באמצע מילה, ככל הנראה בראש תיבות עברי "
+    "({fields}). כתוב מחדש את כל הפלט במלואו: ודא שכל משפט מסתיים בסימן פיסוק, ושבכל ראש תיבות "
+    "עברי (כגון כטב\"ם, מטע\"ד, תע\"א, צה\"ל, מ\"מ) אתה משתמש בגרש/גרשיים העבריים ״ (U+05F4) "
+    "ולעולם לא בגרשיים ASCII רגילים (\"). החזר JSON תקין ומלא לפי הסכמה."
+)
+
+
+def _guard_hebrew_truncation(
+    role: str,
+    schema: type[T],
+    messages: list[dict[str, Any]],
+    validated: T,
+    *,
+    task: str,
+    interactive: bool,
+    options: dict[str, Any] | None,
+    provider: str | None,
+) -> T:
+    """``chat_structured``'s Q3-1 post-validation step (see module note above): detect a
+    suspected mid-acronym truncation, attempt one corrective retry, then always normalise
+    remaining ASCII quotes-between-Hebrew-letters before returning. Never raises -- a failure to
+    even get a corrective retry through just falls back to the original (only quote-normalised)
+    result, exactly like the plain schema-validation retry falls back to raising only when the
+    *initial* attempt(s) fail, never adding a new failure mode of its own."""
+    suspects = _find_truncation_suspects(validated)
+    if not suspects:
+        return _normalize_model_hebrew_quotes(validated)
+    log.warning("hebrew_truncation_suspected_retry", schema=schema.__name__, fields=suspects)
+    corrective_messages = [
+        *messages,
+        {"role": "assistant", "content": validated.model_dump_json()},
+        {"role": "user", "content": _HEBREW_TRUNCATION_RETRY_MESSAGE_HE.format(fields=", ".join(suspects))},
+    ]
+    try:
+        retried, _res = _structured_once(
+            role, schema, corrective_messages, task=task, interactive=interactive, options=options, provider=provider
+        )
+    except LLMOutputError as exc:
+        log.warning("hebrew_truncation_retry_failed", schema=schema.__name__, error=str(exc)[:200])
+        return _normalize_model_hebrew_quotes(validated)
+    still_suspect = _find_truncation_suspects(retried)
+    if still_suspect:
+        log.warning("hebrew_truncation_suspected", schema=schema.__name__, fields=still_suspect)
+    return _normalize_model_hebrew_quotes(retried)
+
+
 def chat_structured(
     role: str,
     schema: type[T],
@@ -465,13 +614,25 @@ def chat_structured(
     validation failure that survives one corrective retry against the chain's *current* entry now
     falls back to the *next* chain entry (a fresh one-corrective-retry attempt there), rather than
     raising immediately -- exactly like a provider/HTTP failure does.
+
+    Additive (Q3-1): once a validated result is in hand (from either path below), it passes
+    through :func:`_guard_hebrew_truncation` -- a best-effort detector + one corrective retry for
+    the "Hebrew acronym truncated right before its closing quote" failure mode, independent of and
+    on top of the schema-validation contract above.
     """
     if _in_pipeline_process():
         chain = settings().llm_providers.effective_chain(role)
         if len(chain) > 1 or chain[0].provider != "ollama":
-            return _chat_structured_chain(role, chain, schema, messages, task=task, interactive=interactive, options=options)
+            validated = _chat_structured_chain(
+                role, chain, schema, messages, task=task, interactive=interactive, options=options
+            )
+            return _guard_hebrew_truncation(
+                role, schema, messages, validated, task=task, interactive=interactive, options=options, provider=None
+            )
     validated, _res = _structured_once(role, schema, messages, task=task, interactive=interactive, options=options, provider=provider)
-    return validated
+    return _guard_hebrew_truncation(
+        role, schema, messages, validated, task=task, interactive=interactive, options=options, provider=provider
+    )
 
 
 def _chat_structured_chain(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import structlog
@@ -44,6 +45,66 @@ _META_PHRASES = (
     "הפריט מספק",
 )
 _MIN_QUESTION_WORDS = 12
+
+# Q3-4 (docs/qa/findings_Q3_r1.md): the same fixed sum->score lookup table triage.md gives the
+# model ("אל תחשב נוסחה, רק תרגם לפי הטבלה") -- used to deterministically check that the model's
+# own `score` actually matches the sum of the `(novelty, magnitude, core_relevance)` components it
+# also returned. ids 10/67 in the QA sample had a `reason_he` narrating one level (e.g. "orange")
+# while `score` corresponded to another ("red") -- the components/score disagreed with each other.
+_SUM_TO_SCORE: dict[int, int] = {
+    3: 1, 4: 1,
+    5: 2, 6: 2,
+    7: 3,
+    8: 4,
+    9: 5,
+    10: 6,
+    11: 7,
+    12: 8,
+    13: 9,
+    14: 10, 15: 10,
+}  # fmt: skip
+
+
+def _expected_score(novelty: int, magnitude: int, core_relevance: int) -> int:
+    """Deterministic score for a component triple, per triage.md's fixed lookup table."""
+    total = max(3, min(15, novelty + magnitude + core_relevance))
+    return _SUM_TO_SCORE[total]
+
+
+def _score_matches_components(out: TriageOut) -> bool:
+    return out.score == _expected_score(out.novelty, out.magnitude, out.core_relevance)
+
+
+# ids 10/67 in the QA sample had a numerically self-consistent score (its components really do
+# sum to it per the table) but `reason_he` still narrated a *different* level word in its own
+# concluding sentence (e.g. "...רמה orange" for a score of 8, which the config's own thresholds
+# put at "red") -- a prose/threshold disagreement `_score_matches_components` alone can't catch,
+# since it only looks at the numbers, never the free text's own stated conclusion.
+_LEVEL_WORDS_HE: dict[str, tuple[str, ...]] = {
+    "red": ("אדום", "red"),
+    "orange": ("כתום", "orange"),
+    "yellow": ("צהוב", "yellow"),
+    "archive": ("ארכיון", "archive"),
+}
+_REASON_LEVEL_CONCLUSION_RE = re.compile(
+    r"(?:רמה|level)\s*[:\-]?\s*(אדום|כתום|צהוב|ארכיון|red|orange|yellow|archive)", re.IGNORECASE
+)
+
+
+def _reason_conflicting_level(reason_he: str, expected_level: str) -> str | None:
+    """The level word ``reason_he`` explicitly concludes with (via a "רמה .../level ..." phrase),
+    if it names a level other than ``expected_level`` -- else ``None``. Only trusts an explicit
+    conclusion phrase (not any incidental level-word mention elsewhere) to avoid false positives."""
+    if not reason_he:
+        return None
+    m = _REASON_LEVEL_CONCLUSION_RE.search(reason_he)
+    if not m:
+        return None
+    stated = m.group(1).lower()
+    for level, words in _LEVEL_WORDS_HE.items():
+        if stated in (w.lower() for w in words) and level != expected_level:
+            return level
+    return None
 
 
 def _bare_article_reference(question: str) -> bool:
@@ -200,6 +261,71 @@ def _triage_system() -> str:
     return render("system_analyst", data_guard=DATA_GUARD_SYSTEM)
 
 
+def _reconcile_score(
+    item: dict, out: TriageOut, *, role: str = "resident", interactive: bool = False
+) -> TriageOut:
+    """Q3-4: ``score`` must equal the deterministic sum-to-score mapping of the
+    ``(novelty, magnitude, core_relevance)`` components the model also returned, AND
+    ``reason_he``'s own stated conclusion (if any) must not name a different level -- ids 10/67 in
+    the QA sample had a numerically self-consistent score whose own ``reason_he`` still concluded
+    with the *wrong* level word (e.g. "...רמה orange" for a score of 8, which the config's red
+    threshold puts at "red"). On either mismatch, one corrective retry (mirroring the
+    schema-validation "one corrective retry" contract used elsewhere); if the retry still
+    disagrees, fall back to the deterministic value computed from whatever components came back
+    and log ``triage_score_reconciled`` -- the caller then always has an internally-consistent
+    result, never blocking the pipeline on this."""
+    expected = _expected_score(out.novelty, out.magnitude, out.core_relevance)
+    conflicting_level = _reason_conflicting_level(out.reason_he, level_for(expected))
+    if out.score == expected and conflicting_level is None:
+        return out
+    log.warning(
+        "triage_score_mismatch_retry",
+        item_id=item.get("id"),
+        returned_score=out.score,
+        expected_score=expected,
+        conflicting_level_in_reason=conflicting_level,
+        novelty=out.novelty,
+        magnitude=out.magnitude,
+        core_relevance=out.core_relevance,
+    )
+    conflict_note = (
+        f' כמו כן, הנימוק שלך (reason_he) מסיק רמה "{conflicting_level}", אך זה סותר את הרמה '
+        f'הנכונה ("{level_for(expected)}") לפי score={expected}.'
+        if conflicting_level
+        else ""
+    )
+    retry_messages = [
+        {"role": "system", "content": _triage_system()},
+        {"role": "user", "content": _triage_prompt(item)},
+        {"role": "assistant", "content": out.model_dump_json()},
+        {
+            "role": "user",
+            "content": (
+                f"שים לב: הרכיבים שנתת (core_relevance={out.core_relevance}, "
+                f"magnitude={out.magnitude}, novelty={out.novelty}) מסתכמים ל-"
+                f"{out.novelty + out.magnitude + out.core_relevance}, שמתאים לפי הטבלה הקבועה ל-"
+                f"score={expected}, אבל החזרת score={out.score} -- הנתונים סותרים זה את זה."
+                f"{conflict_note} score הסופי, ומסקנת הרמה בתוך reason_he אם קיימת, חייבים "
+                "להתאים בדיוק לתרגום הטבלה של סכום שלושת הרכיבים. החזר JSON מלא ותקין עם score "
+                "ו-reason_he מתוקנים (אפשר גם לתקן את הרכיבים עצמם אם טעית בהם)."
+            ),
+        },
+    ]
+    try:
+        retried = chat_structured(role, TriageOut, retry_messages, task="triage", interactive=interactive)
+    except LLMOutputError as exc:
+        log.warning("triage_score_reconcile_retry_failed", item_id=item.get("id"), error=str(exc)[:200])
+        out.score = expected
+        log.warning("triage_score_reconciled", item_id=item.get("id"), score=expected)
+        return out
+    retried_expected = _expected_score(retried.novelty, retried.magnitude, retried.core_relevance)
+    retried_conflict = _reason_conflicting_level(retried.reason_he, level_for(retried_expected))
+    if retried.score != retried_expected or retried_conflict is not None:
+        retried.score = retried_expected
+        log.warning("triage_score_reconciled", item_id=item.get("id"), score=retried_expected)
+    return retried
+
+
 def triage_item(item: dict, *, role: str = "resident", interactive: bool = False) -> TriageOut:
     """Score one classified item (does not persist). Level is recomputed from config thresholds."""
     out = chat_structured(
@@ -212,6 +338,7 @@ def triage_item(item: dict, *, role: str = "resident", interactive: bool = False
         task="triage",
         interactive=interactive,
     )
+    out = _reconcile_score(item, out, role=role, interactive=interactive)
     out.level = level_for(out.score)  # type: ignore[assignment]
     return out
 
@@ -220,11 +347,17 @@ def triage_batch(items: list[dict], *, role: str = "resident") -> dict[int, Tria
     """U8-6 batch mode (Revision 2026-09-06): triage up to ``BATCH_SIZE`` items in one cloud call
     instead of one call per item; returns ``{item_id: TriageOut}`` with ``level`` already
     recomputed from config thresholds, same as ``triage_item``. Only used by ``run_triage`` when
-    ``is_cloud_batch_mode()`` is true."""
+    ``is_cloud_batch_mode()`` is true. Q3-4's score/component reconciliation still runs per-item
+    (a mismatched item gets its own single corrective call, same as the non-batch path -- the
+    batch call itself is not retried just for this)."""
     prompts = [(it["id"], _triage_prompt(it)) for it in items]
     results = chat_structured_batch(role, TriageOut, prompts, system=_triage_system(), task="triage")
-    for out in results.values():
-        out.level = level_for(out.score)  # type: ignore[assignment]
+    items_by_id = {it["id"]: it for it in items}
+    for item_id, out in results.items():
+        item = items_by_id.get(item_id)
+        if item is not None:
+            results[item_id] = _reconcile_score(item, out, role=role)
+        results[item_id].level = level_for(results[item_id].score)  # type: ignore[assignment]
     return results
 
 
@@ -241,7 +374,7 @@ def run_triage(
         if it.get("domain") is None:
             continue  # not classified yet — leave for the next pass, do not mark
         if (
-            it.get("security_status") == "quarantined"
+            it.get("security_status") in ("quarantined", "blocked")
             or it.get("dedup_of")
             or it.get("domain") == "out_of_scope"
         ):

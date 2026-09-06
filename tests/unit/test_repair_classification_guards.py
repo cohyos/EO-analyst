@@ -12,8 +12,6 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
-
 if "eoa.db" not in sys.modules:
     try:
         import eoa.db  # noqa: F401
