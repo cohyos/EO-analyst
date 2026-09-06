@@ -1,12 +1,13 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
 import { Cloud, Send, Square, X } from "lucide-react";
 import type { ChatMessage } from "@/hooks/useAskChat";
-import { CitationText } from "@/components/CitationText";
+import { AskAnswer } from "./AskAnswer";
+import { AskSourcesFooter } from "./AskSourcesFooter";
 import { EmptyState } from "@/components/states";
 import { useUiStore } from "@/store/uiStore";
 import { cn } from "@/lib/cn";
 import { ModelPicker } from "./ModelPicker";
+import type { AskCitation } from "@/types/api";
 
 export function ChatThread({
   messages,
@@ -29,7 +30,6 @@ export function ChatThread({
   onProviderChange?: (next: string | null) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const navigate = useNavigate();
   const chatContext = useUiStore((s) => s.chatContext);
   const removeFromChatContext = useUiStore((s) => s.removeFromChatContext);
 
@@ -81,11 +81,11 @@ export function ChatThread({
               )}
             >
               {m.role === "assistant" ? (
-                <CitationText
-                  text={m.content || (m.streaming ? "…" : "")}
-                  citations={m.citations}
-                  onOpenItem={(id) => navigate(`/feed?open=${id}`)}
-                />
+                m.content ? (
+                  <AskAnswer text={m.content} citations={m.citations} />
+                ) : m.streaming ? (
+                  <span className="text-fg-dim">…</span>
+                ) : null
               ) : (
                 <bdi className="block">{m.content}</bdi>
               )}
@@ -146,34 +146,16 @@ export function ChatThread({
         )}
       </form>
       {!compact && messages.some((m) => m.citations.length > 0) && (
-        <SourcesList messages={messages} />
+        <AskSourcesFooter sources={mergeThreadSources(messages)} />
       )}
     </div>
   );
 }
 
-function SourcesList({ messages }: { messages: ChatMessage[] }) {
-  const allCitations = messages.flatMap((m) => m.citations);
-  const unique = Array.from(new Map(allCitations.map((c) => [c.item_id, c])).values());
-  if (unique.length === 0) return null;
-  return (
-    <div className="border-t border-border p-3">
-      <h3 className="mb-2 text-xs font-medium text-fg-dim">מקורות</h3>
-      <ul className="space-y-1.5">
-        {unique.map((c) => (
-          <li key={c.item_id} className="text-xs">
-            <a
-              href={c.url}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-start gap-1.5 text-accent hover:underline"
-            >
-              <span className="font-mono text-fg-dim">[{c.n}]</span>
-              <bdi className="line-clamp-2">{c.title}</bdi>
-            </a>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
+/** De-dupes by item_id across every message in the thread (a citation's `n` is only unique
+ * within its own message, since each answer's [n] numbering restarts at 1), preferring the
+ * level/source_name/note-enriched `sources` event over the earlier plain `citations` one. */
+function mergeThreadSources(messages: ChatMessage[]): AskCitation[] {
+  const all = messages.flatMap((m) => (m.sources.length > 0 ? m.sources : m.citations));
+  return Array.from(new Map(all.map((c) => [c.item_id, c])).values());
 }

@@ -8,6 +8,9 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   citations: AskCitation[];
+  /** U11: citations enriched with level/source_name/note for the sources footer -- arrives once,
+   * after the answer finishes streaming. Falls back to `citations` until then. */
+  sources: AskCitation[];
   streaming?: boolean;
   /** U8: provider/model that answered this message (assistant messages only). */
   provider?: string;
@@ -63,6 +66,7 @@ export function useAskChat() {
         role: "user",
         content: question,
         citations: [],
+        sources: [],
       };
       const assistantId = nextId();
       const assistantMsg: ChatMessage = {
@@ -70,6 +74,7 @@ export function useAskChat() {
         role: "assistant",
         content: "",
         citations: [],
+        sources: [],
         streaming: true,
       };
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -101,6 +106,11 @@ export function useAskChat() {
           onCitations: (items) => {
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantId ? { ...m, citations: items } : m)),
+            );
+          },
+          onSources: (items) => {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, sources: items } : m)),
             );
           },
           onMeta: (providerKind, providerModel) => {

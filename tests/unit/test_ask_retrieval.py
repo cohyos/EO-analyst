@@ -263,3 +263,13 @@ class TestAskBuildMessages:
         assert "הערת איכות" in system  # named as forbidden
         assert "ציטוט מדויק" in system  # named as forbidden
         assert "===SOURCES_JSON===" in system
+
+    def test_system_prompt_forbids_fake_citations_when_no_sources_retrieved(self) -> None:
+        """Live-verified 2026-09-06: with zero retrieved items the model still wrote "[1]"/"[2]"
+        under "עובדות מרכזיות" with nothing behind them -- the prompt must explicitly forbid any
+        [n] marker when the sources list is empty."""
+        messages, citations = services.ask_build_messages("שאלה עם מקורות ריקים", [], [])
+        assert citations == []
+        system = messages[0]["content"]
+        assert "רשימת \"מקורות\" שסופקה לך ריקה" in system or 'רשימת "מקורות" שסופקה לך ריקה' in system
+        assert "אסור" in system

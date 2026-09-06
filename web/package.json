@@ -15,7 +15,9 @@
   "dependencies": {
     "@tanstack/react-query": "^5.59.0",
     "cytoscape": "^3.30.2",
+    "dompurify": "^3.4.14",
     "lucide-react": "^0.451.0",
+    "marked": "^16.4.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.18.3",

@@ -76,6 +76,68 @@ export class ApiError extends Error {
   }
 }
 
+// --- Remote-access session gate (ADR-008, docs/adr/008-remote-access.md) ---------------------
+// `agent/eoa/api/auth.py`'s middleware returns 401 `{"error":{"code":"auth_required",...}}` for
+// any non-loopback client (Tailscale/LAN) without a valid session cookie. No passcode is ever
+// stored client-side -- the session lives entirely in an HttpOnly cookie the browser manages; the
+// two tiny pub/sub flags below just let `AccessGate`/`TopBar` react to what the API just told us.
+type BoolListener = (value: boolean) => void;
+
+let authRequired = false;
+let remoteSessionActive = false;
+const authRequiredListeners = new Set<BoolListener>();
+const remoteSessionListeners = new Set<BoolListener>();
+
+function setAuthRequired(value: boolean): void {
+  if (authRequired === value) return;
+  authRequired = value;
+  for (const listener of authRequiredListeners) listener(value);
+}
+
+function setRemoteSessionActive(value: boolean): void {
+  if (remoteSessionActive === value) return;
+  remoteSessionActive = value;
+  for (const listener of remoteSessionListeners) listener(value);
+}
+
+/** Subscribe to the "a 401 auth_required just happened" flag. Returns an unsubscribe function. */
+export function subscribeAuthRequired(listener: BoolListener): () => void {
+  authRequiredListeners.add(listener);
+  return () => authRequiredListeners.delete(listener);
+}
+
+export function getAuthRequired(): boolean {
+  return authRequired;
+}
+
+/** Subscribe to "the last response was an authenticated remote session" (set from the
+ * `X-EOA-Remote-Session` response header -- see `auth.py::RemoteAccessMiddleware`). */
+export function subscribeRemoteSession(listener: BoolListener): () => void {
+  remoteSessionListeners.add(listener);
+  return () => remoteSessionListeners.delete(listener);
+}
+
+export function getRemoteSessionActive(): boolean {
+  return remoteSessionActive;
+}
+
+/** `POST /api/auth/login` -- on success the server sets the HttpOnly session cookie itself. */
+export async function loginRemoteAccess(passcode: string): Promise<void> {
+  await request<{ ok: boolean }>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ passcode }),
+  });
+  setAuthRequired(false);
+}
+
+export async function logoutRemoteAccess(): Promise<void> {
+  try {
+    await request<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+  } finally {
+    setRemoteSessionActive(false);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -84,6 +146,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {}),
     },
   });
+  setRemoteSessionActive(res.headers.get("x-eoa-remote-session") === "1");
   if (!res.ok) {
     let body: unknown = null;
     try {
@@ -93,10 +156,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     const err = body as { error?: { code: string; message_he: string; detail: unknown } } | null;
     if (err?.error) {
+      if (err.error.code === "auth_required") setAuthRequired(true);
       throw new ApiError(err.error.code, err.error.message_he, err.error.detail);
     }
     throw new ApiError("http_error", `שגיאת שרת (${res.status})`, res.statusText);
   }
+  setAuthRequired(false);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }

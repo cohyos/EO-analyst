@@ -39,9 +39,30 @@ test.describe("Ask the analyst (/ask)", () => {
         expect(text?.trim().length ?? 0).toBeGreaterThan(0);
       } else {
         // Happy path: some assistant content rendered (even a short one) —
-        // never an empty bubble left behind.
+        // never an empty bubble left behind, and it must be real rendered
+        // Markdown, never the literal "### **מקור 1**" / "**הערת איכות:**"
+        // text the pre-fix UI showed verbatim (2026-09-06 bug report).
         const assistantBubbles = page.locator("main .bg-bg-raised.shadow-panel, main [class*='bg-bg-raised']");
         expect(await assistantBubbles.count()).toBeGreaterThan(0);
+
+        const answerRoot = assistantBubbles.last().locator(".eo-ask-answer");
+        await expect(answerRoot).toBeVisible();
+        const answerText = await answerRoot.innerText();
+        expect(answerText).not.toMatch(/###/);
+        expect(answerText).not.toMatch(/\*\*/);
+        expect(answerText).not.toMatch(/הערת איכות/);
+        expect(answerText).not.toMatch(/ציטוט מדויק/);
+
+        // Rendered as real HTML elements (react-markdown output), not raw
+        // markdown source text — at minimum one paragraph.
+        expect(await answerRoot.locator("p").count()).toBeGreaterThan(0);
+
+        // Any [n] marker that resolved to a real source renders as a
+        // clickable citation chip, not literal bracket text left inert.
+        const citationChips = answerRoot.locator(".eo-citation");
+        if (await citationChips.count()) {
+          await expect(citationChips.first()).toBeVisible();
+        }
       }
     },
   );
