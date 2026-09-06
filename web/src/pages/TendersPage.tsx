@@ -167,11 +167,24 @@ export function TendersPage() {
                     showClosedArchived={showClosedArchived}
                     onToggleClosedArchived={setShowClosedArchived}
                   />
-                  <TenderTable
-                    tenders={filteredTenders}
-                    expandedId={expandedId}
-                    onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
-                  />
+                  {filteredTenders.length === 0 &&
+                  !filters.status &&
+                  !filters.country &&
+                  !filters.q &&
+                  !showClosedArchived ? (
+                    // Default view (open + unknown, no user filters) is empty while closed/archived
+                    // rows exist: say "no open tenders" rather than "no matches" (QA r2, 2026-09-06).
+                    <EmptyState
+                      title={t("tenders.emptyOpenTitle")}
+                      description={t("tenders.emptyOpenDescription")}
+                    />
+                  ) : (
+                    <TenderTable
+                      tenders={filteredTenders}
+                      expandedId={expandedId}
+                      onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
+                    />
+                  )}
                 </>
               )}
             </>

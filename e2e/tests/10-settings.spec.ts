@@ -94,6 +94,9 @@ test.describe("Settings screen (/settings)", () => {
 // this file exercises, so a failed/aborted run here can't corrupt the live app's session or an
 // in-progress night run.
 test.describe("Settings — LLM chain editor (throwaway instance)", () => {
+  // Opt-in only: these tests write real settings, so they run solely when a throwaway
+  // instance is provided via EOA_CHAINS_BASE_URL (QA r2, 2026-09-06).
+  test.skip(!process.env.EOA_CHAINS_BASE_URL, "set EOA_CHAINS_BASE_URL to a throwaway instance to run the chain-editor tests");
   test.use({ baseURL: process.env.EOA_CHAINS_BASE_URL ?? "http://127.0.0.1:8766" });
 
   // Every test in this block starts from an empty `resident` chain and restores it afterward
