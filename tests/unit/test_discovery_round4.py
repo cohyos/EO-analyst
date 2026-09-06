@@ -403,6 +403,9 @@ class TestToolReadUsesL2Arbitration:
         )
         monkeypatch.setattr("eoa.security.guard.screen", fake_screen)
         monkeypatch.setattr(ds, "_summarise_page", lambda inv, text, url: "summary")
+        # `_tool_read` also writes an investigation_log row (`ds._log` -> DB); without this the
+        # test waits out the connection-pool timeout against a real Postgres.
+        monkeypatch.setattr(ds, "_log", lambda *a, **k: None)
 
         ds._tool_read(inv, budget, "https://example.com/a", round_no=1)
         assert captured.get("use_l2") is True
@@ -423,6 +426,7 @@ class TestToolReadUsesL2Arbitration:
             ),
         )
 
+        monkeypatch.setattr(ds, "_log", lambda *a, **k: None)
         ds._tool_read(inv, budget, "https://example.com/a", round_no=1)
         assert inv.security_flagged_pages
         assert inv.security_flagged_pages[0]["reason"] == "instruction_override"
