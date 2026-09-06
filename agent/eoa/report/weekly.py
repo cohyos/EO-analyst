@@ -397,7 +397,9 @@ def draft_weekly(
         ],
         task="report",
         interactive=interactive,
-        options={"temperature": 0.3},
+        # 2026-09-06: the weekly draft is long prose over ~40 items; the shared "report" cap (6000)
+        # truncated the JSON mid-string (LLMOutputError). Per-call override, like bd_territory.
+        options={"temperature": 0.3, "num_predict": 14000},
     )
     return _normalize_section_titles(draft)
 
