@@ -304,6 +304,11 @@ class CliProvider:
     @staticmethod
     def _cleanup(tmp_out: Path | None) -> None:
         if tmp_out is not None:
+            if os.environ.get("EOA_CLI_KEEP_PROMPT") == "1" and tmp_out.name.startswith("eoa_agy_prompt_"):
+                # debugging aid (2026-09-07): keep the spilled prompt so a failing agy call can be
+                # replayed by hand; never set in production runs.
+                log.warning("cli_prompt_file_kept", path=str(tmp_out))
+                return
             try:
                 tmp_out.unlink(missing_ok=True)
             except OSError:
@@ -332,7 +337,13 @@ def _fail(kind: str, proc: subprocess.CompletedProcess[str], reason: str) -> Cli
             stderr = str(data.get("error") or data.get("message") or "")[:500]
         except (json.JSONDecodeError, AttributeError):
             pass
-    return CliProviderError(f"{kind} CLI {reason} (exit {proc.returncode}): {stderr or '(no output)'}")
+    # 2026-09-07: agy's stderr on a mid-run failure is the generic "Agent execution terminated due
+    # to error." while the JSON body on stdout carries the real cause -- always append its tail.
+    stdout_tail = (proc.stdout or "").strip()[:400]
+    detail = stderr or "(no output)"
+    if stdout_tail and stdout_tail not in detail:
+        detail = f"{detail} | stdout: {stdout_tail}"
+    return CliProviderError(f"{kind} CLI {reason} (exit {proc.returncode}): {detail}")
 
 
 def _parse_agy(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str, Any]]:
