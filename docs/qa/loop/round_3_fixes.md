@@ -147,3 +147,8 @@ that calls it. Gone after the 15:15 restart (job 95 re-run queued to confirm).
   daily cache, exponential backoff per provider, a second keyless provider in rotation
   (Brave/Bing via SearXNG or Startpage), and a per-run query budget so one stage cannot exhaust
   the quota for the rest of the night.
+- **Patent survey nits after the rebuilds (reports 47/48 + in-process 19:03/19:04):** the exec
+  summary opens with the coverage caveat carrying all 17 [n] marks glued to it (render the caveat
+  as its own uncited system line); the keyless data yields a bogus assignee "Europe" (drop
+  region/country words from assignee parsing); "אשכול טכנולוגי: לא מסווג" when CPC is missing
+  (cluster by abstract keywords instead).
