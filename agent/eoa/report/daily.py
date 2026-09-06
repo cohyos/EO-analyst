@@ -331,6 +331,42 @@ def collect_deep_search(
                 "contradictions_he": result.get("contradictions_he", ""),
             }
         )
+    return reconcile_deep_search_reruns(out)
+
+
+#: Outcome rank for :func:`reconcile_deep_search_reruns` -- a "found" answer beats a later
+#: "not_found" for the same question (the later run usually failed on budget/search outage).
+_OUTCOME_RANK = {"found": 4, "partial": 3, "off_topic": 1, "not_found": 0}
+
+
+def reconcile_deep_search_reruns(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Round-3 judge (weekly 2026-09-06): the same investigation question appeared several times
+    in one report with contradictory outcomes ("found" with an answer vs "not_found" ×3). Group
+    entries by normalised question (and trigger item), keep the best-outcome run (ties → newest,
+    i.e. first in the ``finished_at DESC`` order), and record ``rerun_count`` plus a Hebrew note
+    so the reader sees one reconciled answer, not a contradiction."""
+    groups: dict[tuple[Any, str], list[dict[str, Any]]] = {}
+    order: list[tuple[Any, str]] = []
+    for e in entries:
+        q = " ".join((e.get("question") or "").split()).casefold()
+        key = (e.get("trigger_item_id"), q)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+    out: list[dict[str, Any]] = []
+    for key in order:
+        runs = groups[key]
+        best = max(runs, key=lambda r: (_OUTCOME_RANK.get(r.get("outcome") or "", 0), -runs.index(r)))
+        if len(runs) > 1:
+            best = dict(best)
+            best["rerun_count"] = len(runs)
+            others = [r.get("outcome") for r in runs if r is not best]
+            best["rerun_note_he"] = (
+                f"השאלה נחקרה {len(runs)} פעמים השבוע; מוצגת הריצה עם התוצאה הטובה ביותר "
+                f"(ריצות נוספות: {', '.join(str(o) for o in others)})."
+            )
+        out.append(best)
     return out
 
 
