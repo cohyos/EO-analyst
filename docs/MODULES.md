@@ -6592,3 +6592,230 @@ fakes already return dict rows). Verified: the 16 files above plus
 `agent/eoa/cli.py` and `agent/eoa/report/weekly.py`/`daily.py` still carry pre-existing mypy debt
 (not in this task's file ownership) — full-repo `mypy agent/eoa` before this pass: 215 errors / 38
 files; the three files above no longer appear in that list at all.
+
+## Q3 r4 (2026-09-06): junk-entity gate broadened + entity-write canonicalization root cause
+
+Two linked follow-ups reported live during the 2026-09-06 ~05:00 LLM re-analyze backfill.
+
+**A — junk technique-like/source-name entities still slipping through.**
+`agent/eoa/pipeline/entity_normalize.py`'s `_TECHNIQUE_LIKE_RE` only ever matched a fixed literal
+list (e.g. `vehicle detector[s]?`, not the singular `vehicle detection`), so the backfill created
+new junk rows the r3 gate didn't cover: "camouflaged military vehicle detection" (kind=company,
+item 156), "GenAI image editing" (entity 1009), "arXiv" typed kind=person (entity 132). Reviewing
+`SELECT id, name, kind FROM entities ORDER BY id DESC LIMIT 80` live turned up ~30 more of the same
+shape (`target behaviors`, `proxy-guided placement`, `transformer-based architectures`, `potential
+suppliers`, `RGB-infrared fusion`, `binary wildfire segmentation`, ...) plus several people
+(`Amiram Norkin`, `Michael Gardner`, `Brig. Gen. Joseph Wortham`) mistyped `kind='company'`
+(out of this fix's scope — flagged for a future round, not touched here).
+
+`is_technique_like` (now `resolve_canonical`/`resolve_country_name`/`_is_system_designation`-
+guarded up front, matching `is_generic_non_entity`'s own guard, so a real watchlist/curated-org/
+country/system name can never be rejected on a substring/shape coincidence) gained two new pattern
+classes on top of the r3 literal list:
+
+- `_TECHNIQUE_SUFFIX_RE`: `"<1-5 words> <technique noun>[s]"` for the same suffix vocabulary the
+  task asked for (detection/segmentation/estimation/extraction/synthesis/translation/recognition/
+  tracking/classification/captioning/editing/generation/fusion/calibration/registration),
+  substring-matched (not anchored) so a phrase embedded in a longer string still matches.
+- `_TECHNIQUE_PREFIX_RE`: `"(GenAI|generative AI|LLM|deep learning|neural network) <anything>"`.
+- `_is_lowercase_multiword_junk` (backed by `_GENERIC_ENGLISH_KEYWORDS`, an English keyword-
+  substring stoplist mirroring `_GENERIC_HEBREW_KEYWORDS`'s existing style): a lowercase-starting,
+  multi-word name containing a generic-concept keyword (supplier/behavior/placement/architecture/
+  approach/vehicle/weapon/market/...). **Design note**: an earlier version of this rule rejected
+  *any* lowercase-start multi-word phrase regardless of content — verified safe against the live
+  `entities` table (31 real lowercase-start rows, zero false positives) but it broke
+  `test_upsert_entity_normalization.py::test_case_insensitive_existing_row_reused` (`"acme corp"`,
+  a fictitious but structurally-identical-to-real-companies test name) because `is_technique_like`
+  is a pure function with no DB access and so cannot itself check "does a case-insensitively-
+  matching row already exist" the way `upsert_entity` does downstream. Requiring a keyword closes
+  that gap while still catching every observed junk row.
+
+`is_source_like_name` (new): arXiv/IEEE/SPIE/Nature/Reddit/Wikipedia/YouTube/Google Scholar are
+never a person/company/org, and `entities.kind`'s CHECK constraint (`VALID_ENTITY_KINDS`) has no
+separate `'source'` value to type them under instead, so they are rejected outright (same as a
+technique-like name) rather than stored — matches the bare name or a leading-source-name category
+tag ("arXiv cs.CV"). `is_junk_entity` = `is_technique_like` OR `is_generic_non_entity` OR
+`is_source_like_name`; `scripts/repair_entities_normalize.py`'s existing `_reject_junk` pass (no
+signature change needed — it already calls `is_junk_entity`) picked up the broadened gate for free.
+
+**Run live 2026-09-06 (`--dry-run` then applied)**: entities 450 → 416 (31 junk rejected — see the
+list in the repair script's own output for the full set including `GroundingDINO detector`,
+`RGB-to-IR image translation`, `UAV-based wildfire segmentation`, `feature-level multimodal
+fusion`; 2 country backfills; 3 duplicate groups merged — `גרמניה`→`Germany`, `טורקיה`→`Turkey`, a
+curly-vs-straight-apostrophe ATLA duplicate). Zero false positives verified by hand against the
+full pre-repair entity list and the watchlist/curated-org aliases ("Iron Beam", "Drone Dome",
+"Sniper ATP", "LITENING", "US Air Force", "Israel", "LOCUST" all confirmed to survive).
+
+**B — entity 394 "Israel"/"country" reverting to "ישראל"/"company".** Root-cause investigation:
+grepped every `UPDATE entities` / `INSERT INTO entities` / `upsert_entity(` / `merge_entity(` call
+across `agent/eoa` and `scripts` (`agent/eoa/memory/relational.py::upsert_entity`,
+`agent/eoa/memory/graph.py::merge_entity`, `agent/eoa/pipeline/classify.py::persist_classification`,
+`agent/eoa/pipeline/analyze.py::persist_analysis`'s edge writer, `agent/eoa/patents/analyze.py::
+_resolve_entity_ids`, `agent/eoa/pipeline/entity_relevance.py::score_and_persist_entity` /
+`scripts/repair_entity_relevance.py` (`kind`/`relevance`/`is_watchlist` only, exact-name `WHERE`,
+never touches `name`), `agent/eoa/pipeline/israel_focus.py::score_and_persist_entity_israeli`
+(`is_israeli` only), `db/seed/seed_watchlist.py`). Findings:
+
+- `upsert_entity` (`agent/eoa/memory/relational.py:448-527`) resolves `name`/`kind` through
+  `entity_normalize.canonical_name_and_kind` *before* building the `INSERT ... ON CONFLICT (name)
+  DO UPDATE SET kind = EXCLUDED.kind, ...` — critically, that `DO UPDATE SET` clause never assigns
+  to `name` at all, so this function cannot revert an already-canonical row's name under any
+  call order or race, regardless of what raw spelling a caller passes in. The task's suspected
+  mechanism ("`ON CONFLICT` on a normalised key updating `name = EXCLUDED.name`") does not exist in
+  the actual schema/query — the unique constraint is on the literal `name` column, and the current
+  query text has no such assignment.
+- `merge_entity` (`agent/eoa/memory/graph.py:110-132`, **before this fix**) does an unconditional
+  raw `UPDATE entities SET name = %(name)s, kind = %(kind)s ...` with **no internal
+  canonicalisation** — this is the only write path in the codebase capable of literally reproducing
+  the reported symptom. Its one call site, `agent/eoa/pipeline/analyze.py`'s edge writer
+  (`persist_analysis`, ~line 434-459), already resolves both edge endpoints through
+  `canonical_name_and_kind` before calling it (a prior fix, confirmed present in the current
+  working tree) — so, as given, that call site could not have produced the observed reversion.
+  `classify.py`'s `persist_classification` and `patents/analyze.py`'s `_resolve_entity_ids` both
+  call `upsert_entity` only (never `merge_entity`), and `upsert_entity` canonicalises internally
+  regardless of the raw `kind`/name a caller passes — so every currently-known write path is safe
+  by the time of this investigation.
+- Live DB check (2026-09-06): entity id 394 no longer exists at all (0 `graph_edges` references —
+  cleanly gone, not corrupted in place), and a canonical `name='Israel'`, `kind='country'` row
+  already exists under a new id (1091). The exact reversion could not be reproduced or caught
+  in the act against the current working tree; the most plausible explanation is a **stale
+  long-running process** (the "do not restart live processes" constraint on this task) still
+  executing an in-memory pre-fix version of `analyze.py`/`graph.py` from before commit `422e460`
+  landed the r3 canonicalisation — a live Python process does not re-import already-loaded modules
+  from disk, so a worker started before that fix would keep exhibiting the old raw-`merge_entity`
+  behaviour until it is restarted, which this task was explicitly told not to do.
+- **Hardening applied regardless** (defense-in-depth, since the exact mechanism could not be
+  conclusively pinned to a single still-live bug): `merge_entity` now also resolves `name`/`kind`
+  through `canonical_name_and_kind` internally (`agent/eoa/memory/graph.py:110-135`), so it can
+  never be the mechanism that reverts a canonical row, independent of what any current or future
+  caller passes in. `persist_classification` (`agent/eoa/pipeline/classify.py:284-299`) now stores
+  the *canonical* name in `items.entities_mentioned` instead of the raw `ent.name` — the array
+  previously held a raw alias/Hebrew-country-name even when the matching `entities` row was
+  correctly canonicalised, which is exactly the mismatch that makes an exact `entities.name = ...`
+  lookup against `entities_mentioned` (e.g. `israel_focus.score_and_persist_entity_israeli`)
+  silently no-op instead of updating the real row.
+- `scripts/repair_entities_normalize.py` gained a fifth pass, `_canonicalize_item_mentions`
+  (backed by `_canonical_mention_name`, the name-only half of `canonical_name_and_kind`'s
+  resolution precedence): rewrites every existing `items.entities_mentioned` array through the same
+  canonical resolution, deduplicating afterward. **Run live 2026-09-06**: 2 rows rewritten (item
+  1352: `"Defense Innovation Unit"` → `"DIU"`; item 105: `"Hero 120"` → `"UVision"`).
+
+### Tests
+
+New: `tests/unit/test_entity_canonical_write_regression.py` (upsert_entity/merge_entity
+canonicalisation regression, kept standalone since `test_upsert_entity_normalization.py` and
+`test_graph_edges.py` were being concurrently edited by other agents at investigation time),
+`tests/unit/test_persist_classification_entities.py` (persist_classification stores canonical
+names, same standalone-file reasoning). Extended: `tests/unit/test_entity_normalize.py` (+`
+TestIsTechniqueLike` r4 positives/negatives incl. every DB-observed junk phrase and the
+watchlist/curated-org/country/system/brand-name negatives; new `TestIsSourceLikeName`; `
+TestIsJunkEntity` source-like case), `tests/unit/test_repair_entities_normalize.py` (new
+`TestCanonicalizeItemMentions`, 5 cases). ruff clean on every touched file. Full targeted suite
+(`test_entity_normalize.py`, `test_repair_entities_normalize.py`,
+`test_entity_canonical_write_regression.py`, `test_persist_classification_entities.py`,
+`test_graph_edges.py`, `test_upsert_entity_normalization.py`, `test_persist_analysis.py`): 196
+passed. Live DB repair run (`--dry-run` then applied): entities 450 → 416.
+
+## A14: פטנטים ו-IP (docs/PLAN_WINDOWS_NATIVE.md row A14, 2026-09-06)
+
+**דרישת המשתמש:** מעקב אחר נוף הפטנטים בתחומי EO/IR/CV — נושאי מעקב מוגדרים + בעלי פטנטים
+מרכזיים ברשימת המעקב, ניתוח LLM (סיכום תביעות, "מה זה אומר"), מדד-ערך דטרמיניסטי, "סקר פטנטים"
+יזום לנושא חופשי, ואינטגרציה לדוחות השבועי/החודשי/BD. יושם כמודול חדש `agent/eoa/patents/**`.
+
+### 1. סכימת DB (מיגרציה `0018_patents.py`, ר' הערת התיאום ב-A13 לעיל על התנגשות מספור ה-revision)
+
+- `patents`: `pub_number` (unique), `kind`, `title`, `abstract`, `assignees`/`inventors`/`cpc`/
+  `jurisdictions` (`TEXT[]`), תאריכים (`priority_date`/`filing_date`/`publication_date`/
+  `grant_date`), `family_id`, `forward_citations`/`backward_citations`, `url`, `source`, `raw`
+  (JSONB), ותוצרי ניתוח: `subdomain`, `claims_summary_he`, `so_what_he`, `israel_relevance`,
+  `value_score`, `value_reasons` (`TEXT[]`), `entity_ids` (`BIGINT[]`).
+- `patent_watch_topics`: נושאי מעקב הניתנים לעריכה (מלבד ברירות המחדל ב-`config/patents.yaml`).
+- `patent_surveys`: רשומת סקר אחת לכל הרצת "סקר פטנטים", מקושרת ל-`reports` (`kind='patent_survey'`,
+  הוסף ל-CHECK constraint הקיים).
+
+### 2. סריקה (`agent/eoa/patents/scan.py`)
+
+לכל נושא מעקב (`config/patents.yaml`'s `watch_topics`) ולכל בעלים מוגדר (`assignees`, תת-קבוצה
+של `config/watchlist.yaml`): כאשר `EPO_OPS_KEY`+`EPO_OPS_SECRET` או `PATENTSVIEW_API_KEY` מוגדרים
+— קריאה **בתוך התהליך** (import ישיר, לא spawn של שרת stdio) לפונקציות הכלים ב-
+`eoa.mcp_servers.patents`; אחרת (המצב על מכונת הפיתוח הזו) — נפילה לחיפוש חסר-מפתחות דרך
+`eoa.search.provider` עם `site:patents.google.com <שאילתה>`, פענוח מספר הפרסום מכתובת ה-URL
+והבעלים מהכותרת/הקטע (התאמת כינויי watchlist, **מוגבל ל-kind=="company" בלבד** — כינוי ארגון/
+מדינה מהטבלה המתוקננת כמו "Europe"/"NATO" אף פעם לא הופך לבעלים מדומה). דה-דופ לפי `pub_number`
+(`ON CONFLICT DO NOTHING`); חלון: 90 יום בהרצה ראשונה, 21 יום בהרצות הבאות (דה-דופ עצמו מבטיח
+נכונות; החלון רק חוסך תעבורת חיפוש מיותרת).
+
+### 3. ניתוח (`agent/eoa/patents/analyze.py`)
+
+LLM (`resident`, `chat_structured`, מוגבל) על כותרת+תקציר: `claims_summary_he` (3–5 משפטים),
+`subdomain` (מתוך `taxonomy.yaml`'s `domains.tech_dev.sub`, או ריק), `so_what_he`. Israel-relevance
+דטרמיניסטי דרך `eoa.pipeline.israel_focus` (import מוגן — נופל חזרה לבדיקת מדינת-בעלים ישירה אם
+המודול חסר). קישור בעלים → ישות: בעלים מזוהה מרשימת המעקב או ישראלי מקבל/יוצר רשומת `entities`
+אמיתית (`upsert_entity`); בעלים לא-מזוהה מקושר רק לרשומה קיימת (case-insensitive) — לעולם לא יוצר
+רשומה חדשה רק כי פטנט הזכיר אותו.
+
+### 4. מדד-ערך (`agent/eoa/patents/valuation.py`)
+
+`value_score` (0–100) — **מדד פרוקסי, לא הערכת שווי כספית** (המשפט הזה תמיד השורה האחרונה ב-
+`value_reasons`) — משוקלל מ-5 גורמים דטרמיניסטיים ומתועדים: רוחב משפחת ההגשה (`jurisdictions`,
+0–25), ציטוטים קדימה מנורמלים לגיל הפטנט (0–25), אורך חיים נותר משוער מ-20 שנות תוקף (0–20), קצב
+הגשה של אותו בעלים במאגר (0–15), ודגל התדיינות משפטית (0–15, כמעט תמיד 0 — אין מקור שמספק זאת).
+
+### 5. סקר פטנטים (`agent/eoa/patents/survey.py`)
+
+`build_patent_survey(topic)`: איסוף עד 150 רשומות לנושא חופשי (`eoa.patents.scan.search_records`),
+upsert למאגר, ניתוח/הערכה של המדגם הטרי ביותר (עד 20), ריכוזים דטרמיניסטיים (CPC/בעלים/ציר-זמן
+שנתי/מיצוב ישראלי/פערי "white space" בין CPC לבעלים מובילים), סינתזת LLM עם רישום הפניות `[n]`
+לרשימה ממוספרת (אותה מוסכמה כמו דוחות היומי/שבועי/חודשי), רינדור docx/md/html דרך
+`eoa.report.docx_builder` (עם `title_text` מותאם, `include_toc=True`), ושמירת שורת `reports`
+(`kind='patent_survey'`) + שורת `patent_surveys`. כשל בסינתזת ה-LLM אינו חוסם את הדוח — הטבלאות
+הדטרמיניסטיות תמיד מוצגות, עם הודעה קצרה במקום הפרוזה.
+
+### 6. אינטגרציית דוחות (`agent/eoa/patents/report_section.py`)
+
+קריאה אדיטיבית אחת בכל אחד מ-`weekly.py`/`monthly.py`/`bd_territory.py` (בלוק מסומן `# A14`,
+`try/except` שלעולם לא שובר את הדוח המארח): שבועי — "פטנטים ו-IP" (חדשים בחלון + טבלה); חודשי —
+"נוף פטנטים — סיכום חודשי" (התפלגות לפי תת-תחום/בעלים); BD — "מיצוב IP של מתחרים בטריטוריה"
+(בעלים שמדינתם תואמת את הטריטוריה). לפטנטים אין שורת `items` משלהם (בשונה ממכרזים) — הטבלאות
+משתמשות במספר סידורי פשוט ("#"), לא ב-`[n]` הגלובלי.
+
+### 7. API (`agent/eoa/api/routes/patents.py`, self-contained — שאילתות DB ישירות)
+
+`GET /api/patents` (סינון: assignee/subdomain/israeli/min_value_score/q), `GET /api/patents/{pub}`,
+`GET /api/patents/heatmap` (מטריצת CPC×בעלים), `GET /api/patents/status` (באנר "מצב חיפוש בלבד"),
+`GET /api/patents/surveys`, `POST /api/patents/surveys` ({topic}, מינימום 8 תווים — enqueue job
+`patent_survey` + polling קצר לפי אותה מוסכמה כמו `build_or_enqueue_bd_report`, אחרת מחזיר
+`{job_id, status: "queued"}`).
+
+### 8. תזמון (`agent/eoa/orchestrator`)
+
+Job `patent_scan` (יום שלישי 05:30, `orchestrator/main.py`) — סריקה מלאה + ניתוח (30) + הערכה
+(100). Job `patent_survey` — מטפל בבקשות `POST /api/patents/surveys`. `eo run patents [--topic]`
+ב-CLI להרצה ידנית.
+
+### 9. UI (`web/src/pages/PatentsPage.tsx`, `web/src/components/patents/**`)
+
+טבלת פטנטים מסוננת (בעלים/תת-תחום/ישראלי/ציון-ערך מינ') עם שורה מתרחבת (סיכום תביעות + "מה זה
+אומר"); פופאובר "?" ליד ציון-הערך עם פירוט הגורמים; לשונית מטריצת CPC×בעלים; דיאלוג "סקר
+פטנטים…" (נושא חופשי, מינימום 8 תווים, רשימת סקרים קודמים עם קישור הורדת docx). באנר "מקורות
+פטנטים: מצב חיפוש בלבד" כאשר אין מפתחות מוגדרים.
+
+### 10. הרצה חיה (2026-09-06, ללא מפתחות EPO/PatentsView)
+
+`eo run patents --topic "digital pixel readout integrated circuit infrared focal plane"`: 10
+רשומות אמיתיות מ-Google Patents (DROIC/ROIC אמיתיים, US/CN/WO), נותחו כולן ב-LLM (סיכומי תביעות
+בעברית תקינים), הוערכו כולן (`value_score`). סקר פטנטים על "FPA עם פיקסל דיגיטלי (DROIC)"
+(`deep_limit=30`): 24 רשומות, נותחו/הוערכו, דוח מלא הופק (`report_id=27`, `survey_id=1`) — docx
+43KB, md 13KB, html 27KB תחת `output/reports/`.
+
+### Tests
+
+`tests/unit/test_patents_scan.py` (58 מקרים כולל scan/valuation/report_section — ר' להלן),
+`tests/unit/test_patents_valuation.py`, `tests/unit/test_patents_report_section.py` — כולם ירוקים
+(ruff check + format נקיים). e2e: `e2e/tests/17-patents.spec.ts` (6 מקרים) — ירוק מול backend חי
+אמיתי (uvicorn חד-פעמי על 8766, ללא הפרעה ל-process החי על 8765) עם נתונים אמיתיים מה-DB. Frontend:
+`web/src/pages/PatentsPage.test.tsx` (4 מקרים) ירוק; `npm run build`/`tsc --noEmit` נקיים; מלוא
+סוויטת ה-vitest (23 קבצים, 162 מקרים) ירוקה. `pytest tests/unit` (1883 מקרים) ירוק פרט ל-3 כשלים
+קיימים-מראש שאינם קשורים ל-A14 (`test_llm_batch_mode.py`'s cloud-mode batch dict-hash bug,
+`test_prompts.py`'s `ask_answer_format`/`report_daily` template checks — שינויים מקבילים של סוכנים
+אחרים).

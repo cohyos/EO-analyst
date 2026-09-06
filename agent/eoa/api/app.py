@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from eoa import db
+from eoa.api import auth
 from eoa.api.errors import APIError
 from eoa.api.routes import (
     ask,
@@ -32,6 +33,7 @@ from eoa.api.routes import (
     lessons,
     llm,
     mcp,
+    patents,
     reports,
     runs,
     status,
@@ -155,6 +157,12 @@ def create_app() -> FastAPI:
     """Build the FastAPI app: routers, CORS, `{"error": {...}}` error handling, SPA static mount."""
     app = FastAPI(title="EO-Analyst API", lifespan=lifespan)
 
+    # ADR-008 (docs/adr/008-remote-access.md): registered first so it ends up innermost among the
+    # user middlewares below (Starlette executes the *last*-registered middleware *first*) --
+    # CORSMiddleware then wraps its manual 401/error responses too, and it still sits inside
+    # BodySizeLimitMiddleware (a no-op for the auth endpoints' tiny bodies). A no-op entirely
+    # while `api.remote_access.enabled` is false (the default).
+    app.add_middleware(auth.RemoteAccessMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=CORS_ORIGINS,
@@ -217,6 +225,7 @@ def create_app() -> FastAPI:
             },
         )
 
+    app.include_router(auth.router, prefix="/api")
     app.include_router(status.router, prefix="/api")
     app.include_router(status.ws_router)
     app.include_router(reports.router, prefix="/api")
@@ -238,6 +247,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp.router, prefix="/api")
     app.include_router(bd.router, prefix="/api")
     app.include_router(tech.router, prefix="/api")
+    app.include_router(patents.router, prefix="/api")
 
     if WEB_DIST.exists():
         # Registered after every API router, so `/api/*` and `/ws/*` paths

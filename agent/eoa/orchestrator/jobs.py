@@ -738,6 +738,49 @@ def run_tender_scan(job: dict[str, Any]) -> dict[str, Any]:
     return _run_tenders(role=role)
 
 
+def run_patent_scan(job: dict[str, Any]) -> dict[str, Any]:
+    """``patent_scan`` job kind (A14): weekly scan of every configured watch topic + assignee
+    (``config/patents.yaml``), then a best-effort analyze/valuation pass over whatever is still
+    unanalyzed -- mirrors ``run_tender_scan``'s "scan + a bit of pipeline follow-through" shape. A
+    payload ``topic`` (the CLI's ``eo run patents --topic``) scans just that one ad-hoc topic
+    instead of the full configured set."""
+    from eoa.patents.analyze import analyze_patents
+    from eoa.patents.scan import WatchTopic, scan_patents
+    from eoa.patents.valuation import score_and_persist
+
+    payload = job.get("payload") or {}
+    topic = payload.get("topic")
+    scan_stats = scan_patents(topics=[WatchTopic(name_he=topic, query=topic)] if topic else None, assignees=[] if topic else None)
+    analyze_stats = analyze_patents(30)
+    scored = score_and_persist(limit=100)
+    return {"scan": _as_dict(scan_stats), "analyze": _as_dict(analyze_stats), "valued": scored}
+
+
+def run_patent_survey(job: dict[str, Any]) -> dict[str, Any]:
+    """``patent_survey`` job kind (A14): the on-demand "סקר פטנטים" pipeline for the ``topic`` in
+    the payload (``eoa.api.routes.patents.create_patent_survey``), returning
+    ``{"patent_survey": {"report_id", "survey_id", "patent_count"}}`` so that endpoint's poll loop
+    can resolve the finished survey."""
+    from eoa.patents.survey import build_patent_survey
+
+    payload = job.get("payload") or {}
+    topic = (payload.get("topic") or "").strip()
+    if not topic:
+        return {"patent_survey_error": "missing topic"}
+    try:
+        paths = build_patent_survey(topic)
+        return {
+            "patent_survey": {
+                "report_id": paths.report_id,
+                "survey_id": paths.survey_id,
+                "patent_count": paths.patent_count,
+            }
+        }
+    except Exception as exc:
+        log.error("patent_survey_failed", topic=topic, error=str(exc)[:300])
+        return {"patent_survey_error": str(exc)[:300]}
+
+
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "daily_run": run_daily,
     "ingest": lambda job: _as_dict(_ingest()),
@@ -748,6 +791,8 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "conference_scan": run_conference_scan,
     "tender_scan": run_tender_scan,
     "bd_report": run_bd_report,
+    "patent_scan": run_patent_scan,
+    "patent_survey": run_patent_survey,
     # Native single-process mode (ADR-004): serve any stray fetch_url job in-process instead of
     # leaving it queued forever (the fetcher container that used to claim these is gone).
     "fetch_url": lambda job: _fetch_url_job(job),

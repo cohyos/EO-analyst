@@ -174,6 +174,16 @@ def build_scheduler() -> BackgroundScheduler:
         misfire_grace_time=3600,
         coalesce=True,
     )
+    # A14: weekly patent/IP scan (config/patents.yaml: schedule.weekday/start, default Tue 05:30).
+    sched.add_job(
+        lambda: enqueue_job("patent_scan", {}, priority=4),
+        _cron(tz, "05:30", day_of_week="tue"),
+        id="patent_scan_weekly",
+        name="פטנטים ו-IP -- סריקה שבועית (A14)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+
     return sched
 
 

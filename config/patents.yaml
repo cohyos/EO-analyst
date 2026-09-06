@@ -1,0 +1,98 @@
+# Patent / IP landscape tracking (A14, docs/PLAN_WINDOWS_NATIVE.md).
+#
+# `cpc` codes and `watch_topics` drive eoa.patents.scan: each topic is queried against EPO OPS /
+# PatentsView when EPO_OPS_KEY+EPO_OPS_SECRET / PATENTSVIEW_API_KEY are configured (see
+# agent/eoa/mcp_servers/patents.py -- not configured on this dev machine, so live calls degrade to
+# `not_configured`), and always additionally via the keyless Google Patents search fallback
+# (`eoa.search.provider`, `site:patents.google.com <query>`) so the module still produces real
+# results with zero keys.
+#
+# `assignees` seeds the per-company scan pass (in addition to the topic scan) -- reuses the
+# watchlist company list (config/watchlist.yaml) rather than duplicating it; the ones actually
+# scanned each run are `watchlist_companies` below, kept as an explicit list here (rather than
+# always reading the full watchlist) so this file stays the single source of truth for "which
+# assignees does the patents module track" without silently growing every time a new company is
+# added to config/watchlist.yaml for unrelated reasons.
+
+cpc:
+  - G01J5   # radiation pyrometry (IR detectors)
+  - G02B23  # telescopes, binoculars, periscopes (EO sighting/observation)
+  - G02B26  # optical devices/systems for control of light (scanning, gimbal-adjacent)
+  - G02B27  # optical systems/apparatus not otherwise provided for (incl. head-up/thermal sighting)
+  - F41G3   # aiming or laying means for weapons (targeting/fire-control)
+  - F41G7   # guidance systems for missiles (incl. IIR seekers)
+  - H04N23  # camera details (image sensors, incl. IR/thermal imaging cameras)
+  - H01L27  # semiconductor devices with plural components (incl. focal-plane arrays)
+  - G06V10  # image/video pattern recognition, feature extraction (ATR/CV)
+  - G06T7   # image analysis (target detection/tracking, sensor fusion)
+  - G01S17  # LIDAR/laser rangefinding
+  - B64D47  # equipment for laying-out or observation from aircraft (pods/payloads)
+
+watch_topics:
+  - name_he: "FPA עם פיקסל דיגיטלי (DROIC)"
+    query: "digital pixel readout integrated circuit infrared focal plane"
+    cpc: [H01L27, G01J5]
+  - name_he: "SWIR / eSWIR (InGaAs, נקודות קוונטיות)"
+    query: "SWIR eSWIR InGaAs colloidal quantum dot infrared detector"
+    cpc: [G01J5, H01L27]
+  - name_he: "HOT MCT, T2SL, XBn"
+    query: "HOT MCT T2SL XBn barrier infrared detector"
+    cpc: [G01J5]
+  - name_he: "גלאים מבוססי אירועים (Event Cameras)"
+    query: "event-based neuromorphic camera sensor"
+    cpc: [H04N23]
+  - name_he: "אופטיקה מטא-משטחית (Metasurfaces)"
+    query: "metasurface flat optics freeform imaging lens"
+    cpc: [G02B27]
+  - name_he: "בינה מלאכותית על-החיישן (Edge AI / In-Sensor Compute)"
+    query: "edge AI in-sensor compute automatic target recognition FPGA"
+    cpc: [G06V10, H01L27]
+  - name_he: "לייזרים ו-LiDAR (Designators, LiDAR)"
+    query: "laser designator rangefinder LiDAR military"
+    cpc: [G01S17]
+  - name_he: "ראייה ממוחשבת לזיהוי מטרות (CV / ATR)"
+    query: "automatic target recognition computer vision multispectral fusion"
+    cpc: [G06V10, G06T7]
+  - name_he: "עיבוד תמונה (Super-Resolution, Turbulence Mitigation)"
+    query: "atmospheric turbulence mitigation super-resolution image processing infrared"
+    cpc: [G06T7]
+  - name_he: "מיקרו-בולומטר לא-מקורר"
+    query: "uncooled microbolometer infrared detector array"
+    cpc: [G01J5]
+  - name_he: "פודי כיוון וגימבלים (Targeting Pods / Gimbals)"
+    query: "airborne targeting pod electro-optical infrared gimbal stabilization"
+    cpc: [B64D47, G02B27]
+  - name_he: "ראשי ביות אלקטרואופטיים (IIR Seekers)"
+    query: "imaging infrared seeker missile guidance"
+    cpc: [F41G7]
+
+# Assignees scanned individually each run (in addition to the topic scan above) -- a subset of
+# config/watchlist.yaml's `companies`, focused on the EO/IR-core watchlist names (Israeli +
+# closest peer-group competitors) so a per-assignee scan pass stays a handful of queries, not the
+# whole watchlist.
+assignees:
+  - Elbit
+  - IAI
+  - Rafael
+  - Controp
+  - RTX
+  - "Lockheed Martin"
+  - "Northrop Grumman"
+  - L3Harris
+  - "Teledyne FLIR"
+  - "Leonardo DRS"
+  - Thales
+  - Safran
+  - Leonardo
+  - Hensoldt
+  - Aselsan
+  - Hanwha
+
+schedule:
+  weekday: tue
+  start: "05:30"
+
+# First-run lookback window for eoa.patents.scan (subsequent runs scan since the last completed
+# scan instead -- see eoa.patents.scan.scan_patents' `since_days` default/override contract,
+# mirroring eoa.tenders.scan).
+first_run_since_days: 90

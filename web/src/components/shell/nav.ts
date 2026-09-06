@@ -8,6 +8,7 @@ import {
   MessageSquareText,
   Network,
   Radar,
+  Scale,
   Search,
   Settings as SettingsIcon,
   Telescope,
@@ -34,6 +35,7 @@ const NAV_ROUTES: NavItem[] = [
   { to: "/ask", labelKey: "nav.ask", icon: MessageSquareText },
   { to: "/conferences", labelKey: "nav.conferences", icon: CalendarDays },
   { to: "/tenders", labelKey: "nav.tenders", icon: Gavel },
+  { to: "/patents", labelKey: "nav.patents", icon: Scale },
   { to: "/inbox", labelKey: "nav.inbox", icon: Inbox },
   { to: "/reports", labelKey: "nav.reports", icon: FileText },
   { to: "/bd", labelKey: "nav.bd", icon: Briefcase },
@@ -58,6 +60,7 @@ export function usePageTitle(pathname: string): string {
   if (pathname.startsWith("/ask")) return t("nav.ask");
   if (pathname.startsWith("/conferences")) return t("nav.conferences");
   if (pathname.startsWith("/tenders")) return t("nav.tenders");
+  if (pathname.startsWith("/patents")) return t("nav.patents");
   if (pathname.startsWith("/inbox")) return t("nav.inbox");
   if (pathname.startsWith("/reports")) return t("nav.reports");
   if (pathname.startsWith("/bd")) return t("nav.bd");

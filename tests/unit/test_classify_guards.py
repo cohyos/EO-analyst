@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from eoa.llm.schemas.analysis import ClassifyOut, EntityMention
 from eoa.pipeline.classify import (
+    _has_ai_market_labor_signal,
     _has_eoir_vocabulary,
     _has_generic_ai_tech_market_vocabulary,
     _watchlist_alias_hit,
@@ -170,6 +171,22 @@ class TestHasGenericAiTechMarketVocabulary:
         assert _has_generic_ai_tech_market_vocabulary(text) is False
 
 
+class TestHasAiMarketLaborSignal:
+    def test_hebrew_professions_hit(self) -> None:
+        assert _has_ai_market_labor_signal("אילו מקצועות יהפכו מבוקשים") is True
+
+    def test_english_hiring_hit(self) -> None:
+        assert _has_ai_market_labor_signal("Layoffs are reshaping the hiring landscape.") is True
+
+    def test_robotic_workforce_is_not_a_labor_market_signal(self) -> None:
+        """ "workforce" alone (e.g. "autonomous robotic workforce") must not count -- it is
+        deliberately excluded from the signal list (calibration regression)."""
+        assert _has_ai_market_labor_signal("An autonomous robotic workforce for the battlefield.") is False
+
+    def test_no_hit_on_unrelated_text(self) -> None:
+        assert _has_ai_market_labor_signal("A new bridge was opened downtown today.") is False
+
+
 class TestApplyGenericAiMarketGate:
     def _item(self, **overrides: object) -> dict:
         base = {
@@ -211,6 +228,37 @@ class TestApplyGenericAiMarketGate:
         out = ClassifyOut(domain="secondary", subdomain="", report_kind="verified_report", one_line_he="x")
         gated = apply_generic_ai_market_gate(item, out)
         assert gated.domain == "secondary"
+
+    def test_not_gated_when_generic_ai_vocab_present_but_no_labor_market_frame(self) -> None:
+        """Calibration regression: a real defense-tech funding/product story ("XTEND", "Smack
+        Technologies"-style) that describes its product in AI/robotics terms -- without hitting the
+        curated EO/IR keyword list -- must NOT be demoted just because it mentions "artificial
+        intelligence"/"startup". Only a piece that ALSO frames itself as being about jobs/hiring/
+        the labor market is gated (see the calibration note on apply_generic_ai_market_gate)."""
+        item = self._item(
+            title="Defense startup raises $61 million for AI-powered wrist display",
+            clean_text=(
+                "The company develops an artificial intelligence display worn on the wrist for "
+                "field operators, funded in a Series B venture capital round."
+            ),
+        )
+        out = ClassifyOut(
+            domain="computer_vision", subdomain="edge_ai", report_kind="verified_report", one_line_he="x"
+        )
+        gated = apply_generic_ai_market_gate(item, out)
+        assert gated.domain == "computer_vision"
+
+    def test_gated_only_when_both_generic_vocab_and_labor_market_frame_present(self) -> None:
+        item = self._item(
+            title="How XTEND reached a $1.5B valuation",
+            clean_text="Autonomous robotic workforce technology for the battlefield, an AI-driven company.",
+        )
+        out = ClassifyOut(
+            domain="computer_vision", subdomain="atr", report_kind="company_pr", one_line_he="x"
+        )
+        gated = apply_generic_ai_market_gate(item, out)
+        # "workforce" alone (as in "robotic workforce") must not count as a labor-market frame.
+        assert gated.domain == "computer_vision"
 
     def test_already_out_of_scope_is_a_noop(self) -> None:
         out = ClassifyOut(

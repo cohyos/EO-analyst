@@ -29,6 +29,8 @@ def _item(
     domain: str = "c_uas",
     key_facts: list[str] | None = None,
     url: str = "https://example.com",
+    level: str | None = "yellow",
+    source_name: str | None = "Example Source",
 ) -> dict[str, Any]:
     return {
         "id": id,
@@ -39,6 +41,8 @@ def _item(
         "key_facts": key_facts or [],
         "security_status": security_status,
         "domain": domain,
+        "level": level,
+        "source_name": source_name,
     }
 
 
@@ -50,7 +54,7 @@ class TestAskRetrieveContextAlwaysIncluded:
         quarantined = _item(1, title="XM30 item", security_status="quarantined", domain="out_of_scope")
 
         def fake_fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
-            if "FROM items WHERE id" in query:
+            if "WHERE i.id = %s" in query:
                 return quarantined
             return None
 
@@ -71,7 +75,7 @@ class TestAskRetrieveContextAlwaysIncluded:
         monkeypatch.setattr(
             services,
             "_fetchone",
-            lambda q, p=None: item if "FROM items WHERE id" in q else None,
+            lambda q, p=None: item if "WHERE i.id = %s" in q else None,
         )
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
         monkeypatch.setattr(
@@ -236,3 +240,26 @@ class TestAskBuildMessages:
         contents = [m["content"] for m in messages]
         assert "מה זה XM30?" in contents
         assert "תשובה" in contents
+
+    def test_citations_carry_level_and_source_name_for_the_sources_footer(self) -> None:
+        """U11: the UI's "מקורות" footer renders a level badge + source name without a second
+        round-trip, so `ask_build_messages` must forward what `ask_retrieve` now selects."""
+        item = _item(1, title="XM30 item", level="orange", source_name="Globes")
+        item["_is_context"] = True
+        _, citations = services.ask_build_messages("מה זה XM30?", [], [item])
+        assert citations[0]["level"] == "orange"
+        assert citations[0]["source_name"] == "Globes"
+
+    def test_system_prompt_mandates_synthesized_format_and_forbids_per_source_dump(self) -> None:
+        """U11 (2026-09-06 bug report): the old prompt let the model answer with a per-source
+        dump ("מקור 1", "הערת איכות:", "ציטוט מדויק:") instead of one synthesized analyst answer
+        -- the rewritten prompt must mandate the new section structure and explicitly forbid the
+        old shape."""
+        messages, _ = services.ask_build_messages("שאלה", [], [])
+        system = messages[0]["content"]
+        assert "עובדות מרכזיות" in system
+        assert "הערכת האנליסט" in system
+        assert "פערים" in system
+        assert "הערת איכות" in system  # named as forbidden
+        assert "ציטוט מדויק" in system  # named as forbidden
+        assert "===SOURCES_JSON===" in system
