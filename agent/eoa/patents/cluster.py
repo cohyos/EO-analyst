@@ -12,8 +12,15 @@ see ``config/patents.yaml``), labelled in Hebrew via whichever configured watch 
 names that CPC code (``config/patents.yaml``'s ``watch_topics``). A patent with no CPC code at all
 (the common case for the keyless Google-Patents-search fallback -- see ``eoa.patents.scan``'s own
 docstring) falls back to a keyword-overlap match against each watch topic's own query text; a
-patent matching neither lands in an explicit "לא מסווג" bucket rather than a fabricated cluster.
-This is a landscape-analysis heuristic, not a legal CPC classification.
+patent matching neither used to land in one flat "לא מסווג" bucket regardless of size. Round 5 D8
+(2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md P5 follow-up): that flat bucket is now itself
+sub-clustered by a dependency-free "TF-IDF-lite" pass over each unclassified patent's own
+title/abstract text (:func:`tfidf_subcluster_unclassified` -- term frequency x inverse document
+frequency across just this survey's unclassified patents, no ``sklearn``/``numpy`` needed, at most
+``UNCLASSIFIED_MAX_SUBCLUSTERS`` sub-clusters), each labelled by its own top terms rather than the
+single generic "לא מסווג" label -- still an unsupervised text-similarity heuristic, not a legal CPC
+classification, and still never fabricates a topic name the way a watch-topic match already has one
+supplied.
 
 **Cross-citation note**: this project's ``patents`` table only stores citation *counts*
 (``forward_citations``/``backward_citations``), never the actual citing/cited publication numbers
@@ -26,6 +33,7 @@ documented here as exactly that (a patent-family relationship, not a citation).
 from __future__ import annotations
 
 import datetime as dt
+import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -176,6 +184,130 @@ def _topic_keyword_index(topics: list[_TopicLike]) -> list[tuple[_TopicLike, set
     return [(t, _keyword_tokens(t.query)) for t in topics]
 
 
+# --------------------------------------------------------------------------
+# round 5 D8 point 3 (2026-09-06): TF-IDF-lite sub-clustering of the "לא מסווג" bucket -- pure
+# stdlib (no numpy/sklearn dependency, consistent with the rest of this DB-free/LLM-free module).
+# Hebrew tokens are captured alongside the existing Latin-word tokenizer above (which stays
+# untouched, and keeps driving the watch-topic keyword-overlap match in :func:`_keyword_cluster`)
+# so a patent whose title/abstract does carry Hebrew text (e.g. a Hebrew-topic keyless-search
+# result) still contributes real terms to its sub-cluster's own label -- "top terms in Hebrew+
+# English" per the round-5 spec, mirroring how every *other* cluster label in this module already
+# mixes a Hebrew frame with an English/Latin technical term (see config/patents.yaml's own
+# ``name_he`` values, e.g. "SWIR / eSWIR (InGaAs, נקודות קוונטיות)").
+# --------------------------------------------------------------------------
+
+_HEBREW_WORD_RE = re.compile(r"[֐-׿]{2,}")
+UNCLASSIFIED_MAX_SUBCLUSTERS = 5
+_UNCLASSIFIED_LABEL_TOP_TERMS = 3
+_UNCLASSIFIED_SIMILARITY_THRESHOLD = 0.15
+
+
+def _subcluster_tokens(text: str) -> list[str]:
+    """Latin words (≥3 chars, stopwords dropped -- same tokenizer as :func:`_keyword_tokens`) plus
+    Hebrew words (≥2 chars) from ``text``, as a list (repeats kept, unlike :func:`_keyword_tokens`'s
+    ``set`` -- term *frequency* is the whole point of a TF-IDF vector)."""
+    latin = [t.lower() for t in _WORD_RE.findall(text or "") if t.lower() not in _STOPWORDS]
+    hebrew = list(_HEBREW_WORD_RE.findall(text or ""))
+    return latin + hebrew
+
+
+def _tfidf_vectors(token_lists: list[list[str]]) -> list[dict[str, float]]:
+    """Classic tf (raw in-document count) x idf (smoothed log(N/df) + 1, always positive) weight
+    per term per document, over ``token_lists`` -- ``N`` is ``len(token_lists)``. A term unique to
+    one document scores highest; a term shared by every document scores near its raw tf alone
+    (idf -> 1). Pure Python, no external numerical dependency."""
+    n = len(token_lists)
+    df: Counter[str] = Counter()
+    for tokens in token_lists:
+        for t in set(tokens):
+            df[t] += 1
+    vectors: list[dict[str, float]] = []
+    for tokens in token_lists:
+        tf = Counter(tokens)
+        vectors.append({term: count * (math.log((n + 1) / (df[term] + 1)) + 1.0) for term, count in tf.items()})
+    return vectors
+
+
+def _cosine_similarity(a: dict[str, float], b: dict[str, float]) -> float:
+    if not a or not b:
+        return 0.0
+    dot = sum(weight * b[term] for term, weight in a.items() if term in b)
+    if not dot:
+        return 0.0
+    norm_a = math.sqrt(sum(w * w for w in a.values()))
+    norm_b = math.sqrt(sum(w * w for w in b.values()))
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+
+def _average_vector(vectors: list[dict[str, float]]) -> dict[str, float]:
+    out: dict[str, float] = defaultdict(float)
+    for vec in vectors:
+        for term, weight in vec.items():
+            out[term] += weight
+    n = len(vectors) or 1
+    return {term: weight / n for term, weight in out.items()}
+
+
+def _top_terms(vec: dict[str, float], n: int) -> list[str]:
+    return [term for term, _weight in sorted(vec.items(), key=lambda kv: (-kv[1], kv[0]))[:n]]
+
+
+def tfidf_subcluster_unclassified(
+    rows: list[dict[str, Any]],
+    *,
+    max_clusters: int = UNCLASSIFIED_MAX_SUBCLUSTERS,
+    similarity_threshold: float = _UNCLASSIFIED_SIMILARITY_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """TF-IDF-lite sub-clustering (round 5 D8 point 3) of patents that carry no CPC code and
+    matched no configured watch topic -- title/abstract term-similarity grouping into at most
+    ``max_clusters`` sub-clusters, instead of one flat "לא מסווג" bucket. Greedy single-pass and
+    fully deterministic (input order preserved, ties broken alphabetically by term): each row joins
+    the most-similar existing sub-cluster centroid when that similarity clears
+    ``similarity_threshold`` OR ``max_clusters`` has already been reached (so the bucket count never
+    exceeds the cap); otherwise it opens a new sub-cluster of its own. A row with no title/abstract
+    tokens at all (an empty vector, similarity 0.0 to everything) still lands somewhere rather than
+    being dropped -- ``docs/CONVENTIONS.md`` rule 5, never silently discard a patent from its own
+    survey. Returns ``[]`` for an empty ``rows``; each returned item is
+    ``{"patent_ns": [...], "patent_ids": [...], "label_terms": [...]}`` (``label_terms`` -- see
+    :func:`_top_terms` -- is ``[]`` only when every row in that sub-cluster had no tokens at all)."""
+    if not rows:
+        return []
+    vectors = _tfidf_vectors([_subcluster_tokens(f"{r.get('title') or ''} {r.get('abstract') or ''}") for r in rows])
+    clusters: list[dict[str, Any]] = []
+    for row, vec in zip(rows, vectors):
+        best_idx: int | None = None
+        best_sim = -1.0
+        for i, c in enumerate(clusters):
+            sim = _cosine_similarity(vec, c["centroid"])
+            if sim > best_sim:
+                best_idx, best_sim = i, sim
+        if best_idx is not None and (best_sim >= similarity_threshold or len(clusters) >= max_clusters):
+            c = clusters[best_idx]
+            c["rows"].append(row)
+            c["vectors"].append(vec)
+            c["centroid"] = _average_vector(c["vectors"])
+        else:
+            clusters.append({"rows": [row], "vectors": [vec], "centroid": dict(vec)})
+    return [
+        {
+            "patent_ns": [r["n"] for r in c["rows"]],
+            "patent_ids": [r.get("id") for r in c["rows"]],
+            "label_terms": _top_terms(c["centroid"], _UNCLASSIFIED_LABEL_TOP_TERMS),
+        }
+        for c in clusters
+    ]
+
+
+def _unclassified_label_he(label_terms: list[str]) -> str:
+    """:data:`UNCLASSIFIED_LABEL_HE` alone when a sub-cluster has no terms at all (nothing to name
+    it by), else that same Hebrew frame plus its top terms -- e.g. "לא מסווג: sensor / thermal /
+    array" -- mixing a Hebrew frame with English/Hebrew technical terms exactly like every other
+    cluster label in this module already does (see the module-level note above)."""
+    if not label_terms:
+        return UNCLASSIFIED_LABEL_HE
+    return f"{UNCLASSIFIED_LABEL_HE}: " + " / ".join(label_terms)
+
+
 def _cpc_label(code: str, topics: list[_TopicLike]) -> str:
     for topic in topics:
         if code in (topic.cpc or []):
@@ -250,14 +382,35 @@ class PatentCluster:
         return "מוקדם (רוב בבחינה)"
 
 
+def _accumulate_into_cluster(cluster: PatentCluster, row: dict[str, Any]) -> None:
+    cluster.patent_ns.append(row["n"])
+    cluster.patent_ids.append(row.get("id"))
+    for c in row.get("cpc") or []:
+        if c not in cluster.cpc_codes:
+            cluster.cpc_codes.append(c)
+    for a in row.get("assignees") or []:
+        if a:
+            cluster.assignees[a] += 1
+    pub = row.get("publication_date")
+    if pub:
+        cluster.years[pub.year] += 1
+    cluster.total += 1
+    if row.get("grant_date"):
+        cluster.granted += 1
+
+
 def cluster_patents(
     registry_rows: list[dict[str, Any]], *, topics: list[_TopicLike] | None = None
 ) -> list[PatentCluster]:
     """Group every patent registry row (each carrying at least ``n``/``id``/``cpc``/``assignees``/
     ``title``/``abstract``/``publication_date``/``grant_date``) into :class:`PatentCluster`\\ s,
-    sorted largest-first. See the module docstring for the clustering method."""
+    sorted largest-first. See the module docstring for the clustering method -- a row with neither a
+    CPC code nor a watch-topic keyword match is set aside and, once every row has been placed,
+    sub-clustered by :func:`tfidf_subcluster_unclassified` instead of joining one flat "לא מסווג"
+    bucket (round 5 D8 point 3)."""
     topic_index = _topic_keyword_index(topics or [])
     clusters: dict[str, PatentCluster] = {}
+    unclassified_rows: list[dict[str, Any]] = []
     for row in registry_rows:
         cpc_list = row.get("cpc") or []
         if cpc_list:
@@ -265,22 +418,22 @@ def cluster_patents(
             label = _cpc_label(key, topics or [])
         else:
             kw = _keyword_cluster(row.get("title") or "", row.get("abstract") or "", topic_index)
-            key, label = kw if kw else (UNCLASSIFIED_KEY, UNCLASSIFIED_LABEL_HE)
+            if kw is None:
+                unclassified_rows.append(row)
+                continue
+            key, label = kw
         cluster = clusters.setdefault(key, PatentCluster(key=key, label_he=label))
-        cluster.patent_ns.append(row["n"])
-        cluster.patent_ids.append(row.get("id"))
-        for c in cpc_list:
-            if c not in cluster.cpc_codes:
-                cluster.cpc_codes.append(c)
-        for a in row.get("assignees") or []:
-            if a:
-                cluster.assignees[a] += 1
-        pub = row.get("publication_date")
-        if pub:
-            cluster.years[pub.year] += 1
-        cluster.total += 1
-        if row.get("grant_date"):
-            cluster.granted += 1
+        _accumulate_into_cluster(cluster, row)
+    if unclassified_rows:
+        by_n = {row["n"]: row for row in unclassified_rows}
+        subclusters = tfidf_subcluster_unclassified(unclassified_rows)
+        multi = len(subclusters) > 1
+        for i, sub in enumerate(subclusters):
+            key = f"{UNCLASSIFIED_KEY}_{i}" if multi else UNCLASSIFIED_KEY
+            label = _unclassified_label_he(sub["label_terms"]) if multi else UNCLASSIFIED_LABEL_HE
+            cluster = clusters.setdefault(key, PatentCluster(key=key, label_he=label))
+            for n in sub["patent_ns"]:
+                _accumulate_into_cluster(cluster, by_n[n])
     return sorted(clusters.values(), key=lambda c: -c.size)
 
 

@@ -8,6 +8,8 @@ mirroring how ``scripts/purge_stale_tenders.py`` re-checks every row rather than
 from __future__ import annotations
 
 import datetime as dt
+import re
+from pathlib import Path
 from typing import Any
 
 from eoa.qa.types import Check, DomainScore, weighted_score
@@ -15,9 +17,69 @@ from eoa.qa.types import Check, DomainScore, weighted_score
 _VALID_CONFERENCE_STATUSES = frozenset({"confirmed", "estimated", "past", "cancelled"})
 _SOURCE_FRESHNESS_DAYS = 7
 
+# Round 5 (2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 item 12): a source-reliability
+# column in the report's own appendix is landing in another engineer's file scope
+# (``docx_builder.py``/``render_markdown``) this same evening -- small weight per the task brief
+# ("source_reliability_column_in_appendix (weight small)").
+_HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)$", re.MULTILINE)
+_APPENDIX_HEADING_HE = "נספח מקורות"
+_RELIABILITY_COLUMN_KEYWORDS_HE = ("אמינות", "מהימנות")
 
-def score_D9(conn: Any) -> DomainScore:  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md naming
-    """D9: tenders/conferences/sources deterministic checks over the whole current table state."""
+
+def _sections(md_text: str) -> list[tuple[str, str]]:
+    matches = list(_HEADING_RE.finditer(md_text))
+    out: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(md_text)
+        out.append((m.group(2).strip(), md_text[start:end].strip()))
+    return out
+
+
+def _source_reliability_column_check(report_path: Path | None) -> Check:
+    """A reliability column (``sources.source_reliability``, per docs/CONVENTIONS.md) rendered in
+    the report's own source appendix -- not just present in the DB (docs/REPORT_TEMPLATE_BENCHMARK.md
+    finding D7: "the DB has this column but the appendix renderer doesn't show it")."""
+    if report_path is None or not report_path.exists():
+        return Check(
+            "source_reliability_column_in_appendix",
+            True,
+            weight=0.5,
+            evidence="no report file this round -- check not applicable",
+        )
+    text = report_path.read_text(encoding="utf-8")
+    for h, body in _sections(text):
+        if _APPENDIX_HEADING_HE in h:
+            lines = [ln.strip() for ln in body.splitlines() if ln.strip().startswith("|")]
+            if not lines:
+                return Check(
+                    "source_reliability_column_in_appendix",
+                    False,
+                    weight=0.5,
+                    evidence=f"'{_APPENDIX_HEADING_HE}' heading found but no table under it",
+                )
+            header_cells = [c.strip() for c in lines[0].strip("|").split("|")]
+            has_col = any(any(kw in c for kw in _RELIABILITY_COLUMN_KEYWORDS_HE) for c in header_cells)
+            return Check(
+                "source_reliability_column_in_appendix",
+                has_col,
+                weight=0.5,
+                evidence=f"appendix header cells: {header_cells}",
+            )
+    return Check(
+        "source_reliability_column_in_appendix",
+        False,
+        weight=0.5,
+        evidence=f"no '{_APPENDIX_HEADING_HE}' heading found in {report_path.name}",
+    )
+
+
+def score_D9(conn: Any, *, report_path: Path | None = None) -> DomainScore:  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md naming
+    """D9: tenders/conferences/sources deterministic checks over the whole current table state.
+
+    ``report_path`` (round 5, optional): the latest daily/weekly report Markdown, used only for
+    :func:`_source_reliability_column_check`.
+    """
     with conn.cursor() as cur:
         cur.execute("SELECT id, status, deadline, published_at FROM tenders")
         tenders = cur.fetchall()
@@ -79,5 +141,6 @@ def score_D9(conn: Any) -> DomainScore:  # noqa: N802 -- score_Dn matches docs/Q
                 f"{_SOURCE_FRESHNESS_DAYS}d; stale ids: {stale_sources[:10]}"
             ),
         ),
+        _source_reliability_column_check(report_path),
     ]
     return DomainScore(domain="D9", score_0_100=weighted_score(checks), checks=checks, n=n)

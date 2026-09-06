@@ -27,6 +27,7 @@ from eoa.qa.d10_ui_e2e import score_D10
 from eoa.qa.report_files import (
     latest_bd_reports,
     latest_daily_md,
+    latest_monthly_md,
     latest_patent_survey_html,
     latest_patent_survey_md,
     latest_weekly_md,
@@ -70,12 +71,12 @@ def score_all_domains(
         "D1": score_D1(items_all, conn),
         "D2": score_D2(items_all, conn),
         "D3": score_D3(items_all, conn),
-        "D4": score_D4(resolved.investigation_job_ids, conn),
+        "D4": score_D4(resolved.investigation_job_ids, conn, report_path=daily_or_weekly),
         "D5": score_D5(golden_questions, conn),
-        "D6": score_D6(daily_or_weekly, run_link_check=run_link_check),
+        "D6": score_D6(daily_or_weekly, run_link_check=run_link_check, monthly_path=latest_monthly_md()),
         "D7": score_D7(latest_bd_reports(), conn),
         "D8": score_D8(latest_patent_survey_md(), latest_patent_survey_html()),
-        "D9": score_D9(conn),
+        "D9": score_D9(conn, report_path=daily_or_weekly),
         "D10": score_D10(run_e2e=run_e2e),
     }
 

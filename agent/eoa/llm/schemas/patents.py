@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -155,9 +156,27 @@ class AssigneeProfile(BaseModel):
 class PatentBizAction(BaseModel):
     """One recommended action for OUR company (``bd_report.our_company``/``perspective_he``,
     mirrors ``eoa.llm.schemas.reports.BdAction``'s perspective discipline) in "השלכות עסקיות
-    והמלצות" -- 3-6 concrete actions, per the user's 2026-09-06 request."""
+    והמלצות" -- 3-6 concrete actions, per the user's 2026-09-06 request.
+
+    ``priority``/``confidence`` (round 5, docs/REPORT_TEMPLATE_BENCHMARK.md P3/item 9): the same
+    two judgement-rating fields ``eoa.report.bd_territory``'s own recommended-actions table already
+    carries (there as ``BdAction.priority`` -- "H"/"M"/"L") -- ICD 203 discipline (never present a
+    recommendation without an explicit priority and an explicit confidence in that priority), added
+    here in the ``high``/``medium``/``low`` + 0-1 shape the round-5 spec asks for rather than
+    ``BdAction``'s single-letter code, so the renderer can show ``confidence`` as a plain percentage
+    without a second lookup table."""
 
     action_he: str = Field(description="פעולה קונקרטית אחת עבור החברה שלנו")
+    priority: Literal["high", "medium", "low"] = Field(
+        default="medium",
+        description='עדיפות הפעולה: "high" (גבוהה), "medium" (בינונית) או "low" (נמוכה) בלבד',
+    )
+    confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="רמת ביטחון בהמלצה, 0.0-1.0 (למשל 0.7 = ביטחון בינוני-גבוה)",
+    )
     rationale_he: str = Field(description="נימוק קצר לפעולה")
     rationale_cites: list[int] = Field(
         default_factory=list, description="מספרי רשומות תומכות בנימוק, אם קיימות"

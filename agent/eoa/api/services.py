@@ -2231,12 +2231,47 @@ class RunAlreadyActive(Exception):
         super().__init__(f"a {job.get('kind')} job is already {job.get('state')} (id={job.get('id')})")
 
 
+# W20 (docs/REVIEW_2026-09-06_evening.md): the jobs table only ever showed the generic `kind`
+# (e.g. "deep_search" for every deep search, indistinguishable from one another) -- `subject_he`
+# reads the same per-kind identifying field the job actually enqueued with (never invented, per
+# docs/CONVENTIONS.md rule 5): `deep_search`'s own question, `bd_report`'s territory (rendered
+# through the same `_territory_label_he` table the reports list already uses), `patent_survey`'s
+# topic, and for the period-based runs (no per-job subject field at all) the job's own
+# `created_at` date so at least two jobs of the same kind on different days are distinguishable.
+_JOB_SUBJECT_MAX_LEN = 80
+_JOB_DATE_SUBJECT_KINDS = ("daily_run", "weekly_run", "monthly_run", "ingest", "report")
+
+
+def _job_subject_he(kind: str | None, payload: dict[str, Any] | None, created_at: Any) -> str | None:
+    payload = payload or {}
+    if kind == "deep_search":
+        question = payload.get("question")
+        question = question.strip() if isinstance(question, str) else ""
+        return question[:_JOB_SUBJECT_MAX_LEN] if question else None
+    if kind == "bd_report":
+        territory = payload.get("territory")
+        return _territory_label_he(territory) if territory else None
+    if kind == "patent_survey":
+        topic = payload.get("topic")
+        return topic.strip() if isinstance(topic, str) and topic.strip() else None
+    if kind in _JOB_DATE_SUBJECT_KINDS:
+        return created_at.strftime("%d.%m.%Y") if hasattr(created_at, "strftime") else None
+    return None
+
+
+def _job_card(row: dict[str, Any]) -> dict[str, Any]:
+    row = dict(row)
+    row["subject_he"] = _job_subject_he(row.get("kind"), row.get("payload"), row.get("created_at"))
+    return row
+
+
 def list_jobs(*, state: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
     where = "state = %(state)s" if state else "1 = 1"
     params: dict[str, Any] = {"limit": min(max(limit, 1), 500)}
     if state:
         params["state"] = state
-    return _fetchall(f"SELECT * FROM jobs WHERE {where} ORDER BY created_at DESC LIMIT %(limit)s", params)
+    rows = _fetchall(f"SELECT * FROM jobs WHERE {where} ORDER BY created_at DESC LIMIT %(limit)s", params)
+    return [_job_card(row) for row in rows]
 
 
 def enqueue_run(scope: str, mode: str) -> int:

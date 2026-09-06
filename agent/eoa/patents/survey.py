@@ -84,7 +84,7 @@ from eoa.patents.render import (
     svg_timeline_bar_chart,
 )
 from eoa.patents.valuation import score_and_persist
-from eoa.pipeline.entity_normalize import resolve_canonical
+from eoa.pipeline.entity_normalize import find_watchlist_aliases_in_text, resolve_canonical, resolve_country_name
 from eoa.report.docx_builder import (
     build_docx,
     fmt_date,
@@ -449,15 +449,39 @@ def _cluster_by(rows: list[dict[str, Any]], field_name: str) -> Counter[str]:
     return counter
 
 
+# Round 5 D8 (2026-09-06, live example: patent_survey_FPA_.../2026-09-06, patent US20150015759A1,
+# assignee parsed as bare "Europe"): a name that resolves to a *non*-company canonical record (a
+# curated org entry like "NATO"/"Europe") was already excluded below, but a name that resolves to
+# *nothing at all* on either curated list fell through to the permissive default ("unresolved ->
+# treat as real company") -- exactly the case for a plain country name typed in English/Hebrew
+# ("United States", "ארה\"ב") never registered as a curated org (only ``resolve_country_name``
+# recognises it) and a bare corporate-suffix/generic-noun fragment ("Inc", "Ltd", "Systems") that a
+# keyless-search scrape sometimes yields as the entire "assignee" string when the real company name
+# was truncated by the source page's own formatting. Neither is ever a real company; both are
+# rejected outright, before ``resolve_canonical`` is even consulted.
+_GENERIC_ASSIGNEE_RE = re.compile(
+    r"^(?:inc|incorporated|llc|ltd|limited|co|corp|corporation|company|group|holdings?|"
+    r"international|systems?|technolog(?:y|ies)|industries|enterprises?|s\.?a\.?|gmbh|n\.?v\.?|"
+    r"plc)\.?$",
+    re.IGNORECASE,
+)
+
+
 def _is_real_company_assignee(name: str) -> bool:
     """A watchlist-recognised (or otherwise unresolved, i.e. not on any curated list at all)
     assignee name is treated as a real company; a name that resolves to a *non*-company canonical
-    record (a country, or a curated government/org entry like "NATO"/"Europe") is not -- see
-    ``eoa.patents.scan._assignee_candidates_in_text``'s own docstring for why such a name could
-    ever end up in ``patents.assignees`` in the first place (a pre-fix stale row)."""
+    record (a country, or a curated government/org entry like "NATO"/"Europe"), a plain country
+    name only ``resolve_country_name`` recognises ("United States", "ארה\"ב" -- round 5 D8), or a
+    bare generic corporate-suffix/noun fragment (:data:`_GENERIC_ASSIGNEE_RE`, e.g. "Inc", "Ltd",
+    "Systems" -- round 5 D8) is not -- see ``eoa.patents.scan._assignee_candidates_in_text``'s own
+    docstring for why such a name could ever end up in ``patents.assignees`` in the first place (a
+    keyless-search parsing artifact)."""
     if not name or name == "—":
         return False
-    canonical = resolve_canonical(name)
+    stripped = name.strip()
+    if not stripped or _GENERIC_ASSIGNEE_RE.match(stripped) or resolve_country_name(stripped):
+        return False
+    canonical = resolve_canonical(stripped)
     return not (canonical and canonical.get("kind") != "company")
 
 
@@ -607,23 +631,57 @@ def _assignee_events(names: set[str], since: dt.date, limit: int = 6) -> list[di
 # either, via eoa.pipeline.entity_normalize) literally appear in that same source's own text
 # (event title + parent item title + parent item body) -- an edge that fails this is dropped, never
 # silently rendered, and the drop is logged and counted in the survey's open-questions section.
+#
+# Round 5 D8 (2026-09-06, judge round_3_judge.md: "the untraceable Anduril-Elbit relationship edge
+# was 'dropped' is false -- it's still there, live, now duplicated (Elbit + Elbit Systems)"): two
+# real bugs behind that regression, both fixed here.
+#
+# 1. The round-3 ``_name_in_text`` matched a raw, word-boundary-free substring against *every*
+#    watchlist alias, including a "strict" alias (``config/watchlist.yaml``'s ``strict_aliases:``
+#    -- a product/program codename that collides with an ordinary word or an unrelated program,
+#    e.g. Anduril's own "Anvil"/"Lattice"/"Roadrunner"). A source article about an unrelated Elbit
+#    personnel appointment that merely happens to contain the ordinary English word "anvil" was
+#    therefore read as "names Anduril" and let the edge survive verification -- reproduced live:
+#    ``_name_in_text("Anduril", "... appointment today. The old blacksmiths anvil rang loudly ...")``
+#    returned ``True`` under the old substring check. This now delegates to
+#    ``eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text``, the same strict-alias-safe,
+#    whole-word matcher already used for ``items.entities_mentioned`` backfill (a strict alias only
+#    counts when the company's own canonical name or a non-strict alias also co-occurs in the same
+#    text) -- a name that isn't on the watchlist at all still falls back to a plain whole-word/
+#    -phrase, case-insensitive match (never the old bare ``in`` substring check).
+# 2. Two raw assignee spellings of the very same real company ("Elbit" and "Elbit Systems" both
+#    landing in ``top_assignees`` as distinct strings) each ran their own assignee-profile loop
+#    iteration (``build_patent_survey``), independently rebuilding a relationship edge to the same
+#    counterparty off the same underlying event -- both survived verification (correctly, since the
+#    source genuinely named the company) but rendered as two literal-duplicate rows under two
+#    different spellings. Edges are now deduped by *canonical* party pair (``resolve_canonical``
+#    when the name is on the watchlist, else the raw name) + kind + citation number; a duplicate is
+#    dropped (not silently -- logged the same way an unsupported edge is) rather than rendered
+#    twice. The kept edge's own ``from``/``to`` text is left exactly as given (never rewritten to
+#    the canonical spelling) so a caller matching on the original assignee name is unaffected.
 # --------------------------------------------------------------------------
 
 
-def _alias_candidates(name: str) -> set[str]:
+def _canonical_party_name(name: str) -> str:
+    """The watchlist canonical display name for ``name`` (e.g. ``"Elbit Systems"`` -> ``"Elbit"``)
+    when it resolves to one, else ``name`` unchanged -- used only as a dedup key (see module note
+    above), never to rewrite a rendered edge's own ``from``/``to`` text."""
     canonical = resolve_canonical(name)
-    names = {name}
-    if canonical:
-        names.add(canonical.get("name") or "")
-        names.update(canonical.get("aliases") or [])
-    return {n for n in names if n}
+    return canonical["name"] if canonical else name
 
 
 def _name_in_text(name: str, text: str) -> bool:
+    """Whether ``name`` is genuinely named in ``text`` -- see the module-level note above for why
+    this is no longer a bare case-insensitive substring check over every watchlist alias
+    (word-boundary-free, and blind to ``strict_aliases``). A watchlist-resolvable name delegates to
+    :func:`eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text` (whole-word, strict-alias
+    -safe); anything else falls back to a plain whole-word/-phrase, case-insensitive match."""
     if not name or not text:
         return False
-    lowered = text.lower()
-    return any(candidate.lower() in lowered for candidate in _alias_candidates(name))
+    canonical = resolve_canonical(name)
+    if canonical:
+        return canonical["name"] in find_watchlist_aliases_in_text(text)
+    return re.search(r"\b" + re.escape(name) + r"\b", text, re.IGNORECASE) is not None
 
 
 def _verify_relationship_edges(
@@ -633,21 +691,38 @@ def _verify_relationship_edges(
     :func:`eoa.patents.cluster.relationship_edges_from_events`) into ``(kept, dropped_notes)``: an
     edge is kept only when it carries a registry number ``n`` present in ``source_text_by_n`` *and*
     that source's own text names both ``from`` and ``to`` (via :func:`_name_in_text`, which also
-    checks watchlist aliases). ``dropped_notes`` is one human-readable Hebrew sentence per dropped
-    edge -- never a silent drop."""
+    checks watchlist aliases), and is not a canonical-party-pair duplicate of an edge already kept
+    (see the module note above -- "Elbit" and "Elbit Systems" naming the same real relationship
+    collapse to one row). ``dropped_notes`` is one human-readable Hebrew sentence per dropped edge
+    (unsupported *or* duplicate) -- never a silent drop."""
     kept: list[dict[str, Any]] = []
     dropped_notes: list[str] = []
+    seen_pairs: set[tuple[str, str, Any, Any]] = set()
     for edge in edges:
         n = edge.get("n")
         text = source_text_by_n.get(n, "") if n is not None else ""
-        if n is not None and _name_in_text(edge["from"], text) and _name_in_text(edge["to"], text):
-            kept.append(edge)
-            continue
         kind_he = _EVENT_KIND_HE.get(edge.get("kind"), edge.get("kind") or "אחר")
-        dropped_notes.append(
-            f'קשר "{edge["from"]} <-> {edge["to"]}" ({kind_he}) הוסר: המקור המצוטט '
-            f"{f'[{n}]' if n is not None else '(ללא ציטוט)'} אינו מזכיר את שני הצדדים."
+        cite_he = f"[{n}]" if n is not None else "(ללא ציטוט)"
+        if n is None or not _name_in_text(edge["from"], text) or not _name_in_text(edge["to"], text):
+            dropped_notes.append(
+                f'קשר "{edge["from"]} <-> {edge["to"]}" ({kind_he}) הוסר: המקור המצוטט '
+                f"{cite_he} אינו מזכיר את שני הצדדים."
+            )
+            continue
+        pair_key = (
+            _canonical_party_name(edge["from"]),
+            _canonical_party_name(edge["to"]),
+            edge.get("kind"),
+            n,
         )
+        if pair_key in seen_pairs:
+            dropped_notes.append(
+                f'קשר "{edge["from"]} <-> {edge["to"]}" ({kind_he}) {cite_he} הוסר ככפילות: אותו '
+                f'קשר כבר נכלל תחת "{pair_key[0]} <-> {pair_key[1]}" (איות/מקצה שונה של אותה ישות).'
+            )
+            continue
+        seen_pairs.add(pair_key)
+        kept.append(edge)
     return kept, dropped_notes
 
 
@@ -1008,12 +1083,52 @@ def _assignee_profile_section(profile: AssigneeProfile, *, has_cpc_data: bool) -
     return _RenderSection(title_he=f"פרופיל מקצה: {profile.assignee_name}", sentences=sentences)
 
 
+# Round 5 (docs/REPORT_TEMPLATE_BENCHMARK.md P3/item 9, 2026-09-06): every business-implications
+# action now carries an explicit priority + confidence (schema-enforced, eoa.llm.schemas.patents.
+# PatentBizAction) -- mirrors eoa.report.bd_territory.BdAction/recommended_actions_table's own
+# priority-rated recommended-actions table, in the high/medium/low + 0-1 shape this report's own
+# spec asks for (that BD table uses a single-letter H/M/L code instead).
+_PRIORITY_LABEL_HE = {"high": "גבוהה", "medium": "בינונית", "low": "נמוכה"}
+_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _priority_confidence_prefix_he(action: PatentBizAction) -> str:
+    priority_he = _PRIORITY_LABEL_HE.get(action.priority, action.priority)
+    return f"[עדיפות: {priority_he} | ביטחון: {round(action.confidence * 100)}%]"
+
+
 def _business_action_sentences(actions: list[PatentBizAction]) -> list[_CiteSentence]:
     out: list[_CiteSentence] = []
     for a in actions:
-        out.append(_CiteSentence(text_he=a.action_he))
+        out.append(_CiteSentence(text_he=f"{_priority_confidence_prefix_he(a)} {a.action_he}"))
         out.append(_CiteSentence(text_he=f"נימוק: {a.rationale_he}", cites=list(a.rationale_cites)))
     return out
+
+
+def business_implications_table(actions: list[PatentBizAction]) -> dict[str, Any] | None:
+    """Deterministic priority/confidence table for "השלכות עסקיות והמלצות" (round 5, P3/item 9) --
+    mirrors :func:`eoa.report.bd_territory.recommended_actions_table`'s own priority-ordered table
+    shape (there: ``BdAction``'s H/M/L code; here: ``PatentBizAction.priority``'s high/medium/low +
+    an explicit ``confidence`` percentage column). Sorted highest-priority first, ties broken by
+    confidence descending -- same reading order a decision-maker would want. ``None`` when
+    ``actions`` is empty (no synthesis / no actions at all -- nothing to render)."""
+    if not actions:
+        return None
+    ordered = sorted(actions, key=lambda a: (_PRIORITY_ORDER.get(a.priority, 9), -a.confidence))
+    rows = [
+        [
+            _PRIORITY_LABEL_HE.get(a.priority, a.priority),
+            f"{round(a.confidence * 100)}%",
+            a.action_he,
+            f"{a.rationale_he} " + ("".join(f"[{n}]" for n in a.rationale_cites) or "—"),
+        ]
+        for a in ordered
+    ]
+    return {
+        "title_he": "השלכות עסקיות והמלצות -- עדיפות וביטחון",
+        "headers": ["עדיפות", "ביטחון", "פעולה", "נימוק"],
+        "rows": rows,
+    }
 
 
 def _cluster_narrative_section(cluster: ClusterNarrative) -> _RenderSection:
@@ -1540,6 +1655,13 @@ def build_patent_survey(
                 "rows": [[ltr_isolate(a), n] for a, n in top_assignees.most_common(TOP_N_ASSIGNEES)],
             },
         ]
+        # Round 5 P3/item 9: deterministic priority/confidence table alongside the cited narrative
+        # section _business_action_sentences already renders (see business_implications_table's own
+        # docstring) -- omitted honestly when there was no synthesis at all (fallback draft path).
+        if synthesis is not None:
+            biz_table = business_implications_table(synthesis.business_implications)
+            if biz_table is not None:
+                tables.append(biz_table)
         # Round 3 D8 finding 3 (2026-09-06): when there is genuinely no publication-year / CPC data
         # at all in the gathered sample (the common keyless-search-fallback case), the table is
         # replaced by an explicit disclosure section (never a silently-empty heading) -- rendered as

@@ -47,6 +47,17 @@ keywords: &kw
   - ATR
   - IRST
   - imaging sensor
+  # Round-4b W24 (docs/REVIEW_2026-09-06_evening.md, 2026-09-06): high-energy laser / directed-
+  # energy weapon vocabulary -- same DOMAIN-signal role as the terms above (still requires a
+  # PROCUREMENT signal below to actually gate a notice in).
+  - high-energy laser
+  - high energy laser
+  - HEL weapon
+  - directed energy
+  - directed-energy weapon
+  - laser weapon system
+  - beam director
+  - beam control
 
 # PROCUREMENT signal vocabulary: at least one of these must also be present (in title+summary) for
 # a notice from a general source (kind: search / rss) before it is stored -- this is what keeps a

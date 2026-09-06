@@ -3,7 +3,16 @@ domains:
   airborne_pods:
     label: "פודים ומטע\"דים אוויריים (Airborne Pods & Payloads)"
     sub:
-      targeting_pods: "פודי כיוון (Targeting Pods)"
+      # Round-4b W21 (docs/REVIEW_2026-09-06_evening.md, 2026-09-06): renamed from "פודי כיוון" --
+      # "כיוון" reads as generic "direction/aiming", not the professional term used in Israeli
+      # defense-industry usage. Canonical: "פודי ציון מטרות" (mirrors targeting doctrine's own
+      # "ציון מטרה" = target designation); informal alias still seen in industry text: "פוד
+      # תקיפה" (attack pod). The key (`targeting_pods`) is unchanged, so classification/DB rows are
+      # unaffected; classify.py's curated Hebrew EO/IR vocabulary gate (`_EOIR_KEYWORDS_HE`) still
+      # matches the old phrase "פוד כיוון" (harmless -- it may still appear in incoming text
+      # verbatim) but was not extended with the new phrase/alias here since that file is out of
+      # this round's scope (flagged separately for its owner).
+      targeting_pods: "פודי ציון מטרות (Targeting Pods)"
       isr_pods: "פודי מודיעין וסיור (ISR/Recce Pods)"
       uav_gimbals: "מטע\"דים ג'ימבליים לכטב\"מים ומסוקים (EO/IR Gimbals)"
       small_gimbals: "מטע\"דים זעירים (Micro-Gimbals)"
@@ -14,7 +23,12 @@ domains:
     sub:
       border_towers: "תצפית גבולות ומגדלים (Border & Long-Range Surveillance)"
       mobile_portable: "מערכות תצפית ניידות ונישאות (Mobile/Portable Observation)"
-      vehicle_sights: "מטע\"די רק\"ם ורכב (Commander/Gunner Sights, Situational Awareness)"
+      # Round-4b W21: "מטע\"ד מפקד/תותחן" was imprecise -- מטע\"ד (מטען ייעודי) denotes a
+      # standalone mission payload/pod, while the fixed EO/IR sighting devices built into an AFV's
+      # commander's/gunner's station have their own standard Hebrew term, "כוונת" (sight). Renamed
+      # to lead with the correct term for that equipment, keeping "מטע\"די רק\"ם" for the broader
+      # vehicle-payload/situational-awareness scope this subdomain still covers.
+      vehicle_sights: "כוונות מפקד ותותחן ומטע\"די רק\"ם (Commander/Gunner Sights, Vehicle EO/IR Payloads)"
       night_vision: "ראיית לילה אישית (Fused/Digital Night Vision)"
       site_security: "אבטחת מתקנים משולבת EO/מכ\"ם (Perimeter Security)"
   naval_surveillance:
@@ -31,6 +45,22 @@ domains:
       eo_trackers: "עוקבים אלקטרואופטיים במערכות יירוט (EO Trackers)"
       sensor_fusion: "שילוב EO/מכ\"ם (Sensor Fusion)"
       hel: "לייזר בעוצמה גבוהה (High-Energy Laser, HEL)"
+  # Round-4b W24 (docs/REVIEW_2026-09-06_evening.md, 2026-09-06): new domain for the HEL/DEW
+  # technology stack itself (laser sources, beam control, thermal/power) -- airborne and ground,
+  # any platform -- as distinct from `air_defense.hel` (kept unchanged), which stays scoped to HEL
+  # specifically framed as an *air-defense interceptor* kill mechanism within an air-defense
+  # system. classify.md's platform-vs-payload domain-selection rule applies as usual: an item whose
+  # dominant subject is the interceptor engagement itself -> air_defense/hel; an item whose
+  # dominant subject is the laser weapon/subsystem/component technology (a beam director, a fiber
+  # laser source, a HEL weapon program of record) -> directed_energy, regardless of which platform
+  # or mission (air defense, C-UAS, naval, ground) it is destined for.
+  directed_energy:
+    label: "אנרגיה מכוונת ולייזר בעוצמה גבוהה (Directed Energy / High-Energy Laser, HEL/DEW)"
+    sub:
+      hel_weapon_systems: "מערכות נשק לייזר, אוויריות וקרקעיות (Airborne & Ground HEL Weapon Systems)"
+      laser_sources_amplifiers: "מקורות לייזר, מגברים ומצרפי אלומה (Fiber/Slab/Diode-Pumped Laser Sources, Amplifiers, Beam Combiners, Spectral Beam Combining)"
+      beam_control_directors: "בקרת אלומה ומכווני אלומה (Beam Directors, Beam Control, Adaptive Optics)"
+      thermal_power_management: "ניהול תרמי והספקה למערכות לייזר (Thermal Management & Power Systems for HEL)"
   c_uas:
     label: "נגד כטב\"מים (C-UAS)"
     sub:
@@ -43,8 +73,11 @@ domains:
     label: "בינה חזותית (Computer Vision / AI)"
     sub:
       atr: "זיהוי מטרות אוטומטי (ATR/ATD)"
-      edge_ai: "Edge AI על גבי מטע\"ד"
-      gps_denied_nav: "ניווט חזותי ב-GPS-Denied"
+      # Round-4b W21: normalized to this taxonomy's own "עברית (English)" convention (already used
+      # by tech_dev.on_sensor_ai's near-identical "בינה מלאכותית על-החיישן (Edge AI, ...)") instead
+      # of leading with a bare English term.
+      edge_ai: "בינה מלאכותית על גבי מטע\"ד (Edge AI)"
+      gps_denied_nav: "ניווט חזותי בסביבת GPS מוגבל (GPS-Denied Navigation)"
       realtime_video: "עיבוד וידאו בזמן אמת"
       multimodal_isr: "מודלים מולטימודליים לניתוח ISR"
       sim2real: "למידה מסימולציה (Sim2Real, Synthetic Data)"
@@ -52,7 +85,9 @@ domains:
     label: "תחומים משיקים (Secondary)"
     sub:
       detectors_fpa: "גלאים ומישורי מוקד (SWIR/MWIR/LWIR, Uncooled, Event Cameras)"
-      computational_optics: "אופטיקה חישובית, Gimbal Stabilization, On-Chip"
+      # Round-4b W21: English terms moved into the parenthetical gloss (this taxonomy's own
+      # convention) instead of running on directly after a Hebrew comma-separated list.
+      computational_optics: "אופטיקה חישובית וייצוב ג'ימבל (Computational Optics, Gimbal Stabilization, On-Chip Processing)"
       defense_ai_infra: "תשתיות AI ביטחוניות (MLOps, Datasets)"
   tech_dev:
     label: "התפתחויות טכנולוגיות (Technology Developments)"

@@ -12,8 +12,8 @@
 # were judged low-risk (acronym-shaped or otherwise unlikely to appear as ordinary English/Hebrew
 # prose) -- re-audit any new alias against this same test before adding it un-flagged.
 companies:
-  - { name: RTX, aliases: [Raytheon, "Raytheon Technologies", "Collins Aerospace"], country: US, focus: [airborne_pods, air_defense, c_uas] }
-  - { name: "Lockheed Martin", aliases: [LMT, Sniper ATP, "Lockheed"], country: US, focus: [airborne_pods, air_defense] }
+  - { name: RTX, aliases: [Raytheon, "Raytheon Technologies", "Collins Aerospace"], country: US, focus: [airborne_pods, air_defense, c_uas, directed_energy] }
+  - { name: "Lockheed Martin", aliases: [LMT, Sniper ATP, "Lockheed", HELIOS], country: US, focus: [airborne_pods, air_defense, directed_energy] }
   # round-2: "LITENING" removed -- it is Rafael's own targeting-pod product (see Rafael's own
   # `aliases` below, "Litening"), not Northrop Grumman's; a straight copy/collision error, not a
   # strict-alias case (there is no legitimate reading of "LITENING" as a Northrop Grumman product).
@@ -25,21 +25,29 @@ companies:
   - { name: "Leonardo DRS", aliases: [DRS], country: US, focus: [land_surveillance, secondary] }
   - { name: Anduril, aliases: [Lattice, Anvil, Roadrunner, "Anduril Industries"], strict_aliases: [Lattice, Anvil, Roadrunner], country: US, focus: [c_uas, computer_vision, air_defense] }
   - { name: "Shield AI", aliases: [Hivemind, "V-BAT"], country: US, focus: [computer_vision] }
-  - { name: BlueHalo, aliases: [LOCUST, Titan], strict_aliases: [LOCUST, Titan], country: US, focus: [c_uas, air_defense] }
+  - { name: BlueHalo, aliases: [LOCUST, Titan], strict_aliases: [LOCUST, Titan], country: US, focus: [c_uas, air_defense, directed_energy] }
   - { name: Epirus, aliases: [Leonidas], country: US, focus: [c_uas] }
   - { name: Fortem, aliases: [DroneHunter, SkyDome], country: US, focus: [c_uas] }
   - { name: Thales, aliases: ["Thales Group", TALIOS, "Thales Land & Naval"], country: EU, focus: [airborne_pods, naval_surveillance, land_surveillance, air_defense] }
   - { name: Safran, aliases: ["Safran Electronics & Defense", Vectronix, Paseo, Euroflir], country: EU, focus: [airborne_pods, land_surveillance, naval_surveillance] }
   - { name: Leonardo, aliases: ["Leonardo S.p.A.", "Leonardo Electronics"], country: EU, focus: [airborne_pods, naval_surveillance, air_defense] }
   - { name: Hensoldt, aliases: ["Hensoldt Optronics", "HENSOLDT"], country: EU, focus: [land_surveillance, naval_surveillance, air_defense] }
-  - { name: MBDA, aliases: [], country: EU, focus: [air_defense] }
-  - { name: Rheinmetall, aliases: ["Rheinmetall Air Defence", Skynex, Skyranger], strict_aliases: [Skynex, Skyranger], country: EU, focus: [air_defense, c_uas, naval_surveillance] }
+  # Round-4b W24: alias "DragonFire" added -- MBDA is the prime/systems-integration lead of the UK
+  # DragonFire laser-directed-energy-weapon programme (with Leonardo UK and QinetiQ; QinetiQ
+  # tracked separately below).
+  - { name: MBDA, aliases: [DragonFire], country: EU, focus: [air_defense, directed_energy] }
+  - { name: Rheinmetall, aliases: ["Rheinmetall Air Defence", Skynex, Skyranger], strict_aliases: [Skynex, Skyranger], country: EU, focus: [air_defense, c_uas, naval_surveillance, directed_energy] }
   - { name: Saab, aliases: ["Saab AB", Giraffe, "Saab Naval"], country: EU, focus: [air_defense, naval_surveillance, c_uas] }
   - { name: Terma, aliases: [Scanter], country: EU, focus: [naval_surveillance] }
   - { name: Aselsan, aliases: [ASELSAN, ASELFLIR, "İHTAR"], country: TR, focus: [airborne_pods, land_surveillance, naval_surveillance, c_uas] }
-  - { name: Elbit, aliases: ["Elbit Systems", "Elbit Land", "Elbit ISTAR", "אלביט", "אלביט מערכות", Elop, "El-Op", "אלאופ", Elisra, "אלישרא", "Elbit Systems Elisra"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas, computer_vision] }
-  - { name: IAI, aliases: ["Israel Aerospace Industries", "התעשייה האווירית", "תע\"א", ELTA, Tamam, "תמ\"מ", MOSP, POP], strict_aliases: [POP], country: IL, focus: [airborne_pods, air_defense, c_uas] }
-  - { name: Rafael, aliases: ["Rafael Advanced Defense Systems", "רפאל", Litening, "Iron Beam", "מגן אור", "Drone Dome", Toplite], country: IL, focus: [airborne_pods, air_defense, c_uas, naval_surveillance] }
+  - { name: Elbit, aliases: ["Elbit Systems", "Elbit Land", "Elbit ISTAR", "אלביט", "אלביט מערכות", Elop, "El-Op", "אלאופ", Elisra, "אלישרא", "Elbit Systems Elisra"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas, computer_vision, directed_energy] }
+  - { name: IAI, aliases: ["Israel Aerospace Industries", "התעשייה האווירית", "תע\"א", ELTA, Tamam, "תמ\"מ", MOSP, POP], strict_aliases: [POP], country: IL, focus: [airborne_pods, air_defense, c_uas, directed_energy] }
+  # Round-4b W24: Rafael is the developer of Iron Beam ("מגן אור") -- Israel's fielded HEL air-
+  # defense system -- already carried as an alias here; `directed_energy` added to focus alongside
+  # the existing `air_defense` (Iron Beam interception itself stays classified air_defense/hel per
+  # classify.md's new rule; Rafael's directed_energy focus covers its laser-technology coverage
+  # more broadly, e.g. component/program items not framed around an interception event).
+  - { name: Rafael, aliases: ["Rafael Advanced Defense Systems", "רפאל", Litening, "Iron Beam", "מגן אור", "Drone Dome", Toplite], country: IL, focus: [airborne_pods, air_defense, c_uas, naval_surveillance, directed_energy] }
   - { name: Controp, aliases: ["CONTROP Precision Technologies", "קונטרופ"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance] }
   - { name: "Smart Shooter", aliases: [SMASH, "סמארט שוטר"], country: IL, focus: [c_uas, computer_vision] }
   - { name: Xtend, aliases: ["XTEND"], country: IL, focus: [computer_vision, c_uas] }
@@ -68,7 +76,7 @@ companies:
   - { name: IWI, aliases: ["Israel Weapon Industries", "רשק\"מ"], country: IL, focus: [secondary] }
   - { name: Tomer, aliases: ["Tomer - Rafael Group", "תומר"], country: IL, focus: [air_defense] }
   - { name: RADA, aliases: ["RADA Electronic Industries", "Leonardo DRS RADA", "רדא"], country: IL, focus: [air_defense, c_uas, land_surveillance] }
-  - { name: Hanwha, aliases: ["Hanwha Aerospace", "Hanwha Systems"], country: KR, focus: [airborne_pods, air_defense, land_surveillance] }
+  - { name: Hanwha, aliases: ["Hanwha Aerospace", "Hanwha Systems"], country: KR, focus: [airborne_pods, air_defense, land_surveillance, directed_energy] }
   - { name: "LIG Nex1", aliases: [], country: KR, focus: [air_defense, airborne_pods] }
   - { name: "Mitsubishi Electric", aliases: [MELCO], country: JP, focus: [air_defense, secondary] }
   - { name: HAL, aliases: ["Hindustan Aeronautics"], country: IN, focus: [airborne_pods] }
@@ -86,12 +94,28 @@ companies:
   # matching). Added here so `find_watchlist_aliases_in_text` actually recognises it.
   - { name: Palantir, aliases: ["Palantir Technologies"], country: US, focus: [computer_vision, secondary] }
 
+  # Round-4b W24 (docs/REVIEW_2026-09-06_evening.md, 2026-09-06): high-energy laser / directed-
+  # energy watchlist additions -- new companies not previously tracked (the HEL-relevant primes
+  # already on the watchlist -- RTX, Lockheed Martin, BlueHalo, Rheinmetall, MBDA, Elbit, IAI,
+  # Rafael, Hanwha -- had `directed_energy` added to their existing `focus` above instead of a
+  # duplicate entry). No Israeli-academia entities added here (no stable canonical
+  # company/institution name to attribute a hit to without inventing one -- see hard rule 5, "never
+  # invent"); Israeli academic HEL/photonics research is covered via the arXiv physics.optics feed
+  # in config/sources.yaml, not a named watchlist entity.
+  - { name: QinetiQ, aliases: [], country: UK, focus: [directed_energy, air_defense], note: "DragonFire consortium member (laser/beam-control), with MBDA and Leonardo UK" }
+  - { name: Boeing, aliases: ["Boeing Defense, Space & Security", "Boeing Defense"], country: US, focus: [directed_energy, air_defense] }
+  - { name: "General Atomics", aliases: ["GA-EMS", "General Atomics Electromagnetic Systems", "General Atomics Aeronautical"], country: US, focus: [directed_energy, air_defense] }
+  - { name: nLIGHT, aliases: ["nLIGHT Inc"], country: US, focus: [directed_energy] }
+  - { name: Coherent, aliases: ["Coherent Corp", "II-VI", "II-VI Incorporated"], strict_aliases: ["II-VI"], country: US, focus: [directed_energy, secondary] }
+  - { name: "IPG Photonics", aliases: [IPG], strict_aliases: [IPG], country: US, focus: [directed_energy] }
+  - { name: TRUMPF, aliases: ["TRUMPF Laser", "TRUMPF Group"], country: EU, focus: [directed_energy] }
+
 programs:
   - { name: Replicator, owner: "US DoD / DIU", focus: [c_uas, computer_vision] }
   - { name: "JCO C-UAS", aliases: ["Joint Counter-small UAS Office", JCO], owner: "US Army", focus: [c_uas] }
   - { name: ESSI, aliases: ["European Sky Shield Initiative"], owner: EU, focus: [air_defense] }
   - { name: "Next-gen targeting pod", aliases: ["NGTP", "advanced targeting pod"], owner: "USAF", focus: [airborne_pods] }
-  - { name: "Iron Beam", aliases: ["מגן אור"], owner: IL, focus: [air_defense, c_uas] }
+  - { name: "Iron Beam", aliases: ["מגן אור"], owner: IL, focus: [air_defense, c_uas, directed_energy] }
   - { name: "NATO C-UAS", aliases: ["NATO counter-drone"], owner: NATO, focus: [c_uas] }
 
 # A13 (מיקוד תעשייה ישראלית, 2026-09-06): Israeli government/military bodies -- not EO/IR

@@ -466,13 +466,34 @@ sources:
     kind: html
     lang: en
     reliability: 4
-    tags: [secondary, computer_vision]
+    # Round-4b W24: `directed_energy` added -- SPIE's own program (Security + Defence, Photonics
+    # West) covers HEL/beam-control research; still blocked pending a JS-capable fetch (see notes).
+    tags: [secondary, computer_vision, directed_energy]
     schedule: weekly
     notes: "No working RSS found (/news/rss and /news/rss.xml both resolve to the JS app shell, not a feed). The listing page itself is also client-rendered (no-js shell in static fetch), so scraping needs a JS-capable fetch later."
     verified: false
     verified_at: "2026-09-04"
     list_selector: "div.news-item"
     link_selector: "a"
+
+  # Round-4b W24 (docs/REVIEW_2026-09-06_evening.md, 2026-09-06): Breaking Defense's own
+  # directed-energy-weapons tag feed -- kept as documentation of a checked, currently-dead path
+  # (per this registry's own convention, see spie_news/intelligent_aerospace above) rather than
+  # omitted. `breaking_defense` (top of this file) already ingests this publication's full stream
+  # unfiltered and stays the working way to get its DEW coverage in the meantime.
+  - id: breaking_defense_dew
+    name: "Breaking Defense -- Directed Energy Weapons tag"
+    url: "https://breakingdefense.com/tag/directed-energy-weapons/feed/"
+    kind: rss
+    lang: en
+    category: science
+    reliability: 4
+    tags: [directed_energy, air_defense]
+    schedule: daily
+    notes: "Verified live 2026-09-06 (curl, desktop Chrome UA, 15s timeout): 403 Forbidden. The site's main feed (breaking_defense above) returns 200, but every /tag/*/feed/ path tried (this one plus counter-uas and c-uas as a control) also 403s -- bot-protection appears to block /tag/ paths specifically, not this tag in particular. Kept unverified/disabled-by-convention rather than removed; re-check if Breaking Defense's tag-feed protection ever changes."
+    verified: false
+    verified_at: "2026-09-06"
+    enabled: false
 
   - id: intelligent_aerospace
     name: "Intelligent Aerospace"
@@ -744,16 +765,19 @@ sources:
     verified_at: "2026-09-06"
 
   - id: arxiv_physics_optics_tech
-    name: "arXiv physics.optics (detectors/metasurfaces keyword-filtered)"
+    name: "arXiv physics.optics (detectors/metasurfaces/HEL keyword-filtered)"
     url: "https://rss.arxiv.org/rss/physics.optics"
     kind: rss
     lang: en
     category: science
     reliability: 4
-    tags: [tech_dev]
+    # Round-4b W24: `directed_energy` added -- physics.optics is also where fiber/beam-combining/
+    # adaptive-optics HEL-source papers land; keywords_any extended to catch them without a
+    # separate near-duplicate feed.
+    tags: [tech_dev, directed_energy]
     schedule: daily
-    keywords_any: ["detector", "metasurface", "focal plane array", "meta-optic", "flat optics"]
-    notes: "arXiv's official per-category daily-announcement RSS, keyword-filtered downstream (same export.arxiv.org robots.txt substitution -- see arxiv_eess_iv_tech's notes). Verified live 2026-09-06: 200 OK, valid RSS 2.0; empty at verification time (weekend skipDays), not yet confirmed with real entries."
+    keywords_any: ["detector", "metasurface", "focal plane array", "meta-optic", "flat optics", "high-energy laser", "high energy laser", "fiber laser", "beam combining", "beam combiner", "adaptive optics", "beam director", "directed energy"]
+    notes: "arXiv's official per-category daily-announcement RSS, keyword-filtered downstream (same export.arxiv.org robots.txt substitution -- see arxiv_eess_iv_tech's notes). Verified live 2026-09-06: 200 OK, valid RSS 2.0; empty at verification time (weekend skipDays), not yet confirmed with real entries. Round-4b W24 (2026-09-06): re-verified live, still 200 OK/valid RSS -- keywords_any extended, URL unchanged."
     verified: true
     verified_at: "2026-09-06"
 
@@ -806,10 +830,13 @@ sources:
     lang: en
     category: science
     reliability: 3
-    tags: [tech_dev]
+    # Round-4b W24: `directed_energy` added -- this site's own beat already covers HEL/DEW
+    # (fiber/diode-pumped laser sources, beam combining, beam directors); keywords_any extended
+    # rather than adding a near-duplicate second feed for the same publication.
+    tags: [tech_dev, directed_energy]
     schedule: daily
-    keywords_any: ["infrared", "SWIR", "focal plane", "detector", "lidar", "laser", "photonics", "sensor", "imaging", "quantum dot", "metasurface", "microbolometer"]
-    notes: "Endeavor Business Media site-wide feed (mixed lasers/photonics/fiber-optics content), keyword-filtered to EO/IR-relevant items. Verified live 2026-09-06: 200 OK, 25 <item> entries."
+    keywords_any: ["infrared", "SWIR", "focal plane", "detector", "lidar", "laser", "photonics", "sensor", "imaging", "quantum dot", "metasurface", "microbolometer", "high-energy laser", "high energy laser", "directed energy", "fiber laser", "diode-pumped", "beam combining", "beam combiner", "beam director", "adaptive optics"]
+    notes: "Endeavor Business Media site-wide feed (mixed lasers/photonics/fiber-optics content), keyword-filtered to EO/IR-relevant items. Verified live 2026-09-06: 200 OK, 25 <item> entries. Round-4b W24 (2026-09-06): re-verified live, still 200 OK/valid RSS -- keywords_any extended for HEL/DEW, URL unchanged."
     verified: true
     verified_at: "2026-09-06"
 

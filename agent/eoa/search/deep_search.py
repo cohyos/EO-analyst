@@ -33,6 +33,7 @@ from eoa.errors import CliProviderError, LLMOutputError, ProviderUnavailable, Re
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import InvestigationOut, QueryPlan, RelevanceVerdict
+from eoa.report.textnorm import normalize_hebrew_punctuation
 from eoa.search.provider import SearchHit, search
 
 # U8-6b (Revision 2026-09-06): pending question shape for `investigate_batch_cloud` below --
@@ -99,11 +100,25 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "outcome": {"type": "string", "enum": ["found", "partial", "not_found"]},
-                    "answer_he": {"type": "string"},
+                    "answer_he": {
+                        "type": "string",
+                        "description": (
+                            "Direct-answer paragraph (2-6 sentences), self-contained. An optional "
+                            "2nd+ paragraph (blank-line separated) only for real extra context -- "
+                            "see deep_search_system.md rule 7. Never a sources list/headers here."
+                        ),
+                    },
                     "confidence": {"type": "number"},
                     "sources": {"type": "array", "items": {"type": "string"}},
-                    "key_facts": {"type": "array", "items": {"type": "string"}},
-                    "contradictions_he": {"type": "string"},
+                    "key_facts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Each fact ends with its own [n] citation into `sources`.",
+                    },
+                    "contradictions_he": {
+                        "type": "string",
+                        "description": "Source contradictions AND general gaps/unknowns; empty if none.",
+                    },
                     "what_was_tried_he": {"type": "string"},
                 },
                 "required": ["outcome", "answer_he", "confidence", "sources"],
@@ -864,6 +879,207 @@ def plan_queries(
         return [{"lang": lang, "query": question} for lang in langs[:2]]
 
 
+# =================================================================================================
+# Round-4b W27 (docs/REVIEW_2026-09-06_evening.md): deterministic answer_he assembly.
+#
+# Before this, `InvestigationOut.answer_he` was whatever free prose the model (or, on the cloud
+# path, `_screen_cloud_answer`) produced -- unstructured, and prone to a Latin term/number sitting
+# directly against a Hebrew letter with no space (a real bidi rendering bug the user hit reading
+# investigation answers, distinct from the report-rendering bidi handling `eoa.report.docx_builder`
+# already has for docx output). `format_investigation_answer_he` is a deterministic safety net that
+# re-assembles the final text as five sections, in this fixed order, skipping any that are empty:
+#   1. תשובה ישירה   -- no header; the model's own direct-answer prose (first paragraph of its
+#                        `answer_he`, blank-line-separated from an optional 2nd context paragraph).
+#   2. עובדות מרכזיות -- bullets, sourced from the existing `InvestigationOut.key_facts` field the
+#                        model already fills in via `finish()` (never re-derived from `answer_he`).
+#   3. הקשר          -- any paragraph(s) after the first blank line in the model's `answer_he`.
+#   4. פערים / מה לא ידוע -- sourced from the existing `contradictions_he` field (broadened by the
+#                        updated `deep_search_system.md` to also cover open gaps/unknowns, not only
+#                        source-vs-source contradictions -- no schema change needed).
+#   5. מקורות        -- NEVER written by the model; generated here from `sources` (the ground-truth
+#                        URL list, same "never trust the model's own list" doctrine as `_finalize_
+#                        outcome`'s Q3-5 fix above `sources = list(inv.read_urls)`).
+# A bidi-safe spacing pass then runs once over the assembled text: it inserts a space at any
+# Hebrew/Latin-or-digit run boundary that has none, and wraps every Latin/digit run in Unicode
+# isolate marks (U+2066 LRI / U+2069 PDI) -- a plain-text analogue of `eoa.report.docx_builder`'s
+# own per-run bidi handling (`split_runs`/`_bidi_html`) for the same problem in HTML/docx output;
+# reimplemented locally (rather than importing `docx_builder`, which pulls in python-docx) since
+# the underlying classification (Hebrew-block codepoint ranges) is tiny and self-contained. Finally
+# `eoa.report.textnorm.normalize_hebrew_punctuation` runs once for the gershayim/geresh fixes it
+# already provides report renderers. This function is NOT idempotent by design (re-running it on
+# its own output would double-wrap the isolate marks) -- it is meant to run exactly once, at the
+# point `InvestigationOut.answer_he` is finalized, never on already-formatted text.
+# =================================================================================================
+
+_LRI = "⁦"  # Left-to-Right Isolate
+_PDI = "⁩"  # Pop Directional Isolate
+_HEBREW_CODEPOINT_RANGES = ((0x0590, 0x05FF), (0xFB1D, 0xFB4F))
+
+_ANSWER_SECTION_TITLES_HE = {
+    "facts": "עובדות מרכזיות",
+    "context": "הקשר",
+    "gaps": "פערים / מה לא ידוע",
+    "sources": "מקורות",
+}
+
+
+def _is_hebrew_char(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _HEBREW_CODEPOINT_RANGES)
+
+
+def _bidi_run_class(ch: str) -> str | None:
+    """'he' for a Hebrew-script character, 'other' for a Latin letter/digit, None for anything
+    else (whitespace/punctuation inherits the surrounding run -- resolved per-character by
+    `_split_bidi_runs` below, which also mirrors `docx_builder.split_runs`'s bracket-pair symmetry)."""
+    if _is_hebrew_char(ch):
+        return "he"
+    if ch.isalpha() or ch.isdigit():
+        return "other"
+    return None
+
+
+_BIDI_BRACKET_OPEN_TO_CLOSE = {"(": ")", "[": "]", "{": "}"}
+_BIDI_BRACKET_CLOSE_TO_OPEN = {v: k for k, v in _BIDI_BRACKET_OPEN_TO_CLOSE.items()}
+
+
+def _split_bidi_runs(text: str) -> list[tuple[str, str]]:
+    """Like `docx_builder.split_runs` (Hebrew-vs-Latin/digit run segmentation, punctuation inherits
+    the surrounding run) but simplified for a plain-text safety net: no quote-pair tracking, since
+    this function never sees `text_he` prose with embedded literal `"` -- only this module's own
+    assembled section text (bullets, `[n]` markers, URLs). Bracket-pair symmetry IS kept: a closing
+    bracket takes its matching opening bracket's class rather than whatever is "current" at the
+    closing mark's own position -- without it, "- [1] https://..." would put the opening `[` in the
+    preceding Hebrew run but `1]` in the following Latin/digit run, an asymmetric split that (a)
+    reads as broken bidi and (b) trips the space-insertion pass into wedging a space inside the
+    bracket (see `docx_builder.split_runs`'s own docstring for the same failure mode on `()`)."""
+    if not text:
+        return []
+    runs: list[tuple[str, str]] = []
+    buf: list[str] = []
+    cur: str | None = None
+    bracket_stack: list[tuple[str, str]] = []  # (opening char, class it was emitted with)
+    for ch in text:
+        base = _bidi_run_class(ch)
+        if base is not None:
+            c = base
+        elif (
+            ch in _BIDI_BRACKET_CLOSE_TO_OPEN
+            and bracket_stack
+            and bracket_stack[-1][0] == _BIDI_BRACKET_CLOSE_TO_OPEN[ch]
+        ):
+            c = bracket_stack[-1][1]
+        else:
+            c = cur or "he"
+
+        if cur is not None and c != cur and buf:
+            runs.append((cur, "".join(buf)))
+            buf = []
+        cur = c
+        buf.append(ch)
+
+        if base is None:
+            if ch in _BIDI_BRACKET_OPEN_TO_CLOSE:
+                bracket_stack.append((ch, cur))
+            elif (
+                ch in _BIDI_BRACKET_CLOSE_TO_OPEN
+                and bracket_stack
+                and bracket_stack[-1][0] == _BIDI_BRACKET_CLOSE_TO_OPEN[ch]
+            ):
+                bracket_stack.pop()
+    if buf and cur is not None:
+        runs.append((cur, "".join(buf)))
+    return runs
+
+
+def _needs_bidi_space(prev_char: str, next_char: str) -> bool:
+    """True only when a Latin/Hebrew *letter or digit* sits directly against one from the other
+    script with nothing between them ("Targetingפוד" -> needs a space). Deliberately narrower than
+    "any non-whitespace boundary": punctuation (brackets, slashes, colons, dashes) already provides
+    visual separation on its own, and forcing a space there would instead wedge one *inside* a
+    bracket pair -- e.g. "- [1] https://..." would become "- [ 1] https://..." if a bare "not
+    whitespace" check ran the opening `[` (which stays in the preceding Hebrew run, see
+    `_split_bidi_runs`'s bracket-symmetry note) against the digit that starts the next run."""
+    if not prev_char or not next_char or prev_char.isspace() or next_char.isspace():
+        return False
+    return prev_char.isalnum() and next_char.isalnum()
+
+
+def _bidi_space_and_isolate_line(line: str) -> str:
+    """Insert a space at any he/other run boundary that needs one (see `_needs_bidi_space`), and
+    wrap every Latin/digit ('other') run in LRI/PDI isolate marks -- see the module note above.
+    Operates on a single line; see `_bidi_space_and_isolate` for why the pass is run per-line."""
+    if not line:
+        return line
+    out: list[str] = []
+    prev_last_char = ""
+    for cls, chunk in _split_bidi_runs(line):
+        if not chunk:
+            continue
+        if _needs_bidi_space(prev_last_char, chunk[0]):
+            out.append(" ")
+        out.append(f"{_LRI}{chunk}{_PDI}" if cls == "other" else chunk)
+        prev_last_char = chunk[-1]
+    return "".join(out)
+
+
+def _bidi_space_and_isolate(text: str) -> str:
+    """Run `_bidi_space_and_isolate_line` independently on each line of `text`.
+
+    Line-by-line, never on the joined multi-line string: a trailing digit/URL/bracket run at the
+    end of one line (a source's "[2]", a fact's trailing citation marker) has no natural class
+    break at the newline that follows it (a bare "\\n" is punctuation, so `_split_bidi_runs` would
+    otherwise let it inherit the still-open 'other' run) -- left unfixed, that 'other' run would
+    swallow the blank line *and* the next section's own "### " header into the same isolate-wrapped
+    span, corrupting the markdown structure the caller just built. Splitting on newlines first
+    means every line starts and ends its own run state, so this can never happen; blank lines
+    (falsy) short-circuit through unchanged.
+    """
+    return "\n".join(_bidi_space_and_isolate_line(line) for line in text.split("\n"))
+
+
+def format_investigation_answer_he(
+    answer_he: str,
+    *,
+    key_facts: list[str] | None = None,
+    contradictions_he: str = "",
+    sources: list[str] | None = None,
+) -> str:
+    """Deterministic safety-net assembly of the final ``InvestigationOut.answer_he`` (W27).
+
+    Degrades gracefully when the model didn't follow `deep_search_system.md`'s structure: a
+    single-paragraph ``answer_he`` with no ``key_facts``/``contradictions_he``/``sources`` (e.g.
+    the not_found fallback messages built in `_finalize_outcome`/`investigate_batch_cloud`) comes
+    back as just that one paragraph, bidi-spaced -- no empty headers.
+    """
+    key_facts = [f.strip() for f in (key_facts or []) if f and f.strip()]
+    sources = [s for s in (sources or []) if s]
+    raw = (answer_he or "").strip()
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
+    direct = paragraphs[0] if paragraphs else ""
+    context_paragraphs = paragraphs[1:]
+
+    blocks: list[str] = []
+    if direct:
+        blocks.append(direct)
+    if key_facts:
+        facts_lines = "\n".join(f"- {f}" for f in key_facts)
+        blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['facts']}\n{facts_lines}")
+    if context_paragraphs:
+        blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['context']}\n" + "\n\n".join(context_paragraphs))
+    gaps = (contradictions_he or "").strip()
+    if gaps:
+        blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['gaps']}\n{gaps}")
+    if sources:
+        src_lines = "\n".join(f"- [{i}] {u}" for i, u in enumerate(sources, start=1))
+        blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['sources']}\n{src_lines}")
+
+    assembled = "\n\n".join(blocks)
+    assembled = _bidi_space_and_isolate(assembled)
+    return normalize_hebrew_punctuation(assembled) or assembled
+
+
 def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
     """Settle `inv.result`/`inv.outcome` and the budget-accounting fields once the loop stops,
     whether by a model `finish` call or by running out of rounds/budget.
@@ -937,6 +1153,16 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
         first = inv.security_flagged_pages[0]
         inv.result.security_flag_reason = first.get("reason")
         inv.result.security_flag_snippet = first.get("excerpt")
+
+    # Round-4b W27: assemble the final answer_he as fixed, titled sections (see the module note
+    # above `format_investigation_answer_he`) -- runs last, after every other field above
+    # (`sources`, any UNVERIFIED_PREFIX_HE prefix) has settled into its final value.
+    inv.result.answer_he = format_investigation_answer_he(
+        inv.result.answer_he,
+        key_facts=inv.result.key_facts,
+        contradictions_he=inv.result.contradictions_he,
+        sources=inv.result.sources,
+    )
 
 
 # ----------------------------------------------------------------------------- main loop
@@ -1624,6 +1850,12 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
                     answer_he = f"{UNVERIFIED_PREFIX_HE}{answer_he}"
                 if len(source_urls) < PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE:
                     confidence = min(confidence, PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE)
+            # Round-4b W27: same deterministic section assembly as the local ReAct path
+            # (`_finalize_outcome`) -- the cloud-delegated `CloudInvestigationAnswer` schema carries
+            # no `key_facts`/`contradictions_he` (the delegated CLI's own answer contract, U8-6b,
+            # doesn't ask for them), so those two sections simply don't appear here; direct-answer
+            # (+ optional context paragraph) and מקורות (from `source_urls`, ground truth) still do.
+            answer_he = format_investigation_answer_he(answer_he, sources=source_urls)
             inv.result = InvestigationOut(
                 outcome=outcome,
                 answer_he=answer_he,

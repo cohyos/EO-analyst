@@ -10149,3 +10149,184 @@ concurrent BD engineer, confirmed via `git status`/`git diff` showing `BdPage.ts
 untouched by this round's changes), `npm run build`, `e2e/tests/10-settings.spec.ts` against the
 live app (8765) on both `desktop-1440x900` and `iphone-safari`, `ruff check` on every touched
 Python file, `pytest tests/unit -q -k "jobs or payload or ui_round4b"` (116 passed).
+
+
+## Round 4b taxonomy/style (docs/REVIEW_2026-09-06_evening.md W21, W24, W26, W27)
+
+Scope for this round: `config/taxonomy.yaml`, `config/watchlist.yaml`, `config/sources.yaml`,
+`config/tenders.yaml` keyword lists, `agent/eoa/llm/prompts/{analyze,triage,classify,
+report_daily,report_weekly,report_bd_territory,deep_search_system,ask_answer_format,
+system_analyst}.md`, `agent/eoa/search/deep_search.py` (answer_he assembly only), new
+`agent/eoa/report/style.py`, and the round's own new test files. No DB writes, no pipeline runs,
+no service restarts.
+
+### W21 -- taxonomy terminology review (label text only; every key unchanged)
+
+Reviewed every domain/subdomain/dimension/TRL/level label in `config/taxonomy.yaml` against
+professional Israeli defense-industry Hebrew. `classify.py`'s `_taxonomy_glossary_terms()` mines
+the English parenthetical from each label for its EO/IR vocabulary gate, so every rename below kept
+(or improved) its English term in parens -- classification is unaffected by construction, verified
+live via `tests/unit/test_classify_guards.py` (still green) and the new taxonomy test's assertion
+that every label is a non-empty "עברית (English)" string.
+
+| Key | Old label | New label | Why |
+|---|---|---|---|
+| `airborne_pods.targeting_pods` | פודי כיוון (Targeting Pods) | פודי ציון מטרות (Targeting Pods) | "כיוון" reads as generic "direction/aiming", not the professional term; "ציון מטרות" mirrors targeting doctrine's own "ציון מטרה" (target designation). Informal alias "פוד תקיפה" documented in a code comment (no structural alias field exists in this taxonomy) -- see "Not done this round" below. |
+| `land_surveillance.vehicle_sights` | מטע"די רק"ם ורכב (Commander/Gunner Sights, Situational Awareness) | כוונות מפקד ותותחן ומטע"די רק"ם (Commander/Gunner Sights, Vehicle EO/IR Payloads) | מטע"ד (מטען ייעודי) denotes a standalone mission payload/pod, not the vehicle's own fixed sighting device -- that has its own term, "כוונת". Kept "מטע"די רק"ם" for the subdomain's broader vehicle-payload scope. |
+| `computer_vision.edge_ai` | Edge AI על גבי מטע"ד | בינה מלאכותית על גבי מטע"ד (Edge AI) | Normalized to this taxonomy's own "עברית (English)" convention (already used by `tech_dev.on_sensor_ai`'s near-identical label) instead of leading with a bare English term. |
+| `computer_vision.gps_denied_nav` | ניווט חזותי ב-GPS-Denied | ניווט חזותי בסביבת GPS מוגבל (GPS-Denied Navigation) | Same convention fix -- Hebraized the adjective instead of splicing an English compound directly onto a Hebrew preposition. |
+| `secondary.computational_optics` | אופטיקה חישובית, Gimbal Stabilization, On-Chip | אופטיקה חישובית וייצוב ג'ימבל (Computational Optics, Gimbal Stabilization, On-Chip Processing) | English terms moved into the parenthetical gloss instead of running on after a Hebrew comma-separated list. |
+
+`מטע"ד` (מטען ייעודי) itself is correct and was deliberately left everywhere else it already
+appears (e.g. `airborne_pods`'s own domain label) -- only its *misuse* for a fixed AFV sight was a
+real error.
+
+**UI dictionary copies for the UI engineer** (do not edit `web/` this round -- listed here per the
+task instruction): `web/src/i18n/dictionaries/{he,en}.ts` carry **no** hardcoded copies of the old
+labels (grepped clean). The following files under `web/src/**` DO hardcode the old Hebrew phrase
+"פוד/פודי כיוון" and will read stale once the config label changes reach production UI copy:
+`web/src/mocks/mockApi.ts` (1), `web/src/mocks/data/tenders.ts` (2), `web/src/mocks/data/
+reports.ts` (4, including a mock decision-log Q&A whose own answer text is "פודי כיוון"),
+`web/src/mocks/data/investigations.ts` (3), `web/src/mocks/data/misc.ts` (1), `web/src/mocks/data/
+items.ts` (1, the taxonomy-label mock table itself -- `{ domain: "airborne_pods", sub:
+"targeting_pods", label: "פודי כיוון" }`), `web/src/mocks/data/bd.ts` (2),
+`web/src/pages/TendersPage.test.tsx` (2, both in test fixtures/assertions). All are mock/test data,
+not live-rendered dictionary strings, but should be updated to "פודי ציון מטרות" for consistency
+whenever that engineer next touches these files.
+
+**Not done this round** (flagged, not fixed -- out of this round's file scope):
+`classify.py`'s curated `_EOIR_KEYWORDS_HE` (independent of `taxonomy.yaml`, not auto-derived) still
+only recognizes the old phrase "פוד כיוון" -- harmless (it may still legitimately appear in
+incoming text verbatim) but does not yet also recognize the new canonical "פודי ציון מטרות" or the
+alias "פוד תקיפה". Left as a follow-up for `classify.py`'s owner.
+
+### W24 -- new `directed_energy` domain (HEL/DEW)
+
+Added a new top-level domain (kept every existing key, per the task's own instruction --
+`air_defense.hel` is untouched) rather than folding HEL/DEW component technology under
+`air_defense`/`c_uas`, since the requested scope (laser sources, amplifiers, beam combiners, beam
+directors/beam control, adaptive optics, thermal management, power -- airborne and ground, any
+platform/mission) is a coherent technology stack broader than either existing domain's own framing.
+Inserted between `air_defense` and `c_uas` in `taxonomy.yaml` (domain order drives report section
+order per `report_daily.md`/`report_weekly.md`'s own "לפי סדר הופעת התחומים ברשימה" instruction).
+
+`config/taxonomy.yaml` -- `domains.directed_energy` (4 subdomains): `hel_weapon_systems`
+(airborne & ground HEL weapon systems), `laser_sources_amplifiers` (fiber/slab/diode-pumped
+sources, amplifiers, beam combiners, spectral beam combining), `beam_control_directors` (beam
+directors, beam control, adaptive optics), `thermal_power_management` (thermal management & power).
+`classify.md` gained an explicit `air_defense/hel` vs `directed_energy` domain-selection rule
+(interceptor-engagement framing -> `air_defense/hel`; laser/DEW technology-or-program framing ->
+`directed_energy`, regardless of destination platform/mission); `system_analyst.md`'s core-domain
+enumeration and `triage.md`'s calibration examples updated to match the W21 rename.
+
+`config/watchlist.yaml` -- 16 companies + 1 program carry `directed_energy` in `focus`: 9 existing
+HEL-relevant primes got the focus tag added to their existing entry (RTX, Lockheed Martin
+[+alias HELIOS], BlueHalo, MBDA [+alias DragonFire], Rheinmetall, Elbit, IAI, Rafael, Hanwha) plus
+the existing `Iron Beam` program entry; 7 new companies added (QinetiQ, Boeing, General Atomics,
+nLIGHT, Coherent [+strict_alias "II-VI"], IPG Photonics [+strict_alias "IPG", avoiding the same
+short-acronym collision risk this file's header comment already documents for BlueHalo/LOCUST],
+TRUMPF). No Israeli-academia entity added (no stable canonical name to attribute a hit to without
+inventing one, per CONVENTIONS.md rule 5 "never invent") -- covered instead via the arXiv
+physics.optics source below.
+
+`config/sources.yaml` -- 4 sources tagged `directed_energy`: `arxiv_physics_optics_tech` and
+`laser_focus_world_tech` (both pre-existing, re-verified live 2026-09-06, `keywords_any` extended
+with HEL/DEW terms rather than adding near-duplicate feeds for the same publications), `spie_news`
+(pre-existing, tag added; still `verified: false`/JS-shell-blocked as before, unchanged this
+round), and a new `breaking_defense_dew` entry for Breaking Defense's own directed-energy-weapons
+tag feed -- live-checked 2026-09-06 (curl, desktop Chrome UA, 15s timeout): **403 Forbidden**
+(the site's main feed, already in this registry, returns 200; every `/tag/*/feed/` path tried,
+including two unrelated tags as a control, also 403s -- bot-protection blocks `/tag/` paths
+generically, not this tag specifically). Kept in the registry per this file's own
+documented-dead-end convention, `verified: false`, `enabled: false` (Q4-2/Q4-3 convention: a source
+with no working fetch path is disabled rather than left to fail every run).
+
+`config/tenders.yaml` -- 8 keywords added to the shared DOMAIN-signal list (`&kw`): "high-energy
+laser", "high energy laser", "HEL weapon", "directed energy", "directed-energy weapon", "laser
+weapon system", "beam director", "beam control" (still gated behind the existing PROCUREMENT-signal
+requirement, unchanged).
+
+### W26 -- executive-summary writing rules + deterministic style guard
+
+`report_daily.md`, `report_weekly.md`, `report_bd_territory.md` each gained a "כללי כתיבה
+תמציתית" block: one idea per sentence, <=20 words, lead with the decision-relevant fact (not
+meta-description), numbers always with units, no repeated sentence across sections/fields, and an
+explicit banned-filler-phrase list ("יש לציין", "חשוב להדגיש", "בהקשר זה", "ראוי לציין", "יש
+לזכור", "כפי שניתן לראות", "יצוין כי", "נציין כי", "מן הראוי לציין", "בהתייחס לכך", "במסגרת זו").
+
+New `agent/eoa/report/style.py` -- a deterministic post-check, deliberately split into a **safe
+removal** (`strip_filler_phrases`: every banned phrase above is pure padding, so deleting it plus
+cleaning up the resulting whitespace/punctuation can never change a sentence's factual claim or
+orphan its `cites`) and **detection-only flags** (`check_sentence_length_he` for the >20-word rule,
+plus cross-field duplicate-sentence detection in `apply_style_guard`) -- sentence
+splitting/merging/rewriting is deliberately never attempted, since safely re-deriving which `cites`
+apply to a rewritten sentence is exactly the silent-rewrite risk CONVENTIONS.md rule 4 ("provenance
+everywhere") warns against. `apply_style_guard(draft)` duck-types across every report draft shape
+in this codebase (same field names/traversal as `eoa.report.textnorm.normalize_draft`, mirrored
+deliberately) and returns `(updated_draft, StyleReport)`; `StyleReport.log_all(...)` emits one
+structlog event per violation for QA follow-up (CONVENTIONS.md rule 8).
+
+**Not wired into `eoa.report.daily`/`weekly`/`bd_territory`/`monthly` this round** -- those report
+builders are other engineers' concurrent work this round (file-ownership boundary, not a technical
+blocker). The module is complete and independently tested (16 unit tests,
+`tests/unit/test_report_style_round4b.py`); wiring `apply_style_guard(draft)` in at the same point
+each pipeline already calls `textnorm.normalize_draft(draft)` is a follow-up for those files'
+owners.
+
+### W27 -- deep-search answer_he: fixed-section assembly + bidi-safe formatting
+
+`InvestigationOut.answer_he` (the deep-search final answer) is now deterministically re-assembled,
+in `agent/eoa/search/deep_search.py`, as up to five sections in this fixed order -- each skipped
+when empty rather than rendered as a dangling header:
+
+1. **תשובה ישירה** (no header) -- the model's own direct-answer prose (paragraph 1 of `answer_he`);
+   an optional 2nd+ paragraph (blank-line separated in the model's own text) becomes...
+2. **### הקשר** -- any paragraph(s) after the first.
+3. **### עובדות מרכזיות** -- bullets, sourced from the existing `InvestigationOut.key_facts` field
+   (already populated by the model's `finish()` call; no schema change needed).
+4. **### פערים / מה לא ידוע** -- sourced from the existing `contradictions_he` field, whose scope
+   `deep_search_system.md` now documents as covering general gaps/unknowns too, not only
+   source-vs-source contradictions.
+5. **### מקורות** -- **never written by the model**; generated purely from the ground-truth
+   `sources` URL list (same "never trust the model's own list" doctrine as `_finalize_outcome`'s
+   pre-existing `sources = list(inv.read_urls)` fix). `deep_search_system.md` explicitly tells the
+   model never to write a sources section/list itself.
+
+A bidi-safe spacing/isolation pass (`_bidi_space_and_isolate`, applied line-by-line -- see its own
+docstring for the cross-line class-bleed bug that made a per-line design necessary rather than a
+single pass over the whole assembled string) then runs once: it inserts a space at any
+Hebrew/Latin-or-digit run boundary with none (the reported bug -- "Elbit Systemsזכתה" ->
+"Elbit Systems זכתה"), and wraps every Latin/digit run in Unicode isolate marks (U+2066 LRI /
+U+2069 PDI) -- a plain-text analogue of `eoa.report.docx_builder`'s own per-run bidi handling for
+HTML/docx output, reimplemented locally (not imported, to avoid pulling python-docx into the search
+module) with the same bracket-pair-symmetry fix `docx_builder.split_runs` documents (needed here so
+"- [1] https://..." never gets a space wedged inside the bracket). `eoa.report.textnorm.
+normalize_hebrew_punctuation` is reused as-is for the gershayim/geresh cleanup pass.
+
+Wired into both answer-producing paths: the local ReAct loop (`_finalize_outcome`, using the full
+`key_facts`/`contradictions_he`/`sources`) and the cloud-delegated batch path
+(`investigate_batch_cloud`, `sources` only -- `CloudInvestigationAnswer`'s own contract, U8-6b,
+carries no `key_facts`/`contradictions_he` fields, so those two sections simply don't appear there;
+out of scope to extend that schema this round). `deep_search_system.md` rule 7 rewritten with the
+full structure contract for the model (direct-answer paragraph, optional context paragraph,
+`key_facts` each ending in its own `[n]`, `contradictions_he` broadened, never write a sources
+section) and rule 10 (the Israeli-focus sub-question) updated to reference the new paragraph
+structure instead of "a short separate paragraph" with no further specification.
+
+Two pre-existing `test_deep_search_cloud_batch.py` assertions hardcoded the old passthrough
+`answer_he` and were updated to assert against `format_investigation_answer_he(...)`'s own output
+instead of a literal string (kept in sync with the module rather than duplicating its formatting
+logic in the test).
+
+### Verification
+
+- New tests: `tests/unit/test_taxonomy_round4b.py` (38), `tests/unit/test_deep_search_answer_format.py`
+  (18, including a deliberately run-on/bidi-messy sample per the task's own ask), `tests/unit/
+  test_report_style_round4b.py` (16) -- 72 new, all passing.
+- `pytest tests/unit -q -k "taxonomy or classify or triage or prompts or deep_search or style"` and
+  the full pre-existing deep-search suite (`test_deep_search_anchors/budget/cloud_batch/
+  mcp_tools/outcomes/reconcile_round4`, `test_jobs_deep_search_batch` -- 94 tests) -- all green
+  after the two `test_deep_search_cloud_batch.py` updates above.
+- `ruff check`/`ruff format --check` clean on every touched/new Python file.
+- `config/taxonomy.yaml`, `config/watchlist.yaml`, `config/sources.yaml` (via `eoa.fetch.
+  sources_loader.load_sources`), `config/tenders.yaml` all parse and load cleanly.

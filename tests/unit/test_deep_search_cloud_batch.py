@@ -226,7 +226,12 @@ class TestInvestigateBatchCloud:
         results, cross = ds.investigate_batch_cloud(pending)
         assert cross == "תובנה משותפת"
         assert results[1].outcome == "found"
-        assert results[1].result.answer_he == "תשובה טובה"
+        # Round-4b W27: answer_he is now deterministically re-assembled (direct answer + a
+        # מקורות section built from the ground-truth source list) -- see
+        # `format_investigation_answer_he`, exercised directly in test_deep_search_answer_format.py.
+        assert results[1].result.answer_he == ds.format_investigation_answer_he(
+            "תשובה טובה", sources=["https://a.example"]
+        )
 
     def test_missing_question_id_becomes_not_found(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(ds, "write_investigations_file", lambda pending, **k: Path("fake.md"))
@@ -253,7 +258,9 @@ class TestInvestigateBatchCloud:
         )
         pending = [{"job_id": 1, "item_id": None, "question": "q1"}]
         results, _cross = ds.investigate_batch_cloud(pending)
-        assert results[1].result.answer_he == "x"
+        # Round-4b W27: no sources here, so the assembled answer is just the bidi-safe-formatted
+        # direct answer (a lone Latin "x" still gets isolate-wrapped -- see the module's own note).
+        assert results[1].result.answer_he == ds.format_investigation_answer_he("x", sources=[])
 
     def test_both_providers_fail_raises_llm_output_error(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(ds, "write_investigations_file", lambda pending, **k: Path("fake.md"))
