@@ -207,11 +207,17 @@ export const he = {
       stdio: "תהליך מקומי",
       http: "HTTP",
     },
-    enabledChip: "פעיל",
-    disabledChip: "כבוי",
+    // Q5-12 (docs/qa/findings_Q5_r2.md): one status chip per server, priority order global switch
+    // > server's own enabled flag > required-key presence > live ping result.
+    status: {
+      globalOff: "כבוי (מתג ראשי)",
+      serverOff: "כבוי",
+      keyMissing: "לא מוגדר (מפתח חסר)",
+      configured: "מוגדר",
+      connected: "מחובר",
+      error: "שגיאה",
+    },
     inheritCliOnly: "מחובר רק דרך Claude CLI",
-    keyConfigured: "מפתח מוגדר",
-    keyNotConfigured: "מפתח לא מוגדר",
     toolCount: "{count} כלים",
     ping: "בדוק חיבור",
     pinging: "בודק…",
@@ -236,6 +242,11 @@ export const he = {
     },
     countsAria: "{open} פתוחים · {unknown} לא ידוע · {closed} סגורים · {archived} בארכיון",
     showClosedArchived: "הצג סגורים / בארכיון",
+    // Q5-11 (docs/qa/findings_Q5_r2.md): התצוגה הראשית (פתוח/לא ידוע) ריקה אך קיימים מכרזים
+    // סגורים/בארכיון -- רמז מוטבע + פעולה במקום הודעת "אין תוצאות" סתמית, כי הטוגל למעלה
+    // דווקא כן יחשוף אותם.
+    hiddenClosedArchivedHint: "{count} מכרזים סגורים מוסתרים בתצוגה הנוכחית.",
+    showHiddenClosedArchivedCta: "הצג {count} מכרזים סגורים",
     whyRelevantPrefix: "למה רלוונטי: ",
   },
   bd: {
@@ -252,6 +263,10 @@ export const he = {
     failedStatus: "יצירת הדוח נכשלה",
     pastReportsTitle: "דוחות קודמים",
     emptyTerritories: "לא נמצאו טריטוריות פעילות",
+    // Q5-15 (docs/qa/findings_Q5_r2.md): "לא נמצאו טריטוריות פעילות" is only true when the
+    // territories list itself is empty -- when the selector is populated but nothing is picked
+    // yet, that label is simply wrong. A neutral prompt for the latter, unrelated case.
+    selectTerritoryPrompt: "בחר טריטוריה כדי להציג דוחות",
     emptyReports: "אין עדיין דוחות לטריטוריה זו",
     emptyReportsDescription: "צור דוח חדש כדי להתחיל",
     selectReportPrompt: "בחר דוח מהרשימה או צור דוח חדש",

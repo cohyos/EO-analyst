@@ -47,6 +47,30 @@ class TestListTendersDefaultView:
         _, params = mock_fetchall.call_args_list[0].args
         assert set(params["statuses"]) == {"open", "unknown", "archived"}
 
+    def test_include_closed_without_explicit_since_days_lifts_the_window(self):
+        """Q5-11 (docs/qa/findings_Q5_r2.md): closed tenders are old by definition -- asking to see
+        them must not leave the 90-day window in place, or the toggle reveals nothing."""
+        with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
+            services.list_tenders(include_closed=True)
+        query, params = mock_fetchall.call_args_list[0].args
+        assert "since_days" not in params
+        assert "COALESCE(deadline, published_at::date, created_at::date) >=" not in query
+
+    def test_include_archived_without_explicit_since_days_lifts_the_window(self):
+        with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
+            services.list_tenders(include_archived=True)
+        query, params = mock_fetchall.call_args_list[0].args
+        assert "since_days" not in params
+        assert "COALESCE(deadline, published_at::date, created_at::date) >=" not in query
+
+    def test_include_closed_with_explicit_since_days_still_applies_it(self):
+        """An explicit since_days always wins, include_* or not."""
+        with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
+            services.list_tenders(include_closed=True, since_days=30)
+        query, params = mock_fetchall.call_args_list[0].args
+        assert "COALESCE(deadline, published_at::date, created_at::date) >=" in query
+        assert params["since_days"] == 30
+
     def test_explicit_status_bypasses_default_set_and_since_days(self):
         """An operator who explicitly asks for status=closed wants every closed tender, not just
         recent ones -- since_days only narrows the default (no explicit status) view."""

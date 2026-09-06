@@ -29,6 +29,12 @@ class _FakeCursor:
     def fetchone(self) -> dict:
         return self._row
 
+    def fetchall(self) -> list:
+        # Q3-6b: `insert_event` probes for a same-item, different-kind near-duplicate before its
+        # own exact-match upsert -- an empty result here means "no such row", falling through to
+        # the exact-match upsert this test actually exercises.
+        return []
+
     def __enter__(self) -> _FakeCursor:
         return self
 

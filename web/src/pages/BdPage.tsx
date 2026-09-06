@@ -168,7 +168,20 @@ export function BdPage() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {!territory && <EmptyState title={t("bd.emptyTerritories")} />}
+        {/* Q5-15 (docs/qa/findings_Q5_r2.md): "no active territories" used to show any time no
+            territory was selected, even with a fully populated selector -- that label is only
+            true when the territories list itself is empty. A neutral "pick one" prompt otherwise;
+            nothing renders here while the territories query is still loading, to avoid flashing
+            either message before we actually know which one applies. */}
+        {!territory && !territoriesQuery.isLoading && (
+          <EmptyState
+            title={
+              (territoriesQuery.data?.length ?? 0) === 0
+                ? t("bd.emptyTerritories")
+                : t("bd.selectTerritoryPrompt")
+            }
+          />
+        )}
         {territory && !selectedId && <EmptyState title={t("bd.selectReportPrompt")} />}
         {selectedId && detailQuery.isLoading && <LoadingState label={t("common.loading")} />}
         {selectedId && detailQuery.isError && <ErrorState onRetry={() => detailQuery.refetch()} />}

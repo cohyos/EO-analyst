@@ -66,6 +66,10 @@ export function TendersPage() {
   // view is empty but toggling 'show closed/archived' or changing filters might reveal rows"
   // (show the filters + toggle so the user actually can).
   const totalTendersEverywhere = Object.values(counts).reduce((sum, n) => sum + (n ?? 0), 0);
+  // Q5-11 (docs/qa/findings_Q5_r2.md): closed/archived rows that exist but aren't shown because
+  // `showClosedArchived` is off -- when this is > 0 while the default view is empty, the toggle
+  // above can actually fix it, so say so inline instead of a dead-end "no matches" message.
+  const hiddenClosedArchivedCount = (counts.closed ?? 0) + (counts.archived ?? 0);
 
   const countries = useMemo(() => {
     const set = new Set<string>();
@@ -172,11 +176,28 @@ export function TendersPage() {
                   !filters.country &&
                   !filters.q &&
                   !showClosedArchived ? (
-                    // Default view (open + unknown, no user filters) is empty while closed/archived
-                    // rows exist: say "no open tenders" rather than "no matches" (QA r2, 2026-09-06).
+                    // Default view (open + unknown, no user filters) is empty. Q5-11: if
+                    // closed/archived rows exist, the "show closed/archived" toggle above would
+                    // reveal them, so surface an inline action instead of a dead-end "no matches"
+                    // message; only fall back to the plain empty state when nothing would help.
                     <EmptyState
                       title={t("tenders.emptyOpenTitle")}
-                      description={t("tenders.emptyOpenDescription")}
+                      description={
+                        hiddenClosedArchivedCount > 0
+                          ? t("tenders.hiddenClosedArchivedHint", { count: hiddenClosedArchivedCount })
+                          : t("tenders.emptyOpenDescription")
+                      }
+                      action={
+                        hiddenClosedArchivedCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setShowClosedArchived(true)}
+                            className="mt-1 rounded-md border border-border-strong px-3 py-1.5 text-sm text-fg hover:bg-bg-sunken"
+                          >
+                            {t("tenders.showHiddenClosedArchivedCta", { count: hiddenClosedArchivedCount })}
+                          </button>
+                        ) : undefined
+                      }
                     />
                   ) : (
                     <TenderTable

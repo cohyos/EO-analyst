@@ -64,6 +64,49 @@ class TestMergeKeyAndTarget:
         key2, _ = ren._merge_key_and_target({"name": "IAI", "kind": "company"})
         assert key1 != key2
 
+    def test_country_hebrew_english_variants_group_under_english_name(self) -> None:
+        """Q3-13 r3 (docs/qa/findings_Q3_r2.md): "יפן" and "Japan" (or "ארה\"ב"/"ארצות הברית" and
+        "United States") are the same country entity, however spelled/language."""
+        key1, target1 = ren._merge_key_and_target({"name": "יפן", "kind": "company"})
+        key2, target2 = ren._merge_key_and_target({"name": "Japan", "kind": "country"})
+        assert key1 == key2
+        assert target1 == target2 == "Japan"
+
+    def test_curated_org_hebrew_english_variants_group_together(self) -> None:
+        key1, target1 = ren._merge_key_and_target({"name": 'צבא ארה"ב', "kind": "company"})
+        key2, target2 = ren._merge_key_and_target({"name": "צבא ארצות הברית", "kind": "company"})
+        key3, target3 = ren._merge_key_and_target({"name": "US Army", "kind": "org"})
+        assert key1 == key2 == key3
+        assert target1 == target2 == target3 == "US Army"
+
+
+class TestRejectJunk:
+    def test_generic_non_entities_rejected(self) -> None:
+        entities = [
+            {"id": 1, "name": "השוק הביטחוני"},
+            {"id": 2, "name": "Elbit"},
+            {"id": 3, "name": "image captioning"},
+        ]
+        report = ren._reject_junk(entities, dry_run=True)
+        rejected_ids = {r["id"] for r in report}
+        assert rejected_ids == {1, 3}
+
+
+class TestBackfillCountry:
+    def test_watchlist_and_static_map_both_fill_country(self) -> None:
+        entities = [
+            {"id": 1, "name": "Elbit", "kind": "company", "country": None},
+            {"id": 2, "name": "Rolls-Royce", "kind": "company", "country": None},
+            {"id": 3, "name": "Acme Corp", "kind": "company", "country": None},
+            {"id": 4, "name": "Iran", "kind": "country", "country": None},
+        ]
+        report = ren._backfill_country(entities, dry_run=True)
+        by_id = {r["id"]: r["country"] for r in report}
+        assert by_id[1] == "IL"
+        assert by_id[2] == "UK"
+        assert 3 not in by_id  # unknown company -- nothing to backfill from
+        assert 4 not in by_id  # a country-kind row's own `country` column is untouched
+
 
 class TestMergeDuplicatesReportShape:
     def test_singleton_groups_produce_no_merge_report(self) -> None:

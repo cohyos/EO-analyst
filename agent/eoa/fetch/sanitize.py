@@ -12,6 +12,8 @@ reports what it found via `CleanText.suspicious` / `.encoded_blobs` /
 from __future__ import annotations
 
 import hashlib
+import html as html_entities  # `choose_title`'s own `html` parameter (raw page HTML) shadows the
+# stdlib module name in that function's scope, so it's imported under a distinct name here.
 import json
 import re
 from datetime import UTC, datetime
@@ -707,11 +709,19 @@ def choose_title(
     """
 
     def _normalize_candidate(text: str | None) -> str | None:
-        """Strip whitespace, collapse internal whitespace, and reject implausible candidates."""
+        """Strip whitespace, unescape HTML entities, collapse internal whitespace, and reject
+        implausible candidates.
+
+        Q5-13 (docs/qa/findings_Q5_r2.md): rungs 1-3 pull the candidate straight out of raw HTML
+        via regex (`_extract_og_title`/`_extract_title_tag`/`_extract_h1_title`), never through a
+        real HTML parser -- so a numeric/named entity in the source markup (`Israel&#39;s Aero
+        Sentinel`) reached `items.title` completely undecoded. `html.unescape` runs before the
+        whitespace collapse so an entity like `&nbsp;` normalizes the same as a literal space.
+        """
         if not text:
             return None
-        cleaned = text.strip()
-        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = html_entities.unescape(text.strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
         if not cleaned or _is_implausible_title(cleaned):
             return None
         return cleaned

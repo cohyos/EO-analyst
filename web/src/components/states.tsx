@@ -41,16 +41,22 @@ export function EmptyState({
   title = "אין נתונים להצגה",
   description,
   icon,
+  action,
 }: {
   title?: string;
   description?: string;
   icon?: ReactNode;
+  /** Q5-11 (docs/qa/findings_Q5_r2.md): an optional inline action (e.g. a button) rendered below
+   * the description -- for an empty state that a control elsewhere on the page can actually fix
+   * (e.g. "X מכרזים סגורים מוסתרים — הצג"), so the fix sits right where the dead end was. */
+  action?: ReactNode;
 }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 p-10 text-center text-fg-muted">
       {icon ?? <Inbox size={26} aria-hidden="true" />}
       <p className="font-medium text-fg">{title}</p>
       {description && <p className="max-w-sm text-sm">{description}</p>}
+      {action}
     </div>
   );
 }

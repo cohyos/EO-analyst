@@ -24,6 +24,7 @@ from eoa.tenders.forecast import (
     _rationale_guard_failure,
     _regenerate_flagged_forecasts,
     _resolve_buyer_country,
+    _upsert_forecast,
     _window,
     compute_likelihood,
     forecast_tenders,
@@ -786,3 +787,75 @@ class TestForecastTendersNeedsRegenWiring:
 
         assert stats.needs_regen == 0
         assert mock_upsert.call_args.kwargs.get("needs_regen") is False
+
+
+class TestUpsertForecastSourcesDedup:
+    """Q3-11b (docs/qa/findings_Q3_r2.md): `tender_forecasts.sources` must not contain the same
+    "item:N" entry more than once, even when `candidate.trigger_item_ids` itself has repeats
+    (multiple triggering events landing on the same item)."""
+
+    def test_duplicate_trigger_item_ids_produce_deduped_sources(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict = {}
+
+        class _FakeCursor:
+            def execute(self, query, params):
+                captured["params"] = params
+
+            def fetchone(self):
+                return {"id": 1}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _FakeConnection:
+            def cursor(self):
+                return _FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr("eoa.tenders.forecast.connection", lambda: _FakeConnection())
+
+        candidate = _candidate(trigger_item_ids=[105, 105, 105, 58])
+        _upsert_forecast(candidate, 0.7, (dt.date(2026, 1, 1), dt.date(2026, 6, 1)), "rationale")
+
+        assert captured["params"]["sources"] == ["item:105", "item:58"]
+
+    def test_single_trigger_item_id_unaffected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict = {}
+
+        class _FakeCursor:
+            def execute(self, query, params):
+                captured["params"] = params
+
+            def fetchone(self):
+                return {"id": 1}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _FakeConnection:
+            def cursor(self):
+                return _FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr("eoa.tenders.forecast.connection", lambda: _FakeConnection())
+
+        candidate = _candidate(trigger_item_ids=[10])
+        _upsert_forecast(candidate, 0.7, (dt.date(2026, 1, 1), dt.date(2026, 6, 1)), "rationale")
+
+        assert captured["params"]["sources"] == ["item:10"]

@@ -6150,3 +6150,225 @@ touched file (`agent/eoa/mcp_servers/*.py`, `agent/eoa/mcp/client.py`, `agent/eo
 `agent/eoa/api/services.py`, `agent/eoa/security/redact.py`, `agent/eoa/security/__init__.py`,
 `agent/eoa/llm/providers/api.py`, and all new/changed test files).
 
+
+## Q3 r3 fixes (docs/qa/findings_Q3_r2.md, 2026-09-06): entity dedup/gate/country, events kind-diff
+merge, forecast sources dedup, legacy investigations, analysis-gaps backfill
+
+Round-2 QA re-graded several Q3 items still open after the r1 fixes (commit `f83a98c`) landed:
+Q3-13 (entity duplicates/junk/country still bad), Q3-8/Q3-9 (entities_mentioned/key_facts still
+~90%/~83% empty despite r1's deterministic watchlist backfill), Q3-6b (a same-item event
+duplicate differing only by `kind` slipped past the r1 `(item_id, kind, lower(title))` unique
+index), Q3-11b (`tender_forecasts.sources` repeats), Q3-5 (14-15 historical `deep_search` jobs
+with no read URLs at all -- unrecoverable, only fair to label), Q3-10 (stub-content items analyzed
+before the content-quality gate existed).
+
+**Q3-13 r3 -- entity duplicates/junk/country, continued.** `agent/eoa/pipeline/entity_normalize.py`
+gained three new lookup tables and a stricter "real entity" gate, all pure text/config (no DB):
+
+- `_CURATED_ORG_RECORDS`/`_curated_org_index()`: ~40 government/military bodies not on
+  `config/watchlist.yaml` (which only tracks EO/IR *companies*/*programs*) -- US Army/Navy/Air
+  Force/Marines/Space Force/Coast Guard/National Guard/DoD/DIU/DARPA/DHS/DIA/CIA/FBI, IDF/Israeli
+  MoD/Government of Israel/Mossad/Shin Bet, NATO/NSPA, Bundeswehr/German MoD, French/British/
+  Ukrainian/Russian/Japanese/South Korean/Taiwanese/Indian/Saudi/Emirati/Turkish/Polish/Australian/
+  Canadian armed forces, "Europe" -- every record resolving to kind="org", each with its Hebrew
+  transliteration(s) as aliases (e.g. US Army <- "צבא ארה"ב", "צבא ארצות הברית", "הצבא האמריקאי").
+  resolve_canonical/find_watchlist_aliases_in_text now check this table alongside the watchlist.
+- `_COUNTRY_NAMES`/`resolve_country_name`: ~35 countries, English + Hebrew (including common
+  transliterations), mapping to one canonical English display name -- lets normalize_kind fix a
+  country mistakenly stored kind="company" (איראן/ארצות הברית/יוון -> "country") and lets
+  canonical_name_and_kind merge language/spelling variants of the same country entity (יפן and
+  Japan, ארה"ב/ארצות הברית and United States) onto one canonical English name.
+- `_COMPANY_COUNTRY_MAP`/`resolve_company_country`: ~45-entry static country map for well-known
+  defense-industry companies deliberately not on the watchlist (Rolls-Royce, ThyssenKrupp, Baykar,
+  Boeing, General Dynamics, BAE Systems, Palantir, Kratos, KNDS, Airbus, Naval Group, Honeywell,
+  GE Aerospace, several Israeli/Korean/Singaporean primes, ...), keyed by English name and, for a
+  few observed Hebrew-spelled rows, that transliteration too.
+- `_GENERIC_HEBREW_KEYWORDS`/`is_generic_non_entity`/`is_junk_entity`: a stoplist of substrings
+  (שוק/תעשיי/סטארט/לקוח/תמונ/מפעיל/איומ/מלחמ/מצר/משבר/משקיע/תשתי/אבטח/ספק/תצוג/סביב/חברות/תחום/
+  "של מדינה") that mark a Hebrew phrase as a generic concept/market/category rather than one
+  specific named actor (e.g. השוק הביטחוני, תעשייה, סטארט-אפים, לקוחות בינלאומיים, תמונות תרמיות,
+  מפעילים בשטח, איומים בקבוצת משקל 3, מלחמת איראן-עיראק, מצר הורמוז), plus a comma-separated
+  multi-country enumeration check (יפן, דנמרק, גרמניה is a list, not an entity). Checked only
+  after a name has failed to resolve against the watchlist/curated-org/country tables, so a real
+  recognised entity is never rejected on a keyword coincidence. is_junk_entity =
+  is_technique_like (r1) OR is_generic_non_entity (r3) -- the single gate upsert_entity and the
+  repair script both call.
+- `config/watchlist.yaml`: added AeroVironment (aliases incl. the two Hebrew transliterations that
+  had split into separate entities, ארוויירונמנט/ארוויונמנט) and Kongsberg (aliases incl.
+  קונגסברג, KONGSBERG), plus "Anduril Industries" as an alias of the existing Anduril record
+  (caught live during this fix's own LLM re-analyze pass, below).
+- **Root-cause bug fix, `agent/eoa/pipeline/analyze.py`'s edge-writer** (persist_analysis,
+  post-processing block): merge_entity (eoa.memory.graph, not owned by this fix) does a raw
+  `UPDATE entities SET name = ...` -- it was being called with the raw, as-extracted edge endpoint
+  name (e.g. "USAF") even though upsert_entity had just canonicalised that same call onto an
+  existing row ("US Air Force"), so every edge write was silently renaming the row back to the raw
+  spelling, undoing Q3-13's de-duplication and guaranteeing the duplicate would reappear the next
+  time some other item's extraction spelled it the canonical way. This is almost certainly why
+  r1's fix (commit f83a98c, entities 428->416) didn't hold: entities had grown back to 470 by r2's
+  re-check. Fixed by resolving (name, kind) through entity_normalize.canonical_name_and_kind once
+  per edge endpoint and passing that same canonical form to both upsert_entity and merge_entity.
+  Regression test: test_persist_analysis.py::test_persist_analysis_merge_entity_never_reverts_canonicalization.
+- `scripts/repair_entities_normalize.py`: pass 1 renamed `_reject_junk` (uses is_junk_entity,
+  report key `junk_rejected`; `technique_like_rejected` kept as a backward-compatible alias of the
+  same list); pass 3 (_backfill_country) also tries resolve_company_country for a
+  non-watchlisted company-kind row, and skips a country-kind row's own `country` column (denotes
+  its country, not a country it's from); pass 4's `_merge_key_and_target` also groups by
+  resolve_country_name.
+- **Run live 2026-09-06 (r3, on top of r1's already-applied fix)**: entities 470 -> 420 (29 junk
+  rejected, 25 kind fixes, 35 country backfills, 14 duplicate groups / 21 rows merged -- including
+  AeroVironment (2 Hebrew transliterations), Kongsberg, US Army (3 variants), US Navy (3
+  variants), US Air Force (2 variants), US Department of Defense (2 variants), Japan/ישראל/Iran/
+  United States (Hebrew<->English country pairs), Europe/אירופה, Israeli Ministry of Defense/
+  משרד הביטחון). country filled: 38 -> 59 of 420 entities (14%, up from r2's reported 8.6% -- the
+  top-40 static map only covers well-known primes, so a long tail of small/unrecognised company
+  names stays uncovered by design). 15 example junk rows rejected: לקוח בינלאומי לא מזוהה,
+  לקוחות בינלאומיים, תשתיות ייצור, יפן, דנמרק, גרמניה, סטארט-אפים, חברות סייבר ו-AI, איומים בקבוצת
+  משקל 3, תמונות תרמיות, מפעילים בשטח, תצוגות ראש בקסדה, סביבות ניתוק קישוריות, תעשייה, משרד
+  הביטחון של מדינה חברה בנאט"ו, השוק הביטחוני הגלובלי/המבצעי/והמבצעי, תחום ההגנה האווירית
+  והאלקטרו-אופטית (29 total, all verified by hand -- zero false positives against a real
+  watchlist/curated-org/country name).
+
+**Q3-6b -- near-duplicate events differing only by kind.** `agent/eoa/memory/relational.py`:
+event_title_similarity(a, b) (character-level, difflib.SequenceMatcher on
+casefolded/whitespace-collapsed titles -- not token-Jaccard: the corpus's titles are short Hebrew
+sentences where a single one-letter prefix difference on one word out of six/seven ("זכייה במכרז
+לפיתוח..." vs "זכייה במכרז פיתוח...", item 70's actual r1/r2 motivating example) turns
+token-Jaccard's score to ~0.71 -- well under threshold -- while difflib correctly scores it ~0.99);
+EVENT_KIND_PRIORITY (contract_award > acquisition > partnership > deployment > test > anything
+else) and more_specific_event_kind; EVENT_TITLE_DEDUP_THRESHOLD = 0.9. insert_event now checks,
+before its existing exact-(item_id, kind, lower(title)) upsert, for an existing different-kind
+event of the same item at or above that similarity -- when found, merges into it (same
+non-null-wins/richer-parties/max-confidence policy as the exact-match upsert) with kind upgraded
+to the more specific of the two, instead of inserting a second row the exact-match unique index
+can't catch. scripts/repair_events_dedup.py gained a third pass, find_kind_diff_duplicate_groups
+(same similarity/priority functions, applied over the rows surviving pass 1's exact dedup) for
+existing data. **Run live 2026-09-06**: 1 group found and merged -- item 70's contract_award/test
+pair (id 3 kept, contract_award survives; id 64 deleted) -- events 142 -> 141.
+
+**Q3-11b -- tender_forecasts.sources duplicate entries.** `agent/eoa/tenders/forecast.py`'s
+_upsert_forecast built sources from candidate.trigger_item_ids without deduping it (that list can
+repeat an item id when multiple triggering events land on the same item) -- now
+dict.fromkeys(...)-deduped (order-preserving) at write time. scripts/repair_forecast_sources.py
+(new) applies the same dedup to existing rows. **Run live 2026-09-06**: 7/7 forecast rows had
+duplicates (id 1: 3->1, id 2: 8->4, id 5: 7->4, id 6: 11->6, id 7: 9->5, id 9: 5->4, id 11: 3->1).
+
+**Q3-5 -- legacy investigations with no documented sources.** scripts/mark_legacy_investigations.py
+(new): (1) for every deep_search job whose jobs.result.sources is empty and whose
+investigation_log rows carry no url at all (pre-dates migration 0015's url/title columns --
+unrecoverable, nothing to backfill from), appends " (מקורות לא תועדו בגרסה זו)" to
+result.what_was_tried_he and sets result.legacy_no_sources = true (idempotent); (2) for a job with
+outcome="not_found" but non-empty sources (the model did read something, it just didn't call it a
+finding), reclassifies to outcome="partial", confidence=0.5. **Run live 2026-09-06**: 15 jobs
+labelled legacy (ids 2, 3, 5, 16, 17, 23-27, 45-48, 70 -- one more than r2's reported 14, since a
+new job matched the same criteria in the interim); 2 jobs reclassified (15, 20, exactly as r2
+named).
+
+**Q3-8/Q3-9/Q3-10 -- analysis gaps backfill.** scripts/backfill_analysis_gaps.py (new), three
+independent passes:
+
+1. Deterministic entities_mentioned backfill (no LLM) -- sweeps every classified item with an
+   empty entities_mentioned through find_watchlist_aliases_in_text (now also matching the curated
+   org table above, so "US Army"/"IDF"/"NATO" mentions backfill too, not just watchlist
+   companies). **Run live**: 294 candidates, 190 filled, 104 still empty (no recognised name in
+   the text at all -- a real ceiling for a purely deterministic pass, not a bug).
+2. LLM re-analyze pass (gated via the normal eoa.resources.gate, no separate concurrency control)
+   -- re-runs analyze.analyze_item/persist_analysis (the real pipeline functions; the analyze
+   schema always emits summary/so_what/key_facts/entities/events/edges together, so there is no
+   cheaper "fields-only" extraction) for red/orange/yellow items (red/orange first) still missing
+   key_facts or entities_mentioned after pass 1, capped --limit (default 60). Stops (doesn't
+   raise) on ResourceUnavailable; counts an LLMOutputError/persist failure and continues. Checked
+   eo status/the jobs table for an active night-window run before starting (GPU was briefly at
+   95%/81C from a transient deep_search job finishing; idle before this pass began) -- run live
+   with --limit 40, 22 real candidates after pass 1.
+3. Pre-gate stub cleanup (no LLM) -- a content_status='stub' item still carrying
+   summary_he/so_what_he/key_facts was analyzed before analyze.run_analyze's content-quality gate
+   existed; clears those three fields unconditionally, and resets level/domain to
+   NULL/'out_of_scope' unless the title alone names a recognised watchlist/curated-org entity and
+   the item already has both a level and domain on record (_title_only_classification_defensible).
+   **Run live 2026-09-06**: 30 candidates (one more than r2's reported 29), 27 level/domain reset,
+   3 kept (title-defensible: id 4 "Why the Army wants to deploy nuclear microreactors...", id 603
+   "...F-35 pilots get $400,000 helmets...", and one more whose full title -- beyond the 80-char
+   preview -- names a recognised entity).
+
+### Tests
+
+New: tests/unit/test_events_near_duplicate.py (19, incl. a regression for item 70's exact real
+near-duplicate titles), tests/unit/test_mark_legacy_investigations.py (7),
+tests/unit/test_repair_forecast_sources.py (4), tests/unit/test_backfill_analysis_gaps.py (11).
+Extended: tests/unit/test_entity_normalize.py (+37: curated org/country/company-country/
+generic-non-entity/junk-gate coverage), tests/unit/test_repair_entities_normalize.py (+7:
+country-merge grouping, junk rejection, country backfill), tests/unit/test_tenders_forecast.py
+(+2: sources dedup), tests/unit/test_events_dedup.py (updated _FakeCursor for the new
+near-duplicate pre-check), tests/unit/test_persist_analysis.py (updated two edge-writer tests'
+expected canonical names + 1 new regression for the merge_entity raw-name bug). ruff check clean
+on every touched file. All new/changed unit tests pass without DB/GPU (fake cursor/connection
+objects); the DB-touching repair-script runs above were executed for real against the live
+eoanalyst database (not mocked), with dry-run verification first for every one.
+
+## Q5 r2 UI/UX fixes (docs/qa/findings_Q5_r2.md): Q5-10, Q5-11, Q5-12, Q5-13, Q5-15, Q5-16
+
+- **Q5-10 (Morning KPI vs. feed count mismatch)**: `_night_summary()` counted red/orange/
+  items_ingested by `COALESCE(fetched_at, created_at)` over a rolling last-24h window; the feed's
+  `since` filter (`eoa.api.services.list_items`) instead keyed off `COALESCE(published_at,
+  fetched_at)` with no window ceiling -- two different fields, so a KPI card's number and the feed
+  count of the page it deep-linked to disagreed (216 ingested vs. 24 in the QA report). Both now
+  use `COALESCE(fetched_at, created_at) >= since`; `MorningPage.tsx`'s red/orange cards also carry
+  `&since=24h` (previously only the "ingested" card did). Verified live: `/api/morning`'s
+  red/orange/items_ingested exactly equal `/api/items?since=<24h-ago-iso>&level=...` totals on a
+  throwaway 8766 instance (the shared 8765 backend predates this fix).
+- **Q5-11 (tenders "show closed/archived" toggle revealed nothing)**: `list_tenders`'s
+  `since_days` defaulted to 90 at both the route and service layer, so `include_closed`/
+  `include_archived` widened the *status* set but the 90-day window still hid everything (closed
+  tenders are old by definition). Route default is now `None`, and the service only applies
+  `DEFAULT_SINCE_DAYS` when the caller passed nothing AND neither include flag is set; an
+  explicit `since_days` (any value) always applies regardless. `TendersPage.tsx` now shows an
+  inline "X מכרזים סגורים מוסתרים בתצוגה הנוכחית" hint + "הצג X מכרזים סגורים" action (via a new
+  `EmptyState.action` prop in `components/states.tsx`) instead of the generic "no open tenders"
+  message when the toggle would actually reveal rows. Verified live on a throwaway 8766: default
+  view 0 tenders (5 closed exist), `include_closed=true&include_archived=true` with no
+  `since_days` -> 5 rows; the same call with an explicit `since_days=1` correctly stays at 0.
+- **Q5-12 (MCP card showed "פעיל" regardless of the global switch/missing keys)**: `MCPCard.tsx`'s
+  per-server chip used to read `server.enabled` alone. Replaced with `serverStatus()`, a single
+  priority-ordered chip: global switch off -> "כבוי (מתג ראשי)"; server's own `enabled` false ->
+  "כבוי"; a required key missing -> "לא מוגדר (מפתח חסר)"; otherwise "מוגדר", replaced by
+  "מחובר"/"שגיאה" once a ping result exists. No backend change needed -- `list_mcp_servers`
+  already returned every needed field (`mcp_enabled`, `server.enabled`, `key_configured`, `ok`,
+  `error`). Verified live: with the global MCP switch off, every connector chip now reads "כבוי
+  (מתג ראשי)".
+- **Q5-13 (raw HTML entities in titles, e.g. `Israel&#39;s Aero Sentinel`)**: rungs 1-3 of
+  `choose_title` pull a candidate out of raw HTML via regex, never through a real HTML parser, so
+  an entity in the source markup reached `items.title` undecoded. `_normalize_candidate` now runs
+  `html.unescape` before the whitespace collapse (imported as `html_entities` -- `choose_title`'s
+  own `html` parameter, the raw page HTML, shadows the stdlib module name in that function's
+  scope). Added `scripts/repair_titles.py --unescape` (dry-run by default, `--apply` to write) --
+  **run for real against the live DB**: 6 titles repaired (ids 112, 119, 1007, 2036, 4671, 5841;
+  `&#39;`/`&#039;`/`&quot;`/`&amp;` variants), 0 candidates left on a follow-up dry-run.
+- **Q5-15 (`/bd` without `?territory` showed "no active territories" over a populated selector)**:
+  `BdPage.tsx`'s right-pane empty state used to fire on `!territory` alone. Now checks the
+  territories query: empty list -> `bd.emptyTerritories` ("לא נמצאו טריטוריות פעילות"); populated
+  but nothing picked -> new `bd.selectTerritoryPrompt` ("בחר טריטוריה כדי להציג דוחות"); nothing
+  renders while the territories query is still loading (avoids flashing the wrong one). Verified
+  live: `/bd` with a populated selector now shows the neutral prompt.
+- **Q5-16 (e2e 04-entities watchlist toggle flaky)**: root-caused by direct, repeated
+  reproduction (not a guess) -- the checkbox's `onChange` goes through react-router's
+  `setSearchParams`, which Playwright's `.check()`/`.uncheck()` treat as a "scheduled navigation"
+  to wait out; their built-in post-click state check is a single immediate read of the DOM
+  `checked` property, which can land in the narrow window before React's re-render has caught up,
+  throwing "Clicking the checkbox did not change its state" even though the click and the
+  resulting state/URL both land correctly a moment later, every time. Not a detachment/remount of
+  the control (`EntityListPanel` never unmounts across this flow). Fixed in
+  `e2e/tests/04-entities.spec.ts`: drive the checkbox with `.click()` + `expect(...).toBeChecked()`
+  (which polls/retries) instead of `.check()`/`.uncheck()`; use the accessible role/name locator;
+  wait for the entities list's own network response after the *first* toggle only -- the *second*
+  toggle (back to the untouched default filter set) hits the QueryClient's global 15s `staleTime`
+  (`web/src/App.tsx`) and is served from cache with no network round-trip, so waiting for one
+  there would deadlock. 8/8 clean runs after the fix (was failing ~7/8 before).
+
+### Tests
+
+New: `TestQ5_13HtmlEntityUnescape` in `tests/unit/test_title_fallback.py` (4), 3 new cases in
+`tests/unit/test_api_tenders_service.py` (Q5-11 window-lifting), 3 new cases in
+`web/src/pages/TendersPage.test.tsx` (Q5-11 inline hint/CTA). Updated:
+`web/src/pages/MorningPage.test.tsx` (red/orange hrefs now carry `&since=24h`). `npm run build`
+clean, `npm run lint` clean (0 errors, pre-existing warnings only), full vitest suite green (140
+tests). Backend: 112 targeted pytest cases green (sanitize/title/tenders/morning/services).

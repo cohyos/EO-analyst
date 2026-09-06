@@ -356,30 +356,72 @@ def test_persist_analysis_creates_edges(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert n_edges == 1
 
-    # upsert_entity should be called twice: once for src, once for dst
+    # upsert_entity should be called twice: once for src, once for dst -- Q3-13 r3 (docs/qa/
+    # findings_Q3_r2.md): with the *canonical* watchlist name ("Elbit Systems" -> "Elbit",
+    # "Israel Aerospace Industries" -> "IAI"), not the raw as-extracted alias.
     assert len(upsert_entity_stub.calls) == 2
 
     # First upsert_entity call (src)
     _, kwargs1 = upsert_entity_stub.calls[0]
-    assert kwargs1["name"] == "Elbit Systems"
+    assert kwargs1["name"] == "Elbit"
     assert kwargs1["kind"] == "company"
     assert kwargs1["first_seen_item"] == 300
 
     # Second upsert_entity call (dst)
     _, kwargs2 = upsert_entity_stub.calls[1]
-    assert kwargs2["name"] == "Israel Aerospace Industries"
+    assert kwargs2["name"] == "IAI"
     assert kwargs2["kind"] == "company"
     assert kwargs2["first_seen_item"] == 300
 
-    # merge_entity should be called twice
+    # merge_entity should be called twice, with the same canonical names -- regression for the
+    # bug where merge_entity's raw `UPDATE entities SET name = ...` was called with the
+    # *uncanonicalised* alias, silently renaming the row back and undoing the deduplication.
     assert len(merge_entity_stub.calls) == 2
-    assert merge_entity_stub.calls[0][0] == (1, "Elbit Systems", "company", None)
-    assert merge_entity_stub.calls[1][0] == (2, "Israel Aerospace Industries", "company", None)
+    assert merge_entity_stub.calls[0][0] == (1, "Elbit", "company", None)
+    assert merge_entity_stub.calls[1][0] == (2, "IAI", "company", None)
 
     # add_edge should be called once
     assert len(add_edge_stub.calls) == 1
     args, _kwargs = add_edge_stub.calls[0]
     assert args == (1, 2, "PARTNER_OF", 300, {"evidence": "הם שותפים בפרויקט משותף"})
+
+
+def test_persist_analysis_merge_entity_never_reverts_canonicalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression for Q3-13 r3 (docs/qa/findings_Q3_r2.md): an edge naming a Hebrew/alias spelling
+    of a curated-org entity ("צבא ארה\"ב" for US Army) must have `merge_entity` called with the
+    *canonical* name, not the raw extracted spelling -- otherwise `merge_entity`'s raw `UPDATE
+    entities SET name = ...` silently renames the already-canonicalised row back, causing a fresh
+    duplicate the next time some other item's extraction spells it "US Army" again."""
+    upsert_entity_stub = RecordingStub()
+    merge_entity_stub = RecordingStub()
+    add_edge_stub = RecordingStub()
+
+    monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", RecordingStub())
+    monkeypatch.setattr("eoa.pipeline.analyze.insert_event", RecordingStub())
+    monkeypatch.setattr("eoa.pipeline.analyze.upsert_entity", upsert_entity_stub)
+    monkeypatch.setattr("eoa.db.connection", lambda: (_ for _ in ()).throw(RuntimeError("no db")))
+
+    fake_graph = types.ModuleType("eoa.memory.graph")
+    fake_graph.merge_entity = merge_entity_stub  # type: ignore[attr-defined]
+    fake_graph.add_edge = add_edge_stub  # type: ignore[attr-defined]
+    sys.modules["eoa.memory.graph"] = fake_graph
+
+    out = AnalyzeOut(
+        summary_he="תקציר",
+        so_what_he="השלכות",
+        key_facts=[],
+        events=[],
+        edges=[
+            EdgeOut(src='צבא ארה"ב', dst="General Atomics", label="BIDS_AGAINST", evidence_he="x"),
+        ],
+    )
+    item = {"id": 700, "title": "Test", "url": "https://example.com"}
+
+    persist_analysis(item, out)
+
+    _, kwargs_src = upsert_entity_stub.calls[0]
+    assert kwargs_src["name"] == "US Army"
+    assert merge_entity_stub.calls[0][0] == (1, "US Army", "org", None)
 
 
 def test_heuristic_kind_org_program_company() -> None:

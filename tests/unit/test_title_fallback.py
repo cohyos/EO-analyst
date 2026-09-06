@@ -484,3 +484,51 @@ class TestChooseTitleFallbackChain:
             url="https://example.com/test",
         )
         assert title == 'Company\'s "New System" — A Breakthrough'
+
+
+class TestQ5_13HtmlEntityUnescape:
+    """Q5-13 (docs/qa/findings_Q5_r2.md): rungs 1-3 pull a candidate straight out of raw HTML via
+    regex, never through a real HTML parser, so a numeric/named entity in the source markup
+    reached `items.title` completely undecoded (item 112: "Israel&#39;s Aero Sentinel")."""
+
+    def test_numeric_entity_in_title_tag_is_unescaped(self) -> None:
+        title = choose_title(
+            clean_title=None,
+            fallback_title=None,
+            html="<title>Israel&#39;s Aero Sentinel</title>",
+            clean_text="body",
+            url="https://example.com/test",
+        )
+        assert title == "Israel's Aero Sentinel"
+
+    def test_named_entity_in_og_title_is_unescaped(self) -> None:
+        title = choose_title(
+            clean_title=None,
+            fallback_title=None,
+            html='<meta property="og:title" content="Aegis &amp; Iron Dome">',
+            clean_text="body",
+            url="https://example.com/test",
+        )
+        assert title == "Aegis & Iron Dome"
+
+    def test_hex_entity_and_nbsp_in_h1_are_unescaped_and_collapsed(self) -> None:
+        title = choose_title(
+            clean_title=None,
+            fallback_title=None,
+            html="<h1>Israel&#x27;s&nbsp;Aero Sentinel</h1>",
+            clean_text="body",
+            url="https://example.com/test",
+        )
+        assert title == "Israel's Aero Sentinel"
+
+    def test_entity_in_fallback_rss_title_is_also_unescaped(self) -> None:
+        """Every rung goes through the same `_normalize_candidate`, not just the HTML-derived
+        ones -- an RSS feed's own <title> can carry the same raw entities."""
+        title = choose_title(
+            clean_title=None,
+            fallback_title="Rafael &amp; Elbit sign cooperation deal",
+            html="<html><body>no structured title</body></html>",
+            clean_text="",
+            url="https://example.com/test",
+        )
+        assert title == "Rafael & Elbit sign cooperation deal"

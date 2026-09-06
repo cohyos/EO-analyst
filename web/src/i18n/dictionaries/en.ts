@@ -201,11 +201,17 @@ export const en: Dictionary = {
       stdio: "Local process",
       http: "HTTP",
     },
-    enabledChip: "Active",
-    disabledChip: "Disabled",
+    // Q5-12 (docs/qa/findings_Q5_r2.md): one status chip per server, priority order global switch
+    // > server's own enabled flag > required-key presence > live ping result.
+    status: {
+      globalOff: "Off (global switch)",
+      serverOff: "Disabled",
+      keyMissing: "Not configured (missing key)",
+      configured: "Configured",
+      connected: "Connected",
+      error: "Error",
+    },
     inheritCliOnly: "Reachable only via the Claude CLI",
-    keyConfigured: "Key configured",
-    keyNotConfigured: "Key not configured",
     toolCount: "{count} tools",
     ping: "Check connection",
     pinging: "Checking…",
@@ -230,6 +236,11 @@ export const en: Dictionary = {
     },
     countsAria: "{open} open · {unknown} unknown · {closed} closed · {archived} archived",
     showClosedArchived: "Show closed / archived",
+    // Q5-11 (docs/qa/findings_Q5_r2.md): the default (open/unknown) view is empty but closed/
+    // archived rows exist -- an inline hint + action right there, instead of a dead-end
+    // "no matching tenders" message, since the toggle above would actually reveal them.
+    hiddenClosedArchivedHint: "{count} closed/archived tenders are hidden by the current view.",
+    showHiddenClosedArchivedCta: "Show {count} closed tenders",
     whyRelevantPrefix: "Why relevant: ",
   },
   bd: {
@@ -246,6 +257,10 @@ export const en: Dictionary = {
     failedStatus: "Report generation failed",
     pastReportsTitle: "Past Reports",
     emptyTerritories: "No active territories found",
+    // Q5-15 (docs/qa/findings_Q5_r2.md): "no active territories" is only true when the territory
+    // list itself is empty -- a neutral prompt for the (unrelated) case where the selector is
+    // populated but nothing is picked yet.
+    selectTerritoryPrompt: "Select a territory to view reports",
     emptyReports: "No reports yet for this territory",
     emptyReportsDescription: "Create a new report to get started",
     selectReportPrompt: "Select a report from the list, or create a new one",

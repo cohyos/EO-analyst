@@ -14,8 +14,38 @@ import type { McpServerInfo } from "@/types/api";
 import { LoadingState } from "@/components/states";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
+import type { TranslationKey } from "@/i18n/types";
 
-function ServerRow({ server }: { server: McpServerInfo }) {
+type StatusTone = "dim" | "warn" | "ok";
+
+// Q5-12 (docs/qa/findings_Q5_r2.md): the card used to show every server as "פעיל" (active) purely
+// off `server.enabled` (the yaml flag), regardless of the global MCP switch or whether a required
+// key was actually set -- so a server read "active" while nothing could actually reach it. One
+// status now folds all three inputs, in priority order: the global switch beats everything (if
+// it's off, nothing is reachable no matter what each server's own flag/key says); then the
+// server's own enabled flag; then whether a required key is present; "connected"/"error" only
+// replace the resting "configured" label once an actual ping has run (or the last one on record).
+function serverStatus(
+  mcpEnabled: boolean,
+  server: McpServerInfo,
+  pingResult: { ok: boolean; error: string | null } | null,
+): { labelKey: TranslationKey; tone: StatusTone } {
+  if (!mcpEnabled) return { labelKey: "mcp.status.globalOff", tone: "dim" };
+  if (!server.enabled) return { labelKey: "mcp.status.serverOff", tone: "dim" };
+  if (server.key_configured === false) return { labelKey: "mcp.status.keyMissing", tone: "warn" };
+  const ok = pingResult?.ok ?? server.ok;
+  if (ok === true) return { labelKey: "mcp.status.connected", tone: "ok" };
+  if (ok === false) return { labelKey: "mcp.status.error", tone: "warn" };
+  return { labelKey: "mcp.status.configured", tone: "ok" };
+}
+
+const STATUS_CHIP_CLASS: Record<StatusTone, string> = {
+  dim: "bg-bg-sunken text-fg-dim",
+  warn: "bg-danger/15 text-danger",
+  ok: "bg-ok/15 text-ok",
+};
+
+function ServerRow({ server, mcpEnabled }: { server: McpServerInfo; mcpEnabled: boolean }) {
   const t = useT();
   const queryClient = useQueryClient();
   const [pingResult, setPingResult] = useState<{ ok: boolean; error: string | null; tool_count: number } | null>(
@@ -34,19 +64,15 @@ function ServerRow({ server }: { server: McpServerInfo }) {
   });
 
   const toolCount = pingResult?.tool_count ?? server.tool_count;
+  const status = serverStatus(mcpEnabled, server, pingResult);
 
   return (
     <li className="rounded-md border border-border-strong bg-bg p-2">
       <div className="flex flex-wrap items-center gap-2">
         <Plug size={14} aria-hidden="true" className="text-fg-dim" />
         <bdi className="text-sm font-medium text-fg">{server.label}</bdi>
-        <span
-          className={cn(
-            "rounded-full px-2 py-0.5 text-xs font-medium",
-            server.enabled ? "bg-ok/15 text-ok" : "bg-bg-sunken text-fg-dim",
-          )}
-        >
-          {server.enabled ? t("mcp.enabledChip") : t("mcp.disabledChip")}
+        <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", STATUS_CHIP_CLASS[status.tone])}>
+          {t(status.labelKey)}
         </span>
         <span className="rounded-full bg-bg-sunken px-2 py-0.5 text-xs text-fg-dim">
           {server.transport === "http" ? t("mcp.transport.http") : t("mcp.transport.stdio")}
@@ -56,11 +82,10 @@ function ServerRow({ server }: { server: McpServerInfo }) {
             {t("mcp.inheritCliOnly")}
           </span>
         )}
-        {server.key_configured !== null && (
-          <span className={cn("text-xs", server.key_configured ? "text-ok" : "text-fg-dim")}>
-            {server.key_configured ? t("mcp.keyConfigured") : t("mcp.keyNotConfigured")}
-            {server.key_env ? ` (${server.key_env.join(", ")})` : ""}
-          </span>
+        {/* Q5-12: which env var(s) a key comes from -- never the value itself. Configured/missing
+            is already conveyed by the status chip above, so this is just the variable name(s). */}
+        {server.key_env && server.key_env.length > 0 && (
+          <span className="text-xs text-fg-dim">{server.key_env.join(", ")}</span>
         )}
         {typeof toolCount === "number" && (
           <span className="text-xs text-fg-dim">{t("mcp.toolCount", { count: toolCount })}</span>
@@ -129,7 +154,7 @@ export function MCPCard() {
 
           <ul className="space-y-2">
             {serversQuery.data.servers.map((s) => (
-              <ServerRow key={s.id} server={s} />
+              <ServerRow key={s.id} server={s} mcpEnabled={serversQuery.data.mcp_enabled} />
             ))}
           </ul>
 

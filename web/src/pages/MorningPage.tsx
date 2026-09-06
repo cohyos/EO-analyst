@@ -115,7 +115,10 @@ export function MorningPage() {
       </section>
 
       {/* U2 (docs/REVIEW_2026-09-05.md): every KPI card is clickable and navigates to (or, for
-          errors, opens a drawer onto) its filtered view — they used to go nowhere. */}
+          errors, opens a drawer onto) its filtered view — they used to go nowhere.
+          Q5-10 (docs/qa/findings_Q5_r2.md): red/orange also carry `since=24h` so the feed count
+          the analyst lands on matches the KPI card's own last-24h window (both now read
+          `COALESCE(fetched_at, created_at)` — see `list_items` in eoa/api/services.py). */}
       <section aria-label="תקציר הלילה" className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatTile
           label={t("morning.itemsIngestedLabel")}
@@ -129,7 +132,7 @@ export function MorningPage() {
           value={night_summary.red}
           tone="danger"
           icon={<AlertOctagon size={14} />}
-          to="/feed?level=red"
+          to="/feed?level=red&since=24h"
           ariaLabel={t("morning.redAria")}
         />
         <StatTile
@@ -137,7 +140,7 @@ export function MorningPage() {
           value={night_summary.orange}
           tone="warn"
           icon={<TriangleAlert size={14} />}
-          to="/feed?level=orange"
+          to="/feed?level=orange&since=24h"
           ariaLabel={t("morning.orangeAria")}
         />
         <StatTile

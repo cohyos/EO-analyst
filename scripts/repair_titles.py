@@ -354,6 +354,80 @@ def _print_requality_report(stats: RequalityStats, *, apply: bool) -> None:
     print(f"{'=' * 64}\n")
 
 
+# --------------------------------------------------------------------------
+# Q5-13 (docs/qa/findings_Q5_r2.md): titles left with a raw, undecoded HTML entity (e.g.
+# "Israel&#39;s Aero Sentinel") -- from before eoa.fetch.sanitize.choose_title ran html.unescape
+# on every candidate. Pure text transform on the already-stored title; unlike --requality, this
+# needs no live re-fetch.
+# --------------------------------------------------------------------------
+
+# Matches a named entity (&amp;, &#39;, &nbsp;, ...), a decimal numeric reference (&#39;), or a
+# hex numeric reference (&#x27;) -- the three forms `html.unescape` decodes.
+_ENTITY_SQL_PATTERN = r"&(#[0-9]+|#x[0-9a-fA-F]+|[a-zA-Z]+);"
+
+
+@dataclass
+class UnescapeStats:
+    candidates: int = 0
+    changed: int = 0
+    examples: list[dict] = field(default_factory=list)
+
+
+def run_unescape_repair(*, apply: bool, limit: int | None = None) -> UnescapeStats:
+    """Scan `items.title` for a raw HTML entity, `html.unescape` it, and (with `--apply`) write
+    the decoded title back. Dry-run by default, same convention as `--requality`."""
+    import html as html_lib
+    import re
+
+    from eoa.db import connection
+
+    stats = UnescapeStats()
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, title FROM items WHERE title IS NOT NULL AND title ~ %s ORDER BY id",
+            (_ENTITY_SQL_PATTERN,),
+        )
+        rows = cur.fetchall()
+        if limit:
+            rows = rows[:limit]
+        stats.candidates = len(rows)
+
+        for row in rows:
+            old_title = row["title"]
+            new_title = html_lib.unescape(old_title)
+            new_title = re.sub(r"\s+", " ", new_title).strip()
+            if new_title == old_title:
+                continue
+
+            stats.changed += 1
+            if len(stats.examples) < 20:
+                stats.examples.append({"id": row["id"], "old_title": old_title[:100], "new_title": new_title[:100]})
+            if apply:
+                cur.execute("UPDATE items SET title = %s WHERE id = %s", (new_title, row["id"]))
+
+        if apply:
+            conn.commit()
+        else:
+            conn.rollback()
+
+    return stats
+
+
+def _print_unescape_report(stats: UnescapeStats, *, apply: bool) -> None:
+    print(f"\n{'=' * 64}")
+    print(f"Q5-13 title HTML-entity unescape repair ({'APPLY' if apply else 'DRY-RUN'})")
+    print(f"{'=' * 64}")
+    print(f"  Candidates (title contains a raw HTML entity): {stats.candidates}")
+    print(f"  Titles changed:                                {stats.changed}")
+    if stats.examples:
+        print("  Examples (up to 20):")
+        for ex in stats.examples[:10]:
+            print(f"    id={ex['id']}")
+            print(f"      old: {ex['old_title']!r}")
+            print(f"      new: {ex['new_title']!r}")
+    print(f"{'=' * 64}\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -361,13 +435,25 @@ def main() -> int:
         action="store_true",
         help="Run the Q4-9 wrong-title re-fetch repair instead of the null-title repair.",
     )
-    parser.add_argument("--apply", action="store_true", help="Write updates (default: dry-run). --requality only.")
-    parser.add_argument("--limit", type=int, default=None, help="Cap candidates scanned. --requality only.")
+    parser.add_argument(
+        "--unescape",
+        action="store_true",
+        help="Run the Q5-13 HTML-entity unescape repair (no re-fetch) instead of the null-title repair.",
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Write updates (default: dry-run). --requality/--unescape only."
+    )
+    parser.add_argument("--limit", type=int, default=None, help="Cap candidates scanned. --requality/--unescape only.")
     args = parser.parse_args()
 
     if args.requality:
         stats = asyncio.run(run_requality_repair(apply=args.apply, limit=args.limit))
         _print_requality_report(stats, apply=args.apply)
+        return 0
+
+    if args.unescape:
+        unescape_stats = run_unescape_repair(apply=args.apply, limit=args.limit)
+        _print_unescape_report(unescape_stats, apply=args.apply)
         return 0
 
     total, repaired, failed = run_repair()

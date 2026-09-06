@@ -154,3 +154,107 @@ class TestFindWatchlistAliasesInText:
         """"IAI" (an alias-free watchlist company via `ELTA`) must not match inside an unrelated
         longer word."""
         assert "IAI" not in en.find_watchlist_aliases_in_text("This is trIAIl text with no real hit.")
+
+    def test_finds_curated_org_via_hebrew_alias(self) -> None:
+        """Q3-13 r3: the curated defense-org table (US Army/Navy/IDF/NATO/...) is also searched,
+        not just the watchlist."""
+        assert en.find_watchlist_aliases_in_text('צבא ארה"ב חתם על חוזה.') == ["US Army"]
+
+
+class TestResolveCountryName:
+    @pytest.mark.parametrize(
+        ("surface", "expected"),
+        [
+            ("Iran", "Iran"), ("איראן", "Iran"),
+            ("United States", "United States"), ('ארה"ב', "United States"), ("ארצות הברית", "United States"),
+            ("Greece", "Greece"), ("יוון", "Greece"),
+            ("Japan", "Japan"), ("יפן", "Japan"),
+        ],
+    )
+    def test_resolves_known_country(self, surface: str, expected: str) -> None:
+        assert en.resolve_country_name(surface) == expected
+
+    def test_unknown_name_returns_none(self) -> None:
+        assert en.resolve_country_name("Elbit") is None
+        assert en.resolve_country_name("") is None
+
+
+class TestResolveCompanyCountry:
+    def test_resolves_known_non_watchlist_company(self) -> None:
+        assert en.resolve_company_country("Rolls-Royce") == "UK"
+        assert en.resolve_company_country("רולס-רויס") == "UK"
+        assert en.resolve_company_country("Baykar") == "TR"
+
+    def test_unknown_company_returns_none(self) -> None:
+        assert en.resolve_company_country("Totally Unknown Widgets Inc") is None
+
+
+class TestIsGenericNonEntity:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "השוק הביטחוני", "תעשייה", "סטארט-אפים", "לקוחות בינלאומיים", "תמונות תרמיות",
+            "מפעילים בשטח", "איומים בקבוצת משקל 3", "מלחמת איראן-עיראק", "מצר הורמוז",
+            "יפן, דנמרק, גרמניה",
+        ],
+    )
+    def test_positive(self, name: str) -> None:
+        assert en.is_generic_non_entity(name) is True
+
+    @pytest.mark.parametrize("name", ["Elbit", "IAI", "LOCUST", "US Army", "Iran", 'צבא ארה"ב'])
+    def test_negative_known_entities_never_rejected(self, name: str) -> None:
+        assert en.is_generic_non_entity(name) is False
+
+    def test_empty_string_is_generic(self) -> None:
+        assert en.is_generic_non_entity("") is True
+
+
+class TestIsJunkEntity:
+    def test_technique_like_is_junk(self) -> None:
+        assert en.is_junk_entity("image captioning") is True
+
+    def test_generic_non_entity_is_junk(self) -> None:
+        assert en.is_junk_entity("השוק הביטחוני") is True
+
+    def test_real_entity_not_junk(self) -> None:
+        assert en.is_junk_entity("Elbit") is False
+        assert en.is_junk_entity('צבא ארה"ב') is False
+
+
+class TestCuratedOrgResolution:
+    def test_hebrew_variants_resolve_to_same_canonical_org(self) -> None:
+        rec1 = en.resolve_canonical('צבא ארה"ב')
+        rec2 = en.resolve_canonical("צבא ארצות הברית")
+        rec3 = en.resolve_canonical("US Army")
+        assert rec1 and rec2 and rec3
+        assert rec1["name"] == rec2["name"] == rec3["name"] == "US Army"
+        assert rec1["kind"] == "org"
+        assert rec1["country"] == "US"
+
+    def test_navy_hebrew_variants_resolve_together(self) -> None:
+        rec1 = en.resolve_canonical("הצי האמריקאי")
+        rec2 = en.resolve_canonical("חיל הים האמריקאי")
+        assert rec1 and rec2
+        assert rec1["name"] == rec2["name"] == "US Navy"
+
+
+class TestNormalizeKindCountryOverride:
+    def test_country_typed_as_company_fixed(self) -> None:
+        assert en.normalize_kind("איראן", "company") == "country"
+        assert en.normalize_kind("ארצות הברית", "company") == "country"
+        assert en.normalize_kind("יוון", "company") == "country"
+
+    def test_curated_org_kind(self) -> None:
+        assert en.normalize_kind('צבא ארה"ב', "company") == "org"
+
+
+class TestCanonicalNameAndKindCountryAndOrg:
+    def test_country_name_canonicalized_to_english(self) -> None:
+        name, kind = en.canonical_name_and_kind("יפן", "company")
+        assert name == "Japan"
+        assert kind == "country"
+
+    def test_curated_org_alias_canonicalized(self) -> None:
+        name, kind = en.canonical_name_and_kind('צבא ארה"ב', "company")
+        assert name == "US Army"
+        assert kind == "org"

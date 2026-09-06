@@ -178,6 +178,41 @@ test.describe("Tenders screen (/tenders)", () => {
     }).toPass({ timeout: 5_000 });
   });
 
+  // Q5-11 (docs/qa/findings_Q5_r2.md): the default (open/unknown) view can be empty while closed/
+  // archived tenders exist, hidden only because `since_days` used to stay at 90 days even after
+  // `include_closed`/`include_archived` widened the status set. The fix lifts that window (unless
+  // an explicit since_days is given) and the UI now shows an inline "X מכרזים סגורים מוסתרים —
+  // הצג" hint instead of a dead-end "no matches" message.
+  test("when the default view is empty but closed/archived rows exist, an inline hint reveals them", async ({
+    page,
+  }) => {
+    await page.goto("/tenders");
+    await expect(page.getByRole("status").filter({ hasText: "טוען" })).toHaveCount(0, { timeout: 15_000 });
+
+    const chips = page.getByRole("list", { name: "ספירת מכרזים לפי סטטוס" });
+    const hasChips = (await chips.locator("[role='listitem']").count()) > 0;
+    test.skip(!hasChips, "No tenders in any status yet (or the API hasn't restarted onto the new /api/tenders contract)");
+
+    const rowsBefore = await page.locator("tbody tr[aria-expanded]").count();
+    const hint = page.getByText(/מכרזים סגורים מוסתרים בתצוגה הנוכחית/);
+    const hintVisible = await hint.isVisible().catch(() => false);
+    test.skip(
+      rowsBefore > 0 || !hintVisible,
+      "Default view already has open/unknown rows, or no closed/archived rows are hidden right now",
+    );
+
+    const cta = page.getByRole("button", { name: /הצג \d+ מכרזים סגורים/ });
+    await expect(cta).toBeVisible();
+    await cta.click();
+    // Clicking the inline action must check the same toggle the header checkbox controls, and
+    // actually reveal rows (not leave the "no matches" dead end in place).
+    await expect(page.getByRole("checkbox")).toBeChecked();
+    await expect(async () => {
+      const rowsAfter = await page.locator("tbody tr[aria-expanded]").count();
+      expect(rowsAfter).toBeGreaterThan(0);
+    }).toPass({ timeout: 5_000 });
+  });
+
   test("no bad literal text renders on either tab", async ({ page }, testInfo) => {
     await page.goto("/tenders");
     await expect(page.getByRole("tablist", { name: "מכרזים והזדמנויות" })).toBeVisible({

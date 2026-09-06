@@ -80,6 +80,26 @@ test.describe("Entities screens (/entities, /entities/:id)", () => {
     }
   });
 
+  // Q5-16 (docs/qa/findings_Q5_r2.md): this checkbox's onChange goes through react-router's
+  // `setSearchParams` (a history/URL update), which Playwright's own `.check()`/`.uncheck()`
+  // treat as a "scheduled navigation" to wait out. Their built-in post-click state check is a
+  // single, immediate read of the checkbox's DOM `checked` property -- reproduced directly and
+  // repeatedly (outside this suite): that single read can land in the narrow window before
+  // React's re-render has caught up with the new URL, throwing "Clicking the checkbox did not
+  // change its state" even though the click and the resulting state/URL change both land
+  // correctly a moment later every time. This is a Playwright/React timing artifact, not a
+  // detachment or remount of the control (EntityListPanel never unmounts across this flow --
+  // confirmed by watching the same DOM node throughout the repro). Fix: drive the checkbox with
+  // a plain `.click()` and verify the resulting state with `expect(...).toBeChecked()`, which
+  // polls/retries instead of checking once.
+  //
+  // The first toggle also waits for the entities list's own network round-trip (not a blind
+  // timeout) before asserting -- but the *second* toggle (back to the untouched default filter
+  // set: no q/kind/country, watchlist off) must NOT wait for a response the same way: the
+  // QueryClient's global 15s `staleTime` (web/src/App.tsx) means react-query serves that exact
+  // query straight from cache with no network round-trip at all, so waiting for one there
+  // deadlocks until the timeout. `toBeChecked()`'s own polling is enough to confirm the UI state
+  // actually flipped back.
   test("watchlist-only toggle and kind/country filters narrow the list without an error", async ({
     page,
   }) => {
@@ -87,13 +107,24 @@ test.describe("Entities screens (/entities, /entities/:id)", () => {
     const list = page.getByRole("list");
     await expect(list).toBeVisible({ timeout: 15_000 });
 
-    await page.getByLabel("רשימת מעקב בלבד", { exact: false }).check();
-    await page.waitForTimeout(400);
+    const watchlistCheckbox = page.getByRole("checkbox", { name: "רשימת מעקב בלבד" });
+    await expect(watchlistCheckbox).toBeVisible();
+
+    await Promise.all([
+      page.waitForResponse((r) => r.url().includes("/api/entities") && r.url().includes("watchlist=true")),
+      watchlistCheckbox.click(),
+    ]);
+    await expect(watchlistCheckbox).toBeChecked();
     await expect(page.getByRole("alert")).toHaveCount(0);
 
-    await page.getByLabel("רשימת מעקב בלבד", { exact: false }).uncheck();
-    await page.getByLabel("סינון לפי סוג ישות").selectOption("company");
-    await page.waitForTimeout(400);
+    await watchlistCheckbox.click();
+    await expect(watchlistCheckbox).not.toBeChecked();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+
+    await Promise.all([
+      page.waitForResponse((r) => r.url().includes("/api/entities") && r.url().includes("kind=company")),
+      page.getByLabel("סינון לפי סוג ישות").selectOption("company"),
+    ]);
     await expect(page.getByRole("alert")).toHaveCount(0);
   });
 

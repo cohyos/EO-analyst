@@ -119,6 +119,8 @@ CONFERENCES_DATA = {
             "end_date": dt.date(2026, 10, 12),
             "city": "Washington",
             "relevance": 5,
+            "status": "confirmed",
+            "organizer": "Association of the United States Army",
         }
     ],
     "international": [],
@@ -181,6 +183,7 @@ def patch_bd_collectors(monkeypatch, tmp_path):
             "international": [],
         },
     )
+    monkeypatch.setattr(bdt, "collect_dormant_watchlist_competitors", lambda t, active, limit=20: [])
     monkeypatch.setattr(bdt, "draft_bd_territory", lambda *a, **k: _draft_fixture())
     monkeypatch.setattr(bdt, "_persist_report", lambda *a, **k: 777)
     monkeypatch.setattr(bdt, "_report_path", lambda territory, period_end, ext: tmp_path / f"bd.{ext}")
@@ -228,7 +231,7 @@ def test_build_bd_territory_renders_expected_tables(patch_bd_collectors):
     assert ["תאריך", "פלטפורמה/תוכנית", "רוכש", "ספק", "סכום", "צורך EO/IR נגזר", "מקור"] in table_headers
     assert ["כותרת", "גורם מזמין", "דדליין", "סטטוס", "קישור"] in table_headers
     assert ["מתחרה", "מדינה", "אזכורים בחלון", "תעשייה ישראלית", "זכייה אחרונה"] in table_headers
-    assert ["שם", "תאריכים", "עיר", "רלוונטיות"] in table_headers
+    assert ["שם", "תאריכים", "עיר", "סטטוס", "מארגן", "רלוונטיות"] in table_headers
     assert ["עדיפות", "פעולה", "נימוק", "אחראי", "תזמון"] in table_headers
 
     heading_texts = {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"}
@@ -257,6 +260,7 @@ def test_build_bd_territory_no_items_skips_llm_and_still_persists(monkeypatch, t
         "collect_conferences_for_territory",
         lambda t, months=12, international_limit=5: {"territory": [], "international": []},
     )
+    monkeypatch.setattr(bdt, "collect_dormant_watchlist_competitors", lambda t, active, limit=20: [])
     monkeypatch.setattr(bdt, "_persist_report", lambda *a, **k: 1)
     monkeypatch.setattr(bdt, "_report_path", lambda territory, period_end, ext: tmp_path / f"bd.{ext}")
 
@@ -335,3 +339,389 @@ def test_format_competitors_block_includes_win_citation_numbers():
     ]
     block = bdt.format_competitors_block(competitors)
     assert "[3]" in block
+
+
+# --------------------------------------------------------------------------
+# BD-1 (docs/qa/findings_Q3_r2.md) regression tests
+# --------------------------------------------------------------------------
+
+
+def test_conferences_table_includes_status_and_organizer():
+    data = {
+        "territory": [
+            {
+                "name": "AUSA",
+                "start_date": dt.date(2026, 10, 10),
+                "end_date": dt.date(2026, 10, 12),
+                "city": "Washington",
+                "relevance": 5,
+                "status": "confirmed",
+                "organizer": "Association of the United States Army",
+            }
+        ],
+        "international": [],
+    }
+    table = bdt.conferences_table(data)
+    assert table["headers"] == ["שם", "תאריכים", "עיר", "סטטוס", "מארגן", "רלוונטיות"]
+    assert table["rows"][0] == [
+        "AUSA",
+        "2026-10-10 - 2026-10-12",
+        "Washington",
+        "מאושר",
+        "Association of the United States Army",
+        5,
+    ]
+
+
+def test_format_conferences_block_includes_status_and_organizer():
+    data = {
+        "territory": [
+            {
+                "name": "AUSA",
+                "n": 1,
+                "start_date": dt.date(2026, 10, 10),
+                "end_date": dt.date(2026, 10, 12),
+                "city": "Washington",
+                "status": "estimated",
+                "organizer": "AUSA Inc.",
+            }
+        ],
+        "international": [],
+    }
+    block = bdt.format_conferences_block(data)
+    assert "משוער" in block
+    assert "AUSA Inc." in block
+    assert "2026-10-10" in block and "2026-10-12" in block
+
+
+def test_conference_status_he_falls_back_to_raw_value():
+    assert bdt._conference_status_he({"status": "confirmed"}) == "מאושר"
+    assert bdt._conference_status_he({"status": "estimated"}) == "משוער"
+    assert bdt._conference_status_he({"status": None}) == "—"
+
+
+def test_drop_empty_sections_removes_blank_prose():
+    from eoa.llm.schemas.analysis import ReportSection
+
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר [1].",
+        sections=[
+            ReportSection(title_he="בינה חזותית (Computer Vision / AI)", domain="computer_vision", prose_he="   "),
+            ReportSection(title_he="עם תוכן", domain="tech_dev", prose_he="יש כאן תוכן אמיתי [1]."),
+        ],
+    )
+    cleaned = bdt._drop_empty_sections(draft)
+    assert [s.title_he for s in cleaned.sections] == ["עם תוכן"]
+
+
+def test_drop_empty_sections_noop_when_nothing_blank():
+    from eoa.llm.schemas.analysis import ReportSection
+
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר [1].",
+        sections=[ReportSection(title_he="X", domain="tech_dev", prose_he="תוכן [1].")],
+    )
+    cleaned = bdt._drop_empty_sections(draft)
+    assert cleaned is draft
+
+
+def test_strip_uncited_drops_dependent_fragment_starting_with_conjunction():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he=(
+            'צבא ארה"ב מתמודד עם איומי רחפנים קטנים ומשימות מורכבות [1]. '
+            "ובפרט לאיומי רחפנים קטנים ומשימות."
+        ),
+        market_bullets_he=[],
+        recommended_actions=[],
+        risks_assumptions_he="",
+    )
+    qa = bdt.QAResult(
+        passed=False,
+        errors=["..."],
+        uncited_sentences=['צבא ארה"ב מתמודד עם איומי רחפנים קטנים ומשימות מורכבות [1].'],
+        bad_refs=[],
+        duplicate_sentences=[],
+    )
+    cleaned = bdt._strip_uncited(draft, qa)
+    assert "ובפרט" not in cleaned.exec_summary_he
+    for sentence in bdt.split_sentences(cleaned.exec_summary_he):
+        assert not bdt._starts_with_conjunction(sentence)
+
+
+def test_strip_uncited_drops_short_verbless_fragment_after_stripped_sentence():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he=("החברה זכתה בחוזה גדול בארה\"ב [1]. תוצאה ישירה של כך."),
+        market_bullets_he=[],
+        recommended_actions=[],
+        risks_assumptions_he="",
+    )
+    qa = bdt.QAResult(
+        passed=False,
+        errors=["..."],
+        uncited_sentences=['החברה זכתה בחוזה גדול בארה"ב [1].'],
+        bad_refs=[],
+        duplicate_sentences=[],
+    )
+    cleaned = bdt._strip_uncited(draft, qa)
+    assert "תוצאה ישירה" not in cleaned.exec_summary_he
+
+
+def test_strip_uncited_keeps_kept_sentence_followed_by_unrelated_fragment_start():
+    # A conjunction-led sentence is dropped unconditionally (BD-1's absolute invariant),
+    # regardless of whether the sentence before it survived.
+    draft = BdTerritoryReportDraft(
+        exec_summary_he='החברה זכתה בחוזה גדול בארה"ב [1]. או שמא לא.',
+        market_bullets_he=[],
+        recommended_actions=[],
+        risks_assumptions_he="",
+    )
+    qa = bdt.QAResult(passed=True, errors=[], uncited_sentences=[], bad_refs=[], duplicate_sentences=[])
+    cleaned = bdt._strip_uncited(draft, qa)
+    assert 'החברה זכתה בחוזה גדול בארה"ב [1].' in cleaned.exec_summary_he
+    assert "או שמא לא" not in cleaned.exec_summary_he
+
+
+def test_watchlist_competitor_names_filters_non_watchlist():
+    competitors = [
+        {"name": "Elbit", "is_watchlist": True},
+        {"name": "Vendor X", "is_watchlist": False},
+    ]
+    assert bdt._watchlist_competitor_names(competitors) == {"Elbit"}
+
+
+def test_action_promoted_competitor_detects_promotion_verb_and_name():
+    action = BdAction(
+        action_he="להציג יכולת של Shield AI בכנס AUSA הקרוב",
+        priority="M",
+        rationale_he="Shield AI פעילה בשוק [1].",
+        owner_role_he="שיווק",
+        timing_he="רבעון הקרוב",
+    )
+    assert bdt._action_promoted_competitor(action, {"Shield AI"}) == "Shield AI"
+
+
+def test_action_promoted_competitor_ignores_non_watchlist_mentions():
+    action = BdAction(
+        action_he="לפנות ללקוח בנוגע ל-Shield AI כמתחרה בשוק",
+        priority="M",
+        rationale_he="Shield AI מתחרה בשוק [1].",
+        owner_role_he="פיתוח עסקי",
+        timing_he="מיידי",
+    )
+    # No promotion verb present -- monitoring/approaching the customer about a competitor is fine.
+    assert bdt._action_promoted_competitor(action, {"Shield AI"}) is None
+
+
+def test_perspective_violations_flags_competitor_promoting_action():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר [1].",
+        recommended_actions=[
+            BdAction(
+                action_he="להציג יכולת של Shield AI בכנס AUSA",
+                priority="H",
+                rationale_he="Shield AI פעילה בתחום [1].",
+                owner_role_he="שיווק",
+                timing_he="רבעון הקרוב",
+            ),
+            BdAction(
+                action_he="ליזום פגישה עם הלקוח בנוגע למכרז",
+                priority="M",
+                rationale_he="נפתח מכרז רלוונטי [1].",
+                owner_role_he="פיתוח עסקי",
+                timing_he="מיידי",
+            ),
+        ],
+    )
+    competitors = [{"name": "Shield AI", "is_watchlist": True}]
+    violations = bdt._perspective_violations(draft, competitors)
+    assert len(violations) == 1
+    assert violations[0][1] == "Shield AI"
+
+
+def test_perspective_violations_empty_when_no_watchlist_competitors():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר [1].",
+        recommended_actions=[
+            BdAction(
+                action_he="להציג יכולת של Shield AI בכנס AUSA",
+                priority="H",
+                rationale_he="Shield AI פעילה בתחום [1].",
+                owner_role_he="שיווק",
+                timing_he="רבעון הקרוב",
+            )
+        ],
+    )
+    assert bdt._perspective_violations(draft, []) == []
+
+
+def test_drop_perspective_violations_removes_only_offending_action():
+    keep = BdAction(
+        action_he="ליזום פגישה עם הלקוח", priority="M", rationale_he="נפתח מכרז [1].",
+        owner_role_he="פיתוח עסקי", timing_he="מיידי",
+    )
+    drop = BdAction(
+        action_he="להציג יכולת של Shield AI בכנס AUSA", priority="H", rationale_he="Shield AI פעילה [1].",
+        owner_role_he="שיווק", timing_he="רבעון הקרוב",
+    )
+    draft = BdTerritoryReportDraft(exec_summary_he="תקציר [1].", recommended_actions=[keep, drop])
+    cleaned = bdt._drop_perspective_violations(draft, [(drop, "Shield AI")])
+    assert cleaned.recommended_actions == [keep]
+
+
+def test_cap_draft_lengths_truncates_runaway_bullets_and_actions():
+    bullets = [f"בולט מספר {i} [1]." for i in range(15)]
+    actions = [
+        BdAction(
+            action_he=f"פעולה {i}", priority="M", rationale_he="נימוק [1].",
+            owner_role_he="מכירות", timing_he="מיידי",
+        )
+        for i in range(20)
+    ]
+    draft = BdTerritoryReportDraft(exec_summary_he="תקציר [1].", market_bullets_he=bullets, recommended_actions=actions)
+    capped = bdt._cap_draft_lengths(draft)
+    assert len(capped.market_bullets_he) == 8
+    assert len(capped.recommended_actions) == 8
+    assert capped.market_bullets_he == bullets[:8]
+    assert capped.recommended_actions == actions[:8]
+
+
+def test_cap_draft_lengths_noop_when_within_limits():
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר [1].",
+        market_bullets_he=["בולט [1]."],
+        recommended_actions=[
+            BdAction(action_he="פעולה", priority="M", rationale_he="נימוק [1].", owner_role_he="מכירות", timing_he="מיידי")
+        ],
+    )
+    assert bdt._cap_draft_lengths(draft) is draft
+
+
+def test_our_company_block_he_reads_config_default():
+    block = bdt._our_company_block_he()
+    assert "החברה שלנו" in block or "our_company" in block.lower()
+
+
+def test_bd_table_counts_context_he_lists_nonzero_counts():
+    counts = bdt.BdTableCounts(events=2, tenders=1, forecasts=0, competitors=3, conferences=0)
+    text = counts.context_he()
+    assert "2 אירועי" in text
+    assert "1 מכרזים" in text
+    assert "3 מתחרים" in text
+    assert "תחזיות" not in text
+    assert "כנסים" not in text
+
+
+def test_bd_table_counts_context_he_empty_when_all_zero():
+    assert bdt.BdTableCounts().context_he() == "אין (כל הטבלאות ריקות בתקופה זו)."
+
+
+def test_tables_only_draft_used_when_items_empty_but_tables_present():
+    draft = bdt.draft_bd_territory(
+        "US", 90, "", "", "", "", "",
+        has_items=False,
+        table_counts=bdt.BdTableCounts(competitors=3),
+    )
+    assert "לא זוהו פריטי שוק חדשים" in draft.exec_summary_he
+    assert "3 מתחרים פעילים" in draft.exec_summary_he
+    assert draft.recommended_actions == []
+
+
+def test_no_items_draft_used_when_everything_empty():
+    draft = bdt.draft_bd_territory(
+        "US", 90, "", "", "", "", "", has_items=False, table_counts=bdt.BdTableCounts()
+    )
+    assert "אין ממצאים" in draft.exec_summary_he
+
+
+def test_collect_active_competitors_excludes_zero_activity_company(monkeypatch):
+    def fake_fetchall(query, params=None):
+        if "FROM entities" in query and "unnest" not in query:
+            return [
+                {"id": 1, "name": "Active Co", "country": "US", "relevance": 0.9, "is_watchlist": True},
+                {"id": 2, "name": "Dormant Co", "country": "US", "relevance": 0.9, "is_watchlist": True},
+            ]
+        if "unnest(entities_mentioned)" in query:
+            return [{"name": "Active Co", "n": 2}]
+        if "FROM events" in query:
+            return []
+        if "FROM graph_edges" in query:
+            return [{"n": 0}]
+        raise AssertionError(f"unexpected query: {query}")
+
+    monkeypatch.setattr(bdt, "_fetchall", fake_fetchall)
+    out = bdt.collect_active_competitors("US", [10, 11], dt.date(2026, 1, 1), dt.date(2026, 3, 1))
+    names = [c["name"] for c in out]
+    assert names == ["Active Co"]
+
+
+def test_collect_dormant_watchlist_competitors_lists_names_not_in_active_set(monkeypatch):
+    def fake_fetchall(query, params=None):
+        return [
+            {"name": "Active Co", "country": "US"},
+            {"name": "Dormant Co", "country": "US"},
+            {"name": "Other Territory Co", "country": "IL"},
+        ]
+
+    monkeypatch.setattr(bdt, "_fetchall", fake_fetchall)
+    dormant = bdt.collect_dormant_watchlist_competitors("US", {"Active Co"})
+    assert dormant == ["Dormant Co"]
+
+
+def test_build_bd_territory_adds_dormant_note_when_few_competitors(patch_bd_collectors, monkeypatch):
+    monkeypatch.setattr(bdt, "collect_active_competitors", lambda t, ids, s, e, limit=15: [dict(c) for c in COMPETITORS])
+    monkeypatch.setattr(
+        bdt, "collect_dormant_watchlist_competitors", lambda t, active, limit=20: ["Dormant Co", "Sleepy Co"]
+    )
+    paths = bdt.build_bd_territory("US", 90, period_end=dt.date(2026, 9, 6))
+    html_text = paths.html.read_text(encoding="utf-8")
+    assert "Dormant Co" in html_text
+    assert "Sleepy Co" in html_text
+
+
+def test_build_bd_territory_no_dormant_note_when_three_or_more_competitors(patch_bd_collectors, monkeypatch):
+    many_competitors = [dict(COMPETITORS[0]) for _ in range(3)]
+    for idx, c in enumerate(many_competitors):
+        c["name"] = f"Competitor {idx}"
+        c["recent_wins"] = []
+    monkeypatch.setattr(bdt, "collect_active_competitors", lambda t, ids, s, e, limit=15: many_competitors)
+    monkeypatch.setattr(
+        bdt, "collect_dormant_watchlist_competitors", lambda t, active, limit=20: ["Dormant Co"]
+    )
+    paths = bdt.build_bd_territory("US", 90, period_end=dt.date(2026, 9, 6))
+    html_text = paths.html.read_text(encoding="utf-8")
+    assert "Dormant Co" not in html_text
+
+
+def test_build_bd_territory_drops_perspective_violation_after_failed_retry(patch_bd_collectors, monkeypatch):
+    bad_action = BdAction(
+        action_he="להציג יכולת של Shield AI בכנס AUSA",
+        priority="H",
+        rationale_he="Shield AI פעילה בתחום [1].",
+        owner_role_he="שיווק",
+        timing_he="רבעון הקרוב",
+    )
+    good_action = BdAction(
+        action_he="ליזום פגישת היכרות עם US Army",
+        priority="M",
+        rationale_he='נפתח RFI לכיוון ימי בארה"ב [4].',
+        owner_role_he="פיתוח עסקי",
+        timing_he="מיידי",
+    )
+    violating_draft = _draft_fixture().model_copy(update={"recommended_actions": [bad_action, good_action]})
+
+    monkeypatch.setattr(bdt, "draft_bd_territory", lambda *a, **k: violating_draft)
+    monkeypatch.setattr(
+        bdt, "collect_active_competitors",
+        lambda t, ids, s, e, limit=15: [dict(c) for c in COMPETITORS] + [{"entity_id": 2, "name": "Shield AI", "country": "US", "mentions": 1, "is_watchlist": True, "is_israeli_industry": False, "recent_wins": []}],
+    )
+    # The regeneration retry itself still violates (simulating a stubborn model) -- the fallback
+    # must drop exactly the offending action rather than persist a competitor-promoting one.
+    monkeypatch.setattr(bdt, "_perspective_corrective_retry", lambda *a, **k: violating_draft)
+
+    paths = bdt.build_bd_territory("US", 90, period_end=dt.date(2026, 9, 6))
+    html_text = paths.html.read_text(encoding="utf-8")
+    # Shield AI may legitimately appear in the competitors table (it *is* an active competitor) --
+    # what must never survive is the action that recommends promoting it.
+    assert "להציג יכולת של Shield AI" not in html_text
+    assert "ליזום פגישת היכרות" in html_text
+    assert "US Army" in html_text
