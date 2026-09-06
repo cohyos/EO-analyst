@@ -25,9 +25,13 @@ app.add_typer(native_app, name="native")
 
 @app.command()
 def run(
-    scope: str = typer.Argument("daily", help="daily|ingest|report|dedup|classify|triage|analyze"),
+    scope: str = typer.Argument("daily", help="daily|ingest|report|dedup|classify|triage|analyze|bd"),
     mode: str = typer.Option("full", help="full|eco"),
     now: bool = typer.Option(True, help="run in-process now"),
+    territory: str = typer.Option(
+        None, help="scope=bd only: ISO-2 country code or region code (US, IL, EU, ...)"
+    ),
+    lookback_days: int = typer.Option(90, help="scope=bd only: lookback window in days"),
 ) -> None:
     """Run a cycle (or one stage) immediately in this process — respects the resource gate & polite mode."""
     from eoa.orchestrator.main import configure_logging
@@ -73,6 +77,24 @@ def run(
         # 6-hour idempotency guard (which exists to stop the automatic nightly pipeline from
         # building a second daily report on top of one built minutes earlier by another job).
         rprint(build_daily(force=True))
+    elif scope == "bd":
+        from eoa.report.bd_territory import build_bd_territory
+
+        if not territory:
+            raise typer.BadParameter("scope=bd requires --territory (e.g. --territory US)")
+        paths = build_bd_territory(territory, lookback_days)
+        rprint(
+            json.dumps(
+                {
+                    "report_id": paths.report_id,
+                    "territory": paths.territory,
+                    "qa_passed": paths.qa.passed,
+                    "docx": str(paths.docx),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         raise typer.BadParameter(f"unknown scope {scope}")
 

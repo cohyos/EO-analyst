@@ -479,6 +479,46 @@ def run_monthly(job: dict[str, Any]) -> dict[str, Any]:
         return {"monthly_report_error": str(exc)[:300]}
 
 
+def run_bd_report(job: dict[str, Any]) -> dict[str, Any]:
+    """``bd_report`` job kind (A11): builds one territory's "דוח מיקוד לפיתוח עסקי" when the
+    payload names a ``territory`` (API-enqueued, ``eoa.api.services.enqueue_bd_report``) --
+    returning ``{"bd_report": {"report_id", "qa_passed", "territory"}}`` so
+    ``services.build_or_enqueue_bd_report``'s poll loop can resolve the finished report. With no
+    ``territory`` in the payload (the weekly scheduler job, ``orchestrator.main.build_scheduler``)
+    it instead builds one for every territory in ``config.bd_report.territories``, returning
+    ``{"bd_reports": {territory: {...}}}`` -- a failure for one territory never blocks the others
+    (docs/CONVENTIONS.md rule 9)."""
+    from eoa.report.bd_territory import build_bd_territory
+
+    payload = job.get("payload") or {}
+    lookback_days = int(payload.get("lookback_days") or settings().bd_report.lookback_days)
+    territory = payload.get("territory")
+
+    if territory:
+        try:
+            paths = build_bd_territory(territory, lookback_days)
+            return {
+                "bd_report": {
+                    "report_id": paths.report_id,
+                    "qa_passed": paths.qa.passed,
+                    "territory": paths.territory,
+                }
+            }
+        except Exception as exc:
+            log.error("bd_report_failed", territory=territory, error=str(exc)[:300])
+            return {"bd_report_error": str(exc)[:300]}
+
+    results: dict[str, Any] = {}
+    for t in settings().bd_report.territories:
+        try:
+            paths = build_bd_territory(t, lookback_days)
+            results[t] = {"report_id": paths.report_id, "qa_passed": paths.qa.passed}
+        except Exception as exc:
+            log.error("bd_report_failed", territory=t, error=str(exc)[:300])
+            results[t] = {"error": str(exc)[:300]}
+    return {"bd_reports": results}
+
+
 def _backup() -> dict[str, Any]:
     """Obsidian vault export (if enabled) + pg_dump via docker (best effort) + retention prune."""
     out: dict[str, Any] = {}
@@ -688,6 +728,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "monthly_run": run_monthly,
     "conference_scan": run_conference_scan,
     "tender_scan": run_tender_scan,
+    "bd_report": run_bd_report,
 }
 
 

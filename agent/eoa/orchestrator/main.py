@@ -161,6 +161,19 @@ def build_scheduler() -> BackgroundScheduler:
             log.warning("conference_reminders_failed", error=str(exc)[:160])
 
     sched.add_job(_reminders, _cron(tz, "07:00"), id="conference_reminders", coalesce=True)
+
+    # A11: weekly BD-by-territory reports for the configured default territory set
+    # (config/config.yaml `bd_report.territories`) -- no `territory` in the payload, which is how
+    # `eoa.orchestrator.jobs.run_bd_report` distinguishes this loop-over-defaults run from an
+    # on-demand single-territory run (`eoa.api.services.enqueue_bd_report`).
+    sched.add_job(
+        lambda: enqueue_job("bd_report", {}, priority=4),
+        _cron(tz, "06:30", day_of_week="sun"),
+        id="bd_report_weekly",
+        name='דוח מיקוד לפיתוח עסקי לפי טריטוריה -- שבועי (A11)',
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
     return sched
 
 
