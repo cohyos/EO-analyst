@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from eoa.api import ask_grounding, services
+from eoa.errors import ResourceUnavailable
 from eoa.llm import ollama_client
 
 log = structlog.get_logger(__name__)
@@ -66,6 +67,17 @@ _REPEAT_MIN_COUNT = 3
 
 _REPETITION_NOTE = "\n\n---\n_(התשובה קוצרה: המודל נכנס ללולאת חזרה.)_"
 _TIMEOUT_NOTE = "\n\n---\n_(התשובה קוצרה: חריגה ממגבלת הזמן.)_"
+
+# P1 fix (incident 2026-09-06 16:15-16:24): shown when the resource gate can't admit the chat's
+# model within the interactive budget (`resources.interactive_wait_s`, default 20s) -- e.g. a
+# nightly run or a report generation is holding the GPU. Emitted as a `token` (so it renders in
+# today's chat UI exactly like any other answer text) *and* as its own `gate_busy` event (for a
+# client that wants to distinguish it, e.g. to skip the "citations"/grounding UI chrome).
+_GATE_BUSY_MESSAGE = "המודל המקומי תפוס כרגע (ריצת לילה/דוח); נסה שוב בעוד דקה"
+
+# Sentinel distinguishing "the sync generator is exhausted" from any real chunk value (including
+# `None`/`""`) when polling it via `next(stream_gen, _STREAM_DONE)` from the threadpool below.
+_STREAM_DONE = object()
 
 _NO_CITATION_PREFIX = "⚠ ללא ציטוטים: "
 _OFF_TOPIC_PREFIX = "⚠ ייתכן שהתשובה אינה עוסקת בשאלה: "
@@ -296,13 +308,19 @@ async def ask(body: AskRequest) -> StreamingResponse:
             # the (possibly slow, for a cloud CLI) call even starts.
             provider_kind, provider_model = ollama_client.resolve_provider_info(body.provider)
             yield _sse({"type": "meta", "provider": provider_kind, "model": provider_model})
-            # `chat_stream` is a synchronous generator over blocking HTTP reads; this is a
-            # local, single-user deployment (see docs/CONVENTIONS.md), so driving it directly
-            # inside the async generator (rather than off-loading to a thread) is an accepted
-            # trade-off -- it blocks the event loop only for the duration of this one request.
-            # (This also means the wall-clock guard below can only observe elapsed time between
-            # chunks Ollama actually sends -- a total hang with zero output isn't preemptable
-            # without a separate thread, which this single-user deployment doesn't need.)
+            # P1 fix (incident 2026-09-06 16:15-16:24, docs/qa/...): `chat_stream` is a
+            # synchronous generator -- its first `next()` blocks inside `ResourceGate.acquire()`
+            # (which can itself `time.sleep()` across the gate's queue backoff) and every
+            # subsequent `next()` blocks on a synchronous HTTP read. Driving it directly inside
+            # this async generator (the previous approach, on the theory that a local
+            # single-user deployment could accept blocking the loop for "the duration of this
+            # one request") turned out to freeze the *entire* single-worker uvicorn process for
+            # as long as the gate queued -- 7+ minutes live, with `GET /api/status` timing out at
+            # 60s along with every other request. Each `next()` call below is now offloaded to
+            # FastAPI's threadpool (`run_in_threadpool`) so the event loop stays free to serve
+            # other requests for the whole time this one is blocked; see also the interactive
+            # gate budget (`resources.interactive_wait_s`) in `eoa.resources.gate`, which now
+            # caps how long that blocking wait can even be for an interactive call like this one.
             # U11: hold back at most `len(_SOURCES_SENTINEL) - 1` trailing characters of `pending`
             # at any time -- that's the most that could still turn into the sentinel once the next
             # chunk arrives, so ordinary text streams through with no perceptible delay. Once the
@@ -314,6 +332,7 @@ async def ask(body: AskRequest) -> StreamingResponse:
             answer_text = ""
             tail_buf = ""
             abort_note: str | None = None
+            gate_busy = False
             t_answer_start = time.monotonic()
 
             stream_gen = ollama_client.chat_stream(
@@ -329,7 +348,10 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 },
             )
             try:
-                for chunk in stream_gen:
+                while True:
+                    chunk = await run_in_threadpool(next, stream_gen, _STREAM_DONE)
+                    if chunk is _STREAM_DONE:
+                        break
                     if time.monotonic() - t_answer_start > _MAX_ANSWER_SECONDS:
                         log.warning(
                             "ask.wallclock_abort",
@@ -367,6 +389,13 @@ async def ask(body: AskRequest) -> StreamingResponse:
                             )
                             abort_note = _REPETITION_NOTE
                             break
+            except ResourceUnavailable as exc:
+                # Item 2 of the P1 fix: the interactive gate budget expired -- a nightly run or
+                # report generation is holding the GPU/VRAM the chat model needs. Surface this
+                # immediately as a clear, visible message instead of letting the request hang for
+                # the patient `queue_timeout_min` a batch/pipeline caller would wait.
+                log.warning("ask.gate_busy", question_hash=_question_hash(body.question), error=str(exc))
+                gate_busy = True
             finally:
                 # `chat_stream` is a generator (has `.close()`, which propagates `GeneratorExit`
                 # through its `with c.stream(...)` and actually tears down the HTTP connection on
@@ -374,6 +403,16 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 close = getattr(stream_gen, "close", None)
                 if callable(close):
                     close()
+
+            if gate_busy:
+                # Emitted as a plain `token` too (in addition to the dedicated `gate_busy` event)
+                # so today's UI -- which renders `token`/`sources`/`done` but has no bespoke
+                # handling for a `gate_busy` event yet -- still shows the user a clear message
+                # instead of silence.
+                yield _sse({"type": "token", "text": _GATE_BUSY_MESSAGE})
+                yield _sse({"type": "gate_busy", "message": _GATE_BUSY_MESSAGE})
+                yield _sse({"type": "sources", "items": []})
+                return
 
             if abort_note is not None:
                 # `pending` may still hold up to `len(_SOURCES_SENTINEL) - 1` real answer chars

@@ -136,7 +136,12 @@ class ResourceGate:
         need = est_vram_mb or spec.est_vram_mb
         rc = s.resources
         backoffs = list(rc.queue_backoff_seconds) or [5]
-        deadline = time.monotonic() + rc.queue_timeout_min * 60
+        # 2026-09-06 P1: an interactive caller (chat, on-demand actions) gets the short
+        # `interactive_wait_s` deadline instead of the patient `queue_timeout_min` nightly/pipeline
+        # callers use -- see `ResourcesCfg.interactive_wait_s` for why. Raising
+        # `ResourceUnavailable` this quickly is deliberate: the caller (currently `/api/ask`) turns
+        # it into an immediate, clear "busy" message instead of the request hanging.
+        deadline = time.monotonic() + (rc.interactive_wait_s if interactive else rc.queue_timeout_min * 60)
         waited_ms = 0
         attempt = 0
         model_name = spec.ollama or spec.hf or spec.key

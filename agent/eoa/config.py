@@ -75,6 +75,13 @@ class ResourcesCfg(BaseModel):
     gpu_temp_stop_c: int = 88
     queue_backoff_seconds: list[int] = [5, 10, 30, 60]
     queue_timeout_min: int = 20
+    # P1 fix (2026-09-06 incident): an *interactive* caller (chat, on-demand actions) must not be
+    # left waiting behind `queue_timeout_min` (20 min) for VRAM a nightly/pipeline job is holding --
+    # that reads to the user as the whole app hanging. `ResourceGate._acquire_locked` uses this
+    # (instead of `queue_timeout_min`) as the queue deadline whenever `interactive=True`; batch/
+    # pipeline callers (`interactive=False`, the default) are unaffected and keep the patient
+    # `queue_timeout_min` behaviour.
+    interactive_wait_s: int = 20
     min_loaded_seconds: int = 300
     polite_mode: PoliteModeCfg = PoliteModeCfg()
 
