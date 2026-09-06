@@ -1997,6 +1997,39 @@ def build_bd_territory(
         extra_sections.append(
             {"title_he": "סיכונים והנחות", "body_he": draft.risks_assumptions_he, "position": "after_outlook"}
         )
+    # A16 (מעקב רכישות ושותפויות) + A17 (מחירי ייחוס למטע"דים): data-driven, model-free sections;
+    # each extends ``citation_items`` in place so its [n] marks resolve in the source appendix, and
+    # each is skipped entirely (never a placeholder) when it has nothing to show or its DB read
+    # fails -- the BD report must not depend on either feature's tables being populated.
+    try:
+        from eoa.report.acquisition_watch import SECTION_TITLE_HE as _ACQ_TITLE_HE
+        from eoa.report.acquisition_watch import acquisition_watch_section_md
+
+        with connection() as conn:
+            acq_body = acquisition_watch_section_md(conn, start, end, citation_items)
+        if acq_body.strip():
+            extra_sections.append(
+                {"title_he": _ACQ_TITLE_HE, "body_he": acq_body, "position": "after_outlook"}
+            )
+    except Exception as exc:  # optional section, never blocks the report
+        log.warning("bd_territory_acquisition_section_failed", territory=code, error=str(exc)[:160])
+    try:
+        from eoa.payloads.report_section import payload_price_table_md
+
+        with connection() as conn:
+            price_body = payload_price_table_md(code, conn)
+        # the helper renders its own "## ..." heading; the section renderer adds the title itself
+        price_body = chr(10).join(ln for ln in price_body.splitlines() if not ln.startswith("## ")).strip()
+        if price_body and "|" in price_body:
+            extra_sections.append(
+                {
+                    "title_he": 'מחירי ייחוס למטע"דים בטריטוריה',
+                    "body_he": price_body,
+                    "position": "after_outlook",
+                }
+            )
+    except Exception as exc:
+        log.warning("bd_territory_payload_prices_failed", territory=code, error=str(exc)[:160])
 
     # D7 round-1 fix (docs/qa/loop/round_1_fixes.md, ``actions_table_nonempty``): if the LLM's
     # recommended actions ended up empty by this point -- never drafted any (has_items=False),
