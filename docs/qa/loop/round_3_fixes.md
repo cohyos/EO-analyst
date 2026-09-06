@@ -122,3 +122,22 @@ progressively as the nightly backfill re-analyses them.
 The long-running orchestrator process had imported the old `relational` module before the D7/D9
 agent added the function to the working tree, then lazily imported the new `fetch/service.py`
 that calls it. Gone after the 15:15 restart (job 95 re-run queued to confirm).
+
+## Open for round 4 (seen while closing round 3)
+
+- **Cloud-delegated deep search blocked by the L2 guard (job 113, item 6872 — Rafael buys the
+  Volkswagen Osnabrück plant for an Iron Dome line).** The delegated claude run did real research
+  (Hebrew/English/German queries) but its *answer* tripped the injection heuristic ("התשובה נחסמה
+  בבדיקת אבטחה") and the whole investigation returned `not_found` with no sources. The guard should
+  score fetched page content, not the delegated model's own answer; on suspicion, drop the
+  flagged sentence and keep the rest with a caveat, never the entire answer.
+- **Weekly domain keys from the model** ("land_eoir", "cuas", an "out_of_scope" section) — fixed
+  in 11e951c (canonicalised + prompt lists the allowed keys); verify on the cloud-drafted weekly
+  rebuilt after the restart (job 108).
+- **Patent surveys with 0 patents when the keyless search times out** — fixed in 934710b (stored
+  patents supplement the search); verify on jobs 109/110.
+- **iPhone nav rail overflow + FAB overlap after the payloads entry** (3 e2e failures on
+  iphone-safari) — agent in flight.
+- **Cloud chain throughput:** weekly = ~30 claude CLI calls at 25–37 s; BD ≈ 5 calls. Nightly
+  pipeline on 200 items in batches of 8 → ~25 classify/triage/analyze batch calls; measure the
+  first night (2026-09-07 01:00) and compare with the 4 h local baseline.
