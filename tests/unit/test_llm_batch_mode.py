@@ -109,7 +109,9 @@ class TestClassifyBatchWiring:
         monkeypatch.setattr(classify, "mark_stage", lambda item_id, stage: marked.append(item_id))
         persisted = []
         monkeypatch.setattr(
-            classify, "persist_classification", lambda item_id, out: persisted.append(item_id)
+            classify,
+            "persist_classification",
+            lambda item, out: persisted.append(item["id"] if isinstance(item, dict) else item),
         )
         monkeypatch.setattr(classify, "update_item_fields", lambda *a, **k: None)
 
