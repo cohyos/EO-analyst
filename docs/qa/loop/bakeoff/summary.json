@@ -405,5 +405,390 @@
         }
       }
     ]
+  },
+  "judge_all5": {
+    "judge_provider": "agy:gemini-3.1-pro-high",
+    "mean_score": {
+      "dictalm3_12b": 36.9,
+      "gemma4_12b": 41.2,
+      "gemma4_e4b": 23.1,
+      "agy_gemini31_pro_high": 91.9,
+      "claude_sonnet5": 94.9
+    },
+    "n_judged": {
+      "dictalm3_12b": 8,
+      "gemma4_12b": 8,
+      "gemma4_e4b": 8,
+      "agy_gemini31_pro_high": 8,
+      "claude_sonnet5": 7
+    },
+    "examples": [
+      {
+        "item_id": 3,
+        "outputs": {
+          "dictalm3_12b": {
+            "domain": "out_of_scope",
+            "subdomain": "",
+            "level": "archive",
+            "score": 1,
+            "triage_reason": "הפריט עומד בכל הקריטריונים של סוג דיווח חדשותי (science), כולל תאריך, כותרת, סוג דיווח, תיאור קצר, תגיות, ישויות, מקור, תוכן מלא, ו-URL. הוא מספק מידע חדש על מאמצי חיל האוויר האמריקאי להחליף את מטוסי הרפאים MQ-9A Reaper במטוסים בלתי מאוישים חדשים, תוך ציון עלויות, יעדים וטכנולוגיה. הפריט כולל גם ציטוטים של בכירים בחיל האוויר וציטוטים של דוברים מטעם החברה המתחרה, General Atomics. הוא מספק מידע חדש,",
+            "summary_he": "לאחר הפסדים כבדים של כטב״ם ה-MQ-9A רייפר במבצעים קרביים נגד איראן, מפקדת חיל האוויר האמריקאי מזרזת את מאמציה להחליף את הכטב״ם הוותיק בכטב״ם חדש בעלות של 10 מיליון דולר כל אחד. הדחיפות נובעת מהפסדים משמעותיים שהאיצו את הדיון על החלפתו, כאשר רבע ממאגר הכטב״מים של הפנטגון אבד מאז תחילת מבצע Epic Fury בפברואר. חיל האוויר מעוניין להביא את הדגם החדש מהר ככל האפשר, ומציין כי למרות שישנם כטב״מים זמינים, קצב השימוש בהם מדאיג. חיל האוויר החל בתוכנית חדשה בשם Mass Modular Aircraft (MMA) כדי להחליף את ה-MQ-9A, אך הדגיש כי לא ניתן לרכוש כטב״מים חדשים באופן מיידי בשל מגבלות תקציביות. המטרה היא להגיע לפרוטוטיפ תוך שנה ולפריסה מלאה בתוך שלוש שנים, עם כוונה לשלוח לפחות 180 כטב״מים. חיל האוויר שואף להוריד את עלות הכטב״מים החדשים לכ-20 מיליון דולר, לעומת 50 מיליון דולר לדגם הנוכחי.",
+            "so_what_he": "להערכתנו, המהלך מחזק את מעמדה של חיל האוויר האמריקאי מול מתחרותיה בתעשיית הכטב״מים הביטחוניים. הדחיפות בפיתוח כטב״ם חדש, לצד הדגש על עלות נמוכה יותר ויכולות אוטומציה גבוהות יותר, מעידים על מגמה של התמקדות ביעילות תפעולית וצמצום עלויות. הדבר עשוי לאתגר את מעמדה של ג'נרל אטומיקס, שמפתחת את ה-MQ-9A רייפר, ולהעצים את התחרות על פיתוח כטב״מים מתקדמים וזולים יותר.",
+            "key_facts": [],
+            "entities_mentioned": []
+          },
+          "gemma4_12b": {
+            "domain": "out_of_scope",
+            "subdomain": "",
+            "level": "archive",
+            "score": 1,
+            "triage_reason": "The article discusses a significant shift in US Air Force procurement strategy due to high attrition rates of MQ-9A Reapers. It introduces a new program, Mass Modular Aircraft (MMA), aimed at creating a lower-cost, high-volume replacement. The text provides specific technical targets (range, cost, quantity) and mentions a specific competitor (General Atomics' 'Wildfire' design).",
+            "summary_he": "חיל האוויר האמריקאי מאיץ את המאמצים להחלפת כטב״ר מסוג MQ-9A Reaper בשל אבדות משמעותיות של כלי טיס אלו במהלך מבצעים לוחמניים. התוכנית החדשה, המכונה Mass Modular Aircraft (MMA), שואפת לספק כלי טיס זולים יותר (כ-10 מיליון דולר ליחידה) בעלי יכולות מודולריות וייצור המוני. המטרה היא להשיג 20 כלי טיס מוכנים למשימה עד שנת הכספים 2031, עם שאיפה לייצר לפחות 180 כלי טיס מסוג MMA.",
+            "so_what_he": "להערכתנו, המהלך משקף שינוי אסטרטגי במודל התפעולי של כטב״רי תצפית ותקיפה: המעבר ממוקד בטכנולוגיה פורצת דרשת (Cutting-edge) למוטב של 'כלי עבודה' (Trucks) זולים וניתנים להחלפה במהירות, במטרה לשמור על עוצמה מבצעית מול איומים מודרניים. הדגש על מודולריות וממשק משתמש מאוחד (Common Interface) מעיד על כוונה להגדיל את יעילות המפעילים ולייצר עקבות של אוטונומיה גבוהה יותר במערכות EO/IR וניהול כטב״רים מרובי-משימות.",
+            "key_facts": [
+              "כטב״ר מסוג MQ-9A Reaper עלו בעלויות של עד 50 מיליון דולר ליחידה, בהתאם למטע",
+              ".brinkley_quote_not_included_here_but_in_source_context_of_cost_calculation], // Note: The source says ",
+              " up to $50 million depending on payload. Correcting to exact text: ",
+              " up to $50 million a piece depending on their payload."
+            ],
+            "entities_mentioned": []
+          },
+          "gemma4_e4b": {
+            "domain": "secondary",
+            "subdomain": "detectors_fpa",
+            "level": "red",
+            "score": 8,
+            "triage_reason": "הציון המצטבר (3+4+5=12) תואם לציון ה-score=8 בהתאם לטבלה הקבועה. הנתונים עוסקים בהערכת יכולות טכנולוגיות וכלכליות של מערכות אוויריות מתקדמות (MMA/CCA), מה שמצדיק רמת 'ארכיון' (Archive) המצביעה על מידע מקיף או תכנון ארוך טווח.",
+            "summary_he": "לאחר אובדנים משמעותיים של כטב״מים מסוג MQ-9A Reaper במהלך מבצעים קרביים נגד איראן, בכירים בחיל האוויר האמריקאי מאיצים את המאמצים להחליף את הכטב״ם המיושן בכלי טיס בלתי מאויש חדש במחיר של 10 מיליון דולר ליחידה. המהלך הניע להקמת תוכנית חדשה בשם Mass Modular Aircraft (MMA), שנועדה להשיג יכולות תצפית וקישוריות תוך שמירה על יכולת הפחתת עלויות. המטרה המקורית של המערכת הייתה להשיג 20 כטב״מים מוכנים למשימה עד שנת הכספים 2031, כאשר המועמדים המרכזיים כוללים את General Atomics עם עיצוב בשם Wildfire.",
+            "so_what_he": "להערכתנו, הדגש על הפחתת עלויות והגברת המודולריות (modularity) בתוכנית MMA מעיד על שינוי פרדיגמה בתפיסת המבצעים האוויריים, המעבירה את המיקוד משימור יכולות טכנולוגיות מתקדמות (cutting-edge) למיקסום היעילות התפעולית והכלכלית. הדרישה ליכולת תפעול מרובה באמצעות ממשק משתמש פשוט (כמו עכבר ומקלדת) מצביעה על דגש עתידי על אוטומציה מתקדמת וניהול נכסים מרובים (multi-asset management) במערכות ISR.",
+            "key_facts": [
+              "כ-45 כטב״מים מסוג Reaper אובדו מאז השקת מבצע Epic Fury בפברואר.",
+              "הכטב״ם MQ-9A הפסיק את ייצורו בשנה שעברה.",
+              "התוכנית החדשה, Mass Modular Aircraft (MMA), הופעלה במאי ע"
+            ],
+            "entities_mentioned": [
+              "General Atomics MQ-9A Reaper",
+              "Mass Modular Aircraft (MMA)",
+              "Collaborative Combat Aircraft (CCA)",
+              "SkyGuardian"
+            ]
+          },
+          "agy_gemini31_pro_high": {
+            "domain": "out_of_scope",
+            "subdomain": "",
+            "level": "archive",
+            "score": 2,
+            "triage_reason": "הכתבה עוסקת בהאצת תוכנית הפלטפורמות לכטב״ם MMA כמחליף ל-MQ-9, ללא התייחסות למטע״דים או למערכות תצפית. למרות אזכור אגבי של חברת Anduril, הפריט חורג מתחומי הליבה שכן הוא מתמקד בפלטפורמה עצמה ולא בחיישנים אלקטרו-אופטיים.",
+            "summary_he": "חיל האוויר של ארה״ב מאיץ את פיתוח כטב״ם ה-Massed Modular Aircraft (MMA), שנועד להחליף את ה-MQ-9A Reaper בעלות של כ-10 מיליון דולר ליחידה. ההאצה נובעת מאובדן של לפחות 45 כטב״מי Reaper, בשווי של עד 50 מיליון דולר כל אחד, במסגרת פעילות קרבית. חיל האוויר שואף לכלים מודולריים המבוססים על טכנולוגיה קיימת ומוכחת, תוך ויתור על יכולות קצה (cutting-edge), כדי לאפשר עמידה כלכלית באובדן כלים.",
+            "so_what_he": "להערכתנו, הדרישה לפלטפורמות זולות ובנות-החלפה על חשבון ביצועי קצה מבטאת שינוי פרדיגמה עמוק בחיל האוויר האמריקאי כלפי התמודדות בסביבות רוויות איומים. המעבר מתבסס על ארכיטקטורה פתוחה, מודולריות ושליטה אוטומטית מממשק משותף לניהול מספר כלים במקביל, מה שמהווה פוטנציאל עבור תעשיית התוכנה וספקי מטע״דים (Payloads). ההתמקדות בפשטות טכנולוגית צפויה לפתוח את השוק ליצרנים חדשים, שעשויים לאתגר את שליטתה המסורתית של General Atomics בתחום.",
+            "key_facts": [
+              "45 כטב״מי MQ-9A, המהווים כרבע ממלאי הפנטגון, אבדו מאז חודש פברואר.",
+              "מחיר כטב״ם MQ-9A יכול להגיע לעד 50 מיליון דולר, בהתאם למטע״ד (payload) המותקן עליו.",
+              "תוכנית ה-MMA שואפת להגיע לעלות של כ-10 מיליון דולר לכלי, מחצית מהעלות המתוכננת של כטב״מי CCA שעומדת על 20 מיליון דולר.",
+              "מטרת יחידת DIU היא להגיע לאב-טיפוס של ה-MMA תוך שנה, ולפרוס אותו בהיקף רחב (fielded at scale) תוך 3 שנים.",
+              "חיל האוויר של ארה״ב מתכנן לרכוש לפחות 180 כטב״מי MMA.",
+              "דרישות ה-MMA כוללות טווח של 8,000 מייל ימי, רמת מודולריות גבוהה, ויכולת ייצור ועלות המאפשרים עמידה באובדנים.",
+              "חברת General Atomics מתמודדת במכרז ה-MMA עם תכנון חדש בשם Wildfire.",
+              "ייצור דגם ה-MQ-9A הופסק לחלוטין בשנה שעברה."
+            ],
+            "entities_mentioned": [
+              "US Air Force",
+              "General Atomics",
+              "MQ-9A Reaper",
+              "Mass Modular Aircraft",
+              "MQ-9B SkyGuardian",
+              "Defense Innovation Unit",
+              "Collaborative Combat Aircraft",
+              "Anduril",
+              "Iran"
+            ]
+          }
+        },
+        "judge_scores": {
+          "gemma4_12b": 40,
+          "agy_gemini31_pro_high": 95,
+          "gemma4_e4b": 20,
+          "dictalm3_12b": 15
+        },
+        "judge_notes": {
+          "gemma4_12b": "Good summary and inference, but the 'key_facts' section contains leaked chain-of-thought text and broken formatting rather than clean facts.",
+          "agy_gemini31_pro_high": "Excellent output. Highly faithful to the source, comprehensive key facts, excellent Hebrew, and the 'so_what' provides genuine analyst-grade inference regarding the paradigm shift and market impact.",
+          "gemma4_e4b": "Incorrectly classifies as 'detectors_fpa' despite no mention of sensors. The triage_reason contains bizarre hallucinatory math. Key facts include a hallucinated date (May instead of July) and truncate mid-sentence.",
+          "dictalm3_12b": "Factually incorrect (states the new drone will cost $20M instead of $10M). Poor Hebrew translation ('מטוסי הרפאים'). Triage reason cuts off mid-sentence, and key_facts/entities are entirely empty."
+        }
+      },
+      {
+        "item_id": 9,
+        "outputs": {
+          "dictalm3_12b": {
+            "domain": "out_of_scope",
+            "subdomain": "",
+            "level": "archive",
+            "score": 1,
+            "triage_reason": "הפריט עוסק בפיתוח מערכת נגד כטב",
+            "summary_he": "שלושה תרגילים צבאיים הוכיחו כי מערכת ההגנה האווירית Halo_Shield של AV התפתחה מאב-טיפוס מוכח לשימוש מבצעי. המערכת, המורכבת ממערך חיישנים ותוכנה, הוכיחה יכולת זיהוי, מעקב ותגובה מהירים נגד איומים אוויריים, כולל כטב״מים, בתרגילים מורכבים. התרגילים הדגימו את יכולתה של המערכת לפעול בסביבות מאתגרות, לשתף פעולה עם מערכות אחרות, ולספק הגנה רב-שכבתית.",
+            "so_what_he": "להערכתנו, הצלחת התרגילים מצביעה על כך ש-Halo_Shield עשויה לסמן שינוי משמעותי בתפיסת ההגנה האווירית, במיוחד בהקשר של איום הכטב״מים. המערכת מציעה פתרון מקיף, מבוזר וניתן להרחבה, שיכול להתמודד עם מגוון רחב של איומים. הצלחתה בתרגילים מציעה שהיא עשויה להיות מוכנה לפריסה מבצעית, ומעלה את השאלה האם מערכות הגנה אווירית מסורתיות ייאלצו להשתנות כדי להתמודד עם יכולותיה.",
+            "key_facts": [
+              "Halo_Shield היא מערכת הגנה אווירית מבוזרת (distributed C-UAS architecture)",
+              "המערכת משלבת חיישנים פסיביים ואקטיביים (passive and active sensor data)",
+              "היא פועלת באמצעות תוכנת AV_Halo ליצירת תמונת מצב משותפת (common operating picture - COP)",
+              "המערכת מורכבת מיחידות \"Tiles\" (modular, distributed counter-UAS architecture)",
+              "הוכחה כמוכנה מבצעית (proven warfighting system) בתרגילים צבאיים",
+              "הצליחה לזהות כטב״מים קטנים ולספק אישור חזותי מהיר",
+              "הפעלה ראשונית נמשכת כ-15 דקות, תצורות מורכבות מוסיפות 15-20 דקות",
+              "השגת זמני זיהוי-פגיעה של פחות מדקה"
+            ],
+            "entities_mentioned": []
+          },
+          "gemma4_12b": {
+            "domain": "computer_vision",
+            "subdomain": "atr",
+            "level": "archive",
+            "score": 1,
+            "triage_reason": "The article describes a transition of the Halo_Shield system from a prototype to a proven warfighting system through specific military exercises (T-REX 25-2, TWIX 2026, T-REX 2026). It details the integration of various sensors (Walaris, Squarehead, Titan, etc.) and the performance of the system in neutralizing drone swarms and various UAS types.",
+            "summary_he": "מערכת Halo_Shield של חברת AV הוכחה ביצועי שדה במערכי הגנה אווירית מול כטב״מים (UAS) במהלך שלושה תרגילים משמעותיים: T-REX 25-2, TWIX 2026, ו-T-REX 2026. המערכת מהווה ארכיטקטורת מטע״ד (C-UAS) מודולרית המשלבת חיישנים פסיביים ואקטיביים לצורך יצירת תמונת מצב מאוחדת (COP) וניהול שרשרת ההשמדה (Kill Chain). המערכת הוכיחה יכולות של שילוב חיישנים (Sensor Fusion), ניווט וניהול (C2), ואינטראופרביליות גבוהה בסביבות מבצעיות מורכבות.",
+            "so_what_he": "להערכתנו, המעבר של Halo_Shield משלב אב-טיפוס למערכת מוכחתה (Proven) מעיד על מגמה של מעבר מפתרונות נקודתיים לפתרונות מבוססי תוכנה המשלבים מגוון חיישנים (Multi-sensor Fusion). היכולת של המערכת לשמש כמרכזת C2 עבור לייזרים (HEL) וליצור שרשרת השמדה שלמה מעלה את ערכה המבצעי כפתרון מורחב המשלב גם הגנה אווירית וגם ניטור (ISR).",
+            "key_facts": [
+              "מערכת Halo_Shield מבוססת על תוכנת AV_Halo המשלבת נתוני חיישנים פסיביים ואקטיביים.",
+              "המערכת הוכחה ביצועי שדה בשלוש סבבי תרגול: T-REX 25-2, TWIX 2026, ו-T-REX 2026.",
+              "באירוע T-REX 25-2, המערכת שילבה חיישני Walaris AirScout, Squarehead Discovair, ו-AV Titan SV.",
+              "באירוע TWIX 2026, המערכת הוכיחה יכולות של שרשרת השמדה מרובת שכבות ואינטגרציה עם מערכות חיצוניות.",
+              "באירוע T-REX 2026, המערכת שימשה כמרכז ניהול (C2) עבור מערכת לייזר LOCUST.",
+              "זמן הזיהוי (Detection) בתרגיל T-REX 2026 היה פחות מדקה, וזמן הזיהוי לזהות (ID) ויישור ליעד (Cue) נמשכו שניות ספורות.",
+              "המערכת תמכה בזיהוי אתרי שיגור וצוותי טייסים (Left-of-launch detection) באמצעות AV_Halo CORTEX ו-Puma ISR.",
+              "המערכת הציגה זמן עבודת רציף של כמעט 100% ללא קריסות תוכנה או כשלים בחומרה."
+            ],
+            "entities_mentioned": []
+          },
+          "gemma4_e4b": {
+            "domain": "air_defense",
+            "subdomain": "iir_seekers",
+            "level": "archive",
+            "score": 1,
+            "triage_reason": "הפריט עוסק במערכות הגנה אווירית מתקדמות (C-UAS) שפותחו ומוכחו באמצעות תרגילים צבאיים אמריקאיים (T-REX 25-2, TWIX 2026, T-REX 2026). המערכת המרכזית היא Halo_Shield של חברת AV. יש צורך בבדיקה מעמיקה כדי להבין את ההקשר הטכנולוגי המדויק, את המשתתפים המדויקים (כגון Argus Perimeter Security, Titan RF C-UAS, Locust high-energy laser) ואת המשמעות האסטרטגית של המעבר מ-",
+            "summary_he": "מערכות רחפנים (UAS) מודרניות הפכו את הגנת המרחב האווירי למתחרה אסימטרית ומהירה, מה שמאתגר את מערכות ההגנה המסורתיות המבוססות על רדאר (radar-centric). מערכת ה-Halo_Shield של חברת AV, המציגה ארכיטקטורה מודולרית ומופצת להגנת רחבת פעולה נגד רחפנים (C-UAS), הוכחה במספר תרגילים גדולים של משרד ההגנה, כולל T-REX 25-2, TWIX 2026 ו-T-REX 2026. בתרגילים אלו, המערכת הפגינה יכולות של שרשרת הקרנה (kill-chain) מלאה, תוך שילוב חיישנים פסיביים ואקטיביים וניהול תמונה מותאמת (COP) בתוכנת AV_Halo.",
+            "so_what_he": "להערכתנו, ההצלחה של Halo_Shield בתרגילים המגוונים הללו מדגימה מעבר משמעותי ממעמד אב-טיפוס (prototype) למערכת מבצעית מוכחת (proven warfighting system) בתחום ה-C-UAS. ההדגמה של יכולת אינטגרציה רב-מערכתית (multi-sensor fusion) וקישוריות (interoperability) מול מספר תאגידים וסוגי מטע, מצביעה על מגמה תעשייתית לכיוון מערכות הגנה אווירית מודולריות, מבוזרות ובעלות יכולת ",
+            "key_facts": [],
+            "entities_mentioned": []
+          },
+          "agy_gemini31_pro_high": {
+            "domain": "c_uas",
+            "subdomain": "multi_sensor",
+            "level": "yellow",
+            "score": 5,
+            "triage_reason": "המאמר סוקר את הצלחת פלטפורמת Halo_Shield ומערכת הלייזר LOCUST (הנמצאות במעקב) בשלושה תרגילי הגנה אווירית של צבא ארה״ב. הדיווח מעיד על התקדמותן של המערכות מאב-טיפוס למערכת מבצעית מוכחת, אך אינו כולל דיווח על זכייה בחוזה או פריצת דרך תקדימית.",
+            "summary_he": "חברת AV מדווחת כי מערכת ה־C-UAS מתוצרתה, Halo_Shield, השלימה בהצלחה שלושה ניסויים של משרד ההגנה האמריקאי. המערכת, המשמשת פלטפורמת שו״ב (C2) והיתוך מידע מסנסורים פסיביים ואקטיביים, הודגמה בתצורות שונות תוך שילוב מכ״מים, מצלמות אלקטרו־אופטיות (EO/IR), גלאים אקוסטיים ולייזר רב־עוצמה (HEL). בניסוי T-REX 2026, המערכת ניהלה שרשרת הרג שלמה שכללה יירוט להקת כטב״מים באמצעות מערכת הלייזר LOCUST.",
+            "so_what_he": "להערכתנו, הצלחת ניסויי AV ממצבת את Halo_Shield כפלטפורמת שו״ב מרכזית לניהול מערכי C-UAS פתוחים, באופן המצמצם תלות ביצרן בודד (Vendor Lock-in). השילוב של היתוך מידע רב־סנסורי יחד עם ניהול אש של מערכת נשק לייזר מעיד על בשלות גבוהה של הארכיטקטורה ויכולות סגירת מעגל מתקדמות. בנוסף, הדגש המבצעי על פריסה מהירה ותאימות לתקנים מחזק את המעבר מצד צבא ארה״ב למערכות הגנה מודולריות ומבוזרות.",
+            "key_facts": [
+              "מערכת Halo_Shield שילבה במהלך הניסויים סנסורים ומערכות של Walaris, Squarehead, Axis, SRC, וכן את הלייזר LOCUST.",
+              "המערכת הופעלה מול כטב״מים מקבוצות 1 ו־2, והצליחה לנטרל להקה של חמישה כלים בזמן קצר.",
+              "זמן ההפעלה של המערכת ממצב כבוי לפעולה מבצעית אורך כ־15 דקות.",
+              "במהלך T-REX 2026 נרשם הירי הראשון אי פעם של לייזר רב־עוצמה (HEL) בבסיס חיל האוויר Grand Forks, תחת ניהול השו״ב של המערכת.",
+              "מערכת Halo_Shield הפגינה תאימות לתצורת ההודעות OMNI והשתלבה בסביבות PMASKC ו־Ninja Fusion/TRAX."
+            ],
+            "entities_mentioned": [
+              "AV",
+              "Halo_Shield",
+              "LOCUST",
+              "Walaris",
+              "Squarehead",
+              "Axis",
+              "SRC",
+              "U.S. Air Force",
+              "National Guard",
+              "MITRE",
+              "Stephen Lloyd"
+            ]
+          },
+          "claude_sonnet5": {
+            "domain": "c_uas",
+            "subdomain": "multi_sensor",
+            "level": "orange",
+            "score": 6,
+            "triage_reason": "הפריט עוסק ישירות במערכת ה-C-UAS מרובת-החיישנים Halo_Shield של AV (עם שילוב LOCUST HEL), ולכן קרבה גבוהה לליבה; עם זאת מדובר בהודעת PR חברתית על הבשלה מבצעית בשלושה תרגילים ללא סכום חוזה או פריצת דרך טכנולוגית, כך שהגודל והחידוש מוגבלים.",
+            "summary_he": "מאמר מבית AV מתאר כיצד מערכת ה-C-UAS המודולרית Halo_Shield נבחנה בשלושה תרגילים של משרד ההגנה האמריקאי (DoW) והמשמר הלאומי: T-REX 25-2 במחנה אטרברי, אינדיאנה; TWIX 2026 בסאמטר, דרום קרוליינה; ו-T-REX 2026 בבסיס חיל האוויר גרנד פורקס. ב-T-REX 25-2 המערכת מיזגה נתונים מחיישנים פסיביים מרובים (Walaris AirScout, Squarehead Discovair, AV Titan SV) לתמונת מצב משותפת (COP), עלתה לפעולה תוך כ-15 דקות ופעלה בזמינות קרובה ל-100% ללא תקלות תוכנה או חומרה. ב-T-REX 2026 שולבו חיישנים נוספים (Squarehead Acoustic, Axis EO/IR, SRC Gryphon) ו-Halo_Shield שימש כמפקדה (C2) להפעלת לייזר אנרגיה גבוהה (HEL) מסוג LOCUST - ירי הלייזר הראשון אי-פעם בבסיס גרנד פורקס - עם זמן שיגור-לזיהוי (launch-to-detection) של פחות מדקה וניטרול נחיל בן חמישה כלי טיס. הכתבה נכתבה על ידי Stephen Lloyd, Senior Director ב-AV, לשעבר בכיר ברשות התעופה הפדרלית (FAA).",
+            "so_what_he": "להערכתנו, השלמת שלושה תרגילי DoW/משמר לאומי נפרדים תוך הדגמת שרשרת הרג מלאה - כולל שילוב לייזר HEL (LOCUST) תחת מפקדה (C2) אחודה - ממצבת את Halo_Shield של AV כפתרון C-UAS משולב-חיישנים בשל יחסית להטמעה מבצעית קרובה, ומחזקת את עמדתה התחרותית מול פתרונות C-UAS מבוססי מכ״ם נקודתי מול איומי כטב״ם מקבוצה 1-2 ונחילים.",
+            "key_facts": [
+              "T-REX 25-2 נערך במחנה אטרברי, אינדיאנה (Camp Atterbury, Indiana).",
+              "TWIX 2026 נערך בסאמטר, דרום קרוליינה (Sumter, SC).",
+              "T-REX 2026 נערך בבסיס חיל האוויר גרנד פורקס (Grand Forks AFB).",
+              "Halo_Shield עלה לפעולה תוך כ-15 דקות, עם תוספת של 15–20 דקות בלבד להגדרות מורכבות יותר כולל הקמת תוכנה.",
+              "המערכת פעלה בזמינות (uptime) קרובה ל-100%, ללא קריסות תוכנה או תקלות חומרה.",
+              "זמן שיגור-לזיהוי (launch-to-detection) בניסויים היה פחות מדקה, וזמני זיהוי-לזיהוי-מטרה (detection-to-ID) והפעלה-להשמדה (cue to kill) עמדו על מספר שניות בודדות כל אחד.",
+              "ב-T-REX 2026 ניטרלה המערכת נחיל בן חמישה כלי טיס (five-ship swarm) בזמן קצר.",
+              "ב-T-REX 2026 בוצע ירי הלייזר הראשון אי-פעם בבסיס גרנד פורקס, כאשר Halo_Shield שימש כמפקדה (C2) להפעלת מערכת הלייזר LOCUST."
+            ],
+            "entities_mentioned": [
+              "AV",
+              "Halo_Shield",
+              "Walaris",
+              "Squarehead",
+              "LOCUST",
+              "Axis Communications",
+              "SRC Inc.",
+              "PUMA",
+              "MITRE",
+              "DHS",
+              "National Guard",
+              "U.S. Air Force"
+            ]
+          }
+        },
+        "judge_scores": {
+          "dictalm3_12b": 35,
+          "agy_gemini31_pro_high": 92,
+          "claude_sonnet5": 96,
+          "gemma4_e4b": 15,
+          "gemma4_12b": 45
+        },
+        "judge_notes": {
+          "dictalm3_12b": "Failed to identify the correct domain and incorrectly classified it as out_of_scope. The entities list is completely empty, and the triage reason is incomplete.",
+          "agy_gemini31_pro_high": "Excellent analysis and strong 'so what' inference that accurately addresses vendor lock-in and modular C-UAS trends. Correct domain/subdomain, good entity extraction, and fluent Hebrew.",
+          "claude_sonnet5": "Outstanding detail and completeness. Perfectly extracts all sensors, exercises, and even the author's background. Excellent taxonomy reasoning and strong analyst-grade inference.",
+          "gemma4_e4b": "Severe output issues: both triage_reason and so_what_he are cut off mid-sentence. Key facts and entities arrays are empty. Also features incorrect domain taxonomy and poor translation of kill-chain.",
+          "gemma4_12b": "Incorrect domain and subdomain classification (computer_vision/atr instead of c_uas). The triage reason is written in English instead of Hebrew, and the entities list is completely empty."
+        }
+      },
+      {
+        "item_id": 10,
+        "outputs": {
+          "dictalm3_12b": {
+            "domain": "air_defense",
+            "subdomain": "hel",
+            "level": "yellow",
+            "score": 5,
+            "triage_reason": "הפריט עוסק במערכת לייזר EO/IR (E-HEL) שהיא בתחום הליבה של המשתמש, אך אינה מערכת watchlist. גודל האירוע הוא חוזה ייצור משמעותי ($465M), מה שמעלה את `magnitude` ל-3. החידוש טמון בכך שזהו חוזה הייצור הראשון אי פעם למערכת לייזר צבאית בארה״ב, מה שמעלה את `novelty` ל-3.",
+            "summary_he": "צבא ארה״ב העניק חוזה ייצור בסך 464.8 מיליון דולר לחברת AeroVironment, Inc. עבור תוכנית הלייזר האנרגיה הגבוהה המתמשכת (E-HEL), מה שמסמן את חוזה הייצור הראשון עבור מערכת אנרגיה מופנית בהיסטוריה של הצבא האמריקאי. במקום להשתמש בטילים ליירוט כלי טיס בלתי מאוישים, ה-E-HEL משתמש בקרן לייזר ויכול להטעין מחדש את מחסניתו באמצעות אספקת החשמל של המערכת. תוכנית זו תאפשר לכוחות הצבא להביס מערכות בלתי מאוישות ולשלוט מההתחלה, כפי שאמר סגן הרמטכל של הצבא, גנרל כריסטופר לאנב. החוזה הוא במסגרת הסכם עסקה אחרת (Other Transaction Agreement), ו-AV תספק עשרות מערכות לייזר LOCUST X3 בנפח 30 קילוואט, המסוגלות ליירט כלי טיס בלתי מאוישים קטנים. ה-E-HEL הוא פלטפורמה אגנית שאינה תלויה בכלי רכב ספציפי, בניגוד לפרוטוטיפים הקודמים שהותאמו לרכב הקרב המשוריין Stryker.",
+            "so_what_he": "להערכתנו, חוזה הייצור הראשון של מערכת לייזר צבאית בארה״ב מסמן נקודת מפנה אסטרטגית בתחום ההגנה האווירית. המעבר מטכנולוגיית לייזר ניסיונית לייצור המוני מעיד על הבשלה טכנולוגית משמעותית ויכולת מבצעית מוכחת. הצלחת ה-E-HEL, בניגוד לאכזבה מהפרוטוטיפים הקודמים, מעידה על שיפור מהותי בביצועים ובהתאמה לצרכים המבצעיים. היכולת ליירט מגוון רחב של כלי טיס בלתי מאוישים, החל מכלי טיס מיקרוסקופיים ועד לכלי טיס גדולים יותר, מעידה על פוטנציאל לשינוי פרדיגמה בהגנה אווירית. הדבר מחזק את מעמדה של AeroVironment כמובילה טכנולוגית בתחום הלייזר הצבאי, ומעיד על מגמה גוברת של אימוץ מערכות לייזר כאלטרנטיבה יעילה ומדויקת למערכות טילים מסורתיות.",
+            "key_facts": [
+              "צבא ארה״ב העניק חוזה ייצור בסך 464.8 מיליון דולר",
+              "החוזה הוא עבור תוכנית הלייזר האנרגיה הגבוהה המתמשכת (E-HEL)",
+              "זהו חוזה הייצור הראשון עבור מערכת אנרגיה מופנית בהיסטוריה של הצבא האמריקאי",
+              "החוזה ניתן לחברת AeroVironment, Inc.",
+              "ה-E-HEL משתמש בקרן לייזר במקום טילים ליירוט כלי טיס בלתי מאוישים",
+              "ה-E-HEL יכול להטעין מחדש את מחסניתו באמצעות אספקת החשמל של המערכת",
+              "ה-E-HEL הוא פלטפורמה אגנית שאינה תלויה בכלי רכב ספציפי",
+              "החוזה ניתן במסגרת הסכם עסקה אחרת (Other Transaction Agreement)"
+            ],
+            "entities_mentioned": []
+          },
+          "gemma4_12b": {
+            "domain": "air_defense",
+            "subdomain": "hel",
+            "level": "red",
+            "score": 9,
+            "triage_reason": "הודעת חברה על חוזה ייצור משמעותי של מערכת לייזר (HEL) ראשונה מסוגה עבור צבא ארה״ב, המהווה פריצת דר טכנולוגית בתחום ה-C-UAS.",
+            "summary_he": "צבא ארצות הברית העניק ל-AeroVironment, Inc. חוזה ייצור בשווי 464.8 מיליון דולר עבור תוכנית ה-Enduring-High Energy Laser (E-HEL). זהו חוזה הייצור הראשון עבור מערכת אנרגיה מכוונת (Directed Energy) בהיסטוריה של צבא ארצות הברית, המיועדת לנטרל כטב״מים (UAVs) באמצעות קרן לייזר.",
+            "so_what_he": "להערכתנו, המהלך מסמן נקודת מפנה משמעותית במעבר של צבא ארה״ב ממוטני יירוט מסורתיים למערכות אנרגיה מכוונת (DE) ככלי מרכזי במלחמה נגד כטב״מים. המעבר לטכנולוגיית לייזר המאפשרת טעינה רציפה (Reloading) ושימוש בפלטפורמות רב-תכליתיות (Platform-agnostic) מעיד על ניסיון לייצר פתרון קבוע ומשמעותי לבעיית ה-C-UAS.",
+            "key_facts": [
+              "סכום החוזה הוא 464.8 מיליון דולר.",
+              "החוזה הוענק לחברת AeroVironment, Inc.",
+              "שם התוכנית הוא Enduring-High Energy Laser (E-HEL).",
+              "מערכת ה-E-HEL משתמשת בקרן לייזר לנטרול מטרות במקום שימוש בטילים.",
+              "המערכת מסוגלת לטעון את המחסנית דרך ספק הכוח של המערכת.",
+              "החוזה כולל אספקת עשרות של נשקי לייזר מסוג LOCUST בעוצמת 30 kW.",
+              "המערכת מיועדת לנטרול כטב״מים קטנים (Groups 1-3), כולל מודלים כמו Wasp III ו-RQ-7B Shadow.",
+              "מערכת ה-LOCUST X3 היא Platform-agnostic ומתאימה לרכב ה-JLTV."
+            ],
+            "entities_mentioned": []
+          },
+          "gemma4_e4b": {
+            "domain": "air_defense",
+            "subdomain": "eo_trackers",
+            "level": "red",
+            "score": 10,
+            "triage_reason": "החוזה הוא על ייצור מערכת אנרגיה מופנית (Directed Energy System) ייחודית בהיסטוריה הצבאית האמריקאית, מה שמצדיק את הציון הגבוה ביותר לכל המדדים.",
+            "summary_he": "הצבא האמריקאי העניק לאירו-וירוןמנט (AeroVironment, Inc.) חוזה ייצור בשווי 464.8 מיליון דולר עבור תוכנית לייזר אנרגיה גבוהה מתמשכת (Enduring-High Energy Laser, E-HEL). חוזה זה מהווה את חוזה הייצור הראשון למערכת אנרגיה ממוקדת (directed energy system) בהיסטוריה של צבא ארה״ב. המערכת תאפשר להכריע במערכות בלתי מאוישות (unmanned systems) ותספק יכולת לחימום מחדש של המחסנית באמצעות אספקת החשמל.",
+            "so_what_he": "להערכתנו, הענקת חוזה ייצור ראשון למערכת אנרגיה ממוקדת מהווה ציון דרך משמעותי המצביע על מעבר של טכנולוגיה שהייתה עדיין בשלבי אב-טיפוס (prototype) לשלב ייצור מסחרי צבאי. הדבר מחזק את המגמה הגלובלית של אימוץ מערכות אנרגיה ממוקדת (Directed Energy) להגנה אווירית ונגד רחפנים, ומצביע על תחרות טכנולוגית מתגברת בין יצרנים בתחום זה.",
+            "key_facts": [
+              "הצבא האמריקאי העניק חוזה ייצור בשווי 464.8 מיליון דולר לאירו-וירוןמנט (AeroVironment, Inc.)",
+              "החוזה הוא עבור תוכנית לייזר אנרגיה גבוהה מתמשכת (E-HEL)",
+              "זהו חוזה הייצור הראשון למערכת אנרגיה ממוקדת בהיסטוריה של צבא ארה״ב",
+              "החוזה כולל אספקת עשרות נשקי לייזר LOCUST בהספק של 30 קילוואט",
+              "הנשק מסוג LOCUST X3 הוא 'platform-agnostic' ויכול להיות מותקן על רכב ה-JLTV",
+              "התוכנית נבנתה על הצלחת אב-טיפוסים של מערכת לייזר אנרגיה גבוהה רב-תכליתית (AMP-HEL) בהמשך לשימוש של חיילים אמריקאים",
+              "החוזה הגיע לאחר בדיקות מוצלחות של LOCUST בטווח לבנות החול (White Sands Missile Range)",
+              "הדיווח נמסר על ידי ה-Defense News בתאריך 2026-09-03"
+            ],
+            "entities_mentioned": []
+          },
+          "agy_gemini31_pro_high": {
+            "domain": "air_defense",
+            "subdomain": "hel",
+            "level": "red",
+            "score": 10,
+            "triage_reason": "זכייה היסטורית בסך 465 מיליון דולר של חברת AeroVironment לאספקת מערכות לייזר מסוג LOCUST ליירוט כטב״מים עבור צבא ארה״ב. זהו חוזה הייצור הראשון אי פעם למערכות נשק לייזר בצבא האמריקאי, המהווה פריצת דרך בשוק ומצדיק התראה מיידית.",
+            "summary_he": "צבא ארה״ב (U.S. Army) העניק לחברת אירוויירונמנט (AeroVironment) חוזה ייצור בסך 464.8 מיליון דולר עבור תוכנית הלייזר E-HEL. זהו חוזה הייצור הראשון אי פעם למערכת נשק באנרגיה מכוונת (Directed Energy) בצבא ארה״ב. במסגרת ההסכם יסופקו עשרות מערכות לייזר מסוג LOCUST בהספק 30 קילו-וואט (kW) ליירוט כטב״מים מקבוצות 1 עד 3, המיועדות להתקנה על רכבים טקטיים קלים (JLTV).",
+            "so_what_he": "להערכתנו, המעבר של צבא ארה״ב לרכש סדרתי של מערכות לייזר מסמן אבן דרך קריטית בבשלות טכנולוגיית הלייזר (HEL) להגנה אווירית וליירוט כטב״מים בפרט. הבחירה בפתרון של אירוויירונמנט (LOCUST X3), המאופיין בגמישות פלטפורמטית ומשתלב על רכבי JLTV, מגיעה על חשבון מערכות מגושמות יותר כמו DE M-SHORAD, ומעידה על העדפה לניידות ופשטות אינטגרציה. בנוסף, אישור הבטיחות של ה-FAA יאפשר פריסה של יכולות אלו גם בתוך המרחב האווירי האזרחי של ארה״ב להגנה על מתקנים אסטרטגיים.",
+            "key_facts": [
+              "צבא ארה״ב העניק לאירוויירונמנט חוזה ייצור בסך 464.8 מיליון דולר עבור תוכנית E-HEL.",
+              "זהו חוזה הייצור הראשון למערכת נשק באנרגיה מכוונת בהיסטוריה של צבא ארה״ב.",
+              "החוזה כולל אספקת עשרות מערכות לייזר מסוג LOCUST בהספק 30 קילו-וואט (kW).",
+              "המערכות מיועדות ליירוט כטב״מים מקבוצות 1 עד 3, מ-Wasp III ועד RQ-7B Shadow.",
+              "מערכת הלייזר LOCUST X3 היא אגנוסטית לפלטפורמה ויכולה להיות מותקנת על רכבי JLTV.",
+              "ההכרזה מגיעה לאחר משוב מאכזב מחיילים על ביצועי מערכת הלייזר DE M-SHORAD במזרח התיכון.",
+              "תוכנית E-HEL מתבססת על אבות-הטיפוס מסדרת AMP-HEL שנמצאים כיום בשימוש מבצעי.",
+              "המערכת קיבלה אישור בטיחות DOW-FAA לשימוש בארה״ב בעקבות סדרת ניסויים מוצלחת במטווח ווייט סנדס."
+            ],
+            "entities_mentioned": [
+              "US Army",
+              "AeroVironment",
+              "E-HEL",
+              "Christopher LaNeve",
+              "LOCUST",
+              "DE M-SHORAD",
+              "AMP-HEL",
+              "FAA"
+            ]
+          },
+          "claude_sonnet5": {
+            "domain": "air_defense",
+            "subdomain": "hel",
+            "level": "red",
+            "score": 10,
+            "triage_reason": "הפריט עוסק ישירות במערכת הלייזר LOCUST של AeroVironment (חברת watchlist) במסגרת תוכנית E-HEL, שהיא חוזה הייצור הראשון אי-פעם למערכת אנרגיה מכוונת בהיסטוריה של צבא ארה״ב, בהיקף של כ-465 מיליון דולר. שילוב של היקף כספי גדול, פריצת דרך טכנולוגית ושינוי דוקטרינרי (מעבר מטילים ליירוט בלייזר) הופך אותו לאירוע נדיר ברמת חשיבות מרבית.",
+            "summary_he": "צבא ארצות הברית העניק לחברת AeroVironment חוזה ייצור בהיקף 464.8 מיליון דולר במסגרת תוכנית ה-Enduring-High Energy Laser (E-HEL), המתואר כחוזה הייצור הראשון אי-פעם למערכת אנרגיה מכוונת (directed energy) בצבא ארה״ב, כך לפי הודעת החברה. תחת הסכם ה-Other Transaction Agreement (OTA), תספק AeroVironment עשרות מערכות לייזר LOCUST בעוצמת 30 קילוואט המיועדות ליירוט כטב״מים בקבוצות משקל 1 עד 3, מדגם Wasp III ועד RQ-7B Shadow. בשונה ממערכת ה-DE M-SHORAD שהותאמה לרק״ם מסוג Stryker וזכתה למשוב מאכזב מחיילים במזרח התיכון, מערכת ה-LOCUST X3 היא פלטפורמה-אגנוסטית ומתאימה גם ל-JLTV. החוזה מגיע בעקבות בדיקות מוצלחות של LOCUST ב-White Sands Missile Range בהובלת JIATF-401 ו-PAE Fires, שאפשרו הסכם בטיחות בין משרד ההגנה ל-FAA לאישור המערכת לשימוש בשמי ארה״ב.",
+            "so_what_he": "להערכתנו, זכייתה של AeroVironment בחוזה הייצור הראשון-מסוגו לנשק לייזר באנרגיה גבוהה מבססת אותה כשחקנית מובילה בשוק ההגנה האווירית נגד כטב״ם (C-UAS) מבוסס אנרגיה מכוונת, ומהווה ניצחון תדמיתי חשוב לצבא ארה״ב לאחר האכזבה מביצועי ה-DE M-SHORAD. הגמישות הפלטפורמתית של LOCUST X3, המתאימה גם ל-JLTV ולא רק לרק״ם ייעודי, עשויה להאיץ את פריסתו על פני מגוון רחב יותר של פלטפורמות ולחזק את מעמד החברה מול מתחרות בתחום נשקי האנרגיה המכוונת.",
+            "key_facts": [
+              "צבא ארצות הברית העניק ל-AeroVironment חוזה ייצור בהיקף 464.8 מיליון דולר במסגרת תוכנית E-HEL.",
+              "לפי הודעת החברה, זהו חוזה הייצור הראשון אי-פעם למערכת אנרגיה מכוונת בצבא ארה״ב.",
+              "החוזה נחתם כהסכם Other Transaction Agreement (OTA).",
+              "במסגרת החוזה תספק AeroVironment 'עשרות' מערכות לייזר LOCUST בעוצמת 30 קילוואט.",
+              "המערכות מיועדות ליירוט כטב״מים בקבוצות משקל 1 עד 3, מדגם Wasp III ועד RQ-7B Shadow.",
+              "מערכת LOCUST X3 היא פלטפורמה-אגנוסטית ומסוגלת להתאים ל-JLTV, בשונה מ-DE M-SHORAD שהותאמה ל-Stryker.",
+              "תוכנית E-HEL נבנית על הצלחת אבות-הטיפוס של Army Multi-Purpose High Energy Laser (AMP-HEL) הנמצאים כיום בשימוש חיילי ארה״ב.",
+              "בדיקות מוצלחות של LOCUST ב-White Sands Missile Range, בהובלת JIATF-401 ו-PAE Fires, הובילו להסכם בטיחות בין משרד ההגנה ל-FAA המאשר את המערכת לשימוש בשמי ארה״ב."
+            ],
+            "entities_mentioned": [
+              "AeroVironment",
+              "U.S. Army",
+              "E-HEL",
+              "LOCUST",
+              "LOCUST X3",
+              "AMP-HEL",
+              "DE M-SHORAD",
+              "JIATF-401",
+              "PAE Fires",
+              "Christopher LaNeve",
+              "FAA"
+            ]
+          }
+        },
+        "judge_scores": {
+          "agy_gemini31_pro_high": 95,
+          "gemma4_12b": 65,
+          "gemma4_e4b": 20,
+          "claude_sonnet5": 100,
+          "dictalm3_12b": 30
+        },
+        "judge_notes": {
+          "agy_gemini31_pro_high": "Strong analyst inference, excellent Hebrew, accurate extraction. Misses nothing major and keeps facts faithful to the text.",
+          "gemma4_12b": "Empty entities list. Contains a strange Hebrew typo/hallucination ('מוטני יירוט'). Misses key context regarding FAA and DE M-SHORAD.",
+          "gemma4_e4b": "Hallucinates date and source (Defense News, 2026-09-03). Mistranslates 'reload' as 'reheat' (חימום מחדש). Incorrect subdomain assigned (eo_trackers).",
+          "claude_sonnet5": "Exceptional analyst-grade inference, comprehensive key facts, perfect terminology conventions, and accurate entities extraction.",
+          "dictalm3_12b": "Empty entities list. Features severe mistranslations (translates 'platform-agnostic' as 'pelvic platform' - פלטפורמה אגנית, and 'miniature' as 'microscopic')."
+        }
+      }
+    ]
   }
 }

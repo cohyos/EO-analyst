@@ -13,6 +13,7 @@ import { AskPage } from "@/pages/AskPage";
 import { ConferencesPage } from "@/pages/ConferencesPage";
 import { TendersPage } from "@/pages/TendersPage";
 import { PatentsPage } from "@/pages/PatentsPage";
+import { PayloadsPage } from "@/pages/PayloadsPage";
 import { InboxPage } from "@/pages/InboxPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { BdPage } from "@/pages/BdPage";
@@ -53,6 +54,7 @@ export default function App() {
                 <Route path="conferences" element={<ConferencesPage />} />
                 <Route path="tenders" element={<TendersPage />} />
                 <Route path="patents" element={<PatentsPage />} />
+                <Route path="payloads" element={<PayloadsPage />} />
                 <Route path="inbox" element={<InboxPage />} />
                 <Route path="reports" element={<ReportsPage />} />
                 <Route path="bd" element={<BdPage />} />

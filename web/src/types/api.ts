@@ -321,12 +321,16 @@ export type AskSseEvent =
   // U11: sent once, after the answer finishes streaming -- citations enriched with
   // level/source_name/note for the sources footer (see AskCitation above).
   | { type: "sources"; items: AskCitation[] }
-  // Round 2 (docs/qa/loop/round_2_chat_fixes.md, D5 P2): sent 0-2 times, after streaming ends
+  // Round 2 (docs/qa/loop/round_2_chat_fixes.md, D5 P2): sent 0-3 times, after streaming ends
   // and before `sources`, when the server wholesale-replaces the streamed answer -- a citation
   // repair pass that attached [n] markers, an "⚠ ללא ציטוטים" prefix when repair still couldn't,
   // or an "⚠ ייתכן שהתשובה אינה עוסקת בשאלה" prefix from the topic-anchor guard. The UI must
   // replace the message's whole `content` with `text`, not append it.
-  | { type: "answer_final"; text: string }
+  // Round 3 (docs/qa/loop/round_3_chat_fixes.md, D5 grounding guard): an additive, optional
+  // `ungrounded_removed` count is present when this event comes from the grounded-entity /
+  // cross-source-conflation guard (eoa.api.ask_grounding) stripping a fabricated sentence --
+  // not required reading for the UI today, kept for future surfacing/telemetry.
+  | { type: "answer_final"; text: string; ungrounded_removed?: number }
   | { type: "done" };
 
 // U8 (docs/adr/005-cloud-llm-cli.md + "Revision 2026-09-06"): local Ollama vs. cloud CLI
@@ -622,6 +626,35 @@ export interface ForecastCard {
   updated_at: string;
 }
 
+// A15 (docs/TENDER_PORTALS.md): per-source status returned by the coverage panel's backing
+// endpoint (`GET /api/tenders/coverage`). Mirrors `_tender_source_status` (agent/eoa/api/services.py).
+export type TenderSourceStatus = "integrated_keyless" | "waiting_for_key" | "not_integrated";
+
+// Mirrors one entry of `tender_source_coverage`'s per-region `sources` list.
+export interface TenderSourceCoverageItem {
+  id: string;
+  name: string;
+  kind: "api_json" | "rss" | "html" | "search";
+  country: string;
+  status: TenderSourceStatus;
+  verified: boolean;
+  needs_key_env_var: string | null;
+  notices_stored: number;
+  last_fetch_at: string | null;
+}
+
+export interface TenderSourceCoverageRegion {
+  region: string;
+  sources: TenderSourceCoverageItem[];
+}
+
+// Mirrors `services.tender_source_coverage()` / `GET /api/tenders/coverage`.
+export interface TenderSourceCoverageResponse {
+  regions: TenderSourceCoverageRegion[];
+  totals: Partial<Record<TenderSourceStatus | "search_only", number>>;
+  source_count: number;
+}
+
 export interface Clarification {
   id: number;
   kind: string;
@@ -910,4 +943,106 @@ export interface PatentSurveyCreateResponse {
   job_id: number;
   status?: "queued" | "failed";
   error?: string | null;
+}
+
+// --- A17: מטע"דים -- מפרטים ומחירי ייחוס (eoa.payloads), עם היסטוריית גרסאות ------------------
+
+export type PayloadCategory = "gimbal" | "pod" | "thermal_camera" | "detector_core" | "lrf" | "seeker" | "other";
+
+export interface PayloadRecord {
+  id: number;
+  canonical_name: string;
+  vendor_entity_name: string | null;
+  family: string | null;
+  category: PayloadCategory;
+  first_seen: string | null;
+  last_seen: string | null;
+  notes: string | null;
+  spec_version_count: number;
+  price_ref_count: number;
+  latest_spec_date: string | null;
+  latest_price_date: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PayloadSpecDetector {
+  type?: string | null;
+  resolution?: string | null;
+  pitch_um?: number | null;
+}
+
+export interface PayloadSpecFov {
+  wide_deg?: number | null;
+  narrow_deg?: number | null;
+}
+
+export interface PayloadSpecRanges {
+  detect?: number | null;
+  recognize?: number | null;
+  identify?: number | null;
+  target_class?: string | null;
+}
+
+export interface PayloadSpec {
+  mass_kg?: number | null;
+  channels?: string[];
+  detector?: PayloadSpecDetector | null;
+  fov?: PayloadSpecFov | null;
+  ranges_km?: PayloadSpecRanges | null;
+  stabilisation_urad?: number | null;
+  interfaces?: string[];
+  trl?: string | null;
+  other?: Record<string, string>;
+}
+
+export interface PayloadSpecVersion {
+  id: number;
+  payload_id: number;
+  version_no: number;
+  effective_date: string;
+  spec: PayloadSpec;
+  source_item_id: number | null;
+  source_url: string | null;
+  source_quote: string | null;
+  confidence: number | null;
+  created_at: string;
+}
+
+export type PayloadPriceKind = "unit" | "contract" | "estimate";
+
+export interface PayloadPriceRef {
+  id: number;
+  payload_id: number;
+  price_usd: number | null;
+  currency: string | null;
+  original_amount: number | null;
+  quantity: number | null;
+  unit_price_usd: number | null;
+  price_kind: PayloadPriceKind;
+  date: string;
+  buyer: string | null;
+  programme: string | null;
+  source_item_id: number | null;
+  source_url: string | null;
+  source_quote: string | null;
+  created_at: string;
+}
+
+export interface PayloadsResponse {
+  payloads: PayloadRecord[];
+  total: number;
+}
+
+export interface PayloadDetailResponse {
+  payload: PayloadRecord;
+  spec_versions: PayloadSpecVersion[];
+  price_refs: PayloadPriceRef[];
+}
+
+export interface PayloadDiffResponse {
+  payload_id: number;
+  a: PayloadSpecVersion;
+  b: PayloadSpecVersion;
+  changed_fields: string[];
 }

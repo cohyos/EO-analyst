@@ -27,6 +27,12 @@ import type {
   PatentSurveyCreateResponse,
   PatentsResponse,
   PatentsStatusResponse,
+  PayloadDetailResponse,
+  PayloadDiffResponse,
+  PayloadPriceRef,
+  PayloadRecord,
+  PayloadSpecVersion,
+  PayloadsResponse,
   ReportCitationsResponse,
   ReportDetail,
   RunsCurrentResponse,
@@ -35,6 +41,7 @@ import type {
   SettingsPutResponse,
   Survey,
   TechRadarResponse,
+  TenderSourceCoverageResponse,
   TenderStatus,
   TendersResponse,
   TriageLevel,
@@ -45,6 +52,7 @@ import type {
   GraphQuery,
   ItemsQuery,
   PatentsQuery,
+  PayloadsQuery,
   TendersQuery,
 } from "@/api/types";
 import type { CountryGroup } from "@/types/api";
@@ -142,6 +150,97 @@ const mockPatentSurveys: PatentSurveyCard[] = [
     path_html: "output/reports/patent_survey_droic_2026-09-06.html",
   },
 ];
+
+// A17: מטע"דים -- דוגמת מפרט עם שתי גרסאות (להדגמת ציר הזמן/diff) + רשומת מחיר ייחוס.
+const mockPayloads: PayloadRecord[] = [
+  {
+    id: 1,
+    canonical_name: "WESCAM MX-15",
+    vendor_entity_name: "L3Harris WESCAM",
+    family: "MX",
+    category: "gimbal",
+    first_seen: "2026-08-01",
+    last_seen: "2026-09-05",
+    notes: null,
+    spec_version_count: 2,
+    price_ref_count: 1,
+    latest_spec_date: "2026-09-05",
+    latest_price_date: "2026-08-20",
+    created_at: "2026-08-01T08:00:00+00:00",
+    updated_at: "2026-09-05T08:00:00+00:00",
+  },
+];
+
+const mockPayloadSpecVersions: Record<number, PayloadSpecVersion[]> = {
+  1: [
+    {
+      id: 2,
+      payload_id: 1,
+      version_no: 2,
+      effective_date: "2026-09-05",
+      spec: {
+        mass_kg: 20.2,
+        channels: ["MWIR", "VIS", "LRF"],
+        detector: { type: "MCT", resolution: "1280x1024", pitch_um: 15 },
+        fov: { wide_deg: 24, narrow_deg: 1.2 },
+        ranges_km: { detect: 12, recognize: 6, identify: 3, target_class: "כלי רכב" },
+        stabilisation_urad: 15,
+        interfaces: ["Ethernet", "MIL-STD-1553"],
+        trl: "9",
+        other: {},
+      },
+      source_item_id: 501,
+      source_url: "https://example.com/mx15-spec-update",
+      source_quote: "The updated MX-15 weighs 20.2 kg with a 1280x1024 MCT detector.",
+      confidence: 0.8,
+      created_at: "2026-09-05T08:00:00+00:00",
+    },
+    {
+      id: 1,
+      payload_id: 1,
+      version_no: 1,
+      effective_date: "2026-08-01",
+      spec: {
+        mass_kg: 19.5,
+        channels: ["MWIR", "VIS"],
+        detector: { type: "MCT", resolution: "640x512", pitch_um: 15 },
+        fov: { wide_deg: 24, narrow_deg: 1.2 },
+        ranges_km: { detect: 10, recognize: 5, identify: 2.5, target_class: "כלי רכב" },
+        stabilisation_urad: 20,
+        interfaces: ["Ethernet"],
+        trl: "9",
+        other: {},
+      },
+      source_item_id: 502,
+      source_url: "https://example.com/mx15-spec",
+      source_quote: "The MX-15 weighs 19.5 kg with a 640x512 MCT detector.",
+      confidence: 0.75,
+      created_at: "2026-08-01T08:00:00+00:00",
+    },
+  ],
+};
+
+const mockPayloadPriceRefs: Record<number, PayloadPriceRef[]> = {
+  1: [
+    {
+      id: 1,
+      payload_id: 1,
+      price_usd: 500000,
+      currency: "USD",
+      original_amount: 500000,
+      quantity: 1,
+      unit_price_usd: 500000,
+      price_kind: "unit",
+      date: "2026-08-20",
+      buyer: null,
+      programme: null,
+      source_item_id: 503,
+      source_url: "https://example.com/mx15-price",
+      source_quote: "The unit price of the MX-15 was reported at $500,000.",
+      created_at: "2026-08-20T08:00:00+00:00",
+    },
+  ],
+};
 
 // U7a/U7c mock-mode mirror of `eoa.report.geography.items_by_country`.
 function groupItemsByCountry(rows: ItemCard[]): CountryGroup[] {
@@ -584,6 +683,87 @@ export const mockApi: ApiClient = {
   getTenderForecasts: async (limit = 100): Promise<ForecastCard[]> =>
     delay(mockForecasts.slice(0, limit)),
 
+  // A15 (docs/TENDER_PORTALS.md): a small representative slice of the real config/tenders.yaml
+  // registry -- enough regions/statuses to exercise the coverage panel's grouping/badges in Storybook-
+  // less dev mode and vitest, not a full mirror of all ~40 real sources.
+  getTenderSourceCoverage: async (): Promise<TenderSourceCoverageResponse> =>
+    delay({
+      regions: [
+        {
+          region: "EU",
+          sources: [
+            {
+              id: "ted_eu",
+              name: "TED (Tenders Electronic Daily) -- EU",
+              kind: "api_json",
+              country: "EU",
+              status: "integrated_keyless",
+              verified: true,
+              needs_key_env_var: null,
+              notices_stored: 12,
+              last_fetch_at: "2026-09-06T04:00:00Z",
+            },
+            {
+              id: "uk_find_tender",
+              name: "UK Find a Tender Service (FTS, OCDS)",
+              kind: "api_json",
+              country: "UK",
+              status: "integrated_keyless",
+              verified: true,
+              needs_key_env_var: null,
+              notices_stored: 3,
+              last_fetch_at: "2026-09-06T04:00:00Z",
+            },
+          ],
+        },
+        {
+          region: "US",
+          sources: [
+            {
+              id: "sam_gov_api",
+              name: "SAM.gov Opportunities API v2 (US)",
+              kind: "api_json",
+              country: "US",
+              status: "waiting_for_key",
+              verified: false,
+              needs_key_env_var: "SAM_GOV_API_KEY",
+              notices_stored: 0,
+              last_fetch_at: null,
+            },
+            {
+              id: "sam_gov_search",
+              name: "SAM.gov opportunities -- SearXNG fallback",
+              kind: "search",
+              country: "US",
+              status: "integrated_keyless",
+              verified: true,
+              needs_key_env_var: null,
+              notices_stored: 5,
+              last_fetch_at: "2026-09-05T22:00:00Z",
+            },
+          ],
+        },
+        {
+          region: "IL",
+          sources: [
+            {
+              id: "il_mod",
+              name: 'אתר מכרזים -- משרד הביטחון (mod.gov.il)',
+              kind: "html",
+              country: "IL",
+              status: "not_integrated",
+              verified: false,
+              needs_key_env_var: null,
+              notices_stored: 0,
+              last_fetch_at: null,
+            },
+          ],
+        },
+      ],
+      totals: { integrated_keyless: 3, waiting_for_key: 1, search_only: 1, not_integrated: 1 },
+      source_count: 5,
+    }),
+
   // A14: פטנטים ו-IP.
   getPatents: async (query: PatentsQuery): Promise<PatentsResponse> => {
     let filtered = mockPatents.slice();
@@ -630,6 +810,43 @@ export const mockApi: ApiClient = {
       },
       job_id: 999,
     }),
+
+  // A17: מטע"דים -- מפרטים ומחירי ייחוס, עם היסטוריית גרסאות.
+  getPayloads: async (query: PayloadsQuery = {}): Promise<PayloadsResponse> => {
+    let filtered = mockPayloads.slice();
+    if (query.category) filtered = filtered.filter((p) => p.category === query.category);
+    if (query.vendor) {
+      const v = query.vendor.toLowerCase();
+      filtered = filtered.filter((p) => (p.vendor_entity_name ?? "").toLowerCase().includes(v));
+    }
+    if (query.q) {
+      const q = query.q.toLowerCase();
+      filtered = filtered.filter(
+        (p) => p.canonical_name.toLowerCase().includes(q) || (p.family ?? "").toLowerCase().includes(q),
+      );
+    }
+    return delay({ payloads: filtered.slice(0, query.limit ?? 200), total: filtered.length });
+  },
+  getPayload: async (id: number): Promise<PayloadDetailResponse> => {
+    const payload = mockPayloads.find((p) => p.id === id);
+    if (!payload) throw new Error("payload not found");
+    return delay({
+      payload,
+      spec_versions: mockPayloadSpecVersions[id] ?? [],
+      price_refs: mockPayloadPriceRefs[id] ?? [],
+    });
+  },
+  getPayloadDiff: async (id: number, a: number, b: number): Promise<PayloadDiffResponse> => {
+    const versions = mockPayloadSpecVersions[id] ?? [];
+    const va = versions.find((v) => v.version_no === a);
+    const vb = versions.find((v) => v.version_no === b);
+    if (!va || !vb) throw new Error("version not found");
+    const keys = new Set([...Object.keys(va.spec), ...Object.keys(vb.spec)]);
+    const changed_fields = [...keys].filter(
+      (k) => JSON.stringify((va.spec as Record<string, unknown>)[k]) !== JSON.stringify((vb.spec as Record<string, unknown>)[k]),
+    );
+    return delay({ payload_id: id, a: va, b: vb, changed_fields });
+  },
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
   getTechRadar: async (weeks = 12): Promise<TechRadarResponse> => {

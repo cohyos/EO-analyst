@@ -184,6 +184,19 @@ def build_scheduler() -> BackgroundScheduler:
         coalesce=True,
     )
 
+    # A17: optional nightly EO-payload spec/price extraction scan (config/config.yaml
+    # `payloads.enabled`, default true) -- job kind/API/UI exist regardless of this flag; it only
+    # controls whether the scan runs unattended every night.
+    if s.payloads.enabled:
+        sched.add_job(
+            lambda: enqueue_job("payload_extract", {"limit": s.payloads.nightly_limit}, priority=5),
+            CronTrigger(hour=4, minute=15, timezone=tz),
+            id="payload_extract_nightly",
+            name="מטע\"דים -- סריקת מפרט/מחיר לילית (A17)",
+            misfire_grace_time=3600,
+            coalesce=True,
+        )
+
     return sched
 
 

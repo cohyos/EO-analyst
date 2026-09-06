@@ -1,0 +1,93 @@
+# A17: seed identity-only rows for `payloads` (canonical_name/vendor_entity_name/family/category).
+#
+# Deliberately NO spec numbers and NO prices here -- per the user's explicit instruction, every
+# spec field and every price must come from a cited source (a triaged item's verbatim text, via
+# `eoa.payloads.extract.run_payload_extract`), never be invented in a seed file. This list only
+# gives the system a starting set of well-known EO payload families to recognize/match against so
+# the first extraction runs have somewhere to attach their findings, exactly like
+# `config/watchlist.yaml` seeds known companies/programs without asserting any of their facts.
+#
+# Loaded by `db/seed/seed_payloads.py` (idempotent upsert by `canonical_name`, never overwrites an
+# already-set vendor/family/category with a blank one).
+
+payloads:
+  - canonical_name: "WESCAM MX-10"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+  - canonical_name: "WESCAM MX-15"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+  - canonical_name: "WESCAM MX-20"
+    vendor_entity_name: "L3Harris WESCAM"
+    family: "MX"
+    category: gimbal
+  - canonical_name: "FLIR Star SAFIRE 380-HD"
+    vendor_entity_name: "Teledyne FLIR"
+    family: "Star SAFIRE"
+    category: gimbal
+  - canonical_name: "Controp T-Stamp"
+    vendor_entity_name: "Controp"
+    family: "T-Stamp"
+    category: gimbal
+  - canonical_name: "Controp DSP-HD"
+    vendor_entity_name: "Controp"
+    family: "DSP"
+    category: gimbal
+  - canonical_name: "Elbit DCoMPASS"
+    vendor_entity_name: "Elbit Systems"
+    family: "CoMPASS"
+    category: gimbal
+  - canonical_name: "Elbit CoMPASS"
+    vendor_entity_name: "Elbit Systems"
+    family: "CoMPASS"
+    category: gimbal
+  - canonical_name: "Rafael Toplite"
+    vendor_entity_name: "Rafael Advanced Defense Systems"
+    family: "Toplite"
+    category: gimbal
+  - canonical_name: "Rafael Litening 5"
+    vendor_entity_name: "Rafael Advanced Defense Systems"
+    family: "Litening"
+    category: pod
+  - canonical_name: "IAI MOSP 3000"
+    vendor_entity_name: "Israel Aerospace Industries"
+    family: "MOSP"
+    category: gimbal
+  - canonical_name: "IAI Mini-POP"
+    vendor_entity_name: "Israel Aerospace Industries"
+    family: "POP"
+    category: gimbal
+  - canonical_name: "Safran Euroflir 410"
+    vendor_entity_name: "Safran Electronics & Defense"
+    family: "Euroflir"
+    category: gimbal
+  - canonical_name: "Hensoldt Argos-II"
+    vendor_entity_name: "Hensoldt"
+    family: "Argos"
+    category: gimbal
+  - canonical_name: "Leonardo LEOSS"
+    vendor_entity_name: "Leonardo"
+    family: "LEOSS"
+    category: gimbal
+  - canonical_name: "Aselsan ASELFLIR-500"
+    vendor_entity_name: "Aselsan"
+    family: "ASELFLIR"
+    category: gimbal
+  - canonical_name: "Teledyne FLIR Boson"
+    vendor_entity_name: "Teledyne FLIR"
+    family: "Boson"
+    category: detector_core
+  - canonical_name: "Teledyne FLIR Neutrino"
+    vendor_entity_name: "Teledyne FLIR"
+    family: "Neutrino"
+    category: detector_core
+  - canonical_name: "Opgal Sii"
+    vendor_entity_name: "Opgal"
+    family: "Sii"
+    category: thermal_camera
+  - canonical_name: "PVP Thermal Core"
+    vendor_entity_name: "PVP Photonics"
+    family: null
+    category: detector_core

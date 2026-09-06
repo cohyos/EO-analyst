@@ -14,6 +14,7 @@ export const he = {
     conferences: "לוח כנסים",
     tenders: "מכרזים והזדמנויות",
     patents: "פטנטים",
+    payloads: 'מטע"דים',
     inbox: "הבהרות ומשוב",
     reports: "דוחות",
     bd: "פיתוח עסקי",
@@ -256,6 +257,27 @@ export const he = {
     hiddenClosedArchivedHint: "{count} מכרזים סגורים מוסתרים בתצוגה הנוכחית.",
     showHiddenClosedArchivedCta: "הצג {count} מכרזים סגורים",
     whyRelevantPrefix: "למה רלוונטי: ",
+    // A15 (docs/TENDER_PORTALS.md): source-coverage panel -- per-region status of every tender
+    // portal in config/tenders.yaml (keyless-integrated / waiting for an API key / search-only /
+    // not integrated), backed by GET /api/tenders/coverage.
+    coverage: {
+      title: "כיסוי מקורות",
+      sourceCount: "{count} מקורות",
+      integratedKeyless: "משולב (ללא מפתח)",
+      searchOnly: "חיפוש בלבד",
+      waitingForKey: "ממתין למפתח API",
+      notIntegrated: "לא משולב",
+      status: {
+        integratedKeyless: "משולב",
+        waitingForKey: "ממתין למפתח",
+        notIntegrated: "לא משולב",
+      },
+      colSource: "מקור",
+      colAccess: "גישה",
+      colStatus: "סטטוס",
+      colNotices: "הודעות",
+      colLastFetch: "שליפה אחרונה",
+    },
   },
   // A13 (מיקוד תעשייה ישראלית): the "ישראליות" facet chip + flag badge on EntitiesPage — the page
   // itself is not otherwise migrated to t() yet (its other strings stay hardcoded Hebrew), so this

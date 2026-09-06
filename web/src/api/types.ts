@@ -30,6 +30,9 @@ import type {
   PatentSurveyCreateResponse,
   PatentsResponse,
   PatentsStatusResponse,
+  PayloadDetailResponse,
+  PayloadDiffResponse,
+  PayloadsResponse,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -39,6 +42,7 @@ import type {
   SettingsPutResponse,
   Survey,
   TechRadarResponse,
+  TenderSourceCoverageResponse,
   TenderStatus,
   TendersResponse,
   TriageLevel,
@@ -103,6 +107,14 @@ export interface PatentsQuery {
   subdomain?: string;
   israeli?: boolean;
   min_value_score?: number;
+  q?: string;
+  limit?: number;
+}
+
+/** A17: `GET /api/payloads` filters. */
+export interface PayloadsQuery {
+  category?: string;
+  vendor?: string;
   q?: string;
   limit?: number;
 }
@@ -200,6 +212,8 @@ export interface ApiClient {
 
   getTenders(query: TendersQuery): Promise<TendersResponse>;
   getTenderForecasts(limit?: number): Promise<ForecastCard[]>;
+  /** A15 (docs/TENDER_PORTALS.md): per-region tender-source coverage for the "כיסוי מקורות" panel. */
+  getTenderSourceCoverage(): Promise<TenderSourceCoverageResponse>;
 
   /** A14: פטנטים ו-IP (agent/eoa/patents/**). */
   getPatents(query: PatentsQuery): Promise<PatentsResponse>;
@@ -207,6 +221,11 @@ export interface ApiClient {
   getPatentsHeatmap(topCpc?: number, topAssignees?: number): Promise<PatentHeatmapResponse>;
   getPatentSurveys(limit?: number): Promise<PatentSurveyCard[]>;
   createPatentSurvey(topic: string): Promise<PatentSurveyCreateResponse>;
+
+  /** A17: מטע"דים -- מפרטים ומחירי ייחוס, עם היסטוריית גרסאות (agent/eoa/payloads/**). */
+  getPayloads(query?: PayloadsQuery): Promise<PayloadsResponse>;
+  getPayload(id: number): Promise<PayloadDetailResponse>;
+  getPayloadDiff(id: number, a: number, b: number): Promise<PayloadDiffResponse>;
 
   /** A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי" -- subdomain x maturity matrix. */
   getTechRadar(weeks?: number): Promise<TechRadarResponse>;

@@ -14,6 +14,7 @@ export const en: Dictionary = {
     conferences: "Conference Calendar",
     tenders: "Tenders & Opportunities",
     patents: "Patents",
+    payloads: "EO Payloads",
     inbox: "Clarifications & Feedback",
     reports: "Reports",
     bd: "Business Development",
@@ -248,6 +249,25 @@ export const en: Dictionary = {
     hiddenClosedArchivedHint: "{count} closed/archived tenders are hidden by the current view.",
     showHiddenClosedArchivedCta: "Show {count} closed tenders",
     whyRelevantPrefix: "Why relevant: ",
+    // A15 (docs/TENDER_PORTALS.md): source-coverage panel.
+    coverage: {
+      title: "Source coverage",
+      sourceCount: "{count} sources",
+      integratedKeyless: "Integrated (keyless)",
+      searchOnly: "Search-only",
+      waitingForKey: "Waiting for API key",
+      notIntegrated: "Not integrated",
+      status: {
+        integratedKeyless: "Integrated",
+        waitingForKey: "Waiting for key",
+        notIntegrated: "Not integrated",
+      },
+      colSource: "Source",
+      colAccess: "Access",
+      colStatus: "Status",
+      colNotices: "Notices",
+      colLastFetch: "Last fetch",
+    },
   },
   entities: {
     israelFilterLabel: "🇮🇱 Israeli only",

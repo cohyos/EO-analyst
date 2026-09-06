@@ -179,6 +179,27 @@ class BdReportCfg(BaseModel):
     )
 
 
+class PayloadsCfg(BaseModel):
+    """A17 "מאגר מפרטי מטע\"דים ומחירי ייחוס" (``eoa.payloads``). ``enabled`` gates the optional
+    nightly ``payload_extract`` scheduler job (``eoa.orchestrator.main``) -- the job kind/API/UI
+    exist regardless; this only controls whether the scan runs unattended every night."""
+
+    enabled: bool = True
+    nightly_limit: int = 20
+
+
+class AcquisitionWatchCfg(BaseModel):
+    """A16 "מעקב רכישות ושותפויות" (``eoa.pipeline.acquisition`` / ``eoa.report.acquisition_watch``).
+
+    ``enabled`` gates both the deterministic triage alert (``eoa.pipeline.triage``'s
+    ``_apply_acquisition_watch_boost``) and the weekly/BD "מעקב רכישות ושותפויות" section.
+    ``alert_level`` names the ``triage.levels`` key (default ``red``) that boost raises a
+    matching item's score to -- never lowers it."""
+
+    enabled: bool = True
+    alert_level: str = "red"
+
+
 class NotifyCfg(BaseModel):
     url: str = "http://ntfy:80"
     topic: str = "eo-analyst"
@@ -487,6 +508,8 @@ class Settings(BaseModel):
     security: SecurityCfg = SecurityCfg()
     report: ReportCfg = ReportCfg()
     bd_report: BdReportCfg = BdReportCfg()
+    payloads: PayloadsCfg = PayloadsCfg()
+    acquisition_watch: AcquisitionWatchCfg = AcquisitionWatchCfg()
     notify: NotifyCfg = NotifyCfg()
     retention: RetentionCfg = RetentionCfg()
     api: ApiCfg = ApiCfg()

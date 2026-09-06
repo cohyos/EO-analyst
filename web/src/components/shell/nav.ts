@@ -2,6 +2,7 @@ import {
   Bot,
   Briefcase,
   CalendarDays,
+  Camera,
   Gavel,
   Inbox,
   LayoutDashboard,
@@ -36,6 +37,7 @@ const NAV_ROUTES: NavItem[] = [
   { to: "/conferences", labelKey: "nav.conferences", icon: CalendarDays },
   { to: "/tenders", labelKey: "nav.tenders", icon: Gavel },
   { to: "/patents", labelKey: "nav.patents", icon: Scale },
+  { to: "/payloads", labelKey: "nav.payloads", icon: Camera },
   { to: "/inbox", labelKey: "nav.inbox", icon: Inbox },
   { to: "/reports", labelKey: "nav.reports", icon: FileText },
   { to: "/bd", labelKey: "nav.bd", icon: Briefcase },
@@ -61,6 +63,7 @@ export function usePageTitle(pathname: string): string {
   if (pathname.startsWith("/conferences")) return t("nav.conferences");
   if (pathname.startsWith("/tenders")) return t("nav.tenders");
   if (pathname.startsWith("/patents")) return t("nav.patents");
+  if (pathname.startsWith("/payloads")) return t("nav.payloads");
   if (pathname.startsWith("/inbox")) return t("nav.inbox");
   if (pathname.startsWith("/reports")) return t("nav.reports");
   if (pathname.startsWith("/bd")) return t("nav.bd");

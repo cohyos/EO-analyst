@@ -792,6 +792,19 @@ def run_patent_survey(job: dict[str, Any]) -> dict[str, Any]:
         return {"patent_survey_error": str(exc)[:300]}
 
 
+def run_payload_extract_job(job: dict[str, Any]) -> dict[str, Any]:
+    """``payload_extract`` job kind (A17): scan triaged items mentioning EO payload vocabulary and
+    persist any spec/price found via the append-only rules in ``eoa.payloads.extract``. Payload
+    ``limit``/``item_ids`` mirror the same optional-override shape other scan-style jobs accept."""
+    from eoa.payloads.extract import run_payload_extract
+
+    payload = job.get("payload") or {}
+    limit = int(payload.get("limit") or 20)
+    item_ids = payload.get("item_ids")
+    stats = run_payload_extract(limit, item_ids=item_ids)
+    return _as_dict(stats)
+
+
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "daily_run": run_daily,
     "ingest": lambda job: _as_dict(_ingest()),
@@ -804,6 +817,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "bd_report": run_bd_report,
     "patent_scan": run_patent_scan,
     "patent_survey": run_patent_survey,
+    "payload_extract": run_payload_extract_job,
     # Native single-process mode (ADR-004): serve any stray fetch_url job in-process instead of
     # leaving it queued forever (the fetcher container that used to claim these is gone).
     "fetch_url": lambda job: _fetch_url_job(job),

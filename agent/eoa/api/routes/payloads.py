@@ -1,0 +1,208 @@
+"""`GET /api/payloads`, `/api/payloads/{id}`, `/api/payloads/{id}/diff`, `/api/payloads/export.csv`
+-- A17 EO payload spec/price documentation (eoa.payloads).
+
+Self-contained (queries the DB directly, mirrors `eoa.api.routes.patents`) -- read-only: this
+router never inserts/updates/deletes anything, per the A17 spec ("read-only endpoints only").
+Extraction/persistence lives entirely in `eoa.payloads.extract`.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+from typing import Any
+
+import structlog
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+
+from eoa.db import connection
+from eoa.payloads.models import field_diff
+
+log = structlog.get_logger(__name__)
+
+router = APIRouter(tags=["payloads"])
+
+
+def _fetchall(query: str, params: Any = None) -> list[dict[str, Any]]:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, params)
+        return cur.fetchall()
+
+
+def _fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, params)
+        return cur.fetchone()
+
+
+@router.get("/payloads")
+def list_payloads(
+    category: str | None = Query(None),
+    vendor: str | None = Query(None),
+    q: str | None = Query(None, description="free-text match against canonical_name/family/notes"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    where = ["1=1"]
+    params: dict[str, Any] = {"limit": limit}
+    if category:
+        where.append("p.category = %(category)s")
+        params["category"] = category
+    if vendor:
+        where.append("p.vendor_entity_name ILIKE %(vendor)s")
+        params["vendor"] = f"%{vendor}%"
+    if q:
+        where.append("(p.canonical_name ILIKE %(q)s OR p.family ILIKE %(q)s OR p.notes ILIKE %(q)s)")
+        params["q"] = f"%{q}%"
+    rows = _fetchall(
+        f"""
+        SELECT p.*,
+            (SELECT count(*) FROM payload_spec_versions v WHERE v.payload_id = p.id) AS spec_version_count,
+            (SELECT count(*) FROM payload_price_refs r WHERE r.payload_id = p.id) AS price_ref_count,
+            (SELECT max(v.effective_date) FROM payload_spec_versions v WHERE v.payload_id = p.id) AS latest_spec_date,
+            (SELECT max(r.date) FROM payload_price_refs r WHERE r.payload_id = p.id) AS latest_price_date
+        FROM payloads p
+        WHERE {" AND ".join(where)}
+        ORDER BY p.canonical_name
+        LIMIT %(limit)s
+        """,
+        params,
+    )
+    total_row = _fetchone("SELECT count(*) AS c FROM payloads")
+    return {"payloads": rows, "total": (total_row or {}).get("c", len(rows))}
+
+
+@router.get("/payloads/export.csv")
+def export_payloads_csv() -> StreamingResponse:
+    """CSV export of the latest spec (one flattened row per payload) + its latest price ref."""
+    payloads = _fetchall("SELECT * FROM payloads ORDER BY canonical_name")
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "canonical_name",
+            "vendor_entity_name",
+            "family",
+            "category",
+            "spec_version_no",
+            "spec_effective_date",
+            "mass_kg",
+            "channels",
+            "detector_type",
+            "detector_resolution",
+            "detector_pitch_um",
+            "fov_wide_deg",
+            "fov_narrow_deg",
+            "range_detect_km",
+            "range_recognize_km",
+            "range_identify_km",
+            "stabilisation_urad",
+            "interfaces",
+            "trl",
+            "spec_source_url",
+            "price_date",
+            "price_kind",
+            "price_usd",
+            "unit_price_usd",
+            "currency",
+            "original_amount",
+            "quantity",
+            "buyer",
+            "programme",
+            "price_source_url",
+        ]
+    )
+    for p in payloads:
+        latest_spec = _fetchone(
+            "SELECT * FROM payload_spec_versions WHERE payload_id = %(id)s ORDER BY version_no DESC LIMIT 1",
+            {"id": p["id"]},
+        )
+        latest_price = _fetchone(
+            "SELECT * FROM payload_price_refs WHERE payload_id = %(id)s ORDER BY date DESC, id DESC LIMIT 1",
+            {"id": p["id"]},
+        )
+        spec = (latest_spec or {}).get("spec") or {}
+        detector = spec.get("detector") or {}
+        fov = spec.get("fov") or {}
+        ranges = spec.get("ranges_km") or {}
+        writer.writerow(
+            [
+                p.get("canonical_name"),
+                p.get("vendor_entity_name"),
+                p.get("family"),
+                p.get("category"),
+                (latest_spec or {}).get("version_no"),
+                (latest_spec or {}).get("effective_date"),
+                spec.get("mass_kg"),
+                ";".join(spec.get("channels") or []),
+                detector.get("type"),
+                detector.get("resolution"),
+                detector.get("pitch_um"),
+                fov.get("wide_deg"),
+                fov.get("narrow_deg"),
+                ranges.get("detect"),
+                ranges.get("recognize"),
+                ranges.get("identify"),
+                spec.get("stabilisation_urad"),
+                ";".join(spec.get("interfaces") or []),
+                spec.get("trl"),
+                (latest_spec or {}).get("source_url"),
+                (latest_price or {}).get("date"),
+                (latest_price or {}).get("price_kind"),
+                (latest_price or {}).get("price_usd"),
+                (latest_price or {}).get("unit_price_usd"),
+                (latest_price or {}).get("currency"),
+                (latest_price or {}).get("original_amount"),
+                (latest_price or {}).get("quantity"),
+                (latest_price or {}).get("buyer"),
+                (latest_price or {}).get("programme"),
+                (latest_price or {}).get("source_url"),
+            ]
+        )
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=payloads_latest.csv"},
+    )
+
+
+@router.get("/payloads/{payload_id}")
+def get_payload(payload_id: int) -> dict[str, Any]:
+    payload = _fetchone("SELECT * FROM payloads WHERE id = %(id)s", {"id": payload_id})
+    if payload is None:
+        raise HTTPException(status_code=404, detail='המטע"ד לא נמצא')
+    versions = _fetchall(
+        "SELECT * FROM payload_spec_versions WHERE payload_id = %(id)s ORDER BY version_no DESC",
+        {"id": payload_id},
+    )
+    price_refs = _fetchall(
+        "SELECT * FROM payload_price_refs WHERE payload_id = %(id)s ORDER BY date DESC, id DESC",
+        {"id": payload_id},
+    )
+    return {"payload": payload, "spec_versions": versions, "price_refs": price_refs}
+
+
+@router.get("/payloads/{payload_id}/diff")
+def diff_payload_versions(
+    payload_id: int,
+    a: int = Query(..., description="older version_no"),
+    b: int = Query(..., description="newer version_no"),
+) -> dict[str, Any]:
+    va = _fetchone(
+        "SELECT * FROM payload_spec_versions WHERE payload_id = %(id)s AND version_no = %(v)s",
+        {"id": payload_id, "v": a},
+    )
+    vb = _fetchone(
+        "SELECT * FROM payload_spec_versions WHERE payload_id = %(id)s AND version_no = %(v)s",
+        {"id": payload_id, "v": b},
+    )
+    if va is None or vb is None:
+        raise HTTPException(status_code=404, detail="גרסה לא נמצאה")
+    changed_keys = field_diff(va.get("spec"), vb.get("spec") or {})
+    return {
+        "payload_id": payload_id,
+        "a": va,
+        "b": vb,
+        "changed_fields": changed_keys,
+    }

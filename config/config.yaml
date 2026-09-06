@@ -125,6 +125,14 @@ bd_report:   # A11: "דוח מיקוד לפיתוח עסקי, מכירה ושי�
     ברשימת המעקב (watchlist) מוזכר תמיד ככזה — אסור בשום פנים ואופן להמליץ להציג, לקדם או לשווק את
     היכולות/המוצרים של מתחרה.
 
+payloads:   # A17: מאגר מפרטי מטע"דים ומחירי ייחוס (eoa.payloads) -- append-only version history
+  enabled: true       # gates the optional nightly `payload_extract` scheduler job
+  nightly_limit: 20   # max candidate items scanned per nightly run
+
+acquisition_watch:   # A16: מעקב רכישות ושותפויות (eoa.pipeline.acquisition / eoa.report.acquisition_watch)
+  enabled: true       # gates the deterministic triage alert AND the weekly/BD "מעקב רכישות" section
+  alert_level: red    # triage.levels key the deterministic acquisition-watch boost raises a matching item's score to
+
 notify:
   url: http://127.0.0.1:8091      # native ntfy (ADR-004); NTFY_URL env overrides
   topic: eo-analyst

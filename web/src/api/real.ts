@@ -29,6 +29,9 @@ import type {
   PatentSurveyCard,
   PatentSurveyCreateResponse,
   PatentsStatusResponse,
+  PayloadDetailResponse,
+  PayloadDiffResponse,
+  PayloadRecord,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -39,6 +42,7 @@ import type {
   Survey,
   TechRadarResponse,
   TenderCard,
+  TenderSourceCoverageResponse,
   TenderStatus,
   TriageLevel,
 } from "@/types/api";
@@ -48,6 +52,7 @@ import type {
   GraphQuery,
   ItemsQuery,
   PatentsQuery,
+  PayloadsQuery,
   TechItemsQuery,
   TendersQuery,
 } from "./types";
@@ -439,6 +444,26 @@ function normalizePatentRecord(raw: Partial<PatentRecord> | null | undefined): P
   };
 }
 
+function normalizePayloadRecord(raw: Partial<PayloadRecord> | null | undefined): PayloadRecord {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    canonical_name: str(r.canonical_name),
+    vendor_entity_name: r.vendor_entity_name ?? null,
+    family: r.family ?? null,
+    category: (r.category ?? "other") as PayloadRecord["category"],
+    first_seen: r.first_seen ?? null,
+    last_seen: r.last_seen ?? null,
+    notes: r.notes ?? null,
+    spec_version_count: num(r.spec_version_count),
+    price_ref_count: num(r.price_ref_count),
+    latest_spec_date: r.latest_spec_date ?? null,
+    latest_price_date: r.latest_price_date ?? null,
+    created_at: str(r.created_at),
+    updated_at: str(r.updated_at),
+  };
+}
+
 function normalizePatentSurveyCard(raw: Partial<PatentSurveyCard> | null | undefined): PatentSurveyCard {
   const r = raw ?? {};
   return {
@@ -732,6 +757,31 @@ export const realApi: ApiClient = {
       await request<Partial<ForecastCard>[] | null>(`/api/tenders/forecasts${qs({ limit })}`),
     ).map(normalizeForecastCard),
 
+  getTenderSourceCoverage: async () => {
+    type CoverageItem = TenderSourceCoverageResponse["regions"][number]["sources"][number];
+    const raw = await request<Partial<TenderSourceCoverageResponse> | null>("/api/tenders/coverage");
+    return {
+      regions: arr(raw?.regions).map((r) => ({
+        region: str(r?.region, "other"),
+        sources: arr(r?.sources).map(
+          (s): CoverageItem => ({
+            id: str(s?.id),
+            name: str(s?.name),
+            kind: (s?.kind ?? "search") as CoverageItem["kind"],
+            country: str(s?.country, "other"),
+            status: (s?.status ?? "not_integrated") as CoverageItem["status"],
+            verified: bool(s?.verified),
+            needs_key_env_var: s?.needs_key_env_var ?? null,
+            notices_stored: num(s?.notices_stored),
+            last_fetch_at: s?.last_fetch_at ?? null,
+          }),
+        ),
+      })),
+      totals: raw?.totals ?? {},
+      source_count: num(raw?.source_count),
+    };
+  },
+
   // A14: פטנטים ו-IP.
   getPatents: async (query: PatentsQuery) => {
     const raw = await request<{ patents?: Partial<PatentRecord>[] | null; total?: number }>(
@@ -761,6 +811,17 @@ export const realApi: ApiClient = {
       method: "POST",
       body: JSON.stringify({ topic }),
     }),
+
+  // A17: מטע"דים -- מפרטים ומחירי ייחוס, עם היסטוריית גרסאות.
+  getPayloads: async (query: PayloadsQuery = {}) => {
+    const raw = await request<{ payloads?: Partial<PayloadRecord>[] | null; total?: number }>(
+      `/api/payloads${qs({ category: query.category, vendor: query.vendor, q: query.q, limit: query.limit })}`,
+    );
+    return { payloads: arr(raw?.payloads).map(normalizePayloadRecord), total: raw?.total ?? 0 };
+  },
+  getPayload: async (id: number) => request<PayloadDetailResponse>(`/api/payloads/${id}`),
+  getPayloadDiff: async (id: number, a: number, b: number) =>
+    request<PayloadDiffResponse>(`/api/payloads/${id}/diff${qs({ a, b })}`),
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
   getTechRadar: async (weeks = 12) =>
