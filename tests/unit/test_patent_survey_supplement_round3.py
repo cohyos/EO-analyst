@@ -18,61 +18,68 @@ def test_topic_keywords_drop_stopwords_and_short_tokens() -> None:
     assert mod._topic_keywords("של עם") == []
 
 
-def test_stored_ids_prefer_multi_keyword_hits(monkeypatch) -> None:
-    rows = [{"id": i, "hits": 2} for i in range(1, 7)] + [{"id": 99, "hits": 1}]
+class _Cur:
+    def __init__(self, rows):
+        self.rows, self.sql, self.params = rows, "", {}
 
-    class _Cur:
-        def execute(self, sql, params):
-            assert "hits > 0" in sql and params["kw0"] == "%anduril%"
+    def execute(self, sql, params):
+        self.sql, self.params = sql, params
 
-        def fetchall(self):
-            return rows
+    def fetchall(self):
+        return self.rows
 
-        def __enter__(self):
-            return self
+    def __enter__(self):
+        return self
 
-        def __exit__(self, *a):
-            return None
-
-    class _Conn:
-        def cursor(self):
-            return _Cur()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return None
-
-    monkeypatch.setattr(mod, "connection", lambda: _Conn())
-    assert mod._stored_patent_ids_for_topic("Anduril lattice") == [1, 2, 3, 4, 5, 6]
+    def __exit__(self, *a):
+        return None
 
 
-def test_stored_ids_fall_back_to_single_hits_when_few_strong(monkeypatch) -> None:
-    rows = [{"id": 1, "hits": 2}, {"id": 2, "hits": 1}, {"id": 3, "hits": 1}]
+class _Conn:
+    def __init__(self, cur):
+        self._cur = cur
 
-    class _Cur:
-        def execute(self, sql, params):
-            return None
+    def cursor(self):
+        return self._cur
 
-        def fetchall(self):
-            return rows
+    def __enter__(self):
+        return self
 
-        def __enter__(self):
-            return self
+    def __exit__(self, *a):
+        return None
 
-        def __exit__(self, *a):
-            return None
 
-    class _Conn:
-        def cursor(self):
-            return _Cur()
+def test_generic_only_topic_requires_most_keywords(monkeypatch) -> None:
+    cur = _Cur([{"id": 1, "d_hits": 0, "g_hits": 3, "publication_date": None}])
+    monkeypatch.setattr(mod, "connection", lambda: _Conn(cur))
+    monkeypatch.setattr(mod, "_keyword_document_frequency", lambda kws: {k: 0.4 for k in kws})
+    assert mod._stored_patent_ids_for_topic("optical tracking system") == [1]
+    assert "g_hits >=" in cur.sql and "d_hits >= 1" not in cur.sql
 
-        def __enter__(self):
-            return self
 
-        def __exit__(self, *a):
-            return None
+def test_distinctive_keyword_gates_admission(monkeypatch) -> None:
+    cur = _Cur([{"id": 62, "d_hits": 2, "g_hits": 1, "publication_date": None}])
+    monkeypatch.setattr(mod, "connection", lambda: _Conn(cur))
+    monkeypatch.setattr(
+        mod,
+        "_keyword_document_frequency",
+        lambda kws: {"anduril": 0.02, "lattice": 0.02, "optical": 0.36, "tracking": 0.3},
+    )
+    assert mod._stored_patent_ids_for_topic("Anduril Lattice optical tracking") == [62]
+    assert "d_hits >= 1" in cur.sql
+    # generic keywords are ranked, never gated
+    assert cur.params["d0"] == "%anduril%" and cur.params["g0"] == "%optical%"
 
-    monkeypatch.setattr(mod, "connection", lambda: _Conn())
-    assert mod._stored_patent_ids_for_topic("droic readout") == [1, 2, 3]
+
+def test_old_patents_dropped_when_newer_exist(monkeypatch) -> None:
+    import datetime as dt
+
+    cur = _Cur(
+        [
+            {"id": 1, "d_hits": 1, "g_hits": 0, "publication_date": dt.date(1964, 1, 1)},
+            {"id": 2, "d_hits": 1, "g_hits": 0, "publication_date": dt.date(2021, 1, 1)},
+        ]
+    )
+    monkeypatch.setattr(mod, "connection", lambda: _Conn(cur))
+    monkeypatch.setattr(mod, "_keyword_document_frequency", lambda kws: {k: 0.05 for k in kws})
+    assert mod._stored_patent_ids_for_topic("droic readout") == [2]

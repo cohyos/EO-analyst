@@ -269,43 +269,114 @@ def _topic_keywords(topic: str) -> list[str]:
     return out
 
 
+#: A topic keyword is *distinctive* when at most this share of stored patents mention it
+#: ("anduril", "droic"); the rest are generic vocabulary ("optical", "tracking") that alone must
+#: never pull a patent into a survey -- the Anduril survey once filled up with 1960s "optical
+#: tracking system" patents on that basis (user finding 2026-09-06 evening).
+_DISTINCTIVE_DF_MAX = 0.15
+#: Stored patents older than this are left out of an on-demand survey unless nothing newer exists
+#: (a technology-map survey is about the current landscape; expired art belongs to the timeline
+#: only when it actually matches the topic's distinctive terms).
+_SUPPLEMENT_MAX_AGE_YEARS = 25
+
+
+def _keyword_document_frequency(kws: list[str]) -> dict[str, float]:
+    """Share of stored patents (title/abstract/assignees/cpc) mentioning each keyword."""
+    if not kws:
+        return {}
+    exprs = ", ".join(
+        f"COUNT(*) FILTER (WHERE haystack ILIKE %(kw{i})s)::float AS c{i}" for i in range(len(kws))
+    )
+    params: dict[str, Any] = {f"kw{i}": f"%{kw}%" for i, kw in enumerate(kws)}
+    sql = f"""
+        SELECT COUNT(*)::float AS n, {exprs}
+        FROM (
+            SELECT COALESCE(title, '') || ' ' || COALESCE(abstract, '') || ' ' ||
+                   COALESCE(array_to_string(cpc, ' '), '') || ' ' ||
+                   COALESCE(array_to_string(assignees, ' '), '') AS haystack
+            FROM patents
+        ) h
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+    if not row:
+        return {}
+    n = float(row["n"] or 0.0)
+    return {kw: (float(row[f"c{i}"] or 0.0) / n if n else 0.0) for i, kw in enumerate(kws)}
+
+
 def _stored_patent_ids_for_topic(
     topic: str, *, limit: int = 60, exclude: list[int] | None = None
 ) -> list[int]:
     """Round-3 (surveys 45/46, 2026-09-06): the on-demand survey used to rest solely on a fresh
     keyless web search, so a DuckDuckGo timeout produced a survey with zero patents while the
-    ``patents`` table already held the topic's rows from earlier scans. Returns stored patent ids
-    whose title/abstract/CPC/assignees match at least one topic keyword, best matches (most
-    keyword hits, then value_score) first."""
+    ``patents`` table already held the topic's rows. Returns stored patent ids that match the
+    topic *specifically*: at least one distinctive keyword (document frequency <=
+    :data:`_DISTINCTIVE_DF_MAX`) plus a second keyword or an assignee match; two distinctive
+    keywords always qualify; generic keywords alone never do. When the topic has no distinctive
+    keyword at all, a patent must match most of the keywords. Ranked by distinctive hits, total
+    hits, then value_score; patents older than :data:`_SUPPLEMENT_MAX_AGE_YEARS` are dropped
+    when newer matches exist."""
     kws = _topic_keywords(topic)
     if not kws:
         return []
-    hit_exprs = " + ".join(f"(CASE WHEN haystack ILIKE %(kw{i})s THEN 1 ELSE 0 END)" for i in range(len(kws)))
-    params: dict[str, Any] = {f"kw{i}": f"%{kw}%" for i, kw in enumerate(kws)}
+    df = _keyword_document_frequency(kws)
+    distinctive = [kw for kw in kws if 0.0 < df.get(kw, 1.0) <= _DISTINCTIVE_DF_MAX]
+    generic = [kw for kw in kws if kw not in distinctive]
+
+    def _hits(cols: list[str], prefix: str) -> str:
+        if not cols:
+            return "0"
+        return " + ".join(
+            f"(CASE WHEN haystack ILIKE %({prefix}{i})s THEN 1 ELSE 0 END)" for i in range(len(cols))
+        )
+
+    params: dict[str, Any] = {}
+    params.update({f"d{i}": f"%{kw}%" for i, kw in enumerate(distinctive)})
+    params.update({f"g{i}": f"%{kw}%" for i, kw in enumerate(generic)})
+    params.update({f"a{i}": f"%{kw}%" for i, kw in enumerate(distinctive)})
     params["limit"] = limit
     params["exclude"] = list(exclude or [])
+    assignee_hit = (
+        " + ".join(
+            f"(CASE WHEN assignee_text ILIKE %(a{i})s THEN 1 ELSE 0 END)" for i in range(len(distinctive))
+        )
+        if distinctive
+        else "0"
+    )
+    if distinctive:
+        # one distinctive term is enough ("droic", "anduril"); generic terms and an assignee
+        # match only rank the result higher -- they never admit a patent on their own
+        where = "d_hits >= 1"
+    else:
+        where = f"g_hits >= {max(2, (len(generic) + 1) // 2 + 1)}"
     sql = f"""
-        SELECT id, hits FROM (
-            SELECT id, value_score, {hit_exprs} AS hits
+        SELECT id, d_hits, g_hits, publication_date FROM (
+            SELECT id, value_score, publication_date,
+                   {_hits(distinctive, "d")} AS d_hits,
+                   {_hits(generic, "g")} AS g_hits,
+                   {assignee_hit} AS a_hits
             FROM (
-                SELECT id, value_score,
+                SELECT id, value_score, publication_date,
                        COALESCE(title, '') || ' ' || COALESCE(abstract, '') || ' ' ||
                        COALESCE(array_to_string(cpc, ' '), '') || ' ' ||
-                       COALESCE(array_to_string(assignees, ' '), '') AS haystack
+                       COALESCE(array_to_string(assignees, ' '), '') AS haystack,
+                       COALESCE(array_to_string(assignees, ' '), '') AS assignee_text
                 FROM patents
                 WHERE NOT (id = ANY(%(exclude)s::bigint[]))
             ) h
         ) scored
-        WHERE hits > 0
-        ORDER BY hits DESC, value_score DESC NULLS LAST, id DESC
+        WHERE {where}
+        ORDER BY d_hits DESC, a_hits DESC, g_hits DESC, value_score DESC NULLS LAST, publication_date DESC NULLS LAST, id DESC
         LIMIT %(limit)s
     """
     with connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
-    # prefer rows matching ≥2 keywords when there are enough of them; otherwise any single hit
-    strong = [r["id"] for r in rows if r["hits"] >= 2]
-    return strong if len(strong) >= _MIN_SURVEY_PATENTS else [r["id"] for r in rows]
+    cutoff = dt.date.today() - dt.timedelta(days=365 * _SUPPLEMENT_MAX_AGE_YEARS)
+    recent = [r for r in rows if r.get("publication_date") is None or r["publication_date"] >= cutoff]
+    return [r["id"] for r in (recent or rows)]
 
 
 def _fetch_patent_rows(patent_ids: list[int]) -> list[dict[str, Any]]:
