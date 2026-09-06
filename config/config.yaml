@@ -168,10 +168,10 @@ export:
   obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }
 
 llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — global local/cloud switch + fallback chains
-  mode: local
+  mode: cloud   # user decision 2026-09-06 16:20: cloud chain for analysis/reports, local fallback (docs/qa/loop/MODEL_DECISION.md)
   allow_cloud: true                 # kill switch: false disables every cloud provider everywhere, chat falls back to ollama
   interactive_default: "ollama"
-  timeout_s: 120
+  timeout_s: 240   # bake-off: one of 8 claude analyze calls exceeded 120 s on an 11k-char prompt
   cli:
     agy:
       binary: agy      # Gemini via Antigravity CLI (resolved through PATH; falls back to an absolute path if set)
@@ -207,12 +207,18 @@ llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — 
   #   report:        [{provider: claude, model: claude-opus-5, power: high}, {provider: ollama}]
   chains:
     resident:
+    - { provider: claude, model: claude-sonnet-5, power: medium }
+    - { provider: agy, model: gemini-3.1-pro-high }
     - provider: ollama
     investigator:
+    - { provider: claude, model: claude-sonnet-5, power: high }
+    - { provider: agy, model: gemini-3.1-pro-high }
     - provider: ollama
     light:
     - provider: ollama
     report:
+    - { provider: claude, model: claude-sonnet-5, power: high }
+    - { provider: agy, model: gemini-3.1-pro-high }
     - provider: ollama
   # U8-ו/5: USD per million tokens, "approximate, edit me". CLI providers (agy/claude/codex) are
   # intentionally absent — subscription-based, cost 0 even when usage is reported.
