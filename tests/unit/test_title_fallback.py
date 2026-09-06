@@ -486,7 +486,7 @@ class TestChooseTitleFallbackChain:
         assert title == 'Company\'s "New System" — A Breakthrough'
 
 
-class TestQ5_13HtmlEntityUnescape:
+class TestQ513HtmlEntityUnescape:
     """Q5-13 (docs/qa/findings_Q5_r2.md): rungs 1-3 pull a candidate straight out of raw HTML via
     regex, never through a real HTML parser, so a numeric/named entity in the source markup
     reached `items.title` completely undecoded (item 112: "Israel&#39;s Aero Sentinel")."""

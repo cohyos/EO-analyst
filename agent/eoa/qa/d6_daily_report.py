@@ -93,6 +93,18 @@ def _first_table_header_cells(body: str) -> list[str]:
     return [c.strip() for c in lines[0].strip("|").split("|")]
 
 
+_TRAILING_CITES_AFTER_STOP_RE = re.compile(r"([.!?])((?:\s*\[\d+(?:\s*,\s*\d+)*\])+)")
+
+
+def _normalize_bluf_body(body: str) -> str:
+    """Round 5 follow-up (P3/P6 finding): the renderer emits the BLUF as ``**sentence. [3]**`` -- a
+    citation group *after* the full stop -- and the plain sentence splitter then yields an uncited
+    ``sentence.`` plus a bare ``[3]`` fragment, failing a correctly cited BLUF. Strip Markdown bold
+    and move each trailing citation group back before its terminal punctuation before splitting."""
+    text = (body or "").replace("**", "").strip()
+    return _TRAILING_CITES_AFTER_STOP_RE.sub(lambda m: f" {m.group(2).strip()}{m.group(1)}", text)
+
+
 def _bluf_check(sections: list[tuple[str, str]]) -> Check:
     """Item 4/1: a ``שורה תחתונה`` heading, before the exec summary, 1-2 short cited sentences."""
     bluf_idx = exec_idx = None
@@ -106,6 +118,7 @@ def _bluf_check(sections: list[tuple[str, str]]) -> Check:
         return Check(
             "bluf_present_and_short", False, weight=2.0, evidence=f"no '{_BLUF_HEADING_HE}' heading found"
         )
+    bluf_body = _normalize_bluf_body(bluf_body)
     sentences = split_sentences(bluf_body)
     word_count = len(bluf_body.split())
     cited = bool(sentences) and all(citations_in(s) for s in sentences)

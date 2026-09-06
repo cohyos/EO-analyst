@@ -54,6 +54,18 @@ def _split_sentences_simple(text: str) -> list[str]:
     return [p.strip() for p in _SENTENCE_BOUNDARY_RE.split(text.strip()) if p.strip()]
 
 
+_TRAILING_CITES_AFTER_STOP_RE = re.compile(r"([.!?])((?:\s*\[\d+(?:\s*,\s*\d+)*\])+)")
+
+
+def _normalize_bluf_body(body: str) -> str:
+    """Round 5 follow-up (P3/P6 finding): the renderer emits the BLUF as ``**sentence. [3]**`` -- a
+    citation group *after* the full stop -- and the plain sentence splitter then yields an uncited
+    ``sentence.`` plus a bare ``[3]`` fragment, failing a correctly cited BLUF. Strip Markdown bold
+    and move each trailing citation group back before its terminal punctuation before splitting."""
+    text = (body or "").replace("**", "").strip()
+    return _TRAILING_CITES_AFTER_STOP_RE.sub(lambda m: f" {m.group(2).strip()}{m.group(1)}", text)
+
+
 def _bluf_check(sections: list[tuple[str, str]]) -> Check:
     """Item 4: a ``שורה תחתונה`` heading, before the exec summary, 1-2 short cited sentences --
     same shape as ``eoa.qa.d6_daily_report``'s own BLUF check, duplicated locally per this
@@ -70,6 +82,7 @@ def _bluf_check(sections: list[tuple[str, str]]) -> Check:
         return Check(
             "bluf_present_and_short", False, weight=1.5, evidence=f"no '{_BLUF_HEADING_HE}' heading found"
         )
+    bluf_body = _normalize_bluf_body(bluf_body)
     sentences = _split_sentences_simple(bluf_body)
     word_count = len(bluf_body.split())
     cited = bool(sentences) and all(_CITATION_RE.search(s) for s in sentences)
