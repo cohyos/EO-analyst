@@ -35,23 +35,38 @@ or port 5433 is legacy.
 # Start postgres + ntfy + orchestrator + api (idempotent -- no-ops if already running)
 eo native start
 
-# Status of each managed process (reads runtime\pids\*.pid)
+# Status of each managed process (reads runtime\pids\*.pid). Q6-3b (2026-09-06): the ntfy/api
+# health probes use a 10s timeout (was 3s, which misreported a healthy-but-busy service as
+# "down (ReadTimeout)"); a response that still takes >3s is reported "up (slow N.Ns)" instead of
+# a plain "up" so a slow-but-healthy service stays visible.
 eo native status
 
 # Tail a service's log (supervisor | postgres | ntfy | orchestrator | api)
 eo native logs supervisor
 eo native logs api
 
-# Stop everything (writes runtime\supervisor.stop, waits for graceful shutdown)
+# Stop everything except postgres (writes runtime\supervisor.stop, waits for graceful shutdown).
+# Q6-4 (2026-09-06): postgres is now left running by default -- other tools/ad-hoc psql sessions
+# keep working across a stop/start cycle instead of losing their connection every time.
 eo native stop
+
+# Stop postgres too:
+eo native stop --with-postgres
 ```
 
 Equivalent direct invocation of the supervisor (useful for foreground debugging):
 
 ```powershell
+# Default: leave postgres running on shutdown.
 pwsh -NoProfile -File scripts\native\eoa-supervisor.ps1
 # from another shell, to stop it:
 New-Item -ItemType File -Force runtime\supervisor.stop
+
+# To also stop postgres, either launch with -StopPostgres ...
+pwsh -NoProfile -File scripts\native\eoa-supervisor.ps1 -StopPostgres
+# ... or write the sentinel with the "with-postgres" marker `eo native stop --with-postgres` looks
+# for (scripts\native\eoa-supervisor.ps1 checks the sentinel file's content, not just its presence):
+Set-Content -Path runtime\supervisor.stop -Value "stop-with-postgres"
 ```
 
 ### Where things live
@@ -59,6 +74,7 @@ New-Item -ItemType File -Force runtime\supervisor.stop
 | What | Path |
 |---|---|
 | Logs (all services, daily-rotated) | `runtime\logs\` (e.g. `runtime\logs\api.2026-09-05.log`) |
+| Legacy/archived logs (Q6-5a, 2026-09-06) | `runtime\logs\archive\<yyyymmdd>\` -- any non-dated `*.log` found in `runtime\logs\` at supervisor startup (leftovers from before the supervisor existed, e.g. `agent.log`/`web.log`) is moved here once; the supervisor's own dated logs are deleted after 14 days |
 | Postgres logs | `runtime\logs\pg\` |
 | Pidfiles | `runtime\pids\<name>.pid` (`ntfy`, `orchestrator`, `api`) + `runtime\supervisor.pid` |
 | Environment | `runtime\eoa.env` (written by `scripts\native\install_native.ps1`) |

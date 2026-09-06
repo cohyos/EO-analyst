@@ -12,10 +12,11 @@ import datetime as dt
 import difflib
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from psycopg import sql
+from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from eoa.db import connection
@@ -60,6 +61,10 @@ _ITEM_UPDATABLE_FIELDS = {
     # Q3-10 (docs/qa/findings_Q3_r1.md): 'full' | 'partial' | 'stub', see migration 0015 and
     # eoa.fetch.content_quality.assess / eoa.pipeline.analyze's pre-check.
     "content_status",
+    # A13 (מיקוד תעשייה ישראלית, 2026-09-06): additive, see migration 0017 and
+    # eoa.pipeline.israel_focus.israel_relevance() / classify.py + analyze.py's "# --- A13" blocks.
+    "israel_relevance",
+    "israel_reasons",
 }
 
 
@@ -97,9 +102,9 @@ def upsert_source(
         "reliability": reliability,
         "active": active,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        source_id: int = cur.fetchone()["id"]
+        source_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("source.upserted", source_id=source_id, name=name, kind=kind)
     return source_id
 
@@ -158,9 +163,9 @@ def insert_item(
         "report_kind": report_kind,
         "trl": trl,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        item_id: int = cur.fetchone()["id"]
+        item_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("item.inserted", item_id=item_id, url=url, source_id=source_id)
     return item_id
 
@@ -183,7 +188,7 @@ def get_items_for_stage(
         ORDER BY fetched_at NULLS LAST, id
         LIMIT %(limit)s
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"stage": stage, "limit": limit, "item_ids": item_ids})
         rows = cur.fetchall()
     return rows
@@ -199,7 +204,7 @@ def mark_stage(item_id: int, stage: str) -> None:
         END
         WHERE id = %(item_id)s
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"stage": stage, "item_id": item_id})
     log.debug("item.stage_marked", item_id=item_id, stage=stage)
 
@@ -216,7 +221,7 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
     )
     query = sql.SQL("UPDATE items SET {assignments} WHERE id = %(item_id)s").format(assignments=assignments)
     params: dict[str, Any] = {**fields, "item_id": item_id}
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
     log.debug("item.fields_updated", item_id=item_id, fields=sorted(fields))
 
@@ -277,7 +282,7 @@ def _find_near_duplicate_event(item_id: int, kind: str, title: str) -> dict[str,
     similarity) match, or ``None``. Exact-same-`kind` near-duplicates are left to the
     `(item_id, kind, lower(title))` unique-index upsert below; this only catches the "same event,
     different kind" case that index can't."""
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT id, kind, title, date, amount_usd, currency, parties, customer, program, "
             "summary_he, confidence FROM events WHERE item_id = %(item_id)s AND kind <> %(kind)s "
@@ -299,7 +304,7 @@ def _merge_into_existing_event(existing: dict[str, Any], *, kind: str, **fields:
     different `kind`), keeping the more specific `kind` and the same non-null-wins/richer-parties/
     max-confidence policy as the exact-match upsert in :func:`insert_event`."""
     merged_kind = more_specific_event_kind(existing["kind"], kind)
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             UPDATE events SET
@@ -421,9 +426,9 @@ def insert_event(
         "summary_he": summary_he,
         "confidence": confidence,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        event_id: int = cur.fetchone()["id"]
+        event_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("event.inserted", event_id=event_id, item_id=item_id, kind=kind)
     return event_id
 
@@ -434,7 +439,7 @@ def _find_case_insensitive_existing_name(name: str) -> str | None:
     reuses that row's exact spelling instead of creating a case-variant duplicate. Returns `None`
     on no case-insensitive match (including when `name` itself is already the exact match)."""
     query = "SELECT name FROM entities WHERE lower(name) = lower(%(name)s) AND name <> %(name)s LIMIT 1"
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"name": name})
         row = cur.fetchone()
     return row["name"] if row else None
@@ -515,9 +520,9 @@ def upsert_entity(
         "notes": notes,
         "first_seen_item": first_seen_item,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        entity_id: int = cur.fetchone()["id"]
+        entity_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("entity.upserted", entity_id=entity_id, name=name, kind=kind)
     return entity_id
 
@@ -552,9 +557,9 @@ def record_resource_decision(
         "ram_free_mb": ram_free_mb,
         "wait_ms": wait_ms,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        log_id: int = cur.fetchone()["id"]
+        log_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     return log_id
 
 
@@ -603,9 +608,9 @@ def log_llm_call(
         "role": role,
         "error": error,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        row_id: int = cur.fetchone()["id"]
+        row_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     return row_id
 
 
@@ -628,7 +633,7 @@ def summarize_llm_calls(since_hours: int = 24) -> dict[str, Any]:
         GROUP BY provider
         ORDER BY provider
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"hours": since_hours})
         rows = [dict(r) for r in cur.fetchall()]
     for r in rows:
@@ -672,9 +677,9 @@ def log_mcp_call(
         "verdict": verdict,
         "error": error,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        row_id: int = cur.fetchone()["id"]
+        row_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     return row_id
 
 
@@ -696,7 +701,7 @@ def summarize_mcp_calls(since_hours: int = 24) -> dict[str, Any]:
         GROUP BY server, tool
         ORDER BY server, tool
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"hours": since_hours})
         rows = [dict(r) for r in cur.fetchall()]
     for r in rows:
@@ -734,9 +739,9 @@ def log_security(
         "excerpt": excerpt,
         "action": action,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        log_id: int = cur.fetchone()["id"]
+        log_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.warning("security.logged", item_id=item_id, source_id=source_id, layer=layer, action=action)
     return log_id
 
@@ -765,9 +770,9 @@ def enqueue_job(
         "priority": priority,
         "not_before": not_before,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        job_id: int = cur.fetchone()["id"]
+        job_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("job.enqueued", job_id=job_id, kind=kind, priority=priority)
     return job_id
 
@@ -806,7 +811,7 @@ def claim_next_job(
     params: dict[str, Any] = {"worker_id": worker_id, "lease_seconds": lease_seconds}
     if kinds:
         params["kinds"] = list(kinds)
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
         row = cur.fetchone()
     if row:
@@ -845,7 +850,7 @@ def finish_job(
         "not_before": not_before,
         "job_id": job_id,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
         row = cur.fetchone()
     if row is None:
@@ -875,7 +880,7 @@ def heartbeat(
         "event": event,
         "detail": Json(detail) if detail is not None else None,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
         cur.execute(
             "UPDATE jobs SET lease_expires_at = now() + (%(lease_seconds)s || ' seconds')::interval "
@@ -904,7 +909,7 @@ def reap_stale_jobs(max_age_hours: int = 6) -> int:
           )
         RETURNING id
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"max_age_hours": max_age_hours})
         rows = cur.fetchall()
     if rows:
@@ -953,9 +958,9 @@ def insert_investigation_log(
         "outcome": outcome,
         "notes": notes,
     }
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql_query, params)
-        log_id: int = cur.fetchone()["id"]
+        log_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("investigation.logged", job_id=job_id, trigger_item=trigger_item, outcome=outcome)
     return log_id
 
@@ -968,7 +973,7 @@ def get_lessons(kind: str | None = None) -> list[dict[str, Any]]:
         query += " AND kind = %(kind)s"
         params["kind"] = kind
     query += " ORDER BY created_at DESC"
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
         return cur.fetchall()
 
@@ -980,9 +985,9 @@ def add_lesson(kind: str, text: str, source_ref: str | None = None) -> int:
         VALUES (%(kind)s, %(text)s, %(source_ref)s, true)
         RETURNING id
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"kind": kind, "text": text, "source_ref": source_ref})
-        lesson_id: int = cur.fetchone()["id"]
+        lesson_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("lesson.added", lesson_id=lesson_id, kind=kind)
     return lesson_id
 
@@ -994,6 +999,6 @@ def recent_feedback(days: int) -> list[dict[str, Any]]:
         WHERE created_at >= now() - (%(days)s || ' days')::interval
         ORDER BY created_at DESC
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"days": days})
         return cur.fetchall()

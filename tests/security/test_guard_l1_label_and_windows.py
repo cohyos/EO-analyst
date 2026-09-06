@@ -144,7 +144,7 @@ def test_l1_score_detects_a_payload_placed_past_the_old_30000_char_cutoff(monkey
 # --------------------------------------------------------------------------
 
 
-def test_agent_role_forces_local_files_only_true(monkeypatch: pytest.MonkeyPatch):
+def test_agent_role_forces_local_files_only_true(monkeypatch: pytest.MonkeyPatch, tmp_path):
     captured: dict = {}
 
     def fake_pipeline(*args, **kwargs):
@@ -152,7 +152,16 @@ def test_agent_role_forces_local_files_only_true(monkeypatch: pytest.MonkeyPatch
         raise RuntimeError("stub: never actually loads a model in this test")
 
     monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(pipeline=fake_pipeline))
+    # Q1-r2-1 (2026-09-06): isolate from a real local guard_l1 install. Without this, a machine
+    # with HF_HUB_OFFLINE=1 and/or a real model dropped at runtime/models/prompt-guard (or
+    # EOA_GUARD_L1_DIR pointing elsewhere) takes the local-dir ONNX branch instead of the
+    # `transformers.pipeline` branch this test targets -- the fake pipeline above is never called,
+    # `captured` stays empty, and the assertion below fails. Unset both env vars and repoint
+    # `guard.REPO_ROOT` at an empty tmp_path so the default local-dir fallback can't resolve to a
+    # real directory, forcing the code down into the mocked-pipeline branch being tested here.
     monkeypatch.delenv("EOA_GUARD_L1_DIR", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(guard, "REPO_ROOT", tmp_path)
     monkeypatch.setenv("EOA_ROLE", "agent")
 
     fake_spec = SimpleNamespace(hf="fake-org/fake-model")
@@ -168,7 +177,7 @@ def test_agent_role_forces_local_files_only_true(monkeypatch: pytest.MonkeyPatch
     assert captured.get("local_files_only") is True
 
 
-def test_non_agent_role_does_not_force_local_files_only(monkeypatch: pytest.MonkeyPatch):
+def test_non_agent_role_does_not_force_local_files_only(monkeypatch: pytest.MonkeyPatch, tmp_path):
     captured: dict = {}
 
     def fake_pipeline(*args, **kwargs):
@@ -176,7 +185,11 @@ def test_non_agent_role_does_not_force_local_files_only(monkeypatch: pytest.Monk
         raise RuntimeError("stub: never actually loads a model in this test")
 
     monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(pipeline=fake_pipeline))
+    # Q1-r2-1: see the comment in test_agent_role_forces_local_files_only_true above -- same
+    # isolation from a real local guard_l1 install / HF_HUB_OFFLINE is needed here.
     monkeypatch.delenv("EOA_GUARD_L1_DIR", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(guard, "REPO_ROOT", tmp_path)
     monkeypatch.delenv("EOA_ROLE", raising=False)
 
     fake_spec = SimpleNamespace(hf="fake-org/fake-model")

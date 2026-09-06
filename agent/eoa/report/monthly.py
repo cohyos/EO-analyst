@@ -18,12 +18,14 @@ invent" — none of them can carry an ``[n]`` citation into the item list): the 
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import structlog
+from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from eoa.config import REPO_ROOT, settings
@@ -135,7 +137,7 @@ def collect_month_items(
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             sql, {"levels": list(_LEVELS_MAIN), "start": period_start, "end": period_end, "limit": cap}
         )
@@ -162,7 +164,7 @@ def players_map() -> dict[str, list[dict[str, Any]]]:
         WHERE i.domain IS NOT NULL AND i.domain <> ''
         GROUP BY e.id, e.name, i.domain
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql)
         rows = cur.fetchall()
     best_domain: dict[int, dict[str, Any]] = {}
@@ -203,7 +205,7 @@ def top_events_by_amount(period_start: dt.date, period_end: dt.date, limit: int 
         ORDER BY e.amount_usd DESC NULLS LAST
         LIMIT %(limit)s
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": period_start, "end": period_end, "limit": limit})
         return cur.fetchall()
 
@@ -217,7 +219,7 @@ def watchlist_changes(period_start: dt.date, period_end: dt.date) -> list[dict[s
         WHERE created_at::date BETWEEN %(start)s AND %(end)s
         ORDER BY created_at
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": period_start, "end": period_end})
         return cur.fetchall()
 
@@ -294,7 +296,7 @@ def draft_monthly(
         interactive=interactive,
         options={"temperature": 0.3},
     )
-    return _normalize_section_titles(draft)
+    return cast(MonthlyReportDraft, _normalize_section_titles(draft))
 
 
 def _corrective_retry(
@@ -336,7 +338,7 @@ def _corrective_retry(
         interactive=interactive,
         options={"temperature": 0.2},
     )
-    return _normalize_section_titles(draft)
+    return cast(MonthlyReportDraft, _normalize_section_titles(draft))
 
 
 def _strip_uncited(draft: MonthlyReportDraft, qa: QAResult) -> MonthlyReportDraft:
@@ -346,7 +348,7 @@ def _strip_uncited(draft: MonthlyReportDraft, qa: QAResult) -> MonthlyReportDraf
     uncited = set(qa.uncited_sentences)
     duplicates = set(qa.duplicate_sentences)
 
-    def _clean(text: str, *, extra_drop: set[str] = frozenset()) -> str:
+    def _clean(text: str, *, extra_drop: AbstractSet[str] = frozenset()) -> str:
         kept = []
         for sentence in split_sentences(text):
             if sentence in uncited or sentence in extra_drop:
@@ -411,7 +413,7 @@ def _persist_report(
         VALUES ('monthly', %(start)s, %(end)s, %(docx)s, %(md)s, %(html)s, %(items)s, %(qa_passed)s, %(qa_report)s)
         RETURNING id
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             sql,
             {
@@ -425,7 +427,7 @@ def _persist_report(
                 "qa_report": Json(qa_report),
             },
         )
-        report_id: int = cur.fetchone()["id"]
+        report_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("monthly_report_persisted", report_id=report_id, qa_passed=qa.passed)
     return report_id
 
@@ -547,6 +549,23 @@ def build_monthly(
                 ],
             }
         )
+
+    # A14 (פטנטים ו-IP, 2026-09-06): monthly landscape summary by subdomain + top assignees, same
+    # additive mechanism as the tables above. A failure here must never break the monthly report.
+    try:
+        from eoa.patents.report_section import (
+            collect_patents_landscape,
+            patents_landscape_extra_section,
+            patents_landscape_table,
+        )
+
+        patents_landscape_data = collect_patents_landscape()
+        extra_sections.append(patents_landscape_extra_section(patents_landscape_data))
+        patents_landscape_tbl = patents_landscape_table(patents_landscape_data)
+        if patents_landscape_tbl:
+            tables.append(patents_landscape_tbl)
+    except Exception as exc:
+        log.warning("monthly_report_patents_section_failed", error=str(exc)[:160])
 
     docx_path = _report_path(end, "docx")
     md_path = _report_path(end, "md")

@@ -10,7 +10,13 @@ Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_classify_guards.py
 from __future__ import annotations
 
 from eoa.llm.schemas.analysis import ClassifyOut, EntityMention
-from eoa.pipeline.classify import _has_eoir_vocabulary, _watchlist_alias_hit, apply_no_eoir_gate
+from eoa.pipeline.classify import (
+    _has_eoir_vocabulary,
+    _has_generic_ai_tech_market_vocabulary,
+    _watchlist_alias_hit,
+    apply_generic_ai_market_gate,
+    apply_no_eoir_gate,
+)
 
 
 class TestSubdomainTaxonomyValidator:
@@ -136,4 +142,83 @@ class TestApplyNoEoirGate:
             one_line_he="x",
         )
         gated = apply_no_eoir_gate(self._item(), out)
+        assert gated.relevance_note == "already out"
+
+
+# --------------------------------------------------------------------------
+# Goal 3 (2026-09-06, docs/qa/STATUS.md r3): the narrower "generic AI/hi-tech market" gate --
+# regression for a 06:27 daily report that leaked a Hebrew "AI jobs market" opinion piece into a
+# report section with zero genuine EO/IR/CV content.
+# --------------------------------------------------------------------------
+
+
+class TestHasGenericAiTechMarketVocabulary:
+    def test_hebrew_ai_jobs_market_hit(self) -> None:
+        assert _has_generic_ai_tech_market_vocabulary("אילו מקצועות יהפכו מבוקשים בעידן ה-AI?") is True
+
+    def test_english_hi_tech_market_hit(self) -> None:
+        assert _has_generic_ai_tech_market_vocabulary("The AI jobs market is booming this year.") is True
+
+    def test_no_hit_on_unrelated_text(self) -> None:
+        assert _has_generic_ai_tech_market_vocabulary("A new bridge was opened downtown today.") is False
+
+    def test_no_hit_on_real_eoir_content(self) -> None:
+        """A real computer-vision/defense article that happens to also use the word "AI" is not
+        this gate's concern (it's real in-scope vocabulary) -- checked at the `_has_eoir_vocabulary`
+        short-circuit in `apply_generic_ai_market_gate`, not in this helper directly."""
+        text = "The new targeting pod uses AI-based computer vision for target recognition."
+        assert _has_generic_ai_tech_market_vocabulary(text) is False
+
+
+class TestApplyGenericAiMarketGate:
+    def _item(self, **overrides: object) -> dict:
+        base = {
+            "id": 2,
+            "title": "זה שעולה וזה שיורד: אילו מקצועות יהפכו מבוקשים בעידן ה-AI?",
+            "clean_text": "מאמר על שוק העבודה בהיי-טק ומקצועות מבוקשים בעידן הבינה המלאכותית.",
+        }
+        return {**base, **overrides}
+
+    def test_generic_ai_market_item_gated_even_with_entities(self) -> None:
+        """Regression: unlike apply_no_eoir_gate, this gate must fire even when the LLM extracted
+        entities or a watchlist alias appears -- a defense company can be mentioned in passing in
+        a generic labor-market listicle."""
+        out = ClassifyOut(
+            domain="secondary",
+            subdomain="",
+            report_kind="rumor_speculation",
+            entities=[EntityMention(name="Elbit", kind="company")],
+            one_line_he="x",
+        )
+        gated = apply_generic_ai_market_gate(self._item(), out)
+        assert gated.domain == "out_of_scope"
+        assert gated.subdomain == ""
+        assert gated.relevance_note == "gate:generic_ai_market_vocabulary"
+
+    def test_not_gated_when_real_eoir_content_present(self) -> None:
+        item = self._item(
+            title="New targeting pod uses AI for target detection",
+            clean_text="The electro-optical targeting pod uses AI-based computer vision.",
+        )
+        out = ClassifyOut(
+            domain="airborne_pods", subdomain="targeting_pods", report_kind="verified_report", one_line_he="x"
+        )
+        gated = apply_generic_ai_market_gate(item, out)
+        assert gated.domain == "airborne_pods"
+
+    def test_not_gated_when_no_generic_ai_vocabulary_at_all(self) -> None:
+        item = self._item(title="Completely unrelated topic", clean_text="Nothing about AI or tech here.")
+        out = ClassifyOut(domain="secondary", subdomain="", report_kind="verified_report", one_line_he="x")
+        gated = apply_generic_ai_market_gate(item, out)
+        assert gated.domain == "secondary"
+
+    def test_already_out_of_scope_is_a_noop(self) -> None:
+        out = ClassifyOut(
+            domain="out_of_scope",
+            subdomain="",
+            report_kind="rumor_speculation",
+            relevance_note="already out",
+            one_line_he="x",
+        )
+        gated = apply_generic_ai_market_gate(self._item(), out)
         assert gated.relevance_note == "already out"

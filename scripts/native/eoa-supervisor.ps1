@@ -10,6 +10,11 @@ Loads runtime\eoa.env into the process environment, then starts and keeps alive,
   3. orchestrator (.venv\Scripts\python.exe -m eoa.orchestrator.main)
   4. api          (.venv\Scripts\python.exe -m uvicorn eoa.api.app:app --host 127.0.0.1 --port 8765)
 
+On shutdown, postgres is left running by default (Q6-4, 2026-09-06) -- pass -StopPostgres (or
+-KeepPostgres:$false) to also stop it, or trigger the stop via `eo native stop --with-postgres`,
+which writes a sentinel file this script recognizes. See the -StopPostgres/-KeepPostgres param
+docs and the `finally` block below.
+
 Each child's stdout/stderr is logged to runtime\logs\<name>.log with daily rotation
 (a new file per calendar day, old ones left in place for retention/cleanup elsewhere).
 A crashed child (steps 2-4; postgres restarts are left to `pg_ctl`/manual intervention
@@ -45,7 +50,15 @@ or by `eo native start` (agent\eoa\cli.py). Also runnable directly for foregroun
 
 param(
     [int] $HealthIntervalSeconds = 60,
-    [int] $StopPollSeconds = 2
+    [int] $StopPollSeconds = 2,
+    # Q6-4 (2026-09-06): by default postgres is left running when the supervisor stops -- a
+    # database that stays up across `eo native stop` avoids the unconditional shutdown the r2 QA
+    # pass flagged. Pass -StopPostgres (or have the sentinel content say so, see `eo native stop
+    # --with-postgres`) to also stop postgres. -KeepPostgres is accepted as an explicit synonym
+    # for the default (keep postgres up); it exists so callers can be explicit either way and so
+    # -KeepPostgres:$false reads naturally as "don't keep it".
+    [switch] $StopPostgres,
+    [bool] $KeepPostgres = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,6 +113,52 @@ Import-DotEnv -Path $envFilePath
 
 [System.Diagnostics.Process]::GetCurrentProcess().Id | Set-Content -Path $supervisorPidPath -Encoding ascii
 Write-Log "Supervisor started (pid $((Get-Content $supervisorPidPath)))"
+
+# ---------------------------------------------------------------------------
+# Q6-5a (2026-09-06): log housekeeping, run once at startup.
+#   1. Archive legacy, non-dated *.log files left over from before this supervisor existed
+#      (e.g. agent.log, web.log, agent.err.log, web.err.log) into runtime\logs\archive\<yyyymmdd>\.
+#   2. Rotate away this supervisor's own dated logs (<name>.yyyy-MM-dd.log[.err]) once they are
+#      older than 14 days.
+# supervisor.log and postgres.log are excluded from archiving: both are actively appended to by
+# processes this same script manages across restarts (Write-Log -> supervisor.log for the life of
+# the machine; pg_ctl's -l target is postgres.log, and moving it while postgres holds the handle
+# open would orphan future writes).
+# ---------------------------------------------------------------------------
+$datedLogPattern = '^.+\.\d{4}-\d{2}-\d{2}\.log(\.err)?$'
+$legacyExcluded = @('supervisor.log', 'postgres.log')
+try {
+    if (Test-Path $logDir) {
+        $legacyLogs = Get-ChildItem -Path $logDir -Filter "*.log" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch $datedLogPattern -and $_.Name -notin $legacyExcluded }
+        if ($legacyLogs) {
+            $archiveDir = Join-Path $logDir ("archive\{0:yyyyMMdd}" -f (Get-Date))
+            New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+            foreach ($f in $legacyLogs) {
+                try {
+                    Move-Item -Path $f.FullName -Destination (Join-Path $archiveDir $f.Name) -Force -ErrorAction Stop
+                    Write-Log "Archived legacy log '$($f.Name)' -> $archiveDir"
+                } catch {
+                    Write-Log "WARNING: could not archive legacy log '$($f.Name)': $_"
+                }
+            }
+        }
+
+        $rotateCutoff = (Get-Date).AddDays(-14)
+        $oldDatedLogs = Get-ChildItem -Path $logDir -Filter "*.log*" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $datedLogPattern -and $_.LastWriteTime -lt $rotateCutoff }
+        foreach ($f in $oldDatedLogs) {
+            try {
+                Remove-Item -Path $f.FullName -Force -ErrorAction Stop
+                Write-Log "Rotated out old dated log '$($f.Name)' (last write $($f.LastWriteTime))"
+            } catch {
+                Write-Log "WARNING: could not rotate old dated log '$($f.Name)': $_"
+            }
+        }
+    }
+} catch {
+    Write-Log "WARNING: log housekeeping (archive/rotate) failed: $_"
+}
 
 # ---------------------------------------------------------------------------
 # Child process bookkeeping
@@ -269,7 +328,23 @@ try {
     foreach ($name in @($children.Keys)) {
         Stop-ManagedChild -Name $name
     }
-    Stop-Postgres
+
+    # Q6-4 (2026-09-06): postgres is kept running by default. It is stopped only if the script
+    # was launched with -StopPostgres / -KeepPostgres:$false, or if the sentinel file that
+    # triggered this shutdown carries the "with-postgres" marker (written by
+    # `eo native stop --with-postgres`; see agent\eoa\cli.py).
+    $sentinelSaysStopPostgres = $false
+    if (Test-Path $sentinelPath) {
+        $sentinelContent = Get-Content -Path $sentinelPath -Raw -ErrorAction SilentlyContinue
+        if ($sentinelContent -match 'with-postgres') { $sentinelSaysStopPostgres = $true }
+    }
+    $shouldStopPostgres = $StopPostgres -or (-not $KeepPostgres) -or $sentinelSaysStopPostgres
+    if ($shouldStopPostgres) {
+        Stop-Postgres
+    } else {
+        Write-Log "Leaving postgres running (default; pass -StopPostgres or 'eo native stop --with-postgres' to stop it too)"
+    }
+
     Remove-Item $sentinelPath -Force -ErrorAction SilentlyContinue
     Remove-Item $supervisorPidPath -Force -ErrorAction SilentlyContinue
     Write-Log "Supervisor stopped"

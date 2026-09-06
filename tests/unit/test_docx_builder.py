@@ -8,7 +8,14 @@ import docx
 import pytest
 from docx.oxml.ns import qn
 
-from eoa.llm.schemas.analysis import DailyReportDraft, ReportSection
+from eoa.llm.schemas.analysis import (
+    DailyReportDraft,
+    OutlookIndicator,
+    ReportSection,
+    Sentence,
+    StructuredSection,
+)
+from eoa.llm.schemas.reports import WeeklyReportDraft
 from eoa.report import docx_builder as db
 from eoa.report.qa_citations import QAResult
 
@@ -83,24 +90,40 @@ def fixture_events() -> list[dict]:
 
 @pytest.fixture
 def fixture_draft() -> DailyReportDraft:
+    """Goal 1 (2026-09-06): the structured sentence-per-claim shape. Citation counts are kept
+    equivalent to the pre-goal-1 fixture (3 exec-summary markers [1][2][3] + 1 per section = 5
+    internal citations total) so the downstream structural assertions below don't need to change."""
     return DailyReportDraft(
-        exec_summary_he=(
-            "אלביט מערכות (Elbit Systems) זכתה בחוזה של 80 מיליון דולר לאספקת פודי כיוון [1]. "
-            "רפאל השיקה מערכת C-UAS חדשה [2]. בוצע ניסוי ימי מוצלח למערכת EO ימית [3]."
-        ),
+        exec_summary=[
+            Sentence(
+                text_he="אלביט מערכות (Elbit Systems) זכתה בחוזה של 80 מיליון דולר לאספקת פודי כיוון.",
+                cites=[1],
+            ),
+            Sentence(text_he="רפאל השיקה מערכת C-UAS חדשה.", cites=[2]),
+            Sentence(text_he="בוצע ניסוי ימי מוצלח למערכת EO ימית.", cites=[3]),
+        ],
         sections=[
-            ReportSection(
+            StructuredSection(
                 title_he='פודים ומטע"דים אוויריים',
                 domain="airborne_pods",
-                prose_he="אלביט מערכות זכתה בחוזה בהיקף 80 מיליון דולר לאספקת Targeting Pods [1].",
+                sentences=[
+                    Sentence(
+                        text_he="אלביט מערכות זכתה בחוזה בהיקף 80 מיליון דולר לאספקת Targeting Pods.",
+                        cites=[1],
+                    )
+                ],
             ),
-            ReportSection(
+            StructuredSection(
                 title_he='נגד כטב"מים',
                 domain="c_uas",
-                prose_he="רפאל השיקה מערכת C-UAS חדשה המבוססת על חיישני EO/IR [2].",
+                sentences=[
+                    Sentence(text_he="רפאל השיקה מערכת C-UAS חדשה המבוססת על חיישני EO/IR.", cites=[2])
+                ],
             ),
         ],
-        outlook_he="להערכתנו מגמת ההשקות תימשך ברבעון הקרוב.",
+        outlook=[
+            OutlookIndicator(text_he="להערכתנו מגמת ההשקות תימשך ברבעון הקרוב.", cites=[], is_assessment=True)
+        ],
         open_points_he=["האם ידוע מי היו המתחרות שהפסידו במכרז?"],
     )
 
@@ -414,9 +437,30 @@ def test_build_docx_update_fields_flagged(built_doc):
     assert el.get(qn("w:val")) == "true"
 
 
-def test_build_docx_qa_warning_when_failed(fixture_draft, fixture_items, fixture_events):
-    qa = QAResult(passed=False, errors=["דוגמה לשגיאה"], uncited_sentences=["משפט"], bad_refs=[99])
+def test_build_docx_no_qa_warning_banner_for_structured_daily_draft(
+    fixture_draft, fixture_items, fixture_events
+):
+    """Goal 1 (2026-09-06): the blanket bold-red QA-failure banner is legacy-draft-only now -- a
+    structured daily draft never reaches the renderer with `qa.passed=False` and full content
+    (two failures replace the whole narrative with `system_note_he` instead, at the
+    ``eoa.report.daily.build_daily`` orchestration level, not here)."""
+    qa = QAResult(passed=False, errors=["דוגמה לשגיאה"], bad_refs=[99])
     doc = db.build_docx(fixture_draft, fixture_items, fixture_events, period_end=dt.date(2026, 9, 4), qa=qa)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "אזהרה" not in all_text
+
+
+def test_build_docx_qa_warning_banner_for_legacy_draft_when_failed(fixture_items, fixture_events):
+    """The legacy free-prose shape (weekly/monthly/bd_territory) still degrades by silently
+    stripping flagged sentences, so it still needs the visible banner."""
+    legacy_draft = WeeklyReportDraft(
+        exec_summary_he="תקציר [1].",
+        sections=[ReportSection(title_he="סעיף", domain="c_uas", prose_he="תוכן [1].")],
+        outlook_he="",
+        open_points_he=[],
+    )
+    qa = QAResult(passed=False, errors=["דוגמה לשגיאה"], uncited_sentences=["משפט"], bad_refs=[99])
+    doc = db.build_docx(legacy_draft, fixture_items, fixture_events, period_end=dt.date(2026, 9, 4), qa=qa)
     all_text = "\n".join(p.text for p in doc.paragraphs)
     assert "אזהרה" in all_text
 
@@ -525,9 +569,9 @@ def test_render_html_stylesheet_is_theme_aware(fixture_draft, fixture_items, fix
 
 def test_render_html_escapes_content():
     draft = DailyReportDraft(
-        exec_summary_he="<script>alert(1)</script> [1].",
+        exec_summary=[Sentence(text_he="<script>alert(1)</script>", cites=[1])],
         sections=[],
-        outlook_he="",
+        outlook=[],
         open_points_he=[],
     )
     items = [{"n": 1, "title": "t", "source_name": "s", "url": "https://x", "published_at": None}]

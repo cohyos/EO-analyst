@@ -6418,3 +6418,177 @@ New: `TestQ5_13HtmlEntityUnescape` in `tests/unit/test_title_fallback.py` (4), 3
 `web/src/pages/MorningPage.test.tsx` (red/orange hrefs now carry `&since=24h`). `npm run build`
 clean, `npm run lint` clean (0 errors, pre-existing warnings only), full vitest suite green (140
 tests). Backend: 112 targeted pytest cases green (sanitize/title/tenders/morning/services).
+
+## A13: מיקוד תעשייה ישראלית (docs/PLAN_WINDOWS_NATIVE.md row A13, 2026-09-06)
+
+**דרישת המשתמש (2026-09-06 בוקר):** חברות ביטחוניות ישראליות, ובפרט בהקשרים אלקטרואופטיים, חייבות
+מיקוד ייעודי במערכת. יושם כתוסף דטרמיניסטי (ללא LLM) על גבי הפייפליין הקיים.
+
+### 1. Watchlist (`config/watchlist.yaml`)
+
+- הורחבו הכינויים (`aliases`) של Elbit (Elop/El-Op/Elisra), IAI (Tamam/MOSP/POP) ו-Rafael (מגן אור).
+- נוספו 20 חברות EO/IR/ביטחון ישראליות חדשות: SCD, Ophir Optronics, Opgal, Nextvision, Netline,
+  UVision, Aeronautics, Steadicopter, Third Eye Systems, Sightec, Camero-Tech, Meprolight, Duke
+  Robotics, BIRD Aerosystems, IWI, Tomer, RADA (סה"כ 24 חברות `country: IL` ב-watchlist).
+- נוסף מקטע `agencies:` חדש (top-level key נוסף, לא שובר את ה-loader הקיים שקורא רק
+  `companies`/`programs`): משרד הביטחון/IMOD, מפא"ת/DDR&D, סיב"ט/SIBAT, צה"ל/IDF, חיל האוויר,
+  חיל הים.
+
+### 2. `eoa.pipeline.israel_focus` (מודול חדש)
+
+`israel_relevance(item_text, entities, lang, geography) -> {score: 0..1, reasons: [...]}`,
+דטרמיניסטי לחלוטין (ללא LLM), מ-5 אותות: (1) חברה/סוכנות ישראלית מוזכרת, (2) לקוח/סוכנות ישראלית
+כצד, (3) מתחרה ישיר לחברה ישראלית באותו תת-domain (`focus` tags משותפים), (4) אות שוק יצוא
+(IN/GR/AZ/DE/PH/VN/KR), (5) מקור בעברית. משוקלל ל-score ב-[0,1] (קפוא ב-1.0).
+`score_and_persist_entity_israeli(name)` מעדכן `entities.is_israeli`.
+`israeli_watchlist_names()` — משמש גם את `eoa.report.bd_territory` (במקום רשימה קשיחה של 4 שמות).
+
+### 3. סכימת DB (מיגרציה `0017_israel_relevance.py`)
+
+`items.israel_relevance REAL`, `items.israel_reasons TEXT[]`, `entities.is_israeli BOOLEAN DEFAULT
+false` (+ אינדקסים). **הערת תיאום:** מיגרציה `0018_patents.py` (A14, סוכן מקביל) נוצרה באותו זמן
+עם אותו מספר revision ("0017") ואותו `down_revision` ("0016") — התנגשות revision-id בין שני סוכנים
+שעבדו על "המיגרציה הבאה אחרי 0016" בו-זמנית. תוקן ע"י שינוי מספור ל-0018 עם `down_revision="0017"`
+(שרשרת ליניארית יחידה, שתי המיגרציות הופעלו בהצלחה מול ה-DB החי).
+
+### 4. Hooks בפייפליין (בלוקים מסומנים `# --- A13`)
+
+- `classify.persist_classification`: מחשב `israel_relevance`/`israel_reasons` מיד אחרי חילוץ
+  הישויות, ומסמן `entities.is_israeli` לכל ישות שנקלטה.
+- `analyze.persist_analysis`: מרענן את הציון אחרי ה-backfill של `entities_mentioned` (Q3-8) —
+  **לעולם לא מוריד** ציון שכבר נקבע ב-classify, רק מעלה.
+- `triage.py`: רכיב ציון "מעורבות ישראלית" (`_apply_israel_focus_boost`, דטרמיניסטי, אחרי
+  ההתאמה של Q3-4) — `+1` כאשר `israel_relevance >= 0.6`, `+2` נוספים כאשר חברה ישראלית מה-
+  watchlist היא עצמה אחת מ-`entities_mentioned`; **לעולם רק מעלה** את ה-score (אף פעם לא מוריד),
+  ולכן גם את ה-`level` הנגזר. תיעוד קצר גם ב-`triage.md` (בלוק מסומן, אינפורמטיבי בלבד).
+  חקירת עומק (`_enqueue_deep_search`): כאשר `israel_relevance >= 0.6`, מתווספת תת-שאלה קבועה
+  "מה המשמעות לתעשייה הישראלית ולמי מהחברות הישראליות זה נוגע?" לשאלת המחקר.
+
+### 5. API (`agent/eoa/api`)
+
+`GET /api/items?israel=true` — מסנן `israel_relevance >= 0.5`. `GET /api/entities?israel=true` —
+מסנן `is_israeli = true`. שני ה-card-builders (`_item_card`/`_entity_card`) מחזירים גם
+`israel_relevance`/`israel_reasons`/`is_israeli` (additive).
+
+### 6. דוחות — `eoa.report.israel_section` (מודול חדש)
+
+מנגנון זהה ל-`eoa.report.tech_watch` (טבלאות `tables=[...]` דטרמיניסטיות, ללא LLM, מרחיבות את
+`citation_items` כדי ש-`[n]` יעבדו בנספח המקורות). דוח יומי: עד 4 טבלאות קטגוריה (זכיות/חוזים,
+תחרות ומתחרים, הזדמנויות יצוא, איומים ורגולציה) לכל פריט עם `israel_relevance >= 0.5`. דוח שבועי:
+אותן 4 טבלאות + טבלת סיכום "חברה ישראלית | אזכורים | זכיות | מתחרים פעילים". שתי הקריאות additive
+ב-`daily.py`/`weekly.py` (בלוק מסומן `# --- A13`), עם `try/except` שלעולם לא שובר את הדוח.
+`eoa.report.bd_territory`'s `is_israeli_industry` flag שודרג מרשימה קשיחה (4 שמות) לקריאה דינמית
+מ-`israeli_watchlist_names()`.
+
+### 7. Backfill
+
+`scripts/backfill_israel_relevance.py` (דטרמיניסטי, ללא LLM, `--dry-run`/`--limit`) — **הופעל בפועל
+מול ה-DB החי** (2026-09-06): 377 פריטים נבדקו, 140 עם אות ישראלי כלשהו (>0), **59 עם
+`israel_relevance >= 0.5`**, 14 ישויות סומנו `is_israeli=true` (Controp, D-Fend, Elbit, IAI, Iron
+Beam, Rafael, Smart Shooter, XTEND, Israeli Ministry of Defense, Israel Shipyards, Hero 120,
+IDF, NextVision Stabilized Systems, ממשלת ישראל).
+
+### Tests
+
+`tests/unit/test_israel_focus.py` (12 מקרים, כל 5 האותות + חיתוך ל-1.0 + `israeli_watchlist_names`
++ `score_and_persist_entity_israeli`) — ירוק. הרצות ממוקדות נוספות שנשארו ירוקות אחרי השינוי:
+`test_classify_guards.py`, `test_triage_levels.py`, `test_persist_analysis.py`,
+`test_analyze_key_facts_entities.py`, `test_report_bd_territory.py`, `test_report_daily.py`,
+`test_report_weekly_monthly.py`, `test_settings_api.py`, `test_llm_settings_api.py`,
+`test_entity_normalize.py`, `test_prompts.py` (למעט כשל אחד קיים-מראש ב-`report_daily.md`, לא
+קשור לשינוי הזה). כשלים אחרים שנצפו בהרצת הסוויטה המלאה (`test_upsert_entity_normalization.py`,
+`test_events_dedup.py`, `test_jobs_leases.py`, `test_docx_builder.py`, `test_report_qa.py`,
+`test_relational_stage_filter.py`, `test_llm_batch_mode.py`) נובעים משינויים מקבילים של סוכנים
+אחרים (`relational.py`'s cursor row_factory refactor, `docx_builder.py`/`qa_citations.py`
+rewrite) שלא נגעתי בהם — לא נגרמו ע"י A13.
+
+## Q6 native-supervisor + Q1 typing/security/dep fixes (docs/qa/findings_Q6_r2.md,
+## findings_Q1_r2.md, 2026-09-06)
+
+**Q6-4 — `eo native stop` no longer stops postgres unconditionally.**
+`scripts\native\eoa-supervisor.ps1` gained `-StopPostgres` (switch) / `-KeepPostgres` (bool,
+default `$true`); the `finally` block now stops postgres only when `-StopPostgres` was passed,
+`-KeepPostgres:$false` was passed, or the stop sentinel file's *content* contains the substring
+`with-postgres`. `agent\eoa\cli.py`'s `eo native stop` grew `--with-postgres` (default off), which
+writes `"stop-with-postgres"` instead of the plain `"stop"` into `runtime\supervisor.stop` — the
+only channel available to signal the already-running supervisor process at stop time. Default
+behavior flipped: postgres now survives `eo native stop` unless explicitly asked to stop too.
+Parse-validated with `[System.Management.Automation.Language.Parser]::ParseFile` (not run against
+the live supervisor).
+
+**Q6-5a — legacy/unrotated log housekeeping.** `eoa-supervisor.ps1` now runs a one-time
+archive/rotate pass right after the pidfile-pruning step (Q6-14) on every startup: any non-dated
+`*.log` file directly under `runtime\logs\` (e.g. `agent.log`, `web.log`, `*.err.log` written
+before the supervisor existed) is moved into `runtime\logs\archive\<yyyymmdd>\`; `supervisor.log`
+and `postgres.log` are excluded (both are actively appended to by processes this same script
+manages across restarts, so moving them mid-life would orphan the open file handle). Separately,
+this supervisor's own dated logs (`<name>.yyyy-MM-dd.log[.err]`) are deleted once their last-write
+time is more than 14 days old. Parse-validated only, per the same constraint as Q6-4.
+
+**Q6-3b — `eo native status` timeout/label.** The ntfy/api `httpx.get` probes already use a 10s
+timeout (raised from 3s in an earlier pass). Added on top: each probe is timed
+(`time.monotonic()`), and if it takes longer than 3s the status cell reads `up (slow N.Ns)`
+instead of a plain `up`, so a healthy-but-slow service doesn't look identical to a fast one.
+
+**Q1-r2-1 — `tests/security/test_guard_l1_label_and_windows.py` isolation.** The two
+`local_files_only` tests (`test_agent_role_forces_local_files_only_true` /
+`test_non_agent_role_does_not_force_local_files_only`) now `monkeypatch.delenv("HF_HUB_OFFLINE")`
+and `monkeypatch.setattr(guard, "REPO_ROOT", tmp_path)` in addition to the existing
+`EOA_GUARD_L1_DIR` delenv. Without this, a machine with `HF_HUB_OFFLINE=1` and/or a real model at
+`runtime\models\prompt-guard` (both true when `runtime\eoa.env` is loaded) makes
+`eoa.security.guard._l1_pipeline()` take the local-dir ONNX branch instead of the
+`transformers.pipeline` branch the test targets, so the fake pipeline is never called and the
+`local_files_only` assertion fails against an empty `captured` dict. Verified green both with and
+without `runtime\eoa.env` loaded (12/12 both ways); `tests/security` full suite: 56 passed.
+
+**Q1-r2-2 — web dev-dependency audit.** `npm audit` on `web/` showed 5 dev-only vulnerabilities
+(esbuild <=0.24 bundled by vite 5.4, plus a critical vitest UI arbitrary-file-read, GHSA-5xrq-8626-
+4rwp, on vitest <3.2.6). Vite 8/vitest 5 (what `npm audit fix --force` suggests) breaks the
+TypeScript build (`tsc -b`) — a `vite.config.ts` `build.rollupOptions.output.manualChunks` object
+literal no longer matches vite 8's bundled rollup types (`ManualChunksFunction` overload picked
+instead of the object-map overload) — and `vite.config.ts` is out of scope for this fix (owned
+elsewhere). Landed on the smaller, non-breaking bump instead: `vite` `^5.4.8` → `^7.1.12`,
+`vitest` `^2.1.2` → `^3.2.6`, `@vitejs/plugin-react` `^4.3.2` → `^5.2.0` (needed — 4.3.2's peer
+range is `vite ^4.2.0 || ^5.0.0`, incompatible with vite 7). `npm audit` / `npm audit --omit=dev`:
+0 vulnerabilities. `npm run lint`: 0 errors, 6 pre-existing warnings (baseline). `npm run test`:
+140/140 (20 files). `npm run build`: passes (vite 7.3.6, vitest 3.2.7 at install time).
+
+**Q1-7 (partial) — mypy typing-only cleanup, `dict_row` cursors.** `eoa.db.connection()`'s pool is
+already configured with `row_factory=dict_row` (`agent\eoa\db.py`) — every cursor returns dict rows
+at runtime — but `connection()` itself is annotated as bare `Iterator[psycopg.Connection]`, so
+`conn.cursor()` typed as `Cursor[TupleRow]` by default and every `cur.fetchone()["col"]` /
+`cur.fetchall()` looked like a type error to mypy. Fixed, in the three owned files only, by passing
+`row_factory=dict_row` explicitly at every `conn.cursor(...)` call site (behaviorally a no-op — the
+connection already uses `dict_row`, so this only tightens the static type to `Cursor[dict[str,
+Any]]`) and using `typing.cast` (zero runtime effect) to narrow the few remaining `T | None` return
+values right after a `... RETURNING id` fetch that always yields exactly one row. In
+`report/monthly.py`, also: `cast(MonthlyReportDraft, _normalize_section_titles(draft))` at both
+call sites (the shared helper lives in `report/weekly.py`, annotated `WeeklyReportDraft | Any`,
+outside this task's file ownership), and `_clean`'s `extra_drop: set[str] = frozenset()` default
+retyped to `collections.abc.Set[str]` (frozenset/set both satisfy the read-only `Set` protocol;
+`extra_drop` is only ever read via `in`, never mutated). mypy error counts (`mypy agent/eoa`,
+counting only lines containing `error:` for that file):
+
+| file | before | after | target |
+|---|---|---|---|
+| `agent/eoa/memory/relational.py` | 33 | **0** | ≤5 |
+| `agent/eoa/report/monthly.py` | 15 | **0** | ≤3 |
+| `agent/eoa/report/trends.py` | 10 | **0** | ≤2 |
+
+Several test files monkeypatch a hand-rolled fake `connection()`/`cursor()` pair instead of a real
+DB (`tests/unit/test_relational_stage_filter.py`, `test_backfill_analysis_gaps.py`,
+`test_graph_edges.py`, `test_events_near_duplicate.py`, `test_events_dedup.py`,
+`test_fetch_service.py`, `test_jobs_leases.py`, `test_jobs_post_tenders_catchup.py`,
+`test_report_daily.py`, `test_purge_stale_tenders.py`, `test_tech_watch.py`,
+`test_repair_forecasts_country.py`, `test_vector.py`, `test_tenders_forecast.py`,
+`test_upsert_entity_normalization.py`, `test_tenders_scan.py`); their fake `cursor(self)` methods
+took no arguments, so the new `row_factory=dict_row` keyword broke them with `TypeError:
+_FakeConn.cursor() got an unexpected keyword argument 'row_factory'`. Updated every one to `def
+cursor(self, row_factory=None)` (accepted and ignored, matching real psycopg semantics since the
+fakes already return dict rows). Verified: the 16 files above plus
+`tests/unit/test_persist_analysis.py`, `test_entity_relevance.py`, `test_jobs_status.py`,
+`test_feedback_calibration.py`, `test_obsidian_export.py` — 468 tests, all passing after the fix.
+
+`agent/eoa/cli.py` and `agent/eoa/report/weekly.py`/`daily.py` still carry pre-existing mypy debt
+(not in this task's file ownership) — full-repo `mypy agent/eoa` before this pass: 215 errors / 38
+files; the three files above no longer appear in that list at all.

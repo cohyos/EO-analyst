@@ -25,13 +25,14 @@ app.add_typer(native_app, name="native")
 
 @app.command()
 def run(
-    scope: str = typer.Argument("daily", help="daily|ingest|report|dedup|classify|triage|analyze|bd"),
+    scope: str = typer.Argument("daily", help="daily|ingest|report|dedup|classify|triage|analyze|bd|patents"),
     mode: str = typer.Option("full", help="full|eco"),
     now: bool = typer.Option(True, help="run in-process now"),
     territory: str = typer.Option(
         None, help="scope=bd only: ISO-2 country code or region code (US, IL, EU, ...)"
     ),
     lookback_days: int = typer.Option(90, help="scope=bd only: lookback window in days"),
+    topic: str = typer.Option(None, help="scope=patents only: scan just this one ad-hoc topic"),
 ) -> None:
     """Run a cycle (or one stage) immediately in this process — respects the resource gate & polite mode."""
     from eoa.orchestrator.main import configure_logging
@@ -93,6 +94,26 @@ def run(
                 },
                 ensure_ascii=False,
                 indent=2,
+            )
+        )
+    elif scope == "patents":
+        from eoa.patents.analyze import analyze_patents
+        from eoa.patents.scan import WatchTopic, scan_patents
+        from eoa.patents.valuation import score_and_persist
+
+        scan_stats = scan_patents(topics=[WatchTopic(name_he=topic, query=topic)] if topic else None, assignees=[] if topic else None)
+        analyze_stats = analyze_patents(30)
+        scored = score_and_persist(limit=100)
+        rprint(
+            json.dumps(
+                {
+                    "scan": vars(scan_stats),
+                    "analyze": vars(analyze_stats),
+                    "valued": scored,
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
             )
         )
     else:
@@ -283,13 +304,25 @@ def native_start() -> None:
 @native_app.command("stop")
 def native_stop(
     timeout: int = typer.Option(30, help="seconds to wait for the supervisor to exit"),
+    with_postgres: bool = typer.Option(
+        False,
+        "--with-postgres",
+        help="also stop postgres (default: Q6-4 — leave postgres running so other tools/queries "
+        "keep working; the supervisor's own -KeepPostgres default matches this)",
+    ),
 ) -> None:
-    """Write the stop sentinel and wait for the supervisor (and its children) to exit."""
+    """Write the stop sentinel and wait for the supervisor (and its children) to exit.
+
+    Q6-4 (2026-09-06): postgres is left running unless --with-postgres is given, which is
+    conveyed to the running supervisor via the sentinel file's content (scripts/native/
+    eoa-supervisor.ps1 looks for the substring "with-postgres" in it).
+    """
     import time
 
     paths = _native_paths()
     paths["runtime"].mkdir(parents=True, exist_ok=True)
-    paths["sentinel"].write_text("stop", encoding="utf-8")
+    sentinel_text = "stop-with-postgres" if with_postgres else "stop"
+    paths["sentinel"].write_text(sentinel_text, encoding="utf-8")
     rprint(f"stop sentinel written ({paths['sentinel']}); waiting up to {timeout}s...")
 
     deadline = time.time() + timeout
@@ -309,6 +342,7 @@ def native_stop(
 def native_status() -> None:
     """pg_ctl status, ntfy health, api /api/status, orchestrator/supervisor process liveness."""
     import subprocess
+    import time
 
     import httpx
 
@@ -325,18 +359,33 @@ def native_status() -> None:
     else:
         t.add_row("postgres", "not installed (run scripts/native/install_native.ps1)")
 
+    # Q6-3b (2026-09-06): the probe timeout was widened from 3s to 10s so a healthy-but-busy
+    # api/ntfy doesn't get misreported as "down (ReadTimeout)"; a "slow" label is added below when
+    # a probe still takes more than 3s, so an unusually slow-but-up response stays visible.
+    slow_threshold_s = 3.0
+
     try:
+        t0 = time.monotonic()
         r = httpx.get(
             os.environ.get("NTFY_URL", "http://127.0.0.1:8091").rstrip("/") + "/v1/health", timeout=10
         )
-        t.add_row("ntfy", "up" if r.status_code == 200 else f"http {r.status_code}")
+        elapsed = time.monotonic() - t0
+        state = "up" if r.status_code == 200 else f"http {r.status_code}"
+        if elapsed > slow_threshold_s:
+            state = f"{state} (slow {elapsed:.1f}s)"
+        t.add_row("ntfy", state)
     except Exception as exc:
         t.add_row("ntfy", f"down ({exc.__class__.__name__})")
 
     try:
         # agent/eoa/api/routes/status.py — this codebase has no separate /api/health route.
+        t0 = time.monotonic()
         r = httpx.get("http://127.0.0.1:8765/api/status", timeout=10)
-        t.add_row("api", "up" if r.status_code == 200 else f"http {r.status_code}")
+        elapsed = time.monotonic() - t0
+        state = "up" if r.status_code == 200 else f"http {r.status_code}"
+        if elapsed > slow_threshold_s:
+            state = f"{state} (slow {elapsed:.1f}s)"
+        t.add_row("api", state)
     except Exception as exc:
         t.add_row("api", f"down ({exc.__class__.__name__})")
 

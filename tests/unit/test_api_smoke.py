@@ -148,6 +148,25 @@ def test_items_list_country_filter_passed_through(
     assert captured["country"] == "US,IL"
 
 
+def test_items_list_israel_filter_passed_through(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A13 (מיקוד תעשייה ישראלית): `GET /api/items?israel=true` reaches
+    `services.list_items(israel=True)` unchanged."""
+    from eoa.api import services
+
+    captured: dict = {}
+
+    def fake_list_items(**kwargs):
+        captured.update(kwargs)
+        return 0, []
+
+    monkeypatch.setattr(services, "list_items", fake_list_items)
+    r = client.get("/api/items", params={"israel": "true"})
+    assert r.status_code == 200
+    assert captured["israel"] is True
+
+
 def test_items_by_country_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """U7c: `GET /api/items/by-country` -- must route here, not to
     `GET /api/items/{item_id}` (the literal "by-country" segment must not be
@@ -164,6 +183,25 @@ def test_items_by_country_endpoint(client: TestClient, monkeypatch: pytest.Monke
     assert r.json() == {
         "countries": [{"country": "IL", "total": 3, "red": 1, "orange": 1, "yellow": 1, "archive": 0}]
     }
+
+
+def test_entities_list_israel_filter_passed_through(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A13 (מיקוד תעשייה ישראלית): `GET /api/entities?israel=true` reaches
+    `services.list_entities(israel=True)` unchanged."""
+    from eoa.api import services
+
+    captured: dict = {}
+
+    def fake_list_entities(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(services, "list_entities", fake_list_entities)
+    r = client.get("/api/entities", params={"israel": "true"})
+    assert r.status_code == 200
+    assert captured["israel"] is True
 
 
 def test_item_feedback(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

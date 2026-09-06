@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from eoa.llm.schemas.analysis import DailyReportDraft, ReportSection
+from eoa.llm.schemas.analysis import (
+    AnalystNote,
+    DailyReportDraft,
+    OutlookIndicator,
+    ReportSection,
+    Sentence,
+    StructuredSection,
+)
+from eoa.llm.schemas.reports import WeeklyReportDraft
 from eoa.report.qa_citations import check, is_factual, split_sentences
 
 # --------------------------------------------------------------------------
@@ -87,113 +95,109 @@ def test_is_factual_false_for_plain_sentence():
 
 
 # --------------------------------------------------------------------------
-# check()
+# check() -- goal 1 (2026-09-06) structured DailyReportDraft: Sentence.cites is enforced by the
+# schema itself (see test_report_schema.py), so check() only has to validate the *registry range*
+# of each cites entry, plus the F5 duplicate-sentence rule -- there is no "uncited sentence" case
+# to test here any more.
 # --------------------------------------------------------------------------
 
 ITEMS = [{"n": 1}, {"n": 2}, {"n": 3}]
 
 
-def _draft(exec_summary: str, sections=None, outlook: str = "", open_points=None) -> DailyReportDraft:
+def _draft(
+    summary_cites: list[int] | None = (1,),
+    sections=None,
+    outlook: list[OutlookIndicator] | None = None,
+    open_points=None,
+    summary_text: str = "תקציר תקין.",
+) -> DailyReportDraft:
     return DailyReportDraft(
-        exec_summary_he=exec_summary,
+        exec_summary=[Sentence(text_he=summary_text, cites=list(summary_cites))] if summary_cites else [],
         sections=sections or [],
-        outlook_he=outlook,
+        outlook=outlook or [],
         open_points_he=open_points or [],
     )
 
 
-def test_check_passes_when_every_factual_sentence_is_cited():
-    draft = _draft("אלביט זכתה בחוזה של 50 מיליון דולר [1]. זהו חוזה משמעותי לתחום.")
-    result = check(draft, ITEMS)
+def test_check_passes_when_every_sentence_has_valid_cites():
+    result = check(_draft(), ITEMS)
     assert result.passed
     assert result.errors == []
 
 
-def test_check_fails_on_uncited_factual_sentence():
-    draft = _draft("אלביט זכתה בחוזה של 50 מיליון דולר.")
-    result = check(draft, ITEMS)
-    assert not result.passed
-    assert result.uncited_sentences
-    assert any("ללא הפניה" in e for e in result.errors)
-
-
 def test_check_fails_on_out_of_range_reference():
-    draft = _draft("אלביט זכתה בחוזה של 50 מיליון דולר [99].")
-    result = check(draft, ITEMS)
+    result = check(_draft(summary_cites=[99]), ITEMS)
     assert not result.passed
     assert result.bad_refs == [99]
 
 
-def test_check_checks_section_prose_too():
-    section = ReportSection(
-        title_he="פודים אוויריים", domain="airborne_pods", prose_he="החברה השיקה מוצר חדש בספטמבר."
+def test_check_checks_section_sentences_too():
+    section = StructuredSection(
+        title_he="פודים אוויריים",
+        domain="airborne_pods",
+        sentences=[Sentence(text_he="החברה השיקה מוצר חדש בספטמבר.", cites=[42])],
     )
-    draft = _draft("תקציר ללא טענות עובדתיות כלל.", sections=[section])
-    result = check(draft, ITEMS)
+    result = check(_draft(sections=[section]), ITEMS)
     assert not result.passed
     assert any("פודים אוויריים" in e for e in result.errors)
+    assert 42 in result.bad_refs
 
 
-def test_check_section_prose_passes_when_cited():
-    section = ReportSection(
-        title_he="פודים אוויריים", domain="airborne_pods", prose_he="החברה השיקה מוצר חדש בספטמבר [2]."
+def test_check_section_sentences_pass_when_cites_valid():
+    section = StructuredSection(
+        title_he="פודים אוויריים",
+        domain="airborne_pods",
+        sentences=[Sentence(text_he="החברה השיקה מוצר חדש בספטמבר.", cites=[2])],
     )
-    draft = _draft("תקציר תקין [1].", sections=[section])
-    result = check(draft, ITEMS)
+    result = check(_draft(sections=[section]), ITEMS)
     assert result.passed
 
 
-def test_check_outlook_exempt_from_citation_requirement():
-    draft = _draft("תקציר תקין [1].", outlook="להערכתנו המגמה תימשך ברבעון הבא.")
-    result = check(draft, ITEMS)
+def test_check_outlook_assessment_indicator_exempt_from_citation_requirement():
+    outlook = [OutlookIndicator(text_he="להערכתנו המגמה תימשך ברבעון הבא.", cites=[], is_assessment=True)]
+    result = check(_draft(outlook=outlook), ITEMS)
     assert result.passed
-
-
-def test_check_outlook_without_assessment_marker_fails():
-    draft = _draft("תקציר תקין [1].", outlook="המגמה תימשך ברבעון הבא.")
-    result = check(draft, ITEMS)
-    assert not result.passed
-    assert any("מבט קדימה" in e for e in result.errors)
-
-
-def test_check_outlook_accepts_all_marker_variants():
-    for marker in ("להערכתנו", "נראה ש", "ייתכן"):
-        draft = _draft("תקציר תקין [1].", outlook=f"{marker} המגמה תימשך.")
-        result = check(draft, ITEMS)
-        assert result.passed, f"marker {marker!r} should have been accepted"
 
 
 def test_check_outlook_out_of_range_reference_still_flagged():
-    draft = _draft("תקציר תקין [1].", outlook="ייתכן שהמגמה תימשך [42].")
-    result = check(draft, ITEMS)
+    outlook = [OutlookIndicator(text_he="המגמה תימשך.", cites=[42])]
+    result = check(_draft(outlook=outlook), ITEMS)
     assert not result.passed
     assert 42 in result.bad_refs
 
 
 def test_check_empty_draft_passes():
-    draft = _draft("")
-    result = check(draft, ITEMS)
+    result = check(_draft(summary_cites=None), ITEMS)
     assert result.passed
 
 
 def test_check_multiple_citations_in_one_sentence_all_validated():
-    draft = _draft("אלביט ורפאל חתמו הסכם משותף [1][2].")
-    result = check(draft, ITEMS)
+    result = check(_draft(summary_cites=[1, 2]), ITEMS)
     assert result.passed
 
 
+def test_check_analyst_note_over_three_sentences_rejected_by_schema():
+    """The schema itself (AnalystNote.sentences_he, max_length=3) is the primary guard; check()
+    still defends the invariant in case a draft was constructed some other way."""
+    with_error = None
+    try:
+        AnalystNote(sentences_he=["א.", "ב.", "ג.", "ד."])
+    except Exception as exc:
+        with_error = exc
+    assert with_error is not None
+
+
 # --------------------------------------------------------------------------
-# F5: exec-summary sentences duplicated verbatim from a section
+# F5: exec-summary sentences duplicated verbatim from a section (structured schema)
 # --------------------------------------------------------------------------
 
 
 def test_check_fails_when_summary_copies_section_sentence_verbatim():
-    section = ReportSection(
-        title_he="פודים אוויריים",
-        domain="airborne_pods",
-        prose_he="אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון [1].",
+    text = "אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון."
+    section = StructuredSection(
+        title_he="פודים אוויריים", domain="airborne_pods", sentences=[Sentence(text_he=text, cites=[1])]
     )
-    draft = _draft("אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון [1].", sections=[section])
+    draft = _draft(sections=[section], summary_text=text)
     result = check(draft, ITEMS)
     assert not result.passed
     assert result.duplicate_sentences
@@ -203,21 +207,51 @@ def test_check_fails_when_summary_copies_section_sentence_verbatim():
 def test_check_passes_when_summary_paraphrases_section():
     """A summary sentence that overlaps in subject matter but isn't a verbatim (normalised) copy
     must not be flagged -- only exact duplication is a problem."""
-    section = ReportSection(
+    section = StructuredSection(
         title_he="פודים אוויריים",
         domain="airborne_pods",
-        prose_he="אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון [1].",
+        sentences=[
+            Sentence(text_he="אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון.", cites=[1])
+        ],
     )
-    draft = _draft("אלביט מערכות זכתה בחוזה משמעותי לאספקת פודי כיוון החודש [1].", sections=[section])
+    draft = _draft(
+        sections=[section], summary_text="אלביט מערכות זכתה בחוזה משמעותי לאספקת פודי כיוון החודש."
+    )
     result = check(draft, ITEMS)
     assert result.passed
     assert not result.duplicate_sentences
 
 
-def test_check_duplicate_detection_ignores_citation_numbers_and_short_sentences():
-    """A trivial short sentence repeating by coincidence (e.g. an assessment marker) must not be
-    flagged as a duplicate -- only substantial (>= 4 word) overlaps count."""
-    section = ReportSection(title_he="סעיף", domain="d", prose_he="להערכתנו זה חשוב [1].")
-    draft = _draft("תקציר תקין [1]. להערכתנו זה חשוב.", sections=[section])
+def test_check_duplicate_detection_ignores_short_sentences():
+    """A trivial short sentence repeating by coincidence must not be flagged as a duplicate --
+    only substantial (>= 4 word) overlaps count."""
+    section = StructuredSection(
+        title_he="סעיף", domain="d", sentences=[Sentence(text_he="להערכתנו זה חשוב.", cites=[1])]
+    )
+    draft = _draft(sections=[section], summary_text="להערכתנו זה חשוב.")
     result = check(draft, ITEMS)
     assert not result.duplicate_sentences
+
+
+# --------------------------------------------------------------------------
+# check() -- legacy free-prose shape (weekly/monthly/bd_territory), unchanged behaviour: dispatch
+# must still work for a draft that has `exec_summary_he` (not `exec_summary`).
+# --------------------------------------------------------------------------
+
+
+def test_check_legacy_shape_still_supported():
+    section = ReportSection(
+        title_he="פודים אוויריים", domain="airborne_pods", prose_he="החברה השיקה מוצר חדש בספטמבר [2]."
+    )
+    draft = WeeklyReportDraft(
+        exec_summary_he="תקציר תקין [1].", sections=[section], outlook_he="", open_points_he=[]
+    )
+    result = check(draft, ITEMS)
+    assert result.passed
+
+
+def test_check_legacy_shape_still_flags_uncited_sentence():
+    draft = WeeklyReportDraft(exec_summary_he="אלביט זכתה בחוזה של 50 מיליון דולר.", sections=[])
+    result = check(draft, ITEMS)
+    assert not result.passed
+    assert result.uncited_sentences

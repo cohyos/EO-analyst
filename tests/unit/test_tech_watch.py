@@ -67,7 +67,7 @@ class _FakeConnection:
     def __exit__(self, *exc: object) -> bool:
         return False
 
-    def cursor(self) -> _FakeCursor:
+    def cursor(self, row_factory=None) -> _FakeCursor:
         return _FakeCursor(self._rows)
 
 

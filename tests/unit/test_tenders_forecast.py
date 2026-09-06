@@ -676,7 +676,7 @@ class TestRegenerateFlaggedForecasts:
             def __exit__(self, *a):
                 return False
 
-            def cursor(self):
+            def cursor(self, row_factory=None):
                 class _Cur:
                     def __enter__(self):
                         return self
@@ -821,7 +821,7 @@ class TestUpsertForecastSourcesDedup:
                 return False
 
         class _FakeConnection:
-            def cursor(self):
+            def cursor(self, row_factory=None):
                 return _FakeCursor()
 
             def __enter__(self):
@@ -854,7 +854,7 @@ class TestUpsertForecastSourcesDedup:
                 return False
 
         class _FakeConnection:
-            def cursor(self):
+            def cursor(self, row_factory=None):
                 return _FakeCursor()
 
             def __enter__(self):

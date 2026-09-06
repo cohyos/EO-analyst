@@ -37,7 +37,7 @@ class _FakeConnCtx:
     def __exit__(self, *exc):
         return False
 
-    def cursor(self):
+    def cursor(self, row_factory=None):
         return self
 
     def execute(self, sql, params=None):

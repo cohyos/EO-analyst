@@ -44,7 +44,7 @@ class FakeConnection:
     def __init__(self, cursor: FakeCursor):
         self._cursor = cursor
 
-    def cursor(self):
+    def cursor(self, row_factory=None):
         return self._cursor
 
     def __enter__(self):

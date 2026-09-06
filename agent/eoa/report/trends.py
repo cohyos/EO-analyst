@@ -26,6 +26,7 @@ import datetime as dt
 from typing import Any
 
 import structlog
+from psycopg.rows import dict_row
 
 from eoa.config import settings
 from eoa.db import connection
@@ -70,7 +71,7 @@ def _entity_cluster_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         GROUP BY entity, domain
         HAVING count(*) >= %(min)s
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end, "min": _ENTITY_CLUSTER_MIN_ITEMS})
         return cur.fetchall()
 
@@ -109,7 +110,7 @@ def _domain_counts(start: dt.date, end: dt.date) -> dict[str, int]:
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end})
         return {r["domain"]: r["n"] for r in cur.fetchall()}
 
@@ -126,7 +127,7 @@ def _domain_baseline_counts(start: dt.date, end: dt.date) -> dict[str, float]:
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": baseline_start, "end": baseline_end})
         return {r["domain"]: (r["n"] or 0) / _BASELINE_WEEKS for r in cur.fetchall()}
 
@@ -139,7 +140,7 @@ def _domain_item_ids(start: dt.date, end: dt.date) -> dict[str, list[int]]:
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end})
         return {r["domain"]: list(r["item_ids"] or []) for r in cur.fetchall()}
 
@@ -203,7 +204,7 @@ def _convergence_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         GROUP BY i.subdomain
         HAVING count(DISTINCT e.id) >= %(min)s
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end, "min": _CONVERGENCE_MIN_EVENTS})
         return cur.fetchall()
 
@@ -247,7 +248,7 @@ def _tech_race_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
               BETWEEN %(start)s AND %(end)s
         GROUP BY i.subdomain
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end})
         return cur.fetchall()
 
@@ -312,7 +313,7 @@ def _items_by_domain_level(start: dt.date, end: dt.date) -> list[dict[str, Any]]
         GROUP BY domain, level
         ORDER BY domain, level
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end})
         return cur.fetchall()
 
@@ -343,7 +344,7 @@ def _top_entities_with_delta(start: dt.date, end: dt.date, limit: int = 10) -> l
         ORDER BY tp.n DESC
         LIMIT %(limit)s
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             sql,
             {"start": start, "end": end, "prev_start": prev_start, "prev_end": prev_end, "limit": limit},
@@ -359,7 +360,7 @@ def _events_by_kind(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         GROUP BY kind
         ORDER BY n DESC
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end})
         return cur.fetchall()
 
@@ -373,7 +374,7 @@ def _deep_search_outcomes(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         GROUP BY outcome
         ORDER BY n DESC
     """
-    with connection() as conn, conn.cursor() as cur:
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end})
         return cur.fetchall()
 

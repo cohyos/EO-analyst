@@ -50,7 +50,7 @@ class _FakeConnection:
     def __init__(self, rows: list[dict]) -> None:
         self._rows = rows
 
-    def cursor(self) -> _FakeCursor:
+    def cursor(self, row_factory=None) -> _FakeCursor:
         return _FakeCursor(self._rows)
 
 
@@ -97,7 +97,7 @@ class TestRecomputeBuyerCountry:
         row = {"buyer_country": "US", "sources": ["item:1"], "rationale_he": ""}
 
         class _BoomConn:
-            def cursor(self):
+            def cursor(self, row_factory=None):
                 raise AssertionError("should not query the DB when buyer_country is already known")
 
         assert rfc._recompute_buyer_country(row, _BoomConn()) == "US"

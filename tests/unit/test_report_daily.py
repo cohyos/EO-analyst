@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from eoa.llm.schemas.analysis import DailyReportDraft, ReportSection
+from eoa.llm.schemas.analysis import DailyReportDraft, Sentence, StructuredSection
 from eoa.report import daily
 
 # --------------------------------------------------------------------------
@@ -59,11 +59,13 @@ def test_period_single_explicit_date_is_one_day():
 
 def test_normalize_section_titles_uses_taxonomy_label():
     draft = DailyReportDraft(
-        exec_summary_he="תקציר.",
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
         sections=[
-            ReportSection(title_he="נגד כטב", domain="c_uas", prose_he="פרוזה."),
+            StructuredSection(
+                title_he="נגד כטב", domain="c_uas", sentences=[Sentence(text_he="פרוזה.", cites=[1])]
+            ),
         ],
-        outlook_he="",
+        outlook=[],
         open_points_he=[],
     )
     normalized = daily._normalize_section_titles(draft)
@@ -72,9 +74,13 @@ def test_normalize_section_titles_uses_taxonomy_label():
 
 def test_normalize_section_titles_leaves_unknown_domain_alone():
     draft = DailyReportDraft(
-        exec_summary_he="תקציר.",
-        sections=[ReportSection(title_he="כותרת כלשהי", domain="", prose_he="פרוזה.")],
-        outlook_he="",
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+        sections=[
+            StructuredSection(
+                title_he="כותרת כלשהי", domain="", sentences=[Sentence(text_he="פרוזה.", cites=[1])]
+            )
+        ],
+        outlook=[],
         open_points_he=[],
     )
     normalized = daily._normalize_section_titles(draft)
@@ -142,6 +148,22 @@ def test_tenders_forecast_table_none_when_no_forecasts():
 
 
 # --------------------------------------------------------------------------
+# Goal 1 (2026-09-06): two QA failures drop narrative content entirely (tables + one-line note)
+# instead of stripping sentences behind a warning banner.
+# --------------------------------------------------------------------------
+
+
+def test_qa_failed_twice_draft_has_no_narrative_content():
+    draft = daily._qa_failed_twice_draft()
+    assert draft.exec_summary == []
+    assert draft.sections == []
+    assert draft.outlook == []
+    assert draft.analyst_note_he is None
+    assert draft.system_note_he  # a one-line note is present
+    assert "לא עברה" in draft.system_note_he or "אזהרה" not in draft.system_note_he
+
+
+# --------------------------------------------------------------------------
 # Q3-14 (docs/qa/findings_Q3_r1.md): exec summary must not say "no findings" next to full tables
 # --------------------------------------------------------------------------
 
@@ -168,7 +190,8 @@ class TestDraftReportTablesOnlyFallback:
 
         monkeypatch.setattr(daily, "chat_structured", boom)
         draft = daily.draft_report([], table_counts=daily.TableCounts())
-        assert "אין ממצאים" in draft.exec_summary_he
+        assert "אין ממצאים" in draft.system_note_he
+        assert draft.exec_summary == []
         assert draft.sections == []
 
     def test_empty_items_but_nonempty_tables_summarizes_tables_instead(self, monkeypatch):
@@ -178,10 +201,10 @@ class TestDraftReportTablesOnlyFallback:
         monkeypatch.setattr(daily, "chat_structured", boom)
         counts = daily.TableCounts(events=3, open_tenders=2, new_forecasts=0, deep_search=1)
         draft = daily.draft_report([], table_counts=counts)
-        assert "אין ממצאים" not in draft.exec_summary_he
-        assert "3 אירועים" in draft.exec_summary_he
-        assert "2 מכרזים פתוחים" in draft.exec_summary_he
-        assert "1 חקירות עומק" in draft.exec_summary_he
+        assert "אין ממצאים" not in draft.system_note_he
+        assert "3 אירועים" in draft.system_note_he
+        assert "2 מכרזים פתוחים" in draft.system_note_he
+        assert "1 חקירות עומק" in draft.system_note_he
 
     def test_nonempty_items_still_calls_llm_with_counts_in_prompt(self, monkeypatch):
         captured_messages = []
@@ -189,7 +212,10 @@ class TestDraftReportTablesOnlyFallback:
         def fake_chat_structured(role, schema, messages, **kw):
             captured_messages.append(messages)
             return DailyReportDraft(
-                exec_summary_he="תקציר [1].", sections=[], outlook_he="", open_points_he=[]
+                exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+                sections=[],
+                outlook=[],
+                open_points_he=[],
             )
 
         monkeypatch.setattr(daily, "chat_structured", fake_chat_structured)
@@ -230,9 +256,15 @@ class TestDomainLabelFuzzyMatch:
 class TestNormalizeSectionTitlesNeverRawSlug:
     def test_unknown_domain_gets_fallback_label_not_raw_slug(self):
         draft = DailyReportDraft(
-            exec_summary_he="תקציר.",
-            sections=[ReportSection(title_he="naval_eo_ir", domain="naval_eo_ir", prose_he="פרוזה [1].")],
-            outlook_he="",
+            exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+            sections=[
+                StructuredSection(
+                    title_he="naval_eo_ir",
+                    domain="naval_eo_ir",
+                    sentences=[Sentence(text_he="פרוזה.", cites=[1])],
+                )
+            ],
+            outlook=[],
             open_points_he=[],
         )
         normalized = daily._normalize_section_titles(draft)
@@ -287,7 +319,7 @@ class _FakeConn:
     def __init__(self, cursor: _FakeCursor):
         self._cursor = cursor
 
-    def cursor(self):
+    def cursor(self, row_factory=None):
         return self._cursor
 
     def __enter__(self):
