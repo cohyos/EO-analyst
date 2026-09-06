@@ -21,6 +21,7 @@ docs/PLAN_ROUND5_REPORTS.md's "גל ב'" wave; wiring that call site into
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -329,6 +330,19 @@ def compute_deltas(
     )
 
 
+_RAW_SUBDOMAIN_IN_TITLE_RE = re.compile(r'בתת-התחום "([a-z][a-z0-9_]*)"')
+
+
+def _label_raw_subdomain_keys(title: str) -> str:
+    """Trend titles stored in report_state by runs before 2026-09-07 carry raw subdomain keys
+    ('בתת-התחום "atr"'); map them to the taxonomy label at render time."""
+    from eoa.report.trends import _subdomain_label
+
+    return _RAW_SUBDOMAIN_IN_TITLE_RE.sub(
+        lambda m: f'בתת-התחום "{_subdomain_label(m.group(1))}"', title or ""
+    )
+
+
 def render_delta_section_he(result: DeltaResult) -> str:
     """Deterministic Hebrew body for the "מה השתנה מאז הדוח הקודם" section — plain paragraphs plus
     "- " bullet runs (``eoa.report.docx_builder._md_blocks`` renders each as its own block in all
@@ -368,12 +382,16 @@ def render_delta_section_he(result: DeltaResult) -> str:
             status_he = _STATUS_LABELS_HE.get(td.status, td.status)
             if td.status in ("strengthened", "weakened"):
                 lines.append(
-                    f"- {td.title_he}: {status_he} ({td.previous_strength} ← {td.current_strength}){marker}"
+                    f"- {_label_raw_subdomain_keys(td.title_he)}: {status_he} ({td.previous_strength} ← {td.current_strength}){marker}"
                 )
             elif td.status == "appeared":
-                lines.append(f"- {td.title_he}: {status_he} (עוצמה {td.current_strength}){marker}")
+                lines.append(
+                    f"- {_label_raw_subdomain_keys(td.title_he)}: {status_he} (עוצמה {td.current_strength}){marker}"
+                )
             else:  # vanished
-                lines.append(f"- {td.title_he}: {status_he} (הייתה בעוצמה {td.previous_strength}){marker}")
+                lines.append(
+                    f"- {_label_raw_subdomain_keys(td.title_he)}: {status_he} (הייתה בעוצמה {td.previous_strength}){marker}"
+                )
 
     return "\n".join(lines)
 

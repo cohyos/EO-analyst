@@ -66,6 +66,7 @@ def _entity_cluster_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         WHERE security_status = 'clean'
           AND dedup_of IS NULL
           AND entities_mentioned IS NOT NULL
+          AND COALESCE(domain, '') <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
           AND cardinality(entities_mentioned) > 0
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY entity, domain
@@ -107,6 +108,7 @@ def _domain_counts(start: dt.date, end: dt.date) -> dict[str, int]:
         SELECT domain, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
+          AND domain <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
@@ -124,6 +126,7 @@ def _domain_baseline_counts(start: dt.date, end: dt.date) -> dict[str, float]:
         SELECT domain, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
+          AND domain <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
@@ -137,6 +140,7 @@ def _domain_item_ids(start: dt.date, end: dt.date) -> dict[str, list[int]]:
         SELECT domain, array_agg(id) AS item_ids
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
+          AND domain <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
@@ -199,6 +203,7 @@ def _convergence_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         LEFT JOIN LATERAL unnest(e.parties) AS p ON true
         WHERE e.kind IN ('m_and_a', 'partnership')
           AND i.subdomain IS NOT NULL AND i.subdomain <> ''
+          AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
           AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
               BETWEEN %(start)s AND %(end)s
         GROUP BY i.subdomain
@@ -261,6 +266,7 @@ def _tech_race_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         JOIN items i ON i.id = e.item_id
         LEFT JOIN LATERAL unnest(e.parties) AS p ON true
         WHERE e.kind IN ('launch', 'test')
+          AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
           AND i.subdomain IS NOT NULL AND i.subdomain <> ''
           AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
               BETWEEN %(start)s AND %(end)s

@@ -249,10 +249,17 @@ def watchlist_changes(period_start: dt.date, period_end: dt.date) -> list[dict[s
     """Entities first seen this month (``entities.created_at`` in the period — the schema has no
     dedicated "first seen" date column beyond ``created_at``/``first_seen_item``)."""
     sql = """
-        SELECT id, name, kind, country, created_at
-        FROM entities
-        WHERE created_at::date BETWEEN %(start)s AND %(end)s
-        ORDER BY created_at
+        SELECT e.id, e.name, e.kind, e.country, e.created_at
+        FROM entities e
+        WHERE e.created_at::date BETWEEN %(start)s AND %(end)s
+          -- 2026-09-07 (round-5 judge / live monthly): entities extracted only from out-of-scope or
+          -- archived items ('Western Burrowing Owl', 'Rees Training Center') are not watchlist news
+          AND EXISTS (
+              SELECT 1 FROM items i
+              WHERE e.name = ANY(i.entities_mentioned)
+                AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
+          )
+        ORDER BY e.created_at
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": period_start, "end": period_end})
