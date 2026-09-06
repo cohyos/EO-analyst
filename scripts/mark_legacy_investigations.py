@@ -123,8 +123,13 @@ def run_repair(*, dry_run: bool = False) -> dict[str, Any]:
             before = job["result"] or {}
             result = apply_not_found_to_partial(before)
             outcome_report.append(
-                {"job_id": job["id"], "before_outcome": "not_found", "after_outcome": "partial",
-                 "before_confidence": before.get("confidence"), "after_confidence": PARTIAL_CONFIDENCE_FALLBACK}
+                {
+                    "job_id": job["id"],
+                    "before_outcome": "not_found",
+                    "after_outcome": "partial",
+                    "before_confidence": before.get("confidence"),
+                    "after_confidence": PARTIAL_CONFIDENCE_FALLBACK,
+                }
             )
             if not dry_run:
                 cur.execute(

@@ -143,7 +143,8 @@ class AnthropicProvider:
         mdl = model or self.model or (models[0] if models else "claude-sonnet-5")
         system, turns = _flatten_system_and_turns(messages)
         api_messages = [
-            {"role": t["role"] if t["role"] == "assistant" else "user", "content": t["content"]} for t in turns
+            {"role": t["role"] if t["role"] == "assistant" else "user", "content": t["content"]}
+            for t in turns
         ] or [{"role": "user", "content": " "}]
         max_tokens = 4096
         body: dict[str, Any] = {"model": mdl, "max_tokens": max_tokens, "messages": api_messages}
@@ -257,7 +258,11 @@ class GeminiProvider:
         # errors, a non-JSON body, and an unexpected response shape (missing "name")
         # are expected failure modes here; anything else should surface, not be
         # swallowed as "best effort".
-        except (httpx.HTTPError, ValueError, KeyError) as exc:  # live listing is best-effort; never break the picker
+        except (
+            httpx.HTTPError,
+            ValueError,
+            KeyError,
+        ) as exc:  # live listing is best-effort; never break the picker
             log.warning("gemini_list_models_failed", error=redact_secrets(str(exc))[:200])
             return static
 
@@ -339,6 +344,7 @@ class GeminiProvider:
 
 
 # ---------------------------------------------------------------------------------------- OpenAI
+
 
 class OpenAIProvider:
     """OpenAI Chat Completions API."""

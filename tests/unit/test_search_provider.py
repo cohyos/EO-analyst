@@ -199,9 +199,16 @@ class TestProviderSwitch:
 
         called = {}
 
-        def fake_search(query, lang="en", *, categories="general", max_results=10, time_range=None, engines=None):
+        def fake_search(
+            query, lang="en", *, categories="general", max_results=10, time_range=None, engines=None
+        ):
             called.update(
-                query=query, lang=lang, categories=categories, max_results=max_results, time_range=time_range, engines=engines
+                query=query,
+                lang=lang,
+                categories=categories,
+                max_results=max_results,
+                time_range=time_range,
+                engines=engines,
             )
             return searxng_client.SearchResponse(query, lang, [])
 

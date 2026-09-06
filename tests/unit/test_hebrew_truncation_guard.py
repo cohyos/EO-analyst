@@ -131,7 +131,9 @@ class TestGuardHebrewTruncation:
         assert called == []
         assert result.summary_he == "כטב״ם פעל אתמול."
 
-    def test_suspect_triggers_one_retry_and_accepts_fixed_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_suspect_triggers_one_retry_and_accepts_fixed_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         fixed = _Sample(summary_he="הכוח פעל נגד כטב״ם בהצלחה.")
 
         def fake_structured_once(role, schema, messages, **kwargs):
@@ -142,8 +144,14 @@ class TestGuardHebrewTruncation:
 
         model = _Sample(summary_he="הכוח פעל נגד כטב")  # truncated
         result = oc._guard_hebrew_truncation(
-            "resident", _Sample, [{"role": "user", "content": "x"}], model,
-            task="classify", interactive=False, options=None, provider=None,
+            "resident",
+            _Sample,
+            [{"role": "user", "content": "x"}],
+            model,
+            task="classify",
+            interactive=False,
+            options=None,
+            provider=None,
         )
         assert result is fixed
         assert result.summary_he.endswith("בהצלחה.")
@@ -155,8 +163,14 @@ class TestGuardHebrewTruncation:
 
         model = _Sample(summary_he="הכוח פעל נגד כטב")
         result = oc._guard_hebrew_truncation(
-            "resident", _Sample, [{"role": "user", "content": "x"}], model,
-            task="classify", interactive=False, options=None, provider=None,
+            "resident",
+            _Sample,
+            [{"role": "user", "content": "x"}],
+            model,
+            task="classify",
+            interactive=False,
+            options=None,
+            provider=None,
         )
         # accepted (no exception), and the ASCII quote got normalized regardless
         assert "״" in result.summary_he
@@ -168,9 +182,15 @@ class TestGuardHebrewTruncation:
 
         monkeypatch.setattr(oc, "_structured_once", raise_llm_error)
 
-        model = _Sample(summary_he='נגד כטב')
+        model = _Sample(summary_he="נגד כטב")
         result = oc._guard_hebrew_truncation(
-            "resident", _Sample, [{"role": "user", "content": "x"}], model,
-            task="classify", interactive=False, options=None, provider=None,
+            "resident",
+            _Sample,
+            [{"role": "user", "content": "x"}],
+            model,
+            task="classify",
+            interactive=False,
+            options=None,
+            provider=None,
         )
         assert result is model  # fell back to original (normalization is a no-op here, no quotes)

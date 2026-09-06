@@ -19,7 +19,8 @@ def estimate_cost_usd(provider: str, model: str, prompt_tokens: int, completion_
     if not entry:
         return 0.0
     return round(
-        (prompt_tokens / 1_000_000) * entry.input_per_mtok + (completion_tokens / 1_000_000) * entry.output_per_mtok,
+        (prompt_tokens / 1_000_000) * entry.input_per_mtok
+        + (completion_tokens / 1_000_000) * entry.output_per_mtok,
         6,
     )
 

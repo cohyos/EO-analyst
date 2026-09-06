@@ -395,7 +395,7 @@ class TestChooseTitleFallbackChain:
         "Financial highlights" (a sidebar widget heading reused on every page); the real
         <title>/og:title carried the actual per-article headline."""
         html = (
-            '<html><head><title>LEONARDO IS EXPANDING IN THE US WITH THE ACQUISITION OF RAFT'
+            "<html><head><title>LEONARDO IS EXPANDING IN THE US WITH THE ACQUISITION OF RAFT"
             "</title></head><body>...</body></html>"
         )
         title = choose_title(

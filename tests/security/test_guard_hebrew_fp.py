@@ -21,7 +21,7 @@ BENIGN_HEBREW_PARAGRAPHS = [
     "אלקטרו-אופטיות מתקדמות. נציגי חברות מובילות בתחום יציגו פתרונות חדשניים לזיהוי מטרות "
     "ומעקב אחריהן בתנאי ראות ירודה. האירוע ייפתח בברכה מטעם משרד הביטחון ויכלול פאנל דיונים "
     "על שיתופי פעולה בינלאומיים.",
-    'תרגיל צבאי משותף בהשתתפות כוחות יבשה ואוויר החל השבוע בבסיס אימונים בדרום הארץ. התרגיל '
+    "תרגיל צבאי משותף בהשתתפות כוחות יבשה ואוויר החל השבוע בבסיס אימונים בדרום הארץ. התרגיל "
     "נועד לתרגל תרחישי הגנה משולבים תוך שימוש בחיישנים תרמיים ומערכות זיהוי אוטומטיות. דובר "
     'צה"ל מסר כי התרגיל מתוכנן מראש ואינו קשור לאירועים מבצעיים עדכניים באזור.',
     "כנס טכנולוגי בנושא חישה מרחוק ועיבוד תמונה יתקיים בירושלים בסוף החודש. במרכז הכנס יעמדו "
@@ -79,7 +79,9 @@ class TestHebrewL1FalsePositiveMitigation:
         assert result.verdict == "clean"
         assert result.layer == "l2"
 
-    def test_benign_hebrew_paragraph_with_l2_unavailable_is_not_flagged(self, monkeypatch: pytest.MonkeyPatch):
+    def test_benign_hebrew_paragraph_with_l2_unavailable_is_not_flagged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """When the L2 judge can't be reached at all (LLM down), an L1-only Hebrew signal must
         still never resolve to "flagged" by itself (per Q2-6's explicit requirement)."""
         monkeypatch.setattr(guard, "_l1_score", lambda text: 0.96)
@@ -112,7 +114,12 @@ class TestHebrewL1FalsePositiveMitigation:
         monkeypatch.setattr(
             guard,
             "_l2_judge",
-            lambda *a, **k: {"injection": True, "confidence": 0.9, "kind": "instruction_override", "excerpt": ""},
+            lambda *a, **k: {
+                "injection": True,
+                "confidence": 0.9,
+                "kind": "instruction_override",
+                "excerpt": "",
+            },
         )
 
         result = guard.screen(ATTACK_B_L2_ONLY_CATCH, "", use_l2=True)

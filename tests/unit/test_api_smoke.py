@@ -108,7 +108,9 @@ def test_items_list(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None
     assert captured["level"] == "red,orange"
 
 
-def test_items_list_group_by_country_adds_groups_field(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_items_list_group_by_country_adds_groups_field(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """U7a: `group_by=country` is additive -- omitted entirely unless requested."""
     from eoa.api import services
 
@@ -129,7 +131,9 @@ def test_items_list_group_by_country_adds_groups_field(client: TestClient, monke
     assert body["groups"] == [{"country": "US", "total": 2, "red": 1, "orange": 1, "yellow": 0, "archive": 0}]
 
 
-def test_items_list_country_filter_passed_through(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_items_list_country_filter_passed_through(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from eoa.api import services
 
     captured: dict = {}

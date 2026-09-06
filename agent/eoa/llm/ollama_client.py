@@ -169,7 +169,9 @@ def _dispatch_explicit_provider(
 
         client = CliProvider(kind, model or None, power or None)
     result = client.chat(messages, model=model or None, json_schema=format_schema)
-    _log_cloud_call(provider=kind, model=result.model, prompt_chars=result.prompt_chars, duration_ms=result.duration_ms)
+    _log_cloud_call(
+        provider=kind, model=result.model, prompt_chars=result.prompt_chars, duration_ms=result.duration_ms
+    )
     log.info(
         "llm_chat_cloud",
         provider=kind,
@@ -530,7 +532,9 @@ def _find_truncation_suspects(model: BaseModel) -> list[str]:
     """Field names (not full paths -- good enough for logging) whose text looks truncated
     mid-Hebrew-acronym, per :func:`_looks_truncated_mid_hebrew_acronym`."""
     return [
-        name for value, name, _setter in _iter_model_strings(model) if _looks_truncated_mid_hebrew_acronym(value, name)
+        name
+        for value, name, _setter in _iter_model_strings(model)
+        if _looks_truncated_mid_hebrew_acronym(value, name)
     ]
 
 
@@ -547,8 +551,8 @@ def _normalize_model_hebrew_quotes(model: T) -> T:
 _HEBREW_TRUNCATION_RETRY_MESSAGE_HE = (
     "שים לב: השדות הבאים בתשובה הקודמת שלך נראים חתוכים באמצע מילה, ככל הנראה בראש תיבות עברי "
     "({fields}). כתוב מחדש את כל הפלט במלואו: ודא שכל משפט מסתיים בסימן פיסוק, ושבכל ראש תיבות "
-    "עברי (כגון כטב\"ם, מטע\"ד, תע\"א, צה\"ל, מ\"מ) אתה משתמש בגרש/גרשיים העבריים ״ (U+05F4) "
-    "ולעולם לא בגרשיים ASCII רגילים (\"). החזר JSON תקין ומלא לפי הסכמה."
+    'עברי (כגון כטב"ם, מטע"ד, תע"א, צה"ל, מ"מ) אתה משתמש בגרש/גרשיים העבריים ״ (U+05F4) '
+    'ולעולם לא בגרשיים ASCII רגילים ("). החזר JSON תקין ומלא לפי הסכמה.'
 )
 
 
@@ -580,7 +584,13 @@ def _guard_hebrew_truncation(
     ]
     try:
         retried, _res = _structured_once(
-            role, schema, corrective_messages, task=task, interactive=interactive, options=options, provider=provider
+            role,
+            schema,
+            corrective_messages,
+            task=task,
+            interactive=interactive,
+            options=options,
+            provider=provider,
         )
     except LLMOutputError as exc:
         log.warning("hebrew_truncation_retry_failed", schema=schema.__name__, error=str(exc)[:200])
@@ -627,11 +637,27 @@ def chat_structured(
                 role, chain, schema, messages, task=task, interactive=interactive, options=options
             )
             return _guard_hebrew_truncation(
-                role, schema, messages, validated, task=task, interactive=interactive, options=options, provider=None
+                role,
+                schema,
+                messages,
+                validated,
+                task=task,
+                interactive=interactive,
+                options=options,
+                provider=None,
             )
-    validated, _res = _structured_once(role, schema, messages, task=task, interactive=interactive, options=options, provider=provider)
+    validated, _res = _structured_once(
+        role, schema, messages, task=task, interactive=interactive, options=options, provider=provider
+    )
     return _guard_hebrew_truncation(
-        role, schema, messages, validated, task=task, interactive=interactive, options=options, provider=provider
+        role,
+        schema,
+        messages,
+        validated,
+        task=task,
+        interactive=interactive,
+        options=options,
+        provider=provider,
     )
 
 
@@ -659,7 +685,13 @@ def _chat_structured_chain(
         provider_str = _provider_string(entry)
         try:
             validated, res = _structured_once(
-                role, schema, messages, task=task, interactive=interactive, options=options, provider=provider_str
+                role,
+                schema,
+                messages,
+                task=task,
+                interactive=interactive,
+                options=options,
+                provider=provider_str,
             )
         except FALLBACK_EXCEPTIONS as exc:
             attempt = ChainAttempt(
@@ -676,7 +708,9 @@ def _chat_structured_chain(
                 raise
             last_err = exc
             fell_back_from = entry.provider
-            log.warning("llm_chain_fallback_structured", role=role, provider=entry.provider, error=str(exc)[:200])
+            log.warning(
+                "llm_chain_fallback_structured", role=role, provider=entry.provider, error=str(exc)[:200]
+            )
             continue
         attempt = ChainAttempt(
             provider=entry.provider,
@@ -750,7 +784,7 @@ def chat_structured_batch(
     wrapper = _batch_wrapper_schema(item_schema)
     body = "\n\n".join(f"### item_id={item_id}\n{prompt}" for item_id, prompt in items)
     intro = intro_he or (
-        f"להלן {len(items)} פריטים לעיבוד באצווה אחת. החזר מערך אחד בשדה \"items\" עם אובייקט "
+        f'להלן {len(items)} פריטים לעיבוד באצווה אחת. החזר מערך אחד בשדה "items" עם אובייקט '
         "נפרד לכל פריט; כל אובייקט חייב לכלול item_id התואם למספר שניתן לו למטה, ואת שאר השדות "
         "לפי הסכמה הנדרשת לכל פריט בנפרד -- אין לערבב מידע בין פריטים שונים בתשובה עצמה."
     )

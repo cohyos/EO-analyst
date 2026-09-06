@@ -125,6 +125,8 @@ class TestPatentsviewSearch:
 
     def test_non_200(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("PATENTSVIEW_API_KEY", "pvkey")
-        monkeypatch.setattr(pt, "http_get_json", lambda *a, **kw: {"status": 500, "json": None, "text": "err"})
+        monkeypatch.setattr(
+            pt, "http_get_json", lambda *a, **kw: {"status": 500, "json": None, "text": "err"}
+        )
         out = json.loads(pt.patentsview_search("x"))
         assert "error" in out

@@ -188,7 +188,9 @@ class TestDraftReportTablesOnlyFallback:
 
         def fake_chat_structured(role, schema, messages, **kw):
             captured_messages.append(messages)
-            return DailyReportDraft(exec_summary_he="תקציר [1].", sections=[], outlook_he="", open_points_he=[])
+            return DailyReportDraft(
+                exec_summary_he="תקציר [1].", sections=[], outlook_he="", open_points_he=[]
+            )
 
         monkeypatch.setattr(daily, "chat_structured", fake_chat_structured)
         items = [{"n": 1, "id": 1, "title": "t", "domain": "c_uas", "summary_he": "s", "so_what_he": "so"}]

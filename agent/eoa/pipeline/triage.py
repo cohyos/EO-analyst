@@ -361,9 +361,7 @@ def triage_batch(items: list[dict], *, role: str = "resident") -> dict[int, Tria
     return results
 
 
-def run_triage(
-    limit: int = 300, role: str = "resident", *, item_ids: list[int] | None = None
-) -> TriageStats:
+def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] | None = None) -> TriageStats:
     """Triage all classified, in-scope items.
 
     F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
@@ -404,7 +402,9 @@ def run_triage(
                     stats.failed += 1
                     continue
                 try:
-                    update_item_fields(it["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600])
+                    update_item_fields(
+                        it["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600]
+                    )
                     if out.needs_deep_search or out.level == "red":
                         _enqueue_deep_search(it, out)
                     mark_stage(it["id"], STAGE)

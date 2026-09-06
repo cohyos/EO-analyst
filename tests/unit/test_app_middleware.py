@@ -59,7 +59,9 @@ def test_oversized_body_rejected_via_content_length_precheck(client: TestClient)
     assert r.status_code == 413
 
 
-def test_normal_sized_body_passes_through_untouched(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_normal_sized_body_passes_through_untouched(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Regression guard: the middleware must not corrupt/empty a normal-sized body -- a classic
     `BaseHTTPMiddleware` pitfall when the body is consumed without re-caching it for downstream."""
     from eoa.api import services

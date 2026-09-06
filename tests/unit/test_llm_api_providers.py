@@ -28,7 +28,7 @@ from eoa.llm.providers.api import (
 def _no_retry_sleep(monkeypatch):
     """Tenacity's wait_exponential really sleeps between attempts -- for a unit test we want the
     retry *logic* exercised (attempt count, eventual failure) without the real backoff delay."""
-    monkeypatch.setattr("eoa.llm.providers.api.wait_exponential", lambda **kw: (lambda *a, **k: 0))
+    monkeypatch.setattr("eoa.llm.providers.api.wait_exponential", lambda **kw: lambda *a, **k: 0)
 
 
 @pytest.fixture(autouse=True)
@@ -113,7 +113,9 @@ class TestAnthropicChat:
             )
         )
         schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
-        result = AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}], json_schema=schema)
+        result = AnthropicProvider("claude-sonnet-5").chat(
+            [{"role": "user", "content": "hi"}], json_schema=schema
+        )
         assert json.loads(result.content) == {"ok": True}
         sent = json.loads(route.calls[0].request.content)
         assert sent["tool_choice"] == {"type": "tool", "name": "emit_result"}
@@ -163,7 +165,9 @@ class TestGeminiChat:
     @respx.mock
     def test_plain_text_response(self, monkeypatch):
         monkeypatch.setenv("GEMINI_API_KEY", "gk-x")
-        respx.post("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent").mock(
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -199,7 +203,15 @@ class TestGeminiChat:
         monkeypatch.setenv("GEMINI_API_KEY", "gk-x")
         monkeypatch.setattr(
             "eoa.llm.providers.api.settings",
-            lambda: type("S", (), {"llm_providers": type("L", (), {"api": {"gemini": ApiProviderCfg(models=["static-model"])}})()})(),
+            lambda: type(
+                "S",
+                (),
+                {
+                    "llm_providers": type(
+                        "L", (), {"api": {"gemini": ApiProviderCfg(models=["static-model"])}}
+                    )()
+                },
+            )(),
         )
         respx.get("https://generativelanguage.googleapis.com/v1beta/models").mock(
             return_value=httpx.Response(500)
@@ -258,7 +270,9 @@ class TestGeminiKeyHandling:
         monkeypatch.setenv("GEMINI_API_KEY", "gk-secret-value")
         route = respx.post(
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-        ).mock(return_value=httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "x"}]}}]}))
+        ).mock(
+            return_value=httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "x"}]}}]})
+        )
         GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "hi"}])
         sent = route.calls[0].request
         assert sent.headers["x-goog-api-key"] == "gk-secret-value"

@@ -137,10 +137,12 @@ class TestPostTendersCatchup:
 
         monkeypatch.setattr("eoa.pipeline.dedup.run_dedup", _boom)
         monkeypatch.setattr(
-            "eoa.pipeline.classify.run_classify", lambda *, role, item_ids: _Stats(done=1, out_of_scope=0, failed=0)
+            "eoa.pipeline.classify.run_classify",
+            lambda *, role, item_ids: _Stats(done=1, out_of_scope=0, failed=0),
         )
         monkeypatch.setattr(
-            "eoa.pipeline.triage.run_triage", lambda *, role, item_ids: _Stats(done=1, red=0, orange=0, failed=0)
+            "eoa.pipeline.triage.run_triage",
+            lambda *, role, item_ids: _Stats(done=1, red=0, orange=0, failed=0),
         )
 
         out = jobs._post_tenders_catchup()

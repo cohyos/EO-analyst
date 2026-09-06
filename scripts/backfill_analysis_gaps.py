@@ -217,7 +217,9 @@ def stub_cleanup_pass(*, dry_run: bool = False) -> dict[str, Any]:
         if not defensible:
             fields["level"] = None
             fields["domain"] = "out_of_scope"
-        cleared.append({"id": row["id"], "title": (row.get("title") or "")[:80], "title_only_defensible": defensible})
+        cleared.append(
+            {"id": row["id"], "title": (row.get("title") or "")[:80], "title_only_defensible": defensible}
+        )
         if not dry_run:
             update_item_fields(row["id"], **fields)
 
@@ -230,10 +232,16 @@ def stub_cleanup_pass(*, dry_run: bool = False) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--deterministic", action="store_true", help="run pass 1 (Q3-8 watchlist-alias backfill, no LLM)")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--deterministic", action="store_true", help="run pass 1 (Q3-8 watchlist-alias backfill, no LLM)"
+    )
     parser.add_argument("--llm", action="store_true", help="run pass 2 (Q3-8/Q3-9 LLM re-analyze, gated)")
-    parser.add_argument("--stub-cleanup", action="store_true", help="run pass 3 (Q3-10 pre-gate stub cleanup, no LLM)")
+    parser.add_argument(
+        "--stub-cleanup", action="store_true", help="run pass 3 (Q3-10 pre-gate stub cleanup, no LLM)"
+    )
     parser.add_argument("--all", action="store_true", help="run all three passes in order")
     parser.add_argument("--limit", type=int, default=60, help="max items for the LLM pass (default 60)")
     parser.add_argument("--role", default="resident", help="model role for the LLM pass (default 'resident')")

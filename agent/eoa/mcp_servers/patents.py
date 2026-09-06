@@ -126,7 +126,9 @@ def patentsview_search(query: str, assignee: str = "", limit: int = 20) -> str:
         f"{base}/patent/",
         params={
             "q": _json_compact(query_obj),
-            "f": _json_compact(["patent_id", "patent_title", "patent_date", "assignees.assignee_organization"]),
+            "f": _json_compact(
+                ["patent_id", "patent_title", "patent_date", "assignees.assignee_organization"]
+            ),
             "o": _json_compact({"size": max(1, min(limit, 100))}),
         },
         headers={"X-Api-Key": api_key},

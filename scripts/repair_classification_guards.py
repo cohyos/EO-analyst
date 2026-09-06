@@ -146,7 +146,9 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
             continue
         try:
             out = triage_item(item, role=role)
-            update_item_fields(item["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600])
+            update_item_fields(
+                item["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600]
+            )
             report["triage_repaired"].append(
                 {"id": item["id"], "before": before, "after": {"score": out.score, "level": out.level}}
             )
@@ -164,7 +166,9 @@ def main() -> None:
 
     report = repair(dry_run=args.dry_run, role=args.role)
 
-    print(f"{'='*70}\nQ3-2/Q3-3/Q3-4 classification/triage guard repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'='*70}")
+    print(
+        f"{'=' * 70}\nQ3-2/Q3-3/Q3-4 classification/triage guard repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'=' * 70}"
+    )
     for key, rows in report.items():
         print(f"\n{key}: {len(rows)}")
         for r in rows[:20]:
@@ -172,8 +176,12 @@ def main() -> None:
         if len(rows) > 20:
             print(f"  ... and {len(rows) - 20} more")
 
-    total = len(report["subdomain_cleared"]) + len(report["gated_out_of_scope"]) + len(report["triage_repaired"])
-    print(f"\n{'='*70}\nTotal repaired: {total}  |  triage failed: {len(report['triage_failed'])}\n{'='*70}")
+    total = (
+        len(report["subdomain_cleared"]) + len(report["gated_out_of_scope"]) + len(report["triage_repaired"])
+    )
+    print(
+        f"\n{'=' * 70}\nTotal repaired: {total}  |  triage failed: {len(report['triage_failed'])}\n{'=' * 70}"
+    )
     if args.dry_run:
         print("(dry run -- nothing written; re-run without --dry-run to apply)")
 

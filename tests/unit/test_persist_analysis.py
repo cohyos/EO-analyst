@@ -386,7 +386,9 @@ def test_persist_analysis_creates_edges(monkeypatch: pytest.MonkeyPatch) -> None
     assert args == (1, 2, "PARTNER_OF", 300, {"evidence": "הם שותפים בפרויקט משותף"})
 
 
-def test_persist_analysis_merge_entity_never_reverts_canonicalization(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_persist_analysis_merge_entity_never_reverts_canonicalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Regression for Q3-13 r3 (docs/qa/findings_Q3_r2.md): an edge naming a Hebrew/alias spelling
     of a curated-org entity ("צבא ארה\"ב" for US Army) must have `merge_entity` called with the
     *canonical* name, not the raw extracted spelling -- otherwise `merge_entity`'s raw `UPDATE
@@ -596,9 +598,30 @@ def test_persist_analysis_returns_counts(monkeypatch: pytest.MonkeyPatch) -> Non
         # `customer` gives each event an anchor so Q3-6's narrative-title filter doesn't reject
         # these factless placeholder titles -- this test is about counts, not that filter.
         events=[
-            EventOut(kind="test", title="e1", program="Program A", customer="Client", summary_he="e1", confidence=0.8),
-            EventOut(kind="test", title="e2", program="Program B", customer="Client", summary_he="e2", confidence=0.8),
-            EventOut(kind="test", title="e3", program="Program C", customer="Client", summary_he="e3", confidence=0.8),
+            EventOut(
+                kind="test",
+                title="e1",
+                program="Program A",
+                customer="Client",
+                summary_he="e1",
+                confidence=0.8,
+            ),
+            EventOut(
+                kind="test",
+                title="e2",
+                program="Program B",
+                customer="Client",
+                summary_he="e2",
+                confidence=0.8,
+            ),
+            EventOut(
+                kind="test",
+                title="e3",
+                program="Program C",
+                customer="Client",
+                summary_he="e3",
+                confidence=0.8,
+            ),
         ],
         edges=[
             EdgeOut(src="A", dst="B", label="PARTNER_OF", evidence_he="test"),

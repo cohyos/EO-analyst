@@ -160,7 +160,9 @@ def _build_candidates(platforms: list[PlatformSpec], events: list[dict[str, Any]
             if not platform.matches(text):
                 continue
             key = (platform.key, buyer_country)
-            vendors = [v for v in platform.typical_vendors if v in watchlist_vendors] or platform.typical_vendors
+            vendors = [
+                v for v in platform.typical_vendors if v in watchlist_vendors
+            ] or platform.typical_vendors
             cand = groups.get(key)
             if cand is None:
                 groups[key] = ForecastCandidate(
@@ -374,7 +376,12 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _llm_rationale(
-    candidate: ForecastCandidate, likelihood: float, window: tuple[dt.date, dt.date], data_block: str, *, role: str
+    candidate: ForecastCandidate,
+    likelihood: float,
+    window: tuple[dt.date, dt.date],
+    data_block: str,
+    *,
+    role: str,
 ) -> str:
     prompt = render(
         "tender_forecast",
@@ -474,7 +481,9 @@ def _llm_rationale_guarded(
 def _fallback_rationale(candidate: ForecastCandidate) -> str:
     """Deterministic rationale used when the LLM call is unavailable/fails -- still cites the
     trigger items by id (per FR-5.3's citation rule), just without prose synthesis."""
-    refs = " ".join(f"[item {iid}]" for iid in dict.fromkeys(candidate.trigger_item_ids))  # unique, order kept
+    refs = " ".join(
+        f"[item {iid}]" for iid in dict.fromkeys(candidate.trigger_item_ids)
+    )  # unique, order kept
     return (
         f"זוהו {len(candidate.trigger_event_ids)} אירוע(ים) הקשורים לפלטפורמה '{candidate.platform_he}' "
         f"ב-90 הימים האחרונים {refs}; פלטפורמה זו נזקקת בדרך כלל ל-{candidate.payload_need_he}. "
@@ -583,7 +592,8 @@ def _regenerate_flagged_forecasts(role: str) -> int:
 
     all_item_ids = sorted({iid for row in rows for iid in _item_ids_from_sources(row.get("sources"))})
     item_rows = _fetchall(
-        "SELECT id, title, url, clean_text, summary_he FROM items WHERE id = ANY(%(ids)s)", {"ids": all_item_ids}
+        "SELECT id, title, url, clean_text, summary_he FROM items WHERE id = ANY(%(ids)s)",
+        {"ids": all_item_ids},
     )
     items_by_id = {r["id"]: r for r in item_rows}
 
@@ -668,7 +678,8 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
 
     all_item_ids = sorted({iid for c in candidates for iid in c.trigger_item_ids})
     item_rows = _fetchall(
-        "SELECT id, title, url, clean_text, summary_he FROM items WHERE id = ANY(%(ids)s)", {"ids": all_item_ids}
+        "SELECT id, title, url, clean_text, summary_he FROM items WHERE id = ANY(%(ids)s)",
+        {"ids": all_item_ids},
     )
     items_by_id = {r["id"]: r for r in item_rows}
 

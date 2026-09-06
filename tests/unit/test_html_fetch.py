@@ -110,7 +110,6 @@ async def test_fetch_page_raises_fetch_error_after_exhausting_retries() -> None:
         await fetch_page("https://example.test/always-down")
 
 
-
 # --------------------------------------------------------------------------
 # _decode: charset priority (HTTP header -> declared <meta>/XML -> charset_normalizer -> utf-8 replace)
 # and eoa.fetch.sanitize._repair_mojibake -- regression coverage for the
@@ -137,7 +136,7 @@ async def test_decode_uses_meta_charset_when_http_header_has_none() -> None:
 
 async def test_decode_uses_xml_declaration_when_http_header_has_none() -> None:
     hebrew = "מבחן"
-    xml_str = f"<?xml version=\"1.0\" encoding=\"windows-1255\"?><rss><item>{hebrew}</item></rss>"
+    xml_str = f'<?xml version="1.0" encoding="windows-1255"?><rss><item>{hebrew}</item></rss>'
     content = xml_str.encode("windows-1255")
     response = _fake_response(content, "application/rss+xml")
 

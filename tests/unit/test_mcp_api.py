@@ -55,7 +55,11 @@ class TestGetMcpCalls:
 
         def fake_summarize(since_hours):
             captured["since_hours"] = since_hours
-            return {"since_hours": since_hours, "calls": [], "totals": {"calls": 0, "failures": 0, "flagged": 0}}
+            return {
+                "since_hours": since_hours,
+                "calls": [],
+                "totals": {"calls": 0, "failures": 0, "flagged": 0},
+            }
 
         monkeypatch.setattr(services, "summarize_mcp_calls", fake_summarize)
         r = client.get("/api/mcp/calls")
@@ -67,7 +71,9 @@ class TestGetMcpCalls:
         monkeypatch.setattr(
             services,
             "summarize_mcp_calls",
-            lambda since_hours: captured.update(h=since_hours) or {"since_hours": since_hours, "calls": [], "totals": {}},
+            lambda since_hours: (
+                captured.update(h=since_hours) or {"since_hours": since_hours, "calls": [], "totals": {}}
+            ),
         )
         client.get("/api/mcp/calls?since=6h")
         assert captured["h"] == 6
@@ -77,7 +83,9 @@ class TestGetMcpCalls:
         monkeypatch.setattr(
             services,
             "summarize_mcp_calls",
-            lambda since_hours: captured.update(h=since_hours) or {"since_hours": since_hours, "calls": [], "totals": {}},
+            lambda since_hours: (
+                captured.update(h=since_hours) or {"since_hours": since_hours, "calls": [], "totals": {}}
+            ),
         )
         client.get("/api/mcp/calls?since=garbage")
         assert captured["h"] == 24

@@ -109,12 +109,18 @@ class TestTitleOnlyClassificationDefensible:
         assert bag._title_only_classification_defensible(item) is False
 
     def test_not_defensible_without_named_entity_in_title(self) -> None:
-        item = {"title": "Some vague headline with nothing recognisable", "level": "orange", "domain": "contracts"}
+        item = {
+            "title": "Some vague headline with nothing recognisable",
+            "level": "orange",
+            "domain": "contracts",
+        }
         assert bag._title_only_classification_defensible(item) is False
 
 
 class TestStubCleanupPass:
-    def test_clears_analysis_fields_and_resets_level_when_not_defensible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_clears_analysis_fields_and_resets_level_when_not_defensible(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         rows = [{"id": 1, "title": "Vague unclear headline", "level": "yellow", "domain": "contracts"}]
         cursor = _FakeCursor(fetchall_result=rows)
         monkeypatch.setattr("eoa.db.connection", lambda: _FakeConnection(cursor))
@@ -129,11 +135,27 @@ class TestStubCleanupPass:
         assert len(report["cleared"]) == 1
         assert report["cleared"][0]["title_only_defensible"] is False
         assert update_calls == [
-            (1, {"summary_he": None, "so_what_he": None, "key_facts": None, "level": None, "domain": "out_of_scope"})
+            (
+                1,
+                {
+                    "summary_he": None,
+                    "so_what_he": None,
+                    "key_facts": None,
+                    "level": None,
+                    "domain": "out_of_scope",
+                },
+            )
         ]
 
     def test_keeps_level_domain_when_title_defensible(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rows = [{"id": 2, "title": "Elbit Systems announces new program", "level": "orange", "domain": "contracts"}]
+        rows = [
+            {
+                "id": 2,
+                "title": "Elbit Systems announces new program",
+                "level": "orange",
+                "domain": "contracts",
+            }
+        ]
         cursor = _FakeCursor(fetchall_result=rows)
         monkeypatch.setattr("eoa.db.connection", lambda: _FakeConnection(cursor))
         update_calls: list[tuple[int, dict]] = []
@@ -154,7 +176,10 @@ class TestLlmReanalyzePass:
 
         candidates = [{"id": 1, "level": "red", "title": "a"}, {"id": 2, "level": "red", "title": "b"}]
         monkeypatch.setattr(bag, "_llm_candidates", lambda limit: candidates)
-        monkeypatch.setattr("eoa.pipeline.analyze.analyze_item", lambda item, role="resident": (_ for _ in ()).throw(ResourceUnavailable("busy")))
+        monkeypatch.setattr(
+            "eoa.pipeline.analyze.analyze_item",
+            lambda item, role="resident": (_ for _ in ()).throw(ResourceUnavailable("busy")),
+        )
         monkeypatch.setattr("eoa.pipeline.analyze.persist_analysis", lambda item, out: (0, 0))
 
         report = bag.llm_reanalyze_pass(limit=10, dry_run=False)
@@ -187,7 +212,9 @@ class TestLlmReanalyzePass:
         candidates = [{"id": 1, "level": "red", "title": "a"}]
         monkeypatch.setattr(bag, "_llm_candidates", lambda limit: candidates)
         called = []
-        monkeypatch.setattr("eoa.pipeline.analyze.analyze_item", lambda item, role="resident": called.append(item["id"]))
+        monkeypatch.setattr(
+            "eoa.pipeline.analyze.analyze_item", lambda item, role="resident": called.append(item["id"])
+        )
 
         report = bag.llm_reanalyze_pass(limit=10, dry_run=True)
 

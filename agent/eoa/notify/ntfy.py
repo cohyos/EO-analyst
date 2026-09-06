@@ -78,7 +78,9 @@ def send(
                 except Exception:
                     pass
                 log.info("ntfy_sent", url=url, title=title[:60])
-                return Sent(True, mid, url)  # mirroring to the public topic is done by eoa.notify.relay (fetcher)
+                return Sent(
+                    True, mid, url
+                )  # mirroring to the public topic is done by eoa.notify.relay (fetcher)
             log.warning("ntfy_http_error", url=url, status=r.status_code)
         except Exception as exc:
             log.warning("ntfy_failed", url=url, error=str(exc)[:120])

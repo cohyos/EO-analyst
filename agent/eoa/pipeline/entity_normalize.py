@@ -72,7 +72,10 @@ def _alias_index() -> dict[str, dict[str, Any]]:
     monkeypatch the watchlist should also clear this cache (``_alias_index.cache_clear()``)."""
     wl = settings().watchlist
     index: dict[str, dict[str, Any]] = {}
-    for kind, records in (("company", wl.get("companies", []) or []), ("program", wl.get("programs", []) or [])):
+    for kind, records in (
+        ("company", wl.get("companies", []) or []),
+        ("program", wl.get("programs", []) or []),
+    ):
         for rec in records:
             canonical = {
                 "name": rec.get("name", ""),
@@ -189,22 +192,66 @@ def canonical_name_and_kind(name: str, kind: str) -> tuple[str, str]:
 # what actually merges "צבא ארה\"ב" / "צבא ארצות הברית" (US Army), "הצי האמריקאי" / "חיל הים
 # האמריקאי" (US Navy), etc. into one canonical entity going forward and in the repair script.
 _CURATED_ORG_RECORDS: list[dict[str, Any]] = [
-    {"name": "US Army", "country": "US", "aliases": ["U.S. Army", "United States Army", 'צבא ארה"ב', "צבא ארצות הברית", "הצבא האמריקאי"]},
-    {"name": "US Navy", "country": "US", "aliases": ["U.S. Navy", "United States Navy", "חיל הים האמריקאי", "הצי האמריקאי"]},
-    {"name": "US Air Force", "country": "US", "aliases": ["USAF", "U.S. Air Force", "United States Air Force", "חיל האוויר האמריקאי"]},
-    {"name": "US Marine Corps", "country": "US", "aliases": ["USMC", "U.S. Marine Corps", "United States Marine Corps", "חיל הנחתים האמריקאי"]},
-    {"name": "US Space Force", "country": "US", "aliases": ["USSF", "United States Space Force", "חיל החלל האמריקאי"]},
-    {"name": "US Coast Guard", "country": "US", "aliases": ["USCG", "United States Coast Guard", "משמר החופים האמריקאי"]},
+    {
+        "name": "US Army",
+        "country": "US",
+        "aliases": ["U.S. Army", "United States Army", 'צבא ארה"ב', "צבא ארצות הברית", "הצבא האמריקאי"],
+    },
+    {
+        "name": "US Navy",
+        "country": "US",
+        "aliases": ["U.S. Navy", "United States Navy", "חיל הים האמריקאי", "הצי האמריקאי"],
+    },
+    {
+        "name": "US Air Force",
+        "country": "US",
+        "aliases": ["USAF", "U.S. Air Force", "United States Air Force", "חיל האוויר האמריקאי"],
+    },
+    {
+        "name": "US Marine Corps",
+        "country": "US",
+        "aliases": ["USMC", "U.S. Marine Corps", "United States Marine Corps", "חיל הנחתים האמריקאי"],
+    },
+    {
+        "name": "US Space Force",
+        "country": "US",
+        "aliases": ["USSF", "United States Space Force", "חיל החלל האמריקאי"],
+    },
+    {
+        "name": "US Coast Guard",
+        "country": "US",
+        "aliases": ["USCG", "United States Coast Guard", "משמר החופים האמריקאי"],
+    },
     {"name": "US National Guard", "country": "US", "aliases": ["National Guard", "המשמר הלאומי האמריקאי"]},
-    {"name": "US Department of Defense", "country": "US", "aliases": ["DoD", "U.S. DoD", "Pentagon", "The Pentagon", "משרד ההגנה האמריקאי", 'משרד ההגנה של ארה"ב', "הפנטגון"]},
+    {
+        "name": "US Department of Defense",
+        "country": "US",
+        "aliases": [
+            "DoD",
+            "U.S. DoD",
+            "Pentagon",
+            "The Pentagon",
+            "משרד ההגנה האמריקאי",
+            'משרד ההגנה של ארה"ב',
+            "הפנטגון",
+        ],
+    },
     {"name": "DIU", "country": "US", "aliases": ["Defense Innovation Unit"]},
     {"name": "DARPA", "country": "US", "aliases": ["Defense Advanced Research Projects Agency"]},
-    {"name": "DHS", "country": "US", "aliases": ["Department of Homeland Security", "משרד הביטחון הפנים האמריקאי"]},
+    {
+        "name": "DHS",
+        "country": "US",
+        "aliases": ["Department of Homeland Security", "משרד הביטחון הפנים האמריקאי"],
+    },
     {"name": "DIA", "country": "US", "aliases": ["Defense Intelligence Agency"]},
     {"name": "CIA", "country": "US", "aliases": ["Central Intelligence Agency"]},
     {"name": "FBI", "country": "US", "aliases": ["Federal Bureau of Investigation"]},
     {"name": "IDF", "country": "IL", "aliases": ["Israel Defense Forces", 'צה"ל', "צבא ההגנה לישראל"]},
-    {"name": "Israeli Ministry of Defense", "country": "IL", "aliases": ["MoD Israel", "משרד הביטחון", "משרד הביטחון הישראלי"]},
+    {
+        "name": "Israeli Ministry of Defense",
+        "country": "IL",
+        "aliases": ["MoD Israel", "משרד הביטחון", "משרד הביטחון הישראלי"],
+    },
     {"name": "Government of Israel", "country": "IL", "aliases": ["ממשלת ישראל"]},
     {"name": "Mossad", "country": "IL", "aliases": ["המוסד"]},
     {"name": "Shin Bet", "country": "IL", "aliases": ['שב"כ', "שירות הביטחון הכללי"]},
@@ -213,14 +260,26 @@ _CURATED_ORG_RECORDS: list[dict[str, Any]] = [
     {"name": "Bundeswehr", "country": "DE", "aliases": ["German Armed Forces", "הצבא הגרמני"]},
     {"name": "German Federal Ministry of Defence", "country": "DE", "aliases": ["BMVg", "משרד ההגנה הגרמני"]},
     {"name": "French Armed Forces", "country": "FR", "aliases": ["Armée française", "הצבא הצרפתי"]},
-    {"name": "UK Ministry of Defence", "country": "UK", "aliases": ["MoD UK", "British Ministry of Defence", "משרד ההגנה הבריטי"]},
+    {
+        "name": "UK Ministry of Defence",
+        "country": "UK",
+        "aliases": ["MoD UK", "British Ministry of Defence", "משרד ההגנה הבריטי"],
+    },
     {"name": "Royal Navy", "country": "UK", "aliases": ["הצי המלכותי הבריטי"]},
     {"name": "Royal Air Force", "country": "UK", "aliases": ["RAF", "חיל האוויר המלכותי הבריטי"]},
     {"name": "British Army", "country": "UK", "aliases": ["הצבא הבריטי"]},
-    {"name": "Ukrainian Armed Forces", "country": "UA", "aliases": ["Armed Forces of Ukraine", "הצבא האוקראיני", "הכוחות המזוינים של אוקראינה"]},
+    {
+        "name": "Ukrainian Armed Forces",
+        "country": "UA",
+        "aliases": ["Armed Forces of Ukraine", "הצבא האוקראיני", "הכוחות המזוינים של אוקראינה"],
+    },
     {"name": "Russian Armed Forces", "country": "RU", "aliases": ["הצבא הרוסי"]},
     {"name": "Japan Self-Defense Forces", "country": "JP", "aliases": ["JSDF", "כוחות ההגנה העצמית של יפן"]},
-    {"name": "South Korean Armed Forces", "country": "KR", "aliases": ["ROK Armed Forces", "הצבא הדרום קוריאני"]},
+    {
+        "name": "South Korean Armed Forces",
+        "country": "KR",
+        "aliases": ["ROK Armed Forces", "הצבא הדרום קוריאני"],
+    },
     {"name": "Taiwan Armed Forces", "country": "TW", "aliases": ["הצבא הטייוואני"]},
     {"name": "Indian Ministry of Defence", "country": "IN", "aliases": ["MoD India", "משרד ההגנה ההודי"]},
     {"name": "Indian Armed Forces", "country": "IN", "aliases": ["הצבא ההודי"]},
@@ -241,7 +300,13 @@ def _curated_org_index() -> dict[str, dict[str, Any]]:
     to ``kind="org"``."""
     index: dict[str, dict[str, Any]] = {}
     for rec in _CURATED_ORG_RECORDS:
-        canonical = {"name": rec["name"], "kind": "org", "country": rec.get("country"), "aliases": list(rec.get("aliases") or []), "focus": []}
+        canonical = {
+            "name": rec["name"],
+            "kind": "org",
+            "country": rec.get("country"),
+            "aliases": list(rec.get("aliases") or []),
+            "focus": [],
+        }
         for surface in [rec["name"], *canonical["aliases"]]:
             key = normalize_name_key(surface)
             if key:
@@ -320,18 +385,27 @@ def resolve_country_name(name: str) -> str | None:
 # an existing entity row is spelled in Hebrew, that transliteration too); values are the same
 # country-code convention as `config/watchlist.yaml` (ISO-ish, "EU" for pan-European primes).
 _COMPANY_COUNTRY_MAP: dict[str, str] = {
-    "rolls-royce": "UK", "rolls royce": "UK", "רולס-רויס": "UK", "רולס רויס": "UK",
-    "thyssenkrupp": "DE", "תיסנקרופ": "DE",
-    "baykar": "TR", "באייקר baykar": "TR", "באייקר": "TR",
+    "rolls-royce": "UK",
+    "rolls royce": "UK",
+    "רולס-רויס": "UK",
+    "רולס רויס": "UK",
+    "thyssenkrupp": "DE",
+    "תיסנקרופ": "DE",
+    "baykar": "TR",
+    "באייקר baykar": "TR",
+    "באייקר": "TR",
     "boeing": "US",
     "general dynamics": "US",
     "bae systems": "UK",
     "textron": "US",
     "general atomics": "US",
     "leidos": "US",
-    "palantir": "US", "palantir technologies": "US",
-    "kratos defense": "US", "kratos": "US",
-    "diehl defence": "DE", "diehl": "DE",
+    "palantir": "US",
+    "palantir technologies": "US",
+    "kratos defense": "US",
+    "kratos": "US",
+    "diehl defence": "DE",
+    "diehl": "DE",
     "knds": "DE",
     "nexter": "FR",
     "cmi defence": "BE",
@@ -339,7 +413,8 @@ _COMPANY_COUNTRY_MAP: dict[str, str] = {
     "indra": "ES",
     "embraer": "BR",
     "denel": "ZA",
-    "st engineering": "SG", "singapore technologies engineering": "SG",
+    "st engineering": "SG",
+    "singapore technologies engineering": "SG",
     "hyundai rotem": "KR",
     "doosan": "KR",
     "israel shipyards": "IL",
@@ -348,21 +423,26 @@ _COMPANY_COUNTRY_MAP: dict[str, str] = {
     "roboteam": "IL",
     "percepto": "IL",
     "simlat": "IL",
-    "robin radar systems": "NL", "robin radar": "NL",
+    "robin radar systems": "NL",
+    "robin radar": "NL",
     "detect": "US",
     "echodyne": "US",
     "droneshield": "AU",
     "qinetiq": "UK",
     "ultra electronics": "UK",
-    "chemring group": "UK", "chemring": "UK",
+    "chemring group": "UK",
+    "chemring": "UK",
     "meggitt": "UK",
     "cobham": "UK",
-    "dassault aviation": "FR", "dassault": "FR",
-    "airbus": "EU", "airbus defence and space": "EU",
+    "dassault aviation": "FR",
+    "dassault": "FR",
+    "airbus": "EU",
+    "airbus defence and space": "EU",
     "naval group": "FR",
     "fincantieri": "IT",
     "damen": "NL",
-    "babcock international": "UK", "babcock": "UK",
+    "babcock international": "UK",
+    "babcock": "UK",
     "honeywell": "US",
     "ge aerospace": "US",
     "imi systems": "IL",
@@ -387,8 +467,24 @@ def resolve_company_country(name: str) -> str | None:
 # so a real, specific, recognised entity is never rejected just because a keyword happens to
 # appear inside it.
 _GENERIC_HEBREW_KEYWORDS: tuple[str, ...] = (
-    "שוק", "תעשיי", "סטארט", "לקוח", "תמונ", "מפעיל", "איומ", "מלחמ", "מצר",
-    "משבר", "משקיע", "תשתי", "אבטח", "ספק", "תצוג", "סביב", "חברות", "תחום",
+    "שוק",
+    "תעשיי",
+    "סטארט",
+    "לקוח",
+    "תמונ",
+    "מפעיל",
+    "איומ",
+    "מלחמ",
+    "מצר",
+    "משבר",
+    "משקיע",
+    "תשתי",
+    "אבטח",
+    "ספק",
+    "תצוג",
+    "סביב",
+    "חברות",
+    "תחום",
     "של מדינה",
 )
 

@@ -118,7 +118,9 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
     def _reject() -> JSONResponse:
         return JSONResponse(
             status_code=413,
-            content={"error": {"code": "payload_too_large", "message_he": "גוף הבקשה גדול מדי", "detail": None}},
+            content={
+                "error": {"code": "payload_too_large", "message_he": "גוף הבקשה גדול מדי", "detail": None}
+            },
         )
 
 

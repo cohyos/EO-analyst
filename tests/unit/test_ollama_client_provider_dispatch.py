@@ -57,7 +57,9 @@ class TestResolveProvider:
         assert oc._resolve_provider("agy:gemini-3.8-flash-medium") == "agy:gemini-3.8-flash-medium"
 
     def test_none_falls_back_to_configured_default(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(oc, "settings", lambda: _fake_settings(interactive_default="claude:claude-sonnet-5"))
+        monkeypatch.setattr(
+            oc, "settings", lambda: _fake_settings(interactive_default="claude:claude-sonnet-5")
+        )
         monkeypatch.delenv("EOA_PIPELINE", raising=False)
         assert oc._resolve_provider(None) == "claude:claude-sonnet-5"
 
@@ -108,7 +110,12 @@ class TestChatDispatch:
         monkeypatch.setattr(
             "eoa.llm.providers.cli.CliProvider.chat",
             lambda self, messages, **kw: ProviderResult(
-                content="PONG", model="gemini-3.8-flash-medium", provider="agy", duration_ms=10, prompt_chars=5, usage={}
+                content="PONG",
+                model="gemini-3.8-flash-medium",
+                provider="agy",
+                duration_ms=10,
+                prompt_chars=5,
+                usage={},
             ),
         )
         # log_llm_call touches the DB -- swallow it so this stays a pure unit test.
@@ -152,7 +159,13 @@ class TestChatDispatch:
             raise AssertionError("cloud CLI must never be reached when EOA_PIPELINE=1")
 
         monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.chat", boom)
-        monkeypatch.setattr(oc, "gate", lambda: SimpleNamespace(acquire=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop-here-ollama-path-reached"))))
+        monkeypatch.setattr(
+            oc,
+            "gate",
+            lambda: SimpleNamespace(
+                acquire=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop-here-ollama-path-reached"))
+            ),
+        )
         with pytest.raises(RuntimeError, match="stop-here-ollama-path-reached"):
             oc.chat("light", [{"role": "user", "content": "ping"}], provider="agy")
 
@@ -269,7 +282,11 @@ class TestPipelineChainDispatch:
 
         monkeypatch.setattr(oc, "_dispatch_chain", boom)
         monkeypatch.setattr(
-            oc, "gate", lambda: SimpleNamespace(acquire=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ollama-path")))
+            oc,
+            "gate",
+            lambda: SimpleNamespace(
+                acquire=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ollama-path"))
+            ),
         )
         with pytest.raises(RuntimeError, match="ollama-path"):
             oc.chat("resident", [{"role": "user", "content": "hi"}])
@@ -278,9 +295,7 @@ class TestPipelineChainDispatch:
         chains = {"resident": [ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium")]}
         monkeypatch.setattr(oc, "settings", lambda: _fake_settings(mode="cloud", chains=chains))
         monkeypatch.setenv("EOA_PIPELINE", "1")
-        monkeypatch.setattr(
-            "eoa.llm.providers.cli.CliProvider.is_available", lambda self: True
-        )
+        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider.is_available", lambda self: True)
         monkeypatch.setattr(
             "eoa.llm.providers.cli.CliProvider.chat",
             lambda self, messages, **kw: ProviderResult(
@@ -313,7 +328,9 @@ class TestPipelineChainDispatch:
         monkeypatch.setattr(
             oc,
             "gate",
-            lambda: SimpleNamespace(acquire=lambda *a, **k: SimpleNamespace(ollama="dictalm3_12b", key="resident", ctx_max=8192)),
+            lambda: SimpleNamespace(
+                acquire=lambda *a, **k: SimpleNamespace(ollama="dictalm3_12b", key="resident", ctx_max=8192)
+            ),
         )
 
         class _FakeResp:
@@ -353,6 +370,8 @@ class TestChatStructuredProviderThreading:
             return oc.ChatResult(content='{"ok": true}')
 
         monkeypatch.setattr(oc, "chat", fake_chat)
-        result = oc.chat_structured("light", Out, [{"role": "user", "content": "hi"}], provider="claude:claude-sonnet-5")
+        result = oc.chat_structured(
+            "light", Out, [{"role": "user", "content": "hi"}], provider="claude:claude-sonnet-5"
+        )
         assert result.ok is True
         assert seen_providers == ["claude:claude-sonnet-5"]

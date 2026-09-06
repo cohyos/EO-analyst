@@ -79,21 +79,34 @@ _BD_NUM_PREDICT = 16000
 # actually host EO/IR-relevant defense conferences the tracker seeds. Case-insensitive substring
 # match against ``city``/``venue``/``name``.
 _CONFERENCE_CITY_TERRITORY: dict[str, str] = {
-    "washington": "US", "national harbor": "US", "orlando": "US", "las vegas": "US",
-    "huntsville": "US", "arlington": "US", "tampa": "US", "san diego": "US",
-    "tel aviv": "IL", "herzliya": "IL", "jerusalem": "IL",
-    "london": "GB", "farnborough": "GB",
+    "washington": "US",
+    "national harbor": "US",
+    "orlando": "US",
+    "las vegas": "US",
+    "huntsville": "US",
+    "arlington": "US",
+    "tampa": "US",
+    "san diego": "US",
+    "tel aviv": "IL",
+    "herzliya": "IL",
+    "jerusalem": "IL",
+    "london": "GB",
+    "farnborough": "GB",
     "paris": "FR",
     "berlin": "DE",
-    "abu dhabi": "AE", "dubai": "AE",
-    "seoul": "KR", "goyang": "KR",
+    "abu dhabi": "AE",
+    "dubai": "AE",
+    "seoul": "KR",
+    "goyang": "KR",
     "tokyo": "JP",
     "singapore": "SG",
     "athens": "GR",
     "warsaw": "PL",
     "riyadh": "SA",
-    "canberra": "AU", "adelaide": "AU",
-    "new delhi": "IN", "bengaluru": "IN",
+    "canberra": "AU",
+    "adelaide": "AU",
+    "new delhi": "IN",
+    "bengaluru": "IN",
 }
 
 
@@ -272,11 +285,15 @@ def collect_platform_events(
     out: list[dict[str, Any]] = []
     for ev in rows:
         text = " ".join(
-            str(x) for x in (ev.get("title"), ev.get("item_title"), ev.get("clean_text"), ev.get("summary_he")) if x
+            str(x)
+            for x in (ev.get("title"), ev.get("item_title"), ev.get("clean_text"), ev.get("summary_he"))
+            if x
         )
         match = next((p for p in platforms if p.matches(text)), None)
         parties = ev.get("parties") or []
-        vendor = next((p for p in parties if p != ev.get("customer")), None) or (parties[0] if parties else None)
+        vendor = next((p for p in parties if p != ev.get("customer")), None) or (
+            parties[0] if parties else None
+        )
         out.append(
             {
                 "item_id": ev.get("item_id"),
@@ -485,7 +502,11 @@ def collect_dormant_watchlist_competitors(
     silently dropped, so the analyst knows they were checked and simply had nothing to report."""
     code = normalize_country(territory)
     rows = _fetchall("SELECT name, country FROM entities WHERE kind = 'company' AND is_watchlist = true")
-    dormant = [r["name"] for r in rows if normalize_country(r.get("country")) == code and r["name"] not in active_names]
+    dormant = [
+        r["name"]
+        for r in rows
+        if normalize_country(r.get("country")) == code and r["name"] not in active_names
+    ]
     return dormant[:limit]
 
 
@@ -498,7 +519,13 @@ def format_competitors_block(competitors: list[dict[str, Any]]) -> str:
         return "לא זוהו מתחרים פעילים בטריטוריה זו בחלון הזמן שנבדק."
     lines: list[str] = []
     for c in competitors:
-        tag = " (תעשייה ישראלית)" if c["is_israeli_industry"] else " (מתחרה ברשימת המעקב)" if c.get("is_watchlist") else " (מתחרה)"
+        tag = (
+            " (תעשייה ישראלית)"
+            if c["is_israeli_industry"]
+            else " (מתחרה ברשימת המעקב)"
+            if c.get("is_watchlist")
+            else " (מתחרה)"
+        )
         lines.append(f"- {c['name']}{tag} | מדינה: {c.get('country') or '—'} | אזכורים: {c['mentions']}")
         for w in c.get("recent_wins") or []:
             amount = f"{w['amount_usd']:,.0f} {w.get('currency') or 'USD'}" if w.get("amount_usd") else "—"
@@ -568,7 +595,7 @@ def collect_conferences_for_territory(
     territory_rows = [r for r in rows if _conference_territory(r) == code]
     international_rows = sorted(
         (r for r in rows if _conference_territory(r) != code),
-        key=lambda r: (r.get("relevance") or 0),
+        key=lambda r: r.get("relevance") or 0,
         reverse=True,
     )[:international_limit]
     log.info(
@@ -711,21 +738,31 @@ def _synthetic_registry_entry(
     return next_n + 1
 
 
-def _extend_registry_with_tenders(citation_items: list[dict[str, Any]], data: dict[str, Any]) -> list[dict[str, Any]]:
+def _extend_registry_with_tenders(
+    citation_items: list[dict[str, Any]], data: dict[str, Any]
+) -> list[dict[str, Any]]:
     """Every tender/forecast gets its own registry row (F: without this the model has no valid
     citation for a tender/forecast-derived claim, which in practice produced uncited -- and once,
     degenerate/runaway -- generations, see ``format_tenders_block``)."""
     next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
     for t in data.get("tenders") or []:
         next_n = _synthetic_registry_entry(
-            citation_items, t, next_n,
-            title=t.get("title"), source_name=t.get("agency") or "מכרז", url=t.get("url"),
+            citation_items,
+            t,
+            next_n,
+            title=t.get("title"),
+            source_name=t.get("agency") or "מכרז",
+            url=t.get("url"),
             published_at=t.get("published_at"),
         )
     for f in data.get("forecasts") or []:
         next_n = _synthetic_registry_entry(
-            citation_items, f, next_n,
-            title=f.get("platform"), source_name="תחזית רכש", url=None,
+            citation_items,
+            f,
+            next_n,
+            title=f.get("platform"),
+            source_name="תחזית רכש",
+            url=None,
             published_at=f.get("created_at"),
         )
     return citation_items
@@ -739,8 +776,12 @@ def _extend_registry_with_conferences(
     next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
     for c in (data.get("territory") or []) + (data.get("international") or []):
         next_n = _synthetic_registry_entry(
-            citation_items, c, next_n,
-            title=c.get("name"), source_name=c.get("organizer") or "כנס", url=c.get("registration_url"),
+            citation_items,
+            c,
+            next_n,
+            title=c.get("name"),
+            source_name=c.get("organizer") or "כנס",
+            url=c.get("registration_url"),
             published_at=c.get("start_date"),
         )
     return citation_items
@@ -751,7 +792,9 @@ def _attach_win_citations(citation_items: list[dict[str, Any]], competitors: lis
     already in ``citation_items`` (``collect_active_competitors`` only looks among
     ``market_item_ids``) -- so each win reuses that item's existing ``n`` rather than getting a new
     synthetic registry row."""
-    id_to_n = {it["id"]: it["n"] for it in citation_items if it.get("id") is not None and it.get("n") is not None}
+    id_to_n = {
+        it["id"]: it["n"] for it in citation_items if it.get("id") is not None and it.get("n") is not None
+    }
     for c in competitors:
         for w in c.get("recent_wins") or []:
             w["n"] = id_to_n.get(w.get("item_id"))
@@ -1063,7 +1106,9 @@ def _run_qa(draft: BdTerritoryReportDraft, citation_items: list[dict[str, Any]])
         draft,
         citation_items,
         extra_sections=_qa_extra_sections(draft),
-        exempt_sections=[("סיכונים והנחות", draft.risks_assumptions_he)] if draft.risks_assumptions_he else None,
+        exempt_sections=[("סיכונים והנחות", draft.risks_assumptions_he)]
+        if draft.risks_assumptions_he
+        else None,
     )
 
 
@@ -1162,9 +1207,33 @@ _FRAGMENT_TRAILING_PUNCT = ".,!?:;\"'׳״)"
 # short entries like "יש" would otherwise false-match inside unrelated words (e.g. "ישירה").
 _FRAGMENT_VERB_HINTS = frozenset(
     {
-        "זכתה", "חתמה", "רכשה", "הודיעה", "השיקה", "נבחרה", "קיבלה", "סיפקה", "נחתם", "הוענק",
-        "צפויה", "מתכננת", "מפתחת", "מייצרת", "מספקת", "פועלת", "משתתפת", "מתמודדת", "ממליצים",
-        "מומלץ", "יש", "ניתן", "נדרש", "נמצא", "נמצאה", "קיים", "קיימת",
+        "זכתה",
+        "חתמה",
+        "רכשה",
+        "הודיעה",
+        "השיקה",
+        "נבחרה",
+        "קיבלה",
+        "סיפקה",
+        "נחתם",
+        "הוענק",
+        "צפויה",
+        "מתכננת",
+        "מפתחת",
+        "מייצרת",
+        "מספקת",
+        "פועלת",
+        "משתתפת",
+        "מתמודדת",
+        "ממליצים",
+        "מומלץ",
+        "יש",
+        "ניתן",
+        "נדרש",
+        "נמצא",
+        "נמצאה",
+        "קיים",
+        "קיימת",
     }
 )
 
@@ -1180,7 +1249,9 @@ def _starts_with_conjunction(sentence: str) -> bool:
         return False
     if word in _FRAGMENT_STANDALONE_CONJUNCTIONS:
         return True
-    return any(word.startswith(prefix) and len(word) > len(prefix) for prefix in _FRAGMENT_BOUND_CONJUNCTION_PREFIXES)
+    return any(
+        word.startswith(prefix) and len(word) > len(prefix) for prefix in _FRAGMENT_BOUND_CONJUNCTION_PREFIXES
+    )
 
 
 def _has_verb_hint(sentence: str) -> bool:
@@ -1352,8 +1423,12 @@ def _persist_report(
 
 
 def build_bd_territory(
-    territory: str, lookback_days: int = 90, *, period_end: dt.date | None = None,
-    role: str = "resident", interactive: bool = False,
+    territory: str,
+    lookback_days: int = 90,
+    *,
+    period_end: dt.date | None = None,
+    role: str = "resident",
+    interactive: bool = False,
 ) -> ReportPaths:
     """Collect -> draft -> perspective-gate -> QA-gate -> render docx/md/html -> persist, for one
     territory. BD-1 (docs/qa/findings_Q3_r2.md): the perspective gate runs *before* the citation
@@ -1375,11 +1450,16 @@ def build_bd_territory(
     _attach_win_citations(citation_items, competitors)
 
     items_block = format_market_items_block(items)
-    events_block = format_market_items_block([]) if not events else "\n".join(
-        f"[{ev.get('n', '—')}] {ev.get('platform_he')} | {ev.get('buyer')} <- {ev.get('vendor')} | "
-        f"{fmt_date(ev.get('date') or ev.get('published_at'))}"
-        for ev in events
-    ) or "לא זוהו אירועי רכש/פלטפורמות בטריטוריה זו בחלון הזמן."
+    events_block = (
+        format_market_items_block([])
+        if not events
+        else "\n".join(
+            f"[{ev.get('n', '—')}] {ev.get('platform_he')} | {ev.get('buyer')} <- {ev.get('vendor')} | "
+            f"{fmt_date(ev.get('date') or ev.get('published_at'))}"
+            for ev in events
+        )
+        or "לא זוהו אירועי רכש/פלטפורמות בטריטוריה זו בחלון הזמן."
+    )
     tenders_block = format_tenders_block(tenders_data)
     competitors_block = format_competitors_block(competitors)
     conferences_block = format_conferences_block(conferences_data)
@@ -1393,8 +1473,17 @@ def build_bd_territory(
     )
 
     draft = draft_bd_territory(
-        code, lookback_days, items_block, events_block, tenders_block, competitors_block, conferences_block,
-        has_items=bool(items), table_counts=table_counts, role=role, interactive=interactive,
+        code,
+        lookback_days,
+        items_block,
+        events_block,
+        tenders_block,
+        competitors_block,
+        conferences_block,
+        has_items=bool(items),
+        table_counts=table_counts,
+        role=role,
+        interactive=interactive,
     )
     draft = _cap_draft_lengths(_strip_placeholder_echoes(_drop_empty_sections(draft)))
 
@@ -1407,8 +1496,17 @@ def build_bd_territory(
                 actions=[a.action_he for a, _competitor in violations],
             )
             draft = _perspective_corrective_retry(
-                code, lookback_days, items_block, events_block, tenders_block, competitors_block,
-                conferences_block, draft, violations, role=role, interactive=interactive,
+                code,
+                lookback_days,
+                items_block,
+                events_block,
+                tenders_block,
+                competitors_block,
+                conferences_block,
+                draft,
+                violations,
+                role=role,
+                interactive=interactive,
             )
             draft = _cap_draft_lengths(_strip_placeholder_echoes(_drop_empty_sections(draft)))
             violations = _perspective_violations(draft, competitors)
@@ -1425,8 +1523,17 @@ def build_bd_territory(
     if not qa.passed and items:
         log.warning("bd_territory_qa_failed_retrying", territory=code, errors=qa.errors[:10])
         draft = _corrective_retry(
-            code, lookback_days, items_block, events_block, tenders_block, competitors_block, conferences_block,
-            draft, qa, role=role, interactive=interactive,
+            code,
+            lookback_days,
+            items_block,
+            events_block,
+            tenders_block,
+            competitors_block,
+            conferences_block,
+            draft,
+            qa,
+            role=role,
+            interactive=interactive,
         )
         draft = _cap_draft_lengths(_strip_placeholder_echoes(_drop_empty_sections(draft)))
         qa = _run_qa(draft, citation_items)
@@ -1500,15 +1607,28 @@ def build_bd_territory(
     validate_docx(docx_path)
 
     md_text = render_markdown(
-        draft, citation_items, [], period_end=end, qa=qa, title_text=title_text,
-        extra_sections=extra_sections, tables=tables or None,
+        draft,
+        citation_items,
+        [],
+        period_end=end,
+        qa=qa,
+        title_text=title_text,
+        extra_sections=extra_sections,
+        tables=tables or None,
     )
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(md_text, encoding="utf-8")
 
     html_text = render_html(
-        draft, citation_items, [], period_end=end, qa=qa, title_text=title_text,
-        extra_sections=extra_sections, tables=tables or None, include_toc=True,
+        draft,
+        citation_items,
+        [],
+        period_end=end,
+        qa=qa,
+        title_text=title_text,
+        extra_sections=extra_sections,
+        tables=tables or None,
+        include_toc=True,
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")

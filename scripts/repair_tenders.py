@@ -194,7 +194,9 @@ def main() -> None:
         print(f"  agency:       {b['agency']!r} -> {a['agency']!r}")
         print(f"  country:      {b['country']!r} -> {a['country']!r}")
         if r.get("extract_error"):
-            print(f"  (LLM extraction failed, dates/agency/country from domain-fallback only: {r['extract_error']})")
+            print(
+                f"  (LLM extraction failed, dates/agency/country from domain-fallback only: {r['extract_error']})"
+            )
 
     if args.dry_run:
         print("\n(dry run -- nothing written)")

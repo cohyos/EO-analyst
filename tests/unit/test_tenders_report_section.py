@@ -80,7 +80,7 @@ class TestTendersExtraSection:
 
     def test_body_lists_forecasts(self):
         section = tenders_extra_section({"open_tenders": [], "new_forecasts": [_forecast_row()]})
-        assert '55%' in section["body_he"] or "55%" in section["body_he"]
+        assert "55%" in section["body_he"] or "55%" in section["body_he"]
         assert 'כטב"ם MALE' in section["body_he"]
 
     def test_empty_data_still_returns_section(self):

@@ -72,9 +72,7 @@ class TestDatabaseSchema:
             pytest.skip(f"alembic heads failed: {heads_result.stderr[:200]}")
 
         head_revisions = {
-            line.replace("(head)", "").strip()
-            for line in heads_result.stdout.splitlines()
-            if line.strip()
+            line.replace("(head)", "").strip() for line in heads_result.stdout.splitlines() if line.strip()
         }
         assert head_revisions, "alembic heads returned no revisions"
         assert current_revision in head_revisions, (
@@ -141,9 +139,7 @@ class TestDatabaseSchema:
         """Verify AGE graph 'eo_graph' exists and Entity vertex count matches entities table."""
         # First check if AGE extension is available
         with db_conn.cursor() as cur:
-            cur.execute(
-                "SELECT installed_version FROM pg_available_extensions WHERE name = 'age' LIMIT 1"
-            )
+            cur.execute("SELECT installed_version FROM pg_available_extensions WHERE name = 'age' LIMIT 1")
             has_age = cur.fetchone() is not None
 
         if not has_age:
@@ -174,9 +170,7 @@ class TestDatabaseSchema:
                 entity_count = cur.fetchone()["cnt"]
 
             # They should match (within reason; vertex count >= entity count due to dedup logic)
-            assert (
-                vertex_count >= entity_count
-            ), f"Graph vertices {vertex_count} < entities {entity_count}"
+            assert vertex_count >= entity_count, f"Graph vertices {vertex_count} < entities {entity_count}"
         except Exception as exc:
             if "permission denied" in str(exc).lower() or "syntax error" in str(exc).lower():
                 pytest.skip(f"Cannot query AGE graph: {str(exc)[:100]}")
@@ -291,9 +285,9 @@ class TestApiEndpoints:
         body = r.json()
         # Per spec: list or {"conferences": [...]}
         if isinstance(body, dict):
-            assert "conferences" in body or any(
-                k in body for k in ["data", "items"]
-            ), "Expected conference data"
+            assert "conferences" in body or any(k in body for k in ["data", "items"]), (
+                "Expected conference data"
+            )
         else:
             assert isinstance(body, list), "Expected list or dict"
 

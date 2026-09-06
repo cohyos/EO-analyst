@@ -316,7 +316,9 @@ class TestRationaleDataBlockCaps:
 
     def test_prefers_summary_he_over_clean_text(self):
         cand = _candidate(trigger_item_ids=[1])
-        items = {1: _item_row(id=1, clean_text="RAW CLEAN TEXT SHOULD NOT APPEAR", summary_he="short summary")}
+        items = {
+            1: _item_row(id=1, clean_text="RAW CLEAN TEXT SHOULD NOT APPEAR", summary_he="short summary")
+        }
         block = _rationale_data_block(cand, items)
         assert "short summary" in block
         assert "RAW CLEAN TEXT SHOULD NOT APPEAR" not in block
@@ -411,7 +413,9 @@ class TestLlmRationaleGuarded:
     def test_resource_unavailable_propagates_without_retry(self):
         """A genuine availability failure (not a bad-output guard failure) must propagate straight
         through so forecast_tenders's own except ResourceUnavailable branch handles it."""
-        with patch("eoa.tenders.forecast._llm_rationale", side_effect=ResourceUnavailable("no vram")) as mock_llm:
+        with patch(
+            "eoa.tenders.forecast._llm_rationale", side_effect=ResourceUnavailable("no vram")
+        ) as mock_llm:
             with pytest.raises(ResourceUnavailable):
                 _llm_rationale_guarded(
                     _candidate(), 0.5, (dt.date(2026, 12, 1), dt.date(2027, 6, 1)), "data", role="resident"
@@ -536,7 +540,9 @@ class TestResolveBuyerCountry:
     def test_unknown_falls_back_to_rationale_mention(self):
         cand = _candidate(buyer_country="other", trigger_texts=["a contract was signed"])
         with patch("eoa.tenders.forecast._country_from_entities", return_value=None):
-            result = _resolve_buyer_country(cand, rationale_he="החוזה נחתם עבור חיל האוויר של גרמניה [item 10].")
+            result = _resolve_buyer_country(
+                cand, rationale_he="החוזה נחתם עבור חיל האוויר של גרמניה [item 10]."
+            )
         assert result == "DE"
 
     def test_still_unknown_stays_other(self):
@@ -569,7 +575,9 @@ class TestPlatformTypeContradiction:
         assert contradiction.key == "attack_helicopter"
 
     def test_unmapped_platform_key_never_flagged(self):
-        cand = _candidate(platform_key="c_uas_program", trigger_texts=["Apache attack helicopter also mentioned"])
+        cand = _candidate(
+            platform_key="c_uas_program", trigger_texts=["Apache attack helicopter also mentioned"]
+        )
         assert _platform_type_contradiction(cand, self._all_platforms()) is None
 
 
@@ -646,7 +654,7 @@ class TestRegenerateFlaggedForecasts:
             "buyer_country": "US",
             "trigger_event_id": 1,
             "trigger_item_id": 10,
-            "payload_need": "מטע\"ד",
+            "payload_need": 'מטע"ד',
             "candidate_vendors": ["Elbit"],
             "likelihood": 0.4,
             "window_from": dt.date(2026, 1, 1),
@@ -698,7 +706,7 @@ class TestRegenerateFlaggedForecasts:
             "buyer_country": "US",
             "trigger_event_id": 1,
             "trigger_item_id": 10,
-            "payload_need": "מטע\"ד",
+            "payload_need": 'מטע"ד',
             "candidate_vendors": [],
             "likelihood": 0.4,
             "window_from": dt.date(2026, 1, 1),
@@ -794,7 +802,9 @@ class TestUpsertForecastSourcesDedup:
     "item:N" entry more than once, even when `candidate.trigger_item_ids` itself has repeats
     (multiple triggering events landing on the same item)."""
 
-    def test_duplicate_trigger_item_ids_produce_deduped_sources(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_duplicate_trigger_item_ids_produce_deduped_sources(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         captured: dict = {}
 
         class _FakeCursor:

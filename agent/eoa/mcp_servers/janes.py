@@ -49,7 +49,9 @@ def _call(path: str, params: dict[str, Any]) -> str:
     if headers is None:
         return not_configured("JANES_API_KEY")
     url = f"{_base()}/{path.lstrip('/')}"
-    resp = http_get_json(url, params={k: v for k, v in params.items() if v not in (None, "")}, headers=headers)
+    resp = http_get_json(
+        url, params={k: v for k, v in params.items() if v not in (None, "")}, headers=headers
+    )
     if resp["status"] != 200:
         return json_out(
             {

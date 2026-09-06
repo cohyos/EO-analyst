@@ -151,7 +151,7 @@ class TestFindWatchlistAliasesInText:
         assert en.find_watchlist_aliases_in_text(text) == ["Elbit"]
 
     def test_word_boundary_avoids_partial_match(self) -> None:
-        """"IAI" (an alias-free watchlist company via `ELTA`) must not match inside an unrelated
+        """ "IAI" (an alias-free watchlist company via `ELTA`) must not match inside an unrelated
         longer word."""
         assert "IAI" not in en.find_watchlist_aliases_in_text("This is trIAIl text with no real hit.")
 
@@ -165,10 +165,15 @@ class TestResolveCountryName:
     @pytest.mark.parametrize(
         ("surface", "expected"),
         [
-            ("Iran", "Iran"), ("איראן", "Iran"),
-            ("United States", "United States"), ('ארה"ב', "United States"), ("ארצות הברית", "United States"),
-            ("Greece", "Greece"), ("יוון", "Greece"),
-            ("Japan", "Japan"), ("יפן", "Japan"),
+            ("Iran", "Iran"),
+            ("איראן", "Iran"),
+            ("United States", "United States"),
+            ('ארה"ב', "United States"),
+            ("ארצות הברית", "United States"),
+            ("Greece", "Greece"),
+            ("יוון", "Greece"),
+            ("Japan", "Japan"),
+            ("יפן", "Japan"),
         ],
     )
     def test_resolves_known_country(self, surface: str, expected: str) -> None:
@@ -193,8 +198,15 @@ class TestIsGenericNonEntity:
     @pytest.mark.parametrize(
         "name",
         [
-            "השוק הביטחוני", "תעשייה", "סטארט-אפים", "לקוחות בינלאומיים", "תמונות תרמיות",
-            "מפעילים בשטח", "איומים בקבוצת משקל 3", "מלחמת איראן-עיראק", "מצר הורמוז",
+            "השוק הביטחוני",
+            "תעשייה",
+            "סטארט-אפים",
+            "לקוחות בינלאומיים",
+            "תמונות תרמיות",
+            "מפעילים בשטח",
+            "איומים בקבוצת משקל 3",
+            "מלחמת איראן-עיראק",
+            "מצר הורמוז",
             "יפן, דנמרק, גרמניה",
         ],
     )

@@ -136,9 +136,7 @@ class TestNightSummary24hWindow:
 class TestRecentErrors:
     """U2: backs the Morning "שגיאות אחרונות" drawer."""
 
-    def test_extracts_message_from_detail_and_skips_traceback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_extracts_message_from_detail_and_skips_traceback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [
             {
                 "id": 5,

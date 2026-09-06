@@ -26,7 +26,11 @@ class OllamaProvider:
     def list_models(self) -> list[str]:
         """Config roles that resolve to an Ollama model (the picker shows roles, not raw model ids)."""
         s = settings()
-        return [role for role, key in s.models.items() if key and s.registry.models.get(key, None) and s.registry.models[key].runtime == "ollama"]
+        return [
+            role
+            for role, key in s.models.items()
+            if key and s.registry.models.get(key, None) and s.registry.models[key].runtime == "ollama"
+        ]
 
     def chat(
         self,

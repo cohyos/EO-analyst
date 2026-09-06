@@ -20,7 +20,7 @@ def _item(**overrides):
         "id": 46,
         "title": "Rheinmetall and GDLS deliver first XM30 prototypes to US Army",
         "entities_mentioned": ["Rheinmetall", "GDLS"],
-        "summary_he": "ריינמטל ו-GDLS מסרו את אבי-הטיפוס הראשונים של ה-XM30 לצבא ארה\"ב",
+        "summary_he": 'ריינמטל ו-GDLS מסרו את אבי-הטיפוס הראשונים של ה-XM30 לצבא ארה"ב',
     }
     base.update(overrides)
     return base
@@ -39,7 +39,7 @@ class TestQuestionIsValid:
 
     def test_accepts_self_contained_question_with_entities(self) -> None:
         question = (
-            "מהו המחיר ליחידה של אב-הטיפוס XM30 שמסרו Rheinmetall ו-GDLS לצבא ארה\"ב, "
+            'מהו המחיר ליחידה של אב-הטיפוס XM30 שמסרו Rheinmetall ו-GDLS לצבא ארה"ב, '
             "ומי היו המציעים המפסידים במכרז?"
         )
         assert triage._question_is_valid(question, _item())
@@ -55,10 +55,12 @@ class TestQuestionIsValid:
 class TestEnsureValidInvestigationQuestion:
     def test_valid_question_passed_through_unchanged(self) -> None:
         good_q = (
-            "מהו המחיר ליחידה של אב-הטיפוס XM30 שמסרו Rheinmetall ו-GDLS לצבא ארה\"ב, "
+            'מהו המחיר ליחידה של אב-הטיפוס XM30 שמסרו Rheinmetall ו-GDLS לצבא ארה"ב, '
             "ומי היו המציעים המפסידים במכרז?"
         )
-        q, seed = triage._ensure_valid_investigation_question(_item(), good_q, "Rheinmetall GDLS XM30 unit price")
+        q, seed = triage._ensure_valid_investigation_question(
+            _item(), good_q, "Rheinmetall GDLS XM30 unit price"
+        )
         assert q == good_q
         assert seed == "Rheinmetall GDLS XM30 unit price"
 
@@ -78,7 +80,7 @@ class TestEnsureValidInvestigationQuestion:
 
     def test_short_seed_replaced_with_entity_based_fallback(self) -> None:
         good_q = (
-            "מהו המחיר ליחידה של אב-הטיפוס XM30 שמסרו Rheinmetall ו-GDLS לצבא ארה\"ב, "
+            'מהו המחיר ליחידה של אב-הטיפוס XM30 שמסרו Rheinmetall ו-GDLS לצבא ארה"ב, '
             "ומי היו המציעים המפסידים במכרז?"
         )
         _, seed = triage._ensure_valid_investigation_question(_item(), good_q, "XM30")

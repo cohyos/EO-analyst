@@ -149,10 +149,10 @@ def test_split_runs_bracket_pair_stays_symmetric():
     '(' in the Hebrew run (it follows Hebrew) but the closing ')' in the Latin run (it follows the
     English words) -- an asymmetric split. Both brackets must land in the same (Hebrew/RTL) run.
     Uses the exact heading from the finding (gershayim ״, U+05F4, is itself a Hebrew-range char)."""
-    text = 'פודים ומטע״דים אוויריים (Airborne Pods & Payloads)'
+    text = "פודים ומטע״דים אוויריים (Airborne Pods & Payloads)"
     runs = db.split_runs(text)
     assert runs == [
-        ("he", 'פודים ומטע״דים אוויריים ('),
+        ("he", "פודים ומטע״דים אוויריים ("),
         ("other", "Airborne Pods & Payloads"),
         ("he", ")"),
     ]
@@ -174,7 +174,7 @@ def test_bidi_html_renders_symmetric_bracket_pair():
     """The HTML export (`_bidi_html`, used for md/html reports) shares `split_runs` -- verify the
     fix actually produces the bidi-safe markup the finding asked for: both parens outside the
     <bdi dir="ltr"> span, not the closing one trailing inside it."""
-    html_out = db._bidi_html('פודים ומטע״דים אוויריים (Airborne Pods & Payloads)')
+    html_out = db._bidi_html("פודים ומטע״דים אוויריים (Airborne Pods & Payloads)")
     assert '(<bdi dir="ltr">Airborne Pods &amp; Payloads</bdi>)' in html_out
 
 
@@ -323,10 +323,7 @@ def test_build_docx_citation_is_internal_hyperlink_to_appendix_bookmark(built_do
     """F23: a `[n]` citation marker is a real internal hyperlink (``w:anchor``) to the bookmark on
     its row in the sources appendix, not just superscript text."""
     citation_hyperlinks = [
-        h
-        for p in _all_paragraphs(built_doc)
-        for h in p.hyperlinks
-        if h.fragment.startswith("src_")
+        h for p in _all_paragraphs(built_doc) for h in p.hyperlinks if h.fragment.startswith("src_")
     ]
     assert citation_hyperlinks
     fragments = {h.fragment for h in citation_hyperlinks}
@@ -488,7 +485,9 @@ def test_render_markdown_contains_citations_and_appendix(fixture_draft, fixture_
     assert "https://example.com/news/elbit-pod-contract" in md
 
 
-def test_render_markdown_citations_are_links_to_appendix_anchors(fixture_draft, fixture_items, fixture_events):
+def test_render_markdown_citations_are_links_to_appendix_anchors(
+    fixture_draft, fixture_items, fixture_events
+):
     """F23: `[n]` in markdown body text becomes a real `[n](#src-n)` link, and the appendix row
     carries a matching `<a id="src-n">` anchor for it to land on."""
     md = db.render_markdown(fixture_draft, fixture_items, fixture_events, period_end=dt.date(2026, 9, 4))

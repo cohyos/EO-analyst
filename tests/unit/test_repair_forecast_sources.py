@@ -33,7 +33,10 @@ class TestDedupe:
 
     def test_preserves_order_of_first_occurrence(self) -> None:
         assert rfs._dedupe(["item:815", "item:257", "item:58", "item:58", "item:105"]) == [
-            "item:815", "item:257", "item:58", "item:105",
+            "item:815",
+            "item:257",
+            "item:58",
+            "item:105",
         ]
 
     def test_no_duplicates_returns_equal_list(self) -> None:

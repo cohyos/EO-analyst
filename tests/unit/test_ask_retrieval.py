@@ -43,7 +43,9 @@ def _item(
 
 
 class TestAskRetrieveContextAlwaysIncluded:
-    def test_explicit_context_item_included_even_if_quarantined(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_explicit_context_item_included_even_if_quarantined(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The user attached this item on purpose -- it must never be dropped by a security/scope filter."""
         quarantined = _item(1, title="XM30 item", security_status="quarantined", domain="out_of_scope")
 
@@ -62,7 +64,9 @@ class TestAskRetrieveContextAlwaysIncluded:
         assert out[0]["id"] == 1
         assert out[0]["_is_context"] is True
 
-    def test_context_item_survives_even_with_no_matching_entity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_context_item_survives_even_with_no_matching_entity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         item = _item(7, title="Rheinmetall XM30")
         monkeypatch.setattr(
             services,
@@ -70,7 +74,9 @@ class TestAskRetrieveContextAlwaysIncluded:
             lambda q, p=None: item if "FROM items WHERE id" in q else None,
         )
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: (_ for _ in ()).throw(RuntimeError("no embed")))
+        monkeypatch.setattr(
+            services.ollama_client, "embed", lambda texts: (_ for _ in ()).throw(RuntimeError("no embed"))
+        )
 
         out = services.ask_retrieve("מה זה XM30?", [7], [])
         assert [r["id"] for r in out] == [7]
@@ -112,7 +118,9 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         """Live-verified 2026-09-05: a Cloudflare challenge page fetched as `clean_text` with
         `security_status='clean'` still has `summary_he=None` because it never reached analyze --
         that gap, not text presence, is what actually distinguishes a fetch failure."""
-        unsummarized = _item(6, title="Some item", clean_text="raw text but never analyzed yet", summary_he="")
+        unsummarized = _item(
+            6, title="Some item", clean_text="raw text but never analyzed yet", summary_he=""
+        )
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: unsummarized if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
         monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
@@ -121,7 +129,9 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         out = services.ask_retrieve("מה קורה?", [], [])
         assert out == []
 
-    def test_vector_retrieval_excludes_cloudflare_challenge_page(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_vector_retrieval_excludes_cloudflare_challenge_page(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The exact live U9 finding: Safran press-room fetches that were actually bot-block pages,
         with a summary_he a hypothetical future pipeline change might still populate -- the content
         heuristic is defense in depth on top of the summary_he gate."""
@@ -140,7 +150,9 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         assert out == []
 
     def test_vector_retrieval_keeps_clean_in_scope_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        clean = _item(5, title="Elbit item", clean_text="some text about the program", summary_he="תקציר על אלביט")
+        clean = _item(
+            5, title="Elbit item", clean_text="some text about the program", summary_he="תקציר על אלביט"
+        )
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: clean if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
         monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])

@@ -91,7 +91,9 @@ def tenders_extra_section(data: dict[str, Any]) -> dict[str, Any]:
 
     lines: list[str] = []
     if open_tenders:
-        lines.append(f"{len(open_tenders)} מכרזים/RFI/RFP פתוחים הרלוונטיים לתחומי EO/IR/CV, ממוינים לפי דדליין:")
+        lines.append(
+            f"{len(open_tenders)} מכרזים/RFI/RFP פתוחים הרלוונטיים לתחומי EO/IR/CV, ממוינים לפי דדליין:"
+        )
         for t in open_tenders[:10]:
             lines.append(
                 f"- {t.get('title') or '—'} | {t.get('agency') or t.get('country') or '—'} | "

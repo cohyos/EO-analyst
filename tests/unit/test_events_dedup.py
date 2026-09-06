@@ -98,12 +98,22 @@ class TestNarrativeEventTitleRejection:
 
     def test_no_verb_but_has_amount_is_accepted(self) -> None:
         ev = EventOut(
-            kind="investment", title="סבב גיוס של 41 מיליון דולר", amount_usd=41_000_000, summary_he="x", confidence=0.5
+            kind="investment",
+            title="סבב גיוס של 41 מיליון דולר",
+            amount_usd=41_000_000,
+            summary_he="x",
+            confidence=0.5,
         )
         assert _is_narrative_event_title(ev.title, ev) is False
 
     def test_no_verb_but_has_party_is_accepted(self) -> None:
-        ev = EventOut(kind="partnership", title="שיתוף פעולה בין רפאל לאלביט", parties=["Rafael", "Elbit"], summary_he="x", confidence=0.5)
+        ev = EventOut(
+            kind="partnership",
+            title="שיתוף פעולה בין רפאל לאלביט",
+            parties=["Rafael", "Elbit"],
+            summary_he="x",
+            confidence=0.5,
+        )
         assert _is_narrative_event_title(ev.title, ev) is False
 
     def test_empty_title_not_flagged(self) -> None:
@@ -111,7 +121,13 @@ class TestNarrativeEventTitleRejection:
         assert _is_narrative_event_title(ev.title, ev) is False
 
     def test_ordinary_contract_award_title_accepted(self) -> None:
-        ev = EventOut(kind="contract_award", title="Elbit wins pod contract", customer="USAF", summary_he="x", confidence=0.8)
+        ev = EventOut(
+            kind="contract_award",
+            title="Elbit wins pod contract",
+            customer="USAF",
+            summary_he="x",
+            confidence=0.8,
+        )
         assert _is_narrative_event_title(ev.title, ev) is False
 
 
@@ -119,9 +135,7 @@ class TestPersistAnalysisSkipsNarrativeEvents:
     def test_narrative_event_never_reaches_insert_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[dict] = []
         monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", lambda *a, **k: None)
-        monkeypatch.setattr(
-            "eoa.pipeline.analyze.insert_event", lambda **kw: (calls.append(kw), 1)[1]
-        )
+        monkeypatch.setattr("eoa.pipeline.analyze.insert_event", lambda **kw: (calls.append(kw), 1)[1])
         monkeypatch.setattr("eoa.pipeline.analyze.upsert_entity", lambda **kw: 1)
 
         out = AnalyzeOut(
@@ -130,7 +144,13 @@ class TestPersistAnalysisSkipsNarrativeEvents:
             key_facts=[],
             events=[
                 EventOut(kind="other", title="השלכות ההשקעה על השוק", summary_he="x", confidence=0.5),
-                EventOut(kind="contract_award", title="Elbit wins pod contract", customer="USAF", summary_he="x", confidence=0.8),
+                EventOut(
+                    kind="contract_award",
+                    title="Elbit wins pod contract",
+                    customer="USAF",
+                    summary_he="x",
+                    confidence=0.8,
+                ),
             ],
             edges=[],
         )

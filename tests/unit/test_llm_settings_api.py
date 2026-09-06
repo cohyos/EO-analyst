@@ -53,7 +53,7 @@ def settings_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 class TestPatchYamlScalar:
     def test_replaces_value_preserving_rest(self):
-        text = "a: 1\ninteractive_default: \"ollama\"\nb: 2\n"
+        text = 'a: 1\ninteractive_default: "ollama"\nb: 2\n'
         out = services._patch_yaml_scalar(text, "interactive_default", '"agy:gemini-3.8-flash-medium"')
         assert out == 'a: 1\ninteractive_default: "agy:gemini-3.8-flash-medium"\nb: 2\n'
 
@@ -92,13 +92,17 @@ class TestPatchLlmProviderSettings:
         # time, not at write time) -- this just documents that a structurally-broken result
         # (e.g. quoting bug) would be caught by the same EOASettings(**parsed) validation the
         # generic settings editor uses, since patch goes through write_settings_yaml unchanged.
-        ok, _errors, _ = services.patch_llm_provider_settings(interactive_default='has "quote', allow_cloud=None)
+        ok, _errors, _ = services.patch_llm_provider_settings(
+            interactive_default='has "quote', allow_cloud=None
+        )
         assert ok is True  # a string value with an escaped quote is still valid YAML/pydantic
         parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
         assert parsed["llm_providers"]["interactive_default"] == 'has "quote'
 
     def test_updates_mode(self, settings_tmp: Path):
-        ok, errors, _ = services.patch_llm_provider_settings(interactive_default=None, allow_cloud=None, mode="cloud")
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None, allow_cloud=None, mode="cloud"
+        )
         assert ok is True
         assert errors == []
         parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
@@ -172,7 +176,9 @@ class TestPatchLlmProviderSettingsChains:
                 ChainEntryCfg(provider="ollama"),
             ]
         }
-        ok, errors, _ = services.patch_llm_provider_settings(interactive_default=None, allow_cloud=None, chains=chains)
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None, allow_cloud=None, chains=chains
+        )
         assert ok is True
         assert errors == []
         parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
@@ -204,7 +210,9 @@ class TestPatchLlmProviderSettingsChains:
 
     def test_ollama_step_needs_no_model(self, settings_tmp: Path):
         ok, errors, _ = services.patch_llm_provider_settings(
-            interactive_default=None, allow_cloud=None, chains={"resident": [ChainEntryCfg(provider="ollama")]}
+            interactive_default=None,
+            allow_cloud=None,
+            chains={"resident": [ChainEntryCfg(provider="ollama")]},
         )
         assert ok is True
         assert errors == []
@@ -240,7 +248,9 @@ class TestPatchLlmProviderSettingsChains:
         )
         assert setup_ok is True
         assert setup_errors == []
-        ok, errors, _ = services.patch_llm_provider_settings(interactive_default=None, allow_cloud=None, chains={})
+        ok, errors, _ = services.patch_llm_provider_settings(
+            interactive_default=None, allow_cloud=None, chains={}
+        )
         assert ok is True
         assert errors == []
         parsed = yaml.safe_load((settings_tmp / "config.yaml").read_text(encoding="utf-8"))
@@ -295,7 +305,9 @@ class TestListLlmProviders:
 
     def test_cloud_hidden_when_allow_cloud_false(self, settings_tmp: Path):
         (settings_tmp / "config.yaml").write_text(
-            (settings_tmp / "config.yaml").read_text(encoding="utf-8").replace("allow_cloud: true", "allow_cloud: false"),
+            (settings_tmp / "config.yaml")
+            .read_text(encoding="utf-8")
+            .replace("allow_cloud: true", "allow_cloud: false"),
             encoding="utf-8",
         )
         eoa_config.settings.cache_clear()

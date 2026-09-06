@@ -123,9 +123,13 @@ def run_repair(*, apply: bool, limit: int | None = None) -> RepairStats:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--apply", action="store_true", help="Actually write the updates (default: dry-run).")
-    parser.add_argument("--limit", type=int, default=None, help="Cap the number of items scanned (debugging).")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Cap the number of items scanned (debugging)."
+    )
     args = parser.parse_args()
 
     stats = run_repair(apply=args.apply, limit=args.limit)

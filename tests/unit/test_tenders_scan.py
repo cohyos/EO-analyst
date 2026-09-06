@@ -206,7 +206,10 @@ class TestParseContractsFinder:
 
     def test_uuid_extracted_into_notice_url(self):
         notices = _parse_contracts_finder(self._payload(), _cf_source())
-        assert notices[0].url == "https://www.contractsfinder.service.gov.uk/Notice/a1b2c3d4-1111-2222-3333-444455556666"
+        assert (
+            notices[0].url
+            == "https://www.contractsfinder.service.gov.uk/Notice/a1b2c3d4-1111-2222-3333-444455556666"
+        )
 
     def test_award_tag_maps_to_awarded_status_hint(self):
         notices = _parse_contracts_finder(self._payload(), _cf_source())
@@ -230,7 +233,10 @@ class TestIsDenylistedDomain:
         assert _is_denylisted_domain("https://www.reddit.com/r/foo", ["reddit.com"]) is True
 
     def test_unrelated_domain_not_denied(self):
-        assert _is_denylisted_domain("https://ted.europa.eu/en/notice/1", ["wikipedia.org", "reddit.com"]) is False
+        assert (
+            _is_denylisted_domain("https://ted.europa.eu/en/notice/1", ["wikipedia.org", "reddit.com"])
+            is False
+        )
 
     def test_empty_url_not_denied(self):
         assert _is_denylisted_domain("", ["wikipedia.org"]) is False
@@ -252,7 +258,10 @@ class TestParseSearchHitsDenylist:
                 engine="google",
             ),
             SearchHit(
-                url="https://sam.gov/opp/1", title="RFI electro-optical", snippet="sources sought", engine="google"
+                url="https://sam.gov/opp/1",
+                title="RFI electro-optical",
+                snippet="sources sought",
+                engine="google",
             ),
         ]
         notices = _parse_search_hits(hits, _search_source(), ["wikipedia.org"])
@@ -279,7 +288,10 @@ class TestMatchesKeywords:
     def test_bare_generic_word_does_not_match_multi_word_phrase(self):
         """'windows'/'camera' alone must never satisfy a domain-signal phrase like 'surveillance camera'."""
         notice = NoticeRaw(
-            source_id="x", external_ref="x:1", title="HMP Onley: Windows and New Cell Doors", summary="New camera"
+            source_id="x",
+            external_ref="x:1",
+            title="HMP Onley: Windows and New Cell Doors",
+            summary="New camera",
         )
         assert _matches_keywords(notice, ["surveillance camera", "electro-optical"]) == []
 
@@ -290,11 +302,15 @@ class TestHasProcurementSignal:
         assert _has_procurement_signal(notice, "api_json", PROCUREMENT_SIGNALS) is True
 
     def test_search_source_requires_explicit_signal(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="What is Infrared Light?", summary="A physics primer")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="What is Infrared Light?", summary="A physics primer"
+        )
         assert _has_procurement_signal(notice, "search", PROCUREMENT_SIGNALS) is False
 
     def test_search_source_with_signal_present(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="RFI: electro-optical sensor sources sought")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="RFI: electro-optical sensor sources sought"
+        )
         assert _has_procurement_signal(notice, "search", PROCUREMENT_SIGNALS) is True
 
     def test_hebrew_signal_recognized(self):
@@ -305,15 +321,24 @@ class TestHasProcurementSignal:
 class TestPassesGate:
     def test_api_json_domain_only_passes(self):
         """TED/Contracts Finder notices rarely say "tender" literally -- domain signal alone suffices."""
-        notice = NoticeRaw(source_id="ted_eu", external_ref="x:1", title="Supply of electro-optical targeting pods")
-        assert _passes_gate(notice, "api_json", DOMAIN_KEYWORDS, PROCUREMENT_SIGNALS) == ["electro-optical", "targeting pod"]
+        notice = NoticeRaw(
+            source_id="ted_eu", external_ref="x:1", title="Supply of electro-optical targeting pods"
+        )
+        assert _passes_gate(notice, "api_json", DOMAIN_KEYWORDS, PROCUREMENT_SIGNALS) == [
+            "electro-optical",
+            "targeting pod",
+        ]
 
     def test_search_source_needs_both_signals(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="Infrared: How It Works", summary="A NASA explainer")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="Infrared: How It Works", summary="A NASA explainer"
+        )
         assert _passes_gate(notice, "search", DOMAIN_KEYWORDS, PROCUREMENT_SIGNALS) == []
 
     def test_search_source_with_both_signals_passes(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="RFI for infrared targeting pod sources sought")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="RFI for infrared targeting pod sources sought"
+        )
         terms = _passes_gate(notice, "search", DOMAIN_KEYWORDS, PROCUREMENT_SIGNALS)
         assert "infrared" in terms
         assert "targeting pod" in terms
@@ -333,7 +358,9 @@ class TestPassesGate:
             title="HMP Onley: Windows and New Cell Doors",
             summary="Refurbishment works including a surveillance camera at the gatehouse.",
         )
-        assert _passes_gate(notice, "api_json", DOMAIN_KEYWORDS, PROCUREMENT_SIGNALS) == ["surveillance camera"]
+        assert _passes_gate(notice, "api_json", DOMAIN_KEYWORDS, PROCUREMENT_SIGNALS) == [
+            "surveillance camera"
+        ]
 
 
 # --------------------------------------------------------------------------
@@ -428,8 +455,11 @@ class TestApplyExtractionToNotice:
     def test_fills_missing_published_at_and_deadline(self):
         notice = NoticeRaw(source_id="x", external_ref="x:1", title="t")
         extract = TenderExtract(
-            relevant=True, relevance=6, confidence=0.8,
-            published_at=dt.date(2026, 8, 1), deadline=dt.date(2026, 10, 1),
+            relevant=True,
+            relevance=6,
+            confidence=0.8,
+            published_at=dt.date(2026, 8, 1),
+            deadline=dt.date(2026, 10, 1),
         )
         _apply_extraction_to_notice(notice, extract)
         assert notice.published_at == dt.date(2026, 8, 1)
@@ -438,12 +468,18 @@ class TestApplyExtractionToNotice:
     def test_never_overwrites_existing_dates(self):
         """TED/Contracts Finder's own structured parse stays authoritative over the LLM."""
         notice = NoticeRaw(
-            source_id="x", external_ref="x:1", title="t",
-            published_at=dt.date(2026, 1, 1), deadline=dt.date(2026, 2, 1),
+            source_id="x",
+            external_ref="x:1",
+            title="t",
+            published_at=dt.date(2026, 1, 1),
+            deadline=dt.date(2026, 2, 1),
         )
         extract = TenderExtract(
-            relevant=True, relevance=6, confidence=0.8,
-            published_at=dt.date(2099, 1, 1), deadline=dt.date(2099, 1, 1),
+            relevant=True,
+            relevance=6,
+            confidence=0.8,
+            published_at=dt.date(2099, 1, 1),
+            deadline=dt.date(2099, 1, 1),
         )
         _apply_extraction_to_notice(notice, extract)
         assert notice.published_at == dt.date(2026, 1, 1)
@@ -451,7 +487,9 @@ class TestApplyExtractionToNotice:
 
     def test_fills_agency_and_country_when_generic(self):
         notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", country="other")
-        extract = TenderExtract(relevant=True, relevance=6, confidence=0.8, agency="US Air Force", country="US")
+        extract = TenderExtract(
+            relevant=True, relevance=6, confidence=0.8, agency="US Air Force", country="US"
+        )
         _apply_extraction_to_notice(notice, extract)
         assert notice.agency == "US Air Force"
         assert notice.country == "US"
@@ -465,18 +503,26 @@ class TestApplyExtractionToNotice:
 
 class TestApplyDomainCountryFallback:
     def test_fills_country_from_url_when_generic(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", country="other", url="https://sam.gov/opp/1")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t", country="other", url="https://sam.gov/opp/1"
+        )
         _apply_domain_country_fallback(notice)
         assert notice.country == "US"
 
     def test_does_not_overwrite_real_country(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", country="IL", url="https://sam.gov/opp/1")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t", country="IL", url="https://sam.gov/opp/1"
+        )
         _apply_domain_country_fallback(notice)
         assert notice.country == "IL"
 
     def test_no_match_leaves_country_unchanged(self):
         notice = NoticeRaw(
-            source_id="x", external_ref="x:1", title="t", country="other", url="https://www.rfpmart.com/x.html"
+            source_id="x",
+            external_ref="x:1",
+            title="t",
+            country="other",
+            url="https://www.rfpmart.com/x.html",
         )
         _apply_domain_country_fallback(notice)
         assert notice.country == "other"
@@ -488,7 +534,9 @@ class TestFetchNoticeText:
     second value feeds the "unverified + undated -> reject" gate rule."""
 
     def test_api_json_source_never_fetches(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://ted.europa.eu/x")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t", summary="s", url="https://ted.europa.eu/x"
+        )
         with patch("eoa.tenders.scan.fetch_remote") as mock_fetch:
             text, verified = _fetch_notice_text(notice, "api_json")
         mock_fetch.assert_not_called()
@@ -496,14 +544,20 @@ class TestFetchNoticeText:
         assert verified is True
 
     def test_search_source_fetches_and_uses_page_text(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1")
-        with patch("eoa.tenders.scan.fetch_remote", return_value={"text": "full notice body with a deadline"}):
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1"
+        )
+        with patch(
+            "eoa.tenders.scan.fetch_remote", return_value={"text": "full notice body with a deadline"}
+        ):
             text, verified = _fetch_notice_text(notice, "search")
         assert text == "full notice body with a deadline"
         assert verified is True
 
     def test_fetch_failure_falls_back_to_title_and_summary_unverified(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1"
+        )
         with patch("eoa.tenders.scan.fetch_remote", side_effect=RuntimeError("blocked")):
             text, verified = _fetch_notice_text(notice, "search")
         assert text == "t\n\ns"
@@ -518,7 +572,9 @@ class TestFetchNoticeText:
         assert verified is False
 
     def test_empty_page_text_falls_back_unverified(self):
-        notice = NoticeRaw(source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1")
+        notice = NoticeRaw(
+            source_id="x", external_ref="x:1", title="t", summary="s", url="https://example.gov/n/1"
+        )
         with patch("eoa.tenders.scan.fetch_remote", return_value={"text": ""}):
             text, verified = _fetch_notice_text(notice, "search")
         assert text == "t\n\ns"
@@ -663,7 +719,13 @@ class TestScanTendersGateAndDedup:
     def test_source_failure_does_not_stop_scan(self):
         good = _cf_source()
         bad = TenderSource(
-            id="broken", name="x", kind="api_json", country="US", url="https://x", keywords=["x"], verified=True
+            id="broken",
+            name="x",
+            kind="api_json",
+            country="US",
+            url="https://x",
+            keywords=["x"],
+            verified=True,
         )
         with (
             patch("eoa.tenders.scan._collect_source_notices") as mock_collect,
@@ -719,10 +781,14 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_relevance_below_floor_rejected(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
-            patch("eoa.tenders.scan._llm_classify", return_value=(_extract(relevant=False, relevance=1), True)),
+            patch(
+                "eoa.tenders.scan._llm_classify", return_value=(_extract(relevant=False, relevance=1), True)
+            ),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
@@ -733,7 +799,9 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_relevance_one_below_floor_rejected(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
             patch(
@@ -748,7 +816,9 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_relevance_at_floor_stored_normally(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
             patch(
@@ -771,7 +841,9 @@ class TestScanTendersLlmRelevanceGate:
         contracts. Same for 'other' (the model couldn't place it as a real solicitation type)."""
         for bad_type in ("award", "other"):
             src = _ted_source()
-            notice = NoticeRaw(source_id=src.id, external_ref=f"ted_eu:{bad_type}", title="Supply of electro-optical widgets")
+            notice = NoticeRaw(
+                source_id=src.id, external_ref=f"ted_eu:{bad_type}", title="Supply of electro-optical widgets"
+            )
             with (
                 _common_patches(notice),
                 patch("eoa.tenders.scan._llm_classify", return_value=(_extract(notice_type=bad_type), True)),
@@ -784,10 +856,14 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_expired_deadline_gate_rejected(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
-            patch("eoa.tenders.scan._llm_classify", return_value=(_extract(deadline=dt.date(2020, 1, 1)), True)),
+            patch(
+                "eoa.tenders.scan._llm_classify", return_value=(_extract(deadline=dt.date(2020, 1, 1)), True)
+            ),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
@@ -796,7 +872,9 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_stale_published_at_gate_rejected(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         stale = dt.date.today() - dt.timedelta(days=NOTICE_MAX_AGE_DAYS + 1)
         with (
             _common_patches(notice),
@@ -861,7 +939,9 @@ class TestScanTendersLlmRelevanceGate:
         """F24: a deferred/unavailable LLM call is itself a rejection now -- no more "insert on
         the deterministic two-signal gate's own strength alone" degrade path."""
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", side_effect=ResourceUnavailable("no vram")),
@@ -876,7 +956,9 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_llm_output_error_gate_rejected(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
             patch("eoa.tenders.scan._llm_classify", side_effect=LLMOutputError("bad json")),
@@ -890,10 +972,14 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_unexpected_llm_exception_gate_rejected(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
-            patch("eoa.tenders.scan._llm_classify", side_effect=UnicodeEncodeError("cp1252", "x", 0, 1, "boom")),
+            patch(
+                "eoa.tenders.scan._llm_classify", side_effect=UnicodeEncodeError("cp1252", "x", 0, 1, "boom")
+            ),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
         ):
             stats = scan_tenders(sources=[src])
@@ -904,7 +990,9 @@ class TestScanTendersLlmRelevanceGate:
 
     def test_llm_matched_terms_override_deterministic_ones_when_present(self):
         src = _ted_source()
-        notice = NoticeRaw(source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets")
+        notice = NoticeRaw(
+            source_id=src.id, external_ref="ted_eu:1", title="Supply of electro-optical widgets"
+        )
         with (
             _common_patches(notice),
             patch(
@@ -994,12 +1082,16 @@ class TestGateRejectReason:
 
     def test_clean_notice_passes(self):
         notice = self._notice(deadline=dt.date(2099, 1, 1))
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason is None
 
     def test_no_extract_rejected(self):
         notice = self._notice()
-        reason = _gate_reject_reason(notice, None, page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, None, page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason == "no_llm_classification"
 
     def test_low_relevance_rejected(self):
@@ -1016,7 +1108,11 @@ class TestGateRejectReason:
     def test_not_relevant_flag_rejected_even_at_high_relevance(self):
         notice = self._notice()
         reason = _gate_reject_reason(
-            notice, _extract(relevant=False, relevance=9), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+            notice,
+            _extract(relevant=False, relevance=9),
+            page_verified=True,
+            today=dt.date(2026, 9, 6),
+            deny_domains=[],
         )
         assert reason is not None and reason.startswith("relevance_")
 
@@ -1024,7 +1120,11 @@ class TestGateRejectReason:
         for bad_type in ("award", "other"):
             notice = self._notice()
             reason = _gate_reject_reason(
-                notice, _extract(notice_type=bad_type), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+                notice,
+                _extract(notice_type=bad_type),
+                page_verified=True,
+                today=dt.date(2026, 9, 6),
+                deny_domains=[],
             )
             assert reason == f"notice_type_{bad_type}"
 
@@ -1032,28 +1132,40 @@ class TestGateRejectReason:
         for good_type in VALID_NOTICE_TYPES:
             notice = self._notice()
             reason = _gate_reject_reason(
-                notice, _extract(notice_type=good_type), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+                notice,
+                _extract(notice_type=good_type),
+                page_verified=True,
+                today=dt.date(2026, 9, 6),
+                deny_domains=[],
             )
             assert reason is None
 
     def test_past_deadline_rejected(self):
         notice = self._notice(deadline=dt.date(2020, 1, 1))
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason == "deadline_passed"
 
     def test_deadline_today_not_yet_passed(self):
         notice = self._notice(deadline=dt.date(2026, 9, 6))
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason is None
 
     def test_published_over_90_days_rejected(self):
         notice = self._notice(published_at=dt.date(2026, 9, 6) - dt.timedelta(days=NOTICE_MAX_AGE_DAYS + 1))
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason == "published_over_90_days"
 
     def test_published_exactly_90_days_accepted(self):
         notice = self._notice(published_at=dt.date(2026, 9, 6) - dt.timedelta(days=NOTICE_MAX_AGE_DAYS))
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason is None
 
     def test_denylisted_domain_rejected(self):
@@ -1065,7 +1177,9 @@ class TestGateRejectReason:
 
     def test_unverified_and_undated_rejected(self):
         notice = self._notice()
-        reason = _gate_reject_reason(notice, _extract(), page_verified=False, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=False, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason == "unverified_undated"
 
     def test_unverified_but_dated_accepted(self):
@@ -1073,20 +1187,28 @@ class TestGateRejectReason:
         snippet or an RSS pubDate already carried a date) is not penalized by 'unverified_undated'
         -- that rule only fires when there is no date at all to fall back on."""
         notice = self._notice(deadline=dt.date(2099, 1, 1))
-        reason = _gate_reject_reason(notice, _extract(), page_verified=False, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=False, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason is None
 
     def test_verified_and_undated_accepted(self):
         notice = self._notice()
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason is None
 
     def test_status_hint_awarded_rejected(self):
         notice = self._notice(status_hint="awarded")
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason == "status_hint_awarded"
 
     def test_status_hint_closed_rejected(self):
         notice = self._notice(status_hint="closed")
-        reason = _gate_reject_reason(notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[])
+        reason = _gate_reject_reason(
+            notice, _extract(), page_verified=True, today=dt.date(2026, 9, 6), deny_domains=[]
+        )
         assert reason == "status_hint_closed"

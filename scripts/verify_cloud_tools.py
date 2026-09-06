@@ -59,7 +59,9 @@ class ToolCheckResult:
     notes: str = ""
 
 
-def _run(args: list[str], *, input_text: str | None = None, timeout: int = TIMEOUT_S) -> subprocess.CompletedProcess[str]:
+def _run(
+    args: list[str], *, input_text: str | None = None, timeout: int = TIMEOUT_S
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         input=input_text,
@@ -161,7 +163,9 @@ def check_codex() -> ToolCheckResult:
     CLI providers deliberately avoid (docs/adr/005-cloud-llm-cli.md). Recorded as unsupported
     rather than attempted with a risky sandbox mode."""
     res = ToolCheckResult(cli="codex", binary_found=bool(shutil.which("codex")))
-    res.notes = "no --search/--web flag in `codex exec --help` on this machine's installed version; not attempted"
+    res.notes = (
+        "no --search/--web flag in `codex exec --help` on this machine's installed version; not attempted"
+    )
     return res
 
 
@@ -182,7 +186,9 @@ def main() -> int:
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out_path = out_dir / f"verify_cloud_tools_{ts}.json"
     out_path.write_text(
-        json.dumps({"question": QUESTION, "results": [asdict(r) for r in results]}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {"question": QUESTION, "results": [asdict(r) for r in results]}, ensure_ascii=False, indent=2
+        ),
         encoding="utf-8",
     )
     print(f"\nWrote {out_path}")

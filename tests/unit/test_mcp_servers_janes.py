@@ -75,7 +75,9 @@ class TestCallWithKey:
 
     def test_non_200_reports_hint(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("JANES_API_KEY", "k")
-        monkeypatch.setattr(j, "http_get_json", lambda *a, **kw: {"status": 401, "json": None, "text": "unauthorized"})
+        monkeypatch.setattr(
+            j, "http_get_json", lambda *a, **kw: {"status": 401, "json": None, "text": "unauthorized"}
+        )
         out = json.loads(j.janes_search("x"))
         assert "error" in out
         assert "hint" in out

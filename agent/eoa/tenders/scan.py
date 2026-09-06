@@ -918,19 +918,25 @@ def scan_tenders(
             page_verified = False
             if time.monotonic() < llm_deadline:
                 try:
-                    extract, page_verified = _llm_classify(notice, role=role, interactive=interactive, src_kind=src.kind)
+                    extract, page_verified = _llm_classify(
+                        notice, role=role, interactive=interactive, src_kind=src.kind
+                    )
                     stats.llm_used += 1
                 except ResourceUnavailable:
                     stats.llm_deferred += 1
                 except LLMOutputError as exc:
-                    log.warning("tender_llm_classify_failed", external_ref=notice.external_ref, error=str(exc)[:200])
+                    log.warning(
+                        "tender_llm_classify_failed", external_ref=notice.external_ref, error=str(exc)[:200]
+                    )
                     stats.llm_failed += 1
                 except Exception as exc:
                     # Never let one notice's LLM call take down the whole scan (docs/
                     # CONVENTIONS.md rule 9) -- it just falls through to F24's gate below, which
                     # rejects an unclassified notice outright (see _gate_reject_reason).
                     log.warning(
-                        "tender_llm_classify_unexpected_error", external_ref=notice.external_ref, error=str(exc)[:200]
+                        "tender_llm_classify_unexpected_error",
+                        external_ref=notice.external_ref,
+                        error=str(exc)[:200],
                     )
                     stats.llm_failed += 1
             else:

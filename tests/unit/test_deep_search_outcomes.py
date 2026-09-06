@@ -48,7 +48,9 @@ class TestFinalizeOutcomeConfidenceClamp:
 
     def test_found_confidence_not_touched(self) -> None:
         inv = Investigation(job_id=1, item_id=1, question="q")
-        inv.result = InvestigationOut(outcome="found", answer_he="נמצא", confidence=0.95, sources=["https://x"])
+        inv.result = InvestigationOut(
+            outcome="found", answer_he="נמצא", confidence=0.95, sources=["https://x"]
+        )
         _finalize_outcome(inv, _budget())
         assert inv.result.confidence == 0.95
 
@@ -86,14 +88,18 @@ class TestFinalizeOutcomeClassification:
 
     def test_found_outcome_is_kept_verbatim(self) -> None:
         inv = Investigation(job_id=1, item_id=1, question="q")
-        inv.result = InvestigationOut(outcome="found", answer_he="נמצא", confidence=0.9, sources=["https://x"])
+        inv.result = InvestigationOut(
+            outcome="found", answer_he="נמצא", confidence=0.9, sources=["https://x"]
+        )
         _finalize_outcome(inv, _budget())
         assert inv.outcome == "found"
 
     def test_budget_accounting_fields_populated(self) -> None:
         inv = Investigation(job_id=1, item_id=1, question="q")
         inv.rounds_done = 3
-        inv.result = InvestigationOut(outcome="found", answer_he="נמצא", confidence=0.9, sources=["https://x"])
+        inv.result = InvestigationOut(
+            outcome="found", answer_he="נמצא", confidence=0.9, sources=["https://x"]
+        )
         budget = _budget(queries=7, pages=4)
         _finalize_outcome(inv, budget)
         assert inv.queries_used == 7
@@ -167,7 +173,9 @@ class TestFinalizeOutcomePartialConfidenceCap:
 
     def test_zero_source_partial_gets_unverified_prefix(self) -> None:
         inv = Investigation(job_id=1, item_id=1, question="q")
-        inv.result = InvestigationOut(outcome="partial", answer_he="חרב ברזל פותחה בשיתוף רפאל", confidence=0.5, sources=[])
+        inv.result = InvestigationOut(
+            outcome="partial", answer_he="חרב ברזל פותחה בשיתוף רפאל", confidence=0.5, sources=[]
+        )
         _finalize_outcome(inv, _budget())
         assert inv.result.answer_he.startswith(UNVERIFIED_PREFIX_HE)
         assert inv.result.confidence <= PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE

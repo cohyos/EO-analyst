@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agent"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.purge_stale_tenders import fails_gate, purge  # noqa: E402
+from scripts.purge_stale_tenders import fails_gate, purge
 
 TODAY = dt.date(2026, 9, 6)
 

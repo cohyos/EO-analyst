@@ -170,7 +170,7 @@ def build_scheduler() -> BackgroundScheduler:
         lambda: enqueue_job("bd_report", {}, priority=4),
         _cron(tz, "06:30", day_of_week="sun"),
         id="bd_report_weekly",
-        name='דוח מיקוד לפיתוח עסקי לפי טריטוריה -- שבועי (A11)',
+        name="דוח מיקוד לפיתוח עסקי לפי טריטוריה -- שבועי (A11)",
         misfire_grace_time=3600,
         coalesce=True,
     )

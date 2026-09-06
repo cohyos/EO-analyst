@@ -31,7 +31,9 @@ class TestPingMcpServer:
 
     def test_globally_disabled_returns_not_enabled_without_connecting(self, monkeypatch: pytest.MonkeyPatch):
         server = _server()
-        monkeypatch.setattr(services.eoa_config, "settings", _settings_with(McpCfg(enabled=False, servers=[server])))
+        monkeypatch.setattr(
+            services.eoa_config, "settings", _settings_with(McpCfg(enabled=False, servers=[server]))
+        )
 
         def boom(_server):
             raise AssertionError("ping_server must not be called while mcp.enabled is False")
@@ -45,7 +47,9 @@ class TestPingMcpServer:
 
     def test_inherit_cli_only_short_circuits(self, monkeypatch: pytest.MonkeyPatch):
         server = _server(inherit_cli_only=True)
-        monkeypatch.setattr(services.eoa_config, "settings", _settings_with(McpCfg(enabled=True, servers=[server])))
+        monkeypatch.setattr(
+            services.eoa_config, "settings", _settings_with(McpCfg(enabled=True, servers=[server]))
+        )
 
         def boom(_server):
             raise AssertionError("ping_server must not be called for an inherit_cli_only server")
@@ -58,7 +62,9 @@ class TestPingMcpServer:
 
     def test_enabled_dials_the_server(self, monkeypatch: pytest.MonkeyPatch):
         server = _server()
-        monkeypatch.setattr(services.eoa_config, "settings", _settings_with(McpCfg(enabled=True, servers=[server])))
+        monkeypatch.setattr(
+            services.eoa_config, "settings", _settings_with(McpCfg(enabled=True, servers=[server]))
+        )
 
         result = SimpleNamespace(
             id="procurement", ok=True, error=None, tool_count=4, tools=["ping"], latency_ms=12

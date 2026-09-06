@@ -167,7 +167,9 @@ def dsca_major_arms_sales(keyword: str = "", limit: int = 10) -> str:
     notifications (search "arms sales notification") and is confirmed working from this network --
     prefer it as the primary source for DSCA-adjacent content until this is resolved.
     """
-    resp = http_get_json(DSCA_MAJOR_ARMS_SALES_URL, headers={"User-Agent": _BROWSER_UA, "Accept": "text/html"})
+    resp = http_get_json(
+        DSCA_MAJOR_ARMS_SALES_URL, headers={"User-Agent": _BROWSER_UA, "Accept": "text/html"}
+    )
     if resp["status"] != 200:
         return json_out(
             {
@@ -212,7 +214,9 @@ def federal_register_search(query: str, agencies: list[str] | None = None, per_p
         params[f"conditions[agencies][{i}]"] = agency
     resp = http_get_json(FEDERAL_REGISTER_SEARCH_URL, params=params)
     if resp["status"] != 200:
-        return json_out({"error": f"federalregister.gov returned HTTP {resp['status']}", "body": resp.get("text")})
+        return json_out(
+            {"error": f"federalregister.gov returned HTTP {resp['status']}", "body": resp.get("text")}
+        )
     data = resp["json"] or {}
     results = truncate_list(data.get("results") or [], per_page)
     return json_out(

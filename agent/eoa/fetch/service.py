@@ -38,6 +38,7 @@ async def _guarded_fetch_page(url: str):
     initial_ips = assert_public_http_url(url)
     return await fetch_page(url, validate_redirect=assert_public_http_url, pin_ips=initial_ips)
 
+
 _CONCURRENCY = 6
 _PER_DOMAIN_MIN_INTERVAL_SECONDS = 1.0
 _RAW_TEXT_MAX_CHARS = 200_000

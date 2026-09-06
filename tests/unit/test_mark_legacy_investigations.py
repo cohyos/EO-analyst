@@ -35,7 +35,11 @@ class TestApplyLegacyLabel:
         assert result["what_was_tried_he"] == f"3 שאילתות.{mli.LEGACY_NOTE_HE}"
 
     def test_idempotent_on_already_labelled_result(self) -> None:
-        already = {"outcome": "not_found", "what_was_tried_he": f"3 שאילתות.{mli.LEGACY_NOTE_HE}", "legacy_no_sources": True}
+        already = {
+            "outcome": "not_found",
+            "what_was_tried_he": f"3 שאילתות.{mli.LEGACY_NOTE_HE}",
+            "legacy_no_sources": True,
+        }
         result, changed = mli.apply_legacy_label(already)
         assert changed is False
         assert result == already
@@ -53,7 +57,9 @@ class TestApplyLegacyLabel:
 
 class TestApplyNotFoundToPartial:
     def test_reclassifies_outcome_and_confidence(self) -> None:
-        result = mli.apply_not_found_to_partial({"outcome": "not_found", "confidence": 0.2, "sources": ["https://x"]})
+        result = mli.apply_not_found_to_partial(
+            {"outcome": "not_found", "confidence": 0.2, "sources": ["https://x"]}
+        )
         assert result["outcome"] == "partial"
         assert result["confidence"] == mli.PARTIAL_CONFIDENCE_FALLBACK
 

@@ -401,7 +401,9 @@ def run_unescape_repair(*, apply: bool, limit: int | None = None) -> UnescapeSta
 
             stats.changed += 1
             if len(stats.examples) < 20:
-                stats.examples.append({"id": row["id"], "old_title": old_title[:100], "new_title": new_title[:100]})
+                stats.examples.append(
+                    {"id": row["id"], "old_title": old_title[:100], "new_title": new_title[:100]}
+                )
             if apply:
                 cur.execute("UPDATE items SET title = %s WHERE id = %s", (new_title, row["id"]))
 
@@ -429,7 +431,9 @@ def _print_unescape_report(stats: UnescapeStats, *, apply: bool) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--requality",
         action="store_true",
@@ -443,7 +447,9 @@ def main() -> int:
     parser.add_argument(
         "--apply", action="store_true", help="Write updates (default: dry-run). --requality/--unescape only."
     )
-    parser.add_argument("--limit", type=int, default=None, help="Cap candidates scanned. --requality/--unescape only.")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Cap candidates scanned. --requality/--unescape only."
+    )
     args = parser.parse_args()
 
     if args.requality:

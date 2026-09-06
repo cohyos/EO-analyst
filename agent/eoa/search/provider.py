@@ -43,7 +43,16 @@ LANG_REGION = {
 # classes but ship with `disabled = True` and never register). Anything outside this set is
 # dropped before being handed to ddgs so an unsupported/renamed engine degrades to "auto"
 # instead of silently searching nothing.
-DDGS_TEXT_BACKENDS = {"brave", "duckduckgo", "google", "grokipedia", "mojeek", "startpage", "wikipedia", "yahoo"}
+DDGS_TEXT_BACKENDS = {
+    "brave",
+    "duckduckgo",
+    "google",
+    "grokipedia",
+    "mojeek",
+    "startpage",
+    "wikipedia",
+    "yahoo",
+}
 
 # News-search backends ddgs 9.x resolves (`ddgs.engines.ENGINES["news"]`). Note there is no
 # "google" news engine at all in this package.
@@ -188,7 +197,12 @@ def _ddgs_search(
                         continue
                     seen.add(url)
                     hits.append(
-                        SearchHit(url=url, title=r.get("title") or "", snippet=(r.get("body") or "")[:400], engine="ddgs")
+                        SearchHit(
+                            url=url,
+                            title=r.get("title") or "",
+                            snippet=(r.get("body") or "")[:400],
+                            engine="ddgs",
+                        )
                     )
             if news_backends:
                 try:

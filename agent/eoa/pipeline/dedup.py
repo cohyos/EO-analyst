@@ -29,9 +29,7 @@ def _embed_text(item: dict) -> str:
     return f"{title}\n{body}"
 
 
-def run_dedup(
-    limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | None = None
-) -> DedupStats:
+def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | None = None) -> DedupStats:
     """Embed new items and link near-duplicates (same story, any language) via ``dedup_of``.
 
     F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see

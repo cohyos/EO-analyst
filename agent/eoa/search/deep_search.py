@@ -558,10 +558,14 @@ def investigate(
     cfg = settings().deep_search
     inv = Investigation(job_id=job_id, item_id=item_id, question=question)
     if prior_findings_he:
-        context_he = (context_he + "\n\nממצאי החקירה הקודמת (להרחבה, לא לחזרה):\n" + prior_findings_he).strip()
+        context_he = (
+            context_he + "\n\nממצאי החקירה הקודמת (להרחבה, לא לחזרה):\n" + prior_findings_he
+        ).strip()
     max_queries = max(cfg.max_queries, round(cfg.max_queries * budget_multiplier))
     max_pages = max(cfg.max_pages, round(cfg.max_pages * budget_multiplier))
-    timeout_min = max(cfg.per_investigation_timeout_min, round(cfg.per_investigation_timeout_min * budget_multiplier))
+    timeout_min = max(
+        cfg.per_investigation_timeout_min, round(cfg.per_investigation_timeout_min * budget_multiplier)
+    )
     budget = Budget(
         max_queries,
         max_pages,
@@ -634,7 +638,8 @@ def investigate(
         results_n=len(inv.hits_seen),
         pages_read=budget.pages,
         outcome=inv.outcome
-        if inv.outcome in {"found", "partial", "not_found", "stopped_budget", "stopped_timeout", "insufficient_context"}
+        if inv.outcome
+        in {"found", "partial", "not_found", "stopped_budget", "stopped_timeout", "insufficient_context"}
         else "partial",
         notes=inv.result.answer_he[:500],
     )
@@ -719,7 +724,10 @@ def _act(
                     str(args.get("outcome")) == "not_found"
                     and inv.hits_seen  # zero hits at all -> nothing left to search/read, honest to stop now
                     and not budget.exhausted
-                    and (budget.queries < MIN_QUERIES_BEFORE_NOT_FOUND or budget.pages < MIN_PAGES_BEFORE_NOT_FOUND)
+                    and (
+                        budget.queries < MIN_QUERIES_BEFORE_NOT_FOUND
+                        or budget.pages < MIN_PAGES_BEFORE_NOT_FOUND
+                    )
                 ):
                     # U11/F17 rigor rule: don't accept a lazy not_found before the persistence
                     # protocol's minimum search effort has actually been spent.
@@ -892,7 +900,9 @@ def _run_claude_with_tools(file_path: Path, model: str | None) -> str:
         creationflags=_CLOUD_TOOL_CREATE_NO_WINDOW,
     )
     if proc.returncode != 0:
-        raise CliProviderError(f"claude CLI failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}")
+        raise CliProviderError(
+            f"claude CLI failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}"
+        )
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
@@ -930,7 +940,9 @@ def _run_agy_with_tools(file_path: Path, model: str | None) -> str:
         creationflags=_CLOUD_TOOL_CREATE_NO_WINDOW,
     )
     if proc.returncode != 0:
-        raise CliProviderError(f"agy CLI failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}")
+        raise CliProviderError(
+            f"agy CLI failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:500]}"
+        )
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
@@ -1019,7 +1031,9 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
             log.warning("cloud_batch_investigation_provider_failed", provider=kind, error=str(exc)[:200])
             continue
     if raw_text is None:
-        raise LLMOutputError(f"no tool-capable cloud CLI available for batch deep search: {last_exc}") from last_exc
+        raise LLMOutputError(
+            f"no tool-capable cloud CLI available for batch deep search: {last_exc}"
+        ) from last_exc
 
     try:
         parsed = CloudBatchInvestigationOut.model_validate_json(_batch_strip_fences(raw_text))

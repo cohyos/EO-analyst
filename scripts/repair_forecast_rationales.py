@@ -99,7 +99,12 @@ def repair(*, dry_run: bool = False, force: bool = False, role: str = "resident"
         candidate = _candidate_from_row(row)
         if candidate is None:
             results.append(
-                {"id": row["id"], "platform": row.get("platform"), "skipped": "no_trigger_items", "before": before}
+                {
+                    "id": row["id"],
+                    "platform": row.get("platform"),
+                    "skipped": "no_trigger_items",
+                    "before": before,
+                }
             )
             continue
 

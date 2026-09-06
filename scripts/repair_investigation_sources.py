@@ -123,7 +123,9 @@ def run_repair(*, dry_run: bool = False) -> dict[str, Any]:
     from eoa.db import connection
 
     with connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, result FROM jobs WHERE kind = 'deep_search' AND result IS NOT NULL ORDER BY id")
+        cur.execute(
+            "SELECT id, result FROM jobs WHERE kind = 'deep_search' AND result IS NOT NULL ORDER BY id"
+        )
         jobs = cur.fetchall()
 
         broken = [j for j in jobs if not (j.get("result") or {}).get("sources")]
@@ -151,7 +153,10 @@ def run_repair(*, dry_run: bool = False) -> dict[str, Any]:
             return counts
 
         for job_id, new_result in updates:
-            cur.execute("UPDATE jobs SET result = %(result)s WHERE id = %(id)s", {"result": Json(new_result), "id": job_id})
+            cur.execute(
+                "UPDATE jobs SET result = %(result)s WHERE id = %(id)s",
+                {"result": Json(new_result), "id": job_id},
+            )
         conn.commit()
 
     log.info("repair_investigation_sources.complete", **counts)

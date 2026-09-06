@@ -264,8 +264,7 @@ class TestGoldenSetValidation:
                 word_count = len(text.split())
                 # Allow flexibility for diverse text types
                 assert 60 <= word_count <= 350, (
-                    f"Line {line_no}: text has {word_count} words, "
-                    "expected 60–350 (target: 120–250)"
+                    f"Line {line_no}: text has {word_count} words, expected 60–350 (target: 120–250)"
                 )
 
     def test_golden_distribution(self) -> None:

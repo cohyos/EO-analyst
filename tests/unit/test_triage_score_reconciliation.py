@@ -36,7 +36,9 @@ class TestExpectedScoreTable:
             (5, 5, 5, 10),  # sum 15
         ],
     )
-    def test_table_matches_triage_md(self, novelty: int, magnitude: int, core_relevance: int, expected: int) -> None:
+    def test_table_matches_triage_md(
+        self, novelty: int, magnitude: int, core_relevance: int, expected: int
+    ) -> None:
         assert triage._expected_score(novelty, magnitude, core_relevance) == expected
 
     def test_known_examples_from_triage_md(self) -> None:
@@ -93,7 +95,9 @@ class TestReconcileScore:
         assert calls == []
 
     def test_mismatch_triggers_retry_and_uses_retried_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        fixed = TriageOut(score=5, level="orange", novelty=2, magnitude=2, core_relevance=5, reason_he="fixed")
+        fixed = TriageOut(
+            score=5, level="orange", novelty=2, magnitude=2, core_relevance=5, reason_he="fixed"
+        )
 
         def fake_chat_structured(role, schema, messages, **kwargs):
             assert any("סותרים" in m["content"] for m in messages if m["role"] == "user")
@@ -114,7 +118,12 @@ class TestReconcileScore:
         11 -> score 8), but reason_he's own conclusion says "orange" while score=8 is red-level --
         must still trigger a retry."""
         fixed = TriageOut(
-            score=8, level="red", novelty=3, magnitude=5, core_relevance=3, reason_he="סכום 11 -> score=8 -> רמה red."
+            score=8,
+            level="red",
+            novelty=3,
+            magnitude=5,
+            core_relevance=3,
+            reason_he="סכום 11 -> score=8 -> רמה red.",
         )
         calls = []
 
@@ -137,7 +146,9 @@ class TestReconcileScore:
         assert result is fixed
 
     def test_retry_still_mismatched_uses_deterministic_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        still_bad = TriageOut(score=9, level="red", novelty=2, magnitude=2, core_relevance=5, reason_he="still bad")
+        still_bad = TriageOut(
+            score=9, level="red", novelty=2, magnitude=2, core_relevance=5, reason_he="still bad"
+        )
         monkeypatch.setattr(triage, "chat_structured", lambda *a, **k: still_bad)
 
         out = TriageOut(score=9, level="red", novelty=2, magnitude=2, core_relevance=5, reason_he="orig")
@@ -160,7 +171,9 @@ class TestReconcileScore:
 
 class TestTriageItemAndBatchIntegration:
     def test_triage_item_reconciles_before_setting_level(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mismatched = TriageOut(score=9, level="red", novelty=2, magnitude=2, core_relevance=5, reason_he="orig")
+        mismatched = TriageOut(
+            score=9, level="red", novelty=2, magnitude=2, core_relevance=5, reason_he="orig"
+        )
         monkeypatch.setattr(triage, "chat_structured", lambda *a, **k: mismatched)
 
         item = {"id": 67, "title": "Test", "domain": "air_defense", "clean_text": "x"}
@@ -174,7 +187,9 @@ class TestTriageItemAndBatchIntegration:
 
         batch_result = {
             10: TriageOut(score=9, level="red", novelty=2, magnitude=2, core_relevance=5, reason_he="orig10"),
-            67: TriageOut(score=10, level="red", novelty=5, magnitude=5, core_relevance=5, reason_he="orig67"),
+            67: TriageOut(
+                score=10, level="red", novelty=5, magnitude=5, core_relevance=5, reason_he="orig67"
+            ),
         }
         monkeypatch.setattr(triage, "chat_structured_batch", lambda *a, **k: batch_result)
         # per-item reconciliation retry for item 10 only (67 already matches: 5+5+5=15 -> score=10)
@@ -182,7 +197,9 @@ class TestTriageItemAndBatchIntegration:
 
         def fake_chat_structured(role, schema, messages, **kwargs):
             reconcile_calls.append(1)
-            return TriageOut(score=5, level="orange", novelty=2, magnitude=2, core_relevance=5, reason_he="fixed10")
+            return TriageOut(
+                score=5, level="orange", novelty=2, magnitude=2, core_relevance=5, reason_he="fixed10"
+            )
 
         monkeypatch.setattr(triage, "chat_structured", fake_chat_structured)
 

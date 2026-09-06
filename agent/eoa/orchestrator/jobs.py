@@ -341,7 +341,9 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
         try:
             results, cross_insights_he = investigate_batch_cloud(pending)
         except Exception as exc:
-            log.warning("deep_search_cloud_batch_failed_falling_back_local", n=len(claimed), error=str(exc)[:300])
+            log.warning(
+                "deep_search_cloud_batch_failed_falling_back_local", n=len(claimed), error=str(exc)[:300]
+            )
             outcomes = [_run_deep_search_job_local(job) for job in claimed]
             return {"investigations": len(claimed), "outcomes": ",".join(outcomes)}
 
@@ -350,7 +352,9 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
             inv = results.get(job["id"])
             p = job.get("payload") or {}
             if inv is None:
-                finish_job(job["id"], "failed", error="cloud batch investigation returned no result for this job")
+                finish_job(
+                    job["id"], "failed", error="cloud batch investigation returned no result for this job"
+                )
                 outcomes.append("failed")
                 continue
             finish_job(job["id"], "done", result=_investigation_result_payload(inv))
@@ -359,7 +363,11 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
                 _red_alert_for(p.get("item_id"), inv.result.answer_he)
         if cross_insights_he:
             log.info("deep_search_cloud_cross_insights", text=cross_insights_he[:500])
-        return {"investigations": len(claimed), "outcomes": ",".join(outcomes), "cross_insights_he": cross_insights_he}
+        return {
+            "investigations": len(claimed),
+            "outcomes": ",".join(outcomes),
+            "cross_insights_he": cross_insights_he,
+        }
 
     done, outcomes = 0, []
     while done < cap:
@@ -556,13 +564,24 @@ def _pg_dump() -> dict[str, Any]:
     keep = settings().retention.backups_keep
     db_url = settings().database_url
     root = Path(os.environ.get("EOA_ROOT", Path(__file__).resolve().parents[3]))
-    candidates = [root / "runtime" / "pgsql" / "bin" / "pg_dump.exe", root / "runtime" / "pgsql" / "bin" / "pg_dump"]
+    candidates = [
+        root / "runtime" / "pgsql" / "bin" / "pg_dump.exe",
+        root / "runtime" / "pgsql" / "bin" / "pg_dump",
+    ]
     pg_dump_bin = next((str(c) for c in candidates if c.exists()), None) or shutil.which("pg_dump")
     try:
         if pg_dump_bin:
             name = out_dir / f"eoanalyst_{stamp}.dump"
             subprocess.run(
-                [pg_dump_bin, "--format=custom", "--no-owner", "--no-privileges", "--file", str(name), db_url],
+                [
+                    pg_dump_bin,
+                    "--format=custom",
+                    "--no-owner",
+                    "--no-privileges",
+                    "--file",
+                    str(name),
+                    db_url,
+                ],
                 capture_output=True,
                 check=True,
                 timeout=900,

@@ -157,8 +157,7 @@ def _so_what_system() -> str:
 
 def _so_what_prompt(subdomain_label: str, items: list[dict[str, Any]]) -> str:
     bullets = "\n".join(
-        f"- [item {it['id']}] {it.get('title') or ''}: "
-        f"{it.get('so_what_he') or it.get('summary_he') or ''}"
+        f"- [item {it['id']}] {it.get('title') or ''}: {it.get('so_what_he') or it.get('summary_he') or ''}"
         for it in items
     )
     return render(

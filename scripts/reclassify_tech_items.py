@@ -95,7 +95,9 @@ TECH_KEYWORDS: list[str] = [
 # "lidar" or "swir" produces real false positives -- e.g. "lidar" matches inside "solidarity"
 # (`consoLIDARity`), and this pre-filter's whole job is to be a *cheap, cheap-to-verify* recall
 # net, not to burn an LLM call re-classifying items that only coincidentally contain the letters.
-_TECH_KEYWORD_PATTERNS = [(kw, re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)) for kw in TECH_KEYWORDS]
+_TECH_KEYWORD_PATTERNS = [
+    (kw, re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)) for kw in TECH_KEYWORDS
+]
 
 
 def _keyword_match(title: str | None, clean_text: str | None) -> str | None:
@@ -122,7 +124,9 @@ def _fetch_candidates(cur) -> list[dict]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--apply", action="store_true", help="Actually re-classify and persist (default: dry-run only)."
     )

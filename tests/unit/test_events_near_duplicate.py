@@ -85,7 +85,7 @@ class TestEventTitleSimilarity:
         single one-letter prefix ("ל") difference on one word out of six/seven -- token-Jaccard
         scored this ~0.71 (below threshold); difflib correctly scores it near 1.0."""
         score = relational.event_title_similarity(
-            'זכייה במכרז לפיתוח פלטפורמת פיקוד ושליטה',
+            "זכייה במכרז לפיתוח פלטפורמת פיקוד ושליטה",
             "זכייה במכרז פיתוח פלטפורמת פיקוד ושליטה",
         )
         assert score >= relational.EVENT_TITLE_DEDUP_THRESHOLD
@@ -104,18 +104,30 @@ class TestMoreSpecificEventKind:
 
 
 class TestInsertEventMergesNearDuplicateAcrossKind:
-    def test_near_duplicate_different_kind_merges_and_upgrades_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_near_duplicate_different_kind_merges_and_upgrades_kind(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         title = "Elbit Systems wins pod contract from USAF"
         existing = {
-            "id": 70, "kind": "test", "title": title, "date": None, "amount_usd": None,
-            "currency": None, "parties": None, "customer": None, "program": None,
-            "summary_he": None, "confidence": 0.4,
+            "id": 70,
+            "kind": "test",
+            "title": title,
+            "date": None,
+            "amount_usd": None,
+            "currency": None,
+            "parties": None,
+            "customer": None,
+            "program": None,
+            "summary_he": None,
+            "confidence": 0.4,
         }
         find_cursor = _FakeCursor(fetchall_result=[existing])
         update_cursor = _FakeCursor()
         monkeypatch.setattr(relational, "connection", _ConnectionQueue([find_cursor, update_cursor]))
 
-        event_id = relational.insert_event(item_id=70, kind="contract_award", title=title, amount_usd=5_000_000, confidence=0.8)
+        event_id = relational.insert_event(
+            item_id=70, kind="contract_award", title=title, amount_usd=5_000_000, confidence=0.8
+        )
 
         assert event_id == 70
         assert len(find_cursor.calls) == 1
@@ -131,7 +143,9 @@ class TestInsertEventMergesNearDuplicateAcrossKind:
         insert_cursor = _FakeCursor(fetchone_result={"id": 99})
         monkeypatch.setattr(relational, "connection", _ConnectionQueue([find_cursor, insert_cursor]))
 
-        event_id = relational.insert_event(item_id=70, kind="contract_award", title="A brand new distinct event")
+        event_id = relational.insert_event(
+            item_id=70, kind="contract_award", title="A brand new distinct event"
+        )
 
         assert event_id == 99
         query, _params = insert_cursor.calls[0]
@@ -149,15 +163,25 @@ class TestInsertEventMergesNearDuplicateAcrossKind:
 
     def test_low_similarity_different_kind_does_not_merge(self, monkeypatch: pytest.MonkeyPatch) -> None:
         existing = {
-            "id": 70, "kind": "test", "title": "Completely unrelated title here",
-            "date": None, "amount_usd": None, "currency": None, "parties": None,
-            "customer": None, "program": None, "summary_he": None, "confidence": 0.4,
+            "id": 70,
+            "kind": "test",
+            "title": "Completely unrelated title here",
+            "date": None,
+            "amount_usd": None,
+            "currency": None,
+            "parties": None,
+            "customer": None,
+            "program": None,
+            "summary_he": None,
+            "confidence": 0.4,
         }
         find_cursor = _FakeCursor(fetchall_result=[existing])
         insert_cursor = _FakeCursor(fetchone_result={"id": 101})
         monkeypatch.setattr(relational, "connection", _ConnectionQueue([find_cursor, insert_cursor]))
 
-        event_id = relational.insert_event(item_id=70, kind="contract_award", title="Elbit wins pod contract from USAF")
+        event_id = relational.insert_event(
+            item_id=70, kind="contract_award", title="Elbit wins pod contract from USAF"
+        )
 
         assert event_id == 101
 
@@ -209,6 +233,11 @@ class TestFindKindDiffDuplicateGroupsRepair:
         red = self._load_script()
         rows = [
             {"id": 1, "item_id": 70, "kind": "test", "title": "Elbit wins pod contract from USAF"},
-            {"id": 2, "item_id": 70, "kind": "contract_award", "title": "Completely unrelated event happened"},
+            {
+                "id": 2,
+                "item_id": 70,
+                "kind": "contract_award",
+                "title": "Completely unrelated event happened",
+            },
         ]
         assert red.find_kind_diff_duplicate_groups(rows) == []

@@ -31,7 +31,9 @@ class TestAskRequestMaxLength:
         assert r.status_code == 422
         assert r.json()["error"]["code"] == "validation_error"
 
-    def test_question_at_4000_chars_accepted(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_question_at_4000_chars_accepted(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from eoa.api import services
         from eoa.llm import ollama_client
 
@@ -50,7 +52,9 @@ class TestNewInvestigationRequestMaxLength:
         assert r.status_code == 422
         assert r.json()["error"]["code"] == "validation_error"
 
-    def test_question_at_2000_chars_accepted(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_question_at_2000_chars_accepted(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from eoa.api import services
 
         monkeypatch.setattr(services, "start_investigation", lambda question, item_id: 7)

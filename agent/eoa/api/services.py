@@ -463,7 +463,9 @@ class InvestigationAlreadyActive(Exception):
 
     def __init__(self, job: dict[str, Any]) -> None:
         self.job = job
-        super().__init__(f"a deep_search job for this item is already {job.get('state')} (id={job.get('id')})")
+        super().__init__(
+            f"a deep_search job for this item is already {job.get('state')} (id={job.get('id')})"
+        )
 
 
 def investigate_item(item_id: int, question: str | None) -> dict[str, Any] | None:
@@ -856,7 +858,7 @@ def _resolve_repo_path(raw: str) -> Path:
     prefix ``/app/...`` (ADR-004: the same tree is now ``REPO_ROOT``), so that prefix is remapped."""
     text = str(raw).replace("\\", "/")
     if text.startswith("/app/"):
-        return REPO_ROOT / text[len("/app/"):]
+        return REPO_ROOT / text[len("/app/") :]
     p = Path(raw)
     return p if p.is_absolute() else REPO_ROOT / p
 
@@ -928,7 +930,9 @@ def report_citations(report_id: int) -> dict[str, Any] | None:
     items_included = row.get("items_included") or []
     citations: dict[str, dict[str, Any]] = {}
     if items_included:
-        db_rows = _fetchall("SELECT id, title, url FROM items WHERE id = ANY(%(ids)s)", {"ids": items_included})
+        db_rows = _fetchall(
+            "SELECT id, title, url FROM items WHERE id = ANY(%(ids)s)", {"ids": items_included}
+        )
         by_id = {r["id"]: r for r in db_rows}
         for i, item_id in enumerate(items_included, start=1):
             it = by_id.get(item_id)
@@ -1532,7 +1536,9 @@ def list_tenders(
         if effective_since_days is None and not (include_closed or include_archived):
             effective_since_days = DEFAULT_SINCE_DAYS
         if effective_since_days is not None:
-            where.append("COALESCE(deadline, published_at::date, created_at::date) >= (CURRENT_DATE - %(since_days)s)")
+            where.append(
+                "COALESCE(deadline, published_at::date, created_at::date) >= (CURRENT_DATE - %(since_days)s)"
+            )
             params["since_days"] = effective_since_days
 
     if country:
@@ -1714,7 +1720,15 @@ def enqueue_run(scope: str, mode: str) -> int:
 # Jobs the "run now" button (or the scheduler) can start that the analyst thinks of as "a run" --
 # excludes `deep_search` (consumed piecemeal from inside `daily_run`'s own stage, or triggered
 # individually from the UI/chat -- see `other_running` below).
-_PRIMARY_RUN_KINDS = ("daily_run", "weekly_run", "monthly_run", "report", "ingest", "tender_scan", "conference_scan")
+_PRIMARY_RUN_KINDS = (
+    "daily_run",
+    "weekly_run",
+    "monthly_run",
+    "report",
+    "ingest",
+    "tender_scan",
+    "conference_scan",
+)
 
 
 def _stage_progress_for_job(job_id: int, job_state: str) -> dict[str, Any]:
@@ -2196,7 +2210,9 @@ def _render_chains_yaml_block(chains: dict[str, list[ChainEntryCfg]]) -> str:
     payload = {
         role: [entry.model_dump(exclude_none=True) for entry in entries] for role, entries in chains.items()
     }
-    dumped = yaml.safe_dump({"chains": payload}, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    dumped = yaml.safe_dump(
+        {"chains": payload}, default_flow_style=False, sort_keys=False, allow_unicode=True
+    )
     lines = dumped.rstrip("\n").split("\n")
     return "\n".join(f"  {line}" if line else line for line in lines) + "\n"
 
@@ -2306,7 +2322,13 @@ def list_mcp_servers() -> dict[str, Any]:
     cfg = eoa_config.settings().mcp
     servers: list[dict[str, Any]] = []
     for server in cfg.servers:
-        status: dict[str, Any] = {"tool_count": None, "ok": None, "error": None, "latency_ms": None, "tools": []}
+        status: dict[str, Any] = {
+            "tool_count": None,
+            "ok": None,
+            "error": None,
+            "latency_ms": None,
+            "tools": [],
+        }
         if cfg.enabled and server.enabled and not server.inherit_cli_only:
             try:
                 result = ping_server(server)
@@ -2452,7 +2474,7 @@ def bd_territories() -> list[dict[str, Any]]:
         }
         for code in sorted(codes)
     ]
-    out.sort(key=lambda t: (t["items"] + t["tenders"] + t["forecasts"]), reverse=True)
+    out.sort(key=lambda t: t["items"] + t["tenders"] + t["forecasts"], reverse=True)
     return out
 
 
@@ -2462,7 +2484,9 @@ def enqueue_bd_report(territory: str, lookback_days: int) -> int:
     code = geography.normalize_country(territory)
     if code == geography.UNKNOWN_COUNTRY:
         raise ValueError(f"unrecognized territory: {territory!r}")
-    return relational.enqueue_job("bd_report", {"territory": code, "lookback_days": lookback_days}, priority=4)
+    return relational.enqueue_job(
+        "bd_report", {"territory": code, "lookback_days": lookback_days}, priority=4
+    )
 
 
 def build_or_enqueue_bd_report(territory: str, lookback_days: int = 90) -> dict[str, Any]:

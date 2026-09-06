@@ -377,9 +377,7 @@ class McpServerCfg(BaseModel):
 class ProcurementMcpCfg(BaseModel):
     """Defaults consumed by ``eoa.mcp_servers.procurement`` (not by the client/registry)."""
 
-    psc_codes_eo_ir: list[str] = Field(
-        default_factory=lambda: ["5855", "6650", "1270", "5840", "5841"]
-    )
+    psc_codes_eo_ir: list[str] = Field(default_factory=lambda: ["5855", "6650", "1270", "5840", "5841"])
 
 
 class McpCfg(BaseModel):
@@ -473,7 +471,8 @@ class Settings(BaseModel):
     @property
     def database_url(self) -> str:
         return os.environ.get(
-            "DATABASE_URL", "postgresql://eoa@127.0.0.1:5432/eoanalyst"  # no default password: set DATABASE_URL (runtime/eoa.env)
+            "DATABASE_URL",
+            "postgresql://eoa@127.0.0.1:5432/eoanalyst",  # no default password: set DATABASE_URL (runtime/eoa.env)
         )
 
     @property

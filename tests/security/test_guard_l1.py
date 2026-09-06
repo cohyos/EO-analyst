@@ -105,12 +105,10 @@ class TestGuardL1Classifier:
         print(f"False positives: {false_positives}/{len(clean_results)}\n")
 
         assert coverage >= 0.15, (
-            f"L1 injection detection coverage {coverage:.1%} below 15% sanity threshold "
-            f"({detected}/{total})."
+            f"L1 injection detection coverage {coverage:.1%} below 15% sanity threshold ({detected}/{total})."
         )
         assert false_positives <= 2, (
-            f"L1 false positive rate {false_positives}/{len(clean_results)} exceeds the "
-            f"maximum of 2."
+            f"L1 false positive rate {false_positives}/{len(clean_results)} exceeds the maximum of 2."
         )
 
     def test_score_bounds(self):

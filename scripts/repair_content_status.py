@@ -32,9 +32,7 @@ def run_repair(*, dry_run: bool = False) -> dict[str, Any]:
     from eoa.fetch.content_quality import assess
 
     with connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, clean_text, raw_text, security_status, content_status FROM items ORDER BY id"
-        )
+        cur.execute("SELECT id, clean_text, raw_text, security_status, content_status FROM items ORDER BY id")
         rows = cur.fetchall()
 
         changes: list[tuple[int, str, str]] = []  # (id, old_status, new_status)

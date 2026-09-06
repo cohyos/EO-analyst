@@ -84,7 +84,12 @@ def _is_narrative(row: dict[str, Any]) -> bool:
         return False
     if t.startswith(_NARRATIVE_TITLE_PREFIXES_HE):
         return True
-    has_anchor = bool(row.get("parties")) or bool(row.get("customer")) or row.get("amount_usd") is not None or bool(row.get("date"))
+    has_anchor = (
+        bool(row.get("parties"))
+        or bool(row.get("customer"))
+        or row.get("amount_usd") is not None
+        or bool(row.get("date"))
+    )
     has_occurrence_verb = any(v in t for v in _OCCURRENCE_VERBS_HE)
     return not has_occurrence_verb and not has_anchor
 
@@ -110,7 +115,8 @@ def find_kind_diff_duplicate_groups(rows: list[dict[str, Any]]) -> list[dict[str
         for ev in sorted(evs, key=lambda r: r["id"]):
             match = next(
                 (
-                    k for k in kept
+                    k
+                    for k in kept
                     if k["kind"] != ev["kind"]
                     and event_title_similarity(k["title"], ev["title"]) >= EVENT_TITLE_DEDUP_THRESHOLD
                 ),
@@ -190,7 +196,9 @@ def run_repair(*, dry_run: bool = False, delete_narrative: bool = False) -> dict
                     f"title={g['keep']['title'][:60]!r} <- {[(r['id'], r['kind']) for r in g['merge']]}"
                 )
             for r in narrative_rows:
-                print(f"  narrative-looking event id={r['id']} item_id={r['item_id']} title={r['title'][:80]!r}")
+                print(
+                    f"  narrative-looking event id={r['id']} item_id={r['item_id']} title={r['title'][:80]!r}"
+                )
             return counts
 
         for event_id, merged in to_update:

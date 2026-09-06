@@ -273,7 +273,9 @@ def _filter_deep_search_to_items_included(
     isn't orphaned relative to anything."""
     included_item_ids = {it["id"] for it in items if it.get("id") is not None}
     return [
-        d for d in deep_search if d.get("trigger_item_id") is None or d.get("trigger_item_id") in included_item_ids
+        d
+        for d in deep_search
+        if d.get("trigger_item_id") is None or d.get("trigger_item_id") in included_item_ids
     ]
 
 
@@ -778,7 +780,9 @@ def build_daily(
 
     if not qa.passed and items:
         log.warning("report_qa_failed_retrying", errors=qa.errors[:10])
-        draft = _corrective_retry(items, draft, qa, role=role, interactive=interactive, table_counts=table_counts)
+        draft = _corrective_retry(
+            items, draft, qa, role=role, interactive=interactive, table_counts=table_counts
+        )
         qa = check(draft, items)
 
     if not qa.passed and items:
@@ -891,7 +895,11 @@ def build_daily(
     )
     if llm_footer_he:
         footer_html = f'<p class="llm-footer">{llm_footer_he}</p>'
-        html_text = html_text.replace("</body>", f"{footer_html}</body>") if "</body>" in html_text else html_text + footer_html
+        html_text = (
+            html_text.replace("</body>", f"{footer_html}</body>")
+            if "</body>" in html_text
+            else html_text + footer_html
+        )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")
 

@@ -33,7 +33,12 @@ class TestChatStructuredBatch:
     def test_maps_results_by_item_id(self, monkeypatch: pytest.MonkeyPatch):
         def fake_chat_structured(role, schema, messages, **kw):
             return schema.model_validate(
-                {"items": [{"item_id": 1, "domain": "a", "score": 3}, {"item_id": 2, "domain": "b", "score": 7}]}
+                {
+                    "items": [
+                        {"item_id": 1, "domain": "a", "score": 3},
+                        {"item_id": 2, "domain": "b", "score": 7},
+                    ]
+                }
             )
 
         monkeypatch.setattr(oc, "chat_structured", fake_chat_structured)
@@ -64,11 +69,15 @@ class TestChatStructuredBatch:
 
 class TestIsCloudBatchMode:
     def test_local_mode_false(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(oc, "settings", lambda: SimpleNamespace(llm_providers=SimpleNamespace(mode="local")))
+        monkeypatch.setattr(
+            oc, "settings", lambda: SimpleNamespace(llm_providers=SimpleNamespace(mode="local"))
+        )
         assert oc.is_cloud_batch_mode() is False
 
     def test_cloud_mode_true(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(oc, "settings", lambda: SimpleNamespace(llm_providers=SimpleNamespace(mode="cloud")))
+        monkeypatch.setattr(
+            oc, "settings", lambda: SimpleNamespace(llm_providers=SimpleNamespace(mode="cloud"))
+        )
         assert oc.is_cloud_batch_mode() is True
 
 
@@ -99,7 +108,9 @@ class TestClassifyBatchWiring:
         marked = []
         monkeypatch.setattr(classify, "mark_stage", lambda item_id, stage: marked.append(item_id))
         persisted = []
-        monkeypatch.setattr(classify, "persist_classification", lambda item_id, out: persisted.append(item_id))
+        monkeypatch.setattr(
+            classify, "persist_classification", lambda item_id, out: persisted.append(item_id)
+        )
         monkeypatch.setattr(classify, "update_item_fields", lambda *a, **k: None)
 
         def fake_batch(chunk, *, role):

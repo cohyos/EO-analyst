@@ -353,7 +353,11 @@ def _with_partial_content_note(item: dict, uncertainty_he: str | None) -> str | 
         return uncertainty_he
     if uncertainty_he and PARTIAL_CONTENT_UNCERTAINTY_NOTE_HE in uncertainty_he:
         return uncertainty_he
-    return f"{PARTIAL_CONTENT_UNCERTAINTY_NOTE_HE}. {uncertainty_he}" if uncertainty_he else PARTIAL_CONTENT_UNCERTAINTY_NOTE_HE
+    return (
+        f"{PARTIAL_CONTENT_UNCERTAINTY_NOTE_HE}. {uncertainty_he}"
+        if uncertainty_he
+        else PARTIAL_CONTENT_UNCERTAINTY_NOTE_HE
+    )
 
 
 def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
@@ -424,9 +428,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 if src_id is None or dst_id is None:
                     # Q3-13: one (or both) endpoints was rejected by upsert_entity as junk (a
                     # technique-like or generic-non-entity name) -- the edge itself is meaningless.
-                    log.info(
-                        "edge_skipped_rejected_entity", item_id=item["id"], src=e.src, dst=e.dst
-                    )
+                    log.info("edge_skipped_rejected_entity", item_id=item["id"], src=e.src, dst=e.dst)
                     continue
                 merge_entity(src_id, src_name, src_kind, None)
                 merge_entity(dst_id, dst_name, dst_kind, None)

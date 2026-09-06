@@ -43,8 +43,10 @@ async def main() -> None:
     if missing:
         print(f"WARNING: slugs not found in config/sources.yaml: {missing}")
 
-    print(f"Ingesting {len(wanted_db_ids)} tech_dev sources (since_days=14, wider than the default "
-          f"3 to give the arXiv/journal feeds a real first-run sample)...")
+    print(
+        f"Ingesting {len(wanted_db_ids)} tech_dev sources (since_days=14, wider than the default "
+        f"3 to give the arXiv/journal feeds a real first-run sample)..."
+    )
     stats = await run_ingest(source_ids=wanted_db_ids, since_days=14)
 
     print("-" * 78)

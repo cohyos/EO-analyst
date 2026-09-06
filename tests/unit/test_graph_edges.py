@@ -153,7 +153,9 @@ class TestAddEdge:
 
 class TestMergeEntity:
     def test_update_query_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        conn = _patch_connection(monkeypatch, rows=[{"entity_id": 1, "name": "RTX", "kind": "company", "country": "US"}])
+        conn = _patch_connection(
+            monkeypatch, rows=[{"entity_id": 1, "name": "RTX", "kind": "company", "country": "US"}]
+        )
         result = graph.merge_entity(1, "RTX", "company", None)
 
         query, params = conn.last_cursor.executed
@@ -343,7 +345,9 @@ class TestEdgeStats:
 
 
 class TestNamedQueries:
-    def test_partners_of_competitors_query_shape_and_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_partners_of_competitors_query_shape_and_passthrough(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         rows = [{"entity_id": 3, "name": "Elbit", "kind": "company", "country": "IL"}]
         conn = _patch_connection(monkeypatch, rows=rows)
         result = graph.partners_of_competitors("RTX")

@@ -122,8 +122,12 @@ class TestStoreItemStats:
         monkeypatch.setattr("eoa.memory.relational.insert_item", lambda **kw: 1)
 
         stats = service.IngestStats()
-        service._store_item(source_db_id=None, url="https://example.com/1", html_text=_SAMPLE_HTML, stats=stats)
-        service._store_item(source_db_id=None, url="https://example.com/2", html_text=_SAMPLE_HTML, stats=stats)
+        service._store_item(
+            source_db_id=None, url="https://example.com/1", html_text=_SAMPLE_HTML, stats=stats
+        )
+        service._store_item(
+            source_db_id=None, url="https://example.com/2", html_text=_SAMPLE_HTML, stats=stats
+        )
         service._store_item(
             source_db_id=None, url="https://example.com/seen-3", html_text=_SAMPLE_HTML, stats=stats
         )

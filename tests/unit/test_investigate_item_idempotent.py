@@ -46,7 +46,9 @@ class TestInvestigateItemService:
         assert excinfo.value.job["id"] == 42
         assert calls == ["active"]
 
-    def test_recent_done_investigation_is_reused_not_reenqueued(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_recent_done_investigation_is_reused_not_reenqueued(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         done_job = {"id": 7, "state": "done"}
         enqueue_calls: list[Any] = []
 
@@ -116,7 +118,9 @@ class TestInvestigateItemRoute:
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "not_found"
 
-    def test_active_job_returns_409_with_job_detail(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_active_job_returns_409_with_job_detail(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         def raise_active(*_a: Any, **_kw: Any) -> Any:
             raise services.InvestigationAlreadyActive({"id": 42, "state": "running"})
 

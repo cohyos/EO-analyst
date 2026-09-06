@@ -86,7 +86,9 @@ async def list_tools(server: McpServerCfg) -> list[McpToolInfo]:
         # Q2-15 (2026-09-06): `exc`'s own text can echo a request URL (or other upstream detail)
         # carrying an API key -- redact before it becomes an exception message that gets logged,
         # persisted to `mcp_calls.error`, or returned to the model.
-        raise McpConnectionError(f"mcp server '{server.id}': list_tools failed: {redact_secrets(str(exc))}") from exc
+        raise McpConnectionError(
+            f"mcp server '{server.id}': list_tools failed: {redact_secrets(str(exc))}"
+        ) from exc
 
 
 async def call_tool(server: McpServerCfg, tool_name: str, arguments: dict[str, Any]) -> McpCallResult:

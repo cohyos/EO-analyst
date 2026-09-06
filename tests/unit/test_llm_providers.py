@@ -76,7 +76,9 @@ class TestCliProviderChatAgy:
         def fake_run(args, **kwargs):
             captured["args"] = args
             captured["input"] = kwargs.get("input")
-            return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "PONG\n", "usage": {"output_tokens": 3}}))
+            return _completed(
+                stdout=json.dumps({"status": "SUCCESS", "response": "PONG\n", "usage": {"output_tokens": 3}})
+            )
 
         monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
         result = CliProvider("agy").chat([{"role": "user", "content": "ping"}])
@@ -123,7 +125,9 @@ class TestCliProviderChatClaude:
         def fake_run(args, **kwargs):
             captured["args"] = args
             captured["input"] = kwargs.get("input")
-            return _completed(stdout=json.dumps({"is_error": False, "result": "PONG", "usage": {"output_tokens": 5}}))
+            return _completed(
+                stdout=json.dumps({"is_error": False, "result": "PONG", "usage": {"output_tokens": 5}})
+            )
 
         monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
         result = CliProvider("claude", "claude-haiku-4-5-20251001").chat(
@@ -178,7 +182,10 @@ class TestCliProviderChatCodex:
 
             return real(proc, None)  # simulate the temp file having vanished
 
-        monkeypatch.setattr("eoa.llm.providers.cli.CliProvider._parse_output", lambda self, proc, tmp_out: fake_parse_codex(proc, tmp_out))
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.CliProvider._parse_output",
+            lambda self, proc, tmp_out: fake_parse_codex(proc, tmp_out),
+        )
         with pytest.raises(CliProviderError):
             CliProvider("codex").chat([{"role": "user", "content": "ping"}])
 

@@ -22,7 +22,10 @@ class TestSubdomainTaxonomyValidator:
 
     def test_invalid_subdomain_cleared(self) -> None:
         out = ClassifyOut(
-            domain="airborne_pods", subdomain="not_a_real_subdomain", report_kind="company_pr", one_line_he="x"
+            domain="airborne_pods",
+            subdomain="not_a_real_subdomain",
+            report_kind="company_pr",
+            one_line_he="x",
         )
         assert out.subdomain == ""
 
@@ -34,11 +37,15 @@ class TestSubdomainTaxonomyValidator:
         assert out.subdomain == ""
 
     def test_empty_subdomain_untouched(self) -> None:
-        out = ClassifyOut(domain="out_of_scope", subdomain="", report_kind="rumor_speculation", one_line_he="x")
+        out = ClassifyOut(
+            domain="out_of_scope", subdomain="", report_kind="rumor_speculation", one_line_he="x"
+        )
         assert out.subdomain == ""
 
     def test_out_of_scope_domain_with_empty_subdomain(self) -> None:
-        out = ClassifyOut(domain="out_of_scope", subdomain="", report_kind="rumor_speculation", one_line_he="x")
+        out = ClassifyOut(
+            domain="out_of_scope", subdomain="", report_kind="rumor_speculation", one_line_he="x"
+        )
         assert out.domain == "out_of_scope"
 
 
@@ -74,13 +81,19 @@ class TestWatchlistAliasHit:
 
 class TestApplyNoEoirGate:
     def _item(self, **overrides: object) -> dict:
-        base = {"id": 117, "title": "AI deepfake video fools viewers", "clean_text": "A deepfake AI video went viral on social media."}
+        base = {
+            "id": 117,
+            "title": "AI deepfake video fools viewers",
+            "clean_text": "A deepfake AI video went viral on social media.",
+        }
         return {**base, **overrides}
 
     def test_item_117_style_gated_to_out_of_scope(self) -> None:
         """Regression for item 117: an AI/deepfake story with no EO/IR content, classified
         c_uas with zero entities, must be forced to out_of_scope."""
-        out = ClassifyOut(domain="c_uas", subdomain="detect_track", report_kind="verified_report", one_line_he="x")
+        out = ClassifyOut(
+            domain="c_uas", subdomain="detect_track", report_kind="verified_report", one_line_he="x"
+        )
         gated = apply_no_eoir_gate(self._item(), out)
         assert gated.domain == "out_of_scope"
         assert gated.subdomain == ""
@@ -102,7 +115,9 @@ class TestApplyNoEoirGate:
             title="New targeting pod",
             clean_text="The electro-optical targeting pod features a FLIR sensor.",
         )
-        out = ClassifyOut(domain="airborne_pods", subdomain="targeting_pods", report_kind="verified_report", one_line_he="x")
+        out = ClassifyOut(
+            domain="airborne_pods", subdomain="targeting_pods", report_kind="verified_report", one_line_he="x"
+        )
         gated = apply_no_eoir_gate(item, out)
         assert gated.domain == "airborne_pods"
 
@@ -113,6 +128,12 @@ class TestApplyNoEoirGate:
         assert gated.domain == "secondary"
 
     def test_already_out_of_scope_is_a_noop(self) -> None:
-        out = ClassifyOut(domain="out_of_scope", subdomain="", report_kind="rumor_speculation", relevance_note="already out", one_line_he="x")
+        out = ClassifyOut(
+            domain="out_of_scope",
+            subdomain="",
+            report_kind="rumor_speculation",
+            relevance_note="already out",
+            one_line_he="x",
+        )
         gated = apply_no_eoir_gate(self._item(), out)
         assert gated.relevance_note == "already out"

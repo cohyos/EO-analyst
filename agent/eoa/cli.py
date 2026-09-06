@@ -216,9 +216,7 @@ def _pid_alive(pid: int) -> bool:
     import subprocess
 
     try:
-        r = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, timeout=5
-        )
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, timeout=5)
         return str(pid) in r.stdout
     except Exception:
         return False
@@ -259,7 +257,9 @@ def native_start() -> None:
     paths["sentinel"].unlink(missing_ok=True)
     # Q6-1 (2026-09-06): DETACHED_PROCESS makes the `pwsh` App-Execution-Alias exit 0 without running
     # -File; CREATE_NO_WINDOW keeps the console hidden and actually starts the script.
-    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+        subprocess, "CREATE_NO_WINDOW", 0
+    )
     proc = subprocess.Popen(
         ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(paths["supervisor_script"])],
         cwd=str(paths["root"]),
@@ -273,7 +273,9 @@ def native_start() -> None:
 
     _time.sleep(3)
     if proc.poll() is not None:
-        rprint(f"[red]supervisor exited immediately (code {proc.returncode}); see runtime/logs/supervisor.log[/red]")
+        rprint(
+            f"[red]supervisor exited immediately (code {proc.returncode}); see runtime/logs/supervisor.log[/red]"
+        )
         raise typer.Exit(code=1)
     rprint("[green]native supervisor launched (hidden window) — check `eo native status` shortly[/green]")
 
@@ -324,7 +326,9 @@ def native_status() -> None:
         t.add_row("postgres", "not installed (run scripts/native/install_native.ps1)")
 
     try:
-        r = httpx.get(os.environ.get("NTFY_URL", "http://127.0.0.1:8091").rstrip("/") + "/v1/health", timeout=10)
+        r = httpx.get(
+            os.environ.get("NTFY_URL", "http://127.0.0.1:8091").rstrip("/") + "/v1/health", timeout=10
+        )
         t.add_row("ntfy", "up" if r.status_code == 200 else f"http {r.status_code}")
     except Exception as exc:
         t.add_row("ntfy", f"down ({exc.__class__.__name__})")

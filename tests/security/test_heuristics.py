@@ -378,7 +378,9 @@ class TestHeuristicDetection:
     def test_json_tool_call_key_pattern_ignores_plain_english_mentions(self):
         """`"the tool"` / `"a function call"` in ordinary prose must not trip the JSON-key pattern
         -- only the literal `"tool":`/`"tool_call":`/`"function_call":` JSON-key shape should."""
-        text = "The technician used a specialized tool to calibrate the sensor during the function call review."
+        text = (
+            "The technician used a specialized tool to calibrate the sensor during the function call review."
+        )
         result = scan_heuristics(text)
         assert "json_tool_call_key" not in {h.pattern_id for h in result.hits}
 

@@ -23,7 +23,9 @@ class TestMcpConfigPath:
     def test_returns_none_when_mcp_disabled(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
             "eoa.llm.providers.cli.settings",
-            _settings_with(McpCfg(enabled=False, servers=[McpServerCfg(id="x", enabled=True, command="python")])),
+            _settings_with(
+                McpCfg(enabled=False, servers=[McpServerCfg(id="x", enabled=True, command="python")])
+            ),
         )
         assert _mcp_config_path("claude") is None
 
@@ -81,7 +83,9 @@ class TestMcpConfigPath:
 
 class TestBuildArgsWiresMcpConfig:
     def test_claude_args_include_mcp_config_when_enabled(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
-        server = McpServerCfg(id="procurement", transport="stdio", enabled=True, command="{python}", args=["-m", "x"])
+        server = McpServerCfg(
+            id="procurement", transport="stdio", enabled=True, command="{python}", args=["-m", "x"]
+        )
         monkeypatch.setattr(
             "eoa.llm.providers.cli.settings",
             _settings_with(McpCfg(enabled=True, servers=[server], inherit_cli_mcp={"claude": True})),
@@ -102,10 +106,14 @@ class TestBuildArgsWiresMcpConfig:
         assert tmp_out is None
 
     def test_agy_never_gets_mcp_config_flag(self, monkeypatch: pytest.MonkeyPatch):
-        server = McpServerCfg(id="procurement", transport="stdio", enabled=True, command="{python}", args=["-m", "x"])
+        server = McpServerCfg(
+            id="procurement", transport="stdio", enabled=True, command="{python}", args=["-m", "x"]
+        )
         monkeypatch.setattr(
             "eoa.llm.providers.cli.settings",
-            _settings_with(McpCfg(enabled=True, servers=[server], inherit_cli_mcp={"agy": True, "claude": True})),
+            _settings_with(
+                McpCfg(enabled=True, servers=[server], inherit_cli_mcp={"agy": True, "claude": True})
+            ),
         )
         cp = CliProvider("agy")
         args, _stdin_data, _tmp_out = cp._build_args("agy.exe", None, "hi", None)

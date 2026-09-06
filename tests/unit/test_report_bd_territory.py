@@ -27,7 +27,7 @@ MARKET_ITEMS = [
         "level": "red",
         "geography": "US",
         "entities_mentioned": ["Elbit"],
-        "summary_he": "צבא ארה\"ב הכריז על מכרז חדש לפוד כיוון [1].",
+        "summary_he": 'צבא ארה"ב הכריז על מכרז חדש לפוד כיוון [1].',
         "so_what_he": "הזדמנות לספקי EO/IR.",
     },
     {
@@ -41,7 +41,7 @@ MARKET_ITEMS = [
         "level": "orange",
         "geography": "US",
         "entities_mentioned": [],
-        "summary_he": "הוכרזה תוכנית חדשה נגד כטב\"מים בארה\"ב [2].",
+        "summary_he": 'הוכרזה תוכנית חדשה נגד כטב"מים בארה"ב [2].',
         "so_what_he": "שוק צומח.",
     },
 ]
@@ -129,9 +129,7 @@ CONFERENCES_DATA = {
 
 def _draft_fixture() -> BdTerritoryReportDraft:
     return BdTerritoryReportDraft(
-        exec_summary_he=(
-            'צבא ארה"ב הכריז על מכרז חדש לפוד כיוון [1]. שוק ה-C-UAS בארה"ב צומח [2].'
-        ),
+        exec_summary_he=('צבא ארה"ב הכריז על מכרז חדש לפוד כיוון [1]. שוק ה-C-UAS בארה"ב צומח [2].'),
         market_bullets_he=[
             'צבא ארה"ב מקדם מכרז לפוד כיוון חדש [1].',
             'תוכנית C-UAS חדשה הוכרזה בארה"ב [2].',
@@ -142,7 +140,7 @@ def _draft_fixture() -> BdTerritoryReportDraft:
             BdAction(
                 action_he="ליזום פגישת היכרות עם US Army לקראת ה-RFI הימי",
                 priority="H",
-                rationale_he="נפתח RFI לכיוון ימי בארה\"ב [4], ותחזית הרכש תומכת בכך [5].",
+                rationale_he='נפתח RFI לכיוון ימי בארה"ב [4], ותחזית הרכש תומכת בכך [5].',
                 owner_role_he="פיתוח עסקי",
                 timing_he="מיידי",
             ),
@@ -162,8 +160,12 @@ def _draft_fixture() -> BdTerritoryReportDraft:
 
 @pytest.fixture
 def patch_bd_collectors(monkeypatch, tmp_path):
-    monkeypatch.setattr(bdt, "collect_market_items", lambda t, s, e, max_items=250: [dict(it) for it in MARKET_ITEMS])
-    monkeypatch.setattr(bdt, "collect_platform_events", lambda t, s, e, limit=25: [dict(ev) for ev in PLATFORM_EVENTS])
+    monkeypatch.setattr(
+        bdt, "collect_market_items", lambda t, s, e, max_items=250: [dict(it) for it in MARKET_ITEMS]
+    )
+    monkeypatch.setattr(
+        bdt, "collect_platform_events", lambda t, s, e, limit=25: [dict(ev) for ev in PLATFORM_EVENTS]
+    )
     monkeypatch.setattr(
         bdt,
         "collect_tenders_and_forecasts",
@@ -237,14 +239,18 @@ def test_build_bd_territory_renders_expected_tables(patch_bd_collectors):
     heading_texts = {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"}
     assert "תמונת שוק בטריטוריה" in heading_texts
     assert "סיכונים והנחות" in heading_texts
-    assert "דוח מיקוד לפיתוח עסקי — US" in {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Title"}
+    assert "דוח מיקוד לפיתוח עסקי — US" in {
+        p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Title"
+    }
 
 
 def test_build_bd_territory_actions_table_sorted_by_priority(patch_bd_collectors):
     paths = bdt.build_bd_territory("US", 90, period_end=dt.date(2026, 9, 6))
     doc = docx.Document(str(paths.docx))
     actions_table = next(
-        t for t in doc.tables if [c.text for c in t.rows[0].cells] == ["עדיפות", "פעולה", "נימוק", "אחראי", "תזמון"]
+        t
+        for t in doc.tables
+        if [c.text for c in t.rows[0].cells] == ["עדיפות", "פעולה", "נימוק", "אחראי", "תזמון"]
     )
     priorities = [row.cells[0].text for row in actions_table.rows[1:]]
     assert priorities == ["גבוהה", "בינונית"]
@@ -253,7 +259,9 @@ def test_build_bd_territory_actions_table_sorted_by_priority(patch_bd_collectors
 def test_build_bd_territory_no_items_skips_llm_and_still_persists(monkeypatch, tmp_path):
     monkeypatch.setattr(bdt, "collect_market_items", lambda t, s, e, max_items=250: [])
     monkeypatch.setattr(bdt, "collect_platform_events", lambda t, s, e, limit=25: [])
-    monkeypatch.setattr(bdt, "collect_tenders_and_forecasts", lambda t, limit=20: {"tenders": [], "forecasts": []})
+    monkeypatch.setattr(
+        bdt, "collect_tenders_and_forecasts", lambda t, limit=20: {"tenders": [], "forecasts": []}
+    )
     monkeypatch.setattr(bdt, "collect_active_competitors", lambda t, ids, s, e, limit=15: [])
     monkeypatch.setattr(
         bdt,
@@ -406,7 +414,9 @@ def test_drop_empty_sections_removes_blank_prose():
     draft = BdTerritoryReportDraft(
         exec_summary_he="תקציר [1].",
         sections=[
-            ReportSection(title_he="בינה חזותית (Computer Vision / AI)", domain="computer_vision", prose_he="   "),
+            ReportSection(
+                title_he="בינה חזותית (Computer Vision / AI)", domain="computer_vision", prose_he="   "
+            ),
             ReportSection(title_he="עם תוכן", domain="tech_dev", prose_he="יש כאן תוכן אמיתי [1]."),
         ],
     )
@@ -428,8 +438,7 @@ def test_drop_empty_sections_noop_when_nothing_blank():
 def test_strip_uncited_drops_dependent_fragment_starting_with_conjunction():
     draft = BdTerritoryReportDraft(
         exec_summary_he=(
-            'צבא ארה"ב מתמודד עם איומי רחפנים קטנים ומשימות מורכבות [1]. '
-            "ובפרט לאיומי רחפנים קטנים ומשימות."
+            'צבא ארה"ב מתמודד עם איומי רחפנים קטנים ומשימות מורכבות [1]. ובפרט לאיומי רחפנים קטנים ומשימות.'
         ),
         market_bullets_he=[],
         recommended_actions=[],
@@ -450,7 +459,7 @@ def test_strip_uncited_drops_dependent_fragment_starting_with_conjunction():
 
 def test_strip_uncited_drops_short_verbless_fragment_after_stripped_sentence():
     draft = BdTerritoryReportDraft(
-        exec_summary_he=("החברה זכתה בחוזה גדול בארה\"ב [1]. תוצאה ישירה של כך."),
+        exec_summary_he=('החברה זכתה בחוזה גדול בארה"ב [1]. תוצאה ישירה של כך.'),
         market_bullets_he=[],
         recommended_actions=[],
         risks_assumptions_he="",
@@ -556,12 +565,18 @@ def test_perspective_violations_empty_when_no_watchlist_competitors():
 
 def test_drop_perspective_violations_removes_only_offending_action():
     keep = BdAction(
-        action_he="ליזום פגישה עם הלקוח", priority="M", rationale_he="נפתח מכרז [1].",
-        owner_role_he="פיתוח עסקי", timing_he="מיידי",
+        action_he="ליזום פגישה עם הלקוח",
+        priority="M",
+        rationale_he="נפתח מכרז [1].",
+        owner_role_he="פיתוח עסקי",
+        timing_he="מיידי",
     )
     drop = BdAction(
-        action_he="להציג יכולת של Shield AI בכנס AUSA", priority="H", rationale_he="Shield AI פעילה [1].",
-        owner_role_he="שיווק", timing_he="רבעון הקרוב",
+        action_he="להציג יכולת של Shield AI בכנס AUSA",
+        priority="H",
+        rationale_he="Shield AI פעילה [1].",
+        owner_role_he="שיווק",
+        timing_he="רבעון הקרוב",
     )
     draft = BdTerritoryReportDraft(exec_summary_he="תקציר [1].", recommended_actions=[keep, drop])
     cleaned = bdt._drop_perspective_violations(draft, [(drop, "Shield AI")])
@@ -586,12 +601,18 @@ def test_strip_placeholder_echoes_removes_bullet_and_action_with_generic_names()
         market_bullets_he=["התפתחות אמיתית [1].", "התפתחות בכנס Z הקרוב [2]."],
         recommended_actions=[
             BdAction(
-                action_he="להציג יכולת Y בכנס Z הקרוב", priority="M", rationale_he="נימוק [1].",
-                owner_role_he="שיווק", timing_he="מיידי",
+                action_he="להציג יכולת Y בכנס Z הקרוב",
+                priority="M",
+                rationale_he="נימוק [1].",
+                owner_role_he="שיווק",
+                timing_he="מיידי",
             ),
             BdAction(
-                action_he="ליזום פגישה עם US Army", priority="H", rationale_he="נימוק אמיתי [1].",
-                owner_role_he="פיתוח עסקי", timing_he="מיידי",
+                action_he="ליזום פגישה עם US Army",
+                priority="H",
+                rationale_he="נימוק אמיתי [1].",
+                owner_role_he="פיתוח עסקי",
+                timing_he="מיידי",
             ),
         ],
     )
@@ -606,7 +627,13 @@ def test_strip_placeholder_echoes_noop_when_clean():
         exec_summary_he="תקציר אמיתי [1].",
         market_bullets_he=["בולט אמיתי [1]."],
         recommended_actions=[
-            BdAction(action_he="פעולה", priority="M", rationale_he="נימוק [1].", owner_role_he="מכירות", timing_he="מיידי")
+            BdAction(
+                action_he="פעולה",
+                priority="M",
+                rationale_he="נימוק [1].",
+                owner_role_he="מכירות",
+                timing_he="מיידי",
+            )
         ],
     )
     cleaned = bdt._strip_placeholder_echoes(draft)
@@ -617,12 +644,17 @@ def test_cap_draft_lengths_truncates_runaway_bullets_and_actions():
     bullets = [f"בולט מספר {i} [1]." for i in range(15)]
     actions = [
         BdAction(
-            action_he=f"פעולה {i}", priority="M", rationale_he="נימוק [1].",
-            owner_role_he="מכירות", timing_he="מיידי",
+            action_he=f"פעולה {i}",
+            priority="M",
+            rationale_he="נימוק [1].",
+            owner_role_he="מכירות",
+            timing_he="מיידי",
         )
         for i in range(20)
     ]
-    draft = BdTerritoryReportDraft(exec_summary_he="תקציר [1].", market_bullets_he=bullets, recommended_actions=actions)
+    draft = BdTerritoryReportDraft(
+        exec_summary_he="תקציר [1].", market_bullets_he=bullets, recommended_actions=actions
+    )
     capped = bdt._cap_draft_lengths(draft)
     assert len(capped.market_bullets_he) == 8
     assert len(capped.recommended_actions) == 8
@@ -635,7 +667,13 @@ def test_cap_draft_lengths_noop_when_within_limits():
         exec_summary_he="תקציר [1].",
         market_bullets_he=["בולט [1]."],
         recommended_actions=[
-            BdAction(action_he="פעולה", priority="M", rationale_he="נימוק [1].", owner_role_he="מכירות", timing_he="מיידי")
+            BdAction(
+                action_he="פעולה",
+                priority="M",
+                rationale_he="נימוק [1].",
+                owner_role_he="מכירות",
+                timing_he="מיידי",
+            )
         ],
     )
     assert bdt._cap_draft_lengths(draft) is draft
@@ -662,7 +700,13 @@ def test_bd_table_counts_context_he_empty_when_all_zero():
 
 def test_tables_only_draft_used_when_items_empty_but_tables_present():
     draft = bdt.draft_bd_territory(
-        "US", 90, "", "", "", "", "",
+        "US",
+        90,
+        "",
+        "",
+        "",
+        "",
+        "",
         has_items=False,
         table_counts=bdt.BdTableCounts(competitors=3),
     )
@@ -713,7 +757,9 @@ def test_collect_dormant_watchlist_competitors_lists_names_not_in_active_set(mon
 
 
 def test_build_bd_territory_adds_dormant_note_when_few_competitors(patch_bd_collectors, monkeypatch):
-    monkeypatch.setattr(bdt, "collect_active_competitors", lambda t, ids, s, e, limit=15: [dict(c) for c in COMPETITORS])
+    monkeypatch.setattr(
+        bdt, "collect_active_competitors", lambda t, ids, s, e, limit=15: [dict(c) for c in COMPETITORS]
+    )
     monkeypatch.setattr(
         bdt, "collect_dormant_watchlist_competitors", lambda t, active, limit=20: ["Dormant Co", "Sleepy Co"]
     )
@@ -756,8 +802,22 @@ def test_build_bd_territory_drops_perspective_violation_after_failed_retry(patch
 
     monkeypatch.setattr(bdt, "draft_bd_territory", lambda *a, **k: violating_draft)
     monkeypatch.setattr(
-        bdt, "collect_active_competitors",
-        lambda t, ids, s, e, limit=15: [dict(c) for c in COMPETITORS] + [{"entity_id": 2, "name": "Shield AI", "country": "US", "mentions": 1, "is_watchlist": True, "is_israeli_industry": False, "recent_wins": []}],
+        bdt,
+        "collect_active_competitors",
+        lambda t, ids, s, e, limit=15: (
+            [dict(c) for c in COMPETITORS]
+            + [
+                {
+                    "entity_id": 2,
+                    "name": "Shield AI",
+                    "country": "US",
+                    "mentions": 1,
+                    "is_watchlist": True,
+                    "is_israeli_industry": False,
+                    "recent_wins": [],
+                }
+            ]
+        ),
     )
     # The regeneration retry itself still violates (simulating a stubborn model) -- the fallback
     # must drop exactly the offending action rather than persist a competitor-promoting one.

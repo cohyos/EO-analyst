@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import html as html_entities  # `choose_title`'s own `html` parameter (raw page HTML) shadows the
+
 # stdlib module name in that function's scope, so it's imported under a distinct name here.
 import json
 import re

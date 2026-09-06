@@ -320,7 +320,12 @@ def _merge_into_existing_event(existing: dict[str, Any], *, kind: str, **fields:
             """,
             {"id": existing["id"], "kind": merged_kind, **fields},
         )
-    log.info("event.merged_near_duplicate", event_id=existing["id"], kind=merged_kind, previous_kind=existing["kind"])
+    log.info(
+        "event.merged_near_duplicate",
+        event_id=existing["id"],
+        kind=merged_kind,
+        previous_kind=existing["kind"],
+    )
     return existing["id"]
 
 

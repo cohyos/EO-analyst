@@ -61,9 +61,23 @@ def _row_flagged_fields(row: dict[str, Any], fields: tuple[str, ...]) -> list[st
 
 
 def _fetch_items() -> list[dict[str, Any]]:
-    cols = ", ".join({"id", "title", "url", "clean_text", "source_name", "report_kind", "published_at",
-                       "domain", "subdomain", "trl", "entities_mentioned", *_ITEM_ANALYZE_FIELDS,
-                       *_ITEM_TRIAGE_FIELDS})
+    cols = ", ".join(
+        {
+            "id",
+            "title",
+            "url",
+            "clean_text",
+            "source_name",
+            "report_kind",
+            "published_at",
+            "domain",
+            "subdomain",
+            "trl",
+            "entities_mentioned",
+            *_ITEM_ANALYZE_FIELDS,
+            *_ITEM_TRIAGE_FIELDS,
+        }
+    )
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT {cols} FROM items")
         return cur.fetchall()
@@ -99,7 +113,9 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
         if analyze_fields:
             before = {f: item.get(f) for f in analyze_fields}
             if dry_run:
-                report["items_analyze_repaired"].append({"id": item["id"], "fields": analyze_fields, "before": before})
+                report["items_analyze_repaired"].append(
+                    {"id": item["id"], "fields": analyze_fields, "before": before}
+                )
                 continue
             try:
                 out = analyze_item(item, role=role)
@@ -118,8 +134,12 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
                 continue
             try:
                 out = triage_item(item, role=role)
-                update_item_fields(item["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600])
-                report["items_triage_repaired"].append({"id": item["id"], "before": before, "after": out.reason_he})
+                update_item_fields(
+                    item["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600]
+                )
+                report["items_triage_repaired"].append(
+                    {"id": item["id"], "before": before, "after": out.reason_he}
+                )
             except Exception as exc:
                 report["items_triage_failed"].append({"id": item["id"], "error": str(exc)[:200]})
 
@@ -140,14 +160,19 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
                 report[report_key].append({"id": row["id"], "before": text, "after": fixed})
                 if not dry_run:
                     with db.connection() as conn, conn.cursor() as cur:
-                        cur.execute(f"UPDATE {table} SET {text_col} = %(text)s WHERE {id_col} = %(id)s", {"text": fixed, "id": row["id"]})
+                        cur.execute(
+                            f"UPDATE {table} SET {text_col} = %(text)s WHERE {id_col} = %(id)s",
+                            {"text": fixed, "id": row["id"]},
+                        )
                 continue
             # No quote to normalise -- but if the text still ends bare on a known acronym stem
             # (genuine truncation: content is actually *missing*, not just mis-quoted), there is
             # no single-row regeneration path for this table, so it's reported as a known,
             # currently-unrepairable gap rather than silently skipped.
             if _looks_truncated_mid_hebrew_acronym(text, "raw"):  # "raw": skip the generic *_he-suffix branch
-                report[f"{report_key.rsplit('_', 2)[0]}_truncated_unrepairable"].append({"id": row["id"], "text": text})
+                report[f"{report_key.rsplit('_', 2)[0]}_truncated_unrepairable"].append(
+                    {"id": row["id"], "text": text}
+                )
 
     return report
 
@@ -155,22 +180,26 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing it")
-    parser.add_argument("--role", default="resident", help="LLM role for re-analysis/re-triage (default: resident)")
+    parser.add_argument(
+        "--role", default="resident", help="LLM role for re-analysis/re-triage (default: resident)"
+    )
     args = parser.parse_args()
 
     report = repair(dry_run=args.dry_run, role=args.role)
 
-    print(f"{'='*70}\nQ3-1 Hebrew-truncation repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'='*70}")
+    print(
+        f"{'=' * 70}\nQ3-1 Hebrew-truncation repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'=' * 70}"
+    )
     for key, rows in report.items():
         print(f"\n{key}: {len(rows)}")
         for r in rows[:15]:
-            print(f"  id={r.get('id')} {({k: v for k, v in r.items() if k not in ('id',)})}")
+            print(f"  id={r.get('id')} { ({k: v for k, v in r.items() if k not in ('id',)}) }")
         if len(rows) > 15:
             print(f"  ... and {len(rows) - 15} more")
 
     total = sum(len(v) for k, v in report.items() if not k.endswith("_failed"))
     total_failed = len(report["items_analyze_failed"]) + len(report["items_triage_failed"])
-    print(f"\n{'='*70}\nTotal rows flagged/repaired: {total}  |  failed: {total_failed}\n{'='*70}")
+    print(f"\n{'=' * 70}\nTotal rows flagged/repaired: {total}  |  failed: {total_failed}\n{'=' * 70}")
     if args.dry_run:
         print("(dry run -- nothing written; re-run without --dry-run to apply)")
 

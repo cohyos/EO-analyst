@@ -68,7 +68,9 @@ class TestSamGovSearch:
 
     def test_non_200_returns_error(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("SAM_GOV_API_KEY", "test-key")
-        monkeypatch.setattr(p, "http_get_json", lambda *a, **kw: {"status": 500, "json": None, "text": "boom"})
+        monkeypatch.setattr(
+            p, "http_get_json", lambda *a, **kw: {"status": 500, "json": None, "text": "boom"}
+        )
         out = json.loads(p.sam_gov_search(keyword="x"))
         assert "error" in out
 
@@ -89,13 +91,20 @@ class TestUsaspendingAwardsByPsc:
     def test_explicit_psc_codes_override_default(self, monkeypatch: pytest.MonkeyPatch):
         captured = {}
         monkeypatch.setattr(
-            p, "http_post_json", lambda url, **kw: captured.update(body=kw["json_body"]) or {"status": 200, "json": {"results": []}, "text": None}
+            p,
+            "http_post_json",
+            lambda url, **kw: (
+                captured.update(body=kw["json_body"])
+                or {"status": 200, "json": {"results": []}, "text": None}
+            ),
         )
         p.usaspending_awards_by_psc(psc_codes=["9999"])
         assert captured["body"]["filters"]["psc_codes"] == ["9999"]
 
     def test_error_status(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(p, "http_post_json", lambda *a, **kw: {"status": 422, "json": None, "text": "bad filter"})
+        monkeypatch.setattr(
+            p, "http_post_json", lambda *a, **kw: {"status": 422, "json": None, "text": "bad filter"}
+        )
         out = json.loads(p.usaspending_awards_by_psc())
         assert "error" in out
 
@@ -169,7 +178,9 @@ class TestDscaMajorArmsSalesParsing:
         assert p._parse_dsca_listing(html, keyword="nomatch", limit=10) == []
 
     def test_non_200_returns_error_with_hint(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(p, "http_get_json", lambda *a, **kw: {"status": 403, "json": None, "text": "denied"})
+        monkeypatch.setattr(
+            p, "http_get_json", lambda *a, **kw: {"status": 403, "json": None, "text": "denied"}
+        )
         out = json.loads(p.dsca_major_arms_sales())
         assert out["error"]
         assert "hint" in out

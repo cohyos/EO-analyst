@@ -61,7 +61,7 @@ class TestStalePlatformMatch:
         assert rfc._stale_platform_match(row, conn) is False
 
     def test_no_recoverable_item_ids_is_never_flagged(self) -> None:
-        row = {"platform": 'מסוק קרב', "sources": None}
+        row = {"platform": "מסוק קרב", "sources": None}
         conn = _FakeConnection([])
         assert rfc._stale_platform_match(row, conn) is False
 
@@ -102,7 +102,9 @@ class TestRecomputeBuyerCountry:
 
         assert rfc._recompute_buyer_country(row, _BoomConn()) == "US"
 
-    def test_falls_back_to_rationale_mention_when_nothing_else_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_falls_back_to_rationale_mention_when_nothing_else_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("eoa.tenders.forecast._country_from_entities", lambda ids: None)
         row = {"buyer_country": "other", "sources": [], "rationale_he": "העסקה נחתמה עבור צרפת."}
         conn = _FakeConnection([])

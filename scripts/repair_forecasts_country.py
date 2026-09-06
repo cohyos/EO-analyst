@@ -62,9 +62,7 @@ def _recompute_buyer_country(row: dict[str, Any], conn: Any) -> str:
                 "SELECT title, clean_text, summary_he FROM items WHERE id = ANY(%(ids)s)", {"ids": item_ids}
             )
             item_rows = cur.fetchall()
-        combined = " ".join(
-            str(x) for r in item_rows for x in (r.get("title"), r.get("summary_he")) if x
-        )
+        combined = " ".join(str(x) for r in item_rows for x in (r.get("title"), r.get("summary_he")) if x)
         mentions = country_mentions_in_text(combined)
         if mentions:
             return mentions[0]
@@ -136,7 +134,9 @@ def run_repair(*, dry_run: bool = False, delete_stale_platform: bool = False) ->
             for fid in regen_flags:
                 print(f"  forecast {fid}: flagged needs_regen=true (fallback rationale)")
             for fid in stale_platform_ids:
-                print(f"  forecast {fid}: stale platform match (trigger text no longer matches its own platform)")
+                print(
+                    f"  forecast {fid}: stale platform match (trigger text no longer matches its own platform)"
+                )
             return counts
 
         for fid, _old, new_country in country_updates:

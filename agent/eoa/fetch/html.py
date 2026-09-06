@@ -339,7 +339,9 @@ async def fetch_page(
                     follow_redirects=not manual_redirects,
                 )
             except _RetryableStatusError as exc:
-                raise FetchError(f"upstream returned {exc.status_code} for {current_url} after retries") from exc
+                raise FetchError(
+                    f"upstream returned {exc.status_code} for {current_url} after retries"
+                ) from exc
             except httpx.HTTPError as exc:
                 raise FetchError(f"transport error fetching {current_url}: {exc}") from exc
 

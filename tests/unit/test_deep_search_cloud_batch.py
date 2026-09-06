@@ -48,7 +48,9 @@ class TestWriteInvestigationsFile:
         assert "פריט הקשר" in text
 
     def test_uses_item_id_when_no_job_id(self, tmp_path: Path):
-        path = ds.write_investigations_file([{"job_id": None, "item_id": 42, "question": "q"}], out_dir=tmp_path)
+        path = ds.write_investigations_file(
+            [{"job_id": None, "item_id": 42, "question": "q"}], out_dir=tmp_path
+        )
         assert "## שאלה 42" in path.read_text(encoding="utf-8")
 
     def test_empty_pending_short_circuits(self):
@@ -75,7 +77,9 @@ class TestRunClaudeWithTools:
         idx = captured["args"].index("--allowedTools")
         assert captured["args"][idx + 1] == "WebSearch,WebFetch"
 
-    def test_missing_binary_raises_provider_unavailable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    def test_missing_binary_raises_provider_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
         monkeypatch.setattr(ds.shutil, "which", lambda name: None)
         with pytest.raises(ProviderUnavailable):
             ds._run_claude_with_tools(tmp_path / "x.md", None)
@@ -83,7 +87,9 @@ class TestRunClaudeWithTools:
     def test_is_error_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.setattr(ds.shutil, "which", lambda name: "/bin/claude")
         monkeypatch.setattr(
-            ds.subprocess, "run", lambda *a, **k: _completed(stdout=json.dumps({"is_error": True, "result": "boom"}))
+            ds.subprocess,
+            "run",
+            lambda *a, **k: _completed(stdout=json.dumps({"is_error": True, "result": "boom"})),
         )
         file_path = tmp_path / "f.md"
         file_path.write_text("x", encoding="utf-8")
@@ -95,7 +101,9 @@ class TestRunAgyWithTools:
     def test_success(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.setattr(ds.shutil, "which", lambda name: f"/bin/{name}")
         monkeypatch.setattr(
-            ds.subprocess, "run", lambda *a, **k: _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"}))
+            ds.subprocess,
+            "run",
+            lambda *a, **k: _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"})),
         )
         file_path = tmp_path / "f.md"
         file_path.write_text("x", encoding="utf-8")
@@ -167,9 +175,7 @@ class TestInvestigateBatchCloud:
                 }
             ),
         )
-        monkeypatch.setattr(
-            ds, "_screen_cloud_answer", lambda qid, answer: answer
-        )
+        monkeypatch.setattr(ds, "_screen_cloud_answer", lambda qid, answer: answer)
         pending = [{"job_id": 1, "item_id": None, "question": "q1"}]
         results, cross = ds.investigate_batch_cloud(pending)
         assert cross == "תובנה משותפת"
@@ -178,7 +184,9 @@ class TestInvestigateBatchCloud:
 
     def test_missing_question_id_becomes_not_found(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(ds, "write_investigations_file", lambda pending, **k: Path("fake.md"))
-        monkeypatch.setattr(ds, "_run_claude_with_tools", lambda file_path, model: json.dumps({"results": {}}))
+        monkeypatch.setattr(
+            ds, "_run_claude_with_tools", lambda file_path, model: json.dumps({"results": {}})
+        )
         pending = [{"job_id": 7, "item_id": None, "question": "q1"}]
         results, _cross = ds.investigate_batch_cloud(pending)
         assert results[7].outcome == "not_found"

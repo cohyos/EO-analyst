@@ -238,7 +238,11 @@ def split_runs(text: str) -> list[tuple[str, str]]:
         base = _char_class(ch)
         if base is not None:
             c = base
-        elif ch in _BRACKET_CLOSE_TO_OPEN and bracket_stack and bracket_stack[-1][0] == _BRACKET_CLOSE_TO_OPEN[ch]:
+        elif (
+            ch in _BRACKET_CLOSE_TO_OPEN
+            and bracket_stack
+            and bracket_stack[-1][0] == _BRACKET_CLOSE_TO_OPEN[ch]
+        ):
             c = bracket_stack[-1][1]
         elif ch == '"' and quote_open_class is not None:
             c = quote_open_class
@@ -254,7 +258,11 @@ def split_runs(text: str) -> list[tuple[str, str]]:
         if base is None:
             if ch in _BRACKET_OPEN_TO_CLOSE:
                 bracket_stack.append((ch, cur))
-            elif ch in _BRACKET_CLOSE_TO_OPEN and bracket_stack and bracket_stack[-1][0] == _BRACKET_CLOSE_TO_OPEN[ch]:
+            elif (
+                ch in _BRACKET_CLOSE_TO_OPEN
+                and bracket_stack
+                and bracket_stack[-1][0] == _BRACKET_CLOSE_TO_OPEN[ch]
+            ):
                 bracket_stack.pop()
             elif ch == '"':
                 quote_open_class = None if quote_open_class is not None else cur
@@ -968,7 +976,11 @@ def render_markdown(
         ]
         for ev in events:
             n = ev.get("n")
-            src = f"[{n}](#src-{n})" if n is not None else source_label(ev.get("source_name"), ev.get("item_url"))
+            src = (
+                f"[{n}](#src-{n})"
+                if n is not None
+                else source_label(ev.get("source_name"), ev.get("item_url"))
+            )
             lines.append(
                 f"| {fmt_date(ev.get('date'))} "
                 f"| {_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—')} "

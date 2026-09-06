@@ -62,7 +62,9 @@ from eoa.pipeline.entity_normalize import (  # noqa: E402
 
 def _fetch_entities() -> list[dict[str, Any]]:
     with db.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, kind, country, aliases, focus, first_seen_item FROM entities ORDER BY id")
+        cur.execute(
+            "SELECT id, name, kind, country, aliases, focus, first_seen_item FROM entities ORDER BY id"
+        )
         return cur.fetchall()
 
 
@@ -101,10 +103,15 @@ def _fix_kinds(entities: list[dict[str, Any]], *, dry_run: bool) -> list[dict[st
         new_kind = normalize_kind(ent["name"], ent["kind"])
         if new_kind == ent["kind"]:
             continue
-        report.append({"id": ent["id"], "name": ent["name"], "before_kind": ent["kind"], "after_kind": new_kind})
+        report.append(
+            {"id": ent["id"], "name": ent["name"], "before_kind": ent["kind"], "after_kind": new_kind}
+        )
         if not dry_run:
             with db.connection() as conn, conn.cursor() as cur:
-                cur.execute("UPDATE entities SET kind = %(kind)s WHERE id = %(id)s", {"kind": new_kind, "id": ent["id"]})
+                cur.execute(
+                    "UPDATE entities SET kind = %(kind)s WHERE id = %(id)s",
+                    {"kind": new_kind, "id": ent["id"]},
+                )
     return report
 
 
@@ -191,9 +198,18 @@ def _repoint_and_merge(loser_id: int, loser_name: str, winner_id: int, winner_na
         for row in cur.fetchall():
             parties = row["parties"] or []
             deduped = list(dict.fromkeys(winner_name if p == loser_name else p for p in parties))
-            cur.execute("UPDATE events SET parties = %(parties)s WHERE id = %(id)s", {"parties": deduped, "id": row["id"]})
-        cur.execute("UPDATE events SET customer = %(winner)s WHERE customer = %(loser)s", {"winner": winner_name, "loser": loser_name})
-        cur.execute("UPDATE events SET program = %(winner)s WHERE program = %(loser)s", {"winner": winner_name, "loser": loser_name})
+            cur.execute(
+                "UPDATE events SET parties = %(parties)s WHERE id = %(id)s",
+                {"parties": deduped, "id": row["id"]},
+            )
+        cur.execute(
+            "UPDATE events SET customer = %(winner)s WHERE customer = %(loser)s",
+            {"winner": winner_name, "loser": loser_name},
+        )
+        cur.execute(
+            "UPDATE events SET program = %(winner)s WHERE program = %(loser)s",
+            {"winner": winner_name, "loser": loser_name},
+        )
         cur.execute("DELETE FROM entities WHERE id = %(id)s", {"id": loser_id})
 
 
@@ -226,7 +242,10 @@ def _merge_duplicates(entities: list[dict[str, Any]], *, dry_run: bool) -> list[
             continue
         if winner["name"] != winner_name:
             with db.connection() as conn, conn.cursor() as cur:
-                cur.execute("UPDATE entities SET name = %(name)s WHERE id = %(id)s", {"name": winner_name, "id": winner["id"]})
+                cur.execute(
+                    "UPDATE entities SET name = %(name)s WHERE id = %(id)s",
+                    {"name": winner_name, "id": winner["id"]},
+                )
         for loser in losers:
             _repoint_and_merge(loser["id"], loser["name"], winner["id"], winner_name)
     return report
@@ -261,7 +280,9 @@ def main() -> None:
 
     report = repair(dry_run=args.dry_run)
 
-    print(f"{'='*70}\nQ3-13 entity normalisation repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'='*70}")
+    print(
+        f"{'=' * 70}\nQ3-13 entity normalisation repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'=' * 70}"
+    )
     print(f"\nentities before: {report['before_count']}")
 
     print(f"\njunk_rejected (technique-like + generic non-entities): {len(report['junk_rejected'])}")
@@ -280,7 +301,9 @@ def main() -> None:
     merged_rows = sum(len(g["merged"]) for g in report["duplicates_merged"])
     print(f"\nduplicates_merged: {merge_count} group(s), {merged_rows} row(s) merged away")
     for g in report["duplicates_merged"][:20]:
-        print(f"  winner id={g['winner_id']} name={g['winner_name']!r} (renamed_from={g['renamed_from']!r}) <- {g['merged']}")
+        print(
+            f"  winner id={g['winner_id']} name={g['winner_name']!r} (renamed_from={g['renamed_from']!r}) <- {g['merged']}"
+        )
 
     if not args.dry_run:
         with db.connection() as conn, conn.cursor() as cur:
@@ -288,7 +311,7 @@ def main() -> None:
             after_count = cur.fetchone()["n"]
         print(f"\nentities after: {after_count}  (removed: {report['before_count'] - after_count})")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     if args.dry_run:
         print("(dry run -- nothing written; re-run without --dry-run to apply)")
 

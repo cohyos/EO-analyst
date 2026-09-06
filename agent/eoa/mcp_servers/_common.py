@@ -76,7 +76,12 @@ def http_post_json(
     headers: dict[str, str] | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> dict[str, Any]:
-    hdrs = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": USER_AGENT, **(headers or {})}
+    hdrs = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+        **(headers or {}),
+    }
     resp = _request("POST", url, json_body=json_body, headers=hdrs, timeout_s=timeout_s)
     return _parse_response(resp)
 
@@ -143,9 +148,7 @@ def _request(
                 assert_public_http_url(next_url)
                 next_host = urlsplit(next_url).hostname
                 if next_host != original_host:
-                    raise FetchError(
-                        f"refusing cross-host redirect from {original_host!r} to {next_host!r}"
-                    )
+                    raise FetchError(f"refusing cross-host redirect from {original_host!r} to {next_host!r}")
                 current_url = next_url
             raise FetchError(f"too many redirects (> {_MAX_REDIRECT_HOPS}) fetching the configured API URL")
     except FetchError as exc:

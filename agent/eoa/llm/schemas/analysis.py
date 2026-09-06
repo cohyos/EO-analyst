@@ -99,9 +99,7 @@ class ClassifyOut(BaseModel):
             return self
         valid_subs = (domains.get(self.domain) or {}).get("sub", {}) or {}
         if self.subdomain not in valid_subs:
-            log.warning(
-                "classify_invalid_subdomain", domain=self.domain, subdomain=self.subdomain
-            )
+            log.warning("classify_invalid_subdomain", domain=self.domain, subdomain=self.subdomain)
             self.subdomain = ""
         return self
 

@@ -120,7 +120,9 @@ class TestRunChainFallback:
         assert attempts[2].fell_back_from == "agy"
 
     def test_local_terminal_failure_raises_chain_exhausted(self, monkeypatch):
-        monkeypatch.setattr("eoa.llm.chain._build_provider", lambda entry: _failing_provider(CliProviderError("x")))
+        monkeypatch.setattr(
+            "eoa.llm.chain._build_provider", lambda entry: _failing_provider(CliProviderError("x"))
+        )
         monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: None)
         chain = [ChainEntryCfg(provider="agy"), ChainEntryCfg(provider="ollama")]
 
@@ -152,12 +154,18 @@ class TestRunChainRecording:
             return 1
 
         monkeypatch.setattr("eoa.memory.relational.log_llm_call", fake_log_llm_call)
-        monkeypatch.setattr("eoa.llm.chain._build_provider", lambda entry: _ok_provider(content="x", usage={"input_tokens": 100, "output_tokens": 50}))
+        monkeypatch.setattr(
+            "eoa.llm.chain._build_provider",
+            lambda entry: _ok_provider(content="x", usage={"input_tokens": 100, "output_tokens": 50}),
+        )
         monkeypatch.setattr(
             "eoa.llm.chain.estimate_cost_usd",
             lambda provider, model, p, c: 0.0042,
         )
-        chain = [ChainEntryCfg(provider="anthropic", model="claude-sonnet-5", power="high"), ChainEntryCfg(provider="ollama")]
+        chain = [
+            ChainEntryCfg(provider="anthropic", model="claude-sonnet-5", power="high"),
+            ChainEntryCfg(provider="ollama"),
+        ]
         run_chain("resident", chain, _local_ollama_leg(), messages=[], batch_size=3)
         assert captured["provider"] == "anthropic"
         assert captured["prompt_tokens"] == 100

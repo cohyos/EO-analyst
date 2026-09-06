@@ -71,9 +71,7 @@ class BdAction(BaseModel):
 
     action_he: str = Field(description="פעולה מומלצת אחת, משפט קצר וברור")
     priority: str = Field(description='עדיפות: "H" (גבוהה), "M" (בינונית) או "L" (נמוכה) בלבד')
-    rationale_he: str = Field(
-        description="נימוק לפעולה, משפט אחד עד שניים, עם הפניות [n] לכל טענה עובדתית"
-    )
+    rationale_he: str = Field(description="נימוק לפעולה, משפט אחד עד שניים, עם הפניות [n] לכל טענה עובדתית")
     owner_role_he: str = Field(description='תפקיד אחראי: "מכירות", "פיתוח עסקי" או "שיווק"')
     timing_he: str = Field(description='תזמון מוצע, למשל "מיידי" / "רבעון הקרוב" / "תוך חצי שנה"')
 

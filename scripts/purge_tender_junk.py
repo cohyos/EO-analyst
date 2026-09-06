@@ -59,7 +59,12 @@ from eoa.tenders.scan import (  # noqa: E402
 # lighter-weight, faster alternative when only the original three checks are needed.
 
 
-def _fails_gate(row: dict[str, Any], sources_by_id: dict[str, Any], procurement_signals: list[str], deny_domains: list[str]) -> str | None:
+def _fails_gate(
+    row: dict[str, Any],
+    sources_by_id: dict[str, Any],
+    procurement_signals: list[str],
+    deny_domains: list[str],
+) -> str | None:
     """Returns a short reason string if `row` should be purged, else None."""
     url = row.get("url") or ""
     if url and _is_denylisted_domain(url, deny_domains):
@@ -119,9 +124,7 @@ def purge(*, dry_run: bool = False) -> dict[str, Any]:
             cur.execute("DELETE FROM tenders WHERE id = ANY(%s)", (ids,))
             deleted_tenders = cur.rowcount
             if item_ids:
-                cur.execute(
-                    "DELETE FROM items WHERE id = ANY(%s) AND report_kind = 'tender'", (item_ids,)
-                )
+                cur.execute("DELETE FROM items WHERE id = ANY(%s) AND report_kind = 'tender'", (item_ids,))
                 deleted_items = cur.rowcount
 
     # Belt-and-suspenders: an `items` row can end up report_kind='tender' with no *surviving*

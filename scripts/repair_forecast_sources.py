@@ -62,7 +62,10 @@ def run_repair(*, dry_run: bool = False) -> dict[str, Any]:
             conn.commit()
 
     counts = {"rows_scanned": len(rows), "rows_with_duplicates": len(changed), "changed": changed}
-    log.info("repair_forecast_sources.complete" if not dry_run else "repair_forecast_sources.dry_run", **{k: v for k, v in counts.items() if k != "changed"})
+    log.info(
+        "repair_forecast_sources.complete" if not dry_run else "repair_forecast_sources.dry_run",
+        **{k: v for k, v in counts.items() if k != "changed"},
+    )
     return counts
 
 

@@ -103,7 +103,9 @@ def run_chain(
                 )
                 attempts.append(attempt)
                 _record(role, attempt, batch_size)
-                raise ChainExhausted(f"llm chain for role={role!r}: local terminal entry failed: {exc}") from exc
+                raise ChainExhausted(
+                    f"llm chain for role={role!r}: local terminal entry failed: {exc}"
+                ) from exc
             attempt = ChainAttempt(
                 provider="ollama",
                 model=result.model,
@@ -111,7 +113,9 @@ def run_chain(
                 ok=True,
                 duration_ms=result.duration_ms,
                 prompt_tokens=int(result.usage.get("prompt_tokens") or result.usage.get("input_tokens") or 0),
-                completion_tokens=int(result.usage.get("eval_tokens") or result.usage.get("output_tokens") or 0),
+                completion_tokens=int(
+                    result.usage.get("eval_tokens") or result.usage.get("output_tokens") or 0
+                ),
                 fell_back_from=fell_back_from,
                 attempt_no=attempt_no,
             )
@@ -165,7 +169,9 @@ def _record(role: str, attempt: ChainAttempt, batch_size: int) -> None:
     try:
         from eoa.memory.relational import log_llm_call
 
-        cost = estimate_cost_usd(attempt.provider, attempt.model, attempt.prompt_tokens, attempt.completion_tokens)
+        cost = estimate_cost_usd(
+            attempt.provider, attempt.model, attempt.prompt_tokens, attempt.completion_tokens
+        )
         log_llm_call(
             provider=attempt.provider,
             model=attempt.model or "(unavailable)",

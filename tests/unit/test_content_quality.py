@@ -65,7 +65,9 @@ class TestAssess:
 class TestContentStatusPrecheck:
     def test_persists_status_when_changed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = []
-        monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", lambda item_id, **kw: calls.append((item_id, kw)))
+        monkeypatch.setattr(
+            "eoa.pipeline.analyze.update_item_fields", lambda item_id, **kw: calls.append((item_id, kw))
+        )
         it = {"id": 1, "clean_text": "short", "content_status": "full"}
         status = _content_status_precheck(it)
         assert status == "stub"
@@ -74,7 +76,9 @@ class TestContentStatusPrecheck:
 
     def test_no_write_when_status_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = []
-        monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", lambda item_id, **kw: calls.append((item_id, kw)))
+        monkeypatch.setattr(
+            "eoa.pipeline.analyze.update_item_fields", lambda item_id, **kw: calls.append((item_id, kw))
+        )
         it = {"id": 1, "clean_text": "a" * 5000, "content_status": "full"}
         status = _content_status_precheck(it)
         assert status == "full"

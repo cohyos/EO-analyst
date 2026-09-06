@@ -35,7 +35,9 @@ class TestLocalModeUnchanged:
     def test_never_calls_investigate_batch_cloud(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(jobs, "settings", lambda: _fake_settings("local"))
         jobs_queue = [_job(1)]
-        monkeypatch.setattr(jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None)
+        monkeypatch.setattr(
+            jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None
+        )
         finished = []
         monkeypatch.setattr(jobs, "finish_job", lambda *a, **k: finished.append(a))
 
@@ -48,7 +50,9 @@ class TestLocalModeUnchanged:
         monkeypatch.setattr(
             ds_mod,
             "investigate",
-            lambda *a, **k: SimpleNamespace(outcome="not_found", result=SimpleNamespace(outcome="not_found", answer_he="x")),
+            lambda *a, **k: SimpleNamespace(
+                outcome="not_found", result=SimpleNamespace(outcome="not_found", answer_he="x")
+            ),
         )
         rs = SimpleNamespace(time_left_min=lambda: None)
         result = jobs.run_deep_searches(rs)
@@ -59,7 +63,9 @@ class TestCloudModeBatchDelegation:
     def test_claims_up_to_cap_and_delegates_in_one_call(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(jobs, "settings", lambda: _fake_settings("cloud", max_per_night=3))
         jobs_queue = [_job(1), _job(2), _job(3), _job(4)]  # a 4th job must not be claimed (cap=3)
-        monkeypatch.setattr(jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None)
+        monkeypatch.setattr(
+            jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None
+        )
         finished = []
         monkeypatch.setattr(jobs, "finish_job", lambda job_id, status, **k: finished.append((job_id, status)))
 
@@ -102,7 +108,9 @@ class TestCloudModeBatchDelegation:
     def test_missing_job_in_results_marked_failed(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(jobs, "settings", lambda: _fake_settings("cloud", max_per_night=2))
         jobs_queue = [_job(1), _job(2)]
-        monkeypatch.setattr(jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None)
+        monkeypatch.setattr(
+            jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None
+        )
         finished = []
         monkeypatch.setattr(jobs, "finish_job", lambda job_id, status, **k: finished.append((job_id, status)))
 
@@ -113,7 +121,11 @@ class TestCloudModeBatchDelegation:
             ds_mod,
             "investigate_batch_cloud",
             lambda pending: (
-                {1: SimpleNamespace(outcome="found", result=SimpleNamespace(outcome="found", answer_he="a", sources=[]))},
+                {
+                    1: SimpleNamespace(
+                        outcome="found", result=SimpleNamespace(outcome="found", answer_he="a", sources=[])
+                    )
+                },
                 "",
             ),
         )
@@ -128,7 +140,9 @@ class TestCloudModeBatchDelegation:
     def test_batch_failure_falls_back_to_local_per_job(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(jobs, "settings", lambda: _fake_settings("cloud", max_per_night=2))
         jobs_queue = [_job(1), _job(2)]
-        monkeypatch.setattr(jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None)
+        monkeypatch.setattr(
+            jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None
+        )
         finished = []
         monkeypatch.setattr(jobs, "finish_job", lambda job_id, status, **k: finished.append((job_id, status)))
 
@@ -142,7 +156,9 @@ class TestCloudModeBatchDelegation:
 
         def fake_investigate(question, **kw):
             local_calls.append(kw.get("job_id"))
-            return SimpleNamespace(outcome="not_found", result=SimpleNamespace(outcome="not_found", answer_he="x"))
+            return SimpleNamespace(
+                outcome="not_found", result=SimpleNamespace(outcome="not_found", answer_he="x")
+            )
 
         monkeypatch.setattr(ds_mod, "investigate", fake_investigate)
         rs = SimpleNamespace(time_left_min=lambda: None)

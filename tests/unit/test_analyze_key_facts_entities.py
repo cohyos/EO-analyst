@@ -47,7 +47,12 @@ class TestDedupeKeyFacts:
 
 class TestBackfillEntitiesFromWatchlist:
     def test_no_backfill_when_already_populated(self) -> None:
-        item = {"id": 1, "title": "x", "clean_text": "Elbit Systems won a contract.", "entities_mentioned": ["Something"]}
+        item = {
+            "id": 1,
+            "title": "x",
+            "clean_text": "Elbit Systems won a contract.",
+            "entities_mentioned": ["Something"],
+        }
         assert _backfill_entities_from_watchlist(item) is None
 
     def test_backfill_from_title_and_text(self) -> None:
@@ -61,12 +66,22 @@ class TestBackfillEntitiesFromWatchlist:
         assert result == ["Elbit"]
 
     def test_backfill_via_alias(self) -> None:
-        item = {"id": 3, "title": "עדכון", "clean_text": "אלביט מערכות זכתה בחוזה חדש.", "entities_mentioned": None}
+        item = {
+            "id": 3,
+            "title": "עדכון",
+            "clean_text": "אלביט מערכות זכתה בחוזה חדש.",
+            "entities_mentioned": None,
+        }
         result = _backfill_entities_from_watchlist(item)
         assert result == ["Elbit"]
 
     def test_no_backfill_when_no_alias_found(self) -> None:
-        item = {"id": 4, "title": "Unrelated news", "clean_text": "Nothing to see here.", "entities_mentioned": []}
+        item = {
+            "id": 4,
+            "title": "Unrelated news",
+            "clean_text": "Nothing to see here.",
+            "entities_mentioned": [],
+        }
         assert _backfill_entities_from_watchlist(item) is None
 
 
