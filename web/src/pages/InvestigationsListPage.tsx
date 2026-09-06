@@ -113,8 +113,16 @@ export function InvestigationsListPage() {
               <tr key={inv.job_id} className="border-t border-border hover:bg-bg-sunken">
                 <td className="p-2">
                   <Link to={`/investigations/${inv.job_id}`} className="text-accent hover:underline">
-                    <bdi>{inv.question}</bdi>
+                    <bdi>
+                      {inv.question?.trim() ||
+                        (inv.item_title ? `אימות והרחבה: ${inv.item_title}` : `חקירה על פריט #${inv.item_id ?? "?"}`)}
+                    </bdi>
                   </Link>
+                  {inv.state === "failed" && inv.error && (
+                    <div className="mt-1 text-xs text-danger" title={inv.error}>
+                      <bdi>שגיאה: {inv.error.length > 90 ? inv.error.slice(0, 90) + "…" : inv.error}</bdi>
+                    </div>
+                  )}
                 </td>
                 <td className="p-2">
                   <span

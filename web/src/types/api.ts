@@ -233,6 +233,8 @@ export interface InvestigationSummary {
   job_id: string;
   item_id: number | null;
   question: string;
+  item_title: string | null;
+  error: string | null;
   state: InvestigationState;
   rounds: number;
   queries: number;

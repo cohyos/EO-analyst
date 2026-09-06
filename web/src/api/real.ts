@@ -223,6 +223,8 @@ function normalizeInvestigationSummary(
     job_id: idStr(r.job_id),
     item_id: r.item_id ?? null,
     question: str(r.question),
+    item_title: r.item_title ?? null,
+    error: r.error ?? null,
     state: r.state ?? "not_found",
     rounds: num(r.rounds),
     queries: num(r.queries),

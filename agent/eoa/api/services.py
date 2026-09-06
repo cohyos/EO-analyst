@@ -503,8 +503,30 @@ def investigate_item(item_id: int, question: str | None) -> dict[str, Any] | Non
     )
     if recent_done is not None:
         return {"job_id": recent_done["id"], "existing": True}
-    job_id = relational.enqueue_job("deep_search", {"item_id": item_id, "question": question}, priority=0)
+    # 2026-09-06 (user report): the "I" shortcut sends no question, and rows with a null question
+    # rendered as empty lines in the investigations list. Derive a default question from the item
+    # and carry the item title in the payload so the list always has text.
+    item = _fetchone("SELECT title, so_what_he FROM items WHERE id = %s", (item_id,)) or {}
+    title = (item.get("title") or "").strip()
+    if not (question or "").strip():
+        question = default_investigation_question(title, item.get("so_what_he"))
+    job_id = relational.enqueue_job(
+        "deep_search", {"item_id": item_id, "question": question, "item_title": title}, priority=0
+    )
     return {"job_id": job_id, "existing": False}
+
+
+def default_investigation_question(title: str, so_what_he: str | None = None) -> str:
+    """Self-contained Hebrew research question for an item-triggered investigation with no explicit
+    question: verify the reported event and expand on it (parties, customer, amount, timeline,
+    competitors and the implication for Israeli EO/IR industry)."""
+    base = title or "הפריט"
+    hint = (so_what_he or "").strip()
+    hint_part = f" בהקשר: {hint[:160]}" if hint else ""
+    return (
+        f"אמת והרחב את הדיווח \"{base}\": מי הצדדים, הלקוח, היקף/סכום, לוח זמנים ומתחרים, "
+        f"ומה המשמעות למוצרי EO/IR ולתעשייה הישראלית.{hint_part}"
+    )
 
 
 def start_investigation(question: str, item_id: int | None = None) -> int | None:
@@ -1161,6 +1183,8 @@ def list_investigations(*, limit: int = 20) -> list[dict[str, Any]]:
                 "job_id": j["id"],
                 "item_id": payload.get("item_id"),
                 "question": payload.get("question"),
+                "item_title": payload.get("item_title"),
+                "error": j.get("error"),
                 "state": j["state"],
                 "rounds": agg["rounds"] or 0,
                 "queries": agg["queries"] or 0,
@@ -1251,7 +1275,14 @@ def investigation_log_since(job_id: int, last_id: int) -> tuple[list[dict[str, A
 # --------------------------------------------------------------------------
 
 
-_ASK_ITEM_FIELDS = "id, title, url, clean_text, summary_he, key_facts, security_status, domain"
+_ASK_ITEM_FIELDS = (
+    "i.id, i.title, i.url, i.clean_text, i.summary_he, i.key_facts, i.security_status, "
+    "i.domain, i.level, s.name AS source_name"
+)
+# U11 (2026-09-06 answer-format rewrite): the sources footer needs a triage level + a
+# human-readable source name (not just the item's own scope-taxonomy `domain`), so every
+# `_ASK_ITEM_FIELDS` query now joins `sources` the same way `services.get_item`/`list_items` do.
+_ASK_ITEM_JOIN = "items i LEFT JOIN sources s ON s.id = i.source_id"
 
 # U9 (docs/REVIEW_2026-09-05.md): tokens that mix letters and digits (program/model names like
 # "XM30", "F-35") are exactly the kind of rare, specific term vector similarity blurs past --
@@ -1317,7 +1348,7 @@ def ask_retrieve(
     retrieved: dict[int, dict[str, Any]] = {}
 
     for iid in context_item_ids or []:
-        row = _fetchone(f"SELECT {_ASK_ITEM_FIELDS} FROM items WHERE id = %s", (iid,))
+        row = _fetchone(f"SELECT {_ASK_ITEM_FIELDS} FROM {_ASK_ITEM_JOIN} WHERE i.id = %s", (iid,))
         if row:
             context[row["id"]] = row
 
@@ -1326,9 +1357,9 @@ def ask_retrieve(
         if not erow:
             continue
         rows = _fetchall(
-            f"SELECT {_ASK_ITEM_FIELDS} FROM items "
-            "WHERE %s = ANY(COALESCE(entities_mentioned, '{}')) "
-            "ORDER BY COALESCE(published_at, fetched_at) DESC LIMIT 5",
+            f"SELECT {_ASK_ITEM_FIELDS} FROM {_ASK_ITEM_JOIN} "
+            "WHERE %s = ANY(COALESCE(i.entities_mentioned, '{}')) "
+            "ORDER BY COALESCE(i.published_at, i.fetched_at) DESC LIMIT 5",
             (erow["name"],),
         )
         for r in rows:
@@ -1338,8 +1369,9 @@ def ask_retrieve(
     # hybrid retrieval 1/2: exact-token keyword match (tried first so it always outranks vector noise).
     for token in _rare_tokens(question):
         rows = _fetchall(
-            f"SELECT {_ASK_ITEM_FIELDS} FROM items WHERE title ILIKE %(t)s OR clean_text ILIKE %(t)s "
-            "ORDER BY COALESCE(published_at, fetched_at) DESC LIMIT 5",
+            f"SELECT {_ASK_ITEM_FIELDS} FROM {_ASK_ITEM_JOIN} "
+            "WHERE i.title ILIKE %(t)s OR i.clean_text ILIKE %(t)s "
+            "ORDER BY COALESCE(i.published_at, i.fetched_at) DESC LIMIT 5",
             {"t": f"%{token}%"},
         )
         for r in rows:
@@ -1354,7 +1386,7 @@ def ask_retrieve(
                 continue
             if len(retrieved) >= 8:
                 break
-            row = _fetchone(f"SELECT {_ASK_ITEM_FIELDS} FROM items WHERE id = %s", (item_id,))
+            row = _fetchone(f"SELECT {_ASK_ITEM_FIELDS} FROM {_ASK_ITEM_JOIN} WHERE i.id = %s", (item_id,))
             if _ask_item_retrievable(row):
                 retrieved[item_id] = row  # type: ignore[assignment]
     except Exception as exc:
@@ -1379,6 +1411,15 @@ def ask_build_messages(
     the corpus-wide retrieval would have ranked it low. Retrieved-only items keep the shorter
     excerpt. The system prompt tells the model to answer from the attached items first and to say
     explicitly when it falls back to general knowledge instead of the corpus.
+
+    U11 (2026-09-06 answer-format rewrite): the system prompt also now demands ONE synthesized
+    analyst answer -- direct answer, key facts (each [n]-cited), "הערכת האנליסט", then gaps --
+    never the old per-source "מקור 1 / הערת איכות / ציטוט מדויק" dump (`ask_answer_format.md`
+    carries the exact rules and the `===SOURCES_JSON===` sentinel format for the model's optional
+    per-source relevance notes; `ask.py`'s SSE generator peels that trailing block off the stream
+    before it ever reaches the client, see `_split_sources_json`/`_parse_source_notes` there).
+    Citations here additionally carry `level`/`source_name` (now selected by `ask_retrieve`) so
+    the UI's sources footer never needs a second round-trip just to render a badge.
     """
     from eoa.llm import prompts
     from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, wrap_data
@@ -1391,7 +1432,8 @@ def ask_build_messages(
         "על ידי חיפוש ויש להשתמש בהם כתמיכה נוספת. כל משפט עובדתי המבוסס על פריט חייב לסמן אותו "
         "ב-[n]. אם התשובה אינה נמצאת באף פריט מסופק, מותר להיעזר בידע כללי -- אך יש לציין זאת "
         "במפורש ('בהתבסס על ידע כללי, לא מהמאגר'), ולעולם לא להציג ידע כללי כאילו מקורו בפריטים. "
-        "אם גם בפריטים וגם בידע הכללי אין מענה -- כתוב זאת בפירוש ואל תמציא."
+        "אם גם בפריטים וגם בידע הכללי אין מענה -- כתוב זאת בפירוש ואל תמציא.\n\n"
+        + prompts.render("ask_answer_format")
     )
 
     ordered = sorted(retrieved, key=lambda r: 0 if r.get("_is_context") else 1)
@@ -1414,7 +1456,16 @@ def ask_build_messages(
         blocks.append(
             f"[{i}] ({label}) {row.get('title') or ''}\n{wrap_data(body, row['id'], src=row.get('url') or '')}"
         )
-        citations.append({"n": i, "item_id": row["id"], "title": row.get("title"), "url": row.get("url")})
+        citations.append(
+            {
+                "n": i,
+                "item_id": row["id"],
+                "title": row.get("title"),
+                "url": row.get("url"),
+                "level": row.get("level"),
+                "source_name": row.get("source_name"),
+            }
+        )
     context_block = "\n\n".join(blocks) if blocks else "(לא נמצאו פריטים רלוונטיים)"
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}]

@@ -391,8 +391,18 @@ def run_deep_search_job(job: dict[str, Any]) -> dict[str, Any]:
     from eoa.search.deep_search import investigate
 
     p = job.get("payload") or {}
+    question = (p.get("question") or "").strip()
+    if not question and p.get("item_id"):
+        # Defensive: a job enqueued without a question (older UI paths) gets the item-derived default.
+        from eoa.api.services import default_investigation_question
+        from eoa.db import connection
+
+        with connection() as conn:
+            row = conn.execute("SELECT title, so_what_he FROM items WHERE id = %s", (p["item_id"],)).fetchone()
+        if row:
+            question = default_investigation_question(row["title"] or "", row.get("so_what_he"))
     inv = investigate(
-        p.get("question", ""),
+        question,
         item_id=p.get("item_id"),
         job_id=job["id"],
         context_he=p.get("context_he", ""),
