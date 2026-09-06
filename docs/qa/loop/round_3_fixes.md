@@ -30,3 +30,30 @@ Tests: `tests/unit/test_events_round3.py` (46 cases incl. the live false positiv
 ## D6 / D7 / D9 / D8 — in flight (sonnet repair agents, code only)
 
 See the per-domain sections appended below when each lands.
+
+## D3 repair — applied 2026-09-06 12:58 (after judge J2 finished)
+
+`scripts/repair_events_round3.py --apply` on 127.0.0.1:5432 (alembic 0019): 4 amounts scaled
+(55 → 540 700 000; 84/89/121 → 464 800 000; 198 left at 1 595), 16 duplicate rows merged
+(185 → 169 events). Verified from a separate connection: item 81 now has 4 events (22 with the
+2026-09-01 date pulled from 245, 23, 24 with parties Anduril/Elbit/Elbit Systems, 224).
+
+## D1 — stranded domain-NULL items (Fable)
+
+18 clean items (52, 56, 57, 84, 182, 186, 188, 190, 194, 196, 198, 200, 203, 206, 208, 211, 212,
+214) had `classify` in `processed_stages` but `domain IS NULL`; triage skips domain NULL and
+classify never revisits a "done" stage, so they were invisible forever. `run_classify` now appends
+`get_items_stuck_unclassified()` to its batch (unscoped runs only); they are re-classified on the
+next pipeline pass (also triggered explicitly after the restart below).
+
+## D2 — the templated so_what phrase was our own example
+
+`analyze.md` illustrated `so_what_he` with "להערכתנו, המהלך מחזק את מעמדה מול..." — the exact
+phrase the judge counted on 32 items DB-wide. The example is gone; the prompt now demands a
+concrete beneficiary/loser/change and forbids the generic formulas. Existing rows keep their text
+until re-analysed (the nightly key_facts backfill re-runs analyze on them progressively).
+
+## D4 — job 91 regression (Fable)
+
+`scripts/mark_legacy_investigations.py`'s not_found→partial pass is now scoped to job ids 15/20
+(`NOT_FOUND_TO_PARTIAL_JOB_IDS`); job 91 restored to `not_found / 0.0` with a `repair_notes` entry.
