@@ -729,7 +729,17 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "conference_scan": run_conference_scan,
     "tender_scan": run_tender_scan,
     "bd_report": run_bd_report,
+    # Native single-process mode (ADR-004): serve any stray fetch_url job in-process instead of
+    # leaving it queued forever (the fetcher container that used to claim these is gone).
+    "fetch_url": lambda job: _fetch_url_job(job),
 }
+
+
+def _fetch_url_job(job: dict[str, Any]) -> dict[str, Any]:
+    from eoa.fetch.remote import _fetch_local
+
+    url = (job.get("payload") or {}).get("url") or ""
+    return _fetch_local(url)
 
 
 # ----------------------------------------------------------------------------- worker loop
