@@ -168,6 +168,33 @@ PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE = 2
 #: must say so plainly rather than read like a sourced finding.
 UNVERIFIED_PREFIX_HE = "לא אומת: "
 
+# =================================================================================================
+# Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): the `blocked` outcome -- distinct from
+# `not_found` -- covers three cases where the investigation could not actually be carried out:
+#   (a) local ReAct path: every page it ever fetched was quarantined by the security guard
+#       (`_tool_read`'s `screen()` call) -- zero pages were ever successfully read.
+#   (b) local ReAct path: every search hit across the whole investigation was itself screened out
+#       by the search-stage heuristic gate (`_tool_search`'s `scan_heuristics` check) before a
+#       single page could ever be fetched -- a hard gate stop, not "search returned nothing"
+#       (`insufficient_context`).
+#   (c) cloud-delegated batch path: the delegated CLI's own synthesized answer was screened and
+#       nothing survived the sentence-level redaction (`_screen_cloud_answer` -> the full-block
+#       stand-in text) -- as opposed to a `partial` answer where only some sentences were dropped.
+# Each Hebrew reason below is surfaced verbatim as `InvestigationOut.blocked_reason_he`.
+# =================================================================================================
+_BLOCKED_REASON_ALL_PAGES_QUARANTINED_HE = (
+    "כל הדפים שהחקירה שלפה נחסמו בבדיקת האבטחה (חשד להזרקת הוראות בתוכן שנשלף) -- לא בוצעה קריאה "
+    "בפועל של אף מקור, ולכן אין ממצא לדווח עליו."
+)
+_BLOCKED_REASON_SEARCH_GATE_HE = (
+    "כל תוצאות החיפוש נחסמו כבר בשלב הסינון הראשוני (חשד להזרקת הוראות בכותרת/תקציר) לפני שנקרא ולו "
+    "דף אחד -- החקירה לא בוצעה בפועל."
+)
+_BLOCKED_REASON_FULL_REDACTION_HE = (
+    "תשובת הסוכן בענן הוסתרה במלואה בבדיקת אבטחה (חשד להזרקת הוראות בתוכן שנשלף מהרשת) -- לא ניתן "
+    "להציג ממצא אמין; דרושה בדיקת מפעיל."
+)
+
 
 # =================================================================================================
 # 2026-09-06 (job 86 regression): question anchoring + finish-time relevance gate.
@@ -514,6 +541,11 @@ class Investigation:
     #: can still surface a `security_review` flag for operator awareness even though the
     #: investigation itself recovered and produced a clean answer from other sources.
     security_flagged_pages: list[dict[str, str]] = field(default_factory=list)
+    #: Round-5 P7: every search hit dropped by `_tool_search`'s heuristic gate (`scan_heuristics`)
+    #: before it was ever offered to the model for `read` -- kept so `_finalize_outcome` can tell
+    #: "every hit was security-screened out before any page could be read" (`blocked`) apart from
+    #: "search genuinely returned nothing" (`insufficient_context`).
+    security_flagged_search_hits: list[dict[str, str]] = field(default_factory=list)
 
 
 class StopRequested(Exception):
@@ -574,6 +606,7 @@ def _tool_search(
             continue
         if scan_heuristics(f"{h.title}\n{h.snippet}").score >= 0.5:
             log.warning("search_hit_dropped_injection", url=h.url[:120])
+            inv.security_flagged_search_hits.append({"url": h.url, "reason": "search_heuristic"})
             _log(
                 inv,
                 round_no,
@@ -1096,9 +1129,15 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
         trusted for this field.
       - a `not_found` outcome is refined into `stopped_budget`/`stopped_timeout` (ran out of
         budget mid-investigation), `insufficient_context` (search returned zero hits -- nothing
-        to work with at all), or a plain `not_found` (searched thoroughly, genuinely nothing
-        there); any other outcome (`found`/`partial`) is kept as the model reported it.
-      - a `not_found` outcome can never claim confidence above :data:`NOT_FOUND_MAX_CONFIDENCE`.
+        to work with at all), `blocked` (every fetched page was quarantined by the security guard,
+        or every search hit was screened out before any page could be fetched -- Round-5 P7, see
+        the module note above the `_BLOCKED_REASON_*_HE` constants), or a plain `not_found`
+        (searched thoroughly, genuinely nothing there); any other outcome (`found`/`partial`) is
+        kept as the model reported it. Unlike the other refinements, `blocked` also overwrites
+        `InvestigationOut.outcome` itself (not just `stopped_reason`) -- it is a first-class
+        outcome value, not merely a stopped-reason footnote on `not_found`.
+      - a `not_found`/`blocked` outcome can never claim confidence above
+        :data:`NOT_FOUND_MAX_CONFIDENCE`.
       - a `partial` outcome resting on fewer than
         :data:`PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE` sources can never claim confidence above
         :data:`PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE`; a `partial` answer with zero sources is
@@ -1118,9 +1157,6 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
     # Q3-5: ground truth for `sources` is what was actually read, never the model's own claim.
     inv.result.sources = list(inv.read_urls)
 
-    if inv.result.outcome == "not_found" and inv.result.confidence > NOT_FOUND_MAX_CONFIDENCE:
-        inv.result.confidence = NOT_FOUND_MAX_CONFIDENCE
-
     if inv.result.outcome == "partial":
         if not inv.result.sources and not inv.result.answer_he.startswith(UNVERIFIED_PREFIX_HE):
             inv.result.answer_he = f"{UNVERIFIED_PREFIX_HE}{inv.result.answer_he}"
@@ -1130,14 +1166,37 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
         ):
             inv.result.confidence = PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE
 
+    # Round-5 P7: `blocked` is checked as a refinement of `not_found`, same as
+    # stopped_budget/stopped_timeout/insufficient_context below -- but unlike those (which only
+    # ever change `inv.outcome`/`stopped_reason`, leaving `InvestigationOut.outcome` at the coarse
+    # `not_found`), `blocked` also overrides `inv.result.outcome` itself: the report collector
+    # (`eoa.report.daily.collect_deep_search`) reads `result.outcome` directly, so "the
+    # investigation could not be carried out" must be visible there, not just in `stopped_reason`.
     if inv.result.outcome != "not_found":
         inv.outcome = inv.result.outcome
     elif budget.exhausted:
         inv.outcome = budget.exhausted
+    elif (
+        inv.attempted_urls
+        and not inv.read_urls
+        and len(inv.security_flagged_pages) == len(inv.attempted_urls)
+    ):
+        # every page this investigation ever fetched was quarantined -- zero successful reads.
+        inv.outcome = "blocked"
+        inv.result.outcome = "blocked"
+        inv.result.blocked_reason_he = _BLOCKED_REASON_ALL_PAGES_QUARANTINED_HE
+    elif not inv.hits_seen and inv.security_flagged_search_hits:
+        # every search hit was itself screened out before a single page could ever be fetched.
+        inv.outcome = "blocked"
+        inv.result.outcome = "blocked"
+        inv.result.blocked_reason_he = _BLOCKED_REASON_SEARCH_GATE_HE
     elif not inv.hits_seen:
         inv.outcome = "insufficient_context"
     else:
         inv.outcome = "not_found"
+
+    if inv.result.outcome in ("not_found", "blocked") and inv.result.confidence > NOT_FOUND_MAX_CONFIDENCE:
+        inv.result.confidence = NOT_FOUND_MAX_CONFIDENCE
 
     inv.queries_used = budget.queries
     inv.max_queries = budget.max_queries
@@ -1145,14 +1204,19 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
     inv.max_pages = budget.max_pages
     inv.stopped_reason = inv.outcome
 
-    # Round-4 W10: surface the flag even though the investigation itself continued normally past
-    # any quarantined page(s) -- never blocks/changes the answer, just tells the operator a source
-    # along the way was screened out so they can review it if they want.
+    # Round-4 W10 / Round-5 P7: surface the flag even when the investigation itself continued
+    # normally past a quarantined page/hit (recovered, `blocked` not triggered) -- never
+    # blocks/changes the answer on its own, just tells the operator a source along the way was
+    # screened out so they can review it if they want. `blocked_reason_he` above already implies
+    # `security_review=True`, but this still fills in the reason/snippet detail for it too.
     if inv.security_flagged_pages:
         inv.result.security_review = True
         first = inv.security_flagged_pages[0]
         inv.result.security_flag_reason = first.get("reason")
         inv.result.security_flag_snippet = first.get("excerpt")
+    elif inv.security_flagged_search_hits:
+        inv.result.security_review = True
+        inv.result.security_flag_reason = "search_heuristic"
 
     # Round-4b W27: assemble the final answer_he as fixed, titled sections (see the module note
     # above `format_investigation_answer_he`) -- runs last, after every other field above
@@ -1276,7 +1340,15 @@ def investigate(
         pages_read=budget.pages,
         outcome=inv.outcome
         if inv.outcome
-        in {"found", "partial", "not_found", "stopped_budget", "stopped_timeout", "insufficient_context"}
+        in {
+            "found",
+            "partial",
+            "not_found",
+            "stopped_budget",
+            "stopped_timeout",
+            "insufficient_context",
+            "blocked",
+        }
         else "partial",
         notes=inv.result.answer_he[:500],
     )
@@ -1832,8 +1904,21 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
             inv.outcome = "not_found"
         else:
             screened = _screen_cloud_answer(qid_str, answer)
-            outcome: Literal["found", "partial", "not_found"]
-            if not screened.sources and screened.confidence < 0.3:
+            outcome: Literal["found", "partial", "not_found", "blocked"]
+            blocked_reason_he: str | None = None
+            # Round-5 P7: `_screen_cloud_answer` returns the fixed `_SECURITY_FULL_BLOCK_HE` text
+            # (with empty `sources`) only when nothing survived the sentence-level redaction --
+            # that is "the investigation could not actually be carried out" (`blocked`), distinct
+            # from a `partial` answer where only some sentences were dropped (something survived)
+            # and from a plain `not_found` (nothing was ever flagged at all).
+            if (
+                screened.security_review
+                and not screened.sources
+                and screened.answer_he == _SECURITY_FULL_BLOCK_HE
+            ):
+                outcome = "blocked"
+                blocked_reason_he = _BLOCKED_REASON_FULL_REDACTION_HE
+            elif not screened.sources and screened.confidence < 0.3:
                 outcome = "not_found"
             elif screened.confidence >= cfg_deep_search_confidence_stop():
                 outcome = "found"
@@ -1842,7 +1927,7 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
             source_urls = [s.url for s in screened.sources]
             confidence = screened.confidence
             answer_he = screened.answer_he
-            if outcome == "not_found":
+            if outcome in ("not_found", "blocked"):
                 confidence = min(confidence, NOT_FOUND_MAX_CONFIDENCE)
             elif outcome == "partial":
                 # Q3-5: same partial-confidence/unverified-claim rules as the local ReAct path.
@@ -1865,8 +1950,10 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
                 security_review=screened.security_review,
                 security_flag_reason=screened.security_flag_reason,
                 security_flag_snippet=screened.security_flag_snippet,
+                blocked_reason_he=blocked_reason_he,
             )
             inv.outcome = outcome
+            inv.stopped_reason = outcome
         _log(
             inv,
             0,

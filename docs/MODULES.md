@@ -10899,3 +10899,208 @@ green, including the pre-existing `PayloadsPage.test.tsx` (6 tests) and `i18n/en
 `react-hooks/exhaustive-deps` shape already present in `PatentsPage.tsx`/`TendersPage.tsx`).
 `npm run build` (`tsc -b && vite build`) -- clean. Live DB backfill and the `/api/payloads/tree`
 response verified read-only against the dev Postgres instance (127.0.0.1:5432), never 5433.
+
+## Round-5 P7 (2026-09-06): deep search's `blocked` outcome, distinct from `not_found` (DS3)
+
+DS3 (docs/REPORT_TEMPLATE_BENCHMARK.md §2.6/§3.6/§4-7): a deep-search investigation that could not
+actually be carried out (every fetched page quarantined, a hard security gate stopped it before any
+page was read, or a cloud-delegated answer was fully redacted) used to be indistinguishable from a
+genuine `not_found` (searched fully, nothing there) -- both showed "לא נמצא" to the reader, with no
+way to tell "we looked and there's nothing" from "we couldn't actually look." Round-4's own W10 fix
+(`security_review`/`security_flag_reason`/`security_flag_snippet`, see that section above) already
+distinguished a *partially* redacted answer from a clean one, but a *fully* blocked investigation
+still reported `outcome: "not_found"` with no further signal beyond the generic answer text.
+
+**Schema (`agent/eoa/llm/schemas/analysis.py::InvestigationOut`).** `outcome` is now
+`Literal["found", "partial", "not_found", "blocked"]` (previously without `"blocked"`), and a new
+additive field `blocked_reason_he: str | None = None` carries one Hebrew sentence explaining why,
+always set when `outcome == "blocked"`. `partial` is unchanged in meaning: an answer with *some*
+content redacted (something survived) still counts as an actual finding, not a block.
+
+**Where `blocked` is set (`agent/eoa/search/deep_search.py`), never by the investigating model
+itself** (the `finish` tool's own JSON schema still only offers `found`/`partial`/`not_found` to the
+model -- `blocked` is a deterministic post-hoc classification, same spirit as
+`stopped_budget`/`insufficient_context`):
+
+1. **Local ReAct path, every fetched page quarantined** -- `_finalize_outcome`: when the
+   investigation's own `not_found` refinement runs (same branch that already produces
+   `stopped_budget`/`insufficient_context`), a new condition fires first: `attempted_urls` is
+   non-empty, `read_urls` is empty, and `len(security_flagged_pages) == len(attempted_urls)` --
+   every single page this investigation ever fetched was quarantined by `_tool_read`'s existing
+   `screen()` call (Round-4 W10/W11), so zero pages were ever successfully read. `blocked_reason_he`
+   is set to `_BLOCKED_REASON_ALL_PAGES_QUARANTINED_HE`.
+2. **Local ReAct path, hard gate stop before any page was read** -- new `Investigation` field
+   `security_flagged_search_hits: list[dict]` (mirrors `security_flagged_pages`'s shape), appended
+   to by `_tool_search` whenever `scan_heuristics` drops a search hit (score >= 0.5) *before* it
+   ever becomes readable -- previously this drop was only logged, never recorded on the
+   investigation itself. `_finalize_outcome` fires `blocked` when `hits_seen` ends up empty *and*
+   `security_flagged_search_hits` is non-empty -- i.e. search did return something, but every hit
+   was itself screened out at the search stage, as opposed to plain `insufficient_context` (search
+   returned literally nothing, no security signal involved at all -- unchanged, still requires
+   `security_flagged_search_hits` to be empty too). `blocked_reason_he` is set to
+   `_BLOCKED_REASON_SEARCH_GATE_HE`.
+3. **Cloud-delegated batch path, answer fully redacted** -- `investigate_batch_cloud`: when
+   `_screen_cloud_answer` (Round-4 W10) finds nothing survives the sentence-level redaction, it
+   already degrades to the fixed `_SECURITY_FULL_BLOCK_HE` stand-in text with `sources=[]` and
+   `security_review=True` -- this is now detected explicitly (`screened.answer_he ==
+   _SECURITY_FULL_BLOCK_HE`) and mapped to `outcome="blocked"` (previously fell through to the
+   ordinary not_found/found/partial confidence-threshold logic, which could even produce a
+   misleadingly-labelled `partial` at confidence 0.4 for an answer with literally no surviving
+   content). `blocked_reason_he` is set to `_BLOCKED_REASON_FULL_REDACTION_HE`. A *partially*
+   redacted cloud answer (some sentences survive) is unaffected -- still `partial`, with
+   `security_review=True` and no `blocked_reason_he`.
+
+**Unlike `stopped_budget`/`stopped_timeout`/`insufficient_context`** (which only ever change
+`Investigation.outcome`/`stopped_reason`, leaving the persisted `InvestigationOut.outcome` at the
+coarse `not_found`), `blocked` also overwrites `InvestigationOut.outcome` itself, in both paths, plus
+`stopped_reason = "blocked"` (`_investigation_result_payload` in `agent/eoa/orchestrator/jobs.py`,
+unmodified, already merges `inv.stopped_reason` and `inv.result.model_dump()` into the persisted job
+result -- so `blocked_reason_he` flows through automatically, no orchestrator change needed). This
+is deliberate: `eoa.report.daily.collect_deep_search` (unmodified this round, another engineer's
+file) reads `result.get("outcome")` directly for the report, so "could not be carried out" must be
+visible there as a first-class value, not buried in a stopped-reason footnote a report collector
+would need extra logic to unpack. `NOT_FOUND_MAX_CONFIDENCE` now caps `blocked` the same way it
+already capped `not_found`. The pre-existing Round-4 W10 behaviour is untouched: a single quarantined
+page/hit that the investigation recovers from (found an answer from other sources) still only sets
+`security_review`/`security_flag_reason`/`security_flag_snippet` on an otherwise-unchanged
+`found`/`partial`/`not_found` outcome -- `blocked` never overrides a real finding.
+
+**Report collector contract (`agent/eoa/report/daily.py::collect_deep_search`, NOT modified this
+round -- another engineer's file per this round's ownership split; documented here as the exact
+handoff instead).** The collector's `outcome` field (line ~326) is built as
+`result.get("outcome") or row.get("state")` -- a raw passthrough of whatever string is in the job's
+`result` JSON, so `"blocked"` already flows through unchanged with **zero code change required**: it
+was never a Literal-checked/whitelisted value on that side. What the collector does *not* yet expose
+is `blocked_reason_he` -- its per-entry dict (lines ~319-333) lists `job_id`/`trigger_item_id`/
+`trigger_title`/`trigger_url`/`question`/`outcome`/`answer_he`/`confidence`/`sources`/`key_facts`/
+`contradictions_he`, with no `blocked_reason_he` key. **The one-line addition needed there:**
+```python
+"blocked_reason_he": result.get("blocked_reason_he", ""),
+```
+added to that same dict literal. Once present, the renderer (daily-report builder, also another
+engineer's file) should show, wherever it currently renders a deep-search entry's outcome label,
+**"נחסם (לא נחקר בפועל): `<blocked_reason_he>`"** instead of the generic "לא נמצא" whenever
+`entry["outcome"] == "blocked"` -- distinguishing it from the existing "לא נמצא" bullet used for a
+genuine `not_found`. `reconcile_deep_search_reruns`'s `_OUTCOME_RANK` map (same file) does not
+currently rank `"blocked"` at all (`.get(outcome, 0)` defaults it to the same rank as `not_found`'s
+`0`) -- a reasonable default (a blocked rerun is no better than a not_found one, so a later `found`/
+`partial` rerun of the same question still wins), left as-is since changing rank semantics is outside
+this round's file ownership and the default already produces the right tie-break.
+
+**UI (`web/src/lib/investigations.ts`, `web/src/pages/InvestigationsListPage.tsx` +
+`InvestigationDetailPage.tsx`, `web/src/types/api.ts`, `web/src/i18n/dictionaries/{he,en}.ts`).**
+`InvestigationOutcomeReason` (api.ts) and `InvestigationOut.blocked_reason_he?: string | null`
+(api.ts) gained the new value/field additively. `web/src/lib/investigations.ts` -- the single
+Hebrew-hardcoded `OUTCOME_LABEL`/`OUTCOME_TONE` map every outcome value in this app already goes
+through, not in this task's originally-listed file set but the only source of truth the two owned
+pages render from, and not owned by another engineer this round -- gained `blocked: "נחסם"` with
+`text-warn bg-level-orange-bg` (amber, the same tone family as `off_topic`/`stopped_budget`/
+`stopped_timeout`, explicitly distinct from `not_found`'s grey `text-fg-dim bg-bg-sunken`).
+`InvestigationsListPage.tsx` needed no code change at all -- its outcome chip already renders
+generically via `outcomeLabel`/`outcomeTone`. `InvestigationDetailPage.tsx` gained a new callout
+(`data-testid="investigation-blocked-reason"`) shown whenever `answer.outcome === "blocked" &&
+answer.blocked_reason_he`, reading "**`{t("investigations.blockedReasonPrefix")}`:**
+`{blocked_reason_he}`" -- shown independently of (not instead of) the existing `security_review`
+banner, which keeps working exactly as before (a `blocked` result from full cloud redaction also has
+`security_review=true`, so both render together; a `blocked` result from the local-path branches
+also sets `security_review=true`/`security_flag_reason` via the pre-existing Round-4 W10 code path).
+Two new i18n keys, `investigations.blockedChip`/`investigations.blockedReasonPrefix`, added to both
+`he.ts` and `en.ts` (new keys only, matching `Dictionary`'s `typeof he` shape check) -- used only by
+the new blocked-reason callout; the rest of `OUTCOME_LABEL` (every other outcome value, in both
+locales) stays hardcoded Hebrew exactly as it already was, not retrofitted to i18n as part of this
+task. **Known pre-existing gap, not touched:** `InvestigationDetailPage.tsx`'s `SecurityReviewBanner`
+reads `answer.security_review_reason_he`/`answer.security_review_snippet`, while the actual backend
+field names (both before and after this round) are `security_flag_reason`/`security_flag_snippet`
+(see `api.ts`'s own comment on `InvestigationOut` acknowledging this) -- a Round-4 W10 UI-wiring gap
+in a different work item (the security-review-queue banner), left as documented, not fixed here.
+
+**`agent/eoa/api/services.py` (investigation list/detail functions) -- audited, no code change
+needed.** `list_investigations`'s `outcome` field comes from `_investigation_aggregate`'s
+`(array_agg(outcome ORDER BY id DESC))[1]` over `investigation_log` -- the *last logged row's* own
+`outcome` column, not `jobs.result.outcome` directly. That last row is written by `investigate()`'s
+own final `_log(...)` call (`agent/eoa/search/deep_search.py`, engine="final"), which previously
+clamped its `outcome` argument to a fixed allow-list (`{"found", "partial", "not_found",
+"stopped_budget", "stopped_timeout", "insufficient_context"}`, falling back to `"partial"` for
+anything else) that did not include `"blocked"` -- so without a fix there, a newly-blocked local-path
+investigation would have shown up in the list as `"partial"` even though `jobs.result.outcome` was
+already correctly `"blocked"`. Fixed by adding `"blocked"` to that allow-list (in
+`deep_search.py`, not `services.py` -- the bug was upstream of the API layer). `investigate_batch_cloud`
+already logs `outcome=inv.outcome` unconditionally (no allow-list), so the cloud path needed no
+equivalent fix. `get_investigation`'s `answer` field (`_deep_search_answer`) returns the raw
+`jobs.result` dict verbatim (no field whitelist) when `eoa.search.deep_search.load_answer` doesn't
+exist (it doesn't, today) -- so `blocked_reason_he` reaches the detail page automatically via
+`InvestigationOut.model_dump()` (`agent/eoa/orchestrator/jobs.py::_investigation_result_payload`,
+unmodified) with no `services.py` change required either.
+
+**Backfill (one-off, NOT run by this task -- read-only `SELECT`s only, against the live DB, port
+5432, per this round's constraints).** Two read-only audits (2026-09-06):
+```sql
+-- narrow: matches the exact historical block-message text (pre-round-4-W10 wholesale-block wording)
+SELECT id, state, result->>'outcome', (result->>'security_review')::boolean, left(result->>'answer_he', 60)
+FROM jobs
+WHERE kind = 'deep_search' AND result->>'outcome' = 'not_found'
+  AND (
+       (result->>'security_review')::boolean IS TRUE
+    OR result->>'answer_he' LIKE 'התשובה נחסמה%'
+    OR result->>'answer_he' LIKE '%הוסתרה במלואה בבדיקת אבטחה%'
+  );
+-- broader: any not_found job whose result already carries security_review=true
+SELECT id FROM jobs WHERE kind='deep_search' AND result->>'outcome'='not_found'
+  AND (result->>'security_review')::boolean IS TRUE;
+```
+Narrow query: exactly **job_id = 113** (the W10 example above, "מפעל פולקסווגן→רפאל", cloud-batch
+path, `answer_he` starting "התשובה נחסמה בבדיקת אבטחה..."). Broad query: **0 rows** -- job 113 predates
+the `security_review` field's existence, so that column is simply absent/`NULL` on its stored JSON;
+only the text-match heuristic catches it. Its single `investigation_log` row (`id=392`, `job_id=113`,
+`engine='cloud_batch'`) also still reads `outcome='not_found'`. The one-off relabel SQL (updates both
+places so the daily-report collector and the UI list/detail agree):
+```sql
+BEGIN;
+
+UPDATE jobs
+SET result = jsonb_set(
+               jsonb_set(
+                jsonb_set(
+                 jsonb_set(result, '{outcome}', '"blocked"'::jsonb, true),
+                 '{stopped_reason}', '"blocked"'::jsonb, true),
+                '{security_review}', 'true'::jsonb, true),
+               '{blocked_reason_he}',
+               to_jsonb('תשובת הסוכן בענן הוסתרה במלואה בבדיקת אבטחה (חשד להזרקת הוראות בתוכן שנשלף מהרשת) -- לא ניתן להציג ממצא אמין; דרושה בדיקת מפעיל.'::text),
+               true)
+WHERE id = 113 AND kind = 'deep_search';
+
+UPDATE investigation_log
+SET outcome = 'blocked'
+WHERE job_id = 113 AND id = 392;
+
+COMMIT;
+
+-- verify:
+-- SELECT result->>'outcome', result->>'stopped_reason', result->>'security_review',
+--        result->>'blocked_reason_he' FROM jobs WHERE id = 113;
+-- SELECT outcome FROM investigation_log WHERE job_id = 113;
+```
+The Hebrew text used for `blocked_reason_he` above is `_BLOCKED_REASON_FULL_REDACTION_HE` verbatim
+(job 113 is the cloud-delegated full-redaction case, not either local-path case). No other
+`deep_search` job in the live DB matched either audit query, so this is the only row affected.
+
+**Tests.** `tests/unit/test_deep_search_blocked_round5.py` (new, 24 tests, no DB/LLM/network):
+schema validation (`blocked` accepted, `blocked_reason_he` additive/defaults `None`, existing three
+outcomes unaffected); `_finalize_outcome` unit tests for both local-path `blocked` conditions
+(all-pages-quarantined, search-gate-stop) including regression guards (one successful read among a
+quarantine stays `not_found`; a `found` outcome is never downgraded by a quarantined page; zero hits
+with no security signal stays `insufficient_context`, not `blocked`); `_tool_search`'s new
+`security_flagged_search_hits` bookkeeping (a dropped hit is recorded, a clean hit is not);
+`investigate_batch_cloud` tests for all three cloud-path outcomes (fully redacted -> `blocked`,
+partially redacted -> `partial` unchanged, clean low-confidence -> `not_found` unchanged), reusing
+the same fake-`guard.screen`/fake-CLI-output patterns already established in
+`test_deep_search_cloud_batch.py`. `pytest tests/unit -q -k "deep_search or investigation"`: **162
+passed** (target command from the task); the new file alone: **24 passed**; the broader
+`test_deep_search_blocked_round5.py` + `test_deep_search_cloud_batch.py` +
+`test_deep_search_outcomes.py` + `test_discovery_round4.py` + `test_deep_search_anchors.py` bundle:
+**118 passed**. `ruff check`/`ruff format --check` clean on every changed Python file. Frontend:
+`npx vitest run` -- full suite **39 files / 270 tests** green (3 new tests in
+`InvestigationsListPage.test.tsx`/`InvestigationDetailPage.test.tsx` combined, on top of the
+pre-existing 267); `npm run lint` -- 0 errors (12 pre-existing warnings, none in touched files);
+`npm run build` (`tsc -b && vite build`) -- clean, confirming the `Dictionary`/`InvestigationOut`
+type-shape changes compile.

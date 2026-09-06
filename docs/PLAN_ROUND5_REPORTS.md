@@ -134,3 +134,68 @@ anvil" כבר לא מתפרשת כאזכור Anduril רק כי "Anvil" הוא al
 חסר-מפתחות)" כל עוד `EPO_OPS_KEY`/`EPO_OPS_SECRET`/`PATENTSVIEW_API_KEY` לא מוגדרים -- שדה כיסוי
 CPC/מקצה יישאר נמוך במבנה הנוכחי כי המקור חסר-המפתחות לרוב אינו מחזיר אף אחד מהם; שום דבר בחבילה
 הזו לא מוסתר או ממציא נתון בהיעדרם, רק מדווח את הפער בכנות (כפי שכבר נהוג בקוד הקיים).
+
+## סטטוס P7 (עודכן 2026-09-06, בוצע)
+
+**DS3 סגור: `blocked` הוא outcome נפרד מ-`not_found`.** `InvestigationOut.outcome`
+(`agent/eoa/llm/schemas/analysis.py`) הורחב ל-`Literal["found", "partial", "not_found", "blocked"]`
++ שדה אדיטיבי חדש `blocked_reason_he: str | None`. שלושת התרחישים שמניבים `blocked`
+(`agent/eoa/search/deep_search.py::_finalize_outcome` למסלול המקומי,
+`investigate_batch_cloud` למסלול המוזרם לענן):
+
+| תרחיש | מסלול | תנאי דטרמיניסטי | `blocked_reason_he` |
+|---|---|---|---|
+| כל הדפים שנשלפו נחסמו | מקומי (ReAct) | `attempted_urls` לא ריק, `read_urls` ריק, `len(security_flagged_pages) == len(attempted_urls)` | `_BLOCKED_REASON_ALL_PAGES_QUARANTINED_HE` |
+| שער אבטחה קשיח לפני קריאת דף כלשהו | מקומי (ReAct) | `hits_seen` ריק וגם `security_flagged_search_hits` לא ריק (כל תוצאות החיפוש נחסמו בשלב ה-heuristics לפני שדף כלשהו נפתח לקריאה) | `_BLOCKED_REASON_SEARCH_GATE_HE` |
+| תשובת הענן הוסתרה במלואה | מוזרם לענן (batch) | `_screen_cloud_answer` לא השאיר שום משפט (`answer_he == _SECURITY_FULL_BLOCK_HE`, `sources=[]`) | `_BLOCKED_REASON_FULL_REDACTION_HE` |
+| `not_found` רגיל (נחקר במלואו, לא נמצא) | שני המסלולים | ללא דגל אבטחה כלל | -- (`outcome` נשאר `not_found`) |
+| `partial` עם הסתרה חלקית | מוזרם לענן | חלק מהמשפטים שרדו את ההסתרה | -- (`outcome` נשאר `partial`, `security_review=true`) |
+
+בניגוד ל-`stopped_budget`/`stopped_timeout`/`insufficient_context` (שרק מעדכנים
+`stopped_reason`/`Investigation.outcome` ומשאירים את `InvestigationOut.outcome` הפורמלי כ-`not_found`),
+`blocked` דורס גם את `InvestigationOut.outcome` עצמו -- כי `eoa.report.daily.collect_deep_search`
+(אספן הדוח, לא בבעלות חבילה זו) קורא `result.get("outcome")` ישירות. `stopped_reason` מקבל `"blocked"`
+בשני המסלולים; `security_review`/`security_flag_reason` ממשיכים לעבוד כרגיל (Round-4 W10) גם כשלא
+`blocked` (עמוד/hit בודד נחסם אך החקירה התאוששה ממקורות אחרים -- ה`outcome` המקורי, כולל `found`,
+לעולם לא נדרס).
+
+**חוזה אספן הדוח:** `collect_deep_search` (`agent/eoa/report/daily.py`, שורה ~326) כבר קורא
+`result.get("outcome") or row.get("state")` -- `"blocked"` עובר ללא שינוי קוד כאילו היה כל מחרוזת
+אחרת (זה string גולמי מה-DB, לא Literal מאומת בצד הקורא). אבל שדה `blocked_reason_he` **אינו**
+נכלל היום ברשימת המפתחות שהפונקציה בונה בשורות 319-333 (`job_id`/`trigger_item_id`/.../`outcome`/
+`answer_he`/`confidence`/`sources`/`key_facts`/`contradictions_he` -- ואין `blocked_reason_he`) --
+תוספת שורה אחת נדרשת שם (`"blocked_reason_he": result.get("blocked_reason_he", "")`) כדי שהרנדרר
+יוכל להציג את הסיבה. `daily.py` הוא קובץ של מהנדס אחר בסבב הזה כרגע (ר' תיאום המשימה) ולכן לא נגעתי
+בו -- זו מסירה מתועדת בלבד, ר' docs/MODULES.md "Round-5 P7" למפרט המדויק (מיקום שורה, שם השדה,
+נוסח התצוגה המצופה "נחסם (לא נחקר בפועל): <reason>").
+
+**UI:** `web/src/lib/investigations.ts` (מפת `OUTCOME_LABEL`/`OUTCOME_TONE`, לא ברשימת הקבצים
+הבלעדית אך היא מקור האמת היחיד של שני העמודים והיא לא בבעלות מהנדס אחר) קיבל `blocked: "נחסם"`
+בגוון ענבר (`text-warn bg-level-orange-bg`, זהה למשפחת "נעצר בגלל.../לא רלוונטי" הקיימת) -- שונה
+במפורש מהאפור של `not_found`. `InvestigationsListPage.tsx` לא נזקק לשינוי קוד (הצ'יפ כבר גנרי דרך
+`outcomeLabel`/`outcomeTone`); `InvestigationDetailPage.tsx` קיבל בלוק "נחסם (לא נחקר בפועל):
+<blocked_reason_he>" חדש (`data-testid="investigation-blocked-reason"`), מוצג לצד (לא במקום)
+הבאנר הקיים של `security_review` -- שני המפתחות `investigations.blockedChip`/
+`investigations.blockedReasonPrefix` נוספו ל-`web/src/i18n/dictionaries/{he,en}.ts` (מפתחות
+חדשים בלבד; שאר מפת ה-outcome, בכל שפה, נשארה בעברית קשיחה כמו כל שאר הערכים בה -- לא רפקטור
+i18n-רוחבי לפריט הזה).
+
+**`agent/eoa/api/services.py` -- נבדק, לא נדרש שינוי קוד.** `list_investigations`/`get_investigation`
+כבר עוברים דרך `_investigation_aggregate` (המחרוזת האחרונה מ-`investigation_log`, ממוינת לפי `id`)
+עבור שדה `outcome` בתצוגת הרשימה, ו-`_deep_search_answer` מחזיר את `jobs.result` הגולמי (או
+`deep_search.load_answer`, שלא קיים כרגע) לתצוגת הפרטים -- שניהם כבר מעבירים כל שדה חדש שקיים
+ב-JSON בלי whitelist מפורש. התיקון היחיד שהיה נדרש היה ב-`deep_search.py` עצמו: שורת ה-`_log`
+הסופית ב-`investigate()` הגבילה את ה-outcome שנכתב לשורת ה-log האחרונה לרשימה סגורה שלא כללה
+`"blocked"` (נפל ל-`"partial"` בלי זה) -- תוקן (נוסף `"blocked"` לרשימה), אחרת `list_investigations`
+היה ממשיך להציג `"partial"`/`"not_found"` עבור חקירה חסומה חדשה למרות ש-`jobs.result.outcome`
+עצמו כבר `"blocked"`. `investigate_batch_cloud` כבר כתב `outcome=inv.outcome` ישירות לשורת ה-log
+שלו בלי מגבלה כזו.
+
+**Backfill (אחד-פעמי, לא הרצתי -- קריאה בלבד בוצעה):** סריקה חיה (`SELECT` בלבד, DB פורט 5432)
+של `jobs` עבור `kind='deep_search' AND result->>'outcome'='not_found'` מצאה **job_id=113 בלבד**
+(השאלה "מפעל פולקסווגן→רפאל", המסלול המוזרם-לענן שתועד ב-docs/MODULES.md W10 -- `answer_he` מתחיל
+ב-"התשובה נחסמה בבדיקת אבטחה") -- גם החיפוש הרחב יותר (`security_review=true AND outcome='not_found'`)
+החזיר 0 שורות, כי שדה `security_review` פשוט לא היה קיים כשג'וב 113 רץ. שורת ה-`investigation_log`
+היחידה שלו (`id=392`) גם היא עדיין `outcome='not_found'`. ה-SQL המדויק (ר' docs/MODULES.md "Round-5
+P7" לגוף המלא) מעדכן את שני המקומות יחד (`jobs.result` + `investigation_log.outcome`) כדי ששני
+העמודים (יומי + UI) יראו את אותה תוצאה.

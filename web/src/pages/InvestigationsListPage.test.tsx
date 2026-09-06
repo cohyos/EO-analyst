@@ -56,6 +56,17 @@ beforeEach(() => {
   getInvestigations.mockResolvedValue([makeSummary("1")]);
 });
 
+// Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): `blocked` must render as a distinct amber
+// chip in the list, not the grey `not_found` tone.
+describe("InvestigationsListPage blocked outcome chip (Round-5 P7)", () => {
+  it("shows a distinct 'נחסם' chip for a blocked investigation, not 'לא נמצא'", async () => {
+    getInvestigations.mockResolvedValue([{ ...makeSummary("1"), outcome: "blocked" }]);
+    renderPage();
+    expect(await screen.findByText("נחסם")).toBeInTheDocument();
+    expect(screen.queryByText("לא נמצא")).not.toBeInTheDocument();
+  });
+});
+
 describe("InvestigationsListPage new-investigation flow (Q5-6)", () => {
   it("toasts success and navigates to the new investigation once it starts", async () => {
     postInvestigationNew.mockResolvedValue({ job_id: "42" });

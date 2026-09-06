@@ -273,7 +273,15 @@ class QueryPlan(BaseModel):
 class InvestigationOut(BaseModel):
     """Deep search: final answer of the ReAct loop."""
 
-    outcome: Literal["found", "partial", "not_found"]
+    # Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): `blocked` is a distinct terminal outcome
+    # from `not_found` -- it means the investigation could not actually be carried out (every
+    # fetched page was quarantined by the security guard, the delegated cloud answer was fully
+    # redacted, or a hard security gate stopped things before any page was ever read), as opposed
+    # to `not_found` (the investigation ran to completion and genuinely found nothing supporting
+    # the question). `partial` is unchanged: an answer with *some* content redacted still counts
+    # as an actual (partial) finding. See `agent/eoa/search/deep_search.py::_finalize_outcome` /
+    # `investigate_batch_cloud` for where this is set, never by the investigating model itself.
+    outcome: Literal["found", "partial", "not_found", "blocked"]
     answer_he: str
     confidence: float = Field(ge=0, le=1)
     sources: list[str] = Field(default_factory=list, description="URLs actually read")
@@ -298,6 +306,12 @@ class InvestigationOut(BaseModel):
     security_review: bool = False
     security_flag_reason: str | None = None
     security_flag_snippet: str | None = None
+    # Round-5 P7: one Hebrew sentence explaining *why* this investigation was `blocked` (vs. the
+    # generic `not_found` message) -- always set when `outcome == "blocked"`, `None` otherwise.
+    # The report renderer (`eoa.report.daily.collect_deep_search` / the daily-report builder,
+    # another engineer's file this round -- see docs/MODULES.md) is expected to show
+    # "נחסם (לא נחקר בפועל): <blocked_reason_he>" instead of "לא נמצא" when this is set.
+    blocked_reason_he: str | None = None
 
 
 class RelevanceVerdict(BaseModel):
@@ -392,15 +406,43 @@ class StructuredSection(BaseModel):
     sentences: list[Sentence] = Field(default_factory=list, description="משפטי הסעיף, כל אחד עם cites")
 
 
+#: Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md D2/W4, ICD 203 "Analytic Standards"): likelihood
+#: (axis 1 -- how probable the event/outcome is) and confidence (axis 2 -- how much the analyst
+#: trusts their own judgement, driven by source quantity/quality) are two INDEPENDENT axes that
+#: must never be merged into one clause -- see ``OutlookIndicator.display_text_he`` below and
+#: ``docs/QA_CONTINUOUS_LOOP.md``'s ``outlook_likelihood_and_confidence_separated`` D6 check.
+LikelihoodHe = Literal["גבוהה", "בינונית", "נמוכה"]
+ConfidenceLevelHe = Literal["גבוה", "בינוני", "נמוך"]
+
+
 class OutlookIndicator(BaseModel):
     """One forward-looking indicator in 'מבט קדימה' (goal 4): either a sourced claim (``cites``
     non-empty) or the analyst's own forward assessment (``cites`` may be empty, but only when
     ``is_assessment=True`` and ``text_he`` opens with an explicit assessment marker) -- every
-    indicator is one or the other, never an uncited claim silently passed off as sourced."""
+    indicator is one or the other, never an uncited claim silently passed off as sourced.
+
+    Round 5 P3: ``likelihood``/``confidence_level``/``confidence_basis_he`` are additive and all
+    optional (default ``None``/``""``) so an indicator persisted or fixture-built before this round
+    still loads unchanged. When set, they are rendered by :attr:`display_text_he` as two separate,
+    period-terminated clauses appended to ``text_he`` -- never asked of ``text_he`` itself, so the
+    model's own claim text and the deterministic likelihood/confidence suffix never collide."""
 
     text_he: str
     cites: list[int] = Field(default_factory=list)
     is_assessment: bool = Field(default=False, description="True אם זו הערכת האנליסט (לא ציטוט ישיר של מקור)")
+    likelihood: LikelihoodHe | None = Field(
+        default=None,
+        description="סבירות האירוע/המגמה (ICD 203, ציר 1 -- 'מה הסיכוי שזה יקרה'); לא רמת ביטחון",
+    )
+    confidence_level: ConfidenceLevelHe | None = Field(
+        default=None,
+        description="רמת ביטחון האנליסט בשיפוט עצמו (ICD 203, ציר 2 -- כמות/איכות המקורות); לא סבירות",
+    )
+    confidence_basis_he: str = Field(
+        default="",
+        max_length=200,
+        description="נימוק קצר לרמת הביטחון (למשל: מבוסס על N מקורות עצמאיים / מקור בודד לא-מאומת)",
+    )
 
     @model_validator(mode="after")
     def _validate(self) -> OutlookIndicator:
@@ -414,13 +456,99 @@ class OutlookIndicator(BaseModel):
                 "an analyst-assessment outlook indicator must open with an explicit marker "
                 f"({'/'.join(ASSESSMENT_MARKERS_HE)})"
             )
+        if self.confidence_level and not self.confidence_basis_he.strip():
+            raise ValueError("confidence_level requires a short confidence_basis_he explaining why")
         return self
+
+    @property
+    def display_text_he(self) -> str:
+        """``text_he`` plus a deterministic likelihood/confidence suffix (round 5 P3) -- RENDERING
+        ONLY: never persisted, never fed back to the model, and never used by
+        ``eoa.report.indicators`` (which reads ``.text_he`` directly for the cross-issue watchlist
+        dedupe key, so that key stays stable regardless of any confidence-basis rewording).
+
+        Each axis is its own period-terminated clause ("סבירות: X." / "ביטחון: Y (בסיס: ...)."), so
+        a downstream deterministic check that splits on ``[.,;]`` (see
+        ``eoa.qa.d6_daily_report._outlook_likelihood_confidence_check``) never finds both the
+        "סבירות" and "ביטחון" keywords inside the same clause -- see docs/MODULES.md "Round 5 P3"
+        for the exact rendering contract. Returns ``text_he`` unchanged when neither axis is set
+        (an older indicator, or one the model/fallback left unrated)."""
+        parts: list[str] = []
+        if self.likelihood:
+            parts.append(f"סבירות: {self.likelihood}.")
+        if self.confidence_level:
+            basis = f" (בסיס: {self.confidence_basis_he})" if self.confidence_basis_he else ""
+            parts.append(f"ביטחון: {self.confidence_level}{basis}.")
+        if not parts:
+            return self.text_he
+        return f"{self.text_he.rstrip()} " + " ".join(parts)
+
+
+#: Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.1 item 1 / sec 4 item 4, D6
+#: ``bluf_present_and_short``): a BLUF is 1-2 short, cited sentences, at most this many words total.
+MAX_BLUF_SENTENCES = 2
+MAX_BLUF_WORDS = 40
+
+
+def validate_bluf_length(bluf: list[Sentence]) -> list[Sentence]:
+    """Shared field-validator body for ``bluf`` on every structured report draft (Daily here;
+    Weekly/Monthly in ``eoa.llm.schemas.reports`` import and re-apply this same function as their
+    own ``field_validator`` -- both modules already share public schema classes across this file
+    boundary, so this is a plain public helper, not a private cross-module import). Every
+    ``Sentence`` in ``bluf``
+    already requires non-empty ``cites`` by construction (goal 1) -- this only enforces the
+    sentence-count and total-word-count caps docs/QA_CONTINUOUS_LOOP.md's ``bluf_present_and_short``
+    check expects."""
+    if len(bluf) > MAX_BLUF_SENTENCES:
+        raise ValueError(f"bluf must have at most {MAX_BLUF_SENTENCES} sentences (got {len(bluf)})")
+    total_words = sum(len(s.text_he.split()) for s in bluf)
+    if total_words > MAX_BLUF_WORDS:
+        raise ValueError(f"bluf must be at most {MAX_BLUF_WORDS} words total (got {total_words})")
+    return bluf
+
+
+class AssumptionFalsifier(BaseModel):
+    """One analytic assumption underlying the report's judgement, paired with what would prove it
+    wrong (round 5 P3, docs/REPORT_TEMPLATE_BENCHMARK.md sec 1 item 6 / W4 / B5 -- the CIA
+    Tradecraft Primer's "key assumptions check" / structured analytic techniques). Rendered as one
+    "הנחות והפרכות" list section (``eoa.report.qa_citations.assumptions_extra_section``).
+
+    ``cites`` may be empty: an assumption is often a structural premise ("קצב הרכש הנוכחי נמשך")
+    rather than itself a citable claim from one item -- when it does rest directly on report
+    evidence, cite it."""
+
+    assumption_he: str = Field(description="הנחה מרכזית אחת שעליה מבוסס הניתוח/השיפוט למעלה")
+    falsifier_he: str = Field(description="מה יפריך את ההנחה -- אינדיקטור או ראיה קונקרטיים וניתנים לצפייה")
+    cites: list[int] = Field(default_factory=list)
+
+    @field_validator("assumption_he", "falsifier_he")
+    @classmethod
+    def _validate_text(cls, v: str) -> str:
+        v = _reject_inline_citation_markers(v, field_name="assumptions[].assumption_he/falsifier_he")
+        if not v.strip():
+            raise ValueError("assumption_he/falsifier_he must not be empty")
+        return v
 
 
 class DailyReportDraft(BaseModel):
     """Report writer output (goal 1: citation discipline by construction). ``cites``/``sentences``
     refer to the numbered item list given in the prompt; the model never writes "[n]" itself."""
 
+    # Round 5 P3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.1 item 1): "שורה תחתונה" -- the one thing
+    # the reader must know first, ahead of the executive summary. 1-2 Sentence objects, cited,
+    # <=40 words total combined (see MAX_BLUF_SENTENCES/MAX_BLUF_WORDS); the priority emoji
+    # (🔴/🟠/🟡) that the exec summary used to carry moves here instead (see report_daily.md).
+    # Optional/empty-default so a draft with no qualifying items (``_no_items_draft`` et al.) is
+    # still valid without a BLUF to write.
+    bluf: list[Sentence] = Field(
+        default_factory=list,
+        max_length=MAX_BLUF_SENTENCES,
+        description=(
+            "שורה תחתונה: 1-2 אובייקטי Sentence בלבד, עד 40 מילה בסה\"כ, שמכילים את הדבר החשוב "
+            "ביותר שהקורא חייב לדעת לפני הפרטים -- כולל אימוג'י העדיפות (🔴/🟠/🟡) של הפריט המוביל, "
+            "שאינו מופיע יותר בתקציר המנהלים"
+        ),
+    )
     exec_summary: list[Sentence] = Field(
         default_factory=list,
         description=(
@@ -445,4 +573,16 @@ class DailyReportDraft(BaseModel):
         default_factory=list,
         description="2-3 אינדיקטורים קונקרטיים למעקב ב'מבט קדימה', כל אחד מצוטט או מסומן כהערכת אנליסט",
     )
+    # Round 5 P3: optional on the daily draft (per task scope -- required in spirit on weekly/
+    # monthly, see eoa.llm.schemas.reports); 0-4 entries, rendered as "הנחות והפרכות" when present.
+    assumptions: list[AssumptionFalsifier] = Field(
+        default_factory=list,
+        max_length=4,
+        description="0-4 זוגות הנחה/הפרכה (key assumptions check) -- אופציונלי בדוח היומי",
+    )
     open_points_he: list[str] = Field(default_factory=list, description="נקודות פתוחות להכרעת המשתמש")
+
+    @field_validator("bluf")
+    @classmethod
+    def _check_bluf(cls, v: list[Sentence]) -> list[Sentence]:
+        return validate_bluf_length(v)

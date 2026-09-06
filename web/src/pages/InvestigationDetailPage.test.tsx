@@ -137,6 +137,54 @@ describe("InvestigationDetailPage security review banner (W10)", () => {
   });
 });
 
+// Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): `blocked` is a distinct terminal outcome
+// from `not_found` -- the investigation could not actually be carried out, and the detail page
+// must show *why* via `blocked_reason_he`, not just a generic outcome chip.
+describe("InvestigationDetailPage blocked outcome (Round-5 P7)", () => {
+  function detailWithBlocked() {
+    return {
+      ...baseDetail(),
+      state: "done" as const,
+      answer: {
+        answer_he: "לא נמצא מידע מספק במסגרת התקציב.",
+        sources: [],
+        outcome: "blocked",
+        stopped_reason: "blocked",
+        security_review: true,
+        blocked_reason_he:
+          "כל הדפים שהחקירה שלפה נחסמו בבדיקת האבטחה (חשד להזרקת הוראות בתוכן שנשלף) -- לא בוצעה קריאה בפועל של אף מקור, ולכן אין ממצא לדווח עליו.",
+      },
+    };
+  }
+
+  it("shows a distinct 'נחסם' chip, not the plain 'לא נמצא' label", async () => {
+    getInvestigation.mockResolvedValue(detailWithBlocked());
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.getByText("נחסם")).toBeInTheDocument();
+    expect(screen.queryByText("לא נמצא")).not.toBeInTheDocument();
+  });
+
+  it("shows the blocked-reason callout with the reason text", async () => {
+    getInvestigation.mockResolvedValue(detailWithBlocked());
+    renderPage();
+    const callout = await screen.findByTestId("investigation-blocked-reason");
+    expect(callout).toHaveTextContent("נחסם (לא נחקר בפועל)");
+    expect(callout).toHaveTextContent("כל הדפים שהחקירה שלפה נחסמו בבדיקת האבטחה");
+  });
+
+  it("does not show the blocked-reason callout for a plain not_found result", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      state: "not_found",
+      answer: { answer_he: "לא נמצא", sources: [], outcome: "not_found", stopped_reason: "not_found" },
+    });
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.queryByTestId("investigation-blocked-reason")).not.toBeInTheDocument();
+  });
+});
+
 describe("InvestigationDetailPage live log auto-scroll", () => {
   it("sets scrollTop to scrollHeight on mount and again as new lines arrive (not paused)", async () => {
     const { rerender } = renderPage();

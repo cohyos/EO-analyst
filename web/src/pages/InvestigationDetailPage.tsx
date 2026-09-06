@@ -7,11 +7,13 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { CitationText } from "@/components/CitationText";
 import { SecurityReviewBanner } from "@/components/investigations/SecurityReviewBanner";
 import { useInvestigationSocket } from "@/hooks/useInvestigationSocket";
+import { useT } from "@/i18n";
 import { formatDateTime } from "@/lib/time";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
 import { cn } from "@/lib/cn";
 
 export function InvestigationDetailPage() {
+  const t = useT();
   const { jobId } = useParams<{ jobId: string }>();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -135,6 +137,22 @@ export function InvestigationDetailPage() {
           </button>
         )}
       </header>
+
+      {/* Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): `blocked` means the investigation
+          could not actually be carried out -- surface the "why" plainly, distinct from a generic
+          "לא נמצא" answer, mirroring the daily report's own "נחסם (לא נחקר בפועל): <reason>" text
+          (docs/MODULES.md). Shown regardless of the security-review banner's own resolved state --
+          this is informational, not an actionable review item on its own. */}
+      {data.answer?.outcome === "blocked" && data.answer?.blocked_reason_he && (
+        <div
+          data-testid="investigation-blocked-reason"
+          className="rounded-lg border border-level-orange bg-level-orange-bg p-3 text-sm text-warn"
+        >
+          <bdi className="block" dir="auto">
+            <strong>{t("investigations.blockedReasonPrefix")}:</strong> {data.answer.blocked_reason_he}
+          </bdi>
+        </div>
+      )}
 
       {data.answer?.security_review && !data.answer?.security_review_resolved && (
         <SecurityReviewBanner

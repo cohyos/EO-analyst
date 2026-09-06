@@ -12,6 +12,12 @@ import type { InvestigationOutcomeReason } from "@/types/api";
 // a genuine "searched and nothing was there". Currently set only via manual/retroactive
 // correction (see docs/qa job-86 notes); surfaced here so the UI can label it distinctly from a
 // plain "not found" the moment a job's result carries it.
+// Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): `blocked` is a distinct terminal outcome
+// from `not_found` -- the investigation could not actually be carried out (every fetched page was
+// quarantined, every search hit was screened out before any page was read, or a cloud-delegated
+// answer was fully redacted by the security guard), as opposed to `not_found` (searched fully,
+// genuinely nothing there). It must render as a visually distinct amber chip, not the grey
+// `not_found` tone, so the analyst notices "this wasn't actually investigated" at a glance.
 export const OUTCOME_LABEL: Record<string, string> = {
   found: "נמצא",
   partial: "נמצא חלקית",
@@ -20,6 +26,7 @@ export const OUTCOME_LABEL: Record<string, string> = {
   stopped_budget: "נעצר בגלל תקציב",
   stopped_timeout: "נעצר בגלל זמן",
   insufficient_context: "אין מספיק מידע לחיפוש",
+  blocked: "נחסם",
 };
 
 export const OUTCOME_TONE: Record<string, string> = {
@@ -30,6 +37,9 @@ export const OUTCOME_TONE: Record<string, string> = {
   stopped_budget: "text-warn bg-level-orange-bg",
   stopped_timeout: "text-warn bg-level-orange-bg",
   insufficient_context: "text-fg-dim bg-bg-sunken",
+  // amber (level-orange), same tone family as the other "something stopped this early" reasons
+  // above, but always distinct from not_found's grey.
+  blocked: "text-warn bg-level-orange-bg",
 };
 
 export function outcomeLabel(outcome: string | null | undefined): string {
@@ -50,4 +60,5 @@ export const ALL_OUTCOME_REASONS: InvestigationOutcomeReason[] = [
   "stopped_budget",
   "stopped_timeout",
   "insufficient_context",
+  "blocked",
 ];
