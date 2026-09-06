@@ -42,7 +42,7 @@ the first few rows) without writing anything.
 
 Run with the same ``DATABASE_URL`` as the app, e.g.:
 
-    DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5433/eoanalyst \\
+    DATABASE_URL=<from runtime/eoa.env — port 5432> \\
         PYTHONPATH=agent python scripts/repair_gershayim.py [--dry-run]
 """
 
