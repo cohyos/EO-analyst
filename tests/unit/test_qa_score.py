@@ -527,7 +527,34 @@ _GOOD_PATENT_MD = """# סקר פטנטים
 
 ## ציר זמן שנתי
 
+| שנה | מספר פטנטים |
+|---|---|
+| 2024 | 3 |
+
+## קודי CPC מובילים
+
+| קוד CPC | מספר פטנטים |
+|---|---|
+| G01J5 | 3 |
+
+## נספח מקורות
+
 תוכן.
+"""
+
+_DISCLOSURE_PATENT_MD = """# סקר פטנטים
+
+## תקציר מנהלים
+
+תוכן.
+
+## ציר זמן שנתי
+
+אין נתוני ציר זמן שנתי זמינים לפטנטים במדגם זה (חסרים תאריכי פרסום/הגשה במקור הנתונים).
+
+## קודי CPC מובילים
+
+אין נתוני קודי CPC זמינים לפטנטים במדגם זה (מקור החיפוש חסר-המפתחות אינו מספק סיווג CPC).
 
 ## נספח מקורות
 
@@ -540,19 +567,50 @@ class TestD8:
         result = score_D8(tmp_path / "missing.md")
         assert result.score_0_100 is None
 
-    def test_timeline_present(self, tmp_path: Path) -> None:
+    def test_timeline_and_cpc_present_with_real_data_rows(self, tmp_path: Path) -> None:
         path = tmp_path / "patent_survey_x_2026-01-01.md"
         path.write_text(_GOOD_PATENT_MD, encoding="utf-8")
         result = score_D8(path)
-        timeline_check = next(c for c in result.checks if c.name == "timeline_section_present")
+        timeline_check = next(c for c in result.checks if c.name == "timeline_present")
+        cpc_check = next(c for c in result.checks if c.name == "cpc_present")
         assert timeline_check.passed is True
+        assert cpc_check.passed is True
+
+    def test_timeline_and_cpc_present_with_explicit_disclosure(self, tmp_path: Path) -> None:
+        """Round 3 D8 finding 3: a genuinely data-starved survey (no CPC/date data at all) is
+        never scored as "missing" as long as it carries the explicit disclosure sentence in place
+        of a silently-empty table."""
+        path = tmp_path / "patent_survey_d_2026-01-01.md"
+        path.write_text(_DISCLOSURE_PATENT_MD, encoding="utf-8")
+        result = score_D8(path)
+        timeline_check = next(c for c in result.checks if c.name == "timeline_present")
+        cpc_check = next(c for c in result.checks if c.name == "cpc_present")
+        assert timeline_check.passed is True
+        assert cpc_check.passed is True
 
     def test_timeline_missing_detected(self, tmp_path: Path) -> None:
         path = tmp_path / "patent_survey_y_2026-01-01.md"
         path.write_text("# סקר\n\n## תקציר מנהלים\n\nתוכן.\n", encoding="utf-8")
         result = score_D8(path)
-        timeline_check = next(c for c in result.checks if c.name == "timeline_section_present")
+        timeline_check = next(c for c in result.checks if c.name == "timeline_present")
+        cpc_check = next(c for c in result.checks if c.name == "cpc_present")
         assert timeline_check.passed is False
+        assert cpc_check.passed is False
+
+    def test_bare_heading_with_no_data_or_disclosure_fails(self, tmp_path: Path) -> None:
+        """The exact round-1 bug: a heading exists but the table under it has zero data rows and
+        no disclosure sentence -- must fail, not silently pass on heading presence alone."""
+        path = tmp_path / "patent_survey_bare_2026-01-01.md"
+        path.write_text(
+            "# סקר\n\n## ציר זמן שנתי\n\n| שנה | מספר פטנטים |\n|---|---|\n\n"
+            "## קודי CPC מובילים\n\n| קוד CPC | מספר פטנטים |\n|---|---|\n\n## נספח מקורות\n\nתוכן.\n",
+            encoding="utf-8",
+        )
+        result = score_D8(path)
+        timeline_check = next(c for c in result.checks if c.name == "timeline_present")
+        cpc_check = next(c for c in result.checks if c.name == "cpc_present")
+        assert timeline_check.passed is False
+        assert cpc_check.passed is False
 
     def test_ltr_isolation_checked_from_html(self, tmp_path: Path) -> None:
         md_path = tmp_path / "patent_survey_z_2026-01-01.md"

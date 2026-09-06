@@ -45,7 +45,9 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -122,6 +124,45 @@ _EVENT_KIND_HE = {
 }
 
 _PUB_NUMBER_COUNTRY_RE = re.compile(r"^([A-Z]{2})")
+
+# Round 3 D8 finding 1 (2026-09-06, judge round_1_judge.md): the Anduril survey's executive
+# summary asserted Anduril was "the exclusive player" in its field from a sample where 5 of 6
+# patents simply carried no assignee data at all (a keyless-search data-source gap, never evidence
+# of exclusivity/market share) -- below this coverage bar, a claim of exclusivity/market
+# domination is unsupportable and must be replaced with an explicit caveat instead.
+_ASSIGNEE_COVERAGE_THRESHOLD = 0.70
+_COVERAGE_CAVEAT_TEMPLATE_HE = (
+    "ל-{missing} מתוך {total} הפטנטים אין נתוני מקצה — לא ניתן להסיק בלעדיות או נתח שוק."
+)
+_EXCLUSIVITY_CLAIM_RE = re.compile(
+    r"בלעדי|השחקן\s+היחיד|שולט\S*\s+בשוק|\bexclusive\b|\bonly\s+player\b", re.IGNORECASE
+)
+
+# Round 3 D8 finding 3 (2026-09-06): when the gathered sample genuinely carries no CPC codes /
+# publication-year data at all (the common case for the keyless Google-Patents-search fallback --
+# see eoa.patents.scan's own docstring), the corresponding table must never render as a bare,
+# silently-empty heading (the exact shape docs/qa/loop/round_1_judge.md flagged the deterministic
+# D8 auto-check for missing) -- it is replaced by one of these explicit disclosure sentences
+# instead, in both the section itself and the survey's own open-questions list.
+_TIMELINE_DISCLOSURE_HE = (
+    "אין נתוני ציר זמן שנתי זמינים לפטנטים במדגם זה (חסרים תאריכי פרסום/הגשה במקור הנתונים)."
+)
+_CPC_DISCLOSURE_HE = (
+    "אין נתוני קודי CPC זמינים לפטנטים במדגם זה (מקור החיפוש חסר-המפתחות אינו מספק סיווג CPC -- "
+    "ראו eoa.patents.scan; הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY ב-.env לכיסוי מלא)."
+)
+
+# Round 3 D8 finding 4 (2026-09-06): a survey whose LLM synthesis stage never reached Ollama (or
+# any configured fallback) despite retries must never be left silently "final" with an empty
+# narrative -- this marker is both human-readable (shown in the report itself) and, via
+# _persist_report's qa_report["narrative_pending"] flag, machine-detectable by
+# find_surveys_pending_narrative for a later regeneration pass (regenerate_pending_narrative).
+NARRATIVE_PENDING_MARKER_HE = (
+    "⏳ ניתוח שפה טבעית ממתין לרענון: המודל המקומי (Ollama) לא היה זמין במהלך יצירת הסקר, גם "
+    "לאחר מספר ניסיונות חוזרים -- הטבלאות הדטרמיניסטיות למעלה (נספח פטנטים, אשכולות, ציר זמן, "
+    "יחסים עסקיים) תקפות ומלאות ואינן תלויות ב-LLM. סקר זה מסומן לרענון אוטומטי -- ראו "
+    "eoa.patents.survey.find_surveys_pending_narrative / regenerate_pending_narrative."
+)
 
 
 # --------------------------------------------------------------------------
@@ -304,6 +345,27 @@ def _white_spaces(
     return gaps[:10]
 
 
+def _assignee_coverage(rows: list[dict[str, Any]]) -> tuple[int, int, float]:
+    """``(missing, total, coverage)`` -- ``coverage`` is the fraction of ``rows`` (patents) that
+    carry at least one real company assignee (:func:`_is_real_company_assignee`); ``missing`` is
+    the complementary count. Round 3 D8 finding 1: gates exclusivity/market-share language against
+    exactly this signal (see :data:`_ASSIGNEE_COVERAGE_THRESHOLD`) -- a sample where most patents
+    simply have no assignee on record (a data-source gap) can never support a claim that one
+    company "controls" or is "the only player" in the field. An empty sample counts as full
+    (vacuous) coverage -- there is nothing to be under-covered."""
+    total = len(rows)
+    if total == 0:
+        return 0, 0, 1.0
+    with_assignee = sum(
+        1 for r in rows if any(_is_real_company_assignee(a) for a in (r.get("assignees") or []))
+    )
+    return total - with_assignee, total, with_assignee / total
+
+
+def _coverage_caveat_he(missing: int, total: int) -> str:
+    return _COVERAGE_CAVEAT_TEMPLATE_HE.format(missing=missing, total=total)
+
+
 def _israel_position(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
     israeli_companies: set[str] = set()
     count = 0
@@ -371,8 +433,8 @@ def _assignee_events(names: set[str], since: dt.date, limit: int = 6) -> list[di
     rows = _fetchall(
         """
         SELECT e.id, e.item_id, e.kind, e.title, e.date, e.amount_usd, e.currency, e.parties,
-               e.customer, e.program, i.url AS item_url, i.title AS item_title, i.published_at,
-               COALESCE(src.name, i.url) AS source_name
+               e.customer, e.program, i.url AS item_url, i.title AS item_title, i.summary_he AS item_summary_he,
+               i.published_at, COALESCE(src.name, i.url) AS source_name
         FROM events e
         JOIN items i ON i.id = e.item_id
         LEFT JOIN sources src ON src.id = i.source_id
@@ -384,6 +446,60 @@ def _assignee_events(names: set[str], since: dt.date, limit: int = 6) -> list[di
     )
     out = [r for r in rows if (r.get("customer") in names) or (set(r.get("parties") or []) & names)]
     return out[:limit]
+
+
+# --------------------------------------------------------------------------
+# round 3 D8 finding 2 (2026-09-06): a relationship-map row hallucination -- "Anduril <-> Elbit
+# Systems | מיזוג/רכישה | Sigma 155 howitzer system" was traceable to no source that actually named
+# both parties (the cited source was solely a personnel-appointment article). Every
+# eoa.patents.cluster.relationship_edges_from_events edge already carries the registry number of
+# the one DB event it was built from (see that function's own docstring) -- this verifies, before
+# the edge is ever rendered or handed to the LLM, that BOTH party names (or a watchlist alias of
+# either, via eoa.pipeline.entity_normalize) literally appear in that same source's own text
+# (event title + parent item title + parent item body) -- an edge that fails this is dropped, never
+# silently rendered, and the drop is logged and counted in the survey's open-questions section.
+# --------------------------------------------------------------------------
+
+
+def _alias_candidates(name: str) -> set[str]:
+    canonical = resolve_canonical(name)
+    names = {name}
+    if canonical:
+        names.add(canonical.get("name") or "")
+        names.update(canonical.get("aliases") or [])
+    return {n for n in names if n}
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    if not name or not text:
+        return False
+    lowered = text.lower()
+    return any(candidate.lower() in lowered for candidate in _alias_candidates(name))
+
+
+def _verify_relationship_edges(
+    edges: list[dict[str, Any]], source_text_by_n: dict[int, str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Split ``edges`` (each an ``{"from", "to", "kind", "n", ...}`` dict from
+    :func:`eoa.patents.cluster.relationship_edges_from_events`) into ``(kept, dropped_notes)``: an
+    edge is kept only when it carries a registry number ``n`` present in ``source_text_by_n`` *and*
+    that source's own text names both ``from`` and ``to`` (via :func:`_name_in_text`, which also
+    checks watchlist aliases). ``dropped_notes`` is one human-readable Hebrew sentence per dropped
+    edge -- never a silent drop."""
+    kept: list[dict[str, Any]] = []
+    dropped_notes: list[str] = []
+    for edge in edges:
+        n = edge.get("n")
+        text = source_text_by_n.get(n, "") if n is not None else ""
+        if n is not None and _name_in_text(edge["from"], text) and _name_in_text(edge["to"], text):
+            kept.append(edge)
+            continue
+        kind_he = _EVENT_KIND_HE.get(edge.get("kind"), edge.get("kind") or "אחר")
+        dropped_notes.append(
+            f'קשר "{edge["from"]} <-> {edge["to"]}" ({kind_he}) הוסר: המקור המצוטט '
+            f"{f'[{n}]' if n is not None else '(ללא ציטוט)'} אינו מזכיר את שני הצדדים."
+        )
+    return kept, dropped_notes
 
 
 def _extend_registry_with_db_records(
@@ -558,12 +674,22 @@ def _synthesis_data_block(
     timeline_rows: list[cluster_mod.TimelineRow],
     cluster_waves: dict[str, Counter[int]],
     assignee_waves: dict[str, Counter[int]],
+    assignee_missing: int = 0,
+    assignee_total: int = 0,
 ) -> str:
     patent_count = sum(1 for it in registry if it.get("kind") != "db_item")
+    coverage_pct = (
+        round(100 * (assignee_total - assignee_missing) / assignee_total) if assignee_total else 100
+    )
     lines = [
         f"נושא: {topic}",
         f'סה"כ פטנטים: {patent_count}',
         f'סה"כ רשומות ברשימה הממוספרת (פטנטים ואז רשומות מאגר): {len(registry)}',
+        # Round 3 D8 finding 1 (2026-09-06, prompt rule 8): explicit ground truth for the
+        # exclusivity/market-share guard -- see _scrub_exclusivity_claims for the deterministic
+        # backstop this line supports.
+        f"כיסוי נתוני מקצה: {assignee_total - assignee_missing} מתוך {assignee_total} הפטנטים "
+        f"({coverage_pct}%) כוללים בעל-פטנטים מזוהה; ל-{assignee_missing} אין נתוני מקצה כלל.",
         "",
     ]
     lines.append(
@@ -633,6 +759,44 @@ def _run_synthesis(
         log.warning("patent_survey_synthesis_failed", topic=topic, error=str(exc)[:200])
     except Exception as exc:
         log.warning("patent_survey_synthesis_unexpected_error", topic=topic, error=str(exc)[:200])
+    return None
+
+
+# Round 3 D8 finding 4 (2026-09-06, observed on report_id=35, "FPA/DROIC"): a single failed
+# _run_synthesis call used to be treated as final, even for a transient cause (GPU momentarily
+# busy, Ollama briefly unreachable) that a short wait would clear. eoa.llm.ollama_client already
+# retries a schema-validation failure once *within* one call, and -- inside the pipeline/worker
+# process with llm_providers.mode="cloud" -- walks a full role fallback chain that always
+# terminates in local Ollama; this adds the one retry dimension neither of those covers: trying the
+# whole synthesis call again, with a short pause, when the *entire* chain came back unavailable.
+_SYNTHESIS_MAX_ATTEMPTS = 3
+_SYNTHESIS_RETRY_DELAY_S = 5.0
+
+
+def _run_synthesis_with_retries(
+    topic: str,
+    registry: list[dict[str, Any]],
+    data_block: str,
+    *,
+    role: str,
+    interactive: bool,
+    max_attempts: int = _SYNTHESIS_MAX_ATTEMPTS,
+    delay_s: float = _SYNTHESIS_RETRY_DELAY_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> PatentSurveyDraft | None:
+    """:func:`_run_synthesis`, retried up to ``max_attempts`` times (with ``delay_s`` between
+    attempts) before giving up -- ``sleep`` is injectable so unit tests exercise every attempt
+    without actually waiting. Returns ``None`` only after every attempt failed/deferred (the
+    caller then falls back to :func:`_fallback_draft` with :data:`NARRATIVE_PENDING_MARKER_HE` and
+    flags the persisted report ``narrative_pending`` for later regeneration, see
+    :func:`find_surveys_pending_narrative`)."""
+    for attempt in range(1, max_attempts + 1):
+        result = _run_synthesis(topic, registry, data_block, role=role, interactive=interactive)
+        if result is not None:
+            return result
+        if attempt < max_attempts:
+            log.info("patent_survey_synthesis_retry", topic=topic, attempt=attempt, max_attempts=max_attempts)
+            sleep(delay_s)
     return None
 
 
@@ -808,11 +972,68 @@ def _scrub_consistency_violations(synthesis: PatentSurveyDraft, assignee_counts:
     return notes
 
 
-def _fallback_draft(open_points_extra: list[str]) -> _RenderableSurveyDraft:
+def _fallback_draft(
+    open_points_extra: list[str], *, exec_summary_he: str = _NO_LLM_TEXT_HE
+) -> _RenderableSurveyDraft:
     return _RenderableSurveyDraft(
-        exec_summary=[_CiteSentence(text_he=_NO_LLM_TEXT_HE)],
+        exec_summary=[_CiteSentence(text_he=exec_summary_he)],
         open_points_he=open_points_extra,
     )
+
+
+# --------------------------------------------------------------------------
+# round 3 D8 finding 1 (2026-09-06): exclusivity/market-share overclaim guard -- a deterministic
+# backstop mirroring _scrub_consistency_violations's own shape (never silently drop a sentence,
+# replace it with an honest, deterministic correction; log + surface the violation as an open
+# point). Applied whenever _assignee_coverage falls under _ASSIGNEE_COVERAGE_THRESHOLD.
+# --------------------------------------------------------------------------
+
+
+def _scrub_exclusivity_claims(
+    synthesis: PatentSurveyDraft, *, coverage: float, missing: int, total: int
+) -> list[str]:
+    """Mutates ``synthesis`` in place, replacing the text of every sentence/action that claims
+    exclusivity or market domination (:data:`_EXCLUSIVITY_CLAIM_RE`) when ``coverage`` (see
+    :func:`_assignee_coverage`) is under :data:`_ASSIGNEE_COVERAGE_THRESHOLD` -- such a claim can
+    never be supported by a sample where most patents simply lack assignee data. Returns the list
+    of violation notes found (empty when ``coverage`` already clears the bar, or no such claim was
+    made) for the caller to surface as open points, same contract as
+    :func:`_scrub_consistency_violations`."""
+    if coverage >= _ASSIGNEE_COVERAGE_THRESHOLD:
+        return []
+    caveat = _coverage_caveat_he(missing, total)
+    notes: list[str] = []
+    for sentences in _iter_sentence_lists(synthesis):
+        for s in sentences:
+            if _EXCLUSIVITY_CLAIM_RE.search(s.text_he):
+                notes.append(
+                    f'הוסרה טענת בלעדיות/נתח-שוק שאינה נתמכת (כיסוי מקצה {round(coverage * 100)}%): "{s.text_he}"'
+                )
+                s.text_he = caveat
+    for action in synthesis.business_implications:
+        if _EXCLUSIVITY_CLAIM_RE.search(action.rationale_he):
+            notes.append(f'הוסרה טענת בלעדיות/נתח-שוק שאינה נתמכת בנימוק פעולה: "{action.rationale_he}"')
+            action.rationale_he = caveat
+        if _EXCLUSIVITY_CLAIM_RE.search(action.action_he):
+            notes.append(f'הוסרה טענת בלעדיות/נתח-שוק שאינה נתמכת בפעולה: "{action.action_he}"')
+            action.action_he = caveat
+    return notes
+
+
+def _enforce_coverage_caveat(draft: _RenderableSurveyDraft, missing: int, total: int) -> None:
+    """Guarantees the coverage caveat (:func:`_coverage_caveat_he`) is present verbatim in the
+    executive summary and in every assignee-profile section of ``draft`` -- required regardless of
+    whether the LLM (or the no-LLM fallback path) ever wrote an exclusivity claim to scrub, per the
+    round 3 D8 finding 1 spec ("the survey must carry an explicit caveat sentence in the executive
+    summary and the assignee-profile section")."""
+    caveat = _coverage_caveat_he(missing, total)
+    if not any(s.text_he == caveat for s in draft.exec_summary):
+        draft.exec_summary.append(_CiteSentence(text_he=caveat))
+    for section in draft.sections:
+        if section.title_he.startswith("פרופיל מקצה:") and not any(
+            s.text_he == caveat for s in section.sentences
+        ):
+            section.sentences.append(_CiteSentence(text_he=caveat))
 
 
 # --------------------------------------------------------------------------
@@ -838,7 +1059,14 @@ def _finish_survey_row(survey_id: int, *, status: str, report_id: int | None) ->
 
 
 def _persist_report(
-    topic: str, period_end: dt.date, docx_path: Path, md_path: Path, html_path: Path, patent_ids: list[int]
+    topic: str,
+    period_end: dt.date,
+    docx_path: Path,
+    md_path: Path,
+    html_path: Path,
+    patent_ids: list[int],
+    *,
+    narrative_pending: bool = False,
 ) -> int:
     query = """
         INSERT INTO reports (kind, period_end, path_docx, path_md, path_html, items_included, qa_passed, qa_report)
@@ -852,6 +1080,11 @@ def _persist_report(
             "schema level (every sentence carries non-empty cites or is labelled general knowledge)"
         ),
         "topic": topic,
+        # Round 3 D8 finding 4: machine-detectable twin of NARRATIVE_PENDING_MARKER_HE -- true only
+        # when synthesis exhausted every retry against a real LLM attempt (never for the unrelated
+        # "no real assignee data at all" fallback, which no amount of LLM retrying would fix) --
+        # see find_surveys_pending_narrative.
+        "narrative_pending": narrative_pending,
     }
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -866,6 +1099,53 @@ def _persist_report(
             },
         )
         return cur.fetchone()["id"]
+
+
+# --------------------------------------------------------------------------
+# round 3 D8 finding 4 (2026-09-06): nightly-maintenance regeneration hook. Detection
+# (find_surveys_pending_narrative) and the actual regeneration (regenerate_pending_narrative) are
+# plain functions here -- no scheduler wiring; docs/MODULES.md "Round 3 D8" describes where a
+# nightly job (agent/eoa/orchestrator/jobs.py or the night pipeline's own job list) would call
+# these, since wiring a new scheduled job is outside agent/eoa/patents/**'s ownership for this task.
+# --------------------------------------------------------------------------
+
+
+def find_surveys_pending_narrative(limit: int = 20) -> list[dict[str, Any]]:
+    """Every ``patent_survey`` report whose persisted ``qa_report`` JSON carries
+    ``narrative_pending: true`` (set by :func:`_persist_report` when
+    :func:`_run_synthesis_with_retries` exhausted every attempt) -- a survey whose deterministic
+    tables rendered fully but whose LLM narrative never did. Returns
+    ``[{"report_id", "survey_id", "topic"}, ...]``, most recent first."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.id AS report_id, s.id AS survey_id, s.topic
+            FROM reports r
+            JOIN patent_surveys s ON s.report_id = r.id
+            WHERE r.kind = 'patent_survey' AND (r.qa_report ->> 'narrative_pending')::boolean IS TRUE
+            ORDER BY r.id DESC
+            LIMIT %(limit)s
+            """,
+            {"limit": limit},
+        )
+        return cur.fetchall()
+
+
+def regenerate_pending_narrative(
+    survey_id: int, *, role: str = "resident", interactive: bool = False
+) -> PatentSurveyPaths:
+    """Re-run the full survey pipeline for a survey previously flagged pending
+    (:func:`find_surveys_pending_narrative`) by looking up its original ``topic`` and calling
+    :func:`build_patent_survey` again -- a fresh run (including a fresh ``patent_surveys`` row; the
+    stale pending row is left as historical record, same convention as a plain re-run of the same
+    topic). Territory scoping is not persisted on ``patent_surveys`` today, so a regeneration
+    always re-runs unscoped (docs/MODULES.md "Round 3 D8" notes this as a follow-up)."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT topic FROM patent_surveys WHERE id = %(id)s", {"id": survey_id})
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"no patent_surveys row with id={survey_id}")
+    return build_patent_survey(row["topic"], role=role, interactive=interactive)
 
 
 # --------------------------------------------------------------------------
@@ -906,6 +1186,7 @@ def build_patent_survey(
             log.warning("patent_survey_valuation_failed", topic=topic, error=str(exc)[:200])
 
         rows = _territory_filter(_fetch_patent_rows(patent_ids), territory)
+        assignee_missing, assignee_total, assignee_coverage = _assignee_coverage(rows)
 
         registry: list[dict[str, Any]] = [
             {
@@ -960,8 +1241,10 @@ def build_patent_survey(
 
         profile_names = _select_profile_assignees(top_assignees)
         synthesis: PatentSurveyDraft | None = None
+        synthesis_llm_failed = False
         assignee_has_cpc: dict[str, bool] = {}
         relationship_edges: list[dict[str, Any]] = []
+        dropped_relationship_notes: list[str] = []
         if profile_names:
             since = period_end - dt.timedelta(days=PROFILE_LOOKBACK_DAYS)
             profile_blocks: list[str] = []
@@ -977,12 +1260,33 @@ def build_patent_survey(
                 events = _assignee_events(names_for_matching, since)
                 _extend_registry_with_db_records(registry, market_items, item_id_key="id")
                 _extend_registry_with_db_records(registry, events, item_id_key="item_id")
-                relationship_edges += cluster_mod.relationship_edges_from_events(name, events)
+                raw_edges = cluster_mod.relationship_edges_from_events(name, events)
+                source_text_by_n = {
+                    ev["n"]: " ".join(
+                        filter(None, [ev.get("title"), ev.get("item_title"), ev.get("item_summary_he")])
+                    )
+                    for ev in events
+                    if ev.get("n") is not None
+                }
+                verified_edges, dropped_notes = _verify_relationship_edges(raw_edges, source_text_by_n)
+                relationship_edges += verified_edges
+                dropped_relationship_notes += dropped_notes
                 profile_blocks.append(
                     _assignee_profile_input_block(
                         name, canonical, cpc_cluster, patent_ns, market_items, events
                     )
                 )
+
+            if dropped_relationship_notes:
+                log.warning(
+                    "patent_survey_relationship_edges_dropped",
+                    topic=topic,
+                    count=len(dropped_relationship_notes),
+                )
+                open_points_extra = [
+                    *open_points_extra,
+                    f"{len(dropped_relationship_notes)} קשרים הוסרו כי המקורות לא תומכים בהם.",
+                ]
 
             data_block = _synthesis_data_block(
                 topic,
@@ -1000,23 +1304,43 @@ def build_patent_survey(
                 timeline_rows,
                 cluster_waves,
                 assignee_waves,
+                assignee_missing=assignee_missing,
+                assignee_total=assignee_total,
             )
-            synthesis = _run_synthesis(topic, registry, data_block, role=role, interactive=interactive)
+            synthesis = _run_synthesis_with_retries(
+                topic, registry, data_block, role=role, interactive=interactive
+            )
+            if synthesis is None:
+                synthesis_llm_failed = True
+                open_points_extra = [*open_points_extra, NARRATIVE_PENDING_MARKER_HE]
         else:
             log.info("patent_survey_no_real_assignees", topic=topic, patent_count=len(rows))
             open_points_extra = [*open_points_extra, _NO_ASSIGNEE_DATA_HE]
 
         consistency_notes: list[str] = []
+        exclusivity_notes: list[str] = []
         if synthesis is not None:
             consistency_notes = _scrub_consistency_violations(synthesis, dict(top_assignees))
             if consistency_notes:
                 log.warning("patent_survey_consistency_violations", topic=topic, count=len(consistency_notes))
+            exclusivity_notes = _scrub_exclusivity_claims(
+                synthesis, coverage=assignee_coverage, missing=assignee_missing, total=assignee_total
+            )
+            if exclusivity_notes:
+                log.warning("patent_survey_exclusivity_violations", topic=topic, count=len(exclusivity_notes))
 
         draft = (
-            _build_draft_from_synthesis(synthesis, open_points_extra + consistency_notes, assignee_has_cpc)
+            _build_draft_from_synthesis(
+                synthesis, open_points_extra + consistency_notes + exclusivity_notes, assignee_has_cpc
+            )
             if synthesis
-            else _fallback_draft(open_points_extra + consistency_notes)
+            else _fallback_draft(
+                open_points_extra + consistency_notes + exclusivity_notes,
+                exec_summary_he=NARRATIVE_PENDING_MARKER_HE if synthesis_llm_failed else _NO_LLM_TEXT_HE,
+            )
         )
+        if assignee_coverage < _ASSIGNEE_COVERAGE_THRESHOLD:
+            _enforce_coverage_caveat(draft, assignee_missing, assignee_total)
 
         # A14b point 4: per-patent "advance" description (problem/solution/novelty), reused for the
         # appendix table column below and the md/html footnote-style first-citation line.
@@ -1047,17 +1371,43 @@ def build_patent_survey(
                 "headers": ["בעלים", "מספר פטנטים"],
                 "rows": [[ltr_isolate(a), n] for a, n in top_assignees.most_common(TOP_N_ASSIGNEES)],
             },
-            {
-                "title_he": "ציר זמן שנתי",
-                "headers": ["שנה", "מספר פטנטים"],
-                "rows": [[y, n] for y, n in sorted(timeline.items())],
-            },
-            {
-                "title_he": "קודי CPC מובילים",
-                "headers": ["קוד CPC", "מספר פטנטים"],
-                "rows": [[ltr_isolate(c), n] for c, n in top_cpc.most_common(TOP_N_CPC)],
-            },
         ]
+        # Round 3 D8 finding 3 (2026-09-06): when there is genuinely no publication-year / CPC data
+        # at all in the gathered sample (the common keyless-search-fallback case), the table is
+        # replaced by an explicit disclosure section (never a silently-empty heading) -- rendered as
+        # a plain draft section (the same structured-sentence path every other narrative section
+        # uses) so it appears identically across docx/md/html without touching docx_builder.py, and
+        # mirrored into open_points_he so it also surfaces in "נקודות פתוחות".
+        if timeline:
+            tables.append(
+                {
+                    "title_he": "ציר זמן שנתי",
+                    "headers": ["שנה", "מספר פטנטים"],
+                    "rows": [[y, n] for y, n in sorted(timeline.items())],
+                }
+            )
+        else:
+            draft.sections.append(
+                _RenderSection(
+                    title_he="ציר זמן שנתי", sentences=[_CiteSentence(text_he=_TIMELINE_DISCLOSURE_HE)]
+                )
+            )
+            draft.open_points_he.append(_TIMELINE_DISCLOSURE_HE)
+        if top_cpc:
+            tables.append(
+                {
+                    "title_he": "קודי CPC מובילים",
+                    "headers": ["קוד CPC", "מספר פטנטים"],
+                    "rows": [[ltr_isolate(c), n] for c, n in top_cpc.most_common(TOP_N_CPC)],
+                }
+            )
+        else:
+            draft.sections.append(
+                _RenderSection(
+                    title_he="קודי CPC מובילים", sentences=[_CiteSentence(text_he=_CPC_DISCLOSURE_HE)]
+                )
+            )
+            draft.open_points_he.append(_CPC_DISCLOSURE_HE)
         if white_spaces:
             tables.append(
                 {
@@ -1254,7 +1604,15 @@ def build_patent_survey(
         html_content = inject_advance_footnotes_html(html_content, advance_by_n)
         html_path.write_text(html_content, encoding="utf-8")
 
-        report_id = _persist_report(topic, period_end, docx_path, md_path, html_path, patent_ids)
+        report_id = _persist_report(
+            topic,
+            period_end,
+            docx_path,
+            md_path,
+            html_path,
+            patent_ids,
+            narrative_pending=synthesis_llm_failed,
+        )
         _finish_survey_row(survey_id, status="done", report_id=report_id)
         log.info(
             "patent_survey_done",
