@@ -285,6 +285,19 @@ class InvestigationOut(BaseModel):
     # answer was accepted/downgraded, not just the final outcome. `None` when the gate wasn't run
     # (e.g. outcome == "not_found", or the cloud-batch path's cheaper deterministic-only check).
     relevance_check: dict[str, Any] | None = None
+    # Round-4 W10 (docs/REVIEW_2026-09-06_evening.md): whether any content touched by this
+    # investigation (a page it fetched locally, or -- for the cloud-delegated batch path -- its own
+    # final answer text) was screened out or edited by the security guard on suspicion of a prompt
+    # injection. `False`/`None` fields mean nothing was ever flagged; a `True` `security_review`
+    # means the answer above is still safe to show (a flagged local page is simply dropped and
+    # never contributes; a flagged cloud answer has the offending sentence(s) already stripped) but
+    # an operator may want to review `security_flag_reason`/`security_flag_snippet` (the guard's
+    # own `ScreenResult.kind`/`excerpt`, truncated) before treating it as fully trusted. The API/UI
+    # review queue (separate work item) reads these three fields; nothing here is a new outcome or
+    # blocks persistence on its own.
+    security_review: bool = False
+    security_flag_reason: str | None = None
+    security_flag_snippet: str | None = None
 
 
 class RelevanceVerdict(BaseModel):

@@ -39,6 +39,35 @@ log = structlog.get_logger(__name__)
 
 CONFIDENCE_MIN = 0.6
 
+# Round-4 W12 (docs/REVIEW_2026-09-06_evening.md): config/watchlist.yaml's `conferences_seed` rows
+# now carry an optional `kind` (trade_show | research | seminar) and `date_confirmed` (bool). There
+# is no `conferences.kind`/`date_confirmed` DB column (out of scope this round: no schema
+# migration -- see docs/MODULES.md), so both are folded into the seeded row's free-text
+# `rationale` instead, the same additive convention `roll_horizon` already used for the
+# cadence-based estimate note below.
+_KIND_LABEL_HE = {
+    "trade_show": "תערוכה/כנס תעשייתי",
+    "research": "כנס מחקר/טכני",
+    "seminar": "סמינר/יום עיון",
+}
+
+
+def _seed_rationale(seed: dict[str, Any], *, month: int, cadence: str | None) -> str:
+    """Build the `rationale` text for one seed's estimated occurrence -- the historical-cadence
+    estimate note (unchanged from before this round) plus, when present, the seed's `kind` and an
+    explicit "date not yet officially published" caveat when `date_confirmed` is `False`."""
+    parts = [f"מועד משוער לפי מחזוריות היסטורית (חודש {month}, {cadence}); יאומת בסריקה החודשית (FR-12.3)."]
+    kind_label = _KIND_LABEL_HE.get(str(seed.get("kind") or ""))
+    if kind_label:
+        parts.append(f"סוג: {kind_label}.")
+    if seed.get("date_confirmed") is False:
+        parts.append("התאריך הרשמי טרם פורסם -- זהו חודש צפוי בלבד לפי דפוס היסטורי, לא תאריך מאושר.")
+    source_note = seed.get("source_note")
+    if source_note:
+        parts.append(str(source_note))
+    return " ".join(parts)
+
+
 DATE_FIELDS = ("start_date", "end_date", "registration_opens", "early_bird_deadline", "cfp_deadline")
 _VERIFY_FIELDS = (*DATE_FIELDS, "city", "venue", "cost_range", "registration_url", "entry_conditions")
 
@@ -419,9 +448,7 @@ def roll_horizon(months: int = 24) -> dict[str, Any]:
         for year in _years_in_horizon(cadence, month, today, horizon_end):
             start_date = dt.date(year, month, 15)
             end_date = start_date + dt.timedelta(days=3)
-            rationale = (
-                f"מועד משוער לפי מחזוריות היסטורית (חודש {month}, {cadence}); יאומת בסריקה החודשית (FR-12.3)."
-            )
+            rationale = _seed_rationale(seed, month=month, cadence=cadence)
             canonical_name = f"{name} {year}"
 
             existing_row = _find_occurrence_row(existing_rows, name, year, month)

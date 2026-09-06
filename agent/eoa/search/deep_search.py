@@ -182,20 +182,114 @@ _QUOTED_RE = re.compile(r'"([^"]{3,120})"')
 #: them keeps anchors specific (proper nouns, acronyms, product/program names) rather than noise
 #: that would make the anchor requirement toothless.
 _EN_STOPWORDS_ANCHOR = {
-    "the", "a", "an", "and", "or", "but", "for", "nor", "so", "yet", "of", "in", "on", "at", "to",
-    "by", "with", "after", "before", "from", "into", "onto", "over", "under", "about", "against",
-    "between", "during", "is", "are", "was", "were", "be", "been", "being", "this", "that",
-    "these", "those", "it", "its", "as", "who", "what", "when", "where", "why", "how", "which",
-    "speeds", "successor", "timeline", "losses", "news", "report", "reported", "reports", "says",
-    "said", "new", "amid", "following",
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "for",
+    "nor",
+    "so",
+    "yet",
+    "of",
+    "in",
+    "on",
+    "at",
+    "to",
+    "by",
+    "with",
+    "after",
+    "before",
+    "from",
+    "into",
+    "onto",
+    "over",
+    "under",
+    "about",
+    "against",
+    "between",
+    "during",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "this",
+    "that",
+    "these",
+    "those",
+    "it",
+    "its",
+    "as",
+    "who",
+    "what",
+    "when",
+    "where",
+    "why",
+    "how",
+    "which",
+    "speeds",
+    "successor",
+    "timeline",
+    "losses",
+    "news",
+    "report",
+    "reported",
+    "reports",
+    "says",
+    "said",
+    "new",
+    "amid",
+    "following",
 }
 #: Hebrew function words / question boilerplate excluded from the token-level anchor scan (they'd
 #: match almost every question and defeat the purpose of anchoring).
 _HE_STOPWORDS_ANCHOR = {
-    "את", "של", "על", "עם", "אחרי", "לפני", "זה", "זו", "אלה", "הוא", "היא", "הם", "הן", "גם",
-    "כי", "או", "אם", "מה", "מי", "איך", "כמה", "הדיווח", "הכתבה", "המאמר", "בהקשר", "בנוסף",
-    "להערכתנו", "המהלך", "משקף", "אמת", "והרחב", "מהם", "הצדדים", "הלקוח", "ומתחרים", "ומה",
-    "המשמעות", "למוצרי", "ולתעשייה", "הישראלית", "בפרט", "לגבי",
+    "את",
+    "של",
+    "על",
+    "עם",
+    "אחרי",
+    "לפני",
+    "זה",
+    "זו",
+    "אלה",
+    "הוא",
+    "היא",
+    "הם",
+    "הן",
+    "גם",
+    "כי",
+    "או",
+    "אם",
+    "מה",
+    "מי",
+    "איך",
+    "כמה",
+    "הדיווח",
+    "הכתבה",
+    "המאמר",
+    "בהקשר",
+    "בנוסף",
+    "להערכתנו",
+    "המהלך",
+    "משקף",
+    "אמת",
+    "והרחב",
+    "מהם",
+    "הצדדים",
+    "הלקוח",
+    "ומתחרים",
+    "ומה",
+    "המשמעות",
+    "למוצרי",
+    "ולתעשייה",
+    "הישראלית",
+    "בפרט",
+    "לגבי",
 }
 
 
@@ -257,7 +351,9 @@ def extract_anchors(
                     add(tok)
                 continue
             is_acronym = tok.isupper() and len(tok) >= 2  # US, IAI, ATR, EO, IR, MOSP...
-            is_proper_noun = tok[:1].isupper() and len(tok) >= 3 and tok.casefold() not in _EN_STOPWORDS_ANCHOR
+            is_proper_noun = (
+                tok[:1].isupper() and len(tok) >= 3 and tok.casefold() not in _EN_STOPWORDS_ANCHOR
+            )
             if is_acronym or is_proper_noun:
                 add(tok)
     return anchors
@@ -268,8 +364,17 @@ def extract_anchors(
 #: at least one relevant read -- otherwise the model could dodge anchoring entirely by steering
 #: every query through the Israeli sub-question from round 1.
 _ISRAEL_QUERY_MARKERS = (
-    "ישראל", "israel", "israeli", "אלביט", "elbit", "רפאל", "rafael", "תעשייה האווירית",
-    "iai", "aerospace industries", "התעשייה הישראלית",
+    "ישראל",
+    "israel",
+    "israeli",
+    "אלביט",
+    "elbit",
+    "רפאל",
+    "rafael",
+    "תעשייה האווירית",
+    "iai",
+    "aerospace industries",
+    "התעשייה הישראלית",
 )
 
 
@@ -308,8 +413,8 @@ def _judge_relevance(question: str, answer_he: str) -> RelevanceVerdict:
     the investigation question -- independent of the investigating model's own claimed confidence."""
     prompt = (
         f"שאלת החקירה: {question}\n\nהתשובה המוצעת (סיכום שנכתב על ידי סוכן חוקר):\n{answer_he}\n\n"
-        "האם התשובה עונה בפועל על שאלת החקירה? ענה verdict=\"yes\" אם היא עונה במלואה, "
-        "\"partial\" אם היא נוגעת רק בעקיפין/חלקית, \"no\" אם היא עוסקת בנושא אחר לגמרי ולא עונה על "
+        'האם התשובה עונה בפועל על שאלת החקירה? ענה verdict="yes" אם היא עונה במלואה, '
+        '"partial" אם היא נוגעת רק בעקיפין/חלקית, "no" אם היא עוסקת בנושא אחר לגמרי ולא עונה על '
         "השאלה כלל. הוסף ב-reason משפט אחד קצר המסביר את הקביעה."
     )
     try:
@@ -324,7 +429,9 @@ def _judge_relevance(question: str, answer_he: str) -> RelevanceVerdict:
         )
     except LLMOutputError as exc:
         log.warning("relevance_judge_failed", error=str(exc)[:160])
-        return RelevanceVerdict(verdict="partial", reason="שיפוט הרלוונטיות נכשל טכנית; לא ניתן היה לאמת אוטומטית.")
+        return RelevanceVerdict(
+            verdict="partial", reason="שיפוט הרלוונטיות נכשל טכנית; לא ניתן היה לאמת אוטומטית."
+        )
 
 
 def _relevance_gate(inv: Investigation, answer_he: str) -> dict[str, Any]:
@@ -387,6 +494,11 @@ class Investigation:
     #: the finish-time relevance gate grants exactly one extra round of search when its verdict is
     #: "no"; this flags that the one extra chance has already been used for this investigation.
     relevance_retry_used: bool = False
+    #: Round-4 W10 (docs/REVIEW_2026-09-06_evening.md): every page `_tool_read` quarantined during
+    #: this investigation (dropped, the loop continued as designed) -- kept so the *final* result
+    #: can still surface a `security_review` flag for operator awareness even though the
+    #: investigation itself recovered and produced a clean answer from other sources.
+    security_flagged_pages: list[dict[str, str]] = field(default_factory=list)
 
 
 class StopRequested(Exception):
@@ -547,6 +659,16 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
         page = fetch_remote(url)
         text = page.get("text") or ""
         title = page.get("title") or ""
+        # Round-4 W10/W11 (docs/REVIEW_2026-09-06_evening.md): this call used to hardcode
+        # `use_l2=False`, so any page whose heuristic/L1 score only rose to "suspicious" (not the
+        # strong-signal quarantine threshold) skipped L2 arbitration entirely and fell straight to
+        # the guard's own "cannot adjudicate -> flag" default (agent/eoa/security/guard.py) -- i.e.
+        # every borderline page was dropped with no chance to be confirmed clean, even predominantly
+        # Hebrew defense-news prose the guard's own comments document as a known L1 false-positive
+        # pattern. `use_l2=True` lets the L2 judge actually run (only reached for the minority of
+        # already-suspicious pages -- see `screen()`'s early "not suspicious -> clean" return), which
+        # both fixes W10 (the guard scores this page's own fetched content either way -- that part
+        # was never the bug) and W11 (job 91's investigation lost 6+ legitimate reads this way).
         verdict = screen(
             text,
             title,
@@ -554,9 +676,12 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
             sanitizer_flags=list(page.get("suspicious") or []),
             hidden_text_ratio=float(page.get("hidden_text_ratio") or 0.0),
             encoded_blobs=int(page.get("encoded_blobs") or 0),
-            use_l2=False,
+            use_l2=True,
         )
         if verdict.verdict != "clean":
+            inv.security_flagged_pages.append(
+                {"url": url, "reason": verdict.kind, "excerpt": (verdict.excerpt or "")[:300]}
+            )
             _log(
                 inv,
                 round_no,
@@ -804,6 +929,15 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
     inv.max_pages = budget.max_pages
     inv.stopped_reason = inv.outcome
 
+    # Round-4 W10: surface the flag even though the investigation itself continued normally past
+    # any quarantined page(s) -- never blocks/changes the answer, just tells the operator a source
+    # along the way was screened out so they can review it if they want.
+    if inv.security_flagged_pages:
+        inv.result.security_review = True
+        first = inv.security_flagged_pages[0]
+        inv.result.security_flag_reason = first.get("reason")
+        inv.result.security_flag_snippet = first.get("excerpt")
+
 
 # ----------------------------------------------------------------------------- main loop
 def investigate(
@@ -868,7 +1002,9 @@ def investigate(
             for q in queries:
                 if budget.queries >= budget.max_queries:
                     break
-                seeded.append(_tool_search(inv, budget, q["query"], q["lang"], round_no, q.get("anchor_used")))
+                seeded.append(
+                    _tool_search(inv, budget, q["query"], q["lang"], round_no, q.get("anchor_used"))
+                )
             anchors_line = ", ".join(inv.anchors[:8]) or "(לא זוהו עוגנים בשאלה)"
             transcript.append(
                 {
@@ -1044,7 +1180,9 @@ def _act(
                             # now, but capped: never `found`/`partial` when the judge still says no.
                             args = dict(args)
                             args["outcome"] = "not_found"
-                            args["confidence"] = min(float(args.get("confidence") or 0), NOT_FOUND_MAX_CONFIDENCE)
+                            args["confidence"] = min(
+                                float(args.get("confidence") or 0), NOT_FOUND_MAX_CONFIDENCE
+                            )
                         else:
                             inv.relevance_retry_used = True
                             out = json.dumps(
@@ -1139,6 +1277,12 @@ class CloudInvestigationAnswer(BaseModel):
     confidence: float = Field(ge=0, le=1, default=0.0)
     sources: list[CloudSourceOut] = Field(default_factory=list)
     what_was_tried_he: str = ""
+    # Round-4 W10: set only by `_screen_cloud_answer` (never by the cloud CLI's own JSON -- the
+    # delegated model has no reason to fill these in, they default to "nothing flagged" for that
+    # parse) -- see `InvestigationOut`'s matching fields for what they mean.
+    security_review: bool = False
+    security_flag_reason: str | None = None
+    security_flag_snippet: str | None = None
 
 
 class CloudBatchInvestigationOut(BaseModel):
@@ -1277,34 +1421,114 @@ def _run_agy_with_tools(file_path: Path, model: str | None) -> str:
     return str(data.get("response", ""))
 
 
-def _screen_cloud_answer(qid: str, answer: CloudInvestigationAnswer) -> CloudInvestigationAnswer:
-    """docs/CONVENTIONS.md rule #3: content a cloud CLI fetched from the open web on our behalf
-    is still untrusted -- run it through the same guard `screen()` every fetched page goes
-    through before it can reach the DB/UI. A flagged answer is replaced with a safe not_found-
-    shaped stand-in rather than persisted; only http(s) sources are ever kept (U8-6's "sources
-    are kept only if they are http(s) URLs")."""
+#: Best-effort Hebrew/English sentence splitter -- keeps the terminator with the sentence it ends.
+#: Good enough to isolate which sentence(s) of a cloud-delegated answer tripped the guard; not
+#: meant to be linguistically perfect (abbreviations, decimals, etc. may over/under-split, which
+#: only affects how finely the redaction below is scoped, never whether flagged content survives).
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?׃])\s+")
+
+_SECURITY_CAVEAT_HE = (
+    "\n\n[הערת אבטחה: משפט אחד או יותר בתשובה המקורית הוסר על ידי שער האבטחה בשל חשד להזרקת הוראות "
+    "בתוכן שנשלף מהרשת; שאר התשובה כאן ללא שינוי. מומלץ לבדוק את הפרטים המלאים לפני הסתמכות מלאה.]"
+)
+_SECURITY_FULL_BLOCK_HE = (
+    "התשובה המקורית הוסתרה במלואה בבדיקת אבטחה (חשד להזרקת הוראות בתוכן שנשלף); דרושה בדיקת מפעיל."
+)
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = [p.strip() for p in _SENTENCE_SPLIT_RE.split(text or "") if p.strip()]
+    return parts
+
+
+def _screen_text_partial(text: str, *, item_id: str) -> tuple[str, Any]:
+    """Screen one field (``answer_he`` or ``what_was_tried_he``) of a cloud-delegated answer.
+
+    Round-4 W10 (docs/REVIEW_2026-09-06_evening.md): job 113's investigation had its entire
+    answer replaced by a generic block message because the guard scored the *delegated model's own
+    synthesized answer* with L2 arbitration hardcoded off (``use_l2=False``) -- any borderline
+    heuristic/L1 hit (the guard's own docs note real false positives on ordinary Hebrew
+    defense-industry prose) then fell straight to "cannot adjudicate -> flag", discarding an
+    otherwise-good answer wholesale with no way to tell a real injection from a false alarm.
+
+    Fix, in two steps: (1) screen the whole field once with ``use_l2=True`` -- if the L2 judge
+    clears it, nothing is touched (this alone rescues the Hebrew-prose false-positive case, the
+    exact mitigation :func:`eoa.security.guard.screen`'s ``hebrew_only_l1_signal`` path already
+    implements but could never reach here with L2 disabled). (2) Only if it is genuinely still not
+    clean, fall back to sentence-level heuristics-only screening (no extra LLM calls) to localize
+    exactly which sentence(s) reproduce the flag, and drop only those -- the rest of the answer is
+    kept verbatim, never invented or rewritten. Returns ``(possibly-edited text, ScreenResult or
+    None)``; ``None`` means nothing was flagged.
+    """
     from eoa.security.guard import screen
 
-    text = f"{answer.answer_he}\n{answer.what_was_tried_he}"
+    if not (text or "").strip():
+        return text, None
     try:
-        result = screen(text, title="", item_id=f"cloud_investigation:{qid}", use_l2=False)
+        verdict = screen(text, title="", item_id=item_id, use_l2=True)
     except Exception as exc:  # guard failing must never crash the investigation
-        log.warning("cloud_investigation_screen_failed", question_id=qid, error=str(exc)[:160])
-        result = None
+        log.warning("cloud_investigation_screen_failed", item_id=item_id, error=str(exc)[:160])
+        return text, None
+    if verdict.is_clean:
+        return text, None
+
+    sentences = _split_sentences(text)
+    kept: list[str] = []
+    any_sentence_flagged = False
+    for sentence in sentences:
+        try:
+            sent_verdict = screen(sentence, title="", item_id=item_id, use_l2=False)
+        except Exception:
+            sent_verdict = None
+        if sent_verdict is not None and not sent_verdict.is_clean:
+            any_sentence_flagged = True
+            continue
+        kept.append(sentence)
+
+    if not any_sentence_flagged:
+        # The combined text tripped the guard but no individual sentence reproduces it (a signal
+        # that only emerges from the whole) -- can't localize it, so nothing is kept from this field.
+        return "", verdict
+    return " ".join(kept).strip(), verdict
+
+
+def _screen_cloud_answer(qid: str, answer: CloudInvestigationAnswer) -> CloudInvestigationAnswer:
+    """docs/CONVENTIONS.md rule #3: content a cloud CLI fetched from the open web on our behalf
+    is still untrusted. Unlike the previous "screen the whole answer, block it wholesale if
+    anything trips" behavior (see :func:`_screen_text_partial`'s docstring for the job-113
+    regression this replaces): screens ``answer_he``/``what_was_tried_he`` independently, keeps
+    whatever text survives, and -- only when something was actually stripped -- appends a Hebrew
+    caveat and sets ``security_review``/``security_flag_reason``/``security_flag_snippet`` so an
+    operator can review it later; the answer itself is never discarded outright unless nothing
+    survives the redaction. Only http(s) sources are ever kept (U8-6's "sources are kept only if
+    they are http(s) URLs")."""
+    item_id = f"cloud_investigation:{qid}"
+    cleaned_answer, verdict_a = _screen_text_partial(answer.answer_he, item_id=item_id)
+    cleaned_tried, verdict_b = _screen_text_partial(answer.what_was_tried_he, item_id=item_id)
     safe_sources = [s for s in answer.sources if s.url.startswith(("http://", "https://"))]
-    if result is not None and not result.is_clean:
-        log.warning("cloud_investigation_flagged", question_id=qid, verdict=result.verdict, kind=result.kind)
+    verdict = verdict_a or verdict_b
+    if verdict is None:
         return CloudInvestigationAnswer(
-            answer_he="התשובה נחסמה בבדיקת אבטחה (חשד להזרקת הוראות בתוכן שנשלף).",
-            confidence=0.0,
-            sources=[],
-            what_was_tried_he=answer.what_was_tried_he[:300],
+            answer_he=cleaned_answer,
+            confidence=answer.confidence,
+            sources=safe_sources,
+            what_was_tried_he=cleaned_tried,
         )
+
+    log.warning("cloud_investigation_flagged", question_id=qid, verdict=verdict.verdict, kind=verdict.kind)
+    if cleaned_answer.strip():
+        answer_he = cleaned_answer + _SECURITY_CAVEAT_HE
+    else:
+        answer_he = _SECURITY_FULL_BLOCK_HE
+        safe_sources = []
     return CloudInvestigationAnswer(
-        answer_he=answer.answer_he,
-        confidence=answer.confidence,
+        answer_he=answer_he,
+        confidence=min(answer.confidence, 0.4),
         sources=safe_sources,
-        what_was_tried_he=answer.what_was_tried_he,
+        what_was_tried_he=cleaned_tried,
+        security_review=True,
+        security_flag_reason=verdict.kind,
+        security_flag_snippet=(getattr(verdict, "excerpt", "") or "")[:300],
     )
 
 
@@ -1406,6 +1630,9 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
                 confidence=confidence,
                 sources=source_urls,
                 what_was_tried_he=screened.what_was_tried_he or "חקירת אצווה בענן עם כלי חיפוש/הבאה מובנים.",
+                security_review=screened.security_review,
+                security_flag_reason=screened.security_flag_reason,
+                security_flag_snippet=screened.security_flag_snippet,
             )
             inv.outcome = outcome
         _log(

@@ -8663,6 +8663,100 @@ market-item reduction. The competitor IP position rendering (`eoa.patents.report
 `is_israeli_industry` watchlist wiring (`eoa.pipeline.israel_focus`) were exercised only through
 their existing `try/except`-guarded call sites, never against a live DB.
 
+## Round 4 P1 -- `/api/ask` freezing the whole API under gate contention (incident 2026-09-06 16:15-16:24)
+
+**Root cause (confirmed):** every API request hung for 60-90s+ (`GET /api/status` itself timed out
+at 60s) because `POST /api/ask`'s async SSE generator (`eoa.api.routes.ask.ask`'s `gen()`) drove
+`ollama_client.chat_stream` -- a synchronous generator whose first `next()` blocks inside
+`ResourceGate.acquire()` (which can itself `time.sleep()` across the gate's queue backoff, and did:
+the live log showed `gate_decision decision=queued ... reason='free 8758MB < 9700MB; retry in 60s'`
+repeated for 7 minutes) and whose every later `next()` blocks on a synchronous HTTP read -- directly
+inside the event loop. A single-worker uvicorn process has exactly one thread running that loop, so
+this froze the *entire* process for every other request, not just the slow chat's own client.
+
+**Fix 1 -- never block the event loop (`agent/eoa/api/routes/ask.py`):** `gen()`'s streaming loop
+(`for chunk in stream_gen: ...`) is now `while True: chunk = await run_in_threadpool(next, stream_gen,
+_STREAM_DONE); ...` -- every blocking `next()` call (the gate wait, the HTTP read, and for a cloud
+CLI provider the single blocking `chat()` call `chat_stream` makes internally) now runs in FastAPI's
+threadpool instead of the event-loop thread, so the loop stays free to serve other requests
+(`GET /api/status`, `GET /api/reports`, ...) for the whole time this one is blocked. `_STREAM_DONE`
+is a sentinel object distinguishing "the generator is exhausted" from any real chunk value via
+`next(it, default)`. Audited every other `async def` route (`grep -rn "^async def" agent/eoa/api/routes/`):
+`status.py`'s `get_status`/`ws_status` and `investigations.py`'s `ws_investigation` already wrap
+every blocking DB/telemetry call in `run_in_threadpool` -- `ask.py`'s `gen()` was the only offender.
+Plain `def` routes (`list_reports`, `get_report`, the `/investigations` CRUD endpoints, ...) are
+already dispatched through FastAPI's threadpool automatically and needed no change.
+
+**Fix 2 -- interactive gate budget (`agent/eoa/config.py`'s `ResourcesCfg.interactive_wait_s`,
+default 20, also in `config/config.yaml`; `agent/eoa/resources/gate.py`'s `_acquire_locked`):** an
+`interactive=True` caller's queue deadline is now `time.monotonic() + rc.interactive_wait_s` instead
+of `+ rc.queue_timeout_min * 60` (20 minutes) -- a chat request must not wait behind a nightly run or
+report generation holding the GPU. `interactive=False` (nightly/pipeline) callers are unaffected and
+keep the patient `queue_timeout_min` deadline; this is a one-line branch on the existing `interactive`
+parameter every gate caller already threads through (`ollama_client.chat`/`chat_stream`/`embed` all
+already accepted and forwarded it). `eoa.api.routes.ask.ask`'s `gen()` now catches the resulting
+`ResourceUnavailable` around the streaming loop and, instead of letting it fall through to the
+generic `{"type": "error", ...}` handler, emits `_GATE_BUSY_MESSAGE` ("המודל המקומי תפוס כרגע (ריצת
+לילה/דוח); נסה שוב בעוד דקה") as both a `token` event (so today's UI -- which has no bespoke handling
+for a new event type -- still renders it as the answer text) and a dedicated `gate_busy` event (for a
+future client to key off), followed by an empty `sources` event and `done`; the citation-repair pass
+never fires on this early-return path.
+
+**Item 3 (reports "spinner", user finding W13) -- investigated, no backend fix needed:** profiled
+`services.list_reports`/`get_report`/`report_citations` directly against the live DB (read-only,
+`DATABASE_URL` on 5432): `list_reports(limit=30)` -- 80ms, 16.5KB; `get_report` on 5 real rows --
+1-10ms each, 9-42KB (proportional to `items_included` count); `report_citations` -- <1ms. `_report_card`
+already builds an explicit field whitelist (id/kind/period_start/period_end/path_docx/path_md/
+path_html/qa_passed/created_at/headline_count/territory) rather than spreading the DB row, so the list
+endpoint never carried the HTML/markdown body to begin with -- only `get_report` (detail) reads
+`path_html` off disk. Both `list_reports`/`get_report` routes (`agent/eoa/api/routes/reports.py`) are
+plain `def`, already threadpooled. Conclusion: W13's spinner was very likely the *same* root cause as
+the P1 (a concurrent chat freezing the single-worker event loop, `GET /api/reports` included) rather
+than a distinct reports-endpoint perf bug -- fix 1 above should resolve it as a side effect. Locked in
+as a regression test (`TestReportsListStaysLight`) rather than left as an assumption.
+
+**Live end-to-end verification** (throwaway instance, `--port 8767`, never the live 8765 service):
+`GET /api/status` baseline ~2.1s (GPU/host telemetry, not related to this fix) and `GET /api/reports`
+~11ms. Fired a real `POST /api/ask` (resident = DictaLM-3.0-Nemotron-12B, already loaded --
+`gate_decision decision=proceed ... reason='free 11463MB >= 9700MB'`) that streamed for ~14.4s
+(`llm_chat_stream ... ms=14370 tokens=369`); four `GET /api/status` calls issued *during* that window
+each returned in 1.9-2.6s -- i.e. at the same baseline latency, not delayed by the in-flight chat.
+Before this fix that same window would have serialised behind the chat (or, per the incident, behind
+however long the gate queued).
+
+**Tests** (`tests/unit/test_api_round4_gate_and_reports.py`, new, 8 tests) + existing suites
+unaffected: `TestAskDoesNotBlockConcurrentStatus` (`TestClient` + a `chat_stream` stub that
+`time.sleep(1.5)`s in its sync body, run concurrently via `ThreadPoolExecutor` against a `GET
+/api/status` call -- asserts the status call returns in well under the sleep duration);
+`TestInteractiveGateBusyEvent` (a `chat_stream` stub whose first `next()` raises
+`ResourceUnavailable`, asserting the SSE stream carries `_GATE_BUSY_MESSAGE` as both a `token` and a
+`gate_busy` event, an empty `sources` event, `done` last, and that the citation-repair pass never
+fires); `TestInteractiveGateBudget` (gate-unit-level, fake clock: an `interactive=True` starved
+`acquire()` times out at `interactive_wait_s` while `interactive=False` under the identical
+starvation waits the full `queue_timeout_min` -- the direct contrast the fix is about);
+`TestReportsListStaysLight` (`_report_card`'s whitelist excludes a simulated bloated `html` column;
+the `/api/reports` route passes `services.list_reports`'s cards through unchanged; the detail route
+does carry the body). Full battery run (`tests/unit/test_gate.py`,
+`test_ask_sse_sources.py`, `test_ask_round2_chat_fixes.py`, `test_ask_round3_grounding.py`,
+`test_ask_retrieval.py`, `test_ask_investigations_max_length.py`, plus the new file): 119 passed / 1
+failed on the first pass (a test-only bug -- `TestInteractiveGateBudget`'s non-interactive contrast
+case needs `resource_gate.force_night_mode = True`, the same workaround `test_gate.py`'s own
+`TestAcquireLocking` already uses, to keep `is_batch_window()` from touching the duck-typed
+`_FakeSettings`'s missing `.timezone`; fixed, not a production-code issue). `ruff check`/`ruff format`
+clean on every line this round added (two pre-existing, unrelated formatting-drift spots the checker
+also flagged -- `ask.py`'s untouched `_run_citation_repair` signature, `config.py`'s untouched
+`ReportCfg.output_dir` block -- were left alone, not part of this round's diff).
+
+### Environment note (not a code finding)
+
+This round's own test runs were repeatedly, severely slowed (single-digit-percent CPU deltas over
+tens of seconds of wall clock) by heavy concurrent host load from unrelated processes -- other
+engineers' `pytest` runs against `agent/eoa/report/**`/`tenders/**`, a live 8765 instance, and (most
+of all) an unrelated multi-GB, 2000+-CPU-second ML training job on the same machine. Confirmed
+environmental rather than a hang in this round's code by running each affected file in isolation
+(fast: e.g. `test_ask_sse_sources.py` alone in 1.08s) and by one full combined run actually completing
+end-to-end (124.84s) with results consistent with the isolated runs.
+
 ## Round 4 reports (2026-09-06, `docs/REVIEW_2026-09-06_evening.md` W1/W5/W6/W7/W9)
 
 Fixes for five findings from the round-4 evening review, all confirmed live against the actual
@@ -8818,3 +8912,264 @@ round should rebuild `daily_2026-09-06` (or the next available day) and re-check
 platform+payload row, every forecast row's "מקורות" column resolves in the sources appendix, no
 `ניסוי` label on a row without trial/test vocabulary, at least one previously-"open" dead/stale
 tender link now shows "ארכיון"/is gone, and no duplicate-outlet row in the events/top-items tables.
+
+## Round 4 discovery (2026-09-06, `docs/REVIEW_2026-09-06_evening.md` W2/W10/W11/W12)
+
+Four findings from the round-4 evening review's discovery/deep-search/conference area. Touched:
+`agent/eoa/tenders/scan.py`, `agent/eoa/search/deep_search.py`, `agent/eoa/llm/schemas/analysis.py`,
+`agent/eoa/conferences/tracker.py`, `config/watchlist.yaml`. No changes to `agent/eoa/api/**`,
+`agent/eoa/report/**`, `agent/eoa/tenders/report_section.py`/`forecast.py`, or `web/**` (other
+engineers' round-4 scope).
+
+### W2 -- audit of the 2026-09-06 tender_scan run (job 102: `matched 15, inserted 0, llm_used 14,
+duplicates 1, llm_rejected 9, gate_rejected 5, archived 5`)
+
+`runtime/logs/orchestrator.2026-09-06.log` captured 9 of the 14 real per-notice `tender_rejected`
+lines for this run (the log file itself ends mid-run, presumably rotated/truncated -- the DB job
+row's own stored `result` JSON, read via a read-only `SELECT` against job 102, is what supplied the
+authoritative aggregate counts above). Audit table of the 9 logged rejections:
+
+| external_ref (truncated) | reason | verdict |
+|---|---|---|
+| `uk_contracts_finder:...` | `status_hint_awarded` | correct -- Contracts Finder's own OCDS tag says awarded |
+| `canada_buys_search:.../node/preview/997700` | `relevance_1_below_6` | correct, on the evidence available |
+| `canada_buys_search:.../w8476-206262_isr_mod_rfi...pdf` | `relevance_5_below_6` | correct -- 2020 PDF, borderline |
+| `rfi_rfp_news:.../sweetspotgov.com/federal-contracts/...` | `deadline_passed` | correct |
+| `rfi_rfp_news:govtribe.com/.../electro-opticinfrared-eoir-sight-system-eoss-n0016426snb35` | `relevance_0_below_6` | **wrong** -- see below |
+| `rfi_rfp_news:govtribe.com/.../commercial-satellite-capabilities-for-nighttime-eo-...` | `relevance_0_below_6` | **wrong** -- see below |
+| `rfi_rfp_news:.../globaltenders.com/.../request-for-information-electro-optical-i-118249941` | `deadline_passed` | correct |
+| `rfi_rfp_news:.../ted.europa.eu/.../557550-2025/pdf` | `relevance_0_below_6` | correct -- PDF text extraction failed (`discarding data` in the log), genuinely no content reached the LLM |
+| `rfi_rfp_news:.../thedefensenews.com/US-Air-Force-Plans-Major-Infrared-Sensor.../` | `relevance_0_below_6` | correct-ish -- 403 on fetch, generic news-site snippet, no procurement-notice content |
+
+Root cause of the two wrong verdicts (confirmed against the same log's HTTP trace):
+`govtribe.com` returns **HTTP 403** on every direct page fetch (`_fetch_notice_text` falls back to
+the search hit's title+snippet), and GovTribe's own search-indexed snippet for a locked opportunity
+is a content-free "sign up to see this opportunity" teaser -- so the LLM correctly followed its own
+"never invent a fact not in the text" instruction and scored `relevant=false` on a snippet that
+carries no real content, even though the notice's own title (`N0016426SNB35`, a real US Navy
+NSWC-Crane solicitation number) already names a genuine EO/IR sources-sought/RFI. A live grep of
+the log's HTTP trace confirms **3** such govtribe.com 403s in this one run alone (the third,
+`request-for-information-rfisources-sought-laser-range-finder-n0016423snb23`, is past line 850 of
+the log and outside the 9 lines the truncated log captured, but the same `relevance_0_below_6`
+pattern is visible in the DB's own `llm_rejected: 9` vs. the 6 logged `relevance_*` lines).
+
+Fix (`agent/eoa/tenders/scan.py`): a new deterministic rescue,
+`_rescue_thin_snippet_from_trusted_tracker`, runs after LLM classification and before F24's gate.
+It fires only when **every** one of these holds: the notice's page was never actually fetched
+(`page_verified=False`); the source kind is `search`/`rss` (an `api_json` structured record is
+never this thin); the notice's own title+summary -- never the LLM's possibly-empty extraction text
+-- already carries a real EO/IR/CV domain term AND a procurement-process signal (the exact same
+deterministic check `_passes_gate` already ran); and the notice's URL host is one of
+`TRUSTED_PROCUREMENT_TRACKER_DOMAINS` (`govtribe.com`, `sam.gov`/`beta.sam.gov`, `highergov.com`,
+`usarfp.com`, `grants.gov`, `dibbs.bsm.dla.mil`, `sbir.gov`/`www.sbir.gov` -- domains verified live
+2026-09-06 to 403/paywall a bare fetch, per `docs/TENDER_PORTALS.md`). When it fires: `relevant` is
+forced `True`, `relevance` raised to `RELEVANCE_MIN_ACCEPT` (never higher), `notice_type` is
+inferred from the same procurement-signal phrase already matched (`_infer_notice_type_from_text`,
+e.g. "sources sought" -> `sources_sought`, "RFI"/"request for information" -> `rfi`) *only* if the
+LLM's own `notice_type` wasn't already valid, `confidence` is capped at 0.4 (this was never
+independently confirmed), and `summary_he` gets a placeholder Hebrew note ("could not fetch the
+page; relevance inferred from title alone -- recommend manual review") when the LLM left it empty.
+It never touches `published_at`/`deadline`/`agency`/`country` -- those stay whatever the LLM
+actually found (usually nothing), so a rescued notice is stored with `status='unknown'`, not
+`'open'`. Critically, the rescue also flips the caller's local `page_verified` flag to `True` for
+this notice: F24's own `_gate_reject_reason` independently rejects an "unverified + undated" notice
+outright (the same `page_verified=False` signal), so without this the rescue would only relabel the
+rejection reason from `relevance_0_below_6` to `unverified_undated` -- still zero inserted. The
+rescue is itself treated as the verification step (a deliberate, logged --
+`tender_thin_snippet_rescued` -- auditable substitute for a page fetch this platform always blocks).
+
+Dry run (no DB writes) against the exact two live govtribe.com cases from job 102's run (built as
+fixtures from the real URLs/titles in `docs/TENDER_PORTALS.md`/the orchestrator log, since the raw
+search-hit payloads themselves were never persisted -- nothing is stored for a rejected notice):
+both now clear the gate and would insert with `relevance=6`, `notice_type='sources_sought'`,
+`status='unknown'`, `confidence<=0.4` -- see `tests/unit/test_discovery_round4.py`'s
+`TestScanTendersEndToEndRescue.test_govtribe_thin_snippet_notice_gets_inserted`, which runs the
+real `scan_tenders()` end to end against a fixture reproducing this exact notice. A control test
+(`test_untrusted_domain_thin_snippet_still_rejected`) confirms the identical failure shape on a
+domain *not* on the trusted list is still rejected exactly as before this fix -- the rescue is
+narrowly scoped, not a general relevance-floor relaxation.
+
+**"לא ידוע-עדכני" (unknown-recent) status display**: by construction, every `tenders.status='unknown'`
+row already cleared F24's full gate (relevant, valid notice_type, no expired deadline, not
+`published_at`-stale) and either has a verified live page with simply no stated date, or (after this
+fix) was rescued on the same trustworthy-title basis -- so an `'unknown'` row is never stale junk,
+it is a live, unresolved-date opportunity that should be shown to the operator, not hidden alongside
+closed/archived rows. This is a **UI/API display concern** (`agent/eoa/api/**`/`web/**`, both
+another engineer's round-4 files this round) -- no code there was touched; the DB's current state
+(0 `'unknown'` rows as of this round, all 5 pre-round-4 tenders having already transitioned to
+`'archived'` -- see the live `SELECT status, count(*) FROM tenders GROUP BY status` run for this
+audit) meant there was nothing live to demonstrate the label against today, so this note plus a
+flagged follow-up task is the handoff instead of a UI change.
+
+### W10/W11 -- deep-search security guard: partial redaction + L2 arbitration
+
+**(a) The guard was scoring the wrong thing on the cloud-delegated path.** Job 113 (deep_search,
+2026-09-06, "מפעל פולקסווגן→רפאל") stored `answer_he: "התשובה נחסמה בבדיקת אבטחה (חשד להזרקת הוראות
+בתוכן שנשלף)."` -- the delegated cloud CLI (claude/agy, given `WebSearch`/`WebFetch` and no other
+tools) does its own page fetching internally and only ever returns a final synthesized answer; the
+old `_screen_cloud_answer` screened that **answer text itself** (plus `use_l2=False`, disabling the
+guard's own L2-judge arbitration step) and, on any flag, discarded the *entire* answer as a generic
+block message -- there is no way to "screen the fetched page instead" on this path (we never
+receive the individual pages the cloud CLI read), so the fix targets the two things that actually
+are fixable here: (1) give the guard a real chance to clear a false positive before blocking
+anything at all, and (2) when something genuinely is flagged, never discard more than the flagged
+part.
+
+`_screen_text_partial` (new, `deep_search.py`) replaces the old single `screen()` call: screens the
+whole field (`answer_he`, `what_was_tried_he`) once with **`use_l2=True`** (previously hardcoded
+`False` at every deep-search call site) -- this alone lets `eoa.security.guard.screen`'s own
+documented Hebrew-false-positive mitigation (`hebrew_only_l1_signal`, a real, commented behavior in
+`guard.py` that was simply unreachable with L2 disabled) actually run; only if the whole-text
+verdict is still not clean does it fall back to sentence-level heuristics-only screening
+(`_split_sentences`, a best-effort Hebrew/English sentence splitter) to localize exactly which
+sentence(s) reproduce the flag, dropping only those. `_screen_cloud_answer` then: keeps whatever
+survives, appends a Hebrew caveat (`_SECURITY_CAVEAT_HE`) when anything was stripped, caps
+confidence at 0.4, and sets three new result fields -- `security_review: bool`,
+`security_flag_reason: str | None` (the guard's own `ScreenResult.kind`), `security_flag_snippet:
+str | None` (the flagged excerpt, truncated) -- added to `CloudInvestigationAnswer`
+(`deep_search.py`) and `InvestigationOut` (`agent/eoa/llm/schemas/analysis.py`, this round's one
+touched file outside the task's originally-listed set -- it is `InvestigationOut`'s own schema
+module and has no other round-4 owner). Only when *nothing* survives the redaction does the answer
+degrade to a safe stand-in (same shape as the old behavior, but now correctly labeled
+`security_review=True` with a reason/snippet an operator can act on, instead of an opaque wholesale
+block). These three fields are the contract for the separate security-review-queue UI work item
+(W10's own "אשר והמשך"/"דחה" queue) mentioned in the review -- not built this round (UI is another
+engineer's file scope), but its API surface now exists.
+
+**(b) The same `use_l2=False` bug also existed on the local ReAct path** (`_tool_read`) and is a
+direct contributor to W11. `_tool_read` already did the *architecturally correct* thing --
+screening the actually-fetched page content, dropping a quarantined page and continuing the
+investigation (this part was never the bug) -- but with L2 disabled, any page whose heuristic/L1
+score only reached "suspicious" (not the strong-signal auto-quarantine threshold) skipped
+arbitration entirely and fell straight to the guard's own "cannot adjudicate -> flag" default,
+discarding it with no chance to be confirmed clean. Live evidence: `investigation_log` for job 91
+("MQ-9 Reaper successor" question, 4 rounds, `pages_read: 10` of a 60-page budget, ended
+`not_found` despite exhausting the full 30-query budget) shows **6 of its `fetch` attempts** across
+rounds 2-3 logged `security flagged: other` -- more than half its fetch attempts in those rounds,
+plausibly ordinary defense-news prose (the same class of content `guard.py`'s own comments document
+L1 having real false positives on) lost with no arbitration chance. Changed `use_l2=False ->
+use_l2=True` at this one call site. `Investigation` gained `security_flagged_pages: list[dict]`
+(url/reason/excerpt), appended to whenever `_tool_read` quarantines a page; `_finalize_outcome`
+copies the first entry into the final `InvestigationOut.security_review`/`security_flag_reason`/
+`security_flag_snippet` -- so even an investigation that recovered cleanly (found its answer from
+other sources after one page was dropped) still surfaces the flag for operator awareness, without
+ever touching the answer itself.
+
+**Not fixed this round** (documented, not code): job 91's own query log also shows several
+near-identical queries repeated verbatim across rounds ("US Air Force Reaper successor program
+details" in both round 1 and round 4) -- wasted query budget, but a prompt/model-behavior issue
+(the investigating model's own query diversity), not a code defect in the budget/anchor machinery
+itself (which is already working as designed per the job-86 regression fixes). Categorization of
+the last 20 `deep_search` jobs (read-only `SELECT` against the live `jobs` table, 2026-09-06):
+4 `failed` (job-runner-level, not this module); the 2 most recent (`112`/`113`) are cloud-delegated
+batch investigations, which *always* report `rounds: 0`/`max_queries: 0`/`max_pages: 0` regardless
+of outcome quality -- that is simply how the cloud-batch path accounts for budget (it never uses the
+local `Budget` object at all), **not** itself a failure signature: job 112 scored `outcome: partial,
+confidence: 0.78, sources: 10` with `rounds: 0`, so "rounds: 0" alone must never be read as "the
+investigation did nothing." Job 86 correctly ended `off_topic` (the job-86 regression's own
+anchor/relevance-gate fix, working as intended, not a new bug). Job 91 is the one real, fixed-this-
+round code-level failure mode; roughly a dozen older jobs (pre-`queries_used`/`pages_used`
+instrumentation) have no budget breakdown stored at all and could only be categorized by outcome/
+confidence, not by stopped-reason -- a gap in what earlier rounds' `InvestigationOut` schema
+persisted, not something this round's fix can retroactively recover.
+
+### W12 -- conference calendar: new technology/research conferences and seminars
+
+`config/watchlist.yaml`'s `conferences_seed` gained a `kind` field (`trade_show` | `research` |
+`seminar`) on every existing row plus 8 new entries; every date below was verified live 2026-09-06
+via WebSearch + WebFetch against each event's own official site (not a secondary aggregator):
+
+| name | kind | date (verified) | city | date_confirmed |
+|---|---|---|---|---|
+| SPIE Security + Defence | research | 14-17 Sep 2026 | Edinburgh, UK | true |
+| SPIE Photonics West | research | 30 Jan-4 Feb 2027 | San Francisco | true |
+| MSS Active E-O Systems / EO & IRCM Conference | research | 6-10 Apr 2026 (past); 2027 TBA | Springfield, VA | false |
+| OPTRO | research | 3-5 Feb 2026 (past, 12th ed.); 2028 TBA | France (city varies) | false |
+| IEEE Aerospace Conference | research | 6-13 Mar 2027 (48th ed.) | Big Sky, Montana | true |
+| IRMMW-THz | research | 11-16 Oct 2026 (51st ed.) | Salt Lake City, UT | true |
+| NATO SET Panel symposia | research | no single date -- rotating symposia/business meetings, no `month` set | varies | false |
+| Defense.Tech Expo (Israel) | trade_show | 6-7 Apr 2027 (inaugural ed. 17-18 Feb 2026 already past) | Tel Aviv | true |
+
+Notes: **NATO SET** has no `month` (deliberately -- the SET Panel runs multiple specialist
+symposia/business meetings per year at rotating venues, not one fixed annual event; `roll_horizon`
+already skips a seed with no `month`/`name` via its existing `conference_seed_missing_fields`
+warning path, confirmed live -- see below), so this row exists in the YAML for analyst awareness/
+future manual tracking only, never as a scheduled DB row. **Israeli academic EO/photonics seminars**
+(Technion/Weizmann/BGU) were searched live 2026-09-06 -- no publicly-dated, named, recurring event
+was found for any of the three institutions, so per this task's own "only when a date is public"
+rule none was added (a fabricated placeholder would be worse than no row). **Defense.Tech Expo**
+fills the "Israel's IMOD/SIBAT events" ask as closely as live evidence supports: it's a private
+trade expo (Stier Group Ltd), not an IMOD/SIBAT-run conference -- no standalone recurring
+IMOD/SIBAT-organized public conference was found (SIBAT's public activity found live was ad-hoc
+delegation trips, e.g. a May-2026 Helsinki industry seminar, not a repeating named conference).
+
+**No DB schema migration** (out of scope this round): `conferences` has no `kind`/`date_confirmed`
+column. Both are instead folded into the row's existing free-text `rationale` at seed time
+(`eoa.conferences.tracker._seed_rationale`, new) -- e.g. `"...סוג: כנס מחקר/טכני. התאריך הרשמי טרם
+פורסם -- זהו חודש צפוי בלבד לפי דפוס היסטורי, לא תאריך מאושר. <source_note text>"`. This also
+retroactively surfaces every existing row's `source_note` field (e.g. ISDEF's 2027-date-TBC note,
+added round-3) into the live `rationale` for the first time -- previously `source_note` was
+YAML-only documentation that `roll_horizon` never read.
+
+Actually run against the live DB (`roll_horizon(months=24)`, additive/idempotent --
+`ON CONFLICT (name) DO NOTHING` -- the only DB write this round, per this task's constraints):
+**15 -> 28 rows** (13 created -- 2 occurrences apiece, within the 24-month horizon, for 6 of the 7
+new dated entries (SPIE Security + Defence, SPIE Photonics West, MSS, IEEE Aerospace Conference,
+IRMMW-THz, Defense.Tech Expo) + 1 for OPTRO (`biennial_even`, only its 2028 occurrence falls in the
+horizon -- its 2026 edition already passed); NATO SET Panel symposia produced 0 rows (no `month`,
+skipped exactly as designed, logged `conference_seed_missing_fields`). The pre-existing 15 rows
+were untouched (`skipped_existing`/`merged`/`duplicates_merged`/`transitioned_past` all 0 for
+them -- none of this round's 8 new *names* collided with an existing row). Verified with a
+read-only `SELECT` immediately after: 28 rows total, the 13 new ones' `rationale` correctly carries
+the `kind` label + `date_confirmed`/`source_note` text.
+
+### Tests
+
+`tests/unit/test_discovery_round4.py` (new, 37 tests, no DB/LLM/network):
+`TestIsTrustedTrackerDomain`/`TestInferNoticeTypeFromText` (unit-level helpers);
+`TestRescueThinSnippetFromTrustedTracker` (the rescue fires only when every one of its five
+conditions holds -- page unverified, `search`/`rss` kind, trusted domain, deterministic gate
+already relevant, LLM hadn't already accepted it -- and each condition's own no-op case is tested
+individually; never invents `published_at`/`deadline`/`agency`/`country`);
+`TestScanTendersEndToEndRescue` (`scan_tenders()` end to end: the govtribe fixture actually inserts,
+an identical-shape notice on an untrusted domain still doesn't); `TestScreenTextPartial`/
+`TestSplitSentences` (clean text untouched, empty text never even calls the guard, a guard exception
+degrades to "keep, unflagged" rather than crashing, a localizable flag strips only the bad sentence,
+an unlocalizable whole-text-only flag drops the whole field); `TestToolReadUsesL2Arbitration` (the
+guard is actually called with `use_l2=True`; a quarantined page is recorded on
+`inv.security_flagged_pages`); `TestFinalizeOutcomeSurfacesSecurityReview` (a flagged page sets the
+final result's `security_review` triple without touching the answer itself; no flagged pages leaves
+it `False`); `TestSeedRationale`/`TestConferencesSeedYamlShape` (kind label and
+date-not-confirmed caveat folded into rationale correctly, `source_note` appended, the real
+`config/watchlist.yaml` has every round-4 entry with a valid `kind`, no duplicate seed names).
+
+`tests/unit/test_deep_search_cloud_batch.py` updated: `TestScreenCloudAnswer`'s old
+"whole-answer-blocked" test is renamed `test_flagged_answer_fully_stripped_replaced_with_safe_stand_in`
+(its mock flags every call, so every sentence still reproduces the flag and the outcome is still
+fully-blocked -- now reached via the partial-redaction code path rather than a hardcoded block) and
+extended to assert the new `security_review`/`security_flag_reason`/`security_flag_snippet` fields;
+new `test_flagged_answer_partial_sentence_stripped_rest_kept` is the direct regression test for the
+job 113 bug this round fixes -- a two-sentence answer where only one sentence trips the guard now
+keeps the other sentence, appends the caveat, and sets `security_review=True`.
+
+`PYTHONPATH=agent python -m pytest tests/unit -q -k "tender or deep or conference or discovery"`
+(excluding `tests/unit/test_patent_survey_supplement_round3.py`/`test_patents_round3.py`/
+`test_patents_survey.py`, which fail to even *import* due to a pre-existing `IndentationError` in
+`agent/eoa/patents/survey.py` line 1392-1393 -- not a file in this round's scope, and not modified
+by this work; appears to be mid-edit by a concurrent engineer, see the task's own final report for
+the exact pass count) and `ruff check`/`ruff format --check` clean on every file this round touched.
+
+### Not verifiable without the live stack
+
+The rescued notices in the W2 audit table are dry-run/fixture-verified (built from the real
+URLs/titles logged live, since a rejected notice's raw payload is never persisted) -- the next
+live `tender_scan` run should confirm the same govtribe.com/highergov.com/sam.gov notices that would
+have scored `relevance_0` before this fix now actually insert with `status='unknown'`, and that
+`inserted` in that run's stats is no longer stubbornly `0` every day. The W10/W11 guard fix's
+`use_l2=True` change trades a small latency cost (one extra `chat_structured` call, only for the
+minority of pages/answers that are already heuristically suspicious) for fewer false-positive drops
+-- this was not measured against a live Ollama instance this round; the next round's deep-search
+runs should be watched for whether L2 latency ever meaningfully slows an investigation down, and
+whether the false-positive rate genuinely drops (fewer `security flagged: other` log lines per
+investigation) without letting a real injection through (no `use_l2=True` call site's quarantine
+threshold changed -- only the "cannot adjudicate" default's behavior when L2 *is* reachable).

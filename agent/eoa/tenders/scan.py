@@ -749,6 +749,154 @@ def _apply_domain_country_fallback(notice: NoticeRaw) -> None:
             notice.country = domain_country
 
 
+# Round-4 W2 (docs/REVIEW_2026-09-06_evening.md): audit of job 102's 2026-09-06 scan found that
+# every one of the 9 ``llm_rejected`` notices from ``rfi_rfp_news``/``canada_buys_search`` whose
+# URL was a known DoD contract-tracker aggregator (govtribe.com, sam.gov, highergov.com, ...)
+# scored ``relevance=0`` -- because those aggregators return HTTP 403 to a bare fetch (confirmed
+# live in runtime/logs/orchestrator.2026-09-06.log), so ``_fetch_notice_text`` falls back to just
+# the search hit's title+snippet, and that snippet is frequently a generic
+# "sign up to see this opportunity" teaser carrying none of the real notice content -- even when
+# the notice's own URL slug/title already names a genuine, on-topic solicitation (e.g.
+# ".../electro-opticinfrared-eoir-sight-system-eoss-n0016426snb35",
+# ".../request-for-information-rfisources-sought-laser-range-finder-n0016423snb23", both real Navy
+# NSWC Crane solicitation numbers). The LLM's own "never invent a fact not in the text" instruction
+# then correctly refuses to score those as relevant from a content-free teaser -- so the fix is not
+# "make the LLM guess harder", it is a deterministic rescue that only fires when the *title/URL
+# slug themselves* (never fabricated body content) already carry both required signals.
+TRUSTED_PROCUREMENT_TRACKER_DOMAINS = frozenset(
+    {
+        "govtribe.com",
+        "sam.gov",
+        "beta.sam.gov",
+        "highergov.com",
+        "usarfp.com",
+        "grants.gov",
+        "dibbs.bsm.dla.mil",
+        "sbir.gov",
+        "www.sbir.gov",
+    }
+)
+
+# Maps a procurement-signal phrase (as matched by ``_has_procurement_signal``, casefold substring)
+# to the ``TenderExtract.notice_type`` it implies -- needed because the rescue below must produce a
+# value in ``VALID_NOTICE_TYPES`` (F24's gate rejects ``notice_type == 'other'`` outright), and the
+# LLM's own low-content classification typically left it at the ``other`` default. Order matters:
+# checked most-specific-first so "sources sought" (which also contains no "rfi"/"rfp" substring
+# anyway) and "request for quotation" don't get shadowed by a coarser match.
+_NOTICE_TYPE_BY_SIGNAL: tuple[tuple[str, str], ...] = (
+    ("sources sought", "sources_sought"),
+    ("request for quotation", "rfq"),
+    ("rfq", "rfq"),
+    ("request for proposal", "rfp"),
+    ("rfp", "rfp"),
+    ("request for information", "rfi"),
+    ("בקשת מידע", "rfi"),
+    ("בקשה למידע", "rfi"),
+    ("rfi", "rfi"),
+    ("invitation to tender", "tender"),
+    ("contract notice", "tender"),
+    ("prior information notice", "tender"),
+    ("tender", "tender"),
+    ("מכרז", "tender"),
+)
+
+
+def _infer_notice_type_from_text(text: str) -> str | None:
+    """Best-effort ``notice_type`` from the DEFAULT_PROCUREMENT_SIGNALS phrase actually present in
+    ``text`` (title+summary) -- used only by the thin-snippet rescue below, never to override an
+    LLM-supplied value."""
+    low = text.casefold()
+    for phrase, notice_type in _NOTICE_TYPE_BY_SIGNAL:
+        if phrase in low:
+            return notice_type
+    return None
+
+
+def _is_trusted_tracker_domain(url: str | None) -> bool:
+    """True if ``url``'s host is (or is a subdomain of) a known DoD/government contract-notice
+    aggregator that is known to 403 a bare page fetch (see ``TRUSTED_PROCUREMENT_TRACKER_DOMAINS``
+    above) -- i.e. an unfetchable page here is a *platform* limitation, not evidence the notice
+    itself is thin or dubious."""
+    if not url:
+        return False
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in TRUSTED_PROCUREMENT_TRACKER_DOMAINS)
+
+
+#: Rescued notices are always stored with reduced confidence and exactly this relevance -- never
+#: higher, since the rescue never actually confirmed anything beyond the title/URL signal.
+_RESCUED_RELEVANCE = RELEVANCE_MIN_ACCEPT
+_RESCUED_CONFIDENCE_CAP = 0.4
+
+
+def _rescue_thin_snippet_from_trusted_tracker(
+    notice: NoticeRaw,
+    extract: TenderExtract,
+    *,
+    page_verified: bool,
+    src_kind: str,
+    domain_terms: list[str],
+    procurement_signals: list[str],
+) -> TenderExtract:
+    """Round-4 W2: when the LLM classified a notice as not relevant / below the relevance floor
+    *because* its page could not be fetched (``page_verified`` is False) and all it saw was a thin
+    search snippet, but the notice's own title+summary -- the reliable part, already gate-verified
+    by ``_passes_gate`` before the LLM ever ran -- already carries a real EO/IR/CV domain term AND a
+    procurement-process signal, AND the notice comes from a known government contract-tracker
+    domain that predictably blocks bare page fetches: treat it as relevant at the deterministic
+    minimum (``RELEVANCE_MIN_ACCEPT``) rather than discard it. Never touches
+    ``published_at``/``deadline``/``agency``/``country`` (those stay whatever the LLM -- possibly
+    nothing -- actually found; the rescue only concerns topical relevance, it invents no facts).
+
+    A no-op (returns ``extract`` unchanged) unless every one of these holds:
+      - the page was never actually verified (``not page_verified``) -- a notice whose real page WAS
+        read and still scored low relevance is left alone, that is a genuine LLM verdict;
+      - ``src_kind`` is ``search``/``rss`` (an ``api_json`` structured record is never this thin);
+      - the notice is already relevant per the deterministic two-signal gate (``domain_terms`` +
+        ``_has_procurement_signal``) -- the exact same check ``_passes_gate`` already ran, re-run
+        here against title+summary alone (never the LLM's own possibly-empty extraction text);
+      - the URL host is a recognised tracker domain (``_is_trusted_tracker_domain``);
+      - the LLM's own verdict was actually the failure mode this targets (not relevant / below
+        floor) -- a notice the LLM already accepted needs no rescue.
+    """
+    if page_verified or src_kind not in ("search", "rss"):
+        return extract
+    if extract.relevant and extract.relevance >= RELEVANCE_MIN_ACCEPT:
+        return extract
+    if not domain_terms or not _has_procurement_signal(notice, src_kind, procurement_signals):
+        return extract
+    if not _is_trusted_tracker_domain(notice.url):
+        return extract
+    inferred_type = extract.notice_type
+    if inferred_type not in VALID_NOTICE_TYPES:
+        guessed = _infer_notice_type_from_text(f"{notice.title} {notice.summary}")
+        if guessed is None:
+            return extract  # can't even name a valid notice_type -- F24 would reject it anyway
+        inferred_type = guessed
+    log.info(
+        "tender_thin_snippet_rescued",
+        external_ref=notice.external_ref,
+        domain=urlparse(notice.url or "").netloc,
+        original_relevance=extract.relevance,
+        matched_terms=domain_terms,
+    )
+    return extract.model_copy(
+        update={
+            "relevant": True,
+            "relevance": max(extract.relevance, _RESCUED_RELEVANCE),
+            "matched_terms": extract.matched_terms or domain_terms,
+            "notice_type": inferred_type,
+            "confidence": min(extract.confidence, _RESCUED_CONFIDENCE_CAP),
+            "summary_he": extract.summary_he
+            or "לא ניתן היה לשלוף את תוכן העמוד (חסימת גישה בפורטל); הרלוונטיות הוסקה מכותרת ההודעה בלבד -- מומלץ לבדוק ידנית.",
+        }
+    )
+
+
 def _as_datetime(d: dt.date | None) -> dt.datetime | None:
     return None if d is None else dt.datetime.combine(d, dt.time(), tzinfo=dt.UTC)
 
@@ -1130,6 +1278,24 @@ def scan_tenders(
             if extract is not None:
                 _apply_extraction_to_notice(notice, extract)
             _apply_domain_country_fallback(notice)
+
+            if extract is not None:
+                rescued = _rescue_thin_snippet_from_trusted_tracker(
+                    notice,
+                    extract,
+                    page_verified=page_verified,
+                    src_kind=src.kind,
+                    domain_terms=domain_terms,
+                    procurement_signals=procurement_signals,
+                )
+                if rescued is not extract:
+                    # The rescue is itself the verification step for this notice (a deliberate,
+                    # logged, auditable substitute for a page fetch the tracker domain always 403s)
+                    # -- without this, F24's own "unverified + undated -> reject" rule
+                    # (_gate_reject_reason) would immediately re-reject it for the exact same
+                    # unfetchable-page reason the rescue exists to work around.
+                    page_verified = True
+                extract = rescued
 
             reject_reason = _gate_reject_reason(
                 notice, extract, page_verified=page_verified, today=today, deny_domains=deny_domains
