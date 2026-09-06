@@ -159,6 +159,51 @@ def _split_md_cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+_ROW_CITE_RE = re.compile(r"\[(\d+)\]")
+
+
+def _row_identity(row: list[Any]) -> str:
+    """Identity of a table row across a report: the sorted set of its [n] citations when it has
+    any (the same item/event cited in two tables), else the whitespace-normalised cell text."""
+    cites = sorted({m for cell in row for m in _ROW_CITE_RE.findall(str(cell))})
+    if cites:
+        return "n:" + ",".join(cites)
+    return "t:" + " ".join(" ".join(str(c) for c in row).split()).casefold()
+
+
+def dedupe_rows_across_tables(tables: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """User finding W28 (2026-09-06 21:30): the report's tables repeated the same rows table
+    after table (an item in "זכיות וחוזים" again in "תחרות ומתחרים", an event in the events
+    table again in a territory table). A row is rendered once, in the first table that carries
+    it; a later table drops it and gains a note "N שורות כבר הופיעו בטבלאות קודמות". Tables with
+    fewer than two cells per row (single-column lists) are left alone."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for tbl in tables or []:
+        rows = list(tbl.get("rows") or [])
+        if not rows or any(len(r) < 2 for r in rows if isinstance(r, list)):
+            out.append(tbl)
+            for r in rows:
+                if isinstance(r, list):
+                    seen.add(_row_identity(r))
+            continue
+        kept: list[Any] = []
+        dropped = 0
+        for r in rows:
+            key = _row_identity(r)
+            if key in seen:
+                dropped += 1
+                continue
+            seen.add(key)
+            kept.append(r)
+        if dropped:
+            note = (tbl.get("note_he") or "").strip()
+            extra = f"{dropped} שורות כבר הופיעו בטבלאות קודמות בדוח ולא חזרו כאן."
+            tbl = {**tbl, "rows": kept, "note_he": f"{note} {extra}".strip()}
+        out.append(tbl)
+    return out
+
+
 def _md_blocks(text: str) -> list[tuple[str, Any]]:
     """Split a section body into render blocks: ``("table", (headers, rows))`` for a Markdown
     pipe table, ``("bullets", [items])`` for a run of ``- `` lines, ``("para", text)`` otherwise.
@@ -894,6 +939,7 @@ def build_docx(
     weekly/monthly builders pass ``True`` to get a real, immediately-clickable bookmark-based TOC
     (:func:`_add_real_toc`) instead.
     """
+    tables = dedupe_rows_across_tables(tables) or None
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []
@@ -1115,6 +1161,7 @@ def render_markdown(
 ) -> str:
     """Render the report as GitHub-flavoured Markdown (see :func:`build_docx` for the shared,
     additive ``title_text``/``extra_sections``/``tables`` hooks)."""
+    tables = dedupe_rows_across_tables(tables) or None
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []
@@ -1379,6 +1426,7 @@ def render_html(
     link, where it must stand on its own). ``include_toc`` (see :func:`build_docx`) adds a simple
     anchor-based table of contents; the daily report leaves it off.
     """
+    tables = dedupe_rows_across_tables(tables) or None
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []

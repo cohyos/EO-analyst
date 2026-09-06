@@ -254,3 +254,25 @@ def mock_database(monkeypatch):
 
     monkeypatch.setattr("eoa.db.connection", mock_connection)
     return mock_connection
+
+
+@pytest.fixture(autouse=True)
+def _search_isolation(monkeypatch):
+    """Round 4: the search provider keeps process-wide circuit breakers and a file cache; without
+    this every test file inherits whatever state an earlier file left (three order-dependent
+    failures in the full suite on 2026-09-06). Fresh circuits + no cache reads for every test;
+    the search tests that exercise the cache opt back in explicitly."""
+    monkeypatch.setenv("EOA_SEARCH_NO_CACHE", "1")
+    try:
+        from eoa.search import circuit
+
+        circuit.reset_all()
+    except Exception:
+        pass
+    yield
+    try:
+        from eoa.search import circuit
+
+        circuit.reset_all()
+    except Exception:
+        pass
