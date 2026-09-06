@@ -53,6 +53,13 @@ _EOIR_KEYWORDS_HE = (
     "ג'ימבל", "ראש ביות", 'מטע"ד', "מטעד", "חיישן", "מצלמת", "אופטיקה", "אופטרוני",
     "מטען תצפית", 'נגד כטב"ם', "לייזר", "ראייה ממוחשבת", "בינה חזותית", "מיקרו-בולומטר",
     "היפרספקטרלי",
+    # Round 4b (W21/W24, 2026-09-06): the taxonomy label moved from "פודי כיוון" to the
+    # professional "פודי ציון מטרות" (alias "פוד תקיפה"); the old phrase stays because it still
+    # occurs in real text. HEL/DEW terms join the list with the new `directed_energy` domain --
+    # specific multi-word phrases only ("לייזר" alone was already here); "אנרגיה" or "אלומה" on
+    # their own would be false-positive magnets.
+    "פודי ציון מטרות", "פוד ציון מטרות", "ציון מטרות", "פוד תקיפה",
+    "אנרגיה מכוונת", "מכוון אלומה", "לייזר רב-עוצמה", "לייזר רב עוצמה", "נשק לייזר",
 )  # fmt: skip
 
 
