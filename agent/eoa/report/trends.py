@@ -209,6 +209,22 @@ def _convergence_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         return cur.fetchall()
 
 
+def _subdomain_label(key: str | None) -> str:
+    """Hebrew taxonomy label for a subdomain key -- the raw slug ("atr", "isr_pods") leaked into
+    monthly/weekly trend headings (live monthly_2026-09-30, 2026-09-07); fall back to the key only
+    when the taxonomy has no entry for it."""
+    if not key:
+        return "כללי"
+    for entry in (settings().taxonomy.get("domains") or {}).values():
+        subs = (entry or {}).get("sub") or {}
+        if key in subs:
+            label = subs[key]
+            if isinstance(label, dict):
+                label = label.get("label_he") or label.get("label") or key
+            return str(label)
+    return key
+
+
 def _convergence_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -219,7 +235,9 @@ def _convergence_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out.append(
             {
                 "kind": "market_convergence",
-                "title_he": (f'התכנסות שוק בתת-התחום "{subdomain}" — {n} עסקאות מיזוג/רכישה ושותפות בתקופה'),
+                "title_he": (
+                    f'התכנסות שוק בתת-התחום "{_subdomain_label(subdomain)}" — {n} עסקאות מיזוג/רכישה ושותפות בתקופה'
+                ),
                 "evidence_item_ids": sorted(set(row.get("item_ids") or [])),
                 "entities": sorted(set(row.get("parties") or [])),
                 "strength": _clamp(n + 1, lo=3, hi=5),
@@ -264,7 +282,7 @@ def _tech_race_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "kind": "tech_race",
                 "title_he": (
-                    f'מירוץ טכנולוגי בתת-התחום "{subdomain}" — {len(companies)} חברות עם השקות/ניסויים בתקופה'
+                    f'מירוץ טכנולוגי בתת-התחום "{_subdomain_label(subdomain)}" — {len(companies)} חברות עם השקות/ניסויים בתקופה'
                 ),
                 "evidence_item_ids": sorted(set(row.get("item_ids") or [])),
                 "entities": companies,
