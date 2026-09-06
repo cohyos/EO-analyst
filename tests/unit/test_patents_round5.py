@@ -345,7 +345,7 @@ class TestClusterPatentsUnclassifiedSubclustering:
         unclassified = [c for c in clusters if c.key.startswith(UNCLASSIFIED_KEY)]
         assert len(unclassified) >= 2
         assert all(c.label_he != UNCLASSIFIED_LABEL_HE for c in unclassified)
-        assert all(c.label_he.startswith(f"{UNCLASSIFIED_LABEL_HE}:") for c in unclassified)
+        assert all(c.label_he.startswith("אשכול נושאי:") for c in unclassified)  # round 6: term-derived label, never "לא מסווג"
         total = sum(c.total for c in unclassified)
         assert total == 4
 

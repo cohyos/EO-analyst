@@ -627,6 +627,7 @@ def methodology_box_lines_he(
     cpc_with: int,
     cpc_total: int,
     caveat_he: str | None,
+    term_derived_cluster_count: int = 0,
 ) -> list[str]:
     """The ordered lines of the "שיטה והיקף" box (see the module note above) -- a plain
     ``list[str]``, rendering-agnostic, so the same content reaches docx/md/html identically via
@@ -635,7 +636,13 @@ def methodology_box_lines_he(
     ``caveat_he`` (:func:`_coverage_caveat_he`, only non-``None`` under
     :data:`_ASSIGNEE_COVERAGE_THRESHOLD`) is appended as the box's own last line -- this is now the
     *only* place that sentence appears in the survey's opening (round 5: no longer duplicated into
-    `exec_summary`, see :func:`_enforce_coverage_caveat`'s own updated docstring)."""
+    `exec_summary`, see :func:`_enforce_coverage_caveat`'s own updated docstring). Round 6 D8
+    finding 2 (2026-09-06/07): ``term_derived_cluster_count`` (the number of this survey's
+    technology clusters that came from :func:`eoa.patents.cluster.tfidf_subcluster_unclassified`'s
+    term-similarity heuristic rather than an actual CPC/taxonomy match) is appended as one more
+    honest disclosure line whenever it is non-zero -- these clusters are never given the taxonomy
+    label eoa.patents.cluster.cluster_patents' matched clusters carry, but a reader should still be
+    told the labelling method differs."""
     assignee_pct = round((assignee_with / assignee_total) * 100) if assignee_total else 100
     cpc_pct = round((cpc_with / cpc_total) * 100) if cpc_total else 100
     date_range_text = (
@@ -653,6 +660,12 @@ def methodology_box_lines_he(
     ]
     if caveat_he:
         lines.append(caveat_he)
+    if term_derived_cluster_count:
+        lines.append(
+            f"{term_derived_cluster_count} מאשכולות הטכנולוגיה במדגם זה מבוססי-מונחים (דמיון TF-IDF "
+            "בין כותרת/תקציר) ולא על מיפוי קוד CPC/טקסונומיה -- ראו "
+            "eoa.patents.cluster.tfidf_subcluster_unclassified."
+        )
     return lines
 
 
@@ -1577,6 +1590,17 @@ def build_patent_survey(
                 n_stored = len(stored)
                 patent_ids = [*patent_ids, *stored]
 
+        # Round 6 D8 finding 1 (2026-09-06/07): the keyless Google-Patents-search fallback only
+        # carries title+snippet, so most gathered records land with no assignee at all -- for a
+        # capped number of the survey's own patents (fresh-this-run and supplemented-from-store
+        # alike) still missing one, fetch that patent's own Google Patents detail page and backfill
+        # assignee/CPC/priority-date onto the stored row (see eoa.patents.scan's own docstring for
+        # this section). Never blocks the survey on a network hiccup.
+        try:
+            scan_mod.enrich_stored_patents_missing_assignee(patent_ids)
+        except Exception as exc:
+            log.warning("patent_survey_enrich_assignees_failed", topic=topic, error=str(exc)[:200])
+
         # Analyze/value only the freshest slice so a large gather doesn't blow the LLM budget --
         # every record still gets its deterministic clustering/timeline/white-space treatment
         # below regardless of whether it was analyzed.
@@ -1632,6 +1656,18 @@ def build_patent_survey(
             else []
         )
 
+        # A14b (2026-09-06): deterministic clustering (point 2), business relationships (point 3),
+        # and timeline/expiry math (point 6) -- all pure, DB-independent computation over the
+        # registry/rows already gathered above; see eoa.patents.cluster's own module docstring.
+        # Computed before the methodology box below (round 6 D8 finding 2) so that box can report
+        # how many of these clusters are term-derived (TF-IDF sub-clusters of the unclassified
+        # bucket) rather than mapped to a real CPC/taxonomy entry.
+        patent_registry_entries = [it for it in registry if it.get("kind") != "db_item"]
+        clusters = cluster_mod.cluster_patents(patent_registry_entries, topics=scan_mod.load_watch_topics())
+        term_derived_cluster_count = sum(
+            1 for c in clusters if c.key.startswith(cluster_mod.UNCLASSIFIED_KEY)
+        )
+
         # Round 5 P5/item 1: the "שיטה והיקף" box (see methodology_box_lines_he's own docstring)
         # -- spliced before the executive summary in every output format near the very end of this
         # function, after doc/md/html are already rendered (see below).
@@ -1650,13 +1686,9 @@ def build_patent_survey(
                 if assignee_coverage < _ASSIGNEE_COVERAGE_THRESHOLD
                 else None
             ),
+            term_derived_cluster_count=term_derived_cluster_count,
         )
 
-        # A14b (2026-09-06): deterministic clustering (point 2), business relationships (point 3),
-        # and timeline/expiry math (point 6) -- all pure, DB-independent computation over the
-        # registry/rows already gathered above; see eoa.patents.cluster's own module docstring.
-        patent_registry_entries = [it for it in registry if it.get("kind") != "db_item"]
-        clusters = cluster_mod.cluster_patents(patent_registry_entries, topics=scan_mod.load_watch_topics())
         cross_links = cluster_mod.cross_cluster_links(clusters)
         co_assign = cluster_mod.co_assignment_pairs(rows)
         family_groups = cluster_mod.same_family_groups(patent_registry_entries)

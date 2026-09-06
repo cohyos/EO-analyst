@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from eoa.config import CONFIG_DIR
 from eoa.db import connection
+from eoa.fetch.remote import fetch_raw_remote
 from eoa.patents.models import PatentRecord
 from eoa.pipeline.entity_normalize import find_watchlist_aliases_in_text, resolve_canonical
 from eoa.search.provider import search
@@ -256,12 +258,16 @@ def _any_patents_exist() -> bool:
 
 def _backfill_patent_fields(pub_number: str, rec: PatentRecord) -> None:
     """Goal (2026-09-06, user feedback re: mostly-empty assignee/CPC columns): a non-destructive
-    backfill for an *existing* ``patents`` row whose ``assignees``/``cpc`` are still empty --
-    ``_insert_patent``'s ``ON CONFLICT (pub_number) DO NOTHING`` means a repeat scan of the same
-    ``pub_number`` (e.g. the routine watch-topic scan re-touching a row a keyless on-demand survey
-    first inserted, or vice versa) would otherwise never get a chance to fill in a field the first
-    scan happened not to find. Never overwrites a field that is already non-empty."""
-    if not rec.assignees and not rec.cpc:
+    backfill for an *existing* ``patents`` row whose ``assignees``/``cpc``/``priority_date`` are
+    still empty -- ``_insert_patent``'s ``ON CONFLICT (pub_number) DO NOTHING`` means a repeat scan
+    of the same ``pub_number`` (e.g. the routine watch-topic scan re-touching a row a keyless
+    on-demand survey first inserted, or vice versa -- round 6: or the Google-Patents-detail-page
+    enrichment pass below, :func:`enrich_stored_patents_missing_assignee`) would otherwise never
+    get a chance to fill in a field the first scan happened not to find. Never overwrites a field
+    that is already non-empty (``priority_date`` is a plain scalar column, so a bare
+    ``COALESCE(priority_date, ...)`` is enough -- no ``NULLIF`` empty-sentinel needed the way the
+    two array columns require)."""
+    if not rec.assignees and not rec.cpc and not rec.priority_date:
         return
     sets: list[str] = []
     params: dict[str, Any] = {"p": pub_number}
@@ -271,8 +277,165 @@ def _backfill_patent_fields(pub_number: str, rec: PatentRecord) -> None:
     if rec.cpc:
         sets.append("cpc = COALESCE(NULLIF(cpc, ARRAY[]::text[]), %(cpc)s)")
         params["cpc"] = rec.cpc
+    if rec.priority_date:
+        sets.append("priority_date = COALESCE(priority_date, %(priority_date)s)")
+        params["priority_date"] = rec.priority_date
     with connection() as conn, conn.cursor() as cur:
         cur.execute(f"UPDATE patents SET {', '.join(sets)} WHERE pub_number = %(p)s", params)
+
+
+# --------------------------------------------------------------------------
+# Round 6 D8 finding 1 (2026-09-06/07, docs/qa/loop/round_5_judge.md D8): the keyless
+# Google-Patents-search fallback (:func:`_google_patents_records` above) only carries a search
+# hit's title+snippet, so ``assignee``/``cpc`` land empty for most gathered records -- downstream
+# (``eoa.patents.survey``) that yields a 0%-assignee-coverage survey with no assignee profiles and
+# no CPC x assignee matrix (both gated on a non-empty top-assignees list). This section adds a
+# best-effort, on-demand enrichment pass: for a capped number of a survey's own patents that still
+# have no assignee on record, fetch that patent's own **individual** Google Patents detail page
+# (not a search result -- a full page, keyed by ``pub_number``, that carries real structured
+# bibliographic ``<meta>``/``<time>``/``<span>`` markup Google Patents does not put in its search
+# results) and parse assignee/CPC codes/priority date out of it. Uses
+# ``eoa.fetch.remote.fetch_raw_remote`` (the project's shared SSRF-guarded HTTP client -- see that
+# module's ``assert_public_http_url``) rather than a raw ``requests``/``httpx`` call. Confirmed live
+# 2026-09-06/07 against a handful of real ``patents.google.com/patent/<pub>/en`` pages pulled from
+# this project's own ``patents`` table (design/verification only, well under a dozen fetches).
+# --------------------------------------------------------------------------
+
+_ENRICH_ASSIGNEE_CAP = 25
+_ENRICH_SLEEP_S = 2.0
+_GOOGLE_PATENT_DETAIL_URL_TMPL = "https://patents.google.com/patent/{pub}/en"
+
+# "<meta name="DC.contributor" content="Xidrone Systems Inc" scheme="assignee">" -- an inventor
+# carries the exact same DC.contributor tag with scheme="inventor" instead, so the scheme attribute
+# is what actually distinguishes an assignee from an inventor on this page.
+_DC_CONTRIBUTOR_ASSIGNEE_RE = re.compile(r'<meta name="DC\.contributor" content="([^"]*)" scheme="assignee">')
+# The page's "Classifications" section lists every level of each CPC code's own hierarchy as its
+# own <li> (class "G", subclass "G01", ..., down to a specific subgroup like "G01S13/02") -- only
+# the IsCPC=true entries are genuinely CPC (Google Patents lists the legacy US classification the
+# same way, IsCPC=false). :func:`_normalize_cpc_codes` below reduces a subgroup code to its
+# class+subclass+main-group prefix (the part before the "/", e.g. "G01S13" from "G01S13/00") to
+# match this project's own coarser config/patents.yaml convention (e.g. "G01J5") rather than
+# storing every individual subgroup.
+_CPC_CODE_ITEM_RE = re.compile(
+    r'<li itemprop="classifications" itemscope repeat>\s*'
+    r'<span itemprop="Code">([^<]+)</span>.*?'
+    r'<meta itemprop="IsCPC" content="true">',
+    re.DOTALL,
+)
+_PRIORITY_DATE_RE = re.compile(r'<time itemprop="priorityDate" datetime="([^"]+)">')
+_FILING_DATE_RE = re.compile(r'<time itemprop="filingDate" datetime="([^"]+)">')
+_PUBLICATION_DATE_RE = re.compile(r'<time itemprop="publicationDate" datetime="([^"]+)">')
+
+
+def _normalize_cpc_codes(raw_codes: list[str]) -> list[str]:
+    """Every ``raw_codes`` entry that carries a "/" (an actual group-level CPC code, not a bare
+    class/subclass like "G" or "G01S") reduced to its class+subclass+main-group prefix (the part
+    before the "/"), deduped, order preserved -- e.g. ``["G01S13/00", "G01S13/02", "G01S3/00"]`` ->
+    ``["G01S13", "G01S3"]``. A bare class/subclass entry with no "/" at all is dropped -- too coarse
+    to be a useful CPC value next to config/patents.yaml's own codes."""
+    out: list[str] = []
+    for code in raw_codes:
+        code = code.strip()
+        if "/" not in code:
+            continue
+        main = code.split("/", 1)[0]
+        if main and main not in out:
+            out.append(main)
+    return out
+
+
+def _parse_google_patent_detail_html(html: str) -> dict[str, Any]:
+    """Best-effort parse of one ``patents.google.com/patent/<pub>/en`` detail page into
+    ``{"assignees", "cpc", "priority_date", "filing_date", "publication_date"}``. Every value is
+    ``[]``/``None`` when the corresponding markup was not found on the page -- never guessed."""
+    assignees = [a.strip() for a in _DC_CONTRIBUTOR_ASSIGNEE_RE.findall(html) if a.strip()]
+    cpc = _normalize_cpc_codes(_CPC_CODE_ITEM_RE.findall(html))
+
+    def _first_date(pattern: re.Pattern[str]) -> dt.date | None:
+        m = pattern.search(html)
+        return _parse_date(m.group(1)) if m else None
+
+    return {
+        "assignees": assignees,
+        "cpc": cpc,
+        "priority_date": _first_date(_PRIORITY_DATE_RE),
+        "filing_date": _first_date(_FILING_DATE_RE),
+        "publication_date": _first_date(_PUBLICATION_DATE_RE),
+    }
+
+
+def _fetch_patent_detail_html(pub_number: str) -> str | None:
+    """One politeness-unaware fetch of ``pub_number``'s own Google Patents detail page (the
+    caller, :func:`enrich_stored_patents_missing_assignee`, is what actually spaces calls out) --
+    ``None`` on any fetch failure (SSRF-guard rejection, network error, non-2xx, ...), never raises
+    (docs/CONVENTIONS.md rule 9: one bad fetch must not abort the batch)."""
+    url = _GOOGLE_PATENT_DETAIL_URL_TMPL.format(pub=pub_number)
+    try:
+        resp = fetch_raw_remote(url)
+    except Exception as exc:
+        log.debug("patents_detail_fetch_failed", pub_number=pub_number, error=str(exc)[:200])
+        return None
+    text = resp.get("text") if isinstance(resp, dict) else None
+    return text if isinstance(text, str) and text else None
+
+
+def _patents_missing_assignee(patent_ids: list[int], limit: int) -> list[dict[str, Any]]:
+    """Up to ``limit`` ``{id, pub_number}`` rows among ``patent_ids`` whose ``assignees`` column is
+    still empty (``NULL`` or ``{}``) right now -- the DB is the source of truth here (not the
+    in-memory records the caller may also be holding), since ``patent_ids`` mixes freshly-inserted
+    and supplemented-from-store patents alike."""
+    if not patent_ids:
+        return []
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, pub_number FROM patents "
+            "WHERE id = ANY(%(ids)s) AND (assignees IS NULL OR assignees = ARRAY[]::text[]) "
+            "ORDER BY id LIMIT %(limit)s",
+            {"ids": patent_ids, "limit": limit},
+        )
+        return cur.fetchall()
+
+
+def enrich_stored_patents_missing_assignee(
+    patent_ids: list[int], *, cap: int = _ENRICH_ASSIGNEE_CAP, sleep_s: float = _ENRICH_SLEEP_S
+) -> int:
+    """Round 6 D8 finding 1: for up to ``cap`` of ``patent_ids`` that currently have no assignee on
+    record in the ``patents`` table (fresh-this-run and supplemented-from-store alike -- called
+    once, after both are merged, from ``eoa.patents.survey.build_patent_survey``), fetch that
+    patent's own Google Patents detail page (politely, ``sleep_s`` seconds apart -- never in
+    parallel, never before the first fetch) and backfill assignee/CPC/priority-date straight onto
+    the stored row via :func:`_backfill_patent_fields` (never overwrites a field already
+    populated). A fetch or parse failure for one patent is logged and skipped -- it never aborts
+    the rest of the batch (docs/CONVENTIONS.md rule 9). Returns how many rows were actually
+    updated (at least one new field found and written)."""
+    targets = _patents_missing_assignee(patent_ids, cap)
+    enriched = 0
+    for i, row in enumerate(targets):
+        if i:
+            time.sleep(sleep_s)
+        html = _fetch_patent_detail_html(row["pub_number"])
+        if not html:
+            continue
+        try:
+            detail = _parse_google_patent_detail_html(html)
+        except Exception as exc:
+            log.debug("patents_detail_parse_failed", pub_number=row["pub_number"], error=str(exc)[:200])
+            continue
+        if not (detail["assignees"] or detail["cpc"] or detail["priority_date"]):
+            continue
+        rec = PatentRecord(
+            pub_number=row["pub_number"],
+            assignees=detail["assignees"],
+            cpc=detail["cpc"],
+            priority_date=detail["priority_date"],
+        )
+        try:
+            _backfill_patent_fields(row["pub_number"], rec)
+        except Exception as exc:
+            log.warning("patents_enrich_backfill_failed", pub_number=row["pub_number"], error=str(exc)[:200])
+            continue
+        enriched += 1
+    return enriched
 
 
 def upsert_records(records: list[PatentRecord]) -> dict[str, int]:

@@ -302,14 +302,27 @@ def tfidf_subcluster_unclassified(
     ]
 
 
+#: Round 6 D8 finding 2 (2026-09-06/07, docs/qa/loop/round_5_judge.md D8): the deterministic
+#: no-unclassified-cluster check (``eoa.qa.d8_patent_survey._no_unclassified_cluster_check``)
+#: matches the literal "לא מסווג" ("unclassified") anywhere in a cluster heading or its body --
+#: including the old "לא מסווג: sensor / drone" form, which still opened with that exact word. A
+#: sub-cluster that DOES have real top terms should be named by them outright rather than prefixed
+#: with a word meaning "unclassified" it no longer is; :data:`UNCLASSIFIED_LABEL_HE` stays reserved
+#: for the one genuinely nameless case below.
+_TERM_CLUSTER_LABEL_PREFIX_HE = "אשכול נושאי"
+
+
 def _unclassified_label_he(label_terms: list[str]) -> str:
-    """:data:`UNCLASSIFIED_LABEL_HE` alone when a sub-cluster has no terms at all (nothing to name
-    it by), else that same Hebrew frame plus its top terms -- e.g. "לא מסווג: sensor / thermal /
-    array" -- mixing a Hebrew frame with English/Hebrew technical terms exactly like every other
-    cluster label in this module already does (see the module-level note above)."""
+    """A genuinely descriptive Hebrew label built from a TF-IDF sub-cluster's own top terms --
+    e.g. "אשכול נושאי: sensor / drone / counter" -- never the literal :data:`UNCLASSIFIED_LABEL_HE`
+    once there is at least one real term to name the cluster by (round 6 D8 finding 2: the old
+    "לא מסווג: <terms>" form still tripped the deterministic no-unclassified-cluster check on its
+    literal prefix, and read as a dead end to a human despite genuinely having real terms to show).
+    Falls back to :data:`UNCLASSIFIED_LABEL_HE` only when ``label_terms`` is empty -- a sub-cluster
+    whose patents carry no title/abstract tokens at all has nothing honest to derive a name from."""
     if not label_terms:
         return UNCLASSIFIED_LABEL_HE
-    return f"{UNCLASSIFIED_LABEL_HE}: " + " / ".join(label_terms)
+    return f"{_TERM_CLUSTER_LABEL_PREFIX_HE}: " + " / ".join(label_terms)
 
 
 def _cpc_label(code: str, topics: list[_TopicLike]) -> str:
@@ -434,7 +447,10 @@ def cluster_patents(
         multi = len(subclusters) > 1
         for i, sub in enumerate(subclusters):
             key = f"{UNCLASSIFIED_KEY}_{i}" if multi else UNCLASSIFIED_KEY
-            label = _unclassified_label_he(sub["label_terms"]) if multi else UNCLASSIFIED_LABEL_HE
+            # Round 6 D8 finding 2: always name the sub-cluster by its own top terms when it has
+            # any (never gated on `multi` -- a *single* leftover sub-cluster with real terms is
+            # exactly as nameable as one of several) -- see _unclassified_label_he's own docstring.
+            label = _unclassified_label_he(sub["label_terms"])
             cluster = clusters.setdefault(key, PatentCluster(key=key, label_he=label))
             for n in sub["patent_ns"]:
                 _accumulate_into_cluster(cluster, by_n[n])
