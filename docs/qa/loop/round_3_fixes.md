@@ -57,3 +57,44 @@ until re-analysed (the nightly key_facts backfill re-runs analyze on them progre
 
 `scripts/mark_legacy_investigations.py`'s not_found→partial pass is now scoped to job ids 15/20
 (`NOT_FOUND_TO_PARTIAL_JOB_IDS`); job 91 restored to `not_found / 0.0` with a `repair_notes` entry.
+
+## D6 — daily/weekly (agent R3-D6, commit 01d9f68)
+
+- Two structured-draft QA failures no longer drop the summary: `_deterministic_fallback_draft`
+  builds a labelled ("תקציר מובנה אוטומטית (ללא ניסוח מודל)"), fully cited summary from the top
+  items, the day's events and the Israel-relevant items — passes `qa_citations.check` by
+  construction. Same machinery in weekly.
+- "תעשייה ישראלית — תחרות ומתחרים" requires an IL-watchlist company entity or a business event
+  kind; an item whose only Israeli hook is IDF/MoD/IAF is excluded (the opinion piece and the
+  Lebanon-ridge item the judge found).
+- Source appendix excluded from the D6 duplicate-sentence scan; duplicates elsewhere still fail.
+- `textnorm.normalize_draft` (doubled ASCII quotes → gershayim/geresh) on daily/weekly/monthly.
+
+## D7 — BD territory report (agents R3-D7/D9 b29bb61 + B2 954e004 + wiring 18cfe68)
+
+- Conference dates: table already DB-sourced; prose mentions now corrected against the DB by name.
+- `textnorm` on every BD prose field and table cell; explicit no-activity marker naming the
+  watchlist competitors checked (accepted by the D7 check, contradiction still fails).
+- **Structured schema migration** (the judge's #3): `BdTerritoryReportDraft` with cited Sentences
+  for exec summary / market bullets / competitor moves / action rationales, typed analyst note;
+  one corrective retry then a deterministic cited substitute — the warning-banner path no longer
+  exists.
+- New data-driven sections: "מעקב רכישות ושותפויות" (A16) and "מחירי ייחוס למטע"דים" (A17).
+
+## D8 — patent survey (agent R3-D8, commit 8e9d97e)
+
+Assignee-coverage caveat + exclusivity-claim scrub below 70% coverage; relationship edges verified
+against the cited source text (the Anduril–Elbit "Sigma 155" row is dropped and counted);
+timeline/CPC render data rows or an explicit disclosure line (scorer requires one of the two);
+synthesis retries + `narrative_pending` marker with a regeneration hook.
+
+## D9 — tenders and sources (b29bb61 + A15 eb3e8c5)
+
+Status redrive for the whole table; open-first ordering; `sources.active` synced with config
+(3 disabled-in-config sources and 4 renamed arXiv feeds explained the "stale" 7); A15 added 8
+keyless machine-readable portals + 22 regional search sources (docs/TENDER_PORTALS.md).
+
+## D5 — chat (agent R3-D5, pending)
+
+Grounded-entity check, cross-source conflation guard, `[n=…]` template-leak sanitiser, topic
+substitution gap-first — see docs/qa/loop/round_3_chat_fixes.md when it lands.
