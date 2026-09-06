@@ -51,10 +51,12 @@ if str(_AGENT_DIR) not in sys.path:
 from eoa import db  # noqa: E402
 from eoa.pipeline.entity_normalize import (  # noqa: E402
     _is_system_designation,
-    is_technique_like,
+    is_junk_entity,
     normalize_kind,
     normalize_name_key,
     resolve_canonical,
+    resolve_company_country,
+    resolve_country_name,
 )
 
 
@@ -64,10 +66,15 @@ def _fetch_entities() -> list[dict[str, Any]]:
         return cur.fetchall()
 
 
-def _reject_technique_like(entities: list[dict[str, Any]], *, dry_run: bool) -> list[dict[str, Any]]:
+def _reject_junk(entities: list[dict[str, Any]], *, dry_run: bool) -> list[dict[str, Any]]:
+    """Q3-13 r3 (docs/qa/findings_Q3_r2.md): reject every entity that fails the "real entity" gate
+    -- a technique/algorithm name (as before) *or* a generic Hebrew concept/market/category phrase
+    (e.g. "השוק הביטחוני", "תעשייה", "סטארט-אפים", "לקוחות בינלאומיים", "תמונות תרמיות", "מפעילים
+    בשטח", "איומים בקבוצת משקל 3", "מלחמת איראן-עיראק", "מצר הורמוז") -- see
+    ``eoa.pipeline.entity_normalize.is_junk_entity``."""
     report = []
     for ent in entities:
-        if not is_technique_like(ent["name"]):
+        if not is_junk_entity(ent["name"]):
             continue
         report.append({"id": ent["id"], "name": ent["name"]})
         if dry_run:
@@ -102,19 +109,26 @@ def _fix_kinds(entities: list[dict[str, Any]], *, dry_run: bool) -> list[dict[st
 
 
 def _backfill_country(entities: list[dict[str, Any]], *, dry_run: bool) -> list[dict[str, Any]]:
+    """Q3-13 r3: fill ``country`` from (in order) a watchlist/curated-org match, then -- for a
+    ``company``-kind entity not on either -- the static top-40 non-watchlist company->country map
+    (:func:`resolve_company_country`). A ``country``-kind entity's own ``country`` column is left
+    alone (it denotes *its* country, not a country it's *from*, which is a category error for a
+    country entity itself -- covered instead by ``_fix_kinds``/``_merge_duplicates`` canonicalising
+    the row's ``name`` itself)."""
     report = []
     for ent in entities:
-        if ent.get("country"):
+        if ent.get("country") or ent.get("kind") == "country":
             continue
         canonical = resolve_canonical(ent["name"])
-        if not canonical or not canonical.get("country"):
+        country = (canonical or {}).get("country") or resolve_company_country(ent["name"])
+        if not country:
             continue
-        report.append({"id": ent["id"], "name": ent["name"], "country": canonical["country"]})
+        report.append({"id": ent["id"], "name": ent["name"], "country": country})
         if not dry_run:
             with db.connection() as conn, conn.cursor() as cur:
                 cur.execute(
                     "UPDATE entities SET country = %(country)s WHERE id = %(id)s",
-                    {"country": canonical["country"], "id": ent["id"]},
+                    {"country": country, "id": ent["id"]},
                 )
     return report
 
@@ -134,6 +148,11 @@ def _merge_key_and_target(ent: dict[str, Any]) -> tuple[str, str | None]:
     canonical = resolve_canonical(ent["name"])
     if canonical:
         return f"canonical:{canonical['name']}", canonical["name"]
+    country_name = resolve_country_name(ent["name"])
+    if country_name:
+        # Q3-13 r3: a genuine country entity, however spelled/language ("יפן" vs "Japan", "ארה\"ב"
+        # vs "ארצות הברית") -- merge onto its canonical English display name.
+        return f"country:{country_name}", country_name
     return f"norm:{normalize_name_key(ent['name'])}", None
 
 
@@ -217,7 +236,7 @@ def repair(*, dry_run: bool = False) -> dict[str, Any]:
     entities = _fetch_entities()
     before_count = len(entities)
 
-    rejected = _reject_technique_like(entities, dry_run=dry_run)
+    rejected = _reject_junk(entities, dry_run=dry_run)
     rejected_ids = {r["id"] for r in rejected}
     entities = [e for e in entities if e["id"] not in rejected_ids]
 
@@ -227,7 +246,8 @@ def repair(*, dry_run: bool = False) -> dict[str, Any]:
 
     return {
         "before_count": before_count,
-        "technique_like_rejected": rejected,
+        "junk_rejected": rejected,
+        "technique_like_rejected": rejected,  # backwards-compatible alias (same list)
         "kind_fixed": kind_fixed,
         "country_backfilled": country_backfilled,
         "duplicates_merged": merged,
@@ -244,8 +264,8 @@ def main() -> None:
     print(f"{'='*70}\nQ3-13 entity normalisation repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'='*70}")
     print(f"\nentities before: {report['before_count']}")
 
-    print(f"\ntechnique_like_rejected: {len(report['technique_like_rejected'])}")
-    for r in report["technique_like_rejected"][:20]:
+    print(f"\njunk_rejected (technique-like + generic non-entities): {len(report['junk_rejected'])}")
+    for r in report["junk_rejected"][:20]:
         print(f"  {r}")
 
     print(f"\nkind_fixed: {len(report['kind_fixed'])}")

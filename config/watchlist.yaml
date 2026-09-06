@@ -6,7 +6,7 @@ companies:
   - { name: L3Harris, aliases: [WESCAM, "L3Harris WESCAM", "MX-Series"], country: US, focus: [airborne_pods, naval_surveillance, land_surveillance] }
   - { name: "Teledyne FLIR", aliases: [FLIR, "FLIR Systems", "Teledyne FLIR Defense"], country: US, focus: [land_surveillance, naval_surveillance, c_uas, secondary] }
   - { name: "Leonardo DRS", aliases: [DRS], country: US, focus: [land_surveillance, secondary] }
-  - { name: Anduril, aliases: [Lattice, Anvil, Roadrunner], country: US, focus: [c_uas, computer_vision, air_defense] }
+  - { name: Anduril, aliases: [Lattice, Anvil, Roadrunner, "Anduril Industries"], country: US, focus: [c_uas, computer_vision, air_defense] }
   - { name: "Shield AI", aliases: [Hivemind, "V-BAT"], country: US, focus: [computer_vision] }
   - { name: BlueHalo, aliases: [LOCUST, Titan], country: US, focus: [c_uas, air_defense] }
   - { name: Epirus, aliases: [Leonidas], country: US, focus: [c_uas] }
@@ -34,6 +34,10 @@ companies:
   - { name: BEL, aliases: ["Bharat Electronics"], country: IN, focus: [land_surveillance, air_defense] }
   - { name: Norinco, aliases: [], country: CN, focus: [air_defense, land_surveillance], note: competitive-intel only }
   - { name: CETC, aliases: ["China Electronics Technology Group"], country: CN, focus: [secondary, air_defense], note: competitive-intel only }
+  # Q3-13 r3 (docs/qa/findings_Q3_r2.md): added -- both showed up as separate Hebrew
+  # transliteration duplicates of the same company (ארוויירונמנט / ארוויונמנט; קונגסברג).
+  - { name: AeroVironment, aliases: ["AV Inc", "ארוויירונמנט", "ארוויונמנט"], country: US, focus: [c_uas, computer_vision] }
+  - { name: Kongsberg, aliases: ["Kongsberg Gruppen", "Kongsberg Defence & Aerospace", "KONGSBERG", "קונגסברג"], country: NO, focus: [naval_surveillance, air_defense] }
 
 programs:
   - { name: Replicator, owner: "US DoD / DIU", focus: [c_uas, computer_vision] }

@@ -91,10 +91,13 @@ def _alias_index() -> dict[str, dict[str, Any]]:
 @lru_cache(maxsize=1)
 def _surface_to_canonical_name() -> list[tuple[str, str]]:
     """``[(surface string, canonical name), ...]`` for regex text search (Q3-8), longest surface
-    first so e.g. "Elbit Systems" is tried before a shorter alias substring of it would be."""
+    first so e.g. "Elbit Systems" is tried before a shorter alias substring of it would be. Q3-13
+    r3: includes the curated org table (below) as well as the watchlist, so a deep-search/analyze
+    text mention of e.g. "US Army"/"IDF"/"NATO" also deterministically backfills
+    ``entities_mentioned``, not just watchlist companies/programs."""
     pairs: list[tuple[str, str]] = []
     seen_surfaces: set[str] = set()
-    for record in _alias_index().values():
+    for record in {**_alias_index(), **_curated_org_index()}.values():
         for surface in [record["name"], *record["aliases"]]:
             if surface and surface not in seen_surfaces:
                 pairs.append((surface, record["name"]))
@@ -103,11 +106,14 @@ def _surface_to_canonical_name() -> list[tuple[str, str]]:
 
 
 def resolve_canonical(name: str) -> dict[str, Any] | None:
-    """The watchlist canonical record (name/kind/country/aliases/focus) for ``name`` if it (or a
-    recorded alias of it) is on the watchlist -- else ``None``."""
+    """The canonical record (name/kind/country/aliases/focus) for ``name`` if it (or a recorded
+    alias of it) is on the watchlist or the curated defense-org table (Q3-13 r3, below) -- else
+    ``None``. The watchlist is checked first, so a name that happens to collide with both (none do
+    today) would resolve to the watchlist's own kind (company/program)."""
     if not name:
         return None
-    return _alias_index().get(normalize_name_key(name))
+    key = normalize_name_key(name)
+    return _alias_index().get(key) or _curated_org_index().get(key)
 
 
 def is_technique_like(name: str) -> bool:
@@ -139,6 +145,11 @@ def normalize_kind(name: str, kind: str) -> str:
         if kind in ("system", "program"):
             return kind
         return canonical["kind"]
+    if resolve_country_name(name):
+        # Q3-13 r3: a genuine country name (HE or EN) is always "country", even when the caller
+        # (or a stale existing row) had it typed "company" -- "איראן"/"ארצות הברית"/"יוון" are
+        # countries, not companies.
+        return "country"
     if any(kw in (name or "").lower() for kw in _GOVERNMENT_KEYWORDS):
         return "org"
     if kind in VALID_ENTITY_KINDS:
@@ -160,8 +171,250 @@ def canonical_name_and_kind(name: str, kind: str) -> tuple[str, str]:
     if _is_system_designation(name):
         return name, "system"
     canonical = resolve_canonical(name)
-    canonical_name = canonical["name"] if canonical else name
-    return canonical_name, normalize_kind(name, kind)
+    if canonical:
+        return canonical["name"], normalize_kind(name, kind)
+    country_name = resolve_country_name(name)
+    if country_name:
+        # Q3-13 r3: canonicalise a Hebrew country name onto its English display name so e.g.
+        # "יפן" and "Japan" (or "ארה\"ב" and "ארצות הברית") land on the very same entity row.
+        return country_name, "country"
+    return name, normalize_kind(name, kind)
+
+
+# --------------------------------------------------------------------------
+# Q3-13 r3 (docs/qa/findings_Q3_r2.md): curated Hebrew<->English alias table for the most common
+# defense actors/agencies/services that are *not* EO/IR companies/programs (so don't belong in
+# `config/watchlist.yaml`, which tracks watchlist-relevance for search/NER of the domain's own
+# vendor landscape) -- government/military bodies. Every record resolves to `kind="org"`. This is
+# what actually merges "צבא ארה\"ב" / "צבא ארצות הברית" (US Army), "הצי האמריקאי" / "חיל הים
+# האמריקאי" (US Navy), etc. into one canonical entity going forward and in the repair script.
+_CURATED_ORG_RECORDS: list[dict[str, Any]] = [
+    {"name": "US Army", "country": "US", "aliases": ["U.S. Army", "United States Army", 'צבא ארה"ב', "צבא ארצות הברית", "הצבא האמריקאי"]},
+    {"name": "US Navy", "country": "US", "aliases": ["U.S. Navy", "United States Navy", "חיל הים האמריקאי", "הצי האמריקאי"]},
+    {"name": "US Air Force", "country": "US", "aliases": ["USAF", "U.S. Air Force", "United States Air Force", "חיל האוויר האמריקאי"]},
+    {"name": "US Marine Corps", "country": "US", "aliases": ["USMC", "U.S. Marine Corps", "United States Marine Corps", "חיל הנחתים האמריקאי"]},
+    {"name": "US Space Force", "country": "US", "aliases": ["USSF", "United States Space Force", "חיל החלל האמריקאי"]},
+    {"name": "US Coast Guard", "country": "US", "aliases": ["USCG", "United States Coast Guard", "משמר החופים האמריקאי"]},
+    {"name": "US National Guard", "country": "US", "aliases": ["National Guard", "המשמר הלאומי האמריקאי"]},
+    {"name": "US Department of Defense", "country": "US", "aliases": ["DoD", "U.S. DoD", "Pentagon", "The Pentagon", "משרד ההגנה האמריקאי", 'משרד ההגנה של ארה"ב', "הפנטגון"]},
+    {"name": "DIU", "country": "US", "aliases": ["Defense Innovation Unit"]},
+    {"name": "DARPA", "country": "US", "aliases": ["Defense Advanced Research Projects Agency"]},
+    {"name": "DHS", "country": "US", "aliases": ["Department of Homeland Security", "משרד הביטחון הפנים האמריקאי"]},
+    {"name": "DIA", "country": "US", "aliases": ["Defense Intelligence Agency"]},
+    {"name": "CIA", "country": "US", "aliases": ["Central Intelligence Agency"]},
+    {"name": "FBI", "country": "US", "aliases": ["Federal Bureau of Investigation"]},
+    {"name": "IDF", "country": "IL", "aliases": ["Israel Defense Forces", 'צה"ל', "צבא ההגנה לישראל"]},
+    {"name": "Israeli Ministry of Defense", "country": "IL", "aliases": ["MoD Israel", "משרד הביטחון", "משרד הביטחון הישראלי"]},
+    {"name": "Government of Israel", "country": "IL", "aliases": ["ממשלת ישראל"]},
+    {"name": "Mossad", "country": "IL", "aliases": ["המוסד"]},
+    {"name": "Shin Bet", "country": "IL", "aliases": ['שב"כ', "שירות הביטחון הכללי"]},
+    {"name": "NATO", "country": None, "aliases": ["North Atlantic Treaty Organization", 'נאט"ו']},
+    {"name": "NSPA", "country": None, "aliases": ["NATO Support and Procurement Agency"]},
+    {"name": "Bundeswehr", "country": "DE", "aliases": ["German Armed Forces", "הצבא הגרמני"]},
+    {"name": "German Federal Ministry of Defence", "country": "DE", "aliases": ["BMVg", "משרד ההגנה הגרמני"]},
+    {"name": "French Armed Forces", "country": "FR", "aliases": ["Armée française", "הצבא הצרפתי"]},
+    {"name": "UK Ministry of Defence", "country": "UK", "aliases": ["MoD UK", "British Ministry of Defence", "משרד ההגנה הבריטי"]},
+    {"name": "Royal Navy", "country": "UK", "aliases": ["הצי המלכותי הבריטי"]},
+    {"name": "Royal Air Force", "country": "UK", "aliases": ["RAF", "חיל האוויר המלכותי הבריטי"]},
+    {"name": "British Army", "country": "UK", "aliases": ["הצבא הבריטי"]},
+    {"name": "Ukrainian Armed Forces", "country": "UA", "aliases": ["Armed Forces of Ukraine", "הצבא האוקראיני", "הכוחות המזוינים של אוקראינה"]},
+    {"name": "Russian Armed Forces", "country": "RU", "aliases": ["הצבא הרוסי"]},
+    {"name": "Japan Self-Defense Forces", "country": "JP", "aliases": ["JSDF", "כוחות ההגנה העצמית של יפן"]},
+    {"name": "South Korean Armed Forces", "country": "KR", "aliases": ["ROK Armed Forces", "הצבא הדרום קוריאני"]},
+    {"name": "Taiwan Armed Forces", "country": "TW", "aliases": ["הצבא הטייוואני"]},
+    {"name": "Indian Ministry of Defence", "country": "IN", "aliases": ["MoD India", "משרד ההגנה ההודי"]},
+    {"name": "Indian Armed Forces", "country": "IN", "aliases": ["הצבא ההודי"]},
+    {"name": "Saudi Ministry of Defense", "country": "SA", "aliases": ["משרד ההגנה הסעודי"]},
+    {"name": "UAE Armed Forces", "country": "AE", "aliases": ["הכוחות המזוינים של האמירויות"]},
+    {"name": "Turkish Armed Forces", "country": "TR", "aliases": ["TSK", "הצבא הטורקי"]},
+    {"name": "Polish Armed Forces", "country": "PL", "aliases": ["הצבא הפולני"]},
+    {"name": "Australian Defence Force", "country": "AU", "aliases": ["ADF", "כוחות ההגנה האוסטרליים"]},
+    {"name": "Canadian Armed Forces", "country": "CA", "aliases": ["הכוחות המזוינים הקנדיים"]},
+    {"name": "Europe", "country": None, "aliases": ["אירופה"]},
+]
+
+
+@lru_cache(maxsize=1)
+def _curated_org_index() -> dict[str, dict[str, Any]]:
+    """Same shape as :func:`_alias_index` (``{normalize_name_key(surface) -> canonical record}``)
+    but built from :data:`_CURATED_ORG_RECORDS` instead of the watchlist -- every record resolves
+    to ``kind="org"``."""
+    index: dict[str, dict[str, Any]] = {}
+    for rec in _CURATED_ORG_RECORDS:
+        canonical = {"name": rec["name"], "kind": "org", "country": rec.get("country"), "aliases": list(rec.get("aliases") or []), "focus": []}
+        for surface in [rec["name"], *canonical["aliases"]]:
+            key = normalize_name_key(surface)
+            if key:
+                index[key] = canonical
+    return index
+
+
+# Q3-13 r3: country names (English + Hebrew, including the common transliterations seen in this
+# corpus) -> canonical English display name. Used both to fix a country mistakenly typed as
+# "company" (e.g. "איראן", "ארצות הברית", "יוון") and to merge Hebrew/English duplicates of the
+# same country entity (e.g. "יפן" and "Japan").
+_COUNTRY_NAMES: dict[str, str] = {
+    k: v
+    for surfaces, v in [
+        (["united states", "usa", "u.s.a", "us", "u.s.", 'ארה"ב', "ארצות הברית"], "United States"),
+        (["israel", "ישראל", "מדינת ישראל"], "Israel"),
+        (["japan", "יפן"], "Japan"),
+        (["china", "prc", "סין"], "China"),
+        (["russia", "רוסיה"], "Russia"),
+        (["iraq", "עיראק"], "Iraq"),
+        (["iran", "איראן"], "Iran"),
+        (["germany", "גרמניה"], "Germany"),
+        (["turkey", "turkiye", "טורקיה"], "Turkey"),
+        (["india", "הודו"], "India"),
+        (["greece", "יוון"], "Greece"),
+        (["serbia", "סרביה"], "Serbia"),
+        (["ukraine", "אוקראינה"], "Ukraine"),
+        (["belgium", "בלגיה"], "Belgium"),
+        (["france", "צרפת"], "France"),
+        (["united kingdom", "uk", "britain", "great britain", "בריטניה"], "United Kingdom"),
+        (["south korea", "republic of korea", "rok", "דרום קוריאה"], "South Korea"),
+        (["north korea", "dprk", "צפון קוריאה"], "North Korea"),
+        (["taiwan", "טייוואן"], "Taiwan"),
+        (["poland", "פולין"], "Poland"),
+        (["australia", "אוסטרליה"], "Australia"),
+        (["canada", "קנדה"], "Canada"),
+        (["saudi arabia", "ערב הסעודית"], "Saudi Arabia"),
+        (["united arab emirates", "uae", "איחוד האמירויות", "האמירויות"], "United Arab Emirates"),
+        (["netherlands", "holland", "הולנד"], "Netherlands"),
+        (["spain", "ספרד"], "Spain"),
+        (["italy", "איטליה"], "Italy"),
+        (["sweden", "שוודיה"], "Sweden"),
+        (["norway", "נורווגיה"], "Norway"),
+        (["finland", "פינלנד"], "Finland"),
+        (["denmark", "דנמרק"], "Denmark"),
+        (["egypt", "מצרים"], "Egypt"),
+        (["jordan", "ירדן"], "Jordan"),
+        (["lebanon", "לבנון"], "Lebanon"),
+        (["syria", "סוריה"], "Syria"),
+        (["yemen", "תימן"], "Yemen"),
+        (["qatar", "קטאר"], "Qatar"),
+        (["bahrain", "בחריין"], "Bahrain"),
+        (["brazil", "ברזיל"], "Brazil"),
+        (["singapore", "סינגפור"], "Singapore"),
+        (["philippines", "הפיליפינים"], "Philippines"),
+    ]
+    for k in surfaces
+}
+_COUNTRY_NAMES = {normalize_name_key(k): v for k, v in _COUNTRY_NAMES.items()}
+
+
+def resolve_country_name(name: str) -> str | None:
+    """The canonical English country display name if ``name`` (English or Hebrew, any of the
+    common transliterations in :data:`_COUNTRY_NAMES`) literally denotes a country -- else
+    ``None``. Used to (a) fix a country mistakenly stored with ``kind="company"`` and (b) merge
+    Hebrew/English duplicates of the same country entity."""
+    if not name:
+        return None
+    return _COUNTRY_NAMES.get(normalize_name_key(name))
+
+
+# Q3-13 r3: static country map for well-known defense-industry companies that are deliberately
+# *not* on `config/watchlist.yaml` (not EO/IR-relevant enough to track for search/NER expansion)
+# but still show up as entities in this corpus and deserve a filled-in `country` rather than being
+# left blank forever. Keys are `normalize_name_key`-ready surface strings (English name and, where
+# an existing entity row is spelled in Hebrew, that transliteration too); values are the same
+# country-code convention as `config/watchlist.yaml` (ISO-ish, "EU" for pan-European primes).
+_COMPANY_COUNTRY_MAP: dict[str, str] = {
+    "rolls-royce": "UK", "rolls royce": "UK", "רולס-רויס": "UK", "רולס רויס": "UK",
+    "thyssenkrupp": "DE", "תיסנקרופ": "DE",
+    "baykar": "TR", "באייקר baykar": "TR", "באייקר": "TR",
+    "boeing": "US",
+    "general dynamics": "US",
+    "bae systems": "UK",
+    "textron": "US",
+    "general atomics": "US",
+    "leidos": "US",
+    "palantir": "US", "palantir technologies": "US",
+    "kratos defense": "US", "kratos": "US",
+    "diehl defence": "DE", "diehl": "DE",
+    "knds": "DE",
+    "nexter": "FR",
+    "cmi defence": "BE",
+    "patria": "FI",
+    "indra": "ES",
+    "embraer": "BR",
+    "denel": "ZA",
+    "st engineering": "SG", "singapore technologies engineering": "SG",
+    "hyundai rotem": "KR",
+    "doosan": "KR",
+    "israel shipyards": "IL",
+    "plasan": "IL",
+    "general robotics": "IL",
+    "roboteam": "IL",
+    "percepto": "IL",
+    "simlat": "IL",
+    "robin radar systems": "NL", "robin radar": "NL",
+    "detect": "US",
+    "echodyne": "US",
+    "droneshield": "AU",
+    "qinetiq": "UK",
+    "ultra electronics": "UK",
+    "chemring group": "UK", "chemring": "UK",
+    "meggitt": "UK",
+    "cobham": "UK",
+    "dassault aviation": "FR", "dassault": "FR",
+    "airbus": "EU", "airbus defence and space": "EU",
+    "naval group": "FR",
+    "fincantieri": "IT",
+    "damen": "NL",
+    "babcock international": "UK", "babcock": "UK",
+    "honeywell": "US",
+    "ge aerospace": "US",
+    "imi systems": "IL",
+}
+_COMPANY_COUNTRY_MAP = {normalize_name_key(k): v for k, v in _COMPANY_COUNTRY_MAP.items()}
+
+
+def resolve_company_country(name: str) -> str | None:
+    """The static-map country for a well-known non-watchlist defense company (Q3-13 r3), or
+    ``None`` when ``name`` isn't in :data:`_COMPANY_COUNTRY_MAP`."""
+    if not name:
+        return None
+    return _COMPANY_COUNTRY_MAP.get(normalize_name_key(name))
+
+
+# Q3-13 r3: substrings that mark a Hebrew phrase as a generic concept/category/market description
+# rather than a specific, named entity -- e.g. "השוק הביטחוני" (the defense market), "תעשייה"
+# (industry), "לקוחות בינלאומיים" (international customers), "תמונות תרמיות" (thermal images),
+# "מפעילים בשטח" (field operators), "איומים בקבוצת משקל 3" (weight-class-3 threats), "מלחמת
+# איראן-עיראק" (Iran-Iraq war), "מצר הורמוז" (Strait of Hormuz). Checked only *after* a name has
+# failed to resolve against the watchlist, the curated org table, and the country table above --
+# so a real, specific, recognised entity is never rejected just because a keyword happens to
+# appear inside it.
+_GENERIC_HEBREW_KEYWORDS: tuple[str, ...] = (
+    "שוק", "תעשיי", "סטארט", "לקוח", "תמונ", "מפעיל", "איומ", "מלחמ", "מצר",
+    "משבר", "משקיע", "תשתי", "אבטח", "ספק", "תצוג", "סביב", "חברות", "תחום",
+    "של מדינה",
+)
+
+
+def is_generic_non_entity(name: str) -> bool:
+    """True for a Hebrew (or mixed) phrase that describes a generic concept/market/category
+    rather than one specific named actor -- see :data:`_GENERIC_HEBREW_KEYWORDS` -- or a
+    comma-separated enumeration of two or more countries (e.g. "יפן, דנמרק, גרמניה", a list, not
+    a single entity). Never true for anything recognised via the watchlist, the curated org
+    table, a known system designation, or the country table."""
+    if not name or not name.strip():
+        return True
+    if resolve_canonical(name) or resolve_country_name(name) or _is_system_designation(name):
+        return False
+    if "," in name:
+        parts = [p.strip() for p in name.split(",") if p.strip()]
+        if sum(1 for p in parts if resolve_country_name(p)) >= 2:
+            return True
+    return any(kw in name for kw in _GENERIC_HEBREW_KEYWORDS)
+
+
+def is_junk_entity(name: str) -> bool:
+    """The "real entity" gate (Q3-13 r3): true when ``name`` should never be stored as an entity
+    at all -- either a technique/algorithm name (:func:`is_technique_like`) or a generic Hebrew
+    concept/category/market phrase (:func:`is_generic_non_entity`)."""
+    return is_technique_like(name) or is_generic_non_entity(name)
 
 
 def find_watchlist_aliases_in_text(text: str) -> list[str]:

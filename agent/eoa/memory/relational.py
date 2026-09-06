@@ -9,6 +9,8 @@ function here calls ``conn.commit()`` / ``conn.rollback()`` directly.
 from __future__ import annotations
 
 import datetime as dt
+import difflib
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -223,6 +225,104 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
 # events / entities
 # --------------------------------------------------------------------------
 
+#: Q3-6b (docs/qa/findings_Q3_r2.md): when two events for the same item are near-duplicates that
+#: differ only by `kind` (e.g. item 70: `contract_award` vs `test`, same underlying fact read two
+#: different ways), the more *specific* kind wins the merge. Anything not listed here (including
+#: the free-text "other") ranks lowest.
+EVENT_KIND_PRIORITY: dict[str, int] = {
+    "contract_award": 5,
+    "acquisition": 4,
+    "partnership": 3,
+    "deployment": 2,
+    "test": 1,
+}
+
+_WS_RE = re.compile(r"\s+", re.UNICODE)
+
+#: Q3-6b: two event titles for the same item at or above this similarity are treated as the same
+#: underlying event (re-extracted with a different `kind`), not two distinct events.
+EVENT_TITLE_DEDUP_THRESHOLD = 0.9
+
+
+def _normalize_title_for_similarity(title: str | None) -> str:
+    return _WS_RE.sub(" ", (title or "").strip().casefold())
+
+
+def event_title_similarity(a: str | None, b: str | None) -> float:
+    """Similarity of two event titles (Q3-6b), in ``[0, 1]``. Empty/``None`` titles never match
+    anything (returns ``0.0``) -- there's no title to compare identity on.
+
+    Uses :class:`difflib.SequenceMatcher` (character-level) rather than token-Jaccard: this
+    corpus's titles are short Hebrew sentences (5-7 words), where token-Jaccard is too brittle --
+    e.g. item 70's real near-duplicate, "זכייה במכרז **ל**פיתוח פלטפורמת פיקוד ושליטה" (contract_
+    award) vs "זכייה במכרז פיתוח פלטפורמת פיקוד ושליטה" (test), differ by a single one-letter
+    prefix ("ל") on one word -- but because that turns it into a wholly different *token*,
+    token-Jaccard only scores ~0.71 (5 shared / 7 total tokens) on a 6-7-token title, well under
+    :data:`EVENT_TITLE_DEDUP_THRESHOLD`, while ``SequenceMatcher`` correctly scores ~0.99."""
+    na, nb = _normalize_title_for_similarity(a), _normalize_title_for_similarity(b)
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
+def more_specific_event_kind(a: str, b: str) -> str:
+    """The more specific of two event `kind` values per :data:`EVENT_KIND_PRIORITY` (Q3-6b) --
+    ties (including two kinds neither of which is in the priority table) keep `a`."""
+    return b if EVENT_KIND_PRIORITY.get(b, 0) > EVENT_KIND_PRIORITY.get(a, 0) else a
+
+
+def _find_near_duplicate_event(item_id: int, kind: str, title: str) -> dict[str, Any] | None:
+    """Q3-6b: an existing event for `item_id`, with a *different* `kind`, whose title is a
+    near-duplicate (:data:`EVENT_TITLE_DEDUP_THRESHOLD`) of `title` -- the best (highest-
+    similarity) match, or ``None``. Exact-same-`kind` near-duplicates are left to the
+    `(item_id, kind, lower(title))` unique-index upsert below; this only catches the "same event,
+    different kind" case that index can't."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, kind, title, date, amount_usd, currency, parties, customer, program, "
+            "summary_he, confidence FROM events WHERE item_id = %(item_id)s AND kind <> %(kind)s "
+            "AND title IS NOT NULL",
+            {"item_id": item_id, "kind": kind},
+        )
+        candidates = cur.fetchall()
+    best: dict[str, Any] | None = None
+    best_score = 0.0
+    for cand in candidates:
+        score = event_title_similarity(title, cand["title"])
+        if score >= EVENT_TITLE_DEDUP_THRESHOLD and score > best_score:
+            best, best_score = cand, score
+    return best
+
+
+def _merge_into_existing_event(existing: dict[str, Any], *, kind: str, **fields: Any) -> int:
+    """Q3-6b: merge a new extraction's fields into `existing` (a near-duplicate event with a
+    different `kind`), keeping the more specific `kind` and the same non-null-wins/richer-parties/
+    max-confidence policy as the exact-match upsert in :func:`insert_event`."""
+    merged_kind = more_specific_event_kind(existing["kind"], kind)
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE events SET
+                kind = %(kind)s,
+                date = COALESCE(events.date, %(date)s),
+                amount_usd = COALESCE(events.amount_usd, %(amount_usd)s),
+                currency = COALESCE(events.currency, %(currency)s),
+                parties = CASE
+                    WHEN events.parties IS NULL OR array_length(events.parties, 1) IS NULL
+                    THEN %(parties)s ELSE events.parties
+                END,
+                customer = COALESCE(events.customer, %(customer)s),
+                program = COALESCE(events.program, %(program)s),
+                summary_he = COALESCE(events.summary_he, %(summary_he)s),
+                confidence = GREATEST(COALESCE(events.confidence, 0), COALESCE(%(confidence)s, 0)),
+                updated_at = now()
+            WHERE id = %(id)s
+            """,
+            {"id": existing["id"], "kind": merged_kind, **fields},
+        )
+    log.info("event.merged_near_duplicate", event_id=existing["id"], kind=merged_kind, previous_kind=existing["kind"])
+    return existing["id"]
+
 
 def insert_event(
     *,
@@ -254,7 +354,30 @@ def insert_event(
     A `title=None` event never conflicts with anything (`lower(NULL)` is `NULL`, and Postgres
     unique indexes treat `NULL` as distinct from every other `NULL`) -- there's no title to key
     identity on, so every such row is inserted as new, exactly as before this change.
+
+    Q3-6b (docs/qa/findings_Q3_r2.md): before the exact-match upsert below, also checks for an
+    *existing* event of the same item with a *different* `kind` whose title is a near-duplicate
+    (:func:`event_title_similarity` >= :data:`EVENT_TITLE_DEDUP_THRESHOLD`) of `title` -- e.g. the same
+    underlying fact re-extracted once as `contract_award` and once as `test`. When found, merges
+    into that row instead of inserting a second one, keeping the more specific `kind`
+    (:data:`EVENT_KIND_PRIORITY`) rather than creating a same-item near-duplicate that the exact
+    `(item_id, kind, lower(title))` unique index can't catch.
     """
+    fields = {
+        "date": date,
+        "amount_usd": amount_usd,
+        "currency": currency,
+        "parties": parties,
+        "customer": customer,
+        "program": program,
+        "summary_he": summary_he,
+        "confidence": confidence,
+    }
+    if title and title.strip():
+        near_dup = _find_near_duplicate_event(item_id, kind, title)
+        if near_dup is not None:
+            return _merge_into_existing_event(near_dup, kind=kind, **fields)
+
     query = """
         INSERT INTO events (
             item_id, kind, title, date, amount_usd, currency, parties, customer, program,
@@ -324,22 +447,31 @@ def upsert_entity(
 ) -> int | None:
     """Insert or update an entity keyed by its unique `name`, returning its id.
 
-    Q3-13 (docs/qa/findings_Q3_r1.md, ``eoa.pipeline.entity_normalize``): before writing,
-    ``name``/``kind`` are resolved through the watchlist (an alias like "Elbit Systems UK" maps
-    to the canonical "Elbit"; ``kind`` is normalised onto the ``entities`` table's actually
-    allowed values -- e.g. the schema's "country" `EntityMention.kind`, which the table's CHECK
-    constraint does not accept, maps to "org"), a watchlist-known `country`/`aliases`/`focus`
-    backfills whatever the caller didn't supply, and a case-insensitive match against an existing
-    row reuses that row's exact spelling instead of creating a duplicate. A technique/algorithm
-    name masquerading as an entity (e.g. "image captioning") is rejected outright: **not stored**,
-    and this returns ``None`` instead of an id -- every current caller (``classify.persist_
-    classification``, ``analyze.persist_analysis``'s edge writer) already treats "this entity
-    didn't get an id" as "skip it", so this is a safe additive contract change.
+    Q3-13 (docs/qa/findings_Q3_r1.md/r2.md, ``eoa.pipeline.entity_normalize``): before writing,
+    ``name``/``kind`` are resolved through the watchlist and the curated defense-org/country
+    tables (an alias like "Elbit Systems UK" maps to the canonical "Elbit"; "צבא ארה\"ב" maps to
+    "US Army"; "איראן" maps to kind "country"; ``kind`` is normalised onto the ``entities``
+    table's actually allowed values -- e.g. the schema's "country" `EntityMention.kind`, which the
+    table's CHECK constraint does not accept, maps to "org"), a watchlist-known
+    `country`/`aliases`/`focus` backfills whatever the caller didn't supply (falling back to the
+    static non-watchlist company->country map for a well-known company not on the watchlist), and
+    a case-insensitive match against an existing row reuses that row's exact spelling instead of
+    creating a duplicate. A "junk" name -- a technique/algorithm masquerading as an entity (e.g.
+    "image captioning") or a generic Hebrew concept/market/category phrase (e.g. "השוק הביטחוני",
+    "תעשייה") -- is rejected outright: **not stored**, and this returns ``None`` instead of an id
+    -- every current caller (``classify.persist_classification``, ``analyze.persist_analysis``'s
+    edge writer) already treats "this entity didn't get an id" as "skip it", so this is a safe
+    additive contract change.
     """
-    from eoa.pipeline.entity_normalize import canonical_name_and_kind, is_technique_like, resolve_canonical
+    from eoa.pipeline.entity_normalize import (
+        canonical_name_and_kind,
+        is_junk_entity,
+        resolve_canonical,
+        resolve_company_country,
+    )
 
-    if is_technique_like(name):
-        log.info("entity.rejected_technique_like", name=name)
+    if is_junk_entity(name):
+        log.info("entity.rejected_junk", name=name)
         return None
 
     canonical = resolve_canonical(name)
@@ -348,6 +480,8 @@ def upsert_entity(
         country = country or canonical.get("country")
         aliases = aliases or (canonical.get("aliases") or None)
         focus = focus or (canonical.get("focus") or None)
+    elif kind == "company":
+        country = country or resolve_company_country(name)
 
     existing_name = _find_case_insensitive_existing_name(name)
     if existing_name is not None:

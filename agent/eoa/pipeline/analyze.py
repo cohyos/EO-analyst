@@ -403,23 +403,33 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     if out.edges:
         try:
             from eoa.memory.graph import add_edge, merge_entity
+            from eoa.pipeline.entity_normalize import canonical_name_and_kind
 
             names = sorted({e.src for e in out.edges} | {e.dst for e in out.edges})
             kind_by_name = _resolve_edge_kinds(names)
             for e in out.edges:
-                src_kind = kind_by_name.get(e.src, "company")
-                dst_kind = kind_by_name.get(e.dst, "company")
-                src_id = upsert_entity(name=e.src, kind=src_kind, first_seen_item=item["id"])
-                dst_id = upsert_entity(name=e.dst, kind=dst_kind, first_seen_item=item["id"])
+                # Q3-13 r3 (docs/qa/findings_Q3_r2.md): resolve each endpoint's *canonical*
+                # name/kind once, up front, and use that canonical form consistently for both
+                # `upsert_entity` and `merge_entity` below. Previously `merge_entity` was called
+                # with the raw, as-extracted name (e.g. "USAF") even though `upsert_entity` had
+                # just canonicalised it onto an existing row (e.g. "US Air Force", id 685) --
+                # `merge_entity` does a raw `UPDATE entities SET name = ...`, so it was silently
+                # renaming the row *back* to the raw spelling on every edge write, undoing Q3-13's
+                # de-duplication and eventually recreating a same-name-different-case/spelling
+                # duplicate the moment another item's extraction used the row's canonical name.
+                src_name, src_kind = canonical_name_and_kind(e.src, kind_by_name.get(e.src, "company"))
+                dst_name, dst_kind = canonical_name_and_kind(e.dst, kind_by_name.get(e.dst, "company"))
+                src_id = upsert_entity(name=src_name, kind=src_kind, first_seen_item=item["id"])
+                dst_id = upsert_entity(name=dst_name, kind=dst_kind, first_seen_item=item["id"])
                 if src_id is None or dst_id is None:
-                    # Q3-13: one (or both) endpoints was rejected by upsert_entity as a
-                    # technique-like non-entity name -- the edge itself is meaningless then.
+                    # Q3-13: one (or both) endpoints was rejected by upsert_entity as junk (a
+                    # technique-like or generic-non-entity name) -- the edge itself is meaningless.
                     log.info(
                         "edge_skipped_rejected_entity", item_id=item["id"], src=e.src, dst=e.dst
                     )
                     continue
-                merge_entity(src_id, e.src, src_kind, None)
-                merge_entity(dst_id, e.dst, dst_kind, None)
+                merge_entity(src_id, src_name, src_kind, None)
+                merge_entity(dst_id, dst_name, dst_kind, None)
                 add_edge(src_id, dst_id, e.label, item["id"], {"evidence": e.evidence_he[:300]})
                 n_edges += 1
         except Exception as exc:

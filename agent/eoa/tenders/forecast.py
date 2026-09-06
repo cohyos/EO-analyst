@@ -535,7 +535,10 @@ def _upsert_forecast(
                 "window_from": window[0],
                 "window_to": window[1],
                 "rationale_he": rationale_he,
-                "sources": [f"item:{iid}" for iid in candidate.trigger_item_ids] or None,
+                # Q3-11b (docs/qa/findings_Q3_r2.md): `candidate.trigger_item_ids` can repeat the
+                # same item id (multiple triggering events on one item) -- dedupe (order-preserving)
+                # so `sources` never stores the same "item:N" entry more than once.
+                "sources": [f"item:{iid}" for iid in dict.fromkeys(candidate.trigger_item_ids)] or None,
                 "needs_regen": needs_regen,
             },
         )

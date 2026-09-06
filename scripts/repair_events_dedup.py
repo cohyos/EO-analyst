@@ -3,7 +3,7 @@
 dedup, and report (optionally delete) existing rows that look like a narrative/assessment
 sentence rather than a real event.
 
-Two independent passes:
+Three independent passes:
 
 1. **Dedup** (idempotent -- ``db/migrations/versions/0016_events_dedup_unique_index.py`` already
    performs the same merge/delete when that migration is applied; this pass exists so the same
@@ -19,6 +19,15 @@ Two independent passes:
    ("השלכות...", "ייתכן...", or a factless, verb-less title) rather than a real event. Deleted
    only when ``--delete-narrative`` is passed -- reporting-only by default, since removing
    historical rows on a heuristic is a stronger action than deduping exact identical rows.
+
+3. **Kind-diff near-duplicate merge (Q3-6b, docs/qa/findings_Q3_r2.md)**: existing rows for the
+   *same item* with *different* ``kind`` but a near-identical title (similarity >=
+   ``eoa.memory.relational.EVENT_TITLE_DEDUP_THRESHOLD``, e.g. item 70's investment/contract fact
+   read once as ``contract_award`` and once as ``test``) -- the exact ``(item_id, kind,
+   lower(title))`` unique index can't catch these since ``kind`` differs. Merges each such pair
+   into one row exactly as ``eoa.memory.relational.insert_event`` now does for new writes: fields
+   merge non-null-wins/richer-parties/max-confidence, ``kind`` becomes the more specific of the
+   two (``eoa.memory.relational.EVENT_KIND_PRIORITY``).
 
 Usage:
     DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \
@@ -80,8 +89,46 @@ def _is_narrative(row: dict[str, Any]) -> bool:
     return not has_occurrence_verb and not has_anchor
 
 
+def find_kind_diff_duplicate_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Q3-6b (docs/qa/findings_Q3_r2.md): for each item, greedily group rows whose title is a
+    near-duplicate (``event_title_similarity`` >= ``EVENT_TITLE_DEDUP_THRESHOLD``) of an
+    already-kept row's title but whose ``kind`` differs -- lowest id in each item processed first,
+    so it's always the "kept" row a later near-duplicate merges into. Returns one dict per
+    non-trivial group: ``{"keep": row, "merge": [row, ...]}``."""
+    from eoa.memory.relational import EVENT_TITLE_DEDUP_THRESHOLD, event_title_similarity
+
+    by_item: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        if not (row.get("title") or "").strip():
+            continue
+        by_item.setdefault(row["item_id"], []).append(row)
+
+    groups: list[dict[str, Any]] = []
+    for evs in by_item.values():
+        kept: list[dict[str, Any]] = []
+        merges: dict[int, list[dict[str, Any]]] = {}
+        for ev in sorted(evs, key=lambda r: r["id"]):
+            match = next(
+                (
+                    k for k in kept
+                    if k["kind"] != ev["kind"]
+                    and event_title_similarity(k["title"], ev["title"]) >= EVENT_TITLE_DEDUP_THRESHOLD
+                ),
+                None,
+            )
+            if match is not None:
+                merges.setdefault(match["id"], []).append(ev)
+            else:
+                kept.append(ev)
+        for keep in kept:
+            if keep["id"] in merges:
+                groups.append({"keep": keep, "merge": merges[keep["id"]]})
+    return groups
+
+
 def run_repair(*, dry_run: bool = False, delete_narrative: bool = False) -> dict[str, Any]:
     from eoa.db import connection
+    from eoa.memory.relational import more_specific_event_kind
 
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -103,13 +150,32 @@ def run_repair(*, dry_run: bool = False, delete_narrative: bool = False) -> dict
                 to_update.append((keep["id"], merged))
             to_delete.extend(r["id"] for r in rest)
 
+        # Q3-6b: kind-diff near-duplicates, computed over the rows surviving pass 1 above.
+        remaining_after_exact_dedup = [r for r in rows if r["id"] not in to_delete]
+        kind_diff_groups = find_kind_diff_duplicate_groups(remaining_after_exact_dedup)
+        for group in kind_diff_groups:
+            keep = group["keep"]
+            merged = keep
+            merged_kind = keep["kind"]
+            for other in group["merge"]:
+                merged = _richer(merged, other)
+                merged_kind = more_specific_event_kind(merged_kind, other["kind"])
+            merged = {**merged, "kind": merged_kind}
+            existing_update = next((u for u in to_update if u[0] == keep["id"]), None)
+            if existing_update:
+                to_update.remove(existing_update)
+            to_update.append((keep["id"], merged))
+            to_delete.extend(r["id"] for r in group["merge"])
+
         remaining_after = [r for r in rows if r["id"] not in to_delete]
         narrative_rows = [r for r in remaining_after if _is_narrative(r)]
 
         counts = {
             "rows_scanned": len(rows),
             "duplicate_groups": len(dup_groups),
-            "duplicates_deleted": len(to_delete),
+            "duplicates_deleted": len(to_delete) - sum(len(g["merge"]) for g in kind_diff_groups),
+            "kind_diff_groups": len(kind_diff_groups),
+            "kind_diff_merged": sum(len(g["merge"]) for g in kind_diff_groups),
             "narrative_titles_found": len(narrative_rows),
             "narrative_titles_deleted": 0,
         }
@@ -118,13 +184,18 @@ def run_repair(*, dry_run: bool = False, delete_narrative: bool = False) -> dict
             log.info("repair_events_dedup.dry_run", **counts)
             for ids_key, group in dup_groups.items():
                 print(f"  dup group {ids_key}: ids={sorted(r['id'] for r in group)}")
+            for g in kind_diff_groups:
+                print(
+                    f"  kind-diff group: keep id={g['keep']['id']} kind={g['keep']['kind']!r} "
+                    f"title={g['keep']['title'][:60]!r} <- {[(r['id'], r['kind']) for r in g['merge']]}"
+                )
             for r in narrative_rows:
                 print(f"  narrative-looking event id={r['id']} item_id={r['item_id']} title={r['title'][:80]!r}")
             return counts
 
         for event_id, merged in to_update:
             cur.execute(
-                "UPDATE events SET date=%(date)s, amount_usd=%(amount_usd)s, currency=%(currency)s, "
+                "UPDATE events SET kind=%(kind)s, date=%(date)s, amount_usd=%(amount_usd)s, currency=%(currency)s, "
                 "customer=%(customer)s, program=%(program)s, summary_he=%(summary_he)s, "
                 "parties=%(parties)s, confidence=%(confidence)s, updated_at=now() WHERE id=%(id)s",
                 {**merged, "id": event_id},
@@ -159,6 +230,8 @@ def main() -> int:
         f"\n  Rows scanned:              {counts['rows_scanned']}"
         f"\n  Duplicate groups:          {counts['duplicate_groups']}"
         f"\n  Duplicates deleted:        {counts['duplicates_deleted']}"
+        f"\n  Kind-diff groups (Q3-6b):  {counts['kind_diff_groups']}"
+        f"\n  Kind-diff rows merged:     {counts['kind_diff_merged']}"
         f"\n  Narrative titles found:    {counts['narrative_titles_found']}"
         f"\n  Narrative titles deleted:  {counts['narrative_titles_deleted']}"
         f"\n{'=' * 60}\n"
