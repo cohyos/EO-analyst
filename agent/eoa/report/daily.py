@@ -208,9 +208,7 @@ def _sanitize_event_kind(ev: dict[str, Any]) -> dict[str, Any]:
     if ev.get("kind") != "test":
         return ev
     if _looks_like_exercise(ev):
-        log.info(
-            "event_kind_test_reclassified_exercise", event_id=ev.get("id"), item_id=ev.get("item_id")
-        )
+        log.info("event_kind_test_reclassified_exercise", event_id=ev.get("id"), item_id=ev.get("item_id"))
         ev = dict(ev)
         ev["kind"] = _EXERCISE_KIND_LABEL_HE
         return ev
@@ -242,16 +240,57 @@ def _event_richness(ev: dict[str, Any]) -> int:
     return score + len(ev.get("parties") or [])
 
 
+#: R6-forecast (round 6 judge D6, docs/qa/loop/round_5_judge.md finding 2): a second dedup key,
+#: applied on top of :func:`_normalize_event_key`'s content-based one -- same triggering item +
+#: same date + same amount + same kind almost always means "the same underlying fact, once
+#: extracted with every descriptive field empty and once with them populated" (the motivating
+#: example: '2026-09-05 | אחר | — | — | 10,000,000 USD | [4]' immediately followed by
+#: '2026-09-05 | אחר | US Air Force | Massed Modular Aircraft | 10,000,000 USD | [4]' -- both citing
+#: the same item). The content key alone never catches this pair: empty parties/customer/program on
+#: one side vs. populated on the other means two different :func:`_normalize_event_key` tuples.
+#: Deliberately narrow -- requires a concrete, matching ``item_id`` *and* a non-null ``amount_usd``
+#: on both sides, so two genuinely distinct events sharing an item/date/kind but with no monetary
+#: figure (or two different figures) are never merged by this pass.
+def _item_amount_kind_key(ev: dict[str, Any]) -> tuple[int, str, Any, float] | None:
+    item_id = ev.get("item_id")
+    amount = ev.get("amount_usd")
+    if item_id is None or amount is None:
+        return None
+    try:
+        amount_val = round(float(amount), 2)
+    except (TypeError, ValueError):
+        return None
+    return (item_id, ev.get("kind") or "", ev.get("date"), amount_val)
+
+
 def _dedup_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse events sharing :func:`_normalize_event_key` across the whole report window,
-    keeping the richest (most fields populated) row per group (F9/F16)."""
+    keeping the richest (most fields populated) row per group (F9/F16).
+
+    R6-forecast: a second pass then collapses any remaining rows sharing
+    :func:`_item_amount_kind_key` (same trigger item + date + amount + kind) -- see that function's
+    docstring for the motivating near-duplicate this catches that the content key above misses.
+    Rows with no ``item_id``/``amount_usd`` to key on (the key function returns ``None``) are never
+    touched by this second pass and pass through unchanged."""
     best: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for ev in rows:
         key = _normalize_event_key(ev)
         cur = best.get(key)
         if cur is None or _event_richness(ev) > _event_richness(cur):
             best[key] = ev
-    return list(best.values())
+    stage1 = list(best.values())
+
+    # Second pass: merge remaining rows sharing (item_id, kind, date, amount_usd). ``merged`` keeps
+    # insertion order (Python dict semantics) so the richest-per-group result preserves stage1's
+    # relative ordering; a row with no mergeable key (``_item_amount_kind_key`` returns ``None``)
+    # gets its own always-unique placeholder key so it always passes through untouched.
+    merged: dict[tuple[int, str, Any, float] | tuple[str, int], dict[str, Any]] = {}
+    for ev in stage1:
+        key2 = _item_amount_kind_key(ev) or ("__unmergeable__", id(ev))
+        cur = merged.get(key2)
+        if cur is None or _event_richness(ev) > _event_richness(cur):
+            merged[key2] = ev
+    return list(merged.values())
 
 
 def _event_has_signal(ev: dict[str, Any]) -> bool:

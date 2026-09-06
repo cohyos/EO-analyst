@@ -45,6 +45,35 @@ PLATFORM_PAYLOADS_YAML = Path(__file__).resolve().parent / "platform_payloads.ya
 _TRIGGER_EVENT_KINDS = ("contract_award", "deployment", "launch")
 _LOOKBACK_DAYS = 90
 
+# R6-forecast (round 6 judge D6, docs/qa/loop/round_5_judge.md finding 1): Hebrew multi-letter
+# abbreviations (כטב"ם, רק"ם, מטע"ד, ...) are conventionally punctuated with the Hebrew gershayim
+# mark (״, ״) rather than a plain ASCII double-quote, and a single-letter abbreviation with a
+# geresh (׳, ׳) rather than an apostrophe. ``platform_payloads.yaml`` has used a plain ASCII
+# quote/apostrophe for a while now, but some ``tender_forecasts`` rows were written back when it (or
+# an earlier version of it) used the Hebrew marks -- e.g. row `platform='כטב״ם MALE'` (gershayim)
+# alongside a later run's `platform='כטב"ם MALE'` (ASCII quote). Both spellings denote the exact
+# same platform, but ``tender_forecasts`` has a hard ``UNIQUE (platform, buyer_country,
+# payload_need)`` constraint (db/migrations/versions/0004_tenders.py) on the literal text, so the
+# punctuation drift alone makes ``ON CONFLICT`` miss and insert a brand-new row instead of updating
+# the existing one -- the observed "same platform/payload/reasoning text, window shifted by a day or
+# two" near-duplicates (AeroVironment/E-HEL C-UAS, APC/IFV commander/gunner sight, MALE UAV EO/IR
+# gimbal -- docs/qa/loop/round_5_judge.md D6/D9) are exactly this: one row from before the yaml's
+# punctuation settled on ASCII, one from after.
+_HEBREW_GERSHAYIM = "״"  # ״ -- Hebrew punctuation gershayim
+_HEBREW_GERESH = "׳"  # ׳ -- Hebrew punctuation geresh
+
+
+def normalize_hebrew_punctuation(text: str | None) -> str:
+    """Canonicalise Hebrew gershayim/geresh onto the plain ASCII quote/apostrophe -- the form
+    ``platform_payloads.yaml`` uses today. Used both when loading the yaml (so a future edit back
+    to the Hebrew marks is canonicalised before it ever reaches the DB -- see the module-level note
+    above) and by :func:`_forecast_stable_key` / :func:`find_duplicate_forecast_groups` to recognise
+    already-diverged historical rows as the same forecast. ``None``/empty input returns ``""``."""
+    if not text:
+        return ""
+    return text.replace(_HEBREW_GERSHAYIM, '"').replace(_HEBREW_GERESH, "'")
+
+
 _RFI_RE = re.compile(
     r"\bRFI\b|\bRFP\b|request for information|request for proposal(?:s)?|sources sought|"
     r"בקשת מידע|קול קורא|מכרז",
@@ -64,8 +93,11 @@ class PlatformSpec:
     def __init__(self, raw: dict[str, Any]) -> None:
         self.key: str = raw["key"]
         self.match: list[str] = [m.lower() for m in raw.get("match", [])]
-        self.category_he: str = raw.get("category_he", self.key)
-        self.payload_need_he: str = raw.get("payload_need_he", "")
+        # R6-forecast: normalised at load time (see :func:`normalize_hebrew_punctuation`) so every
+        # candidate built from this spec always writes the same canonical text to
+        # ``tender_forecasts``, regardless of which punctuation mark the yaml entry happens to use.
+        self.category_he: str = normalize_hebrew_punctuation(raw.get("category_he", self.key))
+        self.payload_need_he: str = normalize_hebrew_punctuation(raw.get("payload_need_he", ""))
         self.payload_domain: str = raw.get("payload_domain", "")
         self.typical_vendors: list[str] = list(raw.get("typical_vendors", []))
         lag = raw.get("lag_months") or {}
@@ -633,6 +665,113 @@ def _regenerate_flagged_forecasts(role: str) -> int:
             )
         regenerated += 1
     return regenerated
+
+
+# --------------------------------------------------------------------------
+# R6-forecast (round 6 judge D6, finding 1): existing-row near-duplicate detection/repair
+# --------------------------------------------------------------------------
+
+
+def _forecast_stable_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    """The (platform, buyer_country, payload_need) identity a forecast should live at in
+    ``tender_forecasts`` -- normalised (see :func:`normalize_hebrew_punctuation`) so historical
+    Hebrew-punctuation drift, and incidental case/whitespace differences, don't split what is
+    really one forecast into several rows. Deliberately excludes ``window_from``/``window_to``/
+    ``likelihood``/``rationale_he``/``sources``/``updated_at`` -- ignoring dates is the point: those
+    are exactly the fields a re-run is expected to refresh in place via ``ON CONFLICT``, not grow a
+    new row for."""
+    return (
+        normalize_hebrew_punctuation(row.get("platform")).strip().casefold(),
+        (row.get("buyer_country") or "").strip(),
+        normalize_hebrew_punctuation(row.get("payload_need")).strip().casefold(),
+    )
+
+
+@dataclass
+class ForecastDuplicateGroup:
+    """One group of ``tender_forecasts`` rows sharing a :func:`_forecast_stable_key` -- i.e. a
+    near-duplicate cluster :func:`dedupe_existing_forecasts` would collapse to a single row."""
+
+    key: tuple[str, str, str]
+    ids: list[int]
+    #: the row to keep -- the most recently updated member of the group (ties broken by highest id,
+    #: i.e. the most recently inserted), on the theory that it carries the freshest
+    #: window/likelihood/rationale.
+    kept_id: int
+    dropped_ids: list[int]
+
+
+def find_duplicate_forecast_groups(rows: list[dict[str, Any]]) -> list[ForecastDuplicateGroup]:
+    """Group already-fetched ``tender_forecasts`` rows by :func:`_forecast_stable_key`, returning
+    only groups with more than one member -- the near-duplicate clusters a repair pass should
+    collapse. Pure function over plain dicts (no DB access), so both the dry-run report and this
+    module's own unit tests can exercise it directly without touching the database. Each input row
+    is expected to carry at least ``id``, ``platform``, ``buyer_country``, ``payload_need``, and
+    (for ordering) ``updated_at``/``created_at``."""
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(_forecast_stable_key(row), []).append(row)
+
+    def _recency(row: dict[str, Any]) -> tuple[Any, Any]:
+        return (row.get("updated_at") or row.get("created_at"), row.get("id") or 0)
+
+    out: list[ForecastDuplicateGroup] = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        ordered = sorted(members, key=_recency, reverse=True)
+        out.append(
+            ForecastDuplicateGroup(
+                key=key,
+                ids=[m["id"] for m in members],
+                kept_id=ordered[0]["id"],
+                dropped_ids=[m["id"] for m in ordered[1:]],
+            )
+        )
+    return out
+
+
+def dedupe_existing_forecasts(conn: Any, *, apply: bool = False) -> list[ForecastDuplicateGroup]:
+    """R6-forecast: read every ``tender_forecasts`` row, group by :func:`_forecast_stable_key`, and
+    return the near-duplicate groups found (see :func:`find_duplicate_forecast_groups`).
+
+    ``apply=False`` (the default): read-only, a dry-run listing -- never writes to the DB. This is
+    the mode used for the report's duplicate-group listing; DB writes for existing rows are owned by
+    the data-repair engineer, not this stage.
+
+    ``apply=True``: for each group, merges every dropped row's ``sources`` into the kept row's own
+    (order-preserving, deduplicated), stamps its ``updated_at``, and deletes the dropped rows. The
+    kept row's own ``window_from``/``window_to``/``likelihood``/``rationale_he`` are left untouched
+    -- it is already the most recently updated member of the group, i.e. the most current data.
+    Does not commit -- like every other ``conn``-taking helper in this codebase, the caller's own
+    ``with connection() as conn:`` block (or an explicit ``conn.commit()``) controls the transaction.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, platform, buyer_country, payload_need, likelihood, window_from, window_to, "
+            "rationale_he, sources, created_at, updated_at FROM tender_forecasts"
+        )
+        rows = cur.fetchall()
+    groups = find_duplicate_forecast_groups(rows)
+    if not apply or not groups:
+        return groups
+
+    rows_by_id = {row["id"]: row for row in rows}
+    with conn.cursor() as cur:
+        for group in groups:
+            merged_sources = list(rows_by_id[group.kept_id].get("sources") or [])
+            seen = set(merged_sources)
+            for dropped_id in group.dropped_ids:
+                for source in rows_by_id[dropped_id].get("sources") or []:
+                    if source not in seen:
+                        seen.add(source)
+                        merged_sources.append(source)
+            cur.execute(
+                "UPDATE tender_forecasts SET sources=%s, updated_at=now() WHERE id=%s",
+                (merged_sources or None, group.kept_id),
+            )
+            cur.execute("DELETE FROM tender_forecasts WHERE id = ANY(%s)", (group.dropped_ids,))
+    return groups
 
 
 # --------------------------------------------------------------------------
