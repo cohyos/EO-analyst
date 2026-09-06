@@ -48,6 +48,7 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check, citations_in, split_sentences
+from eoa.report.textnorm import normalize_draft
 from eoa.report.weekly import (
     _domain_label,
     _extend_registry_with_events,
@@ -485,6 +486,11 @@ def build_monthly(
             bad_refs=original_errors.bad_refs,
             duplicate_sentences=original_errors.duplicate_sentences,
         )
+
+    # Round 3 (2026-09-06, D6 judge finding 4): repair doubled ASCII quotes / non-typographic
+    # quote marks around Hebrew abbreviations in every rendered text field before handing the
+    # draft to docx_builder -- see eoa.report.textnorm.
+    draft = normalize_draft(draft)
 
     # deterministic, non-LLM data (rule 4: never ask the model to narrate ungrounded numbers)
     players = players_map()

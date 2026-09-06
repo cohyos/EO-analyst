@@ -3,12 +3,13 @@
 Pipeline: collect the week's red/orange items (+ a yellow-level domain-count summary, context
 only) -> ``eoa.report.trends.detect_trends`` (no LLM) -> ``draft_weekly`` (resident model: the
 daily report's structured, sentence-per-claim shape — see round-2 note below) ->
-``qa_citations.check`` -> on failure, one corrective retry, then (if still failing) drop the
-narrative content entirely and render tables + a one-line system note instead, mirroring
-``eoa.report.daily``'s own two-failure fallback -> render docx/md/html reusing ``docx_builder``'s
-additive ``extra_sections``/``tables`` hooks for the trend prose, the FR-11.4 meta-summary
-(deterministic, not LLM-authored — see ``collect_meta_summary``), and the "לוח 90 הימים הקרובים"
-conference table -> insert a ``reports`` row (``kind='weekly'``).
+``qa_citations.check`` -> on failure, one corrective retry, then (if still failing) replace the
+narrative with a deterministic, cited substitute synthesis built straight from the data (round 3,
+2026-09-06 -- see ``_deterministic_fallback_draft``, mirrors ``eoa.report.daily``'s own two-failure
+fallback) -> render docx/md/html reusing ``docx_builder``'s additive ``extra_sections``/``tables``
+hooks for the trend prose, the FR-11.4 meta-summary (deterministic, not LLM-authored — see
+``collect_meta_summary``), and the "לוח 90 הימים הקרובים" conference table -> insert a ``reports``
+row (``kind='weekly'``).
 
 Round-2 (2026-09-06): migrated ``WeeklyReportDraft`` from free-prose (``exec_summary_he``/
 ``sections[].prose_he``/``trend_paragraphs``) to the daily report's structured
@@ -39,6 +40,7 @@ from eoa.report import trends as trends_mod
 from eoa.report.daily import collect_deep_search, collect_events, collect_open_clarifications
 from eoa.report.docx_builder import (
     build_docx,
+    fmt_amount,
     fmt_date,
     hebrew_date_str,
     render_html,
@@ -47,6 +49,7 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check
+from eoa.report.textnorm import normalize_draft
 
 log = structlog.get_logger(__name__)
 
@@ -444,11 +447,9 @@ def _no_items_draft() -> WeeklyReportDraft:
 
 
 def _qa_failed_twice_draft() -> WeeklyReportDraft:
-    """Mirrors ``eoa.report.daily._qa_failed_twice_draft`` (goal 1): when the draft still fails
-    citation QA after one corrective retry, the narrative content (exec summary/trends/sections/
-    outlook) is dropped entirely rather than partially kept — the reader gets the deterministic
-    tables (events, tenders, tech watch, Israel-industry focus, patents, the conference calendar)
-    and the sources appendix, plus this one-line note."""
+    """Kept only for the items-somehow-empty edge case (should not happen in practice, mirroring
+    ``eoa.report.daily._qa_failed_twice_draft``'s own note). The normal two-failure fallback since
+    round 3 (2026-09-06) is :func:`_deterministic_fallback_draft`."""
     return WeeklyReportDraft(
         exec_summary=[],
         trends=[],
@@ -458,6 +459,158 @@ def _qa_failed_twice_draft() -> WeeklyReportDraft:
             "הושמטה במלואה מדוח זה כדי לא להציג ניסוח חלקי או לא מאומת. הטבלאות הדטרמיניסטיות "
             "(אירועים, מכרזים, מעקב טכנולוגי, תעשייה ישראלית, פטנטים, לוח כנסים) ונספח המקורות "
             "שלהלן אינם מושפעים ומוצגים במלואם."
+        ),
+        analyst_note_he=None,
+        outlook=[],
+        open_points_he=[],
+    )
+
+
+# --------------------------------------------------------------------------
+# round-3 (2026-09-06, D6 judge finding 1): deterministic substitute synthesis, mirroring
+# eoa.report.daily's own (see that module for the detailed rationale) -- small local copies of the
+# helpers per this package's established "no cross-module private-name imports" convention (see
+# e.g. this module's own ``_domain_label``/``_level_label`` above).
+# --------------------------------------------------------------------------
+
+_FALLBACK_TOP_ITEMS = 6
+_FALLBACK_TOP_EVENTS = 5
+_FALLBACK_TOP_ISRAEL_ITEMS = 5
+_FALLBACK_TEXT_TRUNC_CHARS = 220
+
+_EVENT_KIND_LABELS_HE_FALLBACK = {
+    "contract_award": "זכייה בחוזה",
+    "m_and_a": "מיזוג/רכישה",
+    "partnership": "שותפות",
+    "investment": "השקעה",
+    "launch": "השקה",
+    "test": "ניסוי",
+    "deployment": "פריסה",
+    "regulation": "רגולציה",
+    "other": "אחר",
+}
+
+
+def _fallback_event_sort_key(ev: dict[str, Any]) -> tuple[dt.date, float]:
+    date = ev.get("date") or dt.date.min
+    amount = ev.get("amount_usd")
+    try:
+        amount_val = float(amount) if amount is not None else 0.0
+    except (TypeError, ValueError):
+        amount_val = 0.0
+    return (date, amount_val)
+
+
+def _extend_registry_with_rows(citation_items: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
+    """Mutate ``citation_items`` in place, appending any ``rows`` entry not already present by id,
+    and stamping ``row["n"]`` -- same convention as :func:`_extend_registry_with_events`. Used by
+    :func:`_deterministic_fallback_draft` to fold Israel-relevant items into the registry before
+    ``weekly_israel_tables`` runs its own (idempotent) extension of the same list later."""
+    by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
+    next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
+    for row in rows:
+        rid = row.get("id")
+        if rid is None:
+            continue
+        entry = by_id.get(rid)
+        if entry is None:
+            entry = {
+                "id": rid,
+                "n": next_n,
+                "title": row.get("title"),
+                "source_name": row.get("source_name"),
+                "url": row.get("url"),
+                "published_at": row.get("published_at"),
+            }
+            citation_items.append(entry)
+            by_id[rid] = entry
+            next_n += 1
+        row["n"] = entry["n"]
+
+
+def _fallback_truncate(text: str | None, limit: int = _FALLBACK_TEXT_TRUNC_CHARS) -> str:
+    text = (text or "").strip()
+    if not text:
+        return "—"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _fallback_top_item_sentences(items: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    sentences: list[Sentence] = []
+    for it in items[:limit]:
+        n = it.get("n")
+        if n is None:
+            continue
+        level = _level_label(it.get("level"))
+        title = it.get("title") or "—"
+        so_what = _fallback_truncate(it.get("so_what_he") or it.get("summary_he"))
+        sentences.append(Sentence(text_he=f"{title} ({level}): {so_what}", cites=[int(n)]))
+    return sentences
+
+
+def _fallback_event_sentences(events_with_n: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    ranked = sorted(
+        (ev for ev in events_with_n if ev.get("n") is not None),
+        key=_fallback_event_sort_key,
+        reverse=True,
+    )
+    sentences: list[Sentence] = []
+    for ev in ranked[:limit]:
+        kind_label = _EVENT_KIND_LABELS_HE_FALLBACK.get(ev.get("kind"), ev.get("kind") or "אחר")
+        parties = ", ".join(ev.get("parties") or []) or "—"
+        customer_program = ev.get("customer") or ev.get("program") or "—"
+        sentences.append(
+            Sentence(
+                text_he=(
+                    f"{kind_label}: {parties} — {customer_program}, {fmt_amount(ev)}, "
+                    f"בתאריך {fmt_date(ev.get('date'))}."
+                ),
+                cites=[int(ev["n"])],
+            )
+        )
+    return sentences
+
+
+def _fallback_israel_item_sentences(israel_items: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    sentences: list[Sentence] = []
+    for it in israel_items[:limit]:
+        n = it.get("n")
+        if n is None:
+            continue
+        title = it.get("title") or "—"
+        so_what = _fallback_truncate(it.get("so_what_he") or it.get("summary_he"))
+        sentences.append(Sentence(text_he=f"רלוונטיות ישראלית — {title}: {so_what}", cites=[int(n)]))
+    return sentences
+
+
+def _deterministic_fallback_draft(
+    items: list[dict[str, Any]],
+    events_with_n: list[dict[str, Any]],
+    israel_items: list[dict[str, Any]],
+) -> WeeklyReportDraft:
+    """Round 3 (2026-09-06, D6 judge finding 1), mirrors
+    ``eoa.report.daily._deterministic_fallback_draft``: a deterministic (no LLM) substitute
+    executive summary built straight from the week's already-numbered data -- the top red/orange
+    items, the week's notable business events, and the Israel-relevant items -- used when the
+    LLM-drafted narrative still fails citation QA after one corrective retry. Every sentence cites
+    a real, already-registered item ``n``, so this cannot itself fail
+    :func:`eoa.report.qa_citations.check` (the caller still runs it once anyway, defensively -- see
+    ``build_weekly``)."""
+    sentences: list[Sentence] = []
+    sentences.extend(_fallback_top_item_sentences(items, limit=_FALLBACK_TOP_ITEMS))
+    sentences.extend(_fallback_event_sentences(events_with_n, limit=_FALLBACK_TOP_EVENTS))
+    sentences.extend(_fallback_israel_item_sentences(israel_items, limit=_FALLBACK_TOP_ISRAEL_ITEMS))
+    return WeeklyReportDraft(
+        exec_summary=sentences,
+        trends=[],
+        sections=[],
+        system_note_he=(
+            "תקציר מובנה אוטומטית (ללא ניסוח מודל): הטיוטה הטקסטואלית של הדוח השבועי לא עברה את "
+            "בדיקת האזכורים גם לאחר ניסיון תיקון, ולכן ניסוח המודל הושמט במלואו. התקציר שלעיל הופק "
+            "ישירות מנתוני מסד הנתונים (ללא ניסוח חופשי של מודל), ומכיל את הפריטים המובילים, "
+            "האירועים העסקיים הבולטים והפריטים הרלוונטיים לתעשייה הישראלית לשבוע זה — כל משפט כאן "
+            "מצוטט למקורו. הטבלאות הדטרמיניסטיות (אירועים, מכרזים, מעקב טכנולוגי, תעשייה ישראלית, "
+            "פטנטים, לוח כנסים) ונספח המקורות שלהלן אינם מושפעים ומוצגים במלואם."
         ),
         analyst_note_he=None,
         outlook=[],
@@ -663,13 +816,27 @@ def build_weekly(
         qa = check(draft, citation_items)
 
     if not qa.passed and items:
-        # Round-2 (2026-09-06), mirrors eoa.report.daily: two failures (initial draft + one
-        # corrective retry) drop the narrative content entirely rather than stripping it
-        # sentence-by-sentence behind a warning banner. The original QA errors are kept in
-        # `qa_report` (persisted below) for the analyst to review; `qa.passed` stays False.
-        log.error("weekly_qa_failed_twice_dropping_narrative", errors=qa.errors[:10])
+        # Round 3 (2026-09-06, D6 judge finding 1), mirrors eoa.report.daily: two failures
+        # (initial draft + one corrective retry) replace the narrative with a deterministic, cited
+        # substitute synthesis built straight from the data -- see `_deterministic_fallback_draft`.
+        # The original QA errors are kept in `qa_report` (persisted below) for the analyst to
+        # review; `qa.passed` stays False either way.
+        log.error("weekly_qa_failed_twice_using_deterministic_fallback", errors=qa.errors[:10])
         original_errors = qa
-        draft = _qa_failed_twice_draft()
+        israel_items: list[dict[str, Any]] = []
+        try:
+            from eoa.report.israel_section import collect_israel_items
+
+            week_start_ts = dt.datetime.combine(start, dt.time.min, tzinfo=JERUSALEM).astimezone(dt.UTC)
+            week_end_ts = dt.datetime.combine(end, dt.time.max, tzinfo=JERUSALEM).astimezone(dt.UTC)
+            israel_items = collect_israel_items(week_start_ts, week_end_ts)
+            _extend_registry_with_rows(citation_items, israel_items)
+        except Exception as exc:
+            log.warning("weekly_report_fallback_israel_collect_failed", error=str(exc)[:160])
+        draft = _deterministic_fallback_draft(items, events_with_n, israel_items)
+        fallback_qa = check(draft, citation_items)
+        if not fallback_qa.passed:
+            log.error("weekly_report_fallback_draft_failed_citation_check", errors=fallback_qa.errors[:10])
         qa = QAResult(
             passed=False,
             errors=original_errors.errors,
@@ -677,6 +844,8 @@ def build_weekly(
             bad_refs=original_errors.bad_refs,
             duplicate_sentences=original_errors.duplicate_sentences,
         )
+
+    draft = normalize_draft(draft)
 
     trend_sections = [
         {

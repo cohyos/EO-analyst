@@ -82,9 +82,51 @@ class TestCategorize:
         assert isec._CATEGORY_WINS in cats
         assert isec._CATEGORY_EXPORT in cats
 
-    def test_uncategorized_item_defaults_to_competition(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_uncategorized_item_with_no_company_or_event_is_excluded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round 3 (2026-09-06, D6 judge finding 2): the old behaviour (any uncategorized-but-
+        relevant item defaults into 'competition') let political op-eds whose only Israeli hook is
+        a government/military org mention (e.g. 'IDF') into the section -- an item with no Israeli
+        company entity and no business event kind is now excluded entirely instead."""
         monkeypatch.setattr(isec, "_item_event_kinds", lambda item_id: set())
-        item = {"id": 1, "israel_reasons": [], "summary_he": "", "so_what_he": "", "title": ""}
+        item = {
+            "id": 1,
+            "israel_reasons": [],
+            "summary_he": "",
+            "so_what_he": "",
+            "title": "",
+            "entities_mentioned": ["IDF"],
+        }
+        assert isec._categorize(item) == set()
+
+    def test_uncategorized_item_with_israeli_company_entity_defaults_to_competition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(isec, "_item_event_kinds", lambda item_id: set())
+        monkeypatch.setattr("eoa.pipeline.israel_focus.israeli_watchlist_names", lambda: ["Elbit", "Rafael"])
+        item = {
+            "id": 1,
+            "israel_reasons": [],
+            "summary_he": "",
+            "so_what_he": "",
+            "title": "",
+            "entities_mentioned": ["Elbit"],
+        }
+        assert isec._categorize(item) == {isec._CATEGORY_COMPETITION}
+
+    def test_uncategorized_item_with_eligible_event_kind_defaults_to_competition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(isec, "_item_event_kinds", lambda item_id: {"partnership"})
+        item = {
+            "id": 1,
+            "israel_reasons": [],
+            "summary_he": "",
+            "so_what_he": "",
+            "title": "",
+            "entities_mentioned": ["IDF"],
+        }
         assert isec._categorize(item) == {isec._CATEGORY_COMPETITION}
 
 
@@ -92,9 +134,7 @@ class TestCompanySummaryRows:
     def test_counts_mentions_wins_and_competitors_per_israeli_company(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            "eoa.pipeline.israel_focus.israeli_watchlist_names", lambda: ["Elbit", "Rafael"]
-        )
+        monkeypatch.setattr("eoa.pipeline.israel_focus.israeli_watchlist_names", lambda: ["Elbit", "Rafael"])
         monkeypatch.setattr(
             isec,
             "_item_event_kinds",

@@ -53,6 +53,13 @@ _CATEGORY_ORDER = [_CATEGORY_WINS, _CATEGORY_COMPETITION, _CATEGORY_EXPORT, _CAT
 _WIN_EVENT_KINDS = {"contract_award", "m_and_a", "deployment"}
 _THREAT_TAGS_HE = ("איום", "רגולצי", "סנקצי", "אמברגו", "חקיק")
 
+#: Round 3 (2026-09-06, D6 judge finding 2): business-event kinds that qualify an otherwise-
+#: uncategorized item for the default/broadest bucket (competition) -- a superset of
+#: `_WIN_EVENT_KINDS` (an item with one of those already lands in `wins` directly; it is still
+#: eligible for the default bucket too if it has no other category, though in practice a win-kind
+#: item usually also carries a competitor/export reason).
+_DEFAULT_BUCKET_EVENT_KINDS = _WIN_EVENT_KINDS | {"partnership", "investment", "test", "launch"}
+
 
 def _fetchall(sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     with connection() as conn, conn.cursor() as cur:
@@ -92,8 +99,24 @@ def _item_event_kinds(item_id: int) -> set[str]:
     return {r["kind"] for r in rows if r.get("kind")}
 
 
+def _has_israeli_company_entity(item: dict[str, Any]) -> bool:
+    """True if `item`'s own `entities_mentioned` names an Israeli defence-industry company from
+    `config/watchlist.yaml` (`country: IL`), via `eoa.pipeline.israel_focus` -- round 3 (2026-09-06,
+    D6 judge finding 2)'s eligibility test, distinguishing an actual company mention from a
+    government/military org mention (IDF/MoD/IAF, which `israel_relevance` also treats as an
+    Israeli-hook signal but which is not industry/business intelligence on its own)."""
+    from eoa.pipeline.israel_focus import israeli_watchlist_names
+
+    entities = item.get("entities_mentioned") or []
+    if not entities:
+        return False
+    israeli_names = {name.casefold() for name in israeli_watchlist_names()}
+    return any((e or "").casefold() in israeli_names for e in entities)
+
+
 def _categorize(item: dict[str, Any]) -> set[str]:
-    """Which of the four A13 category buckets `item` belongs to (may be more than one)."""
+    """Which of the four A13 category buckets `item` belongs to (may be more than one); an empty
+    set means `item` is excluded from the "תעשייה ישראלית" section entirely."""
     cats: set[str] = set()
     reasons = item.get("israel_reasons") or []
     event_kinds = _item_event_kinds(item["id"])
@@ -106,9 +129,16 @@ def _categorize(item: dict[str, Any]) -> set[str]:
     text = " ".join(filter(None, [item.get("summary_he"), item.get("so_what_he"), item.get("title")]))
     if any(kw in text for kw in _THREAT_TAGS_HE) or "regulation" in event_kinds:
         cats.add(_CATEGORY_THREATS)
-    if not cats:
-        # Uncategorized-but-relevant items still surface somewhere -- default to competition/
-        # market-context, the broadest of the four buckets, rather than being silently dropped.
+    # Round 3 (2026-09-06, D6 judge finding 2): the default/broadest bucket used to catch *every*
+    # relevant-but-uncategorized item unconditionally -- verified live to let two political op-eds
+    # (an IDF-as-scapegoat opinion piece; a Lebanon-ridge sovereignty piece) into "תחרות ומתחרים"
+    # (competition), both tagged only with the generic entity "IDF" (a government/military org,
+    # not a company) and carrying no business event at all. Only default an uncategorized item
+    # into competition when it actually carries an Israeli defence-industry company entity or a
+    # business event kind -- an item whose only Israeli hook is a government/military org mention
+    # (IDF/MoD/IAF/...) is excluded from the section entirely instead, rather than dropped into
+    # the wrong bucket.
+    if not cats and (_has_israeli_company_entity(item) or (event_kinds & _DEFAULT_BUCKET_EVENT_KINDS)):
         cats.add(_CATEGORY_COMPETITION)
     return cats
 
@@ -136,9 +166,7 @@ def _extend_registry(
     return citation_items
 
 
-def _category_table(
-    category: str, items: list[dict[str, Any]], *, max_items: int
-) -> dict[str, Any] | None:
+def _category_table(category: str, items: list[dict[str, Any]], *, max_items: int) -> dict[str, Any] | None:
     picked = items[:max_items]
     if not picked:
         return None
@@ -189,7 +217,7 @@ def daily_israel_tables(
 
 
 def _company_summary_rows(items: list[dict[str, Any]]) -> list[list[Any]]:
-    """"Israeli company | mentions | wins | competitors active" summary table
+    """ "Israeli company | mentions | wins | competitors active" summary table
     (docs/PLAN_WINDOWS_NATIVE.md row A13 point 4's weekly table)."""
     from eoa.pipeline.israel_focus import israeli_watchlist_names
 

@@ -2,9 +2,10 @@
 
 Pipeline: ``collect_items`` (+ ``collect_events`` / ``collect_deep_search`` / ``collect_open_clarifications``)
 -> ``draft_report`` (resident model) -> ``qa_citations.check`` -> on failure, one corrective LLM retry,
-then (if still failing) drop the narrative content entirely and render tables + a one-line system
-note instead (goal 1, 2026-09-06 -- see ``_qa_failed_twice_draft``) -> render docx/md/html -> persist
-a ``reports`` row.
+then (if still failing) replace the narrative with a deterministic, cited substitute synthesis built
+straight from the data (round 3, 2026-09-06 -- see ``_deterministic_fallback_draft``; superseded the
+original goal-1 behaviour of dropping the narrative to tables-only + an apology sentence) -> render
+docx/md/html -> persist a ``reports`` row.
 """
 
 from __future__ import annotations
@@ -22,9 +23,10 @@ from eoa.config import REPO_ROOT, settings
 from eoa.db import connection
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.analysis import DailyReportDraft
+from eoa.llm.schemas.analysis import DailyReportDraft, Sentence
 from eoa.report.docx_builder import (
     build_docx,
+    fmt_amount,
     fmt_date,
     hebrew_date_str,
     render_html,
@@ -33,6 +35,7 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check
+from eoa.report.textnorm import normalize_draft
 
 log = structlog.get_logger(__name__)
 
@@ -470,12 +473,12 @@ def _tables_only_draft(counts: TableCounts) -> DailyReportDraft:
 
 
 def _qa_failed_twice_draft() -> DailyReportDraft:
-    """Goal 1 (2026-09-06): replaces the old "strip the flagged sentences and show a bold warning
-    banner" behaviour. When the draft still fails citation QA after one corrective retry, the
-    narrative content (exec summary/sections/outlook) is dropped entirely rather than partially
-    kept -- the reader gets the deterministic tables (events, tenders, tech watch) and the sources
-    appendix, plus this one-line note, instead of a document that mixes verified and silently-
-    edited prose behind a banner that is easy to miss."""
+    """Kept only for a report with *zero* qualifying items when the LLM path itself was somehow
+    still exercised (should not happen in practice -- ``draft_report``/``build_daily`` never call
+    the two-failure path with an empty ``items``, see the ``if not qa.passed and items`` guards).
+    The normal two-failure fallback since round 3 (2026-09-06) is
+    :func:`_deterministic_fallback_draft`, which -- unlike this function -- has real per-item data
+    to build a cited substitute summary from."""
     return DailyReportDraft(
         exec_summary=[],
         sections=[],
@@ -483,6 +486,160 @@ def _qa_failed_twice_draft() -> DailyReportDraft:
             "הטיוטה הטקסטואלית של הדוח לא עברה את בדיקת האזכורים גם לאחר ניסיון תיקון, ולכן הושמטה "
             "במלואה מדוח זה כדי לא להציג ניסוח חלקי או לא מאומת. הטבלאות הדטרמיניסטיות (אירועים, "
             "מכרזים, מעקב טכנולוגי) ונספח המקורות שלהלן אינם מושפעים ומוצגים במלואם."
+        ),
+        outlook=[],
+        open_points_he=[],
+    )
+
+
+# --------------------------------------------------------------------------
+# round-3 (2026-09-06, D6 judge finding 1): deterministic substitute synthesis for a draft that
+# fails citation QA twice -- a cited, honestly-labelled executive summary built straight from
+# already-numbered report data (no LLM), rather than dropping the narrative entirely.
+# --------------------------------------------------------------------------
+
+_FALLBACK_TOP_ITEMS = 6
+_FALLBACK_TOP_EVENTS = 5
+_FALLBACK_TOP_ISRAEL_ITEMS = 5
+_FALLBACK_TEXT_TRUNC_CHARS = 220
+
+#: Small local copy of ``eoa.report.docx_builder._EVENT_KIND_LABELS_HE`` (same convention already
+#: used throughout this package -- see e.g. ``eoa.report.weekly``'s module docstring -- of a
+#: report-building module keeping its own copy of a rendering label map rather than importing a
+#: private name across a module boundary).
+_EVENT_KIND_LABELS_HE_FALLBACK = {
+    "contract_award": "זכייה בחוזה",
+    "m_and_a": "מיזוג/רכישה",
+    "partnership": "שותפות",
+    "investment": "השקעה",
+    "launch": "השקה",
+    "test": "ניסוי",
+    "deployment": "פריסה",
+    "regulation": "רגולציה",
+    "other": "אחר",
+}
+
+
+def _extend_registry_with_rows(citation_items: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
+    """Mutate ``citation_items`` in place, appending any ``rows`` entry (a dict carrying ``id``)
+    not already present by id, and stamping ``row["n"]`` with the (possibly pre-existing) registry
+    number -- same convention as :func:`_extend_citation_registry`. Used by
+    :func:`_deterministic_fallback_draft` to fold Israel-relevant items into the citation registry
+    before ``daily_israel_tables`` runs its own (idempotent) extension of the same list later."""
+    by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
+    next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
+    for row in rows:
+        rid = row.get("id")
+        if rid is None:
+            continue
+        entry = by_id.get(rid)
+        if entry is None:
+            entry = {
+                "id": rid,
+                "n": next_n,
+                "title": row.get("title"),
+                "source_name": row.get("source_name"),
+                "url": row.get("url"),
+                "published_at": row.get("published_at"),
+            }
+            citation_items.append(entry)
+            by_id[rid] = entry
+            next_n += 1
+        row["n"] = entry["n"]
+
+
+def _fallback_truncate(text: str | None, limit: int = _FALLBACK_TEXT_TRUNC_CHARS) -> str:
+    text = (text or "").strip()
+    if not text:
+        return "—"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _fallback_top_item_sentences(items: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    """One cited ``Sentence`` per top item (already score-ordered by ``collect_items``): title +
+    level + a one-line ``so_what_he``/``summary_he`` -- judge finding 1's "top red/orange items"."""
+    sentences: list[Sentence] = []
+    for it in items[:limit]:
+        n = it.get("n")
+        if n is None:
+            continue
+        level = _level_label(it.get("level"))
+        title = it.get("title") or "—"
+        so_what = _fallback_truncate(it.get("so_what_he") or it.get("summary_he"))
+        sentences.append(Sentence(text_he=f"{title} ({level}): {so_what}", cites=[int(n)]))
+    return sentences
+
+
+def _fallback_event_sentences(events_with_n: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    """One cited ``Sentence`` per notable business event (kind, parties, customer/program, amount,
+    date) -- judge finding 1's "day's notable events". Only events already carrying a registry
+    ``n`` (every event with an ``item_id`` gets one via :func:`_extend_citation_registry`) can be
+    cited here; an event with no linked item is skipped (it still renders in the events table)."""
+    ranked = sorted(
+        (ev for ev in events_with_n if ev.get("n") is not None), key=_event_sort_key, reverse=True
+    )
+    sentences: list[Sentence] = []
+    for ev in ranked[:limit]:
+        kind_label = _EVENT_KIND_LABELS_HE_FALLBACK.get(ev.get("kind"), ev.get("kind") or "אחר")
+        parties = ", ".join(ev.get("parties") or []) or "—"
+        customer_program = ev.get("customer") or ev.get("program") or "—"
+        sentences.append(
+            Sentence(
+                text_he=(
+                    f"{kind_label}: {parties} — {customer_program}, {fmt_amount(ev)}, "
+                    f"בתאריך {fmt_date(ev.get('date'))}."
+                ),
+                cites=[int(ev["n"])],
+            )
+        )
+    return sentences
+
+
+def _fallback_israel_item_sentences(israel_items: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
+    """One cited ``Sentence`` per Israel-relevant item for the period -- judge finding 1's "Israel-
+    relevant items". ``israel_items`` must already carry a registry ``n`` (see
+    :func:`_extend_registry_with_rows`, called on this same list before this runs)."""
+    sentences: list[Sentence] = []
+    for it in israel_items[:limit]:
+        n = it.get("n")
+        if n is None:
+            continue
+        title = it.get("title") or "—"
+        so_what = _fallback_truncate(it.get("so_what_he") or it.get("summary_he"))
+        sentences.append(Sentence(text_he=f"רלוונטיות ישראלית — {title}: {so_what}", cites=[int(n)]))
+    return sentences
+
+
+def _deterministic_fallback_draft(
+    items: list[dict[str, Any]],
+    events_with_n: list[dict[str, Any]],
+    israel_items: list[dict[str, Any]],
+) -> DailyReportDraft:
+    """Round 3 (2026-09-06, D6 judge finding 1): when the LLM-drafted narrative still fails
+    citation QA after one corrective retry, this replaces
+    :func:`_qa_failed_twice_draft`'s old "drop the executive summary entirely" behaviour with a
+    deterministic (no LLM) substitute executive summary built straight from already-numbered
+    report data: the top red/orange items, the day's notable business events, and the
+    Israel-relevant items for the period. Every sentence here cites a real, already-registered
+    item ``n`` pulled directly from the data itself -- there is no free-text generation step for an
+    uncited claim to slip through, so this cannot fail :func:`eoa.report.qa_citations.check` (the
+    caller still runs it once anyway, defensively -- see ``build_daily``). ``system_note_he``
+    carries the honest explanation of why the model's own draft was dropped, labelled up front so a
+    reader never mistakes this deterministic summary for the model's own analysis."""
+    sentences: list[Sentence] = []
+    sentences.extend(_fallback_top_item_sentences(items, limit=_FALLBACK_TOP_ITEMS))
+    sentences.extend(_fallback_event_sentences(events_with_n, limit=_FALLBACK_TOP_EVENTS))
+    sentences.extend(_fallback_israel_item_sentences(israel_items, limit=_FALLBACK_TOP_ISRAEL_ITEMS))
+    return DailyReportDraft(
+        exec_summary=sentences,
+        sections=[],
+        system_note_he=(
+            "תקציר מובנה אוטומטית (ללא ניסוח מודל): הטיוטה הטקסטואלית של הדוח לא עברה את בדיקת "
+            "האזכורים גם לאחר ניסיון תיקון, ולכן ניסוח המודל הושמט במלואו. התקציר שלעיל הופק ישירות "
+            "מנתוני מסד הנתונים (ללא ניסוח חופשי של מודל), ומכיל את הפריטים המובילים, האירועים "
+            "העסקיים הבולטים והפריטים הרלוונטיים לתעשייה הישראלית לתקופה זו — כל משפט כאן מצוטט "
+            "למקורו. הטבלאות הדטרמיניסטיות (אירועים, מכרזים, מעקב טכנולוגי) ונספח המקורות שלהלן "
+            "אינם מושפעים ומוצגים במלואם."
         ),
         outlook=[],
         open_points_he=[],
@@ -744,6 +901,12 @@ def build_daily(
     deep_search = collect_deep_search(period_start, period_end)
     open_clarifications = collect_open_clarifications()
 
+    # Round 3 (2026-09-06): computed up front (moved from right before rendering) so
+    # `_deterministic_fallback_draft` (the two-failure QA fallback below) has a real, already-
+    # numbered events registry to cite from -- purely a computation-order change, `citation_items`/
+    # `events_with_n` are otherwise used exactly as before (rendering, additive tables).
+    citation_items, events_with_n = _extend_citation_registry(items, events)
+
     # Q3-15: the "חקירות עומק" section must not show an open question about an item that isn't
     # actually in this report.
     deep_search = _filter_deep_search_to_items_included(deep_search, items)
@@ -780,13 +943,30 @@ def build_daily(
         qa = check(draft, items)
 
     if not qa.passed and items:
-        # Goal 1 (2026-09-06): two failures (initial draft + one corrective retry) drop the
-        # narrative content entirely rather than stripping it sentence-by-sentence behind a
-        # warning banner -- see `_qa_failed_twice_draft`. The original QA errors are kept in
-        # `qa_report` (persisted below) for the analyst to review; `qa.passed` stays False.
-        log.error("report_qa_failed_twice_dropping_narrative", errors=qa.errors[:10])
+        # Round 3 (2026-09-06, D6 judge finding 1): two failures (initial draft + one corrective
+        # retry) replace the narrative with a deterministic, cited substitute synthesis built
+        # straight from the data -- see `_deterministic_fallback_draft` (supersedes goal 1's
+        # original "drop the narrative entirely" behaviour, kept only as `_qa_failed_twice_draft`
+        # for the items-somehow-empty edge case). The original QA errors are kept in `qa_report`
+        # (persisted below) for the analyst to review; `qa.passed` stays False either way -- the
+        # model's own draft did genuinely fail, that fact is not hidden by having a better
+        # fallback to show in its place.
+        log.error("report_qa_failed_twice_using_deterministic_fallback", errors=qa.errors[:10])
         original_errors = qa
-        draft = _qa_failed_twice_draft()
+        israel_items: list[dict[str, Any]] = []
+        try:
+            from eoa.report.israel_section import collect_israel_items
+
+            israel_items = collect_israel_items(start_ts, _end_ts)
+            _extend_registry_with_rows(citation_items, israel_items)
+        except Exception as exc:
+            log.warning("daily_report_fallback_israel_collect_failed", error=str(exc)[:160])
+        draft = _deterministic_fallback_draft(items, events_with_n, israel_items)
+        fallback_qa = check(draft, citation_items)
+        if not fallback_qa.passed:
+            # Should not happen -- every sentence here cites an id already present in
+            # `citation_items` -- but never silently ship an uncited fallback either.
+            log.error("daily_report_fallback_draft_failed_citation_check", errors=fallback_qa.errors[:10])
         qa = QAResult(
             passed=False,
             errors=original_errors.errors,
@@ -795,7 +975,7 @@ def build_daily(
             duplicate_sentences=original_errors.duplicate_sentences,
         )
 
-    citation_items, events_with_n = _extend_citation_registry(items, events)
+    draft = normalize_draft(draft)
 
     # section 5.2 / FR-5.2: tenders/RFI/RFP -- deterministic (not LLM-drafted), so it is rendered
     # via the additive tables hook below rather than touching DailyReportDraft or the citation QA

@@ -5,6 +5,21 @@ same content the ``.docx``/``.html`` siblings are built from -- see ``eoa.report
 and ``docs/MODULES.md``). Reuses ``eoa.report.qa_citations``'s sentence-splitting/factuality/
 citation-extraction helpers rather than re-implementing them; link liveness reuses
 ``eoa.qa.links.check_links``.
+
+Round 3 (2026-09-06, D6 judge finding 3): the ``no_duplicate_sentences`` check used to scan every
+``##``/``###`` section including "נספח מקורות" (the sources appendix) -- but the appendix is a
+*registry*, not narrative prose: it deliberately re-renders every numbered item's own title once,
+by design, so a table row citing item ``[n]`` (a deterministic table like "תעשייה ישראלית" or the
+events table) and the appendix's own row for that same item legitimately carry the identical title
+text. Two fixes were considered for this false positive -- (a) change table/appendix rendering so
+one of the two never repeats the title verbatim, at the cost of making it harder for a reader to
+cross-reference a table row back to its full source record, or (b) exempt the appendix section
+from this deterministic scan, since its whole purpose is to be a citable index, not fresh prose.
+(b) is implemented below (the appendix heading is excluded from :func:`score_D6`'s
+``all_sentences``) -- it keeps every table's own rendering unchanged and the appendix fully useful
+as a cross-reference, and it does not weaken the check for its actual purpose: two *narrative*
+sections (exec summary, LLM-drafted sections, deterministic non-appendix tables) restating the same
+sentence is still caught exactly as before.
 """
 
 from __future__ import annotations
@@ -99,7 +114,15 @@ def score_D6(md_path: Path | None, *, run_link_check: bool = True) -> DomainScor
     orphan_ns = _orphan_citations(text, appendix_ns)
     raw_slugs = _RAW_SLUG_HEADING_RE.findall(text)
 
-    all_sentences = [s for _h, body in sections for s in split_sentences(body) if len(s.strip()) > 15]
+    # Round 3 (2026-09-06, D6 judge finding 3): the appendix is excluded from the duplicate-
+    # sentence scan -- see the module docstring for why.
+    all_sentences = [
+        s
+        for h, body in sections
+        if _APPENDIX_HEADING not in h
+        for s in split_sentences(body)
+        if len(s.strip()) > 15
+    ]
     seen: dict[str, str] = {}
     duplicates = []
     for s in all_sentences:
