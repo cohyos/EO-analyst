@@ -228,6 +228,13 @@ def clear_settings_cache():
     settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reports_to_tmp(tmp_path, monkeypatch):
+    """Never let a test write report files into output/reports (see ReportCfg.model_post_init)."""
+    monkeypatch.setenv("EOA_REPORT_OUTPUT_DIR", str(tmp_path / "reports"))
+    yield
+
+
 @pytest.fixture
 def mock_database(monkeypatch):
     """Mock the database module to prevent connection attempts."""

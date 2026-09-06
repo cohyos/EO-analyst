@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -31,7 +32,7 @@ from eoa.config import settings
 from eoa.errors import CliProviderError, LLMOutputError, ProviderUnavailable, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.analysis import InvestigationOut, QueryPlan
+from eoa.llm.schemas.analysis import InvestigationOut, QueryPlan, RelevanceVerdict
 from eoa.search.provider import SearchHit, search
 
 # U8-6b (Revision 2026-09-06): pending question shape for `investigate_batch_cloud` below --
@@ -46,7 +47,9 @@ def _role() -> str:
 
 
 ROUND_HINTS = {
-    1: "Round 1 — direct: ask the question plainly in Hebrew and English.",
+    1: "Round 1 — direct: 2-3 queries ONLY, each a paraphrase of the question itself (not a side "
+    "angle), each carrying at least one of the given anchors; at least one query in Hebrew and one "
+    "in English.",
     2: "Round 2 — reformulate: synonyms, alternative program/system names, acronyms, contract or solicitation numbers, "
     "manufacturer part names; vary phrasing.",
     3: "Round 3 — switch source types: official press releases, SEC/EDGAR filings, government contract portals "
@@ -66,6 +69,14 @@ TOOLS = [
                 "properties": {
                     "query": {"type": "string"},
                     "lang": {"type": "string", "description": "ISO 639-1 (he,en,ru,zh,fr,de,ar,ko,tr)"},
+                    "anchor_used": {
+                        "type": "string",
+                        "description": (
+                            "One of the question's anchors (proper noun/acronym/product name/number) "
+                            "this query is grounded in -- or, if not verbatim, the translation/synonym "
+                            "of one you used instead. Every query must be grounded in an anchor."
+                        ),
+                    },
                 },
                 "required": ["query", "lang"],
             },
@@ -143,6 +154,203 @@ PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE = 2
 UNVERIFIED_PREFIX_HE = "לא אומת: "
 
 
+# =================================================================================================
+# 2026-09-06 (job 86 regression): question anchoring + finish-time relevance gate.
+#
+# Job 86's question was "US Air Force speeds Reaper successor timeline after Iran losses"; its
+# round-2 queries were generic EO/IR terms ("מערכות כטב\"ם עם חיישני אופטיקה ו-IR", "MOSP 5000
+# system specifications Elbit Systems") with no connection to Reaper/Iran/USAF at all, and it
+# `finish`'d with outcome="found", confidence=0.9, an answer entirely about Elbit's MOSP 5000 --
+# a system never mentioned anywhere in the question. Two independent guards close this:
+#   1. every `search` call must be grounded in a deterministic "anchor" extracted from the
+#      question/title/entities (or a declared translation/synonym of one) -- an ungrounded query
+#      is rejected before it ever reaches SearXNG (`_query_anchor_ok`/`_tool_search`).
+#   2. a `finish` call claiming found/partial must pass a relevance gate: the answer must mention
+#      an anchor AND an independent LLM judge (`light` role) must agree the answer addresses the
+#      question -- `_relevance_gate`, wired into `_act`'s `finish` handling below.
+# =================================================================================================
+
+#: Tokens shorter than this are never anchors on their own (too generic/noisy: "of", "עם", ...).
+_ANCHOR_MIN_LEN = 2
+_WORD_RE = re.compile(r"[A-Za-z0-9֐-׿]+(?:[-/][A-Za-z0-9֐-׿]+)*")
+_TITLE_LINE_RE = re.compile(r"כותרת הפריט:\s*(.+)")
+_ENTITIES_LINE_RE = re.compile(r"ישויות:\s*(.+)")
+_QUOTED_RE = re.compile(r'"([^"]{3,120})"')
+
+#: Generic English words that would otherwise pass the "capitalized" or "all-caps" anchor
+#: heuristics (sentence-initial words, common verbs/nouns in report-style headlines) -- excluding
+#: them keeps anchors specific (proper nouns, acronyms, product/program names) rather than noise
+#: that would make the anchor requirement toothless.
+_EN_STOPWORDS_ANCHOR = {
+    "the", "a", "an", "and", "or", "but", "for", "nor", "so", "yet", "of", "in", "on", "at", "to",
+    "by", "with", "after", "before", "from", "into", "onto", "over", "under", "about", "against",
+    "between", "during", "is", "are", "was", "were", "be", "been", "being", "this", "that",
+    "these", "those", "it", "its", "as", "who", "what", "when", "where", "why", "how", "which",
+    "speeds", "successor", "timeline", "losses", "news", "report", "reported", "reports", "says",
+    "said", "new", "amid", "following",
+}
+#: Hebrew function words / question boilerplate excluded from the token-level anchor scan (they'd
+#: match almost every question and defeat the purpose of anchoring).
+_HE_STOPWORDS_ANCHOR = {
+    "את", "של", "על", "עם", "אחרי", "לפני", "זה", "זו", "אלה", "הוא", "היא", "הם", "הן", "גם",
+    "כי", "או", "אם", "מה", "מי", "איך", "כמה", "הדיווח", "הכתבה", "המאמר", "בהקשר", "בנוסף",
+    "להערכתנו", "המהלך", "משקף", "אמת", "והרחב", "מהם", "הצדדים", "הלקוח", "ומתחרים", "ומה",
+    "המשמעות", "למוצרי", "ולתעשייה", "הישראלית", "בפרט", "לגבי",
+}
+
+
+def extract_anchors(
+    question: str,
+    *,
+    title: str = "",
+    entities: list[str] | None = None,
+    context_he: str = "",
+) -> list[str]:
+    """Deterministic anchors for a deep-search question: proper nouns / acronyms / product names /
+    numbers pulled from the question, item title and entities -- in EN and HE.
+
+    Callers that don't already carry a structured ``title``/``entities`` (the local ReAct loop's
+    ``investigate()`` only gets a free-text ``context_he``) can pass that instead: this also parses
+    the "כותרת הפריט: ..." / "ישויות: ..." lines ``eoa.pipeline.triage._enqueue_deep_search`` writes
+    into it, so both call sites get the same quality of anchors without duplicating logic.
+
+    Order matters only in that entities/title/quoted phrases are added first (highest-specificity,
+    whole-phrase anchors); the returned list is deduplicated case-insensitively.
+    """
+    anchors: list[str] = []
+    seen: set[str] = set()
+
+    def add(term: str | None) -> None:
+        t = (term or "").strip(" \"'.,:;()[]")
+        if len(t) < _ANCHOR_MIN_LEN:
+            return
+        key = t.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        anchors.append(t)
+
+    for e in entities or []:
+        add(e)
+    if title and title.strip() not in {"", "—"}:
+        add(title.strip())
+
+    title_m = _TITLE_LINE_RE.search(context_he or "")
+    if title_m:
+        add(title_m.group(1).splitlines()[0].strip())
+    entities_m = _ENTITIES_LINE_RE.search(context_he or "")
+    if entities_m:
+        for part in entities_m.group(1).splitlines()[0].split(","):
+            add(part.strip())
+
+    for m in _QUOTED_RE.finditer(question or ""):
+        add(m.group(1))
+
+    for src in (title, question):
+        for tok in _WORD_RE.findall(src or ""):
+            if re.fullmatch(r"\d+", tok):
+                if len(tok) >= 3:  # a bare 1-2 digit number is too generic to anchor anything
+                    add(tok)
+                continue
+            if re.search(r"[֐-׿]", tok):
+                if len(tok) >= 3 and tok.casefold() not in _HE_STOPWORDS_ANCHOR:
+                    add(tok)
+                continue
+            is_acronym = tok.isupper() and len(tok) >= 2  # US, IAI, ATR, EO, IR, MOSP...
+            is_proper_noun = tok[:1].isupper() and len(tok) >= 3 and tok.casefold() not in _EN_STOPWORDS_ANCHOR
+            if is_acronym or is_proper_noun:
+                add(tok)
+    return anchors
+
+
+#: A13 sub-question exemption (docs/PLAN_WINDOWS_NATIVE.md row A13, point 3 of the 2026-09-06 fix):
+#: an Israeli-angle query is allowed without an anchor, but only once the main question already has
+#: at least one relevant read -- otherwise the model could dodge anchoring entirely by steering
+#: every query through the Israeli sub-question from round 1.
+_ISRAEL_QUERY_MARKERS = (
+    "ישראל", "israel", "israeli", "אלביט", "elbit", "רפאל", "rafael", "תעשייה האווירית",
+    "iai", "aerospace industries", "התעשייה הישראלית",
+)
+
+
+def _is_israel_focused_query(query: str) -> bool:
+    ql = (query or "").casefold()
+    return any(m.casefold() in ql for m in _ISRAEL_QUERY_MARKERS)
+
+
+def _query_anchor_ok(inv: Investigation, query: str, anchor_used: str | None) -> tuple[bool, str | None]:
+    """True if ``query`` is grounded in one of ``inv.anchors`` (verbatim substring match), or the
+    model explicitly declared ``anchor_used`` (a documented translation/synonym of an anchor -- not
+    independently verified, but logged, so a pattern of abuse is auditable). No anchors extracted
+    at all (e.g. a free-typed "חקירה חדשה" with no title/entities to anchor to) means nothing to
+    enforce -- every query passes rather than blocking the investigation outright."""
+    if not inv.anchors:
+        return True, None
+    ql = (query or "").casefold()
+    for a in inv.anchors:
+        if a and a.casefold() in ql:
+            return True, a
+    if anchor_used and anchor_used.strip():
+        return True, anchor_used.strip()
+    return False, None
+
+
+def _answer_mentions_anchor(answer_he: str, anchors: list[str]) -> str | None:
+    al = (answer_he or "").casefold()
+    for a in anchors:
+        if a and a.casefold() in al:
+            return a
+    return None
+
+
+def _judge_relevance(question: str, answer_he: str) -> RelevanceVerdict:
+    """LLM judge (`light` role, no tools) on whether a proposed `finish` answer actually addresses
+    the investigation question -- independent of the investigating model's own claimed confidence."""
+    prompt = (
+        f"שאלת החקירה: {question}\n\nהתשובה המוצעת (סיכום שנכתב על ידי סוכן חוקר):\n{answer_he}\n\n"
+        "האם התשובה עונה בפועל על שאלת החקירה? ענה verdict=\"yes\" אם היא עונה במלואה, "
+        "\"partial\" אם היא נוגעת רק בעקיפין/חלקית, \"no\" אם היא עוסקת בנושא אחר לגמרי ולא עונה על "
+        "השאלה כלל. הוסף ב-reason משפט אחד קצר המסביר את הקביעה."
+    )
+    try:
+        return chat_structured(
+            "light",
+            RelevanceVerdict,
+            [
+                {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
+                {"role": "user", "content": prompt},
+            ],
+            task="judge",
+        )
+    except LLMOutputError as exc:
+        log.warning("relevance_judge_failed", error=str(exc)[:160])
+        return RelevanceVerdict(verdict="partial", reason="שיפוט הרלוונטיות נכשל טכנית; לא ניתן היה לאמת אוטומטית.")
+
+
+def _relevance_gate(inv: Investigation, answer_he: str) -> dict[str, Any]:
+    """Combines the deterministic anchor-mention check with the LLM judge into one verdict.
+    ``verdict="no"`` whenever EITHER signal fails -- job 86's answer would have failed the
+    deterministic half alone (zero anchors of the Reaper/Iran/USAF question appear anywhere in the
+    MOSP 5000 answer), so the gate does not depend on the judge model getting it right."""
+    matched_anchor = _answer_mentions_anchor(answer_he, inv.anchors)
+    judge = _judge_relevance(inv.question, answer_he)
+    if (inv.anchors and not matched_anchor) or judge.verdict == "no":
+        verdict: Literal["yes", "partial", "no"] = "no"
+    elif judge.verdict == "partial":
+        verdict = "partial"
+    else:
+        verdict = "yes"
+    reason = judge.reason.strip() or (
+        "התשובה אינה מזכירה אף עוגן מהשאלה." if inv.anchors and not matched_anchor else ""
+    )
+    return {
+        "verdict": verdict,
+        "reason": reason[:300],
+        "anchor_matched": matched_anchor,
+        "judge_verdict": judge.verdict,
+    }
+
+
 @dataclass
 class Investigation:
     job_id: int | None
@@ -169,6 +377,16 @@ class Investigation:
     pages_used: int = 0
     max_pages: int = 0
     stopped_reason: str = "not_found"
+    # 2026-09-06 (job 86 regression): deterministic anchors extracted from the question/title/
+    # entities (see `extract_anchors`) -- every `search` call must be grounded in one of these
+    # (`_query_anchor_ok`), and a `finish` claiming found/partial must pass `_relevance_gate`.
+    anchors: list[str] = field(default_factory=list)
+    #: rounds in which an unanchored query has already been charged against the budget once --
+    #: further unanchored queries in the same round are rejected but not charged again.
+    anchor_rejected_rounds: set[int] = field(default_factory=set)
+    #: the finish-time relevance gate grants exactly one extra round of search when its verdict is
+    #: "no"; this flags that the one extra chance has already been used for this investigation.
+    relevance_retry_used: bool = False
 
 
 class StopRequested(Exception):
@@ -176,7 +394,44 @@ class StopRequested(Exception):
 
 
 # ----------------------------------------------------------------------------- tools
-def _tool_search(inv: Investigation, budget: Budget, query: str, lang: str, round_no: int) -> str:
+def _tool_search(
+    inv: Investigation,
+    budget: Budget,
+    query: str,
+    lang: str,
+    round_no: int,
+    anchor_used: str | None = None,
+) -> str:
+    ok, _matched = _query_anchor_ok(inv, query, anchor_used)
+    if not ok and _is_israel_focused_query(query) and inv.read_urls:
+        # A13 exemption: the Israeli-angle sub-question may steer off-anchor, but only once the
+        # main question already has at least one relevant read to build on.
+        ok = True
+    if not ok:
+        charged_already = round_no in inv.anchor_rejected_rounds
+        if not charged_already:
+            inv.anchor_rejected_rounds.add(round_no)
+            if budget.queries < budget.max_queries:
+                budget.queries += 1
+        anchors_list = "; ".join(inv.anchors[:6]) or "(לא זוהו עוגנים בשאלה)"
+        _log(
+            inv,
+            round_no,
+            lang,
+            query,
+            engine="searxng",
+            results_n=0,
+            pages_read=0,
+            outcome="not_found",
+            notes=f"query rejected (unanchored): {query[:150]}",
+        )
+        return _data_frame(
+            json.dumps(
+                {"error": f"השאילתה אינה מעוגנת בשאלה; חובה לכלול אחד מ: {anchors_list}"},
+                ensure_ascii=False,
+            ),
+            "anchor_guard",
+        )
     if budget.queries >= budget.max_queries:
         return json.dumps({"error": "query budget exhausted"})
     budget.queries += 1
@@ -447,14 +702,27 @@ def _check_stop(inv: Investigation) -> None:
 
 
 # ----------------------------------------------------------------------------- planning
-def plan_queries(question: str, round_no: int, langs: list[str], context_he: str) -> list[dict[str, str]]:
-    """Ask the model for this round's queries (multilingual, term-aware translation)."""
+def plan_queries(
+    question: str,
+    round_no: int,
+    langs: list[str],
+    context_he: str,
+    anchors: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Ask the model for this round's queries (multilingual, term-aware translation).
+
+    ``anchors`` (2026-09-06, job 86 regression) are shown to the planning model explicitly and it
+    is asked to ground every query in one -- the actual enforcement happens downstream in
+    ``_tool_search``/``_query_anchor_ok``, so a plan that ignores this instruction still gets
+    caught before spending the search budget on an unanchored query.
+    """
     prompt = render(
         "deep_search_plan",
         question=question,
         round_hint=ROUND_HINTS[round_no],
         langs=", ".join(langs),
         context=context_he or "אין.",
+        anchors=", ".join((anchors or [])[:8]) or "(לא זוהו עוגנים -- נסח לפי השאלה כפי שהיא)",
     )
     try:
         plan = chat_structured(
@@ -557,6 +825,10 @@ def investigate(
     """
     cfg = settings().deep_search
     inv = Investigation(job_id=job_id, item_id=item_id, question=question)
+    # 2026-09-06 (job 86 regression): anchors are computed from the ORIGINAL question/context --
+    # before `prior_findings_he` (which may itself describe a previous off-topic answer) is folded
+    # in below -- so a botched prior attempt never becomes the anchor a re-run steers back towards.
+    inv.anchors = extract_anchors(question, context_he=context_he)
     if prior_findings_he:
         context_he = (
             context_he + "\n\nממצאי החקירה הקודמת (להרחבה, לא לחזרה):\n" + prior_findings_he
@@ -590,17 +862,20 @@ def investigate(
             if budget.exhausted:
                 break
             langs_now = primary + (cfg.langs_secondary if round_no >= 3 else [])
-            queries = plan_queries(question, round_no, langs_now, context_he)
+            queries = plan_queries(question, round_no, langs_now, context_he, inv.anchors)
             # seed the round: run planned queries directly (parallel across languages), then let the model act
             seeded = []
             for q in queries:
                 if budget.queries >= budget.max_queries:
                     break
-                seeded.append(_tool_search(inv, budget, q["query"], q["lang"], round_no))
+                seeded.append(_tool_search(inv, budget, q["query"], q["lang"], round_no, q.get("anchor_used")))
+            anchors_line = ", ".join(inv.anchors[:8]) or "(לא זוהו עוגנים בשאלה)"
             transcript.append(
                 {
                     "role": "user",
-                    "content": f"[{ROUND_HINTS[round_no]}]\nתוצאות חיפוש ראשוניות של הסבב ({budget.remaining_text()}):\n"
+                    "content": f"[{ROUND_HINTS[round_no]}]\nעוגני השאלה (כל search חייב לכלול אחד מהם, "
+                    f"או תרגום/מונח נרדף מוצהר ב-anchor_used): {anchors_line}\n"
+                    f"תוצאות חיפוש ראשוניות של הסבב ({budget.remaining_text()}):\n"
                     + "\n".join(s[:3500] for s in seeded)
                     + "\n\nבחר עד 4 דפים לקריאה (read), חפש עוד אם צריך (search), או סיים (finish) כשיש תשובה בביטחון "
                     f"≥ {cfg.confidence_stop} או כשמיצית את הסבב. לעולם אל תמציא — אם לא נמצא, finish עם not_found.",
@@ -700,8 +975,14 @@ def _act(
                 except json.JSONDecodeError:
                     args = {}
             if name == "search":
+                anchor_used = args.get("anchor_used")
                 out = _tool_search(
-                    inv, budget, str(args.get("query", "")), str(args.get("lang", "en")), round_no
+                    inv,
+                    budget,
+                    str(args.get("query", "")),
+                    str(args.get("lang", "en")),
+                    round_no,
+                    str(anchor_used) if anchor_used else None,
                 )
             elif name == "read":
                 out = _tool_read(inv, budget, str(args.get("url", "")), round_no)
@@ -743,6 +1024,46 @@ def _act(
                     )
                     transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
                     continue
+
+                relevance: dict[str, Any] | None = None
+                claimed_outcome = str(args.get("outcome"))
+                if claimed_outcome in {"found", "partial"} and inv.anchors:
+                    # 2026-09-06 (job 86 regression): a confident answer must actually address the
+                    # question -- see the module docstring above `_relevance_gate` for job 86's
+                    # symptom (found/0.9 on an unrelated MOSP 5000 answer to a Reaper/Iran question).
+                    # Gated on `inv.anchors` being non-empty: with nothing extracted to check
+                    # against (a free-typed question with no recognizable proper noun/acronym at
+                    # all), there is nothing meaningful for the gate to enforce -- same philosophy
+                    # as `_query_anchor_ok`'s own "no anchors -> nothing to enforce" rule -- and,
+                    # practically, skips the extra LLM judge call entirely for that case instead of
+                    # spending it on a question with no anchor to judge against.
+                    relevance = _relevance_gate(inv, str(args.get("answer_he", "")))
+                    if relevance["verdict"] == "no":
+                        if inv.relevance_retry_used:
+                            # already gave the one extra chance the spec allows -- force-accept
+                            # now, but capped: never `found`/`partial` when the judge still says no.
+                            args = dict(args)
+                            args["outcome"] = "not_found"
+                            args["confidence"] = min(float(args.get("confidence") or 0), NOT_FOUND_MAX_CONFIDENCE)
+                        else:
+                            inv.relevance_retry_used = True
+                            out = json.dumps(
+                                {
+                                    "error": (
+                                        "שופט הרלוונטיות קבע שהתשובה אינה עונה על שאלת החקירה "
+                                        f"({relevance['reason']}). נסה סבב נוסף עם שאילתות ממוקדות "
+                                        "יותר לשאלה המקורית ולעוגניה, או סיים עם not_found אם באמת "
+                                        "אין תשובה מהימנה."
+                                    )
+                                },
+                                ensure_ascii=False,
+                            )
+                            transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
+                            continue
+                    elif relevance["verdict"] == "partial" and claimed_outcome == "found":
+                        args = dict(args)
+                        args["outcome"] = "partial"
+
                 try:
                     # Q3-5: `sources` here is provisional -- `_finalize_outcome` unconditionally
                     # overwrites it with `inv.read_urls` (the ground truth of what was actually
@@ -752,6 +1073,10 @@ def _act(
                     out = json.dumps({"error": f"invalid finish payload: {str(exc)[:200]}"})
                     transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
                     continue
+                if relevance is not None:
+                    inv.result.relevance_check = relevance
+                    if inv.result.outcome == "not_found" and inv.result.confidence > NOT_FOUND_MAX_CONFIDENCE:
+                        inv.result.confidence = NOT_FOUND_MAX_CONFIDENCE
                 return True
             else:
                 out = json.dumps({"error": f"unknown tool {name}"})

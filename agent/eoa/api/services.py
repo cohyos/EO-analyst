@@ -519,13 +519,19 @@ def investigate_item(item_id: int, question: str | None) -> dict[str, Any] | Non
 def default_investigation_question(title: str, so_what_he: str | None = None) -> str:
     """Self-contained Hebrew research question for an item-triggered investigation with no explicit
     question: verify the reported event and expand on it (parties, customer, amount, timeline,
-    competitors and the implication for Israeli EO/IR industry)."""
+    competitors and the implication for Israeli EO/IR industry).
+
+    2026-09-06 (job 86 regression fix, point 3): the Israeli-industry clause is phrased as a
+    SUBORDINATE closing addendum ("ובנוסף, בקצרה: ...") rather than folded into the main question's
+    own "ומה המשמעות ל..." clause -- keeps it structurally last and clearly secondary, matching the
+    same subordination applied to the A13 sub-question in `eoa.pipeline.triage`.
+    """
     base = title or "הפריט"
     hint = (so_what_he or "").strip()
     hint_part = f" בהקשר: {hint[:160]}" if hint else ""
     return (
         f"אמת והרחב את הדיווח \"{base}\": מי הצדדים, הלקוח, היקף/סכום, לוח זמנים ומתחרים, "
-        f"ומה המשמעות למוצרי EO/IR ולתעשייה הישראלית.{hint_part}"
+        f"ומה המשמעות למוצרי EO/IR.{hint_part} ובנוסף, בקצרה: מה המשמעות לתעשייה הישראלית?"
     )
 
 

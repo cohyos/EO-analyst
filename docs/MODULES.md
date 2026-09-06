@@ -7235,3 +7235,99 @@ has a `NULL` subdomain, and three in-scope items carry neither `entities_mention
 **Tests:** `tests/unit/test_qa_score.py` (51 cases, no DB -- a small `_FakeCursor`/`_FakeConn`
 router stands in for Postgres; `tmp_path`-based fixtures for the file-based D6/D7/D8 checks) + one
 `@pytest.mark.integration` smoke test (skipped without `DATABASE_URL`). All new files ruff-clean.
+
+## A14b -- סקר פטנטים: עומק אנליטי מלא (מפה טכנולוגית, אשכולות, יחסים עסקיים, ציר-זמן/תפוגה) (2026-09-06)
+
+**דרישת המשתמש (docs/PLAN_WINDOWS_NATIVE.md row A14b, 6 סעיפים):** בנוסף לעומק העסקי שנוסף ב-P2
+(ר' הסעיף הקודם, "סקר פטנטים -- משמעת ציטוט מובנית + עומק עסקי") -- (1) מפה טכנולוגית בשפת בני
+אדם לכל אשכול, (2) ניתוח אשכולות דטרמיניסטי (CPC + מילות מפתח + ציטוטים) עם טבלת אשכולות ומטריצת
+אשכול×מקצה, (3) יחסים עסקיים (co-assignment/משפחות פטנט/שרשראות ספק-אינטגרטור-לקוח) כ"מפת
+יחסים", (4) תיאור התקדמות קצר לכל פטנט מצוטט (בעיה/פתרון/חידוש) בנספח ובהערת-שוליים תחת האזכור
+הראשון (md/html), (5) תקציר מנהלים מסכם-מפה ולא רק ספירות, (6) ציר-זמן: תאריכי
+עדיפות/הגשה/פרסום/הענקה, תפוגה משוערת (20 שנה, "בכפוף לתחזוקה") עם דגלי "פג"/"עומד לפוג ב-3 השנים
+הקרובות"/"בבחינה", גלי הגשות לפי אשכול/מקצה, וכן תיקון תקלת העקביות שנצפתה ב-P2 ("אין פטנטים של
+Anduril" כשפטנט 15 היה של Anduril בפועל). יושם כולו בתוך `agent/eoa/patents/**` ותוספות ל-schemas/
+prompts, ללא נגיעה ב-`docx_builder.py`.
+
+### 1. מודול חדש: `agent/eoa/patents/cluster.py`
+
+לוגיקה דטרמיניסטית טהורה (בלי DB/LLM), נבדקת ביחידה במלואה:
+
+- **אשכול (`cluster_patents`)**: לפי קוד ה-CPC הראשי של הפטנט (כבר קוד גס ברמת subclass בנתוני
+  הפרויקט, למשל `"G01J5"`), עם תווית עברית שנלקחת מ-`config/patents.yaml`'s `watch_topics` שמכיל
+  את אותו קוד; פטנט בלי CPC כלל (המצב השכיח בנפילת החיפוש חסרת-המפתחות) עובר להתאמת חפיפת
+  מילות-מפתח מול שאילתת הנושא (`_keyword_cluster`, סף 2 מילים חופפות לפחות), ואם גם זה נכשל --
+  "לא מסווג" (לעולם לא אשכול מומצא). `PatentCluster` חושף `size`/`dominant_assignees`/
+  `grant_ratio`/`filing_velocity_per_year`/`maturity_label_he` (פרוקסי בגרות מיחס ההענקה -- לא
+  קביעה משפטית).
+- **קשרים בין אשכולות (`cross_cluster_links`)**: זוגות אשכולות עם מקצה משותף לפחות (האות היחיד
+  הזמין בלי גרף ציטוטים אמיתי -- ר' הערת המודול: `patents.forward_citations`/`backward_citations`
+  הם ספירות בלבד, לא רשימת הפטנטים המצטטים/מצוטטים בפועל, לא אצל EPO OPS/PatentsView כשמוגדרים
+  ולא בנפילת החיפוש).
+- **יחסים עסקיים**: `co_assignment_pairs` (זוגות מקצים באותו פטנט), `same_family_groups` (קיבוץ
+  לפי `family_id` משותף -- קשר משפחתי אמיתי, לא ציטוט), `relationship_edges_from_events` (שרשרת
+  ספק->אינטגרטור->לקוח מתוך `events.customer`/`events.parties` שכבר נאספו לכל מקצה מוביל ב-
+  `survey.py`'s profile loop הקיים).
+- **ציר-זמן/תפוגה**: `expiry_estimate` (הגשה, או עדיפות בהיעדרה, + 20 שנה), `expiry_flag` (`"בבחינה"`
+  כשאין `grant_date` בכלל; `"פג"`; `"עומד לפוג ב-3 השנים הקרובות"`; מחרוזת ריקה כשבתוקף),
+  `build_timeline_rows` (שורה לכל פטנט), `filing_waves` (גלים לפי מפתח שרירותי -- אשכול/מקצה --
+  ושנת פרסום).
+- **בדיקת עקביות (`consistency_violations`)**: regex על תבניות שלילה עבריות ("אין/לא נרשמו/לא
+  נמצאו/לא קיימים פטנטים... של X") מול ספירת-מקצים דטרמיניסטית אמיתית (`{assignee: count}`, מחושבת
+  ב-`survey.py` ישירות מהנספח -- לעולם לא טענת ה-LLM עצמה); מחזירה הודעת-הפרה קריאה לכל התאמה.
+
+### 2. `agent/eoa/llm/schemas/patents.py`: `ClusterNarrative` + `PatentAdvanceOut` + הרחבת `PatentSurveyDraft`
+
+`ClusterNarrative` (תווית מסופקת מראש, פסקת `PatentCiteSentence` אחת עם אכיפת ציטוט "by
+construction" כרגיל) מחליפה את `tech_clusters: list[PatentCiteSentence]` הישן -- כעת
+`list[ClusterNarrative]`, פסקה נפרדת לכל אשכול אמיתי שסופק, במקום רשימת משפטים שטוחה. שני שדות
+חדשים על `PatentSurveyDraft`: `relationships` (נרטיב מעל "מפת היחסים" הדטרמיניסטית) ו-
+`timeline_narrative` (נרטיב מעל טבלת ציר-הזמן -- גלי הגשות, מה נכנס/עומד להיכנס לנחלת הכלל, מה
+עדיין בבחינה). `PatentAdvanceOut` (סכימה חדשה, שדה יחיד `advance_he`) הוא "אח קטן וזול" של
+`PatentClaimsOut` הקיים: 2-3 משפטים בעיה/פתרון/חידוש במקום 3-5 משפטי היקף-הגנה משפטי, לשימוש
+כשאין `claims_summary_he` קיים (ר' סעיף 3 להלן).
+
+### 3. `agent/eoa/patents/analyze.py`: `generate_advance_descriptions`
+
+לכל פטנט: אם יש כבר `claims_summary_he` (מ-`analyze_patents` הקיים) -- `derive_advance_from_claims`
+לוקח את 3 המשפטים הראשונים שלו ללא קריאת LLM נוספת (חינם, דטרמיניסטי). אחרת -- קריאת LLM קטנה
+וזולה כנגד role="light" עם `num_predict=220` (פרומפט חדש `agent/eoa/llm/prompts/patent_advance.md`),
+מוגבלת ל-15 קריאות לכל היותר לכל סקר (`llm_limit`) כדי לגבול עלות; מעבר לכך, או בכשל/דחייה --
+placeholder כן ("תיאור התקדמות לא זמין") ולעולם לא בדיה.
+
+### 4. `agent/eoa/patents/render.py`: תוספות רינדור (ASCII/SVG/הערות-שוליים/הצללת-docx)
+
+`ascii_timeline` (גרף-עמודות מונוספייס, שורה לשנה, לקובץ ה-md); `svg_timeline_bar_chart` (SVG
+מוטבע ללא ספרייה חיצונית, לקובץ ה-html); `inject_advance_footnotes_md`/`_html` (עיבוד-מחרוזת
+לאחר-רינדור: מוצאים את המופע הראשון של כל `[n]` בגוף הדוח -- לפני נספח המקורות -- ומוסיפים תחתיו
+שורת "התקדמות פטנט [n]" קצרה; docx לא מקבל את זה כלל, רק עמודת "התקדמות" נוספת בטבלת "נספח
+פטנטים"); `insert_section_before_md_appendix`/`_html_appendix` (הזרקת בלוק/SVG חדש ממש לפני כותרת
+"נספח מקורות"); `find_table_by_headers`/`shade_table_cell`/`shade_timeline_table_rows` (מניפולציית
+python-docx טהורה על ה-`Document` שכבר הוחזר מ-`build_docx` -- לעולם לא נוגעים ב-`docx_builder.py`
+עצמו): שורות "פג"/"עומד לפוג" בטבלת ציר-הזמן ב-docx מקבלות הצללת רקע (אין `matplotlib` מותקן
+ב-venv הזה -- נבדק ותועד; לכן PNG מוטמע לא מומש, רק הצללת טבלה, בדיוק כפי שה-fallback המתועד
+מתיר).
+
+### 5. `agent/eoa/patents/survey.py`: חיווט מלא + תיקון עקביות
+
+`build_patent_survey` מחשב עכשיו (אחרי אגירת ה-`rows`/`registry` הרגילה): אשכולות
+(`cluster_mod.cluster_patents`), קשרים בין-אשכולות, זוגות co-assignment, קבוצות משפחה, קצוות-יחסים
+מתוך אירועי כל מקצה (נאספים כבר בלולאת הפרופילים הקיימת), שורות ציר-זמן, וגלי-הגשות
+לפי-אשכול/לפי-מקצה -- כל אלה מוזרמים ל-`_synthesis_data_block` (כולל שורת "ספירת פטנטים לפי מקצה"
+מלאה עבור *כל* מקצה, לא רק ה-top-N המוצג, לתמיכה בכלל 7 החדש בפרומפט). לאחר קבלת ה-synthesis:
+`_scrub_consistency_violations` סורק כל רשימת משפטים (כולל `rationale_he` של המלצות עסקיות) מול
+ספירת-המקצים האמיתית ומחליף כל משפט מפר בתיקון דטרמיניסטי מפורש ("תוקן אוטומטית לפי נתוני הנספח:
+...") -- זו התשובה לדרישת "לוודא שטענות תקציר... נדחות": ההפרה מזוהה ומתוקנת (לא מוסתרת), ומועברת
+גם כ-open point. הטבלאות החדשות שנוספו: "אשכולות טכנולוגיה", "מטריצת אשכול x מקצה" (LTR-isolated),
+"קשרים בין אשכולות", "מפת יחסים", "ציר זמן פטנטים" (+ הצללת docx), "גלי הגשות לפי אשכול/לפי מקצה";
+טבלת "נספח פטנטים" קיבלה עמודת "התקדמות" נוספת. ה-md/html מקבלים גם את בלוק ה-ASCII/SVG והערות
+השוליים לפני שמירה לקובץ.
+
+### Tests
+
+`tests/unit/test_patents_cluster.py` (חדש, 27 מקרים) -- כל פונקציות `cluster.py`.
+`tests/unit/test_patents_render.py` הורחב (+37 מקרים) -- ASCII/SVG/הזרקת-הערות/הצללת-docx.
+`tests/unit/test_patents_schemas.py` הורחב (+6 מקרים) -- `ClusterNarrative`/`PatentAdvanceOut`.
+`tests/unit/test_patents_survey.py` הורחב/עודכן (+3 מקרים, וסדר-הסקציות בטסט הקיים עודכן ל-schema
+החדש) -- `_scrub_consistency_violations`. כל הקבצים הנוגעים ירוקים (ruff check + format נקיים);
+`pytest tests/unit -k patent` (181 מקרים) ירוק במלואו.

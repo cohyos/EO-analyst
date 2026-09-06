@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -86,11 +86,16 @@ class ClassifyOut(BaseModel):
     def _validate_subdomain_against_taxonomy(self) -> ClassifyOut:
         """Q3-3 (docs/qa/findings_Q3_r1.md): ``subdomain`` must be one of the chosen ``domain``'s
         sub-keys in ``config/taxonomy.yaml`` -- the LLM otherwise sometimes invents a value (6
-        rows in the QA sample had a subdomain that doesn't exist in the taxonomy at all). An
-        unknown value is reset to ``""`` (the schema's own "no sub-domain" convention) with a
-        warning logged, rather than rejecting the whole classification."""
-        if not self.subdomain:
-            return self
+        rows in the QA sample had a subdomain that doesn't exist in the taxonomy at all).
+
+        D1 round-1 fix (docs/qa/loop/round_1_fixes.md, ``subdomain_valid_vs_taxonomy``): a domain
+        that *does* have taxonomy sub-keys must always end up with a real one -- an invalid value
+        (or one left empty by the model) used to be reset to ``""``, which ``eoa.pipeline.classify``
+        then persists as SQL ``NULL`` (``out.subdomain or None``), which the taxonomy validator (and
+        every downstream consumer expecting a real sub-key for an in-scope item) then flags as
+        invalid. Falling back to the domain's first/default sub-key instead keeps every in-scope
+        item's subdomain valid by construction. ``""`` remains correct only for a domain with no
+        taxonomy sub-keys at all (``out_of_scope`` and any future no-subdomain domain)."""
         try:
             from eoa.config import settings
 
@@ -99,9 +104,15 @@ class ClassifyOut(BaseModel):
             log.debug("subdomain_taxonomy_check_skipped", error=str(exc)[:160])
             return self
         valid_subs = (domains.get(self.domain) or {}).get("sub", {}) or {}
+        if not valid_subs:
+            # No sub-keys defined for this domain (e.g. out_of_scope) -- "" is the only valid value.
+            if self.subdomain:
+                self.subdomain = ""
+            return self
         if self.subdomain not in valid_subs:
-            log.warning("classify_invalid_subdomain", domain=self.domain, subdomain=self.subdomain)
-            self.subdomain = ""
+            if self.subdomain:
+                log.warning("classify_invalid_subdomain", domain=self.domain, subdomain=self.subdomain)
+            self.subdomain = next(iter(valid_subs))
         return self
 
 
@@ -251,6 +262,22 @@ class InvestigationOut(BaseModel):
     key_facts: list[str] = Field(default_factory=list)
     contradictions_he: str = ""
     what_was_tried_he: str = ""
+    # 2026-09-06 (job 86 regression -- see docs/qa or the fix's own commit message): the finish-time
+    # relevance gate's verdict, persisted alongside the answer so the API/UI can show *why* an
+    # answer was accepted/downgraded, not just the final outcome. `None` when the gate wasn't run
+    # (e.g. outcome == "not_found", or the cloud-batch path's cheaper deterministic-only check).
+    relevance_check: dict[str, Any] | None = None
+
+
+class RelevanceVerdict(BaseModel):
+    """Deep search finish-time relevance judge (2026-09-06, job 86 regression): job 86's queries
+    drifted from "US Air Force speeds Reaper successor timeline after Iran losses" to generic EO/IR
+    terms and `finish`'d with a `found`/0.9-confidence answer about Elbit's MOSP 5000 -- a system
+    never mentioned in the question. This judge is asked, independently of the investigating
+    model's own claimed confidence, whether a proposed answer actually addresses the question."""
+
+    verdict: Literal["yes", "partial", "no"]
+    reason: str = Field(default="", max_length=300, description="one short sentence, Hebrew or English")
 
 
 class ReportSection(BaseModel):

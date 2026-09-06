@@ -487,8 +487,18 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
 #: own israel_relevance (eoa.pipeline.israel_focus, computed in classify.py) is >= 0.6 -- per
 #: docs/PLAN_WINDOWS_NATIVE.md row A13 point 6, "מה המשמעות לתעשייה הישראלית / למי מהחברות
 #: הישראליות זה נוגע".
+#:
+#: 2026-09-06 (job 86 regression fix, point 3): phrased and placed as a SUBORDINATE closing
+#: clause, not a co-equal second question -- job 86's investigation drifted off the main question
+#: (US Air Force / Reaper / Iran) into generic EO/IR queries partway through, and an Israeli-angle
+#: clause phrased as a second question invites exactly that drift. The wording now explicitly
+#: orders the model to answer the main question FIRST, in a short separate paragraph, and NOT to
+#: search for Israeli products on their own (query anchoring in eoa.search.deep_search exempts an
+#: Israeli-angle `search` call from the anchor requirement only once the main question already has
+#: >= 1 relevant read -- see `_is_israel_focused_query`/`_query_anchor_ok`).
 _ISRAEL_DEEP_SEARCH_SUBQUESTION_HE = (
-    " בנוסף: מה המשמעות לתעשייה הישראלית ולמי מהחברות הישראליות זה נוגע?"
+    " לאחר שענית על השאלה המרכזית, הוסף פסקה קצרה על המשמעות לתעשייה הישראלית ולחברות הישראליות "
+    "הרלוונטיות -- בלי לחפש מוצרים ישראליים בנפרד אלא אם השאלה המרכזית עצמה עוסקת בהם."
 )
 _ISRAEL_DEEP_SEARCH_THRESHOLD = 0.6
 

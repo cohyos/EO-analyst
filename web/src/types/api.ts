@@ -226,6 +226,10 @@ export type InvestigationOutcomeReason =
   | "found"
   | "partial"
   | "not_found"
+  // 2026-09-06 (job 86 regression fix): the finish-time answer was judged not to address the
+  // question at all (see web/src/lib/investigations.ts for the label/tone and the backend fix in
+  // eoa.search.deep_search).
+  | "off_topic"
   | "stopped_budget"
   | "stopped_timeout"
   | "insufficient_context";

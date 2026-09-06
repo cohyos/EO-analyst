@@ -127,6 +127,14 @@ class ReportCfg(BaseModel):
     language: str = "he"
     formats: list[str] = ["docx", "md", "html"]
     output_dir: str = "output/reports"
+
+    def model_post_init(self, __context: Any) -> None:
+        # EOA_REPORT_OUTPUT_DIR overrides the configured directory; the test suite sets it to a
+        # tmp path so unit tests never write placeholder reports into output/reports (2026-09-06:
+        # a weekly report file shipped with test fixture text).
+        override = os.environ.get("EOA_REPORT_OUTPUT_DIR")
+        if override:
+            self.output_dir = override
     template: str | None = None
     citation_style: str = "numbered"
     require_citations: bool = True
