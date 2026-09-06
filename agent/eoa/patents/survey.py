@@ -228,6 +228,86 @@ def _report_paths(topic: str, today: dt.date) -> tuple[Path, Path, Path]:
     return base.with_suffix(".docx"), base.with_suffix(".md"), base.with_suffix(".html")
 
 
+_TOPIC_STOPWORDS = frozenset(
+    [
+        "patents",
+        "patent",
+        "with",
+        "and",
+        "the",
+        "of",
+        "for",
+        "in",
+        "on",
+        "a",
+        "an",
+        "or",
+        "עם",
+        "של",
+        "על",
+        "את",
+        "פטנטים",
+        "פטנט",
+        "ב",
+        "ל",
+        "מ",
+    ]
+)
+#: Minimum stored patents a survey should rest on before the keyless live search's result alone is
+#: trusted; below this the topic's stored patents are pulled in (see _stored_patent_ids_for_topic).
+_MIN_SURVEY_PATENTS = 5
+
+
+def _topic_keywords(topic: str) -> list[str]:
+    """Content words of a survey topic ("FPA עם פיקסל דיגיטלי (DROIC)" -> fpa, פיקסל, דיגיטלי,
+    droic) for the stored-patent lookup: ≥3 chars, stop-words dropped, order preserved."""
+    out: list[str] = []
+    for tok in re.findall(r"[\w-]+", topic.lower()):
+        tok = tok.strip("-_")
+        if len(tok) >= 3 and tok not in _TOPIC_STOPWORDS and tok not in out:
+            out.append(tok)
+    return out
+
+
+def _stored_patent_ids_for_topic(
+    topic: str, *, limit: int = 60, exclude: list[int] | None = None
+) -> list[int]:
+    """Round-3 (surveys 45/46, 2026-09-06): the on-demand survey used to rest solely on a fresh
+    keyless web search, so a DuckDuckGo timeout produced a survey with zero patents while the
+    ``patents`` table already held the topic's rows from earlier scans. Returns stored patent ids
+    whose title/abstract/CPC/assignees match at least one topic keyword, best matches (most
+    keyword hits, then value_score) first."""
+    kws = _topic_keywords(topic)
+    if not kws:
+        return []
+    hit_exprs = " + ".join(f"(CASE WHEN haystack ILIKE %(kw{i})s THEN 1 ELSE 0 END)" for i in range(len(kws)))
+    params: dict[str, Any] = {f"kw{i}": f"%{kw}%" for i, kw in enumerate(kws)}
+    params["limit"] = limit
+    params["exclude"] = list(exclude or [])
+    sql = f"""
+        SELECT id, hits FROM (
+            SELECT id, value_score, {hit_exprs} AS hits
+            FROM (
+                SELECT id, value_score,
+                       COALESCE(title, '') || ' ' || COALESCE(abstract, '') || ' ' ||
+                       COALESCE(array_to_string(cpc, ' '), '') || ' ' ||
+                       COALESCE(array_to_string(assignees, ' '), '') AS haystack
+                FROM patents
+                WHERE NOT (id = ANY(%(exclude)s::bigint[]))
+            ) h
+        ) scored
+        WHERE hits > 0
+        ORDER BY hits DESC, value_score DESC NULLS LAST, id DESC
+        LIMIT %(limit)s
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    # prefer rows matching ≥2 keywords when there are enough of them; otherwise any single hit
+    strong = [r["id"] for r in rows if r["hits"] >= 2]
+    return strong if len(strong) >= _MIN_SURVEY_PATENTS else [r["id"] for r in rows]
+
+
 def _fetch_patent_rows(patent_ids: list[int]) -> list[dict[str, Any]]:
     if not patent_ids:
         return []
@@ -1169,9 +1249,23 @@ def build_patent_survey(
     period_end = period_end or dt.date.today()
     survey_id = _create_survey_row(topic)
     try:
-        records = scan_mod.search_records(topic, limit=deep_limit)
+        try:
+            records = scan_mod.search_records(topic, limit=deep_limit)
+        except Exception as exc:  # a search outage must not empty the survey
+            log.warning("patent_survey_search_failed", topic=topic, error=str(exc)[:200])
+            records = []
         pub_to_id = scan_mod.upsert_records(records)
         patent_ids = list(pub_to_id.values())
+        if len(patent_ids) < _MIN_SURVEY_PATENTS:
+            stored = _stored_patent_ids_for_topic(topic, exclude=patent_ids)
+            if stored:
+                log.info(
+                    "patent_survey_supplemented_from_store",
+                    topic=topic,
+                    fresh=len(patent_ids),
+                    stored=len(stored),
+                )
+                patent_ids = [*patent_ids, *stored]
 
         # Analyze/value only the freshest slice so a large gather doesn't blow the LLM budget --
         # every record still gets its deterministic clustering/timeline/white-space treatment
