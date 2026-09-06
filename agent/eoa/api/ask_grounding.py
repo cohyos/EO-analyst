@@ -90,7 +90,20 @@ _PROPER_NOUN_RE = re.compile(r"\b[A-Z][A-Za-z0-9]{1,}(?:[-\s][A-Z][A-Za-z0-9]{1,
 # gershayim (״) for acronyms (system_analyst.md rule 5), so a real quoted name/title uses ASCII
 # quotes; only spans of >= 2 words are treated as candidates (a single quoted word is far more
 # likely to be an ordinary emphasis-quote than an invented proper noun).
-_QUOTED_RE = re.compile(r'"([^"]{3,80})"')
+#
+# Live-verified 2026-09-06 (throwaway 8766, golden Q2, local resident model): `system_analyst.md`
+# rule 5's own ASCII-quote-for-acronyms prohibition is not always followed by the model itself --
+# real generations kept writing ARA-style acronyms ("ארה\"ב", "כטב\"מים") with a literal ASCII `"`
+# stuck directly between two Hebrew letters, no surrounding whitespace at all. A naive
+# `"[^"]{3,80}"` pairs one such stray acronym-internal quote with the *next* one anywhere within
+# 80 chars -- possibly a full sentence or more later -- and treats the huge, nonsensical span
+# between them as a "quoted phrase" candidate, which then fails grounding and gets an entire
+# otherwise-fine sentence removed. A genuine quoted phrase always has whitespace/punctuation (never
+# a Hebrew letter with no gap) immediately outside both its quote marks, so requiring that -- via
+# the negative lookbehind/lookahead below -- filters out every acronym-internal quote without
+# needing the model to follow the gershayim rule in the first place.
+_HEBREW_LETTERS = "א-ת"
+_QUOTED_RE = re.compile(rf'(?<![{_HEBREW_LETTERS}])"([^"\n]{{3,80}})"(?![{_HEBREW_LETTERS}])')
 
 _MONEY_RE = re.compile(
     r"[$€₪]\s?\d[\d,.]*\s?(?:[MBK]\b)?"
@@ -218,6 +231,44 @@ def _conflation_violation(unit_text: str, cited_ns: list[int], sources_by_n: dic
     return None
 
 
+def _money_conflation_violation(
+    unit_text: str, cited_ns: list[int], sources_by_n: dict[int, str], corpus_cf: str
+) -> str | None:
+    """The first money figure in a ``[n]``-cited ``unit_text`` that is genuinely real (appears
+    *somewhere* in the retrieved corpus) but does not appear in the specific source(s) this unit
+    itself cites -- live-found 2026-09-06 (throwaway 8766, golden Q2, local resident model): the
+    model took a real, correctly-quoted "$465 million" figure from a genuinely retrieved
+    AeroVironment laser-contract item and wrote it into a Rafael/Iron Beam paragraph citing an
+    unrelated "top 30 companies" ranking item instead -- the exact live reproduction of the round-2
+    Rafael/AeroVironment conflation this whole guard exists for, except the conflated content here
+    is a specific number rather than a watchlist-recognised company name, so
+    :func:`_conflation_violation` (which only inspects watchlist entities) never saw it and
+    :func:`_grounding_violation`'s corpus-wide money check never flagged it either (the figure is
+    real, just cited to the wrong source).
+
+    Deliberately narrower than generalizing this same "must be grounded in *its own* citation, not
+    just the wider corpus" rule to proper nouns too: a sentence legitimately synthesizing facts
+    from multiple retrieved sources under a single citation number is common and not itself wrong
+    (round 2 flagged exactly this as a cosmetic-only issue for golden Q6), so a strict per-citation
+    check on every named entity would newly misfire on that ordinary pattern. A specific money
+    figure is a much more atomic, single-attribution fact in practice -- it is realistically always
+    reported by exactly one source -- so this narrower, stricter check is safe where a general one
+    would not be."""
+    if not cited_ns:
+        return None
+    cited_cf = " ".join(sources_by_n.get(n, "") for n in cited_ns).casefold()
+    for m in _MONEY_RE.finditer(unit_text):
+        figure = m.group(0)
+        digits = re.sub(r"[^\d]", "", figure)
+        if len(digits) < 2:
+            continue
+        if _digits_grounded(figure, cited_cf):
+            continue  # correctly grounded in its own citation
+        if _digits_grounded(figure, corpus_cf):
+            return figure  # real, but reported by a *different* retrieved source
+    return None
+
+
 def _remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
     out: list[str] = []
     prev = 0
@@ -290,7 +341,9 @@ def ground_and_filter_answer(
         if reason is None:
             cited_ns = _cited_ns(unit_text)
             if cited_ns:
-                reason = _conflation_violation(unit_text, cited_ns, sources_by_n)
+                reason = _conflation_violation(
+                    unit_text, cited_ns, sources_by_n
+                ) or _money_conflation_violation(unit_text, cited_ns, sources_by_n, corpus_cf)
         if reason:
             flagged.append((start, end, reason))
 

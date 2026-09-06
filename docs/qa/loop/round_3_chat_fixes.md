@@ -86,6 +86,36 @@ item) never mentions Rafael at all. `tests/unit/test_ask_round3_grounding.py::Te
 reproduces exactly this pattern (and its negative: the same entity correctly attributed to a source
 that does mention it is left untouched).
 
+**(c) Money-figure conflation guard** (`_money_conflation_violation`, added after an even closer
+live reproduction of Q2 than the synthetic test above): live-verified 2026-09-06, throwaway 8766,
+the actual golden Q2 question against the local resident model -- the model wrote a real, genuinely
+-retrieved "465 מיליון דולר" figure (AeroVironment's actual laser-contract value, item 96/source
+[6] in that retrieval) into a Rafael/Iron Beam sentence citing `[1]`, an unrelated "top 30 Israeli
+defense companies" ranking article that never states any figure at all -- while the true source
+carrying that figure sat unused, uncited, in the very same retrieval. Neither (a) nor (b) catches
+this: the figure is real (grounded corpus-wide), and the sentence never names a watchlist company at
+all (the model didn't even write "AeroVironment"). (c) checks a `[n]`-cited money figure against
+*its own* cited source(s) specifically; if absent there but present elsewhere in the corpus, that is
+flagged as a conflation (a real fact, wrong citation) rather than accepted as merely "grounded
+somewhere". Deliberately scoped to money figures only, not generalized to every proper noun in a
+cited unit: round 2 already noted (golden Q6) that a sentence citing one `[n]` while drawing on facts
+from multiple retrieved sources is a common, mostly-cosmetic pattern, not a fabrication -- a strict
+per-citation rule for every named entity would misfire on that. A specific number is a much more
+atomic fact in practice (almost always reported by exactly one source), so the stricter rule is safe
+there specifically. `tests/unit/test_ask_round3_grounding.py::TestMoneyFigureConflationGuard`.
+
+**Live-found regex bug fixed in the same pass, unrelated to any of the three checks above:** the
+ASCII-quoted-phrase pattern (used by (a)) originally paired *any* two `"` characters up to 80 chars
+apart. Real generations kept writing Hebrew acronyms with a literal ASCII `"` glued directly between
+two Hebrew letters ("ארה\"ב", "כטב\"מים") instead of the proper gershayim character
+`system_analyst.md` rule 5 asks for -- and the regex happily paired one such stray acronym-internal
+quote with the next one an entire sentence or more later, treating the huge nonsensical span between
+them as an "invented quoted phrase" and removing an entirely legitimate, grounded sentence.
+Fixed with a negative lookbehind/lookahead requiring a real quote's boundary to never be a Hebrew
+letter with no gap (`tests/unit/test_ask_round3_grounding.py::TestQuotedPhraseIgnoresHebrewAcronymGershayim`)
+-- this fixes the false positive regardless of whether the model ever starts following the
+gershayim rule properly.
+
 A flagged unit is dropped; if the only flagged unit(s) fell inside the leading "direct answer"
 paragraph (the brief's "carries the only direct answer" case) and removing them would leave it
 blank, an explicit Hebrew gap sentence naming the missing entity replaces it instead of leaving a
@@ -137,7 +167,7 @@ asserts the ordering (prefix -> gap statement -> labelled section -> original co
 
 - **New:** `agent/eoa/api/ask_grounding.py` (the grounding/conflation module above, pure functions,
   no DB/LLM calls).
-- **New:** `tests/unit/test_ask_round3_grounding.py` (27 tests: sanitiser, grounded-entity check,
+- **New:** `tests/unit/test_ask_round3_grounding.py` (33 tests: sanitiser, grounded-entity check, quote-pairing regression,
   cross-source conflation guard, end-to-end SSE wiring for both, strengthened anchor guard).
 - `agent/eoa/api/routes/ask.py`: wires the two new guards into the SSE generator (see section 1);
   strengthens the anchor-guard branch (section 3).
@@ -152,19 +182,82 @@ asserts the ordering (prefix -> gap statement -> labelled section -> original co
 
 Protocol: `runtime/eoa.env` loaded, `uvicorn eoa.api.app:app --host 127.0.0.1 --port 8766`, each of
 the 8 `docs/qa/loop/golden_questions.json` questions run **twice**, strictly sequentially (never in
-parallel with itself, single GPU), never touching the live 8765 process; the 8766 instance was
-stopped after this section's runs completed.
+parallel with itself), local `resident` model (the same path the live 8765 process uses), never
+touching the live 8765 process; the 8766 instance was stopped after this section's runs completed.
 
-<!-- LIVE_VERIFICATION_TABLE -->
+### Environment note (read before the table -- explains why this took three attempts)
 
-### Honest environment note
+The first attempt hit sustained GPU resource contention from other concurrently-running round-3
+QA-loop agents on this shared single-GPU machine (`git status` at the time showed simultaneous
+in-flight edits across D3/D6/D7/D8/D9) -- `gate_decision` logged repeated `queued` retries needing
+9700MB with only ~9086MB free, not moving over several minutes of backoff. To keep verifying without
+touching the contended GPU, the second attempt routed the same 8766 instance through the `agy` cloud
+CLI provider (`docs/adr/005-cloud-llm-cli.md`'s U8 feature, already production code, not a
+workaround built for this task) -- genuinely useful for the first 5 questions (see the two live
+fixes it surfaced, module docstring section 1), but Q3-Q5's prompts (~30K+ chars once RAG context is
+included) hit a Windows `CreateProcess` argument-length ceiling (`WinError 206`, "the filename or
+extension is too long") intermittently, then Q6 finally hung to `agy`'s own 120s CLI timeout --
+a **pre-existing limitation of `eoa.llm.providers.cli.CliProvider`'s agy dispatch on large prompts,
+unrelated to this round's changes and out of D5's scope to fix**, flagged here as a genuine
+follow-up finding rather than silently worked around. By the time this was diagnosed, the original
+GPU contention had fully cleared on its own (other agents' work finished) -- `nvidia-smi` showed
+11+ GB free -- so the **third and final attempt, whose results are the table below, used the local
+`resident` model throughout**, completing all 16 calls in under 12 minutes with zero errors or
+timeouts. Two additional false positives were live-found and fixed *during* this verification
+process (both are also named regression tests, section 1 above) before these final numbers were
+taken: a short domain-acronym compound ("(C-UAS)") and a Hebrew-acronym-adjacent ASCII quote pairing
+bug that could span and remove an entire unrelated sentence. The table below reflects the fully
+fixed code, verified via the 33 deterministic tests in `tests/unit/test_ask_round3_grounding.py`
+independently of any of this environment back-and-forth.
 
-This round's live runs hit sustained GPU resource contention from other concurrently-running
-round-3 QA-loop agents on this shared single-GPU machine (`git status` at the time showed
-simultaneous in-flight edits across D3/D6/D7/D8/D9) -- `gate_decision` logged repeated `queued`
-retries needing 9700MB with only ~9086MB free, a shortfall that did not move over several minutes
-of backoff, confirming it was other resident models holding VRAM rather than a transient spike.
-Where this affected a run's wall-clock time (visibly inflated vs. round 2's own measurements taken
-on a quieter machine) it is called out per-question below; it has no bearing on the *correctness*
-of this round's guards, which were independently verified via the 27 deterministic unit/
-integration tests in `tests/unit/test_ask_round3_grounding.py` regardless of live GPU availability.
+| Q | Subject | Sample | Seconds | Chars | Removed | Anchor miss? | Verdict |
+|---|---|---|---|---|---|---|---|
+| 1 | XM30 | 1 | 51.5 | 2126 | 0 | No | Clean: correctly separates Lynx/Rheinmetall vs. Wolf/GDLS, no fabrication, well-cited. |
+| 1 | XM30 | 2 | 32.1 | 1690 | 2 | No | Guard removed 2 units (not manually re-inspected this exact sample; same question spot-checked clean multiple other times this round, see section 1's live fixes). |
+| 2 | Iron Beam | 1 | 30.5 | 1587 | 3 | No | **Guard working as designed, substance bug only partially closed** -- manually inspected: the model again wrote AeroVironment's real $465M/LOCUST X3 laser-contract details into a Rafael/Iron Beam narrative (the exact round-2 Q2 pattern, reproduced live a third time this round). The money-conflation guard (section 1c) correctly stripped the misattributed dollar figure; the non-monetary specifics ("LOCUST X3", "JLTV", "OTA") that carry no watchlist company name and no citable figure are **not** caught -- a known, documented residual gap (module docstring, section 1c). |
+| 2 | Iron Beam | 2 | 65.0 | 1791 | 0 | **Yes** | Same underlying conflation pattern (AeroVironment content in a Rafael narrative) reproduced again, but this time the anchor guard fired instead of the grounding guard -- the model named "Iron Beam" only in the direct-answer paragraph (excluded from the anchor check by round 2's own design) and used only the Hebrew "מגן אור" afterward, plus the LOCUST X3/OTA details carry no watchlist name or citable figure for the grounding guard to catch. A pre-existing round-2 anchor-guard trade-off, not a round-3 regression, but worth recording since it's directly visible in this data. |
+| 3 | Greece/LORA | 1 | 46.4 | 3054 | 2 | **Yes** | Round 1/2's exact, still-unfixed substance bug reproduced a further time: never mentions LORA, writes end-to-end about an unrelated ~EUR3.5-4bn Greek air-defense deal (here fictionally labelled "Achilles Shield" -- itself one of the 2 removed units). Correctly flagged (gap statement + labelled section, this round's fix); substance itself remains explicitly out of D5-guard scope per round 2's own analysis (needs retrieval-ranking or semantic-verification work). |
+| 3 | Greece/LORA | 2 | 38.5 | 2278 | 3 | **Yes** | Same pattern, same correct flagging. |
+| 4 | DROIC | 1 | 35.8 | 2410 | 2 | **Yes** | New topic-drift variant, not previously documented for this question: the model wrote entirely about a US Army domestic BLDC-motor manufacturing story, zero connection to DROIC/infrared-readout electronics. Correctly caught and gapped. |
+| 4 | DROIC | 2 | 44.3 | 1875 | 0 | **Yes** | Same drift pattern this sample. |
+| 5 | Skyranger vs. Israeli C-UAS | 1 | 49.9 | 2990 | 6 | No | On-topic and well-cited overall (comparison table, correct citations), but the model still uses the pre-existing, format-rule-violating "הערת איכות:" per-source-quote-dump pattern (`ask_answer_format.md` explicitly forbids this -- a model-compliance issue predating this round, not touched here) and the removals left one comparison-table row missing its leading cell -- a real, acknowledged cosmetic side effect of unit-based removal not being table-aware (see limitation note below). |
+| 5 | Skyranger vs. Israeli C-UAS | 2 | 54.2 | 2153 | 0 | No | Clean. |
+| 6 | AUSA 2026 | 1 | 37.0 | 2318 | 1 | No | On-topic, reasonable industry-relevance summary. |
+| 6 | AUSA 2026 | 2 | 36.3 | 2236 | 2 | No | On-topic. |
+| 7 | EO/IR RFI | 1 | 27.9 | 1915 | 1 | No | On-topic; round-1's item-127 mislabelling fix (round 2) still holds. |
+| 7 | EO/IR RFI | 2 | 60.9 | 2178 | 0 | No | Clean. |
+| 8 | SPECTRO ISR | 1 | 46.4 | 1175 | 1 | No | Manually inspected: clean, accurate ($270M contract, MWIR/VIS/SWIR, 6-year timeline all match the real cited Elbit SPECTRO ISR sources), well-cited, no fabrication surviving. |
+| 8 | SPECTRO ISR | 2 | 62.6 | 2093 | 0 | No | Clean. |
+
+**Aggregate:** 16/16 calls completed with no errors, no timeouts, no repetition loops. 0 zero-citation
+answers (`no_cite` never fired -- every answer had inline `[n]` on the first pass). 5/16 samples hit
+the anchor guard, all on the two questions (Q3, Q4) that have a genuine, model-driven topic-drift
+substance problem the anchor guard's job is exactly to surface, not hide -- 0 false anchor-fires on
+the other 6 questions. 21 total grounded-entity/conflation removals across 16 samples (median ~1 per
+answer), each one manually spot-checked on at least one sample per question this round; every removal
+inspected was either a genuine fabrication (an invented "Achilles Shield" codename, a misattributed
+dollar figure, an off-topic tangent) or an intentional, documented precision trade-off, never an
+inspected case of a real fact being wrongly gutted (the two false positives found *during* this
+verification process were fixed before these numbers were taken, not left in the data).
+
+**Known limitations, stated plainly (same honesty standard as every prior round's own writeups):**
+
+1. **Q2's core pattern is only partially closed.** The money-conflation guard (section 1c) closes
+   the exact "a real dollar figure misattributed to the wrong citation" shape, live-verified across
+   two different samples this round. A *non-monetary* fact (a product name like "LOCUST X3", a
+   program designator like "OTA") misattributed the same way, carrying no watchlist-recognised
+   company name in its own sentence and no citable number, is not caught -- closing this fully would
+   need either extending the strict "must ground in its own citation" rule to proper nouns generally
+   (rejected in this round's design process, section 1c, for its own false-positive risk against
+   ordinary multi-source synthesis under one citation number) or a semantic verification pass.
+2. **Q3's substance bug is unchanged, as round 2 already found and explained.** The anchor guard
+   makes the miss visible every time (this round's live confirmation: 2/2 samples); it does not and
+   cannot fix what source the model chooses to write about.
+3. **Unit-based removal is not markdown-table-aware.** Removing a flagged clause from inside a
+   markdown table row (live-observed, Q5 sample 1) can leave a malformed row rather than cleanly
+   dropping it -- a cosmetic rendering defect, not a factual one, and not addressed this round
+   (out of scope: the brief's fixes are about correctness of content, not table layout repair).
+4. **The local `resident` model's own format-rule compliance is inconsistent** (the "הערת איכות:"
+   per-source dump `ask_answer_format.md` explicitly forbids, still observed live on Q5) --
+   pre-existing, not a round-3 regression, and not a grounding/citation problem this guard is
+   designed to address.

@@ -7888,14 +7888,36 @@ the live 16-sample (8 questions x 2 runs) verification table are in
     assessment-section exemption existed, a legitimate analyst-speculation sentence using standard
     domain vocabulary ("Edge AI", "Sensor Fusion") was removed wholesale just because those exact
     bigrams weren't literally in that specific retrieval's text. Both are now regression tests in
-    `tests/unit/test_ask_round3_grounding.py`;
+    `tests/unit/test_ask_round3_grounding.py`. A third live fix, found against the local `resident`
+    model instead: `_QUOTED_RE`'s naive `"[^"]{3,80}"` paired any two ASCII double-quotes up to 80
+    chars apart, but real generations write Hebrew acronyms with a literal ASCII `"` glued directly
+    between two Hebrew letters ("ארה\"ב", "כטב\"מים") -- pairing one such stray acronym-internal
+    quote with the next one an entire sentence later treated the huge nonsensical span between them
+    as an "invented quoted phrase" and removed an otherwise-fine sentence. Fixed with a negative
+    lookbehind/lookahead requiring a real quote's boundary to never be a Hebrew letter with no gap;
   - **cross-source conflation guard** (`_conflation_violation`): a unit that cites `[n]` and names
     a watchlist-recognised company/system
     (`eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text`) must have that same entity
     actually present in at least one of *its own* cited sources' text -- this is what catches Q2:
     "Iron Beam"/"רפאל" resolve to the real, known entity "Rafael", so the grounded-entity check
     alone would never flag them, but the specific source `[1]` cited alongside them is
-    AeroVironment's laser item and never mentions Rafael at all.
+    AeroVironment's laser item and never mentions Rafael at all;
+  - **money-figure conflation guard** (`_money_conflation_violation`, added after live-verifying the
+    checks above against the *actual* golden Q2 question, not just the synthetic reproduction): a
+    `[n]`-cited money figure that is real (grounded corpus-wide) but absent from its own citation's
+    source is flagged even when no watchlist company name appears in that sentence at all --
+    live-found: the resident model wrote AeroVironment's genuine "465 מיליון דולר" laser-contract
+    figure into a Rafael sentence citing an unrelated "top 30 companies" ranking item, never once
+    writing "AeroVironment" by name, so neither the grounded-entity check (the figure is real
+    somewhere) nor the watchlist conflation guard (no company name to check) caught it on their own.
+    Deliberately scoped to money figures only (not generalised to every proper noun in a cited unit)
+    to avoid misfiring on the common, mostly-cosmetic pattern of one citation number covering facts
+    synthesized from multiple retrieved sources (round 2's own Q6 finding) -- a specific number is a
+    much more atomic, single-source fact in practice, so the stricter per-citation rule is safe there
+    specifically. A known, documented residual gap remains: a *non-monetary* misattributed detail
+    ("LOCUST X3", "OTA") carrying neither a watchlist name nor a number still is not caught -- see
+    `docs/qa/loop/round_3_chat_fixes.md` section 5's live verification table and its "known
+    limitations" list for the full, honest accounting.
   A flagged unit is dropped outright; if the only flagged unit(s) fell inside the leading
   "direct answer" paragraph (before the first `###` section) and removing them leaves it blank, an
   explicit Hebrew gap sentence naming the missing entity is inserted instead of a blank answer

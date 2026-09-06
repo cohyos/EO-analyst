@@ -347,6 +347,95 @@ def _mock_ask_with_real_sources(
     return question
 
 
+class TestQuotedPhraseIgnoresHebrewAcronymGershayim:
+    """Live-verified 2026-09-06 (throwaway 8766, real golden Q2 answer, local resident model): the
+    model wrote Hebrew acronyms with a literal ASCII `"` glued directly between two Hebrew letters
+    ("ארה\"ב", "כטב\"מים") instead of the proper gershayim character -- a naive quoted-phrase regex
+    paired one such stray quote with the *next* one anywhere later in the text and flagged the
+    entire nonsensical span between them (a whole extra sentence) as an invented "quoted phrase",
+    removing an otherwise perfectly fine, grounded sentence."""
+
+    def test_two_acronyms_far_apart_do_not_pair_into_one_giant_quoted_span(self) -> None:
+        rows = [_src(1, "Rafael Iron Beam contract", 'רפאל חתמה על חוזה מגן אור עם צבא ארה"ב.')]
+        text = (
+            'מגן אור (Iron Beam) של רפאל נגד כטב"מים חתמה על חוזה חדש עם צבא ארה"ב. זהו החוזה הראשון מסוגו.'
+        )
+        new_text, removed = ask_grounding.ground_and_filter_answer(text, "שאלה על מגן אור", rows)
+        assert removed == 0
+        assert new_text == text
+
+    def test_a_genuine_ascii_quoted_phrase_between_two_acronyms_is_still_found(self) -> None:
+        text = 'כטב"מים תקפו את "המטרה החשאית" ליד ארה"ב.'
+        matches = [m.group(1) for m in ask_grounding._QUOTED_RE.finditer(text)]
+        assert matches == ["המטרה החשאית"]
+
+
+class TestMoneyFigureConflationGuard:
+    """Live-verified 2026-09-06 (throwaway 8766, real golden Q2 answer, local resident model): the
+    model wrote a real, genuinely-retrieved "$465 million" AeroVironment laser-contract figure into
+    a Rafael/Iron Beam paragraph, citing [1] -- an unrelated "top 30 companies" ranking item that
+    never mentions any figure at all, while item [6] (the actual, retrieved AeroVironment article)
+    sat unused in the same retrieval. Neither the grounded-entity check (the figure is real,
+    somewhere in the corpus) nor the watchlist conflation guard (no watchlist company name appears
+    in this specific sentence -- the model never once wrote "AeroVironment") caught it. This is the
+    exact live reproduction of the round-2 Q2 fabrication pattern the whole module exists to close,
+    just carried by a number instead of a company name."""
+
+    def test_live_repro_real_figure_misattributed_to_an_unrelated_citation_is_removed(self) -> None:
+        rows = [
+            _src(
+                1, "Defense News ranks 3 Israeli cos in world's top 30", "דירוג חברות הביטחון הגדולות בעולם."
+            ),
+            _src(
+                6,
+                'צבא ארה"ב מעניק לארוויירונמנט חוזה ייצור לייזר ראשון בהיקף כ-465 מיליון דולר',
+                "AeroVironment received a first production contract worth approximately $465 million for a laser weapon.",
+            ),
+        ]
+        text = (
+            "### עובדות מרכזיות\n"
+            '- מגן אור (Iron Beam) של רפאל חתמה על חוזה חדש בהיקף של כ-465 מיליון דולר עם צבא ארה"ב [1].'
+        )
+        new_text, removed = ask_grounding.ground_and_filter_answer(
+            text, "מהם פרטי חוזה מגן אור העדכני ביותר של רפאל?", rows
+        )
+        assert removed == 1
+        assert "465" not in new_text
+
+    def test_figure_correctly_attributed_to_its_own_citation_is_kept_even_when_a_similar_number_exists_elsewhere(
+        self,
+    ) -> None:
+        rows = [
+            _src(1, "Rafael Iron Beam contract", "רפאל חתמה על חוזה מגן אור בשווי 465 מיליון דולר."),
+            _src(6, "AeroVironment laser contract", "AeroVironment laser contract worth $500 million."),
+        ]
+        text = "### עובדות מרכזיות\n- מגן אור של רפאל חתמה על חוזה בהיקף 465 מיליון דולר [1]."
+        new_text, removed = ask_grounding.ground_and_filter_answer(text, "שאלה", rows)
+        assert removed == 0
+        assert new_text == text
+
+    def test_figure_cited_across_multiple_sources_one_of_which_has_it_is_kept(self) -> None:
+        rows = [
+            _src(1, "General overview", "סקירה כללית ללא מספרים."),
+            _src(2, "Rafael Iron Beam contract", "רפאל חתמה על חוזה מגן אור בשווי 465 מיליון דולר."),
+        ]
+        text = "### עובדות מרכזיות\n- מגן אור של רפאל חתמה על חוזה בהיקף 465 מיליון דולר [1][2]."
+        new_text, removed = ask_grounding.ground_and_filter_answer(text, "שאלה", rows)
+        assert removed == 0
+        assert new_text == text
+
+    def test_a_wholly_invented_figure_absent_from_every_source_is_still_caught_by_the_general_check(
+        self,
+    ) -> None:
+        """Not this guard's own job (it only fires when the figure is real elsewhere) -- but the
+        pre-existing grounded-entity check must still catch a figure that is not real anywhere."""
+        rows = [_src(1, "Rafael Iron Beam contract", "רפאל חתמה על חוזה מגן אור.")]
+        text = "### עובדות מרכזיות\n- מגן אור של רפאל חתמה על חוזה בהיקף 999 מיליון דולר [1]."
+        new_text, removed = ask_grounding.ground_and_filter_answer(text, "שאלה", rows)
+        assert removed == 1
+        assert "999" not in new_text
+
+
 class TestGroundingGuardEndToEnd:
     def test_conflated_sentence_is_stripped_and_reported_in_answer_final(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
