@@ -39,7 +39,7 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 _SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.?!])(?=\s|$)")
 _BUYER_PIPELINE_HEADING_KEYWORDS = ("מפת קונים", "צינור הזדמנויות")
 _ASSUMPTIONS_HEADING_KEYWORDS = ("הנחות והפרכות", "הנחות ואלטרנטיבות", "הנחות")
-_FALSIFIER_KEYWORDS_HE = ("פריך", "הפרכ", "falsif")
+_FALSIFIER_KEYWORDS_HE = ("פריך", "הפרכ", "יופרך", "falsif")  # "יופרך אם" is the other valid renderer wording
 _ACQUISITION_HEADING_HE = "מעקב רכישות ושותפויות"
 _GLOBAL_MARKER_KEYWORD_HE = "גלובלי"
 _BD_FILENAME_RE = re.compile(r"bd_([a-z]+)_\d{4}-\d{2}-\d{2}\.md$")
