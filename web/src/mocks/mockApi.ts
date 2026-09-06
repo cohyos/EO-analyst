@@ -42,6 +42,8 @@ import type {
   SettingsPutResponse,
   Survey,
   TechRadarResponse,
+  TenderFeedback,
+  TenderFeedbackVerdict,
   TenderSourceCoverageResponse,
   TenderStatus,
   TendersResponse,
@@ -292,6 +294,12 @@ const llmSettingsStore: {
 };
 let lessonId = lessons.length + 1;
 let investigateJobCounter = 9000;
+
+// W2b: in-memory 👍/👎 feedback store -- postTenderFeedback both appends here AND flips the
+// matching mockTenders row's `intake` in place, so mock mode's tenders screen reacts to feedback
+// exactly like the live backend (eoa.tenders.feedback.record_feedback).
+const mockTenderFeedback: TenderFeedback[] = [];
+let mockTenderFeedbackId = 1;
 
 // W10 (docs/REVIEW_2026-09-06_evening.md round 4): one seeded pending review so
 // `VITE_USE_MOCKS=true` exercises the banner/inbox UI end to end even before the deep-search
@@ -755,6 +763,7 @@ export const mockApi: ApiClient = {
               needs_key_env_var: null,
               notices_stored: 12,
               last_fetch_at: "2026-09-06T04:00:00Z",
+              priority_decrement: 0,
             },
             {
               id: "uk_find_tender",
@@ -766,6 +775,7 @@ export const mockApi: ApiClient = {
               needs_key_env_var: null,
               notices_stored: 3,
               last_fetch_at: "2026-09-06T04:00:00Z",
+              priority_decrement: 0,
             },
           ],
         },
@@ -782,6 +792,7 @@ export const mockApi: ApiClient = {
               needs_key_env_var: "SAM_GOV_API_KEY",
               notices_stored: 0,
               last_fetch_at: null,
+              priority_decrement: 0,
             },
             {
               id: "sam_gov_search",
@@ -793,6 +804,7 @@ export const mockApi: ApiClient = {
               needs_key_env_var: null,
               notices_stored: 5,
               last_fetch_at: "2026-09-05T22:00:00Z",
+              priority_decrement: 0,
             },
           ],
         },
@@ -809,6 +821,7 @@ export const mockApi: ApiClient = {
               needs_key_env_var: null,
               notices_stored: 0,
               last_fetch_at: null,
+              priority_decrement: 0,
             },
           ],
         },
@@ -821,6 +834,38 @@ export const mockApi: ApiClient = {
       },
       source_count: 5,
     }),
+
+  // W2b: one-click 👍/👎 (+ optional reason) -- flips the matching mock tender's `intake` and
+  // appends to the in-memory feedback log, mirroring eoa.tenders.feedback.record_feedback.
+  postTenderFeedback: async (
+    tenderId: number,
+    verdict: TenderFeedbackVerdict,
+    reason: string | null = null,
+  ): Promise<TenderFeedback> => {
+    const tender = mockTenders.find((t) => t.id === tenderId);
+    const entry: TenderFeedback = {
+      id: mockTenderFeedbackId++,
+      tender_id: tenderId,
+      verdict,
+      reason: reason ?? null,
+      source: tender?.source ?? null,
+      territory: tender?.country ?? null,
+      matched_terms: tender?.matched_terms ?? [],
+      created_at: new Date().toISOString(),
+    };
+    mockTenderFeedback.push(entry);
+    if (tender) {
+      tender.intake = verdict === "relevant" ? "accepted" : "rejected-by-user";
+    }
+    return delay(entry);
+  },
+  getTenderFeedback: async (tenderId: number): Promise<TenderFeedback[]> =>
+    delay(
+      mockTenderFeedback
+        .filter((f) => f.tender_id === tenderId)
+        .slice()
+        .reverse(),
+    ),
 
   // A14: פטנטים ו-IP.
   getPatents: async (query: PatentsQuery): Promise<PatentsResponse> => {
@@ -1056,25 +1101,10 @@ export const mockApi: ApiClient = {
     }),
 
   getReports: async (kind?: string, _limit = 30) =>
-    delay(
-      kind && kind !== mockReport.kind
-        ? []
-        : [
-            {
-              id: mockReport.id,
-              kind: mockReport.kind,
-              period_start: mockReport.period_start,
-              period_end: mockReport.period_end,
-              path_docx: mockReport.path_docx,
-              path_md: mockReport.path_md,
-              path_html: mockReport.path_html,
-              qa_passed: mockReport.qa_passed,
-              created_at: mockReport.created_at,
-              headline_count: mockReport.headline_count,
-              territory: mockReport.territory,
-            },
-          ],
-    ),
+    // `mockReport` (a `ReportDetail`) is a valid `ReportSummary` -- reusing it directly (rather
+    // than hand-listing fields, which drifted out of sync every time ReportSummary grew a field,
+    // most recently W14's title_he/subject_he/preview_he/... additive fields) keeps this in sync.
+    delay(kind && kind !== mockReport.kind ? [] : [mockReport]),
   getReport: async (id: number): Promise<ReportDetail> => {
     if (id !== mockReport.id) throw new Error("not_found");
     return delay(mockReport);

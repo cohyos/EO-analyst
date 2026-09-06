@@ -25,6 +25,15 @@ export const mockBdReports: ReportDetail[] = [
     qa_passed: true,
     created_at: "2026-09-06T07:00:00+03:00",
     headline_count: 18,
+    // W14: additive title/preview/grouping fields -- see the ReportSummary type doc.
+    title_he: 'דוח פיתוח עסקי — ארה"ב — 06.09 07:00',
+    subject_he: 'ארה"ב',
+    built_at: "2026-09-06T07:00:00+03:00",
+    preview_he: 'צבא ארה"ב מקדם מכרז חדש לפוד כיוון (targeting pod). תוכנית נגד כטב"מים חדשה הוכרזה בארה"ב בחודשים האחרונים.',
+    source_count: 3,
+    qa_issues: 0,
+    group_key: "bd_territory:US",
+    is_latest: true,
     items_included: [101, 102, 103],
     open_points: [],
     html: `
@@ -62,6 +71,15 @@ export const mockBdReports: ReportDetail[] = [
     qa_passed: true,
     created_at: "2026-09-06T07:05:00+03:00",
     headline_count: 9,
+    // W14: additive title/preview/grouping fields -- see the ReportSummary type doc.
+    title_he: "דוח פיתוח עסקי — ישראל — 06.09 07:05",
+    subject_he: "ישראל",
+    built_at: "2026-09-06T07:05:00+03:00",
+    preview_he: "אלביט מערכות ורפאל ממשיכות להוביל את השוק המקומי, עם התמקדות בפתרונות C-UAS.",
+    source_count: 2,
+    qa_issues: 0,
+    group_key: "bd_territory:IL",
+    is_latest: true,
     items_included: [201, 202],
     open_points: [],
     html: `

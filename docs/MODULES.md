@@ -9516,3 +9516,113 @@ intentionally not run per this round's instructions (a live chat request current
 for minutes while another engineer fixes that). Python: `PYTHONPATH=agent python -m pytest
 tests/unit/test_api_round4_ui.py tests/unit/test_api_smoke.py -q` (20 passed) plus
 `ruff check`/`ruff format --check` clean on every touched `.py` file.
+
+### W14 -- descriptive report titles, content preview, and version grouping
+
+User finding (2026-09-06 19:10): report list rows were meaningless ("patent_survey —
+06.09.2026", "bd_territory — 06.09.2026" ×3) with no preview of what a report actually contains
+before opening it, and seven `patent_survey` rows existed for only two real topics (every re-run
+of the on-demand survey inserts a brand-new `reports` row, never an update).
+
+**Backend** (`agent/eoa/api/services.py`, `_report_card`/`list_reports`/`get_report` only --
+every pre-existing field is unchanged, all new fields are additive):
+
+- `title_he` -- a descriptive Hebrew title, built from a kind label + subject + build time/period,
+  verified read-only against the live `reports` table (52 rows) for every kind actually present:
+  - `patent_survey` (subject = `qa_report->>'topic'`, the value `eoa.patents.survey._persist_report`
+    already stores -- never invented): `"סקר פטנטים: FPA עם פיקסל דיגיטלי (DROIC) — 06.09 19:03"`
+    (id=49, `created_at` 19:03:13).
+  - `bd_territory` (subject = a small local Hebrew country-name table keyed by the existing
+    `reports.territory` column, `_TERRITORY_LABEL_HE` -- an unrecognized code falls back to the
+    raw code itself, never guessed): `'דוח פיתוח עסקי — ארה"ב — 06.09 17:28'` (id=42, territory
+    `US`, `created_at` 17:28:16).
+  - `weekly` (no subject -- title is kind + ISO week number of `period_end` + the
+    `period_start`–`period_end` range): `"דוח שבועי — שבוע 36 (31.08–06.09)"` (id=51, period
+    2026-08-31..2026-09-06).
+  - `daily` (no subject -- kind + `period_end` only, even when `period_start != period_end`):
+    `"דוח יומי — 06.09"` (id=40, `period_end` 2026-09-06).
+  - `monthly`/`adhoc` -- no live rows of either kind exist yet; `monthly` follows the same
+    kind+period shape (`"דוח חודשי — 09.2026"`), `adhoc` falls back to kind + build time.
+- `subject_he` -- the topic/territory used above, `null` for daily/weekly/monthly (they have no
+  subject).
+- `built_at` -- `created_at`, ISO (kept distinct from `created_at` so the frontend never has to
+  guess which of the two is meant for display).
+- `model_chain_he` -- **not added**: every live `qa_report` for every kind was read directly (see
+  the queries below) and none records which LLM/provider drafted the report, so per the task's own
+  "if the qa_report/provenance records which provider drafted it (else omit)" this field is
+  omitted rather than invented.
+- `preview_he` -- first two sentences of the "תקציר מנהלים" (executive summary) section read from
+  `path_md`, blockquoted asides dropped (a patent survey's per-patent "התקדמות פטנט [n]" lines are
+  supplementary detail, not the summary), citation markers/markdown stripped. Reads only the first
+  ~6 KB of the file (the executive summary always sits in the file's first heading section, well
+  within that even for a verbose patent-survey summary that runs to ~12 KB once its blockquoted
+  patent-advance asides are included -- those are filtered out before the byte budget matters).
+- `source_count` -- count of `"נספח מקורות"` (sources appendix) rows, parsed from the same file.
+  The appendix sits at the file's *end* (up to ~22 KB into a 42 KB patent-survey report in the
+  live data), so this requires reading further than the preview's 6 KB slice -- capped at a
+  generous but bounded 128 KB (the largest live report is ~42 KB) rather than an unbounded read,
+  and paid only once per report *version*: results are cached in a module-level dict keyed by
+  `(id, created_at)`, safe because a `reports` row is immutable once written (a re-run always
+  inserts a new row).
+- `qa_issues` -- `len(qa_report.get("errors") or [])`; 0 for `patent_survey` (no `errors` key --
+  citation discipline there is enforced at the pydantic-schema level, see
+  `eoa.patents.survey`'s own docstring, not the `qa_citations` gate the other kinds use).
+- `group_key`/`is_latest` -- `group_key` is kind+subject (`patent_survey:<topic, lowercased>`,
+  `bd_territory:<territory>`) or kind+period for daily/weekly/monthly (`<kind>:<period_start>_
+  <period_end>`). `list_reports` marks the first row per `group_key` (rows already arrive
+  `created_at DESC`) as `is_latest`; `get_report` answers the same question for a single report
+  via a dedicated "any newer row in this group?" query (`_report_group_where`/`_is_latest_report`)
+  mirroring the same grouping rule.
+
+**Frontend**: `types/api.ts`'s `ReportSummary` gained the nine fields above (additive);
+`api/real.ts`'s `normalizeReportSummary` defaults `title_he`/`group_key` to a same-shape fallback
+and `is_latest` to `true` when talking to an older backend that hasn't rolled out yet.
+`pages/ReportsPage.tsx`: the list groups rows by `group_key` (client-side `groupReports`, using
+the server's `is_latest` when present, falling back to "first row per group" since the list
+already arrives newest-first) and renders only each group's latest row by default, with a
+"גרסאות קודמות (N)" expander (`aria-expanded`/`aria-controls`) revealing the older ones. Each row
+(`ReportRow`) shows `title_he`, a one-line clamped `preview_he`, and a chip row (QA ✓/✗, "N
+מקורות", "N כותרות", built time); the full preview is available via the button's native `title`
+attribute and a `role="tooltip"` panel shown on `group-hover`/`group-focus-within` (keyboard
+focus, not just mouse hover), and the row's `aria-label` folds title+preview+QA status into one
+accessible name so the tooltip is never the only way to get that information. The report-kind
+filter `<select>` now also lists `monthly`/`bd_territory`/`patent_survey`/`adhoc` (previously only
+`daily`/`weekly`). Mock data (`mocks/data/reports.ts`, `mocks/data/bd.ts`) updated with the new
+fields; `mocks/mockApi.ts`'s `getReports` now returns `[mockReport]` directly instead of a
+hand-duplicated field list (avoids the exact kind of drift `_report_card`'s additive fields would
+otherwise cause every round).
+
+**Tests**: `tests/unit/test_reports_list_round4.py` (new, 29 -- `_report_subject_he`/
+`_territory_label_he` per kind incl. unknown-territory fallback, `_report_title_he` verified
+against the exact live-DB rows/examples above for every kind, `_report_group_key` case/whitespace
+-insensitive topic grouping and kind+period grouping, `_report_preview_from_text` sentence
+extraction/blockquote-stripping/markdown-stripping, `_report_file_stats` real-file read + cache
+(asserts a second call for the same `(id, created_at)` never re-reads the file) + missing-file/no
+-path handling, `_report_card` end-to-end field shape, `list_reports`/`get_report` `is_latest`).
+`tests/unit/test_api_round4_gate_and_reports.py`'s pre-existing `_report_card` exact-key-set
+regression test updated to include the new additive keys (still asserts a simulated future `html`
+column never leaks into the list card). `web/src/pages/ReportsPage.test.tsx` (new, 9 -- title/
+preview/chip rendering, QA ✓/✗, accessible row name, version grouping shows only the latest with
+a working expander toggle, groups without a subject group by period with no expander when there's
+only one version, detail selection, empty/prompt states).
+
+**Verification**: `PYTHONPATH=agent python -m pytest tests/unit/test_reports_list_round4.py
+tests/unit/test_api_round4_gate_and_reports.py tests/unit/test_report_citations.py
+tests/unit/test_reports_round4.py -q` (29 + 7 + 20 + 33 passed) plus `ruff check`/`ruff format
+--check` clean on every touched `.py` file. `npm run lint` (0 errors, the same 11 pre-existing
+warnings noted in prior rounds, none in a file this round touched). `npx vitest run` (34 files /
+225 tests, all green, +9 new in `ReportsPage.test.tsx`). `npm run build`'s `tsc -b` step currently
+fails on pre-existing, concurrently-in-progress tender-feedback type errors in
+`TendersPage.test.tsx`/`api/types.ts` owned by the other engineer working `agent/eoa/tenders/**`/
+`TendersPage.tsx`/`api/routes/tenders.py` this round (not this round's files, not introduced by
+this round -- `npx tsc -b --noEmit` filtered to non-tender files is clean); `npx vite build` alone
+succeeds and was used to refresh `web/dist` for e2e. e2e (live app + real Postgres data at
+`127.0.0.1:8765`, `web/dist` rebuilt via `npx vite build` and confirmed served by matching the
+live index.html's asset hash against the just-built one -- no service restart, matching this
+round's "do not restart live services" instruction): `09-reports.spec.ts` -- 6 passed / 4 skipped
+(content-dependent: the live top report has no `[n]` citation markers) on `desktop-1440x900` +
+`iphone-safari`, unchanged from before this round's frontend changes. The live backend process
+itself was not restarted (per instructions), so the live-server screenshot still shows the
+pre-existing title format -- confirmed as the intended fallback path: `normalizeReportSummary`'s
+`title_he`/`group_key`/`is_latest` defaults reproduce the exact old "`<kind> — <date>`" shape when
+talking to a backend that hasn't rolled out the new `_report_card` fields yet.

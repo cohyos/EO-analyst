@@ -43,6 +43,8 @@ import type {
   Survey,
   TechRadarResponse,
   TenderCard,
+  TenderFeedback,
+  TenderFeedbackVerdict,
   TenderSourceCoverageResponse,
   TenderStatus,
   TriageLevel,
@@ -389,6 +391,15 @@ function normalizeReportSummary(
     created_at: str(r.created_at),
     headline_count: num(r.headline_count),
     territory: r.territory ?? null,
+    // W14: additive title/preview/grouping fields -- see the ReportSummary type doc.
+    title_he: str(r.title_he) || `${str(r.kind)} — ${str(r.period_end)}`,
+    subject_he: r.subject_he ?? null,
+    built_at: str(r.built_at) || str(r.created_at),
+    preview_he: r.preview_he ?? null,
+    source_count: num(r.source_count),
+    qa_issues: num(r.qa_issues),
+    group_key: str(r.group_key) || `${str(r.kind)}:${r.id ?? ""}`,
+    is_latest: bool(r.is_latest, true),
   };
 }
 
@@ -449,12 +460,28 @@ function normalizeTenderCard(raw: Partial<TenderCard> | null | undefined): Tende
     cpv_naics: arr(r.cpv_naics),
     summary_he: r.summary_he ?? null,
     relevance: r.relevance ?? null,
+    relevance_score: r.relevance_score ?? null,
+    intake: (r.intake ?? "candidate") as TenderCard["intake"],
     matched_terms: arr(r.matched_terms),
     entities: arr(r.entities),
     status: (r.status ?? "unknown") as TenderCard["status"],
     item_id: r.item_id ?? null,
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
+  };
+}
+
+function normalizeTenderFeedback(raw: Partial<TenderFeedback> | null | undefined): TenderFeedback {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    tender_id: num(r.tender_id),
+    verdict: (r.verdict ?? "relevant") as TenderFeedbackVerdict,
+    reason: r.reason ?? null,
+    source: r.source ?? null,
+    territory: r.territory ?? null,
+    matched_terms: arr(r.matched_terms),
+    created_at: str(r.created_at),
   };
 }
 
@@ -854,12 +881,25 @@ export const realApi: ApiClient = {
           needs_key_env_var: s?.needs_key_env_var ?? null,
           notices_stored: num(s?.notices_stored),
           last_fetch_at: s?.last_fetch_at ?? null,
+          priority_decrement: num(s?.priority_decrement),
         })),
       })),
       totals: raw?.totals ?? {},
       source_count: num(raw?.source_count),
     };
   },
+
+  postTenderFeedback: async (tenderId, verdict, reason = null) =>
+    normalizeTenderFeedback(
+      await request<Partial<TenderFeedback>>(`/api/tenders/${tenderId}/feedback`, {
+        method: "POST",
+        body: JSON.stringify({ verdict, reason }),
+      }),
+    ),
+  getTenderFeedback: async (tenderId) =>
+    arr(
+      await request<Partial<TenderFeedback>[] | null>(`/api/tenders/${tenderId}/feedback`),
+    ).map(normalizeTenderFeedback),
 
   // A14: פטנטים ו-IP.
   getPatents: async (query: PatentsQuery) => {

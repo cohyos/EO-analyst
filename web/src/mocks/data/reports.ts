@@ -12,6 +12,15 @@ export const mockReport: ReportDetail = {
   created_at: "2026-09-04T06:05:00+03:00",
   headline_count: 3,
   territory: null,
+  // W14: additive title/preview/grouping fields -- see the ReportSummary type doc.
+  title_he: "דוח יומי — 04.09",
+  subject_he: null,
+  built_at: "2026-09-04T06:05:00+03:00",
+  preview_he: "הלילה עובדו 40 פריטים חדשים, מתוכם 6 בדרגת קריטי ו-11 בדרגת חשוב.",
+  source_count: 5,
+  qa_issues: 0,
+  group_key: "daily:2026-09-03_2026-09-04",
+  is_latest: true,
   items_included: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
   open_points: [
     {

@@ -476,6 +476,31 @@ export interface ReportSummary {
   headline_count: number;
   /** A11: only populated for kind === "bd_territory" (ISO-2/region code) -- null otherwise. */
   territory: string | null;
+  // W14 (docs/REVIEW_2026-09-06_evening.md, user finding 2026-09-06 19:10): additive fields from
+  // `eoa.api.services._report_card` -- a descriptive Hebrew title/subject/preview so the reports
+  // list is no longer a flat run of identical-looking "<kind> — <date>" rows, plus version
+  // grouping (`group_key`/`is_latest`) so only the newest run per kind+subject shows by default.
+  /** e.g. "סקר פטנטים: FPA עם פיקסל דיגיטלי (DROIC) — 06.09 19:03" / "דוח יומי — 06.09". */
+  title_he: string;
+  /** Topic (patent_survey) or territory Hebrew name (bd_territory) -- null for daily/weekly/monthly. */
+  subject_he: string | null;
+  /** `created_at`, ISO -- kept separate from `created_at` so the UI never has to guess which of
+   * the two timestamp fields is meant for display. */
+  built_at: string;
+  /** First two sentences of the executive summary, plain text (citation markers/markdown stripped). */
+  preview_he: string | null;
+  /** Count of "נספח מקורות" (sources appendix) rows -- may differ from `headline_count` when the
+   * report's citation registry was extended beyond the base item/patent list. */
+  source_count: number;
+  /** Count of `qa_report.errors` -- 0 when the report has no recorded QA errors. */
+  qa_issues: number;
+  /** kind+subject (kind+period for daily/weekly/monthly) -- rows sharing a `group_key` are
+   * different versions/re-runs of the same report; see `is_latest`. */
+  group_key: string;
+  /** True for the newest row in its `group_key` (within the returned list, for `getReports`; a
+   * one-off "any newer row in this group?" check for `getReport`'s single-report detail). The UI
+   * shows only `is_latest` rows by default, with older ones behind a version expander. */
+  is_latest: boolean;
 }
 
 // A11 "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (eoa.report.bd_territory).
@@ -593,6 +618,12 @@ export interface Conference {
 // days past its deadline -- never deleted, just hidden from the board's default view.
 export type TenderStatus = "open" | "closed" | "awarded" | "unknown" | "archived";
 
+// W2b (0021_tender_feedback.py, "be open" requirement, 2026-09-06 evening): every notice that
+// clears the two-signal vocabulary gate is now stored -- 'candidate' (below the self-tuning
+// relevance threshold) or 'accepted' (at/above it) at insert time; 'rejected-by-user' once an
+// operator gives explicit 👎 feedback (hidden by default, see services.list_tenders).
+export type TenderIntake = "candidate" | "accepted" | "rejected-by-user";
+
 // Mirrors `_tender_card` (agent/eoa/api/services.py) / docs/API.md section 5.2.
 export interface TenderCard {
   id: number;
@@ -607,12 +638,30 @@ export interface TenderCard {
   cpv_naics: string[];
   summary_he: string | null;
   relevance: number | null;
+  // W2b (additive): 0-1 self-tuning relevance signal + intake bucket -- see TenderIntake above.
+  relevance_score: number | null;
+  intake: TenderIntake;
   matched_terms: string[];
   entities: string[];
   status: TenderStatus;
   item_id: number | null;
   created_at: string;
   updated_at: string;
+}
+
+// W2b: one 👍/👎 an operator gave a tender. Mirrors `tender_feedback`
+// (db/migrations/versions/0021_tender_feedback.py) / `eoa.tenders.feedback`.
+export type TenderFeedbackVerdict = "relevant" | "irrelevant";
+
+export interface TenderFeedback {
+  id: number;
+  tender_id: number;
+  verdict: TenderFeedbackVerdict;
+  reason: string | null;
+  source: string | null;
+  territory: string | null;
+  matched_terms: string[];
+  created_at: string;
 }
 
 // F24 (2026-09-06): `GET /api/tenders` response shape -- the filtered/capped tender list PLUS a
@@ -660,6 +709,9 @@ export interface TenderSourceCoverageItem {
   needs_key_env_var: string | null;
   notices_stored: number;
   last_fetch_at: string | null;
+  // W2b (additive): self-tuning scan-priority decrement (0 = baseline; never disables a source,
+  // only nudges eoa.tenders.scan to poll it later in the pass) -- see eoa.tenders.feedback.
+  priority_decrement: number;
 }
 
 export interface TenderSourceCoverageRegion {

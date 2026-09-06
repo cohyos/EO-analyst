@@ -1,18 +1,162 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { Download } from "lucide-react";
+import { ChevronDown, ChevronUp, Download } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ReportBody } from "@/components/reports/ReportBody";
-import { formatDate, formatDateTime } from "@/lib/time";
+import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
+import type { ReportSummary } from "@/types/api";
 
 const KIND_LABEL: Record<string, string> = {
   daily: "יומי",
   weekly: "שבועי",
-  ad_hoc: "אד-הוק",
+  monthly: "חודשי",
+  bd_territory: "פיתוח עסקי",
+  patent_survey: "סקר פטנטים",
+  adhoc: "אד-הוק",
 };
+
+// W14 (docs/REVIEW_2026-09-06_evening.md, user finding 2026-09-06 19:10): "seven patent_survey
+// rows for two topics" -- reports sharing a `group_key` (server-computed: kind+subject, or
+// kind+period for daily/weekly/monthly) are different runs/versions of the same report. Only the
+// newest (`is_latest`) row per group shows by default; the rest fold behind "גרסאות קודמות (N)".
+interface ReportGroup {
+  key: string;
+  latest: ReportSummary;
+  older: ReportSummary[];
+}
+
+function groupReports(reports: ReportSummary[]): ReportGroup[] {
+  const byKey = new Map<string, ReportSummary[]>();
+  for (const r of reports) {
+    const arr = byKey.get(r.group_key);
+    if (arr) arr.push(r);
+    else byKey.set(r.group_key, [r]);
+  }
+  const groups: ReportGroup[] = [];
+  for (const [key, rows] of byKey) {
+    // `reports` arrives created_at DESC from the server, so the first row of each group in
+    // insertion order is already its newest -- fall back to it if `is_latest` is ever missing.
+    const latest = rows.find((r) => r.is_latest) ?? rows[0];
+    const older = rows.filter((r) => r.id !== latest.id);
+    groups.push({ key, latest, older });
+  }
+  return groups;
+}
+
+// W14 point 4: title_he + a one-line preview + chips (QA ✓/✗, N מקורות, N כותרות, built time),
+// with a hover/focus tooltip surfacing the full preview text. `sub` renders the smaller, indented
+// style used for older versions inside a group's "גרסאות קודמות" expander.
+function ReportRow({
+  report,
+  isSelected,
+  onSelect,
+  sub = false,
+}: {
+  report: ReportSummary;
+  isSelected: boolean;
+  onSelect: () => void;
+  sub?: boolean;
+}) {
+  const previewId = `report-preview-${report.id}`;
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      title={report.preview_he ?? undefined}
+      aria-describedby={report.preview_he ? previewId : undefined}
+      aria-label={`${report.title_he}${report.preview_he ? ` — ${report.preview_he}` : ""} — ${
+        report.qa_passed ? "QA עבר" : "QA נכשל"
+      }`}
+      className={cn(
+        "group relative flex w-full flex-col items-start gap-1 border-b border-border px-3 py-2 text-start hover:bg-bg-sunken",
+        sub ? "ps-6 py-1.5" : "py-2",
+        isSelected && "bg-accent-muted/60",
+      )}
+    >
+      <span className={cn("font-medium", sub ? "text-xs text-fg-dim" : "text-sm")}>
+        {report.title_he}
+      </span>
+      {report.preview_he && (
+        <span className="line-clamp-1 max-w-full text-xs text-fg-dim">{report.preview_he}</span>
+      )}
+      <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-fg-dim">
+        <span
+          className={cn(
+            "rounded bg-bg-sunken px-1.5 py-0.5 font-medium",
+            report.qa_passed ? "text-fg-dim" : "text-danger",
+          )}
+        >
+          {report.qa_passed ? "QA ✓" : "QA ✗"}
+        </span>
+        <span className="rounded bg-bg-sunken px-1.5 py-0.5">{report.source_count} מקורות</span>
+        <span className="rounded bg-bg-sunken px-1.5 py-0.5">{report.headline_count} כותרות</span>
+        <span className="rounded bg-bg-sunken px-1.5 py-0.5">{formatDateTime(report.built_at)}</span>
+      </span>
+      {report.preview_he && (
+        <span
+          id={previewId}
+          role="tooltip"
+          className="pointer-events-none absolute inset-x-2 top-full z-10 mt-1 hidden rounded-md border border-border-strong bg-bg-raised p-2 text-xs text-fg shadow-panel group-focus-within:block group-hover:block"
+        >
+          {report.preview_he}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function ReportGroupRow({
+  group,
+  selectedId,
+  onSelect,
+}: {
+  group: ReportGroup;
+  selectedId: string | null;
+  onSelect: (id: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const olderListId = `report-older-${group.key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  return (
+    <li>
+      <ReportRow
+        report={group.latest}
+        isSelected={selectedId === String(group.latest.id)}
+        onSelect={() => onSelect(group.latest.id)}
+      />
+      {group.older.length > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            aria-controls={olderListId}
+            className="flex w-full items-center gap-1 border-b border-border bg-bg-sunken/40 px-3 py-1 text-[11px] text-fg-dim hover:bg-bg-sunken"
+          >
+            {expanded ? <ChevronUp size={12} aria-hidden="true" /> : <ChevronDown size={12} aria-hidden="true" />}
+            גרסאות קודמות ({group.older.length})
+          </button>
+          {expanded && (
+            <ul id={olderListId}>
+              {group.older.map((r) => (
+                <li key={r.id}>
+                  <ReportRow
+                    report={r}
+                    isSelected={selectedId === String(r.id)}
+                    onSelect={() => onSelect(r.id)}
+                    sub
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </li>
+  );
+}
 
 function addHeadingIds(html: string): {
   html: string;
@@ -39,6 +183,8 @@ export function ReportsPage() {
     queryFn: () => api.getReports(kind || undefined),
   });
 
+  const groups = useMemo(() => groupReports(listQuery.data ?? []), [listQuery.data]);
+
   const detailQuery = useQuery({
     queryKey: ["report", selectedId],
     queryFn: () => api.getReport(Number(selectedId)),
@@ -64,8 +210,11 @@ export function ReportsPage() {
             aria-label="סינון לפי סוג דוח"
           >
             <option value="">כל הסוגים</option>
-            <option value="daily">יומי</option>
-            <option value="weekly">שבועי</option>
+            {Object.entries(KIND_LABEL).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
           </select>
         </div>
         {listQuery.isLoading && <LoadingState label="טוען דוחות…" />}
@@ -76,24 +225,13 @@ export function ReportsPage() {
           <EmptyState title="אין דוחות" />
         )}
         <ul className="max-h-[70vh] overflow-y-auto">
-          {listQuery.data?.map((r) => (
-            <li key={r.id}>
-              <button
-                type="button"
-                onClick={() => setSearchParams({ id: String(r.id) })}
-                className={cn(
-                  "flex w-full flex-col items-start gap-0.5 border-b border-border px-3 py-2 text-start hover:bg-bg-sunken",
-                  selectedId === String(r.id) && "bg-accent-muted/60",
-                )}
-              >
-                <span className="text-sm font-medium">
-                  {KIND_LABEL[r.kind] ?? r.kind} — {formatDate(r.period_end)}
-                </span>
-                <span className="text-xs text-fg-dim">
-                  {r.headline_count ?? 0} כותרות · {r.qa_passed ? "QA עבר" : "QA נכשל"}
-                </span>
-              </button>
-            </li>
+          {groups.map((group) => (
+            <ReportGroupRow
+              key={group.key}
+              group={group}
+              selectedId={selectedId}
+              onSelect={(id) => setSearchParams({ id: String(id) })}
+            />
           ))}
         </ul>
       </div>
@@ -109,7 +247,7 @@ export function ReportsPage() {
             <article className="min-w-0 flex-1">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold text-fg-dim">
-                  {formatDateTime(detailQuery.data.created_at)}
+                  {detailQuery.data.title_he} · {formatDateTime(detailQuery.data.created_at)}
                 </h2>
                 <div className="flex gap-2">
                   <a

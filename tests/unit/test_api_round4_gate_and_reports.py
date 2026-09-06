@@ -355,6 +355,10 @@ class TestReportsListStaysLight:
         card = services._report_card(row)
         assert "html" not in card
         assert card["headline_count"] == 3
+        # W14 (docs/REVIEW_2026-09-06_evening.md): _report_card grew additive title/preview/
+        # grouping fields (title_he, subject_he, built_at, preview_he, source_count, qa_issues,
+        # group_key) -- still an explicit whitelist, so "html" (the simulated future bloated
+        # column above) still never leaks in.
         assert set(card) == {
             "id",
             "kind",
@@ -367,6 +371,13 @@ class TestReportsListStaysLight:
             "created_at",
             "headline_count",
             "territory",
+            "title_he",
+            "subject_he",
+            "built_at",
+            "preview_he",
+            "source_count",
+            "qa_issues",
+            "group_key",
         }
 
     def test_list_reports_route_returns_only_light_cards(
