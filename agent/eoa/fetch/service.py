@@ -26,6 +26,18 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+
+async def _guarded_fetch_page(url: str):
+    """Q2-13 (2026-09-06): every ingestion fetch -- feed URLs, listing pages and article links that
+    come out of untrusted RSS/HTML content -- goes through the same SSRF guard as deep-search reads:
+    the initial URL is validated (public IP, http(s), sane port) and every redirect hop is
+    re-validated before it is requested, with the connection pinned to the validated IPs."""
+    from eoa.fetch.html import fetch_page
+    from eoa.fetch.remote import assert_public_http_url
+
+    initial_ips = assert_public_http_url(url)
+    return await fetch_page(url, validate_redirect=assert_public_http_url, pin_ips=initial_ips)
+
 _CONCURRENCY = 6
 _PER_DOMAIN_MIN_INTERVAL_SECONDS = 1.0
 _RAW_TEXT_MAX_CHARS = 200_000
@@ -266,11 +278,9 @@ async def _fetch_and_store(
     fallback_title: str | None = None,
     fallback_published_at: datetime | None = None,
 ) -> None:
-    from eoa.fetch.html import fetch_page
-
     await throttle.wait(url)
     try:
-        page = await fetch_page(url)
+        page = await _guarded_fetch_page(url)
     except Exception as exc:
         log.warning("fetch.article_fetch_failed", url=url, error=repr(exc))
         return
@@ -299,11 +309,10 @@ def _matches_keywords(entry, keywords_any: list[str]) -> bool:
 async def _ingest_rss_source(
     source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
 ) -> None:
-    from eoa.fetch.html import fetch_page
     from eoa.fetch.rss import parse_feed
 
     await throttle.wait(source.url)
-    feed_page = await fetch_page(source.url)
+    feed_page = await _guarded_fetch_page(source.url)
     entries = parse_feed(feed_page.html, since_days=since_days)
     stats.entries_seen += len(entries)
 
@@ -325,10 +334,8 @@ async def _ingest_rss_source(
 async def _ingest_html_source(
     source, *, source_db_id: int | None, throttle: _DomainThrottle, stats: IngestStats
 ) -> None:
-    from eoa.fetch.html import fetch_page
-
     await throttle.wait(source.url)
-    listing_page = await fetch_page(source.url)
+    listing_page = await _guarded_fetch_page(source.url)
     links = _extract_links(listing_page.html, source.url, source.list_selector, source.link_selector)
     stats.entries_seen += len(links)
 
