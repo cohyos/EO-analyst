@@ -49,6 +49,7 @@ from psycopg.types.json import Json
 
 from eoa.config import REPO_ROOT, settings
 from eoa.db import connection
+from eoa.errors import LLMOutputError
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import Sentence
@@ -103,7 +104,46 @@ def _israeli_industry_names() -> set[str]:
 # ``chat_structured``'s per-call ``options`` (merged over the config default in
 # ``eoa.llm.ollama_client._ollama_chat``) rather than raising the shared config default, so
 # daily/weekly/monthly are unaffected.
-_BD_NUM_PREDICT = 16000
+_BD_NUM_PREDICT = 9000
+
+#: Round-3 (2026-09-06, job 97): the first structured US draft ran away to a 54k-char JSON that
+#: ended mid-string (EOF at column 54376) -- the same failure the weekly report had before its
+#: round-2 input-side reduction. Same cure: the citation registry keeps every market item (``n``
+#: numbering unchanged), but the model only *sees* every red item plus the top few per domain,
+#: with per-item text truncated -- two independent levers on output size, on top of the lower
+#: ``_BD_NUM_PREDICT`` above (9000 tokens is ample for a structured draft over ~15 items and
+#: makes a runaway fail in a third of the time).
+_BD_PROMPT_ITEMS_PER_DOMAIN = 4
+_BD_PROMPT_ITEM_TEXT_CHARS = 400
+
+
+def select_bd_items_for_prompt(
+    items: list[dict[str, Any]], *, per_domain: int = _BD_PROMPT_ITEMS_PER_DOMAIN
+) -> list[dict[str, Any]]:
+    """The reduced, score-ordered subset of ``items`` shown to the model (every ``level == 'red'``
+    item + the top ``per_domain`` per domain), each a shallow copy with ``summary_he`` /
+    ``so_what_he`` truncated to :data:`_BD_PROMPT_ITEM_TEXT_CHARS`. ``items`` itself (the citation
+    registry) is never modified."""
+    keep: set[int] = set()
+    for _domain, group in _group_by_domain(items):
+        for it in group[:per_domain]:
+            if it.get("id") is not None:
+                keep.add(it["id"])
+    for it in items:
+        if it.get("level") == "red" and it.get("id") is not None:
+            keep.add(it["id"])
+    out: list[dict[str, Any]] = []
+    for it in items:
+        if it.get("id") not in keep:
+            continue
+        copy = dict(it)
+        for f in ("summary_he", "so_what_he"):
+            v = copy.get(f)
+            if isinstance(v, str) and len(v) > _BD_PROMPT_ITEM_TEXT_CHARS:
+                copy[f] = v[: _BD_PROMPT_ITEM_TEXT_CHARS - 1].rstrip() + "…"
+        out.append(copy)
+    return out
+
 
 # Best-effort conference-city -> territory-code heuristic (conferences has no country column --
 # see docs/adr, ``eoa.conferences.tracker``). Deliberately small: only the handful of cities that
@@ -998,6 +1038,16 @@ def draft_bd_territory(
     )
 
 
+def _corrective_retry_or_none(*args: Any, **kwargs: Any) -> BdTerritoryReportDraft | None:
+    """:func:`_corrective_retry`, but an invalid/runaway model output returns ``None`` (the caller
+    falls through to the deterministic substitute) instead of failing the whole report job."""
+    try:
+        return _corrective_retry(*args, **kwargs)
+    except LLMOutputError as exc:
+        log.error("bd_territory_corrective_retry_invalid_output", error=str(exc)[:200])
+        return None
+
+
 def _corrective_retry(
     territory: str,
     lookback_days: int,
@@ -1835,7 +1885,7 @@ def build_bd_territory(
     _extend_registry_with_conferences(citation_items, conferences_data)
     _attach_win_citations(citation_items, competitors)
 
-    items_block = format_market_items_block(items)
+    items_block = format_market_items_block(select_bd_items_for_prompt(items))
     events_block = (
         format_market_items_block([])
         if not events
@@ -1858,22 +1908,37 @@ def build_bd_territory(
         conferences=len(conferences_data.get("territory") or []),
     )
 
-    draft = draft_bd_territory(
-        code,
-        lookback_days,
-        items_block,
-        events_block,
-        tenders_block,
-        competitors_block,
-        conferences_block,
-        has_items=bool(items),
-        table_counts=table_counts,
-        role=role,
-        interactive=interactive,
-    )
+    llm_draft_failed = False
+    try:
+        draft = draft_bd_territory(
+            code,
+            lookback_days,
+            items_block,
+            events_block,
+            tenders_block,
+            competitors_block,
+            conferences_block,
+            has_items=bool(items),
+            table_counts=table_counts,
+            role=role,
+            interactive=interactive,
+        )
+    except LLMOutputError as exc:
+        # Round-3 (job 97): a draft that never validated (runaway/EOF JSON even after
+        # chat_structured's own corrective retry) must not fail the job -- it gets the same
+        # deterministic, cited substitute as a twice-failed QA, and skips every further LLM pass.
+        log.error(
+            "bd_territory_draft_invalid_output_using_deterministic_fallback",
+            territory=code,
+            error=str(exc)[:200],
+        )
+        draft = _deterministic_fallback_draft(
+            code, items, events, competitors, tenders_data, conferences_data
+        )
+        llm_draft_failed = True
     draft = _cap_draft_lengths(_strip_placeholder_echoes(draft))
 
-    if items:
+    if items and not llm_draft_failed:
         violations = _perspective_violations(draft, competitors)
         if violations:
             log.warning(
@@ -1906,9 +1971,9 @@ def build_bd_territory(
 
     qa = _run_qa(draft, citation_items, has_items=bool(items))
 
-    if not qa.passed and items:
+    if not qa.passed and items and not llm_draft_failed:
         log.warning("bd_territory_qa_failed_retrying", territory=code, errors=qa.errors[:10])
-        draft = _corrective_retry(
+        draft = _corrective_retry_or_none(
             code,
             lookback_days,
             items_block,
@@ -1921,6 +1986,11 @@ def build_bd_territory(
             role=role,
             interactive=interactive,
         )
+        if draft is None:
+            draft = _deterministic_fallback_draft(
+                code, items, events, competitors, tenders_data, conferences_data
+            )
+            llm_draft_failed = True
         draft = _cap_draft_lengths(_strip_placeholder_echoes(draft))
         qa = _run_qa(draft, citation_items, has_items=bool(items))
 
