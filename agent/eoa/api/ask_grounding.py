@@ -128,6 +128,37 @@ independently real, none a regression in what rounds 3/5 were built to fix:
    ``routes.ask``'s ``_strong_anchors``/``_primary_anchors`` (necessarily duplicated here, not
    imported, since ``routes.ask`` itself imports this module), it prepends an explicit Hebrew caveat
    paragraph -- never removing content -- when no retrieved source mentions any primary anchor.
+
+Round 6 (docs/qa/loop/round_5_judge.md D5, worst-list items 2/3 -- Q1/XM30, Q2/Iron Beam): the
+round-5 judge's live sample found the guards above still miss a *claim-vs-source* fabrication built
+entirely out of independently-real tokens (a real entity, a real figure, each genuinely present
+*somewhere* in the corpus, combined into an invented relationship/capability that no single cited
+source actually supports), plus three smaller, independent hygiene gaps:
+
+7. :func:`filter_claim_grounding` -- a per-bullet check, scoped to the "עובדות מרכזיות" section and
+   the leading direct-answer paragraph only (the two places `ask_answer_format.md` requires a claim
+   to be grounded in a specific source at all): every distinctive token in a `[n]`-cited unit (Latin
+   words/acronyms >= 3 chars, hyphen-split; digit runs >= 2 digits; Hebrew technical terms drawn
+   from `config/taxonomy.yaml`'s own subdomain labels) is checked against *that unit's own cited
+   source(s)* specifically (not the whole corpus, and without the common-acronym/taxonomy
+   allowlists :func:`_single_token_grounded` uses -- those allowlists are exactly why a real-but-
+   generic acronym like "HEL" waved through the live Q1 fabrication even though item 257's own text
+   never mentions it). A unit is dropped only when *none* of its distinctive tokens is grounded this
+   way (nor present in the question) -- a deliberately weak, precision-first bar (one real,
+   correctly-cited token in an otherwise-fabricated bullet still saves it), the same trade-off every
+   guard in this module makes: measure live false positives before tightening further.
+8. :func:`strip_template_phrases` -- reuses (imports, never copies) the banned-phrase lists this
+   project already maintains for report prose -- `eoa.report.qa_citations`'s
+   ``SO_WHAT_TEMPLATE_PHRASES_HE`` and `eoa.report.style`'s ``BANNED_FILLER_PHRASES_HE`` -- live
+   found leaking into a chat answer too (round-5 judge's D2/Q8 finding): a sentence that is *only*
+   a banned template phrase is dropped outright; one with other content keeps that content with
+   just the phrase clause deleted.
+9. :func:`sanitize_citation_markers` (extended in place) -- a genuine `[n]` citation can still come
+   out with a stray extra bracket glued onto it (`[9]]`, `[[6]`, `[9]]]`, live-found round-5 Q5) --
+   collapsed to the bare `[n]` form the web UI's citation renderer actually recognises.
+10. :func:`ensure_headings_on_own_line` -- a final, no-op-safe normalisation pass (live-found on an
+    iPhone Safari e2e run) that inserts a line break before any ``###``-style heading marker a prior
+    guard's removal left glued onto the end of the preceding line.
 """
 
 from __future__ import annotations
@@ -138,6 +169,8 @@ from typing import Any
 
 from eoa.config import settings
 from eoa.pipeline import entity_normalize
+from eoa.report.qa_citations import strip_so_what_phrases
+from eoa.report.style import strip_filler_phrases
 from eoa.search.deep_search import extract_anchors
 
 # A real citation is always a bare `[<digits>]` (see `eoa.api.routes.ask`'s own
@@ -318,6 +351,43 @@ def _taxonomy_vocabulary() -> frozenset[str]:
     return frozenset(words)
 
 
+_LABEL_PAREN_RE = re.compile(r"\s*\(.*$")
+
+
+@lru_cache(maxsize=1)
+def _taxonomy_subdomain_terms() -> frozenset[str]:
+    """The Hebrew half (everything before the first ``(...)`` English gloss) of every
+    ``config/taxonomy.yaml`` ``domains.*.sub`` label -- e.g. ``'לייזר בעוצמה גבוהה'`` from
+    ``hel: "לייזר בעוצמה גבוהה (High-Energy Laser, HEL)"`` -- used by
+    :func:`filter_claim_grounding` (round 6, item 1) as one category of "distinctive Hebrew
+    technical term" a claim can be grounded by. Deliberately narrower than
+    :func:`_taxonomy_vocabulary` above (which walks every string in the whole taxonomy tree,
+    domain labels included, and only ever collects ASCII words): this is specifically the
+    curated Hebrew subdomain phrase, exactly as the round-6 brief names it, not every Hebrew word
+    anywhere in the config."""
+    terms: set[str] = set()
+    try:
+        domains = (settings().taxonomy or {}).get("domains") or {}
+    except Exception:
+        # Config loading is best-effort here, same rationale as `_taxonomy_vocabulary` above.
+        return frozenset()
+    if not isinstance(domains, dict):
+        return frozenset()
+    for domain in domains.values():
+        if not isinstance(domain, dict):
+            continue
+        sub = domain.get("sub")
+        if not isinstance(sub, dict):
+            continue
+        for label in sub.values():
+            if not isinstance(label, str):
+                continue
+            hebrew_part = _LABEL_PAREN_RE.sub("", label).strip()
+            if hebrew_part:
+                terms.add(hebrew_part)
+    return frozenset(terms)
+
+
 def _single_token_grounded(token: str, corpus_cf: str) -> bool:
     """Whether a single suspicious ALL-CAPS/CamelCase ``token`` is grounded: it (case-insensitively)
     appears in ``corpus_cf`` (question + retrieved sources), resolves to a canonical watchlist/
@@ -333,14 +403,53 @@ def _single_token_grounded(token: str, corpus_cf: str) -> bool:
     return token.casefold() in _taxonomy_vocabulary()
 
 
+# Round 6 item 4 (docs/qa/loop/round_5_judge.md D5, live Q5/Skyranger finding): a *real* citation
+# marker can still come out malformed -- one or more stray brackets glued directly onto an
+# otherwise-valid `[n]` (`[9]]`, `[[6]`, `[9]]]`). The web UI's own citation renderer
+# (`web/src/components/CitationText.tsx`) splits strictly on `/(\[\d+\])/g`, turning only an exact
+# `[<digits>]` run into a citation chip -- any stray bracket immediately outside that core is left
+# over as a literal, orphaned "[" or "]" character rendered to the user. Collapsing every run of
+# extra brackets touching a `[<digits>]` core down to the bare marker is always safe: a real
+# citation is never anything but that bare form to begin with, and this never merges two distinct,
+# separately-bracketed citations (`[1][2]` has no extra bracket touching either core, so neither
+# side matches more than its own single pair).
+_MALFORMED_CITATION_RE = re.compile(r"\[+(\d+)\]+")
+
+
+def _fix_malformed_citations(text: str) -> tuple[str, int]:
+    """Collapse every ``_MALFORMED_CITATION_RE`` match in ``text`` down to its bare ``[<digits>]``
+    form. Returns ``(new_text, count)`` where ``count`` only tallies a match that actually *had*
+    an extra bracket (an already-well-formed ``[7]`` matches the same regex but rewrites to itself
+    byte-for-byte, so it must not inflate the count callers use to decide whether anything
+    changed -- see the round-3 ``sanitize_citation_markers`` tests this must keep passing
+    unchanged)."""
+    out: list[str] = []
+    last = 0
+    count = 0
+    for m in _MALFORMED_CITATION_RE.finditer(text):
+        original = m.group(0)
+        fixed = f"[{m.group(1)}]"
+        out.append(text[last : m.start()])
+        out.append(fixed)
+        last = m.end()
+        if fixed != original:
+            count += 1
+    out.append(text[last:])
+    return "".join(out), count
+
+
 def sanitize_citation_markers(text: str) -> tuple[str, int]:
     """Strip any literal, unsubstituted citation-placeholder token (`[n]`, `[n=5]`, `{n}`, any
-    case) from ``text`` -- never a valid citation, which is always a plain `[<digits>]`. Returns
-    ``(cleaned_text, count_removed)``; ``count_removed == 0`` (and ``cleaned_text == text``) when
-    nothing matched, so callers can cheaply skip re-emitting an unchanged answer."""
+    case) from ``text`` -- never a valid citation, which is always a plain `[<digits>]` -- and
+    (round 6) collapse a malformed-but-real citation marker (`[9]]`, `[[6]`, `[9]]]`) down to that
+    bare form (see :data:`_MALFORMED_CITATION_RE`). Returns ``(cleaned_text, count_removed)``;
+    ``count_removed == 0`` (and ``cleaned_text == text``) when nothing matched, so callers can
+    cheaply skip re-emitting an unchanged answer."""
     if not text:
         return text, 0
     cleaned, count = _TEMPLATE_LEAK_RE.subn("", text)
+    cleaned, malformed_count = _fix_malformed_citations(cleaned)
+    count += malformed_count
     if count:
         cleaned = re.sub(r"[ \t]+([.,:;!?])", r"\1", cleaned)
         cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
@@ -1368,3 +1477,216 @@ def retrieval_relevance_caveat(
         return answer_text, False
     caveat = _RETRIEVAL_RELEVANCE_CAVEAT.format(anchor=primary_anchors[0])
     return caveat + "\n\n" + answer_text.lstrip(), True
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 6 item 1 (docs/qa/loop/round_5_judge.md D5, worst-list item 3, live Q1/XM30): a per-bullet
+# *claim* grounding check for the "עובדות מרכזיות" section and the leading direct-answer paragraph
+# -- the two places `ask_answer_format.md` requires a factual claim to trace to a specific cited
+# source. Deliberately checked against *that unit's own* `[n]` citation(s), not the whole corpus
+# (unlike every check above) and without the common-acronym/taxonomy allowlists
+# `_single_token_grounded` uses -- both of those are exactly why the live fabrication ("HEL laser
+# missile-interception system", "ATR/GPS-denied navigation", attributed to item 257, whose actual
+# text is only about vehicle deliveries/program value/supplier roster) sailed through every
+# existing guard: "HEL" is a real, common defense acronym (on `_COMMON_DEFENSE_ACRONYMS`) and
+# "ATR"/"GPS" are each independently real *somewhere* in this retrieval's wider corpus, so the
+# corpus-wide/allowlisted checks above all pass them -- the fabrication is entirely in which
+# *specific source* the claim is attributed to, not in whether the tokens are "real" words.
+# ---------------------------------------------------------------------------------------------
+
+_KEY_FACTS_MARKER = "עובדות מרכזיות"
+
+# Latin "word" candidate for a distinctive token -- letters/digits, with internal hyphens kept in
+# the raw match (split apart below, per the brief's "hyphen-split") rather than treated as a
+# `_PROPER_NOUN_RE`-style segment separator.
+_CLAIM_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*")
+_CLAIM_DIGIT_RUN_RE = re.compile(r"\d{2,}")
+
+
+def _claim_distinctive_tokens(unit_text: str) -> list[tuple[str, str]]:
+    """Every ``(kind, token)`` distinctive-token candidate in ``unit_text`` -- ``kind`` is
+    ``"latin"`` (a hyphen-split Latin word/acronym, >= 3 chars), ``"digit"`` (a standalone digit
+    run, >= 2 digits), or ``"taxonomy"`` (a Hebrew subdomain phrase from
+    :func:`_taxonomy_subdomain_terms` present verbatim in ``unit_text``). Order is
+    latin-then-digit-then-taxonomy, stable but not otherwise meaningful (every token is checked
+    independently, not positionally)."""
+    tokens: list[tuple[str, str]] = []
+    for m in _CLAIM_LATIN_TOKEN_RE.finditer(unit_text):
+        for piece in m.group(0).split("-"):
+            if len(piece) >= 3:
+                tokens.append(("latin", piece))
+    for m in _CLAIM_DIGIT_RUN_RE.finditer(unit_text):
+        tokens.append(("digit", m.group(0)))
+    for phrase in _taxonomy_subdomain_terms():
+        if phrase and phrase in unit_text:
+            tokens.append(("taxonomy", phrase))
+    return tokens
+
+
+def _claim_token_grounded(
+    kind: str, token: str, cited_text: str, cited_text_cf: str, question: str, question_cf: str
+) -> bool:
+    """Whether a single distinctive ``(kind, token)`` claim -- see :func:`_claim_distinctive_tokens`
+    -- is grounded in ``cited_text`` (the unit's own `[n]`-cited source(s) only) or in ``question``
+    itself (the question's own terms are never a fabricated claim). No allowlist/taxonomy-vocabulary
+    exemption here on purpose -- see the section note above."""
+    if kind == "latin":
+        return token.casefold() in cited_text_cf or token.casefold() in question_cf
+    if kind == "digit":
+        pat = re.compile(r"(?<!\d)" + re.escape(token) + r"(?!\d)")
+        return bool(pat.search(cited_text)) or bool(pat.search(question))
+    if kind == "taxonomy":
+        return token in cited_text or token in question
+    return True  # unreachable for the kinds `_claim_distinctive_tokens` ever emits
+
+
+def filter_claim_grounding(
+    answer_text: str, question: str, retrieved: list[dict[str, Any]]
+) -> tuple[str, int]:
+    """Drop every `[n]`-cited unit inside the "עובדות מרכזיות" section or the leading direct-answer
+    paragraph whose distinctive tokens (see :func:`_claim_distinctive_tokens`) are *all* ungrounded
+    in that unit's own cited source(s) and in the question (see :func:`_claim_token_grounded`) --
+    the round-6 closer for the live Q1/XM30 "HEL laser"/"ATR/GPS-denied navigation" fabrication (see
+    the section note above). A unit with no citation, or no distinctive token at all, is left alone
+    (nothing to check); a unit with at least one grounded token is kept even if it also carries an
+    ungrounded one (deliberately weak -- see the module docstring's round-6 note on measuring false
+    positives before tightening). A no-op on a blank answer or empty ``retrieved`` (same rationale
+    as every other guard in this module). The "### הערכת האנליסט" section is out of scope by
+    construction (it is never inside the lead paragraph or the key-facts section)."""
+    if not answer_text or not answer_text.strip() or not retrieved:
+        return answer_text, 0
+    sources_by_n = _sources_by_n(retrieved)
+    question_cf = question.casefold()
+
+    section_titles: list[tuple[int, str]] = [
+        (m.start(), m.group(1).strip()) for m in _SECTION_HEADING_TEXT_RE.finditer(answer_text)
+    ]
+
+    def _section_at(pos: int) -> str:
+        title = ""
+        for heading_start, heading_title in section_titles:
+            if heading_start > pos:
+                break
+            title = heading_title
+        return title
+
+    heading_match = _FIRST_SECTION_HEADING_RE.search(answer_text)
+    lead_end = heading_match.start() if heading_match else len(answer_text)
+
+    flagged: list[tuple[int, int]] = []
+    for start, end in _iter_units(answer_text):
+        unit_text = answer_text[start:end]
+        if not unit_text.strip():
+            continue
+        in_scope = start < lead_end or _KEY_FACTS_MARKER in _section_at(start)
+        if not in_scope:
+            continue
+        cited_ns = _cited_ns(unit_text)
+        if not cited_ns:
+            continue
+        tokens = _claim_distinctive_tokens(unit_text)
+        if not tokens:
+            continue
+        cited_text = " ".join(sources_by_n.get(n, "") for n in cited_ns)
+        cited_text_cf = cited_text.casefold()
+        if any(
+            _claim_token_grounded(kind, token, cited_text, cited_text_cf, question, question_cf)
+            for kind, token in tokens
+        ):
+            continue
+        flagged.append((start, end))
+
+    if not flagged:
+        return answer_text, 0
+    new_text = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, flagged)))
+    return new_text, len(flagged)
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 6 item 3 (docs/qa/loop/round_5_judge.md D2/D5, live Q8/SPECTRO finding): the so_what
+# template-phrase crutch this project already bans from report prose (`eoa.report.qa_citations`'s
+# `SO_WHAT_TEMPLATE_PHRASES_HE`) and the generic analyst-filler phrases banned from report prose
+# (`eoa.report.style`'s `BANNED_FILLER_PHRASES_HE`) leak into chat answers too -- both lists are
+# imported and reused here (never copied) so a future addition to either list closes the chat gap
+# automatically, with no separate edit needed.
+# ---------------------------------------------------------------------------------------------
+
+_HAS_LETTER_RE = re.compile(r"[A-Za-zא-ת]")
+
+
+def strip_template_phrases(answer_text: str) -> tuple[str, int]:
+    """Remove every banned so_what/filler template phrase (see the section note above) from
+    ``answer_text``, unit by unit: a unit that is *only* such a phrase (nothing but the phrase
+    itself, plus a bullet/number marker and punctuation, survives its removal) is dropped outright;
+    a unit with other content keeps that content, just without the banned clause. Returns
+    ``(new_text, count)`` where ``count`` is the total number of banned phrases removed across the
+    whole answer (whether or not their containing unit was itself dropped); ``count == 0`` (and
+    ``new_text == answer_text``) when nothing matched."""
+    if not answer_text or not answer_text.strip():
+        return answer_text, 0
+
+    flagged: list[tuple[int, int]] = []
+    replacements: list[tuple[int, int, str]] = []
+    count = 0
+    for start, end in _iter_units(answer_text):
+        unit_text = answer_text[start:end]
+        if not unit_text.strip():
+            continue
+        cleaned, so_what_removed = strip_so_what_phrases(unit_text)
+        cleaned, filler_removed = strip_filler_phrases(cleaned)
+        removed_here = len(so_what_removed) + len(filler_removed)
+        if not removed_here:
+            continue
+        count += removed_here
+        if _HAS_LETTER_RE.search(cleaned):
+            # Both reused strippers trim their own *leading* junk/whitespace, on the assumption
+            # they're handed a standalone sentence -- here `unit_text` can instead be a
+            # mid-paragraph unit whose own leading space is what separates it from the *previous*
+            # unit (`_iter_units` includes it). Re-attach that leading space if the strippers ate
+            # it, or this unit's surviving text would glue directly onto the previous unit's own
+            # trailing punctuation with no space at all.
+            leading_ws = unit_text[: len(unit_text) - len(unit_text.lstrip())]
+            if leading_ws and not cleaned[:1].isspace():
+                cleaned = leading_ws + cleaned
+            replacements.append((start, end, cleaned))
+        else:
+            # nothing but punctuation/bullet/number markers survived -- the unit *was* the phrase.
+            flagged.append((start, end))
+
+    if not count:
+        return answer_text, 0
+    new_text = _replace_spans(answer_text, [*replacements, *((s, e, "") for s, e in flagged)])
+    new_text = _renumber_lists(_tidy_whitespace(new_text))
+    return new_text, count
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 6 item 5 (live-found on an iPhone Safari e2e run): a prior guard's unit removal can leave a
+# `###`-style section heading glued onto the tail of the preceding line (the newline that used to
+# separate them belonged to the removed unit). A cheap, final, order-independent normalisation
+# pass -- never removes or rewrites any actual content, just re-inserts the line break -- meant to
+# run last, after every other guard above.
+# ---------------------------------------------------------------------------------------------
+
+_GLUED_HEADING_RE = re.compile(r"#{2,6}[ \t]")
+
+
+def ensure_headings_on_own_line(answer_text: str) -> str:
+    """Insert a line break before any ``###``-style heading marker (2-6 ``#`` chars, matching this
+    project's own heading convention -- see ``ask_answer_format.md``) that is not already the first
+    thing on its line, splitting the glued-on prefix onto its own preceding line. A no-op line (no
+    heading marker, or one already at column 0) is returned unchanged; a no-``#`` ``answer_text`` is
+    a fast no-op without even splitting into lines."""
+    if not answer_text or "#" not in answer_text:
+        return answer_text
+    out_lines: list[str] = []
+    for line in answer_text.split("\n"):
+        m = _GLUED_HEADING_RE.search(line)
+        if m and m.start() > 0:
+            prefix = line[: m.start()].rstrip()
+            if prefix:
+                out_lines.append(prefix)
+            out_lines.append(line[m.start() :])
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines)

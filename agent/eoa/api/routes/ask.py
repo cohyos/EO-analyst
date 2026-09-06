@@ -265,6 +265,59 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
 
+def _run_removal_guards(
+    answer_text: str, question: str, retrieved: list[dict[str, Any]]
+) -> tuple[str, int, dict[str, int]]:
+    """Run every deterministic *removal/redaction* grounding guard from ``eoa.api.ask_grounding``
+    over ``answer_text`` once, in a fixed order, returning ``(new_text, removed_count,
+    removed_by_guard)``. Deliberately excludes ``sanitize_citation_markers`` (cheap enough to call
+    separately at every call site that needs it) and ``retrieval_relevance_caveat`` (a one-time
+    prepend, not safe to run a second time on the same text).
+
+    Round 6 (docs/qa/loop/round_5_judge.md D5 finding #2, live Q2/Iron Beam): factored out so the
+    identical guard sequence can be re-applied at every point ``answer_text`` can still change
+    after the very first pass, not just once, right after generation, the way round 3/5 left it.
+    The live gap this closes: a zero-citation answer's ``_run_citation_repair`` rewrite (below)
+    became the new ``answer_text`` completely unguarded -- any fabrication the corrective LLM pass
+    introduced (or reintroduced) while attaching `[n]` markers for the first time sailed straight
+    through every guard, then straight into the anchor-miss "demoted" fallback section unexamined.
+    Calling this same sequence again after that rewrite, and once more on the fully-assembled
+    demoted text, closes both the specific repair-pass gap and the general "guards only ever ran
+    once, upstream of a later rewrite" risk with one fix -- see docs/qa/loop/round_6_fixes.md.
+    """
+    if not retrieved:
+        return answer_text, 0, {}
+    removed_by_guard: dict[str, int] = {}
+    total = 0
+
+    answer_text, n = ask_grounding.ground_and_filter_answer(answer_text, question, retrieved)
+    if n:
+        total += n
+        removed_by_guard["grounded_entity"] = n
+
+    answer_text, n = ask_grounding.filter_claim_grounding(answer_text, question, retrieved)
+    if n:
+        total += n
+        removed_by_guard["claim_grounding"] = n
+
+    answer_text, n = ask_grounding.filter_entity_equivalence(answer_text, retrieved, question=question)
+    if n:
+        total += n
+        removed_by_guard["entity_equivalence"] = n
+
+    answer_text, n = ask_grounding.filter_attribution_mismatches(answer_text, retrieved)
+    if n:
+        total += n
+        removed_by_guard["attribution_mismatch"] = n
+
+    answer_text, n = ask_grounding.filter_self_contradictions(answer_text, retrieved)
+    if n:
+        total += n
+        removed_by_guard["self_contradiction"] = n
+
+    return answer_text, total, removed_by_guard
+
+
 def _run_citation_repair(
     messages: list[dict[str, Any]], answer_text: str, provider: str | None
 ) -> str | None:
@@ -445,6 +498,11 @@ async def ask(body: AskRequest) -> StreamingResponse:
             #       (the Q2 Rafael/AeroVironment conflation pattern) -- see
             #       `eoa.api.ask_grounding` for the full rationale and precision/recall trade-offs.
             answer_text, _leak_removed = ask_grounding.sanitize_citation_markers(answer_text)
+            # Round 6 item 3 (docs/qa/loop/round_5_judge.md D2/D5, live Q8/SPECTRO finding): the
+            # so_what/filler template-phrase crutch already banned from report prose leaks into
+            # chat answers too -- pure style cleanup, independent of citations/retrieval, so it
+            # runs unconditionally rather than inside the `if citations:` block below.
+            answer_text, _template_phrases_removed = ask_grounding.strip_template_phrases(answer_text)
             ungrounded_removed = 0
             _removed_by_guard: dict[str, int] = {}
             if citations:
@@ -454,6 +512,17 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 ungrounded_removed += _grounding_removed
                 if _grounding_removed:
                     _removed_by_guard["grounded_entity"] = _grounding_removed
+                # Round 6 item 1 (docs/qa/loop/round_5_judge.md D5, worst-list item 3, live
+                # Q1/XM30): a claim-vs-source check for the "עובדות מרכזיות" section and the
+                # direct-answer paragraph -- catches a fabricated capability/relationship built out
+                # of otherwise-real tokens (see `ask_grounding.filter_claim_grounding`'s own
+                # docstring for the HEL/ATR/GPS live repro this closes).
+                answer_text, _claim_removed = ask_grounding.filter_claim_grounding(
+                    answer_text, body.question, retrieved
+                )
+                ungrounded_removed += _claim_removed
+                if _claim_removed:
+                    _removed_by_guard["claim_grounding"] = _claim_removed
                 # Round 5 (docs/qa/loop/round_3_judge.md, worst-list items 3/8 and its own
                 # ranked-item-6 follow-up): three more deterministic, additive guards, all
                 # documented in full in `eoa.api.ask_grounding` -- an entity-equivalence guard (the
@@ -489,11 +558,12 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 ungrounded_removed += _contradiction_removed
                 if _contradiction_removed:
                     _removed_by_guard["self_contradiction"] = _contradiction_removed
-            if _leak_removed or ungrounded_removed:
+            if _leak_removed or _template_phrases_removed or ungrounded_removed:
                 log.warning(
                     "ask.grounding_repair",
                     question_hash=_question_hash(body.question),
                     template_leaks_removed=_leak_removed,
+                    template_phrases_removed=_template_phrases_removed,
                     ungrounded_removed=ungrounded_removed,
                     removed_by_guard=_removed_by_guard,
                 )
@@ -516,9 +586,34 @@ async def ask(body: AskRequest) -> StreamingResponse:
                     corrected, _ = ask_grounding.sanitize_citation_markers(corrected)
                 if corrected and re.search(r"\[\d+\]", corrected):
                     answer_text = corrected
+                    # Round 6 item 2 (docs/qa/loop/round_5_judge.md D5 finding #2, live Q2/Iron
+                    # Beam): `corrected` is a brand-new LLM rewrite that never passed through any
+                    # of the grounding guards above -- round 5 adopted it as the new `answer_text`
+                    # completely unguarded. Re-run the same removal-guard sequence on it now, same
+                    # as the very first pass, before it can reach the anchor check/demotion below.
+                    answer_text, _repair_removed, _repair_by_guard = _run_removal_guards(
+                        answer_text, body.question, retrieved
+                    )
+                    if _repair_removed:
+                        for _k, _v in _repair_by_guard.items():
+                            _removed_by_guard[_k] = _removed_by_guard.get(_k, 0) + _v
+                        ungrounded_removed += _repair_removed
+                        log.warning(
+                            "ask.grounding_repair_post_citation_repair",
+                            question_hash=_question_hash(body.question),
+                            ungrounded_removed=_repair_removed,
+                            removed_by_guard=_repair_by_guard,
+                        )
                 else:
                     answer_text = _NO_CITATION_PREFIX + answer_text
-                yield _sse({"type": "answer_final", "text": answer_text})
+                yield _sse(
+                    {
+                        "type": "answer_final",
+                        "text": answer_text,
+                        "ungrounded_removed": ungrounded_removed,
+                        "removed_by_guard": _removed_by_guard,
+                    }
+                )
 
             # Round 2 P2 topic-substitution guard (docs/qa/loop/round_2_chat_fixes.md, D5 Q3
             # Greece/LORA finding): the answer must mention at least one deterministic anchor
@@ -558,6 +653,42 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 answer_text = (
                     _OFF_TOPIC_PREFIX + gap_statement + "\n\n### הקשר קרוב (לא התשובה)\n" + answer_text
                 )
+                # Round 6 item 2 (docs/qa/loop/round_5_judge.md D5 finding #2, live Q2/Iron Beam):
+                # the demoted section is already built from text every guard above has already
+                # seen -- but belt-and-suspenders costs nothing here and closes any future gap in
+                # that assumption (e.g. a guard added later that only some upstream call site
+                # remembers to invoke). Re-run the same removal-guard sequence on the fully
+                # assembled demoted text before it goes out.
+                answer_text, _demoted_removed, _demoted_by_guard = _run_removal_guards(
+                    answer_text, body.question, retrieved
+                )
+                if _demoted_removed:
+                    for _k, _v in _demoted_by_guard.items():
+                        _removed_by_guard[_k] = _removed_by_guard.get(_k, 0) + _v
+                    ungrounded_removed += _demoted_removed
+                    log.warning(
+                        "ask.grounding_repair_post_demotion",
+                        question_hash=_question_hash(body.question),
+                        ungrounded_removed=_demoted_removed,
+                        removed_by_guard=_demoted_by_guard,
+                    )
+                yield _sse(
+                    {
+                        "type": "answer_final",
+                        "text": answer_text,
+                        "ungrounded_removed": ungrounded_removed,
+                        "removed_by_guard": _removed_by_guard,
+                    }
+                )
+
+            # Round 6 item 5 (live-found on an iPhone Safari e2e run): a final, order-independent
+            # normalisation pass -- a prior guard's unit removal can leave a `###`-style heading
+            # glued onto the tail of the preceding line (the newline that used to separate them
+            # belonged to the removed unit). Never rewrites/removes content, only re-inserts a line
+            # break, so it is always safe to run last, after every guard above.
+            _fixed_headings = ask_grounding.ensure_headings_on_own_line(answer_text)
+            if _fixed_headings != answer_text:
+                answer_text = _fixed_headings
                 yield _sse({"type": "answer_final", "text": answer_text})
 
             notes = _parse_source_notes(sources_buf) if in_sources else {}
