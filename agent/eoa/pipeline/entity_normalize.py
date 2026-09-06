@@ -137,6 +137,11 @@ def _alias_index() -> dict[str, dict[str, Any]]:
                 "country": rec.get("country"),
                 "aliases": list(rec.get("aliases") or []),
                 "focus": list(rec.get("focus") or []),
+                # round-2 (2026-09-06, judge D3 item 8): the subset of `aliases` that also
+                # collides with an unrelated generic word/program -- see the module-level note
+                # in config/watchlist.yaml and `_strict_alias_records`/`_record_mentioned_non_
+                # strictly` below.
+                "strict_aliases": list(rec.get("strict_aliases") or []),
             }
             for surface in [rec.get("name", ""), *canonical["aliases"]]:
                 key = normalize_name_key(surface)
@@ -611,19 +616,210 @@ def is_junk_entity(name: str) -> bool:
     return is_technique_like(name) or is_generic_non_entity(name) or is_source_like_name(name)
 
 
+@lru_cache(maxsize=1)
+def _strict_alias_records() -> dict[str, dict[str, Any]]:
+    """``{normalize_name_key(strict-alias surface) -> canonical record}`` (round-2, 2026-09-06,
+    judge D3 item 8): a "strict" alias (``config/watchlist.yaml``'s ``strict_aliases:`` key) is a
+    product/program-style name that also collides with an unrelated generic term or program --
+    e.g. BlueHalo's watchlist alias "LOCUST" vs. AeroVironment's own "Locust X3" product (the
+    verified hallucination this round-2 fix addresses), or "Titan" vs. the US Army's own TITAN
+    ground-station program (awarded to Palantir/Anduril, unrelated to BlueHalo). Such a surface
+    must never, on its own, attribute a text mention to the company --
+    :func:`find_watchlist_aliases_in_text` additionally requires the company's own canonical name
+    (or another, non-strict alias) to independently co-occur in the same text."""
+    index: dict[str, dict[str, Any]] = {}
+    for record in _alias_index().values():
+        for alias in record.get("strict_aliases") or []:
+            key = normalize_name_key(alias)
+            if key:
+                index[key] = record
+    return index
+
+
+def _record_mentioned_non_strictly(text: str, record: dict[str, Any]) -> bool:
+    """Whether ``record``'s own canonical name or a *non-strict* alias literally appears in
+    ``text`` -- the co-occurrence requirement a strict-alias match needs to actually count as a
+    mention of the company (round-2, see :func:`_strict_alias_records`)."""
+    strict_keys = {normalize_name_key(a) for a in (record.get("strict_aliases") or [])}
+    for surface in [record.get("name", ""), *record.get("aliases", [])]:
+        if not surface or normalize_name_key(surface) in strict_keys:
+            continue
+        if re.search(r"\b" + re.escape(surface) + r"\b", text, re.IGNORECASE):
+            return True
+    return False
+
+
 def find_watchlist_aliases_in_text(text: str) -> list[str]:
     """Q3-8: every watchlist canonical name whose name or alias literally appears in ``text``
     (whole-word/phrase, case-insensitive for Latin script) -- deduplicated, in order of first
     appearance in the surface-string list (longest surface first, so a full company name is
-    preferred over a shorter alias substring of it)."""
+    preferred over a shorter alias substring of it).
+
+    Round-2 (2026-09-06, judge D3 item 8): a surface listed as one of its company's
+    ``strict_aliases`` (see :func:`_strict_alias_records`) only counts as a hit when the same
+    company's own canonical name (or a non-strict alias) is *also* present somewhere in ``text`` --
+    otherwise a mention of e.g. AeroVironment's "Locust X3" product no longer silently attributes
+    the whole item to BlueHalo just because the word "Locust" appears."""
     if not text:
         return []
     found: list[str] = []
     seen: set[str] = set()
+    strict_index = _strict_alias_records()
     for surface, canonical_name in _surface_to_canonical_name():
         if canonical_name in seen:
             continue
-        if re.search(r"\b" + re.escape(surface) + r"\b", text, re.IGNORECASE):
-            found.append(canonical_name)
-            seen.add(canonical_name)
+        if not re.search(r"\b" + re.escape(surface) + r"\b", text, re.IGNORECASE):
+            continue
+        strict_record = strict_index.get(normalize_name_key(surface))
+        if strict_record is not None and not _record_mentioned_non_strictly(text, strict_record):
+            continue
+        found.append(canonical_name)
+        seen.add(canonical_name)
     return found
+
+
+# --------------------------------------------------------------------------
+# Round-2 (2026-09-06, judge D3 item 3, docs/qa/loop/round_0_judge.md): person-name
+# transliteration dedup -- the same real person extracted under multiple spellings across a
+# Hebrew<->English transliteration (e.g. item 81's appointee, recorded as "Amikam Norkin" /
+# "Amiram Norkin" in ``entities``, and "עמירם נורקין" / "אמירם נורקין" in event titles/parties
+# text) is not caught by :func:`normalize_name_key` (case/punctuation only, not phonetics) or by
+# the watchlist (a person is never a watchlist entry). This gives that comparison its own,
+# narrowly-scoped mechanism: a small Hebrew-consonant -> Latin-consonant map plus a Latin-vowel
+# strip collapses both scripts to a comparable "skeleton", then difflib decides how similar two
+# skeletons are.
+# --------------------------------------------------------------------------
+
+#: Standard Hebrew letter -> Latin consonant transliteration. 'א'/'ע' are silent/glottal in modern
+#: pronunciation and contribute nothing. 'ו' and 'י' are mapped to "" (not "v"/"y") rather than
+#: their occasional true-consonant reading: in ordinary unvocalized Hebrew they overwhelmingly
+#: function as *matres lectionis* -- vowel-marking letters (e.g. the י in "עמירם"/"Amiram" marks
+#: the "i" sound, not a consonant "y") -- which is exactly the source of the Hebrew<->Latin
+#: transliteration variation this skeleton needs to collapse (regression: "עמירם נורקין" and
+#: "Amiram Norkin" only converge to the same skeleton, ``"mrmnrkn"``, once ו/י are dropped like a
+#: Latin vowel rather than kept as a consonant).
+_HEBREW_TO_LATIN_CONSONANTS: dict[str, str] = {
+    "א": "",
+    "ב": "b",
+    "ג": "g",
+    "ד": "d",
+    "ה": "h",
+    "ו": "",
+    "ז": "z",
+    "ח": "kh",
+    "ט": "t",
+    "י": "",
+    "כ": "k",
+    "ך": "k",
+    "ל": "l",
+    "מ": "m",
+    "ם": "m",
+    "נ": "n",
+    "ן": "n",
+    "ס": "s",
+    "ע": "",
+    "פ": "p",
+    "ף": "p",
+    "צ": "tz",
+    "ץ": "tz",
+    "ק": "k",
+    "ר": "r",
+    "ש": "sh",
+    "ת": "t",
+}
+_LATIN_VOWEL_RE = re.compile(r"[aeiou]")
+
+
+def _name_consonant_skeleton(name: str) -> str:
+    """A rough phonetic consonant-skeleton for ``name`` (Hebrew or Latin script): every Hebrew
+    letter maps to its standard Latin consonant transliteration (:data:`_HEBREW_TO_LATIN_CONSONANTS`,
+    vowel points/diacritics never appear in ordinary Hebrew text so nothing is lost by not handling
+    them); a Latin letter is kept only when it is not a vowel. Punctuation, spaces, and digits are
+    dropped entirely from both. Two spellings of the same name across a Hebrew<->English
+    transliteration collapse to the same (or a very similar) skeleton this way -- e.g. "Amiram
+    Norkin" and "עמירם נורקין" both skeletonize to ``"mrmnrkn"``, and "Amikam Norkin" to
+    ``"mkmnrkn"`` -- close enough for :func:`person_transliteration_similarity` to flag all three
+    (and "אמירם נורקין", the fourth spelling of the same name) as the same person."""
+    out: list[str] = []
+    for ch in name or "":
+        mapped = _HEBREW_TO_LATIN_CONSONANTS.get(ch)
+        if mapped is not None:
+            out.append(mapped)
+        elif ch.isalpha() and ch.isascii() and not _LATIN_VOWEL_RE.match(ch.lower()):
+            out.append(ch.lower())
+    return "".join(out)
+
+
+def person_transliteration_similarity(a: str, b: str) -> float:
+    """``difflib.SequenceMatcher.ratio()`` between the consonant-skeletons of ``a`` and ``b`` (see
+    :func:`_name_consonant_skeleton`) -- ``0.0`` when either skeleton is empty (nothing to compare,
+    e.g. a name with no Hebrew/Latin letters at all)."""
+    import difflib
+
+    skel_a, skel_b = _name_consonant_skeleton(a), _name_consonant_skeleton(b)
+    if not skel_a or not skel_b:
+        return 0.0
+    return difflib.SequenceMatcher(None, skel_a, skel_b).ratio()
+
+
+#: The round-2 bar for "same person, different transliteration/spelling" -- chosen empirically
+#: against the Norkin regression (four spellings, pairwise ratios all >= 0.85) while staying well
+#: above the ratio two genuinely different short Hebrew/English names typically share by chance.
+PERSON_TRANSLITERATION_THRESHOLD = 0.85
+
+
+def is_likely_same_person(a: str, b: str, *, threshold: float = PERSON_TRANSLITERATION_THRESHOLD) -> bool:
+    """True when ``a``/``b`` are plausibly the same person's name under different
+    transliteration/spelling -- see :func:`person_transliteration_similarity`."""
+    if normalize_name_key(a) == normalize_name_key(b):
+        return True
+    return person_transliteration_similarity(a, b) >= threshold
+
+
+_HEBREW_WORD_RE = re.compile(r"^[֐-׿'\"-]+$")
+_LATIN_PERSON_WORD_RE = re.compile(r"^[A-Z][a-zA-Z.'-]*$")
+#: Words that mark a multi-word name as an organisation, not a person -- checked case-insensitively
+#: against every word in the candidate name (Q3-13's existing entity-kind heuristics have no
+#: equivalent "is this a person" positive test, only "is this junk" negative ones).
+_COMPANY_LIKE_WORDS = frozenset(
+    {
+        "inc",
+        "ltd",
+        "llc",
+        "corp",
+        "corporation",
+        "group",
+        "systems",
+        "technologies",
+        "industries",
+        "aerospace",
+        "defense",
+        "defence",
+        "electronics",
+        "dynamics",
+        "solutions",
+        "holdings",
+        "company",
+        "co",
+    }
+)
+
+
+def looks_like_person_name(name: str) -> bool:
+    """True for a 2-4 word name that is plausibly a person's name rather than a company/org/
+    system -- either all-Hebrew words, or all Title-Case Latin words with none of
+    :data:`_COMPANY_LIKE_WORDS` -- and not otherwise a recognised watchlist/curated-org/country
+    entity. Used to scope the round-2 person-transliteration dedup (:func:`is_likely_same_person`)
+    to plausible person names only, since a company's own name can also collapse to a similar
+    consonant-skeleton by coincidence."""
+    stripped = (name or "").strip()
+    if not stripped or resolve_canonical(stripped) or resolve_country_name(stripped):
+        return False
+    words = stripped.split()
+    if not 2 <= len(words) <= 4:
+        return False
+    if all(_HEBREW_WORD_RE.match(w) for w in words):
+        return True
+    if all(_LATIN_PERSON_WORD_RE.match(w) for w in words):
+        return not any(w.strip(".").lower() in _COMPANY_LIKE_WORDS for w in words)
+    return False

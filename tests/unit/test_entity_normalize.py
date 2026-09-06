@@ -336,3 +336,45 @@ class TestCanonicalNameAndKindCountryAndOrg:
         name, kind = en.canonical_name_and_kind('צבא ארה"ב', "company")
         assert name == "US Army"
         assert kind == "org"
+
+
+class TestPersonTransliterationDedup:
+    """Round-2 (2026-09-06, judge D3 item 3): the same person's name across a Hebrew<->English
+    transliteration (item 81's Anduril-Israel appointee, four spellings) must be recognised as a
+    match by :func:`en.is_likely_same_person`, without falsely matching unrelated names."""
+
+    NORKIN_SPELLINGS = ("Amikam Norkin", "Amiram Norkin", "עמירם נורקין", "אמירם נורקין")
+
+    @pytest.mark.parametrize("a", NORKIN_SPELLINGS)
+    @pytest.mark.parametrize("b", NORKIN_SPELLINGS)
+    def test_all_norkin_spellings_match_each_other(self, a: str, b: str) -> None:
+        assert en.is_likely_same_person(a, b) is True
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("Amikam Norkin", "John Smith"),
+            ("Elbit", "Rafael"),
+            ("Amikam Norkin", "Elbit Systems"),
+        ],
+    )
+    def test_unrelated_names_do_not_match(self, a: str, b: str) -> None:
+        assert en.is_likely_same_person(a, b) is False
+
+    @pytest.mark.parametrize("name", ["Amikam Norkin", "עמירם נורקין", "Greg Malandrino"])
+    def test_looks_like_person_name_positive(self, name: str) -> None:
+        assert en.looks_like_person_name(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Elbit Systems",  # company-suffix word
+            "US Army",  # curated org
+            "Israel",  # country
+            "Elbit",  # watchlist company
+            "Anduril Industries",  # company-like word ("industries")
+            "IAI",  # single word, not 2-4 words
+        ],
+    )
+    def test_looks_like_person_name_negative(self, name: str) -> None:
+        assert en.looks_like_person_name(name) is False

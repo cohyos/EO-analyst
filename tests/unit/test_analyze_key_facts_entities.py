@@ -21,8 +21,13 @@ if "eoa.db" not in sys.modules:
         fake_db.get_pool = lambda: None  # type: ignore[attr-defined]
         sys.modules["eoa.db"] = fake_db
 
-from eoa.llm.schemas.analysis import AnalyzeOut
-from eoa.pipeline.analyze import _backfill_entities_from_watchlist, _dedupe_key_facts, persist_analysis
+from eoa.llm.schemas.analysis import AnalyzeOut, EventOut
+from eoa.pipeline.analyze import (
+    _backfill_entities_from_watchlist,
+    _dedupe_key_facts,
+    _recall_event_parties,
+    persist_analysis,
+)
 
 
 class TestDedupeKeyFacts:
@@ -84,14 +89,28 @@ class TestDedupeKeyFacts:
 
 
 class TestBackfillEntitiesFromWatchlist:
-    def test_no_backfill_when_already_populated(self) -> None:
+    def test_no_backfill_when_already_complete(self) -> None:
+        """Nothing new to add: the only watchlist name in the text is already present."""
         item = {
             "id": 1,
             "title": "x",
             "clean_text": "Elbit Systems won a contract.",
-            "entities_mentioned": ["Something"],
+            "entities_mentioned": ["Elbit"],
         }
         assert _backfill_entities_from_watchlist(item) is None
+
+    def test_unions_additional_match_into_already_populated_list(self) -> None:
+        """Round-2 (2026-09-06, judge D3 item 2): a partially-filled entities_mentioned must still
+        pick up an additional watchlist name the LLM's own extraction missed -- item 50's TITAN
+        award named Palantir alongside Anduril, but entities_mentioned only carried a subset."""
+        item = {
+            "id": 1,
+            "title": "Contract awarded for TITAN ground-station program",
+            "clean_text": "Anduril and Palantir won the $192M TITAN ground-station award.",
+            "entities_mentioned": ["Anduril"],
+        }
+        result = _backfill_entities_from_watchlist(item)
+        assert result == ["Anduril", "Palantir"]
 
     def test_backfill_from_title_and_text(self) -> None:
         item = {
@@ -121,6 +140,35 @@ class TestBackfillEntitiesFromWatchlist:
             "entities_mentioned": [],
         }
         assert _backfill_entities_from_watchlist(item) is None
+
+
+class TestRecallEventParties:
+    """Round-2 (2026-09-06, judge D3 item 2): a watchlist name present in an event's own
+    `summary_he` but missing from `parties` is unioned in."""
+
+    def test_adds_missing_party_named_in_summary(self) -> None:
+        ev = EventOut(
+            kind="contract_award",
+            title="TITAN award",
+            parties=["Anduril"],
+            summary_he="ענדוריל ופלנטיר (Palantir) זכו בחוזה TITAN בהיקף 192 מיליון דולר.",
+            confidence=0.9,
+        )
+        assert _recall_event_parties(ev) == ["Anduril", "Palantir"]
+
+    def test_no_change_when_nothing_new(self) -> None:
+        ev = EventOut(
+            kind="contract_award",
+            title="Elbit contract",
+            parties=["Elbit"],
+            summary_he="אלביט מערכות זכתה בחוזה.",
+            confidence=0.9,
+        )
+        assert _recall_event_parties(ev) == ["Elbit"]
+
+    def test_empty_summary_returns_parties_unchanged(self) -> None:
+        ev = EventOut(kind="contract_award", title="x", parties=["Elbit"], summary_he="", confidence=0.9)
+        assert _recall_event_parties(ev) == ["Elbit"]
 
 
 class TestPersistAnalysisIntegration:
@@ -165,9 +213,34 @@ class TestPersistAnalysisIntegration:
 
         assert calls[0]["entities_mentioned"] == ["Elbit"]
 
-    def test_persist_analysis_does_not_touch_entities_when_already_present(
+    def test_persist_analysis_does_not_touch_entities_when_nothing_new_found(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Round-2 (2026-09-06, judge D3 item 2): the contract is now "nothing new to add", not
+        "already non-empty" -- a title/text with no *additional* watchlist name beyond what's
+        already recorded still leaves entities_mentioned untouched."""
+        calls = []
+        monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", lambda item_id, **kw: calls.append(kw))
+        monkeypatch.setattr("eoa.pipeline.analyze.insert_event", lambda **kw: None)
+        monkeypatch.setattr("eoa.pipeline.analyze.upsert_entity", lambda **kw: 1)
+
+        out = AnalyzeOut(summary_he="תקציר", so_what_he="להערכתנו, השלכה", key_facts=[], events=[], edges=[])
+        item = {
+            "id": 702,
+            "title": "Rafael announces new sensor",
+            "clean_text": "",
+            "entities_mentioned": ["Rafael"],
+        }
+        persist_analysis(item, out)
+
+        assert "entities_mentioned" not in calls[0]
+
+    def test_persist_analysis_unions_additional_entity_into_non_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-2 (2026-09-06, judge D3 item 2): a watchlist name found in the title/text that
+        isn't already in entities_mentioned is added, even when the list was already non-empty --
+        the fix for item 50's TITAN award silently dropping Palantir."""
         calls = []
         monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", lambda item_id, **kw: calls.append(kw))
         monkeypatch.setattr("eoa.pipeline.analyze.insert_event", lambda **kw: None)
@@ -182,7 +255,7 @@ class TestPersistAnalysisIntegration:
         }
         persist_analysis(item, out)
 
-        assert "entities_mentioned" not in calls[0]
+        assert calls[0]["entities_mentioned"] == ["Rafael", "Elbit"]
 
     def test_persist_analysis_skips_edge_when_entity_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Q3-13 integration: an edge endpoint upsert_entity rejects (returns None, e.g. a

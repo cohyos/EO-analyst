@@ -63,7 +63,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 def _sse_events(body: str) -> list[dict]:
     events = []
     for chunk in body.split("\n\n"):
-        line = next((l for l in chunk.split("\n") if l.startswith("data:")), None)
+        line = next((ln for ln in chunk.split("\n") if ln.startswith("data:")), None)
         if not line:
             continue
         events.append(json.loads(line[len("data:") :].strip()))
@@ -76,7 +76,17 @@ CITATIONS = [
 ]
 
 
-def _mock_ask(monkeypatch: pytest.MonkeyPatch, chunks: list[str]) -> None:
+class _FakeChatResult:
+    """Minimal stand-in for `ollama_client.ChatResult` -- only `.content` is read by the round-2
+    citation-repair pass (`eoa.api.routes.ask._run_citation_repair`)."""
+
+    def __init__(self, content: str = "") -> None:
+        self.content = content
+
+
+def _mock_ask(
+    monkeypatch: pytest.MonkeyPatch, chunks: list[str], *, repair_content: str = ""
+) -> None:
     from eoa.api import services
     from eoa.llm import ollama_client
 
@@ -84,6 +94,10 @@ def _mock_ask(monkeypatch: pytest.MonkeyPatch, chunks: list[str]) -> None:
     monkeypatch.setattr(services, "ask_build_messages", lambda *a, **k: ([], CITATIONS))
     monkeypatch.setattr(ollama_client, "resolve_provider_info", lambda provider: ("ollama", "resident"))
     monkeypatch.setattr(ollama_client, "chat_stream", lambda *a, **k: iter(chunks))
+    # Round 2 (docs/qa/loop/round_2_chat_fixes.md): most of this file's fixture answers carry no
+    # `[n]` and CITATIONS is non-empty, which now triggers a one-shot corrective `chat()` call
+    # (`ask._run_citation_repair`) -- stub it so these tests never hit a real Ollama server.
+    monkeypatch.setattr(ollama_client, "chat", lambda *a, **k: _FakeChatResult(repair_content))
 
 
 class TestAskSseSources:

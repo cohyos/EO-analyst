@@ -3,15 +3,17 @@
 Two shapes are supported, dispatched on the draft's own attributes (duck-typed, per
 ``_is_structured_draft``):
 
-- **Structured** (goal 1, 2026-09-06): :class:`~eoa.llm.schemas.analysis.DailyReportDraft` —
-  ``exec_summary``/``sections[].sentences`` are already lists of
+- **Structured** (goal 1, 2026-09-06; round-2, 2026-09-06 for weekly):
+  :class:`~eoa.llm.schemas.analysis.DailyReportDraft` and
+  :class:`~eoa.llm.schemas.reports.WeeklyReportDraft` — ``exec_summary``/``sections[].sentences``
+  (plus, for the weekly draft only, ``trends[].sentences``) are already lists of
   :class:`~eoa.llm.schemas.analysis.Sentence` (``text_he`` + non-empty ``cites``), so the "does
   every factual sentence carry a citation" question is answered by construction (a pydantic
   validation error, not a QA finding) — ``check()`` only still needs to verify, at the *registry*
   level (which varies per report run, so it can't live in the schema itself), that every ``cites``
   entry is a valid item number, plus the F5 duplicate-sentence rule (an exec-summary sentence
-  copied verbatim from a section).
-- **Legacy** (``eoa.report.weekly``/``monthly``/``bd_territory``, unchanged): free Hebrew prose
+  copied verbatim from a section/trend).
+- **Legacy** (``eoa.report.monthly``/``bd_territory``, unchanged): free Hebrew prose
   (``exec_summary_he`` + ``sections[].prose_he``) is split into sentences, each decided "factual"
   (contains a number, a currency sign, a capitalized Latin token, a month name, or one of a small
   set of announcement verbs), and every factual sentence must carry an ``[n]`` marker resolving to
@@ -23,11 +25,13 @@ must still resolve to a real item, and legacy ``outlook_he`` must open with an e
 marker.
 
 Two optional, additive parameters generalize the legacy path beyond a single draft for the
-weekly/monthly report drafts, which carry extra LLM-authored prose blocks outside ``draft.sections``
-(e.g. one paragraph per detected trend): ``extra_sections`` are checked exactly like
-``draft.sections`` (citation required on every factual sentence); ``exempt_sections`` get the same
-treatment as ``outlook_he`` — no citation requirement, but any ``[n]`` present must still resolve to
-a real item. Neither parameter is used by the (structured) daily report.
+monthly/bd_territory report drafts, which carry extra LLM-authored prose blocks outside
+``draft.sections`` (e.g. one paragraph per detected trend for monthly): ``extra_sections`` are
+checked exactly like ``draft.sections`` (citation required on every factual sentence);
+``exempt_sections`` get the same treatment as ``outlook_he`` — no citation requirement, but any
+``[n]`` present must still resolve to a real item. None of the three parameters is used by the
+(structured) daily/weekly reports — the weekly report's own trend paragraphs are validated via
+``draft.trends`` directly (see :func:`_check_structured`) instead.
 """
 
 from __future__ import annotations
@@ -294,39 +298,54 @@ def _check_structured(draft: Any, valid_ns: set[int]) -> tuple[list[str], set[in
     """The goal-1 structured-schema equivalent of the legacy prose loop below: every ``cites``
     entry must be a valid registry number, and an exec-summary sentence must not verbatim-duplicate
     a section sentence (F5). Uncited sentences can't occur here — the schema itself
-    (``Sentence.cites`` ``min_length=1``) already rejects them before ``check()`` ever runs."""
+    (``Sentence.cites`` ``min_length=1``) already rejects them before ``check()`` ever runs.
+
+    Round-2 (2026-09-06, weekly structured migration): also validates ``draft.trends`` (a
+    ``WeeklyReportDraft``-only field shaped like ``[{title_he, sentences}]``, e.g.
+    ``eoa.llm.schemas.reports.WeeklyTrendSection``) exactly like ``draft.sections`` — same
+    cite-validity check, and included in the same cross-group duplicate detection. ``getattr``-
+    guarded so ``DailyReportDraft`` (no ``trends`` field) is unaffected.
+    """
     errors: list[str] = []
     bad_refs: set[int] = set()
 
     section_norms: set[str] = set()
     section_groups: list[tuple[str, list[str]]] = []
-    for section in draft.sections:
+
+    def _collect_group(label: str, sentences: Any, *, kind_he: str) -> None:
         sentences_he: list[str] = []
-        for sentence in section.sentences:
+        for sentence in sentences:
             for n in sentence.cites:
                 if n not in valid_ns:
                     bad_refs.add(n)
                     errors.append(
-                        f"בסעיף '{section.title_he}': ההפניה [{n}] אינה מצביעה על פריט קיים "
+                        f"ב{kind_he} '{label}': ההפניה [{n}] אינה מצביעה על פריט קיים "
                         f'ברשימה — "{sentence.text_he}"'
                     )
             sentences_he.append(sentence.text_he)
             norm = _normalize_sentence_text(sentence.text_he)
             if norm:
                 section_norms.add(norm)
-        section_groups.append((section.title_he, sentences_he))
+        section_groups.append((label, sentences_he))
+
+    for section in draft.sections:
+        _collect_group(section.title_he, section.sentences, kind_he="סעיף")
+
+    for trend in getattr(draft, "trends", None) or []:
+        _collect_group(trend.title_he, trend.sentences, kind_he="מגמה")
 
     duplicate_sentences: list[str] = []
 
     # D6 round-1 fix (docs/qa/loop/round_1_fixes.md): a section sentence that verbatim-duplicates
-    # a sentence in an *earlier* section -- not just an exec-summary-vs-section duplicate (below).
+    # a sentence in an *earlier* section/trend -- not just an exec-summary-vs-section duplicate
+    # (below).
     for sentence, first_label, dup_label in _find_cross_group_duplicates(
         section_groups, normalize=_normalize_sentence_text
     ):
         duplicate_sentences.append(sentence)
         errors.append(
-            f"בסעיף '{dup_label}': המשפט \"{sentence}\" מועתק כלשונו מסעיף '{first_label}' — "
-            "כל סעיף חייב להביא ניתוח משלו, לא לחזור על משפט שכבר הופיע בסעיף אחר."
+            f"ב'{dup_label}': המשפט \"{sentence}\" מועתק כלשונו מ'{first_label}' — "
+            "כל סעיף/מגמה חייב להביא ניתוח משלו, לא לחזור על משפט שכבר הופיע במקום אחר."
         )
 
     for sentence in draft.exec_summary:

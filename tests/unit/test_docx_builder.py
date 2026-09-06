@@ -15,7 +15,7 @@ from eoa.llm.schemas.analysis import (
     Sentence,
     StructuredSection,
 )
-from eoa.llm.schemas.reports import WeeklyReportDraft
+from eoa.llm.schemas.reports import MonthlyReportDraft
 from eoa.report import docx_builder as db
 from eoa.report.qa_citations import QAResult
 
@@ -453,7 +453,7 @@ def test_build_docx_no_qa_warning_banner_for_structured_daily_draft(
 def test_build_docx_qa_warning_banner_for_legacy_draft_when_failed(fixture_items, fixture_events):
     """The legacy free-prose shape (weekly/monthly/bd_territory) still degrades by silently
     stripping flagged sentences, so it still needs the visible banner."""
-    legacy_draft = WeeklyReportDraft(
+    legacy_draft = MonthlyReportDraft(
         exec_summary_he="תקציר [1].",
         sections=[ReportSection(title_he="סעיף", domain="c_uas", prose_he="תוכן [1].")],
         outlook_he="",

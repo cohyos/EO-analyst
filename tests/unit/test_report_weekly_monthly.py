@@ -12,8 +12,8 @@ import datetime as dt
 import docx
 import pytest
 
-from eoa.llm.schemas.analysis import ReportSection
-from eoa.llm.schemas.reports import MonthlyReportDraft, TrendParagraph, WeeklyReportDraft
+from eoa.llm.schemas.analysis import OutlookIndicator, ReportSection, Sentence, StructuredSection
+from eoa.llm.schemas.reports import MonthlyReportDraft, WeeklyReportDraft, WeeklyTrendSection
 from eoa.report import monthly, trends, weekly
 
 # --------------------------------------------------------------------------
@@ -164,23 +164,30 @@ WEEKLY_ITEMS = [
 
 def _weekly_draft_fixture() -> WeeklyReportDraft:
     return WeeklyReportDraft(
-        exec_summary_he=(
-            "אלביט מערכות זכתה בחוזה של 50 מיליון דולר [1]. רפאל השיקה מערכת נגד כטבמים חדשה [2]."
-        ),
-        trend_paragraphs=[
-            TrendParagraph(
+        exec_summary=[
+            Sentence(text_he="אלביט מערכות זכתה בחוזה של 50 מיליון דולר.", cites=[1]),
+            Sentence(text_he="רפאל השיקה מערכת נגד כטבמים חדשה.", cites=[2]),
+        ],
+        trends=[
+            WeeklyTrendSection(
                 title_he="מגמה: פעילות מוגברת סביב Elbit Systems",
-                prose_he="נרשמה עלייה בפעילות סביב אלביט מערכות בתחום הפודים האוויריים [1].",
+                sentences=[
+                    Sentence(
+                        text_he="נרשמה עלייה בפעילות סביב אלביט מערכות בתחום הפודים האוויריים.", cites=[1]
+                    )
+                ],
             ),
         ],
         sections=[
-            ReportSection(
+            StructuredSection(
                 title_he="פודים ומטענים אוויריים",
                 domain="airborne_pods",
-                prose_he="אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר [1].",
+                sentences=[Sentence(text_he="אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר.", cites=[1])],
             ),
         ],
-        outlook_he="להערכתנו מגמת ההשקות תימשך ברבעון הקרוב.",
+        outlook=[
+            OutlookIndicator(text_he="להערכתנו מגמת ההשקות תימשך ברבעון הקרוב.", cites=[], is_assessment=True)
+        ],
         open_points_he=["האם ידועות תוכניות המשך?"],
     )
 

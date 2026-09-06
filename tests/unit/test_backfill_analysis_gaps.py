@@ -181,8 +181,10 @@ class TestStubCleanupPass:
                     "summary_he": None,
                     "so_what_he": None,
                     "key_facts": None,
-                    "level": None,
+                    "level": "archive",
                     "domain": "out_of_scope",
+                    "score": 1,
+                    "triage_reason": "gate:stub_content_cleared_non_defensible",
                 },
             )
         ]

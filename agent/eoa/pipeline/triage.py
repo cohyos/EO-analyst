@@ -28,6 +28,25 @@ from eoa.memory.relational import (
 
 log = structlog.get_logger(__name__)
 
+
+def validate_triage_consistency(item_id: int, *, level: str | None, score: int | None) -> None:
+    """Round-2 (2026-09-06, judge D1 item 9, docs/qa/loop/round_0_judge.md): an item must never be
+    persisted with only one of ``level``/``score`` present -- historically a downstream reclassify/
+    cleanup script (``scripts/backfill_analysis_gaps.py``'s ``stub_cleanup_pass``,
+    ``scripts/reclassify_tech_items.py``) desynced them, leaving ``level IS NULL`` while ``score``/
+    ``triage_reason`` stayed stale from an earlier, now-discarded triage run -- a silent failure 4
+    of the judge's 40 golden items hit. *Scorer-independent*: this does not judge what value
+    ``score``/``level`` take, only that they are both present or both cleared together. Raises
+    ``ValueError`` rather than letting the caller silently persist the inconsistent pair; every
+    ``update_item_fields`` call in this module that writes ``level``/``score`` together calls this
+    first."""
+    if (level is None) != (score is None):
+        raise ValueError(
+            f"item {item_id}: refusing to persist inconsistent triage state "
+            f"(level={level!r}, score={score!r}) -- both must be set or both cleared together"
+        )
+
+
 STAGE = "triage"
 MAX_CHARS = 6000
 BATCH_SIZE = 25  # U8-6 (Revision 2026-09-06): "triage ... run in batches of up to 25 items"
@@ -444,6 +463,7 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
                     stats.failed += 1
                     continue
                 try:
+                    validate_triage_consistency(it["id"], level=out.level, score=out.score)
                     update_item_fields(
                         it["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600]
                     )
@@ -463,6 +483,7 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
     for it in eligible:
         try:
             out = triage_item(it, role=role)
+            validate_triage_consistency(it["id"], level=out.level, score=out.score)
             update_item_fields(it["id"], score=out.score, level=out.level, triage_reason=out.reason_he[:600])
             if out.needs_deep_search or out.level == "red":
                 _enqueue_deep_search(it, out)

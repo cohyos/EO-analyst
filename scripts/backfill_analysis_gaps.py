@@ -32,12 +32,17 @@ Three independent passes:
    still carries ``summary_he``/``so_what_he``/``key_facts`` was fully analyzed *before* the Q3-10
    content-quality gate (``analyze.run_analyze``'s ``_content_status_precheck``) existed to skip
    it -- that analysis was extracted from near-empty/blocked text and is not trustworthy. Clears
-   ``summary_he``/``so_what_he``/``key_facts`` unconditionally. ``level``/``domain`` are reset to
-   ``NULL``/``'out_of_scope'`` too, *unless* a title-only classification is defensible: the title
-   itself names a recognised watchlist/curated-org entity (``find_watchlist_aliases_in_text``) and
-   the item already has both a ``level`` and a ``domain`` on record -- in that case the
-   triage-level classification (which only ever needed the title/summary, not full body text) is
-   left as-is, only the deep-analysis text fields are cleared.
+   ``summary_he``/``so_what_he``/``key_facts`` unconditionally. ``level``/``domain``/``score``/
+   ``triage_reason`` are reset to the same ``'archive'``/``'out_of_scope'``/``1``/``gate:...``
+   convention ``eoa.pipeline.classify.run_classify`` already uses for every other out_of_scope
+   item (round-2, 2026-09-06, judge D1 item 9 -- a prior version left only ``level`` NULL while
+   ``score``/``triage_reason`` stayed stale, an inconsistent row nothing downstream would ever fix
+   since out_of_scope items are skipped by both classify and triage), *unless* a title-only
+   classification is defensible: the title itself names a recognised watchlist/curated-org entity
+   (``find_watchlist_aliases_in_text``) and the item already has both a ``level`` and a ``domain``
+   on record -- in that case the triage-level classification (which only ever needed the
+   title/summary, not full body text) is left as-is, only the deep-analysis text fields are
+   cleared.
 
 Usage:
     DATABASE_URL=postgresql://eoa:change-me-local-only@127.0.0.1:5432/eoanalyst \
@@ -215,8 +220,18 @@ def stub_cleanup_pass(*, dry_run: bool = False) -> dict[str, Any]:
         defensible = _title_only_classification_defensible(row)
         fields: dict[str, Any] = {"summary_he": None, "so_what_he": None, "key_facts": None}
         if not defensible:
-            fields["level"] = None
+            # Round-2 (2026-09-06, judge D1 item 9, docs/qa/loop/round_0_judge.md): this used to
+            # set only `level=None` (`domain` to "out_of_scope"), leaving `score`/`triage_reason`
+            # stale from the now-discarded stub analysis -- an inconsistent row (level NULL, score
+            # non-NULL) that no downstream stage would ever fix, since both `eoa.pipeline.classify`
+            # and `eoa.pipeline.triage` skip an already-classified `domain='out_of_scope'` item
+            # outright. Now matches the one consistent convention the rest of the codebase already
+            # uses for every other out_of_scope item (`eoa.pipeline.classify.run_classify`):
+            # `level='archive', score=1`, plus a `triage_reason` recording why.
+            fields["level"] = "archive"
             fields["domain"] = "out_of_scope"
+            fields["score"] = 1
+            fields["triage_reason"] = "gate:stub_content_cleared_non_defensible"
         cleared.append(
             {"id": row["id"], "title": (row.get("title") or "")[:80], "title_only_defensible": defensible}
         )

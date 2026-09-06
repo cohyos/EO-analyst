@@ -1,13 +1,21 @@
 """Stage: report/weekly — FR-5.4 / FR-4.3 / FR-11.4 / FR-12.5 weekly analyst report.
 
 Pipeline: collect the week's red/orange items (+ a yellow-level domain-count summary, context
-only) -> ``eoa.report.trends.detect_trends`` (no LLM) -> ``draft_weekly`` (resident model: one
-prose paragraph per detected trend, plus the usual per-domain sections) -> ``qa_citations.check``
-(extended to also validate the trend paragraphs) -> on failure, one corrective retry, then strip ->
-render docx/md/html reusing ``docx_builder``'s additive ``extra_sections``/``tables`` hooks for the
-trend prose, the FR-11.4 meta-summary (deterministic, not LLM-authored — see
-``collect_meta_summary``), and the "לוח 90 הימים הקרובים" conference table -> insert a ``reports``
-row (``kind='weekly'``).
+only) -> ``eoa.report.trends.detect_trends`` (no LLM) -> ``draft_weekly`` (resident model: the
+daily report's structured, sentence-per-claim shape — see round-2 note below) ->
+``qa_citations.check`` -> on failure, one corrective retry, then (if still failing) drop the
+narrative content entirely and render tables + a one-line system note instead, mirroring
+``eoa.report.daily``'s own two-failure fallback -> render docx/md/html reusing ``docx_builder``'s
+additive ``extra_sections``/``tables`` hooks for the trend prose, the FR-11.4 meta-summary
+(deterministic, not LLM-authored — see ``collect_meta_summary``), and the "לוח 90 הימים הקרובים"
+conference table -> insert a ``reports`` row (``kind='weekly'``).
+
+Round-2 (2026-09-06): migrated ``WeeklyReportDraft`` from free-prose (``exec_summary_he``/
+``sections[].prose_he``/``trend_paragraphs``) to the daily report's structured
+``Sentence``-per-claim shape (goal 1) — two live rebuilds ran away to 24k- then 54k-char JSON and
+hit EOF mid-string on the old free-prose schema. Also reduces the prompt-visible item list (see
+:func:`select_items_for_prompt`) to keep the model's own output bounded regardless of how many
+red/orange items the week actually produced.
 """
 
 from __future__ import annotations
@@ -25,8 +33,8 @@ from eoa.config import REPO_ROOT, settings
 from eoa.db import connection
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.analysis import ReportSection
-from eoa.llm.schemas.reports import TrendParagraph, WeeklyReportDraft
+from eoa.llm.schemas.analysis import Sentence
+from eoa.llm.schemas.reports import WeeklyReportDraft
 from eoa.report import trends as trends_mod
 from eoa.report.daily import collect_deep_search, collect_events, collect_open_clarifications
 from eoa.report.docx_builder import (
@@ -38,7 +46,7 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
-from eoa.report.qa_citations import QAResult, check, citations_in, split_sentences
+from eoa.report.qa_citations import QAResult, check
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +62,12 @@ _TREND_KIND_LABELS_HE = {
     "market_convergence": "התכנסות שוק",
     "tech_race": "מירוץ טכנולוגי",
 }
+
+# round-2 (2026-09-06): input-side reduction to keep the model's own output bounded (see the
+# module docstring) -- top N items per domain by score, in addition to every 'red' item and every
+# item that only feeds a trend's evidence (both kept regardless of the per-domain cap).
+_PROMPT_ITEMS_PER_DOMAIN = 6
+_PROMPT_SUMMARY_TRUNC_CHARS = 500
 
 
 @dataclass
@@ -352,6 +366,66 @@ def format_trends_block(trend_list: list[dict[str, Any]], id_to_n: dict[int, int
     return "\n".join(lines)
 
 
+def _truncate_prompt_text(text: str | None, limit: int = _PROMPT_SUMMARY_TRUNC_CHARS) -> str | None:
+    if not text or len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def select_items_for_prompt(
+    items: list[dict[str, Any]],
+    evidence_item_ids: set[int] | None = None,
+    *,
+    per_domain: int = _PROMPT_ITEMS_PER_DOMAIN,
+) -> list[dict[str, Any]]:
+    """Round-2 (2026-09-06): the full week's red/orange item list (``items``, still the citation
+    registry unchanged — ``n`` numbering and ``check()``'s valid range both stay keyed on the full
+    list) can run into the hundreds; feeding all of it into the prompt is what produced the 24k-
+    then 54k-char runaway JSON that motivated this migration. Returns a reduced, still
+    score-ordered subset actually shown to the model: every ``level == 'red'`` item, the top
+    ``per_domain`` items per domain by score (``items`` already arrives score-desc from
+    ``collect_week_items``, so a plain per-domain slice keeps that order), and any item that only
+    feeds a trend's evidence (``evidence_item_ids``) — each returned item is a shallow copy with
+    ``summary_he``/``so_what_he`` truncated to ~500 chars (the per-item prompt line, not the
+    persisted row) as a second, independent lever on output size."""
+    evidence_item_ids = evidence_item_ids or set()
+    keep_ids: set[int] = set()
+    for _domain, group in _group_by_domain(items):
+        for it in group[:per_domain]:
+            if it.get("id") is not None:
+                keep_ids.add(it["id"])
+    for it in items:
+        item_id = it.get("id")
+        if item_id is None:
+            continue
+        if it.get("level") == "red" or item_id in evidence_item_ids:
+            keep_ids.add(item_id)
+    selected = []
+    for it in items:
+        if it.get("id") not in keep_ids:
+            continue
+        reduced = dict(it)
+        reduced["summary_he"] = _truncate_prompt_text(it.get("summary_he"))
+        reduced["so_what_he"] = _truncate_prompt_text(it.get("so_what_he"))
+        selected.append(reduced)
+    return selected
+
+
+def _render_trend_sentences(sentences: list[Sentence]) -> str:
+    """Flatten a :class:`WeeklyTrendSection`'s structured ``Sentence`` list to one prose string
+    with "[n]" markers appended deterministically from each sentence's ``cites`` — a small local
+    copy of ``eoa.report.docx_builder``'s own (private) sentence-rendering helper, needed here
+    because the trend prose is rendered into the document via the ``extra_sections`` hook (a plain
+    string, not a list of ``Sentence`` objects) rather than through ``draft.sections``'s own
+    duck-typed structured rendering."""
+    parts: list[str] = []
+    for sentence in sentences:
+        text = sentence.text_he.rstrip()
+        markers = "".join(f"[{n}]" for n in sentence.cites)
+        parts.append(f"{text} {markers}".rstrip() if markers else text)
+    return " ".join(parts)
+
+
 # --------------------------------------------------------------------------
 # drafting
 # --------------------------------------------------------------------------
@@ -359,10 +433,34 @@ def format_trends_block(trend_list: list[dict[str, Any]], id_to_n: dict[int, int
 
 def _no_items_draft() -> WeeklyReportDraft:
     return WeeklyReportDraft(
-        exec_summary_he=("לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח השבועי."),
-        trend_paragraphs=[],
+        exec_summary=[],
+        trends=[],
         sections=[],
-        outlook_he="",
+        system_note_he=("לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח השבועי."),
+        analyst_note_he=None,
+        outlook=[],
+        open_points_he=[],
+    )
+
+
+def _qa_failed_twice_draft() -> WeeklyReportDraft:
+    """Mirrors ``eoa.report.daily._qa_failed_twice_draft`` (goal 1): when the draft still fails
+    citation QA after one corrective retry, the narrative content (exec summary/trends/sections/
+    outlook) is dropped entirely rather than partially kept — the reader gets the deterministic
+    tables (events, tenders, tech watch, Israel-industry focus, patents, the conference calendar)
+    and the sources appendix, plus this one-line note."""
+    return WeeklyReportDraft(
+        exec_summary=[],
+        trends=[],
+        sections=[],
+        system_note_he=(
+            "הטיוטה הטקסטואלית של הדוח השבועי לא עברה את בדיקת האזכורים גם לאחר ניסיון תיקון, ולכן "
+            "הושמטה במלואה מדוח זה כדי לא להציג ניסוח חלקי או לא מאומת. הטבלאות הדטרמיניסטיות "
+            "(אירועים, מכרזים, מעקב טכנולוגי, תעשייה ישראלית, פטנטים, לוח כנסים) ונספח המקורות "
+            "שלהלן אינם מושפעים ומוצגים במלואם."
+        ),
+        analyst_note_he=None,
+        outlook=[],
         open_points_he=[],
     )
 
@@ -372,18 +470,24 @@ def draft_weekly(
     yellow_summary: list[dict[str, Any]],
     trends_block: str,
     *,
+    evidence_item_ids: set[int] | None = None,
     role: str = "resident",
     interactive: bool = False,
 ) -> WeeklyReportDraft:
-    """Draft the ``WeeklyReportDraft`` via the resident model; zero items skip the LLM call."""
+    """Draft the ``WeeklyReportDraft`` via the resident model; zero items skip the LLM call.
+
+    ``items`` stays the full citation registry (unchanged ``n`` numbering); only the prompt-visible
+    item list is reduced (:func:`select_items_for_prompt`) — round-2, see the module docstring.
+    """
     if not items:
         return _no_items_draft()
+    prompt_items = select_items_for_prompt(items, evidence_item_ids)
     prompt = render(
         "report_weekly",
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
-        items_block=wrap_data(format_items_block(items), "report_items", "internal"),
+        items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
         yellow_summary_block=wrap_data(
             format_yellow_summary_block(yellow_summary), "report_yellow", "internal"
         ),
@@ -397,8 +501,9 @@ def draft_weekly(
         ],
         task="report",
         interactive=interactive,
-        # 2026-09-06: the weekly draft is long prose over ~40 items; the shared "report" cap (6000)
-        # truncated the JSON mid-string (LLMOutputError). Per-call override, like bd_territory.
+        # 2026-09-06 (round-2): the weekly draft used to run away to 24k- then 54k-char JSON (EOF
+        # mid-string) over the old free-prose schema; the structured schema plus the prompt-item
+        # reduction above keep the output bounded, but num_predict stays generous per the task.
         options={"temperature": 0.3, "num_predict": 14000},
     )
     return _normalize_section_titles(draft)
@@ -411,15 +516,17 @@ def _corrective_retry(
     draft: WeeklyReportDraft,
     qa: QAResult,
     *,
+    evidence_item_ids: set[int] | None = None,
     role: str,
     interactive: bool,
 ) -> WeeklyReportDraft:
+    prompt_items = select_items_for_prompt(items, evidence_item_ids)
     prompt = render(
         "report_weekly",
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
-        items_block=wrap_data(format_items_block(items), "report_items", "internal"),
+        items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
         yellow_summary_block=wrap_data(
             format_yellow_summary_block(yellow_summary), "report_yellow", "internal"
         ),
@@ -428,7 +535,8 @@ def _corrective_retry(
     correction = (
         "הטיוטה הקודמת שלך נכשלה בבדיקת האזכורים האוטומטית. תקן את כל הבעיות הבאות והחזר טיוטה מלאה "
         "ותקינה מחדש (JSON לפי הסכמה בלבד, ללא הסברים נוספים), מבלי להמציא עובדות חדשות שלא הופיעו "
-        "ברשימת הפריטים או ברשימת המגמות:\n" + errors_text
+        'ברשימת הפריטים או ברשימת המגמות. שים לב: אסור לכתוב "[n]" בטקסט עצמו -- מספרי ההפניה '
+        "שייכים אך ורק לשדה cites של כל משפט:\n" + errors_text
     )
     draft = chat_structured(
         role,
@@ -444,44 +552,6 @@ def _corrective_retry(
         options={"temperature": 0.2},
     )
     return _normalize_section_titles(draft)
-
-
-def _strip_uncited(draft: WeeklyReportDraft, qa: QAResult) -> WeeklyReportDraft:
-    """Drop the sentences ``qa`` flagged (uncited-factual, out-of-range refs, or an exec-summary
-    sentence duplicated verbatim from a section/trend paragraph — F5) from the exec summary, every
-    trend paragraph, and every section — mirrors ``daily._strip_uncited``."""
-    bad_refs = set(qa.bad_refs)
-    uncited = set(qa.uncited_sentences)
-    duplicates = set(qa.duplicate_sentences)
-
-    def _clean(text: str, *, extra_drop: set[str] = frozenset()) -> str:
-        kept = []
-        for sentence in split_sentences(text):
-            if sentence in uncited or sentence in extra_drop:
-                continue
-            if bad_refs and set(citations_in(sentence)) & bad_refs:
-                continue
-            kept.append(sentence)
-        return " ".join(kept)
-
-    new_summary = _clean(draft.exec_summary_he, extra_drop=duplicates)
-    if not new_summary:
-        new_summary = "תקציר המנהלים קוצץ במלואו עקב בדיקת אזכורים שנכשלה; ראו qa_report לפרטים."
-    new_trends: list[TrendParagraph] = []
-    for tp in draft.trend_paragraphs:
-        cleaned = _clean(tp.prose_he)
-        if cleaned:
-            new_trends.append(TrendParagraph(title_he=tp.title_he, prose_he=cleaned))
-    new_sections: list[ReportSection] = []
-    for section in draft.sections:
-        cleaned = _clean(section.prose_he)
-        if cleaned:
-            new_sections.append(
-                ReportSection(title_he=section.title_he, domain=section.domain, prose_he=cleaned)
-            )
-    return draft.model_copy(
-        update={"exec_summary_he": new_summary, "trend_paragraphs": new_trends, "sections": new_sections}
-    )
 
 
 # --------------------------------------------------------------------------
@@ -564,24 +634,42 @@ def build_weekly(
     id_to_n = {it["id"]: it["n"] for it in citation_items if it.get("id") is not None}
     trends_block = format_trends_block(trend_list, id_to_n)
 
-    draft = draft_weekly(items, yellow_summary, trends_block, role=role, interactive=interactive)
-    extra_prose = [(tp.title_he, tp.prose_he) for tp in draft.trend_paragraphs]
-    qa = check(draft, citation_items, extra_sections=extra_prose)
+    draft = draft_weekly(
+        items,
+        yellow_summary,
+        trends_block,
+        evidence_item_ids=all_evidence_ids,
+        role=role,
+        interactive=interactive,
+    )
+    # round-2 (2026-09-06): draft.trends' cites/duplicates are validated directly by
+    # qa_citations._check_structured (WeeklyReportDraft is now the structured shape) -- no
+    # extra_sections needed here any more (that hook stays reserved for the legacy free-prose
+    # monthly/bd_territory drafts).
+    qa = check(draft, citation_items)
 
     if not qa.passed and items:
         log.warning("weekly_qa_failed_retrying", errors=qa.errors[:10])
         draft = _corrective_retry(
-            items, yellow_summary, trends_block, draft, qa, role=role, interactive=interactive
+            items,
+            yellow_summary,
+            trends_block,
+            draft,
+            qa,
+            evidence_item_ids=all_evidence_ids,
+            role=role,
+            interactive=interactive,
         )
-        extra_prose = [(tp.title_he, tp.prose_he) for tp in draft.trend_paragraphs]
-        qa = check(draft, citation_items, extra_sections=extra_prose)
+        qa = check(draft, citation_items)
 
     if not qa.passed and items:
-        log.error("weekly_qa_failed_stripping", errors=qa.errors[:10])
+        # Round-2 (2026-09-06), mirrors eoa.report.daily: two failures (initial draft + one
+        # corrective retry) drop the narrative content entirely rather than stripping it
+        # sentence-by-sentence behind a warning banner. The original QA errors are kept in
+        # `qa_report` (persisted below) for the analyst to review; `qa.passed` stays False.
+        log.error("weekly_qa_failed_twice_dropping_narrative", errors=qa.errors[:10])
         original_errors = qa
-        draft = _strip_uncited(draft, qa)
-        extra_prose = [(tp.title_he, tp.prose_he) for tp in draft.trend_paragraphs]
-        check(draft, citation_items, extra_sections=extra_prose)
+        draft = _qa_failed_twice_draft()
         qa = QAResult(
             passed=False,
             errors=original_errors.errors,
@@ -591,8 +679,12 @@ def build_weekly(
         )
 
     trend_sections = [
-        {"title_he": tp.title_he, "body_he": tp.prose_he, "position": "after_summary"}
-        for tp in draft.trend_paragraphs
+        {
+            "title_he": tp.title_he,
+            "body_he": _render_trend_sentences(tp.sentences),
+            "position": "after_summary",
+        }
+        for tp in draft.trends
     ]
     # U13: suppress the meta-summary section entirely when there is nothing to report, rather than
     # printing a heading followed only by a "nothing happened" placeholder line.

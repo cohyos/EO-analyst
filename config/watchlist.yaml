@@ -1,14 +1,29 @@
 # Entities to track. `aliases` are used for NER matching and search-query expansion.
+#
+# `strict_aliases` (round-2, 2026-09-06, judge D3 finding -- docs/qa/loop/round_0_judge.md item
+# 8): a subset of `aliases` that is ALSO a generic word/program name likely to appear in unrelated
+# text (e.g. BlueHalo's alias "LOCUST" collides with AeroVironment's own "Locust X3" product, and
+# with the US Marine Corps' own LOCUST swarm program; "Titan" collides with the US Army's TITAN
+# ground-station program awarded to Palantir/Anduril). A surface listed in `strict_aliases` must
+# never, on its own, attribute a text mention to this company -- `eoa.pipeline.entity_normalize
+# .find_watchlist_aliases_in_text` additionally requires the company's own canonical name (or a
+# *non-strict* alias) to independently co-occur in the same text before counting the hit. Every
+# entry here was audited for the same collision risk during the round-2 pass; entries not listed
+# were judged low-risk (acronym-shaped or otherwise unlikely to appear as ordinary English/Hebrew
+# prose) -- re-audit any new alias against this same test before adding it un-flagged.
 companies:
   - { name: RTX, aliases: [Raytheon, "Raytheon Technologies", "Collins Aerospace"], country: US, focus: [airborne_pods, air_defense, c_uas] }
   - { name: "Lockheed Martin", aliases: [LMT, Sniper ATP, "Lockheed"], country: US, focus: [airborne_pods, air_defense] }
-  - { name: "Northrop Grumman", aliases: [NOC, LITENING], country: US, focus: [airborne_pods, air_defense] }
+  # round-2: "LITENING" removed -- it is Rafael's own targeting-pod product (see Rafael's own
+  # `aliases` below, "Litening"), not Northrop Grumman's; a straight copy/collision error, not a
+  # strict-alias case (there is no legitimate reading of "LITENING" as a Northrop Grumman product).
+  - { name: "Northrop Grumman", aliases: [NOC], country: US, focus: [airborne_pods, air_defense] }
   - { name: L3Harris, aliases: [WESCAM, "L3Harris WESCAM", "MX-Series"], country: US, focus: [airborne_pods, naval_surveillance, land_surveillance] }
   - { name: "Teledyne FLIR", aliases: [FLIR, "FLIR Systems", "Teledyne FLIR Defense"], country: US, focus: [land_surveillance, naval_surveillance, c_uas, secondary] }
   - { name: "Leonardo DRS", aliases: [DRS], country: US, focus: [land_surveillance, secondary] }
-  - { name: Anduril, aliases: [Lattice, Anvil, Roadrunner, "Anduril Industries"], country: US, focus: [c_uas, computer_vision, air_defense] }
+  - { name: Anduril, aliases: [Lattice, Anvil, Roadrunner, "Anduril Industries"], strict_aliases: [Lattice, Anvil, Roadrunner], country: US, focus: [c_uas, computer_vision, air_defense] }
   - { name: "Shield AI", aliases: [Hivemind, "V-BAT"], country: US, focus: [computer_vision] }
-  - { name: BlueHalo, aliases: [LOCUST, Titan], country: US, focus: [c_uas, air_defense] }
+  - { name: BlueHalo, aliases: [LOCUST, Titan], strict_aliases: [LOCUST, Titan], country: US, focus: [c_uas, air_defense] }
   - { name: Epirus, aliases: [Leonidas], country: US, focus: [c_uas] }
   - { name: Fortem, aliases: [DroneHunter, SkyDome], country: US, focus: [c_uas] }
   - { name: Thales, aliases: ["Thales Group", TALIOS, "Thales Land & Naval"], country: EU, focus: [airborne_pods, naval_surveillance, land_surveillance, air_defense] }
@@ -16,12 +31,12 @@ companies:
   - { name: Leonardo, aliases: ["Leonardo S.p.A.", "Leonardo Electronics"], country: EU, focus: [airborne_pods, naval_surveillance, air_defense] }
   - { name: Hensoldt, aliases: ["Hensoldt Optronics", "HENSOLDT"], country: EU, focus: [land_surveillance, naval_surveillance, air_defense] }
   - { name: MBDA, aliases: [], country: EU, focus: [air_defense] }
-  - { name: Rheinmetall, aliases: ["Rheinmetall Air Defence", Skynex, Skyranger], country: EU, focus: [air_defense, c_uas, naval_surveillance] }
+  - { name: Rheinmetall, aliases: ["Rheinmetall Air Defence", Skynex, Skyranger], strict_aliases: [Skynex, Skyranger], country: EU, focus: [air_defense, c_uas, naval_surveillance] }
   - { name: Saab, aliases: ["Saab AB", Giraffe, "Saab Naval"], country: EU, focus: [air_defense, naval_surveillance, c_uas] }
   - { name: Terma, aliases: [Scanter], country: EU, focus: [naval_surveillance] }
   - { name: Aselsan, aliases: [ASELSAN, ASELFLIR, "İHTAR"], country: TR, focus: [airborne_pods, land_surveillance, naval_surveillance, c_uas] }
   - { name: Elbit, aliases: ["Elbit Systems", "Elbit Land", "Elbit ISTAR", "אלביט", "אלביט מערכות", Elop, "El-Op", "אלאופ", Elisra, "אלישרא", "Elbit Systems Elisra"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas, computer_vision] }
-  - { name: IAI, aliases: ["Israel Aerospace Industries", "התעשייה האווירית", "תע\"א", ELTA, Tamam, "תמ\"מ", MOSP, POP], country: IL, focus: [airborne_pods, air_defense, c_uas] }
+  - { name: IAI, aliases: ["Israel Aerospace Industries", "התעשייה האווירית", "תע\"א", ELTA, Tamam, "תמ\"מ", MOSP, POP], strict_aliases: [POP], country: IL, focus: [airborne_pods, air_defense, c_uas] }
   - { name: Rafael, aliases: ["Rafael Advanced Defense Systems", "רפאל", Litening, "Iron Beam", "מגן אור", "Drone Dome", Toplite], country: IL, focus: [airborne_pods, air_defense, c_uas, naval_surveillance] }
   - { name: Controp, aliases: ["CONTROP Precision Technologies", "קונטרופ"], country: IL, focus: [airborne_pods, land_surveillance, naval_surveillance] }
   - { name: "Smart Shooter", aliases: [SMASH, "סמארט שוטר"], country: IL, focus: [c_uas, computer_vision] }
@@ -57,6 +72,12 @@ companies:
   # transliteration duplicates of the same company (ארוויירונמנט / ארוויונמנט; קונגסברג).
   - { name: AeroVironment, aliases: ["AV Inc", "ארוויירונמנט", "ארוויונמנט"], country: US, focus: [c_uas, computer_vision] }
   - { name: Kongsberg, aliases: ["Kongsberg Gruppen", "Kongsberg Defence & Aerospace", "KONGSBERG", "קונגסברג"], country: NO, focus: [naval_surveillance, air_defense] }
+  # Round-2 (2026-09-06, judge D3 item 2, docs/qa/loop/round_0_judge.md): item 50's TITAN award
+  # ($192M, US Army ground-station AI program) named Palantir as a lead co-winner alongside
+  # Anduril, but entities_mentioned omitted it entirely -- Palantir was previously only known to
+  # `eoa.pipeline.entity_normalize._COMPANY_COUNTRY_MAP` (country lookup only, not NER/watchlist
+  # matching). Added here so `find_watchlist_aliases_in_text` actually recognises it.
+  - { name: Palantir, aliases: ["Palantir Technologies"], country: US, focus: [computer_vision, secondary] }
 
 programs:
   - { name: Replicator, owner: "US DoD / DIU", focus: [c_uas, computer_vision] }

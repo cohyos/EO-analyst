@@ -7498,3 +7498,95 @@ backfill_source_last_fetched.py` (חדש): מילוי חד-פעמי של `last_f
 `test_qa_score.py` (+1, D4 legacy_unanchored), `test_fetch_service.py` (+8, touch_source_fetched
 + _ingest_one_source), `test_report_qa.py` (+4, cross-group duplicates), `test_report_bd_territory.py`
 (+5, deterministic actions fallback). כל הקבצים החדשים/מורחבים ירוקים.
+
+## D6/D3/D1 QA-loop round-2 fixes (docs/qa/loop/round_2_fixes.md, 2026-09-06)
+
+פרטים מלאים ב-`docs/qa/loop/round_2_fixes.md`; תמצית כאן.
+
+### 1. דוח שבועי — מעבר למבנה משמעת-ציטוט מובנה (D6)
+
+שני ניסיונות בנייה חיים נכשלו בעבר עם JSON שנקטע (24k ואז 54k תווים) על הסכמה הישנה של פרוזה
+חופשית (`WeeklyReportDraft.exec_summary_he`/`sections[].prose_he`/`trend_paragraphs`). אומץ לאותו
+מבנה משמעת-ציטוט מובנה שכבר קיים בדוח היומי (goal 1): `exec_summary`/`sections`/`analyst_note_he`/
+`outlook`/`system_note_he` מסוג `Sentence`/`StructuredSection`/`AnalystNote`/`OutlookIndicator`
+(`agent/eoa/llm/schemas/reports.py`), ושדה `trends: list[WeeklyTrendSection]` חדש (5 משפטים לכל
+מגמה, עד 8 מגמות) שמחליף את `trend_paragraphs`/`TrendParagraph` **עבור הדוח השבועי בלבד** --
+`MonthlyReportDraft`/`BdTerritoryReportDraft` נשארו ללא שינוי. `eoa.report.qa_citations
+._check_structured` הורחב לבדוק גם `draft.trends` (טווח-ציטוט + כפילויות חוצות-קבוצה) בדיוק כמו
+`draft.sections`. `eoa.report.weekly`: `select_items_for_prompt` (חדש) מצמצם את רשימת הפריטים
+שהמודל רואה (top 6 לכל תחום + כל red + ראיות מגמות, סיכומים מקוצרים ל-~500 תווים) בעוד רשימת
+המספור/הרישום המלאה נשארת ללא שינוי; זרימת ה-QA-gate עברה מ-`_strip_uncited` (חיתוך משפט-משפט) ל-
+נפילה-לטבלאות-בלבד כמו ביומי (`_qa_failed_twice_draft`) אחרי ניסיון תיקון אחד. `report_weekly.md`
+נכתב מחדש בהתאמה. הרצה חיה אמיתית (`build_weekly()`): שני קריאות ה-LLM הושלמו נקי ומהר (ללא חיתוך
+JSON -- התיקון עובד), אך המודל חזר על משפטי-מגמה שכבר הופיעו בסעיפי-תחום -- ה-QA gate תפס את זה
+נכון בשני הניסיונות והדוח נפל לטבלאות-בלבד (`qa_passed=false`, `report_id=38`) -- זו התנהגות
+מכוונת (רשת הביטחון עובדת), לא רגרסיה. 208 טסטים ירוקים (`test_report_qa`/
+`test_report_weekly_monthly`/`test_docx_builder`/`test_entity_normalize`).
+
+### 2. התנגשות alias ברשימת המעקב: הזיית BlueHalo (D3, judge item 8)
+
+`config/watchlist.yaml` הגדיר `LOCUST`/`Titan` כ-alias של BlueHalo, אך שתי המילים מתנגשות עם שמות
+גנריים לא-קשורים (מוצר "Locust X3" של AeroVironment; תוכנית TITAN של הצבא האמריקאי, שנמסרה ל-
+Palantir/Anduril). `find_watchlist_aliases_in_text` ייחס כל הופעה גולמית של המילים ל-BlueHalo.
+נוסף מפתח `strict_aliases:` פר-חברה ב-watchlist.yaml (סומנו: BlueHalo, Anduril, Rheinmetall, IAI) +
+מנגנון ב-`entity_normalize.py` (`_strict_alias_records`/`_record_mentioned_non_strictly`) הדורש
+שהשם הקנוני של החברה (או alias לא-strict) יופיע גם הוא באותו טקסט. גם תוקנה שגיאת-העתקה נפרדת:
+"LITENING" (מוצר של רפאל) הוסר מרשימת ה-alias של Northrop Grumman. תיקון-נתונים
+(`scripts/repair_watchlist_strict_aliases.py`, חדש): 5 פריטים תוקנו בפועל (9, 10, 47, 50, 96).
+
+### 3. כפילויות תעתיק בשמות אנשים (D3, judge item 3)
+
+הממונה על פעילות Anduril בישראל נרשם תחת 4 איותים (Amikam/Amiram Norkin באנגלית, שתי גרסאות
+בעברית). נוסף מנגנון "שלד עיצורים" (`_name_consonant_skeleton`: מיפוי אות-עברית -> עיצור-לטיני +
+הסרת תנועות לטיניות; קריטי: ו'/י' עבריות ממופות לריק, לא ל-v/y, כי הן ברוב המקרים אימות-קריאה
+(matres lectionis) ולא עיצורים אמיתיים) + `person_transliteration_similarity`/
+`is_likely_same_person` (difflib >= 0.85) + `looks_like_person_name` (2-4 מילים, לא ישות ידועה,
+בלי מילות-חברה). תיקון-נתונים (`scripts/repair_person_transliteration_dedup.py`, חדש): קבוצה אחת
+נמצאה ומוזגה בפועל (זוכה: id 258 "Amikam Norkin", תוקן גם ה-kind מ-'company' ל-'person'). כפילות
+ה-*אירועים* (3 רשומות events נפרדות לאותו מינוי) נשארה מחוץ להיקף -- נפתחה משימת רקע נפרדת.
+
+### 4. פער-recall בזיהוי ישויות: Palantir הושמט (D3, judge item 2)
+
+`_backfill_entities_from_watchlist` (Q3-8) הפסיק לבדוק ברגע ש-`entities_mentioned` לא היה ריק --
+פריט 50 (TITAN, 192M$) נקב ב-Palantir לצד Anduril בטקסט שלו, אך `entities_mentioned` הכיל רק
+`[US Army, Anduril, BlueHalo]`. תוקן: הפונקציה תמיד מריצה מחדש את הבדיקה ומאחדת (union) תוצאות
+חדשות לתוך הרשימה הקיימת. נוסף גם `Palantir` ל-watchlist.yaml (היה קיים רק ב-`_COMPANY_COUNTRY_MAP`,
+לא נגיש ל-NER). נוספה גם `_recall_event_parties` -- אותו איחוד עבור `events.parties` מול
+`summary_he` של האירוע עצמו. תיקון-נתונים (`scripts/repair_entity_recall.py`, חדש): 18 פריטים +
+48 אירועים תוקנו בפועל.
+
+### 5. מצב-triage לא-עקבי: level=NULL למרות processed_stages כולל 'triage' (D1, judge item 9)
+
+נמצאו 30 שורות (לא רק 4 של השופט) בשני דפוסי-שורש: (א) ארבעת פריטי השופט -- שלושתם (level/score/
+triage_reason) NULL, מעולם לא הגיעו ל-analyze בפועל; (ב) 26 פריטים נוספים -- `scripts/
+backfill_analysis_gaps.py`'s `stub_cleanup_pass` איפס `level` ל-NULL בלי לאפס גם `score`/
+`triage_reason` הישנים -- ומכיוון ש-classify/triage מדלגים על `domain='out_of_scope'` כבר-מסווג,
+זה מבוי סתום קבוע. תוקן: `stub_cleanup_pass` מיישר עכשיו ל-`level='archive', score=1,
+triage_reason='gate:...'` (אותה מוסכמה ש-`classify.run_classify` כבר משתמש בה לכל פריט out_of_scope
+אחר). נוספה `eoa.pipeline.triage.validate_triage_consistency` -- בדיקת-אינווריאנט בלתי-תלוית-ציון
+(level ו-score חייבים להיות שניהם קיימים או שניהם ריקים) בשתי נקודות ההתמדה של `run_triage`.
+תיקון-נתונים (`scripts/repair_null_triage_state.py`, חדש): 30 פריטים תוקנו; סריקה חוזרת מאשרת 0
+שורות נותרות.
+
+### 6. שאריות round_1_auto.json תחת D2/D3/D4/D7
+
+D3 כבר 100.0 (הממצאים הסמנטיים של השופט לא נתפסים ע"י מערך-הבדיקות הדטרמיניסטי). D2
+`terminology_in_parens_when_relevant` מתועד כ-"informational, high false-positive rate" ע"י
+הבדיקה עצמה -- לא טופל. D4 `queries_anchored_to_question`: נבדק מחדש חי -- 100.0, כל 4 ה-jobs
+כבר נושאים `legacy_unanchored=true` (round 1 כבר תיקן; ה-snapshot ב-round_1_auto.json היה לפני
+שהכתיבה הגיעה ל-DB הזה). D7: `bd_kr` הורץ מחדש (`eo run bd --territory KR`, GPU פנוי) -- עבר QA
+אך טבלת הפעולות עדיין ריקה כי אין בכלל נתוני-שוק/כנסים לקוריאה בחלון הזמן (0/0) -- לא באג קוד.
+
+### ציון QA מצטבר
+
+`scripts/qa_score.py --round 2 --no-links`: **86.3** (עלייה מ-56.3 בסבב 1, 56.9 בסבב 0). D1 87.5
+(מ-33.3), D3/D4 100.0, D8 100.0.
+
+### Tests
+
+חדשים: `test_entity_normalize.py`'s `TestPersonTransliterationDedup` (+10), `test_triage_levels
+.py`'s `TestValidateTriageConsistency` (+4), `test_analyze_key_facts_entities.py` (+5: union-recall
++ event-parties-recall). עודכנו: `test_backfill_analysis_gaps.py` (יעד-חדש ל-stub_cleanup_pass),
+`test_report_qa.py`+`test_docx_builder.py` (דוגמת-שכבה-legacy עברה מ-`WeeklyReportDraft` ל-
+`MonthlyReportDraft`), `test_report_weekly_monthly.py` (fixture שבועי משוחזר במבנה המובנה החדש).
+כל הקבצים החדשים/מורחבים ירוקים.

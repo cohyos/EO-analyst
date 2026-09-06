@@ -359,18 +359,46 @@ def _dedupe_key_facts(facts: list[str]) -> list[str]:
 
 
 def _backfill_entities_from_watchlist(item: dict) -> list[str] | None:
-    """Q3-8: when the item already reached the analyze stage with an empty
-    ``entities_mentioned`` (classify extracted none) but its own title/text plainly names a
-    watchlist company or program, deterministically fill it from a watchlist alias match instead
-    of leaving it empty forever. Returns ``None`` (nothing to backfill) when
-    ``entities_mentioned`` is already non-empty or no watchlist alias is found in the text."""
-    if item.get("entities_mentioned"):
-        return None
+    """Q3-8, extended round-2 (2026-09-06, judge D3, docs/qa/loop/round_0_judge.md item 2): fill
+    ``entities_mentioned`` with any watchlist/curated-org name plainly present in the item's own
+    title/text that isn't already there -- deterministically, via
+    ``eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text``.
+
+    Originally (Q3-8) this only ever ran when ``entities_mentioned`` was completely empty (classify
+    extracted nothing at all). Round-2 found the same gap on a *partially*-filled list: item 50's
+    TITAN award ($192M to Palantir + Anduril) had ``entities_mentioned = [US Army, Anduril,
+    BlueHalo]`` -- Palantir, a lead named party in the item's own summary/key_facts, was silently
+    dropped by the LLM's own extraction and never recovered because the old guard bailed out the
+    moment the list was non-empty. Now always unions in any additional match rather than skipping
+    the check once the model found *something*. Returns ``None`` only when there is truly nothing
+    new to add (already-complete list, or no watchlist alias found in the text at all) --
+    preserves the original "nothing to persist" contract for callers that skip a no-op write."""
     from eoa.pipeline.entity_normalize import find_watchlist_aliases_in_text
 
     text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
     matched = find_watchlist_aliases_in_text(text)
-    return matched or None
+    if not matched:
+        return None
+    existing = item.get("entities_mentioned") or []
+    combined = list(dict.fromkeys([*existing, *matched]))
+    return combined if combined != existing else None
+
+
+def _recall_event_parties(ev: EventOut) -> list[str]:
+    """Round-2 (2026-09-06, judge D3 item 2): a watchlist/curated-org name plainly present in an
+    event's own ``summary_he`` (the LLM's own extracted event narrative) but missing from that same
+    event's ``parties`` list -- e.g. item 50's TITAN event named Palantir + Anduril in its
+    ``summary_he`` while ``parties`` only carried a subset. Unions any such name in, preserving the
+    model's own party ordering first. A no-op (returns ``ev.parties`` unchanged) when
+    ``summary_he`` is empty or names nothing new."""
+    if not ev.summary_he:
+        return ev.parties
+    from eoa.pipeline.entity_normalize import find_watchlist_aliases_in_text
+
+    matched = find_watchlist_aliases_in_text(ev.summary_he)
+    if not matched:
+        return ev.parties
+    return list(dict.fromkeys([*ev.parties, *matched]))
 
 
 def _with_partial_content_note(item: dict, uncertainty_he: str | None) -> str | None:
@@ -439,6 +467,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
             # Q3-6: an assessment/forecast sentence dressed up as an event -- never persisted.
             log.info("event_rejected_narrative_title", item_id=item["id"], title=(ev.title or "")[:160])
             continue
+        event_parties = _recall_event_parties(ev)
         try:
             insert_event(
                 item_id=item["id"],
@@ -447,7 +476,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 date=_parse_date(ev.date),
                 amount_usd=ev.amount_usd,
                 currency=ev.currency,
-                parties=ev.parties,
+                parties=event_parties,
                 customer=ev.customer,
                 program=ev.program,
                 summary_he=ev.summary_he,

@@ -286,12 +286,95 @@ score-without-level raises) — 21/21 passed.
 
 ## Live weekly rebuild
 
-*(filled in after `build_weekly()` finished — see below.)*
+`build_weekly()` run for real against the live DB/GPU (`eo status` showed the GPU idle beforehand,
+model already resident). Path: `output/reports/weekly_2026-09-06.md` (+ `.docx`/`.html`), `report_id
+= 38`, **`qa_passed = false`**.
+
+This is the intended safety net firing, not a regression of the migration itself: both LLM calls
+completed cleanly and quickly (104.6s/3936 tokens, then 105.8s/3557 tokens — both far inside the
+14000-token budget, no truncation, no malformed JSON — confirming the runaway-JSON bug this
+migration set out to fix is gone), but the resident 12B model's own trend-narrative paragraph
+("פעילות מוגברת סביב אלביט מערכות") verbatim-repeated multiple whole sentences that also appear in
+five unrelated domain sections (Land EO/IR, Naval, Air Defense, C-UAS, Computer Vision) — exactly
+the cross-group duplicate condition `_check_structured`'s extended check (item 1 above) now catches
+for `draft.trends`, on both the initial draft and the one corrective retry. Per the "retry once,
+then tables-only fallback like daily" design, the narrative was dropped entirely on the second
+failure; the exec-summary heading now reads:
+
+> אין תקציר לתקופה זו.
+>
+> הטיוטה הטקסטואלית של הדוח השבועי לא עברה את בדיקת האזכורים גם לאחר ניסיון תיקון, ולכן הושמטה
+> במלואה מדוח זה כדי לא להציג ניסוח חלקי או לא מאומת. הטבלאות הדטרמיניסטיות (אירועים, מכרזים,
+> מעקב טכנולוגי, תעשייה ישראלית, פטנטים, לוח כנסים) ונספח המקורות שלהלן אינם מושפעים ומוצגים
+> במלואם.
+
+The deterministic content (the business-events table, the deep-search investigations section, and
+every other additive table) rendered in full and is unaffected — the report is a complete,
+honest, tables-only document rather than a crash or a silently-corrupted one. `qa_report` (in the
+persisted `reports` row) retains the original 10 flagged duplicate-sentence errors for analyst
+review. This is a genuine, separate content-quality finding about the resident model's trend
+narrative (it conflates its own "activity around Elbit" framing with material already covered
+per-domain) — out of this round's "not the LLM-quality ones" mandate; noted for a future prompt
+tightening (e.g. explicitly telling the model a trend paragraph must add analysis *beyond* what its
+own domain sections already said, not restate their sentences) rather than fixed here.
+
+## `scripts/qa_score.py --round 2 --no-links`
+
+```
+domain weight    auto   judge  combined  note
+D1         15    87.5       -      87.5
+D2         15    85.7       -      85.7
+D3          8   100.0       -     100.0
+D4         12   100.0       -     100.0
+D5         10  manual       -         -  manual only -- judge the 8 golden_questions.json answers by hand each round
+D6         15    82.4       -      82.4  output/reports/daily_2026-09-06.md
+D7          8    50.0       -      50.0
+D8          7   100.0       -     100.0  output/reports/patent_survey_FPA_...md
+D9          5    80.0       -      80.0
+D10         5  manual       -         -  skipped (pass --e2e to run playwright)
+------------------------------------------------------------
+weighted total: 86.3
+```
+
+Up from round 1's 56.3 (round 0: 56.9). Wrote `docs/qa/loop/round_2_auto.json`, appended to
+`docs/qa/loop/SCORES.md`.
+
+**Residual failures, not chased this round** (none are this round's mandate items, and each is
+either already documented from round 1 or a single-item/data-freshness edge case):
+
+- **D1 `entities_mentioned_nonempty_in_scope`** (1/32, item 22): item 22 has neither a watchlist
+  company named nor any `key_facts` — the deterministic entity-recall fix (item 4 above) has
+  nothing to recall here; round 1 already noted this needed a full LLM re-analyze, which
+  apparently didn't persist (or item 22 drifted again via concurrent activity on this shared DB).
+  Out of round-2's explicit scope (items 1-6 above); not re-triaged here.
+- **D6 `no_duplicate_sentences`** (`daily_2026-09-06.md`, "אילו מקצועות..."): the exact same
+  structural overlap round 1 already documented (the "תעשייה ישראלית" table and the "נספח מקורות"
+  appendix both deterministically render an item's own title by design) — `daily.py` is outside
+  this round's owned-files list.
+- **D7 `conference_dates_match_db`** (2/4 mismatched): the freshly-rebuilt `bd_kr` didn't fully
+  resolve this — the mismatch is apparently on `bd_us`/`bd_il` (not rebuilt this round) or on
+  `bd_kr`'s own international (non-territory) conference rows; would need a report-by-report,
+  row-by-row diff against the live `conferences` table to isolate, which this round's time budget
+  didn't cover.
+- **D7 `actions_table_nonempty`** (`bd_kr_2026-09-06.md`): see the "Live weekly rebuild" section
+  above — genuinely zero KR-territory data in the window, not a code defect.
+
+## Out-of-scope findings, flagged as background tasks (not fixed this round)
+
+- Item 81's 3 near-duplicate `events` rows for the same Norkin appointment (reworded titles, missed
+  by the exact `(item_id, kind, title)` dedup gate) plus 2 duplicate funding-round and 2 duplicate
+  Elbit-partnership events for the same item — event-row dedup, a different problem from this
+  round's entity-name dedup (item 3).
+- Event id 89 (item 47) stores `amount_usd = 465` for a stated "$464.8 million" contract — a
+  three-orders-of-magnitude unit bug, visible in the freshly-rebuilt weekly report's events table
+  (see "Live weekly rebuild" above, row `2026-09-03 | זכייה בחוזה | US Army | E-HEL | 465 USD`).
 
 ## Quality gates
 
 - `ruff check`/`ruff format --check` on every touched file: clean.
 - Full targeted pytest run across every new/extended test file: green (see per-section counts
-  above).
-- `scripts/qa_score.py --round 2 --no-links`: see the table pasted below / appended to
-  `docs/qa/loop/SCORES.md`.
+  above; 208/208 across `test_report_qa.py`+`test_report_weekly_monthly.py`+`test_docx_builder.py`+
+  `test_entity_normalize.py` in one combined run, 146/146 for `test_entity_normalize.py` alone
+  after the person-dedup additions, 139/139 for `test_analyze_key_facts_entities.py`, 13/13 for
+  `test_backfill_analysis_gaps.py`, 21/21 for `test_triage_levels.py`).
+- `scripts/qa_score.py --round 2 --no-links`: weighted total 86.3 (see table above).

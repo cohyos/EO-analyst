@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from eoa.config import settings
-from eoa.pipeline.triage import _watchlist_hits, level_for
+from eoa.pipeline.triage import _watchlist_hits, level_for, validate_triage_consistency
 
 
 class TestLevelFor:
@@ -201,3 +203,22 @@ class TestWatchlistHits:
         with patch("eoa.pipeline.triage.settings", return_value=mock_settings):
             result = _watchlist_hits(["אלביט"])
             assert "אלביט" in result
+
+
+class TestValidateTriageConsistency:
+    """Round-2 (2026-09-06, judge D1 item 9): both level and score must be set or cleared
+    together -- never one without the other."""
+
+    def test_both_set_is_valid(self):
+        validate_triage_consistency(1, level="red", score=9)  # must not raise
+
+    def test_both_none_is_valid(self):
+        validate_triage_consistency(1, level=None, score=None)  # must not raise
+
+    def test_level_without_score_raises(self):
+        with pytest.raises(ValueError, match="inconsistent triage state"):
+            validate_triage_consistency(1, level="archive", score=None)
+
+    def test_score_without_level_raises(self):
+        with pytest.raises(ValueError, match="inconsistent triage state"):
+            validate_triage_consistency(1, level=None, score=1)
