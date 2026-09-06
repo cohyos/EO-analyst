@@ -51,6 +51,7 @@ resources:
   gpu_temp_stop_c: 88
   queue_backoff_seconds: [5, 10, 30, 60]
   queue_timeout_min: 20
+  interactive_wait_s: 20      # 2026-09-06 P1: interactive (chat) gate wait cap, vs. queue_timeout_min for nightly/pipeline
   min_loaded_seconds: 300
   polite_mode:
     external_gpu_util_threshold: 25
@@ -214,7 +215,8 @@ llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — 
     - { provider: claude, model: claude-sonnet-5, power: high }
     - { provider: agy, model: gemini-3.1-pro-high }
     - provider: ollama
-    light:
+    light:   # 2026-09-06 18:40: local first is what froze tenders/chat while the user's own GPU job held VRAM; cheap flash first, local fallback
+    - { provider: agy, model: gemini-3.8-flash-medium }
     - provider: ollama
     report:
     - { provider: claude, model: claude-sonnet-5, power: high }
