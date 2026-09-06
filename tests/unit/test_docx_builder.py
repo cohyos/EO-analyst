@@ -385,7 +385,9 @@ def test_build_docx_sources_appendix_has_all_items(built_doc, fixture_items):
     appendix = built_doc.tables[-1]
     assert len(appendix.rows) == len(fixture_items) + 1  # header + N items
     header_cells = [c.text for c in appendix.rows[0].cells]
-    assert header_cells == ["#", "כותרת", "מקור", "תאריך", "קישור"]
+    # Round 5 P4 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 item 12): the appendix gained a
+    # reliability column ("אמינות") between "מקור" and "תאריך".
+    assert header_cells == ["#", "כותרת", "מקור", "אמינות", "תאריך", "קישור"]
 
 
 def test_build_docx_no_toc_for_daily(built_doc):

@@ -55,6 +55,12 @@ _OUTCOME_LABELS_HE = {
     "not_found": "לא נמצא",
     "stopped_budget": "הופסק (תקציב)",
     "stopped_timeout": "הופסק (זמן)",
+    # DS3/P7 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.6): a technically/security-blocked
+    # investigation never actually ran -- distinct from `not_found` ("investigated in full, found
+    # nothing"). This label alone already keeps `eoa.qa.d4_investigations`'s
+    # `blocked_distinct_from_not_found` check happy (it only flags an entry labeled *`not_found`*
+    # that also carries a block-signal word).
+    "blocked": "נחסם (לא נחקר בפועל)",
 }
 
 _HE_WEEKDAYS = ("שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון")  # Monday=0 .. Sunday=6
@@ -162,13 +168,58 @@ def _split_md_cells(line: str) -> list[str]:
 _ROW_CITE_RE = re.compile(r"\[(\d+)\]")
 
 
-def _row_identity(row: list[Any]) -> str:
+# -- Round 5 P4 (2026-09-06) row-carried metadata (W5 trend cross-reference) --------------------
+#
+# A table row has always been a plain ``list[Any]`` of cell values (positional, matching
+# ``headers``) everywhere in this codebase (``weekly.py``/``monthly.py``/``bd_territory.py``/
+# ``tech_watch.py``/``israel_section.py``/``patents/survey.py``) -- ``_row_cells``/
+# ``_row_related_trend`` below additionally accept a row shaped
+# ``{"cells": [...], "related_trend_he": "<trend title>"}`` so a collector can *optionally* attach
+# a "this row relates to trend X" note without any change to the plain-list shape every existing
+# caller still uses (a no-op for all of them: ``_row_related_trend`` returns ``None`` for a plain
+# list row).
+
+
+def _row_cells(row: Any) -> list[Any]:
+    """The positional cell values of a table row -- ``row`` itself when it's a plain list (every
+    existing caller), or ``row["cells"]`` for the new optional dict-with-metadata row shape."""
+    if isinstance(row, dict):
+        return list(row.get("cells") or [])
+    if isinstance(row, list):
+        return row
+    return [row]
+
+
+def _row_related_trend(row: Any) -> str | None:
+    """The row's own ``related_trend_he`` (W5) when it is the new dict-with-metadata shape;
+    ``None`` for a plain-list row (the no-op case)."""
+    if isinstance(row, dict):
+        return row.get("related_trend_he") or None
+    return None
+
+
+def _apply_row_trend_note(cells: list[Any], trend: str | None) -> list[Any]:
+    """Fold a row's ``related_trend_he`` (W5) into its last cell as a "(מגמה: …)" suffix -- the
+    same small, non-structural note in all three outputs (md/html table cells and docx table
+    cells can't otherwise carry per-row metadata without reshaping the table itself). A no-op
+    when ``trend`` is falsy, so every existing table (which never sets it) renders unchanged."""
+    if not trend:
+        return cells
+    cells = list(cells) if cells else [None]
+    last = cells[-1]
+    last_text = "—" if last is None else str(last)
+    cells[-1] = f"{last_text} (מגמה: {trend})"
+    return cells
+
+
+def _row_identity(row: Any) -> str:
     """Identity of a table row across a report: the sorted set of its [n] citations when it has
     any (the same item/event cited in two tables), else the whitespace-normalised cell text."""
-    cites = sorted({m for cell in row for m in _ROW_CITE_RE.findall(str(cell))})
+    cells = _row_cells(row)
+    cites = sorted({m for cell in cells for m in _ROW_CITE_RE.findall(str(cell))})
     if cites:
         return "n:" + ",".join(cites)
-    return "t:" + " ".join(" ".join(str(c) for c in row).split()).casefold()
+    return "t:" + " ".join(" ".join(str(c) for c in cells).split()).casefold()
 
 
 def dedupe_rows_across_tables(tables: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -185,11 +236,10 @@ def dedupe_rows_across_tables(tables: list[dict[str, Any]] | None) -> list[dict[
             # actions / forecasts cite the items already shown above by design
             out.append(tbl)
             continue
-        if not rows or any(len(r) < 2 for r in rows if isinstance(r, list)):
+        if not rows or any(len(_row_cells(r)) < 2 for r in rows):
             out.append(tbl)
             for r in rows:
-                if isinstance(r, list):
-                    seen.add(_row_identity(r))
+                seen.add(_row_identity(r))
             continue
         kept: list[Any] = []
         dropped = 0
@@ -307,7 +357,7 @@ def _draft_exec_summary_text(draft: Any) -> str:
 def _draft_outlook_text(draft: Any) -> str:
     if _is_legacy_prose_draft(draft):
         return draft.outlook_he or ""
-    return " ".join(_render_sentence(ind) for ind in getattr(draft, "outlook", None) or [])
+    return " ".join(_render_outlook_indicator(ind) for ind in getattr(draft, "outlook", None) or [])
 
 
 def _draft_analyst_note_text(draft: Any) -> str:
@@ -341,6 +391,132 @@ def _draft_system_note_text(draft: Any) -> str:
     return getattr(draft, "system_note_he", "") or ""
 
 
+# -- Round 5 P4 (2026-09-06) BLUF / likelihood-confidence / assumptions ------------------------
+#
+# docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.1#1 (BLUF), 3.1#9 (likelihood/confidence split), 3.4#10
+# (assumption <-> falsifier). None of ``bluf``/``OutlookIndicator.likelihood``/
+# ``OutlookIndicator.confidence_level``/``confidence_basis_he``/``assumptions`` exist on any draft
+# schema yet (P3, ``eoa.llm.schemas.analysis``, landing separately this same evening) -- every
+# helper below is ``getattr``-guarded against the field's absence so this module works unchanged
+# today and picks up the new fields the moment P3 adds them, with zero further changes here.
+
+
+def _field(obj: Any, name: str, default: Any = None) -> Any:
+    """Attribute or dict-key access, whichever ``obj`` supports -- P3's new schema fields will
+    almost certainly be pydantic model attributes (the codebase convention), but this stays
+    tolerant of a plain-dict shape too since nothing here can see the real schema yet."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _draft_bluf_info(draft: Any) -> tuple[list[Any], bool]:
+    """``(sentences, is_system_built)`` for the "שורה תחתונה" (BLUF) section.
+
+    - ``draft.bluf`` (P3, ``list[Sentence]``) when present and non-empty -- the model-authored
+      BLUF, returned as-is (``is_system_built=False``).
+    - Otherwise, only for the daily report's own zero-narrative deterministic fallback
+      (``eoa.report.daily._deterministic_fallback_draft``: no ``bluf`` field yet, empty
+      ``sections``, a non-empty ``system_note_he`` explaining the model's draft was dropped, and
+      an ``exec_summary`` built straight from the top-scored item/event/Israel-relevant data) --
+      the top 1-2 ``exec_summary`` sentences double as a synthesized BLUF
+      (``is_system_built=True``) so the reader still gets a bottom line even with no model text.
+    - ``([], False)`` for every other shape (legacy free-prose drafts, or a structured draft with
+      real section content but no ``bluf`` -- P3 hasn't reached that report type yet).
+    """
+    bluf = getattr(draft, "bluf", None)
+    if bluf:
+        return list(bluf), False
+    if _is_legacy_prose_draft(draft):
+        return [], False
+    system_note = _draft_system_note_text(draft)
+    exec_summary = getattr(draft, "exec_summary", None) or []
+    if system_note and not draft.sections and exec_summary:
+        return list(exec_summary[:2]), True
+    return [], False
+
+
+_SYSTEM_BUILT_BLUF_PREFIX_HE = "(שורה תחתונה אוטומטית מהנתונים, ללא ניסוח מודל) "
+
+
+def _draft_bluf_text(draft: Any) -> str:
+    """The rendered BLUF text (deterministic ``[n]`` markers from ``cites``, same as any other
+    ``Sentence`` list) -- empty string when there is nothing to show (see
+    :func:`_draft_bluf_info`)."""
+    sentences, is_system_built = _draft_bluf_info(draft)
+    if not sentences:
+        return ""
+    text = _render_sentences(sentences)
+    return f"{_SYSTEM_BUILT_BLUF_PREFIX_HE}{text}" if is_system_built else text
+
+
+_CONFIDENCE_LEVEL_LABELS_HE = {"high": "גבוה", "medium": "בינוני", "low": "נמוך"}
+
+
+def _format_likelihood(value: Any) -> str:
+    """``value`` as a Hebrew percentage: a ``0..1`` float is treated as a ratio, anything already
+    ``> 1`` (or a non-numeric value the model returned as a string) is shown as-is."""
+    if isinstance(value, int | float):
+        pct = value * 100 if 0 <= value <= 1 else value
+        return f"{pct:.0f}%"
+    return str(value)
+
+
+def _format_confidence_level(value: Any) -> str:
+    if isinstance(value, str):
+        return _CONFIDENCE_LEVEL_LABELS_HE.get(value.strip().lower(), value)
+    return str(value)
+
+
+def _render_outlook_indicator(indicator: Any) -> str:
+    """One ``OutlookIndicator`` rendered to display text (docs/REPORT_TEMPLATE_BENCHMARK.md
+    3.1#9): the base sourced/assessment sentence, plus -- only when the field exists on this
+    indicator (P3) -- "סבירות: X%" and "ביטחון: <רמה> (<בסיס>)" as two separate clauses, split by
+    a semicolon so ``eoa.qa.d6_daily_report``'s deterministic clause-boundary check
+    (``_CLAUSE_SPLIT_RE = re.compile(r"[.,;]")``) never sees both Hebrew keywords in the same
+    clause. A legacy indicator without these fields renders exactly as before (no change)."""
+    base = _render_sentence(indicator)
+    likelihood = _field(indicator, "likelihood")
+    confidence_level = _field(indicator, "confidence_level")
+    if likelihood is None and confidence_level is None:
+        return base
+    clauses = []
+    if likelihood is not None:
+        clauses.append(f"סבירות: {_format_likelihood(likelihood)}")
+    if confidence_level is not None:
+        basis = _field(indicator, "confidence_basis_he")
+        conf_clause = f"ביטחון: {_format_confidence_level(confidence_level)}"
+        if basis:
+            conf_clause += f" ({basis})"
+        clauses.append(conf_clause)
+    base = base.rstrip(". ")
+    return f"{base}. {'; '.join(clauses)}."
+
+
+def _draft_assumptions(draft: Any) -> list[Any]:
+    """``draft.assumptions`` (P3, docs/REPORT_TEMPLATE_BENCHMARK.md 3.4#10 "הנחה <-> הפרכה") when
+    present and non-empty; ``[]`` for every draft that doesn't carry this field yet."""
+    return list(getattr(draft, "assumptions", None) or [])
+
+
+def _render_assumption(assumption: Any) -> str:
+    """One assumption/falsifier pair rendered as one bullet line: "<assumption_he> — הפרכה:
+    <falsifier_he> [n]" -- ``cites`` (when present) render as deterministic ``[n]`` markers, same
+    convention as every other cited claim in this module. Wording note (P6 cross-team discovery,
+    docs/MODULES.md "Round 5 P6"): "הפרכה" (not the grammatically-also-valid "יופרך אם") is
+    required so the rendered line contains a substring `eoa.qa.d7_bd_report`'s (and, by the same
+    duplicated-check convention, presumably `d6_daily_report`'s) deterministic
+    ``assumptions_falsifiers_list_present``/equivalent check actually looks for
+    (`_FALSIFIER_KEYWORDS_HE = ("פריך", "הפרכ", "falsif")` -- "יופרך" contains neither "פריך" nor
+    "הפרכ" as a substring, "הפרכה" contains "הפרכ")."""
+    assumption_he = (_field(assumption, "assumption_he", "") or "").rstrip()
+    falsifier_he = (_field(assumption, "falsifier_he", "") or "").rstrip()
+    cites = _field(assumption, "cites", None) or []
+    markers = "".join(f"[{n}]" for n in cites)
+    text = f"{assumption_he} — הפרכה: {falsifier_he}" if falsifier_he else assumption_he
+    return f"{text} {markers}".rstrip() if markers else text
+
+
 # -- source display label (F8: never show a raw URL as the "source" column) --------------
 
 
@@ -371,6 +547,50 @@ def source_label(source_name: str | None, url: str | None) -> str:
     if url:
         return _domain_from_url(url)
     return name or "—"
+
+
+# -- Round 5 P4 (2026-09-06) source-reliability appendix column ---------------------------------
+#
+# docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 item 12: the sources appendix gains a "אמינות" column.
+# ``sources.reliability`` (a 1-5 primary/secondary-ish scale, ``db/migrations/versions/0001_core.py``)
+# and the per-date ``source_reliability`` table (rolling ``score``, confirmed/contradicted counts)
+# both already exist in the DB -- populating them onto each item dict is a collector-side job
+# (``daily.py``/``weekly.py``/etc., out of this package's file scope). This renderer only needs an
+# *optional* ``reliability`` key on a registry item; "—" when it's absent, exactly like every other
+# optional appendix field in this module.
+_RELIABILITY_KIND_LABELS_HE = {"primary": "מקור ראשוני", "secondary": "מקור משני"}
+
+
+def reliability_label(value: Any) -> str:
+    """The "אמינות" appendix cell for one item's optional ``reliability`` value.
+
+    Accepts three shapes so a collector can populate whatever it already has cheaply:
+
+    - ``None`` / missing -- "—" (the DB doesn't carry reliability data for this source yet).
+    - a plain ``str`` -- rendered verbatim (a collector that already composed its own label).
+    - a ``dict`` -- ``{"kind": "primary"|"secondary", "score": float|None, "label": str|None}``,
+      composed here as "<מקור ראשוני/משני> · <label> · <score>" (whichever parts are present);
+      ``kind`` maps to "מקור ראשוני"/"מקור משני" (the reliability-scale primary/secondary split),
+      ``score`` is the rolling ``source_reliability.score`` (or ``sources.reliability``,
+      normalised to 0-1) formatted to two decimals, ``label`` an already-Hebrew free-text label.
+    """
+    if value is None:
+        return "—"
+    if isinstance(value, str):
+        return value.strip() or "—"
+    if isinstance(value, dict):
+        parts: list[str] = []
+        kind_he = _RELIABILITY_KIND_LABELS_HE.get(value.get("kind"))
+        if kind_he:
+            parts.append(kind_he)
+        label = value.get("label")
+        if label:
+            parts.append(str(label))
+        score = value.get("score")
+        if isinstance(score, int | float):
+            parts.append(f"{float(score):.2f}")
+        return " · ".join(parts) if parts else "—"
+    return "—"
 
 
 def _looks_like_url(value: Any) -> bool:
@@ -812,7 +1032,7 @@ def _add_events_table(doc: DocxDocument, events: list[dict]) -> None:
 
 
 def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
-    headers = ["#", "כותרת", "מקור", "תאריך", "קישור"]
+    headers = ["#", "כותרת", "מקור", "אמינות", "תאריך", "קישור"]
     table = doc.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
     _set_table_rtl(table)
@@ -829,9 +1049,10 @@ def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
             _add_bookmark(row[0].paragraphs[0], f"src_{n}")
         _fill_cell(row[1], it.get("title") or "—")
         _fill_cell(row[2], source_label(it.get("source_name"), it.get("url")))
-        _fill_cell(row[3], fmt_date(it.get("published_at")))
+        _fill_cell(row[3], reliability_label(it.get("reliability")))
+        _fill_cell(row[4], fmt_date(it.get("published_at")))
         url = it.get("url") or ""
-        link_p = row[4].paragraphs[0]
+        link_p = row[5].paragraphs[0]
         _paragraph_rtl_right(link_p)
         if url:
             add_hyperlink(link_p, url, url)
@@ -843,7 +1064,12 @@ def _add_generic_table_body(doc: DocxDocument, headers: list[str], rows: list[li
     """The table itself (no heading) for a deterministic, non-citation RTL table — the 90-day
     conference lookahead (weekly) and the players-map/top-events/24-month-horizon tables (monthly).
     Split out so ``build_docx`` can add the Heading-1 itself
-    (wrapped in a TOC bookmark when ``include_toc`` is set) immediately before the table."""
+    (wrapped in a TOC bookmark when ``include_toc`` is set) immediately before the table.
+
+    ``rows`` may hold a plain ``list[Any]`` (every existing caller) or the newer
+    ``{"cells": [...], "related_trend_he": "..."}`` dict shape (W5, see :func:`_row_cells`); a
+    row's ``related_trend_he`` folds into its last cell as a "(מגמה: …)" suffix
+    (:func:`_apply_row_trend_note`)."""
     table = doc.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
     _set_table_rtl(table)
@@ -851,8 +1077,9 @@ def _add_generic_table_body(doc: DocxDocument, headers: list[str], rows: list[li
         _fill_cell(cell, text, bold=True)
     _shade_header_row(table)
     for row_values in rows:
+        cell_values = _apply_row_trend_note(_row_cells(row_values), _row_related_trend(row_values))
         row = table.add_row().cells
-        for cell, value in zip(row, row_values, strict=True):
+        for cell, value in zip(row, cell_values, strict=True):
             if _looks_like_url(value):
                 link_p = cell.paragraphs[0]
                 _paragraph_rtl_right(link_p)
@@ -865,12 +1092,26 @@ def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None
     for entry in deep_search:
         heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
         add_mixed_paragraph(doc, heading, style="Heading 2")
-        outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
+        outcome_key = entry.get("outcome")
+        outcome = _OUTCOME_LABELS_HE.get(outcome_key, outcome_key or "—")
         confidence = entry.get("confidence")
         conf_str = f"{confidence:.0%}" if isinstance(confidence, int | float) else "—"
         add_mixed_paragraph(doc, f"תוצאה: {outcome} | רמת ביטחון: {conf_str}", size_pt=10)
-        if entry.get("answer_he"):
+        if outcome_key == "blocked":
+            # DS3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.6): a blocked investigation never ran
+            # at all -- shown here, never as "לא נמצא".
+            reason = entry.get("blocked_reason_he") or "—"
+            blocked_p = add_mixed_paragraph(doc, f"נחסם (לא נחקר בפועל): {reason}", size_pt=BODY_SIZE_PT)
+            for run in blocked_p.runs:
+                run.font.bold = True
+        elif entry.get("answer_he"):
             add_mixed_paragraph(doc, entry["answer_he"], size_pt=BODY_SIZE_PT)
+        if entry.get("rerun_note_he"):
+            # `eoa.report.daily.reconcile_deep_search_reruns` -- the same question investigated
+            # more than once this period; the reconciled entry above is the best-outcome run.
+            note_p = add_mixed_paragraph(doc, entry["rerun_note_he"], size_pt=9)
+            for run in note_p.runs:
+                run.font.italic = True
         if entry.get("contradictions_he"):
             add_mixed_paragraph(doc, f"סתירות/אי-ודאות: {entry['contradictions_he']}", size_pt=10)
 
@@ -889,7 +1130,17 @@ def _planned_headings(
     """The ordered list of top-level ("Heading 1") section titles this draft will actually render
     — computed once so a real table of contents (docx bookmarks / html anchors) can be built
     without duplicating each renderer's own conditionals (F10)."""
-    headings = ["תקציר מנהלים"]
+    headings: list[str] = []
+    if _draft_bluf_text(draft):
+        # Round 5 P4 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.1#1): the native BLUF, when present,
+        # always leads -- before any `before_summary` extra_sections and before the summary itself.
+        headings.append("שורה תחתונה")
+    headings += [
+        sec.get("title_he") or ""
+        for sec in extra_sections
+        if (sec.get("position") or "after_summary") == "before_summary"
+    ]
+    headings.append("תקציר מנהלים")
     headings += [
         sec.get("title_he") or ""
         for sec in extra_sections
@@ -904,6 +1155,10 @@ def _planned_headings(
         headings.append("נקודות פתוחות")
     if _draft_outlook_text(draft):
         headings.append("מבט קדימה")
+    if _draft_assumptions(draft):
+        # Round 5 P4 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.4#10): rendered right after the outlook,
+        # before the after_outlook extra_sections (indicator watchlist, etc.).
+        headings.append("הנחות והפרכות")
     headings += [
         sec.get("title_he") or ""
         for sec in extra_sections
@@ -998,6 +1253,19 @@ def build_docx(
         _add_real_toc(doc, toc_entries)
         doc.add_page_break()
 
+    bluf_text = _draft_bluf_text(draft)
+    if bluf_text:
+        _heading1(doc, "שורה תחתונה")
+        bluf_p = add_mixed_paragraph(doc, bluf_text)
+        for run in bluf_p.runs:
+            run.font.bold = True
+
+    for sec in extra_sections:
+        if (sec.get("position") or "after_summary") != "before_summary":
+            continue
+        _heading1(doc, sec.get("title_he") or "")
+        _add_md_body_docx(doc, sec.get("body_he") or "")
+
     _heading1(doc, "תקציר מנהלים")
     add_mixed_paragraph(doc, _draft_exec_summary_text(draft) or "אין תקציר לתקופה זו.")
 
@@ -1039,6 +1307,12 @@ def build_docx(
     if outlook_text:
         _heading1(doc, "מבט קדימה")
         add_mixed_paragraph(doc, outlook_text)
+
+    assumptions = _draft_assumptions(draft)
+    if assumptions:
+        _heading1(doc, "הנחות והפרכות")
+        for assumption in assumptions:
+            add_mixed_paragraph(doc, _render_assumption(assumption), style="List Bullet")
 
     for sec in extra_sections:
         if (sec.get("position") or "after_summary") != "after_outlook":
@@ -1143,12 +1417,16 @@ def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
         lines += [f"## {tbl.get('title_he') or ''}", ""]
         if tbl.get("note_he"):
             lines += [_md_citations(tbl["note_he"]), ""]
+        if tbl.get("related_trend_he"):
+            # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
+            lines += [_md_citations(f"מגמה: {tbl['related_trend_he']}"), ""]
         lines += [
             "| " + " | ".join(headers) + " |",
             "|" + "---|" * len(headers),
         ]
         for row in tbl.get("rows") or []:
-            lines.append("| " + " | ".join(_md_cell(v) for v in row) + " |")
+            cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
+            lines.append("| " + " | ".join(_md_cell(v) for v in cells) + " |")
         lines.append("")
 
 
@@ -1178,6 +1456,12 @@ def render_markdown(
     warning = _qa_warning_line(qa) if _is_legacy_prose_draft(draft) else None
     if warning:
         lines += [f"> **{warning}**", ""]
+
+    bluf_text = _draft_bluf_text(draft)
+    if bluf_text:
+        lines += ["## שורה תחתונה", "", f"**{_md_citations(bluf_text)}**", ""]
+
+    _extra_sections_md(lines, extra_sections, "before_summary")
 
     lines += [
         "## תקציר מנהלים",
@@ -1226,8 +1510,20 @@ def render_markdown(
         lines += ["## חקירות עומק", ""]
         for entry in deep_search:
             heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
-            outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
-            lines.append(f"- **{heading}** — {outcome}: {_md_citations(entry.get('answer_he', ''))}")
+            outcome_key = entry.get("outcome")
+            outcome = _OUTCOME_LABELS_HE.get(outcome_key, outcome_key or "—")
+            # DS3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.6): a blocked investigation shows its
+            # blocked_reason_he, never the answer_he it never actually produced.
+            body = (
+                (entry.get("blocked_reason_he") or "—")
+                if outcome_key == "blocked"
+                else entry.get("answer_he", "")
+            )
+            lines.append(f"- **{heading}** — {outcome}: {_md_citations(body)}")
+            if entry.get("rerun_note_he"):
+                # eoa.report.daily.reconcile_deep_search_reruns -- indented, so it is never
+                # mistaken for a new investigation entry by eoa.qa.d4_investigations's `^-` regex.
+                lines.append(f"  - {_md_citations(entry['rerun_note_he'])}")
         lines.append("")
 
     open_points = list(draft.open_points_he or [])
@@ -1241,10 +1537,21 @@ def render_markdown(
     if outlook_text:
         lines += ["## מבט קדימה", "", _md_citations(outlook_text), ""]
 
+    assumptions = _draft_assumptions(draft)
+    if assumptions:
+        lines += ["## הנחות והפרכות", ""]
+        lines += [f"- {_md_citations(_render_assumption(a))}" for a in assumptions]
+        lines.append("")
+
     _extra_sections_md(lines, extra_sections, "after_outlook")
     _tables_md(lines, tables or [])
 
-    lines += ["## נספח מקורות", "", "| # | כותרת | מקור | תאריך | קישור |", "|---|---|---|---|---|"]
+    lines += [
+        "## נספח מקורות",
+        "",
+        "| # | כותרת | מקור | אמינות | תאריך | קישור |",
+        "|---|---|---|---|---|---|",
+    ]
     for it in sorted(items, key=lambda x: x.get("n") or 0):
         url = it.get("url") or ""
         link = f"[{url}]({url})" if url else "—"
@@ -1257,6 +1564,7 @@ def render_markdown(
         n_cell = f'<a id="src-{n}"></a>{n}' if n is not None else ""
         lines.append(
             f"| {n_cell} | {it.get('title') or '—'} | {source_label(it.get('source_name'), url)} "
+            f"| {reliability_label(it.get('reliability'))} "
             f"| {fmt_date(it.get('published_at'))} | {link} |"
         )
     return "\n".join(lines) + "\n"
@@ -1335,13 +1643,18 @@ def _tables_html(parts: list[str], tables: list[dict[str, Any]], h2) -> None:
         parts.append(h2(tbl.get("title_he") or ""))
         if tbl.get("note_he"):
             parts.append(f"<p>{_bidi_html(tbl['note_he'])}</p>")
+        table_trend = tbl.get("related_trend_he")
+        if table_trend:
+            # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
+            parts.append(f"<p>{_bidi_html('מגמה: ' + str(table_trend))}</p>")
         parts.append(
             "<table><thead><tr>"
             + "".join(f"<th>{html.escape(h)}</th>" for h in headers)
             + "</tr></thead><tbody>"
         )
         for row in tbl.get("rows") or []:
-            cells = "".join(f"<td>{_html_cell(v)}</td>" for v in row)
+            row_cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
+            cells = "".join(f"<td>{_html_cell(v)}</td>" for v in row_cells)
             parts.append(f"<tr>{cells}</tr>")
         parts.append("</tbody></table>")
 
@@ -1376,6 +1689,7 @@ _EOA_HTML_STYLE = """
   --eoa-th-bg:#eef1f5;
   --eoa-link:#1a56db;
   --eoa-warning:#b42318;
+  --eoa-blocked:#8a5a00;
   --eoa-toc-bg:#f8f9fb;
   --eoa-toc-border:#e2e5ea;
   --eoa-date:#555;
@@ -1388,6 +1702,7 @@ _EOA_HTML_STYLE = """
     --eoa-th-bg:#1c2b38;
     --eoa-link:#6ea8fe;
     --eoa-warning:#ff8a80;
+    --eoa-blocked:#e0a94e;
     --eoa-toc-bg:#16222c;
     --eoa-toc-border:#2c3d42;
     --eoa-date:#9fb0b4}
@@ -1398,6 +1713,7 @@ _EOA_HTML_STYLE = """
   --eoa-th-bg:#1c2b38;
   --eoa-link:#6ea8fe;
   --eoa-warning:#ff8a80;
+  --eoa-blocked:#e0a94e;
   --eoa-toc-bg:#16222c;
   --eoa-toc-border:#2c3d42;
   --eoa-date:#9fb0b4}
@@ -1407,6 +1723,7 @@ _EOA_HTML_STYLE = """
   --eoa-th-bg:#eef1f5;
   --eoa-link:#1a56db;
   --eoa-warning:#b42318;
+  --eoa-blocked:#8a5a00;
   --eoa-toc-bg:#f8f9fb;
   --eoa-toc-border:#e2e5ea;
   --eoa-date:#555}
@@ -1419,6 +1736,8 @@ _EOA_HTML_STYLE = """
 .eoa-report a{color:var(--eoa-link)}
 .eoa-report a.cite{text-decoration:none;font-size:.75em;vertical-align:super}
 .eoa-report .qa-warning{color:var(--eoa-warning)}
+.eoa-report .ds-blocked{color:var(--eoa-blocked);font-weight:600}
+.eoa-report .ds-rerun-note{color:var(--eoa-date)}
 .eoa-report .date{color:var(--eoa-date)}
 .eoa-report nav.toc{background:var(--eoa-toc-bg);border:1px solid var(--eoa-toc-border);border-radius:6px;padding:.25rem 1.25rem;margin:1rem 0}
 .eoa-report nav.toc ul{margin:.5rem 0;padding-inline-start:1.25rem}
@@ -1499,6 +1818,13 @@ def render_html(
         )
         parts.append(f'<nav class="toc"><h2>תוכן עניינים</h2><ul>{toc_items}</ul></nav>')
 
+    bluf_text = _draft_bluf_text(draft)
+    if bluf_text:
+        parts.append(h2("שורה תחתונה"))
+        parts.append(f"<p><strong>{cite_links(bluf_text)}</strong></p>")
+
+    _extra_sections_html(parts, extra_sections, "before_summary", h2)
+
     parts.append(h2("תקציר מנהלים"))
     parts.append(f"<p>{cite_links(_draft_exec_summary_text(draft) or 'אין תקציר לתקופה זו.')}</p>")
 
@@ -1547,11 +1873,24 @@ def render_html(
         parts.append("<ul>")
         for entry in deep_search:
             heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
-            outcome = _OUTCOME_LABELS_HE.get(entry.get("outcome"), entry.get("outcome") or "—")
-            parts.append(
-                f"<li><strong>{_bidi_html(heading)}</strong> — {html.escape(outcome)}: "
-                f"{_bidi_html(entry.get('answer_he', ''))}</li>"
+            outcome_key = entry.get("outcome")
+            outcome_label = _OUTCOME_LABELS_HE.get(outcome_key, outcome_key or "—")
+            is_blocked = outcome_key == "blocked"
+            # DS3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.6): amber styling, never rendered as
+            # "לא נמצא" -- distinguishes "technically blocked, never actually investigated" from a
+            # genuine "searched thoroughly, nothing there" outcome.
+            body = (entry.get("blocked_reason_he") or "—") if is_blocked else entry.get("answer_he", "")
+            outcome_html = (
+                f'<span class="ds-blocked">{html.escape(outcome_label)}</span>'
+                if is_blocked
+                else html.escape(outcome_label)
             )
+            li = f"<li><strong>{_bidi_html(heading)}</strong> — {outcome_html}: {_bidi_html(body)}"
+            rerun_note = entry.get("rerun_note_he")
+            if rerun_note:
+                li += f'<br><em class="ds-rerun-note">{_bidi_html(rerun_note)}</em>'
+            li += "</li>"
+            parts.append(li)
         parts.append("</ul>")
 
     if open_points:
@@ -1565,12 +1904,19 @@ def render_html(
         parts.append(h2("מבט קדימה"))
         parts.append(f"<p>{cite_links(outlook_text)}</p>")
 
+    assumptions = _draft_assumptions(draft)
+    if assumptions:
+        parts.append(h2("הנחות והפרכות"))
+        parts.append("<ul>")
+        parts += [f"<li>{cite_links(_render_assumption(a))}</li>" for a in assumptions]
+        parts.append("</ul>")
+
     _extra_sections_html(parts, extra_sections, "after_outlook", h2)
     _tables_html(parts, tables or [], h2)
 
     parts.append(h2("נספח מקורות"))
     parts.append(
-        "<table><thead><tr><th>#</th><th>כותרת</th><th>מקור</th><th>תאריך</th>"
+        "<table><thead><tr><th>#</th><th>כותרת</th><th>מקור</th><th>אמינות</th><th>תאריך</th>"
         "<th>קישור</th></tr></thead><tbody>"
     )
     for it in sorted(items, key=lambda x: x.get("n") or 0):
@@ -1581,6 +1927,7 @@ def render_html(
             f"<td>{it.get('n')}</td>"
             f"<td>{_bidi_html(it.get('title') or '—')}</td>"
             f"<td>{_bidi_html(source_label(it.get('source_name'), url))}</td>"
+            f"<td>{_bidi_html(reliability_label(it.get('reliability')))}</td>"
             f"<td>{html.escape(fmt_date(it.get('published_at')))}</td>"
             f"<td>{link}</td>"
             "</tr>"
