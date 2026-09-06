@@ -152,6 +152,65 @@ def _split_paragraphs(text: str) -> list[str]:
     return [p for p in parts if p] or [""]
 
 
+_MD_TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?$")
+
+
+def _split_md_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _md_blocks(text: str) -> list[tuple[str, Any]]:
+    """Split a section body into render blocks: ``("table", (headers, rows))`` for a Markdown
+    pipe table, ``("bullets", [items])`` for a run of ``- `` lines, ``("para", text)`` otherwise.
+    User finding 2026-09-06 evening ("העיצוב?!"): the acquisition-watch section (A16) and the
+    payload-price table (A17) hand the renderer Markdown table bodies, and both the HTML and the
+    docx paths pasted them as one prose paragraph full of pipes. Every extra-section body now goes
+    through this splitter, so a data section can be authored once in Markdown and render as a real
+    table/list in all three outputs."""
+    blocks: list[tuple[str, Any]] = []
+    lines = (text or "").splitlines()
+    i = 0
+    para: list[str] = []
+
+    def flush_para() -> None:
+        if para:
+            blocks.append(("para", " ".join(x.strip() for x in para).strip()))
+            para.clear()
+
+    while i < len(lines):
+        stripped = lines[i].strip()
+        next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        if stripped.startswith("|") and _MD_TABLE_SEP_RE.match(next_line):
+            flush_para()
+            headers = _split_md_cells(stripped)
+            rows: list[list[str]] = []
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = _split_md_cells(lines[i])
+                if len(cells) < len(headers):
+                    cells = cells + [""] * (len(headers) - len(cells))
+                rows.append(cells[: len(headers)])
+                i += 1
+            blocks.append(("table", (headers, rows)))
+            continue
+        if stripped.startswith(("- ", "* ")):
+            flush_para()
+            items: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith(("- ", "* ")):
+                items.append(lines[i].strip()[2:].strip())
+                i += 1
+            blocks.append(("bullets", items))
+            continue
+        if not stripped:
+            flush_para()
+            i += 1
+            continue
+        para.append(stripped)
+        i += 1
+    flush_para()
+    return blocks or [("para", "")]
+
+
 # -- goal-1 (2026-09-06) structured-sentence rendering helpers ---------------------------------
 #
 # ``eoa.llm.schemas.analysis.DailyReportDraft`` moved from free-text prose (with the model
@@ -906,8 +965,7 @@ def build_docx(
         if (sec.get("position") or "after_summary") != "after_summary":
             continue
         _heading1(doc, sec.get("title_he") or "")
-        for para in _split_paragraphs(sec.get("body_he") or ""):
-            add_mixed_paragraph(doc, para)
+        _add_md_body_docx(doc, sec.get("body_he") or "")
 
     for section in draft.sections:
         _heading1(doc, section.title_he)
@@ -936,8 +994,7 @@ def build_docx(
         if (sec.get("position") or "after_summary") != "after_outlook":
             continue
         _heading1(doc, sec.get("title_he") or "")
-        for para in _split_paragraphs(sec.get("body_he") or ""):
-            add_mixed_paragraph(doc, para)
+        _add_md_body_docx(doc, sec.get("body_he") or "")
 
     for tbl in tables or []:
         _heading1(doc, tbl.get("title_he") or "")
@@ -950,6 +1007,19 @@ def build_docx(
 
     _flag_update_fields(doc)
     return doc
+
+
+def _add_md_body_docx(doc: DocxDocument, body: str) -> None:
+    """Render a section body's Markdown blocks (see :func:`_md_blocks`) into ``doc``."""
+    for kind, payload in _md_blocks(body):
+        if kind == "table":
+            headers, rows = payload
+            _add_generic_table_body(doc, headers, rows)
+        elif kind == "bullets":
+            for item in payload:
+                add_mixed_paragraph(doc, item, style="List Bullet")
+        elif payload:
+            add_mixed_paragraph(doc, payload)
 
 
 def save_docx(doc: DocxDocument, path: str | Path) -> Path:
@@ -1170,7 +1240,21 @@ def _extra_sections_html(parts: list[str], sections: list[dict[str, Any]], posit
         if (sec.get("position") or "after_summary") != position:
             continue
         parts.append(h2(sec.get("title_he") or ""))
-        parts.append(f"<p>{_bidi_html(sec.get('body_he') or '')}</p>")
+        for kind, payload in _md_blocks(sec.get("body_he") or ""):
+            if kind == "table":
+                headers, rows = payload
+                parts.append(
+                    "<table><thead><tr>"
+                    + "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+                    + "</tr></thead><tbody>"
+                )
+                for row in rows:
+                    parts.append("<tr>" + "".join(f"<td>{_html_cell(v)}</td>" for v in row) + "</tr>")
+                parts.append("</tbody></table>")
+            elif kind == "bullets":
+                parts.append("<ul>" + "".join(f"<li>{_bidi_html(it)}</li>" for it in payload) + "</ul>")
+            elif payload:
+                parts.append(f"<p>{_bidi_html(payload)}</p>")
 
 
 def _tables_html(parts: list[str], tables: list[dict[str, Any]], h2) -> None:
