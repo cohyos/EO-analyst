@@ -13,7 +13,19 @@ export function NavRail() {
       // tablet band (768-1279px, portrait AND landscape) stays the narrow
       // icon rail so it doesn't eat into the 2-column tablet page layouts;
       // labels there surface as a hover/focus tooltip instead (below).
-      className="flex w-16 shrink-0 flex-col items-center gap-1 border-l border-border bg-bg-raised py-3 xl:w-48 xl:items-stretch xl:px-2"
+      //
+      // `overflow-y-auto` (+ min-h-0, so this flex item can actually shrink
+      // to the row's stretched cross-size instead of forcing it taller):
+      // on short WebKit viewports (iPhone Safari's *visible* viewport is
+      // ~664px after browser chrome, not the 844px device height) this rail
+      // no longer fits all items — without a scroll container the overflow
+      // used to render past this element's own box straight into the
+      // StatusStrip's row below (same normal-flow stacking position),
+      // silently hiding the last 1-2 links (e.g. הגדרות/Settings) behind
+      // it. Scrolling keeps every item reachable (Playwright's own
+      // auto-scroll-into-view finds it) without needing a separate
+      // overflow/"more" menu.
+      className="flex w-16 min-h-0 shrink-0 flex-col items-center gap-1 overflow-y-auto border-l border-border bg-bg-raised py-3 xl:w-48 xl:items-stretch xl:px-2"
     >
       {navItems.map((item) => {
         const Icon = item.icon;

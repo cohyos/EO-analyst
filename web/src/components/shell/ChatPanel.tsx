@@ -49,7 +49,19 @@ export function ChatPanel() {
         onDrop={handleDrop}
         data-testid="chat-panel-fab-dropzone"
         className={cn(
-          "fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] start-4 z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90",
+          // Below `xl` the nav rail (NavRail.tsx) is a `w-16` (64px) icon
+          // column docked at the *start* edge (right in RTL/Hebrew, left in
+          // LTR) — `start-4` alone sat inside that column, overlapping its
+          // icons on short/narrow viewports. `start-20` (80px = 64px rail +
+          // 16px clearance) keeps the FAB clear of it. Moving to the
+          // opposite (`end`) edge instead isn't an option: the full /ask
+          // page's own composer send button (ChatThread.tsx) lives right
+          // there, at the bottom of the *end* edge, which this FAB would
+          // then cover on every screen. `xl:start-4` reverts to the
+          // original tighter inset once the rail widens to `xl:w-48` but
+          // desktop viewports are tall enough that the rail's icons no
+          // longer reach this corner.
+          "fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] start-20 z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90 xl:start-4",
           dragOver && "ring-2 ring-accent-fg ring-offset-2 ring-offset-bg",
         )}
         aria-label="פתח את פאנל שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"
