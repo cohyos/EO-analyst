@@ -1,0 +1,13 @@
+{
+  "note": "8 fixed 'ask the analyst' questions for the QA continuous loop (docs/QA_CONTINUOUS_LOOP.md sec 2). D5 has no deterministic scoring today (no chat-log persistence table -- see eoa.qa.d5_chat) -- these are asked and scored by the judge (rubric) pass each round, not by scripts/qa_score.py.",
+  "questions": [
+    "מה המצב העדכני של תוכנית ה-XM30 (Bradley הבא) מבחינת מטע\"די EO/IR, ומי הספקים המובילים?",
+    "מהם פרטי חוזה מגן אור (Iron Beam) העדכני ביותר של רפאל, כולל היקף כספי וגורמים מעורבים?",
+    "עסקת ה-LORA היוונית (Greece) -- מה המשמעות עבור התעשייה הביטחונית הישראלית?",
+    "מהי המגמה הטכנולוגית האחרונה ב-DROIC (Digital Read-Out Integrated Circuit), ומי מוביל אותה?",
+    "כיצד משתווה ה-Skyranger של Rheinmetall למערכות נגד כטב\"ם (C-UAS) ישראליות מקבילות?",
+    "מהי הרלוונטיות של כנס AUSA 2026 לתעשייה הישראלית בתחום האלקטרו-אופטיקה?",
+    "מהו ה-RFI העדכני ביותר בתחום EO/IR שפורסם בארה\"ב, ומה הוא דורש?",
+    "מה ידוע על מערכת ה-SPECTRO ISR של אלביט (Elbit), ומה הבשלות הטכנולוגית שלה?"
+  ]
+}

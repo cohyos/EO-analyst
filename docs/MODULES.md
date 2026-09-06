@@ -7046,3 +7046,192 @@ EPO_OPS_KEY/PATENTSVIEW_API_KEY.
 `tests/unit/test_patents_scan.py` הורחב (+2 מקרים) — `_backfill_patent_fields` (לא-הרסני,
 short-circuit כשאין שדה חדש). כל הקבצים ירוקים (ruff check נקי); סוויטת `pytest tests/unit`
 המלאה (69 מקרי `patent`) ירוקה.
+
+## `eoa.search.deep_search` — עיגון שאלה (anchors) + שער רלוונטיות בסיום (2026-09-06, תיקון רגרסיית job 86)
+
+**התקלה (job 86, item 1352):** השאלה הייתה "אמת והרחב את הדיווח 'US Air Force speeds Reaper
+successor timeline after Iran losses'…", אך שאילתות החיפוש בסבב 2 סטו לגמרי לנושא כללי
+("מערכות כטב\"ם עם חיישני אופטיקה ו-IR", "MOSP 5000 system specifications Elbit Systems") בלי
+קשר למילה אחת מהשאלה, וה-`finish` הסתיים ב-`outcome="found"`, `confidence=0.9`, עם תשובה
+העוסקת כולה במערכת MOSP 5000 של אלביט — מוצר שלא הוזכר בשאלה בכלל. שני שערים עצמאיים סוגרים
+את הפרצה:
+
+**1. עיגון שאילתות חיפוש (`extract_anchors`, `_query_anchor_ok`, `_tool_search`).**
+`extract_anchors(question, *, title="", entities=None, context_he="")` מחלץ דטרמיניסטית שמות
+פרטיים/ראשי-תיבות/שמות מוצר-תוכנית/מספרים מהשאלה, מכותרת הפריט (או משורת "כותרת הפריט:" ב-
+`context_he`) ומרשימת הישויות (או משורת "ישויות:") — בעברית ובאנגלית; משפט מצוטט בשאלה נלקח
+כעוגן-ביטוי שלם בנוסף לעוגני-מילה בודדים. `inv.anchors` מחושב פעם אחת ב-`investigate()`,
+**לפני** קיפול `prior_findings_he` להקשר (כדי שתשובה שגויה מחקירה קודמת לא תהפוך היא עצמה
+לעוגן של הרצה חוזרת). כל קריאת `search` (גם ה"זריעה" האוטומטית של שאילתות המתכנן ב-
+`plan_queries`, גם קריאת כלי יזומה של המודל ב-`_act`) עוברת דרך `_query_anchor_ok`: השאילתה
+חייבת להכיל לפחות אחד מ-`inv.anchors` (התאמת תת-מחרוזת, לא תלוית-רישיות), או שהמודל מצהיר
+`anchor_used` (תרגום/מונח נרדף לעוגן — לא מאומת עצמאית, אך נרשם ביומן). שאילתה שנכשלת בבדיקה
+נדחית עם שגיאה בעטיפת DATA ("השאילתה אינה מעוגנת בשאלה; חובה לכלול אחד מ: …") ונרשמת
+ל-`investigation_log`; היא נספרת כנגד תקציב השאילתות **לכל היותר פעם אחת בכל סבב**
+(`inv.anchor_rejected_rounds`). כששאלה כוללת שאלת-משנה ישראלית (סעיף A13, ר' להלן), שאילתה
+שעוסקת בישראל/אלביט/רפאל/תעב"א פטורה מדרישת העיגון — אך ורק לאחר שכבר נקרא (`read`) לפחות
+מקור רלוונטי אחד לשאלה המרכזית (`_is_israel_focused_query`). כשלא חולצו עוגנים כלל (שאלה
+חופשית ללא כותרת/ישויות) — אין מה לאכוף, וכל שאילתה מותרת.
+
+**2. שער רלוונטיות בסיום (`_relevance_gate`, `_judge_relevance`, `RelevanceVerdict`).**
+קריאת `finish` עם `outcome` מסוג `found`/`partial` (וכש-`inv.anchors` לא ריק) עוברת שער כפול:
+(א) בדיקה דטרמיניסטית — `_answer_mentions_anchor` מוודאת שה-`answer_he` מזכיר לפחות עוגן אחד;
+(ב) שופט LLM בתפקיד `light` (`_judge_relevance`, ללא כלים) שנשאל "yes/partial/no + משפט אחד"
+האם התשובה אכן עונה על השאלה. `verdict="no"` אם אחד מהשניים נכשל (התשובה של job 86 הייתה
+נכשלת גם בבדיקה הדטרמיניסטית לבדה — אף עוגן של Reaper/Iran/USAF לא מופיע בתשובת MOSP 5000).
+בקריאת `finish` ראשונה עם `verdict="no"` — הקריאה נדחית עם משוב מנומק, והמודל מקבל הזדמנות
+נוספת אחת (`inv.relevance_retry_used`); אם גם ההזדמנות הנוספת נכשלת — הקריאה מתקבלת בכפייה
+אך `outcome` נכפה ל-`not_found` ו-`confidence` נחתך ל-`NOT_FOUND_MAX_CONFIDENCE` (0.3) לכל
+היותר. `verdict="partial"` מוריד `found`→`partial` (אך מתקבל מיד, בלי סבב נוסף). `verdict="yes"`
+מתקבל כפי שהוא. תוצאת השופט נשמרת תמיד ב-`InvestigationOut.relevance_check`
+(`{"verdict","reason","anchor_matched","judge_verdict"}`), שמוזרם אוטומטית ל-`jobs.result`
+דרך `orchestrator.jobs._investigation_result_payload`'s הקיים (`inv.result.model_dump()`) —
+בלי לגעת ב-`orchestrator/jobs.py`. קריאת `not_found` לא עוברת את השער כלל (אין מה לשפוט).
+
+**A13 — ניסוח כפוף:** תת-השאלה הישראלית (`triage._ISRAEL_DEEP_SEARCH_SUBQUESTION_HE`,
+`services.default_investigation_question`) נוסחה מחדש כתוספת כפופה מפורשת ("לאחר שענית על
+השאלה המרכזית, הוסף פסקה קצרה…" / "ובנוסף, בקצרה: …") ולא כשאלה שנייה שוות-מעמד — זה בדיוק מה
+שהזמין את הסחיפה ב-job 86.
+
+**תוצאת UI:** `off_topic` נוסף לטקסונומיית ה-outcome (`web/src/lib/investigations.ts`,
+`web/src/types/api.ts`) — תווית עברית נפרדת מ-`not_found`, לתיוג רטרואקטיבי/ידני של חקירות
+שהתשובה בהן זוהתה כלא-קשורה לשאלה.
+
+**קבצים:** `agent/eoa/search/deep_search.py` (הלוגיקה), `agent/eoa/llm/schemas/analysis.py`
+(`InvestigationOut.relevance_check`, `RelevanceVerdict`), `agent/eoa/llm/prompts/deep_search_plan.md`
+(`{anchors}`, כלל 2-3 שאילתות בסבב 1), `agent/eoa/llm/prompts/deep_search_system.md` (עקרונות 9-10),
+`agent/eoa/pipeline/triage.py` (ניסוח A13 בלבד), `agent/eoa/api/services.py`
+(`default_investigation_question` בלבד), `web/src/lib/investigations.ts`, `web/src/types/api.ts`.
+**בדיקות:** `tests/unit/test_deep_search_anchors.py` (25 מקרים חדשים — חילוץ עוגנים עברית/אנגלית,
+דחיית שאילתות לא-מעוגנות, שער הרלוונטיות עם שופט מדומה, פטור שאלת-המשנה הישראלית) +
+`web/src/lib/investigations.test.ts` (טקסונומיית `off_topic`). כל הקבצים ירוקים (`ruff check`).
+
+## `eoa.qa` — QA continuous-loop deterministic scorer (2026-09-06, docs/QA_CONTINUOUS_LOOP.md)
+
+New package, ten modules (one per domain D1-D10) plus shared plumbing, backing `scripts/qa_score.py`.
+Owns only new files -- reads pipeline modules/DB/report output, never mutates them, never calls
+Ollama. Deliberately reuses existing detectors rather than re-implementing their logic wherever one
+already exists (see each module's own docstring for exactly which function it imports).
+
+**`eoa.qa.types`** -- `Check` (name/passed/weight/evidence), `DomainScore` (domain/score_0_100 —
+`None` means "manual only", not 0/checks/n/note), `weighted_score(checks)` (Sum(weight*passed) /
+Sum(weight) x 100).
+
+**`eoa.qa.d1_classify.score_D1(items, conn=None)`** -- per-item checks over an `items` sample:
+subdomain valid against `taxonomy.yaml`; `eoa.pipeline.classify._has_eoir_vocabulary`/
+`_watchlist_alias_hit`-based no-EO/IR gate re-check; `eoa.pipeline.triage._reason_conflicting_level`/
+`level_for`-based score-level-reason consistency; `eoa.llm.ollama_client._looks_truncated_mid_hebrew_acronym`
+zero-hits (scalar Hebrew fields only -- `key_facts`/`israel_reasons` are short bullet phrases with
+no terminal punctuation by design and are deliberately kept off the broad "_he" net, verified
+against round-0 live data which flooded 48 false positives before this exclusion); the same
+module's `_ASCII_QUOTE_BETWEEN_HEBREW_RE` for gershayim; `key_facts` duplicate detection;
+`entities_mentioned`/`key_facts` non-empty for in-scope items.
+
+**`eoa.qa.d2_summary.score_D2(items, conn=None)`** -- summary/so-what checks on in-scope,
+analyzed items: length bounds; Hebrew-dominant (Hebrew vs Latin char count); no model chatter
+(a small curated disclaimer list + reused `eoa.pipeline.triage._META_PHRASES`); a parenthesised
+technical term present when the combined text is long enough to plausibly need one.
+
+**`eoa.qa.d3_events_entities.score_D3(items, conn)`** -- events/entities attached to the sampled
+items (+ a 7-day recent-entity window): duplicate `(item_id, kind, title)` groups;
+`eoa.pipeline.analyze._is_narrative_event_title` re-check (via a `SimpleNamespace` shim carrying
+`parties`/`customer`/`amount_usd`/`date`); `eoa.pipeline.entity_normalize.is_junk_entity`;
+`VALID_ENTITY_KINDS`; `eoa.report.geography.normalize_country` for `entities.country` (that
+module's own docstring names `entities.country` as one of the two columns its ISO-2/region-code
+convention covers -- NOT `entity_normalize.resolve_country_name`, which answers a different
+question, "is this *name* itself a country").
+
+**`eoa.qa.d4_investigations.score_D4(job_ids, conn)`** -- `jobs` rows (`kind='deep_search'`) +
+their `investigation_log` queries: sources non-empty for `outcome='found'`; confidence capped by
+outcome (`NOT_FOUND_MAX_CONFIDENCE`/`PARTIAL_SINGLE_SOURCE_MAX_CONFIDENCE`/
+`PARTIAL_MIN_SOURCES_FOR_HIGH_CONFIDENCE`, all imported from `eoa.search.deep_search`); relevance
+signal consistency (the job-86-regression `RelevanceVerdict`/`relevance_check` field when present
+must not read `"no"` on a `found`/`partial` outcome; `UNVERIFIED_PREFIX_HE` on a sourceless
+`partial`; non-trivial answer; `what_was_tried_he` on `not_found`); queries anchored to the
+question via `eoa.search.deep_search.extract_anchors` (the exact live anchor extractor, called
+with the item's title/`entities_mentioned` the same way `investigate()` does) -- re-validates the
+deterministic half of `_query_anchor_ok` against every logged query after the fact. This module's
+anchor/relevance-judge reuse target (`extract_anchors`/`RelevanceVerdict`) landed in
+`eoa.search.deep_search` concurrently with this package being written; an earlier draft used a
+hand-rolled token-overlap heuristic, replaced once the real gate existed.
+
+**`eoa.qa.d5_chat.score_D5(golden_questions, conn)`** -- checks `information_schema.tables` for a
+chat-log persistence table (`chat_log`/`ask_log`/`chat_messages`/`ask_the_analyst_log`); none
+exists as of this writing (verified against the live schema), so this always returns
+`score_0_100=None` ("manual only") -- the 8 fixed questions in `docs/qa/loop/golden_questions.json`
+are judged by hand each round until such a table exists.
+
+**`eoa.qa.d6_daily_report.score_D6(md_path, run_link_check=True)`** -- one rendered
+`daily_*.md`/`weekly_*.md`: every factual exec-summary sentence cited (reuses
+`eoa.report.qa_citations.split_sentences`/`is_factual`/`citations_in`); every inline `[n]` resolves
+to a `<a id="src-n">` appendix entry (careful to exclude the unrelated `[item N]` forecast-rationale
+convention); no raw-slug headings; no duplicate sentences (reuses
+`eoa.report.qa_citations._normalize_for_dup_check`); Israel/tech/tenders section headings present;
+appendix links HTTP 200/3xx via `eoa.qa.links.check_links` (skippable with `--no-links`).
+
+**`eoa.qa.d7_bd_report.score_D7(md_paths, conn=None)`** -- latest `bd_<territory>_*.md` per
+territory: conference dates in the report's conferences table match the `conferences` DB row by
+name; no empty headings; no competitor-promotion language -- reuses
+`eoa.report.bd_territory._COMPETITOR_PROMOTION_VERBS`, scoped to the recommended-actions section
+only (an earlier version scanned the whole document and false-positived on the market-overview
+section's purely descriptive use of the same verbs, e.g. "השוק מציג התעצמות ... Leonardo DRS");
+actions/recommendations section present and non-empty (round-0 finding: `bd_us`/`bd_kr` currently
+ship with zero recommended actions).
+
+**`eoa.qa.d8_patent_survey.score_D8(md_path, html_path=None)`** -- latest `patent_survey_*.md`
+(+ sibling `.html` for the LTR check, since Markdown can't express `<bdi>`): timeline section
+present; every `[Pn]` inline citation has a matching row in the patents table; patent-number
+tokens wrapped in `<bdi dir="ltr">` in the HTML (`eoa.report.docx_builder`'s own convention).
+
+**`eoa.qa.d9_tenders_conferences.score_D9(conn)`** -- whole current table state (small,
+config-driven tables, so "the sample" is everything, mirroring `scripts/purge_stale_tenders.py`):
+no `status='open'` tender missing both `deadline` and `published_at`; conference `status` in a
+known set, `start_date` present, no synthetic sequential-day-of-month pattern; every active source
+fetched within 7 days (round-0 finding: **all 60 active sources have `last_fetched_at IS NULL`**
+despite items clearly flowing in daily -- flagged out of this package's scope since it owns no
+pipeline code).
+
+**`eoa.qa.d10_ui_e2e.score_D10(run_e2e=False)`** -- off by default; when `--e2e` is passed, shells
+`npx playwright test --reporter=json` in `e2e/` (never starts/stops the app itself, matching
+`e2e/playwright.config.ts`'s own "drives whatever is already running" design) and scores the
+pass ratio.
+
+**`eoa.qa.links.check_links(urls)`** -- bounded-concurrency (<=6) httpx HEAD-then-GET liveness
+check, 15s timeout, small allow-list (`DEFAULT_ARTIFACT_DOMAIN_ALLOWLIST`) for hosts known from
+prior QA link audits (`docs/qa/findings_Q4_r*.md`) to answer bot traffic with a Cloudflare 403
+while serving real browsers fine.
+
+**`eoa.qa.report_files`** -- pure filesystem globbing for the latest `daily_*.md`/`weekly_*.md`/
+`bd_<territory>_*.md`/`patent_survey_*.{md,html}` under `output/reports/`.
+
+**`eoa.qa.sample`** -- `select_golden_items`/`select_golden_investigation_jobs` (stratified by
+`level`/`domain`/`israel_relevance`, deterministic by ascending id, run once and frozen);
+`select_rotating_items` (20 items from the last 48h, seeded by round number);
+`resolve_sample(conn, round_no, golden_items_path)` loads the frozen golden set from
+`docs/qa/loop/golden_items.json` (generating it on first use) and re-picks the rotating set fresh
+every round.
+
+**`eoa.qa.scorer`** -- `DOMAIN_WEIGHTS` (the section-1 table's weights), `score_all_domains` (calls
+all ten `score_Dn`, resolving each domain's own natural input shape -- items/job-ids/conn/file-path;
+the brief described every domain uniformly as `score_Dn(sample, conn)`, but D6-D10 score a report
+file / whole small table / e2e run, not an item sample, so each keeps the parameter shape its own
+domain needs), `weighted_total(scores, judge_scores=None)` (0.5x auto + 0.5x judge per domain when
+both exist; a domain with neither is excluded from both numerator and denominator, never counted
+as 0).
+
+**`scripts/qa_score.py --round N [--e2e] [--no-links] [--json] [--merge-judge round_N_judge.json]`**
+-- runs one round end to end: resolves the sample, runs all ten scorers, writes
+`docs/qa/loop/round_N_auto.json`, prints a summary table, and appends/replaces that round's row in
+`docs/qa/loop/SCORES.md`. Never commits, never restarts anything, never touches pipeline code.
+
+**Round 0 baseline (2026-09-06, real DB, 40 golden + 20 rotating items, 6 golden investigation
+jobs, latest daily/bd/patent-survey reports):** D1 33.3, D2 100.0, D3 100.0, D4 81.2, D5 manual,
+D6 85.7, D7 71.4, D8 100.0, D9 80.0, D10 skipped -- weighted total **79.2**. D1's low score is
+almost entirely genuine data debt surfaced for the first time: ~40/60 golden items still carry an
+ASCII `"` instead of gershayim `״` inside a Hebrew acronym (`ארה"ב`, `כטב"ם`, `מטע"ד`...), a
+handful of `triage_reason` values are genuinely truncated mid-sentence, one `secondary`-domain item
+has a `NULL` subdomain, and three in-scope items carry neither `entities_mentioned` nor `key_facts`.
+
+**Tests:** `tests/unit/test_qa_score.py` (51 cases, no DB -- a small `_FakeCursor`/`_FakeConn`
+router stands in for Postgres; `tmp_path`-based fixtures for the file-based D6/D7/D8 checks) + one
+`@pytest.mark.integration` smoke test (skipped without `DATABASE_URL`). All new files ruff-clean.
