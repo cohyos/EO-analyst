@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from eoa.api import services
+from eoa.api import ask_grounding, services
 from eoa.llm import ollama_client
 
 log = structlog.get_logger(__name__)
@@ -391,12 +391,47 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 yield _sse({"type": "token", "text": pending})
                 answer_text += pending
 
+            # Round 3 (docs/qa/loop/round_2_judge.md, D5 new findings): two independent,
+            # deterministic post-generation guards, run before the round-2 citation/anchor guards
+            # below so those reason about the already-cleaned text.
+            #   (a) strip a literal, never-substituted citation-placeholder token (`[n=5]`, `[n]`,
+            #       `{n}`) live-found leaking into a rendered heading (round_2_judge.md's Q3
+            #       finding) -- never a valid citation, always safe to remove outright.
+            #   (b) drop any sentence/bullet that either names an entity/figure not grounded in
+            #       the question, the retrieved sources, or the canonical watchlist (the Q4
+            #       invented-professor/university/project pattern), or that cites a source that
+            #       does not actually mention the watchlist entity it attributes to that source
+            #       (the Q2 Rafael/AeroVironment conflation pattern) -- see
+            #       `eoa.api.ask_grounding` for the full rationale and precision/recall trade-offs.
+            answer_text, _leak_removed = ask_grounding.sanitize_citation_markers(answer_text)
+            ungrounded_removed = 0
+            if citations:
+                answer_text, ungrounded_removed = ask_grounding.ground_and_filter_answer(
+                    answer_text, body.question, retrieved
+                )
+            if _leak_removed or ungrounded_removed:
+                log.warning(
+                    "ask.grounding_repair",
+                    question_hash=_question_hash(body.question),
+                    template_leaks_removed=_leak_removed,
+                    ungrounded_removed=ungrounded_removed,
+                )
+                yield _sse(
+                    {
+                        "type": "answer_final",
+                        "text": answer_text,
+                        "ungrounded_removed": ungrounded_removed,
+                    }
+                )
+
             # Round 2 P2 (docs/qa/loop/round_2_chat_fixes.md): live-verified 2026-09-06 that 3/5
             # cleanly-completed answers had zero inline [n] despite a populated sources array.
             if citations and not re.search(r"\[\d+\]", answer_text):
                 corrected = await run_in_threadpool(
                     _run_citation_repair, messages, answer_text, body.provider
                 )
+                if corrected:
+                    corrected, _ = ask_grounding.sanitize_citation_markers(corrected)
                 if corrected and re.search(r"\[\d+\]", corrected):
                     answer_text = corrected
                 else:
@@ -425,7 +460,22 @@ async def ask(body: AskRequest) -> StreamingResponse:
                     question_hash=_question_hash(body.question),
                     anchors=check_anchors,
                 )
-                answer_text = _OFF_TOPIC_PREFIX + answer_text
+                # Round 3 (docs/qa/loop/round_2_judge.md, D5 Q3 finding): round 2's fix made the
+                # miss visible (a warning prefix) but still presented the off-topic content as the
+                # main answer body, immediately after the warning. Strengthened so the explicit gap
+                # statement (naming the missing anchor) comes first, and the substitute content --
+                # which may still be useful context, just not an answer to what was asked -- is
+                # demoted into its own clearly-labelled section rather than left reading as if it
+                # were the direct answer. `_OFF_TOPIC_PREFIX` itself is kept byte-for-byte (round 2
+                # tests assert `answer_text.startswith(_OFF_TOPIC_PREFIX)`) with the gap statement
+                # appended immediately after it, still ahead of everything else.
+                gap_statement = (
+                    f"המקורות שנשלפו אינם מזכירים {', '.join(check_anchors)} "
+                    "עבור ההקשר שנשאל — לא ניתן לאשר תשובה ישירה."
+                )
+                answer_text = (
+                    _OFF_TOPIC_PREFIX + gap_statement + "\n\n### הקשר קרוב (לא התשובה)\n" + answer_text
+                )
                 yield _sse({"type": "answer_final", "text": answer_text})
 
             notes = _parse_source_notes(sources_buf) if in_sources else {}
