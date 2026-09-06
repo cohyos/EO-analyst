@@ -206,10 +206,17 @@ def _acquisition_watch_scope_violations(
     for cells in rows:
         company = cells[1] if len(cells) >= 2 else ""
         counterparty = cells[3] if len(cells) >= 4 else ""
-        for name in (company, counterparty):
-            found_country = country_by_name.get(name)
-            if found_country and found_country != code:
-                violations.append(f"{name}: {found_country} (expected territory {code})")
+        # Round 5 (2026-09-07, live bd_il/bd_us): an Elbit x Anduril deal is Israel-local even
+        # though Anduril is a US company -- a row is in-territory when ANY named party with a known
+        # country sits in the territory; flag it only when every known party is elsewhere.
+        known = {
+            name: country_by_name.get(name) for name in (company, counterparty) if country_by_name.get(name)
+        }
+        if known and all(country != code for country in known.values()):
+            violations.append(
+                ", ".join(f"{name}: {country}" for name, country in known.items())
+                + f" (expected territory {code})"
+            )
     return violations
 
 

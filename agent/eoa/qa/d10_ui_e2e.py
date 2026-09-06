@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from eoa.qa.types import Check, DomainScore
@@ -21,7 +22,7 @@ def _e2e_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "e2e"
 
 
-def run_playwright_json(*, timeout_s: int = 900) -> dict | None:
+def run_playwright_json(*, timeout_s: int = 2400) -> dict | None:
     """Runs ``npx playwright test --reporter=json`` in ``e2e/`` and returns the parsed JSON
     report, or ``None`` on a hard failure to even produce one (npx missing, no app running,
     timeout) -- the caller treats that as "manual only" for this round, not a 0."""
@@ -33,6 +34,13 @@ def run_playwright_json(*, timeout_s: int = 900) -> dict | None:
     # stdout with the JSON. Ask Playwright to write the JSON report to a file instead and read that.
     out_path = e2e_dir / "test-results" / "qa_d10_report.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.environ.get("EOA_D10_REUSE_JSON") == "1" and out_path.exists():
+        # Round 5 (2026-09-07): re-score an already completed e2e run (the full 5-project suite
+        # takes ~22 minutes) instead of driving the browsers again -- explicit opt-in only.
+        try:
+            return json.loads(out_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
     if out_path.exists():
         out_path.unlink()
     env = {**os.environ, "PLAYWRIGHT_JSON_OUTPUT_NAME": str(out_path)}
@@ -46,8 +54,15 @@ def run_playwright_json(*, timeout_s: int = 900) -> dict | None:
             shell=True,  # Windows: npx is a .cmd shim
             env=env,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return None
+    except subprocess.TimeoutExpired:
+        # Round 5 (2026-09-07): the round-5 run finished at 22 min, past the old 15 min cap -- the
+        # shell shim was killed but Playwright itself kept going and wrote the file a few minutes
+        # later; give it that grace period before declaring the run lost.
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline and not out_path.exists():
+            time.sleep(15)
     try:
         return json.loads(out_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

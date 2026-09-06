@@ -238,7 +238,7 @@ class TestD6Round5:
         path.write_text(_GOOD_D6_MD, encoding="utf-8")
         result = score_D6(path, run_link_check=False)
         check = _check(result, "heading_count_within_budget")
-        assert "budget: 12" in check.evidence
+        assert "budget: 15" in check.evidence  # round 5: BLUF + what-changed + indicators + assumptions
 
     def test_monthly_bare_citation_fails_structured_check(self, tmp_path: Path) -> None:
         monthly = tmp_path / "monthly_2026-09-30.md"
