@@ -28,10 +28,12 @@ def get_pool() -> ConnectionPool:
 
 
 @contextmanager
-def connection() -> Iterator[psycopg.Connection]:
+def connection(timeout: float | None = None) -> Iterator[psycopg.Connection]:
     """Yield a pooled connection; commits on success, rolls back on error."""
     pool = get_pool()
-    with pool.connection() as conn:
+    # `timeout` (seconds) overrides the pool's default wait for optional callers (report side
+    # sections) so an unreachable DB fails fast into their try/except instead of blocking.
+    with pool.connection(timeout=timeout) as conn:
         try:
             yield conn
             conn.commit()

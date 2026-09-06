@@ -2093,7 +2093,7 @@ def build_bd_territory(
         from eoa.report.acquisition_watch import SECTION_TITLE_HE as _ACQ_TITLE_HE
         from eoa.report.acquisition_watch import acquisition_watch_section_md
 
-        with connection() as conn:
+        with connection(timeout=5) as conn:
             acq_body = acquisition_watch_section_md(conn, start, end, citation_items)
         if acq_body.strip():
             extra_sections.append(
@@ -2104,7 +2104,7 @@ def build_bd_territory(
     try:
         from eoa.payloads.report_section import payload_price_table_md
 
-        with connection() as conn:
+        with connection(timeout=5) as conn:
             price_body = payload_price_table_md(code, conn)
         # the helper renders its own "## ..." heading; the section renderer adds the title itself
         price_body = chr(10).join(ln for ln in price_body.splitlines() if not ln.startswith("## ")).strip()
