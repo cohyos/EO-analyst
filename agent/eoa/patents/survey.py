@@ -1339,9 +1339,9 @@ def build_patent_survey(
         assignee_has_cpc: dict[str, bool] = {}
         relationship_edges: list[dict[str, Any]] = []
         dropped_relationship_notes: list[str] = []
+        profile_blocks: list[str] = []
         if profile_names:
             since = period_end - dt.timedelta(days=PROFILE_LOOKBACK_DAYS)
-            profile_blocks: list[str] = []
             for name in profile_names:
                 canonical = resolve_canonical(name)
                 names_for_matching = _assignee_names_for_matching(name, canonical)
@@ -1382,6 +1382,14 @@ def build_patent_survey(
                     f"{len(dropped_relationship_notes)} קשרים הוסרו כי המקורות לא תומכים בהם.",
                 ]
 
+        else:
+            log.info("patent_survey_no_real_assignees", topic=topic, patent_count=len(rows))
+            open_points_extra = [*open_points_extra, _NO_ASSIGNEE_DATA_HE]
+        # Round-3 fix (survey 48, FPA/DROIC): the narrative used to run only when at least one
+        # assignee was known -- keyless patent data has none, so a 17-patent survey shipped with
+        # no synthesis at all. The technology map is drawn from abstracts/claims and needs no
+        # assignee; the assignee profile/exclusivity sections stay gated by coverage.
+        if rows:
             data_block = _synthesis_data_block(
                 topic,
                 registry,
@@ -1407,9 +1415,6 @@ def build_patent_survey(
             if synthesis is None:
                 synthesis_llm_failed = True
                 open_points_extra = [*open_points_extra, NARRATIVE_PENDING_MARKER_HE]
-        else:
-            log.info("patent_survey_no_real_assignees", topic=topic, patent_count=len(rows))
-            open_points_extra = [*open_points_extra, _NO_ASSIGNEE_DATA_HE]
 
         consistency_notes: list[str] = []
         exclusivity_notes: list[str] = []
