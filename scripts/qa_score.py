@@ -62,6 +62,8 @@ def _load_judge(path: Path | None) -> dict[str, float]:
         print(f"warning: --merge-judge path {path} does not exist -- ignoring", file=sys.stderr)
         return {}
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and isinstance(raw.get("domains"), dict):
+        raw = raw["domains"]  # judge files wrap scores under "domains" (docs/QA_CONTINUOUS_LOOP.md)
     out: dict[str, float] = {}
     for domain, value in raw.items():
         if isinstance(value, dict):

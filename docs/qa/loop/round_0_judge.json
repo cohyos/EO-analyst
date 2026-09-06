@@ -1,0 +1,112 @@
+{
+  "round": 0,
+  "domains": {
+    "D1": {
+      "score": 55,
+      "n": 40,
+      "notes": [
+        "4/40 golden items (ids 1, 4, 7, 14) have domain='out_of_scope' but level=NULL, score=NULL, triage_reason=NULL even though processed_stages lists 'triage' as complete -- the triage step silently produced no output for ~10% of the golden sample. Compare to items 2/13/16/17/18, also out_of_scope, which DO carry level='archive', score=1 with a full Hebrew reason -- so the failure is inconsistent/non-deterministic, not a designed skip.",
+        "Item 39's triage_reason is truncated mid-word ('העדשה מיועדת למטע'), matching the round_0_auto.json deterministic hit-list (items 8, 33, 39, 55 truncated). Item 24 has domain='secondary' with subdomain=NULL, which is not a valid taxonomy leaf (config/taxonomy.yaml requires one of detectors_fpa/computational_optics/defense_ai_infra under 'secondary').",
+        "Where triage did run, the reasoning is genuinely rule-following: reasons correctly cite core_relevance/magnitude/novelty per agent/eoa/llm/prompts/triage.md, and the EO/IR scope gate looks sound on spot checks (item 8 USV-attack-on-Sochi correctly scored archive/low core_relevance for lacking EO/IR content; item 5 foreign-frigate-study correctly scored low for being about a platform, not a payload; item 24 defense-industry-financial item correctly kept out of scope).",
+        "Dedup is working correctly and should not be double-counted as an item-quality defect: items 52/56/57 are true duplicates (identical text_hash to items 10/2/50 respectively) correctly stopped at 'classify' via dedup_of -- this looked like a gap at first glance but is by design."
+      ]
+    },
+    "D2": {
+      "score": 58,
+      "n": 40,
+      "notes": [
+        "Verified against the live source for item 62 (German Navy LORA firing, navalnews.com): the Hebrew summary is faithful to the article (OPEX/Marine 2035, trailer+launcher, precision impact) and the so_what genuinely connects to the Arrow-3-on-German-soil fact that IS in the source (Boaz Levy's quote) -- a real example of grounded analyst inference, not paraphrase. Minor issue: the quote about 'ישראל-גרמניה שיתוף פעולה' is attributed to IAI's CEO in the item but is actually closer to what IAI's Chairman (Boaz Levy) said in the source; the CEO's quote is narrower.",
+        "Item 39's summary_he is truncated to a fragment ('עדשה חדשה למטע') -- unusable as a deliverable for a yellow-level item.",
+        "Item 10's key_facts array contains the same sentence verbatim three times ('החוזה נועד לאפשר לכוחות הצבא להפיל כלי טיס בלתי מאוישים...') -- duplicate content the deterministic script also flags for ids [5, 10, 51].",
+        "Across the sample the so_what_he text leans on a repeated template phrase ('מחזק את מעמדה של X') in the majority of items (3, 9, 33, 47, 50, 62, 81) -- serviceable but formulaic rather than differentiated per-item insight; a senior analyst would vary the framing based on what's actually novel in each item.",
+        "Item 71 (XTEND) has a populated so_what_he but an empty key_facts=[] despite a fact-rich summary -- inconsistent completeness within the same record."
+      ]
+    },
+    "D3": {
+      "score": 42,
+      "n": 40,
+      "notes": [
+        "Verified against the live source (edrmagazine.eu) that 'BlueHalo' does NOT appear anywhere in the AeroVironment Locust X3 article, yet it is listed in entities_mentioned for item 47 -- and the same spurious BlueHalo entry recurs on items 9, 10 and 50, all unrelated AeroVironment/TITAN stories. Root cause traceable to config/watchlist.yaml: BlueHalo's aliases include 'LOCUST', which collides with AeroVironment's actual 'Locust X3' product name -- a watchlist data bug producing a reproducible entity-hallucination pattern across at least 4 golden items.",
+        "Item 50 (US Army awards $192M to Palantir, Anduril for TITAN) omits 'Palantir' from entities_mentioned even though Palantir is a lead named party in its own summary_he/key_facts ('פלטייר קיבלה 127 מיליון דולר') -- a missing-entity defect alongside the spurious BlueHalo one, i.e. errors in both directions on the same item.",
+        "Item 81 (Anduril appoints Amiram Norkin) has the same real-world appointment recorded as 3 separate 'events' rows (ids 22, 221, 245) plus 2 duplicate funding-round rows (23, 222) and 2 duplicate Elbit-partnership rows (24, 223) -- and across those duplicates the appointee's name is rendered 3 different ways (Amikam Norkin / Amiram Norkin / עמירם נורקין / אמירם נורקין), failing the canonical-name bar the rubric asks for. The deterministic (item_id,kind,title) dedup check misses these because the titles are slightly reworded each time -- a real semantic-duplicate gap the automated gate cannot catch.",
+        "amount_usd unit inconsistency: the AeroVironment E-HEL/Locust X3 contract is stored as amount_usd='464.8' on event id 89 (item 47) while the identical fact on event id 121 (item 10) is stored correctly as a full-precision figure elsewhere in the report pipeline as $464.8M -- mixing raw-million and full-dollar conventions in the same table would corrupt any $ rollups.",
+        "Positive: event id 80 (item 62, LORA firing) and event id 138 (item 50, TITAN $192M) are clean, single, well-attributed events with correct parties/customer/program fields -- so the extraction pipeline clearly can produce correct output, the failures above are not universal."
+      ]
+    },
+    "D4": {
+      "score": 35,
+      "n": 6,
+      "notes": [
+        "5 of 6 golden investigations (jobs 46, 47, 48, 70, 91) ended outcome='not_found' with confidence 0.0-0.3 -- the deep-search agent did not answer the underlying question for the large majority of this sample. Job 91 (the 2x-budget re-run of job 86, item 1352/Reaper) still failed after 30 queries, 10 pages and 4 rounds.",
+        "Job 86 (item 1352, 'verify the Reaper-successor-timeline report') is worse than an honest miss: it returned a substantive, confident-sounding answer entirely about Elbit's MOSP 5000 payload -- a system never mentioned in the question -- and was only flagged wrong by a retroactive relevance_check correction dated after the fact ('verdict: no ... retroactive correction, 2026-09-06'), i.e. the system shipped an off-topic answer and caught it after the fact rather than before.",
+        "Mitigating factor the rubric explicitly rewards: when the agent does fail, it is honest about it -- job 46/47/48/70 all explicitly say 'לא נמצא מידע מספק' and describe concrete search attempts (specific query strings, number of pages/rounds) rather than fabricating a plausible-sounding answer. This honesty is real and should be credited, but it does not substitute for actually answering the golden questions.",
+        "Net effect: on the 'does it answer the question' criterion the golden sample is failing 5/6 (83%); on the 'honest about gaps' criterion it is succeeding on those same 5; the 1 apparent 'success' (job 86, later corrected to job 91 which itself failed) shows the one time it produced a confident narrative it was for the wrong topic."
+      ]
+    },
+    "D5": {
+      "score": 25,
+      "n": 8,
+      "notes": [
+        "Live-tested all 8 golden questions against POST /api/ask on the running server (127.0.0.1:8765). Only 4/8 (Q1 XM30, Q2 Iron Beam, Q3 Greece LORA, Q4 DROIC) returned an answer within 120s per call; Q5 (Skyranger vs. Israeli C-UAS), Q6 (AUSA 2026 relevance), Q7 (US EO/IR RFI) and Q8 (Elbit SPECTRO ISR maturity) all hit the 120s client timeout with zero output -- a 50% non-response rate in this run (GPU-shared environment, per docs/QA_CONTINUOUS_LOOP.md sec 4, so some slowness is expected, but a flat timeout with no partial-answer fallback on half the fixed question set is a real user-facing gap).",
+        "Of the 4 answers received, 0/4 contain any inline [n] citation marker even though a citations array was returned alongside each -- this directly fails the D5 deterministic rubric line 'ציטוטים [n] תקפים'. All 4/4 also render raw Markdown syntax (##, **bold**, '*   ' bullet lists) rather than the plain-text-with-citations format the product calls for -- a clean, 100%-reproducible violation of 'ללא markdown גולמי'.",
+        "Q4 (DROIC trend) appears to hallucinate corporate attribution: it names 'Leonardo DRS', 'Omnisys' and 'Tobyhanna Army Depot' as developing a technology called 'RAFT-DVC' inside an invented 'FlexibleFusion' platform, when the actual retrieved source (citation n=3) is an arXiv academic paper titled 'RAFT-DVC: Resolution-Aware Machine Learning-Based Digital Volume Correlation' -- an academic algorithm, not a named defense-company product line. A senior analyst would flag this as fabricated.",
+        "Q2 (Iron Beam contract details) opens with a header framing the answer as 'רפאל's first US Army laser production contract', then spends most of the response describing the AeroVironment/Locust X3 E-HEL contract (a different company, different program, no connection to Rafael or Iron Beam) before a brief closing caveat admits the sources don't actually cover Iron Beam. The structure invites the reader to misread AeroVironment's contract as Rafael's.",
+        "Q1 and Q3 are directionally reasonable and readable (Q3's Greece/LORA answer correctly covers the David's Sling/Barak MX/Spyder layered stack and the Turkey-rivalry framing) but Q3 is highly repetitive (the same 'strategic opportunity for Israeli industry' point is restated near-verbatim under 3 different headers), and Q1 pulled at least 2 clearly irrelevant citations into its citation list (a DJI/FCC drone story and a generic C4I product release, neither about XM30)."
+      ]
+    },
+    "D6": {
+      "score": 28,
+      "n": 2,
+      "notes": [
+        "output/reports/weekly_2026-09-05.md contains literal test/placeholder text shipped as if it were real analyst output: the executive summary reads 'זהו תקציר בדיקה קצר' ('this is a short test summary'), the trend section reads 'תיאור מגמה' ('trend description'), two section headers are literally titled 'placeholder air_defense' / 'placeholder airborne_pods' with body text 'תיאור כללי' ('general description'), and the entire 'מבט קדימה' (forward-look) section is the single sentence 'להערכתנו זהו מבחן' ('in our assessment, this is a test'). This is the single worst finding in the sample -- a production weekly report with no real narrative content at all in its most important sections.",
+        "The weekly report's 'סיכום מטא שבועי' section is dominated by ~80 lines of feedback-calibration log entries, the large majority of which are exact duplicate contradictory pairs for the same headline flipping red<->yellow and back (e.g. the 'כשה-AI יכול להתחזות' item alone appears roughly 30 times alternating direction) -- reads as a logging bug dumped into a user-facing report, not a curated summary of user feedback.",
+        "output/reports/daily_2026-09-06.md is more honest about its own failure but equally empty of narrative: the exec summary section states outright that the draft failed citation QA and was dropped entirely ('הטיוטה הטקסטואלית של הדוח לא עברה את בדיקת האזכורים... ולכן הושמטה במלואה'), leaving only deterministic tables. Per docs/QA_CONTINUOUS_LOOP.md's explicit ask to 'note if the daily is tables-only and why' -- confirmed: it is tables-only, and the reason is a citation-QA gate rejecting the generated prose outright rather than repairing/regenerating it.",
+        "The deterministic per-sentence citation check on daily_2026-09-06.md trivially 'passes' (0 uncited sentences) only because there are zero narrative sentences to check -- a good illustration of why the citation gate alone cannot certify 'coherent, analyst-grade' output.",
+        "Positive: the tender-forecast table's rationale prose (in both daily and weekly) is coherent, cites concrete item ids, and reasons plausibly about which platforms will need which EO/IR payload -- this piece of the report is doing real work even while the surrounding narrative sections are broken."
+      ]
+    },
+    "D7": {
+      "score": 45,
+      "n": 2,
+      "notes": [
+        "bd_us_2026-09-06.md: the executive summary is completely empty ('תקציר המנהלים קוצץ במלואו עקב בדיקת אזכורים שנכשלה') and there is no recommended-actions/entry-points table at all -- the deterministic check independently confirms this (round_0_auto.json D7 'actions_table_nonempty' fails for exactly this file). A BD-focus report with no synthesized narrative and no recommended actions does not meet 'specific, defensible actions from OUR perspective'.",
+        "bd_il_2026-09-06.md is materially better: it has a real, numbers-heavy executive summary (Elbit's $270M ISR deal, Anduril/Norkin appointment, the Greece deal, Elbit's $370M US orders) and a populated 'נקודות כניסה ופעולות מומלצות' actions table. But the actions themselves are generic and repetitive -- 6 of 7 rows are the same templated action ('Attend conference X to present technologies and build relationships') for each of AUSA/DSEI/SPIE/Euronaval/IDEX/ISDEF, not differentiated by what's actually happening at each show.",
+        "bd_il's exec-summary bullet [5] ('אלביט מערכות זכתה במספר חוזים בארה\"ב בסך כולל של למעלה מ-370 מיליון דולר') is cited to src-5, which per the sources appendix is actually 'Litening advanced targeting pod Tender in USA' -- a mismatched citation; the same $370M fact is correctly cited as [9] two lines later (src-9, 'Elbit Systems wins US orders worth $370m'), so the same fact is both correctly and incorrectly sourced in the same document.",
+        "Competitor tables in both reports are useful and well-formed (mentions-in-window counts, Israeli-industry flag, most-recent-win column) even where many cells are legitimately '--' for lower-frequency competitors."
+      ]
+    },
+    "D8": {
+      "score": 20,
+      "n": 1,
+      "notes": [
+        "Graded the most recently generated patent survey by file mtime: output/reports/patent_survey_Anduril_Lattice_counter-UAS_EO_IR_optical_tracking_patents_2026-09-06.md (08:42, later than the DROIC survey at 08:25 that round_0_auto.json happened to score). Of the 17 patents in the appendix, only 1 (US10506436B1, 'Lattice mesh') is actually assigned to Anduril; the other 16 have '--' for מקצה (assignee) and are generic 1960s-2020s optical-tracking prior art pulled by a keyword search, with no established connection to Anduril's actual technology.",
+        "The 'ציר זמן שנתי' (annual timeline) and 'קודי CPC מובילים' (top CPC codes) tables -- both rubric-required for a technology map -- are present as headers but completely empty (zero rows) in this survey.",
+        "There is no per-patent 'advance' description anywhere in the document: every patent row has only a title, a flat value-score of 10 (except the one Anduril patent at 12), and a Google Patents link -- no sentence anywhere explains what each patent actually claims or how it maps to a product. This fails the rubric's explicit 'per-patent advance' and 'business chain (technology->product->program)' requirements for all but the single correctly-assigned patent.",
+        "The narrative sections ('נוף הפטנטים', 'פרופיל מקצה') openly admit 'לא זוהו פטנטים ספציפיים של Anduril' and then pivot entirely away from patents into a recap of recent news events (TITAN contract, Hermeus partnership, Norkin appointment) that are unrelated to patent activity -- this is a competitive-intelligence news brief mislabeled as a patent survey, not a technology-landscape analysis.",
+        "The one correctly-identified Anduril patent (Lattice mesh) is real and relevant, and the missing-API-key caveat is honestly disclosed ('הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY... לכיסוי מלא') -- so the survey is honest about its own limits, but that does not make the deliverable usable as a technology map."
+      ]
+    },
+    "D9": {
+      "score": 50,
+      "n": 27,
+      "notes": [
+        "Tenders: the entire `tenders` table has exactly 5 rows and ZERO have status='open' (verified by direct query). The 5 rows ingested are all `status='closed'`, several with deadlines from 2015-2016 and 2023, and even the most recent (id 30, Finnish EO/IR RFI) closed on 2025-10-01, before the current date (2026-09-06). This directly fails the rubric's explicit 'רק פתוחים/עדכניים' (only open/current) requirement -- the tenders feed currently surfaces nothing actionable at all.",
+        "Conferences: strong. 15 rows checked all have real, plausible dates, sensible status values (confirmed/estimated), and match config/watchlist.yaml's conferences_seed (organizer, city, month) which per docs/MODULES.md was live-verified against real conference sites -- this is the one clearly solid sub-piece of D9.",
+        "Tender forecasts: structurally reasonable (7 rows, each anchored to a plausible payload_need/platform pair with a window_from/window_to and a likelihood in [0.5, 0.8]), and the rationale prose in the daily report cites concrete item ids. But the prose is templated across rows ('זוהו X אירועים... פלטפורמה זו נזקקת בדרך כלל ל-Y') rather than differentiated per forecast, and forecasts are a proxy for tenders, not a replacement for the empty real-tenders pipeline.",
+        "Net: the part of D9 users would actually check for actionable near-term opportunities (open tenders) is empty and stale; the parts that work well (conferences) are calendar/reference data, not opportunity data."
+      ]
+    }
+  },
+  "worst": [
+    {"domain": "D6", "id": "weekly_2026-09-05.md", "issue": "Executive summary, trend section and forward-look are literal test/placeholder strings ('זהו תקציר בדיקה קצר', 'placeholder air_defense', 'להערכתנו זהו מבחן') shipped as production output."},
+    {"domain": "D6", "id": "weekly_2026-09-05.md", "issue": "~80-line feedback-calibration log dominated by exact duplicate contradictory red<->yellow flips for the same headlines, dumped into the report body."},
+    {"domain": "D8", "id": "patent_survey_Anduril_Lattice_...", "issue": "16 of 17 listed patents have no assignee and no established link to Anduril; annual-timeline and CPC-code tables are empty; no per-patent technical description anywhere."},
+    {"domain": "D5", "id": "golden_questions.json Q4 (DROIC trend)", "issue": "Attributes an academic arXiv algorithm (RAFT-DVC) to fabricated corporate R&D by Leonardo DRS/Omnisys/Tobyhanna Army Depot under an invented 'FlexibleFusion' platform name."},
+    {"domain": "D5", "id": "golden_questions.json Q2 (Iron Beam contract)", "issue": "Frames an unrelated AeroVironment/Locust X3 US Army laser contract as if it were Rafael's Iron Beam contract; only a closing caveat partially corrects this."},
+    {"domain": "D5", "id": "all 4 answered golden questions (Q1-Q4)", "issue": "0/4 contain any inline [n] citation despite a citations array being returned; 4/4 render raw Markdown (##, **, bullet lists) -- 100% violation rate of the D5 'valid [n] citations / no raw markdown' rules on every answer that returned."},
+    {"domain": "D4", "id": "job 86 (item 1352, Reaper successor investigation)", "issue": "Returned a confident, detailed answer entirely about Elbit's MOSP 5000 payload, a system never mentioned in the question; caught only by a retroactive relevance-check correction after the fact."},
+    {"domain": "D3", "id": "item 47 (AeroVironment Locust X3 / E-HEL contract)", "issue": "entities_mentioned includes 'BlueHalo', verified absent from the live source article; traced to a watchlist alias collision (BlueHalo aliases include 'LOCUST'). Same spurious entity recurs on items 9, 10, 50."},
+    {"domain": "D1", "id": "items 1, 4, 7, 14", "issue": "domain='out_of_scope' but score/level/triage_reason are all NULL despite processed_stages listing 'triage' complete -- silent triage failure on 10% of the golden sample."},
+    {"domain": "D7", "id": "bd_us_2026-09-06.md", "issue": "Executive summary entirely empty (citation-QA gate dropped it) and no recommended-actions table exists at all for the US territory report."}
+  ]
+}
