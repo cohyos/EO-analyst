@@ -45,11 +45,11 @@
   "rotating_item_ids": [
     6193,
     6315,
+    7176,
     4668,
     5947,
     6166,
     5123,
-    598,
     6536,
     4675,
     6161,
@@ -57,12 +57,12 @@
     6586,
     2380,
     6175,
-    716,
-    939,
     6182,
     2463,
-    509,
-    6594
+    6594,
+    5121,
+    6222,
+    1357
   ],
   "investigation_job_ids": [
     91,
@@ -75,7 +75,7 @@
   "domains": {
     "D1": {
       "domain": "D1",
-      "score_0_100": 70.8,
+      "score_0_100": 83.3,
       "n": 60,
       "note": "",
       "checks": [
@@ -117,9 +117,9 @@
         },
         {
           "name": "entities_mentioned_nonempty_in_scope",
-          "passed": false,
+          "passed": true,
           "weight": 1.5,
-          "evidence": "28/29 in-scope items have entities or key_facts; empty ids: [22]"
+          "evidence": "29/29 in-scope items have entities or key_facts; empty ids: []"
         }
       ]
     },
@@ -158,26 +158,26 @@
     "D3": {
       "domain": "D3",
       "score_0_100": 100.0,
-      "n": 468,
+      "n": 557,
       "note": "",
       "checks": [
         {
           "name": "events_duplicate_groups_zero",
           "passed": true,
           "weight": 2.0,
-          "evidence": "40 events, 0 duplicate (item_id,kind,title) groups: []"
+          "evidence": "43 events, 0 duplicate (item_id,kind,title) groups: []"
         },
         {
           "name": "no_narrative_events",
           "passed": true,
           "weight": 2.0,
-          "evidence": "40/40 concrete; narrative event ids: []"
+          "evidence": "43/43 concrete; narrative event ids: []"
         },
         {
           "name": "entity_junk_gate",
           "passed": true,
           "weight": 2.0,
-          "evidence": "428/428 clean; junk entity ids: []"
+          "evidence": "514/514 clean; junk entity ids: []"
         },
         {
           "name": "entity_kind_valid",
@@ -241,21 +241,21 @@
     },
     "D6": {
       "domain": "D6",
-      "score_0_100": 100.0,
-      "n": 22,
+      "score_0_100": 52.9,
+      "n": 77,
       "note": "C:\\Users\\cohyo\\Documents\\EO-analyst\\output\\reports\\daily_2026-09-06.md",
       "checks": [
         {
           "name": "every_factual_exec_summary_sentence_cited",
-          "passed": true,
+          "passed": false,
           "weight": 2.5,
-          "evidence": "0 uncited factual sentences: []"
+          "evidence": "5 uncited factual sentences: ['— — —, 10,000,000 USD, בתאריך 2026-09-05.', 'US Air Force — Massed Modular Aircraft (MMA), 10,000,000 USD, בתאריך 2026-09-05.', '— — Operation Atlantic City, —, בתאריך 2026-09-05.', '— — Operation Atlantic City, —, בתאריך 2026-09-05.', 'Kongsberg — Operation Atlantic City, —, בתאריך 2026-09-05.']"
         },
         {
           "name": "every_inline_citation_in_appendix",
           "passed": true,
           "weight": 2.0,
-          "evidence": "appendix has 8 entries; orphan [n] refs: []"
+          "evidence": "appendix has 24 entries; orphan [n] refs: []"
         },
         {
           "name": "no_raw_slug_headings",
@@ -265,9 +265,9 @@
         },
         {
           "name": "no_duplicate_sentences",
-          "passed": true,
+          "passed": false,
           "weight": 1.5,
-          "evidence": "0 duplicate sentences: []"
+          "evidence": "8 duplicate sentences: ['— — Operation Atlantic City, —, בתאריך 2026-09-05.', 'פרויקט כיפת ברזל בגרמניה יוצא לדרך לאחר מכירת מפעל פולקסווגן לרפאל.', '| כותרת | ישויות | מה זה אומר | מקור |\\n|---|---|---|---|\\n| אסטוניה שוקלת לרכוש מ', 'מנגד, לוחות הזמנים הקצרים יחסית (שנתיים-שלוש) שמציעות חלק מהחברות עלולים להטות א', '| [2] |\\n| פרוייקט כיפת ברזל בגרמניה יוצא לדרך:']"
         },
         {
           "name": "israel_tech_tenders_sections_present",
@@ -279,15 +279,15 @@
     },
     "D7": {
       "domain": "D7",
-      "score_0_100": 50.0,
-      "n": 6,
+      "score_0_100": 71.4,
+      "n": 8,
       "note": "",
       "checks": [
         {
           "name": "conference_dates_match_db",
-          "passed": false,
+          "passed": true,
           "weight": 1.5,
-          "evidence": "2/4 conference dates matched the DB"
+          "evidence": "5/5 conference dates matched the DB"
         },
         {
           "name": "no_empty_headings",
@@ -305,27 +305,27 @@
           "name": "actions_table_nonempty",
           "passed": false,
           "weight": 2.0,
-          "evidence": "reports with no populated actions/recommendations section: ['bd_kr_2026-09-06.md (empty)']"
+          "evidence": "reports with no populated actions/recommendations section: ['bd_de_2026-09-06.md (empty)', 'bd_gr_2026-09-06.md (empty)']"
         }
       ]
     },
     "D8": {
       "domain": "D8",
-      "score_0_100": 81.8,
-      "n": 42,
+      "score_0_100": 100.0,
+      "n": 37,
       "note": "C:\\Users\\cohyo\\Documents\\EO-analyst\\output\\reports\\patent_survey_FPA_עם_פיקסל_דיגיטלי_DROIC_2026-09-06.md",
       "checks": [
         {
           "name": "timeline_present",
           "passed": true,
           "weight": 1.0,
-          "evidence": "3 heading(s) matched 'ציר זמן'; data row or disclosure present: True"
+          "evidence": "4 heading(s) matched 'ציר זמן'; data row or disclosure present: True"
         },
         {
           "name": "cpc_present",
-          "passed": false,
+          "passed": true,
           "weight": 1.0,
-          "evidence": "1 heading(s) matched 'CPC'; data row or disclosure present: False"
+          "evidence": "1 heading(s) matched 'CPC'; data row or disclosure present: True"
         },
         {
           "name": "every_cited_patent_has_appendix_row",
@@ -337,14 +337,14 @@
           "name": "patent_numbers_ltr_isolated",
           "passed": true,
           "weight": 2.0,
-          "evidence": "31/31 distinct patent-number tokens wrapped in <bdi>"
+          "evidence": "20/20 distinct patent-number tokens wrapped in <bdi>"
         }
       ]
     },
     "D9": {
       "domain": "D9",
       "score_0_100": 100.0,
-      "n": 72,
+      "n": 85,
       "note": "",
       "checks": [
         {
@@ -357,7 +357,7 @@
           "name": "conferences_status_and_dates_real",
           "passed": true,
           "weight": 2.0,
-          "evidence": "15 conferences; bad status ids: []; missing start_date ids: []; synthetic day sequence: False"
+          "evidence": "28 conferences; bad status ids: []; missing start_date ids: []; synthetic day sequence: False"
         },
         {
           "name": "sources_enabled_fetched_recently",
@@ -375,6 +375,16 @@
       "checks": []
     }
   },
-  "judge_scores": {},
-  "weighted_total": 88.6
+  "judge_scores": {
+    "D1": 76.0,
+    "D2": 58.0,
+    "D3": 88.0,
+    "D4": 55.0,
+    "D5": 42.0,
+    "D6": 55.0,
+    "D7": 68.0,
+    "D8": 58.0,
+    "D9": 55.0
+  },
+  "weighted_total": 71.5
 }

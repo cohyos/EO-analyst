@@ -1,0 +1,150 @@
+{
+  "round": 3,
+  "judge": "independent read-only agent (no pipeline runs, no fixes, no OMC tools, no DB writes, no git changes); DB read via runtime/eoa.env -> postgresql://eoa:***@127.0.0.1:5432/eoanalyst, SELECT version_num FROM alembic_version = '0021' (matches repo HEAD, confirmed on a separate connection); live chat tested against POST /api/ask on 127.0.0.1:8765 (SSE, body {question, history:[]}), all 8 golden questions run sequentially and LAST, only after confirming via tasklist/Get-CimInstance that no playwright process remained running and GET /api/status answered in <2s; 300s wall-clock cap per question, one retry on gate_busy/timeout configured (never needed -- all 8 completed on the first attempt, 28-84s each, ungrounded_removed 0-4 per answer).",
+  "domains": {
+    "D1": {
+      "score": 76,
+      "n": 41,
+      "notes": [
+        "VERIFIED, the single biggest D1 win this round: items 47, 50 and 10 (the $464.8M AeroVironment E-HEL production contract and the $192M Palantir/Anduril TITAN award) -- the flagship defect BAKEOFF.md built its entire case around ('a $464.8M first-of-its-kind production contract scored archive') -- now score level='orange', score=6-7 on the live DB, not 'archive'. This is direct, live confirmation that the 16:30 cloud-model switch (Claude Sonnet 5 -> Gemini 3.1 Pro -> local) fixed the exact defect the bake-off documented, not just a bake-off sandbox result.",
+        "VERIFIED: item 39 was genuinely re-analysed on the new code -- summary_he is now a complete, non-truncated 4-sentence description of the Ophir SupIR-X lens (was the exact truncated fragment 'עדשה חדשה למטע' in rounds 1-2); 8 key_facts, 1 event on the live DB.",
+        "VERIFIED (re-classification of a round-2 misreading, not a fix): items 52, 56, 57 are not stuck pre-triage -- direct query confirms dedup_of populated (57->50, 52->10, 56->2) -- domain=NULL + classify-done is the documented duplicate convention, not a pipeline failure. Round 2's 'new, worse variant' finding was a misdiagnosis this round correctly identified and disclosed in round_3_fixes.md.",
+        "VERIFIED, item 24 subdomain='detectors_fpa' still durably landed (unchanged from round 2).",
+        "NOT LANDED, unchanged for the 3rd round running: item 22 (in-scope, domain='air_defense') still has entities_mentioned=[] on the live DB -- the one deterministic D1 check (entities_mentioned_nonempty_in_scope) still failing, 28/29 not 29/29.",
+        "NEW, minor: rotating-sample item 2463's triage_reason is cut off mid-thought ending in a bare colon ('...ניתן להעניק לו ציון רלוונטיות גבוה:') with the promised list never delivered -- a fresh truncation-adjacent generation defect (1/60 hit on this round's auto sample), distinct from the classic mid-word truncation both prior rounds fixed. Also worth flagging on substance: the item itself is a Western Burrowing Owl conservation story on a military range being justified for 'high relevance' to an EO/IR defense pipeline -- a borderline miscategorisation the cut-off reasoning never actually defends."
+      ]
+    },
+    "D2": {
+      "score": 58,
+      "n": 42,
+      "notes": [
+        "PARTIAL: the templated so_what phrase ('מחזק את מעמד...') count is down to 16 items DB-wide by direct LIKE query (was 32 in round 2, 34 in round 1) -- real but partial progress; round_3_fixes.md's own count (56 rows, morphology-tolerant regex, 40 in scope) uses a broader pattern and describes a 'progressive' rewrite via the nightly backfill, consistent with a partial, in-flight fix rather than a completed one.",
+        "NEW, important cross-cutting finding not in round_3_fixes.md: even the fresh CLOUD-drafted weekly_2026-09-06.md report (built by Claude/Gemini after the 16:30 switch, not the local resident model analyze.md prompt this round's D2 fix targeted) independently reproduces the exact same crutch phrase multiple times in its own narrative prose -- e.g. 'לחזק את מעמדה כמתכננת ומשלבת פתרונות' (Hensoldt row), 'מחזק את מעמדה של אלביט מערכות' (Serbia row). This shows the generic-so-what habit is not just a local-model quirk fixed by one prompt edit in analyze.md -- it recurs independently in the separate report-writing prompt path, and even the higher-quality cloud model falls into it under Hebrew analytical-writing load.",
+        "Item 39's so_what/summary content is now substantive and non-templated on manual read (see D1) -- a genuine per-item win, but not representative of the DB-wide phrase count above."
+      ]
+    },
+    "D3": {
+      "score": 88,
+      "n": 174,
+      "notes": [
+        "VERIFIED, durable: events 55/84/89/121's amount_usd are now full dollar values on the live DB (540700000, 464800000 x3) -- the x1000 unit-scaling bug from rounds 1-2 is fixed and confirmed no longer visible as '465 USD' anywhere checked this round.",
+        "VERIFIED, durable: item 81 now has 4 events (22, 23, 24, 224), down from 7 in rounds 1-2 -- the near-duplicate merge (same_kind_duplicate rule) genuinely landed; exact-duplicate (item_id,kind,lower(title)) groups are 0/0 DB-wide across all 174 live events, confirmed by direct query.",
+        "The repair script's own dry-run log (16 merges across items 12,71,73,81,105,150,153,155,235,2386, with documented false-merge guards for numbered variants and distinct proper nouns) reads as genuine engineering, not just a claim -- spot-checked outcome (item 81) matches exactly what the log predicted.",
+        "Both of round 2's flagship D3 findings are now closed; this is the single cleanest domain-level win of round 3."
+      ]
+    },
+    "D4": {
+      "score": 55,
+      "n": 8,
+      "notes": [
+        "VERIFIED: job 91 restored to outcome='not_found', confidence=0.0, with an explicit repair_notes entry disclosing the prior over-broad sweep and its scope-narrowing fix (now limited to job ids 15/20) -- round 2's regression is fixed AND, unlike round 2's own undisclosed original break, properly documented this time.",
+        "CONFIRMED STILL OPEN, correctly disclosed as a round-4 item (not claimed fixed): job 113 (item 6872, Rafael/Volkswagen Osnabrück Iron Dome plant) is still blocked by the L2 injection guard -- live DB shows outcome='not_found', confidence=0.0, answer_he='התשובה נחסמה בבדיקת אבטחה (חשד להזרקת הוראות בתוכן שנשלף)'. This is now directly visible to a report reader (see D6): the weekly report's own 'חקירות עומק' section renders this exact blocked-answer text for a live investigation question, unexplained.",
+        "Job 112 (Estonia air-defense investigation, cloud-delegated): outcome='partial', confidence=0.78, 10 real, relevant sources -- genuinely useful, well-sourced content (confirmed by reading the full weekly-report excerpt), though key_facts=[] is inconsistent with a 0.78-confidence partial outcome.",
+        "NEW, SEVERE, undisclosed in round_3_fixes.md: the live weekly report's 'חקירות עומק' section renders MULTIPLE re-runs of the IDENTICAL investigation question with CONTRADICTORY outcomes side by side and no reconciliation -- e.g. 'Which company won the Israeli MoD Iron Beam contract...' appears 4 times: once outcome='found' with a specific Rafael+Elbit $500M+ answer, three times outcome='not_found'/'partial' with an empty or hedged answer. A reader cannot tell which of the 4 contradictory answers to trust. This is a genuine investigation-deduplication/consistency gap, arguably a more damaging trust problem than job 91's isolated regression, and it was not caught by any deterministic D4 check (all 4 pass individually)."
+      ]
+    },
+    "D5": {
+      "score": 42,
+      "n": 8,
+      "notes": [
+        "VERIFIED, reproduced independently on a fresh, third live sample of all 8 golden questions (sequential, first attempt, no timeouts, no gate_busy): the repetition-loop bug remains fixed -- 28-84s per question, well within budget.",
+        "VERIFIED: round 2's specific Q2 fabrication (a fictional Rafael 'Iron Beam' contract built from AeroVironment's unrelated $465M/LOCUST-X3 laser program) does NOT reproduce on this independent sample -- the money-figure conflation guard (section 1c of round_3_chat_fixes.md) appears to be doing real work.",
+        "PARTIAL: Q2's underlying substance problem persists in a DIFFERENT shape this sample -- the model conflates 'Iron Beam' (מגן אור) with the real, separate Rafael/Volkswagen-Osnabrück plant story, which is actually about Iron DOME production in Germany, not Iron Beam. Unlike round 2, this is now transparently disclosed: the anchor guard fires ('⚠ ייתכן שהתשובה אינה עוסקת בשאלה... אינם מזכירים Iron, Beam'), and the conflated content is demoted under '### הקשר קרוב (לא התשובה)' rather than presented as the direct answer. Genuine honesty improvement; the underlying Iron Beam/Iron Dome confusion itself is not fixed.",
+        "NEW, SEVERE, not caught by any round-3 guard: Q4 (DROIC) fabricates plausible-sounding but unverifiable ML jargon -- 'Modality-Aware Experts Collaboration (MAEC)' and 'Residual Self-Paced Entropic Optimal Transport (RSPEOT)' -- attributed to 'Leonardo DRS' and a Finnish NH90 tender. This is structurally the same fabrication class as round 2's invented professor/university/project, but in a syntactic form (single-word technical acronyms, not multi-word proper nouns or hyphen-joined compounds) that round 3's own _PROPER_NOUN_RE grounded-entity check does not target -- a real, live-demonstrated gap in the new guard's coverage, exactly the kind the module's own documented precision/recall trade-off predicts.",
+        "NEW: Q7 (EO/IR RFI) contains an internal self-contradiction not caught by any guard -- the answer opens with 'ה-RFI... שפורסמה על ידי ממשלת ארה\"ב' (published by the US government) then immediately attributes the same RFI to 'פיקוד הלוגיסטיקה של הכוחות המזוינים הפיני (FDFLOGCOM)' (Finland's defence logistics command). No existing guard checks answer-internal logical consistency, only citation/entity grounding.",
+        "NEW: Q5 (Skyranger) incorrectly equates two unrelated systems parenthetically -- 'קלע דוד (Skynex)' -- David's Sling (Rafael/Israel) is not Skynex (Rheinmetall/Germany, actually mentioned correctly elsewhere in the same answer as the Skyranger's own fire-control system). Both names are individually grounded/real, so the entity-grounding check does not fire; the error is in the asserted relationship between two correct entities, the same blind-spot class as the Q2 conflation guard was built for but not generalised to.",
+        "Q3 (Greece/LORA): substance bug reproduced a third time (never mentions LORA, answers about the adjacent ~EUR3.5bn Greek air-defense deal) -- but now correctly and transparently gapped per round 3's strengthened-anchor-guard design (explicit missing-anchor statement + demoted '### הקשר קרוב' heading). Minor new rendering glitch observed: a stray doubled heading marker ('## ### עובדות מרכזיות') and two orphaned, content-less numbered list items.",
+        "Q1, Q6, Q8 read clean, well-cited, and appropriately hedged on this independent sample, consistent with round_3_chat_fixes.md's own characterisation.",
+        "Net assessment: real, durable progress on loop-elimination and on the ONE specific fabrication pattern the money-conflation guard targets, plus a genuine and valuable improvement in transparency (gapping instead of silently answering off-topic). But the underlying LLM tendency to fabricate specifics under narrative pressure has not been solved -- it keeps finding new syntactic forms (invented acronyms, wrong entity-equivalences, self-contradictions) that slip past whichever guard was just added. This is a whack-a-mole pattern across all three rounds now, not a converging one."
+      ]
+    },
+    "D6": {
+      "score": 55,
+      "n": 2,
+      "notes": [
+        "MAJOR VERIFIED IMPROVEMENT: weekly_2026-09-06.md (report 51, cloud-drafted after the 16:30 switch, rebuilt 19:43) now has a genuine, coherent, fully-cited executive summary and 9 substantive per-domain analytical sections with real cross-referencing (e.g. correctly linking the Ophir lens launch to the Centauro II vehicle contract as 'sensor layer vs. platform layer' of the same land-EO/IR trend) -- a dramatic, qualitative leap from round 2's zero-synthesis, tables-only report. qa_passed=true with 0 uncited/duplicate sentences on the deterministic gate.",
+        "VERIFIED: daily_2026-09-06.md's 'no summary this period' framing is honest, not a fallback masking a failure -- the day's actual pipeline run ingested only 4 new items, all classified out_of_scope, so there was genuinely nothing red/orange/yellow to summarise; the tables (8 business events, 13 tender forecasts) are populated and real. Footer confirms 144 cloud calls, 0 fallbacks to local, $0 cost.",
+        "NEW, SEVERE, undisclosed in round_3_fixes.md: the same weekly report's 'סיכום מטא שבועי — משוב משתמש (FR-11.4)' section renders 164 raw triage_feedback rows verbatim with zero deduplication. Traced to the DB: item 117 alone contributes 70 of those rows (a yellow<->red flip-flop logged every 30-90 seconds on 2026-09-04, clearly a UI/API double-submit bug from an earlier session, not real user activity), item 112 contributes 40, item 39 contributes 34. The rendered section reads as noisy, spam-like churn and grossly misrepresents 'user feedback volume this week' to a reader who has no way to know 144 of the 164 rows are one bug's echo. This passed the qa_passed citation gate because it is a bullet list, not prose sentences the duplicate-sentence checker inspects.",
+        "NEW, SEVERE, cross-cutting with D4: the same report's 'חקירות עומק' section renders the identical investigation question multiple times with directly contradictory answers (see D4) -- a second, independent instance in the same document of raw, unreconciled duplicate data being surfaced to the reader.",
+        "The new 'מעקב רכישות ושותפויות' (A16, acquisition-watch) section is mostly '—' placeholders with generic event types (שותפות/השקעה) and no real deal specifics -- low information value but not factually wrong; see D7 for the more serious cross-territory version of this same section.",
+        "daily_2026-09-06.md's D6 deterministic check correctly flags a missing 'tech' section (auto-json: present ['israel','tenders'], missing ['tech']) -- explainable by the day's genuine lack of new items, not a code defect, but still a real gap for a reader expecting all three standard sections."
+      ]
+    },
+    "D7": {
+      "score": 68,
+      "n": 4,
+      "notes": [
+        "MAJOR VERIFIED FIX: bd_us_2026-09-06.md (report id 44, rebuilt 17:32) now has a genuine, populated, cited executive summary, an '### הערכת האנליסט' analyst note, market-picture/competitor-moves/open-questions/risks sections -- the warning-banner-only path round 2 found is gone. The structured BdTerritoryReportDraft schema migration round_3_fixes.md claimed has visibly landed.",
+        "VERIFIED, full reversal of round 2's finding: bd_us's 4 cited conferences (AUSA 2026, SPIE Defense+Commercial Sensing 2027, SOF Week 2027, DSEI 2027) now match the live conferences table exactly on all 4 (was 0/4 in round 2) -- direct query confirms identical start/end dates and cities.",
+        "VERIFIED, durable: the doubled-ASCII-quote defect (e.g. 'ארה\"\"ב') is 0 hits across bd_us, bd_il, weekly and daily on direct grep -- the textnorm fix holds live.",
+        "NEW, undisclosed defect: the 'מעקב רכישות ושותפויות' (A16) table is IDENTICAL, byte-for-byte, across bd_us, bd_kr and bd_gr (same 6 Elbit/Hensoldt rows, same placeholder '—' fields) -- the section is not territory-scoped at all, so Korea's and Greece's BD reports both list Elbit's Serbia UAV factory and a Hensoldt-India eVTOL deal that have zero connection to KR or GR. This defeats the purpose of a per-territory report and was not mentioned in round_3_fixes.md's D7 section.",
+        "bd_kr's empty actions/recommendations section ('לא זוהתה פעילות רלוונטית... אין פעולות מומלצות', explicitly naming the two watchlist competitors with zero activity) is a correct, honest 'nothing to report' -- the round_3_auto.json deterministic check flags this as a failure ('actions_table_nonempty': false), but this judge agrees with round 2's precedent that an honest empty section should not be scored as a defect.",
+        "round_3_auto.json's own deterministic note ('2/4 conference dates matched the DB') does not match this judge's direct 4/4 verification of bd_us specifically -- likely scored against a different/earlier bd file; worth reconciling which specific report the automated D7 check targets, since the answer materially changes between reports this round."
+      ]
+    },
+    "D8": {
+      "score": 58,
+      "n": 2,
+      "notes": [
+        "VERIFIED: the Anduril patent survey's round-1/2 flagship overclaim ('אנדוריל היא השחקן הבלעדי') is gone from the live 19:04 rebuild -- replaced with a properly caveated statement ('ל-5 מתוך 6 הפטנטים אין נתוני מקצה — לא ניתן להסיק בלעדיות או נתח שוק') plus THREE explicit, logged scrub entries under 'נקודות פתוחות' ('הוסרה טענת בלעדיות/נתח-שוק שאינה נתמכת, כיסוי מקצה 17%') quoting the exact overclaiming sentences that were caught and removed. This is a genuine, verifiable, self-documenting fix.",
+        "NOT LANDED -- a specific round_3_fixes.md claim does not hold up on live inspection: the doc states the Anduril-Elbit 'Sigma 155 howitzer' relationship-edge claim was 'dropped and counted' by the source-verification pass. It is not dropped: the live 19:04 report's relationship map still shows it, TWICE (once for 'Elbit', once for 'Elbit Systems' -- an uncanonicalised duplicate), with no supporting citation number, identical to rounds 1-2.",
+        "PARTIAL: the 'אשכול טכנולוגי: לא מסווג' (unclassified cluster) fix is inconsistent -- the same-day DROIC survey (19:03) correctly shows a real cluster name ('FPA עם פיקסל דיגיטלי (DROIC)'), but the Anduril survey (19:04, one minute later) still shows the bare 'לא מסווג' label.",
+        "Patent relevance/content quality is genuinely good this round: the DROIC survey's 17 patent abstracts are all substantively on-topic (real DROIC/FPA circuit descriptions, not 1960s optical-tracking filler), each individually described rather than templated.",
+        "CPC codes remain empty in both surveys inspected, but now consistently paired with an explicit, honest disclosure line naming the missing API keys (EPO_OPS_KEY/PATENTSVIEW_API_KEY) rather than a silent gap."
+      ]
+    },
+    "D9": {
+      "score": 55,
+      "n": 3,
+      "notes": [
+        "VERIFIED: conferences table grew from 15 (round 2) to 28 rows on the live DB, including SPIE Security+Defence 2026/2027, SPIE Defense+Commercial Sensing 2027/2028, SPIE Photonics West 2027/2028, MSS Active E-O Systems 2027/2028, and OPTRO 2028 -- all with real forward dates, matching this round's brief.",
+        "NOT LANDED, unchanged in substance across all 3 rounds: the tenders table is still exactly 5 rows (status relabelled 'archived' instead of 'closed', but every deadline is still in the past -- 2015, 2023, 2025-10-01). Direct query confirms 0 open or candidate-status tenders exist on the live DB despite this round's new intake infrastructure; the same-day pipeline run's own tenders-stage log shows 21 candidates matched and scanned but 0 inserted (17 LLM-rejected/deferred, 8 gate-rejected) -- the new sources ARE being scanned, but nothing has cleared the bar into a visible tender yet.",
+        "PARTIAL/INFRASTRUCTURE VERIFIED: docs/TENDER_PORTALS.md is real, substantive engineering, not just a claim -- 41 sources catalogued in config/tenders.yaml with live curl-tested results dated 2026-09-06, 8 direct no-key integrations (6 added today: ted_eu_cpv, uk_find_tender, fr_boamp, nl_tenderned, es_placsp_atom, us_grants_gov) plus 22 SearXNG-mediated search-only sources. This is genuine progress on the intake side even though it has not yet produced a single visible tender row after 3 rounds.",
+        "VERIFIED: sources.active correctly excludes 9 disabled sources (4 arXiv keyword feeds + SIBAT/Aviation Week/Shephard/Janes + a leftover test-source), matching round_3_fixes.md's explanation of the round-2 'stale sources' finding; 52/52 active sources fetched within 7 days."
+      ]
+    }
+  },
+  "worst": [
+    {"domain": "D6/D4", "id": "Weekly report's duplicate-contradictory investigation answers", "desc": "The live weekly_2026-09-06.md renders the same investigation question multiple times with directly contradictory outcomes (e.g. the Iron Beam MoD-contract question: once 'found' with a specific $500M+ Rafael/Elbit answer, three times 'not_found'/hedged) with zero reconciliation -- a reader cannot tell which answer to trust. Not caught by any deterministic check (all pass individually) and not disclosed in round_3_fixes.md."},
+    {"domain": "D6", "id": "Weekly meta-feedback section is spam, not signal", "desc": "164 raw triage_feedback rows rendered verbatim; 144 of them are an echo of a single UI double-submit bug on 3 items (117/112/39) from 2026-09-04, not real user activity this week. Grossly misrepresents 'user feedback volume' to the reader and slipped past the citation/duplicate-sentence QA gate because it is a bullet list, not prose."},
+    {"domain": "D5", "id": "Q4 (DROIC) fabricates plausible ML jargon", "desc": "Invents 'MAEC' and 'RSPEOT' algorithm names attributed to Leonardo DRS/a Finnish tender -- the same fabrication class as round 2's fake professor, in a syntactic form (single-word acronyms) round 3's new grounded-entity regex does not target. A live, reproducible gap in the newest guard's coverage."},
+    {"domain": "D8", "id": "Anduril-Elbit 'Sigma 155' relationship claim, falsely claimed fixed", "desc": "round_3_fixes.md explicitly states this untraceable relationship edge was 'dropped and counted' -- it is still present, live, in duplicate (Elbit + Elbit Systems), with no citation, in the same-day 19:04 rebuild. A documented fix claim that does not hold up under direct verification."},
+    {"domain": "D7", "id": "Acquisition-watch (A16) section not territory-scoped", "desc": "The same 6-row Elbit/Hensoldt table appears byte-for-byte identical in bd_us, bd_kr and bd_gr -- Korea's and Greece's BD reports both cite a Serbia UAV factory and an India eVTOL deal with zero territorial relevance, undermining the report's whole purpose. Not disclosed as a limitation anywhere."},
+    {"domain": "D9", "id": "Tenders table unchanged in substance, 3rd round running", "desc": "Still 5 rows, all with deadlines already years past; 0 open, 0 candidates despite new intake infrastructure (41 sources, 8 live-tested direct integrations) that is scanning 21 candidates/run but converting none. Real engineering progress, zero visible user-facing result."},
+    {"domain": "D4", "id": "Job 113 security-guard false-block, now user-visible", "desc": "The L2 injection guard blocks a legitimate delegated investigation (Rafael/VW Osnabrück) because it scores the delegated model's own honest answer text, not the fetched source content -- confirmed still open (correctly disclosed as round-4 work), but now directly visible, unexplained, in the live weekly report's investigations section."},
+    {"domain": "D5", "id": "Q7 and Q5: correct entities, wrong relationship/claim", "desc": "Q7 self-contradicts (claims a Finnish MoD RFI was 'published by the US government'); Q5 wrongly equates Israel's David's Sling with Germany's unrelated Skynex fire-control system. Neither is caught by any guard because every individual named entity is real and grounded -- the guards check entity existence, not claim correctness."},
+    {"domain": "D2", "id": "Templated so_what phrase survives in cloud-drafted prose too", "desc": "Even the fresh, cloud-model-written weekly report independently reproduces 'מחזק את מעמדה' multiple times in its own narrative -- the round-3 fix targeted analyze.md only; the same crutch phrase recurs in the separate report-generation prompt path, showing the fix's scope was too narrow."},
+    {"domain": "D1", "id": "Item 22 entities_mentioned=[] unchanged, 3rd round running", "desc": "The one remaining deterministic D1 failure has now been flagged, unaddressed, across rounds 1, 2 and 3 -- a small, well-understood, still-unscheduled fix."}
+  ],
+  "deltas": {
+    "fixed": [
+      "D1: the flagship BAKEOFF.md-documented defect ($464.8M and $192M contracts scored 'archive') is genuinely fixed live -- items 47/50/10 now score orange/6-7 on the production DB, directly attributable to the 16:30 cloud-model switch",
+      "D1: item 39's truncated summary/triage_reason fully repaired with substantive content",
+      "D1: items 52/56/57 correctly re-diagnosed as the dedup_of convention, not a pipeline failure (round 2's misdiagnosis corrected)",
+      "D3: amount_usd unit-scaling bug (events 55/84/89/121) fixed and verified nowhere visibly wrong anymore",
+      "D3: item 81's duplicate event rows reduced from 7 to 4 via a documented, guard-tested near-duplicate merge rule",
+      "D4: job 91's outcome regression fixed and, unlike round 2's original break, properly disclosed this time via repair_notes",
+      "D5: round 2's specific Q2 fabrication (fictional Rafael/AeroVironment $465M contract) does not reproduce -- the money-conflation guard works as designed",
+      "D6: weekly report's exec-summary/synthesis defect is a major, genuine improvement -- real cross-referenced analytical prose replaces round 2's tables-only zero-synthesis output",
+      "D7: bd_us's structured-schema migration landed -- warning-banner path is gone, conference dates now 4/4 match the DB (was 0/4)",
+      "D7/D6: the doubled-ASCII-quote defect is durably fixed (0 hits across all reports checked)",
+      "D8: the Anduril patent survey's exclusivity overclaim is genuinely scrubbed with a self-documenting removal log",
+      "D9: conferences table nearly doubled (15->28) with real, verified 2026-2028 dates"
+    ],
+    "unchanged": [
+      "D1: item 22's empty entities_mentioned, 3rd round running",
+      "D2: the templated so_what phrase persists DB-wide (16 items) and, newly observed, recurs independently in cloud-drafted report prose",
+      "D5: Q3's LORA substance bug reproduces a 3rd time (now transparently gapped, not silently wrong)",
+      "D9: the tenders table remains substantively unchanged (still 5 archived/expired rows, 0 open) despite new intake infrastructure"
+    ],
+    "new": [
+      "D6/D4: weekly report renders the same investigation question multiple times with contradictory outcomes, unreconciled -- a serious, undisclosed trust problem in a live deliverable",
+      "D6: weekly report's new meta-feedback section surfaces 164 raw feedback rows, 144 of which are an old UI double-submit bug's echo, misrepresenting real user activity",
+      "D7: the new acquisition-watch (A16) section is not territory-scoped -- identical content appears in bd_us/bd_kr/bd_gr regardless of relevance",
+      "D5: Q4 fabricates plausible-sounding ML jargon (MAEC, RSPEOT) in a form the new grounded-entity guard's regex does not catch",
+      "D5: Q7 and Q5 each contain a 'correct entities, wrong relationship/claim' error (self-contradiction; wrong system equivalence) that no existing guard targets",
+      "D8: round_3_fixes.md's claim that the Anduril-Elbit Sigma-155 relationship edge was 'dropped' is verifiably false on the live report -- it persists, now duplicated",
+      "D4: job 112's confidence=0.78/outcome=partial pairs with an empty key_facts array -- a minor internal inconsistency"
+    ]
+  }
+}
