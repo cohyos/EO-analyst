@@ -139,9 +139,18 @@ def apply_no_eoir_gate(item: dict, out: ClassifyOut) -> ClassifyOut:
 # mentioned a watchlist company name or extracted a generic entity in passing -- neither of those
 # signals is a real defense-technical one when the *only* on-topic-looking vocabulary in the text
 # is generic AI/ML/hi-tech-market language (an industry/labor-market trend piece), not an actual
-# EO/IR/CV-for-defense term. This second, narrower gate closes that hole: it demotes such an item
-# to out_of_scope even when it has entities or a watchlist hit, as long as no genuine EO/IR/CV term
-# appears anywhere in the text.
+# EO/IR/CV-for-defense term. This second, narrower gate closes that hole.
+#
+# Calibration note: an early version of this gate fired on *any* generic AI/tech vocabulary hit
+# with no curated EO/IR term present, regardless of what the item was actually about. Tested
+# against the live DB, that over-triggered on genuine defense-tech company/product news whose
+# phrasing doesn't happen to hit the curated EO/IR list (e.g. a funding-round or drone-company
+# valuation story that describes its product in AI/robotics terms rather than literal "computer
+# vision"/"targeting pod" language) -- exactly the kind of real reporting this pipeline exists to
+# track. The actual leaked item, by contrast, was specifically a labor-market/industry-trends
+# piece (about professions, hiring, layoffs -- not about any product, company deal, or system at
+# all). The gate is therefore scoped to require BOTH signals together: generic AI/tech vocabulary
+# AND an explicit labor-market/industry-trend frame -- not either alone.
 # ---------------------------------------------------------------------------------------------
 _GENERIC_AI_TECH_KEYWORDS_EN = (
     "artificial intelligence", "machine learning", "deep learning", "generative ai",
@@ -152,6 +161,17 @@ _GENERIC_AI_TECH_KEYWORDS_EN = (
 _GENERIC_AI_TECH_KEYWORDS_HE = (
     "בינה מלאכותית", "למידת מכונה", "למידה עמוקה", "היי-טק", "הייטק", "שוק ההיי-טק",
     "שוק ההייטק", "תעשיית ההייטק", "שוק העבודה", "סטארטאפ", "הון סיכון", "ה-ai",
+)  # fmt: skip
+# The labor-market/industry-trend "frame" signal -- deliberately NOT including a word like
+# "workforce" on its own: tested against the live DB, it false-positived on "autonomous robotic
+# workforce" (a real drone/robotics story, not a jobs-market piece).
+_AI_MARKET_LABOR_SIGNAL_EN = (
+    "job market", "jobs market", "labor market", "hiring", "layoffs",
+    "in-demand skills", "in-demand jobs", "career path", "professions",
+)  # fmt: skip
+_AI_MARKET_LABOR_SIGNAL_HE = (
+    "שוק העבודה", "מקצועות מבוקשים", "מקצועות", "משרות", "גיוס עובדים", "פיטורים",
+    "כישורים נדרשים", "כוח אדם",
 )  # fmt: skip
 
 
@@ -167,20 +187,33 @@ def _has_generic_ai_tech_market_vocabulary(text: str) -> bool:
     return bool(pattern and pattern.search(text))
 
 
+def _has_ai_market_labor_signal(text: str) -> bool:
+    """True if ``text`` explicitly frames itself as being about the labor market/hiring/professions
+    -- see the calibration note above: this is what actually distinguishes an off-topic "AI jobs
+    market" piece from a genuine defense-tech company/product story that merely uses AI/ML/hi-tech
+    vocabulary to describe its product."""
+    if not text:
+        return False
+    pattern = _word_boundary_pattern(list(_AI_MARKET_LABOR_SIGNAL_EN) + list(_AI_MARKET_LABOR_SIGNAL_HE))
+    return bool(pattern and pattern.search(text))
+
+
 def apply_generic_ai_market_gate(item: dict, out: ClassifyOut) -> ClassifyOut:
     """Goal 3: an item classified in-scope (any domain other than ``out_of_scope``) whose text
-    contains generic AI/ML/hi-tech-*market* vocabulary but **no** genuine EO/IR/CV-for-defense term
-    anywhere (title + clean_text) is forced to ``out_of_scope`` -- regardless of extracted entities
-    or a watchlist alias hit, unlike :func:`apply_no_eoir_gate` above, since a defense company can
-    legitimately appear in a generic labor-market/industry-trends listicle with zero EO/IR content.
-    A no-op when the item already carries a genuine EO/IR/CV term anywhere (that term is real
-    in-scope signal no matter what other vocabulary also appears), or already out_of_scope."""
+    contains BOTH generic AI/ML/hi-tech-market vocabulary AND an explicit labor-market/industry-
+    trend frame (jobs, hiring, layoffs, professions -- see the calibration note above), but **no**
+    genuine EO/IR/CV-for-defense term anywhere (title + clean_text), is forced to ``out_of_scope``
+    -- regardless of extracted entities or a watchlist alias hit, unlike :func:`apply_no_eoir_gate`
+    above, since a defense company can legitimately appear in a generic labor-market/industry-
+    trends listicle with zero EO/IR content. A no-op when the item already carries a genuine
+    EO/IR/CV term anywhere (real in-scope signal no matter what other vocabulary also appears), or
+    already out_of_scope."""
     if out.domain == "out_of_scope":
         return out
     text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
     if _has_eoir_vocabulary(text):
         return out
-    if not _has_generic_ai_tech_market_vocabulary(text):
+    if not (_has_generic_ai_tech_market_vocabulary(text) and _has_ai_market_labor_signal(text)):
         return out
     log.info("classify_gate_generic_ai_market", item_id=item.get("id"), previous_domain=out.domain)
     out.domain = "out_of_scope"

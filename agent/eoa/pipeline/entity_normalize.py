@@ -43,7 +43,9 @@ _GOVERNMENT_KEYWORDS = (
 )  # fmt: skip
 
 # Technique/algorithm-like names an LLM sometimes extracts as if they were an "entity" -- these
-# describe a method, not a company/program/system/person/org, and should never be stored.
+# describe a method, not a company/program/system/person/org, and should never be stored. Kept
+# as an explicit literal list (in addition to the generic patterns below it) so an exact known
+# phrase is always caught even if it doesn't happen to end in one of _TECHNIQUE_SUFFIX_RE's nouns.
 _TECHNIQUE_LIKE_RE = re.compile(
     r"\b("
     r"image captioning|object detection|vehicle detector[s]?|edge detection|"
@@ -52,6 +54,58 @@ _TECHNIQUE_LIKE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+# Q3-13 r4 (2026-09-06 root-cause investigation): the literal list above only ever caught the
+# handful of exact phrases spelled in it -- a live LLM re-analyze backfill created junk entities
+# it didn't cover: "camouflaged military vehicle detection" (kind=company, item 156; the singular
+# "vehicle detection" wasn't in the literal list, only the plural "vehicle detector[s]?"), "GenAI
+# image editing" (entity 1009). This generalises to "<one to five words> <technique noun>[s]"
+# (matched as a substring, same as the literal list above, so "RF-DETR vehicle detectors" still
+# matches via its "vehicle detectors" tail) and "<GenAI/LLM/deep-learning prefix> <anything>".
+_TECHNIQUE_SUFFIX_RE = re.compile(
+    r"\b[a-zA-Z][\w'-]*(?:[\s-]+[a-zA-Z][\w'-]*){0,4}[\s-]+"
+    r"(?:detection|detector|detectors|segmentation|estimation|extraction|synthesis|"
+    r"translation|recognition|tracking|classification|captioning|editing|generation|"
+    r"fusion|calibration|registration)s?\b",
+    re.IGNORECASE,
+)
+_TECHNIQUE_PREFIX_RE = re.compile(
+    r"\b(?:GenAI|generative\s+AI|LLM|deep\s+learning|neural\s+network)s?\b[\s:-]+\S",
+    re.IGNORECASE,
+)
+
+# Q3-13 r4: a lowercase-starting, multi-word name that also contains one of these generic-concept
+# keywords (substring match on the casefolded phrase) -- both signals required, not just the
+# lowercase-start shape alone. An earlier version of this gate rejected *any* lowercase-starting
+# multi-word phrase with no Title-Case token, but that false-positived on a perfectly ordinary
+# company name typed in lowercase (e.g. a case-insensitive-dedup scenario: "acme corp" re-extracted
+# for an existing "Acme Corp" row) -- ``is_technique_like`` is a pure function with no DB access,
+# so it cannot itself check "does a case-insensitively-matching row already exist" the way
+# ``eoa.memory.relational.upsert_entity`` does downstream. Requiring a keyword keeps the false-
+# positive rate near zero while still catching every lowercase-start junk row observed live
+# (2026-09-06) in the whole `entities` table: "potential suppliers", "target behaviors",
+# "proxy-guided placement", "transformer-based architectures", "existing C-UAS approaches",
+# "future uncrewed ground vehicles (UGVs)", "binary visual question answering", "defense-tech
+# startups", "software developers", "hardware engineers", "anti-satellite weapons", "global
+# satellite market", "space defense needs", "international customer", "commercial off-the-shelf
+# components", "potential technologies", "targeted grayscale patch attacks" -- while a single-word
+# stylised brand ("arXiv", "ePlane", "e200X", "exMHR") never matches (the multi-word requirement)
+# and a real two-word name never matches unless it happens to also contain one of these keywords.
+_LOWERCASE_MULTIWORD_RE = re.compile(r"^[a-z][\w'-]*(?:\s+\S+)+$")
+_GENERIC_ENGLISH_KEYWORDS: tuple[str, ...] = (
+    "startup", "developer", "engineer", "weapon", "market", "customer", "supplier",
+    "technolog", "behavior", "placement", "architecture", "approach", "capabilit",
+    "attack", "answering", "industry", "component", " need", "dataset", "threat",
+    "vehicle",
+)  # fmt: skip
+
+
+def _is_lowercase_multiword_junk(name: str) -> bool:
+    stripped = (name or "").strip()
+    if not _LOWERCASE_MULTIWORD_RE.match(stripped):
+        return False
+    lowered = stripped.lower()
+    return any(kw in lowered for kw in _GENERIC_ENGLISH_KEYWORDS)
 
 
 def normalize_name_key(name: str) -> str:
@@ -121,8 +175,51 @@ def resolve_canonical(name: str) -> dict[str, Any] | None:
 
 def is_technique_like(name: str) -> bool:
     """True for a method/technique/algorithm name (not a real named entity) that should be
-    rejected rather than stored -- e.g. "image captioning", "RF-DETR vehicle detectors"."""
-    return bool(_TECHNIQUE_LIKE_RE.search(name or ""))
+    rejected rather than stored -- e.g. "image captioning", "RF-DETR vehicle detectors",
+    "vehicle detection" (Q3-13 r4: no longer needs to be spelled out in the literal list),
+    "GenAI image editing", or a lowercase-starting multi-word descriptive phrase with no
+    proper-noun token ("potential suppliers", "transformer-based architectures").
+
+    Checked *after* the watchlist/curated-org/country/system-designation resolution (mirroring
+    :func:`is_generic_non_entity`'s own guard) so a real recognised entity is never rejected on a
+    substring/shape coincidence -- this is what lets "Iron Beam", "Drone Dome", "Sniper ATP",
+    "LITENING" (all real watchlist aliases) survive even though the patterns below are otherwise
+    quite permissive.
+    """
+    if not name or not name.strip():
+        return False
+    if resolve_canonical(name) or resolve_country_name(name) or _is_system_designation(name):
+        return False
+    if _TECHNIQUE_LIKE_RE.search(name):
+        return True
+    if _TECHNIQUE_SUFFIX_RE.search(name):
+        return True
+    if _TECHNIQUE_PREFIX_RE.search(name):
+        return True
+    return _is_lowercase_multiword_junk(name)
+
+
+# Q3-13 r4: publication venues / aggregators / media platforms an LLM sometimes extracts as if
+# they were the *subject* of an item rather than where it was found -- observed live: "arXiv"
+# stored with kind='person' (entity 132). None of these are ever a real person/company/org, and
+# the `entities` table has no separate 'source' kind (VALID_ENTITY_KINDS) to type them under
+# instead, so they are rejected outright by :func:`is_junk_entity` rather than stored under a
+# misleading kind.
+_SOURCE_LIKE_NAMES = frozenset(
+    {"arxiv", "ieee", "spie", "nature", "reddit", "wikipedia", "youtube", "google scholar"}
+)
+
+
+def is_source_like_name(name: str) -> bool:
+    """True when ``name`` denotes a publication venue/aggregator/media platform (:data:`
+    _SOURCE_LIKE_NAMES`) rather than a market participant -- the bare name ("arXiv") or a
+    leading-source-name category tag ("arXiv cs.CV", "IEEE Xplore")."""
+    key = normalize_name_key(name)
+    if not key:
+        return False
+    if key in _SOURCE_LIKE_NAMES:
+        return True
+    return key.split(" ", 1)[0] in _SOURCE_LIKE_NAMES
 
 
 def normalize_kind(name: str, kind: str) -> str:
@@ -507,10 +604,11 @@ def is_generic_non_entity(name: str) -> bool:
 
 
 def is_junk_entity(name: str) -> bool:
-    """The "real entity" gate (Q3-13 r3): true when ``name`` should never be stored as an entity
-    at all -- either a technique/algorithm name (:func:`is_technique_like`) or a generic Hebrew
-    concept/category/market phrase (:func:`is_generic_non_entity`)."""
-    return is_technique_like(name) or is_generic_non_entity(name)
+    """The "real entity" gate (Q3-13 r3, broadened r4): true when ``name`` should never be stored
+    as an entity at all -- a technique/algorithm name (:func:`is_technique_like`), a generic
+    Hebrew concept/category/market phrase (:func:`is_generic_non_entity`), or a publication
+    venue/aggregator name (:func:`is_source_like_name`)."""
+    return is_technique_like(name) or is_generic_non_entity(name) or is_source_like_name(name)
 
 
 def find_watchlist_aliases_in_text(text: str) -> list[str]:

@@ -251,6 +251,62 @@ def _merge_duplicates(entities: list[dict[str, Any]], *, dry_run: bool) -> list[
     return report
 
 
+def _canonical_mention_name(name: str) -> str:
+    """The canonical name ``name`` (an ``items.entities_mentioned`` entry) should be stored under
+    -- same name-resolution precedence as :func:`eoa.pipeline.entity_normalize.
+    canonical_name_and_kind` (system designation -> unchanged; watchlist/curated-org alias ->
+    canonical name; country name (any language) -> canonical English name; else unchanged). No
+    ``kind`` is available for a bare mentioned-name string, so this only ever needs the name half
+    of that resolution."""
+    if _is_system_designation(name):
+        return name
+    canonical = resolve_canonical(name)
+    if canonical:
+        return canonical["name"]
+    country_name = resolve_country_name(name)
+    if country_name:
+        return country_name
+    return name
+
+
+def _fetch_items_with_mentions() -> list[dict[str, Any]]:
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, entities_mentioned FROM items "
+            "WHERE entities_mentioned IS NOT NULL AND entities_mentioned <> '{}'"
+        )
+        return cur.fetchall()
+
+
+def _canonicalize_item_mentions(
+    items: list[dict[str, Any]], *, dry_run: bool
+) -> list[dict[str, Any]]:
+    """Root-cause investigation (2026-09-06, entity 394 "Israel"/"ישראל" mismatch): fix Q3-13 r3
+    (docs/qa/findings_Q3_r2.md's ``eoa.pipeline.classify.persist_classification`` bug) already
+    stops *new* writes from storing a raw alias/Hebrew-country-name in
+    ``items.entities_mentioned`` instead of the canonical name the matching ``entities`` row
+    actually landed under -- this is the one-off backfill over every existing row already written
+    before that fix. Deduplicates the rewritten array (a raw and canonical spelling both already
+    present would otherwise become two identical entries once one is canonicalised). Takes a
+    pre-fetched ``items`` list (see :func:`_fetch_items_with_mentions`), matching every other pass
+    in this script, so the rewrite logic is unit-testable without a DB connection."""
+    report: list[dict[str, Any]] = []
+    for row in items:
+        names = row["entities_mentioned"] or []
+        canonical = list(dict.fromkeys(_canonical_mention_name(n) for n in names))
+        if canonical == names:
+            continue
+        report.append({"id": row["id"], "before": names, "after": canonical})
+        if dry_run:
+            continue
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE items SET entities_mentioned = %(names)s WHERE id = %(id)s",
+                {"names": canonical, "id": row["id"]},
+            )
+    return report
+
+
 def repair(*, dry_run: bool = False) -> dict[str, Any]:
     entities = _fetch_entities()
     before_count = len(entities)
@@ -262,6 +318,7 @@ def repair(*, dry_run: bool = False) -> dict[str, Any]:
     kind_fixed = _fix_kinds(entities, dry_run=dry_run)
     country_backfilled = _backfill_country(entities, dry_run=dry_run)
     merged = _merge_duplicates(entities, dry_run=dry_run)
+    mentions_canonicalized = _canonicalize_item_mentions(_fetch_items_with_mentions(), dry_run=dry_run)
 
     return {
         "before_count": before_count,
@@ -270,6 +327,7 @@ def repair(*, dry_run: bool = False) -> dict[str, Any]:
         "kind_fixed": kind_fixed,
         "country_backfilled": country_backfilled,
         "duplicates_merged": merged,
+        "mentions_canonicalized": mentions_canonicalized,
     }
 
 
@@ -304,6 +362,10 @@ def main() -> None:
         print(
             f"  winner id={g['winner_id']} name={g['winner_name']!r} (renamed_from={g['renamed_from']!r}) <- {g['merged']}"
         )
+
+    print(f"\nmentions_canonicalized (items.entities_mentioned rows rewritten): {len(report['mentions_canonicalized'])}")
+    for r in report["mentions_canonicalized"][:20]:
+        print(f"  item={r['id']} {r['before']} -> {r['after']}")
 
     if not args.dry_run:
         with db.connection() as conn, conn.cursor() as cur:

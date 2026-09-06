@@ -118,7 +118,22 @@ def merge_entity(entity_id: int, name: str, kind: str, country: str | None = Non
     (`COALESCE`), since this now writes directly to `entities` and clobbering a
     real column on every edge write would violate "never invent/never destroy
     provenance" data the row may already carry from `eoa.memory.relational.upsert_entity`.
+
+    Root-cause hardening (docs/qa 2026-09-06 investigation into entity 394's name/kind
+    reverting from canonical "Israel"/"country" back to "ישראל"/"company"): this function does a
+    raw `UPDATE entities SET name = ..., kind = ...` -- it always did, and the only caller today
+    (`eoa.pipeline.analyze.persist_analysis`'s edge writer) already resolves `name`/`kind` through
+    `eoa.pipeline.entity_normalize.canonical_name_and_kind` before calling this, so that call site
+    could not have produced the observed reversion (the DB show no reference to entity 394 left
+    anywhere -- it was cleanly merged away, not corrupted in place; the true write path was never
+    conclusively identified). As defense-in-depth against exactly this class of bug -- *any*
+    future or as-yet-unaudited caller passing a raw, non-canonical name/kind -- this now
+    canonicalises internally too, so `merge_entity` itself can never be the mechanism that renames
+    an already-canonical row back to a raw alias, regardless of what its caller passes in.
     """
+    from eoa.pipeline.entity_normalize import canonical_name_and_kind
+
+    name, kind = canonical_name_and_kind(name, kind)
     query = """
         UPDATE entities
         SET name = %(name)s, kind = %(kind)s, country = COALESCE(%(country)s, country)

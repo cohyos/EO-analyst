@@ -6819,3 +6819,148 @@ Job `patent_scan` (יום שלישי 05:30, `orchestrator/main.py`) — סריק
 קיימים-מראש שאינם קשורים ל-A14 (`test_llm_batch_mode.py`'s cloud-mode batch dict-hash bug,
 `test_prompts.py`'s `ask_answer_format`/`report_daily` template checks — שינויים מקבילים של סוכנים
 אחרים).
+
+## Ask/chat: synthesized-answer format + Markdown rendering (U11, 2026-09-06 bug report)
+
+**התקלה:** צילום מסך של המשתמש הראה תשובת צ'אט מוצגת כטקסט Markdown גולמי ("### **מקור
+1** — Globes: …", "**הערת איכות:**", "> …" — סימני `###`/`**`/`>` נראים כתווים ממש, כיוון
+bidi שבור), והתוכן עצמו היה פירוק הערכה-לכל-מקור-בנפרד ("לא רלוונטי לשאלה", "ציטוט
+מדויק", "הערת איכות") במקום תשובת אנליסט מסונתזת אחת.
+
+**פורמט התשובה (`agent/eoa/llm/prompts/ask_answer_format.md`, מוצמד לפרומפט המערכת
+דרך `eoa.api.services.ask_build_messages`):** תשובה ישירה (2–6 משפטים, בלי כותרת) ←
+`### עובדות מרכזיות` (רשימת תבליטים, כל עובדה עם [n]) ← `### הערכת האנליסט` (פרוזה, בלי
+חובת ציטוט) ← `### פערים / מה לא ידוע`. אסור במפורש: פירוק מקור-אחר-מקור, "הערת
+איכות:"/"ציטוט מדויק:", ציטוט פסקאות שלמות, משפט תלוי. אחרי כל הסעיפים, המודל יכול
+(אופציונלי) לתעד הערת-רלוונטיות קצרה לכל מקור בשורה נפרדת אחרי הסנטינל המדויק
+`===SOURCES_JSON===` ואז בלוק `{"source_notes": [{"n": ..., "note": "..."}]}` יחיד — זה
+**אף פעם** לא חלק מהתשובה למשתמש. שימו לב: התבנית מכילה `{{`/`}}` (בריחה כפולה) סביב
+דוגמת ה-JSON כדי ש-`prompts.render()` (המבוסס על `str.format`) יצמצם אותם ל-`{`/`}`
+בודדים בפלט הסופי — קריאה עם `prompts.load()` הגולמי הייתה משאירה אותם כפולים בפרומפט
+בפועל; `ask_build_messages` משתמש ב-`render()`, לא ב-`load()`, בדיוק בשביל זה
+(`tests/unit/test_prompts.py`'s הגנרי `test_template_renders_without_unresolved_placeholders`
+מכסה כל קובץ תבנית חדש אוטומטית, כולל את זה).
+
+**SSE (`agent/eoa/api/routes/ask.py`):** ה-generator סורק את הזרם בזמן אמת ומחפש את
+הסנטינל `===SOURCES_JSON===` (עם חוצץ-אבטחה של `len(sentinel)-1` תווים כדי לתפוס אותו גם
+כשהוא מתחלק בין שני chunks עוקבים) — טקסט לפני הסנטינל ממשיך לזרום כרגיל כאירועי
+`token`; מהסנטינל ואילך שום דבר לא מגיע ללקוח כטקסט. `_parse_source_notes` (regex +
+`json.loads`, סלחני לחלוטין לפורמט שגוי — מעולם לא מפיל את התשובה עצמה) הופך את הבלוק
+ל-`{n: note}`, וממוזג לתוך אירוע `sources` יחיד שנשלח תמיד (גם כשהמודל לא הפיק סנטינל
+בכלל) — `citations` (מ-`ask_build_messages`) מועשר עכשיו גם ב-`level`/`source_name` (JOIN
+חדש ל-`sources` בכל שאילתות `_ASK_ITEM_FIELDS`/`_ASK_ITEM_JOIN`) כדי שפס "מקורות" בממשק
+לא יזדקק לסיבוב-רשת נוסף.
+
+**Frontend (`web/src/lib/askMarkdown.ts`, `web/src/components/ask/AskAnswer.tsx`,
+`AskSourcesFooter.tsx`):** `marked` (Markdown → HTML) + `DOMPurify` (סניטציה, פעמיים —
+לפני ואחרי עיבוד ה-DOM, כי ציטוטים/כותרות מקור זורמים ל-`title`/`href` שאינם מהאלוקליסט
+הקבוע של המודול) → `[n]` הופך ל-`.eo-citation` (אותה מוסכמת `data-item-id`/`data-url` כמו
+`web/src/lib/reportHtml.ts`, אותה תבנית טיפול-קליקים כמו `ReportBody`) → `dir="auto"` על
+כל אלמנט בלוק → עטיפת ריצות לטיניות/URL-ים ב-`<bdi>` (טרי-ווקר על טקסט-נודים, מדלג על
+`code`/`pre`/`.eo-citation`) → סגנון Tailwind לכותרות/רשימות/blockquote/code/table →
+עטיפת `<table>` ב-`overflow-x-auto`. `ChatThread.tsx` עבר מ-`CitationText` (טקסט רגיל +
+regex `[n]`) ל-`AskAnswer` (Markdown מלא) עבור הודעות assistant; ה"מקורות" התחתון עבר
+מרשימת קישורים שטוחה ל-`AskSourcesFooter` (שבב ניתן-להרחבה עם `LevelBadge` + הערת
+רלוונטיות, דה-דופ לפי `item_id` על פני כל השרשור כי `n` ייחודי רק בתוך הודעה בודדת).
+`useAskChat.ts`'s `ChatMessage` קיבל שדה `sources` (בנוסף ל-`citations` הקיים) שמתמלא
+מאירוע ה-SSE `sources`.
+
+### Tests
+
+`web/src/lib/askMarkdown.test.ts` (10 מקרים: כותרות/הדגשה/רשימות מעובדות, שבבי ציטוט,
+ציטוט לא-פתיר נשאר טקסט, `dir=auto`, בידוד `<bdi>` למונח אנגלי ול-URL, טבלה עם גלילה
+אופקית, `<script>`/`onerror` מוסרים, `javascript:` מוסר גם מ-`data-url`, בלי בידוד `<bdi>`
+בתוך code block), `web/src/components/ask/AskAnswer.test.tsx` (3 מקרים: רינדור אמיתי בלי
+`###`/`**` גולמיים, ניווט בלחיצה על ציטוט פתיר, מבנה 4 הכותרות), `AskSourcesFooter.test.tsx`
+(3 מקרים: ריק כשאין מקורות, כותרת+תג רמה+שם מקור, הרחבה/כיווץ הערת רלוונטיות) — כולם
+ירוקים; `npm run lint`/`build`/`tsc -b --noEmit` נקיים; מלוא סוויטת ה-vitest (162 → 178
+מקרים) ירוקה. Backend: `tests/unit/test_ask_retrieval.py` עודכן (JOIN חדש ל-`sources`
+דרש עדכון שני מוקי `_fetchone` שהתאימו לתבנית ה-SQL הישנה, ונוספו 2 מקרים ל-level/
+source_name בציטוטים ולניסוח הפרומפט החדש), `tests/unit/test_ask_sse_sources.py` (חדש, 10
+מקרים: `_parse_source_notes` על קלט תקין/עם רעש/פגום/ריק/עם ערכים חסרים, וזרימת SSE
+מקצה-לקצה כולל סנטינל מפוצל בין chunks, ומודל שלא מפיק סנטינל בכלל) — כולם ירוקים;
+`tests/unit/test_prompts.py` ירוק (הגנרי מכסה את `ask_answer_format.md` אוטומטית).
+`pytest tests/unit` המלא ירוק פרט לאותם 2 כשלים קיימים-מראש שאינם קשורים (ר' לעיל).
+
+הרצה חיה (uvicorn חד-פעמי על 8767, ללא הפרעה לתהליך שחי על 8765/8766): שתי שאלות אמיתיות
+מול DictaLM 3 12B מקומי (Ollama) — "מה זה XM30?" עם פריט 257 מצורף להקשר, ו"מה ההשלכות
+של הצטיידות יוון בטילי LORA על התעשייה הישראלית?" — ר' דוח המשימה לטקסט התשובות
+המלא ואימות שאין `###`/`**` גולמיים ב-DOM המוצג.
+
+## דוח יומי — משמעת ציטוט מובנית (goal 1, 2026-09-06)
+
+**רקע**: הדוח מ-06:27 הציג באנר אזהרה קבוע, משפט תקציר-מנהלים ללא הפניה, משפט שהועתק כלשונו
+מגוף סעיף, ופריט "AI market" גנרי שדלף פנימה. הפתרון: העברת סכמת הדוח היומי ממחרוזת פרוזה חופשית
+(שבה המודל היה אמור לכתוב "[n]" בעצמו) למבנה משפט-לכל-טענה, כך שציטוט חסר הוא שגיאת ולידציה של
+pydantic ולא ממצא QA בדיעבד.
+
+### סכמה (`agent/eoa/llm/schemas/analysis.py`)
+
+`Sentence` (`text_he` + `cites: list[int]`, `min_length=1` על `cites`, ולידטור שדוחה "[n]" מוטבע
+ב-`text_he` עצמו) הוא אבן הבניין. `StructuredSection` (`title_he`/`domain`/`sentences: list[Sentence]`)
+מחליף את `prose_he` החופשי **רק** עבור `DailyReportDraft` — `ReportSection` המקורי (עם `prose_he`)
+נשאר ללא שינוי ועדיין משרת את `WeeklyReportDraft`/`MonthlyReportDraft`/`BdTerritoryReportDraft`/
+`trend_paragraphs`, כדי לא להרחיב את טווח הפגיעה מעבר לדוח היומי. `AnalystNote` (`sentences_he`,
+עד 3 משפטים, ללא "[n]") הוא **המקום היחיד** בדוח שמותר בו משפט ללא מקור — "הערכת האנליסט",
+מוצג נפרד ומודגש (איטליק) מהתוכן המצוטט. `OutlookIndicator` (`text_he`/`cites`/`is_assessment`)
+מייצג אינדיקטור בודד ב"מבט קדימה" (goal 4): מצוטט (cites לא ריק) **או** הערכת אנליסט מפורשת
+(`is_assessment=True` + חובה לפתוח ב"להערכתנו"/"נראה ש"/"ייתכן"), אף פעם לא שניהם-לא. שדה חדש,
+`system_note_he`, מיועד להודעות מערכת דטרמיניסטיות (לא מהמודל) — "אין ממצאים", "תוכן בטבלאות בלבד",
+או הודעת הכשל הכפול (ראו למטה) — נבדל מ-`analyst_note_he` שהוא פלט מודל.
+
+### QA (`agent/eoa/report/qa_citations.py`)
+
+`check()` מבדיל בין הצורה החדשה (`_is_structured_draft`, לפי `hasattr(draft, "exec_summary")`) לצורה
+הישנה (`exec_summary_he`/`prose_he`, עדיין בשימוש שבועי/חודשי/BD). בצורה החדשה אין עוד "משפט ללא
+ציטוט" לבדוק (הסכמה כבר אוכפת זאת) — `check()` מוודא רק שכל `cites` מצביע על מספר פריט תקף (טווח
+שנקבע רק בזמן ריצה, ולכן לא יכול לחיות בתוך הסכמה עצמה), וכלל F5 (משפט תקציר שמועתק כלשונו מסעיף).
+
+### רינדור (`agent/eoa/report/docx_builder.py`)
+
+פונקציות עזר duck-typed (`_render_sentence`/`_section_prose`/`_draft_exec_summary_text`/
+`_draft_outlook_text`/`_draft_analyst_note_text`/`_draft_system_note_text`) מטפלות בשתי הצורות
+(מבנית/ישנה) בכל אחד משלושת המרנדרים (docx/md/html) — המודל אף פעם לא כותב "[n]" בעצמו; ה-renderer
+הוא שמייצר את הסימון מ-`cites` באופן דטרמיניסטי. באנר האזהרה האדום המודגש הוסר **רק** עבור הדוח
+היומי (המבני) — `_is_legacy_prose_draft` שומר עליו כפי שהיה עבור שבועי/חודשי/BD, שעדיין מתנוונים
+על ידי גזירת משפטים חלקית. כשל QA כפול (טיוטה ראשונה + תיקון אחד) בדוח היומי **לא** גוזר משפטים
+חלקיים יותר — `daily._qa_failed_twice_draft()` מחליף את כל התוכן הנרטיבי בטבלאות הדטרמיניסטיות
+(אירועים/מכרזים/מעקב טכנולוגי) + הערת מערכת חד-שורתית ב-`system_note_he`.
+
+### פרומפט (`agent/eoa/llm/prompts/report_daily.md`)
+
+נכתב מחדש לתיאור הסכמה המבנית (JSON עם `cites`, איסור מוחלט על "[n]" בטקסט) ותוספת "רובריקת ניתוח
+אנליסט" (goal 4): כל סעיף תחום נדרש למשפט נוסף (עם ציטוט) שעונה על "משמעות לשוק ה-EO/IR/CV",
+"משמעות למתחרים" (הציר השלישי, "משמעות לתעשייה הישראלית", מסומן `<!-- ISRAEL_SECTION -->` להשלמת
+סוכן IL1 הנפרד). `report_weekly.md` קיבל תוספת קלה יותר (ללא שינוי סכמה): אותה רובריקה, ודרישת
+"מבט קדימה" ל-2–3 אינדיקטורים קונקרטיים, כל אחד מצוטט [n] או פותח במילת הערכה מפורשת.
+
+### שער סיווג — שוק AI/היי-טק גנרי (goal 3, `agent/eoa/pipeline/classify.py`)
+
+`apply_generic_ai_market_gate` (מופעל אחרי `apply_no_eoir_gate` הקיים, בשני נתיבי `run_classify`)
+מוריד ל-`out_of_scope` פריט שיש בו **גם** אוצר מילים גנרי של AI/היי-טק (`_has_generic_ai_tech_market_vocabulary`)
+**וגם** מסגור מפורש של שוק עבודה/תעסוקה (`_has_ai_market_labor_signal`) — ורק אם אין בפריט אף מונח
+EO/IR/CV אמיתי (`_has_eoir_vocabulary`). כיול נגד הרצה חיה על ה-DB: דרישת אחד מהשניים בלבד גרמה
+ל-false positives על כתבות טכנולוגיה ביטחונית אמיתיות (XTEND, Smack Technologies) שמתארות מוצר
+במונחי AI/רובוטיקה בלי לפגוע במילון ה-EO/IR המתויג; "workforce" הוצא בכוונה מרשימת האיתות של שוק
+העבודה כי הוא פגע ב"autonomous robotic workforce" (סיפור רחפנים אמיתי). `scripts/repair_classification_guards.py`
+הורחב עם מעבר תואם (`should_gate_generic_ai_market`) שמריץ את השער על שורות קיימות ב-DB.
+
+### תיקון קטיעת עברית — false positive על ראשי-תיבות שלמים (goal 5, `agent/eoa/llm/ollama_client.py`)
+
+`_looks_truncated_mid_hebrew_acronym` היה מסמן ראש-תיבות **שלם** (גזע+גרש/גרשיים+אות/יות סיום,
+למשל "...בצה\"ל") כקטוע, כי אין סימן פיסוק מיד אחרי ראש-תיבות בסוף משפט — נוסף `_COMPLETE_ACRONYM_END_RE`
+שמזהה ומחריג תבנית זו לפני הרשת הגנרית. גם נוסף "מכ" (מכ"ם, רדאר) לרשימת הגזעים הידועים, אחרי
+ששתי שורות אמיתיות (items 58/155) נמצאו קטועות בדיוק בגזע הזה. שלוש השורות שנותרו מסומנות אחרי
+r3 (items 58/155/614) תוקנו בפועל (`scripts/repair_truncated_hebrew.py`, ריצה חיה) — 0 שורות
+מסומנות בהרצה חוזרת.
+
+### Tests
+
+`tests/unit/test_report_schema.py` (חדש, 24 מקרים) — הוולידטורים של הסכמה המבנית.
+`tests/unit/test_report_qa.py`, `test_report_daily.py`, `test_docx_builder.py`, `test_classify_guards.py`,
+`test_hebrew_truncation_guard.py`, `test_prompts.py` עודכנו/הורחבו לצורה החדשה + רגרסיות (item
+4679 "אילו מקצועות...", item 117 מסוג ישן, XTEND/Smack כ-false-positive guards). כל הקבצים
+הנוגעים ירוקים (ruff check + format נקיים) חוץ מבדיקות `build_weekly`/`build_monthly`/`build_bd`/
+`build_territory` הקיימות-מראש, שאינן ממוקדות ב-DB חי אלא קוראות בפועל ל-`eoa.pipeline.tech_watch`
+ללא mock — נתלות בפועל בזמינות ה-GPU/Ollama החי (עומס אמיתי של המשתמש חסם אותן בזמן הריצה), לא
+קשור לשינויים כאן.
