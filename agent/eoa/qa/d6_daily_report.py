@@ -53,6 +53,255 @@ _SECTION_ANCHORS = {
     "tech": ("טכנולוג",),
 }
 
+# ---------------------------------------------------------------------------------------------
+# Round 5 (2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 1/3/4/5/12): the twelve
+# implementation items are landing in *other* engineers' file scopes this same evening (schemas,
+# prompts, docx_builder/daily.py/weekly.py rendering) -- these checks are the deterministic,
+# read-only-of-the-rendered-markdown QA gates for that work, written against the exact evidence
+# strings/headings docs/REPORT_TEMPLATE_BENCHMARK.md sec 2 cites from the live 2026-09-06 reports.
+# Every check below is tolerant of the feature not existing yet in an older report file (that must
+# read as a normal FAIL via ``passed=False``, never an exception) -- most are expected to fail on
+# today's already-rendered files until the parallel work lands.
+# ---------------------------------------------------------------------------------------------
+
+_BLUF_HEADING_HE = "שורה תחתונה"
+_MAX_BLUF_SENTENCES = 2
+_MAX_BLUF_WORDS = 40
+_WHAT_CHANGED_KEYWORD_HE = "השתנה"
+_INDICATOR_WATCHLIST_HEADING_HE = "מעקב אינדיקטורים"
+_INDICATOR_STATUS_WORDS_HE = ("חדש", "פתוח", "הבשיל", "בוטל")
+_ISRAEL_HEADING_KEYWORD_HE = "תעשייה ישראלית"
+_ISRAEL_TYPE_COLUMN_HE = "סוג"
+_OUTLOOK_HEADING_HE = "מבט קדימה"
+_LIKELIHOOD_WORD_HE = "סבירות"
+_CONFIDENCE_WORD_HE = "ביטחון"
+_CLAUSE_SPLIT_RE = re.compile(r"[.,;]")
+_H2_ONLY_RE = re.compile(r"(?m)^##(?!#)\s+\S")
+
+try:  # pragma: no cover -- exercised indirectly; import guarded per the task brief ("if it exists")
+    from eoa.report.style import BANNED_FILLER_PHRASES_HE as _FILLER_PHRASES_HE
+except ImportError:  # pragma: no cover -- defensive only, style.py exists in this repo today
+    _FILLER_PHRASES_HE = ("יש לציין", "חשוב להדגיש", "בהקשר זה", "ראוי לציין")
+
+_BARE_CITATION_RE = re.compile(r"\[(\d+)\]")
+
+
+def _first_table_header_cells(body: str) -> list[str]:
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip().startswith("|")]
+    if not lines:
+        return []
+    return [c.strip() for c in lines[0].strip("|").split("|")]
+
+
+def _bluf_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 4/1: a ``שורה תחתונה`` heading, before the exec summary, 1-2 short cited sentences."""
+    bluf_idx = exec_idx = None
+    bluf_body = ""
+    for i, (h, body) in enumerate(sections):
+        if _BLUF_HEADING_HE in h and bluf_idx is None:
+            bluf_idx, bluf_body = i, body
+        if _EXEC_SUMMARY_HEADING in h and exec_idx is None:
+            exec_idx = i
+    if bluf_idx is None:
+        return Check(
+            "bluf_present_and_short", False, weight=2.0, evidence=f"no '{_BLUF_HEADING_HE}' heading found"
+        )
+    sentences = split_sentences(bluf_body)
+    word_count = len(bluf_body.split())
+    cited = bool(sentences) and all(citations_in(s) for s in sentences)
+    before_summary = exec_idx is None or bluf_idx < exec_idx
+    ok = (
+        0 < len(sentences) <= _MAX_BLUF_SENTENCES
+        and word_count <= _MAX_BLUF_WORDS
+        and cited
+        and before_summary
+    )
+    return Check(
+        "bluf_present_and_short",
+        ok,
+        weight=2.0,
+        evidence=(
+            f"{len(sentences)} sentence(s), {word_count} words, cited={cited}, "
+            f"before_exec_summary={before_summary}"
+        ),
+    )
+
+
+def _what_changed_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 3: a "מה השתנה מאז הדוח הקודם" section right after the executive summary."""
+    hits = [h for h, _b in sections if _WHAT_CHANGED_KEYWORD_HE in h]
+    return Check(
+        "what_changed_section_present",
+        len(hits) > 0,
+        weight=1.5,
+        evidence=f"headings matching '{_WHAT_CHANGED_KEYWORD_HE}': {hits}",
+    )
+
+
+def _indicator_watchlist_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 6: a "מעקב אינדיקטורים" table with statuses חדש/פתוח/הבשיל/בוטל."""
+    for h, body in sections:
+        if _INDICATOR_WATCHLIST_HEADING_HE in h:
+            hits = [w for w in _INDICATOR_STATUS_WORDS_HE if w in body]
+            return Check(
+                "indicator_watchlist_table_present",
+                len(hits) > 0,
+                weight=1.5,
+                evidence=f"status words found: {hits}"
+                if hits
+                else "heading found but no status word in body",
+            )
+    return Check(
+        "indicator_watchlist_table_present",
+        False,
+        weight=1.5,
+        evidence=f"no '{_INDICATOR_WATCHLIST_HEADING_HE}' heading found",
+    )
+
+
+def _israel_single_table_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 5: the Israeli-industry tables merged into ONE table with a "סוג" column."""
+    matches = [(h, body) for h, body in sections if _ISRAEL_HEADING_KEYWORD_HE in h]
+    if not matches:
+        return Check(
+            "israel_single_table_with_type_column", False, weight=1.5, evidence="no israel heading found"
+        )
+    if len(matches) > 1:
+        return Check(
+            "israel_single_table_with_type_column",
+            False,
+            weight=1.5,
+            evidence=f"{len(matches)} separate israel headings found (should be merged into one): "
+            f"{[h for h, _ in matches]}",
+        )
+    header_cells = _first_table_header_cells(matches[0][1])
+    has_type_col = _ISRAEL_TYPE_COLUMN_HE in header_cells
+    return Check(
+        "israel_single_table_with_type_column",
+        has_type_col,
+        weight=1.5,
+        evidence=f"single israel heading found; header cells: {header_cells}",
+    )
+
+
+def _outlook_likelihood_confidence_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 2: OutlookIndicator carries likelihood AND confidence, never mixed in one clause."""
+    body = ""
+    for h, b in sections:
+        if _OUTLOOK_HEADING_HE in h:
+            body = b
+            break
+    if not body.strip():
+        return Check(
+            "outlook_likelihood_and_confidence_separated",
+            False,
+            weight=1.5,
+            evidence=f"no '{_OUTLOOK_HEADING_HE}' section found",
+        )
+    items = [ln.strip("-* ").strip() for ln in body.splitlines() if ln.strip().startswith(("-", "*"))]
+    if not items:
+        items = [body]
+    bad: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        has_likelihood = _LIKELIHOOD_WORD_HE in item
+        has_confidence = _CONFIDENCE_WORD_HE in item
+        mixed = any(
+            _LIKELIHOOD_WORD_HE in clause and _CONFIDENCE_WORD_HE in clause
+            for clause in _CLAUSE_SPLIT_RE.split(item)
+        )
+        if not (has_likelihood and has_confidence) or mixed:
+            bad.append(item[:80])
+    return Check(
+        "outlook_likelihood_and_confidence_separated",
+        len(bad) == 0,
+        weight=1.5,
+        evidence=f"{len(bad)}/{len(items)} indicator(s) missing a separated marker or mixing them: {bad[:5]}",
+    )
+
+
+def _no_filler_check(sections: list[tuple[str, str]]) -> Check:
+    """W26 backstop: no banned analyst-filler phrase left in the exec summary."""
+    exec_text = _exec_summary_text(sections)
+    hits = [p for p in _FILLER_PHRASES_HE if p in exec_text]
+    return Check(
+        "exec_summary_no_filler_phrases",
+        len(hits) == 0,
+        weight=1.0,
+        evidence=f"filler phrases found in exec summary: {hits}",
+    )
+
+
+def _extract_tables(md_text: str) -> list[list[str]]:
+    tables: list[list[str]] = []
+    current: list[str] = []
+    for line in md_text.splitlines():
+        s = line.strip()
+        if s.startswith("|") and s.endswith("|"):
+            current.append(s)
+        else:
+            if len(current) >= 2:
+                tables.append(current)
+            current = []
+    if len(current) >= 2:
+        tables.append(current)
+    return tables
+
+
+def _no_row_repeated_across_tables_check(md_text: str) -> Check:
+    """No two rows in *different* tables share the exact same ``[n]`` citation set -- a sign the
+    same underlying fact/event was duplicated into two separate tables instead of appearing once."""
+    tables = _extract_tables(md_text)
+    seen: dict[frozenset[int], tuple[int, str]] = {}
+    dups: list[str] = []
+    for ti, table in enumerate(tables):
+        if len(table) < 3:
+            continue
+        for row in table[2:]:
+            ns = frozenset(int(n) for n in _BARE_CITATION_RE.findall(row))
+            if not ns:
+                continue
+            prior = seen.get(ns)
+            if prior is not None and prior[0] != ti:
+                dups.append(f"{prior[1][:60]!r} == {row[:60]!r}")
+            else:
+                seen.setdefault(ns, (ti, row))
+    return Check(
+        "no_row_repeated_across_tables",
+        len(dups) == 0,
+        weight=1.0,
+        evidence=f"{len(dups)} cross-table duplicate row(s) sharing a citation set: {dups[:5]}",
+    )
+
+
+def _heading_budget_check(md_path: Path, md_text: str) -> Check:
+    """Item: weekly ≤ 16 ``##`` headings (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.2: "~14" target
+    down from 24); a daily report gets a tighter budget (12) since it's meant to read in ~10 min."""
+    is_weekly = md_path.name.startswith("weekly")
+    budget = 16 if is_weekly else 12
+    count = len(_H2_ONLY_RE.findall(md_text))
+    return Check(
+        "heading_count_within_budget",
+        count <= budget,
+        weight=1.0,
+        evidence=f"{count} H2 headings (budget: {budget}, kind: {'weekly' if is_weekly else 'daily'})",
+    )
+
+
+def _monthly_structured_check(monthly_path: Path) -> Check:
+    """Item M1: the monthly report adopts the same ``Sentence{text_he, cites}`` structured-citation
+    rendering as daily/weekly/BD -- rendered citations are ``[n](#src-n)`` links, never a bare
+    ``[n]`` left over from the legacy free-prose path."""
+    text = monthly_path.read_text(encoding="utf-8")
+    bad = [m.group(1) for m in _BARE_CITATION_RE.finditer(text) if text[m.end() : m.end() + 1] != "("]
+    return Check(
+        "monthly_is_structured",
+        len(bad) == 0,
+        weight=1.0,
+        evidence=f"{len(bad)} bare (non-link) [n] citation(s) found: {bad[:10]}",
+    )
+
 
 def _sections(md_text: str) -> list[tuple[str, str]]:
     """``[(heading_text, body_until_next_heading)]`` for every ``##``/``###`` heading."""
@@ -96,11 +345,18 @@ def _orphan_citations(text: str, appendix_ns: set[int]) -> list[int]:
     return sorted(cited - appendix_ns)
 
 
-def score_D6(md_path: Path | None, *, run_link_check: bool = True) -> DomainScore:  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md naming
+def score_D6(  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md naming
+    md_path: Path | None, *, run_link_check: bool = True, monthly_path: Path | None = None
+) -> DomainScore:
     """D6: deterministic checks over one rendered daily/weekly report Markdown file.
 
     ``md_path=None`` (no report file found on disk for the round) yields a "manual only" result
     rather than a misleading 0.
+
+    ``monthly_path`` (round 5, optional): the latest monthly report, if one exists this round --
+    checked only for ``monthly_is_structured`` (see :func:`_monthly_structured_check`), a concern
+    independent of the daily/weekly file above. Omitted from the check list entirely (not scored as
+    a fail) when no monthly report has been produced this round -- there's nothing to critique yet.
     """
     if md_path is None or not md_path.exists():
         return DomainScore(domain="D6", score_0_100=None, checks=[], n=0, note="no report file found")
@@ -167,7 +423,20 @@ def score_D6(md_path: Path | None, *, run_link_check: bool = True) -> DomainScor
             weight=1.5,
             evidence=f"present: {[k for k, v in anchors_present.items() if v]}; missing: {[k for k, v in anchors_present.items() if not v]}",
         ),
+        # Round 5 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 1-5, 12): see this module's own
+        # "Round 5" section above for what each check verifies and why it's expected to fail on an
+        # older report that predates the parallel implementation work.
+        _bluf_check(sections),
+        _what_changed_check(sections),
+        _indicator_watchlist_check(sections),
+        _israel_single_table_check(sections),
+        _outlook_likelihood_confidence_check(sections),
+        _no_filler_check(sections),
+        _no_row_repeated_across_tables_check(text),
+        _heading_budget_check(md_path, text),
     ]
+    if monthly_path is not None and monthly_path.exists():
+        checks.append(_monthly_structured_check(monthly_path))
 
     n = len(all_sentences)
     if run_link_check:

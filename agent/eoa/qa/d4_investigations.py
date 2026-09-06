@@ -15,6 +15,8 @@ earlier version of this file used.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 from eoa.qa.types import Check, DomainScore, weighted_score
@@ -25,6 +27,91 @@ from eoa.search.deep_search import (
     UNVERIFIED_PREFIX_HE,
     extract_anchors,
 )
+
+# ---------------------------------------------------------------------------------------------
+# Round 5 (2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md sec 2.6 "DS3" / sec 4 item 7): the
+# "blocked" outcome distinct from "not_found" is landing in other engineers' file scopes
+# (``eoa.search.deep_search``'s result schema, the report renderer) this same evening. These two
+# checks are the deterministic, read-only-of-the-rendered-report QA gates for that work -- they
+# read the "חקירות עומק" bullet list in the already-rendered daily/weekly Markdown (the exact
+# ``- **<question>** — <outcome_label>: <answer>`` shape ``eoa.report.daily``/``weekly`` emit),
+# never the DB directly, since the actual regression this catches (docs/REPORT_TEMPLATE_BENCHMARK.md
+# evidence: "לא נמצא: התשובה נחסמה בבדיקת אבטחה...") is in what gets *rendered*, not the job row.
+# Optional (``report_path=None`` skips both, added to the check list only when the file and its
+# investigations section actually exist) -- there is nothing to audit when no report was produced.
+# ---------------------------------------------------------------------------------------------
+
+_HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)$", re.MULTILINE)
+_INVESTIGATIONS_HEADING_HE = "חקירות עומק"
+_ENTRY_RE = re.compile(r"^-\s+\*\*(.+?)\*\*\s+—\s+([^:]+):\s*(.*)$", re.MULTILINE)
+_NOT_FOUND_LABEL_HE = "לא נמצא"
+_BLOCKED_SIGNAL_WORDS_HE = ("נחסם", "הוסתרה", "בדיקת אבטחה")
+
+
+def _sections(md_text: str) -> list[tuple[str, str]]:
+    matches = list(_HEADING_RE.finditer(md_text))
+    out: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(md_text)
+        out.append((m.group(2).strip(), md_text[start:end].strip()))
+    return out
+
+
+def _investigation_entries(report_text: str) -> list[tuple[str, str, str]]:
+    """``[(question, outcome_label_he, rest_of_line)]`` for every rendered investigation bullet in
+    the "חקירות עומק" section -- returns ``[]`` when the report has no such section (never raises)."""
+    body = ""
+    for h, b in _sections(report_text):
+        if _INVESTIGATIONS_HEADING_HE in h:
+            body = b
+            break
+    if not body:
+        return []
+    return [(m.group(1), m.group(2).strip(), m.group(3)) for m in _ENTRY_RE.finditer(body)]
+
+
+def _blocked_distinct_from_not_found_check(entries: list[tuple[str, str, str]]) -> Check:
+    """A rendered entry labeled "לא נמצא" (not_found) whose own text betrays a security-gate
+    block (docs/REPORT_TEMPLATE_BENCHMARK.md DS3 evidence: "לא נמצא: התשובה נחסמה בבדיקת
+    אבטחה...") is indistinguishable from a genuine "searched thoroughly, nothing there" result --
+    it should read as blocked, not not-found."""
+    bad = [
+        q[:60]
+        for q, label, rest in entries
+        if _NOT_FOUND_LABEL_HE in label and any(w in rest for w in _BLOCKED_SIGNAL_WORDS_HE)
+    ]
+    return Check(
+        "blocked_distinct_from_not_found",
+        len(bad) == 0,
+        weight=1.5,
+        evidence=f"{len(bad)} entr(y/ies) rendered 'לא נמצא' despite a security-block marker: {bad}",
+    )
+
+
+def _normalize_question(q: str) -> str:
+    return re.sub(r"\s+", " ", q).strip().casefold()
+
+
+def _no_contradictory_reruns_check(entries: list[tuple[str, str, str]]) -> Check:
+    """One entry per normalised question in the rendered investigations section -- a question
+    logged twice (a rerun) risks showing two different/contradictory outcomes side by side."""
+    seen: set[str] = set()
+    dups: list[str] = []
+    for q, _label, _rest in entries:
+        norm = _normalize_question(q)
+        if not norm:
+            continue
+        if norm in seen:
+            dups.append(q[:60])
+        else:
+            seen.add(norm)
+    return Check(
+        "no_contradictory_reruns_in_report",
+        len(dups) == 0,
+        weight=1.0,
+        evidence=f"{len(dups)} question(s) logged more than once in the report: {dups}",
+    )
 
 
 def _fetch_jobs(conn: Any, job_ids: list[int]) -> list[dict[str, Any]]:
@@ -60,13 +147,43 @@ def _query_grounded(query: str, anchors: list[str]) -> bool:
     return any(a.casefold() in low for a in anchors)
 
 
-def score_D4(job_ids: list[int], conn: Any) -> DomainScore:  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md naming
+def score_D4(job_ids: list[int], conn: Any, *, report_path: Path | None = None) -> DomainScore:  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md naming
     """D4: deep-search investigation checks over ``job_ids`` (``jobs.id`` for ``kind='deep_search'``
-    rows, typically ``state='done'``). ``conn`` is required."""
+    rows, typically ``state='done'``). ``conn`` is required.
+
+    ``report_path`` (round 5, optional): the latest daily/weekly report Markdown, if one exists
+    this round -- feeds the two report-rendering checks (:func:`_blocked_distinct_from_not_found_check`,
+    :func:`_no_contradictory_reruns_check`). Omitted from the check list when no report file (or no
+    "חקירות עומק" section within it) is available -- nothing to audit yet.
+    """
     jobs = _fetch_jobs(conn, job_ids)
     n = len(jobs)
-    if n == 0:
+
+    # Round 5: the two report-rendering checks are independent of whether any deep-search job was
+    # sampled this round (they read the already-rendered report file, not the DB) -- computed
+    # before the "no jobs" short-circuit below so a round with zero sampled jobs but a real report
+    # still gets scored on them, instead of the whole domain silently going "manual only".
+    report_checks: list[Check] = []
+    report_entries_n = 0
+    if report_path is not None and report_path.exists():
+        entries = _investigation_entries(report_path.read_text(encoding="utf-8"))
+        if entries:
+            report_checks = [
+                _blocked_distinct_from_not_found_check(entries),
+                _no_contradictory_reruns_check(entries),
+            ]
+            report_entries_n = len(entries)
+
+    if n == 0 and not report_checks:
         return DomainScore(domain="D4", score_0_100=None, checks=[], n=0, note="no investigation jobs in scope")
+    if n == 0:
+        return DomainScore(
+            domain="D4",
+            score_0_100=weighted_score(report_checks),
+            checks=report_checks,
+            n=report_entries_n,
+            note="no investigation jobs in scope this round -- report-rendering checks only",
+        )
 
     queries_by_job = _fetch_queries(conn, job_ids)
 
@@ -169,4 +286,8 @@ def score_D4(job_ids: list[int], conn: Any) -> DomainScore:  # noqa: N802 -- sco
             evidence=f"job ids with at least one unanchored logged query: {anchor_bad[:10]}",
         ),
     ]
-    return DomainScore(domain="D4", score_0_100=weighted_score(checks), checks=checks, n=n)
+    # Round 5: append the report-rendering checks computed above (present whenever a report file
+    # with a "חקירות עומק" section was found) rather than discarding them now that jobs also exist
+    # in scope this round -- see the report_checks computation earlier in this function.
+    checks.extend(report_checks)
+    return DomainScore(domain="D4", score_0_100=weighted_score(checks), checks=checks, n=n + report_entries_n)

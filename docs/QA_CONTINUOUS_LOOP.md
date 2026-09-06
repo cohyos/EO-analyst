@@ -39,3 +39,88 @@
 
 ## 5. ארטיפקטים
 `docs/qa/loop/SCORES.md` (מגמה), `round_N_auto.json`, `round_N_judge.md`, `round_N_fixes.md` (מה תוקן ולמה), `golden_items.json`, `golden_questions.json`.
+
+## 6. סבב 5 בדיקות (2026-09-06)
+
+נכתב מול `docs/REPORT_TEMPLATE_BENCHMARK.md` סעיף 4 (12 סעיפי היישום), שנחתו בו-זמנית באחריות קבצים
+של מהנדסים אחרים (סכמות/פרומפטים/`docx_builder.py`/`daily.py`/`weekly.py`/`bd_territory.py`/
+`survey.py`). כל בדיקה חדשה **סובלנית** לכך שהתכונה עדיין לא קיימת בדוח ישן -- `passed=False`
+רגיל, לעולם לא חריגה (exception) -- ולכן רוב הבדיקות החדשות **צפויות להיכשל** על דוח שקדם לעבודה
+המקבילה, עד שזו תיחת. הריצה בפועל על סבב 4 (`scripts/qa_score.py --round 4 --no-links`,
+2026-09-06, ר' סעיף 7 למטה) מאששת זאת.
+
+### D6 -- דוח יומי/שבועי/חודשי (`agent/eoa/qa/d6_daily_report.py`)
+
+| בדיקה | משקל | מה נבדק |
+|---|---|---|
+| `bluf_present_and_short` | 2.0 | כותרת "שורה תחתונה" לפני "תקציר מנהלים", ≤2 משפטים, ≤40 מילים, כל משפט מצוטט |
+| `what_changed_section_present` | 1.5 | כותרת שמכילה "השתנה" (סעיף "מה השתנה מאז הדוח הקודם") קיימת |
+| `indicator_watchlist_table_present` | 1.5 | כותרת "מעקב אינדיקטורים" עם טבלה שמכילה לפחות סטטוס אחד מתוך חדש/פתוח/הבשיל/בוטל |
+| `israel_single_table_with_type_column` | 1.5 | כותרת "תעשייה ישראלית" אחת בלבד (לא כמה סעיפים נפרדים) עם עמודת "סוג" |
+| `outlook_likelihood_and_confidence_separated` | 1.5 | כל פריט ב"מבט קדימה" נושא גם "סבירות" וגם "ביטחון", ולעולם לא באותו פסוקית (clause) |
+| `exec_summary_no_filler_phrases` | 1.0 | ללא ניסוחי מילוי אנליסטיים ("יש לציין"/"חשוב להדגיש"/"בהקשר זה"/"ראוי לציין", או `eoa.report.style.BANNED_FILLER_PHRASES_HE` אם קיים) בתקציר המנהלים |
+| `no_row_repeated_across_tables` | 1.0 | אין שתי שורות בטבלאות **שונות** שחולקות בדיוק את אותה קבוצת ציטוטים `[n]` |
+| `heading_count_within_budget` | 1.0 | ≤16 כותרות H2 בדוח שבועי, ≤12 בדוח יומי |
+| `monthly_is_structured` | 1.0 | (רק כשקיים דוח חודשי השבוע) ציטוטים בדוח החודשי מוצגים כקישור `[n](#src-n)`, לעולם לא `[n]` חשוף |
+
+### D7 -- דוח פיתוח עסקי (`agent/eoa/qa/d7_bd_report.py`)
+
+| בדיקה | משקל | מה נבדק |
+|---|---|---|
+| `bluf_present_and_short` | 1.5 | כמו D6, לכל דוח טריטוריה בנפרד (כישלון של טריטוריה אחת מפיל את הבדיקה המצרפית) |
+| `buyer_pipeline_table_present` | 2.0 | כותרת "מפת קונים / צינור הזדמנויות" עם טבלה מאוכלסת (שורת נתונים אחת לפחות) |
+| `assumptions_falsifiers_list_present` | 1.5 | כותרת "הנחות והפרכות" (או וריאציה) עם רשימה (`-`/`*`) שמכילה לשון הפרכה (פריך/הפרכ/falsif) |
+| `acquisition_watch_scoped_to_territory` | 1.5 | שורות "מעקב רכישות ושותפויות" שאינן מסומנות "גלובלי" תואמות את מדינת הטריטוריה של הדוח לפי `entities.country` |
+
+### D8 -- סקר פטנטים (`agent/eoa/qa/d8_patent_survey.py`)
+
+| בדיקה | משקל | מה נבדק |
+|---|---|---|
+| `methodology_box_before_summary` | 2.0 | תיבת "שיטה והיקף" לפני תקציר המנהלים, נושאת את תגית "כיסוי נתוני מקצה: NN%" |
+| `coverage_tag_present` | 1.0 | תגית "כיסוי נתוני מקצה: NN%" קיימת בדוח (לא רק בתיבה) |
+| `implications_have_priority_confidence` | 1.5 | סעיף "השלכות עסקיות" נושא גם "עדיפות" וגם סמן ביטחון ("ביטחון"/"confidence") |
+| `no_bogus_assignee` | 1.5 | אין "פרופיל מקצה" ששמו מדינה/יבשת/סיומת גנרית (Europe/United States/Inc וכו') |
+| `no_unclassified_cluster_when_patents_exist` | 1.0 | כשיש טבלת פטנטים מאוכלסת, אין אשכול "לא מסווג"/"ללא סיווג" (לא רלוונטי אם אין נתוני פטנטים) |
+| `cpc_assignee_matrix_present` | 1.0 | (docs/REPORT_TEMPLATE_BENCHMARK.md 3.5#7) מטריצת CPC/אשכול × מקצה מאוכלסת -- שלא כשאר הבדיקות בסעיף זה, ``eoa.patents.survey`` **כבר** מרנדר טבלה כזו לפני סבב 5 כשיש אשכולות; לכן זו לא בהכרח כישלון "צפוי" אלא תלוי אם לדוח הנוכחי יש אשכולות ממוינים |
+
+### D9 -- מכרזים/תחזיות/כנסים (`agent/eoa/qa/d9_tenders_conferences.py`)
+
+| בדיקה | משקל | מה נבדק |
+|---|---|---|
+| `source_reliability_column_in_appendix` | 0.5 | עמודת אמינות/מהימנות מוצגת ב"נספח מקורות" של הדוח (לא רק ב-DB) -- משקל קטן לפי הבריף |
+
+### D4 -- חקירות עומק, סעיפי רנדור דוח (`agent/eoa/qa/d4_investigations.py`)
+
+| בדיקה | משקל | מה נבדק |
+|---|---|---|
+| `blocked_distinct_from_not_found` | 1.5 | רשומה שמוצגת כ"לא נמצא" בסעיף "חקירות עומק" אך נושאת מילת-חסימה (נחסם/הוסתרה/בדיקת אבטחה) -- תיוג שגוי, צריך "נחסם" נפרד |
+| `no_contradictory_reruns_in_report` | 1.0 | אין שאלה שמופיעה פעמיים בסעיף "חקירות עומק" של אותו דוח (חשד לריצה כפולה עם תשובות סותרות) |
+
+שני אלה מחושבים **בנוסף** לארבע הבדיקות הקיימות של D4 (מקורות/confidence/relevance/anchors) כשקיים
+קובץ דוח עם סעיף "חקירות עומק" -- לא תלויים ב-`job_ids`, ולא מחליפים אותן (ר' תיקון רגרסיה בסעיף 7).
+
+## 7. ריצת סבב 4 (2026-09-06, `--no-links`) -- מצב הבדיקות החדשות היום
+
+`scripts/qa_score.py --round 4 --no-links` (קריאה-בלבד, DB פורט 5432) הריץ את כל הבדיקות שלמעלה על
+הדוחות שכבר קיימים ב-`output/reports/` -- **לפני** שעבודת הרינדור המקבילה (BLUF/מפת אינדיקטורים/
+טבלה מאוחדת/וכו') נחתה. התוצאה, כצפוי מהעיצוב הסובלני-לכישלון:
+
+- **D6** (33.3): נכשלות `bluf_present_and_short`, `what_changed_section_present`,
+  `indicator_watchlist_table_present`, `israel_single_table_with_type_column` (3 כותרות נפרדות
+  נמצאו), `outlook_likelihood_and_confidence_separated`, `no_row_repeated_across_tables` (5 שורות
+  כפולות אמיתיות נמצאו). עוברות: `exec_summary_no_filler_phrases`, `heading_count_within_budget`.
+  `monthly_is_structured` לא רץ (אין דוח חודשי השבוע).
+- **D7** (37.0): נכשלות `bluf_present_and_short`, `buyer_pipeline_table_present`,
+  `assumptions_falsifiers_list_present`, וגם `acquisition_watch_scoped_to_territory` (שורות Elbit
+  שמקורן ב-IL מופיעות ללא סימון "גלובלי" בדוחות DE/EU/GB -- ממצא אמיתי, לא רק תכונה חסרה).
+- **D8** (40.7): נכשלות כל שש הבדיקות החדשות: `methodology_box_before_summary`,
+  `coverage_tag_present`, `implications_have_priority_confidence`, `no_bogus_assignee` (Europe
+  אמיתי נמצא), `no_unclassified_cluster_when_patents_exist` (אשכול "אשכולות טכנולוגיה" לא מסווג
+  אמיתי), `cpc_assignee_matrix_present`.
+- **D9** (90.9): נכשלת רק `source_reliability_column_in_appendix` (עמודות הנספח היום: #/כותרת/
+  מקור/תאריך/קישור -- אין עמודת אמינות).
+- **D4** (85.7): `no_contradictory_reruns_in_report` עוברת; `blocked_distinct_from_not_found`
+  **נכשלת על ממצא אמיתי** -- רשומת "מפעל פולקסווגן... רפאל בגרמניה" מוצגת "לא נמצא" עם הסבר "נחסם
+  בבדיקת אבטחה" בגוף הטקסט (בדיוק ראיית ה-DS3 שמצוטטת ב-`docs/REPORT_TEMPLATE_BENCHMARK.md`).
+
+ראה `docs/qa/loop/round_4_auto.json` לראיה המלאה של כל בדיקה (evidence string).

@@ -32,6 +32,171 @@ _TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{1,}:?$")
 _TIMELINE_DISCLOSURE_HE = "אין נתוני ציר זמן שנתי זמינים לפטנטים במדגם זה"
 _CPC_DISCLOSURE_HE = "אין נתוני קודי CPC זמינים לפטנטים במדגם זה"
 
+# ---------------------------------------------------------------------------------------------
+# Round 5 (2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 8/9, sec 3.5 rows 1/7/9): the
+# methodology box, coverage tag, and business-implications priority/confidence fields are landing
+# in other engineers' file scopes (``eoa.patents.survey``, ``patent_survey.md``, the schema) this
+# same evening -- these are the deterministic, read-only-of-the-rendered-markdown QA gates for that
+# work. Every check is tolerant of the feature not existing yet (a normal ``passed=False``, never
+# an exception) -- most are expected to fail on today's already-rendered survey until it lands.
+# ``cpc_assignee_matrix_present`` (sec 3.5 row 7) is the one exception: ``eoa.patents.survey``
+# already renders a "מטריצת אשכול x מקצה" table pre-round-5, so this check is expected to pass on
+# an already-rendered survey with patent data, not merely "tolerated" as a future feature.
+# ---------------------------------------------------------------------------------------------
+
+_EXEC_SUMMARY_HEADING = "תקציר מנהלים"
+_METHODOLOGY_HEADING_HE = "שיטה והיקף"
+_COVERAGE_TAG_RE = re.compile(r"כיסוי\s+נתוני\s+מקצה\s*[:：]\s*\d{1,3}\s*%")
+_IMPLICATIONS_HEADING_HE = "השלכות עסקיות"
+_PRIORITY_MARKER_HE = "עדיפות"
+_CONFIDENCE_MARKERS_D8 = ("ביטחון", "confidence")
+_ASSIGNEE_HEADING_RE = re.compile(r"^פרופיל מקצה\s*[:：]\s*(.+)$")
+_BOGUS_ASSIGNEE_NAMES = frozenset(
+    {"europe", "united states", "u.s.", "usa", "u.s.a.", "inc", "inc.", "unknown", "n/a", "various", "asia"}
+)
+_CLUSTER_HEADING_KEYWORD_HE = "אשכול"
+_UNCLASSIFIED_LABELS_HE = ("לא מסווג", "ללא סיווג", "unclassified")
+_PATENTS_TABLE_HEADING_KEYWORDS = ("טבלת פטנטים", "נספח פטנטים")
+#: docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.5 row 7 ("White spaces: להוסיף מטריצת CPC×מקצה") --
+#: matches eoa.patents.survey's own "מטריצת אשכול x מקצה" table heading (clusters are themselves
+#: CPC-code-derived, see survey.py's _cluster_by_cpc) without hardcoding the exact axis label, so a
+#: future rename to e.g. "מטריצת CPC x מקצה" still matches.
+_MATRIX_HEADING_KEYWORD_HE = "מטריצ"
+
+
+def _methodology_box_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 8: a "שיטה והיקף" box before the exec summary, carrying the coverage-% tag."""
+    method_idx = summary_idx = None
+    method_body = ""
+    for i, (h, body) in enumerate(sections):
+        if _METHODOLOGY_HEADING_HE in h and method_idx is None:
+            method_idx, method_body = i, body
+        if _EXEC_SUMMARY_HEADING in h and summary_idx is None:
+            summary_idx = i
+    if method_idx is None:
+        return Check(
+            "methodology_box_before_summary",
+            False,
+            weight=2.0,
+            evidence=f"no '{_METHODOLOGY_HEADING_HE}' heading found",
+        )
+    before_summary = summary_idx is None or method_idx < summary_idx
+    has_coverage_tag = bool(_COVERAGE_TAG_RE.search(method_body))
+    return Check(
+        "methodology_box_before_summary",
+        before_summary and has_coverage_tag,
+        weight=2.0,
+        evidence=f"positioned_before_summary={before_summary}, coverage_tag_in_box={has_coverage_tag}",
+    )
+
+
+def _coverage_tag_check(full_text: str) -> Check:
+    """Item 8: "כיסוי נתוני מקצה: NN%" as a deterministic tag, not buried in exec-summary prose."""
+    m = _COVERAGE_TAG_RE.search(full_text)
+    return Check(
+        "coverage_tag_present",
+        bool(m),
+        weight=1.0,
+        evidence=f"coverage tag found: {m.group(0) if m else None}",
+    )
+
+
+def _implications_priority_confidence_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 9: business_implications carry ``priority``/``confidence``, like the BD report's
+    ``recommended_actions`` already do."""
+    for h, body in sections:
+        if _IMPLICATIONS_HEADING_HE in h:
+            has_priority = _PRIORITY_MARKER_HE in body
+            has_confidence = any(m in body for m in _CONFIDENCE_MARKERS_D8)
+            return Check(
+                "implications_have_priority_confidence",
+                has_priority and has_confidence,
+                weight=1.5,
+                evidence=f"heading '{h}': priority={has_priority}, confidence={has_confidence}",
+            )
+    return Check(
+        "implications_have_priority_confidence",
+        False,
+        weight=1.5,
+        evidence=f"no '{_IMPLICATIONS_HEADING_HE}' heading found",
+    )
+
+
+def _no_bogus_assignee_check(sections: list[tuple[str, str]]) -> Check:
+    """No assignee profile named a bare country/continent/generic-suffix placeholder (observed
+    live: "פרופיל מקצה: Europe") -- a real company/entity name is required."""
+    bad = []
+    for h, _b in sections:
+        m = _ASSIGNEE_HEADING_RE.match(h.strip())
+        if m and m.group(1).strip().casefold() in _BOGUS_ASSIGNEE_NAMES:
+            bad.append(m.group(1).strip())
+    return Check(
+        "no_bogus_assignee",
+        len(bad) == 0,
+        weight=1.5,
+        evidence=f"bogus assignee name(s) found: {bad}",
+    )
+
+
+def _no_unclassified_cluster_check(sections: list[tuple[str, str]]) -> Check:
+    """A survey with real patent data shouldn't dump everything into an unclassified bucket."""
+    has_patent_data = any(
+        any(kw in h for kw in _PATENTS_TABLE_HEADING_KEYWORDS) and _section_has_data_row(body)
+        for h, body in sections
+    )
+    if not has_patent_data:
+        return Check(
+            "no_unclassified_cluster_when_patents_exist",
+            True,
+            weight=1.0,
+            evidence="no populated patents table this round -- check not applicable",
+        )
+    unclassified_hits = [
+        h
+        for h, body in sections
+        if _CLUSTER_HEADING_KEYWORD_HE in h
+        and any(lbl in (h + body).casefold() for lbl in _UNCLASSIFIED_LABELS_HE)
+    ]
+    return Check(
+        "no_unclassified_cluster_when_patents_exist",
+        len(unclassified_hits) == 0,
+        weight=1.0,
+        evidence=f"unclassified cluster heading(s): {unclassified_hits}",
+    )
+
+
+def _cpc_assignee_matrix_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 7 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.5 row 7): a deterministic CPC/cluster x
+    assignee matrix alongside the White-space narrative -- not applicable when the survey has no
+    populated patents table this round (nothing to matrix), same "not applicable" convention as
+    :func:`_no_unclassified_cluster_check`."""
+    has_patent_data = any(
+        any(kw in h for kw in _PATENTS_TABLE_HEADING_KEYWORDS) and _section_has_data_row(body)
+        for h, body in sections
+    )
+    if not has_patent_data:
+        return Check(
+            "cpc_assignee_matrix_present",
+            True,
+            weight=1.0,
+            evidence="no populated patents table this round -- check not applicable",
+        )
+    for h, body in sections:
+        if _MATRIX_HEADING_KEYWORD_HE in h:
+            has_data = _section_has_data_row(body)
+            return Check(
+                "cpc_assignee_matrix_present",
+                has_data,
+                weight=1.0,
+                evidence=f"heading '{h}' found; has populated matrix table: {has_data}",
+            )
+    return Check(
+        "cpc_assignee_matrix_present",
+        False,
+        weight=1.0,
+        evidence="no heading matching a CPC/cluster x assignee matrix found",
+    )
+
 
 def _sections(md_text: str) -> list[tuple[str, str]]:
     matches = list(_HEADING_RE.finditer(md_text))
@@ -133,6 +298,14 @@ def score_D8(md_path: Path | None, html_path: Path | None = None) -> DomainScore
                 else "no [Pn]-style inline citations in this survey (table-only format)"
             ),
         ),
+        # Round 5 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 8/9): see this module's own
+        # "Round 5" section above for what each check verifies.
+        _methodology_box_check(sections),
+        _coverage_tag_check(text),
+        _implications_priority_confidence_check(sections),
+        _no_bogus_assignee_check(sections),
+        _no_unclassified_cluster_check(sections),
+        _cpc_assignee_matrix_check(sections),
     ]
 
     n_extra = 0

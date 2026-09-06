@@ -16,11 +16,188 @@ from typing import Any
 from eoa.config import settings
 from eoa.qa.types import Check, DomainScore, weighted_score
 from eoa.report.bd_territory import _COMPETITOR_PROMOTION_VERBS, NO_ACTIVITY_MARKER_HE
+from eoa.report.geography import normalize_country
 
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)$", re.MULTILINE)
 _CONFERENCES_HEADING = "כנסים"
 _ACTIONS_HEADING_KEYWORDS = ("פעולות", "המלצ")
 _DATE_RANGE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})")
+
+# ---------------------------------------------------------------------------------------------
+# Round 5 (2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 4/10/11): BLUF, the buyer
+# pipeline table, and the assumptions/falsifiers list are landing in other engineers' file scopes
+# (schemas/prompts/``bd_territory.py``) this same evening -- these are the deterministic,
+# read-only-of-the-rendered-markdown QA gates for that work. Every check is tolerant of the
+# feature not existing yet (a normal ``passed=False``, never an exception).
+# ---------------------------------------------------------------------------------------------
+
+_EXEC_SUMMARY_HEADING = "תקציר מנהלים"
+_BLUF_HEADING_HE = "שורה תחתונה"
+_MAX_BLUF_SENTENCES = 2
+_MAX_BLUF_WORDS = 40
+_CITATION_RE = re.compile(r"\[(\d+)\]")
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.?!])(?=\s|$)")
+_BUYER_PIPELINE_HEADING_KEYWORDS = ("מפת קונים", "צינור הזדמנויות")
+_ASSUMPTIONS_HEADING_KEYWORDS = ("הנחות והפרכות", "הנחות ואלטרנטיבות", "הנחות")
+_FALSIFIER_KEYWORDS_HE = ("פריך", "הפרכ", "falsif")
+_ACQUISITION_HEADING_HE = "מעקב רכישות ושותפויות"
+_GLOBAL_MARKER_KEYWORD_HE = "גלובלי"
+_BD_FILENAME_RE = re.compile(r"bd_([a-z]+)_\d{4}-\d{2}-\d{2}\.md$")
+
+
+def _split_sentences_simple(text: str) -> list[str]:
+    """Small local sentence splitter (mirrors ``eoa.report.qa_citations.split_sentences``'s basic
+    shape without the abbreviation table) -- kept local per this module's own "no cross-domain
+    private-name imports" convention."""
+    if not text or not text.strip():
+        return []
+    return [p.strip() for p in _SENTENCE_BOUNDARY_RE.split(text.strip()) if p.strip()]
+
+
+def _bluf_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 4: a ``שורה תחתונה`` heading, before the exec summary, 1-2 short cited sentences --
+    same shape as ``eoa.qa.d6_daily_report``'s own BLUF check, duplicated locally per this
+    codebase's QA-module convention (see e.g. ``d8_patent_survey.py``'s duplicated disclosure
+    strings) rather than importing across domain-scorer modules."""
+    bluf_idx = exec_idx = None
+    bluf_body = ""
+    for i, (h, body) in enumerate(sections):
+        if _BLUF_HEADING_HE in h and bluf_idx is None:
+            bluf_idx, bluf_body = i, body
+        if _EXEC_SUMMARY_HEADING in h and exec_idx is None:
+            exec_idx = i
+    if bluf_idx is None:
+        return Check(
+            "bluf_present_and_short", False, weight=1.5, evidence=f"no '{_BLUF_HEADING_HE}' heading found"
+        )
+    sentences = _split_sentences_simple(bluf_body)
+    word_count = len(bluf_body.split())
+    cited = bool(sentences) and all(_CITATION_RE.search(s) for s in sentences)
+    before_summary = exec_idx is None or bluf_idx < exec_idx
+    ok = (
+        0 < len(sentences) <= _MAX_BLUF_SENTENCES
+        and word_count <= _MAX_BLUF_WORDS
+        and cited
+        and before_summary
+    )
+    return Check(
+        "bluf_present_and_short",
+        ok,
+        weight=1.5,
+        evidence=(
+            f"{len(sentences)} sentence(s), {word_count} words, cited={cited}, "
+            f"before_exec_summary={before_summary}"
+        ),
+    )
+
+
+def _has_table_data_row(body: str) -> bool:
+    """A markdown table (header + ``|---|`` separator) with at least one non-empty data row --
+    local, simplified copy of ``d8_patent_survey._section_has_data_row``'s shape."""
+    table_lines = [
+        ln.strip() for ln in body.splitlines() if ln.strip().startswith("|") and ln.strip().endswith("|")
+    ]
+    if len(table_lines) < 3:
+        return False
+    return any(any(c.strip() for c in line.strip("|").split("|")) for line in table_lines[2:])
+
+
+def _buyer_pipeline_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 10: a "מפת קונים / צינור הזדמנויות" table (opportunity -> stage -> buyer -> date)."""
+    for h, body in sections:
+        if any(kw in h for kw in _BUYER_PIPELINE_HEADING_KEYWORDS):
+            return Check(
+                "buyer_pipeline_table_present",
+                _has_table_data_row(body),
+                weight=2.0,
+                evidence=f"heading '{h}' found; has populated table: {_has_table_data_row(body)}",
+            )
+    return Check(
+        "buyer_pipeline_table_present",
+        False,
+        weight=2.0,
+        evidence=f"no heading matching {_BUYER_PIPELINE_HEADING_KEYWORDS} found",
+    )
+
+
+def _assumptions_falsifiers_check(sections: list[tuple[str, str]]) -> Check:
+    """Item 11: an "הנחות והפרכות" list -- each entry an "assumption <-> what would falsify it"
+    pair, not free unstructured prose."""
+    for h, body in sections:
+        if any(kw in h for kw in _ASSUMPTIONS_HEADING_KEYWORDS):
+            has_falsifier_language = any(kw in body for kw in _FALSIFIER_KEYWORDS_HE)
+            has_list_items = any(ln.strip().startswith(("-", "*")) for ln in body.splitlines())
+            ok = has_falsifier_language and has_list_items
+            return Check(
+                "assumptions_falsifiers_list_present",
+                ok,
+                weight=1.5,
+                evidence=f"heading '{h}': falsifier_language={has_falsifier_language}, list_items={has_list_items}",
+            )
+    return Check(
+        "assumptions_falsifiers_list_present",
+        False,
+        weight=1.5,
+        evidence=f"no heading matching {_ASSUMPTIONS_HEADING_KEYWORDS} found",
+    )
+
+
+def _acquisition_primary_rows(body: str) -> list[list[str]]:
+    """Table data rows of the acquisition-watch section that appear *before* any "גלובלי" marker
+    line (``eoa.report.acquisition_watch.acquisition_watch_section_md``'s own W18 out-of-territory
+    disclosure) -- these are the rows the report claims are territory-local."""
+    rows: list[list[str]] = []
+    for line in body.splitlines():
+        if _GLOBAL_MARKER_KEYWORD_HE in line:
+            break
+        s = line.strip()
+        if not s.startswith("|") or not s.endswith("|"):
+            continue
+        if all(c in "|-: " for c in s):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if cells and cells[0] not in ("תאריך",):
+            rows.append(cells)
+    return rows
+
+
+def _acquisition_watch_scope_violations(
+    sections: list[tuple[str, str]], conn: Any, code: str | None
+) -> list[str]:
+    if conn is None or not code:
+        return []
+    body = ""
+    for h, b in sections:
+        if _ACQUISITION_HEADING_HE in h:
+            body = b
+            break
+    if not body:
+        return []
+    rows = _acquisition_primary_rows(body)
+    if not rows:
+        return []
+    names = {cells[1] for cells in rows if len(cells) >= 2 and cells[1] not in ("—", "-", "")}
+    names |= {cells[3] for cells in rows if len(cells) >= 4 and cells[3] not in ("—", "-", "")}
+    if not names:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, country FROM entities WHERE name = ANY(%s) AND country IS NOT NULL",
+                (sorted(names),),
+            )
+            country_by_name = {r["name"]: normalize_country(r["country"]) for r in cur.fetchall()}
+    except Exception:
+        return []
+    violations: list[str] = []
+    for cells in rows:
+        company = cells[1] if len(cells) >= 2 else ""
+        counterparty = cells[3] if len(cells) >= 4 else ""
+        for name in (company, counterparty):
+            found_country = country_by_name.get(name)
+            if found_country and found_country != code:
+                violations.append(f"{name}: {found_country} (expected territory {code})")
+    return violations
 
 
 def _sections(md_text: str) -> list[tuple[str, str]]:
@@ -140,6 +317,10 @@ def score_D7(md_paths: list[Path], conn: Any = None) -> DomainScore:  # noqa: N8
     empty_heading_hits: list[str] = []
     promotion_hits: list[str] = []
     no_actions: list[str] = []
+    bluf_checks: list[Check] = []
+    buyer_pipeline_checks: list[Check] = []
+    assumptions_checks: list[Check] = []
+    scope_violations: list[str] = []
 
     for path in md_paths:
         text = path.read_text(encoding="utf-8")
@@ -152,6 +333,14 @@ def score_D7(md_paths: list[Path], conn: Any = None) -> DomainScore:  # noqa: N8
         mismatches, checked = _conference_dates_match_db(sections, conn)
         total_mismatch += mismatches
         total_checked += checked
+        bluf_checks.append(_bluf_check(sections))
+        buyer_pipeline_checks.append(_buyer_pipeline_check(sections))
+        assumptions_checks.append(_assumptions_falsifiers_check(sections))
+        territory_match = _BD_FILENAME_RE.search(path.name)
+        code = normalize_country(territory_match.group(1)) if territory_match else None
+        scope_violations.extend(
+            f"{path.name}:{hit}" for hit in _acquisition_watch_scope_violations(sections, conn, code)
+        )
         # Round-3 (D7 finding 3): an honest "no activity this window" report (the shared marker
         # from eoa.report.bd_territory) counts as a populated actions section -- it is a
         # deterministic, machine-detectable statement that the section was checked and correctly
@@ -192,6 +381,39 @@ def score_D7(md_paths: list[Path], conn: Any = None) -> DomainScore:  # noqa: N8
             passed=len(no_actions) == 0,
             weight=2.0,
             evidence=f"reports with no populated actions/recommendations section: {no_actions}",
+        ),
+        # Round 5 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 4 items 4/10/11): one aggregate Check per
+        # new criterion across every territory report in scope this round (mirrors how the checks
+        # above already aggregate across ``md_paths``).
+        Check(
+            "bluf_present_and_short",
+            passed=all(c.passed for c in bluf_checks),
+            weight=1.5,
+            evidence="; ".join(f"{p.name}: {c.evidence}" for p, c in zip(md_paths, bluf_checks, strict=True))[
+                :500
+            ],
+        ),
+        Check(
+            "buyer_pipeline_table_present",
+            passed=all(c.passed for c in buyer_pipeline_checks),
+            weight=2.0,
+            evidence="; ".join(
+                f"{p.name}: {c.evidence}" for p, c in zip(md_paths, buyer_pipeline_checks, strict=True)
+            )[:500],
+        ),
+        Check(
+            "assumptions_falsifiers_list_present",
+            passed=all(c.passed for c in assumptions_checks),
+            weight=1.5,
+            evidence="; ".join(
+                f"{p.name}: {c.evidence}" for p, c in zip(md_paths, assumptions_checks, strict=True)
+            )[:500],
+        ),
+        Check(
+            "acquisition_watch_scoped_to_territory",
+            passed=len(scope_violations) == 0,
+            weight=1.5,
+            evidence=f"out-of-territory rows without a 'גלובלי' disclosure: {scope_violations[:10]}",
         ),
     ]
     return DomainScore(domain="D7", score_0_100=weighted_score(checks), checks=checks, n=len(md_paths))

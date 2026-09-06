@@ -32,6 +32,16 @@ def latest_weekly_md(reports_dir: Path | None = None) -> Path | None:
     return _latest_by_date("weekly_*.md", reports_dir)
 
 
+def latest_monthly_md(reports_dir: Path | None = None) -> Path | None:
+    """Round 5 (D6 ``monthly_is_structured``): the monthly report isn't part of the standard
+    ``daily_or_weekly`` D6 file selection (``eoa.qa.scorer.score_all_domains``), but is checked
+    separately for adoption of the ``Sentence{text_he, cites}`` structured-citation rendering
+    (``[n](#src-n)`` links, not bare ``[n]``) once ``eoa.report.monthly`` migrates to it -- see
+    docs/REPORT_TEMPLATE_BENCHMARK.md item M1. Returns ``None`` (never crashes) when no monthly
+    report has been produced yet, same convention as every other ``latest_*`` helper here."""
+    return _latest_by_date("monthly_*.md", reports_dir)
+
+
 def latest_bd_reports(reports_dir: Path | None = None) -> list[Path]:
     """One latest file per territory code (``bd_<territory>_<date>.md``)."""
     base = reports_dir or _reports_dir()
