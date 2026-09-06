@@ -240,4 +240,10 @@ def test_guard_l2_enumerates_kind_values_and_caps_excerpt() -> None:
 def test_report_templates_require_citations_and_forbid_out_of_list_items(name: str) -> None:
     raw = load(name)
     assert "לא לכתוב על פריטים שאינם ברשימה" in raw
-    assert "עד 4 משפטים" in raw  # short paragraphs, multi-paragraph prose is fine
+    if name == "report_daily":
+        # Goal 1 (2026-09-06): report_daily.md moved to the structured Sentence-per-claim schema
+        # -- there is no free-text "paragraph" concept left to cap at 4 sentences; each `text_he`
+        # is exactly one sentence with its own `cites`, enforced in the schema itself.
+        assert "משפט בודד אחד" in raw
+    else:
+        assert "עד 4 משפטים" in raw  # short paragraphs, multi-paragraph prose is fine

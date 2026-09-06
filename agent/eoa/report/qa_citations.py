@@ -1,20 +1,33 @@
-"""QA gate: blocks daily-report drafts that contain uncited factual claims.
+"""QA gate: blocks report drafts that contain uncited factual claims.
 
-``check()`` splits the Hebrew prose of a :class:`DailyReportDraft` into sentences, decides which
-sentences are "factual" (contain a number, a currency sign, a capitalized Latin token, a month
-name, or one of a small set of announcement verbs), and requires every factual sentence to carry
-at least one ``[n]`` citation whose ``n`` is a valid index into the item list that was given to the
-model. The ``outlook_he`` section is exempt from the citation requirement but must instead open
-with an explicit assessment marker, since it is the analyst's own forward-looking judgement rather
-than a restatement of sourced facts.
+Two shapes are supported, dispatched on the draft's own attributes (duck-typed, per
+``_is_structured_draft``):
 
-Two optional, additive parameters generalize ``check()`` beyond :class:`DailyReportDraft` for the
-weekly/monthly report drafts (``eoa.report.weekly`` / ``eoa.report.monthly``), which carry extra
-LLM-authored prose blocks outside ``draft.sections`` (e.g. one paragraph per detected trend):
-``extra_sections`` are checked exactly like ``draft.sections`` (citation required on every factual
-sentence); ``exempt_sections`` get the same treatment as ``outlook_he`` — no citation requirement,
-but any ``[n]`` present must still resolve to a real item. Neither parameter is used by the daily
-report, so passing neither reproduces the original behaviour exactly.
+- **Structured** (goal 1, 2026-09-06): :class:`~eoa.llm.schemas.analysis.DailyReportDraft` —
+  ``exec_summary``/``sections[].sentences`` are already lists of
+  :class:`~eoa.llm.schemas.analysis.Sentence` (``text_he`` + non-empty ``cites``), so the "does
+  every factual sentence carry a citation" question is answered by construction (a pydantic
+  validation error, not a QA finding) — ``check()`` only still needs to verify, at the *registry*
+  level (which varies per report run, so it can't live in the schema itself), that every ``cites``
+  entry is a valid item number, plus the F5 duplicate-sentence rule (an exec-summary sentence
+  copied verbatim from a section).
+- **Legacy** (``eoa.report.weekly``/``monthly``/``bd_territory``, unchanged): free Hebrew prose
+  (``exec_summary_he`` + ``sections[].prose_he``) is split into sentences, each decided "factual"
+  (contains a number, a currency sign, a capitalized Latin token, a month name, or one of a small
+  set of announcement verbs), and every factual sentence must carry an ``[n]`` marker resolving to
+  a valid item.
+
+In both shapes, the forward-looking indicators (``outlook`` / ``outlook_he``) are exempt from the
+per-sentence citation requirement (they are the analyst's own judgement) but any reference given
+must still resolve to a real item, and legacy ``outlook_he`` must open with an explicit assessment
+marker.
+
+Two optional, additive parameters generalize the legacy path beyond a single draft for the
+weekly/monthly report drafts, which carry extra LLM-authored prose blocks outside ``draft.sections``
+(e.g. one paragraph per detected trend): ``extra_sections`` are checked exactly like
+``draft.sections`` (citation required on every factual sentence); ``exempt_sections`` get the same
+treatment as ``outlook_he`` — no citation requirement, but any ``[n]`` present must still resolve to
+a real item. Neither parameter is used by the (structured) daily report.
 """
 
 from __future__ import annotations
@@ -231,6 +244,71 @@ def _check_prose(
             errors.append(f'ב{label}: משפט עובדתי ללא הפניה [n] — "{sentence}"')
 
 
+def _is_structured_draft(draft: Any) -> bool:
+    """True for the new goal-1 :class:`~eoa.llm.schemas.analysis.DailyReportDraft` shape
+    (``exec_summary``/``sections[].sentences``), false for the legacy free-prose shape used by
+    weekly/monthly/bd_territory (``exec_summary_he``/``sections[].prose_he``)."""
+    return hasattr(draft, "exec_summary") and not hasattr(draft, "exec_summary_he")
+
+
+def _normalize_sentence_text(text: str) -> str:
+    """Like :func:`_normalize_for_dup_check` but for a :class:`Sentence`'s ``text_he``, which never
+    contains a ``[n]`` marker to begin with (goal 1: the model doesn't write markers itself)."""
+    text = _NORMALIZE_PUNCT_RE.sub("", text)
+    return _WHITESPACE_RE.sub(" ", text).strip().casefold()
+
+
+def _check_structured(draft: Any, valid_ns: set[int]) -> tuple[list[str], set[int], list[str]]:
+    """The goal-1 structured-schema equivalent of the legacy prose loop below: every ``cites``
+    entry must be a valid registry number, and an exec-summary sentence must not verbatim-duplicate
+    a section sentence (F5). Uncited sentences can't occur here — the schema itself
+    (``Sentence.cites`` ``min_length=1``) already rejects them before ``check()`` ever runs."""
+    errors: list[str] = []
+    bad_refs: set[int] = set()
+
+    section_norms: set[str] = set()
+    for section in draft.sections:
+        for sentence in section.sentences:
+            for n in sentence.cites:
+                if n not in valid_ns:
+                    bad_refs.add(n)
+                    errors.append(
+                        f"בסעיף '{section.title_he}': ההפניה [{n}] אינה מצביעה על פריט קיים "
+                        f'ברשימה — "{sentence.text_he}"'
+                    )
+            norm = _normalize_sentence_text(sentence.text_he)
+            if norm:
+                section_norms.add(norm)
+
+    duplicate_sentences: list[str] = []
+    for sentence in draft.exec_summary:
+        for n in sentence.cites:
+            if n not in valid_ns:
+                bad_refs.add(n)
+                errors.append(
+                    f'בתקציר המנהלים: ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה — "{sentence.text_he}"'
+                )
+        norm = _normalize_sentence_text(sentence.text_he)
+        if norm and len(norm.split()) >= _MIN_DUP_WORDS and norm in section_norms:
+            duplicate_sentences.append(sentence.text_he)
+            errors.append(
+                f'בתקציר המנהלים: המשפט "{sentence.text_he}" מועתק כלשונו מתוך גוף אחד הסעיפים — '
+                "התקציר חייב לסכם ולקשר בין ממצאי הסעיפים, לא לצטט אותם במדויק."
+            )
+
+    for indicator in getattr(draft, "outlook", None) or []:
+        for n in indicator.cites:
+            if n not in valid_ns:
+                bad_refs.add(n)
+                errors.append(f"במבט קדימה: ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה")
+
+    note = getattr(draft, "analyst_note_he", None)
+    if note is not None and len(note.sentences_he) > 3:
+        errors.append('"הערכת האנליסט" חייבת להכיל עד 3 משפטים בלבד')
+
+    return errors, bad_refs, duplicate_sentences
+
+
 def check(
     draft: DailyReportDraft | Any,
     items: list[dict],
@@ -238,36 +316,48 @@ def check(
     extra_sections: list[tuple[str, str]] | None = None,
     exempt_sections: list[tuple[str, str]] | None = None,
 ) -> QAResult:
-    """Validate every factual sentence in ``draft`` carries an ``[n]`` citation into ``items``.
+    """Validate every factual claim in ``draft`` resolves to a valid ``[n]`` in ``items``.
 
-    ``draft`` only needs ``exec_summary_he``, ``sections`` (each with ``title_he``/``prose_he``)
-    and ``outlook_he`` — duck-typed so :class:`~eoa.llm.schemas.reports.WeeklyReportDraft` /
-    ``MonthlyReportDraft`` work here unchanged. ``extra_sections``/``exempt_sections`` are
-    ``(label, text)`` pairs checked in addition to ``draft.sections`` — the former like a normal
-    section, the latter like ``outlook_he`` (citation-exempt, out-of-range refs still flagged).
+    Dispatches on ``draft``'s own shape (see module docstring / :func:`_is_structured_draft`):
+    the new goal-1 :class:`~eoa.llm.schemas.analysis.DailyReportDraft` (``exec_summary`` +
+    ``sections[].sentences``, both lists of :class:`~eoa.llm.schemas.analysis.Sentence`), or the
+    legacy free-prose shape (``exec_summary_he`` + ``sections[].prose_he``) still used by
+    :class:`~eoa.llm.schemas.reports.WeeklyReportDraft` / ``MonthlyReportDraft`` /
+    ``BdTerritoryReportDraft``. ``extra_sections``/``exempt_sections`` are ``(label, text)`` pairs
+    checked with the legacy free-prose rules regardless of ``draft``'s own shape (used only by the
+    weekly report's trend paragraphs today).
     """
     valid_ns = _valid_range(items)
     errors: list[str] = []
     uncited: list[str] = []
     bad_refs: set[int] = set()
+    duplicate_sentences: list[str] = []
+    section_texts: list[tuple[str, str]] = []
 
-    _check_prose("תקציר המנהלים", draft.exec_summary_he, valid_ns, errors, uncited, bad_refs)
-    for section in draft.sections:
-        _check_prose(f"סעיף '{section.title_he}'", section.prose_he, valid_ns, errors, uncited, bad_refs)
+    if _is_structured_draft(draft):
+        errors, bad_refs, duplicate_sentences = _check_structured(draft, valid_ns)
+    else:
+        _check_prose("תקציר המנהלים", draft.exec_summary_he, valid_ns, errors, uncited, bad_refs)
+        for section in draft.sections:
+            _check_prose(f"סעיף '{section.title_he}'", section.prose_he, valid_ns, errors, uncited, bad_refs)
+        section_texts = [(section.title_he, section.prose_he) for section in draft.sections]
+
     for label, text in extra_sections or []:
         _check_prose(f"'{label}'", text, valid_ns, errors, uncited, bad_refs)
-
-    # F5: the executive summary must synthesize across sections, never copy a section sentence
-    # verbatim — flagged here so the existing corrective-retry loop (daily.py/weekly.py/monthly.py)
-    # picks it up like any other QA error.
-    section_texts = [(section.title_he, section.prose_he) for section in draft.sections]
     section_texts += list(extra_sections or [])
-    duplicate_sentences = _duplicate_summary_sentences(draft.exec_summary_he, section_texts)
-    for sentence in duplicate_sentences:
-        errors.append(
-            f'בתקציר המנהלים: המשפט "{sentence}" מועתק כלשונו מתוך גוף אחד הסעיפים — התקציר חייב '
-            "לסכם ולקשר בין ממצאי הסעיפים, לא לצטט אותם במדויק."
-        )
+
+    if not _is_structured_draft(draft) and section_texts:
+        # F5, legacy path only — the structured path already ran its own duplicate check above
+        # (it also needs to compare against `extra_sections`, e.g. weekly trend paragraphs).
+        extra_duplicates = _duplicate_summary_sentences(draft.exec_summary_he, section_texts)
+        for sentence in extra_duplicates:
+            if sentence in duplicate_sentences:
+                continue
+            duplicate_sentences.append(sentence)
+            errors.append(
+                f'בתקציר המנהלים: המשפט "{sentence}" מועתק כלשונו מתוך גוף אחד הסעיפים — התקציר חייב '
+                "לסכם ולקשר בין ממצאי הסעיפים, לא לצטט אותם במדויק."
+            )
 
     for label, text in exempt_sections or []:
         for n in citations_in(text):
@@ -275,17 +365,18 @@ def check(
                 bad_refs.add(n)
                 errors.append(f"ב'{label}': ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה")
 
-    outlook = (draft.outlook_he or "").strip()
-    if outlook:
-        if not any(outlook.startswith(marker) for marker in _ASSESSMENT_MARKERS):
-            errors.append(
-                f'במבט קדימה: חובה לפתוח במילת הערכה מפורשת (להערכתנו / נראה ש / ייתכן) — "{outlook}"'
-            )
-        # Outlook is exempt from the citation requirement, but out-of-range refs are still an error.
-        for n in citations_in(outlook):
-            if n not in valid_ns:
-                bad_refs.add(n)
-                errors.append(f"במבט קדימה: ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה")
+    if not _is_structured_draft(draft):
+        outlook = (getattr(draft, "outlook_he", "") or "").strip()
+        if outlook:
+            if not any(outlook.startswith(marker) for marker in _ASSESSMENT_MARKERS):
+                errors.append(
+                    f'במבט קדימה: חובה לפתוח במילת הערכה מפורשת (להערכתנו / נראה ש / ייתכן) — "{outlook}"'
+                )
+            # Outlook is exempt from the citation requirement, but out-of-range refs are still an error.
+            for n in citations_in(outlook):
+                if n not in valid_ns:
+                    bad_refs.add(n)
+                    errors.append(f"במבט קדימה: ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה")
 
     return QAResult(
         passed=not errors,

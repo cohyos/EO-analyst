@@ -152,6 +152,70 @@ def _split_paragraphs(text: str) -> list[str]:
     return [p for p in parts if p] or [""]
 
 
+# -- goal-1 (2026-09-06) structured-sentence rendering helpers ---------------------------------
+#
+# ``eoa.llm.schemas.analysis.DailyReportDraft`` moved from free-text prose (with the model
+# expected to type its own "[n]" markers) to a structured sentence-per-claim schema
+# (``Sentence``: ``text_he`` + non-empty ``cites``); these helpers are what actually emit the
+# "[n]" markers now, deterministically, from ``cites`` -- the model never writes a citation
+# bracket in its own text. ``eoa.report.weekly``/``monthly``/``bd_territory`` still hand this
+# module the legacy free-text shape (``exec_summary_he`` / ``sections[].prose_he`` /
+# ``outlook_he``) unchanged, so every helper below is duck-typed to handle both.
+
+
+def _is_legacy_prose_draft(draft: Any) -> bool:
+    """True for the legacy free-text draft shape (weekly/monthly/bd_territory), false for the
+    goal-1 structured :class:`DailyReportDraft`."""
+    return hasattr(draft, "exec_summary_he")
+
+
+def _render_sentence(sentence: Any) -> str:
+    """One ``Sentence``/``OutlookIndicator``-like object (``text_he`` + ``cites``) rendered to
+    display text with its "[n]" markers appended deterministically from ``cites``."""
+    text = (getattr(sentence, "text_he", "") or "").rstrip()
+    cites = getattr(sentence, "cites", None) or []
+    markers = "".join(f"[{n}]" for n in cites)
+    return f"{text} {markers}".rstrip() if markers else text
+
+
+def _render_sentences(sentences: Any) -> str:
+    return " ".join(_render_sentence(s) for s in sentences or [])
+
+
+def _section_prose(section: Any) -> str:
+    """Prose text for one report section: the legacy free-text ``prose_he`` string, or the goal-1
+    structured ``sentences`` list rendered as one flowing paragraph."""
+    if hasattr(section, "sentences"):
+        return _render_sentences(section.sentences)
+    return section.prose_he
+
+
+def _draft_exec_summary_text(draft: Any) -> str:
+    if _is_legacy_prose_draft(draft):
+        return draft.exec_summary_he
+    return _render_sentences(getattr(draft, "exec_summary", None))
+
+
+def _draft_outlook_text(draft: Any) -> str:
+    if _is_legacy_prose_draft(draft):
+        return draft.outlook_he or ""
+    return " ".join(_render_sentence(ind) for ind in getattr(draft, "outlook", None) or [])
+
+
+def _draft_analyst_note_text(draft: Any) -> str:
+    """'הערכת האנליסט' (goal 1) -- empty for a draft that doesn't carry this field at all (every
+    legacy draft type)."""
+    note = getattr(draft, "analyst_note_he", None)
+    sentences = getattr(note, "sentences_he", None) if note is not None else None
+    return " ".join(sentences) if sentences else ""
+
+
+def _draft_system_note_text(draft: Any) -> str:
+    """A deterministic, non-LLM-authored notice (goal 1) -- e.g. "no items this period" or the
+    two-failure QA fallback message. Empty for a draft that doesn't carry this field."""
+    return getattr(draft, "system_note_he", "") or ""
+
+
 # -- source display label (F8: never show a raw URL as the "source" column) --------------
 
 
@@ -713,7 +777,7 @@ def _planned_headings(
         headings.append("חקירות עומק")
     if open_points:
         headings.append("נקודות פתוחות")
-    if draft.outlook_he:
+    if _draft_outlook_text(draft):
         headings.append("מבט קדימה")
     headings += [
         sec.get("title_he") or ""
@@ -788,7 +852,12 @@ def build_docx(
         f"נוצר אוטומטית על ידי EO-Analyst — {generated_at.strftime('%Y-%m-%d %H:%M')} UTC",
         size_pt=9,
     )
-    if qa is not None and not qa.passed:
+    # Goal 1 (2026-09-06): the old blanket "citation QA failed" banner is kept only for the
+    # legacy free-prose drafts (weekly/monthly/bd_territory), which still degrade by silently
+    # stripping flagged sentences and therefore still need a visible flag. The structured daily
+    # draft never reaches this state with partial content -- two QA failures replace the whole
+    # narrative with `system_note_he` (rendered below, in the body, not as a bolted-on banner).
+    if qa is not None and not qa.passed and _is_legacy_prose_draft(draft):
         warn = add_mixed_paragraph(
             doc,
             "אזהרה: הדוח לא עבר את בדיקת האזכורים במלואה — חלק מהמשפטים הוסרו אוטומטית, "
@@ -804,7 +873,17 @@ def build_docx(
         doc.add_page_break()
 
     _heading1(doc, "תקציר מנהלים")
-    add_mixed_paragraph(doc, draft.exec_summary_he or "אין תקציר לתקופה זו.")
+    add_mixed_paragraph(doc, _draft_exec_summary_text(draft) or "אין תקציר לתקופה זו.")
+
+    system_note = _draft_system_note_text(draft)
+    if system_note:
+        add_mixed_paragraph(doc, system_note)
+
+    analyst_note = _draft_analyst_note_text(draft)
+    if analyst_note:
+        note_p = add_mixed_paragraph(doc, f"הערכת האנליסט: {analyst_note}")
+        for run in note_p.runs:
+            run.font.italic = True
 
     for sec in extra_sections:
         if (sec.get("position") or "after_summary") != "after_summary":
@@ -815,7 +894,7 @@ def build_docx(
 
     for section in draft.sections:
         _heading1(doc, section.title_he)
-        for para in _split_paragraphs(section.prose_he):
+        for para in _split_paragraphs(_section_prose(section)):
             add_mixed_paragraph(doc, para)
 
     if events:
@@ -831,9 +910,10 @@ def build_docx(
         for point in open_points:
             add_mixed_paragraph(doc, point, style="List Bullet")
 
-    if draft.outlook_he:
+    outlook_text = _draft_outlook_text(draft)
+    if outlook_text:
         _heading1(doc, "מבט קדימה")
-        add_mixed_paragraph(doc, draft.outlook_he)
+        add_mixed_paragraph(doc, outlook_text)
 
     for sec in extra_sections:
         if (sec.get("position") or "after_summary") != "after_outlook":
@@ -951,21 +1031,30 @@ def render_markdown(
     lines = [f"# {title_text or TITLE_TEXT}", ""]
     if period_end is not None:
         lines += [f"**תאריך:** {hebrew_date_str(period_end)}", ""]
-    warning = _qa_warning_line(qa)
+    # Goal 1: the blanket QA-failure banner is legacy-draft-only now (see `build_docx`'s own note).
+    warning = _qa_warning_line(qa) if _is_legacy_prose_draft(draft) else None
     if warning:
         lines += [f"> **{warning}**", ""]
 
     lines += [
         "## תקציר מנהלים",
         "",
-        _md_citations(draft.exec_summary_he) or "אין תקציר לתקופה זו.",
+        _md_citations(_draft_exec_summary_text(draft)) or "אין תקציר לתקופה זו.",
         "",
     ]
+
+    system_note = _draft_system_note_text(draft)
+    if system_note:
+        lines += [system_note, ""]
+
+    analyst_note = _draft_analyst_note_text(draft)
+    if analyst_note:
+        lines += [f"*הערכת האנליסט: {analyst_note}*", ""]
 
     _extra_sections_md(lines, extra_sections, "after_summary")
 
     for section in draft.sections:
-        lines += [f"## {section.title_he}", "", _md_citations(section.prose_he), ""]
+        lines += [f"## {section.title_he}", "", _md_citations(_section_prose(section)), ""]
 
     if events:
         lines += [
@@ -1005,8 +1094,9 @@ def render_markdown(
         lines += [f"- {_md_citations(p)}" for p in open_points]
         lines.append("")
 
-    if draft.outlook_he:
-        lines += ["## מבט קדימה", "", _md_citations(draft.outlook_he), ""]
+    outlook_text = _draft_outlook_text(draft)
+    if outlook_text:
+        lines += ["## מבט קדימה", "", _md_citations(outlook_text), ""]
 
     _extra_sections_md(lines, extra_sections, "after_outlook")
     _tables_md(lines, tables or [])
@@ -1217,7 +1307,8 @@ def render_html(
     parts = [f"<h1>{_bidi_html(resolved_title)}</h1>"]
     if period_end is not None:
         parts.append(f'<p class="date">{_bidi_html(hebrew_date_str(period_end))}</p>')
-    warning = _qa_warning_line(qa)
+    # Goal 1: the blanket QA-failure banner is legacy-draft-only now (see `build_docx`'s own note).
+    warning = _qa_warning_line(qa) if _is_legacy_prose_draft(draft) else None
     if warning:
         parts.append(f'<p class="qa-warning"><strong>{html.escape(warning)}</strong></p>')
 
@@ -1230,13 +1321,21 @@ def render_html(
         parts.append(f'<nav class="toc"><h2>תוכן עניינים</h2><ul>{toc_items}</ul></nav>')
 
     parts.append(h2("תקציר מנהלים"))
-    parts.append(f"<p>{cite_links(draft.exec_summary_he or 'אין תקציר לתקופה זו.')}</p>")
+    parts.append(f"<p>{cite_links(_draft_exec_summary_text(draft) or 'אין תקציר לתקופה זו.')}</p>")
+
+    system_note = _draft_system_note_text(draft)
+    if system_note:
+        parts.append(f"<p>{_bidi_html(system_note)}</p>")
+
+    analyst_note = _draft_analyst_note_text(draft)
+    if analyst_note:
+        parts.append(f'<p class="analyst-note"><em>הערכת האנליסט: {_bidi_html(analyst_note)}</em></p>')
 
     _extra_sections_html(parts, extra_sections, "after_summary", h2)
 
     for section in draft.sections:
         parts.append(h2(section.title_he))
-        for para in _split_paragraphs(section.prose_he):
+        for para in _split_paragraphs(_section_prose(section)):
             parts.append(f"<p>{cite_links(para)}</p>")
 
     if events:
@@ -1282,9 +1381,10 @@ def render_html(
         parts += [f"<li>{_bidi_html(p)}</li>" for p in open_points]
         parts.append("</ul>")
 
-    if draft.outlook_he:
+    outlook_text = _draft_outlook_text(draft)
+    if outlook_text:
         parts.append(h2("מבט קדימה"))
-        parts.append(f"<p>{_bidi_html(draft.outlook_he)}</p>")
+        parts.append(f"<p>{cite_links(outlook_text)}</p>")
 
     _extra_sections_html(parts, extra_sections, "after_outlook", h2)
     _tables_html(parts, tables or [], h2)

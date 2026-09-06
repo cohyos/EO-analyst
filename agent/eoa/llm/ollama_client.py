@@ -466,13 +466,25 @@ _ASCII_QUOTE_BETWEEN_HEBREW_RE = re.compile(r"([֐-׿])\"([֐-׿])")
 _GERSHAYIM = "״"  # ״
 # Common Hebrew acronym stems -- the part of the acronym that precedes the (ASCII-quote-vulnerable)
 # gershayim, e.g. כטב"ם -> stem "כטב", מטע"ד -> stem "מטע", תע"א -> stem "תע", צה"ל -> stem "צה",
-# מ"מ -> stem "מ", חמ"ל -> stem "חמ", אמ"ן -> stem "אמ". A field whose text ends -- as its very
-# last token, with no trailing punctuation -- on exactly one of these stems is almost certainly a
-# truncated acronym, not a real word (these stems are not standalone Hebrew words on their own).
-_HEBREW_ACRONYM_STEMS = frozenset({"כטב", "מטע", "תע", "צה", "מ", "ק", "חמ", "אמ"})
+# מ"מ -> stem "מ", חמ"ל -> stem "חמ", אמ"ן -> stem "אמ", מכ"ם (radar) -> stem "מכ". A field whose
+# text ends -- as its very last token, with no trailing punctuation -- on exactly one of these
+# stems is almost certainly a truncated acronym, not a real word (these stems are not standalone
+# Hebrew words on their own). Goal 5 (2026-09-06, docs/qa/STATUS.md "Q3-1"): "מכ" added after two
+# rows (items 58/155) were found truncated exactly at "...מכ" / "...מכ-" (מכ"ם, radar).
+_HEBREW_ACRONYM_STEMS = frozenset({"כטב", "מטע", "תע", "צה", "מ", "ק", "חמ", "אמ", "מכ"})
 # A field ending in one of these (.!?)”) is a complete sentence -- never flagged as truncated.
 _TERMINAL_PUNCTUATION = (".", "!", "?", _GERSHAYIM, ")", "”")
 _MIN_HE_FIELD_LEN_FOR_GENERIC_CHECK = 20
+# Goal 5 (2026-09-06, docs/qa/STATUS.md "Q3-1"): a *complete* Hebrew acronym at the very end of the
+# text -- stem + gershayim/ASCII-quote + its final letter(s), e.g. "...בצה\"ל" or "...במטע״ד" --
+# has no terminal sentence punctuation right after it (an acronym is not itself a sentence
+# boundary), so it used to fall through into the broad `_MIN_HE_FIELD_LEN_FOR_GENERIC_CHECK` net
+# below and get flagged as truncated even though nothing is actually missing. This pattern (1-4
+# Hebrew letters, a quote of either kind, then 1-2 more Hebrew letters, anchored at the string's
+# end) recognizes that shape and exempts it -- checked *before* the generic net, but *after* the
+# bare-stem check above (a real truncation like ".. מטע" with no quote/final-letter at all is
+# still caught by that check first).
+_COMPLETE_ACRONYM_END_RE = re.compile(rf'[֐-׿]{{1,4}}["{_GERSHAYIM}][֐-׿]{{1,2}}$')
 
 
 def _normalize_hebrew_quotes(text: str) -> str:
@@ -495,6 +507,11 @@ def _looks_truncated_mid_hebrew_acronym(text: str, field_name: str) -> bool:
     last_token = stripped.split()[-1].strip("\"'" + _GERSHAYIM) if stripped.split() else ""
     if last_token in _HEBREW_ACRONYM_STEMS:
         return True
+    # Goal 5: a complete acronym (stem + quote + final letter(s)) at the very end is not a
+    # truncation -- exempt it from the broader net below even though it has no terminal
+    # punctuation right after it.
+    if _COMPLETE_ACRONYM_END_RE.search(stripped):
+        return False
     # Broader net: any `*_he` free-text sentence field that ends without terminal punctuation and
     # is long enough to be a real sentence (rather than e.g. a short label) is also suspect.
     return field_name.endswith("_he") and len(stripped) >= _MIN_HE_FIELD_LEN_FOR_GENERIC_CHECK

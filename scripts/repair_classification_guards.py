@@ -47,7 +47,12 @@ if str(_AGENT_DIR) not in sys.path:
 from eoa import db  # noqa: E402
 from eoa.config import settings  # noqa: E402
 from eoa.memory.relational import update_item_fields  # noqa: E402
-from eoa.pipeline.classify import _has_eoir_vocabulary, _watchlist_alias_hit  # noqa: E402
+from eoa.pipeline.classify import (  # noqa: E402
+    _has_ai_market_labor_signal,
+    _has_eoir_vocabulary,
+    _has_generic_ai_tech_market_vocabulary,
+    _watchlist_alias_hit,
+)
 from eoa.pipeline.triage import _reason_conflicting_level, level_for, triage_item  # noqa: E402
 
 _SCORE_MENTION_RE = re.compile(r"score[`'\"]*\s*[=:]?\s*(\d{1,2})", re.IGNORECASE)
@@ -86,6 +91,23 @@ def should_gate_no_eoir(item: dict[str, Any]) -> bool:
     return not (_has_eoir_vocabulary(text) or _watchlist_alias_hit(text))
 
 
+def should_gate_generic_ai_market(item: dict[str, Any]) -> bool:
+    """Goal 3 (2026-09-06, docs/qa/STATUS.md r3): same check as
+    ``eoa.pipeline.classify.apply_generic_ai_market_gate``, evaluated against an already-persisted
+    item row -- unlike :func:`should_gate_no_eoir` above, this one does NOT exempt items with
+    extracted entities or a watchlist hit, since a defense company can legitimately appear in a
+    generic AI/hi-tech labor-market article with zero real EO/IR/CV content. Requires BOTH generic
+    AI/tech vocabulary AND an explicit labor-market/industry-trend frame (see the calibration note
+    on ``apply_generic_ai_market_gate``) -- tested against the live DB, requiring either signal
+    alone over-triggered on genuine defense-tech company/product news."""
+    if item.get("domain") == "out_of_scope":
+        return False
+    text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
+    if _has_eoir_vocabulary(text):
+        return False
+    return _has_generic_ai_tech_market_vocabulary(text) and _has_ai_market_labor_signal(text)
+
+
 def parse_stated_score(reason_he: str) -> int | None:
     """The last explicit ``score=N`` (or ``` `score` N ```-style) mention in ``reason_he``, if
     any -- used to catch a persisted ``score`` column that disagrees with what the model's own
@@ -109,6 +131,7 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
     report: dict[str, Any] = {
         "subdomain_cleared": [],
         "gated_out_of_scope": [],
+        "gated_generic_ai_market": [],
         "triage_repaired": [],
         "triage_failed": [],
     }
@@ -134,6 +157,23 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
                     level="archive",
                     score=1,
                     triage_reason="gate:no_eoir_vocabulary",
+                )
+            continue  # already gated by the broader Q3-2 rule -- don't double-count below
+
+        # Goal 3: a narrower gate that fires even when entities/watchlist hits are present, so it
+        # is checked independently of (and after) the Q3-2 no-vocabulary gate above.
+        if should_gate_generic_ai_market(item):
+            report["gated_generic_ai_market"].append(
+                {"id": item["id"], "before_domain": item["domain"], "before_subdomain": item.get("subdomain")}
+            )
+            if not dry_run:
+                update_item_fields(
+                    item["id"],
+                    domain="out_of_scope",
+                    subdomain=None,
+                    level="archive",
+                    score=1,
+                    triage_reason="gate:generic_ai_market_vocabulary",
                 )
 
     triage_items = _fetch(_TRIAGE_COLS, "score IS NOT NULL AND triage_reason IS NOT NULL")
@@ -167,7 +207,8 @@ def main() -> None:
     report = repair(dry_run=args.dry_run, role=args.role)
 
     print(
-        f"{'=' * 70}\nQ3-2/Q3-3/Q3-4 classification/triage guard repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'=' * 70}"
+        f"{'=' * 70}\nQ3-2/Q3-3/Q3-4/goal-3 classification/triage guard repair "
+        f"{'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'=' * 70}"
     )
     for key, rows in report.items():
         print(f"\n{key}: {len(rows)}")
@@ -177,7 +218,10 @@ def main() -> None:
             print(f"  ... and {len(rows) - 20} more")
 
     total = (
-        len(report["subdomain_cleared"]) + len(report["gated_out_of_scope"]) + len(report["triage_repaired"])
+        len(report["subdomain_cleared"])
+        + len(report["gated_out_of_scope"])
+        + len(report["gated_generic_ai_market"])
+        + len(report["triage_repaired"])
     )
     print(
         f"\n{'=' * 70}\nTotal repaired: {total}  |  triage failed: {len(report['triage_failed'])}\n{'=' * 70}"
