@@ -114,7 +114,7 @@ class TestListTendersCounts:
     def test_counts_honor_country_and_q_filters(self):
         with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
             services.list_tenders(country="US", q="infrared")
-        count_query, count_params = mock_fetchall.call_args_list[1].args
+        _count_query, count_params = mock_fetchall.call_args_list[1].args
         assert count_params["country"] == "US"
         assert count_params["q"] == "%infrared%"
 
