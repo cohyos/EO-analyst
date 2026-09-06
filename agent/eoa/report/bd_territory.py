@@ -256,9 +256,15 @@ def _magnitude_score(
     return 1
 
 
-def _recency_score(reference_date: dt.date | None, *, today: dt.date) -> int:
+def _recency_score(reference_date: dt.date | dt.datetime | None, *, today: dt.date) -> int:
     if reference_date is None:
         return 0
+    if isinstance(reference_date, dt.datetime):
+        # events/tenders carry tz-aware timestamps; `datetime - date` raises TypeError (live BD US
+        # rebuild 2026-09-06 23:43 crashed here on the first tiered row).
+        reference_date = reference_date.date()
+    if isinstance(today, dt.datetime):
+        today = today.date()
     delta_days = abs((reference_date - today).days)
     if delta_days <= 30:
         return 2
