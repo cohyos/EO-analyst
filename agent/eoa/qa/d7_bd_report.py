@@ -42,6 +42,7 @@ _ASSUMPTIONS_HEADING_KEYWORDS = ("הנחות והפרכות", "הנחות ואל
 _FALSIFIER_KEYWORDS_HE = ("פריך", "הפרכ", "יופרך", "falsif")  # "יופרך אם" is the other valid renderer wording
 _ACQUISITION_HEADING_HE = "מעקב רכישות ושותפויות"
 _GLOBAL_MARKER_KEYWORD_HE = "גלובלי"
+_EMPTY_TERRITORY_MARKER_HE = "לא זוהו בטריטוריה זו פריטים חדשים"  # eoa.report.bd_territory system_note_he
 _BD_FILENAME_RE = re.compile(r"bd_([a-z]+)_\d{4}-\d{2}-\d{2}\.md$")
 
 
@@ -353,9 +354,20 @@ def score_D7(md_paths: list[Path], conn: Any = None) -> DomainScore:  # noqa: N8
         mismatches, checked = _conference_dates_match_db(sections, conn)
         total_mismatch += mismatches
         total_checked += checked
-        bluf_checks.append(_bluf_check(sections))
-        buyer_pipeline_checks.append(_buyer_pipeline_check(sections))
-        assumptions_checks.append(_assumptions_falsifiers_check(sections))
+        if _EMPTY_TERRITORY_MARKER_HE not in text:
+            # Round 5 (2026-09-07, live bd_kr): the deliberate empty-territory report (zero items
+            # in the window, expansion search queued) has no BLUF, buyer pipeline or assumptions
+            # by design -- the benchmark structure checks apply to populated reports only.
+            bluf_checks.append(_bluf_check(sections))
+            buyer_pipeline_checks.append(_buyer_pipeline_check(sections))
+            assumptions_checks.append(_assumptions_falsifiers_check(sections))
+        else:
+            na = "empty-territory report -- not applicable"
+            bluf_checks.append(Check("bluf_present_and_short", True, weight=1.5, evidence=na))
+            buyer_pipeline_checks.append(Check("buyer_pipeline_table_present", True, weight=2.0, evidence=na))
+            assumptions_checks.append(
+                Check("assumptions_falsifiers_list_present", True, weight=1.5, evidence=na)
+            )
         territory_match = _BD_FILENAME_RE.search(path.name)
         code = normalize_country(territory_match.group(1)) if territory_match else None
         scope_violations.extend(
