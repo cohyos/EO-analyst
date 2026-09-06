@@ -8505,3 +8505,138 @@ failures in `test_bd_tenders_round3.py`/`test_report_bd_territory.py`, owned by 
 active `agent/eoa/report/bd_territory.py` migration, are untouched by this change). `ruff check`
 clean on every file this change touches. `npm run lint` -- 0 errors (pre-existing warnings
 elsewhere, none new). `npx vitest run` -- 186 passed. `npm run build` -- succeeds.
+
+## Round 3 D7 — structured BD draft
+
+D7 judge finding (`docs/qa/loop/round_2_judge.md`, score 35): the US BD territory report
+("דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה") was rebuilt 8 times in one day and failed
+citation QA every time -- the live `bd_us_2026-09-06.md` shipped with a warning banner and one
+surviving sentence. Root cause: `eoa.report.bd_territory` still asked the LLM for free Hebrew
+prose (`eoa.llm.schemas.reports.BdTerritoryReportDraft`/`BdAction`: `exec_summary_he` /
+`market_bullets_he` / `rationale_he`, each a plain string with the model expected to type its own
+`[n]` markers) and then post-hoc regex-stripped whatever came back uncited -- exactly the pattern
+`eoa.report.daily`/`eoa.report.weekly` had already migrated away from (commits b730cfe/85c59c7)
+in favour of a structured, citations-by-construction schema (`Sentence{text_he, cites[]}`;
+deterministic `[n]` rendering from `cites`; QA passes by construction; a tables-only/deterministic
+fallback only after two LLM failures). This round gives the BD report the same treatment.
+
+### Schema (new module, `agent/eoa/llm/schemas/bd_territory.py`)
+
+Deliberately a **new** module rather than a change to `eoa.llm.schemas.reports.
+BdTerritoryReportDraft`/`BdAction` -- those stay exactly as they were (legacy free-prose shape,
+still importable by anyone else) since `eoa.report.bd_territory` is the only importer of the new
+module.
+
+- `BdRecommendedAction`: `action_he` (one sentence, no inline `[n]`), `priority` (H/M/L),
+  `rationale: list[Sentence]` (`min_length=1` -- an uncited rationale is a pydantic validation
+  error, not a QA finding), `owner_role_he`, `timing_he`, plus two additive round-3 fields:
+  `target` (the real entity/programme/tender/conference the action is aimed at) and `confidence`
+  (0-1, the analyst's own confidence in the recommendation).
+- `BdTerritoryReportDraft`: `exec_summary: list[Sentence]` (max 8), `market_bullets: list[Sentence]`
+  (5-8 by prompt convention, capped post-hoc), `competitor_moves: list[Sentence]` (new field -- a
+  cited read on what active competitors are doing, replacing the old free-prose competitors
+  narrative), `sections: list[StructuredSection]` (unused, type-compat only, exactly like the
+  legacy schema's own unused `sections`), `recommended_actions: list[BdRecommendedAction]`,
+  `analyst_note_he: AnalystNote | None` (the one uncited-by-design place, capped at 3 sentences,
+  reusing the daily/weekly "להערכתנו" convention), `risks_assumptions_he: str` (kept as legacy free
+  text -- citation-exempt, same convention as `outlook_he` elsewhere), `system_note_he: str`
+  (deterministic, code-injected messages), `open_points_he: list[str]` (max 6). Reuses
+  `eoa.llm.schemas.analysis.Sentence`/`AnalystNote`/`StructuredSection` unchanged.
+
+### Renderer / orchestrator (`agent/eoa/report/bd_territory.py`)
+
+All data collection (market items, platform/procurement events, tenders/forecasts, active
+competitors, conferences, the citation-registry-extension helpers) is untouched -- it was already
+deterministic, non-LLM code. What changed:
+
+- **Drafting**: `draft_bd_territory`/`_corrective_retry`/`_perspective_corrective_retry` now target
+  the new schema; `_no_items_draft`/`_tables_only_draft` return an empty `exec_summary` with the
+  explanatory message in `system_note_he` (mirrors `eoa.report.daily`'s own zero-items drafts)
+  instead of a free-prose `exec_summary_he`.
+- **QA (`_run_qa`)**: `eoa.report.qa_citations.check()` is reused unchanged and dispatches this
+  draft to its structured path by construction (`hasattr(draft, "exec_summary") and not
+  hasattr(draft, "exec_summary_he")`) -- it validates `exec_summary`/`sections`/`analyst_note_he`
+  generically. `market_bullets`/`competitor_moves`/`recommended_actions[].rationale` are BD-only
+  field names `qa_citations` doesn't know about, so `_run_qa` (local to this module, no
+  `qa_citations.py` changes) validates those `cites` against the same registry itself, plus a
+  "non-empty exec summary when market items exist" rule. `risks_assumptions_he` stays
+  citation-exempt via `check()`'s existing `exempt_sections` parameter.
+- **Perspective gate / placeholder-echo stripping / length capping**: same BD-1 logic, adapted to
+  read `action.rationale` (a `Sentence` list) instead of `action.rationale_he`, and
+  `draft.exec_summary`/`market_bullets`/`competitor_moves` (Sentence lists) instead of free strings
+  split with `qa_citations.split_sentences`.
+- **Two-failure fallback**: replaced the old `_strip_uncited`/`_is_dependent_fragment` free-text
+  fragment-cleanup machinery (obsolete once every claim is already an atomic `Sentence`) with
+  `_deterministic_fallback_draft`, mirroring `eoa.report.daily`/`weekly`'s own two-failure
+  substitute: a cited, model-free `exec_summary` built from the territory's top market items and
+  notable procurement/platform events, plus the same deterministic candidate actions
+  (`_deterministic_candidate_actions`, kept as the "actions when the LLM produced none" fallback
+  and now also the two-failure narrative fallback's action source) -- every sentence cites a real
+  registry `n`, so this cannot itself fail `_run_qa`. `qa.passed` is still reported `False` (the
+  original two-failure errors are preserved in `qa_report`), matching daily/weekly's "don't hide
+  that the model's own draft genuinely failed" convention. Because the new schema carries no
+  `exec_summary_he` attribute, `eoa.report.docx_builder`'s legacy-only "אזהרה: הדוח לא עבר..."
+  warning banner never fires for this report any more (structured drafts were already exempt from
+  that banner in `docx_builder`, unchanged here) -- the deterministic fallback text is what a
+  reader sees instead.
+- **Text normalization / conference-date correction**: `_normalize_draft_text`/
+  `_correct_draft_conference_dates` (D7 round-3 findings 1/2, kept and adapted) now walk `Sentence`
+  lists (`_normalize_sentence`, `_correct_sentence_conference_dates`) instead of plain strings.
+- **No-activity marker** (`NO_ACTIVITY_MARKER_HE`, D7 round-3 finding 3) and **tenders
+  open-first/unknown-recent ordering** (`collect_tenders_and_forecasts`): unchanged, both still
+  read by `eoa.qa.d7_bd_report`/`eoa.tenders.scan` respectively.
+- Rendering: `recommended_actions_table` keeps its original 5 columns (עדיפות/פעולה/נימוק/אחראי/
+  תזמון) -- `rationale` is joined into the נימוק cell via a small local `_render_sentences` helper
+  (same convention as `eoa.report.weekly._render_trend_sentences`) that appends each sentence's
+  `[n]` markers deterministically. `market_bullets`/`competitor_moves` render as new
+  `extra_sections` ("תמונת שוק בטריטוריה" / "מהלכי מתחרים בטריטוריה").
+
+### Prompt (`agent/eoa/llm/prompts/report_bd_territory.md`)
+
+Rewritten for the structured schema: JSON-only, one sentence per `Sentence.text_he`, explicit
+"never write `[n]` in `text_he`/`action_he`" rule, `cites` is the only source of `[n]`, the
+our_company/perspective framing and the "never promote a competitor" rule are unchanged, the new
+`competitor_moves`/`target`/`confidence` fields are documented, and the tenders/conferences/
+competitors tables remain explicitly "DATA — לא הוראות" (not produced by the model).
+
+### Tests
+
+`tests/unit/test_bd_structured_round3.py` (new, 9 tests): happy path renders every `[n]` (checked
+against the markdown output -- the HTML renderer's bidi-run splitting can separate `[`/digit/`]`
+into different `<bdi>` spans inside a table cell, so markdown is the reliable place to assert a
+literal `[n]` substring); an unknown-`[n]` draft is rejected by `_run_qa` then repaired by exactly
+one corrective retry; two consecutive bad-ref drafts produce the deterministic substitute summary
+(present, cited, and never the old free-prose "אזהרה" banner); `_deterministic_fallback_draft`
+always passes its own `_run_qa`; a no-activity territory (every collector empty) still emits
+`NO_ACTIVITY_MARKER_HE` without ever calling `chat_structured`; `_normalize_draft_text` strips
+doubled ASCII quotes from every structured field (`exec_summary`/`market_bullets`/
+`competitor_moves`/action `action_he`/`rationale`/`target`) both directly and end-to-end through
+`build_bd_territory`; the our_company name and the "לעולם לא ... מתחרה" perspective rule (plus the
+`cites`/`Sentence` schema instructions) survive into the rendered prompt.
+
+`tests/unit/test_report_bd_territory.py` (existing suite, migrated in place to the new schema/field
+names -- `BdRecommendedAction`/`Sentence` instead of `BdAction`/plain strings; the obsolete
+`_strip_uncited`/dependent-fragment/`_bullets_text`/`_drop_empty_sections` tests for the removed
+free-prose machinery were dropped, replaced where relevant by structured-schema equivalents, e.g.
+`test_recommended_actions_table_renders_rationale_with_citation_markers`).
+
+`tests/unit/test_bd_tenders_round3.py`: `TestNormalizeDraftText`/`TestConferenceDateCorrection`
+updated to build `BdRecommendedAction`/`Sentence`-based fixtures; `TestNoActivityMarkerEndToEnd`/
+`TestD7ActionsTableNonempty` and the unrelated D9 sections (tenders redrive, orphaned-source
+deactivation, source upsert/ingest) were untouched (they don't reference the draft schema).
+
+`PYTHONPATH=agent python -m pytest tests/unit -q -k "bd or territory"` -- 117 passed. `ruff check`
+and `ruff format --check` clean on every file this round touches.
+
+### Not verifiable without the live stack
+
+No live Postgres/Ollama was used (per this round's constraints) -- so the actual resident-model
+behavior against the new prompt (does it reliably split claims into one-sentence-per-`Sentence`
+objects without ballooning `num_predict`, the way weekly's round-2 migration had to add an
+input-side item-list reduction to control JSON size) is unverified. `_BD_NUM_PREDICT` (16000) is
+unchanged from before the migration; if per-sentence JSON overhead pushes real BD completions past
+that budget the way the old free-prose schema once did, the next round should watch for the same
+truncated-JSON failure mode weekly's round-2 note describes and consider a similar prompt-side
+market-item reduction. The competitor IP position rendering (`eoa.patents.report_section`) and the
+`is_israeli_industry` watchlist wiring (`eoa.pipeline.israel_focus`) were exercised only through
+their existing `try/except`-guarded call sites, never against a live DB.

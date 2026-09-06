@@ -2,6 +2,13 @@
 טריטוריה"), with every DB- and LLM-touching collector monkeypatched so these run with no
 Postgres and no Ollama.
 
+Round 3 (2026-09-06): migrated alongside eoa.report.bd_territory's own structured-schema
+migration (eoa.llm.schemas.bd_territory.BdTerritoryReportDraft/BdRecommendedAction, Sentence-based
+citations-by-construction) -- see tests/unit/test_bd_structured_round3.py for the new round-3
+scenarios (happy path renders every [n], an unknown-[n] draft is rejected then repaired, two
+failures produce the deterministic substitute summary, a no-activity territory still emits the
+marker, textnorm is applied, the our_company perspective rule survives in the prompt).
+
 Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_report_bd_territory.py -q``
 """
 
@@ -12,7 +19,8 @@ import datetime as dt
 import docx
 import pytest
 
-from eoa.llm.schemas.reports import BdAction, BdTerritoryReportDraft
+from eoa.llm.schemas.analysis import Sentence
+from eoa.llm.schemas.bd_territory import BdRecommendedAction, BdTerritoryReportDraft
 from eoa.report import bd_territory as bdt
 
 MARKET_ITEMS = [
@@ -27,7 +35,7 @@ MARKET_ITEMS = [
         "level": "red",
         "geography": "US",
         "entities_mentioned": ["Elbit"],
-        "summary_he": 'צבא ארה"ב הכריז על מכרז חדש לפוד כיוון [1].',
+        "summary_he": 'צבא ארה"ב הכריז על מכרז חדש לפוד כיוון.',
         "so_what_he": "הזדמנות לספקי EO/IR.",
     },
     {
@@ -41,7 +49,7 @@ MARKET_ITEMS = [
         "level": "orange",
         "geography": "US",
         "entities_mentioned": [],
-        "summary_he": 'הוכרזה תוכנית חדשה נגד כטב"מים בארה"ב [2].',
+        "summary_he": 'הוכרזה תוכנית חדשה נגד כטב"מים בארה"ב.',
         "so_what_he": "שוק צומח.",
     },
 ]
@@ -129,31 +137,44 @@ CONFERENCES_DATA = {
 
 def _draft_fixture() -> BdTerritoryReportDraft:
     return BdTerritoryReportDraft(
-        exec_summary_he=('צבא ארה"ב הכריז על מכרז חדש לפוד כיוון [1]. שוק ה-C-UAS בארה"ב צומח [2].'),
-        market_bullets_he=[
-            'צבא ארה"ב מקדם מכרז לפוד כיוון חדש [1].',
-            'תוכנית C-UAS חדשה הוכרזה בארה"ב [2].',
-            "Vendor X זכתה בעסקת ג'ימבל בהיקף 50 מיליון דולר [3].",
+        exec_summary=[
+            Sentence(text_he='צבא ארה"ב הכריז על מכרז חדש לפוד כיוון.', cites=[1]),
+            Sentence(text_he='שוק ה-C-UAS בארה"ב צומח.', cites=[2]),
+        ],
+        market_bullets=[
+            Sentence(text_he='צבא ארה"ב מקדם מכרז לפוד כיוון חדש.', cites=[1]),
+            Sentence(text_he='תוכנית C-UAS חדשה הוכרזה בארה"ב.', cites=[2]),
+            Sentence(text_he="Vendor X זכתה בעסקת ג'ימבל בהיקף 50 מיליון דולר.", cites=[3]),
+        ],
+        competitor_moves=[
+            Sentence(text_he='Elbit זכתה בעסקת פוד כיוון בארה"ב.', cites=[1]),
         ],
         sections=[],
         recommended_actions=[
-            BdAction(
+            BdRecommendedAction(
                 action_he="ליזום פגישת היכרות עם US Army לקראת ה-RFI הימי",
                 priority="H",
-                rationale_he='נפתח RFI לכיוון ימי בארה"ב [4], ותחזית הרכש תומכת בכך [5].',
+                rationale=[
+                    Sentence(text_he='נפתח RFI לכיוון ימי בארה"ב.', cites=[4]),
+                    Sentence(text_he="תחזית הרכש תומכת בכך.", cites=[5]),
+                ],
                 owner_role_he="פיתוח עסקי",
                 timing_he="מיידי",
+                target="US Navy",
+                confidence=0.7,
             ),
-            BdAction(
+            BdRecommendedAction(
                 action_he="להציג יכולות ג'ימבל בכנס AUSA הקרוב",
                 priority="M",
-                rationale_he="Vendor X כבר פעילה בשוק הזה [3].",
+                rationale=[Sentence(text_he="Vendor X כבר פעילה בשוק הזה.", cites=[3])],
                 owner_role_he="שיווק",
                 timing_he="רבעון הקרוב",
+                target="AUSA",
+                confidence=0.6,
             ),
         ],
+        analyst_note_he=None,
         risks_assumptions_he="הדוח מבוסס על כיסוי מקורות חלקי בחלון הזמן שנבדק בלבד.",
-        outlook_he="",
         open_points_he=["האם ידוע על תקציב מאושר ל-RFI הימי?"],
     )
 
@@ -203,11 +224,17 @@ def test_territory_label_normalizes():
     assert bdt.territory_label("uk") == "GB"
 
 
-def test_bullets_text_adds_trailing_period():
-    text = bdt._bullets_text(["בולט בלי נקודה", "בולט עם נקודה."])
+def test_render_sentences_appends_citation_markers():
+    text = bdt._render_sentences([Sentence(text_he="בולט בלי נקודה", cites=[1])])
+    assert text == "בולט בלי נקודה [1]"
+
+
+def test_sentences_bullets_text_one_per_line():
+    text = bdt._sentences_bullets_text(
+        [Sentence(text_he="בולט ראשון", cites=[1]), Sentence(text_he="בולט שני", cites=[2])]
+    )
     lines = text.split("\n")
-    assert lines[0].endswith(".")
-    assert lines[1] == "בולט עם נקודה."
+    assert lines == ["בולט ראשון [1]", "בולט שני [2]"]
 
 
 def test_format_market_items_block_empty():
@@ -238,6 +265,7 @@ def test_build_bd_territory_renders_expected_tables(patch_bd_collectors):
 
     heading_texts = {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"}
     assert "תמונת שוק בטריטוריה" in heading_texts
+    assert "מהלכי מתחרים בטריטוריה" in heading_texts
     assert "סיכונים והנחות" in heading_texts
     assert "דוח מיקוד לפיתוח עסקי — US" in {
         p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Title"
@@ -408,88 +436,6 @@ def test_conference_status_he_falls_back_to_raw_value():
     assert bdt._conference_status_he({"status": None}) == "—"
 
 
-def test_drop_empty_sections_removes_blank_prose():
-    from eoa.llm.schemas.analysis import ReportSection
-
-    draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר [1].",
-        sections=[
-            ReportSection(
-                title_he="בינה חזותית (Computer Vision / AI)", domain="computer_vision", prose_he="   "
-            ),
-            ReportSection(title_he="עם תוכן", domain="tech_dev", prose_he="יש כאן תוכן אמיתי [1]."),
-        ],
-    )
-    cleaned = bdt._drop_empty_sections(draft)
-    assert [s.title_he for s in cleaned.sections] == ["עם תוכן"]
-
-
-def test_drop_empty_sections_noop_when_nothing_blank():
-    from eoa.llm.schemas.analysis import ReportSection
-
-    draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר [1].",
-        sections=[ReportSection(title_he="X", domain="tech_dev", prose_he="תוכן [1].")],
-    )
-    cleaned = bdt._drop_empty_sections(draft)
-    assert cleaned is draft
-
-
-def test_strip_uncited_drops_dependent_fragment_starting_with_conjunction():
-    draft = BdTerritoryReportDraft(
-        exec_summary_he=(
-            'צבא ארה"ב מתמודד עם איומי רחפנים קטנים ומשימות מורכבות [1]. ובפרט לאיומי רחפנים קטנים ומשימות.'
-        ),
-        market_bullets_he=[],
-        recommended_actions=[],
-        risks_assumptions_he="",
-    )
-    qa = bdt.QAResult(
-        passed=False,
-        errors=["..."],
-        uncited_sentences=['צבא ארה"ב מתמודד עם איומי רחפנים קטנים ומשימות מורכבות [1].'],
-        bad_refs=[],
-        duplicate_sentences=[],
-    )
-    cleaned = bdt._strip_uncited(draft, qa)
-    assert "ובפרט" not in cleaned.exec_summary_he
-    for sentence in bdt.split_sentences(cleaned.exec_summary_he):
-        assert not bdt._starts_with_conjunction(sentence)
-
-
-def test_strip_uncited_drops_short_verbless_fragment_after_stripped_sentence():
-    draft = BdTerritoryReportDraft(
-        exec_summary_he=('החברה זכתה בחוזה גדול בארה"ב [1]. תוצאה ישירה של כך.'),
-        market_bullets_he=[],
-        recommended_actions=[],
-        risks_assumptions_he="",
-    )
-    qa = bdt.QAResult(
-        passed=False,
-        errors=["..."],
-        uncited_sentences=['החברה זכתה בחוזה גדול בארה"ב [1].'],
-        bad_refs=[],
-        duplicate_sentences=[],
-    )
-    cleaned = bdt._strip_uncited(draft, qa)
-    assert "תוצאה ישירה" not in cleaned.exec_summary_he
-
-
-def test_strip_uncited_keeps_kept_sentence_followed_by_unrelated_fragment_start():
-    # A conjunction-led sentence is dropped unconditionally (BD-1's absolute invariant),
-    # regardless of whether the sentence before it survived.
-    draft = BdTerritoryReportDraft(
-        exec_summary_he='החברה זכתה בחוזה גדול בארה"ב [1]. או שמא לא.',
-        market_bullets_he=[],
-        recommended_actions=[],
-        risks_assumptions_he="",
-    )
-    qa = bdt.QAResult(passed=True, errors=[], uncited_sentences=[], bad_refs=[], duplicate_sentences=[])
-    cleaned = bdt._strip_uncited(draft, qa)
-    assert 'החברה זכתה בחוזה גדול בארה"ב [1].' in cleaned.exec_summary_he
-    assert "או שמא לא" not in cleaned.exec_summary_he
-
-
 def test_watchlist_competitor_names_filters_non_watchlist():
     competitors = [
         {"name": "Elbit", "is_watchlist": True},
@@ -499,10 +445,10 @@ def test_watchlist_competitor_names_filters_non_watchlist():
 
 
 def test_action_promoted_competitor_detects_promotion_verb_and_name():
-    action = BdAction(
+    action = BdRecommendedAction(
         action_he="להציג יכולת של Shield AI בכנס AUSA הקרוב",
         priority="M",
-        rationale_he="Shield AI פעילה בשוק [1].",
+        rationale=[Sentence(text_he="Shield AI פעילה בשוק.", cites=[1])],
         owner_role_he="שיווק",
         timing_he="רבעון הקרוב",
     )
@@ -510,10 +456,10 @@ def test_action_promoted_competitor_detects_promotion_verb_and_name():
 
 
 def test_action_promoted_competitor_ignores_non_watchlist_mentions():
-    action = BdAction(
+    action = BdRecommendedAction(
         action_he="לפנות ללקוח בנוגע ל-Shield AI כמתחרה בשוק",
         priority="M",
-        rationale_he="Shield AI מתחרה בשוק [1].",
+        rationale=[Sentence(text_he="Shield AI מתחרה בשוק.", cites=[1])],
         owner_role_he="פיתוח עסקי",
         timing_he="מיידי",
     )
@@ -523,19 +469,19 @@ def test_action_promoted_competitor_ignores_non_watchlist_mentions():
 
 def test_perspective_violations_flags_competitor_promoting_action():
     draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר [1].",
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
         recommended_actions=[
-            BdAction(
+            BdRecommendedAction(
                 action_he="להציג יכולת של Shield AI בכנס AUSA",
                 priority="H",
-                rationale_he="Shield AI פעילה בתחום [1].",
+                rationale=[Sentence(text_he="Shield AI פעילה בתחום.", cites=[1])],
                 owner_role_he="שיווק",
                 timing_he="רבעון הקרוב",
             ),
-            BdAction(
+            BdRecommendedAction(
                 action_he="ליזום פגישה עם הלקוח בנוגע למכרז",
                 priority="M",
-                rationale_he="נפתח מכרז רלוונטי [1].",
+                rationale=[Sentence(text_he="נפתח מכרז רלוונטי.", cites=[1])],
                 owner_role_he="פיתוח עסקי",
                 timing_he="מיידי",
             ),
@@ -549,12 +495,12 @@ def test_perspective_violations_flags_competitor_promoting_action():
 
 def test_perspective_violations_empty_when_no_watchlist_competitors():
     draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר [1].",
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
         recommended_actions=[
-            BdAction(
+            BdRecommendedAction(
                 action_he="להציג יכולת של Shield AI בכנס AUSA",
                 priority="H",
-                rationale_he="Shield AI פעילה בתחום [1].",
+                rationale=[Sentence(text_he="Shield AI פעילה בתחום.", cites=[1])],
                 owner_role_he="שיווק",
                 timing_he="רבעון הקרוב",
             )
@@ -564,73 +510,82 @@ def test_perspective_violations_empty_when_no_watchlist_competitors():
 
 
 def test_drop_perspective_violations_removes_only_offending_action():
-    keep = BdAction(
+    keep = BdRecommendedAction(
         action_he="ליזום פגישה עם הלקוח",
         priority="M",
-        rationale_he="נפתח מכרז [1].",
+        rationale=[Sentence(text_he="נפתח מכרז.", cites=[1])],
         owner_role_he="פיתוח עסקי",
         timing_he="מיידי",
     )
-    drop = BdAction(
+    drop = BdRecommendedAction(
         action_he="להציג יכולת של Shield AI בכנס AUSA",
         priority="H",
-        rationale_he="Shield AI פעילה [1].",
+        rationale=[Sentence(text_he="Shield AI פעילה.", cites=[1])],
         owner_role_he="שיווק",
         timing_he="רבעון הקרוב",
     )
-    draft = BdTerritoryReportDraft(exec_summary_he="תקציר [1].", recommended_actions=[keep, drop])
+    draft = BdTerritoryReportDraft(
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])], recommended_actions=[keep, drop]
+    )
     cleaned = bdt._drop_perspective_violations(draft, [(drop, "Shield AI")])
     assert cleaned.recommended_actions == [keep]
 
 
 def test_strip_placeholder_echoes_removes_summary_sentence_with_fictional_tender():
     draft = BdTerritoryReportDraft(
-        exec_summary_he=(
-            'צבא ארה"ב מתמודד עם איומי רחפנים קטנים [1]. הפעולה הדחופה ביותר המומלצת היא ליזום '
-            "פגישת היכרות עם גורם מזמין לקראת מכרז X."
-        ),
+        exec_summary=[
+            Sentence(text_he='צבא ארה"ב מתמודד עם איומי רחפנים קטנים.', cites=[1]),
+            Sentence(
+                text_he="הפעולה הדחופה ביותר המומלצת היא ליזום פגישת היכרות עם גורם מזמין לקראת מכרז X.",
+                cites=[1],
+            ),
+        ],
     )
     cleaned = bdt._strip_placeholder_echoes(draft)
-    assert "מכרז X" not in cleaned.exec_summary_he
-    assert 'צבא ארה"ב מתמודד עם איומי רחפנים קטנים [1].' in cleaned.exec_summary_he
+    texts = [s.text_he for s in cleaned.exec_summary]
+    assert not any("מכרז X" in t for t in texts)
+    assert 'צבא ארה"ב מתמודד עם איומי רחפנים קטנים.' in texts
 
 
 def test_strip_placeholder_echoes_removes_bullet_and_action_with_generic_names():
     draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר [1].",
-        market_bullets_he=["התפתחות אמיתית [1].", "התפתחות בכנס Z הקרוב [2]."],
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+        market_bullets=[
+            Sentence(text_he="התפתחות אמיתית.", cites=[1]),
+            Sentence(text_he="התפתחות בכנס Z הקרוב.", cites=[2]),
+        ],
         recommended_actions=[
-            BdAction(
+            BdRecommendedAction(
                 action_he="להציג יכולת Y בכנס Z הקרוב",
                 priority="M",
-                rationale_he="נימוק [1].",
+                rationale=[Sentence(text_he="נימוק.", cites=[1])],
                 owner_role_he="שיווק",
                 timing_he="מיידי",
             ),
-            BdAction(
+            BdRecommendedAction(
                 action_he="ליזום פגישה עם US Army",
                 priority="H",
-                rationale_he="נימוק אמיתי [1].",
+                rationale=[Sentence(text_he="נימוק אמיתי.", cites=[1])],
                 owner_role_he="פיתוח עסקי",
                 timing_he="מיידי",
             ),
         ],
     )
     cleaned = bdt._strip_placeholder_echoes(draft)
-    assert cleaned.market_bullets_he == ["התפתחות אמיתית [1]."]
+    assert [s.text_he for s in cleaned.market_bullets] == ["התפתחות אמיתית."]
     assert len(cleaned.recommended_actions) == 1
     assert cleaned.recommended_actions[0].action_he == "ליזום פגישה עם US Army"
 
 
 def test_strip_placeholder_echoes_noop_when_clean():
     draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר אמיתי [1].",
-        market_bullets_he=["בולט אמיתי [1]."],
+        exec_summary=[Sentence(text_he="תקציר אמיתי.", cites=[1])],
+        market_bullets=[Sentence(text_he="בולט אמיתי.", cites=[1])],
         recommended_actions=[
-            BdAction(
+            BdRecommendedAction(
                 action_he="פעולה",
                 priority="M",
-                rationale_he="נימוק [1].",
+                rationale=[Sentence(text_he="נימוק.", cites=[1])],
                 owner_role_he="מכירות",
                 timing_he="מיידי",
             )
@@ -641,36 +596,38 @@ def test_strip_placeholder_echoes_noop_when_clean():
 
 
 def test_cap_draft_lengths_truncates_runaway_bullets_and_actions():
-    bullets = [f"בולט מספר {i} [1]." for i in range(15)]
+    bullets = [Sentence(text_he=f"בולט מספר {i}.", cites=[1]) for i in range(15)]
     actions = [
-        BdAction(
+        BdRecommendedAction(
             action_he=f"פעולה {i}",
             priority="M",
-            rationale_he="נימוק [1].",
+            rationale=[Sentence(text_he="נימוק.", cites=[1])],
             owner_role_he="מכירות",
             timing_he="מיידי",
         )
         for i in range(20)
     ]
     draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר [1].", market_bullets_he=bullets, recommended_actions=actions
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+        market_bullets=bullets,
+        recommended_actions=actions,
     )
     capped = bdt._cap_draft_lengths(draft)
-    assert len(capped.market_bullets_he) == 8
+    assert len(capped.market_bullets) == 8
     assert len(capped.recommended_actions) == 8
-    assert capped.market_bullets_he == bullets[:8]
+    assert capped.market_bullets == bullets[:8]
     assert capped.recommended_actions == actions[:8]
 
 
 def test_cap_draft_lengths_noop_when_within_limits():
     draft = BdTerritoryReportDraft(
-        exec_summary_he="תקציר [1].",
-        market_bullets_he=["בולט [1]."],
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+        market_bullets=[Sentence(text_he="בולט.", cites=[1])],
         recommended_actions=[
-            BdAction(
+            BdRecommendedAction(
                 action_he="פעולה",
                 priority="M",
-                rationale_he="נימוק [1].",
+                rationale=[Sentence(text_he="נימוק.", cites=[1])],
                 owner_role_he="מכירות",
                 timing_he="מיידי",
             )
@@ -710,8 +667,9 @@ def test_tables_only_draft_used_when_items_empty_but_tables_present():
         has_items=False,
         table_counts=bdt.BdTableCounts(competitors=3),
     )
-    assert "לא זוהו פריטי שוק חדשים" in draft.exec_summary_he
-    assert "3 מתחרים פעילים" in draft.exec_summary_he
+    assert "לא זוהו פריטי שוק חדשים" in draft.system_note_he
+    assert "3 מתחרים פעילים" in draft.system_note_he
+    assert draft.exec_summary == []
     assert draft.recommended_actions == []
 
 
@@ -719,7 +677,8 @@ def test_no_items_draft_used_when_everything_empty():
     draft = bdt.draft_bd_territory(
         "US", 90, "", "", "", "", "", has_items=False, table_counts=bdt.BdTableCounts()
     )
-    assert "אין ממצאים" in draft.exec_summary_he
+    assert "אין ממצאים" in draft.system_note_he
+    assert draft.exec_summary == []
 
 
 def test_collect_active_competitors_excludes_zero_activity_company(monkeypatch):
@@ -784,17 +743,17 @@ def test_build_bd_territory_no_dormant_note_when_three_or_more_competitors(patch
 
 
 def test_build_bd_territory_drops_perspective_violation_after_failed_retry(patch_bd_collectors, monkeypatch):
-    bad_action = BdAction(
+    bad_action = BdRecommendedAction(
         action_he="להציג יכולת של Shield AI בכנס AUSA",
         priority="H",
-        rationale_he="Shield AI פעילה בתחום [1].",
+        rationale=[Sentence(text_he="Shield AI פעילה בתחום.", cites=[1])],
         owner_role_he="שיווק",
         timing_he="רבעון הקרוב",
     )
-    good_action = BdAction(
+    good_action = BdRecommendedAction(
         action_he="ליזום פגישת היכרות עם US Army",
         priority="M",
-        rationale_he='נפתח RFI לכיוון ימי בארה"ב [4].',
+        rationale=[Sentence(text_he='נפתח RFI לכיוון ימי בארה"ב.', cites=[4])],
         owner_role_he="פיתוח עסקי",
         timing_he="מיידי",
     )
@@ -858,11 +817,29 @@ def test_deterministic_candidate_actions_covers_every_data_source():
     assert any("לפנות ל-US Army בנושא" in t for t in action_texts)
     # every action carries a citation into the registry
     for action in actions:
-        assert bdt.citations_in(action.rationale_he)
+        assert action.rationale
+        for sentence in action.rationale:
+            assert sentence.cites
 
 
 def test_deterministic_candidate_actions_empty_when_no_data():
     assert bdt._deterministic_candidate_actions([], {"tenders": []}, {"territory": []}, []) == []
+
+
+def test_deterministic_candidate_actions_skips_rows_without_registry_n():
+    # A fresh, independent fixture (not the shared COMPETITORS module list, which other tests in
+    # this file mutate in place by adding an "n" key to its nested recent_wins dicts) with no "n"
+    # key on the win at all.
+    competitors = [
+        {
+            "name": "Elbit",
+            "recent_wins": [
+                {"item_id": 501, "title": "Targeting pod win", "program": None},
+            ],
+        }
+    ]
+    actions = bdt._deterministic_candidate_actions(competitors, {"tenders": []}, {"territory": []}, [])
+    assert actions == []
 
 
 def test_recommended_actions_table_deterministic_uses_alternate_title_and_note():
@@ -877,6 +854,13 @@ def test_recommended_actions_table_normal_has_no_note():
     table = bdt.recommended_actions_table(draft)
     assert table["title_he"] == "נקודות כניסה ופעולות מומלצות"
     assert "note_he" not in table
+
+
+def test_recommended_actions_table_renders_rationale_with_citation_markers():
+    draft = _draft_fixture()
+    table = bdt.recommended_actions_table(draft)
+    rationale_cells = [row[2] for row in table["rows"]]
+    assert any("[4]" in cell and "[5]" in cell for cell in rationale_cells)
 
 
 def test_build_bd_territory_uses_deterministic_actions_when_llm_actions_empty(

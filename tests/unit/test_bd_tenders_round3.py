@@ -136,33 +136,34 @@ class TestTextNorm:
 
 class TestNormalizeDraftText:
     def test_normalize_draft_text_covers_every_llm_authored_field(self):
-        from eoa.llm.schemas.reports import BdAction, BdTerritoryReportDraft
+        from eoa.llm.schemas.analysis import Sentence
+        from eoa.llm.schemas.bd_territory import BdRecommendedAction, BdTerritoryReportDraft
 
         draft = BdTerritoryReportDraft(
-            exec_summary_he='פעילות בארה""ב גוברת [1].',
-            market_bullets_he=['מכרז חדש בארה""ב [1].'],
+            exec_summary=[Sentence(text_he='פעילות בארה""ב גוברת.', cites=[1])],
+            market_bullets=[Sentence(text_he='מכרז חדש בארה""ב.', cites=[1])],
+            competitor_moves=[],
             sections=[],
             recommended_actions=[
-                BdAction(
+                BdRecommendedAction(
                     action_he='לפנות לגורם בארה""ב',
                     priority="H",
-                    rationale_he='הזדמנות בארה""ב [1].',
+                    rationale=[Sentence(text_he='הזדמנות בארה""ב.', cites=[1])],
                     owner_role_he="מכירות",
                     timing_he="מיידי",
                 )
             ],
             risks_assumptions_he='כיסוי חלקי בארה""ב.',
-            outlook_he="",
             open_points_he=['האם יש עוד מכרזים בארה""ב?'],
         )
         normalized = bdt._normalize_draft_text(draft)
-        assert '""' not in normalized.exec_summary_he
-        assert '""' not in normalized.market_bullets_he[0]
+        assert '""' not in normalized.exec_summary[0].text_he
+        assert '""' not in normalized.market_bullets[0].text_he
         assert '""' not in normalized.recommended_actions[0].action_he
-        assert '""' not in normalized.recommended_actions[0].rationale_he
+        assert '""' not in normalized.recommended_actions[0].rationale[0].text_he
         assert '""' not in normalized.risks_assumptions_he
         assert '""' not in normalized.open_points_he[0]
-        assert f"ארה{GERSHAYIM}ב" in normalized.exec_summary_he
+        assert f"ארה{GERSHAYIM}ב" in normalized.exec_summary[0].text_he
 
     def test_normalize_table_covers_row_cells_and_note(self):
         table = {
@@ -220,23 +221,24 @@ class TestConferenceDateCorrection:
         assert corrections == []
 
     def test_correct_draft_conference_dates_fixes_summary_and_bullets(self):
-        from eoa.llm.schemas.reports import BdTerritoryReportDraft
+        from eoa.llm.schemas.analysis import Sentence
+        from eoa.llm.schemas.bd_territory import BdTerritoryReportDraft
 
         draft = BdTerritoryReportDraft(
-            exec_summary_he="AUSA 2026 (2026-10-01) הוא אירוע מרכזי.",
-            market_bullets_he=["יש להיערך ל-AUSA 2026 שיחל ב-2026-10-01."],
+            exec_summary=[Sentence(text_he="AUSA 2026 (2026-10-01) הוא אירוע מרכזי.", cites=[1])],
+            market_bullets=[Sentence(text_he="יש להיערך ל-AUSA 2026 שיחל ב-2026-10-01.", cites=[1])],
+            competitor_moves=[],
             sections=[],
             recommended_actions=[],
             risks_assumptions_he="",
-            outlook_he="",
             open_points_he=[],
         )
         lookup = {"AUSA 2026": dt.date(2026, 10, 12)}
         fixed = bdt._correct_draft_conference_dates(draft, lookup, territory="US")
-        assert "2026-10-12" in fixed.exec_summary_he
-        assert "2026-10-12" in fixed.market_bullets_he[0]
-        assert "2026-10-01" not in fixed.exec_summary_he
-        assert "2026-10-01" not in fixed.market_bullets_he[0]
+        assert "2026-10-12" in fixed.exec_summary[0].text_he
+        assert "2026-10-12" in fixed.market_bullets[0].text_he
+        assert "2026-10-01" not in fixed.exec_summary[0].text_he
+        assert "2026-10-01" not in fixed.market_bullets[0].text_he
 
 
 # --------------------------------------------------------------------------
