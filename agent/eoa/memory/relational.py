@@ -318,6 +318,172 @@ _WS_RE = re.compile(r"\s+", re.UNICODE)
 #: underlying event (re-extracted with a different `kind`), not two distinct events.
 EVENT_TITLE_DEDUP_THRESHOLD = 0.9
 
+#: Round-3 (docs/qa/loop/round_2_judge.md D3, item 81): two events of the same item AND the same
+#: `kind` at or above this :func:`event_semantic_similarity` are the same underlying fact re-worded
+#: by a later analyze pass ("מינוי אמיתי נורקין לראש פעילות אנדוריל בישראל" vs "מינוי עמירם נורקין
+#: למנהל הפעילות הישראלית של אנדוריל" -- three spellings of one appointment became three rows).
+#: The `(item_id, kind, lower(title))` unique index only catches verbatim repeats; the 0.9
+#: character threshold above only catches typo-level rewording. Same kind is a much stronger prior
+#: for "same event" than a different kind, so the bar is lower -- but a same-kind candidate whose
+#: parties *conflict* (both non-empty, nothing in common) is never merged, whatever the titles say.
+EVENT_SAME_KIND_DEDUP_THRESHOLD = 0.6
+
+#: Same-kind "weak" merge: a pair that clears neither the typo-level character bar
+#: (:data:`EVENT_TITLE_DEDUP_THRESHOLD`) nor the token bar above may still be the same event
+#: when *both* signals are moderately high at once -- item 81's "מינוי אמיתי נורקין לראש פעילות
+#: אנדוריל בישראל" vs "מינוי עמירם נורקין למנהל הפעילות הישראלית של אנדוריל" shares 4 of 7 content
+#: words (token 0.49) and 66% of its characters. Either signal alone at these levels is not
+#: enough: short Hebrew sentences that merely share a frame ("השלכות על שוק ההגנה האווירית" vs
+#: "השלכות על תעשיות ישראליות") reach 0.60 character similarity with one shared word.
+EVENT_SAME_KIND_WEAK_TOKEN = 0.45
+EVENT_SAME_KIND_WEAK_CHAR = 0.55
+
+_HE_PREFIXES = ("וש", "וב", "ול", "ומ", "וה", "וכ", "ש", "ב", "ל", "מ", "ה", "כ", "ו")
+_TITLE_STOPWORDS = frozenset(
+    [
+        "של",
+        "עם",
+        "בין",
+        "את",
+        "על",
+        "ידי",
+        "אל",
+        "אצל",
+        "לפי",
+        "או",
+        "גם",
+        "כי",
+        "אם",
+        "the",
+        "of",
+        "to",
+        "for",
+        "and",
+        "a",
+        "an",
+        "with",
+        "by",
+        "in",
+        "on",
+        "at",
+        "from",
+        "as",
+        "is",
+    ]
+)
+_PROPER_NOUN_RE = re.compile(r"\b[A-Z][A-Za-z0-9-]{2,}\b")
+_NUMBER_RE = re.compile(r"(?<![\w.])\d[\d.,-]*(?![\w])")
+_TOKEN_RE = re.compile(r"[\w'\"״׳-]+", re.UNICODE)
+_TOKEN_STRIP = "'\"״׳-"
+
+
+def _title_tokens(title: str) -> set[str]:
+    """Content tokens of an event title for :func:`event_semantic_similarity`: casefolded,
+    stop-words dropped, and a single Hebrew clitic prefix (ו/ה/ב/ל/מ/ש/כ, or ו+one of them)
+    stripped from tokens long enough to survive it, so "לאנדוריל" and "אנדוריל" (or "הפעילות" and
+    "פעילות") count as the same word."""
+    out: set[str] = set()
+    for tok in _TOKEN_RE.findall(_normalize_title_for_similarity(title)):
+        tok = tok.strip(_TOKEN_STRIP)
+        if not tok or tok in _TITLE_STOPWORDS:
+            continue
+        for pref in _HE_PREFIXES:
+            if tok.startswith(pref) and len(tok) - len(pref) >= 3:
+                tok = tok[len(pref) :].strip(_TOKEN_STRIP)
+                break
+        if tok and tok not in _TITLE_STOPWORDS:
+            out.add(tok)
+    return out
+
+
+def _token_score(a: str | None, b: str | None) -> float:
+    """``(jaccard + containment) / 2`` over :func:`_title_tokens`; ``0.0`` when either side has no
+    content tokens."""
+    ta, tb = _title_tokens(a or ""), _title_tokens(b or "")
+    if not ta or not tb:
+        return 0.0
+    shared = len(ta & tb)
+    return (shared / len(ta | tb) + shared / min(len(ta), len(tb))) / 2
+
+
+def same_kind_duplicate(a: str | None, b: str | None) -> bool:
+    """Round-3 decision rule for two titles of the same item and the same `kind`: a typo-level
+    character match (:data:`EVENT_TITLE_DEDUP_THRESHOLD`), a strong content-word overlap
+    (:data:`EVENT_SAME_KIND_DEDUP_THRESHOLD`), or both signals moderately high at once
+    (:data:`EVENT_SAME_KIND_WEAK_TOKEN` / :data:`EVENT_SAME_KIND_WEAK_CHAR`). Blocked outright when
+    the titles name different numbers ("אופק 19" vs "דור 1", "T-REX 25-2" vs "T-REX 2026") or
+    different Latin proper nouns (:func:`_distinct_proper_nouns`)."""
+    if _distinct_numbers(a, b) or _distinct_proper_nouns(a, b):
+        return False
+    char = event_title_similarity(a, b)
+    if char >= EVENT_TITLE_DEDUP_THRESHOLD:
+        return True
+    tok = _token_score(a, b)
+    if tok >= EVENT_SAME_KIND_DEDUP_THRESHOLD:
+        return True
+    return tok >= EVENT_SAME_KIND_WEAK_TOKEN and char >= EVENT_SAME_KIND_WEAK_CHAR
+
+
+def _distinct_numbers(a: str | None, b: str | None) -> bool:
+    """True when each title carries a number the other lacks -- two satellites, two exercise
+    years, two contract values are two events even if every other word matches."""
+    na = {t.strip(".,-") for t in _NUMBER_RE.findall(a or "")}
+    nb = {t.strip(".,-") for t in _NUMBER_RE.findall(b or "")}
+    na.discard("")
+    nb.discard("")
+    return bool(na - nb) and bool(nb - na)
+
+
+def event_semantic_similarity(a: str | None, b: str | None) -> float:
+    """Round-3 event-identity similarity in ``[0, 1]``: the greater of the character-level
+    :func:`event_title_similarity` and a token score ``(jaccard + containment) / 2`` over
+    :func:`_title_tokens`. The token half is what recognises a *re-worded* title -- same content
+    words in a different sentence -- while the containment term keeps a short title that is
+    wholly contained in a longer one ("שיתוף פעולה עם אלביט מערכות" in "שיתוף פעולה בין אנדוריל
+    לאלביט מערכות") from being diluted by the longer one's extra words. Averaging with Jaccard
+    stops containment alone from merging two different products that share a brand word."""
+    return max(event_title_similarity(a, b), _token_score(a, b))
+
+
+def _distinct_proper_nouns(a: str | None, b: str | None) -> bool:
+    """True when *each* title names a capitalised Latin-script token (a product/designation/
+    company) the other lacks -- "השקת Nexus Observer" vs "השקת Nexus Sentinel" are two launches,
+    however similar the surrounding words. A one-sided difference (one title just adds a name) is
+    not a conflict; neither is a difference in lowercase words ("production" vs "laser")."""
+    na = {t.casefold() for t in _PROPER_NOUN_RE.findall(a or "")}
+    nb = {t.casefold() for t in _PROPER_NOUN_RE.findall(b or "")}
+    return bool(na - nb) and bool(nb - na)
+
+
+def _parties_conflict(a: Sequence[str] | None, b: Sequence[str] | None) -> bool:
+    """True only when both party lists are non-empty and share no name (casefolded, whitespace-
+    normalised; a name that is a prefix/suffix of the other -- "Elbit" / "Elbit Systems" -- counts
+    as shared). An empty side never conflicts: the model often omits parties on a re-extraction."""
+    na = {_normalize_title_for_similarity(x) for x in (a or []) if x and x.strip()}
+    nb = {_normalize_title_for_similarity(x) for x in (b or []) if x and x.strip()}
+    if not na or not nb:
+        return False
+    for x in na:
+        for y in nb:
+            if x == y or x in y or y in x:
+                return False
+    return True
+
+
+def _union_parties(existing: Sequence[str] | None, new: Sequence[str] | None) -> list[str]:
+    """Existing parties first, then any new name not already present (casefold/prefix-aware)."""
+    out: list[str] = [p for p in (existing or []) if p and p.strip()]
+    for cand in new or []:
+        if not cand or not cand.strip():
+            continue
+        c = _normalize_title_for_similarity(cand)
+        if any(
+            c == _normalize_title_for_similarity(p) or c in _normalize_title_for_similarity(p) for p in out
+        ):
+            continue
+        out.append(cand)
+    return out
+
 
 def _normalize_title_for_similarity(title: str | None) -> str:
     return _WS_RE.sub(" ", (title or "").strip().casefold())
@@ -346,25 +512,46 @@ def more_specific_event_kind(a: str, b: str) -> str:
     return b if EVENT_KIND_PRIORITY.get(b, 0) > EVENT_KIND_PRIORITY.get(a, 0) else a
 
 
-def _find_near_duplicate_event(item_id: int, kind: str, title: str) -> dict[str, Any] | None:
-    """Q3-6b: an existing event for `item_id`, with a *different* `kind`, whose title is a
-    near-duplicate (:data:`EVENT_TITLE_DEDUP_THRESHOLD`) of `title` -- the best (highest-
-    similarity) match, or ``None``. Exact-same-`kind` near-duplicates are left to the
-    `(item_id, kind, lower(title))` unique-index upsert below; this only catches the "same event,
-    different kind" case that index can't."""
+def _find_near_duplicate_event(
+    item_id: int, kind: str, title: str, parties: Sequence[str] | None = None
+) -> dict[str, Any] | None:
+    """The best existing event of `item_id` that is the same underlying fact as `(kind, title)`,
+    or ``None``. Two bars (see the threshold constants): a candidate with a *different* `kind`
+    must be a character-level near-duplicate (Q3-6b, :data:`EVENT_TITLE_DEDUP_THRESHOLD`); a
+    candidate with the *same* `kind` only needs :func:`event_semantic_similarity` >=
+    :data:`EVENT_SAME_KIND_DEDUP_THRESHOLD` and non-conflicting parties (round-3, item 81). Verbatim
+    same-kind repeats are still handled by the `(item_id, kind, lower(title))` upsert in
+    :func:`insert_event`; this is the layer for everything that index can't see."""
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT id, kind, title, date, amount_usd, currency, parties, customer, program, "
-            "summary_he, confidence FROM events WHERE item_id = %(item_id)s AND kind <> %(kind)s "
-            "AND title IS NOT NULL",
-            {"item_id": item_id, "kind": kind},
+            "summary_he, confidence FROM events WHERE item_id = %(item_id)s AND title IS NOT NULL",
+            {"item_id": item_id},
         )
         candidates = cur.fetchall()
+    return _best_duplicate_candidate(kind, title, parties, candidates)
+
+
+def _best_duplicate_candidate(
+    kind: str, title: str, parties: Sequence[str] | None, candidates: Sequence[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Pure part of :func:`_find_near_duplicate_event` (unit-testable without a DB)."""
     best: dict[str, Any] | None = None
     best_score = 0.0
     for cand in candidates:
-        score = event_title_similarity(title, cand["title"])
-        if score >= EVENT_TITLE_DEDUP_THRESHOLD and score > best_score:
+        if cand["kind"] == kind:
+            if _normalize_title_for_similarity(cand["title"]) == _normalize_title_for_similarity(title):
+                continue  # the unique-index upsert handles the verbatim case
+            if _parties_conflict(parties, cand.get("parties")):
+                continue
+            if not same_kind_duplicate(title, cand["title"]):
+                continue
+            score = event_semantic_similarity(title, cand["title"])
+            threshold = 0.0  # the decision was made by same_kind_duplicate; score only ranks
+        else:
+            score = event_title_similarity(title, cand["title"])
+            threshold = EVENT_TITLE_DEDUP_THRESHOLD
+        if score >= threshold and score > best_score:
             best, best_score = cand, score
     return best
 
@@ -374,6 +561,9 @@ def _merge_into_existing_event(existing: dict[str, Any], *, kind: str, **fields:
     different `kind`), keeping the more specific `kind` and the same non-null-wins/richer-parties/
     max-confidence policy as the exact-match upsert in :func:`insert_event`."""
     merged_kind = more_specific_event_kind(existing["kind"], kind)
+    # Round-3: parties are unioned (existing order first) rather than "keep existing unless empty"
+    # -- a re-extraction that adds a genuinely new party (item 50: Palantir) must not be dropped.
+    fields = {**fields, "parties": _union_parties(existing.get("parties"), fields.get("parties"))}
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -382,10 +572,7 @@ def _merge_into_existing_event(existing: dict[str, Any], *, kind: str, **fields:
                 date = COALESCE(events.date, %(date)s),
                 amount_usd = COALESCE(events.amount_usd, %(amount_usd)s),
                 currency = COALESCE(events.currency, %(currency)s),
-                parties = CASE
-                    WHEN events.parties IS NULL OR array_length(events.parties, 1) IS NULL
-                    THEN %(parties)s ELSE events.parties
-                END,
+                parties = %(parties)s,
                 customer = COALESCE(events.customer, %(customer)s),
                 program = COALESCE(events.program, %(program)s),
                 summary_he = COALESCE(events.summary_he, %(summary_he)s),
@@ -402,6 +589,88 @@ def _merge_into_existing_event(existing: dict[str, Any], *, kind: str, **fields:
         previous_kind=existing["kind"],
     )
     return existing["id"]
+
+
+def merge_duplicate_events(*, item_id: int | None = None, dry_run: bool = True) -> list[dict[str, Any]]:
+    """Round-3 maintenance (docs/qa/loop/round_2_judge.md D3): collapse *already stored* duplicate
+    events with the same rule :func:`insert_event` now applies on the way in. Per item, events are
+    scanned in id order; each one is compared (:func:`_best_duplicate_candidate`) against the
+    survivors kept so far and, on a match, merged into that survivor -- non-null fields kept from
+    the survivor first, parties unioned, the higher confidence, the more specific kind -- and the
+    duplicate row deleted. Returns one record per merge ``{item_id, kept_id, removed_id, score,
+    kept_title, removed_title}``; with ``dry_run=True`` (the default) nothing is written."""
+    where = "WHERE item_id = %(item_id)s" if item_id is not None else ""
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, item_id, kind, title, date, amount_usd, currency, parties, customer, program, "
+            f"summary_he, confidence FROM events {where} ORDER BY item_id, id",
+            {"item_id": item_id},
+        )
+        rows = cur.fetchall()
+    by_item: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_item.setdefault(int(r["item_id"]), []).append(r)
+    merges: list[dict[str, Any]] = []
+    for iid, evs in by_item.items():
+        survivors: list[dict[str, Any]] = []
+        for ev in evs:
+            match = None
+            if ev.get("title"):
+                match = _best_duplicate_candidate(ev["kind"], ev["title"], ev.get("parties"), survivors)
+                if match is None:
+                    # verbatim same-kind title repeats can also exist historically (pre-0016 rows)
+                    for cand in survivors:
+                        if cand["kind"] == ev["kind"] and _normalize_title_for_similarity(
+                            cand["title"]
+                        ) == _normalize_title_for_similarity(ev["title"]):
+                            match = cand
+                            break
+            if match is None:
+                survivors.append(dict(ev))
+                continue
+            merged_kind = more_specific_event_kind(match["kind"], ev["kind"])
+            for f in ("date", "amount_usd", "currency", "customer", "program", "summary_he"):
+                if match.get(f) in (None, "") and ev.get(f) not in (None, ""):
+                    match[f] = ev[f]
+            match["parties"] = _union_parties(match.get("parties"), ev.get("parties"))
+            match["confidence"] = max(float(match.get("confidence") or 0), float(ev.get("confidence") or 0))
+            match["kind"] = merged_kind
+            merges.append(
+                {
+                    "item_id": iid,
+                    "kept_id": match["id"],
+                    "removed_id": ev["id"],
+                    "score": round(event_semantic_similarity(match["title"], ev["title"]), 3),
+                    "kept_title": match["title"],
+                    "removed_title": ev["title"],
+                }
+            )
+            if not dry_run:
+                with connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE events SET kind=%(kind)s, date=%(date)s, amount_usd=%(amount_usd)s, "
+                        "currency=%(currency)s, parties=%(parties)s, customer=%(customer)s, "
+                        "program=%(program)s, summary_he=%(summary_he)s, confidence=%(confidence)s, "
+                        "updated_at=now() WHERE id=%(id)s",
+                        {
+                            k: match.get(k)
+                            for k in (
+                                "id",
+                                "kind",
+                                "date",
+                                "amount_usd",
+                                "currency",
+                                "parties",
+                                "customer",
+                                "program",
+                                "summary_he",
+                                "confidence",
+                            )
+                        },
+                    )
+                    cur.execute("DELETE FROM events WHERE id = %(id)s", {"id": ev["id"]})
+                log.info("event.duplicate_merged", item_id=iid, kept_id=match["id"], removed_id=ev["id"])
+    return merges
 
 
 def insert_event(
@@ -454,7 +723,7 @@ def insert_event(
         "confidence": confidence,
     }
     if title and title.strip():
-        near_dup = _find_near_duplicate_event(item_id, kind, title)
+        near_dup = _find_near_duplicate_event(item_id, kind, title, parties)
         if near_dup is not None:
             return _merge_into_existing_event(near_dup, kind=kind, **fields)
 

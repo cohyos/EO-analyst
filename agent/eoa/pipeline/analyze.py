@@ -384,6 +384,62 @@ def _backfill_entities_from_watchlist(item: dict) -> list[str] | None:
     return combined if combined != existing else None
 
 
+#: Round-3 (docs/qa/loop/round_2_judge.md D3, events 55/84/89/121): the analyze prompt tells the
+#: model to copy every number "as it appears in the source", so "$464.8 million" was persisted as
+#: ``amount_usd = 464.8``. The prompt now asks for full units, and this deterministic pass anchors
+#: the stored figure back to the source text regardless: when the number the model wrote appears
+#: in the item's title/text immediately followed by a magnitude word, the amount is scaled by it.
+_AMOUNT_SCALE_RE_TEMPLATE = (
+    r"(?<![\d.,])(?:US\$|USD|\$|€|£)?\s*{num}\s*(?:-|to|–)?\s*"
+    r"(?P<mag>billion|bn|b|million|mn|mm|m|thousand|k|מיליארד|מיליון|אלף|מיליארדי|מיליוני)\b"
+)
+_AMOUNT_MAGNITUDE = {
+    "billion": 1e9,
+    "bn": 1e9,
+    "b": 1e9,
+    "מיליארד": 1e9,
+    "מיליארדי": 1e9,
+    "million": 1e6,
+    "mn": 1e6,
+    "mm": 1e6,
+    "m": 1e6,
+    "מיליון": 1e6,
+    "מיליוני": 1e6,
+    "thousand": 1e3,
+    "k": 1e3,
+    "אלף": 1e3,
+}
+#: Amounts at or above this are already in full units; a smaller figure is checked against the
+#: source for a magnitude word (a real four-figure price such as "$1,595" simply finds none).
+_AMOUNT_SUSPICIOUS_BELOW = 100_000.0
+
+
+def normalize_amount_from_source(amount: float | None, text: str | None) -> tuple[float | None, str | None]:
+    """Return ``(amount, magnitude_word)``: the amount scaled to full units when ``text`` shows the
+    same number followed by a magnitude word ("464.8 million" -> 464800000.0, "million"); otherwise
+    ``(amount, None)`` unchanged. Only amounts below :data:`_AMOUNT_SUSPICIOUS_BELOW` are examined."""
+    if amount is None or not text or amount <= 0 or amount >= _AMOUNT_SUSPICIOUS_BELOW:
+        return amount, None
+    # the number as the model most likely saw it: "464.8", "464,8", "10", "1,595"
+    if float(amount).is_integer():
+        base = str(int(amount))
+        variants = [base, f"{int(amount):,}"]
+    else:
+        base = f"{amount:.4f}".rstrip("0").rstrip(".")
+        variants = [base, base.replace(".", ",")]
+    for v in dict.fromkeys(variants):
+        pat = _AMOUNT_SCALE_RE_TEMPLATE.format(num=re.escape(v))
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            mag = m.group("mag").casefold()
+            return round(amount * _AMOUNT_MAGNITUDE[mag], 2), mag
+    return amount, None
+
+
+def _source_text_for_amounts(item: dict) -> str:
+    return " ".join(filter(None, [item.get("title"), item.get("clean_text"), item.get("raw_text")]))
+
+
 def _recall_event_parties(ev: EventOut) -> list[str]:
     """Round-2 (2026-09-06, judge D3 item 2): a watchlist/curated-org name plainly present in an
     event's own ``summary_he`` (the LLM's own extracted event narrative) but missing from that same
@@ -468,13 +524,22 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
             log.info("event_rejected_narrative_title", item_id=item["id"], title=(ev.title or "")[:160])
             continue
         event_parties = _recall_event_parties(ev)
+        amount_usd, magnitude = normalize_amount_from_source(ev.amount_usd, _source_text_for_amounts(item))
+        if magnitude:
+            log.info(
+                "event_amount_scaled",
+                item_id=item["id"],
+                raw=ev.amount_usd,
+                scaled=amount_usd,
+                magnitude=magnitude,
+            )
         try:
             insert_event(
                 item_id=item["id"],
                 kind=ev.kind,
                 title=ev.title,
                 date=_parse_date(ev.date),
-                amount_usd=ev.amount_usd,
+                amount_usd=amount_usd,
                 currency=ev.currency,
                 parties=event_parties,
                 customer=ev.customer,

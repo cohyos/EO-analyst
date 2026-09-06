@@ -131,7 +131,9 @@ class TestInsertEventMergesNearDuplicateAcrossKind:
 
         assert event_id == 70
         assert len(find_cursor.calls) == 1
-        assert "kind <> %(kind)s" in find_cursor.calls[0][0]
+        # round-3: the candidate query now loads every titled event of the item (same-kind
+        # re-wordings are matched in Python, see _best_duplicate_candidate)
+        assert "WHERE item_id = %(item_id)s AND title IS NOT NULL" in find_cursor.calls[0][0]
         assert len(update_cursor.calls) == 1
         query, params = update_cursor.calls[0]
         assert "UPDATE events SET" in query

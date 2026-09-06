@@ -162,7 +162,13 @@ class EventOut(BaseModel):
             "date cannot be determined at all — never guess"
         ),
     )
-    amount_usd: float | None = None
+    amount_usd: float | None = Field(
+        default=None,
+        description=(
+            "Monetary amount in FULL units (not millions): '$464.8 million' -> 464800000; null when "
+            "the source states no figure"
+        ),
+    )
     currency: str | None = None
     parties: list[str] = Field(default_factory=list)
     customer: str | None = None
