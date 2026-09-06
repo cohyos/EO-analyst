@@ -82,6 +82,13 @@ search:
     backends: [duckduckgo, bing, google, brave, yahoo]   # bing/yahoo only resolve for the *news* category in ddgs 9.x
     timeout_s: 15
     max_results: 10
+  # Round 4 (2026-09-06 evening incident: 21 ddgs timeouts + 12 google captcha "sorry" pages cost
+  # the weekly tender stage >1h). See docs/MODULES.md "Round 4 search" section.
+  cache_ttl_hours: 24
+  circuit_fail_threshold: 3
+  circuit_base_cooldown_minutes: 1
+  circuit_max_cooldown_minutes: 30
+  max_queries_per_stage: 40
 
 searxng:
   url: http://127.0.0.1:8088   # legacy SearXNG container (search.provider=ddgs is the default now)

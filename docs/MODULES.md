@@ -9173,3 +9173,346 @@ runs should be watched for whether L2 latency ever meaningfully slows an investi
 whether the false-positive rate genuinely drops (fewer `security flagged: other` log lines per
 investigation) without letting a real injection through (no `use_l2=True` call site's quarantine
 threshold changed -- only the "cannot adjudicate" default's behavior when L2 *is* reachable).
+
+## Round 4 search — cache, circuit breaker, rotation, per-run budget (2026-09-06 evening incident)
+
+`runtime/logs/orchestrator.2026-09-06.log` from the 2026-09-06 evening weekly run: ddgs logged 21
+`ddgs_partial_failure`/timeout events (`Error in engine duckduckgo: TimeoutException(... "operation
+timed out")`) and, since ddgs's default text backend list includes `google`, 12 Google responses
+came back as a `/sorry/index?...` captcha redirect (HTTP 429) plus Brave 429s and occasional Yahoo
+502s -- e.g. the `patents_google_search_fallback` query for "Anduril Lattice counter-UAS EO/IR
+optical tracking patents" burned two full ~30s multi-backend attempts before giving up, and the
+`kind: search` tender sources (`_fetch_search` in `agent/eoa/tenders/scan.py`) and the patents
+live-search fallback (`_google_patents_search_fallback` in `agent/eoa/patents/scan.py`) kept paying
+that same timeout cost query after query for hours -- the weekly's `tenders` stage alone ran past
+its 15-minute budget by over an hour. None of this reached `agent/eoa/tenders/scan.py` or
+`agent/eoa/patents/scan.py` in this round (both were being edited concurrently by other engineers)
+-- this round delivers the reusable primitives plus their own tests; wiring the call sites is
+called out explicitly below.
+
+Files: `agent/eoa/search/cache.py` (new), `agent/eoa/search/circuit.py` (new),
+`agent/eoa/search/budget.py` (new), `agent/eoa/search/provider.py` (cache/circuit/rotation wiring
+in `search()`), `agent/eoa/config.py` (`SearchCfg` new fields), `config/config.yaml` (`search:`
+block), `tests/unit/test_search_round4.py` (new, 25 tests), `tests/unit/test_search_provider.py`
+(autouse fixture updated for isolation — see below).
+
+### 1. Per-query result cache (`eoa.search.cache`)
+
+One JSON file per normalised `(provider, query, lang, categories, time_range, engines)` key
+(sha256 hex digest as the filename) under `runtime/cache/search/` (created on first use, matching
+the existing `runtime/models`, `runtime/logs` convention off `eoa.config.REPO_ROOT`; never inside
+the repo). `cache_key()` lowercases/collapses whitespace in the query and lowercases+sorts the
+engines list so cosmetic variation doesn't fragment the cache. A hit within
+`search.cache_ttl_hours` (config, default 24) returns instantly with no network attempt; only a
+successful response (`error is None`, including a legitimate zero-hit search) is ever written --
+a transient failure is never cached, so the very next call retries the network (subject to the
+circuit breaker below). `EOA_SEARCH_NO_CACHE=1` bypasses the cache completely (neither read nor
+write) — the escape hatch for a one-off "I know this is stale" run. `EOA_SEARCH_CACHE_DIR` can
+override the directory (used by the test suite to avoid touching the real `runtime/` tree).
+
+Cache entries are keyed by the *configured* `search.provider` (`"ddgs"` or `"searxng"`), not by
+whichever backend actually served a given query after rotation (below) — e.g. if ddgs is down and
+searxng serves a query, the result is still cached under the `"ddgs"` key. This is a deliberate
+simplification: the operator-visible knob is `search.provider`, and it rarely changes within a
+cache TTL window; documenting it here rather than adding a second cache dimension.
+
+### 2. Per-provider circuit breaker (`eoa.search.circuit`)
+
+`ProviderCircuit` tracks consecutive failures for one provider name (`"ddgs"` / `"searxng"`,
+process-wide singletons via `get_circuit(name)`). After `search.circuit_fail_threshold` (default
+3) consecutive failures the circuit opens for a cooldown of `search.circuit_base_cooldown_minutes`
+(default 1 min), doubling on every repeat failure while still open, capped at
+`search.circuit_max_cooldown_minutes` (default 30 min) — 1, 2, 4, 8, 16, 30, 30, ... minutes.
+While open, `allow()` returns `False` instantly (no network attempt, no timeout cost); once the
+cooldown elapses, `allow()` returns `True` for exactly one "probe" attempt (a half-open retry) —
+its own outcome then drives `record_success` (closes the circuit, resets the backoff) or
+`record_failure` (reopens at the next backoff level). Exactly one structlog line
+(`search_circuit_opened` / `search_circuit_reopened` / `search_circuit_closed`) is emitted per
+*state change* — never per skipped query, so a multi-hour dead-provider stretch produces one log
+line, not thousands. The registry is in-memory/process-local (the orchestrator worker and API
+server are separate processes here) — a fresh process re-learning provider health from scratch on
+restart is an accepted trade-off, not a bug (see the module's own docstring).
+
+Failure classification is deliberately coarse: any `SearchResponse` with `error is not None`
+counts as one failure for that provider's circuit, whatever the underlying cause (timeout,
+captcha/"sorry" page, 429, 403 all surface through ddgs/searxng as a non-empty `error` string
+today) — a legitimate zero-hit search (`error is None`, `hits == []`) is never counted as a
+failure. This matches the signal actually available at the `eoa.search.provider` abstraction
+layer without needing to string-match every failure mode.
+
+### 3. Rotation (`eoa.search.provider.search()`)
+
+`search()` now: (1) checks the cache; (2) if the *configured* provider (`settings().search.
+provider`) is `"searxng"`, calls only searxng — an explicit operator choice stays exclusive,
+unchanged from pre-round-4 behaviour, and this also keeps the existing
+`test_provider_ddgs_does_not_touch_searxng_client`-style tests' contract intact; (3) if the
+configured provider is `"ddgs"` (the default), tries ddgs first (skipped instantly if its circuit
+is open), and on failure or an open circuit falls back to searxng in the *same call* (also skipped
+instantly if its circuit is open too). A successful response from either provider is cached and
+returned immediately — no further attempts. **Bing/Brave via SearXNG engines**: no new code was
+needed here — `searxng.engines`/`engines_by_lang` in `config/config.yaml` already lists
+`bing`/`brave`-capable SearXNG engine names per language; the fallback call reuses those exactly
+as `eoa.search.searxng_client.search` always has. **Adding another keyless provider**: give it a
+`_call_<name>(query, lang, *, categories, max_results, time_range, engines) -> SearchResponse`
+function returning the shared `SearchHit`/`SearchResponse` dataclasses, wrap each attempt with
+`circuit.get_circuit("<name>").allow()`/`record_success()`/`record_failure()` the same way the
+ddgs/searxng branches do, and add it to the rotation chain in `search()`.
+
+**When both providers fail or are circuit-open** (the actual 2026-09-06 evening scenario once
+ddgs's failure streak crosses the threshold): `search()` returns
+`SearchResponse(query, lang, error="search unavailable: all providers circuit-open")` (or
+`"...all attempted providers failed"` if at least one was actually attempted) with empty `hits`
+— one structlog `search_unavailable` line, zero additional network attempts, no long wait. Callers
+already treat `resp.error` as "this query came back empty" (both `deep_search.py` and
+`tenders.scan._fetch_search` already log-and-continue on `resp.error`), so this degrades honestly
+without any caller-side change.
+
+### 4. Per-run query budget (`eoa.search.budget`)
+
+`reset(stage)` / `try_consume(stage) -> bool` / `remaining(stage)` / `exhausted(stage)`: a named,
+in-memory counter a batch caller resets once at the start of its own run and consumes once per
+outbound query, backed by `search.max_queries_per_stage` (default 40; 0 or negative disables the
+cap). Deliberately **not** enforced inside `provider.search()` itself — it's caller-side policy
+("don't issue more than N `kind: search` queries this run"), so the caller checks
+`try_consume(stage)` *before* calling `search()` and marks the remaining sources "deferred" in its
+own stats when it returns `False`, rather than the network layer silently truncating a query the
+caller believed it made.
+
+**Not wired into a call site this round** (both files were being edited concurrently by other
+engineers): the intended integration is one `budget.reset("tenders")` at the top of
+`eoa.tenders.scan.scan_tenders()`, and inside `_fetch_search` (around
+`agent/eoa/tenders/scan.py:565-572`) replace the unconditional `search(q, lang=src.engine_lang,
+max_results=8)` call with an `if not budget.try_consume("tenders"): mark this source deferred in
+stats; continue` guard before it — symmetrically, `eoa.patents.scan.search_records`'s Google
+Patents fallback (`_google_patents_search_fallback`, `agent/eoa/patents/scan.py:210-233`) should
+call `budget.reset("patents")` once per survey/scan run and guard its `search(...)` call the same
+way.
+
+### Tests
+
+`tests/unit/test_search_round4.py` (new, 25 tests, no network — `ddgs.DDGS` and
+`eoa.search.searxng_client.search` both faked): `TestCacheHitMissTTL` (a second identical call is
+served from cache with zero new ddgs calls; query/lang normalization collapses whitespace/case;
+different query or lang is a separate entry; an entry older than `cache_ttl_hours` is a miss;
+`cache_ttl_hours: 0` disables caching; `EOA_SEARCH_NO_CACHE=1` bypasses it; a failed response is
+never cached); `TestCircuitBreaker` (closed by default; opens exactly at the configured
+consecutive-failure threshold, not before; an open circuit's `allow()` is `False` until its
+cooldown elapses then `True` for one probe; success closes and resets the backoff; cooldown
+doubles on repeat failure capped at `max_cooldown_s`; `get_circuit` is a singleton per name; five
+`allow()` probes against a still-open circuit produce zero additional log lines beyond the one
+`search_circuit_opened`); `TestRotation` (a ddgs failure falls back to searxng within the same
+`search()` call and only counts as one non-tripping ddgs failure; an already-open ddgs circuit
+skips straight to searxng with zero ddgs calls; both providers failing returns an
+`error`-carrying empty response containing "search unavailable"; both circuits already open makes
+*zero* network attempts to either backend and the error mentions "circuit-open"; an explicit
+`search.provider: searxng` never rotates to ddgs); `TestPerRunQueryBudget` (consume up to the
+limit then `False`; `reset` opens a fresh window; a non-positive limit is unlimited; two stage
+names have independent counters).
+
+`tests/unit/test_search_provider.py`'s autouse fixture was extended (not just this new file) to
+call `circuit.reset_all()` before/after each test and set `EOA_SEARCH_NO_CACHE=1` — without this,
+round 4's now-real per-query cache and process-wide circuit registry would leak between that
+file's existing tests (several reuse the literal query `"q"` across test methods expecting a fresh
+mock call every time, and several deliberately induce a ddgs failure, which would otherwise
+accumulate toward tripping the circuit for tests that run afterward). No behavioral test assertion
+in that file was changed — only test isolation.
+
+Run: `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit -q -k "search or
+ddgs or searx"` (covers both `test_search_provider.py` and the new `test_search_round4.py`);
+`ruff check`/`ruff format --check` clean on every file touched this round.
+
+### Not done this round (explicitly out of scope)
+
+Neither `agent/eoa/tenders/scan.py` nor `agent/eoa/patents/scan.py` was modified — both were
+being edited concurrently by other engineers this round (see "Not wired into a call site" above
+for the exact integration points). No alembic migration was added (a file-based cache under
+`runtime/cache/search/` was simpler and sufficient per the round's own instructions, and needed no
+schema at all). No live network probe of the real ddgs/SearXNG backends was run as part of this
+round's verification — every test above mocks the network; the next live weekly/tender run is the
+first real signal that the circuit breaker actually stops the multi-hour ddgs stall seen on
+2026-09-06.
+
+## Round 4 UI (docs/REVIEW_2026-09-06_evening.md W4/W8/W9/W10/W13, `web/` + one new backend route)
+
+Frontend pass for round 4's W4/W8/W9/W10/W13 findings. `web/` only, except W10's new backend
+route module (`agent/eoa/api/routes/security_review.py` + one `app.py` import/include_router
+line) -- added as a new file per the task brief rather than touching `services.py`/`ask.py`/
+`report/**`/`tenders/**`/`search/**`, which other engineers were editing concurrently this round.
+
+### W4 -- footnote `[n]` markers must actually open the source
+
+**Root cause**: `ReportBody.tsx`'s click handler (added under U3/F23) sent every `[n]` that
+resolved to a real item straight to `/items/:id`, an internal page -- so clicking a footnote never
+opened the cited source at all, which is exactly the round-4 complaint. There was no sanitiser
+stripping attributes and no iframe involved; the report HTML is rendered inline via
+`dangerouslySetInnerHTML` with no DOMPurify pass (unlike `lib/askMarkdown.ts`, which does sanitise
+LLM/markdown output) -- the bug was purely in the click-behavior choice.
+
+**Fix** (`lib/reportHtml.ts`, `components/reports/ReportBody.tsx`, `styles/globals.css`):
+- `linkifyReportCitations` now stamps every resolved `[n]` anchor with `data-n="<n>"` (a stable
+  handle to its `#src-n` appendix row) and sets `data-item-id`/`data-url` independently -- both at
+  once when a citation has both, not one-or-the-other as before -- so the real source URL is
+  always available regardless of whether the citation also resolves to an internal item.
+- Clicking `[n]` no longer navigates anywhere: it `scrollIntoView({behavior:"smooth"})`s the
+  appendix row and applies a `.eo-appendix-highlight` class (a transition-based background flash,
+  ~2.2s, `prefers-reduced-motion`-aware) instead.
+- A new `enhanceSourceAppendixLinks()` rewrites the appendix table's own link (which
+  `agent/eoa/report/docx_builder.py`'s `_html_link()` emits as a bare URL with no `target`/`rel`)
+  into a real `target="_blank" rel="noopener noreferrer"` "פתח מקור" action, idempotently (safe to
+  run on already-enhanced HTML, keyed on a `data-appendix-link` marker).
+- The hover tooltip (`CitationHoverCard`) gained the same "פתח מקור" `target="_blank"` link,
+  alongside its existing title/source/date lookup.
+- Superseded the old F23 e2e assertion ("clicking a resolved citation navigates to /items/:id",
+  `e2e/tests/09-reports.spec.ts`) with one matching the new contract: click stays on the report,
+  scrolls the row into view, and both the appendix row and the hover tooltip expose a real
+  `target="_blank"`/`rel="noopener"` "פתח מקור" link.
+
+**Tests**: `lib/reportHtml.test.ts` (+6: `data-n`/dual `data-item-id`+`data-url`,
+`enhanceSourceAppendixLinks` adds target/rel/label, leaves a linkless row untouched, is idempotent,
+null/undefined passthrough), new `components/reports/ReportBody.test.tsx` (3: click scrolls +
+highlights instead of navigating, appendix link opens in a new tab, hover tooltip's open-source
+link). e2e: `09-reports.spec.ts`'s new test, verified against the live report HTML (a real daily
+report's citations resolve to both `item_id` and `url` for every `[n]`, confirming this was live,
+not a hypothetical edge case).
+
+### W8 -- triage feed row to inline drawer
+
+Mostly already built (`FeedDetailPanel.tsx` already showed `summary_he`/`so_what_he`/`key_facts`/
+a level chip and an outbound source link); the actual gaps:
+- **A single click, not just double-click/Space, now opens the drawer** (`FeedRow.tsx`'s `onClick`
+  calls both `onSelect()` and `onOpen()`) -- previously a single click only selected the row with
+  no visible reaction at all, which read as "clicking a row does nothing". Double-click and Space
+  still work identically (calling the same `onOpen`).
+- **Domain is now a chip**, not bare text, in `FeedDetailPanel.tsx` (mirrors `FeedRow`'s own pill),
+  so both classification facets (level, domain) read consistently as chips.
+- **Escape closes the drawer** -- added to `FeedPage.tsx`'s existing global `onKeyDown` handler.
+- **Mobile bottom sheet**: below `md`, the drawer is now `fixed inset-x-0 bottom-0` with a
+  dismissible backdrop (`data-testid="feed-detail-backdrop"`) and rounded top corners, instead of
+  a static `h-80` block competing for vertical space in the list; `md:` and up keeps the previous
+  docked side panel unchanged.
+
+**Tests**: e2e (`02-feed.spec.ts`, new) -- single click opens the panel, shows a level chip and a
+`target="_blank"` "פתח מקור" link when present, Escape closes it. Existing double-click/Space e2e
+tests and `FeedPage.test.tsx`'s 20 vitest tests all still pass unmodified.
+
+### W9 (feed side) -- group same-story duplicates
+
+`GET /api/items` already returns `dedup_of` on every `_item_card` row (`services.py`, verified) and
+`list_items`'s `WHERE` clause has no `dedup_of IS NULL` filter (unlike most report-building
+queries) -- so the same story from several outlets already arrived as N separate feed rows with no
+backend change needed, just frontend grouping.
+
+New `lib/dedupGroups.ts`: `groupDuplicateItems(items)` clusters by `dedup_of ?? id`, picks the real
+dedup target as the representative when it's among the currently-loaded items (falls back to the
+highest-scored member of the cluster otherwise, e.g. when the target lives on a not-yet-fetched
+page), and returns `{ primaries, duplicatesById }`. `FeedPage.tsx` runs this once, right after the
+raw `items` memo and before the existing U7b country-grouping step, so country grouping and
+pagination math ("מוצג X מתוך Y", "טען עוד") both operate on/report the raw fetched count
+unaffected by grouping, while the rendered row list is the deduped `primaries`.
+
+New `components/feed/DuplicateOutletsPopover.tsx` (mirrors `ExplainScorePopover`'s
+fixed-positioned popover technique, since a virtualized row can't grow in place): a "+N מקורות"
+chip (`data-testid="duplicate-outlets-toggle"`) on `FeedRow`, click-to-expand into the other
+outlets' title/source/timestamp and each one's own `target="_blank"` "פתח מקור" link.
+
+**Tests**: `lib/dedupGroups.test.ts` (4: passthrough with no duplicates, folds a `dedup_of` cluster
+keyed on the primary, falls back to highest-scored when the real primary isn't loaded, doesn't
+merge independent same-score items), `FeedPage.test.tsx` (+3: single row for a 2-item cluster with
+the right "+1 מקורות" count, expanding shows the other outlet's own open-source link, no chip for
+a non-duplicated story).
+
+### W10 -- security review queue (`agent/eoa/api/routes/security_review.py`, new)
+
+Investigations whose answer the L2 prompt-injection guard partially blocked are surfaced with a
+banner + two actions. The `security_review`/`security_review_reason_he`/`security_review_snippet`
+fields on a `deep_search` job's `result` are being added by the deep-search engineer working the
+same round and hadn't landed at the time of this pass -- everything here is coded against the
+documented field names and degrades to an honest empty/absent state until they exist (verified:
+the new route's list endpoint returns `[]` against the live DB today, and the banner simply
+doesn't render when `answer.security_review` is falsy/absent).
+
+**Backend** (new file, self-contained -- queries the DB directly via `eoa.db.connection()` and
+`eoa.memory.relational.enqueue_job` rather than adding to `eoa.api.services`, which another
+engineer was editing concurrently this round, mirroring how `eoa.api.routes.payloads` is
+self-contained):
+- `GET /api/security-reviews` -- every `deep_search` job with `result->>'security_review' =
+  'true'` and not yet resolved, newest first, capped at 100.
+- `POST /api/security-reviews/{job_id}/approve` ("אשר והמשך") -- enqueues a fresh `deep_search`
+  job carrying the original payload plus `security_override: true` and `expanded_from_job_id`
+  (same shape as `services.expand_investigation`'s own re-run), then marks the original resolved
+  via a `jobs.result = jobs.result || '{"security_review_resolved": true}'::jsonb` patch (no new
+  column/migration -- reuses the existing `result` jsonb).
+- `POST /api/security-reviews/{job_id}/dismiss` ("דחה") -- same resolved-patch, no new job.
+- Registered in `app.py` (`from eoa.api.routes import ... security_review ...` +
+  `app.include_router(security_review.router, prefix="/api")`).
+
+**Frontend**: `types/api.ts` gained `SecurityReviewCard` and four optional fields on
+`InvestigationOut` (`security_review`, `security_review_reason_he`, `security_review_snippet`,
+`security_review_resolved`); `ApiClient`/`real.ts`/`mockApi.ts` gained
+`getSecurityReviews`/`postSecurityReviewApprove`/`postSecurityReviewDismiss` (mock mode seeds one
+pending review so `VITE_USE_MOCKS=true` exercises the full flow). New shared
+`components/investigations/SecurityReviewBanner.tsx` (`role="alert"`,
+`data-testid="security-review-banner"`): reason + blocked-snippet text, "אשר והמשך"/"דחה" buttons.
+Wired into `InvestigationDetailPage.tsx` (shown when `data.answer?.security_review` and not yet
+resolved; approve navigates to the new job, mirroring the existing "הרחב חקירה" pattern) and into
+a new "בדיקות אבטחה ממתינות" section at the top of `InboxPage.tsx` (one banner per pending
+review, each with its own approve/dismiss and a "פתח חקירה" link to `/investigations/:jobId`; an
+explicit "אין בדיקות אבטחה ממתינות" empty state, which is what actually renders against the live
+backend today).
+
+**Tests**: `tests/unit/test_api_round4_ui.py` (7, `TestClient` + a fake DB cursor mirroring
+`test_payloads_round3.py`'s convention -- list empty/mapped/excludes-resolved, approve enqueues
+with `security_override`+`expanded_from_job_id` and marks resolved, approve/dismiss 404 on a
+missing job, dismiss never enqueues). `InvestigationDetailPage.test.tsx` (+4), new
+`InboxPage.test.tsx` (4). `ruff check`/`ruff format --check` clean; `PYTHONPATH=agent python -m
+pytest tests/unit -q` green alongside the rest of the suite.
+
+### W13 -- spinners: shell-first rendering, skeleton scope, and a real timeout
+
+- **10s request timeout** (`api/real.ts`'s single `request()` chokepoint, used by every
+  `ApiClient` method): an `AbortController` now aborts any call that hasn't resolved within
+  `timeoutMs` (default 10,000ms), surfacing a dedicated `ApiError("timeout", "השרת לא הגיב, נסה
+  שוב", null)` instead of leaving the caller's `LoadingState` spinning forever on a hung
+  backend/dead connection. Two endpoints that are legitimately synchronous-and-slow by design
+  (`postBdReport`/`createPatentSurvey`, which build a report inline for up to ~55s per
+  `agent/eoa/api/routes/bd.py`/`patents.py` before falling back to a job id) pass an explicit
+  `timeoutMs: 65_000` override so that design isn't mistaken for a hang.
+- **`ErrorState`** (`components/states.tsx`) gained an `error` prop: when it duck-types as the
+  timeout `ApiError` (`{code: "timeout"}`), it overrides the default message with "השרת לא הגיב,
+  נסה שוב" and keeps the existing retry button working via `onRetry`. Wired into
+  `ReportsPage`/`FeedPage`/`InvestigationsListPage`/`InboxPage`'s `ErrorState` calls (passing each
+  query's own `.error`) -- the four screens named in this round's task.
+- **`InvestigationsListPage.tsx`** used to `if (isLoading) return <LoadingState />`, hiding the
+  header (title + "חקירה חדשה" + the new-investigation dialog) until the list finished loading.
+  Restructured so the header always renders first; only the table area below it swaps between
+  loading/error/empty/data.
+- **Reports list already doesn't wait on bodies** -- confirmed, not changed: `ReportsPage.tsx`'s
+  list query only ever calls `api.getReports()` (the summary-row list endpoint); the report body
+  (`html`) is fetched by a separate `detailQuery`, enabled only once a row is selected. `FeedPage`/
+  `InboxPage` already kept their filter bar / section headers visible during `isLoading` before
+  this round (only the list/section body swaps to `LoadingState`), so they needed no shell
+  restructuring -- only the timeout wiring above.
+
+**Tests**: `api/real.test.ts` (new, 2 -- fake-timers: aborts and throws the timeout `ApiError` at
+10s when `fetch` never resolves, a normal fast response is unaffected), `components/states.test.tsx`
+(new, 5 -- default message, timeout-derived message, explicit `message` prop wins, retry button
+works, a non-timeout error falls back to the generic message).
+
+### Verification
+
+`npm run lint` (0 errors, 11 pre-existing warnings unrelated to this round -- `PatentsPage`/
+`PayloadsPage`/`TendersPage`'s `exhaustive-deps` memo warnings and two Fast-Refresh warnings,
+neither touched this round), `npx vitest run` (33 files / 216 tests, all green, +37 new tests this
+round across `lib/reportHtml.test.ts`, `components/reports/ReportBody.test.tsx`,
+`lib/dedupGroups.test.ts`, `FeedPage.test.tsx`, `InvestigationDetailPage.test.tsx`,
+`InboxPage.test.tsx` (new), `api/real.test.ts` (new), `components/states.test.tsx` (new)),
+`npm run build` clean (`tsc -b && vite build`). e2e (live app + real Postgres data at
+`127.0.0.1:8765`, freshly rebuilt `web/dist` confirmed served by checking the live index.html's
+asset hash against the just-built one -- no service restart needed since `app.py`'s `StaticFiles`
+mount reads from disk per-request): `09-reports.spec.ts`, `02-feed.spec.ts`,
+`05-investigations.spec.ts`, `08-inbox.spec.ts` -- 50 passed on `desktop-1440x900` +
+`iphone-safari` (100 total across both projects with the two new tests). `06-ask.spec.ts`
+intentionally not run per this round's instructions (a live chat request currently freezes the API
+for minutes while another engineer fixes that). Python: `PYTHONPATH=agent python -m pytest
+tests/unit/test_api_round4_ui.py tests/unit/test_api_smoke.py -q` (20 passed) plus
+`ruff check`/`ruff format --check` clean on every touched `.py` file.

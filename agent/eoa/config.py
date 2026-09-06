@@ -114,6 +114,18 @@ class SearchCfg(BaseModel):
 
     provider: str = "ddgs"  # "ddgs" (pure-Python, default) | "searxng" (legacy Docker container)
     ddgs: DdgsCfg = DdgsCfg()
+    # Round 4 (docs/qa/loop, 2026-09-06 evening incident): per-query result cache TTL. A hit
+    # skips the network entirely; set EOA_SEARCH_NO_CACHE=1 to bypass (both read and write).
+    cache_ttl_hours: float = 24.0
+    # Consecutive failures (timeout/captcha-"sorry"/429/403) on one provider before its circuit
+    # opens and it is skipped instantly (no timeout cost) for a cool-down.
+    circuit_fail_threshold: int = 3
+    # Cool-down doubles on every repeat failure while still open: base, 2x, 4x, ... capped at max.
+    circuit_base_cooldown_minutes: float = 1.0
+    circuit_max_cooldown_minutes: float = 30.0
+    # Per-run query budget a caller (tender scan, patent scan) resets at the start of its run and
+    # consumes per query via `eoa.search.budget`; 0 or negative disables the cap.
+    max_queries_per_stage: int = 40
 
 
 class FetchCfg(BaseModel):

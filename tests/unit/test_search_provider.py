@@ -50,7 +50,14 @@ class FakeDDGS:
 
 @pytest.fixture(autouse=True)
 def _reset_fake_ddgs(monkeypatch):
-    """Patch ddgs.DDGS everywhere it's looked up and reset canned state between tests."""
+    """Patch ddgs.DDGS everywhere it's looked up and reset canned state between tests.
+
+    Round 4 (docs/MODULES.md "Round 4 search"): also isolate this file's tests from the new
+    per-query cache and per-provider circuit breaker, both process-wide by design — without this,
+    an earlier test's real `runtime/cache/search/` write would serve a stale hit to a later test
+    reusing the same query text (e.g. "q"), and a run of tests that each induce one ddgs failure
+    would accumulate consecutive failures and trip the circuit for tests that come after.
+    """
     FakeDDGS.text_results = []
     FakeDDGS.news_results = []
     FakeDDGS.text_raises = None
@@ -60,7 +67,12 @@ def _reset_fake_ddgs(monkeypatch):
     monkeypatch.setattr(ddgs_pkg, "DDGS", FakeDDGS)
     # keep the rate limiter from accumulating stamps across tests / real config values
     monkeypatch.setattr(provider, "_ddgs_limiter", None)
+    monkeypatch.setenv("EOA_SEARCH_NO_CACHE", "1")
+    from eoa.search import circuit as circuit_mod
+
+    circuit_mod.reset_all()
     yield
+    circuit_mod.reset_all()
 
 
 @pytest.fixture()
@@ -168,14 +180,31 @@ class TestDdgsSearchDispatch:
 
 
 class TestDdgsErrorHandling:
-    """ddgs raises on rate limits and on zero results — never propagate into the ReAct loop."""
+    """ddgs raises on rate limits and on zero results — never propagate into the ReAct loop.
+
+    Round 4 (docs/MODULES.md "Round 4 search"): a ddgs failure now triggers an in-call fallback
+    to searxng (rotation) before `provider.search` gives up, so these tests mock
+    `searxng_client.search` to also fail (never touching the real network) and assert the
+    resulting honest "search unavailable" message rather than ddgs's raw exception text, which no
+    longer necessarily survives all the way to the caller once both providers were tried.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _searxng_also_fails(self, monkeypatch):
+        from eoa.search import searxng_client
+
+        monkeypatch.setattr(
+            searxng_client,
+            "search",
+            lambda q, lang="en", **kw: searxng_client.SearchResponse(q, lang, error="connection refused"),
+        )
 
     def test_ddgs_exception_returns_empty_response_with_error(self):
         FakeDDGS.text_raises = DDGSException("No results found.")
         resp = provider.search("nonexistent query xyz", "en")
         assert resp.hits == []
         assert resp.error is not None
-        assert "No results" in resp.error
+        assert "search unavailable" in resp.error
 
     def test_ratelimit_exception_returns_error_not_raise(self):
         FakeDDGS.text_raises = RatelimitException("rate limited")
@@ -187,7 +216,7 @@ class TestDdgsErrorHandling:
         FakeDDGS.text_raises = RuntimeError("boom")
         resp = provider.search("q", "en")
         assert resp.error is not None
-        assert "boom" in resp.error
+        assert "search unavailable" in resp.error
 
 
 class TestProviderSwitch:

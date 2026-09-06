@@ -13,6 +13,18 @@ container runtime for it. This module is the single entry point callers use
 The dataclasses (`SearchHit`, `SearchResponse`) and the `search()` signature are kept
 identical to the pre-migration ``searxng_client`` module so callers only need an import
 change (see docs/MODULES.md, search/ section, 2026-09-05 note).
+
+Round 4 (docs/MODULES.md "Round 4 search", 2026-09-06 evening incident): ``search()`` now also
+(1) checks a 24h-default per-query result cache (``eoa.search.cache``) before touching the
+network, (2) tracks a per-provider circuit breaker (``eoa.search.circuit``) so a provider stuck
+timing out or captcha-blocked is skipped instantly instead of paying its timeout every query, and
+(3) when the configured provider is ``"ddgs"`` (the default), automatically rotates to
+``"searxng"`` if ddgs fails or its circuit is open (and vice versa is intentionally *not* done: an
+explicit ``search.provider: searxng`` is treated as the operator's exclusive choice, unchanged
+from the pre-round-4 behaviour). When every reachable provider fails or is circuit-open, ``search``
+degrades to an ``error``-carrying empty response immediately — no additional network attempts, no
+long waits. The per-run query budget (``eoa.search.budget``) is deliberately *not* enforced inside
+this function — it is caller-side policy; see that module's docstring.
 """
 
 from __future__ import annotations
@@ -24,6 +36,8 @@ from dataclasses import dataclass, field
 import structlog
 
 from eoa.config import settings
+from eoa.search import cache as _cache
+from eoa.search import circuit as _circuit
 
 log = structlog.get_logger(__name__)
 
@@ -245,6 +259,27 @@ def _ddgs_search(
     return SearchResponse(query, lang, hits[:max_results])
 
 
+def _call_searxng(
+    query: str,
+    lang: str,
+    *,
+    categories: str,
+    max_results: int,
+    time_range: str | None,
+    engines: list[str] | None,
+) -> SearchResponse:
+    from eoa.search.searxng_client import search as searxng_search
+
+    return searxng_search(
+        query,
+        lang,
+        categories=categories,
+        max_results=max_results,
+        time_range=time_range,
+        engines=engines,
+    )
+
+
 def search(
     query: str,
     lang: str = "en",
@@ -259,12 +294,22 @@ def search(
     Signature matches the pre-migration ``eoa.search.searxng_client.search`` exactly so
     existing callers only change their import. Never raises; returns ``error`` on failure
     so the ReAct loop (``eoa.search.deep_search``) can continue.
+
+    Round 4: a fresh cache hit short-circuits straight back here (see module docstring); a miss
+    falls through to the provider(s), each guarded by its own circuit breaker.
     """
     provider = settings().search.provider
-    if provider == "searxng":
-        from eoa.search.searxng_client import search as searxng_search
+    key = _cache.cache_key(
+        provider, query, lang, categories=categories, time_range=time_range, engines=engines
+    )
+    cached = _cache.get(key)
+    if cached is not None:
+        log.debug("search_cache_hit", query=query[:80], lang=lang, provider=provider)
+        return SearchResponse(cached.query, cached.lang, cached.hits[:max_results], error=None)
 
-        return searxng_search(
+    if provider == "searxng":
+        # Explicit operator choice: no automatic rotation to ddgs (unchanged pre-round-4 contract).
+        resp = _call_searxng(
             query,
             lang,
             categories=categories,
@@ -272,7 +317,47 @@ def search(
             time_range=time_range,
             engines=engines,
         )
-    return _ddgs_search(query, lang, max_results=max_results, time_range=time_range, engines=engines)
+        if resp.error is None:
+            _cache.put(key, resp)
+        return resp
+
+    # provider == "ddgs" (default): try ddgs first, then fall back to searxng. Each provider is
+    # skipped instantly (no network attempt) while its circuit is open.
+    attempted: list[str] = []
+    ddgs_circuit = _circuit.get_circuit("ddgs")
+    if ddgs_circuit.allow():
+        attempted.append("ddgs")
+        resp = _ddgs_search(query, lang, max_results=max_results, time_range=time_range, engines=engines)
+        if resp.error is None:
+            ddgs_circuit.record_success()
+            _cache.put(key, resp)
+            return resp
+        ddgs_circuit.record_failure(resp.error or "")
+    else:
+        log.debug("search_circuit_skip", provider="ddgs", query=query[:80])
+
+    searxng_circuit = _circuit.get_circuit("searxng")
+    if searxng_circuit.allow():
+        attempted.append("searxng")
+        resp = _call_searxng(
+            query,
+            lang,
+            categories=categories,
+            max_results=max_results,
+            time_range=time_range,
+            engines=engines,
+        )
+        if resp.error is None:
+            searxng_circuit.record_success()
+            _cache.put(key, resp)
+            return resp
+        searxng_circuit.record_failure(resp.error or "")
+    else:
+        log.debug("search_circuit_skip", provider="searxng", query=query[:80])
+
+    reason = "all attempted providers failed" if attempted else "all providers circuit-open"
+    log.warning("search_unavailable", query=query[:80], lang=lang, attempted=attempted, reason=reason)
+    return SearchResponse(query, lang, error=f"search unavailable: {reason}")
 
 
 def ping() -> bool:
