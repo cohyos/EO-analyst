@@ -57,6 +57,8 @@ function baseItem(over: Partial<ItemDetail> = {}): ItemDetail {
         job_id: "28",
         item_id: 3,
         question: "מי הזוכה במכרז?",
+        item_title: null,
+        error: null,
         state: "queued",
         rounds: 0,
         queries: 0,

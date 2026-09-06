@@ -214,6 +214,7 @@ export type InvestigationState =
   | "queued"
   | "running"
   | "done"
+  | "failed"
   | "stopped"
   | "error"
   | "not_found";

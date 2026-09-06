@@ -21,6 +21,8 @@ function makeSummary(jobId: string): InvestigationSummary {
     job_id: jobId,
     item_id: null,
     question: "שאלת בדיקה קיימת",
+    item_title: null,
+    error: null,
     state: "done",
     rounds: 2,
     queries: 4,
