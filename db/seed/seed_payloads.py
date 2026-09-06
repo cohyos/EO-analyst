@@ -31,7 +31,7 @@ if str(_AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENT_DIR))
 
 from eoa.db import connection  # noqa: E402
-from eoa.payloads.models import CATEGORIES  # noqa: E402
+from eoa.payloads.models import CATEGORIES, parse_family_variant  # noqa: E402
 
 log = structlog.get_logger(__name__)
 
@@ -49,7 +49,20 @@ def _upsert_payload(entry: dict[str, Any], today: dt.date) -> int:
     if not canonical_name:
         raise ValueError("payloads_seed.yaml entry missing canonical_name")
     vendor = (entry.get("vendor_entity_name") or "").strip() or None
-    family = (entry.get("family") or "").strip() or None
+    # W19b (docs/REVIEW_2026-09-06_evening.md, migration 0024): deterministic family/variant
+    # split -- `eoa.payloads.models.parse_family_variant` (tested against all 62 seed names in
+    # tests/unit/test_payload_families.py) is the authoritative source for both, so several
+    # variants of one product line always land under one consistent, collapsible tree family
+    # (e.g. "Trakka TC-300"/"TrakkaCam TC-215" -> family "TC"; "Elbit DCoMPASS" stays its own
+    # family, distinct from "Elbit CoMPASS" -- exactly the two families the user named in the
+    # requirement). config/payloads_seed.yaml's own pre-W19b `family:` field predates this
+    # parser and is coarser/inconsistent (e.g. it had literally grouped "Collins Aerospace
+    # DB-110" under family "DB-110" -- a single-variant "family" identical to the variant, and
+    # "Trakka TC-300" under family "TrakkaCam" -- the vendor name, not a product line) -- it is
+    # only ever consulted as a last-resort fallback for a name the parser can't do anything with.
+    parsed_family, parsed_variant = parse_family_variant(canonical_name)
+    family = parsed_family or (entry.get("family") or "").strip() or None
+    variant = parsed_variant or (entry.get("variant") or "").strip() or None
     category = entry.get("category") or "other"
     if category not in CATEGORIES:
         log.warning("seed_payloads_invalid_category", canonical_name=canonical_name, category=category)
@@ -65,14 +78,21 @@ def _upsert_payload(entry: dict[str, Any], today: dt.date) -> int:
         cur.execute(
             """
             INSERT INTO payloads
-                (canonical_name, vendor_entity_name, family, category, image_url, spec_url, spec_source,
+                (canonical_name, vendor_entity_name, family, variant, category, image_url, spec_url, spec_source,
                  first_seen, last_seen)
             VALUES
-                (%(name)s, %(vendor)s, %(family)s, %(category)s, %(image_url)s, %(spec_url)s, %(spec_source)s,
+                (%(name)s, %(vendor)s, %(family)s, %(variant)s, %(category)s, %(image_url)s, %(spec_url)s, %(spec_source)s,
                  %(today)s, %(today)s)
             ON CONFLICT (canonical_name) DO UPDATE SET
                 vendor_entity_name = COALESCE(payloads.vendor_entity_name, EXCLUDED.vendor_entity_name),
-                family = COALESCE(payloads.family, EXCLUDED.family),
+                -- family/variant (W19b) are always re-derived from `canonical_name` by the pure,
+                -- deterministic parser (never invented/guessed) -- unlike vendor/image/spec,
+                -- which are externally-sourced facts a re-seed must never clobber, so these two
+                -- are force-set from EXCLUDED rather than COALESCE-preserved. A real per-name
+                -- exception belongs in `eoa.payloads.models.FAMILY_OVERRIDES`, not a hand-edited
+                -- DB row that a later re-seed would otherwise silently keep out of sync with it.
+                family = EXCLUDED.family,
+                variant = EXCLUDED.variant,
                 image_url = COALESCE(payloads.image_url, EXCLUDED.image_url),
                 spec_url = COALESCE(payloads.spec_url, EXCLUDED.spec_url),
                 spec_source = COALESCE(payloads.spec_source, EXCLUDED.spec_source),
@@ -83,6 +103,7 @@ def _upsert_payload(entry: dict[str, Any], today: dt.date) -> int:
                 "name": canonical_name,
                 "vendor": vendor,
                 "family": family,
+                "variant": variant,
                 "category": category,
                 "image_url": image_url,
                 "spec_url": spec_url,

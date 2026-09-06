@@ -425,6 +425,16 @@ export const en: Dictionary = {
     priceColKind: "Kind",
     priceColBuyer: "Buyer/programme",
     priceColSource: "Source",
+    // W19b (docs/REVIEW_2026-09-06_evening.md): collapsed vendor -> family -> variant tree
+    // (@/components/payloads/PayloadTree) + flat-table toggle.
+    viewModeLabel: "View",
+    viewModeTree: "Tree",
+    viewModeFlat: "Flat table",
+    treeAriaLabel: "Payload tree by vendor and family",
+    expandAria: "Expand {name}",
+    collapseAria: "Collapse {name}",
+    vendorSummary: "{families} families · {payloads} payloads",
+    familySummary: "{count} variants",
     categories: {
       gimbal: "Gimbal",
       pod: "Pod",
@@ -455,5 +465,11 @@ export const en: Dictionary = {
     rangeDetect: "Detect {km}",
     rangeRecognize: "Recognize {km}",
     rangeIdentify: "Identify {km}",
+  },
+  // Round-5 P7: see he.ts's matching comment -- the `blocked` outcome's chip/reason label used by
+  // InvestigationDetailPage's new blocked-reason callout.
+  investigations: {
+    blockedChip: "Blocked",
+    blockedReasonPrefix: "Blocked (not actually investigated)",
   },
 };

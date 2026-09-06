@@ -32,6 +32,7 @@ import type {
   PayloadDetailResponse,
   PayloadDiffResponse,
   PayloadRecord,
+  PayloadTreeResponse,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -528,6 +529,7 @@ function normalizePayloadRecord(
     canonical_name: str(r.canonical_name),
     vendor_entity_name: r.vendor_entity_name ?? null,
     family: r.family ?? null,
+    variant: r.variant ?? null,
     category: (r.category ?? "other") as PayloadRecord["category"],
     first_seen: r.first_seen ?? null,
     last_seen: r.last_seen ?? null,
@@ -954,7 +956,7 @@ export const realApi: ApiClient = {
       payloads?: Partial<PayloadRecord>[] | null;
       total?: number;
     }>(
-      `/api/payloads${qs({ category: query.category, vendor: query.vendor, q: query.q, limit: query.limit })}`,
+      `/api/payloads${qs({ category: query.category, vendor: query.vendor, family: query.family, q: query.q, limit: query.limit })}`,
     );
     return {
       payloads: arr(raw?.payloads).map(normalizePayloadRecord),
@@ -964,6 +966,7 @@ export const realApi: ApiClient = {
   getPayload: async (id: number) => request<PayloadDetailResponse>(`/api/payloads/${id}`),
   getPayloadDiff: async (id: number, a: number, b: number) =>
     request<PayloadDiffResponse>(`/api/payloads/${id}/diff${qs({ a, b })}`),
+  getPayloadTree: async () => request<PayloadTreeResponse>("/api/payloads/tree"),
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
   getTechRadar: async (weeks = 12) =>

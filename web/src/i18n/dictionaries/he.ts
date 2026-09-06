@@ -446,6 +446,16 @@ export const he = {
     priceColKind: "סוג",
     priceColBuyer: "רוכש/תוכנית",
     priceColSource: "מקור",
+    // W19b (docs/REVIEW_2026-09-06_evening.md): collapsed vendor -> family -> variant tree
+    // (@/components/payloads/PayloadTree) + flat-table toggle.
+    viewModeLabel: "תצוגה",
+    viewModeTree: "עץ",
+    viewModeFlat: "טבלה שטוחה",
+    treeAriaLabel: 'עץ מטע"דים לפי יצרן ומשפחה',
+    expandAria: "הרחב את {name}",
+    collapseAria: "כווץ את {name}",
+    vendorSummary: '{families} משפחות · {payloads} מטע"דים',
+    familySummary: "{count} דגמים",
     categories: {
       gimbal: "כדור תצפית",
       pod: "פוד",
@@ -476,5 +486,14 @@ export const he = {
     rangeDetect: "גילוי {km}",
     rangeRecognize: "הכרה {km}",
     rangeIdentify: "זיהוי {km}",
+  },
+  // Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): the `blocked` investigation outcome --
+  // distinct from `not_found` -- was never localized (InvestigationsListPage/InvestigationDetailPage
+  // still render the chip/reason from web/src/lib/investigations.ts's own hardcoded-Hebrew
+  // OUTCOME_LABEL map, same as every other outcome value there); these keys exist for the one new
+  // piece of UI this round adds on top of that -- the detail page's blocked-reason callout.
+  investigations: {
+    blockedChip: "נחסם",
+    blockedReasonPrefix: "נחסם (לא נחקר בפועל)",
   },
 } as const;

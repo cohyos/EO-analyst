@@ -4,9 +4,12 @@ import { useT } from "@/i18n";
 
 /** W19 (docs/REVIEW_2026-09-06_evening.md): small lazy-loaded thumbnail -- `image_url` is
  * identity-level and nullable (never invented, see migration 0022's docstring); a payload with no
- * known image renders a neutral placeholder instead of an empty cell or a broken `<img>`. */
-function PayloadThumbnail({ payload, alt }: { payload: PayloadRecord; alt: string }) {
-  if (!payload.image_url) {
+ * known image renders a neutral placeholder instead of an empty cell or a broken `<img>`.
+ * Exported (W19b) so `PayloadTree`'s variant rows can reuse the exact same thumbnail/placeholder
+ * without duplicating the markup -- takes just `imageUrl` rather than a full `PayloadRecord` so
+ * it also works for a `PayloadTreeVariant`, which doesn't carry every `PayloadRecord` field. */
+export function PayloadThumbnail({ imageUrl, alt }: { imageUrl: string | null; alt: string }) {
+  if (!imageUrl) {
     return (
       <div
         aria-hidden="true"
@@ -18,7 +21,7 @@ function PayloadThumbnail({ payload, alt }: { payload: PayloadRecord; alt: strin
   }
   return (
     <img
-      src={payload.image_url}
+      src={imageUrl}
       alt={alt}
       loading="lazy"
       className="h-10 w-14 rounded border border-border object-cover"
@@ -65,7 +68,7 @@ export function PayloadTable({
               }
             >
               <td className="p-2">
-                <PayloadThumbnail payload={p} alt={p.canonical_name} />
+                <PayloadThumbnail imageUrl={p.image_url} alt={p.canonical_name} />
               </td>
               <td className="p-2 font-medium text-fg">{p.canonical_name}</td>
               <td className="p-2 text-fg-muted">{p.vendor_entity_name ?? "—"}</td>

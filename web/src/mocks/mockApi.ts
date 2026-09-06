@@ -33,6 +33,7 @@ import type {
   PayloadRecord,
   PayloadSpecVersion,
   PayloadsResponse,
+  PayloadTreeResponse,
   ReportCitationsResponse,
   ReportDetail,
   RunsCurrentResponse,
@@ -60,6 +61,7 @@ import type {
 } from "@/api/types";
 import type { CountryGroup } from "@/types/api";
 import { normalizeCountryCode } from "@/lib/countries";
+import { buildPayloadTree } from "@/lib/payloadFamilies";
 import { mockEntities, type MockEntitySeed } from "./data/entities";
 import { findMockItem, mockItems } from "./data/items";
 import { findMockInvestigation, mockInvestigations } from "./data/investigations";
@@ -162,6 +164,7 @@ const mockPayloads: PayloadRecord[] = [
     canonical_name: "WESCAM MX-15",
     vendor_entity_name: "L3Harris WESCAM",
     family: "MX",
+    variant: "MX-15",
     category: "gimbal",
     first_seen: "2026-08-01",
     last_seen: "2026-09-05",
@@ -938,6 +941,11 @@ export const mockApi: ApiClient = {
         (p.vendor_entity_name ?? "").toLowerCase().includes(v),
       );
     }
+    // W19b (docs/REVIEW_2026-09-06_evening.md): family filter, mirrors `vendor` above.
+    if (query.family) {
+      const f = query.family.toLowerCase();
+      filtered = filtered.filter((p) => (p.family ?? "").toLowerCase().includes(f));
+    }
     if (query.q) {
       const q = query.q.toLowerCase();
       filtered = filtered.filter(
@@ -960,6 +968,9 @@ export const mockApi: ApiClient = {
       price_refs: mockPayloadPriceRefs[id] ?? [],
     });
   },
+  // W19b: mirrors the real API's `GET /api/payloads/tree`, built from the same mock rows via the
+  // shared client-side grouping helper (`@/lib/payloadFamilies`).
+  getPayloadTree: async (): Promise<PayloadTreeResponse> => delay(buildPayloadTree(mockPayloads)),
   getPayloadDiff: async (
     id: number,
     a: number,

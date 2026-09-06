@@ -226,7 +226,14 @@ export type InvestigationOutcomeReason =
   | "off_topic"
   | "stopped_budget"
   | "stopped_timeout"
-  | "insufficient_context";
+  | "insufficient_context"
+  // Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): the investigation could not actually be
+  // carried out (every fetched page was quarantined by the security guard, every search hit was
+  // screened out before any page was read, or the cloud-delegated answer was fully redacted) --
+  // distinct from `not_found` (searched fully, genuinely nothing there). Also a first-class value
+  // of `InvestigationOut.outcome` itself, not just `stopped_reason` -- see
+  // agent/eoa/llm/schemas/analysis.py.
+  | "blocked";
 
 export interface InvestigationSummary {
   job_id: string;
@@ -285,6 +292,10 @@ export interface InvestigationOut {
   /** Set by `POST /api/security-reviews/{job_id}/approve|dismiss` once handled -- the banner
    * hides once this is true, without needing a fresh page load. */
   security_review_resolved?: boolean;
+  /** Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): one Hebrew sentence explaining *why*
+   * `outcome === "blocked"` -- always set on a blocked result, absent/null otherwise. See
+   * `agent/eoa/llm/schemas/analysis.py::InvestigationOut.blocked_reason_he`. */
+  blocked_reason_he?: string | null;
 }
 
 export interface InvestigationDetail extends InvestigationSummary {
@@ -1026,6 +1037,16 @@ export interface PayloadRecord {
   canonical_name: string;
   vendor_entity_name: string | null;
   family: string | null;
+  // W19b (docs/REVIEW_2026-09-06_evening.md, migration 0024): the model-number/generation half
+  // of `canonical_name` with the leading vendor/family stripped (e.g. "MX-15" for a payload
+  // whose `family` is "MX") -- `eoa.payloads.models.parse_family_variant`'s other half. Feeds
+  // the collapsed vendor -> family -> variant tree (`@/lib/payloadFamilies`,
+  // `GET /api/payloads/tree`) so several variants of one product line group under one
+  // expandable row instead of flooding the operator with a flat list. Optional (rather than
+  // always-present-but-nullable like the fields around it) so existing test fixtures built
+  // before W19b (`PayloadsPage.test.tsx`, `i18n/englishMode.test.tsx`) that construct a
+  // `PayloadRecord` literal without it keep compiling unchanged.
+  variant?: string | null;
   category: PayloadCategory;
   first_seen: string | null;
   last_seen: string | null;
@@ -1124,4 +1145,51 @@ export interface PayloadDiffResponse {
   a: PayloadSpecVersion;
   b: PayloadSpecVersion;
   changed_fields: string[];
+}
+
+// --- W19b (docs/REVIEW_2026-09-06_evening.md): GET /api/payloads/tree -- vendor -> family ->
+// variant grouping with counts, mirrored client-side (without the watchlist corporate-alias
+// merge, which needs config/watchlist.yaml) by `@/lib/payloadFamilies`'s `buildPayloadTree` so
+// the collapsed-tree UI doesn't need a second round trip for data it already fetched via
+// `GET /api/payloads`. Shape must stay identical to `eoa.payloads.models.build_payload_tree`'s
+// return value (agent/eoa/payloads/models.py). ---------------------------------------------
+
+export interface PayloadTreeVariant {
+  id: number;
+  canonical_name: string;
+  variant: string;
+  category: PayloadCategory;
+  image_url: string | null;
+  spec_url: string | null;
+  spec_source: string | null;
+  spec_version_count: number;
+  price_ref_count: number;
+  latest_spec_date: string | null;
+  latest_price_date: string | null;
+}
+
+export interface PayloadTreeFamily {
+  family: string;
+  variant_count: number;
+  spec_version_count: number;
+  price_ref_count: number;
+  latest_spec_date: string | null;
+  latest_price_date: string | null;
+  variants: PayloadTreeVariant[];
+}
+
+export interface PayloadTreeVendor {
+  vendor: string;
+  family_count: number;
+  payload_count: number;
+  spec_version_count: number;
+  price_ref_count: number;
+  families: PayloadTreeFamily[];
+}
+
+export interface PayloadTreeResponse {
+  vendors: PayloadTreeVendor[];
+  vendor_count: number;
+  family_count: number;
+  payload_count: number;
 }

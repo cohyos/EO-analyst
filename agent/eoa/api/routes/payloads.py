@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from eoa.db import connection
-from eoa.payloads.models import field_diff
+from eoa.payloads.models import build_payload_tree, field_diff
 
 log = structlog.get_logger(__name__)
 
@@ -36,10 +36,31 @@ def _fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
         return cur.fetchone()
 
 
+# Shared by `list_payloads` and `payloads_tree` (W19b) -- every consumer of a `payloads` row
+# needs the same version/price rollup columns `eoa.payloads.models.build_payload_tree` expects
+# (`spec_version_count`/`price_ref_count`/`latest_spec_date`/`latest_price_date`), so this is the
+# one place that SQL is written.
+_PAYLOAD_ROWS_WITH_COUNTS_SQL = """
+    SELECT p.*,
+        (SELECT count(*) FROM payload_spec_versions v WHERE v.payload_id = p.id) AS spec_version_count,
+        (SELECT count(*) FROM payload_price_refs r WHERE r.payload_id = p.id) AS price_ref_count,
+        (SELECT max(v.effective_date) FROM payload_spec_versions v WHERE v.payload_id = p.id) AS latest_spec_date,
+        (SELECT max(r.date) FROM payload_price_refs r WHERE r.payload_id = p.id) AS latest_price_date
+    FROM payloads p
+    WHERE {where}
+    ORDER BY p.canonical_name
+"""
+
+
+def _payload_rows_with_counts(where: list[str], params: dict[str, Any]) -> list[dict[str, Any]]:
+    return _fetchall(_PAYLOAD_ROWS_WITH_COUNTS_SQL.format(where=" AND ".join(where)), params)
+
+
 @router.get("/payloads")
 def list_payloads(
     category: str | None = Query(None),
     vendor: str | None = Query(None),
+    family: str | None = Query(None, description="W19b: exact/partial match against payloads.family"),
     q: str | None = Query(None, description="free-text match against canonical_name/family/notes"),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
@@ -51,25 +72,29 @@ def list_payloads(
     if vendor:
         where.append("p.vendor_entity_name ILIKE %(vendor)s")
         params["vendor"] = f"%{vendor}%"
+    if family:
+        where.append("p.family ILIKE %(family)s")
+        params["family"] = f"%{family}%"
     if q:
         where.append("(p.canonical_name ILIKE %(q)s OR p.family ILIKE %(q)s OR p.notes ILIKE %(q)s)")
         params["q"] = f"%{q}%"
     rows = _fetchall(
-        f"""
-        SELECT p.*,
-            (SELECT count(*) FROM payload_spec_versions v WHERE v.payload_id = p.id) AS spec_version_count,
-            (SELECT count(*) FROM payload_price_refs r WHERE r.payload_id = p.id) AS price_ref_count,
-            (SELECT max(v.effective_date) FROM payload_spec_versions v WHERE v.payload_id = p.id) AS latest_spec_date,
-            (SELECT max(r.date) FROM payload_price_refs r WHERE r.payload_id = p.id) AS latest_price_date
-        FROM payloads p
-        WHERE {" AND ".join(where)}
-        ORDER BY p.canonical_name
-        LIMIT %(limit)s
-        """,
+        _PAYLOAD_ROWS_WITH_COUNTS_SQL.format(where=" AND ".join(where)) + " LIMIT %(limit)s",
         params,
     )
     total_row = _fetchone("SELECT count(*) AS c FROM payloads")
     return {"payloads": rows, "total": (total_row or {}).get("c", len(rows))}
+
+
+@router.get("/payloads/tree")
+def payloads_tree() -> dict[str, Any]:
+    """W19b (docs/REVIEW_2026-09-06_evening.md; user requirement 2026-09-06 21:20): every payload
+    grouped vendor -> family -> variant, with counts + latest spec/price dates at each level --
+    `eoa.payloads.models.build_payload_tree`, fed every row in the table (unfiltered; the UI's own
+    search/category filters narrow the tree client-side against this same shape, see
+    `@/lib/payloadFamilies`)."""
+    rows = _payload_rows_with_counts(["1=1"], {})
+    return build_payload_tree(rows)
 
 
 @router.get("/payloads/export.csv")

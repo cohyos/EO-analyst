@@ -10800,3 +10800,102 @@ in `docs/qa/loop/round_5_chat_fixes.md`.
 "ask"` (138 passed) all green. `ruff check`/`ruff format --check` clean on `ask_grounding.py`, `ask.py`
 (both had drifted out of format from manually-collapsed lines, reformatted in place this round) and the
 new test file.
+
+## W19b -- payload families with drill-down (docs/REVIEW_2026-09-06_evening.md W19b, user
+requirement 2026-09-06 21:20, verbatim: "group the manufacturers' products by families and allow
+drill-down, not flooding the operator")
+
+Resumed from a partial hand-off (previous engineer cut off by an API rate limit) -- `agent/eoa/payloads/models.py`'s
+parser/tree functions and `tests/unit/test_payload_families.py` were already complete and untouched
+here; migration 0024 and everything downstream of it (seed backfill, API route, frontend) was done
+this round.
+
+**Backend.** `db/migrations/versions/0024_payloads_variant.py` adds `payloads.variant TEXT`
+(nullable) + `ix_payloads_family` -- additive, no backfill in the migration itself. Applying it
+required also applying `0023_indicator_watchlist.py` first (a different, already-written round-5
+migration that had never been run against the dev DB; purely additive -- a nullable
+`reports.report_state` column + a new `indicator_watchlist` table -- so running it was a safe,
+necessary prerequisite rather than scope creep). Both are now live on the dev DB
+(`alembic upgrade head`, 0022 -> 0024).
+
+`eoa.payloads.models.parse_family_variant(canonical_name)` (already written, pre-existing) splits
+a canonical name into `(family, variant)` by stripping a curated leading vendor/brand prefix
+(`BRAND_PREFIXES`) then, if present, a trailing model-number/generation suffix that "looks like"
+a code (all-uppercase-alnum, length 1-4, or containing a digit) rather than a real word -- e.g.
+"WESCAM MX-15" -> `("MX", "MX-15")`, "Controp T-Stamp" -> `("T-Stamp", "T-Stamp")` (real word
+"Stamp" is never mistaken for a code). `canonical_vendor` resolves a raw `vendor_entity_name`
+through `eoa.pipeline.entity_normalize.resolve_canonical` (config/watchlist.yaml aliases), merging
+real corporate siblings (Raytheon/Collins Aerospace -> RTX). `build_payload_tree(rows)` groups
+already-fetched payload rows into vendor -> family -> variant with counts/latest-date rollups at
+every level. All three are tested against every one of the 62 seed names in
+`tests/unit/test_payload_families.py` (pre-existing, 265 lines, complete).
+
+`db/seed/seed_payloads.py` now calls `parse_family_variant` for every seed row and writes its
+`family`/`variant` unconditionally (`ON CONFLICT ... DO UPDATE SET family = EXCLUDED.family,
+variant = EXCLUDED.variant`, not the `COALESCE`-preserve convention used for vendor/image/spec) --
+these two columns are always a pure, deterministic function of `canonical_name`, never an
+externally-sourced fact a re-seed must protect, so re-running the parser is always safe and always
+correct, unlike a hand-edited value. This mattered in practice: `config/payloads_seed.yaml`'s own
+pre-existing `family:` field (written before this parser existed, round 4b) was coarser/wrong for
+5 of the 62 rows -- e.g. it had grouped "Elbit DCoMPASS" under family "CoMPASS" (the user's own
+requirement names "DCoMPASS" as a distinct family) and "Collins Aerospace DB-110" under family
+"DB-110" (a single-variant "family" identical to its own variant, i.e. no grouping at all vs. the
+parser's "DB"). The seed script's `family:`/`variant:` from yaml is now only a last-resort fallback
+for a name the parser can't do anything with. Live re-seed: 62/62 rows now have non-null
+`family`/`variant`, 46 distinct families across 24 vendors (verified via a direct read-only query
+against the dev DB, `DATABASE_URL` from `runtime/eoa.env`, never printed).
+
+`agent/eoa/api/routes/payloads.py`: `GET /api/payloads` gains a `family` filter (mirrors the
+existing `vendor` one, `ILIKE` partial match). New `GET /api/payloads/tree` -- fetches every
+`payloads` row (with the same spec/price rollup subqueries `list_payloads` already used, factored
+out into `_payload_rows_with_counts`/`_PAYLOAD_ROWS_WITH_COUNTS_SQL` so both endpoints share one
+SQL definition) and returns `build_payload_tree`'s output. Registered before the
+`/payloads/{payload_id}` route so FastAPI's path-based dispatch never tries to parse "tree" as an
+int. Live-verified via `TestClient` against the real dev DB (read-only): `vendor_count=24,
+family_count=46, payload_count=62`; `GET /api/payloads?family=MX` returns 8 rows.
+
+**Frontend.** `web/src/lib/payloadFamilies.ts` (new): a client-side mirror of
+`build_payload_tree` (`buildPayloadTree`), built directly from the already-fetched
+`GET /api/payloads` flat list rather than a second round trip to the new tree endpoint --
+deliberately doesn't merge corporate-sibling vendors (that needs `config/watchlist.yaml`, not
+available client-side) and groups by each row's raw `vendor_entity_name` instead. Also:
+`filterPayloadTree` (free-text + category filter that drops empty branches rather than rendering
+them), `expandedKeysForSearch` (every vendor/family key that must stay open so a match is
+visible), `defaultExpandedKeys` (fully expanded under a small threshold -- 8 payloads -- else
+fully collapsed, the actual "not flooding the operator" default), and the `vendorNodeKey`/
+`familyNodeKey`/`variantNodeKey` id helpers. 14 new vitest tests
+(`web/src/lib/payloadFamilies.test.ts`).
+
+`web/src/components/payloads/PayloadTree.tsx` (new): renders the tree as
+`<table role="treegrid">` (not a div-based `role="tree"`) specifically so each row is a real
+`<tr>` -- keeps `PayloadsPage.test.tsx`'s existing `row.closest("tr")!` click assertion working
+unchanged, while still getting proper `aria-level`/`aria-expanded` semantics and a roving-tabindex
+keyboard model (ArrowUp/Down move focus, ArrowRight/Left expand/collapse or move to child/parent,
+Home/End jump to the first/last visible row, Enter/Space activates). A family with exactly one
+variant whose label is identical to the family's own label (`parse_family_variant`'s single-variant
+case -- "Toplite", "DCoMPASS") is folded: its family row is skipped and the lone variant renders
+directly under the vendor, both to avoid a pointless "Toplite > Toplite" row and because rendering
+it would put the exact same text on screen twice (`getByText`-breaking for the W25 English-mode
+audit's exact-text assertions). Reuses `PayloadTable`'s `PayloadThumbnail` (now exported, widened
+to take just `imageUrl` instead of a full `PayloadRecord`).
+
+`web/src/pages/PayloadsPage.tsx`: default view is the tree; a "עץ"/"טבלה שטוחה" (Tree/Flat table)
+toggle switches to the pre-existing flat `PayloadTable` unchanged. Expand state is a
+manual-override map layered on `defaultExpandedKeys`/`expandedKeysForSearch`, reset only when
+search toggles on/off (not on every keystroke) so a match is never left hidden behind a stale
+manual collapse. On a narrow viewport (`useIsNarrowScreen`, `matchMedia`, polyfilled in
+`src/test/setup.ts` as always-false so tests run in the default multi-expand mode) expanding one
+vendor closes every other vendor (accordion). The existing `PayloadFilters` (search/category/
+vendor) and `PayloadDetailDrawer` (variant click -> detail) are unchanged and apply to both view
+modes. `PayloadRecord.variant` was added as *optional* (`variant?: string | null`, not required)
+specifically so the pre-existing `PayloadsPage.test.tsx` and `i18n/englishMode.test.tsx` fixtures
+(which construct a `PayloadRecord` literal without it) keep compiling unchanged.
+
+**Verification.** `pytest tests/unit -q -k payload` -- 119 passed. `ruff check`/`ruff format
+--check` clean on every changed Python file. `npx vitest run` -- full suite 39 files/263 tests
+green, including the pre-existing `PayloadsPage.test.tsx` (6 tests) and `i18n/englishMode.test.tsx`
+(4 tests) with **zero edits** to either, plus the 14 new `payloadFamilies.test.ts` tests.
+`npm run lint` -- 0 errors (12 pre-existing-pattern warnings, 2 new ones matching the same
+`react-hooks/exhaustive-deps` shape already present in `PatentsPage.tsx`/`TendersPage.tsx`).
+`npm run build` (`tsc -b && vite build`) -- clean. Live DB backfill and the `/api/payloads/tree`
+response verified read-only against the dev Postgres instance (127.0.0.1:5432), never 5433.

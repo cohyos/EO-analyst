@@ -33,6 +33,7 @@ import type {
   PayloadDetailResponse,
   PayloadDiffResponse,
   PayloadsResponse,
+  PayloadTreeResponse,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -118,6 +119,9 @@ export interface PatentsQuery {
 export interface PayloadsQuery {
   category?: string;
   vendor?: string;
+  // W19b (docs/REVIEW_2026-09-06_evening.md): filter to one payload family (e.g. "MX") --
+  // mirrors `vendor` above, matches `eoa.api.routes.payloads.list_payloads`'s new `family` param.
+  family?: string;
   q?: string;
   limit?: number;
 }
@@ -250,6 +254,11 @@ export interface ApiClient {
   getPayloads(query?: PayloadsQuery): Promise<PayloadsResponse>;
   getPayload(id: number): Promise<PayloadDetailResponse>;
   getPayloadDiff(id: number, a: number, b: number): Promise<PayloadDiffResponse>;
+  // W19b: vendor -> family -> variant grouping with counts (agent/eoa/payloads/models.py's
+  // `build_payload_tree`). PayloadsPage itself builds its tree client-side from the already
+  // fetched `getPayloads` list (`@/lib/payloadFamilies`) rather than calling this a second time;
+  // it exists on the client for API-surface completeness / other future consumers.
+  getPayloadTree(): Promise<PayloadTreeResponse>;
 
   /** A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי" -- subdomain x maturity matrix. */
   getTechRadar(weeks?: number): Promise<TechRadarResponse>;
