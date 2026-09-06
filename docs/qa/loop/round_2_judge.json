@@ -1,0 +1,147 @@
+{
+  "round": 2,
+  "judge": "independent read-only agent (no pipeline runs, no fixes, no OMC tools, no DB writes); DB read via runtime/eoa.env -> postgresql://eoa:***@127.0.0.1:5432/eoanalyst, SELECT version_num FROM alembic_version = '0019' (matches repo HEAD); live chat tested against POST /api/ask on 127.0.0.1:8765 with body {question, history: []}, SSE parsed for type=token/answer_final/sources/done, 300s wall-clock cap per question enforced client-side, one retry on timeout (no retry was needed -- all 8 completed on the first attempt), questions run strictly sequentially and last (after all DB/file checks), GPU idle/resident before starting per /api/status",
+  "domains": {
+    "D1": {
+      "score": 58,
+      "n": 40,
+      "notes": [
+        "VERIFIED, durable this time: the null-triage repair actually landed on the DB this judge reads (unlike round 1's claimed-but-not-landed fixes). Direct query confirms 0 remaining rows with 'triage' in processed_stages and level/score NULL (was the flagship round-1 defect). Items 1,4,7,14 now domain='out_of_scope', level='archive', score=1, triage_reason='gate:stub_content_cleared_non_defensible'; 26 more rows (177,263,278,300,310,595-602,604,605,844,925,927,1436,1863,1864,1949,5121,5123,5604,5721) also repaired with real, non-templated triage_reason text (not just the stub marker) -- a genuine, substantively larger fix than round 1 attempted.",
+        "VERIFIED: item 24 subdomain now 'detectors_fpa' (was NULL despite round 1's identical claim) -- this specific round-1 claim now actually reflects in the DB, confirming round 1's DB-environment-mismatch process bug is fixed (round_2_fixes.md's data repairs explicitly targeted 127.0.0.1:5432, and this judge's independent read confirms they landed there).",
+        "UNCHANGED, still active: items 52, 56, 57 still have domain=NULL entirely, processed_stages=['embed_dedup','classify'] -- the pipeline still never reaches the triage stage for these. Round 2 did not target this (it was flagged in round 1 as 'NEW, worse variant' but is absent from round_2_fixes.md's scope). Item 57 ($192M TITAN/Palantir/Anduril award) and item 52 ($465M AV laser) remain stuck pre-triage exactly as round 1 found.",
+        "UNCHANGED: item 39's summary_he is still the exact truncated fragment 'עדשה חדשה למטע' and triage_reason still truncates mid-word -- round 1's claimed fix never landed and round 2 did not re-attempt it (out of round 2's stated scope).",
+        "UNCHANGED: item 22 (in-scope, domain='air_defense') still has entities_mentioned=[] AND key_facts=NULL -- the one remaining round-2-auto D1 deterministic failure (entities_mentioned_nonempty_in_scope, 31/32). round_2_fixes.md itself documents this as known/not re-triaged this round.",
+        "Gershayim/ASCII-quote defect remains fixed (0 hits, maintained from round 1)."
+      ]
+    },
+    "D2": {
+      "score": 53,
+      "n": 40,
+      "notes": [
+        "No round-2 fix targeted D2 (confirmed by round_2_fixes.md's own scope list: D1/D3/D6 code, D5 chat-layer only).",
+        "Templated so_what phrase 'מחזק את מעמדה/מעמדן של' still found on 32 items DB-wide (was 34 in round 1, 7 in round 0) -- essentially flat, not meaningfully addressed; spot-checked 5 items (3,6,10,15,26) and confirmed the phrase is used as an interchangeable stock connector across entirely unrelated stories (US laser doctrine, Shield AI CCA, Belgium-India cooperation), i.e. genuinely formulaic, not coincidental repeated wording.",
+        "Item 39's truncated summary_he ('עדשה חדשה למטע') persists unchanged (see D1).",
+        "terminology_in_parens_when_relevant remains a documented, deliberately-not-chased false-positive-prone check (round_2_auto.json note: 'informational, high false-positive rate') -- correctly deprioritized."
+      ]
+    },
+    "D3": {
+      "score": 58,
+      "n": 40,
+      "notes": [
+        "VERIFIED: item 47's entities_mentioned no longer contains the hallucinated 'BlueHalo' (now ['Northrop Grumman','AeroVironment','Anduril','US Army','US Navy']) -- the watchlist strict_aliases fix (config/watchlist.yaml + entity_normalize.py co-occurrence gate) is confirmed live and working; items 9, 10, 96 (the same LOCUST/Titan collision class) also confirmed clean of the false BlueHalo attribution.",
+        "VERIFIED: item 50's entities_mentioned now includes 'Palantir' (was missing despite item 50's own TITAN-award title naming it as a lead party) -- the entity-recall-gap fix (_backfill_entities_from_watchlist re-running on non-empty lists) is confirmed live.",
+        "VERIFIED: the Norkin person-transliteration duplicate is genuinely merged -- entity id 1025 ('Amiram Norkin') no longer exists; the survivor id 258 is now kind='person' (was mistakenly 'company'). A real, durable entity-graph fix.",
+        "NOT FIXED, explicitly deferred (background task spawned by the repair team, confirmed still present): item 81 still has all 7 near-duplicate/reworded EVENT rows for the same 3 underlying stories (Norkin appointment: ids 22, 221, 245; Anduril funding round: 23, 222; Anduril-Elbit partnership: 24, 223, 224) -- word-for-word unchanged from round 1's finding, including the extra row 224 round 1 already flagged as 'one more event row'. This is a different problem (event-row dedup on reworded titles) from the entity-name dedup that was fixed.",
+        "NOT FIXED, explicitly deferred: amount_usd unit bug -- still exactly 4 events (id 55/$540.7, id 84/$464.8, id 89/$464.8, id 121/$464.8, all stored as bare millions instead of full dollars) across items 269, 96, 47, 10. This is now directly user-visible: the freshly-rebuilt weekly_2026-09-06.md's own events table literally shows '465 USD' three times for what the same report's prose elsewhere describes as a $465 million contract -- a real, visible defect in a live deliverable, not just a DB-internal one.",
+        "Item 235 still carries both the uncanonicalized 'Palantir Technologies' alias and the canonical 'Palantir' side by side -- round_2_fixes.md honestly discloses this as a separate, pre-existing canonicalization gap not fixed this round; confirmed present."
+      ]
+    },
+    "D4": {
+      "score": 52,
+      "n": 6,
+      "notes": [
+        "VERIFIED: all 4 previously-flagged jobs (46, 47, 86, 91) now carry result.legacy_unanchored=true, confirming round 1's claimed-but-unlanded fix (round_1_judge.md found neither job carried this key) has now actually landed on the correct DB. queries_anchored_to_question passes cleanly as a result.",
+        "NEW REGRESSION found by this judge, not disclosed in round_2_fixes.md: job 91 -- round 1's single verified 'genuine fix' (an honest not_found/confidence 0.0 answer replacing job 86's hallucination) -- has been silently overwritten. scripts/mark_legacy_investigations.py's pass 2 ('not_found + non-empty sources -> partial, confidence 0.5') is a blanket, unscoped sweep over ALL deep_search jobs matching that pattern (not just the ids 15/20 its own docstring names as motivating examples), and it swept up job 91 too: its outcome is now 'partial' with confidence=0.5, even though its own answer_he field still literally reads 'לא נמצא מידע מספק במסגרת התקציב' (not enough information found) with an empty key_facts array. The deterministic confidence-cap check still passes (3 sources >= the 2-source threshold for the higher cap), but the outcome label is now less honest than what round 1's judge specifically praised -- a real, if subtle, correctness regression introduced by an over-broad repair script running today (all 4 jobs share the identical updated_at timestamp 2026-09-06 11:02:06, confirming a single bulk pass touched them together).",
+        "Job 86 unchanged: still carries its original off-topic MOSP-5000 answer plus the pre-existing relevance_check correction note.",
+        "D4 auto-check is a clean 100.0 (all 4 deterministic checks pass) -- but this judge's semantic read of job 91's content shows the deterministic checks do not catch an outcome label that contradicts its own answer text."
+      ]
+    },
+    "D5": {
+      "score": 32,
+      "n": 8,
+      "notes": [
+        "VERIFIED, reproduced independently: the repetition-loop bug is fixed. Live re-run of all 8 golden questions, sequentially, first-attempt-only (no timeouts, no retries needed): Q1 82.3s/3299 chars, Q2 53.9s/2191, Q3 151.1s/2218, Q4 101.8s/4483, Q5 53.6s/2200, Q6 40.7s/3253, Q7 31.3s/2391, Q8 59.5s/2677 -- none looped, none hit the wall-clock cap. Round 1's Q1/Q8 337-537s garbage loops do not reproduce. This is a real, durable fix.",
+        "VERIFIED: source-type labelling (3c) works as claimed -- item 127 confirmed report_kind='academic' in the DB; Q7's live answer correctly identifies the real Omnisys BRO-API announcement as the current EO/IR development and explicitly frames item 127 as an academic paper, not a government RFI (round 1's specific mislabeling does not reproduce).",
+        "PARTIAL, as the repair team itself disclosed: Q3 (Greece/LORA) substance is still wrong on live retest -- the answer never mentions LORA once, instead describing an unrelated ~EUR3.5-4bn Greek David's Sling/Barak-MX/Spyder deal end to end, with real LORA sources (items 62/37) sitting unused in the same retrieved set. Unlike round 1, the answer is no longer silently wrong: it is now prefixed with a stacked double warning ('⚠ ייתכן שהתשובה אינה עוסקת בשאלה' + '⚠ ללא ציטוטים'). A cosmetic new defect: the facts-section heading literally renders the unsubstituted template token '[n=5]' instead of real citation markers.",
+        "NEW, SEVERE, not caught by round 2's own live verification: Q2 (Iron Beam) independently retested produces a materially different and worse hallucination than round_2_chat_fixes.md's reported sample. The live answer confidently describes Rafael's 'Iron Beam' as having won a $465M US Army production contract for a system called 'LOCUST X3', attributes a fabricated 'new business model' to Rafael supplying modular lasers to companies like AeroVironment -- none of which is true: the $465M/LOCUST-X3/E-HEL contract (item 96) is AeroVironment's own, unrelated laser program with zero connection to Rafael or Iron Beam. None of the 7 sources actually retrieved and cited support this narrative (source #5 is about Rafael's unrelated Iron Dome-in-India deal; source #6 is the AeroVironment item itself, correctly titled in Hebrew, but the model still merged it into a fictional Rafael storyline). This directly contradicts round_2_chat_fixes.md's claim that Q2 'now correctly distinguishes Iron Beam from Iron Dome/Sky Guardian' -- that claim describes one non-representative sample; an independent re-run exposes a worse cross-company fabrication the guards did not catch.",
+        "NEW, SEVERE, not caught by round 2's own live verification: Q4 (DROIC trend) independently retested fabricates a named person and institution that appear nowhere in any retrieved source: 'Prof. Kunat Pipatanakul, Department of Computer Science, [a Thai university]' leading a fictitious 'Wayu-Paxa-OCR-Zero' project on DROIC/SAR super-resolution. Root cause, confirmed against the actual sources returned: the model conflated two genuinely unrelated retrieved arXiv papers -- item 138 ('ProSR: Semantic-Prototype-Guided Discrete Modeling for Physically Consistent SAR Super-Resolution', which does discuss 'semantic prototypes' and 'discrete modeling', explaining that vocabulary in the answer) and item 123 ('How Far Can Synthetic Data Take Thai OCR?', explaining the 'Thailand'/'OCR' framing) -- into a single invented narrative with a fabricated author identity. This is a more specific and more dangerous failure mode than round 1's Q4 finding (mislabeling one real paper's domain); it is outright invention of a person and project that do not exist in any source. round_2_chat_fixes.md's own live sample for Q4 (1746 chars, correctly hedged, no fabricated names) did not surface this -- confirming their single-run live verification methodology under-samples this model's variance and materially overstates the round's D5 reliability.",
+        "Q1, Q5, Q6, Q8 read as clean, reasonably-cited, appropriately-hedged answers on this independent re-run, consistent with round_2_chat_fixes.md's own characterization.",
+        "Net assessment: the loop-and-silence failure modes (round 1's worst D5 findings) are genuinely and durably fixed. But this judge's independent live re-run surfaced two new, severe, specific-fabrication hallucinations (Q2, Q4) in exactly the two questions round 2's own report did not flag as problems -- indicating the round's self-verification (one live sample per question) is not catching a real and severe class of defect that a second independent sample does catch. Scored only marginally above round 1 because the loop fix is real and valuable, but overall answer trustworthiness has not improved and arguably has a new, worse failure mode (fabricated named entities, not just mislabeled real ones)."
+      ]
+    },
+    "D6": {
+      "score": 40,
+      "n": 2,
+      "notes": [
+        "VERIFIED, genuine infrastructure fix: WeeklyReportDraft migrated to the same structured Sentence/cites schema the daily report already used, closing the specific 'runaway JSON / 24k-54k char malformed output' failure mode round 2 set out to fix. Live rebuild (report id 38, weekly_2026-09-06.md, both LLM calls completed cleanly at 104.6s/3936 tok and 105.8s/3557 tok, no truncation, no malformed JSON) confirms the schema-level bug is gone. Targeted test suite (test_report_qa.py + test_report_weekly_monthly.py + test_docx_builder.py + test_entity_normalize.py, re-run independently by this judge) is 292/292 green.",
+        "User-visible outcome is UNCHANGED despite the infrastructure fix: the live weekly_2026-09-06.md still has NO executive summary and NO trend narrative -- the resident model's trend paragraph verbatim-duplicated sentences across 5 domain sections, tripping the new cross-group duplicate check on both the draft and its one corrective retry, so the second-failure fallback (tables-only + a one-line honest system note) fired, exactly as it does for the daily report. The reader gets the identical 'no synthesis this week' experience as before the fix, just via a cleaner failure path instead of a crash. The events table in this same fresh rebuild visibly shows the amount_usd unit bug ('465 USD' for a stated $465M contract) to end users -- see D3.",
+        "daily_2026-09-06.md: completely unchanged from round 1 -- still tables-only (no exec summary), still has the 'אילו מקצועות...' duplicate-sentence title collision between the industry table and the source appendix (confirmed present at rows 41/54), and still includes the same two off-topic pieces round 1 flagged in the 'תעשייה ישראלית' table (the IDF-scapegoat opinion piece and the Lebanon-ridge sovereignty piece, both still tagged only with the generic entity 'IDF') -- none of this was in round 2's scope (daily.py was explicitly not touched)."
+      ]
+    },
+    "D7": {
+      "score": 35,
+      "n": 6,
+      "notes": [
+        "REGRESSION found on live inspection: bd_us, the flagship territory round 1's judge praised for 'a substantial, independently verified improvement' (a real populated exec summary + a genuinely cited 7-row actions table), has visibly regressed. The reports table shows bd_territory/US was rebuilt at least 8 times today (ids 10,12,13,14,15,16,19,20, spanning 02:48-06:10) and EVERY attempt still has qa_passed=false; the current live bd_us_2026-09-06.md (report id 20, the file actually served) now has an exec summary reduced to a warning banner plus one surviving sentence -- worse than what round 1's judge examined -- because the QA gate keeps stripping uncited sentences, including a fresh, still-unaddressed instance of the exact 'מחזק את מעמדן של' templated phrase (see D2) sitting uncited in the draft every single time. This is the same bd_territory.py file round_2_fixes.md explicitly says was 'not touched, out of this round's scope' (still legacy free-prose, not migrated to the structured schema that fixed weekly/daily) -- so it keeps failing the same way, repeatedly, burning GPU cycles on retries that never succeed.",
+        "The doubled-ASCII-quote defect ('ארה\"\"ב' -- two literal quote characters) persists unchanged in the current bd_us.md, 7 occurrences, exactly as round 1 found -- this is report-generation-time, not DB-repair-time, so it was never in scope for either round's fix.",
+        "Conference dates in the current bd_us.md are now WORSE than round 1's judge found: independently checked all 4 conferences cited (AUSA 2026, SOF Week 2027, SPIE Defense 2027, DSEI 2027) against the live conferences table -- ALL FOUR mismatch (bd_us says '2026-10-01 to 2026-10-18' for AUSA vs. DB's 2026-10-12 to 2026-10-14; similar day-1-of-month-looking mismatches on the other three) -- 0/4 matched on this specific report, vs. round 1's 2/4. By contrast, bd_kr (genuinely rebuilt this round, report id 37) shows its own conference citations matching the DB exactly (SPIE 2027-04-18, DSEI 2027-09-07, AUSA 2026-10-12, all correct) -- confirming round_2_fixes.md's own honest note that the date-source fix works on freshly-rebuilt reports but bd_us (not rebuilt with the fix despite 8 attempts today) still shows the older, wrong values.",
+        "bd_kr's own actions_table_nonempty failure is confirmed genuinely honest, not a bug: the report explicitly states zero KR-territory items and zero KR-territory conferences were collected this window and names the two watchlist competitors (Hanwha, LIG Nex1) with no activity -- a correct 'nothing to report' rather than a fabricated table.",
+        "Net: the one concrete round-1 win in this domain (bd_us's populated content) has regressed under repeated same-day rebuild failures, and no round-2 code change targeted bd_territory.py at all -- scored below round 1."
+      ]
+    },
+    "D8": {
+      "score": 45,
+      "n": 2,
+      "notes": [
+        "No round-2 fix targeted D8 (confirmed: round_2_fixes.md explicitly scopes to D1/D3/D6/D5 only). Every round-1 finding independently re-verified as unchanged on the current live file (patent_survey_Anduril_Lattice..., latest of 3 regenerations today, report id 36, 09:23):",
+        "UNCHANGED: executive summary still asserts 'אנדוריל היא השחקן הבלעדי' (Anduril is THE exclusive player) in the C-UAS/EO-IR patent space based on 5/6 patents simply lacking assignee data, not real competitive exclusivity -- an unsupported inference stated as fact, word-for-word the same overclaim round 1 found.",
+        "UNCHANGED: the relationship map still includes the untraceable 'Anduril <-> Elbit Systems | מיזוג/רכישה | Sigma 155 howitzer system' claim with no supporting source among its citations.",
+        "UNCHANGED: timeline and CPC-code tables are still completely empty in both surveys inspected (rows 35 and 36) -- the deterministic auto-check still reports 100.0 because it only checks heading presence, not data population, exactly as round 1 noted.",
+        "Notable process observation, not itself scored: this specific patent survey was regenerated at least 9 times today across both topics (07:23-09:23) without any of the above defects changing between runs -- suggesting repeated, unproductive regeneration cycles rather than iterative improvement."
+      ]
+    },
+    "D9": {
+      "score": 45,
+      "n": 3,
+      "notes": [
+        "UNCHANGED: tenders table still exactly 5 rows, all status='closed', deadlines 2015-08-27/2015-09-11/2023-03-08/2025-10-01/null -- every deadline already past today's date (2026-09-06), word-for-word identical to round 0 and round 1. The tenders_open_rows_have_dates check remains a vacuous pass (0 open rows to check). No round-2 fix targeted this.",
+        "IMPROVING, but from continuation of round 1's fix, not a new round-2 change: sources.last_fetched_at freshness has kept improving organically since round_2_auto.json's own snapshot -- that snapshot showed 30/60 fetched within 7 days; this judge's direct query (run later the same session) shows 53/60 -- confirming round 1's fetch-cadence code fix continues working as the day's fetch cycles complete, not a regression as round 1 itself had found (0/60 at the time).",
+        "UNCHANGED, still solid: conferences table remains 15 rows with real, verifiable 2026-2028 dates matching config/watchlist.yaml -- no defects found here in either round.",
+        "bd_us.md's own 'מכרזים בטריטוריה' table still lists 5 different RFI/sources-sought listings that don't correspond to any row in the persisted tenders table -- the same report-generation/persisted-table desync round 1 found, unaddressed."
+      ]
+    }
+  },
+  "worst": [
+    {"domain": "D5", "id": "Q4 fabricated professor/institution", "desc": "Independent live retest of the DROIC question invents a named person ('Prof. Kunat Pipatanakul'), a fictitious Thai university, and a fictitious project ('Wayu-Paxa-OCR-Zero') by conflating two unrelated retrieved arXiv papers (item 138, SAR super-resolution; item 123, Thai OCR) into one narrative -- a more severe, more specific hallucination than anything round 1 found in this question, and not caught by round 2's own single-sample live verification (which reported a clean, hedged answer for the same question)."},
+    {"domain": "D5", "id": "Q2 Iron Beam / AeroVironment conflation", "desc": "Independent live retest fabricates a Rafael Iron Beam contract narrative ($465M, 'LOCUST X3', a new Rafael-to-AeroVironment business model) that is entirely AeroVironment's own, unrelated laser program (item 96) -- none of the 7 actually-retrieved sources supports this connection. Directly contradicts round_2_chat_fixes.md's own claimed live result for this exact question, showing the round's self-verification did not catch a severe, reproducible-on-retry hallucination."},
+    {"domain": "D7", "id": "bd_us regression", "desc": "The flagship territory report round 1 praised as 'substantially improved' has regressed: 8 rebuild attempts today (02:48-06:10), all qa_passed=false, and the live file now shows a warning-banner-only executive summary (worse than round 1's finding) because bd_territory.py was never migrated to the structured schema that fixed daily/weekly. Conference dates in this report are now 0/4 matched (worse than round 1's 2/4)."},
+    {"domain": "D1", "id": "items 52,56,57 still pre-triage", "desc": "domain=NULL entirely, processed_stages never reaches 'triage' -- unchanged from round 1's 'new, worse variant' finding; not in round 2's scope despite containing obviously EO/IR-relevant stories (TITAN $192M, $465M AV laser)."},
+    {"domain": "D3", "id": "item 81 duplicate events + amount_usd unit bug", "desc": "Both explicitly deferred by the repair team and confirmed still present: 7 near-duplicate event rows across 3 stories for item 81, and 4 events (55,84,89,121) storing amount_usd as bare millions -- now visibly wrong ('465 USD') in the freshly-rebuilt live weekly report's own events table, a user-facing regression path even though the underlying bug is unchanged."},
+    {"domain": "D4", "id": "job 91 outcome regression", "desc": "Round 1's single verified D4 fix (an honest not_found/0.0 answer) was silently overwritten today by a blanket, unscoped repair script pass (not_found+sources -> partial/0.5) applied to ALL matching deep_search jobs, not just its originally intended targets -- job 91 now claims outcome='partial' at confidence 0.5 while its own answer_he text still says nothing sufficient was found. Not disclosed in round_2_fixes.md; found only by this judge's direct DB read."},
+    {"domain": "D8", "id": "Anduril patent-survey overclaim, unchanged", "desc": "Exclusivity overclaim and untraceable Anduril-Elbit Sigma-155 relationship claim persist verbatim from round 1; not in round 2's scope; the survey was regenerated 9 times today with no change to either defect."},
+    {"domain": "D9", "id": "tenders table unchanged", "desc": "Still 5 rows, all closed, every deadline already past -- word-for-word unchanged across all three rounds now."},
+    {"domain": "D6", "id": "weekly/daily no user-visible synthesis", "desc": "Weekly's runaway-JSON bug is genuinely fixed at the schema level, but the live rebuild still produces zero exec summary and zero trend narrative due to the model's own cross-domain sentence duplication -- identical reader experience to before the fix, just via a cleaner failure path."},
+    {"domain": "D5", "id": "Q3 LORA substance still wrong", "desc": "Confirmed on independent retest: never mentions LORA, answers about an unrelated Greek air-defense deal end to end despite real LORA sources sitting in the same retrieved set. Now visibly flagged (a genuine improvement over round 1's silence) but a literal unsubstituted '[n=5]' template token leaks into the rendered heading."}
+  ],
+  "deltas": {
+    "fixed": [
+      "D1: null-triage repair (30 items) now durably landed on the correct production DB, confirmed 0 remaining violations by direct query -- a real fix of round 1's flagship finding, this time on the right database",
+      "D1: item 24 subdomain repair now durably landed (was claimed-but-not-landed in round 1)",
+      "D3: item 47 BlueHalo hallucination fixed via watchlist strict_aliases co-occurrence gate -- verified live",
+      "D3: item 50 Palantir entity-recall gap fixed -- verified live",
+      "D3: Amikam/Amiram Norkin person-entity duplicate genuinely merged (transliteration-skeleton dedup) -- verified live",
+      "D4: all 4 jobs (46,47,86,91) now durably carry legacy_unanchored=true, closing round 1's claimed-but-unlanded fix",
+      "D5: the infinite repetition-decoding loop (round 1's single worst finding) is genuinely and durably fixed -- reproduced independently across all 8 golden questions with zero loops on first attempt",
+      "D5: source-type labelling correctly prevents item 127 (arXiv paper) from being mislabeled as a government RFI or hardware trend document (verified on live Q7 retest)",
+      "D6: the weekly report's runaway-JSON generation failure (24k-54k malformed chars) is fixed at the schema level -- live rebuild completes cleanly within budget on both LLM calls"
+    ],
+    "unchanged": [
+      "D1: items 52, 56, 57 (domain=NULL, pre-triage) -- unaddressed, not in round 2's scope",
+      "D1/D2: item 39 truncated summary_he and triage_reason -- round 1's claimed fix never landed; round 2 did not re-attempt",
+      "D2: templated so_what phrase ('מחזק את מעמדה של') -- 32 items DB-wide, essentially flat from round 1's 34, still unaddressed",
+      "D3: item 81's 7 near-duplicate event rows across 3 stories -- explicitly deferred again (background task spawned)",
+      "D3: amount_usd unit bug (4 events) -- explicitly deferred again, now additionally confirmed visible to end users in the freshly-rebuilt weekly report",
+      "D6: daily report's tables-only exec summary, duplicate-title collision, and off-topic items in the industry table -- daily.py untouched this round",
+      "D8: Anduril patent-survey exclusivity overclaim and untraceable Elbit relationship claim -- D8 entirely untouched this round",
+      "D9: tenders table -- still 5 closed/expired rows, unchanged across all 3 rounds now"
+    ],
+    "new": [
+      "D4: job 91's outcome silently regressed from an honest 'not_found/0.0' (round 1's verified fix) to 'partial/0.5' via an over-broad, unscoped repair-script sweep -- undisclosed side effect, found only by this judge's direct DB read",
+      "D5: Q2 (Iron Beam) independently retested produces a severe new cross-company fabrication (Rafael/AeroVironment conflation) not present in round 2's own reported live sample for the same question",
+      "D5: Q4 (DROIC) independently retested fabricates a named person, institution, and project not present in any retrieved source -- a more specific and severe hallucination category than round 1 found, and not caught by round 2's own live sample for the same question",
+      "D5: a literal unsubstituted '[n=5]' template token now leaks into Q3's rendered output -- a new, minor rendering defect introduced alongside the citation-repair pass",
+      "D7: bd_us has regressed from round 1's praised, populated version to a warning-banner-only exec summary after 8 same-day rebuild attempts, all failing the same uncited-templated-phrase QA gate; its conference dates are now 0/4 matched (worse than round 1's 2/4)",
+      "Cross-cutting process note (positive): round 1's DB-environment-mismatch bug (repairs run against the wrong Postgres instance) appears genuinely fixed -- every round-2 data-repair claim checked against 127.0.0.1:5432 in this session was independently confirmed present"
+    ]
+  }
+}

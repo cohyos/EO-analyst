@@ -109,6 +109,35 @@ def upsert_source(
     return source_id
 
 
+def deactivate_orphaned_sources(current_names: set[str]) -> int:
+    """Round-3 (D9 finding 5, docs/qa/loop/round_1_judge.md): mark ``active = false`` on every
+    ``sources`` row whose ``name`` is not among ``current_names`` (the full, current
+    ``config/sources.yaml`` name set -- every configured source, enabled or not).
+
+    Covers two ways a row goes orphaned: (1) a source *renamed* in config -- ``upsert_source`` is
+    keyed by ``name``, so a rename creates a brand-new row rather than updating the old one, and
+    the old row is never touched again (confirmed live: ids 1562-1565, "arXiv ... (keyword
+    query)", orphaned by a rename to "... (keyword-filtered)" at ids 1657-1660 -- the old rows sat
+    at ``active=true``, ``last_fetched_at=NULL`` forever, exactly the D9
+    ``sources_enabled_fetched_recently`` failure this fixes); (2) a source *removed* from config
+    outright. Never deletes a row (F1: no fetched-content-adjacent row is ever destroyed), only
+    flips ``active``; a row already ``active=false`` is left alone (no needless write). Guarded
+    against an empty/falsy ``current_names`` (a bad or empty config load must never wipe every
+    source's ``active`` flag)."""
+    if not current_names:
+        log.warning("source.deactivate_orphaned_skipped_empty_names")
+        return 0
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "UPDATE sources SET active = false WHERE active = true AND name != ALL(%(names)s) RETURNING id",
+            {"names": list(current_names)},
+        )
+        rows = cur.fetchall()
+    if rows:
+        log.info("source.deactivated_orphaned", count=len(rows), ids=[r["id"] for r in rows])
+    return len(rows)
+
+
 _sources_columns_cache: set[str] | None = None
 
 
@@ -233,6 +262,26 @@ def get_items_for_stage(
         cur.execute(query, {"stage": stage, "limit": limit, "item_ids": item_ids})
         rows = cur.fetchall()
     return rows
+
+
+def get_items_stuck_unclassified(limit: int = 50) -> list[dict[str, Any]]:
+    """Round-3 D1 (docs/qa/loop/round_2_judge.md, items 52/56/57 and 15 more): clean, non-duplicate
+    items whose ``classify`` stage is marked done but whose ``domain`` is still NULL -- an earlier
+    persist failure or a later reset left them invisible to both ``run_classify`` (stage done) and
+    ``run_triage`` (skips domain NULL), so they never moved again. Returned oldest-first so
+    ``run_classify`` can re-classify them as a self-healing tail of its normal batch."""
+    query = """
+        SELECT * FROM items
+        WHERE security_status = 'clean'
+          AND dedup_of IS NULL
+          AND domain IS NULL
+          AND 'classify' = ANY(COALESCE(processed_stages, '{}'))
+        ORDER BY fetched_at NULLS LAST, id
+        LIMIT %(limit)s
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"limit": limit})
+        return cur.fetchall()
 
 
 def mark_stage(item_id: int, stage: str) -> None:

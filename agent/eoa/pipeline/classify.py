@@ -19,7 +19,13 @@ from eoa.llm.ollama_client import (
 )
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import ClassifyOut
-from eoa.memory.relational import get_items_for_stage, mark_stage, update_item_fields, upsert_entity
+from eoa.memory.relational import (
+    get_items_for_stage,
+    get_items_stuck_unclassified,
+    mark_stage,
+    update_item_fields,
+    upsert_entity,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -343,6 +349,15 @@ def run_classify(
     ``eoa.memory.relational.get_items_for_stage``."""
     stats = ClassifyStats()
     items = get_items_for_stage(STAGE, limit, item_ids=item_ids)
+    if item_ids is None:
+        # Round-3 D1 self-heal: items whose classify stage is "done" but domain is NULL never
+        # reach triage (it skips domain NULL) and never come back here (stage done) -- append
+        # them so a persist failure is retried instead of stranding the item forever.
+        seen = {it["id"] for it in items}
+        stuck = [it for it in get_items_stuck_unclassified(limit) if it["id"] not in seen]
+        if stuck:
+            log.info("classify_reclassifying_stuck_items", n=len(stuck), ids=[it["id"] for it in stuck][:20])
+            items = [*items, *stuck][:limit]
     eligible: list[dict] = []
     for it in items:
         if it.get("security_status") in ("quarantined", "blocked") or it.get("dedup_of"):

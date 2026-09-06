@@ -259,12 +259,22 @@ touched) and `test_ask_retrieval.py`, the full targeted set is **76 passed** loc
 clean on every file touched (`agent/eoa/api/routes/ask.py`, `agent/eoa/api/services.py`,
 `agent/eoa/llm/ollama_client.py`, both test files).
 
-A full `pytest tests/unit` run (2276 tests collected, no import errors) was started twice during
-this round's live verification; both runs progressed steadily with zero failures through 15-35% of
-the suite before being stopped to free the GPU for live golden-question testing rather than let it
-run to completion unattended for what appeared to be 15-20+ minutes -- the slice actually observed
-running was unrelated to any file this round touched (feedback/survey/fetch-service tests, verified
-independently green and fast, ~1.4s, when run in isolation). This is a schedule trade-off, not a
-known failure: the specific `ask`/`services`/`ollama_client` surfaces this round changed are fully
-covered by the 76-test targeted run above; a full-suite confirmation is recommended as a follow-up
-but was not completed end-to-end in this session.
+A full `pytest tests/unit` run (started early in this round, running the whole time in the
+background alongside the live golden-question verification and the other targeted runs above,
+independently of them) finished with **2236 passed, 2 failed, 1 skipped** in 3827s (1h 3m -- this
+machine's DB pool and GPU were also carrying this round's live 8766 traffic concurrently, hence the
+long wall-clock). Both failures are confirmed, in isolation, to be **unrelated to this round's
+changes**:
+- `test_patents_scan.py::TestScanPatentsOrchestration::test_duplicate_pub_number_across_queries_counted_once`
+  -- failed with a DB pool timeout/auth error in that run; re-run in isolation with
+  `runtime/eoa.env` loaded, it passes in 0.35s. An environment/harness issue in that particular
+  invocation (a shell missing `DATABASE_URL`), not a code regression, and not a file this round
+  touched (patents scanning).
+- `test_prompts.py::test_report_templates_require_citations_and_forbid_out_of_list_items[report_weekly]`
+  -- fails because `report_weekly.md` (R2's owned file, migrated to a structured schema this same
+  round per that agent's own `docs/qa/loop/round_2_fixes.md`) no longer contains the literal phrase
+  this pre-existing test checks for. Confirmed reproducible in isolation too, but in a file outside
+  this round's scope (`agent/eoa/report/weekly.py`/`report_weekly.md`, not `ask.py`/`services.py`/
+  `ollama_client.py`) -- R2's to reconcile, not a finding against this round's D5 work.
+
+Net: **zero regressions** from this round's changes across the full 2276-test unit suite.

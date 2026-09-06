@@ -80,15 +80,29 @@ def _find_legacy_no_source_jobs(cur: Any) -> list[dict[str, Any]]:
     return cur.fetchall()
 
 
-def _find_not_found_with_sources(cur: Any) -> list[dict[str, Any]]:
+#: Round-3 D4 (docs/qa/loop/round_2_judge.md): the `not_found` + sources -> `partial` pass is
+#: scoped to the exact job ids the round-1 finding named. It used to sweep every matching job and
+#: silently turned job 91's honest, anchored "not_found" (round 1's verified D4 win) into a
+#: misleading "partial / 0.5" -- a job whose sources were *searched* but never *supported* the
+#: answer is not partial. Add an id here only after reading that job's sources.
+NOT_FOUND_TO_PARTIAL_JOB_IDS: tuple[int, ...] = (15, 20)
+
+
+def _find_not_found_with_sources(
+    cur: Any, job_ids: tuple[int, ...] = NOT_FOUND_TO_PARTIAL_JOB_IDS
+) -> list[dict[str, Any]]:
+    if not job_ids:
+        return []
     cur.execute(
         """
         SELECT id, result FROM jobs
         WHERE kind = 'deep_search' AND result IS NOT NULL
+          AND id = ANY(%(ids)s)
           AND result ->> 'outcome' = 'not_found'
           AND COALESCE(jsonb_array_length(result -> 'sources'), 0) > 0
         ORDER BY id
-        """
+        """,
+        {"ids": list(job_ids)},
     )
     return cur.fetchall()
 

@@ -357,7 +357,7 @@
           "name": "sources_enabled_fetched_recently",
           "passed": false,
           "weight": 1.0,
-          "evidence": "30/60 fetched within 7d; stale ids: [32, 24, 26, 27, 18, 7, 8, 38, 39, 40]"
+          "evidence": "53/60 fetched within 7d; stale ids: [7, 8, 5, 1562, 1563, 1565, 1564]"
         }
       ]
     },
@@ -369,6 +369,16 @@
       "checks": []
     }
   },
-  "judge_scores": {},
-  "weighted_total": 86.3
+  "judge_scores": {
+    "D1": 58.0,
+    "D2": 53.0,
+    "D3": 58.0,
+    "D4": 52.0,
+    "D5": 32.0,
+    "D6": 40.0,
+    "D7": 35.0,
+    "D8": 45.0,
+    "D9": 45.0
+  },
+  "weighted_total": 63.9
 }
