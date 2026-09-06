@@ -53,7 +53,12 @@ from eoa.errors import LLMOutputError
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import Sentence
-from eoa.llm.schemas.bd_territory import BdRecommendedAction, BdTerritoryReportDraft
+from eoa.llm.schemas.bd_territory import (
+    BdPipelineOpportunity,
+    BdRecommendedAction,
+    BdTerritoryReportDraft,
+)
+from eoa.report.deltas import build_report_state, compute_deltas, delta_extra_section
 from eoa.report.docx_builder import (
     build_docx,
     fmt_date,
@@ -115,6 +120,176 @@ _BD_NUM_PREDICT = 9000
 #: makes a runaway fail in a third of the time).
 _BD_PROMPT_ITEMS_PER_DOMAIN = 4
 _BD_PROMPT_ITEM_TEXT_CHARS = 400
+
+
+# --------------------------------------------------------------------------
+# Round 5 P6 (docs/PLAN_ROUND5_REPORTS.md, docs/REPORT_TEMPLATE_BENCHMARK.md sec 2.4/3.4/4 items
+# 4/10/11): BLUF, buyer-map/opportunity-pipeline (B1), opportunity tiering (B2), territory delta
+# (B4), assumptions<->falsifiers (B5).
+#
+# BLUF note: unlike B1/B2/B4/B5, the BLUF section itself needs no extra_sections wiring at all here
+# -- P4 (``eoa.report.docx_builder``, landed the same evening) renders "שורה תחתונה" natively,
+# directly from ``draft.bluf`` (duck-typed, ``_draft_bluf_info``/``_draft_bluf_text``), always
+# before "תקציר מנהלים" in all three output formats, and even synthesizes one from the top
+# ``exec_summary`` sentences when ``bluf`` is empty but ``sections`` is (always true for this report
+# -- BD never uses ``sections``) and ``system_note_he`` + ``exec_summary`` are both non-empty (the
+# tables-only/no-items/twice-failed-QA fallback drafts below already satisfy that shape). This
+# module only needs to (a) give the schema a ``bluf: list[Sentence]`` field docx_builder's
+# duck-typed reader picks up automatically (see ``eoa.llm.schemas.bd_territory``), and (b)
+# back-fill ``draft.bluf`` deterministically (:func:`_deterministic_bluf`) for the one shape
+# docx_builder's own generic fallback does *not* cover: a normal, successful, real-item draft whose
+# model output simply omitted ``bluf`` (``system_note_he`` is empty there, so the native fallback
+# never fires) -- richer than the generic fallback besides (adds an honestly-cited sizing sentence,
+# see :func:`_tables_sizing_sentence`), and a no-op whenever the model already provided one.
+#
+# Assumptions note: same story as BLUF -- ``eoa.report.docx_builder`` also renders "הנחות והפרכות"
+# natively straight from ``draft.assumptions`` (duck-typed ``_draft_assumptions``/
+# ``_render_assumption``, field names ``assumption_he``/``falsifier_he``/``cites`` match this
+# module's ``BdAssumption`` exactly), right after "מבט קדימה" -- this module needs no
+# extra_sections wiring for it either, only the schema field.
+#
+# Known, out-of-scope wording/keyword mismatch (flagged, not fixed here -- both files belong to
+# other engineers this round): docx_builder's native assumption line reads "<assumption> — יופרך
+# אם: <falsifier>", but ``eoa.qa.d7_bd_report._assumptions_falsifiers_check`` matches on the
+# substrings ("פריך", "הפרכ", "falsif") -- "יופרך" contains neither, so that QA check fails against
+# the report exactly as P4 renders it today.
+# --------------------------------------------------------------------------
+
+#: B1 stage vocabulary, in pipeline order (RFI -> RFP -> assessment -> decision -> post-award) --
+#: used both as the allowed ``BdPipelineOpportunity.stage`` values and as the table's sort key.
+_STAGE_ORDER: dict[str, int] = {"RFI": 0, "RFP": 1, "הערכה": 2, "החלטה": 3, "לאחר-זכייה": 4}
+
+_RFI_KEYWORDS = ("rfi", "request for information", "בקשת מידע", "בקשה למידע")
+_RFP_KEYWORDS = ("rfp", "request for proposal", "בקשה להצעות", "בקשה להצעת מחיר")
+
+_PIPELINE_TABLE_TITLE_HE = "מפת קונים / צינור הזדמנויות"
+
+
+def _tender_stage(tender: dict[str, Any]) -> str:
+    """B1 stage derivation for one open/unknown tender row: an explicit RFI/RFP marker in the
+    title wins; otherwise a ``status='unknown'`` row (agency intent unclear yet) is "הערכה"
+    (assessment) and a confirmed ``status='open'`` row defaults to "RFP" (a live, open, formal
+    solicitation) -- ``tenders`` has no dedicated notice-type column to read instead."""
+    text = (tender.get("title") or "").lower()
+    if any(k in text for k in _RFI_KEYWORDS):
+        return "RFI"
+    if any(k in text for k in _RFP_KEYWORDS):
+        return "RFP"
+    return "הערכה" if tender.get("status") == "unknown" else "RFP"
+
+
+def _forecast_stage(forecast: dict[str, Any], *, today: dt.date) -> str:
+    """B1 stage derivation for one procurement forecast: a near-term (<=30 day), higher-likelihood
+    (>=0.5) window reads as "החלטה" (a buying decision is imminent); every other forecast is
+    "הערכה" (assessment -- the earliest, least-certain pipeline stage, appropriate for a
+    probabilistic forecast rather than a confirmed solicitation)."""
+    window_to = forecast.get("window_to")
+    likelihood = forecast.get("likelihood")
+    if (
+        isinstance(window_to, dt.date)
+        and (window_to - today).days <= 30
+        and isinstance(likelihood, int | float)
+        and likelihood >= 0.5
+    ):
+        return "החלטה"
+    return "הערכה"
+
+
+def _all_watchlist_names() -> set[str]:
+    """Every configured watchlist company name + alias (``config/watchlist.yaml``), regardless of
+    country -- broader than :func:`_israeli_industry_names`/the in-window ``is_watchlist`` flag on
+    :func:`collect_active_competitors`'s output, since a B1 pipeline row's tender/forecast/event may
+    reference a tracked competitor that isn't otherwise "active in the territory this window" (used
+    only for the B2 tiering "watchlist fit" bonus, never for citation/inclusion decisions)."""
+    try:
+        companies = settings().watchlist.get("companies", []) or []
+    except Exception:
+        return set()
+    names: set[str] = set()
+    for c in companies:
+        if c.get("name"):
+            names.add(c["name"])
+        names.update(c.get("aliases") or [])
+    return names
+
+
+# ---- B2: deterministic Tier A/B/C scoring, documented formula ------------------------------------
+#
+# tier_score = magnitude_score (0-3) + recency_score (0-2) + watchlist_fit_bonus (0 or 1)   [0-6]
+#   Tier A: tier_score >= 4     Tier B: tier_score >= 2     Tier C: otherwise
+#
+# magnitude_score (first signal available, in this order):
+#   - a real amount_usd:        >= $50M -> 3   >= $5M -> 2   > $0 -> 1   else 0
+#   - else a likelihood (0-1):  >= 0.6  -> 3   >= 0.3  -> 2  > 0   -> 1  else 0
+#   - else a triage level:      red -> 3       orange -> 2   yellow -> 1
+#   - else (no amount/likelihood/level signal at all): 1 (a real, active row is worth more than a
+#     row we affirmatively know is worthless -- this only applies to rows born from a plain open
+#     tender, which carries no amount/likelihood/level field in this schema at all)
+#
+# recency_score: |reference_date - today| in days (reference_date may be a past event/win date or
+# a future deadline/window -- either way, closer to "now" is more actionable):
+#   <= 30 days -> 2      <= 90 days -> 1      else / unknown -> 0
+#
+# watchlist_fit_bonus: +1 when the row is tied to a tracked watchlist competitor (buyer/vendor/
+# candidate-vendor/entity mention, or the competitor row's own ``is_watchlist`` flag) -- else 0.
+
+_LEVEL_MAGNITUDE_SCORE = {"red": 3, "orange": 2, "yellow": 1}
+
+
+def _magnitude_score(
+    *, amount_usd: float | None = None, likelihood: float | None = None, level: str | None = None
+) -> int:
+    if amount_usd is not None:
+        if amount_usd >= 50_000_000:
+            return 3
+        if amount_usd >= 5_000_000:
+            return 2
+        return 1 if amount_usd > 0 else 0
+    if likelihood is not None:
+        if likelihood >= 0.6:
+            return 3
+        if likelihood >= 0.3:
+            return 2
+        return 1 if likelihood > 0 else 0
+    if level:
+        return _LEVEL_MAGNITUDE_SCORE.get(level, 1)
+    return 1
+
+
+def _recency_score(reference_date: dt.date | None, *, today: dt.date) -> int:
+    if reference_date is None:
+        return 0
+    delta_days = abs((reference_date - today).days)
+    if delta_days <= 30:
+        return 2
+    if delta_days <= 90:
+        return 1
+    return 0
+
+
+def _tier_score(
+    *,
+    amount_usd: float | None = None,
+    likelihood: float | None = None,
+    level: str | None = None,
+    reference_date: dt.date | None = None,
+    watchlist_fit: bool = False,
+    today: dt.date,
+) -> int:
+    return (
+        _magnitude_score(amount_usd=amount_usd, likelihood=likelihood, level=level)
+        + _recency_score(reference_date, today=today)
+        + (1 if watchlist_fit else 0)
+    )
+
+
+def tier_label(score: int) -> str:
+    """The documented B2 Tier A/B/C thresholds, see the module-level comment above."""
+    if score >= 4:
+        return "A"
+    if score >= 2:
+        return "B"
+    return "C"
 
 
 def select_bd_items_for_prompt(
@@ -454,6 +629,11 @@ def collect_platform_events(
                 "vendor": vendor or "—",
                 "amount_usd": ev.get("amount_usd"),
                 "currency": ev.get("currency"),
+                # Round 5 P6 (B1): the real events.kind, additive -- platform_events_table/existing
+                # consumers never read this key, but _pipeline_rows_from_events needs it to tell a
+                # contract award (a "לאחר-זכייה" follow-on opportunity) apart from an m_and_a/
+                # deployment/test row (not a buyer-pipeline opportunity in this table's sense).
+                "kind": ev.get("kind"),
             }
         )
     return out[:limit]
@@ -602,6 +782,158 @@ def forecasts_table(data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 # --------------------------------------------------------------------------
+# 3b. buyer map / opportunity pipeline (B1) -- deterministic rows from tenders/forecasts/
+# procurement events, plus up to 3 model-proposed rows (BdPipelineOpportunity, validated like a
+# recommended action's rationale). Each row also gets a B2 tier (see the module-level comment near
+# tier_label for the scoring formula).
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class PipelineRow:
+    opportunity_he: str
+    stage: str
+    buyer_he: str
+    target_date_he: str
+    n: int | None
+    reference_date: dt.date | None = None
+    amount_usd: float | None = None
+    likelihood: float | None = None
+    level: str | None = None
+    watchlist_fit: bool = False
+
+    def tier(self, *, today: dt.date) -> str:
+        score = _tier_score(
+            amount_usd=self.amount_usd,
+            likelihood=self.likelihood,
+            level=self.level,
+            reference_date=self.reference_date,
+            watchlist_fit=self.watchlist_fit,
+            today=today,
+        )
+        return tier_label(score)
+
+
+def _pipeline_rows_from_tenders(
+    tenders: list[dict[str, Any]], watchlist_names: set[str]
+) -> list[PipelineRow]:
+    rows: list[PipelineRow] = []
+    for t in tenders:
+        entities = set(t.get("entities") or [])
+        rows.append(
+            PipelineRow(
+                opportunity_he=t.get("title") or "—",
+                stage=_tender_stage(t),
+                buyer_he=t.get("agency") or "—",
+                target_date_he=fmt_date(t.get("deadline")),
+                n=t.get("n"),
+                reference_date=t.get("deadline"),
+                watchlist_fit=bool(entities & watchlist_names),
+            )
+        )
+    return rows
+
+
+def _pipeline_rows_from_forecasts(
+    forecasts: list[dict[str, Any]], watchlist_names: set[str], *, today: dt.date
+) -> list[PipelineRow]:
+    rows: list[PipelineRow] = []
+    for f in forecasts:
+        window_from, window_to = f.get("window_from"), f.get("window_to")
+        candidate_vendors = set(f.get("candidate_vendors") or [])
+        rows.append(
+            PipelineRow(
+                opportunity_he=f"{f.get('platform') or '—'}: {f.get('payload_need') or '—'}",
+                stage=_forecast_stage(f, today=today),
+                buyer_he="—",
+                target_date_he=f"{fmt_date(window_from)} - {fmt_date(window_to)}",
+                n=f.get("n"),
+                reference_date=window_to,
+                likelihood=f.get("likelihood"),
+                watchlist_fit=bool(candidate_vendors & watchlist_names),
+            )
+        )
+    return rows
+
+
+def _pipeline_rows_from_events(events: list[dict[str, Any]], watchlist_names: set[str]) -> list[PipelineRow]:
+    """Only a ``contract_award`` event becomes a "לאחר-זכייה" (post-award/follow-on) pipeline row --
+    an m_and_a/deployment/test event isn't itself a buyer-pipeline opportunity for our company."""
+    rows: list[PipelineRow] = []
+    for ev in events:
+        if ev.get("kind") != "contract_award":
+            continue
+        rows.append(
+            PipelineRow(
+                opportunity_he=f"המשך עסקי סביב {ev.get('platform_he') or '—'} אצל {ev.get('buyer') or '—'}",
+                stage="לאחר-זכייה",
+                buyer_he=ev.get("buyer") or "—",
+                target_date_he=fmt_date(ev.get("date") or ev.get("published_at")),
+                n=ev.get("n"),
+                reference_date=ev.get("date") or ev.get("published_at"),
+                amount_usd=ev.get("amount_usd"),
+                watchlist_fit=(ev.get("vendor") in watchlist_names) or (ev.get("buyer") in watchlist_names),
+            )
+        )
+    return rows
+
+
+def _pipeline_rows_from_model(
+    opportunities: list[BdPipelineOpportunity],
+    citation_items: list[dict[str, Any]],
+    watchlist_names: set[str],
+) -> list[PipelineRow]:
+    """Resolves each model-proposed opportunity's first citation back to its market item (for a
+    triage-level magnitude proxy, a publish-date recency proxy, and a watchlist-entity-mention fit
+    bonus) -- ``None`` when the citation doesn't resolve to a known item (still rendered, just with
+    a neutral tier)."""
+    by_n = {it["n"]: it for it in citation_items if it.get("n") is not None}
+    rows: list[PipelineRow] = []
+    for opp in opportunities:
+        n = opp.rationale[0].cites[0] if opp.rationale and opp.rationale[0].cites else None
+        item = by_n.get(n) if n is not None else None
+        entities = set((item or {}).get("entities_mentioned") or [])
+        rows.append(
+            PipelineRow(
+                opportunity_he=opp.opportunity_he,
+                stage=opp.stage,
+                buyer_he=opp.buyer_he or "—",
+                target_date_he=opp.target_date_he or "—",
+                n=n,
+                reference_date=(item or {}).get("published_at"),
+                level=(item or {}).get("level"),
+                watchlist_fit=bool(entities & watchlist_names),
+            )
+        )
+    return rows
+
+
+def pipeline_table(rows: list[PipelineRow], *, today: dt.date | None = None) -> dict[str, Any] | None:
+    """B1/B2: the "מפת קונים / צינור הזדמנויות" table -- sorted by stage (RFI first, לאחר-זכייה
+    last) then by tier (A first). Returns ``None`` when there are no rows at all (deterministic +
+    model rows both empty), same convention as every other ``*_table`` helper in this module."""
+    if not rows:
+        return None
+    today = today or _today_jerusalem()
+    ordered = sorted(
+        rows, key=lambda r: (_STAGE_ORDER.get(r.stage, 99), {"A": 0, "B": 1, "C": 2}[r.tier(today=today)])
+    )
+    headers = ["הזדמנות", "שלב", "גורם רוכש", "תאריך יעד", "דרג", "מקור"]
+    table_rows = [
+        [
+            r.opportunity_he,
+            r.stage,
+            r.buyer_he or "—",
+            r.target_date_he or "—",
+            r.tier(today=today),
+            f"[{r.n}]" if r.n is not None else "—",
+        ]
+        for r in ordered
+    ]
+    return {"title_he": _PIPELINE_TABLE_TITLE_HE, "headers": headers, "rows": table_rows, "no_dedupe": True}
+
+
+# --------------------------------------------------------------------------
 # 4. active competitors
 # --------------------------------------------------------------------------
 
@@ -727,10 +1059,37 @@ def format_competitors_block(competitors: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def competitors_table(competitors: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _competitor_tier(competitor: dict[str, Any], *, today: dt.date) -> str:
+    """B2: a competitor's tier is driven by its most recent win's amount (magnitude) and date
+    (recency) when it has one; a watchlist-tracked competitor with no recorded win falls back to
+    in-window mention count as a coarse magnitude proxy (>=3 mentions -> orange-equivalent, >=1 ->
+    yellow-equivalent) rather than scoring 0 for lack of a win -- see the module-level B2 comment
+    for the full documented formula."""
+    wins = competitor.get("recent_wins") or []
+    last_win = wins[0] if wins else None
+    amount_usd = last_win.get("amount_usd") if last_win else None
+    reference_date = last_win.get("date") if last_win else None
+    level = None
+    if amount_usd is None and reference_date is None:
+        mentions = competitor.get("mentions") or 0
+        level = "orange" if mentions >= 3 else ("yellow" if mentions >= 1 else None)
+    score = _tier_score(
+        amount_usd=amount_usd,
+        level=level,
+        reference_date=reference_date,
+        watchlist_fit=bool(competitor.get("is_watchlist")),
+        today=today,
+    )
+    return tier_label(score)
+
+
+def competitors_table(
+    competitors: list[dict[str, Any]], *, today: dt.date | None = None
+) -> dict[str, Any] | None:
     if not competitors:
         return None
-    headers = ["מתחרה", "מדינה", "אזכורים בחלון", "תעשייה ישראלית", "זכייה אחרונה"]
+    today = today or _today_jerusalem()
+    headers = ["מתחרה", "מדינה", "אזכורים בחלון", "תעשייה ישראלית", "זכייה אחרונה", "דרג"]
     rows = []
     for c in competitors:
         last_win = (c.get("recent_wins") or [None])[0]
@@ -746,6 +1105,7 @@ def competitors_table(competitors: list[dict[str, Any]]) -> dict[str, Any] | Non
                 c["mentions"],
                 "כן" if c["is_israeli_industry"] else "—",
                 last_win_text,
+                _competitor_tier(c, today=today),
             ]
         )
     return {"title_he": "מתחרים פעילים בטריטוריה", "headers": headers, "rows": rows}
@@ -1273,12 +1633,37 @@ def _run_qa(
     errors += cm_errors
     bad_refs |= cm_bad
 
+    # Round 5 P6: `bluf` is validated the same way as exec_summary/market_bullets (a Sentence's
+    # `cites` must resolve, when the field is non-empty) but -- unlike exec_summary -- is never
+    # required to be non-empty here: `build_bd_territory` back-fills it deterministically whenever
+    # the model leaves it empty (see `_deterministic_bluf`), so a hard "bluf is empty" QA error
+    # would fire on every pre-round-5 draft fixture across this codebase's test suite for no
+    # analytical reason.
+    bluf_errors, bluf_bad = _check_sentence_group("שורה תחתונה (BLUF)", draft.bluf, valid_ns)
+    errors += bluf_errors
+    bad_refs |= bluf_bad
+
     for action in draft.recommended_actions:
         a_errors, a_bad = _check_sentence_group(
             f"נימוק לפעולה '{action.action_he}'", action.rationale, valid_ns
         )
         errors += a_errors
         bad_refs |= a_bad
+
+    for opportunity in draft.pipeline_opportunities:
+        o_errors, o_bad = _check_sentence_group(
+            f"נימוק להזדמנות '{opportunity.opportunity_he}'", opportunity.rationale, valid_ns
+        )
+        errors += o_errors
+        bad_refs |= o_bad
+
+    for assumption in draft.assumptions:
+        if not assumption.cites:
+            continue  # B5: cites are optional on an assumption/falsifier pair
+        bad = [n for n in assumption.cites if n not in valid_ns]
+        if bad:
+            bad_refs |= set(bad)
+            errors.append(f"בהנחה '{assumption.assumption_he}': הפניה {bad} אינה מצביעה על פריט קיים ברשימה")
 
     if has_items and not draft.exec_summary:
         errors.append("תקציר המנהלים ריק למרות שיש נתוני שוק בטריטוריה זו.")
@@ -1434,6 +1819,10 @@ def _strip_placeholder_echoes(draft: BdTerritoryReportDraft) -> BdTerritoryRepor
     too (a recommendation with no surviving grounding is worse than no recommendation)."""
     updates: dict[str, Any] = {}
 
+    new_bluf = _filter_sentences_echo(draft.bluf)
+    if len(new_bluf) != len(draft.bluf):
+        updates["bluf"] = new_bluf
+
     new_summary = _filter_sentences_echo(draft.exec_summary)
     if len(new_summary) != len(draft.exec_summary):
         updates["exec_summary"] = new_summary
@@ -1463,6 +1852,32 @@ def _strip_placeholder_echoes(draft: BdTerritoryReportDraft) -> BdTerritoryRepor
             new_actions.append(action)
     if actions_changed:
         updates["recommended_actions"] = new_actions
+
+    new_opportunities: list[BdPipelineOpportunity] = []
+    opportunities_changed = False
+    for opp in draft.pipeline_opportunities:
+        if _contains_placeholder_echo(opp.opportunity_he) or _contains_placeholder_echo(opp.buyer_he):
+            opportunities_changed = True
+            continue
+        cleaned_rationale = _filter_sentences_echo(opp.rationale)
+        if not cleaned_rationale:
+            opportunities_changed = True
+            continue
+        if len(cleaned_rationale) != len(opp.rationale):
+            opportunities_changed = True
+            new_opportunities.append(opp.model_copy(update={"rationale": cleaned_rationale}))
+        else:
+            new_opportunities.append(opp)
+    if opportunities_changed:
+        updates["pipeline_opportunities"] = new_opportunities
+
+    new_assumptions = [
+        a
+        for a in draft.assumptions
+        if not _contains_placeholder_echo(a.assumption_he) and not _contains_placeholder_echo(a.falsifier_he)
+    ]
+    if len(new_assumptions) != len(draft.assumptions):
+        updates["assumptions"] = new_assumptions
 
     return draft.model_copy(update=updates) if updates else draft
 
@@ -1520,6 +1935,7 @@ def _normalize_draft_text(draft: BdTerritoryReportDraft) -> BdTerritoryReportDra
     that would trigger either substitution)."""
     return draft.model_copy(
         update={
+            "bluf": _normalize_sentences(draft.bluf),
             "exec_summary": _normalize_sentences(draft.exec_summary),
             "market_bullets": _normalize_sentences(draft.market_bullets),
             "competitor_moves": _normalize_sentences(draft.competitor_moves),
@@ -1534,6 +1950,26 @@ def _normalize_draft_text(draft: BdTerritoryReportDraft) -> BdTerritoryReportDra
                     }
                 )
                 for a in draft.recommended_actions
+            ],
+            "pipeline_opportunities": [
+                o.model_copy(
+                    update={
+                        "opportunity_he": normalize_hebrew_punctuation(o.opportunity_he),
+                        "buyer_he": normalize_hebrew_punctuation(o.buyer_he) or o.buyer_he,
+                        "target_date_he": normalize_hebrew_punctuation(o.target_date_he) or o.target_date_he,
+                        "rationale": _normalize_sentences(o.rationale),
+                    }
+                )
+                for o in draft.pipeline_opportunities
+            ],
+            "assumptions": [
+                a.model_copy(
+                    update={
+                        "assumption_he": normalize_hebrew_punctuation(a.assumption_he),
+                        "falsifier_he": normalize_hebrew_punctuation(a.falsifier_he),
+                    }
+                )
+                for a in draft.assumptions
             ],
             "risks_assumptions_he": normalize_hebrew_punctuation(draft.risks_assumptions_he),
             "open_points_he": _normalize_text_list(draft.open_points_he),
@@ -1831,6 +2267,52 @@ def _tables_summary_sentences(
     return sentences
 
 
+def _tables_sizing_sentence(tenders_data: dict[str, Any]) -> Sentence | None:
+    """Round 5 P6 (BLUF item 1): one honestly-cited "how big is this" sentence for the
+    deterministic-BLUF fallback -- counts open/unknown tenders and procurement forecasts, cited to
+    *every* row actually counted (never a single arbitrary citation standing in for an aggregate
+    claim it doesn't itself support). Returns ``None`` when neither list has a numbered row."""
+    ns = [t["n"] for t in (tenders_data.get("tenders") or []) if t.get("n") is not None]
+    ns += [f["n"] for f in (tenders_data.get("forecasts") or []) if f.get("n") is not None]
+    if not ns:
+        return None
+    n_tenders = len(tenders_data.get("tenders") or [])
+    n_forecasts = len(tenders_data.get("forecasts") or [])
+    parts = []
+    if n_tenders:
+        parts.append(f"{n_tenders} מכרזים פתוחים/לא ידועים")
+    if n_forecasts:
+        parts.append(f"{n_forecasts} תחזיות רכש")
+    return Sentence(text_he=f"בטריטוריה זו מזוהים {' ו-'.join(parts)}.", cites=sorted({int(n) for n in ns}))
+
+
+def _deterministic_bluf(
+    items: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    tenders_data: dict[str, Any],
+    conferences_data: dict[str, Any],
+) -> list[Sentence]:
+    """Round 5 P6 (BLUF item 1): a no-LLM BLUF -- used whenever the model-drafted ``bluf`` ends up
+    empty (the tables-only/no-items drafts, and the twice-failed-QA deterministic fallback): the
+    single most urgent already-cited fact available (top market item, else top procurement event,
+    else top open tender, else top upcoming conference, in that priority) plus one honestly-cited
+    sizing sentence (:func:`_tables_sizing_sentence`). Never fabricated -- every sentence is drawn
+    from data already numbered in the citation registry. Returns ``[]`` when there is truly nothing
+    to cite (the genuinely-empty ``_no_items_draft`` case) -- rendering no BLUF section is more
+    honest than a BLUF with an invented citation."""
+    top = (
+        _fallback_top_item_sentences(items, limit=1)
+        or _fallback_event_sentences(events, limit=1)
+        or _fallback_tender_sentences(tenders_data.get("tenders") or [], limit=1)
+        or _fallback_conference_sentences(conferences_data.get("territory") or [], limit=1)
+    )
+    sentences = list(top)
+    sizing = _tables_sizing_sentence(tenders_data)
+    if sizing is not None and len(sentences) < 2:
+        sentences.append(sizing)
+    return sentences[:2]
+
+
 def _deterministic_fallback_draft(
     territory: str,
     items: list[dict[str, Any]],
@@ -1851,6 +2333,11 @@ def _deterministic_fallback_draft(
     sentences.extend(_fallback_top_item_sentences(items, limit=_FALLBACK_TOP_ITEMS))
     sentences.extend(_fallback_event_sentences(events, limit=_FALLBACK_TOP_EVENTS))
     actions = _deterministic_candidate_actions(competitors, tenders_data, conferences_data, events)
+    # `bluf` is deliberately left empty here (default) -- `sections` is always empty for this
+    # report and `system_note_he` below is always non-empty, so `eoa.report.docx_builder`'s own
+    # generic BLUF fallback (`_draft_bluf_info`) already synthesizes a properly-labeled
+    # "(שורה תחתונה אוטומטית מהנתונים, ללא ניסוח מודל)" BLUF from the top `exec_summary` sentences
+    # above -- setting `bluf` explicitly here would only render an *unlabeled* duplicate of that.
     return BdTerritoryReportDraft(
         exec_summary=sentences,
         market_bullets=[],
@@ -2037,6 +2524,8 @@ def _persist_report(
     html_path: Path,
     items: list[dict[str, Any]],
     qa: QAResult,
+    *,
+    report_state: dict[str, Any] | None = None,
 ) -> int:
     qa_report = {
         "passed": qa.passed,
@@ -2046,11 +2535,15 @@ def _persist_report(
         "duplicate_sentences": qa.duplicate_sentences,
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None and it["id"] > 0]
+    # Round 5 P6 (B4): `report_state` is the raw material `eoa.report.deltas.previous_report_state`
+    # reads back for the *next* bd_territory report of the same territory's delta -- see
+    # `eoa.report.deltas.build_report_state`; `None` (a manual caller that doesn't pass it) keeps
+    # this column NULL, same as any report built before this migration/wiring.
     sql = """
         INSERT INTO reports (kind, territory, period_start, period_end, path_docx, path_md, path_html,
-                              items_included, qa_passed, qa_report)
+                              items_included, qa_passed, qa_report, report_state)
         VALUES ('bd_territory', %(territory)s, %(start)s, %(end)s, %(docx)s, %(md)s, %(html)s,
-                %(items)s, %(qa_passed)s, %(qa_report)s)
+                %(items)s, %(qa_passed)s, %(qa_report)s, %(report_state)s)
         RETURNING id
     """
     with connection() as conn, conn.cursor() as cur:
@@ -2066,6 +2559,7 @@ def _persist_report(
                 "items": item_ids,
                 "qa_passed": qa.passed,
                 "qa_report": Json(qa_report),
+                "report_state": Json(report_state) if report_state is not None else None,
             },
         )
         report_id: int = cur.fetchone()["id"]
@@ -2333,7 +2827,34 @@ def build_bd_territory(
     # conferences_table/format_conferences_block).
     draft = _correct_draft_conference_dates(draft, _conferences_date_lookup(conferences_data), territory=code)
 
+    # Round 5 P6 (BLUF, item 1): whenever the model-drafted `bluf` ends up empty *and*
+    # `eoa.report.docx_builder`'s own generic, properly-labeled BLUF fallback would not otherwise
+    # fire for this draft (that fallback covers the tables-only/no-items/twice-failed-QA shapes:
+    # non-empty `system_note_he` + non-empty `exec_summary`, `sections` always empty for BD --
+    # see the module-level "BLUF note" comment above) -- back-fill `bluf` deterministically from
+    # whatever real data is available. The one shape this covers that docx_builder's own fallback
+    # does not: a normal, successful, real-item draft whose model output simply omitted `bluf`
+    # (`system_note_he` is empty there, so the native fallback never fires).
+    if not draft.bluf:
+        docx_builder_fallback_would_fire = bool(draft.system_note_he) and bool(draft.exec_summary)
+        if not docx_builder_fallback_would_fire:
+            deterministic_bluf = _deterministic_bluf(items, events, tenders_data, conferences_data)
+            if deterministic_bluf:
+                draft = draft.model_copy(update={"bluf": deterministic_bluf})
+
     extra_sections: list[dict[str, Any]] = []
+    # BLUF itself needs no extra_sections entry -- eoa.report.docx_builder renders "שורה תחתונה"
+    # natively straight from draft.bluf (see the module-level "BLUF note" comment above).
+    # B4 (territory delta): decorative/optional, mirrors this module's own acquisition-watch/
+    # payload-price sections -- a DB problem here must never break the report build.
+    try:
+        id_to_n = {it["id"]: it["n"] for it in items if it.get("id") is not None and it.get("n") is not None}
+        delta_result = compute_deltas(
+            "bd_territory", items, before_period_end=end, territory=code, id_to_n=id_to_n
+        )
+        extra_sections.append(delta_extra_section(delta_result))
+    except Exception as exc:
+        log.warning("bd_territory_delta_section_failed", territory=code, error=str(exc)[:160])
     if draft.market_bullets:
         extra_sections.append(
             {
@@ -2365,6 +2886,9 @@ def build_bd_territory(
         extra_sections.append(
             {"title_he": "סיכונים והנחות", "body_he": draft.risks_assumptions_he, "position": "after_outlook"}
         )
+    # `draft.assumptions` itself needs no extra_sections entry -- eoa.report.docx_builder (P4)
+    # renders "הנחות והפרכות" natively straight from it (duck-typed `_draft_assumptions`/
+    # `_render_assumption`, same convention as its native BLUF rendering), right after "מבט קדימה".
     # A16 (מעקב רכישות ושותפויות) + A17 (מחירי ייחוס למטע"דים): data-driven, model-free sections;
     # each extends ``citation_items`` in place so its [n] marks resolve in the source appendix, and
     # each is skipped entirely (never a placeholder) when it has nothing to show or its DB read
@@ -2440,12 +2964,25 @@ def build_bd_territory(
             }
         )
 
+    # B1/B2: buyer map / opportunity pipeline -- deterministic rows from tenders/forecasts/
+    # contract-award events, plus up to 3 model-proposed rows (already citation-QA-checked above),
+    # each tiered A/B/C (module-level "B2" comment near tier_label documents the formula).
+    _today = _today_jerusalem()
+    _watchlist_names = _all_watchlist_names()
+    pipeline_rows = (
+        _pipeline_rows_from_tenders(tenders_data.get("tenders") or [], _watchlist_names)
+        + _pipeline_rows_from_forecasts(tenders_data.get("forecasts") or [], _watchlist_names, today=_today)
+        + _pipeline_rows_from_events(events, _watchlist_names)
+        + _pipeline_rows_from_model(draft.pipeline_opportunities, citation_items, _watchlist_names)
+    )
+
     tables: list[dict[str, Any]] = []
     for tbl in (
+        pipeline_table(pipeline_rows, today=_today),
         platform_events_table(events),
         tenders_table(tenders_data),
         forecasts_table(tenders_data),
-        competitors_table(competitors),
+        competitors_table(competitors, today=_today),
         conferences_table(conferences_data),
         recommended_actions_table(draft, deterministic=used_deterministic_actions),
     ):
@@ -2511,6 +3048,13 @@ def build_bd_territory(
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")
 
-    report_id = _persist_report(code, start, end, docx_path, md_path, html_path, citation_items, qa)
+    try:
+        report_state = build_report_state(items)
+    except Exception as exc:
+        log.warning("bd_territory_report_state_build_failed", territory=code, error=str(exc)[:160])
+        report_state = None
+    report_id = _persist_report(
+        code, start, end, docx_path, md_path, html_path, citation_items, qa, report_state=report_state
+    )
 
     return ReportPaths(docx=docx_path, md=md_path, html=html_path, report_id=report_id, qa=qa, territory=code)

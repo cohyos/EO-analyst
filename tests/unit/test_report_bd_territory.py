@@ -259,7 +259,8 @@ def test_build_bd_territory_renders_expected_tables(patch_bd_collectors):
 
     assert ["תאריך", "פלטפורמה/תוכנית", "רוכש", "ספק", "סכום", "צורך EO/IR נגזר", "מקור"] in table_headers
     assert ["כותרת", "גורם מזמין", "דדליין", "סטטוס", "קישור"] in table_headers
-    assert ["מתחרה", "מדינה", "אזכורים בחלון", "תעשייה ישראלית", "זכייה אחרונה"] in table_headers
+    # Round 5 P6 (B2): competitors_table gained a trailing "דרג" (tier A/B/C) column.
+    assert ["מתחרה", "מדינה", "אזכורים בחלון", "תעשייה ישראלית", "זכייה אחרונה", "דרג"] in table_headers
     assert ["שם", "תאריכים", "עיר", "סטטוס", "מארגן", "רלוונטיות"] in table_headers
     assert ["עדיפות", "פעולה", "נימוק", "אחראי", "תזמון"] in table_headers
 
