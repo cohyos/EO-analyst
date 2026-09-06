@@ -385,6 +385,56 @@ def _apply_israel_focus_boost(item: dict, out: TriageOut) -> TriageOut:
 # --- A13 -- END ----------------------------------------------------------------------------
 
 
+# --- A16 (מעקב רכישות ושותפויות, user requirement 2026-09-06) -- BEGIN ----------------------
+# Deterministic acquisition-watch alert, applied *after* the israel-focus boost above -- never
+# lowers `out.score`/level, only ever raises `out.score` to (at least) the threshold named by
+# `config.acquisition_watch.alert_level` (default "red"), when BOTH:
+#   1. the item's own `entities_mentioned` names a `config/watchlist.yaml` `acquisition_watch`
+#      company (`eoa.pipeline.acquisition.acquisition_watch_hit`), AND
+#   2. the item's own text carries an M&A/investment/partnership signal
+#      (`eoa.pipeline.acquisition.has_ma_signal` -- vocabulary only here, since `events` rows
+#      don't exist yet at triage time: `analyze`, which extracts them, runs *after* `triage` in
+#      `eoa.orchestrator.jobs`'s stage order).
+# `triage_reason` is prefixed with "מעקב רכישות: <company>" so the alert is visible in every
+# downstream view (item detail, feedback UI, reports) without a schema change.
+def _apply_acquisition_watch_boost(item: dict, out: TriageOut) -> TriageOut:
+    try:
+        cfg = settings().acquisition_watch
+        if not cfg.enabled:
+            return out
+        from eoa.pipeline.acquisition import acquisition_watch_hit, has_ma_signal
+
+        company = acquisition_watch_hit(item.get("entities_mentioned"))
+        if company is None:
+            return out
+        text = " ".join(
+            filter(
+                None,
+                [item.get("title"), item.get("summary_he"), item.get("so_what_he"), item.get("clean_text")],
+            )
+        )
+        if not has_ma_signal(text):
+            return out
+        red_threshold = settings().triage.levels.get(cfg.alert_level, settings().triage.levels["red"])
+        new_score = max(out.score, min(10, red_threshold))
+        if new_score != out.score:
+            log.info(
+                "acquisition_watch_triage_boost",
+                item_id=item.get("id"),
+                company=company,
+                original_score=out.score,
+                new_score=new_score,
+            )
+        out.score = new_score
+        prefix = f"מעקב רכישות: {company}"
+        if not out.reason_he.startswith(prefix):
+            out.reason_he = f"{prefix}. {out.reason_he}"[:400]
+    except Exception as exc:
+        log.debug("acquisition_watch_triage_boost_failed", item_id=item.get("id"), error=str(exc)[:120])
+    return out
+# --- A16 -- END ------------------------------------------------------------------------------
+
+
 def triage_item(item: dict, *, role: str = "resident", interactive: bool = False) -> TriageOut:
     """Score one classified item (does not persist). Level is recomputed from config thresholds."""
     out = chat_structured(
@@ -399,6 +449,7 @@ def triage_item(item: dict, *, role: str = "resident", interactive: bool = False
     )
     out = _reconcile_score(item, out, role=role, interactive=interactive)
     out = _apply_israel_focus_boost(item, out)
+    out = _apply_acquisition_watch_boost(item, out)
     out.level = level_for(out.score)  # type: ignore[assignment]
     return out
 
@@ -418,6 +469,7 @@ def triage_batch(items: list[dict], *, role: str = "resident") -> dict[int, Tria
         if item is not None:
             results[item_id] = _reconcile_score(item, out, role=role)
             results[item_id] = _apply_israel_focus_boost(item, results[item_id])
+            results[item_id] = _apply_acquisition_watch_boost(item, results[item_id])
         results[item_id].level = level_for(results[item_id].score)  # type: ignore[assignment]
     return results
 

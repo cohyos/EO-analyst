@@ -930,6 +930,23 @@ def build_weekly(
     except Exception as exc:
         log.warning("weekly_report_patents_section_failed", error=str(exc)[:160])
 
+    # A16 (מעקב רכישות ושותפויות, user requirement 2026-09-06): "מעקב רכישות ושותפויות" section
+    # (events on acquisition-watch companies/peers + zero-activity lines + patent-proxy values),
+    # same additive mechanism as the tech-watch/israel-section/patents sections above. A failure
+    # here must never break the weekly report. See docs/MODULES.md's "A16" section for the
+    # equivalent one-line call ``eoa.report.bd_territory`` can add to reuse this.
+    try:
+        from eoa.report.acquisition_watch import SECTION_TITLE_HE, acquisition_watch_section_md
+
+        with connection() as acq_conn:
+            acq_body = acquisition_watch_section_md(acq_conn, start, end, citation_items)
+        if acq_body:
+            extra_sections.append(
+                {"title_he": SECTION_TITLE_HE, "body_he": acq_body, "position": "after_outlook"}
+            )
+    except Exception as exc:
+        log.warning("weekly_report_acquisition_watch_section_failed", error=str(exc)[:160])
+
     docx_path = _report_path(end, "docx")
     md_path = _report_path(end, "md")
     html_path = _report_path(end, "html")
