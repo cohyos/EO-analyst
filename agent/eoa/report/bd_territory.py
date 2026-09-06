@@ -62,6 +62,7 @@ _INSCOPE_LEVELS = ("red", "orange", "yellow")
 # (m_and_a for acquisitions, test for trials/demonstrations).
 _PROCUREMENT_EVENT_KINDS = ("contract_award", "m_and_a", "deployment", "test")
 
+
 # A13 (מיקוד תעשייה ישראלית, 2026-09-06): additive -- was a hardcoded 4-name set; now derived
 # from every `country: IL` company on `config/watchlist.yaml` (eoa.pipeline.israel_focus), so the
 # BD competitors table's "is_israeli_industry" flag stays in sync with the watchlist without this
@@ -75,6 +76,7 @@ def _israeli_industry_names() -> set[str]:
         return set(israeli_watchlist_names())
     except Exception:
         return {"Elbit", "Rafael", "IAI", "Controp"}
+
 
 # BD-1 (docs/qa/findings_Q3_r2.md): observed a live truncated-JSON crash (schema validation
 # failed with "EOF while parsing a string") against a busy territory (22 market items) at the
@@ -1291,7 +1293,9 @@ def _is_dependent_fragment(sentence: str) -> bool:
 
 def _strip_uncited(draft: BdTerritoryReportDraft, qa: QAResult) -> BdTerritoryReportDraft:
     """Drop the sentences ``qa`` flagged from the exec summary, market bullets, and every action's
-    rationale -- mirrors ``eoa.report.weekly._strip_uncited``. An action whose rationale becomes
+    rationale -- mirrors the same per-sentence strip ``eoa.report.monthly._strip_uncited`` uses for
+    the (legacy free-prose) monthly draft (round-2, 2026-09-06: ``eoa.report.weekly`` moved to the
+    structured schema and no longer has a same-named function). An action whose rationale becomes
     empty after stripping is dropped entirely (a recommendation with no surviving grounding is
     worse than no recommendation, per docs/CONVENTIONS.md rule 5).
 

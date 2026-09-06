@@ -342,8 +342,11 @@ def _corrective_retry(
 
 
 def _strip_uncited(draft: MonthlyReportDraft, qa: QAResult) -> MonthlyReportDraft:
-    """Mirrors ``weekly._strip_uncited`` (F5: also drops an exec-summary sentence duplicated
-    verbatim from a section/trend paragraph)."""
+    """Sentence-level QA-failure fallback for the (legacy free-prose) monthly draft (F5: also drops
+    an exec-summary sentence duplicated verbatim from a section/trend paragraph). Round-2
+    (2026-09-06): the weekly report moved to the structured schema and now uses a
+    ``eoa.report.daily``-style two-failure "drop the whole narrative" fallback instead of this
+    per-sentence strip — this function stays monthly-only, no longer mirrored from ``weekly.py``."""
     bad_refs = set(qa.bad_refs)
     uncited = set(qa.uncited_sentences)
     duplicates = set(qa.duplicate_sentences)
