@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { I18nProvider } from "@/i18n";
+import { AccessGate } from "@/components/auth/AccessGate";
 import { AppShell } from "@/components/shell/AppShell";
 import { MorningPage } from "@/pages/MorningPage";
 import { FeedPage } from "@/pages/FeedPage";
@@ -33,29 +34,35 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <I18nProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route element={<AppShell />}>
-              <Route index element={<MorningPage />} />
-              <Route path="feed" element={<FeedPage />} />
-              <Route path="items/:id" element={<ItemDetailPage />} />
-              <Route path="entities" element={<EntitiesPage />} />
-              <Route path="entities/:id" element={<EntitiesPage />} />
-              <Route path="investigations" element={<InvestigationsListPage />} />
-              <Route path="investigations/:jobId" element={<InvestigationDetailPage />} />
-              <Route path="ask" element={<AskPage />} />
-              <Route path="conferences" element={<ConferencesPage />} />
-              <Route path="tenders" element={<TendersPage />} />
-              <Route path="patents" element={<PatentsPage />} />
-              <Route path="inbox" element={<InboxPage />} />
-              <Route path="reports" element={<ReportsPage />} />
-              <Route path="bd" element={<BdPage />} />
-              <Route path="tech-radar" element={<TechRadarPage />} />
-              <Route path="settings" element={<SettingsPage />} />
-              <Route path="*" element={<NotFoundPage />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
+        {/* ADR-008 (docs/adr/008-remote-access.md): renders the passcode form instead of the app
+            whenever the API has told us (via a 401 auth_required) that this client -- reaching the
+            API from a non-loopback host -- needs a session first. A no-op for the primary local
+            usage this app was built around. */}
+        <AccessGate>
+          <BrowserRouter>
+            <Routes>
+              <Route element={<AppShell />}>
+                <Route index element={<MorningPage />} />
+                <Route path="feed" element={<FeedPage />} />
+                <Route path="items/:id" element={<ItemDetailPage />} />
+                <Route path="entities" element={<EntitiesPage />} />
+                <Route path="entities/:id" element={<EntitiesPage />} />
+                <Route path="investigations" element={<InvestigationsListPage />} />
+                <Route path="investigations/:jobId" element={<InvestigationDetailPage />} />
+                <Route path="ask" element={<AskPage />} />
+                <Route path="conferences" element={<ConferencesPage />} />
+                <Route path="tenders" element={<TendersPage />} />
+                <Route path="patents" element={<PatentsPage />} />
+                <Route path="inbox" element={<InboxPage />} />
+                <Route path="reports" element={<ReportsPage />} />
+                <Route path="bd" element={<BdPage />} />
+                <Route path="tech-radar" element={<TechRadarPage />} />
+                <Route path="settings" element={<SettingsPage />} />
+                <Route path="*" element={<NotFoundPage />} />
+              </Route>
+            </Routes>
+          </BrowserRouter>
+        </AccessGate>
       </I18nProvider>
     </QueryClientProvider>
   );

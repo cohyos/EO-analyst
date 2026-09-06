@@ -11,7 +11,9 @@ Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_remote_access_auth
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -66,8 +68,8 @@ def app_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(db, "get_pool", lambda: object())
     monkeypatch.setattr(db, "close_pool", lambda: None)
 
-    from eoa.api.app import create_app
     from eoa.api import services
+    from eoa.api.app import create_app
 
     monkeypatch.setattr(
         services,
@@ -185,6 +187,20 @@ def test_login_success_sets_cookie_with_expected_flags(
     assert "HttpOnly" in set_cookie
     assert "Secure" in set_cookie
     assert "SameSite=strict" in set_cookie or "samesite=strict" in set_cookie.lower()
+    assert f"Max-Age={auth.SESSION_TTL_SECONDS}" in set_cookie
+
+    # Regression guard: `expires` must be an absolute HTTP-date within a few minutes of "now +
+    # 12h", never something derived by mishandling `expires_at.timestamp()` as a relative offset
+    # (that bug produced a cookie dated ~55 years in the future -- see auth.py's `login`).
+    import email.utils
+
+    match = re.search(r"expires=([^;]+);", set_cookie, re.IGNORECASE)
+    assert match, f"no expires= attribute in Set-Cookie: {set_cookie!r}"
+    expires_dt = email.utils.parsedate_to_datetime(match.group(1))
+    delta_seconds = (expires_dt - datetime.now(UTC)).total_seconds()
+    assert abs(delta_seconds - auth.SESSION_TTL_SECONDS) < 300, (
+        f"cookie expires {delta_seconds}s from now, expected ~{auth.SESSION_TTL_SECONDS}s"
+    )
 
 
 def test_login_then_session_cookie_authenticates_subsequent_requests(

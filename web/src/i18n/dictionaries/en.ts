@@ -46,6 +46,9 @@ export const en: Dictionary = {
     themeToDark: "Switch to dark theme",
     languageToggleAriaLabel: "Switch to Hebrew",
     languageToggleLabel: "עב", // "עב" (Hebrew abbreviation), shown while UI is in English
+    // ADR-008 (docs/adr/008-remote-access.md): shown only for a client that logged in remotely.
+    remoteLogout: "Log out",
+    remoteSessionActiveTitle: "Signed in remotely — click to log out",
     runNowQueued: "Queued…",
     runNowAlready: "Already running",
     runNowPopoverTitle: "Run progress",
@@ -275,5 +278,15 @@ export const en: Dictionary = {
     tendersCount: "{n} tenders",
     forecastsCount: "{n} forecasts",
     configuredBadge: "In weekly default set",
+  },
+  accessGate: {
+    // ADR-008 (docs/adr/008-remote-access.md): shown instead of the app for a non-loopback
+    // client (Tailscale/LAN) that hasn't logged in yet.
+    title: "Sign-in required",
+    subtitle: "This system is currently being accessed remotely — enter the access passcode to continue.",
+    passcodeLabel: "Passcode",
+    submit: "Sign in",
+    submitting: "Signing in…",
+    genericError: "Sign-in failed — try again",
   },
 };

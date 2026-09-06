@@ -145,6 +145,16 @@ api:
   host: 127.0.0.1
   port: 8765
   status_push_seconds: 2
+  # ADR-008 (docs/adr/008-remote-access.md): passcode + session gate for any client reaching this
+  # API from a non-loopback host (Tailscale, LAN). Disabled by default -- loopback callers are
+  # unaffected either way. Set the passcode via `scripts\native\remote_access.ps1 -SetPasscode`
+  # (writes EOA_ACCESS_PASSCODE into runtime\eoa.env, read once at process start and hashed in
+  # memory -- never stored here in plaintext) rather than editing passcode_hash by hand.
+  remote_access:
+    enabled: false
+    passcode_hash: ""
+    token_required_for_writes: true
+    trusted_local_only: true
 
 export:
   obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }

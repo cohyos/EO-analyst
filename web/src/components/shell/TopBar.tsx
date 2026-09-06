@@ -1,10 +1,13 @@
+import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Command, Languages, Moon, Search, Sun } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Command, Languages, LockKeyhole, Moon, Search, Sun } from "lucide-react";
 import { usePageTitle } from "./nav";
 import { RunNowButton } from "./RunNowButton";
 import { useUiStore } from "@/store/uiStore";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/i18n";
+import { getRemoteSessionActive, logoutRemoteAccess, subscribeRemoteSession } from "@/api/real";
 
 export function TopBar({ nightWindow }: { nightWindow: boolean }) {
   const location = useLocation();
@@ -13,9 +16,25 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
   const toggleTheme = useUiStore((s) => s.toggleTheme);
   const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
   const { t, locale, toggleLocale } = useI18n();
+  const queryClient = useQueryClient();
+
+  // ADR-008 (docs/adr/008-remote-access.md): a small "remote session active" indicator + logout,
+  // shown only for a non-loopback client that has actually logged in (the `X-EOA-Remote-Session`
+  // response header -- see `auth.py::RemoteAccessMiddleware`). Never shown for ordinary local use.
+  const [remoteSession, setRemoteSession] = useState(getRemoteSessionActive);
+  useEffect(() => subscribeRemoteSession(setRemoteSession), []);
+
+  async function handleRemoteLogout() {
+    await logoutRemoteAccess();
+    await queryClient.invalidateQueries();
+  }
 
   return (
-    <header className="flex h-14 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-bg-raised px-2 sm:gap-3 sm:px-4">
+    <header className="pt-safe flex min-h-14 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-bg-raised px-2 sm:gap-3 sm:px-4">
+      {/* min-h (not h-14): pt-safe adds env(safe-area-inset-top) on top of the
+          normal 56px bar height in iOS standalone mode (status bar overlaps
+          content there) — a fixed height would squeeze the row's own content
+          instead of growing the bar. */}
       <h1 className="min-w-0 shrink truncate text-base font-semibold">{title}</h1>
 
       <span
@@ -39,7 +58,7 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
       <button
         type="button"
         onClick={() => setCommandPaletteOpen(true)}
-        className="flex shrink-0 items-center gap-2 rounded-md border border-border-strong p-1.5 text-sm text-fg-muted hover:bg-bg-sunken sm:px-3 sm:py-1.5"
+        className="tap-target flex shrink-0 items-center gap-2 rounded-md border border-border-strong p-1.5 text-sm text-fg-muted hover:bg-bg-sunken sm:px-3 sm:py-1.5"
         aria-label={t("common.searchGlobal")}
       >
         <Search size={16} aria-hidden="true" className="sm:hidden" />
@@ -51,10 +70,26 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
 
       <RunNowButton />
 
+      {remoteSession && (
+        <button
+          type="button"
+          onClick={() => {
+            void handleRemoteLogout();
+          }}
+          className="tap-target flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2 py-2 text-xs font-medium text-fg-muted hover:bg-bg-sunken"
+          aria-label={t("topBar.remoteLogout")}
+          title={t("topBar.remoteSessionActiveTitle")}
+          data-testid="remote-logout"
+        >
+          <LockKeyhole size={16} aria-hidden="true" />
+          <span className="hidden sm:inline">{t("topBar.remoteLogout")}</span>
+        </button>
+      )}
+
       <button
         type="button"
         onClick={toggleLocale}
-        className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2 py-2 text-xs font-medium text-fg-muted hover:bg-bg-sunken"
+        className="tap-target flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2 py-2 text-xs font-medium text-fg-muted hover:bg-bg-sunken"
         aria-label={t("topBar.languageToggleAriaLabel")}
         title={t("topBar.languageToggleAriaLabel")}
         data-testid="language-toggle"
@@ -67,7 +102,7 @@ export function TopBar({ nightWindow }: { nightWindow: boolean }) {
       <button
         type="button"
         onClick={toggleTheme}
-        className="shrink-0 rounded-md border border-border-strong p-2 text-fg-muted hover:bg-bg-sunken"
+        className="tap-target inline-flex shrink-0 items-center justify-center rounded-md border border-border-strong p-2 text-fg-muted hover:bg-bg-sunken"
         aria-label={theme === "dark" ? t("topBar.themeToLight") : t("topBar.themeToDark")}
       >
         {theme === "dark" ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}

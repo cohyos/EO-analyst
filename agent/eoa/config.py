@@ -189,10 +189,33 @@ class RetentionCfg(BaseModel):
     backups_keep: int = 30
 
 
+class RemoteAccessCfg(BaseModel):
+    """ADR-008: passcode + session gate for any client reaching this API from a host that is not
+    loopback (Tailscale, LAN) -- ``eoa.api.auth.RemoteAccessMiddleware``. Disabled by default, so
+    existing loopback-only behaviour (no auth at all) is completely unchanged until an operator
+    explicitly turns this on (``scripts/native/remote_access.ps1 -Enable``).
+
+    ``passcode_hash`` is an optional pre-hashed passcode persisted here (self-describing --
+    ``$argon2...``/``$2b$...``/``pbkdf2_sha256$...`` -- see ``eoa.api.auth.hash_passcode``); most
+    setups instead rely on the ``EOA_ACCESS_PASSCODE`` environment variable (plain, read once at
+    process start and hashed in memory only -- never logged, never written back to this file) via
+    ``remote_access.ps1 -SetPasscode``. When both are absent, remote login is impossible (every
+    non-loopback request gets 401) even if ``enabled`` is true. ``trusted_local_only`` documents
+    the always-on behaviour that a loopback client is trusted with no session at all -- it is not
+    itself a switch (loopback trust cannot be turned off; see ADR-008's threat model).
+    """
+
+    enabled: bool = False
+    passcode_hash: str = ""
+    token_required_for_writes: bool = True
+    trusted_local_only: bool = True
+
+
 class ApiCfg(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     status_push_seconds: int = 2
+    remote_access: RemoteAccessCfg = Field(default_factory=RemoteAccessCfg)
 
 
 class ObsidianExportCfg(BaseModel):

@@ -142,6 +142,13 @@ def get_patent(pub_number: str) -> dict[str, Any]:
 
 class PatentSurveyCreate(BaseModel):
     topic: str = Field(min_length=MIN_SURVEY_TOPIC_LENGTH)
+    territory: str | None = Field(
+        default=None,
+        description=(
+            "Optional territory filter (2026-09-06), e.g. 'US' -- restricts the gathered sample "
+            "to that publication-number prefix, see eoa.patents.survey._territory_filter"
+        ),
+    )
 
 
 @router.post("/patents/surveys")
@@ -153,7 +160,10 @@ def create_patent_survey(body: PatentSurveyCreate) -> dict[str, Any]:
     topic = body.topic.strip()
     if len(topic) < MIN_SURVEY_TOPIC_LENGTH:
         raise HTTPException(status_code=422, detail="topic must be at least 8 characters")
-    job_id = enqueue_job("patent_survey", {"topic": topic}, priority=4)
+    payload: dict[str, Any] = {"topic": topic}
+    if body.territory and body.territory.strip():
+        payload["territory"] = body.territory.strip()
+    job_id = enqueue_job("patent_survey", payload, priority=4)
     deadline = time.monotonic() + _SURVEY_SYNC_WAIT_SECONDS
     while time.monotonic() < deadline:
         job = _fetchone("SELECT state, result, error FROM jobs WHERE id = %s", (job_id,))

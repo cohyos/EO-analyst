@@ -6964,3 +6964,85 @@ r3 (items 58/155/614) תוקנו בפועל (`scripts/repair_truncated_hebrew.py
 `build_territory` הקיימות-מראש, שאינן ממוקדות ב-DB חי אלא קוראות בפועל ל-`eoa.pipeline.tech_watch`
 ללא mock — נתלות בפועל בזמינות ה-GPU/Ollama החי (עומס אמיתי של המשתמש חסם אותן בזמן הריצה), לא
 קשור לשינויים כאן.
+
+## סקר פטנטים — משמעת ציטוט מובנית + עומק עסקי (goal, 2026-09-06)
+
+**דרישת המשתמש:** משוב על הסקר הקיים ("FPA עם פיקסל דיגיטלי (DROIC)", `report_id=27`) — "יש
+שיבושי עברית/אנגלית וקיטועים; חסר ניתוח עומק עסקי — למשל בסקר על ארה"ב אין את הקשר בין Anduril
+והמוצר שלהם לטכנולוגיה". תוקן בשלמותו בתוך `agent/eoa/patents/**` בלבד (ללא נגיעה ב-
+`eoa.report.docx_builder`, לפי ההנחיה — כל הרינדור נשען על ה-API הציבורי הקיים שלו).
+
+### 1. סכמה חדשה (`agent/eoa/llm/schemas/patents.py`): `PatentSurveyDraft`
+
+מחליפה את `PatentSurveySynthesisOut` הישן (פרוזה חופשית ללא אכיפה). כל משפט הוא
+`PatentCiteSentence` (`text_he`+`cites`): חובה `cites` לא-ריק, **אלא אם** `is_general_knowledge=True`
+וגם הטקסט נפתח במילים המדויקות "ידע כללי (לא מאומת במאגר):" (נאכף ב-`model_validator`, לא רק
+בפרומפט) — כך "ידע כללי" של ה-LLM מותר אך לעולם לא מוצג כממצא מבוסס-מאגר. אסור `[n]`/`[Pn]` מוטבע
+בטקסט (נלכד ע"י regex). `AssigneeProfile` (2–5 לכל סקר): `tech_product_chain` (שרשרת טכנולוגיה
+→ מוצר → תוכנית, חובה משפט אחד לפחות), `recent_activity` (אופציונלי — ריק כשאין נתוני מאגר),
+`implications_he` (חובה). `PatentBizAction` (3–6 לכל סקר): `action_he`+`rationale_he`+
+`rationale_cites`, מנקודת המבט של `bd_report.our_company`/`perspective_he` (אותו מנגנון כמו
+`eoa.llm.schemas.reports.BdAction`).
+
+### 2. רינדור בלי לגעת ב-`docx_builder.py` (`agent/eoa/patents/survey.py`)
+
+ה-draft הפנימי (`_RenderableSurveyDraft`/`_RenderSection`/`_CiteSentence`) מחוקה במכוון את הצורה
+של `eoa.llm.schemas.analysis.DailyReportDraft` (`exec_summary`+`sections[].sentences`, **בלי**
+`exec_summary_he`) — כך `docx_builder.build_docx`/`render_markdown`/`render_html` מרנדרים אותו
+דרך הנתיב המובנה הקיים (משפט-אחר-משפט, `[n]` דטרמיניסטי, קפיצת-היפרלינק פנימית לנספח) בלי שום
+שינוי ב-`docx_builder.py` עצמו. פרופיל כל מקצה הופך לסעיף Heading-1 נפרד ("פרופיל מקצה: X").
+
+### 3. שני מרשמי ציטוט ברצף מספור אחד
+
+הפטנטים ממוספרים ראשונים (1..P, כמו קודם); מיד אחריהם — רשומות מאגר (items/events) שנאספו
+עבור פרופילי המקצים המובילים, ממשיכות את אותו רצף (`_extend_registry_with_db_records`, מחקה את
+`eoa.report.bd_territory._extend_registry_with_source_items`). אירוע ששייך לאותו פריט-מאגר של
+"פריט שוק" שכבר נספר מקבל את אותו `n` (לא כפילות). הטבלה הייעודית "נספח פטנטים" (עמודות: מספר |
+כותרת EN | מקצה | CPC | ציון ערך | קישור) מציגה רק את חצי-הפטנטים; הנספח הכללי "נספח מקורות"
+(המנגנון הקיים ב-`docx_builder`) מציג את כל הרשומות משני החצאים יחד — זהו הפשרה שנבחרה כדי לא
+לגעת ב-`docx_builder.py` (שאין בו היום מנגנון לשני מרשמי `[n]`/`[Pn]` נפרדים באמת).
+
+### 4. עומק עסקי אמיתי מהמאגר (`_assignee_market_items`/`_assignee_events`/`_assignee_profile_input_block`)
+
+לכל אחד מ-3 בעלי-הפטנטים המובילים (מסוננים ל"חברה אמיתית" בלבד — ר' סעיף 6): ישות קנונית
+(`eoa.pipeline.entity_normalize.resolve_canonical`), מוצרים/תוכניות ידועים (`aliases` ב-
+`config/watchlist.yaml`, למשל Anduril → Lattice/Anvil/Roadrunner), תחומי מיקוד (`focus` → תווית
+עברית דרך `taxonomy.yaml`), אשכולות CPC של אותו בעלים, ופעילות עסקית מ-180 הימים האחרונים
+(`items`/`events`, אותה מוסכמת שאילתות כמו `eoa.report.bd_territory`) — הכול מוזרם לפרומפט כדי
+שה-LLM יבנה שרשרת טכנולוגיה→מוצר→תוכנית מפורשת עם הפניות אמיתיות, לא ניחוש. כשאין ולו בעלים
+אחד הניתן לזיהוי בדגימה (מגבלת מקור החיפוש חסר-המפתחות — ר' סעיף 6) — הסינתזה מדולגת לחלוטין
+(לא מתבקש LLM לבדות פרופיל), עם נקודה פתוחה מפורשת המסבירה למה.
+
+### 5. בידי בטבלאות Markdown (`agent/eoa/patents/render.py`, מודול חדש)
+
+`docx_builder`'s `split_runs`/`_bidi_html` נותנים בידי נכון ברמת ה-run בתוך docx/html בלבד; תא
+טבלה ב-Markdown גולמי (`_md_cell`) הוא מחרוזת גולמית ללא בידי — זה מקור ה"קיטועים" בקובצי ה-`.md`
+כשנפתחים כטקסט רגיל. `ltr_isolate`/`ltr_join`/`ltr_isolate_if_latin` עוטפים ערך לטיני-ודאי
+(מספר פרסום, קוד CPC, שם בעלים, כותרת פטנט אנגלית) בסימני בידי יוניקוד (LRI/PDI) *פעם אחת*, בזמן
+בניית התא ב-`survey.py` — אותה מחרוזת עוברת ללא שינוי גם ל-docx/html (תווי הבידי בלתי-נראים,
+בטוחים בתוך run שכבר מסווג "other"). `ltr_isolate_if_latin` נמנע במפורש מלעטוף כותרת שמכילה עברית
+(כדי לא לכפות LTR על טקסט שהוא בעצם עברי/מעורב — מקרה שכבר מטופל נכון ע"י `docx_builder` עצמו
+בתוך docx/html).
+
+### 6. תיקון בעלים "Europe" ובאקפיל שקט (`agent/eoa/patents/scan.py`)
+
+`_is_real_company_assignee`/`_cluster_assignees` (ב-`survey.py`) מסננים בעלה שמתקנן ל-רשומה
+לא-חברה (מדינה/ארגון מתוקנן כמו "Europe"/"NATO") — תוקן ה-bug שנצפה בסקר ה-DROIC (בעלים "Europe"
+עם פטנט אחד, שורה ישנה שנוצרה לפני שהמסנן `kind=="company"` נוסף ל-
+`_assignee_candidates_in_text`). בנוסף, `_backfill_patent_fields` (חדש) ממלא `assignees`/`cpc`
+ריקים ברשומה קיימת כשסריקה חוזרת מוצאת נתון חדש (`COALESCE(NULLIF(col, ARRAY[]::text[]), new)` —
+לעולם לא דורס נתון קיים) — בלי זה, `ON CONFLICT DO NOTHING` ב-`_insert_patent` נועל שדה ריק
+לצמיתות. `territory` חדש (אופציונלי, `build_patent_survey`/`POST /api/patents/surveys`) מסנן
+את הדגימה לפי קידומת מספר-הפרסום (WIPO ST.16, למשל "US") — האות המבנית הזמינה היחידה בלי
+EPO_OPS_KEY/PATENTSVIEW_API_KEY.
+
+### Tests
+
+`tests/unit/test_patents_schemas.py` (חדש, 20 מקרים) — ולידציית `PatentCiteSentence`/
+`AssigneeProfile`/`PatentBizAction`/`PatentSurveyDraft`. `tests/unit/test_patents_render.py`
+(חדש, 13 מקרים) — `ltr_isolate`/`ltr_join`/`ltr_isolate_if_latin`. `tests/unit/test_patents_survey.py`
+(חדש, 16 מקרים) — `_pub_country`/`_territory_filter`, `_is_real_company_assignee`/
+`_cluster_assignees`, `_extend_registry_with_db_records`, `_build_draft_from_synthesis`.
+`tests/unit/test_patents_scan.py` הורחב (+2 מקרים) — `_backfill_patent_fields` (לא-הרסני,
+short-circuit כשאין שדה חדש). כל הקבצים ירוקים (ruff check נקי); סוויטת `pytest tests/unit`
+המלאה (69 מקרי `patent`) ירוקה.

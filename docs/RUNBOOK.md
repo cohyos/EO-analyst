@@ -117,6 +117,37 @@ pwsh -File scripts\native\migrate_from_docker.ps1            # dump docker, rest
 
 See `docs\adr\004-windows-native.md` for the full topology and security-posture writeup.
 
+### Remote Access (Tailscale, ADR-008)
+
+The API has no authentication for loopback callers by design (single local user). Reaching it
+over Tailscale from another device requires opting in to a passcode + session gate first --
+see `docs\adr\008-remote-access.md` for the full threat model.
+
+```powershell
+# One-time: set the passcode (prompts securely, writes EOA_ACCESS_PASSCODE into runtime\eoa.env --
+# never echoed, never committed).
+pwsh -File scripts\native\remote_access.ps1 -SetPasscode
+
+# Restart the API so it picks up the new passcode.
+eo native stop
+eo native start
+
+# Turn the Tailscale Serve share on (prints the resulting https:// URL) / off / check status.
+pwsh -File scripts\native\remote_access.ps1 -Enable
+pwsh -File scripts\native\remote_access.ps1 -Disable
+pwsh -File scripts\native\remote_access.ps1 -Status
+
+# Optional: keep the machine awake on AC power so the API stays reachable overnight.
+pwsh -File scripts\native\remote_access.ps1 -NoSleep
+```
+
+A loopback request (the normal local usage) is completely unaffected either way. Once enabled,
+any non-loopback client must `POST /api/auth/login` (the SPA's `AccessGate` does this
+automatically) before any `/api/*` route or `/ws/status` responds; sessions expire after 12h or on
+`POST /api/auth/logout`. `config/config.yaml`'s `api.remote_access.enabled` is the config-level
+switch this script's `-Enable`/`-Disable` flip is really just a convenience wrapper for verifying
+`tailscale serve` state alongside.
+
 ---
 
 ## Daily Status Checks

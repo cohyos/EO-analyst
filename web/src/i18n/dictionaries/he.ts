@@ -46,6 +46,9 @@ export const he = {
     themeToDark: "עבור לערכת נושא כהה",
     languageToggleAriaLabel: "עבור לאנגלית",
     languageToggleLabel: "EN",
+    // ADR-008 (docs/adr/008-remote-access.md): shown only for a client that logged in remotely.
+    remoteLogout: "התנתק",
+    remoteSessionActiveTitle: "מחובר מרחוק — לחץ כדי להתנתק",
     // U4/F17: "run now" idempotent feedback (button state + progress popover + completion toast).
     runNowQueued: "בתור…",
     runNowAlready: "כבר רץ",
@@ -286,5 +289,15 @@ export const he = {
     tendersCount: "{n} מכרזים",
     forecastsCount: "{n} תחזיות",
     configuredBadge: "בברירת המחדל השבועית",
+  },
+  accessGate: {
+    // ADR-008 (docs/adr/008-remote-access.md): shown instead of the app for a non-loopback
+    // client (Tailscale/LAN) that hasn't logged in yet.
+    title: "נדרשת התחברות",
+    subtitle: "המערכת נגישה כרגע ממחשב מרוחק — יש להזין את קוד הגישה כדי להמשיך.",
+    passcodeLabel: "קוד גישה",
+    submit: "התחבר",
+    submitting: "מתחבר…",
+    genericError: "ההתחברות נכשלה — נסה שוב",
   },
 } as const;
