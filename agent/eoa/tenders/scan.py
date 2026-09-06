@@ -683,6 +683,50 @@ def _tender_exists(external_ref: str) -> bool:
         return cur.fetchone() is not None
 
 
+#: Round-6 D9 fix (docs/qa/loop/round_5_judge.md, junk tender candidates): 5 of the 13 live
+#: `tenders` rows were the SAME generic Northrop Grumman EO/IR product page, and 2 more were the
+#: same "Unmanned Airspace" Counter-UAS category listing -- each re-inserted once per per-country
+#: `search`-kind source that happened to surface it (us_defense_innovation_search, pl_search,
+#: jp_search, gcc_search, nz_search, ...), because `external_ref` is built as
+#: "<source_id>:<url>" (module docstring): a different `source_id` per country produces a
+#: different `external_ref` for the byte-identical URL, so `_tender_exists` above never catches it.
+#: This is a second, title+portal dedupe layer specifically for that shape of duplicate --
+#: "portal" is the notice's own URL host (the actual originating site), not our internal
+#: per-country `source_id`, since that's exactly the dimension the bug duplicates across. Scoped to
+#: 'candidate'-intake rows only (never 'accepted'/'archived') -- a low-relevance marketing page
+#: repeatedly resurfacing is exactly what this catches; a genuinely re-surfaced already-accepted
+#: tender is left alone.
+_TENDER_TITLE_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_tender_title(title: str | None) -> str:
+    return _TENDER_TITLE_WS_RE.sub(" ", (title or "").strip()).casefold()
+
+
+def _notice_portal(url: str | None) -> str:
+    """The URL host ("portal") a notice actually came from, lowercased; ``""`` when there's no URL
+    to derive one from (never matches anything, so such a notice is never treated as a duplicate by
+    :func:`_candidate_duplicate_exists`)."""
+    if not url:
+        return ""
+    return (urlparse(url).netloc or "").lower()
+
+
+def _candidate_duplicate_exists(normalized_title: str, portal: str) -> bool:
+    """True if a 'candidate'-intake `tenders` row already exists with the same normalized title
+    from the same portal (URL host) -- see the module-level note above."""
+    if not normalized_title or not portal:
+        return False
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT url FROM tenders WHERE intake = 'candidate' "
+            "AND lower(regexp_replace(btrim(title), '\\s+', ' ', 'g')) = %(t)s",
+            {"t": normalized_title},
+        )
+        rows = cur.fetchall()
+    return any(_notice_portal(r[0]) == portal for r in rows if r[0])
+
+
 # F2 (2026-09-05): "assume open when undated" bug -- a notice with no deadline (the overwhelming
 # majority of search/rss hits) used to default straight to 'open' forever. A notice whose only date
 # signal (published_at) is this old, with still no deadline, is stale enough to treat as closed
@@ -1323,6 +1367,19 @@ def scan_tenders(
             if _tender_exists(notice.external_ref):
                 stats.duplicates += 1
                 seen_refs.add(notice.external_ref)
+                continue
+            candidate_portal = _notice_portal(notice.url)
+            if candidate_portal and _candidate_duplicate_exists(
+                _normalize_tender_title(notice.title), candidate_portal
+            ):
+                stats.duplicates += 1
+                seen_refs.add(notice.external_ref)
+                log.info(
+                    "tender_candidate_duplicate_skipped",
+                    external_ref=notice.external_ref,
+                    title=(notice.title or "")[:120],
+                    portal=candidate_portal,
+                )
                 continue
 
             extract: TenderExtract | None = None

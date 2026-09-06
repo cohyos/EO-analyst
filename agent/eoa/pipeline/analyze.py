@@ -275,6 +275,65 @@ def _repair_generic_so_what(item: dict, out: AnalyzeOut, *, role: str, interacti
     return out.model_copy(update={"so_what_he": text})
 
 
+def repair_so_what_text(
+    item: dict,
+    *,
+    so_what_he: str,
+    summary_he: str,
+    phrase: str,
+    role: str = "resident",
+    interactive: bool = False,
+) -> str | None:
+    """Round-6 data-repair entry point (``scripts/repair_round6.py``): re-generate an *already
+    persisted* ``items.so_what_he`` that a QA pass flagged against
+    ``eoa.report.qa_citations.SO_WHAT_TEMPLATE_PHRASES_HE`` -- a broader, QA-owned banned-phrase
+    list than this module's own :data:`_GENERIC_SO_WHAT_RES` (which only gates the corrective pass
+    :func:`_repair_generic_so_what` runs during a *fresh* analyze call, and does not cover every
+    phrase in the QA list, e.g. "מהווה צעד נוסף"/"מהווה צעד חשוב"). Calling
+    :func:`_repair_generic_so_what` directly would silently no-op on such a phrase (its own gate
+    wouldn't fire), so this function shares its exact LLM-call shape (same system/user/assistant/
+    repair-instruction messages) but is driven by the caller's already-matched ``phrase`` and
+    persisted text instead of re-deriving them from a freshly-generated :class:`AnalyzeOut`.
+
+    Returns the repaired ``so_what_he`` (guaranteed non-empty and starting with ``"להערכתנו"`` --
+    the same acceptance bar :func:`_repair_generic_so_what` applies), or ``None`` if the LLM call
+    failed or its output didn't clear that bar. The caller (the repair script) is responsible for
+    the round-6-specific validation that the *result* also avoids every
+    ``SO_WHAT_TEMPLATE_PHRASES_HE`` phrase and reads as 1-3 Hebrew sentences before persisting it."""
+    try:
+        fixed = chat_structured(
+            role,
+            SoWhatRepairOut,
+            [
+                {"role": "system", "content": _analyze_system()},
+                {"role": "user", "content": _analyze_prompt(item)},
+                {
+                    "role": "assistant",
+                    "content": AnalyzeOut(summary_he=summary_he, so_what_he=so_what_he).model_dump_json(
+                        exclude_none=True
+                    )[:6000],
+                },
+                {
+                    "role": "user",
+                    "content": _SO_WHAT_REPAIR_INSTRUCTION_HE.format(
+                        phrase=phrase, summary=summary_he, so_what=so_what_he
+                    ),
+                },
+            ],
+            task="summarize",
+            interactive=interactive,
+            options={"temperature": 0.4},
+        )
+    except (LLMOutputError, ResourceUnavailable) as exc:
+        log.warning("so_what_round6_repair_failed", item_id=item.get("id"), error=str(exc)[:120])
+        return None
+    text = (fixed.so_what_he or "").strip()
+    if not text or not text.startswith("להערכתנו"):
+        log.info("so_what_round6_repair_rejected", item_id=item.get("id"), text=text[:160])
+        return None
+    return text
+
+
 def analyze_item(item: dict, *, role: str = "resident", interactive: bool = False) -> AnalyzeOut:
     """Produce the AnalyzeOut for one item (does not persist). A generic-formula ``so_what_he``
     gets one targeted corrective pass (:func:`_repair_generic_so_what`)."""
@@ -379,6 +438,38 @@ def _dedup_events(events: list[EventOut]) -> list[EventOut]:
         if cur is None or _event_richness(ev) > _event_richness(cur):
             best[key] = ev
     return list(best.values())
+
+
+# R6-forecast (round 6 judge D3, docs/qa/loop/round_5_judge.md finding W5-followup): the model
+# sometimes extracts one facet of a multi-party military exercise as its own ``kind='test'`` event
+# (e.g. "ניסוי מערכת ה-StrikeMaster בתנאים ארקטיים" -- literally containing "ניסוי" -- extracted
+# alongside sibling ``deployment``/``partnership`` events from the same item, all sharing the
+# ``program`` "Operation Atlantic City"). Read on its own, kind='test' misleadingly reads as a
+# standalone weapon test; the source is actually describing one NATO Arctic exercise deployment.
+# ``events.kind`` carries a DB CHECK constraint to the 9 ``EventOut`` literals (db/migrations/
+# versions/0001_core.py) -- there is no 'exercise' value to write -- so this reclassifies onto the
+# closest existing literal, 'deployment' ("פריסה"), rather than inventing a value the insert would
+# reject. Conservative: only ever touches 'test' events whose own title/summary/program names an
+# exercise/deployment/named operation; every other kind, and a genuine test with no such vocabulary
+# (e.g. plain "ירי ניסיוני של הטיל בוצע בהצלחה"), is left untouched.
+_EXERCISE_VOCAB_RE = re.compile(
+    r"תרגיל|\bexercise(?:s)?\b|\bdeployment\b|\bOperation\s+[A-Z][A-Za-z]+",
+)
+
+
+def _looks_like_exercise(ev: EventOut) -> bool:
+    text = " ".join(str(x) for x in (ev.title, ev.summary_he, ev.program) if x)
+    return bool(_EXERCISE_VOCAB_RE.search(text))
+
+
+def _reclassify_exercise_kind(ev: EventOut) -> EventOut:
+    """R6-forecast: a ``kind='test'`` event whose text also names an exercise/deployment/named
+    operation is reclassified to ``'deployment'`` -- see the module note above :data:`_EXERCISE_VOCAB_RE`.
+    A no-op for every other kind, and for a 'test' event with no exercise vocabulary at all."""
+    if ev.kind != "test" or not _looks_like_exercise(ev):
+        return ev
+    log.info("event_kind_test_reclassified_deployment", title=(ev.title or "")[:160], program=ev.program)
+    return ev.model_copy(update={"kind": "deployment"})
 
 
 _KEY_FACTS_PUNCT_RE = re.compile(r"[^\w\s]", flags=re.UNICODE)
@@ -588,6 +679,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     )
     n_events = 0
     for ev in _dedup_events(out.events):
+        ev = _reclassify_exercise_kind(ev)
         if _is_narrative_event_title(ev.title, ev):
             # Q3-6: an assessment/forecast sentence dressed up as an event -- never persisted.
             log.info("event_rejected_narrative_title", item_id=item["id"], title=(ev.title or "")[:160])

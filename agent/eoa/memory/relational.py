@@ -240,6 +240,22 @@ def insert_item(
     return item_id
 
 
+#: Round-6 D9 fix (docs/qa/loop/round_5_judge.md D9, the "owl leak" -- event 257 on item 2463, an
+#: archived out_of_scope wildlife story): items that must never reach the ``analyze`` stage, even
+#: when some earlier bug or manual backfill left ``processed_stages`` without ``'analyze'`` on
+#: them. ``run_analyze`` (eoa.pipeline.analyze) already applies an equivalent filter in Python
+#: (skips/mark-only for ``domain is None`` and any ``level`` below its own ``min_level``, which
+#: defaults to excluding 'archive'), but that app-level filter is only as good as every call site
+#: remembering to apply it -- this SQL-level filter is a second, unconditional guard specifically
+#: for the ``analyze`` stage, the one whose output (events/edges/entities) is the most expensive to
+#: silently mis-scope. Deliberately scoped to ``stage == 'analyze'`` only: ``classify`` must still
+#: see every item (domain isn't set yet), and ``triage`` must still see every classified item
+#: (level isn't set yet) -- gating either of those the same way would starve the pipeline.
+_ANALYZE_STAGE_SCOPE_FILTER = (
+    "AND domain IS DISTINCT FROM 'out_of_scope' AND level IS DISTINCT FROM 'archive'"
+)
+
+
 def get_items_for_stage(
     stage: str, limit: int = 50, *, item_ids: list[int] | None = None
 ) -> list[dict[str, Any]]:
@@ -249,12 +265,17 @@ def get_items_for_stage(
     those specific ids -- used by ``orchestrator.jobs``'s ``post_tenders_catchup`` mini-stage to
     embed/classify/triage only the handful of tender-derived items created by the ``tenders`` stage
     this run, instead of sweeping the whole stage backlog (which is ordered oldest-first and would
-    likely not even reach today's newest rows within a short budget)."""
-    query = """
+    likely not even reach today's newest rows within a short budget).
+
+    Round-6 D9: for ``stage == "analyze"`` only, also excludes ``domain = 'out_of_scope'`` and
+    ``level = 'archive'`` items at the SQL level (see :data:`_ANALYZE_STAGE_SCOPE_FILTER`)."""
+    extra_filter = _ANALYZE_STAGE_SCOPE_FILTER if stage == "analyze" else ""
+    query = f"""
         SELECT * FROM items
         WHERE security_status = 'clean'
-          AND NOT (%(stage)s = ANY(COALESCE(processed_stages, '{}')))
+          AND NOT (%(stage)s = ANY(COALESCE(processed_stages, '{{}}')))
           AND (%(item_ids)s::bigint[] IS NULL OR id = ANY(%(item_ids)s::bigint[]))
+          {extra_filter}
         ORDER BY fetched_at NULLS LAST, id
         LIMIT %(limit)s
     """
