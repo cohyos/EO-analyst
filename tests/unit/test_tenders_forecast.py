@@ -430,7 +430,13 @@ class TestLlmRationaleGuarded:
 
 class TestForecastTendersOrchestration:
     def test_no_events_no_candidates(self):
-        with patch("eoa.tenders.forecast._recent_trigger_events", return_value=[]):
+        def _no_db():
+            raise RuntimeError("no DB in unit tests")
+
+        with (
+            patch("eoa.tenders.forecast._recent_trigger_events", return_value=[]),
+            patch("eoa.tenders.forecast.connection", _no_db),
+        ):
             stats = forecast_tenders()
         assert isinstance(stats, ForecastStats)
         assert stats.candidates == 0

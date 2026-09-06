@@ -10,6 +10,7 @@ tooling must not restart processes).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -27,20 +28,29 @@ def run_playwright_json(*, timeout_s: int = 900) -> dict | None:
     e2e_dir = _e2e_dir()
     if not e2e_dir.exists():
         return None
+    # Round-3 close (2026-09-06): parsing stdout failed silently ("playwright run failed to
+    # produce a JSON report") because the config's own reporters and npm/npx warnings share
+    # stdout with the JSON. Ask Playwright to write the JSON report to a file instead and read that.
+    out_path = e2e_dir / "test-results" / "qa_d10_report.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        out_path.unlink()
+    env = {**os.environ, "PLAYWRIGHT_JSON_OUTPUT_NAME": str(out_path)}
     try:
-        proc = subprocess.run(
+        subprocess.run(
             ["npx", "playwright", "test", "--reporter=json"],
             cwd=str(e2e_dir),
             capture_output=True,
             text=True,
             timeout=timeout_s,
             shell=True,  # Windows: npx is a .cmd shim
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError:
+        return json.loads(out_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return None
 
 
@@ -73,11 +83,19 @@ def score_D10(*, run_e2e: bool = False) -> DomainScore:  # noqa: N802 -- score_D
     report = run_playwright_json()
     if report is None:
         return DomainScore(
-            domain="D10", score_0_100=None, checks=[], n=0, note="playwright run failed to produce a JSON report"
+            domain="D10",
+            score_0_100=None,
+            checks=[],
+            n=0,
+            note="playwright run failed to produce a JSON report",
         )
     passed, total = _pass_ratio(report)
     if total == 0:
-        return DomainScore(domain="D10", score_0_100=None, checks=[], n=0, note="playwright report had zero tests")
+        return DomainScore(
+            domain="D10", score_0_100=None, checks=[], n=0, note="playwright report had zero tests"
+        )
     ratio = passed / total
-    check = Check("e2e_pass_ratio", passed=ratio >= 0.95, weight=1.0, evidence=f"{passed}/{total} passed ({ratio:.1%})")
+    check = Check(
+        "e2e_pass_ratio", passed=ratio >= 0.95, weight=1.0, evidence=f"{passed}/{total} passed ({ratio:.1%})"
+    )
     return DomainScore(domain="D10", score_0_100=round(ratio * 100, 1), checks=[check], n=total)

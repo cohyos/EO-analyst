@@ -2147,7 +2147,10 @@ def build_bd_territory(
     # -- naming every watchlist competitor that was actually checked -- so an analyst (and the
     # deterministic QA check) can tell "checked, nothing found" apart from "the pipeline failed to
     # produce a recommendations section at all".
-    if not items and table_counts.total == 0 and not draft.recommended_actions:
+    # Round-4 (bd_gr 2026-09-06): the marker must render whenever the actions list ends up empty,
+    # not only for an all-empty territory -- Greece had market items but no derivable action and
+    # shipped with no recommendations section at all.
+    if not draft.recommended_actions:
         watchlist_checked = dormant_competitors or sorted({c["name"] for c in competitors})
         extra_sections.append(
             {

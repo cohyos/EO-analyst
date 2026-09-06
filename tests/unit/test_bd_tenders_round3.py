@@ -271,6 +271,14 @@ class TestNoActivityMarkerEndToEnd:
             raise AssertionError("chat_structured must not be called when there are no market items")
 
         monkeypatch.setattr("eoa.report.bd_territory.chat_structured", _fail_if_called)
+
+        # the A16/A17 optional sections open their own DB connection; fail fast instead of
+        # waiting out the pool timeout (they are try/except-guarded in the builder)
+        def _no_db():
+            raise RuntimeError("no DB in unit tests")
+
+        monkeypatch.setattr(bdt, "connection", _no_db)
+        monkeypatch.setattr("eoa.patents.report_section.connection", _no_db)
         return tmp_path
 
     def test_no_activity_renders_marker_with_watchlist_names(self, patch_all_empty):
