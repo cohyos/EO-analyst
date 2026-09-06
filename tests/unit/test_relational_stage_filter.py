@@ -57,7 +57,7 @@ def test_get_items_for_stage_without_item_ids_passes_none(monkeypatch):
     rows = relational.get_items_for_stage("classify", limit=10)
 
     assert rows == [{"id": 1}]
-    assert "id = ANY(%(item_ids)s)" in cursor.last_sql
+    assert "id = ANY(%(item_ids)s::bigint[])" in cursor.last_sql
     assert cursor.last_params["item_ids"] is None
 
 

@@ -61,7 +61,7 @@ def scan_candidate_items(limit: int = 50, *, item_ids: list[int] | None = None) 
         WHERE security_status = 'clean'
           AND level IN ('red', 'orange', 'yellow')
           AND NOT (%(stage)s = ANY(COALESCE(processed_stages, '{}')))
-          AND (%(item_ids)s IS NULL OR id = ANY(%(item_ids)s))
+          AND (%(item_ids)s::bigint[] IS NULL OR id = ANY(%(item_ids)s::bigint[]))
         ORDER BY fetched_at NULLS LAST, id
         LIMIT %(scan_limit)s
     """

@@ -130,11 +130,59 @@ def _normalize_section_titles(draft: WeeklyReportDraft | Any) -> WeeklyReportDra
     JSON output, so the deterministic taxonomy label is used instead of trusting the model's copy.
     Duck-typed (only touches ``draft.sections``), so ``eoa.report.monthly`` reuses this unchanged
     for ``MonthlyReportDraft``."""
-    new_sections = [
-        section.model_copy(update={"title_he": _domain_label(section.domain)}) if section.domain else section
-        for section in draft.sections
-    ]
+    new_sections = []
+    for section in draft.sections:
+        domain = canonical_domain_key(section.domain) if section.domain else section.domain
+        if domain == "out_of_scope":
+            # weekly 2026-09-06 (cloud draft): the model produced an "out_of_scope" section --
+            # never a report section; its items are, by definition, not the week's news.
+            continue
+        if domain:
+            section = section.model_copy(update={"domain": domain, "title_he": _domain_label(domain)})
+        new_sections.append(section)
     return draft.model_copy(update={"sections": new_sections})
+
+
+#: weekly 2026-09-06 (first cloud-drafted weekly): the model wrote section ``domain`` keys of its
+#: own ("land_eoir", "naval_eoir", "cuas") instead of the taxonomy keys, so the headings rendered
+#: as raw identifiers. Map the common paraphrases onto the taxonomy; anything else falls back to
+#: the model's key unchanged (its label then prints the key, as before).
+_DOMAIN_KEY_ALIASES = {
+    "land_eoir": "land_surveillance",
+    "land": "land_surveillance",
+    "ground_surveillance": "land_surveillance",
+    "naval_eoir": "naval_surveillance",
+    "naval": "naval_surveillance",
+    "maritime_surveillance": "naval_surveillance",
+    "cuas": "c_uas",
+    "c-uas": "c_uas",
+    "counter_uas": "c_uas",
+    "counter-uas": "c_uas",
+    "cv": "computer_vision",
+    "computer-vision": "computer_vision",
+    "ai_cv": "computer_vision",
+    "airborne": "airborne_pods",
+    "pods": "airborne_pods",
+    "targeting_pods": "airborne_pods",
+    "air-defense": "air_defense",
+    "air_defence": "air_defense",
+    "missile_defense": "air_defense",
+    "technology": "tech_dev",
+    "tech": "tech_dev",
+}
+
+
+def canonical_domain_key(domain: str | None) -> str | None:
+    """A taxonomy domain key for ``domain`` -- exact key, a known alias, or the input unchanged."""
+    if not domain:
+        return domain
+    key = domain.strip().lower()
+    if key in settings().taxonomy.get("domains", {}):
+        return key
+    return _DOMAIN_KEY_ALIASES.get(
+        key,
+        key.replace("-", "_") if key.replace("-", "_") in settings().taxonomy.get("domains", {}) else domain,
+    )
 
 
 # --------------------------------------------------------------------------

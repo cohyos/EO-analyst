@@ -5,6 +5,7 @@ Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_israel_section.py 
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 import types
 
@@ -161,3 +162,25 @@ def test_daily_israel_tables_empty_when_no_items(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(isec, "collect_israel_items", lambda start, end, min_relevance=0.5: [])
     tables = isec.daily_israel_tables([], dt.datetime(2026, 9, 1), dt.datetime(2026, 9, 2))
     assert tables == []
+
+
+class TestCollectIsraelItemsGuards:
+    """User request 2026-09-06: an ``out_of_scope``/``archive`` item must never reach the Israeli
+    industry tables on ``israel_relevance`` alone (report 28 rendered op-eds 4679/4375/4671, all
+    correctly out_of_scope/archive in the DB). The SQL guard landed in 84bb998; this pins it."""
+
+    def test_query_requires_in_scope_triaged_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_fetchall(sql: str, params: dict | None = None) -> list[dict]:
+            captured["sql"] = sql
+            captured["params"] = params
+            return []
+
+        monkeypatch.setattr(isec, "_fetchall", fake_fetchall)
+        isec.collect_israel_items(dt.datetime(2026, 9, 1), dt.datetime(2026, 9, 7))
+        sql = str(captured["sql"])
+        assert "i.domain <> 'out_of_scope'" in sql
+        assert "i.level IN ('red', 'orange', 'yellow')" in sql
+        assert "israel_relevance" in sql  # still ranked/filtered by relevance, but never by it alone
+        assert "NOT EXISTS (SELECT 1 FROM tenders" in sql

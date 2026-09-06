@@ -254,7 +254,7 @@ def get_items_for_stage(
         SELECT * FROM items
         WHERE security_status = 'clean'
           AND NOT (%(stage)s = ANY(COALESCE(processed_stages, '{}')))
-          AND (%(item_ids)s IS NULL OR id = ANY(%(item_ids)s))
+          AND (%(item_ids)s::bigint[] IS NULL OR id = ANY(%(item_ids)s::bigint[]))
         ORDER BY fetched_at NULLS LAST, id
         LIMIT %(limit)s
     """
