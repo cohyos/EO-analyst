@@ -236,6 +236,7 @@ def top_events_by_amount(period_start: dt.date, period_end: dt.date, limit: int 
         WHERE e.amount_usd IS NOT NULL
           AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
               BETWEEN %(start)s AND %(end)s
+          AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
         ORDER BY e.amount_usd DESC NULLS LAST
         LIMIT %(limit)s
     """

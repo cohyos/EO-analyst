@@ -279,6 +279,7 @@ def collect_events(
         JOIN items i ON i.id = e.item_id
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE COALESCE(e.date, i.published_at::date) BETWEEN %(start)s AND %(end)s
+          AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
         ORDER BY e.date DESC NULLS LAST, e.id DESC
     """
     with connection() as conn, conn.cursor() as cur:
