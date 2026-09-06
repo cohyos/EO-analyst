@@ -70,6 +70,26 @@ def _fetch(cols: str, where: str) -> list[dict[str, Any]]:
         return cur.fetchall()
 
 
+def default_subdomain(domain: str | None) -> str | None:
+    """The ``domain``'s first ("default") taxonomy sub-key, or ``None`` when the domain has no
+    sub-keys at all (e.g. ``out_of_scope``) -- matches ``ClassifyOut``'s own
+    ``_validate_subdomain_against_taxonomy`` fallback (schemas/analysis.py, D1 round-1 fix)."""
+    domains = settings().taxonomy.get("domains", {}) or {}
+    valid_subs = (domains.get(domain) or {}).get("sub", {}) or {}
+    return next(iter(valid_subs), None)
+
+
+def subdomain_missing(item: dict[str, Any]) -> bool:
+    """D1 round-1 fix (``subdomain_valid_vs_taxonomy``, item 24): a NULL/empty subdomain on an
+    in-scope item whose domain *does* have taxonomy sub-keys is just as invalid as a garbage
+    string value -- the original Q3-3 pass (:func:`invalid_subdomain` below) only ever caught the
+    latter (it explicitly returns ``False`` for an empty/``None`` value). A no-op for a domain
+    with no sub-keys (``out_of_scope`` and the like), where an empty subdomain is correct."""
+    if item.get("subdomain"):
+        return False
+    return default_subdomain(item.get("domain")) is not None
+
+
 def invalid_subdomain(item: dict[str, Any]) -> bool:
     """Q3-3: ``item['subdomain']`` is non-empty but not a valid sub-key of its ``domain``."""
     subdomain = item.get("subdomain")
@@ -129,7 +149,7 @@ def triage_inconsistent(item: dict[str, Any]) -> bool:
 
 def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
     report: dict[str, Any] = {
-        "subdomain_cleared": [],
+        "subdomain_repaired": [],
         "gated_out_of_scope": [],
         "gated_generic_ai_market": [],
         "triage_repaired": [],
@@ -138,12 +158,18 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
 
     classify_items = _fetch(_CLASSIFY_COLS, "domain IS NOT NULL")
     for item in classify_items:
-        if invalid_subdomain(item):
-            report["subdomain_cleared"].append(
-                {"id": item["id"], "domain": item["domain"], "before_subdomain": item["subdomain"]}
+        if invalid_subdomain(item) or subdomain_missing(item):
+            target = default_subdomain(item["domain"])
+            report["subdomain_repaired"].append(
+                {
+                    "id": item["id"],
+                    "domain": item["domain"],
+                    "before_subdomain": item.get("subdomain"),
+                    "after_subdomain": target,
+                }
             )
             if not dry_run:
-                update_item_fields(item["id"], subdomain=None)
+                update_item_fields(item["id"], subdomain=target)
 
         if should_gate_no_eoir(item):
             report["gated_out_of_scope"].append(
@@ -218,7 +244,7 @@ def main() -> None:
             print(f"  ... and {len(rows) - 20} more")
 
     total = (
-        len(report["subdomain_cleared"])
+        len(report["subdomain_repaired"])
         + len(report["gated_out_of_scope"])
         + len(report["gated_generic_ai_market"])
         + len(report["triage_repaired"])

@@ -136,5 +136,108 @@ class TestStoreItemStats:
         assert stats.items_skipped == 1
 
 
+# --------------------------------------------------------------------------
+# D9 round-1 fix (docs/qa/loop/round_1_fixes.md, sources_recently_fetched): per-source
+# last_fetched_at/fail_count bookkeeping, once per _ingest_one_source call.
+# --------------------------------------------------------------------------
+
+
+class _FakeSource:
+    def __init__(self, kind="rss", source_id=42, name="Example Source", url="https://example.com/feed"):
+        self.kind = kind
+        self.id = source_id
+        self.name = name
+        self.url = url
+
+
+class TestTouchSourceFetched:
+    def test_success_calls_relational_touch_with_ok_true(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.touch_source_fetched", lambda sid, ok: calls.append((sid, ok))
+        )
+        service._touch_source_fetched(7, "Example Source", ok=True)
+        assert calls == [(7, True)]
+
+    def test_failure_calls_relational_touch_with_ok_false(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.touch_source_fetched", lambda sid, ok: calls.append((sid, ok))
+        )
+        service._touch_source_fetched(7, "Example Source", ok=False)
+        assert calls == [(7, False)]
+
+    def test_no_source_id_falls_back_to_name_keyed_bump_on_failure(self, monkeypatch):
+        bumped = []
+        monkeypatch.setattr(service, "_bump_fail_count", lambda name: bumped.append(name))
+        service._touch_source_fetched(None, "Example Source", ok=False)
+        assert bumped == ["Example Source"]
+
+    def test_no_source_id_and_ok_is_a_noop(self, monkeypatch):
+        bumped = []
+        monkeypatch.setattr(service, "_bump_fail_count", lambda name: bumped.append(name))
+        service._touch_source_fetched(None, "Example Source", ok=True)
+        assert bumped == []
+
+    def test_relational_error_is_swallowed(self, monkeypatch):
+        def _boom(sid, ok):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr("eoa.memory.relational.touch_source_fetched", _boom)
+        service._touch_source_fetched(7, "Example Source", ok=True)  # must not raise
+
+
+class TestIngestOneSourceTouchesBookkeeping:
+    @pytest.mark.asyncio
+    async def test_success_touches_ok_true(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(service, "_touch_source_fetched", lambda sid, name, ok: calls.append((sid, ok)))
+
+        async def _fake_rss(source, *, source_db_id, since_days, throttle, stats):
+            return None
+
+        monkeypatch.setattr(service, "_ingest_rss_source", _fake_rss)
+        stats = service.IngestStats()
+        await service._ingest_one_source(
+            _FakeSource(), source_db_id=7, since_days=3, throttle=service._DomainThrottle(), stats=stats
+        )
+        assert calls == [(7, True)]
+        assert stats.sources_failed == 0
+
+    @pytest.mark.asyncio
+    async def test_fetch_error_touches_ok_false(self, monkeypatch):
+        from eoa.errors import FetchError
+
+        calls = []
+        monkeypatch.setattr(service, "_touch_source_fetched", lambda sid, name, ok: calls.append((sid, ok)))
+
+        async def _fake_rss(source, *, source_db_id, since_days, throttle, stats):
+            raise FetchError("boom")
+
+        monkeypatch.setattr(service, "_ingest_rss_source", _fake_rss)
+        stats = service.IngestStats()
+        await service._ingest_one_source(
+            _FakeSource(), source_db_id=7, since_days=3, throttle=service._DomainThrottle(), stats=stats
+        )
+        assert calls == [(7, False)]
+        assert stats.sources_failed == 1
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_touches_ok_false(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(service, "_touch_source_fetched", lambda sid, name, ok: calls.append((sid, ok)))
+
+        async def _fake_rss(source, *, source_db_id, since_days, throttle, stats):
+            raise ValueError("unexpected")
+
+        monkeypatch.setattr(service, "_ingest_rss_source", _fake_rss)
+        stats = service.IngestStats()
+        await service._ingest_one_source(
+            _FakeSource(), source_db_id=7, since_days=3, throttle=service._DomainThrottle(), stats=stats
+        )
+        assert calls == [(7, False)]
+        assert stats.sources_failed == 1
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

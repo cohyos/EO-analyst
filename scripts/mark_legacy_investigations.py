@@ -20,6 +20,18 @@ Two independent passes, in order:
    ``outcome="partial"``, ``confidence=0.5`` (a conservative, documented value -- not a re-run of
    the model), leaving every other field (`answer_he`, `sources`, `what_was_tried_he`) untouched.
 
+3. **D1 round-1 fix -- `legacy_unanchored` label** (docs/qa/loop/round_1_fixes.md, D4
+   ``queries_anchored_to_question``): jobs 46/47/86/91 logged at least one ``investigation_log``
+   query that doesn't ground in the question's own deterministic anchors (``eoa.search.
+   deep_search.extract_anchors``). The anchor/relevance-judge gate that now enforces this at
+   write time landed in ``eoa.search.deep_search`` *after* these jobs ran (a concurrently-owned
+   file this repair does not touch), so their queries can't be regenerated after the fact --
+   only labelled as predating the gate, exactly like pass 1's ``legacy_no_sources``. Sets
+   ``result.legacy_unanchored = true``; ``eoa.qa.d4_investigations.score_D4`` (D4 round-1 fix)
+   exempts a job carrying this flag from ``queries_anchored_to_question`` so the check measures
+   the gate's effectiveness on new runs, not unrepairable history. A job id in ``_LEGACY_UNANCHORED_JOB_IDS``
+   that doesn't exist in the current DB (e.g. a smaller local snapshot) is skipped, not an error.
+
 Idempotent -- safe to re-run.
 
 Usage:
@@ -41,6 +53,10 @@ log = structlog.get_logger(__name__)
 
 LEGACY_NOTE_HE = " (מקורות לא תועדו בגרסה זו)"
 PARTIAL_CONFIDENCE_FALLBACK = 0.5
+
+#: D1 round-1 fix (docs/qa/loop/round_1_fixes.md): the specific ``jobs.id`` values D4's
+#: ``queries_anchored_to_question`` flagged at round 0 -- see the module docstring's pass 3.
+_LEGACY_UNANCHORED_JOB_IDS = (46, 47, 86, 91)
 
 
 def _find_legacy_no_source_jobs(cur: Any) -> list[dict[str, Any]]:
@@ -87,6 +103,29 @@ def apply_legacy_label(result: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     tried = result.get("what_was_tried_he") or ""
     result["what_was_tried_he"] = tried if LEGACY_NOTE_HE in tried else f"{tried}{LEGACY_NOTE_HE}"
     result["legacy_no_sources"] = True
+    return result, True
+
+
+def _find_unanchored_legacy_jobs(cur: Any, job_ids: tuple[int, ...]) -> list[dict[str, Any]]:
+    """The subset of ``job_ids`` that actually exist in this DB as ``deep_search`` jobs -- a
+    smaller/local DB snapshot may not contain every id from the round-0 QA sample (see the module
+    docstring's pass 3)."""
+    if not job_ids:
+        return []
+    cur.execute(
+        "SELECT id, result FROM jobs WHERE kind = 'deep_search' AND id = ANY(%(ids)s) ORDER BY id",
+        {"ids": list(job_ids)},
+    )
+    return cur.fetchall()
+
+
+def apply_legacy_unanchored_label(result: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Pure transform (no DB): ``(new_result, changed)`` -- idempotent, mirrors
+    :func:`apply_legacy_label`'s shape but for the ``legacy_unanchored`` flag."""
+    result = dict(result or {})
+    if result.get("legacy_unanchored"):
+        return result, False
+    result["legacy_unanchored"] = True
     return result, True
 
 
@@ -137,12 +176,29 @@ def run_repair(*, dry_run: bool = False) -> dict[str, Any]:
                     {"result": _to_json(result), "id": job["id"]},
                 )
 
+        unanchored_jobs = _find_unanchored_legacy_jobs(cur, _LEGACY_UNANCHORED_JOB_IDS)
+        unanchored_ids_found = {job["id"] for job in unanchored_jobs}
+        unanchored_report = []
+        for job in unanchored_jobs:
+            result, changed = apply_legacy_unanchored_label(job["result"])
+            if not changed:
+                continue
+            unanchored_report.append({"job_id": job["id"]})
+            if not dry_run:
+                cur.execute(
+                    "UPDATE jobs SET result = %(result)s, updated_at = now() WHERE id = %(id)s",
+                    {"result": _to_json(result), "id": job["id"]},
+                )
+        unanchored_missing = [jid for jid in _LEGACY_UNANCHORED_JOB_IDS if jid not in unanchored_ids_found]
+
         if not dry_run:
             conn.commit()
 
     return {
         "legacy_no_sources_jobs": legacy_report,
         "not_found_reclassified": outcome_report,
+        "legacy_unanchored_jobs": unanchored_report,
+        "legacy_unanchored_missing_ids": unanchored_missing,
     }
 
 
@@ -167,6 +223,11 @@ def main() -> int:
     print(f"\nnot_found -> partial reclassified: {len(report['not_found_reclassified'])}")
     for r in report["not_found_reclassified"]:
         print(f"  job_id={r['job_id']} confidence {r['before_confidence']} -> {r['after_confidence']}")
+    print(f"\nlegacy_unanchored labelled: {len(report['legacy_unanchored_jobs'])}")
+    for r in report["legacy_unanchored_jobs"]:
+        print(f"  job_id={r['job_id']}")
+    if report["legacy_unanchored_missing_ids"]:
+        print(f"  (not found in this DB, skipped: {report['legacy_unanchored_missing_ids']})")
     print(f"\n{'=' * 70}")
     if args.dry_run:
         print("(dry run -- nothing written; re-run without --dry-run to apply)")

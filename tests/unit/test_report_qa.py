@@ -222,6 +222,37 @@ def test_check_passes_when_summary_paraphrases_section():
     assert not result.duplicate_sentences
 
 
+def test_check_fails_when_two_sections_share_a_verbatim_sentence():
+    """D6 round-1 fix (docs/qa/loop/round_1_fixes.md, no_duplicate_sentences): the structured path
+    used to compare only exec-summary sentences against sections -- a sentence duplicated across
+    two *different* sections went undetected."""
+    text = "אלביט מערכות זכתה בחוזה בהיקף 50 מיליון דולר לאספקת פודי כיוון."
+    section_a = StructuredSection(
+        title_he="פודים אוויריים", domain="airborne_pods", sentences=[Sentence(text_he=text, cites=[1])]
+    )
+    section_b = StructuredSection(
+        title_he="תעשייה ישראלית", domain="secondary", sentences=[Sentence(text_he=text, cites=[2])]
+    )
+    draft = _draft(sections=[section_a, section_b], summary_text="תקציר שאינו קשור לכלל.")
+    result = check(draft, ITEMS)
+    assert not result.passed
+    assert result.duplicate_sentences == [text]
+    assert any("תעשייה ישראלית" in e and "פודים אוויריים" in e for e in result.errors)
+
+
+def test_check_passes_when_two_sections_have_distinct_sentences():
+    section_a = StructuredSection(
+        title_he="א", domain="d", sentences=[Sentence(text_he="משפט ראשון עם תוכן ייחודי לגמרי.", cites=[1])]
+    )
+    section_b = StructuredSection(
+        title_he="ב", domain="d", sentences=[Sentence(text_he="משפט שני עם תוכן שונה לחלוטין.", cites=[2])]
+    )
+    draft = _draft(sections=[section_a, section_b], summary_text="תקציר כללי בלבד.")
+    result = check(draft, ITEMS)
+    assert result.passed
+    assert not result.duplicate_sentences
+
+
 def test_check_duplicate_detection_ignores_short_sentences():
     """A trivial short sentence repeating by coincidence must not be flagged as a duplicate --
     only substantial (>= 4 word) overlaps count."""
@@ -255,3 +286,35 @@ def test_check_legacy_shape_still_flags_uncited_sentence():
     result = check(draft, ITEMS)
     assert not result.passed
     assert result.uncited_sentences
+
+
+def test_check_legacy_shape_flags_duplicate_sentence_across_two_sections():
+    """D6 round-1 fix (docs/qa/loop/round_1_fixes.md): the legacy free-prose path (weekly/monthly/
+    bd_territory) never compared two *sections* against each other, only exec-summary-vs-sections
+    -- e.g. two of weekly's trend paragraphs restating the same sentence went undetected."""
+    text = "החברה השיקה מוצר חדש בספטמבר [2]."
+    section_a = ReportSection(title_he="פודים אוויריים", domain="airborne_pods", prose_he=text)
+    section_b = ReportSection(title_he="תעשייה ישראלית", domain="secondary", prose_he=text)
+    draft = WeeklyReportDraft(
+        exec_summary_he="תקציר שאינו קשור לכלל [1].",
+        sections=[section_a, section_b],
+        outlook_he="",
+        open_points_he=[],
+    )
+    result = check(draft, ITEMS)
+    assert not result.passed
+    assert result.duplicate_sentences == [text]
+    assert any("תעשייה ישראלית" in e and "פודים אוויריים" in e for e in result.errors)
+
+
+def test_check_legacy_shape_extra_sections_cross_checked_for_duplicates():
+    """Weekly's trend paragraphs (``extra_sections``) must be cross-checked against each other and
+    against ``draft.sections``, not only against the exec summary."""
+    text = "מגמת שוק חדשה זוהתה החודש בתחום הרחפנים."
+    draft = WeeklyReportDraft(
+        exec_summary_he="תקציר כללי בלבד [1].", sections=[], outlook_he="", open_points_he=[]
+    )
+    result = check(draft, ITEMS, extra_sections=[("מגמה א", text), ("מגמה ב", text)])
+    assert not result.passed
+    assert result.duplicate_sentences == [text]
+    assert any("מגמה ב" in e and "מגמה א" in e for e in result.errors)

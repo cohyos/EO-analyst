@@ -221,6 +221,38 @@ def _duplicate_summary_sentences(summary_text: str, section_texts: list[tuple[st
     return duplicates
 
 
+def _find_cross_group_duplicates(
+    groups: list[tuple[str, list[str]]], *, normalize: Any
+) -> list[tuple[str, str, str]]:
+    """D6 round-1 fix (docs/qa/loop/round_1_fixes.md, ``no_duplicate_sentences``): a sentence
+    (normalized, >= ``_MIN_DUP_WORDS`` words) that verbatim-duplicates a sentence already seen in
+    an *earlier* group in ``groups`` -- generalizes the old exec-summary-vs-sections-only check
+    (:func:`_duplicate_summary_sentences`/the exec-summary loop in :func:`_check_structured`) to
+    catch two ordinary sections/paragraphs restating the same sentence, which neither of those
+    ever compared against each other. Returns ``(original_sentence, first_group_label,
+    duplicate_group_label)`` for the *second and later* occurrence only -- the first occurrence of
+    a sentence is never itself flagged, and a sentence repeated twice within the very same group
+    is not flagged here (that is a same-section repetition, a different problem this check does
+    not address)."""
+    seen: dict[str, str] = {}  # normalized sentence -> label of the group it first appeared in
+    duplicates: list[tuple[str, str, str]] = []
+    for label, sentences in groups:
+        local_seen: set[str] = set()
+        for sentence in sentences:
+            norm = normalize(sentence)
+            if not norm or len(norm.split()) < _MIN_DUP_WORDS:
+                continue
+            if norm in local_seen:
+                continue
+            local_seen.add(norm)
+            first_label = seen.get(norm)
+            if first_label is not None:
+                duplicates.append((sentence, first_label, label))
+            else:
+                seen[norm] = label
+    return duplicates
+
+
 def _valid_range(items: list[dict]) -> set[int]:
     valid: set[int] = set()
     for it in items:
@@ -267,7 +299,9 @@ def _check_structured(draft: Any, valid_ns: set[int]) -> tuple[list[str], set[in
     bad_refs: set[int] = set()
 
     section_norms: set[str] = set()
+    section_groups: list[tuple[str, list[str]]] = []
     for section in draft.sections:
+        sentences_he: list[str] = []
         for sentence in section.sentences:
             for n in sentence.cites:
                 if n not in valid_ns:
@@ -276,11 +310,25 @@ def _check_structured(draft: Any, valid_ns: set[int]) -> tuple[list[str], set[in
                         f"בסעיף '{section.title_he}': ההפניה [{n}] אינה מצביעה על פריט קיים "
                         f'ברשימה — "{sentence.text_he}"'
                     )
+            sentences_he.append(sentence.text_he)
             norm = _normalize_sentence_text(sentence.text_he)
             if norm:
                 section_norms.add(norm)
+        section_groups.append((section.title_he, sentences_he))
 
     duplicate_sentences: list[str] = []
+
+    # D6 round-1 fix (docs/qa/loop/round_1_fixes.md): a section sentence that verbatim-duplicates
+    # a sentence in an *earlier* section -- not just an exec-summary-vs-section duplicate (below).
+    for sentence, first_label, dup_label in _find_cross_group_duplicates(
+        section_groups, normalize=_normalize_sentence_text
+    ):
+        duplicate_sentences.append(sentence)
+        errors.append(
+            f"בסעיף '{dup_label}': המשפט \"{sentence}\" מועתק כלשונו מסעיף '{first_label}' — "
+            "כל סעיף חייב להביא ניתוח משלו, לא לחזור על משפט שכבר הופיע בסעיף אחר."
+        )
+
     for sentence in draft.exec_summary:
         for n in sentence.cites:
             if n not in valid_ns:
@@ -357,6 +405,22 @@ def check(
             errors.append(
                 f'בתקציר המנהלים: המשפט "{sentence}" מועתק כלשונו מתוך גוף אחד הסעיפים — התקציר חייב '
                 "לסכם ולקשר בין ממצאי הסעיפים, לא לצטט אותם במדויק."
+            )
+
+        # D6 round-1 fix (docs/qa/loop/round_1_fixes.md): the legacy free-prose path (weekly/
+        # monthly/bd_territory) never compared two ordinary sections/trend-paragraphs against each
+        # other, only exec-summary-vs-sections (above) -- generalizes the same
+        # ``_find_cross_group_duplicates`` the structured path now runs.
+        cross_groups = [(label, split_sentences(text)) for label, text in section_texts]
+        for sentence, first_label, dup_label in _find_cross_group_duplicates(
+            cross_groups, normalize=_normalize_for_dup_check
+        ):
+            if sentence in duplicate_sentences:
+                continue
+            duplicate_sentences.append(sentence)
+            errors.append(
+                f"ב'{dup_label}': המשפט \"{sentence}\" מועתק כלשונו מתוך '{first_label}' — כל סעיף "
+                "חייב להביא תוכן משלו, לא לחזור על משפט שכבר הופיע בסעיף אחר."
             )
 
     for label, text in exempt_sections or []:

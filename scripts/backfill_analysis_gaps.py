@@ -227,6 +227,39 @@ def stub_cleanup_pass(*, dry_run: bool = False) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# pass 4: key_facts dedup backfill (D1 round-1 fix, docs/qa/loop/round_1_fixes.md)
+# --------------------------------------------------------------------------
+
+
+def key_facts_dedupe_backfill(*, dry_run: bool = False) -> dict[str, Any]:
+    """Re-applies ``eoa.pipeline.analyze._dedupe_key_facts`` (extended in round 1 to be
+    punctuation-insensitive and to collapse near-duplicates, ``difflib`` ratio >= 0.9) to every
+    already-persisted ``items.key_facts`` array -- the analyze-stage fix only ever covers a
+    *newly*-generated array; rows written before it existed (e.g. items 5/10/51, the
+    ``key_facts_no_duplicates`` finding) keep their old duplicates until swept once here.
+    Deterministic, no LLM call. Idempotent -- a clean row is left byte-identical."""
+    from eoa.db import connection
+    from eoa.memory.relational import update_item_fields
+    from eoa.pipeline.analyze import _dedupe_key_facts
+
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, key_facts FROM items WHERE key_facts IS NOT NULL AND key_facts <> '{}'")
+        rows = cur.fetchall()
+
+    repaired: list[dict[str, Any]] = []
+    for row in rows:
+        before = row["key_facts"] or []
+        after = _dedupe_key_facts(before)
+        if after == before:
+            continue
+        repaired.append({"id": row["id"], "before_n": len(before), "after_n": len(after)})
+        if not dry_run:
+            update_item_fields(row["id"], key_facts=after)
+
+    return {"candidates": len(rows), "repaired": repaired}
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -242,14 +275,19 @@ def main() -> int:
     parser.add_argument(
         "--stub-cleanup", action="store_true", help="run pass 3 (Q3-10 pre-gate stub cleanup, no LLM)"
     )
-    parser.add_argument("--all", action="store_true", help="run all three passes in order")
+    parser.add_argument(
+        "--key-facts-dedupe",
+        action="store_true",
+        help="run pass 4 (D1 round-1 key_facts near-duplicate backfill, no LLM)",
+    )
+    parser.add_argument("--all", action="store_true", help="run all four passes in order")
     parser.add_argument("--limit", type=int, default=60, help="max items for the LLM pass (default 60)")
     parser.add_argument("--role", default="resident", help="model role for the LLM pass (default 'resident')")
     parser.add_argument("--dry-run", action="store_true", help="report counts/plan without writing")
     args = parser.parse_args()
 
-    if not (args.deterministic or args.llm or args.stub_cleanup or args.all):
-        parser.error("pass one of --deterministic / --llm / --stub-cleanup / --all")
+    if not (args.deterministic or args.llm or args.stub_cleanup or args.key_facts_dedupe or args.all):
+        parser.error("pass one of --deterministic / --llm / --stub-cleanup / --key-facts-dedupe / --all")
 
     mode = "DRY RUN" if args.dry_run else "APPLIED"
     print(f"\n{'=' * 70}\nQ3-8/Q3-9/Q3-10 analysis-gaps backfill ({mode})\n{'=' * 70}")
@@ -284,6 +322,14 @@ def main() -> int:
         print(f"  cleared (level/domain kept, title-defensible): {kept}")
         for r in report["cleared"][:20]:
             print(f"    id={r['id']} title_only_defensible={r['title_only_defensible']} title={r['title']!r}")
+
+    if args.key_facts_dedupe or args.all:
+        report = key_facts_dedupe_backfill(dry_run=args.dry_run)
+        print("\n[pass 4] key_facts near-duplicate backfill (D1 round-1 fix, no LLM):")
+        print(f"  candidates (non-empty key_facts): {report['candidates']}")
+        print(f"  repaired:                          {len(report['repaired'])}")
+        for r in report["repaired"][:20]:
+            print(f"    id={r['id']} {r['before_n']} -> {r['after_n']} facts")
 
     print(f"\n{'=' * 70}")
     if args.dry_run:

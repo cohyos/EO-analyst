@@ -76,7 +76,9 @@ class _DomainThrottle:
 
 
 def _bump_fail_count(source_name: str) -> None:
-    """Best-effort `sources.fail_count += 1`; no helper for this exists in `eoa.memory.relational` yet."""
+    """Best-effort `sources.fail_count += 1`, keyed by name -- used only when this run has no
+    `sources.id` to bump by (see :func:`_touch_source_fetched`'s own fallback below, which is the
+    normal path since every `run_ingest` caller does have `source_db_id`)."""
     try:
         from eoa.db import connection
 
@@ -87,6 +89,25 @@ def _bump_fail_count(source_name: str) -> None:
             )
     except Exception as exc:
         log.debug("fetch.fail_count_bump_skipped", source=source_name, error=repr(exc))
+
+
+def _touch_source_fetched(source_db_id: int | None, source_name: str, *, ok: bool) -> None:
+    """D9 round-1 fix (docs/qa/loop/round_1_fixes.md, ``sources_recently_fetched``): record that
+    this source was just attempted -- called once per source per :func:`_ingest_one_source` call,
+    success or failure, so ``last_fetched_at`` (and ``fail_count``/``last_ok_at``) actually reflect
+    ingestion activity instead of sitting at ``NULL``/0 forever (round-0: 0/60 sources fetched
+    within 7 days). Falls back to the old name-keyed :func:`_bump_fail_count` (fail_count only, no
+    ``last_fetched_at``) on the rare path where a source has no resolved DB id yet."""
+    if source_db_id is None:
+        if not ok:
+            _bump_fail_count(source_name)
+        return
+    try:
+        from eoa.memory.relational import touch_source_fetched
+
+        touch_source_fetched(source_db_id, ok)
+    except Exception as exc:
+        log.debug("fetch.source_touch_failed", source_id=source_db_id, error=repr(exc))
 
 
 def _strip_tags_fast(html_text: str) -> str:
@@ -361,12 +382,15 @@ async def _ingest_one_source(
         stats.sources_failed += 1
         stats.errors.append(f"{source.id}: {exc}")
         log.warning("fetch.source_failed", source_id=source.id, error=str(exc))
-        _bump_fail_count(source.name)
+        _touch_source_fetched(source_db_id, source.name, ok=False)
+        return
     except Exception as exc:
         stats.sources_failed += 1
         stats.errors.append(f"{source.id}: {exc!r}")
         log.warning("fetch.source_failed_unexpected", source_id=source.id, error=repr(exc))
-        _bump_fail_count(source.name)
+        _touch_source_fetched(source_db_id, source.name, ok=False)
+        return
+    _touch_source_fetched(source_db_id, source.name, ok=True)
 
 
 async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -> IngestStats:

@@ -55,6 +55,32 @@ class TestApplyLegacyLabel:
         assert "legacy_no_sources" not in original
 
 
+class TestApplyLegacyUnanchoredLabel:
+    """D1 round-1 fix (docs/qa/loop/round_1_fixes.md): pass 3, ``legacy_unanchored`` flag."""
+
+    def test_sets_flag(self) -> None:
+        result, changed = mli.apply_legacy_unanchored_label({"outcome": "found"})
+        assert changed is True
+        assert result["legacy_unanchored"] is True
+        assert result["outcome"] == "found"  # every other field untouched
+
+    def test_idempotent_on_already_labelled_result(self) -> None:
+        already = {"outcome": "found", "legacy_unanchored": True}
+        result, changed = mli.apply_legacy_unanchored_label(already)
+        assert changed is False
+        assert result == already
+
+    def test_handles_none_result(self) -> None:
+        result, changed = mli.apply_legacy_unanchored_label(None)
+        assert changed is True
+        assert result["legacy_unanchored"] is True
+
+    def test_does_not_mutate_input(self) -> None:
+        original = {"outcome": "found"}
+        mli.apply_legacy_unanchored_label(original)
+        assert "legacy_unanchored" not in original
+
+
 class TestApplyNotFoundToPartial:
     def test_reclassifies_outcome_and_confidence(self) -> None:
         result = mli.apply_not_found_to_partial(

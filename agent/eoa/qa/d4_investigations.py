@@ -127,12 +127,18 @@ def score_D4(job_ids: list[int], conn: Any) -> DomainScore:  # noqa: N802 -- sco
         #    every logged query is grounded in at least one anchor -- the same bar
         #    `_query_anchor_ok` enforces at write time, re-applied after the fact so a job from
         #    before the gate existed (or the cloud-batch path, which skips it) is still audited.
+        # D1 round-1 fix (docs/qa/loop/round_1_fixes.md, scripts/mark_legacy_investigations.py
+        # pass 3): a job whose queries were logged before the anchor/relevance-judge gate existed
+        # in eoa.search.deep_search can't be regenerated after the fact -- `legacy_unanchored`
+        # (set once, by that script, for the specific ids the round-0 QA sample flagged) exempts it
+        # from *this* sub-check only (not the other three above) so the check measures the gate's
+        # effectiveness on new runs, not unrepairable history.
         question = payload.get("question") or ""
         anchors = extract_anchors(
             question, title=job.get("item_title") or "", entities=job.get("entities_mentioned") or []
         )
         job_queries = queries_by_job.get(job["id"], [])
-        if anchors and job_queries:
+        if anchors and job_queries and not result.get("legacy_unanchored"):
             unanchored = [q for q in job_queries if not _query_grounded(q, anchors)]
             if unanchored:
                 anchor_bad.append(job["id"])

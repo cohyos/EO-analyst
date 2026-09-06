@@ -95,6 +95,46 @@ class TestDeterministicEntitiesBackfill:
         assert update_calls == []
 
 
+class TestKeyFactsDedupeBackfill:
+    """D1 round-1 fix (docs/qa/loop/round_1_fixes.md, ``key_facts_no_duplicates``, pass 4)."""
+
+    def test_repairs_rows_with_duplicates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [
+            {"id": 5, "key_facts": ["עובדה אחת.", "עובדה אחת.", "עובדה שתיים."]},
+            {"id": 6, "key_facts": ["עובדה נקייה לגמרי."]},
+        ]
+        cursor = _FakeCursor(fetchall_result=rows)
+        monkeypatch.setattr("eoa.db.connection", lambda: _FakeConnection(cursor))
+        update_calls: list[tuple[int, dict]] = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.update_item_fields",
+            lambda item_id, **fields: update_calls.append((item_id, fields)),
+        )
+
+        report = bag.key_facts_dedupe_backfill(dry_run=False)
+
+        assert report["candidates"] == 2
+        assert len(report["repaired"]) == 1
+        assert report["repaired"][0]["id"] == 5
+        assert report["repaired"][0] == {"id": 5, "before_n": 3, "after_n": 2}
+        assert update_calls == [(5, {"key_facts": ["עובדה אחת.", "עובדה שתיים."]})]
+
+    def test_dry_run_does_not_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [{"id": 5, "key_facts": ["עובדה אחת.", "עובדה אחת."]}]
+        cursor = _FakeCursor(fetchall_result=rows)
+        monkeypatch.setattr("eoa.db.connection", lambda: _FakeConnection(cursor))
+        update_calls: list[tuple[int, dict]] = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.update_item_fields",
+            lambda item_id, **fields: update_calls.append((item_id, fields)),
+        )
+
+        report = bag.key_facts_dedupe_backfill(dry_run=True)
+
+        assert len(report["repaired"]) == 1
+        assert update_calls == []
+
+
 class TestTitleOnlyClassificationDefensible:
     def test_defensible_when_named_entity_and_level_domain_present(self) -> None:
         item = {"title": "Elbit Systems wins contract", "level": "orange", "domain": "contracts"}

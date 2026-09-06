@@ -924,6 +924,8 @@ def build_docx(
 
     for tbl in tables or []:
         _heading1(doc, tbl.get("title_he") or "")
+        if tbl.get("note_he"):
+            add_mixed_paragraph(doc, tbl["note_he"])
         _add_generic_table_body(doc, tbl.get("headers") or [], tbl.get("rows") or [])
 
     _heading1(doc, "נספח מקורות")
@@ -999,9 +1001,10 @@ def _md_citations(text: str) -> str:
 def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
     for tbl in tables:
         headers = tbl.get("headers") or []
+        lines += [f"## {tbl.get('title_he') or ''}", ""]
+        if tbl.get("note_he"):
+            lines += [_md_citations(tbl["note_he"]), ""]
         lines += [
-            f"## {tbl.get('title_he') or ''}",
-            "",
             "| " + " | ".join(headers) + " |",
             "|" + "---|" * len(headers),
         ]
@@ -1157,6 +1160,8 @@ def _tables_html(parts: list[str], tables: list[dict[str, Any]], h2) -> None:
     for tbl in tables:
         headers = tbl.get("headers") or []
         parts.append(h2(tbl.get("title_he") or ""))
+        if tbl.get("note_he"):
+            parts.append(f"<p>{_bidi_html(tbl['note_he'])}</p>")
         parts.append(
             "<table><thead><tr>"
             + "".join(f"<th>{html.escape(h)}</th>" for h in headers)

@@ -27,21 +27,31 @@ class TestSubdomainTaxonomyValidator:
         )
         assert out.subdomain == "targeting_pods"
 
-    def test_invalid_subdomain_cleared(self) -> None:
+    def test_invalid_subdomain_falls_back_to_domain_default(self) -> None:
+        """D1 round-1 fix: a domain with real taxonomy sub-keys must never end up with an empty/NULL
+        subdomain -- an invalid value falls back to that domain's first ("default") sub-key rather
+        than "" (which used to persist as SQL NULL and fail the subdomain_valid_vs_taxonomy check)."""
         out = ClassifyOut(
             domain="airborne_pods",
             subdomain="not_a_real_subdomain",
             report_kind="company_pr",
             one_line_he="x",
         )
-        assert out.subdomain == ""
+        assert out.subdomain == "targeting_pods"  # airborne_pods' first taxonomy sub-key
 
-    def test_subdomain_valid_for_wrong_domain_is_cleared(self) -> None:
-        """A subdomain that exists, but under a *different* domain, is still invalid."""
+    def test_subdomain_valid_for_wrong_domain_falls_back_to_domain_default(self) -> None:
+        """A subdomain that exists, but under a *different* domain, is still invalid -- falls back
+        to c_uas' own first sub-key rather than being cleared to ""."""
         out = ClassifyOut(
             domain="c_uas", subdomain="targeting_pods", report_kind="company_pr", one_line_he="x"
         )
-        assert out.subdomain == ""
+        assert out.subdomain == "detect_track"  # c_uas' first taxonomy sub-key
+
+    def test_missing_subdomain_falls_back_to_domain_default(self) -> None:
+        """An in-scope domain left with an empty subdomain by the model also gets the domain's
+        default sub-key -- not "" (which persists as NULL, see round_1_fixes.md)."""
+        out = ClassifyOut(domain="airborne_pods", subdomain="", report_kind="company_pr", one_line_he="x")
+        assert out.subdomain == "targeting_pods"
 
     def test_empty_subdomain_untouched(self) -> None:
         out = ClassifyOut(

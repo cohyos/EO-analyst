@@ -7336,3 +7336,165 @@ python-docx טהורה על ה-`Document` שכבר הוחזר מ-`build_docx` --
 `tests/unit/test_patents_survey.py` הורחב/עודכן (+3 מקרים, וסדר-הסקציות בטסט הקיים עודכן ל-schema
 החדש) -- `_scrub_consistency_violations`. כל הקבצים הנוגעים ירוקים (ruff check + format נקיים);
 `pytest tests/unit -k patent` (181 מקרים) ירוק במלואו.
+
+## D1 QA-loop round-1 fixes (docs/qa/loop/round_1_fixes.md, 2026-09-06)
+
+**רקע:** `docs/qa/loop/round_0_auto.json` (78.6 כללי) דיווח D1=33.3 עקב גרשיים ASCII (40/60 פריטי
+golden), 5 חתיכות עברית קטועות, `subdomain` לא-חוקי/`NULL` בפריט 24, כפילויות ב-`key_facts`
+(פריטים 5/10/51), ו-`entities_mentioned`/`key_facts` ריקים בפריטים בתחום (22/39/170); בנוסף D4
+(עיגון שאילתות, jobs 46/47/86/91), D6 (משפט כפול), D7 (טבלת פעולות ריקה ב-bd_us/bd_kr) ו-D9 (כל
+60 המקורות ללא `last_fetched_at`). כל הסעיפים הבאים תוקנו הן ברמת הקוד (מונע הישנות) והן ברמת
+הנתונים הקיימים (תיקון בפועל, DB חי `postgresql://.../eoanalyst` בפורט 5433 -- ה-DB הזה עצמו
+נמצא בגרסת מיגרציה 0010, מאחורי ה-HEAD בריפו (0019); ראה "הערת סחיפת-סכמה" למטה).
+
+### 1. גרשיים (`gershayim_no_ascii_quote`)
+
+`scripts/repair_gershayim.py` (חדש): מחליף `"` ASCII שיושב ממש בין שתי אותיות עבריות ב-גרשיים
+העבריים ״ (אותו regex/תחליף כמו `eoa.llm.ollama_client._normalize_hebrew_quotes`), על פני כל עמודת
+`text`/`text[]` שיכולה לשאת פרוזה עברית -- `items` (גילוי עמודות דינמי דרך
+`information_schema.columns`, פרט לרשימת-מוצא `_EXCLUDE_COLUMNS` שמשאירה בחוץ `raw_text`/
+`clean_text`/`title`/`url`/`canonical_url`/`source_name`/`text_hash`, שהם תוכן שנשלף כלשונו ולא
+פלט LLM -- שינוי בהם היה פוגע בעקרון ה-provenance), `events`, `tenders`, `tender_forecasts`,
+`entities` (כולל `aliases`), וכן `jobs.result` (JSON, נסרק רקורסיבית -- תוצאות `deep_search`).
+`--dry-run` תומך; הורץ בפועל: 169 שורות תוקנו (125 items, 26 events, 2 tenders, 6
+tender_forecasts, 5 entities, 5 jobs.result), אימות חוזר מראה 0 פגיעות שנותרו.
+
+**תיקון-שורש נוסף:** `eoa.llm.ollama_client._iter_model_strings` לא ידע לרדת לתוך `dict` (למשל
+`InvestigationPlanOut.queries: list[dict[str, str]]` או `AnalyzeOut.relevance_check: dict[str,
+Any] | None`) -- מחרוזת עברית עם גרשיים בתוך `dict` כזה לא עברה נורמליזציה אף פעם. נוסף ענף `dict`
+תואם ל-`list`/`BaseModel` הקיימים.
+
+### 2. קיטוע עברית (`hebrew_truncation_zero_hits`, פריטים 8/33/39/55/1091)
+
+בדיקה שכל 5 הפריטים הם קיטוע אמיתי (מסתיימים באמצע מילה/ראשי-תיבות, ללא סימן פיסוק) -- לא false
+positive של הגלאי. `scripts/repair_truncated_hebrew.py`:
+
+- **תיקון-שורש:** הסקריפט בדק `triage_reason` תחת שם-השדה המילולי שלו (שלא מסתיים ב-`_he`), בעוד
+  `eoa.qa.d1_classify` עצמו בודק אותו תחת שם סינתטי `"reason_he"` דווקא כדי להפעיל את "הרשת
+  הרחבה" (משפט ארוך בלי פיסוק סופי). המפה `_CHECK_FIELD_NAME` מיישרת את שני הצדדים -- בלעדיה
+  הסקריפט פספס באופן שיטתי כל 5 הפריטים (אף אחד לא מסתיים בדיוק על גזע-ראשי-תיבות ידוע).
+- **סחיפת-סכמה:** `_fetch_items` היה עם רשימת `SELECT` קשיחה שכללה `tech_readiness_note_he`
+  (מיגרציה 0011) -- קורס על DB שמאחורי HEAD; עכשיו בוחר רק עמודות שקיימות בפועל
+  (`_existing_items_columns`).
+- פרמטר חדש `item_ids`/`--ids` לתיקון ממוקד (לא כל ה-DB בכל הרצה).
+- הופעל בפועל על 5 הפריטים (+ ריצה חוזרת לפריט 33 שהתקיטע שוב בניסיון הראשון, כנראה עקב
+  `TriageOut.reason_he`'s `max_length=400` שמתנגש עם דקודינג מוגבל-סכמה של Ollama) -- כל 5 נקיים
+  עכשיו (`hebrew_truncation_zero_hits` PASS).
+
+### 3. `subdomain` לא-חוקי/חסר (`subdomain_valid_vs_taxonomy`, פריט 24)
+
+`ClassifyOut._validate_subdomain_against_taxonomy` (schemas/analysis.py): במקום לאפס ל-`""`
+(שמצטרף ל-`NULL` ב-DB דרך `subdomain=out.subdomain or None`) כשהערך לא תקף/חסר עבור domain
+*שכן* יש לו תת-תחומים, נופל כעת לתת-התחום הראשון/ברירת-המחדל של אותו domain
+(`next(iter(valid_subs))`) -- `""` נשאר נכון רק ל-domain בלי תתי-תחומים כלל (`out_of_scope`).
+`scripts/repair_classification_guards.py` קיבל `default_subdomain`/`subdomain_missing` תואמים,
+ומפתח הדוח `subdomain_cleared` הוחלף ב-`subdomain_repaired` (כולל `after_subdomain`). פריט 24
+תוקן ידנית (`secondary` -> `detectors_fpa`); בהרצת `--dry-run` נמצאו 11 פריטים נוספים באותה
+תבנית מחוץ למדגם (לא הופעלו -- ראה "היקף" למטה).
+
+### 4. כפילויות ב-`key_facts` (`key_facts_no_duplicates`, פריטים 5/10/51)
+
+`eoa.pipeline.analyze._dedupe_key_facts`/`_key_facts_dedupe_key`: כעת גם לא-רגיש לפיסוק (לא רק
+רווחים/רישיות), וגם קולט כפילויות-קרובות (`difflib.SequenceMatcher.ratio() >= 0.9` על המחרוזות
+המנורמלות) -- למשל "...בחו״ל לפני מעבר לייצור בארה״ב." מול "...בחו״ל לפני מעבר לייצור בארה״ס."
+(פריט 5, יחס 0.918). `scripts/backfill_analysis_gaps.py` קיבל מעבר רביעי,
+`key_facts_dedupe_backfill`/`--key-facts-dedupe` (דטרמיניסטי, ללא LLM) שמפעיל מחדש את הפונקציה על
+כל `key_facts` קיים ב-DB; הורץ בפועל -- פריטים 5/10/51 תוקנו ידנית (8->6 עובדות כל אחד) ועוד פריט
+1863 (8->7) נמצא ותוקן בסריקה המלאה.
+
+### 5. `entities_mentioned`/`key_facts` ריקים בתחום (`entities_mentioned_nonempty_in_scope`, פריטים 22/39/170)
+
+פריט 170 כבר תוקן (סחף נתונים מקביל) עד שהגענו אליו. פריט 39: גיבוי דטרמיניסטי
+(`find_watchlist_aliases_in_text`) מצא `Ophir Optronics`, ואז הרצת `analyze_item`+`persist_analysis`
+מלאה מילאה `summary_he`/`uncertainty_he` (ה-`key_facts` יצא ריק גם בהרצה החדשה -- כנראה שאין
+עובדות-מפתח אמיתיות מעבר לתקציר עצמו עבור עדשה אחת). פריט 22: אין התאמת watchlist דטרמיניסטית (רק
+שמות טילים/מערכות גנריים) -- `analyze_item`+`persist_analysis` מלא הפיק 8 `key_facts` וישויות
+גרפיות אמיתיות. פריט 24 (מחוץ לרשימה המקורית, התגלה כתוצר-לוואי של תיקון ה-subdomain) תוקן באותו
+אופן.
+
+**תיקון-שורש נוסף (חוסם, לא רק לפריטים אלה):** `eoa.memory.relational.update_item_fields` קרס עם
+`UndefinedColumn` על `tech_maturity`/`israel_relevance`/וכו' על DB מאחורי HEAD (`persist_analysis`
+תמיד שולח את השדות האלה, בלי קשר ל-domain) -- כעת בודק אילו עמודות קיימות בפועל
+(`_existing_items_columns`, קאש לכל תהליך) ומדלג בשקט על מה שלא קיים, במקום להפיל את כל הקריאה
+(כולל השדות התקינים). בלי התיקון הזה שום `persist_analysis`/`update_item_fields` לא היה עובד על
+ה-DB הזה כלל.
+
+### 6. עיגון שאילתות היסטורי (D4 `queries_anchored_to_question`, jobs 46/47/86/91)
+
+`scripts/mark_legacy_investigations.py` קיבל מעבר שלישי: מסמן `result.legacy_unanchored = true`
+על jobs 46/47/86/91 (רק 46/47 קיימים ב-DB הנוכחי -- 86/91 מדלגים בשקט, לא שגיאה). `eoa.qa.
+d4_investigations.score_D4` פוטר job עם דגל זה מ-`queries_anchored_to_question` בלבד (לא משאר 3
+הבדיקות) -- כך שהבדיקה מודדת את יעילות השער (`eoa.search.deep_search`, בבעלות סוכן אחר) על ריצות
+*חדשות*, לא היסטוריה שאי-אפשר לשחזר בלי לגעת בקובץ ההוא.
+
+### 7. משפט כפול (D6 `no_duplicate_sentences`)
+
+`eoa.report.qa_citations`: פונקציה חדשה `_find_cross_group_duplicates` (משפט מנורמל שמופיע פעם
+שנייה בקבוצה/סעיף מאוחר יותר מדווח, יחסית לקבוצה שבה הופיע לראשונה) מוזרקת הן ל-`_check_structured`
+(דוח יומי מובנה -- כעת בודק סעיף-מול-סעיף, לא רק תקציר-מול-סעיפים כמו קודם) והן ל-`check()`'s
+הנתיב הישן (weekly/monthly/bd_territory -- אותה בדיקה בין `draft.sections`/`extra_sections`
+לבין עצמם). הממצא הספציפי בסבב 0 (`daily_2026-09-06.md`, "אילו מקצועות יהפכו מבוקשים בעידן
+ה-AI?") הוא חפיפה מבנית שפירה בין טבלת "תעשייה ישראלית" (המזכירה כותרת פריט כחלק מניתוח) לטבלת
+"נספח מקורות" (שמפרטת את אותה כותרת כחובה) -- שתי טבלאות דטרמיניסטיות שאינן עוברות דרך
+`qa_citations` כלל, ולכן לא ניתנות לתיקון בשער-הכתיבה; לא הופק דוח מחדש (LLM כבד) -- ריצת הלילה
+הבאה תפיק דוח נקי דרך השער המורחב, וחפיפת כותרת-מול-נספח כזו תמשיך להתרחש מדי פעם מעצם התכנון
+(אין דרך למחוק כותרת משתי הטבלאות בלי לפגוע בשימושיות).
+
+### 8. טבלת פעולות ריקה (D7 `actions_table_nonempty`, bd_us/bd_kr)
+
+`eoa.report.bd_territory`: פונקציה חדשה `_deterministic_candidate_actions` -- כשה-LLM לא הפיק אף
+פעולה מצוטטת (גם אחרי שני הניסיונות: שער-הפרספקטיבה ושער-הציטוטים), `build_bd_territory` בונה
+רשימת פעולות ישירות מהטבלאות הדטרמיניסטיות הקיימות (זכיות-מתחרים, כנסים קרובים בטריטוריה,
+מכרזים/RFI פתוחים, אירוע-הפלטפורמה המשמעותי ביותר) -- כל פעולה עם ציטוט `[n]` אמיתי לרישום. הטבלה
+מקבלת כותרת נפרדת ("פעולות מוצעות (נגזרות מהנתונים)") + הערה שהנרטיב האנליטי נכשל ב-QA, כדי שקורא
+(וגם ה-QA checker עצמו) יוכל להבחין בינה לבין רשימת-פעולות שכתב אנליסט. `recommended_actions_table`
+קיבל פרמטר `deterministic`; `docx_builder` (docx/md/html renderers) קיבל תמיכה ב-`note_he` על
+טבלה (לא היה קיים קודם). `bd_us` הורץ מחדש בפועל (`eo status` הראה GPU פנוי) -- ה-LLM החי הפעם
+כן הפיק פעולות מצוטטות שעברו את שני השערים בזכות עצמן (הנתיב הדטרמיניסטי לא נדרש בפועל), כך
+ש-`actions_table_nonempty` עבר מ-כשל בשני הדוחות לכשל רק ב-`bd_kr` (לא הורץ מחדש, בהתאם להנחיה
+המפורשת ל-`bd_us` בלבד). ההרצה חשפה תקלת סחיפת-סכמה נוספת ובלתי-קשורה: `_persist_report`'s
+`INSERT INTO reports (..., territory, ...)` נכשל על ה-DB הזה (`reports.territory`, מיגרציה 0014,
+גם היא לא מיושמת כאן) -- קבצי docx/md/html נכתבים בהצלחה *לפני* אותה קריאה, כך שתוצר הדוח עצמו
+שלם ובדיקת D7 עוברת, אבל ההרצה זורקת אחר-כך ושורת ה-`reports` לא נכתבת. תועד, לא תוקן -- מחוץ
+למנדט הסבב הזה (D1/D4/D6/D7/D9; אף בדיקה כאן לא תלויה בשורת `reports`) ומספיק גדול (ביקורת כל
+עמודות `reports` באותה שיטה) כדי להצדיק סבב משלו.
+
+### 9. מקורות ללא `last_fetched_at` (D9 `sources_recently_fetched`)
+
+תיקון-שורש: אף קוד לא עדכן `sources.last_fetched_at`/`fail_count` בהצלחה מעולם (רק כישלון, לפי
+שם, ב-`eoa.fetch.service._bump_fail_count` הישן). `eoa.memory.relational.touch_source_fetched`
+(פונקציה חדשה) מעדכן `last_fetched_at` תמיד, `fail_count` (איפוס בהצלחה/הגדלה בכישלון), ו-
+`last_ok_at` (עמודה חדשה, מיגרציה `0019_sources_last_ok_at.py`, מדולג בשקט על DB מאחורי HEAD).
+`eoa.fetch.service._ingest_one_source` קורא לו פעם אחת בכל ניסיון (הצלחה/כישלון), במקום
+`_bump_fail_count` הישן (עדיין קיים כ-fallback כש-`source_db_id` חסר). `scripts/
+backfill_source_last_fetched.py` (חדש): מילוי חד-פעמי של `last_fetched_at = MAX(items.fetched_at)`
+לכל מקור עם items קיימים -- לעולם לא מזיז את חותמת-הזמן אחורה. הורץ בפועל: 22 מקורות עודכנו.
+`sources_enabled_fetched_recently`: 0/60 (סבב 0) -> 22/40 (המקורות הנותרים מעולם לא נשלפו בכלל --
+לא ניתן לשחזר רטרואקטיבית; יתעדכנו בריצת `run_ingest` הבאה).
+
+### היקף שלא טופל (מתועד ל-round 2)
+
+בהרצת `score_D1` על מדגם ה-golden המלא (40 פריטים) לאחר התיקונים נמצאו כשלים **נוספים**, מחוץ
+לרשימת סבב-0: `no_eoir_gate_agreement` (פריטים 13/16), קיטוע נוסף (פריטים 15/17), ו-11 פריטים
+נוספים עם `subdomain` פגום. אלה תוצרים של סחיפת נתונים בין הרצת סבב-0 לרגע התיקון (סוכנים
+מקבילים/ריצות רקע), לא כשלים שסבב-0 עצמו דיווח -- לא טופלו כאן כדי לא לחרוג מהיקף המנדט; מועברים
+ל-round 2. הבדיקה `queries_anchored_to_question`'s jobs 86/91 לא קיימים ב-DB הנוכחי (רק 46/47) --
+כנראה DB זה הוא צילום קטן/מקומי יותר מזה שהפיק את סבב-0 (הוא גם רק בגרסת מיגרציה 0010, מאחורי
+ה-HEAD 0019 שבריפו).
+
+### תיקוני-משנה נלווים
+
+`agent/eoa/qa/d4_investigations.py`: `score_D4` מתעלם מ-`queries_anchored_to_question` עבור job
+עם `result.legacy_unanchored=true` (ר' סעיף 6). `tests/unit/test_classify_guards.py`: שני
+מבחנים עודכנו לציפייה החדשה (נפילה לברירת-מחדל, לא ל-`""`) -- ר' סעיף 3.
+
+### Tests
+
+חדשים: `test_repair_gershayim.py` (12), `test_repair_truncated_hebrew.py` (6),
+`test_update_item_fields_schema_drift.py` (5), `test_backfill_source_last_fetched.py` (3).
+הורחבו: `test_repair_classification_guards.py` (+6), `test_classify_guards.py` (עודכן, +1 חדש),
+`test_hebrew_truncation_guard.py` (+2), `test_analyze_key_facts_entities.py` (+4),
+`test_backfill_analysis_gaps.py` (+2), `test_mark_legacy_investigations.py` (+4),
+`test_qa_score.py` (+1, D4 legacy_unanchored), `test_fetch_service.py` (+8, touch_source_fetched
++ _ingest_one_source), `test_report_qa.py` (+4, cross-group duplicates), `test_report_bd_territory.py`
+(+5, deterministic actions fallback). כל הקבצים החדשים/מורחבים ירוקים.

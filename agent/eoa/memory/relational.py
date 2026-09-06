@@ -109,6 +109,47 @@ def upsert_source(
     return source_id
 
 
+_sources_columns_cache: set[str] | None = None
+
+
+def _existing_sources_columns(cur: Any) -> set[str]:
+    """Same schema-drift guard as :func:`_existing_items_columns`, for ``sources`` -- ``last_ok_at``
+    (migration 0019, D9 round-1 fix) may not exist yet on a DB behind ``HEAD``."""
+    global _sources_columns_cache
+    if _sources_columns_cache is None:
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'sources'")
+        _sources_columns_cache = {row["column_name"] for row in cur.fetchall()}
+    return _sources_columns_cache
+
+
+def touch_source_fetched(source_id: int, ok: bool) -> None:
+    """D9 round-1 fix (docs/qa/loop/round_1_fixes.md, ``sources_recently_fetched``): record that
+    ``source_id`` was just attempted -- called once per source per ``run_ingest`` attempt
+    (``eoa.fetch.service._ingest_one_source``), success or failure, so
+    ``eoa.qa.d9_tenders_conferences``'s "every active source fetched within 7 days" check reflects
+    reality instead of every source's ``last_fetched_at`` sitting at ``NULL`` forever (round-0: 0/60).
+
+    Always bumps ``last_fetched_at = now()``. On success (``ok=True``): resets ``fail_count`` to 0
+    and, if the column exists (migration 0019 -- a DB behind ``HEAD`` simply skips it, matching
+    :func:`update_item_fields`'s guard), sets ``last_ok_at = now()``. On failure: increments
+    ``fail_count`` (superseding the old name-keyed ``eoa.fetch.service._bump_fail_count`` for any
+    caller that has the row's id, which every ``run_ingest`` caller does)."""
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        columns = _existing_sources_columns(cur)
+        sets = ["last_fetched_at = now()"]
+        if ok:
+            sets.append("fail_count = 0")
+            if "last_ok_at" in columns:
+                sets.append("last_ok_at = now()")
+        else:
+            sets.append("fail_count = fail_count + 1")
+        query = sql.SQL("UPDATE sources SET {sets} WHERE id = %(source_id)s").format(
+            sets=sql.SQL(", ").join(sql.SQL(s) for s in sets)
+        )
+        cur.execute(query, {"source_id": source_id})
+    log.debug("source.fetch_touched", source_id=source_id, ok=ok)
+
+
 # --------------------------------------------------------------------------
 # items
 # --------------------------------------------------------------------------
@@ -209,19 +250,48 @@ def mark_stage(item_id: int, stage: str) -> None:
     log.debug("item.stage_marked", item_id=item_id, stage=stage)
 
 
+_items_columns_cache: set[str] | None = None
+
+
+def _existing_items_columns(cur: Any) -> set[str]:
+    """``items`` columns that actually exist on the connected DB, cached for the process lifetime
+    (the schema doesn't change mid-run). D1 round-1 fix (docs/qa/loop/round_1_fixes.md): a DB can
+    sit behind ``HEAD`` (see docs/MODULES.md) and be missing an additive column a later migration
+    adds (e.g. ``tech_maturity``/``tech_actor_kind``/``tech_readiness_note_he``, migration 0011,
+    or ``israel_relevance``/``israel_reasons``, migration 0017) -- ``persist_analysis`` and the
+    A13 block always pass those keys, so a plain ``UPDATE`` crashed outright on such a DB instead
+    of degrading to "just skip the column that isn't there yet"."""
+    global _items_columns_cache
+    if _items_columns_cache is None:
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'items'")
+        _items_columns_cache = {row["column_name"] for row in cur.fetchall()}
+    return _items_columns_cache
+
+
 def update_item_fields(item_id: int, **fields: Any) -> None:
-    """Update an allow-listed subset of `items` columns for `item_id`."""
+    """Update an allow-listed subset of `items` columns for `item_id`. A field naming a column
+    that doesn't exist on this DB (schema behind HEAD, see :func:`_existing_items_columns`) is
+    silently dropped rather than raising -- every other field in the same call still gets written."""
     unknown = set(fields) - _ITEM_UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"cannot update unknown item fields: {sorted(unknown)}")
     if not fields:
         return
-    assignments = sql.SQL(", ").join(
-        sql.SQL("{} = {}").format(sql.Identifier(key), sql.Placeholder(key)) for key in fields
-    )
-    query = sql.SQL("UPDATE items SET {assignments} WHERE id = %(item_id)s").format(assignments=assignments)
-    params: dict[str, Any] = {**fields, "item_id": item_id}
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        present = _existing_items_columns(cur)
+        missing = set(fields) - present
+        if missing:
+            log.debug("item.fields_skipped_missing_columns", item_id=item_id, fields=sorted(missing))
+        fields = {k: v for k, v in fields.items() if k in present}
+        if not fields:
+            return
+        assignments = sql.SQL(", ").join(
+            sql.SQL("{} = {}").format(sql.Identifier(key), sql.Placeholder(key)) for key in fields
+        )
+        query = sql.SQL("UPDATE items SET {assignments} WHERE id = %(item_id)s").format(
+            assignments=assignments
+        )
+        params: dict[str, Any] = {**fields, "item_id": item_id}
         cur.execute(query, params)
     log.debug("item.fields_updated", item_id=item_id, fields=sorted(fields))
 

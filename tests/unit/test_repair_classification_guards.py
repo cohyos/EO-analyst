@@ -43,6 +43,32 @@ class TestInvalidSubdomain:
         assert rcg.invalid_subdomain({"domain": "c_uas", "subdomain": None}) is False
 
 
+class TestDefaultSubdomain:
+    def test_returns_domains_first_taxonomy_subkey(self) -> None:
+        assert rcg.default_subdomain("c_uas") == "detect_track"
+        assert rcg.default_subdomain("airborne_pods") == "targeting_pods"
+
+    def test_none_for_domain_with_no_subkeys(self) -> None:
+        assert rcg.default_subdomain("out_of_scope") is None
+        assert rcg.default_subdomain(None) is None
+
+
+class TestSubdomainMissing:
+    def test_null_subdomain_on_in_scope_domain_flagged(self) -> None:
+        """Regression for item 24: domain='secondary' with subdomain=NULL is invalid -- the
+        original Q3-3 pass only caught a garbage *value*, never a missing one."""
+        assert rcg.subdomain_missing({"domain": "secondary", "subdomain": None}) is True
+
+    def test_empty_string_subdomain_on_in_scope_domain_flagged(self) -> None:
+        assert rcg.subdomain_missing({"domain": "c_uas", "subdomain": ""}) is True
+
+    def test_valid_subdomain_not_flagged(self) -> None:
+        assert rcg.subdomain_missing({"domain": "c_uas", "subdomain": "detect_track"}) is False
+
+    def test_out_of_scope_domain_not_flagged(self) -> None:
+        assert rcg.subdomain_missing({"domain": "out_of_scope", "subdomain": None}) is False
+
+
 class TestShouldGateNoEoir:
     def test_item_117_style_gated(self) -> None:
         item = {

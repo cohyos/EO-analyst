@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import difflib
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -310,22 +312,48 @@ def _dedup_events(events: list[EventOut]) -> list[EventOut]:
     return list(best.values())
 
 
+_KEY_FACTS_PUNCT_RE = re.compile(r"[^\w\s]", flags=re.UNICODE)
+#: D1 round-1 fix (docs/qa/loop/round_1_fixes.md, ``key_facts_no_duplicates``, items 5/10/51):
+#: threshold above which two key_facts entries are treated as the same fact restated with minor
+#: wording differences (e.g. "בחו״ל לפני מעבר לייצור בארה״ב" vs. "בחו״ל לפני מעבר לייצור בארה״ס")
+#: rather than two distinct facts. Chosen per the task brief; ``difflib.SequenceMatcher.ratio()``
+#: on the already case/punctuation-normalized strings.
+_KEY_FACTS_NEAR_DUP_RATIO = 0.9
+
+
 def _key_facts_dedupe_key(fact: str) -> str:
-    return " ".join(fact.strip().casefold().split())
+    """Case- and punctuation-insensitive normalisation for exact-duplicate comparison. Q3-9
+    originally only stripped whitespace/case; round-1 (docs/qa/loop/round_1_fixes.md) adds
+    punctuation, since two entries differing only in a trailing period or an added comma were
+    still slipping through as "different" facts."""
+    stripped = _KEY_FACTS_PUNCT_RE.sub("", fact.casefold())
+    return " ".join(stripped.split())
 
 
 def _dedupe_key_facts(facts: list[str]) -> list[str]:
-    """Q3-9 (docs/qa/findings_Q3_r1.md): drop word-for-word (modulo whitespace/case) duplicate
-    ``key_facts`` entries, keeping the first occurrence's original text and order."""
-    seen: set[str] = set()
+    """Q3-9 (docs/qa/findings_Q3_r1.md) + D1 round-1 fix (docs/qa/loop/round_1_fixes.md): drop
+    ``key_facts`` entries that are either an exact duplicate (modulo whitespace/case/punctuation)
+    of an earlier one, or a *near*-duplicate of one -- the same fact restated with small wording
+    differences (``difflib.SequenceMatcher.ratio() >= _KEY_FACTS_NEAR_DUP_RATIO`` against every
+    fact already kept) -- keeping the first occurrence's original text and order in both cases."""
+    seen_keys: set[str] = set()
+    kept_keys: list[str] = []
     result: list[str] = []
     for fact in facts:
         if not fact or not fact.strip():
             continue
         key = _key_facts_dedupe_key(fact)
-        if key in seen:
+        if not key:
             continue
-        seen.add(key)
+        if key in seen_keys:
+            continue
+        if any(
+            difflib.SequenceMatcher(None, key, other).ratio() >= _KEY_FACTS_NEAR_DUP_RATIO
+            for other in kept_keys
+        ):
+            continue
+        seen_keys.add(key)
+        kept_keys.append(key)
         result.append(fact)
     return result
 

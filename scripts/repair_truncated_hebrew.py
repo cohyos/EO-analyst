@@ -55,30 +55,56 @@ from eoa.llm.ollama_client import (  # noqa: E402
 _ITEM_ANALYZE_FIELDS = ("summary_he", "so_what_he", "uncertainty_he", "tech_readiness_note_he")
 _ITEM_TRIAGE_FIELDS = ("triage_reason",)
 
+# D1 round-1 fix (docs/qa/loop/round_1_fixes.md, ``hebrew_truncation_zero_hits``, items 8/33/39/
+# 55/1091): ``agent/eoa/qa/d1_classify.py``'s own D1 check passes ``triage_reason`` to
+# ``_looks_truncated_mid_hebrew_acronym`` under the synthetic field name ``"reason_he"`` (not the
+# literal column name) specifically so the *generic* "long sentence, no terminal punctuation" net
+# applies to it (that net only fires for a field name literally ending in ``"_he"`` -- see the
+# function's own docstring). This repair script used to pass the literal column name
+# (``"triage_reason"``, which does not end in ``"_he"``) instead, so it silently missed every one
+# of those five items: none of them happen to end on an exact known acronym stem or a complete
+# acronym pattern (item 55 ends on the Hebrew-prefixed token "לרק", item 8/1091 end mid ordinary
+# word, not mid-acronym at all) -- only the generic net catches them, and it was never reached.
+# Kept as an explicit mapping (not a hardcoded ``if``) so any future *_he-style column gets the
+# same treatment automatically if it's ever added to ``_ITEM_TRIAGE_FIELDS``.
+_CHECK_FIELD_NAME: dict[str, str] = {"triage_reason": "reason_he"}
+
 
 def _row_flagged_fields(row: dict[str, Any], fields: tuple[str, ...]) -> list[str]:
-    return [f for f in fields if row.get(f) and _looks_truncated_mid_hebrew_acronym(row[f], f)]
+    return [
+        f
+        for f in fields
+        if row.get(f) and _looks_truncated_mid_hebrew_acronym(row[f], _CHECK_FIELD_NAME.get(f, f))
+    ]
+
+
+def _existing_items_columns(cur: Any) -> set[str]:
+    cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'items'")
+    return {row["column_name"] for row in cur.fetchall()}
 
 
 def _fetch_items() -> list[dict[str, Any]]:
-    cols = ", ".join(
-        {
-            "id",
-            "title",
-            "url",
-            "clean_text",
-            "source_name",
-            "report_kind",
-            "published_at",
-            "domain",
-            "subdomain",
-            "trl",
-            "entities_mentioned",
-            *_ITEM_ANALYZE_FIELDS,
-            *_ITEM_TRIAGE_FIELDS,
-        }
-    )
+    wanted = {
+        "id",
+        "title",
+        "url",
+        "clean_text",
+        "source_name",
+        "report_kind",
+        "published_at",
+        "domain",
+        "subdomain",
+        "trl",
+        "entities_mentioned",
+        *_ITEM_ANALYZE_FIELDS,
+        *_ITEM_TRIAGE_FIELDS,
+    }
     with db.connection() as conn, conn.cursor() as cur:
+        # A DB may sit behind HEAD (see docs/MODULES.md) and not yet have an additive analyze
+        # column a later migration adds (e.g. `tech_readiness_note_he`, migration 0011) -- select
+        # only the columns that actually exist rather than failing the whole repair run outright.
+        present = _existing_items_columns(cur)
+        cols = ", ".join(sorted(wanted & present))
         cur.execute(f"SELECT {cols} FROM items")
         return cur.fetchall()
 
@@ -89,7 +115,15 @@ def _fetch_simple(table: str, id_col: str, text_col: str) -> list[dict[str, Any]
         return cur.fetchall()
 
 
-def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
+def repair(
+    *, dry_run: bool = False, role: str = "resident", item_ids: set[int] | None = None
+) -> dict[str, Any]:
+    """``item_ids``, when given, restricts the LLM-repairing item passes (analyze/triage) to
+    exactly those ids -- e.g. a QA round's specific flagged rows -- rather than every flagged item
+    in the DB (useful for a small, targeted re-triage without also re-running a much larger
+    backlog the same detector fix newly surfaces). The events/tenders/tender_forecasts
+    quote-normalization pass below is unaffected (it's a cheap, deterministic UPDATE, not an LLM
+    call, so there's no reason to scope it down)."""
     from eoa.memory.relational import update_item_fields
     from eoa.pipeline.analyze import analyze_item, persist_analysis
     from eoa.pipeline.triage import triage_item
@@ -108,6 +142,8 @@ def repair(*, dry_run: bool = False, role: str = "resident") -> dict[str, Any]:
     }
 
     items = _fetch_items()
+    if item_ids is not None:
+        items = [it for it in items if it["id"] in item_ids]
     for item in items:
         analyze_fields = _row_flagged_fields(item, _ITEM_ANALYZE_FIELDS)
         if analyze_fields:
@@ -183,9 +219,15 @@ def main() -> None:
     parser.add_argument(
         "--role", default="resident", help="LLM role for re-analysis/re-triage (default: resident)"
     )
+    parser.add_argument(
+        "--ids",
+        default=None,
+        help="comma-separated items.id list to restrict the LLM analyze/triage passes to (default: all flagged)",
+    )
     args = parser.parse_args()
 
-    report = repair(dry_run=args.dry_run, role=args.role)
+    item_ids = {int(x) for x in args.ids.split(",") if x.strip()} if args.ids else None
+    report = repair(dry_run=args.dry_run, role=args.role, item_ids=item_ids)
 
     print(
         f"{'=' * 70}\nQ3-1 Hebrew-truncation repair {'(DRY RUN)' if args.dry_run else '(APPLIED)'}\n{'=' * 70}"

@@ -44,6 +44,44 @@ class TestDedupeKeyFacts:
     def test_empty_list(self) -> None:
         assert _dedupe_key_facts([]) == []
 
+    # -- D1 round-1 fix (docs/qa/loop/round_1_fixes.md, key_facts_no_duplicates) -----------------
+
+    def test_punctuation_insensitive_dedup(self) -> None:
+        """Two entries differing only in trailing punctuation are the same fact."""
+        facts = [
+            "המחקר עשוי לכלול ספינות מיפן, קוריאה וטורקיה.",
+            "המחקר עשוי לכלול ספינות מיפן קוריאה וטורקיה",
+        ]
+        assert _dedupe_key_facts(facts) == ["המחקר עשוי לכלול ספינות מיפן, קוריאה וטורקיה."]
+
+    def test_near_duplicate_regression_item5(self) -> None:
+        """Regression for item 5: two entries restate the same fact with a couple of words
+        swapped ("שתיים מהספינות" -> "ספינות", "בארה\"ב" -> "בארה\"ס") -- not an exact match even
+        after punctuation/case normalisation, but a near-duplicate (ratio >= 0.9)."""
+        facts = [
+            'המחקר עשוי לכלול בניית שתיים מהספינות בחו"ל לפני מעבר לייצור בארה"ב.',
+            'המחקר עשוי לכלול בניית ספינות בחו"ל לפני מעבר לייצור בארה"ס.',
+        ]
+        result = _dedupe_key_facts(facts)
+        assert len(result) == 1
+        assert result[0] == facts[0]
+
+    def test_item10_style_exact_triplicate_collapsed_but_short_variant_kept(self) -> None:
+        """Regression for item 10's actual data: entries 2-4 are an exact triplicate (collapsed to
+        one by the plain exact-match path), while entry 1 -- a *shorter* restatement missing the
+        appended clause -- scores just under the 0.9 near-duplicate threshold (~0.884) against it,
+        so it is kept as a distinct fact rather than force-merged."""
+        short = 'החוזה נועד לאפשר לכוחות הצבא להפיל כלי טיס בלתי מאוישים (כטב"מים) באמצעות לייזר'
+        long_ = 'החוזה נועד לאפשר לכוחות הצבא להפיל כלי טיס בלתי מאוישים (כטב"מים) באמצעות לייזר, במקום להשתמש בטילים'
+        facts = [short, long_, long_, long_]
+        result = _dedupe_key_facts(facts)
+        assert result == [short, long_]
+
+    def test_distinct_facts_below_threshold_both_kept(self) -> None:
+        """Two facts that share vocabulary but describe different things must not be merged."""
+        facts = ["המטוס החדש יפעל לצד המטוסים הקיימים.", "הצי האמריקאי מבקש לפתח את המטוס במהירות."]
+        assert _dedupe_key_facts(facts) == facts
+
 
 class TestBackfillEntitiesFromWatchlist:
     def test_no_backfill_when_already_populated(self) -> None:

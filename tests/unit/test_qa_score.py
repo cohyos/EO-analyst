@@ -311,6 +311,32 @@ class TestD4:
         relevance_check = next(c for c in result.checks if c.name == "relevance_check_present_consistent")
         assert relevance_check.passed is False
 
+    def test_legacy_unanchored_job_exempt_from_anchor_check(self) -> None:
+        """D1 round-1 fix (docs/qa/loop/round_1_fixes.md): a job labelled by
+        scripts/mark_legacy_investigations.py's ``legacy_unanchored`` pass is exempt from
+        ``queries_anchored_to_question`` (its queries predate the anchor gate and can't be
+        regenerated) but still checked by the other three D4 sub-checks."""
+        jobs = [
+            {
+                "id": 5,
+                "payload": {"question": "מה קורה עם Rafael Iron Beam"},
+                "result": {
+                    "outcome": "found",
+                    "confidence": 0.8,
+                    "sources": ["https://example.com/a"],
+                    "answer_he": "תשובה מלאה כאן.",
+                    "legacy_unanchored": True,
+                },
+            }
+        ]
+        log_rows = [{"job_id": 5, "query": "completely unrelated query text"}]
+        conn = _FakeConn([("FROM jobs", jobs), ("FROM investigation_log", log_rows)])
+        result = score_D4([5], conn)
+        anchor_check = next(c for c in result.checks if c.name == "queries_anchored_to_question")
+        assert anchor_check.passed is True
+        sources_check = next(c for c in result.checks if c.name == "sources_nonempty_for_found")
+        assert sources_check.passed is True
+
     def test_well_formed_investigation_passes_all(self) -> None:
         jobs = [
             {

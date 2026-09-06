@@ -830,3 +830,67 @@ def test_build_bd_territory_drops_perspective_violation_after_failed_retry(patch
     assert "להציג יכולת של Shield AI" not in html_text
     assert "ליזום פגישת היכרות" in html_text
     assert "US Army" in html_text
+
+
+# ---------------------------------------------------------------------------------------------
+# D7 round-1 fix (docs/qa/loop/round_1_fixes.md, actions_table_nonempty): deterministic
+# candidate-actions fallback when the LLM produced no cited actions.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_deterministic_candidate_actions_covers_every_data_source():
+    competitors = [dict(c) for c in COMPETITORS]
+    competitors[0]["recent_wins"][0]["n"] = 1
+    tenders_data = {
+        "tenders": [{**TENDERS_DATA["tenders"][0], "n": 4}],
+        "forecasts": [],
+    }
+    conferences_data = {"territory": [{**CONFERENCES_DATA["territory"][0], "n": 6}], "international": []}
+    events = [{**PLATFORM_EVENTS[0], "n": 3}]
+
+    actions = bdt._deterministic_candidate_actions(competitors, tenders_data, conferences_data, events)
+
+    assert len(actions) == 4
+    action_texts = [a.action_he for a in actions]
+    assert any("לבחון תגובה תחרותית ל-Elbit" in t for t in action_texts)
+    assert any("להיערך ל-AUSA" in t for t in action_texts)
+    assert any("לבחון מענה ל-RFI: naval EO director" in t for t in action_texts)
+    assert any("לפנות ל-US Army בנושא" in t for t in action_texts)
+    # every action carries a citation into the registry
+    for action in actions:
+        assert bdt.citations_in(action.rationale_he)
+
+
+def test_deterministic_candidate_actions_empty_when_no_data():
+    assert bdt._deterministic_candidate_actions([], {"tenders": []}, {"territory": []}, []) == []
+
+
+def test_recommended_actions_table_deterministic_uses_alternate_title_and_note():
+    draft = _draft_fixture()
+    table = bdt.recommended_actions_table(draft, deterministic=True)
+    assert table["title_he"] == bdt._DETERMINISTIC_ACTIONS_TITLE_HE
+    assert table["note_he"] == bdt._DETERMINISTIC_ACTIONS_NOTE_HE
+
+
+def test_recommended_actions_table_normal_has_no_note():
+    draft = _draft_fixture()
+    table = bdt.recommended_actions_table(draft)
+    assert table["title_he"] == "נקודות כניסה ופעולות מומלצות"
+    assert "note_he" not in table
+
+
+def test_build_bd_territory_uses_deterministic_actions_when_llm_actions_empty(
+    patch_bd_collectors, monkeypatch
+):
+    """When the drafted report ends up with zero recommended actions (LLM produced none, or every
+    one was stripped by the citation/perspective gates), the rendered report still carries a
+    populated, deterministic actions table instead of an empty section."""
+    empty_actions_draft = _draft_fixture().model_copy(update={"recommended_actions": []})
+    monkeypatch.setattr(bdt, "draft_bd_territory", lambda *a, **k: empty_actions_draft)
+
+    paths = bdt.build_bd_territory("US", 90, period_end=dt.date(2026, 9, 6))
+    md_text = paths.md.read_text(encoding="utf-8")  # plain markdown -- no bidi <bdi> tags splitting names
+
+    assert bdt._DETERMINISTIC_ACTIONS_TITLE_HE in md_text
+    assert bdt._DETERMINISTIC_ACTIONS_NOTE_HE in md_text
+    assert "לבחון תגובה תחרותית ל-Elbit" in md_text

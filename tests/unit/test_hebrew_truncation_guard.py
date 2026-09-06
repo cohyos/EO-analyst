@@ -27,6 +27,15 @@ class _Sample(BaseModel):
     inner: list[_Inner] = []
 
 
+class _WithDictFields(BaseModel):
+    """Mirrors the real shape that used to defeat ``_iter_model_strings`` (D1 round-1 fix): a
+    ``list[dict[str, str]]`` (``InvestigationPlanOut.queries``) and a bare
+    ``dict[str, Any] | None`` (``AnalyzeOut.relevance_check``)."""
+
+    queries: list[dict[str, str]] = []
+    relevance_check: dict | None = None
+
+
 class TestLooksTruncated:
     @pytest.mark.parametrize(
         "text",
@@ -141,6 +150,25 @@ class TestIterModelStringsAndSuspects:
         assert fixed is model
         assert model.summary_he == "כטב״ם פעל"
         assert model.key_facts[0] == "מטע״ד תקין."
+
+    def test_dict_values_in_list_are_normalized(self) -> None:
+        """D1 round-1 fix (docs/qa/loop/round_1_fixes.md): a ``list[dict[str, str]]`` field (e.g.
+        ``InvestigationPlanOut.queries``, ``{lang, query, rationale}``) used to be skipped
+        entirely -- neither the ``BaseModel`` nor the ``list``-of-strings branch matched a bare
+        ``dict`` element, so a Hebrew ASCII quote inside e.g. ``rationale`` was never normalised."""
+        model = _WithDictFields(queries=[{"lang": "he", "query": "חוזה", "rationale": 'קשור לצה"ל'}])
+        suspects_before = "".join(v for v, _n, _s in oc._iter_model_strings(model))
+        assert '"' in suspects_before  # sanity: the dict string is actually reachable
+        fixed = oc._normalize_model_hebrew_quotes(model)
+        assert fixed.queries[0]["rationale"] == "קשור לצה״ל"
+        assert fixed.queries[0]["lang"] == "he"  # untouched fields survive
+
+    def test_bare_dict_field_values_are_normalized(self) -> None:
+        """Same gap for a bare ``dict[str, Any] | None`` field (``AnalyzeOut.relevance_check``)."""
+        model = _WithDictFields(relevance_check={"verdict": "no", "note_he": 'לא רלוונטי ל-צה"ל'})
+        fixed = oc._normalize_model_hebrew_quotes(model)
+        assert fixed.relevance_check["note_he"] == "לא רלוונטי ל-צה״ל"
+        assert fixed.relevance_check["verdict"] == "no"
 
 
 class TestGuardHebrewTruncation:

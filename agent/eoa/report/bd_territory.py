@@ -1353,7 +1353,94 @@ def _strip_uncited(draft: BdTerritoryReportDraft, qa: QAResult) -> BdTerritoryRe
 _PRIORITY_LABEL_HE = {"H": "גבוהה", "M": "בינונית", "L": "נמוכה"}
 
 
-def recommended_actions_table(draft: BdTerritoryReportDraft) -> dict[str, Any] | None:
+#: D7 round-1 fix (docs/qa/loop/round_1_fixes.md, ``actions_table_nonempty``): title/note used
+#: only for the deterministic fallback table (:func:`_deterministic_candidate_actions`) -- kept
+#: visually distinct from the normal LLM-authored "נקודות כניסה ופעולות מומלצות" table so a reader
+#: (and ``eoa.qa.d7_bd_report``'s ``no_competitor_promotion_language``/heading checks, which match
+#: on "פעולות"/"המלצ" regardless of which title is used) can tell the two apart.
+_DETERMINISTIC_ACTIONS_TITLE_HE = "פעולות מוצעות (נגזרות מהנתונים)"
+_DETERMINISTIC_ACTIONS_NOTE_HE = (
+    "הטיוטה האנליטית (הנרטיב) לא עברה את בדיקת האזכורים גם לאחר ניסיון תיקון, ולכן הפעולות שלהלן "
+    "נגזרו ישירות מהנתונים הדטרמיניסטיים (רכש, מכרזים, מתחרים, כנסים) ללא ניסוח אנליסט."
+)
+
+
+def _deterministic_candidate_actions(
+    competitors: list[dict[str, Any]],
+    tenders_data: dict[str, Any],
+    conferences_data: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> list[BdAction]:
+    """D7 round-1 fix: when the LLM produced no cited recommended actions even after both retries
+    (perspective gate + citation QA), :func:`build_bd_territory` falls back to a small set of
+    candidate actions built directly from the same deterministic tables the report already
+    renders -- every one traceable to a real row (``[n]`` into the citation registry, already
+    attached to each row by ``_attach_win_citations``/``_extend_registry_with_tenders``/
+    ``_extend_registry_with_conferences``/``_extend_registry_with_source_items`` by the time this
+    runs), never invented text. Order: competitor wins, upcoming territory conferences, open/
+    unknown RFIs, then the single top (most recent) platform event -- matches the task brief."""
+    actions: list[BdAction] = []
+
+    for c in competitors:
+        for win in c.get("recent_wins") or []:
+            program = win.get("program") or win.get("title") or "—"
+            cite = f" [{win['n']}]" if win.get("n") is not None else ""
+            actions.append(
+                BdAction(
+                    action_he=f"לבחון תגובה תחרותית ל-{c['name']} ב-{program}",
+                    priority="M",
+                    rationale_he=f"{c['name']} זוהתה כזוכה באירוע עסקי בטריטוריה זו בחלון הזמן שנבדק.{cite}",
+                    owner_role_he="פיתוח עסקי",
+                    timing_he="רבעון הקרוב",
+                )
+            )
+
+    for conf in conferences_data.get("territory") or []:
+        start, end = conf.get("start_date"), conf.get("end_date")
+        dates = " - ".join(fmt_date(d) for d in (start, end) if d)
+        cite = f" [{conf['n']}]" if conf.get("n") is not None else ""
+        actions.append(
+            BdAction(
+                action_he=f"להיערך ל-{conf.get('name') or '—'} ({dates or '—'})",
+                priority="M",
+                rationale_he=f"כנס בטריטוריה זו בחלון 12 החודשים הקרובים.{cite}",
+                owner_role_he="שיווק",
+                timing_he="תוך חצי שנה",
+            )
+        )
+
+    for tender in tenders_data.get("tenders") or []:
+        cite = f" [{tender['n']}]" if tender.get("n") is not None else ""
+        actions.append(
+            BdAction(
+                action_he=f"לבחון מענה ל-{tender.get('title') or '—'}",
+                priority="H",
+                rationale_he=f"מכרז/RFI פתוח או במעמד לא ידוע בטריטוריה זו.{cite}",
+                owner_role_he="פיתוח עסקי",
+                timing_he="מיידי",
+            )
+        )
+
+    if events:
+        top = events[0]
+        cite = f" [{top['n']}]" if top.get("n") is not None else ""
+        payload = top.get("payload_need_he") or top.get("platform_he") or "—"
+        actions.append(
+            BdAction(
+                action_he=f"לפנות ל-{top.get('buyer') or '—'} בנושא {payload}",
+                priority="H",
+                rationale_he=f"אירוע הרכש/פלטפורמה המשמעותי ביותר שזוהה בטריטוריה זו בחלון הזמן.{cite}",
+                owner_role_he="מכירות",
+                timing_he="מיידי",
+            )
+        )
+
+    return actions
+
+
+def recommended_actions_table(
+    draft: BdTerritoryReportDraft, *, deterministic: bool = False
+) -> dict[str, Any] | None:
     if not draft.recommended_actions:
         return None
     headers = ["עדיפות", "פעולה", "נימוק", "אחראי", "תזמון"]
@@ -1369,7 +1456,11 @@ def recommended_actions_table(draft: BdTerritoryReportDraft) -> dict[str, Any] |
         ]
         for a in actions
     ]
-    return {"title_he": "נקודות כניסה ופעולות מומלצות", "headers": headers, "rows": rows}
+    title_he = _DETERMINISTIC_ACTIONS_TITLE_HE if deterministic else "נקודות כניסה ופעולות מומלצות"
+    table: dict[str, Any] = {"title_he": title_he, "headers": headers, "rows": rows}
+    if deterministic:
+        table["note_he"] = _DETERMINISTIC_ACTIONS_NOTE_HE
+    return table
 
 
 # --------------------------------------------------------------------------
@@ -1589,13 +1680,32 @@ def build_bd_territory(
             {"title_he": "סיכונים והנחות", "body_he": draft.risks_assumptions_he, "position": "after_outlook"}
         )
 
+    # D7 round-1 fix (docs/qa/loop/round_1_fixes.md, ``actions_table_nonempty``): if the LLM's
+    # recommended actions ended up empty by this point -- never drafted any (has_items=False),
+    # dropped entirely by the perspective gate (_drop_perspective_violations), or stripped for
+    # being uncited (_strip_uncited) -- ship a deterministic candidate list built straight from
+    # the same tables already rendered below, rather than an empty BD recommendations section.
+    used_deterministic_actions = False
+    if not draft.recommended_actions:
+        deterministic_actions = _deterministic_candidate_actions(
+            competitors, tenders_data, conferences_data, events
+        )
+        if deterministic_actions:
+            log.warning(
+                "bd_territory_actions_deterministic_fallback",
+                territory=code,
+                n_actions=len(deterministic_actions),
+            )
+            draft = draft.model_copy(update={"recommended_actions": deterministic_actions})
+            used_deterministic_actions = True
+
     tables: list[dict[str, Any]] = []
     for tbl in (
         platform_events_table(events),
         tenders_table(tenders_data),
         competitors_table(competitors),
         conferences_table(conferences_data),
-        recommended_actions_table(draft),
+        recommended_actions_table(draft, deterministic=used_deterministic_actions),
     ):
         if tbl is not None:
             tables.append(tbl)

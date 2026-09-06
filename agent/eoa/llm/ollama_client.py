@@ -519,9 +519,16 @@ def _looks_truncated_mid_hebrew_acronym(text: str, field_name: str) -> bool:
 
 def _iter_model_strings(obj: Any, field_name: str = "") -> Iterator[tuple[str, str, Callable[[str], None]]]:
     """Recursively yield ``(value, field_name, setter)`` for every string leaf reachable from
-    ``obj`` (a pydantic model, or a list of models/strings) -- covers every field of every stage's
-    schema (``ClassifyOut``, ``TriageOut``, ``AnalyzeOut`` incl. nested ``EventOut``/``EdgeOut``
-    lists, etc.) without hardcoding any of their field names."""
+    ``obj`` (a pydantic model, or a list/dict of models/strings/dicts) -- covers every field of
+    every stage's schema (``ClassifyOut``, ``TriageOut``, ``AnalyzeOut`` incl. nested
+    ``EventOut``/``EdgeOut`` lists, etc.) without hardcoding any of their field names.
+
+    D1 round-1 fix (docs/qa/loop/round_1_fixes.md): a plain ``dict`` value -- e.g.
+    ``InvestigationPlanOut.queries: list[dict[str, str]]`` (``{lang, query, rationale}``) or
+    ``AnalyzeOut.relevance_check: dict[str, Any] | None`` -- used to fall through both the
+    ``BaseModel``/``list`` branches untouched (neither matched, and the recursive call on a bare
+    ``dict`` had no case to handle it), so a Hebrew ASCII-quote inside e.g. a query's own
+    ``rationale`` string was never normalised by :func:`_normalize_model_hebrew_quotes`."""
     if isinstance(obj, BaseModel):
         for name in type(obj).model_fields:
             value = getattr(obj, name)
@@ -543,6 +550,16 @@ def _iter_model_strings(obj: Any, field_name: str = "") -> Iterator[tuple[str, s
                 yield item, field_name, _list_setter
             else:
                 yield from _iter_model_strings(item, field_name)
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, str):
+
+                def _dict_setter(new_value: str, _obj: dict = obj, _key: Any = key) -> None:
+                    _obj[_key] = new_value
+
+                yield value, field_name, _dict_setter
+            else:
+                yield from _iter_model_strings(value, field_name)
 
 
 def _find_truncation_suspects(model: BaseModel) -> list[str]:
