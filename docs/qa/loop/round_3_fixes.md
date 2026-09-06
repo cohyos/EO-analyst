@@ -98,3 +98,27 @@ keyless machine-readable portals + 22 regional search sources (docs/TENDER_PORTA
 
 Grounded-entity check, cross-source conflation guard, `[n=…]` template-leak sanitiser, topic
 substitution gap-first — see docs/qa/loop/round_3_chat_fixes.md when it lands.
+
+## Correction to the D1 note above (verified 2026-09-06 15:20)
+
+The 18 "stranded" domain-NULL items are **not stuck**: every one carries `dedup_of` (52 → 10,
+57 → 50, 84 → 62, twelve blocked-page rows → 177, …) — `run_classify` marks a duplicate's stage
+done without classifying it, by design. The judge read "domain NULL + classify done" as a
+pipeline failure; it is the duplicate convention. The self-heal tail stays (harmless, and it does
+cover a real persist failure), and the UI/judge should read `dedup_of` first. Item 39 was
+re-analysed on the new code (summary now "חברת Ophir Optronics … השיקה עדשה חדשה למטע״דים …",
+8 key facts, 1 event, 1 edge).
+
+## D2 — corrective pass for generic so_what (Fable, after the prompt change)
+
+Item 39's fresh analysis still produced "מחזקת את מעמדה של תעשייה אווירית" despite the prompt
+ban — a 12B-model habit. `analyze_item` now runs one targeted rewrite of `so_what_he` when it
+matches a generic formula (morphology-tolerant regexes), keeps the original if the rewrite is
+still generic or malformed. 56 rows carry the formula today (40 in scope); they are rewritten
+progressively as the nightly backfill re-analyses them.
+
+## Ingest job 94 (14:00) failed with `relational has no attribute deactivate_orphaned_sources`
+
+The long-running orchestrator process had imported the old `relational` module before the D7/D9
+agent added the function to the working tree, then lazily imported the new `fetch/service.py`
+that calls it. Gone after the 15:15 restart (job 95 re-run queued to confirm).
