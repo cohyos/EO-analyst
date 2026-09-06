@@ -179,7 +179,7 @@ llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — 
   mode: cloud   # user decision 2026-09-06 16:20: cloud chain for analysis/reports, local fallback (docs/qa/loop/MODEL_DECISION.md)
   allow_cloud: true                 # kill switch: false disables every cloud provider everywhere, chat falls back to ollama
   interactive_default: "ollama"
-  timeout_s: 240   # bake-off: one of 8 claude analyze calls exceeded 120 s on an 11k-char prompt
+  timeout_s: 360   # bake-off: one claude analyze call exceeded 120 s on 11k chars; 2026-09-07 weekly/monthly report drafts (20-80k chars, power=high) exceeded 240 s twice each and fell back to agy
   cli:
     agy:
       binary: agy      # Gemini via Antigravity CLI (resolved through PATH; falls back to an absolute path if set)

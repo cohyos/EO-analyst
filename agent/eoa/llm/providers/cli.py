@@ -61,6 +61,11 @@ _JSON_INSTRUCTION = (
 _CREATE_NO_WINDOW = 0x08000000  # subprocess.CREATE_NO_WINDOW, inlined so this imports on non-Windows too
 
 
+# Windows caps the full command line at 32767 chars; leave headroom for the binary path, flags
+# and the multi-byte expansion of Hebrew text.
+_AGY_ARGV_PROMPT_MAX_CHARS = 24_000
+
+
 def _binary_setting(kind: str) -> str:
     cli = settings().llm_providers.cli.get(kind)
     return cli.binary if cli else kind
@@ -226,17 +231,36 @@ class CliProvider:
         real_model = None if model == "default" else model
         if self.kind == "agy":
             # No stdin support (see docs/adr/005-cloud-llm-cli.md); the prompt is a plain argv
-            # element (no shell involved), reliable up to ~32KB per the field notes.
+            # element (no shell involved) up to _AGY_ARGV_PROMPT_MAX_CHARS, an @file include above.
             # A8/point 4 (docs/adr/006-mcp-sources.md): `agy --help` (checked 2026-09-06) has only
             # a persistent `agy mcp add/remove/list/enable/disable` server registry, no per-call
             # config flag equivalent to claude's `--mcp-config` -- not wired here; documented gap,
             # `mcp.inherit_cli_mcp.agy` defaults to `false` in config/mcp.yaml accordingly.
-            args = [binary, "-p", prompt, "--output-format", "json"]
+            tmp_prompt: Path | None = None
+            if len(prompt) > _AGY_ARGV_PROMPT_MAX_CHARS:
+                # 2026-09-07 (live weekly rebuild): a 74k-char report prompt as one argv element
+                # fails with WinError 206 ("filename or extension is too long") -- Windows caps the
+                # whole command line at ~32k chars -- so every agy fallback leg silently died and
+                # the chain fell through to the local model. `agy` has no plain-stdin mode, but
+                # its `@<path>` include (verified live: `agy -p "... @file"` reads the file) does
+                # the job: spill the prompt to a UTF-8 temp file and hand agy a short pointer.
+                fd, tmp_name = tempfile.mkstemp(prefix="eoa_agy_prompt_", suffix=".md")
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(prompt)
+                tmp_prompt = Path(tmp_name)
+                argv_prompt = (
+                    "The complete prompt (system instructions, task, input material and the required "
+                    f"output format) is in the attached file @{tmp_prompt.as_posix()} -- read it in "
+                    "full and respond exactly as that file instructs, with no preamble."
+                )
+            else:
+                argv_prompt = prompt
+            args = [binary, "-p", argv_prompt, "--output-format", "json"]
             if real_model:
                 args += ["--model", real_model]
             if power:
                 args += ["--effort", power]
-            return args, None, None
+            return args, None, tmp_prompt
         if self.kind == "claude":
             # `-p` with no attached value reads the prompt from stdin.
             args = [binary, "-p", "--output-format", "json", "--restricted"]

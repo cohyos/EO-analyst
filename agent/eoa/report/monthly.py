@@ -79,6 +79,7 @@ from eoa.report.weekly import (
     _fallback_israel_item_sentences,
     _fallback_top_item_sentences,
     _normalize_section_titles,
+    canonical_domain_key,
     collect_yellow_domain_summary,
     format_items_block,
     format_yellow_summary_block,
@@ -770,6 +771,11 @@ def build_monthly(
 
     tables: list[dict[str, Any]] = []
     for domain, rows in players.items():
+        domain = canonical_domain_key(domain) or domain
+        if domain == "out_of_scope":
+            # 2026-09-07 (live monthly rebuild): "נוף תחרותי — out_of_scope" is never a report
+            # section; the weekly's section normaliser already drops this key (F7 follow-up).
+            continue
         tables.append(
             {
                 "title_he": f"נוף תחרותי — {_domain_label(domain)}",
