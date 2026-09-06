@@ -225,6 +225,87 @@ def insert_section_before_html_appendix(text: str, heading_he: str, body_html: s
     return "\n".join([*lines[:idx], heading_html, body_html, *lines[idx:]])
 
 
+# --------------------------------------------------------------------------
+# "שיטה והיקף" (methodology & scope) box insertion (round 5 P5/item 1, 2026-09-06,
+# docs/REPORT_TEMPLATE_BENCHMARK.md 3.5/item 1, 4/item 8): ``eoa.report.docx_builder`` has an
+# ``extra_sections`` hook, but only for ``after_summary``/``after_outlook`` positions -- there is
+# no "before the executive summary" position, and that module stays untouched per this task's
+# ownership split (docs/CONVENTIONS.md ownership note, same as every other helper in this file).
+# These three insert a small labelled section right before the executive-summary heading in an
+# already-rendered docx ``Document``/markdown/HTML report -- ``eoa.patents.survey`` builds the
+# actual content (:func:`eoa.patents.survey.methodology_box_lines_he`) as a plain
+# rendering-agnostic ``list[str]``, so the exact same lines reach all three formats identically.
+# --------------------------------------------------------------------------
+
+_MD_SUMMARY_HEADING = "## תקציר מנהלים"
+_HTML_SUMMARY_MARKER = "תקציר מנהלים"
+
+
+def insert_section_before_md_summary(text: str, heading_he: str, lines_he: list[str]) -> str:
+    """Insert a new ``## heading_he`` section (``lines_he`` rendered as a bullet list) right
+    before the executive-summary heading in an already-rendered markdown report. A report whose
+    markdown never carries that heading at all (should not happen for a patent survey) is
+    returned unchanged rather than guessing where to splice."""
+    lines = text.split("\n")
+    try:
+        idx = lines.index(_MD_SUMMARY_HEADING)
+    except ValueError:
+        return text
+    body = "\n".join(f"- {line}" for line in lines_he)
+    insertion = [f"## {heading_he}", "", body, ""]
+    return "\n".join(lines[:idx] + insertion + lines[idx:])
+
+
+def insert_section_before_html_summary(text: str, heading_he: str, lines_he: list[str]) -> str:
+    """HTML analogue of :func:`insert_section_before_md_summary` -- ``lines_he`` rendered as an
+    ``<ul>``, inserted right before the first ``<h2>`` whose text is the executive-summary
+    heading."""
+    lines = text.split("\n")
+    idx = None
+    for i, line in enumerate(lines):
+        if _HTML_SUMMARY_MARKER in line and line.lstrip().startswith("<h2"):
+            idx = i
+            break
+    if idx is None:
+        return text
+    heading_html = f"<h2>{_html.escape(heading_he)}</h2>"
+    items = "".join(f"<li>{_html.escape(line)}</li>" for line in lines_he)
+    body_html = f'<ul class="methodology-box">{items}</ul>'
+    return "\n".join([*lines[:idx], heading_html, body_html, *lines[idx:]])
+
+
+def insert_section_before_summary_docx(doc: Any, heading_he: str, lines_he: list[str]) -> None:
+    """Mutates ``doc`` in place: inserts a new Heading-1 paragraph titled ``heading_he`` plus one
+    "List Bullet"-styled paragraph per ``lines_he`` immediately before the "תקציר מנהלים" Heading-1
+    paragraph -- reusing ``eoa.report.docx_builder.add_mixed_paragraph`` (via a tiny
+    ``add_paragraph``-duck-typed shim around python-docx's own
+    ``Paragraph.insert_paragraph_before``) so every line still gets that function's Hebrew/Latin
+    bidi run-splitting, exactly as if it had been part of the original ``build_docx`` call. A
+    document with no such heading at all (should not happen -- every survey renders one) is left
+    untouched rather than raising or guessing where to insert."""
+    from eoa.report.docx_builder import add_mixed_paragraph
+
+    ref = next(
+        (
+            p
+            for p in doc.paragraphs
+            if p.text.strip() == "תקציר מנהלים" and p.style is not None and p.style.name == "Heading 1"
+        ),
+        None,
+    )
+    if ref is None:
+        return
+
+    class _InsertBeforeRef:
+        def add_paragraph(self, style: str | None = None):
+            return ref.insert_paragraph_before("", style=style)
+
+    container = _InsertBeforeRef()
+    add_mixed_paragraph(container, heading_he, style="Heading 1")
+    for line in lines_he:
+        add_mixed_paragraph(container, line, style="List Bullet")
+
+
 def inject_advance_footnotes_html(text: str, advance_by_n: dict[int, str]) -> str:
     """HTML analogue of :func:`inject_advance_footnotes_md`, matching
     ``eoa.report.docx_builder.render_html``'s own citation-link markup

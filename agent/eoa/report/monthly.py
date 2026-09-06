@@ -2,23 +2,42 @@
 landscape ("נוף תחרותי") and players map.
 
 Pipeline mirrors ``eoa.report.weekly`` (collect the month's red/orange items ->
-``eoa.report.trends.detect_trends`` -> draft -> QA-gate -> render -> persist), reusing several of
-its small, private helper functions (grouping/label helpers, the citation-registry extension, the
-items/trends prompt-block formatters) rather than duplicating them, since both modules live in this
-same package and both are owned by this task.
+``eoa.report.trends.detect_trends`` -> draft (structured, sentence-per-claim shape, round 5 P1 —
+see below) -> ``qa_citations.check`` -> on failure, one corrective retry, then (if still failing)
+replace the narrative with a deterministic, cited substitute synthesis built straight from the data
+(mirrors ``eoa.report.daily``/``eoa.report.weekly``'s own two-failure fallback) -> render docx/md/
+html reusing ``docx_builder``'s additive ``extra_sections``/``tables`` hooks for the trend prose and
+the players/top-events/horizon/watchlist deterministic tables -> insert a ``reports`` row
+(``kind='monthly'``)), reusing several of ``eoa.report.weekly``'s small, private helper functions
+(grouping/label helpers, the citation-registry extension, the items/trends prompt-block formatters,
+the fallback-sentence builders) rather than duplicating them, since both modules live in this same
+package and both are owned by this task (round 5 P1).
+
+Round 5 P1 (2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md M1-M3): migrated ``MonthlyReportDraft``
+from free-prose (``exec_summary_he``/``sections[].prose_he``/``trend_paragraphs``/``outlook_he``,
+still readable via ``MonthlyReportDraftLegacy``) to the same structured, sentence-per-claim shape
+the daily/weekly reports already use (goal 1 / round-2) — see
+``eoa.llm.schemas.reports.MonthlyReportDraft``'s own docstring for why this makes every citation
+correct by construction with zero changes needed in ``eoa.report.qa_citations`` or
+``eoa.report.textnorm`` (both owned by other round-5 packages). Also adds month-over-month trend
+tracking (M2, :func:`collect_previous_monthly_trends`/:class:`~eoa.llm.schemas.reports.
+MonthlyTrendSection`) and migrates ``outlook_he`` to the same ``OutlookIndicator`` list the
+daily/weekly reports use (M3).
 
 Four things are deliberately **not** sent to the LLM and are instead rendered as deterministic
 ``docx_builder`` ``extra_sections``/``tables`` straight from the DB/graph (per rule 4, "Never
 invent" — none of them can carry an ``[n]`` citation into the item list): the players map
 (:func:`players_map`), the top-10-events-by-amount table (:func:`top_events_by_amount`), the
 24-month conference horizon (:func:`full_horizon_table`), and the watchlist-changes prose
-(:func:`watchlist_changes`).
+(:func:`watchlist_changes`). A fifth, new in round 5 P1, is also deterministic: a trend from the
+previous monthly report with no matching evidence this month is never left for the model to notice
+or narrate — ``build_monthly`` appends a ``change="gone"`` :class:`MonthlyTrendSection` for it
+itself (:func:`_gone_trend_sections`).
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -32,8 +51,8 @@ from eoa.config import REPO_ROOT, settings
 from eoa.db import connection
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.analysis import ReportSection
-from eoa.llm.schemas.reports import MonthlyReportDraft, TrendParagraph
+from eoa.llm.schemas.analysis import Sentence
+from eoa.llm.schemas.reports import MonthlyReportDraft, MonthlyTrendSection
 from eoa.memory import graph as graph_mod
 from eoa.report import trends as trends_mod
 from eoa.report.daily import collect_deep_search, collect_events, collect_open_clarifications
@@ -47,17 +66,22 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
-from eoa.report.qa_citations import QAResult, check, citations_in, split_sentences
+from eoa.report.qa_citations import QAResult, check
 from eoa.report.textnorm import normalize_draft
 from eoa.report.weekly import (
+    _TREND_KIND_LABELS_HE,
     _domain_label,
     _extend_registry_with_events,
     _extend_registry_with_ids,
+    _extend_registry_with_rows,
+    _fallback_event_sentences,
+    _fallback_israel_item_sentences,
+    _fallback_top_item_sentences,
     _normalize_section_titles,
     collect_yellow_domain_summary,
     format_items_block,
-    format_trends_block,
     format_yellow_summary_block,
+    select_items_for_prompt,
 )
 
 log = structlog.get_logger(__name__)
@@ -69,12 +93,19 @@ MONTHLY_TITLE_TEXT = "דוח חודשי — אלקטרואופטיקה ובינ�
 _LEVELS_MAIN = ("red", "orange")
 _PLAYER_EDGE_LABELS = ("COMPETITOR_OF", "SUPPLIER_OF", "PARTNER_OF")
 
+# round 5 P1 (2026-09-06): same input-side reduction rationale as weekly.py's own -- a month can
+# have hundreds of red/orange items, so only a reduced, still score-ordered subset is shown to the
+# model (see eoa.report.weekly.select_items_for_prompt); a month gets a somewhat larger per-domain
+# allowance than a week since it spans roughly 4x the time.
+_PROMPT_ITEMS_PER_DOMAIN = 10
+
 # re-exported so callers/tests importing eoa.report.monthly don't need to know these live in weekly.py
 __all__ = [
     "MonthlyReportDraft",
     "ReportPaths",
     "build_monthly",
     "collect_month_items",
+    "collect_previous_monthly_trends",
     "draft_monthly",
     "full_horizon_table",
     "players_map",
@@ -251,16 +282,156 @@ def format_watchlist_he(entries: list[dict[str, Any]]) -> str:
 
 
 # --------------------------------------------------------------------------
+# M2 (round 5 P1): month-over-month trend strength — read the previous monthly report's own
+# persisted trend snapshot back out of ``reports.qa_report`` (see :func:`_persist_report`'s
+# ``"trends"`` key) and feed it to the drafting prompt as grounded DATA.
+# --------------------------------------------------------------------------
+
+
+def collect_previous_monthly_trends(period_start: dt.date) -> list[dict[str, Any]]:
+    """The most recent monthly report strictly before ``period_start``'s own persisted trend
+    snapshot (``[{"title_he", "domain", "strength"}, ...]``), or ``[]`` when there is no earlier
+    monthly report yet, or its ``qa_report`` predates round 5 P1 (no ``"trends"`` key) — every
+    trend is then treated as "new" by construction, and the prompt says so explicitly."""
+    sql = """
+        SELECT qa_report
+        FROM reports
+        WHERE kind = 'monthly' AND period_end < %(period_start)s
+        ORDER BY period_end DESC
+        LIMIT 1
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, {"period_start": period_start})
+        row = cur.fetchone()
+    if not row:
+        return []
+    qa_report = row.get("qa_report") or {}
+    if not isinstance(qa_report, dict):
+        return []
+    trends = qa_report.get("trends") or []
+    return [t for t in trends if isinstance(t, dict) and t.get("title_he")]
+
+
+def _normalize_trend_title(title: str) -> str:
+    return " ".join((title or "").split()).strip().casefold()
+
+
+def _match_previous_trend(title_he: str, previous_trends: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Best-effort month-over-month identity match: exact (whitespace/case normalized) title text.
+
+    ``eoa.report.trends.detect_trends`` titles are fully deterministic given the same underlying
+    (entity, domain) or (subdomain) key, so this matches reliably for the common ``entity_cluster``/
+    ``domain_surge`` kinds. ``market_convergence``/``tech_race`` titles embed a changing event/
+    company count (e.g. "3 עסקאות...בתקופה"), so the same real-world trend continuing with a
+    different count will not match here and is reported as "new" again — a known, documented
+    limitation rather than a fuzzy-matching engine, acceptable for M2's "is this trend new/
+    strengthening/weakening" purpose."""
+    key = _normalize_trend_title(title_he)
+    if not key:
+        return None
+    for prev in previous_trends:
+        if _normalize_trend_title(prev.get("title_he") or "") == key:
+            return prev
+    return None
+
+
+def format_monthly_trends_block(
+    trend_list: list[dict[str, Any]], id_to_n: dict[int, int], previous_trends: list[dict[str, Any]]
+) -> str:
+    """Like ``eoa.report.weekly.format_trends_block``, but appends the previous monthly report's
+    strength for the same trend (M2) so the model can ground ``strength_prev``/``change`` in real
+    data instead of inventing them. A trend with no match in ``previous_trends`` is marked
+    explicitly as having no prior-month record, so the model knows to write ``change="new"``."""
+    if not trend_list:
+        return "לא זוהו מגמות רוחב מובהקות בתקופה זו."
+    lines: list[str] = []
+    for i, t in enumerate(trend_list, start=1):
+        ns = sorted({id_to_n[iid] for iid in t.get("evidence_item_ids", []) if iid in id_to_n})
+        refs = "".join(f"[{n}]" for n in ns) or "—"
+        entities = ", ".join(t.get("entities") or []) or "—"
+        prev = _match_previous_trend(t.get("title_he", ""), previous_trends)
+        prev_note = (
+            f"חוזק בדוח החודשי הקודם: {prev['strength']}/5"
+            if prev
+            else "לא הופיעה בדוח החודשי הקודם — מגמה חדשה"
+        )
+        lines.append(
+            f"{i}. [{_TREND_KIND_LABELS_HE.get(t['kind'], t['kind'])}] {t['title_he']} | "
+            f"חוזק החודש: {t['strength']}/5 | {prev_note} | ישויות: {entities} | ראיות: {refs}"
+        )
+    return "\n".join(lines)
+
+
+def _gone_trend_sections(
+    current_titles: set[str], previous_trends: list[dict[str, Any]]
+) -> list[MonthlyTrendSection]:
+    """M2: every previous-month trend title with no match among ``current_titles`` (already
+    normalized the same way :func:`_match_previous_trend` does) becomes a deterministic
+    ``change="gone"`` entry — never written by the model (rule 5, "never invent": there is no new
+    evidence this month to ask it to cite or narrate)."""
+    out: list[MonthlyTrendSection] = []
+    seen: set[str] = set()
+    for prev in previous_trends:
+        title = prev.get("title_he") or ""
+        key = _normalize_trend_title(title)
+        if not key or key in current_titles or key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            MonthlyTrendSection(
+                title_he=title,
+                domain=prev.get("domain") or "secondary",
+                sentences=[],
+                strength_now=None,
+                strength_prev=prev.get("strength"),
+                change="gone",
+            )
+        )
+    return out
+
+
+def _render_sentence(sentence: Sentence) -> str:
+    """Local copy of ``eoa.report.docx_builder``'s private sentence-rendering helper (same
+    convention ``eoa.report.weekly._render_trend_sentences`` follows), needed here because trend
+    prose is rendered via the ``extra_sections`` hook (a plain string) rather than through
+    ``draft.sections``'s own duck-typed structured rendering."""
+    text = sentence.text_he.rstrip()
+    markers = "".join(f"[{n}]" for n in sentence.cites)
+    return f"{text} {markers}".rstrip() if markers else text
+
+
+def _render_trend_body(trend: MonthlyTrendSection) -> str:
+    """Deterministic prose for one :class:`MonthlyTrendSection`'s ``extra_sections`` body (M2):
+    the model's own cited sentences, preceded by a deterministic, code-authored month-over-month
+    change note derived from ``strength_now``/``strength_prev``/``change`` — never itself a
+    factual claim requiring a citation, since it only restates numbers already computed from
+    ``eoa.report.trends``/the previous report's own persisted snapshot."""
+    if trend.change == "gone":
+        prev = f"{trend.strength_prev}/5" if trend.strength_prev is not None else "—"
+        return f"מגמה זו הופיעה בדוח החודשי הקודם (חוזק {prev}) ולא נמצאו לה ראיות חדשות החודש."
+    if trend.change == "new":
+        note = "מגמה חדשה החודש."
+    elif trend.change == "stronger":
+        note = f"התחזקה מ-{trend.strength_prev}/5 בחודש הקודם ל-{trend.strength_now}/5 החודש."
+    else:  # weaker
+        note = f"נחלשה מ-{trend.strength_prev}/5 בחודש הקודם ל-{trend.strength_now}/5 החודש."
+    body = " ".join(_render_sentence(s) for s in trend.sentences)
+    return f"{note} {body}".strip()
+
+
+# --------------------------------------------------------------------------
 # drafting
 # --------------------------------------------------------------------------
 
 
 def _no_items_draft() -> MonthlyReportDraft:
     return MonthlyReportDraft(
-        exec_summary_he=("לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח החודשי."),
-        trend_paragraphs=[],
+        exec_summary=[],
+        trends=[],
         sections=[],
-        outlook_he="",
+        system_note_he=("לא זוהו בתקופה זו פריטים חדשים ברמת חשיבות red/orange. אין ממצאים לדיווח החודשי."),
+        analyst_note_he=None,
+        outlook=[],
         open_points_he=[],
     )
 
@@ -270,18 +441,25 @@ def draft_monthly(
     yellow_summary: list[dict[str, Any]],
     trends_block: str,
     *,
+    evidence_item_ids: set[int] | None = None,
     role: str = "resident",
     interactive: bool = False,
 ) -> MonthlyReportDraft:
-    """Draft the ``MonthlyReportDraft`` via the resident model; zero items skip the LLM call."""
+    """Draft the ``MonthlyReportDraft`` via the resident model; zero items skip the LLM call.
+
+    ``items`` stays the full citation registry (unchanged ``n`` numbering); only the prompt-visible
+    item list is reduced (:func:`eoa.report.weekly.select_items_for_prompt`) — same rationale as
+    the weekly report's own round-2 migration (module docstring).
+    """
     if not items:
         return _no_items_draft()
+    prompt_items = select_items_for_prompt(items, evidence_item_ids, per_domain=_PROMPT_ITEMS_PER_DOMAIN)
     prompt = render(
         "report_monthly",
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
-        items_block=wrap_data(format_items_block(items), "report_items", "internal"),
+        items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
         yellow_summary_block=wrap_data(
             format_yellow_summary_block(yellow_summary), "report_yellow", "internal"
         ),
@@ -295,7 +473,10 @@ def draft_monthly(
         ],
         task="report",
         interactive=interactive,
-        options={"temperature": 0.3},
+        # round 5 P1: same rationale as weekly's own round-2 migration -- the structured schema
+        # plus the prompt-item reduction above keep the output bounded, but num_predict stays
+        # generous per the task (capped at 14000, mirroring weekly).
+        options={"temperature": 0.3, "num_predict": 14000},
     )
     return cast(MonthlyReportDraft, _normalize_section_titles(draft))
 
@@ -307,15 +488,17 @@ def _corrective_retry(
     draft: MonthlyReportDraft,
     qa: QAResult,
     *,
+    evidence_item_ids: set[int] | None = None,
     role: str,
     interactive: bool,
 ) -> MonthlyReportDraft:
+    prompt_items = select_items_for_prompt(items, evidence_item_ids, per_domain=_PROMPT_ITEMS_PER_DOMAIN)
     prompt = render(
         "report_monthly",
         date_he=hebrew_date_str(_today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
-        items_block=wrap_data(format_items_block(items), "report_items", "internal"),
+        items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
         yellow_summary_block=wrap_data(
             format_yellow_summary_block(yellow_summary), "report_yellow", "internal"
         ),
@@ -324,7 +507,8 @@ def _corrective_retry(
     correction = (
         "הטיוטה הקודמת שלך נכשלה בבדיקת האזכורים האוטומטית. תקן את כל הבעיות הבאות והחזר טיוטה מלאה "
         "ותקינה מחדש (JSON לפי הסכמה בלבד, ללא הסברים נוספים), מבלי להמציא עובדות חדשות שלא הופיעו "
-        "ברשימת הפריטים או ברשימת המגמות:\n" + errors_text
+        'ברשימת הפריטים או ברשימת המגמות. שים לב: אסור לכתוב "[n]" בטקסט עצמו -- מספרי ההפניה '
+        "שייכים אך ורק לשדה cites של כל משפט:\n" + errors_text
     )
     draft = chat_structured(
         role,
@@ -342,43 +526,48 @@ def _corrective_retry(
     return cast(MonthlyReportDraft, _normalize_section_titles(draft))
 
 
-def _strip_uncited(draft: MonthlyReportDraft, qa: QAResult) -> MonthlyReportDraft:
-    """Sentence-level QA-failure fallback for the (legacy free-prose) monthly draft (F5: also drops
-    an exec-summary sentence duplicated verbatim from a section/trend paragraph). Round-2
-    (2026-09-06): the weekly report moved to the structured schema and now uses a
-    ``eoa.report.daily``-style two-failure "drop the whole narrative" fallback instead of this
-    per-sentence strip — this function stays monthly-only, no longer mirrored from ``weekly.py``."""
-    bad_refs = set(qa.bad_refs)
-    uncited = set(qa.uncited_sentences)
-    duplicates = set(qa.duplicate_sentences)
+# --------------------------------------------------------------------------
+# round 5 P1: deterministic substitute synthesis, mirroring eoa.report.daily/eoa.report.weekly's
+# own two-failure fallback -- reuses weekly.py's generic (draft-type-agnostic) sentence builders
+# rather than duplicating them (both modules are owned by this task).
+# --------------------------------------------------------------------------
 
-    def _clean(text: str, *, extra_drop: AbstractSet[str] = frozenset()) -> str:
-        kept = []
-        for sentence in split_sentences(text):
-            if sentence in uncited or sentence in extra_drop:
-                continue
-            if bad_refs and set(citations_in(sentence)) & bad_refs:
-                continue
-            kept.append(sentence)
-        return " ".join(kept)
+_FALLBACK_TOP_ITEMS = 8
+_FALLBACK_TOP_EVENTS = 8
+_FALLBACK_TOP_ISRAEL_ITEMS = 6
 
-    new_summary = _clean(draft.exec_summary_he, extra_drop=duplicates)
-    if not new_summary:
-        new_summary = "תקציר המנהלים קוצץ במלואו עקב בדיקת אזכורים שנכשלה; ראו qa_report לפרטים."
-    new_trends: list[TrendParagraph] = []
-    for tp in draft.trend_paragraphs:
-        cleaned = _clean(tp.prose_he)
-        if cleaned:
-            new_trends.append(TrendParagraph(title_he=tp.title_he, prose_he=cleaned))
-    new_sections: list[ReportSection] = []
-    for section in draft.sections:
-        cleaned = _clean(section.prose_he)
-        if cleaned:
-            new_sections.append(
-                ReportSection(title_he=section.title_he, domain=section.domain, prose_he=cleaned)
-            )
-    return draft.model_copy(
-        update={"exec_summary_he": new_summary, "trend_paragraphs": new_trends, "sections": new_sections}
+
+def _deterministic_fallback_draft(
+    items: list[dict[str, Any]],
+    events_with_n: list[dict[str, Any]],
+    israel_items: list[dict[str, Any]],
+) -> MonthlyReportDraft:
+    """Mirrors ``eoa.report.weekly._deterministic_fallback_draft``: a deterministic (no LLM)
+    substitute executive summary built straight from the month's already-numbered data -- the top
+    red/orange items, the month's notable business events, and the Israel-relevant items -- used
+    when the LLM-drafted narrative still fails citation QA after one corrective retry. Every
+    sentence cites a real, already-registered item ``n``, so this cannot itself fail
+    :func:`eoa.report.qa_citations.check` (the caller still runs it once anyway, defensively -- see
+    ``build_monthly``)."""
+    sentences: list[Sentence] = []
+    sentences.extend(_fallback_top_item_sentences(items, limit=_FALLBACK_TOP_ITEMS))
+    sentences.extend(_fallback_event_sentences(events_with_n, limit=_FALLBACK_TOP_EVENTS))
+    sentences.extend(_fallback_israel_item_sentences(israel_items, limit=_FALLBACK_TOP_ISRAEL_ITEMS))
+    return MonthlyReportDraft(
+        exec_summary=sentences,
+        trends=[],
+        sections=[],
+        system_note_he=(
+            "תקציר מובנה אוטומטית (ללא ניסוח מודל): הטיוטה הטקסטואלית של הדוח החודשי לא עברה את "
+            "בדיקת האזכורים גם לאחר ניסיון תיקון, ולכן ניסוח המודל הושמט במלואו. התקציר שלעיל הופק "
+            "ישירות מנתוני מסד הנתונים (ללא ניסוח חופשי של מודל), ומכיל את הפריטים המובילים, "
+            "האירועים העסקיים הבולטים והפריטים הרלוונטיים לתעשייה הישראלית לחודש זה — כל משפט כאן "
+            "מצוטט למקורו. הטבלאות הדטרמיניסטיות (נוף תחרותי, אירועים מובילים, לוח כנסים, רשימת "
+            "מעקב) ונספח המקורות שלהלן אינם מושפעים ומוצגים במלואם."
+        ),
+        analyst_note_he=None,
+        outlook=[],
+        open_points_he=[],
     )
 
 
@@ -402,13 +591,24 @@ def _persist_report(
     html_path: Path,
     items: list[dict[str, Any]],
     qa: QAResult,
+    draft: MonthlyReportDraft,
 ) -> int:
+    # M2 (round 5 P1): persist a small trend snapshot (title/domain/strength) alongside the usual
+    # QA fields, purely so the *next* monthly report's :func:`collect_previous_monthly_trends` can
+    # read it back -- excludes this month's own "gone" entries (they carry no strength_now/no new
+    # evidence, so they are not a real trend to carry forward).
+    trend_snapshot = [
+        {"title_he": t.title_he, "domain": t.domain, "strength": t.strength_now}
+        for t in draft.trends
+        if t.change != "gone"
+    ]
     qa_report = {
         "passed": qa.passed,
         "errors": qa.errors,
         "uncited_sentences": qa.uncited_sentences,
         "bad_refs": qa.bad_refs,
         "duplicate_sentences": qa.duplicate_sentences,
+        "trends": trend_snapshot,
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
     sql = """
@@ -454,31 +654,64 @@ def build_monthly(
     deep_search = collect_deep_search(start, end)
     open_clarifications = collect_open_clarifications()
     trend_list = trends_mod.detect_trends((start, end))
+    previous_trends = collect_previous_monthly_trends(start)
 
     all_evidence_ids = {iid for t in trend_list for iid in t.get("evidence_item_ids", [])}
     citation_items = _extend_registry_with_ids(items, all_evidence_ids)
     citation_items, events_with_n = _extend_registry_with_events(citation_items, events)
     id_to_n = {it["id"]: it["n"] for it in citation_items if it.get("id") is not None}
-    trends_block = format_trends_block(trend_list, id_to_n)
+    trends_block = format_monthly_trends_block(trend_list, id_to_n, previous_trends)
 
-    draft = draft_monthly(items, yellow_summary, trends_block, role=role, interactive=interactive)
-    extra_prose = [(tp.title_he, tp.prose_he) for tp in draft.trend_paragraphs]
-    qa = check(draft, citation_items, extra_sections=extra_prose)
+    draft = draft_monthly(
+        items,
+        yellow_summary,
+        trends_block,
+        evidence_item_ids=all_evidence_ids,
+        role=role,
+        interactive=interactive,
+    )
+    # round 5 P1: draft.trends' cites/duplicates are validated directly by
+    # qa_citations._check_structured (MonthlyReportDraft is now the structured shape, same
+    # generic `getattr(draft, "trends", None)` handling WeeklyReportDraft already uses) -- no
+    # extra_sections needed here any more (unlike the pre-round-5 legacy free-prose draft).
+    qa = check(draft, citation_items)
 
     if not qa.passed and items:
         log.warning("monthly_qa_failed_retrying", errors=qa.errors[:10])
         draft = _corrective_retry(
-            items, yellow_summary, trends_block, draft, qa, role=role, interactive=interactive
+            items,
+            yellow_summary,
+            trends_block,
+            draft,
+            qa,
+            evidence_item_ids=all_evidence_ids,
+            role=role,
+            interactive=interactive,
         )
-        extra_prose = [(tp.title_he, tp.prose_he) for tp in draft.trend_paragraphs]
-        qa = check(draft, citation_items, extra_sections=extra_prose)
+        qa = check(draft, citation_items)
 
     if not qa.passed and items:
-        log.error("monthly_qa_failed_stripping", errors=qa.errors[:10])
+        # Mirrors eoa.report.daily/eoa.report.weekly: two failures (initial draft + one corrective
+        # retry) replace the narrative with a deterministic, cited substitute synthesis built
+        # straight from the data -- see `_deterministic_fallback_draft`. The original QA errors are
+        # kept in `qa_report` (persisted below) for the analyst to review; `qa.passed` stays False
+        # either way.
+        log.error("monthly_qa_failed_twice_using_deterministic_fallback", errors=qa.errors[:10])
         original_errors = qa
-        draft = _strip_uncited(draft, qa)
-        extra_prose = [(tp.title_he, tp.prose_he) for tp in draft.trend_paragraphs]
-        check(draft, citation_items, extra_sections=extra_prose)
+        israel_items: list[dict[str, Any]] = []
+        try:
+            from eoa.report.israel_section import collect_israel_items
+
+            month_start_ts = dt.datetime.combine(start, dt.time.min, tzinfo=JERUSALEM).astimezone(dt.UTC)
+            month_end_ts = dt.datetime.combine(end, dt.time.max, tzinfo=JERUSALEM).astimezone(dt.UTC)
+            israel_items = collect_israel_items(month_start_ts, month_end_ts)
+            _extend_registry_with_rows(citation_items, israel_items)
+        except Exception as exc:
+            log.warning("monthly_report_fallback_israel_collect_failed", error=str(exc)[:160])
+        draft = _deterministic_fallback_draft(items, events_with_n, israel_items)
+        fallback_qa = check(draft, citation_items)
+        if not fallback_qa.passed:
+            log.error("monthly_report_fallback_draft_failed_citation_check", errors=fallback_qa.errors[:10])
         qa = QAResult(
             passed=False,
             errors=original_errors.errors,
@@ -487,10 +720,15 @@ def build_monthly(
             duplicate_sentences=original_errors.duplicate_sentences,
         )
 
-    # Round 3 (2026-09-06, D6 judge finding 4): repair doubled ASCII quotes / non-typographic
-    # quote marks around Hebrew abbreviations in every rendered text field before handing the
-    # draft to docx_builder -- see eoa.report.textnorm.
     draft = normalize_draft(draft)
+
+    # M2: a previous-month trend with no matching evidence this month is never left for the model
+    # to notice -- appended deterministically, after QA (these carry no cites to validate) and
+    # after normalization (their own text is already normalized-clean, code-authored).
+    current_titles = {_normalize_trend_title(t.title_he) for t in draft.trends}
+    gone = _gone_trend_sections(current_titles, previous_trends)
+    if gone:
+        draft = draft.model_copy(update={"trends": [*draft.trends, *gone]})
 
     # deterministic, non-LLM data (rule 4: never ask the model to narrate ungrounded numbers)
     players = players_map()
@@ -499,11 +737,11 @@ def build_monthly(
     watchlist_new = watchlist_changes(start, end)
 
     trend_sections = [
-        {"title_he": tp.title_he, "body_he": tp.prose_he, "position": "after_summary"}
-        for tp in draft.trend_paragraphs
+        {"title_he": tp.title_he, "body_he": _render_trend_body(tp), "position": "after_summary"}
+        for tp in draft.trends
     ]
-    # U13 (applied here too, same class of issue): suppress the watchlist section when nothing
-    # changed this month, rather than a heading over a "nothing new" placeholder line.
+    # U13 (same class of issue fixed for the weekly report): suppress the watchlist section when
+    # nothing changed this month, rather than a heading over a "nothing new" placeholder line.
     extra_sections = list(trend_sections)
     if watchlist_new:
         extra_sections.append(
@@ -627,6 +865,6 @@ def build_monthly(
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")
 
-    report_id = _persist_report(start, end, docx_path, md_path, html_path, items, qa)
+    report_id = _persist_report(start, end, docx_path, md_path, html_path, items, qa, draft)
 
     return ReportPaths(docx=docx_path, md=md_path, html=html_path, report_id=report_id, qa=qa)

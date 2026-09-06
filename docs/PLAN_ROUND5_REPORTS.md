@@ -36,3 +36,101 @@
 3. איחוד ישראל + "מה השתנה" (P2).
 4. סבירות/ביטחון (P3), blocked (P7), BD מפת קונים (P6).
 5. פטנטים (P5), צ'אט (P8), אמינות מקור (P4), מדדים (P9).
+
+## סטטוס P2 (2026-09-06 -- הושלם)
+
+כל ארבעת המסירות של P2 הושלמו ונבדקו:
+
+1. **"מה השתנה מאז הדוח הקודם"** (`agent/eoa/report/deltas.py`, חדש) — דלתא דטרמיניסטית מול הדוח
+   הקודם מאותו `kind` (יומי/שבועי, ופונקציה גנרית שיכולה לשמש גם BD-טריטוריאלי בגל ב', לא חוברה
+   שם בסבב זה): פריטים חדשים (עד 3 מובילים עם [n]), פריטים שעלו ברמה, ומגמות
+   שהתחדשו/התחזקו/נחלשו/נעלמו (שבועי בלבד). נרינדר כ-`extra_sections` מיד אחרי תקציר המנהלים
+   (`position="after_summary"`), עם שורה כנה אחת כשאין דוח קודם.
+2. **מעקב אינדיקטורים** (`agent/eoa/report/indicators.py` + מיגרציה `0023`) — טבלת
+   `indicator_watchlist` עוקבת אחרי כל אינדיקטור (`OutlookIndicator.text_he`) לאורך גיליונות:
+   הבשלה (התאמת מונחי-מפתח דטרמיניסטית מול פריטי הגיליון הנוכחי), ביטול (30 יום בלי התאמה),
+   ודה-דופ (דמיון טקסט מנורמל ≥0.85) של אינדיקטורים חדשים מול הפתוחים. נרינדר כטבלת מארקדאון
+   ("מעקב אינדיקטורים") ב-`extra_sections` מיד אחרי "מבט קדימה" (`position="after_outlook"`).
+   המודל אינו רואה או כותב את הטבלה הזו כלל.
+3. **איחוד תעשייה ישראלית** (`agent/eoa/report/israel_section.py`) — ארבע טבלאות הקטגוריה מוזגו
+   לטבלה אחת עם עמודת "סוג" (זכייה/תחרות/יצוא/איום, מחוברות ב-"/" כשפריט שייך ליותר מקטגוריה
+   אחת), שורה אחת לכל פריט. שמות הפונקציות `daily_israel_tables`/`weekly_israel_tables` (וה-API
+   שלהן) נשארו ללא שינוי.
+4. **מיגרציה `0023`** (`db/migrations/versions/0023_indicator_watchlist.py`) — הוחלה ואומתה חיה:
+   `alembic current` = `0024` (head, משורשר דרך `0024_payloads_variant.py` שנוסף במקביל);
+   `reports.report_state` (JSONB) וטבלת `indicator_watchlist` קיימות ב-DB עם העמודות הצפויות.
+
+חיווט ב-`daily.py`/`weekly.py`: קוד אספנים/הרכבה בלבד (אחרי `normalize_draft`, בטרם רינדור), כל
+קטע בתוך `try/except` משלו כמו כל הקטעים האדיטיביים האחרים -- כשל בהם לעולם לא שובר את הדוח.
+`_persist_report` בשני המודולים מקבל כעת `report_state` ושומר אותו לעמודה החדשה.
+
+**בדיקות**: `tests/unit/test_report_deltas_round5.py` (חדש, 38 בדיקות) + תוספות ל-
+`tests/unit/test_israel_section.py` (+9). `pytest tests/unit -q -k "delta or indicator or israel
+or report_daily or report_weekly"` (עם `DATABASE_URL` מ-`runtime/eoa.env`): **154 עברו, 0 נכשלו**.
+ruff (`check`+`format --check`) נקי על כל הקבצים שנגעו בהם.
+
+**ממצא לוואי (לא בתחום P2, לתשומת לב מי שיחווט B4 ל-BD בגל ב')**: כל קריאת DB ב-`deltas.py`/
+`indicators.py` משתמשת ב-`connection(timeout=5)` (מוסכמת "סעיף דוח אופציונלי" הקיימת כבר ב-
+`bd_territory.py`) -- ולעומת זאת נמצא (חי, תוך כדי בדיקה) קריאת `connection()` חסרת timeout,
+קיימת מראש ולא קשורה לסבב זה, ב-`eoa.pipeline.tech_watch.run_tech_watch_weekly` (נקראת מ-
+`weekly.py`'s הקיים כבר A12 section) שיכולה לתקוע בדיקת אינטגרציה שלמה של `build_weekly` כש-DB
+לא זמין/לא ממוקה. לא טופל כאן (מחוץ לבעלות הקבצים של חבילה זו).
+
+## סטטוס P1 (עודכן 2026-09-06, בוצע)
+
+**M1, M2, M3 סגורים.** `MonthlyReportDraft` (agent/eoa/llm/schemas/reports.py) עבר לסכמה מובנית
+(`Sentence`/`StructuredSection`/`OutlookIndicator`, זהה בשמות השדות ל-`WeeklyReportDraft`) —
+ציטוט [n] נאכף בבנייה, ללא שינוי נדרש ב-`qa_citations.py`/`textnorm.py`/`docx_builder.py`
+(קריאה-בלבד, כמתוכנן). הסכמה הישנה נשמרת כ-`MonthlyReportDraftLegacy` לקריאת דוחות ישנים בלבד.
+נוסף `MonthlyTrendSection` (חדש, M2) עם `strength_now`/`strength_prev`/`change` ומעקב חודש-מול-חודש
+דרך `reports.qa_report` (`collect_previous_monthly_trends`); מגמות "gone" מוזרקות דטרמיניסטית
+בקוד ולעולם לא נכתבות ע"י המודל. `agent/eoa/report/monthly.py` אומץ למבנה זהה ל-`weekly.py`
+(input reduction, corrective retry, deterministic fallback לאחר שני כשלונות). `report_monthly.md`
+נכתב מחדש. בדיקות: `tests/unit/test_monthly_round5.py` (27, חדש) + עדכון תיקוני-שם ב-3 קבצי בדיקה
+לא-בבעלות המשימה (`test_docx_builder.py`/`test_report_qa.py`/`test_report_round3_d6.py`, ששימשו
+ב-`MonthlyReportDraft` הישן רק כדוגמת-על לסכמה החופשית — שינוי שם בלבד ל-`MonthlyReportDraftLegacy`)
++ עדכון `test_report_weekly_monthly.py` לפיקסצ'ר החודשי החדש. ראו docs/MODULES.md "Round 5 P1"
+לפירוט מלא ותוצאות בדיקות.
+
+## סטטוס P5 (עודכן 2026-09-06, בוצע -- כולל השלמת עבודה שנקטעה ע"י rate limit)
+
+**כל שישת הפערים סגורים.** (1) תיבת "שיטה והיקף" דטרמיניסטית -- שאילתה, מאגרים שנסרקו, טווח
+תאריכים, מספר רשומות (חדשות מהסריקה מול מהמאגר), **"כיסוי נתוני מקצה: NN% (k/n)"** כתגית בולטת
+משלה, כיסוי CPC, ומשפט הכיסוי הנמוך (כשרלוונטי) -- כל זה כ-`list[str]` דטרמיניסטי אחד
+(`methodology_box_lines_he`, `agent/eoa/patents/survey.py`) שמוזרק *לפני* "תקציר מנהלים" בשלושת
+הפורמטים (docx/md/html) דרך שלוש פונקציות חדשות ב-`agent/eoa/patents/render.py`
+(`insert_section_before_summary_docx`/`_md_summary`/`_html_summary`) -- בלי לגעת ב-`docx_builder.py`
+(לזה אין hook "לפני התקציר", רק `after_summary`/`after_outlook`; ההזרקה היא מניפולציית
+python-docx/מחרוזת פוסט-רנדור, אותו דפוס שכבר קיים לגרף ה-ASCII/SVG של ציר הזמן). משפט הכיסוי
+הנמוך הוסר מ`exec_summary` (שינוי חוזי ב-`_enforce_coverage_caveat` -- כבר לא מוסיף אליו, רק
+לסעיפי "פרופיל מקצה"; 3 בדיקות ב-`test_patents_round3.py` עודכנו לחוזה החדש). (2) מקצים כוזבים
+(אזור/מדינה/סיומת גנרית כמו "Inc"/"Ltd"/"United States"/"ארה\"ב") נדחים ב-`_is_real_company_assignee`
+(regex + `resolve_country_name`) -- כבר ממומש מהעבודה שנקטעה, נוספו בדיקות. (3) כשאין CPC, האשכול
+"לא מסווג" מתפצל ל-TF-IDF-lite (מימוש stdlib טהור, ללא sklearn/numpy) לפי מילות מפתח מהכותרת/תקציר,
+עד `UNCLASSIFIED_MAX_SUBCLUSTERS` (=5) תת-אשכולות, כל אחד מתויג לפי מונחיו המובילים במקום תווית
+גנרית אחת. (4) `_verify_relationship_edges` מוודא שכל צד בקשר אכן מוזכר במקור המצוטט (מילה שלמה,
+דרך `find_watchlist_aliases_in_text` -- לא substring גולמי, ולא alias "strict" בלי ליווי השם
+הקנוני עצמו -- זה בדיוק מה שתיקן את הרגרסיה: המילה האנגלית הרגילה "anvil" ב"the old blacksmith's
+anvil" כבר לא מתפרשת כאזכור Anduril רק כי "Anvil" הוא alias מוצר strict שלה), ומבטל כפילויות לפי
+זוג-צד-קנוני+סוג+ציטוט ("Elbit"/"Elbit Systems" לאותו IAI קורסים לשורה אחת) -- נבדק במפורש עם
+תרחיש "Sigma 155" מ-round_3_judge.md D8 #4. (5) `PatentBizAction` קיבל `priority`
+(high/medium/low) + `confidence` (0-1, ולידציה pydantic) -- מוצג כתחילית `[עדיפות: X | ביטחון: Y%]`
+בנרטיב וכטבלה דטרמיניסטית נפרדת ("השלכות עסקיות והמלצות -- עדיפות וביטחון",
+`business_implications_table`, ממוינת עדיפות-קודם). (6) מטריצת CPC x מקצה מלאה
+(`_cpc_assignee_matrix`) לצד טבלת הפערים הקיימת -- מוצגת רק כששני הצירים לא ריקים (אחרת אין מה
+לצייר בכנות).
+
+**בדיקות:** `tests/unit/test_patents_round5.py` חדש, 58 בדיקות (אחת לכל התנהגות/גבול לכל אחד
+משישת הפערים) + 3 בדיקות עודכנו ב-`test_patents_round3.py` (חוזה `_enforce_coverage_caveat` החדש).
+`pytest tests/unit -q -k "patent or d8"`: 314 עברו, כשל אחד קיים-מראש ולא-קשור
+(`test_patents_scan.py::TestScanPatentsOrchestration::test_duplicate_pub_number_across_queries_counted_once`
+-- ניסיון חיבור DB אמיתי שנכשל על אימות, ב-`agent/eoa/patents/scan.py` שאינו בבעלות חבילה זו ולא
+נגעתי בו; קיים כך גם לפני תחילת החבילה). `ruff check`/`ruff format --check` נקיים על כל הקבצים
+שנגעתי בהם (`survey.py`, `cluster.py`, `render.py`, `schemas/patents.py`,
+`test_patents_round5.py`, `test_patents_round3.py`) -- כולל שני תיקוני lint שהיו קיימים בקוד
+המשוחזר מה-stash (`zip()` בלי `strict=` ב-`cluster.py`, ייבוא לא ממוין ב-`survey.py`).
+
+**תלוי במפתחות EPO/PatentsView חסרים:** תיבת "שיטה והיקף" מדווחת באמת "Google Patents (חיפוש
+חסר-מפתחות)" כל עוד `EPO_OPS_KEY`/`EPO_OPS_SECRET`/`PATENTSVIEW_API_KEY` לא מוגדרים -- שדה כיסוי
+CPC/מקצה יישאר נמוך במבנה הנוכחי כי המקור חסר-המפתחות לרוב אינו מחזיר אף אחד מהם; שום דבר בחבילה
+הזו לא מוסתר או ממציא נתון בהיעדרם, רק מדווח את הפער בכנות (כפי שכבר נהוג בקוד הקיים).

@@ -6,13 +6,19 @@ Deterministic (non-LLM-drafted) tables, wired as additive ``tables=[...]`` entri
 report's LLM-drafted sections, citation QA gate (``eoa.report.qa_citations``), or existing
 rendering paths change.
 
+Round 5 P2 (D6, docs/REPORT_TEMPLATE_BENCHMARK.md §2.1/§3.1 row 8): the original A13 shape
+rendered the four category buckets (זכיות/חוזים, תחרות ומתחרים, הזדמנויות יצוא, איומים ורגולציה)
+as up to four *separate* tables -- an item eligible for two categories rendered its own row,
+near-identically, in each one. Both entry points now build a **single** table with a "סוג" column
+instead: one row per item, its category label(s) joined when it qualifies for more than one
+(e.g. "זכייה/תחרות") -- see :func:`_merged_israel_table`. Function names/signatures used by
+``daily.py``/``weekly.py`` are unchanged.
+
   - ``daily_israel_tables``: items with ``israel_relevance >= DAILY_MIN_RELEVANCE`` published/
-    fetched in the collection window, grouped into four category tables per
-    docs/PLAN_WINDOWS_NATIVE.md row A13 point 4 -- זכיות/חוזים, תחרות ומתחרים, הזדמנויות יצוא,
-    איומים ורגולציה (an item's ``event`` kinds / ``israel_reasons`` decide which bucket(s) it
-    lands in; an item can appear in more than one). Each bullet row carries a ``[n]`` citation.
-  - ``weekly_israel_tables``: the same category buckets over the week, plus a small "תעשייה
-    ישראלית -- שבועי" summary table: Israeli company | mentions | wins | competitors active.
+    fetched in the collection window (an item's ``event`` kinds / ``israel_reasons`` decide which
+    categor(y/ies) it lands in -- see :func:`_categorize`), one merged table.
+  - ``weekly_israel_tables``: the same merged table over the week, plus a small "תעשייה ישראלית
+    -- שבועי" summary table: Israeli company | mentions | wins | competitors active.
 
 Both functions take the caller's ``citation_items`` list and extend it in place (mirroring
 ``eoa.report.tech_watch``'s own ``_extend_registry``, duplicated locally per this codebase's
@@ -49,6 +55,17 @@ _CATEGORY_TITLES_HE = {
     _CATEGORY_THREATS: "איומים ורגולציה",
 }
 _CATEGORY_ORDER = [_CATEGORY_WINS, _CATEGORY_COMPETITION, _CATEGORY_EXPORT, _CATEGORY_THREATS]
+
+#: Round 5 P2 (D6): the short "סוג" (type) column label for the merged table -- one word per
+#: category, distinct from :data:`_CATEGORY_TITLES_HE`'s longer table-heading phrasing.
+_CATEGORY_TYPE_LABELS_HE = {
+    _CATEGORY_WINS: "זכייה",
+    _CATEGORY_COMPETITION: "תחרות",
+    _CATEGORY_EXPORT: "יצוא",
+    _CATEGORY_THREATS: "איום",
+}
+
+_MERGED_TABLE_TITLE_HE = "תעשייה ישראלית"
 
 _WIN_EVENT_KINDS = {"contract_award", "m_and_a", "deployment"}
 _THREAT_TAGS_HE = ("איום", "רגולצי", "סנקצי", "אמברגו", "חקיק")
@@ -166,39 +183,38 @@ def _extend_registry(
     return citation_items
 
 
-def _category_table(category: str, items: list[dict[str, Any]], *, max_items: int) -> dict[str, Any] | None:
-    picked = items[:max_items]
-    if not picked:
-        return None
-    headers = ["כותרת", "ישויות", "מה זה אומר", "מקור"]
-    rows = [
-        [
-            it.get("title") or "—",
-            ", ".join((it.get("entities_mentioned") or [])[:4]) or "—",
-            it.get("so_what_he") or it.get("summary_he") or "—",
-            f"[{it['n']}]",
-        ]
-        for it in picked
-    ]
-    return {"title_he": f"תעשייה ישראלית — {_CATEGORY_TITLES_HE[category]}", "headers": headers, "rows": rows}
-
-
-def _build_category_tables(
-    citation_items: list[dict[str, Any]], items: list[dict[str, Any]], *, max_items_per_category: int
-) -> list[dict[str, Any]]:
-    if not items:
-        return []
+def _merged_israel_table(
+    citation_items: list[dict[str, Any]], items: list[dict[str, Any]], *, max_items: int
+) -> dict[str, Any] | None:
+    """Round 5 P2 (D6): one row per item (not one row per item per category) -- an item eligible
+    for more than one category (e.g. a contract win that is also a competitive signal) gets a
+    single row with its "סוג" cell joining every applicable category label
+    (:data:`_CATEGORY_TYPE_LABELS_HE`), e.g. "זכייה/תחרות", instead of duplicating the row once
+    per category as the old per-category tables did. An item :func:`_categorize`\\ s to no
+    category at all is excluded, same as before. Row order: the item's own incoming order
+    (``collect_israel_items``'s relevance/score-desc order), capped at ``max_items``."""
     _extend_registry(citation_items, items)
-    by_category: dict[str, list[dict[str, Any]]] = {c: [] for c in _CATEGORY_ORDER}
+    rows: list[list[Any]] = []
     for it in items:
-        for cat in _categorize(it):
-            by_category[cat].append(it)
-    tables: list[dict[str, Any]] = []
-    for cat in _CATEGORY_ORDER:
-        table = _category_table(cat, by_category[cat], max_items=max_items_per_category)
-        if table:
-            tables.append(table)
-    return tables
+        cats = _categorize(it)
+        if not cats:
+            continue
+        type_cell = "/".join(_CATEGORY_TYPE_LABELS_HE[c] for c in _CATEGORY_ORDER if c in cats)
+        rows.append(
+            [
+                it.get("title") or "—",
+                type_cell,
+                ", ".join((it.get("entities_mentioned") or [])[:4]) or "—",
+                it.get("so_what_he") or it.get("summary_he") or "—",
+                f"[{it['n']}]",
+            ]
+        )
+        if len(rows) >= max_items:
+            break
+    if not rows:
+        return None
+    headers = ["כותרת", "סוג", "ישויות", "מה זה אומר", "מקור"]
+    return {"title_he": _MERGED_TABLE_TITLE_HE, "headers": headers, "rows": rows}
 
 
 def daily_israel_tables(
@@ -209,11 +225,13 @@ def daily_israel_tables(
     min_relevance: float = DAILY_MIN_RELEVANCE,
     max_items_per_category: int = DAILY_MAX_ITEMS_PER_CATEGORY,
 ) -> list[dict[str, Any]]:
-    """Additive `tables=[...]` entries for the daily report's "תעשייה ישראלית" section -- up to
-    four category tables (see module docstring). `[]` when nothing qualifies today, same
-    convention as `eoa.tenders.report_section.tenders_table`."""
+    """Additive `tables=[...]` entries for the daily report's "תעשייה ישראלית" section -- the
+    single merged table (see module docstring; D6). `[]` when nothing qualifies today, same
+    convention as `eoa.tenders.report_section.tenders_table`. `max_items_per_category` is now an
+    overall row cap on the merged table (kept under its original name for call-site stability)."""
     items = collect_israel_items(start, end, min_relevance=min_relevance)
-    return _build_category_tables(citation_items, items, max_items_per_category=max_items_per_category)
+    table = _merged_israel_table(citation_items, items, max_items=max_items_per_category)
+    return [table] if table else []
 
 
 def _company_summary_rows(items: list[dict[str, Any]]) -> list[list[Any]]:
@@ -253,11 +271,12 @@ def weekly_israel_tables(
     min_relevance: float = DAILY_MIN_RELEVANCE,
     max_items_per_category: int = WEEKLY_MAX_ITEMS_PER_CATEGORY,
 ) -> list[dict[str, Any]]:
-    """Additive `tables=[...]` entries for the weekly report: the same four category tables as
-    the daily report (over the week), plus the per-company mentions/wins/competitors summary
+    """Additive `tables=[...]` entries for the weekly report: the same single merged table as the
+    daily report (over the week; D6), plus the per-company mentions/wins/competitors summary
     table. `[]` when nothing qualifies for the week."""
     items = collect_israel_items(start, end, min_relevance=min_relevance)
-    tables = _build_category_tables(citation_items, items, max_items_per_category=max_items_per_category)
+    table = _merged_israel_table(citation_items, items, max_items=max_items_per_category)
+    tables: list[dict[str, Any]] = [table] if table else []
     company_rows = _company_summary_rows(items)
     if company_rows:
         tables.append(

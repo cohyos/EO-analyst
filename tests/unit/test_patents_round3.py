@@ -142,14 +142,28 @@ class TestScrubExclusivityClaims:
 
 
 class TestEnforceCoverageCaveat:
-    def test_appends_caveat_to_exec_summary_and_every_profile_section(self):
+    """Round 5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.5/item 2, "תקציר מנהלים: כפי שקיים, בלי לחזור
+    על נתון הכיסוי"): ``_enforce_coverage_caveat`` no longer force-appends the caveat into
+    ``exec_summary`` the way round 3 did -- that sentence now lives once, prominently, in the
+    "שיטה והיקף" box (:func:`eoa.patents.survey.methodology_box_lines_he`) rendered before the
+    summary, and repeating it verbatim inside the summary text too is exactly the redundancy the
+    round-5 spec asks to remove. It still guarantees the caveat in every assignee-profile section
+    (unchanged from round 3 -- a claim of exclusivity for one specific assignee needs the caveat
+    sitting right next to it, not several sections away in the opening box)."""
+
+    def test_never_touches_exec_summary(self):
+        draft = _fallback_draft([])
+        _enforce_coverage_caveat(draft, 5, 6)
+        caveat = _coverage_caveat_he(5, 6)
+        assert not any(s.text_he == caveat for s in draft.exec_summary)
+
+    def test_appends_caveat_to_every_profile_section_only(self):
         draft = _fallback_draft([])
         draft.sections.append(_RenderSection(title_he="פרופיל מקצה: Anduril", sentences=[]))
         draft.sections.append(_RenderSection(title_he="פרופיל מקצה: Elbit", sentences=[]))
         draft.sections.append(_RenderSection(title_he="נוף הפטנטים", sentences=[]))  # not a profile
         _enforce_coverage_caveat(draft, 5, 6)
         caveat = _coverage_caveat_he(5, 6)
-        assert any(s.text_he == caveat for s in draft.exec_summary)
         profile_sections = [s for s in draft.sections if s.title_he.startswith("פרופיל מקצה:")]
         assert len(profile_sections) == 2
         for section in profile_sections:
@@ -157,12 +171,14 @@ class TestEnforceCoverageCaveat:
         non_profile = next(s for s in draft.sections if s.title_he == "נוף הפטנטים")
         assert non_profile.sentences == []
 
-    def test_idempotent_does_not_duplicate_caveat(self):
+    def test_idempotent_does_not_duplicate_caveat_in_profile_section(self):
         draft = _fallback_draft([])
+        draft.sections.append(_RenderSection(title_he="פרופיל מקצה: Anduril", sentences=[]))
         _enforce_coverage_caveat(draft, 5, 6)
         _enforce_coverage_caveat(draft, 5, 6)
         caveat = _coverage_caveat_he(5, 6)
-        assert sum(1 for s in draft.exec_summary if s.text_he == caveat) == 1
+        section = draft.sections[0]
+        assert sum(1 for s in section.sentences if s.text_he == caveat) == 1
 
 
 # --------------------------------------------------------------------------

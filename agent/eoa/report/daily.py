@@ -893,6 +893,8 @@ def _persist_report(
     html_path: Path,
     items: list[dict[str, Any]],
     qa: QAResult,
+    *,
+    report_state: dict[str, Any] | None = None,
 ) -> int:
     qa_report = {
         "passed": qa.passed,
@@ -902,10 +904,15 @@ def _persist_report(
         "duplicate_sentences": qa.duplicate_sentences,
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
+    # Round 5 P2 (docs/PLAN_ROUND5_REPORTS.md P2): `report_state` is the raw material
+    # `eoa.report.deltas.previous_report_state` reads back for the *next* daily report's delta --
+    # see `eoa.report.deltas.build_report_state`. `None` (a manual caller that doesn't pass it) is
+    # persisted as SQL NULL, same as every report built before this migration.
     sql = """
         INSERT INTO reports (kind, period_start, period_end, path_docx, path_md, path_html,
-                              items_included, qa_passed, qa_report)
-        VALUES ('daily', %(start)s, %(end)s, %(docx)s, %(md)s, %(html)s, %(items)s, %(qa_passed)s, %(qa_report)s)
+                              items_included, qa_passed, qa_report, report_state)
+        VALUES ('daily', %(start)s, %(end)s, %(docx)s, %(md)s, %(html)s, %(items)s, %(qa_passed)s,
+                %(qa_report)s, %(report_state)s)
         RETURNING id
     """
     with connection() as conn, conn.cursor() as cur:
@@ -920,6 +927,7 @@ def _persist_report(
                 "items": item_ids,
                 "qa_passed": qa.passed,
                 "qa_report": Json(qa_report),
+                "report_state": Json(report_state) if report_state is not None else None,
             },
         )
         report_id: int = cur.fetchone()["id"]
@@ -1111,6 +1119,31 @@ def build_daily(
 
     draft = normalize_draft(draft)
 
+    # Round 5 P2 (docs/PLAN_ROUND5_REPORTS.md P2, D4/D5): "מה השתנה מאז הדוח הקודם" (deterministic
+    # delta vs. the previous daily report) and the "מעקב אינדיקטורים" (I&W) watchlist table -- both
+    # additive `extra_sections` entries, computed here (after the draft/fallback is final) so the
+    # delta's "top new items" and the indicator maturation check both see this issue's real,
+    # already-numbered item list. A failure in either must never break the daily report.
+    extra_sections: list[dict[str, Any]] = []
+    indicator_rows: list[dict[str, Any]] = []
+    try:
+        from eoa.report import deltas
+
+        delta_result = deltas.compute_deltas("daily", items, before_period_end=label)
+        extra_sections.append(deltas.delta_extra_section(delta_result))
+    except Exception as exc:
+        log.warning("daily_report_deltas_section_failed", error=str(exc)[:160])
+    try:
+        from eoa.report import indicators
+
+        indicator_section, indicator_rows = indicators.build_indicator_watchlist_section(
+            "daily", draft.outlook, items, citation_items
+        )
+        if indicator_section:
+            extra_sections.append(indicator_section)
+    except Exception as exc:
+        log.warning("daily_report_indicator_watchlist_failed", error=str(exc)[:160])
+
     # section 5.2 / FR-5.2: tenders/RFI/RFP -- deterministic (not LLM-drafted), so it is rendered
     # via the additive tables hook below rather than touching DailyReportDraft or the citation QA
     # gate. F6: ONE rendering of tenders (the open-tenders board) plus a compact forecasts
@@ -1194,6 +1227,7 @@ def build_daily(
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
+        extra_sections=extra_sections or None,
         tables=tender_tables,
     )
     if llm_footer_he:
@@ -1209,6 +1243,7 @@ def build_daily(
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
+        extra_sections=extra_sections or None,
         tables=tender_tables,
     )
     if llm_footer_he:
@@ -1224,6 +1259,7 @@ def build_daily(
         deep_search=deep_search,
         open_clarifications=open_clarifications,
         qa=qa,
+        extra_sections=extra_sections or None,
         tables=tender_tables,
     )
     if llm_footer_he:
@@ -1237,6 +1273,21 @@ def build_daily(
     html_path.write_text(html_text, encoding="utf-8")
 
     period_start_date = start_ts.astimezone(JERUSALEM).date()
-    report_id = _persist_report(period_start_date, label, docx_path, md_path, html_path, items, qa)
+    # Round 5 P2: this issue's own state, persisted for the *next* daily report's delta.
+    try:
+        from eoa.report import deltas
+
+        open_indicator_ids = [
+            r["id"]
+            for r in indicator_rows
+            if r.get("_row_status") in ("open", "new") and r.get("id") is not None
+        ]
+        report_state = deltas.build_report_state(items, indicator_ids=open_indicator_ids)
+    except Exception as exc:
+        log.warning("daily_report_state_build_failed", error=str(exc)[:160])
+        report_state = None
+    report_id = _persist_report(
+        period_start_date, label, docx_path, md_path, html_path, items, qa, report_state=report_state
+    )
 
     return ReportPaths(docx=docx_path, md=md_path, html=html_path, report_id=report_id, qa=qa)

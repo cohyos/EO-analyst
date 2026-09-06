@@ -12,7 +12,7 @@ import datetime as dt
 import docx
 import pytest
 
-from eoa.llm.schemas.analysis import OutlookIndicator, ReportSection, Sentence, StructuredSection
+from eoa.llm.schemas.analysis import OutlookIndicator, Sentence, StructuredSection
 from eoa.llm.schemas.reports import MonthlyReportDraft, WeeklyReportDraft, WeeklyTrendSection
 from eoa.report import monthly, trends, weekly
 
@@ -342,14 +342,16 @@ MONTH_ITEMS = [
 
 def _monthly_draft_fixture() -> MonthlyReportDraft:
     return MonthlyReportDraft(
-        exec_summary_he="IAI זכתה בחוזה חדש לאספקת מערכת EO ימית [1].",
-        trend_paragraphs=[],
+        exec_summary=[Sentence(text_he="IAI זכתה בחוזה חדש לאספקת מערכת EO ימית.", cites=[1])],
+        trends=[],
         sections=[
-            ReportSection(
-                title_he="תצפית ימית", domain="naval_surveillance", prose_he="IAI זכתה בחוזה חדש [1]."
+            StructuredSection(
+                title_he="תצפית ימית",
+                domain="naval_surveillance",
+                sentences=[Sentence(text_he="IAI זכתה בחוזה חדש.", cites=[1])],
             ),
         ],
-        outlook_he="להערכתנו המגמה תימשך.",
+        outlook=[OutlookIndicator(text_he="להערכתנו המגמה תימשך.", cites=[], is_assessment=True)],
         open_points_he=[],
     )
 
@@ -362,6 +364,7 @@ def patch_monthly_collectors(monkeypatch, tmp_path):
     monkeypatch.setattr(monthly, "collect_deep_search", lambda s, e, limit=None: [])
     monkeypatch.setattr(monthly, "collect_open_clarifications", lambda: [])
     monkeypatch.setattr(monthly.trends_mod, "detect_trends", lambda period: [])
+    monkeypatch.setattr(monthly, "collect_previous_monthly_trends", lambda period_start: [])
     monkeypatch.setattr(monthly, "draft_monthly", lambda *a, **k: _monthly_draft_fixture())
     monkeypatch.setattr(
         monthly,

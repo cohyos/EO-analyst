@@ -224,7 +224,9 @@ def _tfidf_vectors(token_lists: list[list[str]]) -> list[dict[str, float]]:
     vectors: list[dict[str, float]] = []
     for tokens in token_lists:
         tf = Counter(tokens)
-        vectors.append({term: count * (math.log((n + 1) / (df[term] + 1)) + 1.0) for term, count in tf.items()})
+        vectors.append(
+            {term: count * (math.log((n + 1) / (df[term] + 1)) + 1.0) for term, count in tf.items()}
+        )
     return vectors
 
 
@@ -272,9 +274,11 @@ def tfidf_subcluster_unclassified(
     :func:`_top_terms` -- is ``[]`` only when every row in that sub-cluster had no tokens at all)."""
     if not rows:
         return []
-    vectors = _tfidf_vectors([_subcluster_tokens(f"{r.get('title') or ''} {r.get('abstract') or ''}") for r in rows])
+    vectors = _tfidf_vectors(
+        [_subcluster_tokens(f"{r.get('title') or ''} {r.get('abstract') or ''}") for r in rows]
+    )
     clusters: list[dict[str, Any]] = []
-    for row, vec in zip(rows, vectors):
+    for row, vec in zip(rows, vectors, strict=True):
         best_idx: int | None = None
         best_sim = -1.0
         for i, c in enumerate(clusters):

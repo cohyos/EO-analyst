@@ -184,3 +184,109 @@ class TestCollectIsraelItemsGuards:
         assert "i.level IN ('red', 'orange', 'yellow')" in sql
         assert "israel_relevance" in sql  # still ranked/filtered by relevance, but never by it alone
         assert "NOT EXISTS (SELECT 1 FROM tenders" in sql
+
+
+# --------------------------------------------------------------------------
+# Round 5 P2 (D6): the four category tables merged into ONE table with a "סוג" column, one row
+# per item (an item eligible for more than one category gets a single row joining its labels).
+# --------------------------------------------------------------------------
+
+
+class TestMergedIsraelTable:
+    def test_one_row_per_item_with_joined_category_labels(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # item 1: wins + competition (contract_award + competitor reason) -> one row, "זכייה/תחרות"
+        # item 2: export only -> one row, "יצוא"
+        monkeypatch.setattr(
+            isec,
+            "_item_event_kinds",
+            lambda item_id: {"contract_award"} if item_id == 1 else set(),
+        )
+        items = [
+            {
+                "id": 1,
+                "title": "עסקה משולבת",
+                "israel_reasons": ["competitor_to_israeli_company"],
+                "summary_he": "",
+                "so_what_he": "כך וכך",
+                "title_he": "",
+                "entities_mentioned": ["Elbit"],
+                "n": 1,
+            },
+            {
+                "id": 2,
+                "title": "יצוא חדש",
+                "israel_reasons": ["export_market_signal"],
+                "summary_he": "",
+                "so_what_he": "יצוא",
+                "entities_mentioned": [],
+                "n": 2,
+            },
+        ]
+        citation_items: list[dict] = []
+        table = isec._merged_israel_table(citation_items, items, max_items=10)
+        assert table is not None
+        assert table["title_he"] == "תעשייה ישראלית"
+        assert table["headers"] == ["כותרת", "סוג", "ישויות", "מה זה אומר", "מקור"]
+        assert len(table["rows"]) == 2  # one row per item, never one row per category
+        row1, row2 = table["rows"]
+        assert row1[0] == "עסקה משולבת"
+        assert row1[1] == "זכייה/תחרות"
+        assert row2[1] == "יצוא"
+
+    def test_excludes_items_with_no_category(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(isec, "_item_event_kinds", lambda item_id: set())
+        items = [
+            {
+                "id": 1,
+                "title": "אופ-אד פוליטי",
+                "israel_reasons": [],
+                "summary_he": "",
+                "so_what_he": "",
+                "entities_mentioned": ["IDF"],
+                "n": 1,
+            }
+        ]
+        table = isec._merged_israel_table([], items, max_items=10)
+        assert table is None
+
+    def test_respects_max_items_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(isec, "_item_event_kinds", lambda item_id: {"contract_award"})
+        items = [
+            {"id": i, "title": f"item {i}", "israel_reasons": [], "summary_he": "", "so_what_he": "", "n": i}
+            for i in range(1, 6)
+        ]
+        table = isec._merged_israel_table([], items, max_items=2)
+        assert table is not None
+        assert len(table["rows"]) == 2
+
+
+class TestDailyIsraelTablesMerged:
+    def test_returns_single_merged_table(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(isec, "_item_event_kinds", lambda item_id: {"contract_award"})
+        items = [{"id": 1, "title": "t", "israel_reasons": [], "summary_he": "", "so_what_he": "", "n": 1}]
+        monkeypatch.setattr(isec, "collect_israel_items", lambda start, end, min_relevance=0.5: items)
+        tables = isec.daily_israel_tables([], dt.datetime(2026, 9, 1), dt.datetime(2026, 9, 2))
+        assert len(tables) == 1
+        assert tables[0]["title_he"] == "תעשייה ישראלית"
+
+
+class TestWeeklyIsraelTablesMerged:
+    def test_returns_merged_table_plus_company_summary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("eoa.pipeline.israel_focus.israeli_watchlist_names", lambda: ["Elbit", "Rafael"])
+        monkeypatch.setattr(isec, "_item_event_kinds", lambda item_id: {"contract_award"})
+        items = [
+            {
+                "id": 1,
+                "title": "t",
+                "israel_reasons": [],
+                "summary_he": "",
+                "so_what_he": "",
+                "entities_mentioned": ["Elbit"],
+                "n": 1,
+            }
+        ]
+        monkeypatch.setattr(isec, "collect_israel_items", lambda start, end, min_relevance=0.5: items)
+        tables = isec.weekly_israel_tables([], dt.datetime(2026, 9, 1), dt.datetime(2026, 9, 8))
+        assert len(tables) == 2
+        assert tables[0]["title_he"] == "תעשייה ישראלית"
+        assert tables[1]["title_he"] == "תעשייה ישראלית — סיכום שבועי לפי חברה"

@@ -10,7 +10,7 @@ from eoa.llm.schemas.analysis import (
     Sentence,
     StructuredSection,
 )
-from eoa.llm.schemas.reports import MonthlyReportDraft
+from eoa.llm.schemas.reports import MonthlyReportDraftLegacy
 from eoa.report.qa_citations import check, is_factual, split_sentences
 
 # --------------------------------------------------------------------------
@@ -274,7 +274,7 @@ def test_check_legacy_shape_still_supported():
     section = ReportSection(
         title_he="פודים אוויריים", domain="airborne_pods", prose_he="החברה השיקה מוצר חדש בספטמבר [2]."
     )
-    draft = MonthlyReportDraft(
+    draft = MonthlyReportDraftLegacy(
         exec_summary_he="תקציר תקין [1].", sections=[section], outlook_he="", open_points_he=[]
     )
     result = check(draft, ITEMS)
@@ -282,7 +282,7 @@ def test_check_legacy_shape_still_supported():
 
 
 def test_check_legacy_shape_still_flags_uncited_sentence():
-    draft = MonthlyReportDraft(exec_summary_he="אלביט זכתה בחוזה של 50 מיליון דולר.", sections=[])
+    draft = MonthlyReportDraftLegacy(exec_summary_he="אלביט זכתה בחוזה של 50 מיליון דולר.", sections=[])
     result = check(draft, ITEMS)
     assert not result.passed
     assert result.uncited_sentences
@@ -295,7 +295,7 @@ def test_check_legacy_shape_flags_duplicate_sentence_across_two_sections():
     text = "החברה השיקה מוצר חדש בספטמבר [2]."
     section_a = ReportSection(title_he="פודים אוויריים", domain="airborne_pods", prose_he=text)
     section_b = ReportSection(title_he="תעשייה ישראלית", domain="secondary", prose_he=text)
-    draft = MonthlyReportDraft(
+    draft = MonthlyReportDraftLegacy(
         exec_summary_he="תקציר שאינו קשור לכלל [1].",
         sections=[section_a, section_b],
         outlook_he="",
@@ -311,7 +311,7 @@ def test_check_legacy_shape_extra_sections_cross_checked_for_duplicates():
     """Monthly's trend paragraphs (``extra_sections``) must be cross-checked against each other and
     against ``draft.sections``, not only against the exec summary."""
     text = "מגמת שוק חדשה זוהתה החודש בתחום הרחפנים."
-    draft = MonthlyReportDraft(
+    draft = MonthlyReportDraftLegacy(
         exec_summary_he="תקציר כללי בלבד [1].", sections=[], outlook_he="", open_points_he=[]
     )
     result = check(draft, ITEMS, extra_sections=[("מגמה א", text), ("מגמה ב", text)])

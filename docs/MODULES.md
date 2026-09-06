@@ -9989,6 +9989,142 @@ benefiting from the W17 fix above.
 `npm run lint`/`npx vitest run`/`npm run build`, and the `12-bd`/`14-tenders` Playwright specs --
 see this round's status report for exact counts.
 
+---
+
+## Round 5 P2 -- "מה השתנה מאז הדוח הקודם" + מעקב אינדיקטורים + איחוד תעשייה ישראלית (2026-09-06)
+
+docs/PLAN_ROUND5_REPORTS.md package P2, closing docs/REPORT_TEMPLATE_BENCHMARK.md D4, D5, W3, M2
+(data side), B4 (data side), and the D6 Israel-section duplication. Two new modules, one migration,
+collector/assembly-only edits to `daily.py`/`weekly.py` (no LLM drafting/prompt changes), and a
+merge inside `israel_section.py`.
+
+### `agent/eoa/report/deltas.py` (new) -- D4/W3/B4
+
+Deterministic (no LLM) comparison of the report being built against the same-`kind` (and, for a
+future `bd_territory` call, same-`territory`) *previous* report's persisted `reports.report_state`.
+Public API: `compute_deltas(kind, current_items, *, before_period_end, territory=None,
+current_trends=None, id_to_n=None) -> DeltaResult`, `build_report_state(items, *, trends=None,
+indicator_ids=None) -> dict` (call once per build and pass into `_persist_report`),
+`previous_report_state(kind, *, before_period_end, territory=None)`, `compute_item_deltas`,
+`compute_trend_deltas`, `render_delta_section_he(result) -> str`, `delta_extra_section(result) ->
+dict` (the ready `extra_sections` entry). Kind-agnostic by design so `eoa.report.bd_territory` can
+call the same functions unchanged in a later wave (B4) -- not wired there this round (out of this
+package's file scope).
+
+`report_state` shape (persisted into the new `reports.report_state` JSONB column):
+```json
+{"item_ids": [1, 2, ...], "item_levels": {"1": "orange", ...}, "trend_titles": [{"title_he": "...", "strength": 3}], "indicator_ids": [7, 9]}
+```
+
+**Section added** -- `extra_sections` entry, `position="after_summary"` (renders immediately after
+"תקציר מנהלים", before `draft.sections`/the weekly trend sections):
+```json
+{"title_he": "מה השתנה מאז הדוח הקודם", "body_he": "<Hebrew prose + '- ' bullet lines + [n] markers>", "position": "after_summary"}
+```
+Body layout (rendered by `eoa.report.docx_builder._md_blocks`, so each paragraph/bullet run is its
+own block in all three outputs): one summary line ("לעומת הדוח ה<יומי/שבועי> הקודם: N פריטים
+חדשים; ..."), then (if any) "פריטים חדשים מאז הדוח הקודם: N." + up to 3 `- <title> [n]` bullets,
+then (if any) "פריטים שעלו ברמת חשיבות..." + `- <title>: <מ-רמה> ← <ל-רמה> [n]` bullets, then
+(weekly only, if any) "שינויים במגמות לעומת הדוח הקודם:" + `- <trend>: <status> (...) [n]` bullets
+(status one of מגמה חדשה/התחזקה/נחלשה/נעלמה). No previous report of this kind yet -> the section
+still renders, with exactly one honest line ("זהו הדוח הראשון מסוג זה שנבנה עבור <יומי/שבועי> --
+אין דוח קודם להשוואה...").
+
+### `agent/eoa/report/indicators.py` (new) -- D5 (I&W with status over time)
+
+`indicator_watchlist` (migration 0023) tracks each `OutlookIndicator.text_he` across issues instead
+of it vanishing after one report. Per build: (1) `check_maturation` partitions this `kind`'s
+currently-`open` rows into still-open / matured (a deterministic key-term-containment match against
+this issue's items -- English/alphanumeric tokens 3+ chars, `extract_key_terms`) / dropped (no
+match past 30 days); (2) this issue's own `outlook` text lines are dedupe-upserted against whatever
+stays open (normalised-text similarity >= 0.85, `difflib.SequenceMatcher`) -- a reword bumps
+`last_seen`, anything new inserts a fresh `open` row. One-call wrapper for daily.py/weekly.py:
+`build_indicator_watchlist_section(kind, draft.outlook, items, citation_items) -> (extra_section |
+None, rows)` -- `rows` is folded by the caller into `deltas.build_report_state(...,
+indicator_ids=...)`. The LLM never sees or writes this table -- it only ever supplies `outlook`
+text, unchanged.
+
+**Table added** -- `extra_sections` entry, `position="after_outlook"` (renders immediately after
+the "מבט קדימה" heading/text, i.e. in the outlook area, before the weekly meta-summary section):
+```json
+{"title_he": "מעקב אינדיקטורים", "body_he": "| אינדיקטור | מאז | סטטוס | ראיה |\n|---|---|---|---|\n| <text> | <first_seen date> | <חדש|פתוח|הבשיל|בוטל> | [n] or — |\n...", "position": "after_outlook"}
+```
+Row order: new, open, matured, dropped. `None` (no section rendered) when there is nothing to show
+this issue. A `matured`/`dropped` row renders once, the issue it transitions, then disappears from
+future issues (its `status` is no longer `'open'`).
+
+### `db/migrations/versions/0023_indicator_watchlist.py` (new) -- applied, verified live
+
+Two additive changes: `reports.report_state JSONB` (nullable) and table `indicator_watchlist(id,
+text_he, source_report_id -> reports(id) ON DELETE SET NULL, first_seen, last_seen, status CHECK
+IN ('open','matured','dropped'), matured_evidence_item_id -> items(id) ON DELETE SET NULL, kind
+CHECK IN ('daily','weekly'))` + `ix_indicator_watchlist_kind_status`. `alembic current` = `0024`
+(head; chains through a concurrently-added `0024_payloads_variant.py`) -- verified live against
+`runtime/eoa.env`'s DATABASE_URL (127.0.0.1:5432): `reports.report_state` column present,
+`indicator_watchlist` table present with the expected 8 columns.
+
+### `agent/eoa/report/israel_section.py` -- D6 (three/four category tables -> one merged table)
+
+`_merged_israel_table` replaces the old `_category_table`/`_build_category_tables`: one row per
+item (not one row per item per category) -- an item eligible for more than one category gets a
+single row whose "סוג" cell joins every applicable label (e.g. "זכייה/תחרות"), instead of the row
+being duplicated once per category. `daily_israel_tables`/`weekly_israel_tables` keep their exact
+names/signatures (per this round's constraint) and now each return a **single** merged table
+(daily) or that table plus the unchanged per-company weekly summary table (weekly), instead of up
+to four/five tables:
+```json
+{"title_he": "תעשייה ישראלית", "headers": ["כותרת", "סוג", "ישויות", "מה זה אומר", "מקור"], "rows": [["<title>", "זכייה/תחרות", "<entities>", "<so_what>", "[n]"], ...]}
+```
+"סוג" values: זכייה / תחרות / יצוא / איום (joined with "/" when an item qualifies for more than
+one). `max_items_per_category` (kept under its original kwarg name at both call sites) is now an
+overall row cap on the merged table rather than a per-category cap.
+
+### Wiring (`agent/eoa/report/daily.py` / `weekly.py`, collector/assembly only)
+
+Both builders compute the delta section and the indicator-watchlist section right after
+`draft = normalize_draft(draft)` (so both see the final item list and the final `draft.outlook`),
+each in its own `try/except` (a failure never breaks the report, same convention as every other
+additive section in these two modules) -- daily.py had no `extra_sections` hook wired at all before
+this round; it now passes `extra_sections=extra_sections or None` to `build_docx`/`render_markdown`
+/`render_html` alongside its existing `tables=`. weekly.py's delta section is inserted *before* the
+existing trend sections in its `extra_sections` list (both are `position="after_summary"` -- list
+order decides render order within the same position), so "מה השתנה" prints immediately after the
+executive summary and ahead of the per-trend sections, per the D4/W3 spec. `_persist_report` in
+both modules gained a `report_state: dict | None = None` keyword and a `report_state` column in its
+`INSERT` -- built via `deltas.build_report_state(items, trends=..., indicator_ids=...)` in its own
+`try/except` right before the persist call (weekly passes `trends=trend_list`; daily omits
+`trends` entirely, since D4 has no trend concept).
+
+**Important cross-module note for whoever wires B4 into `bd_territory.py` next**: every DB call
+`deltas.py`/`indicators.py` makes uses `connection(timeout=5)` (`eoa.db.connection`'s own
+"optional/decorative report section" convention, already used by `bd_territory.py` itself at
+lines ~2374/2385) rather than the bare `connection()` most collector-side code uses -- a
+report-build integration test that doesn't mock these two modules' `connection` will otherwise
+either fail fast (with the timeout) or, if it doesn't mock `connection` in any module at all and
+the DB is genuinely unreachable, could still hang on an *unrelated* pre-existing uncapped
+`connection()` call elsewhere in the same build (confirmed live: `eoa.pipeline.tech_watch
+.run_tech_watch_weekly`, called from `weekly.py`'s existing A12 section, has no timeout at all --
+pre-existing, out of this package's scope, not touched here).
+
+### Tests
+
+`tests/unit/test_report_deltas_round5.py` (new, 38 tests): fake-cursor tests for
+`previous_report_state`/`_fetch_open_indicators`/`_apply_maturation`/`_upsert_open` (dedupe bumps
+vs. inserts new), pure-function tests for `compute_item_deltas` (new/risen/dropping-is-not-a-rise),
+`compute_trend_deltas` (appeared/strengthened/weakened/vanished/unchanged-is-silent), `check_maturation`
+(matches-and-matures/stays-open/ages-out-and-drops/match-wins-over-age), `extract_key_terms`,
+`render_delta_section_he`/`render_watchlist_table` (exact bullet/table-cell shape),
+`build_report_state`, `compute_deltas` (no-previous vs. with-previous), `process_indicator_watchlist`
+orchestration (row `_row_status` tagging), and `build_indicator_watchlist_section`'s wiring.
+`tests/unit/test_israel_section.py` (+9 tests): `_merged_israel_table` one-row-per-item with joined
+"סוג", excludes uncategorized items, respects the row cap; `daily_israel_tables`/
+`weekly_israel_tables` return the single merged table (+ company summary for weekly) instead of
+several.
+
+`pytest tests/unit -q -k "delta or indicator or israel or report_daily or report_weekly"` (with
+`DATABASE_URL` sourced from `runtime/eoa.env`, 127.0.0.1:5432): **154 passed**, 0 failed. Ruff
+(`check` + `format --check`) clean on every file touched this package.
+
 ## Round 4b UI (docs/REVIEW_2026-09-06_evening.md W19/W20/W23/W25, `web/src/pages/PayloadsPage.tsx`
 ## + `web/src/components/payloads/**`, `web/src/pages/SettingsPage.tsx` (jobs table only),
 ## `web/src/i18n/**`, `web/src/components/shell/**`, `config/payloads_seed.yaml`,
@@ -10330,3 +10466,279 @@ logic in the test).
 - `ruff check`/`ruff format --check` clean on every touched/new Python file.
 - `config/taxonomy.yaml`, `config/watchlist.yaml`, `config/sources.yaml` (via `eoa.fetch.
   sources_loader.load_sources`), `config/tenders.yaml` all parse and load cleanly.
+
+### Round 5 P1 -- monthly report migrated to the structured citation schema (M1-M3)
+
+`eoa.report.monthly` (drafting + orchestration), `eoa.llm.schemas.reports.MonthlyReportDraft` /
+`MonthlyTrendSection` (schema), `eoa.llm.prompts.report_monthly` (prompt) -- closes
+docs/REPORT_TEMPLATE_BENCHMARK.md M1, M2, M3 for the monthly report (§2.3, §3.3).
+
+**M1 (structured schema by construction).** `MonthlyReportDraft` moved from free Hebrew prose
+(`exec_summary_he` / `sections[].prose_he` / `trend_paragraphs` / `outlook_he`, with the model
+expected to type its own literal `"[n]"`) to the same sentence-per-claim shape the daily/weekly
+reports already use: `exec_summary: list[Sentence]`, `sections: list[StructuredSection]`,
+`outlook: list[OutlookIndicator]`, `analyst_note_he: AnalystNote | None`, `system_note_he: str`,
+`open_points_he: list[str]`. `Sentence.cites` (non-empty by schema) is what emits the `[n]` marker
+deterministically at render time -- the model never writes a citation bracket itself, so an
+uncited claim is a pydantic validation error, not a post-hoc QA finding. The old shape is kept,
+unchanged, as `MonthlyReportDraftLegacy` for reading a report persisted before this migration;
+nothing in the live pipeline constructs it any more. The new field names deliberately mirror
+`WeeklyReportDraft`'s (`exec_summary`, `trends`, `sections`, `outlook`, ...) so two other
+round-5-owned, read-only files -- `eoa.report.qa_citations.check` (`_is_structured_draft`/
+`_check_structured`) and `eoa.report.textnorm.normalize_draft` -- already validate and normalize
+this shape via their existing generic `getattr`/`hasattr` duck-typing, with zero changes needed in
+either file; `eoa.report.docx_builder._is_legacy_prose_draft` likewise returns `False` for this
+shape (no `exec_summary_he` attribute), so the structured renderer path already used by daily/
+weekly renders the monthly draft automatically too.
+
+Drafting itself (`draft_monthly`/`_corrective_retry`/`build_monthly` in `eoa.report.monthly`) now
+mirrors `eoa.report.weekly` exactly: input-side reduction via
+`eoa.report.weekly.select_items_for_prompt` (`per_domain=10`, a month gets a larger allowance than
+a week's `6`) keeps the prompt bounded regardless of how many red/orange items the month produced;
+`num_predict=14000` on the initial draft; one corrective retry on a citation-QA failure; and, on a
+second failure, a deterministic (no-LLM) substitute exec summary
+(`_deterministic_fallback_draft`, reusing `eoa.report.weekly`'s own generic (draft-type-agnostic)
+`_fallback_top_item_sentences`/`_fallback_event_sentences`/`_fallback_israel_item_sentences`/
+`_extend_registry_with_rows` rather than duplicating them) built straight from the month's top
+items/events/Israel-relevant items -- every sentence cites a real registry number by construction,
+so this step cannot itself fail `qa_citations.check`.
+
+**M2 (month-over-month trend tracking).** New `MonthlyTrendSection` (schema, replaces the
+free-prose `TrendParagraph` for this draft only): `title_he`, `domain`, `sentences:
+list[Sentence]` (capped at 6), `strength_now: int | None` (1-5), `strength_prev: int | None`
+(1-5), `change: Literal["new", "stronger", "weaker", "gone"]`, with a `model_validator` enforcing
+internal consistency (`"new"` forbids `strength_prev`; `"stronger"`/`"weaker"` require it and the
+matching direction; `"gone"` forbids both `sentences` and `strength_now`). Deliberately named
+`trends` (not `trend_paragraphs`) on `MonthlyReportDraft` so `qa_citations`/`textnorm`'s existing
+generic `trends` handling (built for `WeeklyTrendSection`) picks it up with, again, zero changes
+to either read-only file.
+
+`eoa.report.monthly._persist_report` now writes a small trend snapshot
+(`[{"title_he", "domain", "strength"}, ...]`, excluding `"gone"` entries) into the `reports.
+qa_report` JSON alongside the pre-existing QA fields; `collect_previous_monthly_trends(period_start)`
+reads the most recent earlier monthly report's snapshot back out (`[]` if there is none, or it
+predates this migration). `format_monthly_trends_block` (replaces
+`eoa.report.weekly.format_trends_block` for this report) appends each current trend's matched
+previous strength (`_match_previous_trend`: exact, whitespace/case-normalized `title_he` match --
+reliable for `entity_cluster`/`domain_surge` kinds whose titles are stable month to month; a known,
+documented limitation for `market_convergence`/`tech_race`, whose titles embed a changing
+event/company count) as DATA in the prompt, so the model grounds `strength_prev`/`change` in a
+real number instead of inventing one; the prompt explicitly forbids the model from ever writing
+`change="gone"` itself. `build_monthly` instead injects a `change="gone"`
+`MonthlyTrendSection(sentences=[], strength_now=None)` deterministically
+(`_gone_trend_sections`) for every previous-month trend title with no match this month -- rule 5,
+"never invent": there is no new evidence to ask the model to cite. Every trend paragraph's
+`extra_sections` body (`_render_trend_body`) is prefixed with a deterministic, code-authored
+change note ("מגמה חדשה החודש." / "התחזקה מ-X/5...ל-Y/5 החודש." / "נחלשה מ-X/5...ל-Y/5 החודש." /
+"...לא נמצאו לה ראיות חדשות החודש.") before the model's own cited sentences.
+
+**M3 (outlook as indicators).** `outlook_he` (free Hebrew prose) replaced by `outlook:
+list[OutlookIndicator]` (max 4) -- the same class the daily/weekly reports use: either a sourced
+claim (`cites` non-empty) or an explicit analyst assessment (`is_assessment=True`, `text_he` must
+open with "להערכתנו"/"נראה ש"/"ייתכן"), rendered identically to the daily/weekly outlook section by
+the (unchanged) `docx_builder` duck-typed renderer.
+
+`report_monthly.md` rewritten end to end for the new schema: explains the `Sentence`/`cites`
+mechanics with a literal-brace JSON example (`{{"text_he": ..., "cites": [n, ...]}}` --
+`eoa.llm.prompts.render` uses `str.format_map`, so a literal JSON brace in a prompt template must
+be doubled), the M2 previous-strength grounding instructions and the explicit "never write
+`change=\"gone\"`" rule, a "כללי כתיבה" block (one idea per sentence, ~20-word cap, a banned-filler
+list -- "ראוי לציין ש-"/"חשוב לציין כי-"/etc.), and the existing "do not write about items not in
+the list"/no-invention iron rules carried over from the legacy prompt.
+
+### Verification
+
+- New tests: `tests/unit/test_monthly_round5.py` (27, `MonthlyTrendSection` validator, the M2 pure
+  helpers, `qa_citations.check` dispatch on the new structured shape, `MonthlyReportDraftLegacy`
+  still parsing, and five `build_monthly` integration tests with a faked `chat_structured` --
+  happy path/every `[n]` renders, unknown-ref-then-repaired-on-retry, two-failures-then-fallback,
+  month-over-month `stronger`+injected `gone`, and zero-items) -- all passing.
+- `tests/unit/test_report_weekly_monthly.py`'s monthly fixtures/tests updated to the new
+  structured shape (`_monthly_draft_fixture` now builds `Sentence`/`StructuredSection`/
+  `OutlookIndicator` instead of the old free-prose fields); still green.
+- Three test files outside this task's own file list broke on the `MonthlyReportDraft` rename
+  (they used it only as a convenient stand-in for "the legacy free-prose draft shape" when testing
+  generic `docx_builder`/`qa_citations` behaviour, not anything monthly-specific) and were fixed by
+  a mechanical rename of the import/usages to `MonthlyReportDraftLegacy`, with no other change:
+  `tests/unit/test_docx_builder.py`, `tests/unit/test_report_qa.py`,
+  `tests/unit/test_report_round3_d6.py`.
+- `ruff check` clean on every touched/new Python file.
+- No changes needed in `eoa.report.qa_citations`, `eoa.report.textnorm`, or
+  `eoa.report.docx_builder` (all read-only for this task) -- by design, per the field-naming notes
+  above.
+
+## Round 5 QA scorer (2026-09-06) -- deterministic gates for docs/REPORT_TEMPLATE_BENCHMARK.md sec 4
+
+Package P9, written while the twelve sec-4 implementation items were landing in parallel in other
+engineers' file scopes (schemas, prompts, `docx_builder.py`, `daily.py`/`weekly.py`/
+`bd_territory.py`/`survey.py`). Every new check follows the module-wide convention: a missing
+report feature is a normal `Check(passed=False, ...)`, never an exception -- so a report that
+predates the parallel work simply fails the new check instead of crashing the whole domain score.
+Full weight table and per-check description in `docs/QA_CONTINUOUS_LOOP.md` section 6; today's
+actual round-4 pass/fail evidence (before the parallel rendering work landed) in section 7 there
+and in `docs/qa/loop/round_4_auto.json`.
+
+**`eoa.qa.d6_daily_report.score_D6`** gained a `monthly_path: Path | None = None` kwarg (wired from
+`eoa.qa.scorer.score_all_domains` via the new `eoa.qa.report_files.latest_monthly_md()`) and eight
+new checks: `bluf_present_and_short`, `what_changed_section_present`,
+`indicator_watchlist_table_present`, `israel_single_table_with_type_column`,
+`outlook_likelihood_and_confidence_separated`, `exec_summary_no_filler_phrases` (reads
+`eoa.report.style.BANNED_FILLER_PHRASES_HE` when present, else a local fallback tuple -- see the
+module's own `try/except ImportError` import guard), `no_row_repeated_across_tables`,
+`heading_count_within_budget` (weekly ≤16 H2, daily ≤12) -- plus `monthly_is_structured`, appended
+to the check list only when `monthly_path` is given and exists (never scored as a fail on a round
+with no monthly report yet).
+
+**`eoa.qa.d7_bd_report.score_D7`** gained three new aggregate checks (one `Check` per criterion,
+`all()`-combined across every territory's `md_paths`, mirroring how the pre-existing checks already
+aggregate): `bluf_present_and_short`, `buyer_pipeline_table_present`,
+`assumptions_falsifiers_list_present`, plus `acquisition_watch_scoped_to_territory` (queries
+`entities.country` for every non-"גלובלי"-flagged company/counterparty name in the "מעקב רכישות
+ושותפויות" section and flags a mismatch against the report's own filename-derived territory code).
+
+**`eoa.qa.d8_patent_survey.score_D8`** gained five new checks: `methodology_box_before_summary`,
+`coverage_tag_present`, `implications_have_priority_confidence`, `no_bogus_assignee` (a frozenset of
+generic placeholder names -- Europe/United States/Inc/etc.), `no_unclassified_cluster_when_patents_exist`,
+and `cpc_assignee_matrix_present` (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.5 row 7: the "White
+spaces: add a CPC×assignee matrix" item). The matrix check is the one exception to the "tolerant of
+a not-yet-landed feature" framing above: `eoa.patents.survey` already renders a "מטריצת אשכול x
+מקצה" table pre-round-5 whenever it has both clustered technology groups and a top-assignees list,
+so on a survey with real cluster data this check documents an existing feature's continued presence
+rather than a future one -- both this check and `no_unclassified_cluster_when_patents_exist` report
+`passed=True` with a "not applicable" evidence string when the survey's own patents table has no
+populated data row this round (nothing to matrix/cluster).
+
+**`eoa.qa.d4_investigations.score_D4`** gained a `report_path: Path | None = None` kwarg (wired from
+`eoa.qa.scorer.score_all_domains` via `daily_or_weekly`) and two checks that read the rendered
+"חקירות עומק" bullet list rather than the `jobs`/`investigation_log` tables:
+`blocked_distinct_from_not_found` (docs/REPORT_TEMPLATE_BENCHMARK.md sec 2.6 "DS3": an entry
+rendered "לא נמצא" whose own text betrays a security-gate block should read as blocked, not
+not-found) and `no_contradictory_reruns_in_report` (the same question logged twice in one report).
+These two are computed once up front and are independent of whether any `job_id` was sampled this
+round -- `score_D4([], conn, report_path=...)` still returns them even when there are zero jobs in
+scope (the domain no longer silently goes "manual only" just because a round happened to sample no
+deep-search jobs but did produce a report). **Regression fixed in this package:** an interrupted
+prior pass (cut off mid-edit, partially recovered from a `git stash`) had dropped the
+`checks.extend(report_checks)` / `n=n + report_entries_n` lines from the non-empty-`n` return path
+-- the two report-rendering checks were silently computed but never appended to the returned
+`DomainScore.checks` whenever at least one investigation job was also in scope this round (every
+existing round-5 test happened to pass `job_ids=[]`, which is the one path that still appended them
+correctly, so the bug was invisible to the suite until a `job_ids`-non-empty case was added:
+`tests/unit/test_qa_round5.py::TestD4Round5::test_report_checks_still_included_when_jobs_also_in_scope`).
+
+**`eoa.qa.d9_tenders_conferences.score_D9`** gained a `report_path: Path | None = None` kwarg and
+`source_reliability_column_in_appendix` (small weight per the task brief) -- checks the rendered
+"נספח מקורות" table header for an "אמינות"/"מהימנות" column, since docs/REPORT_TEMPLATE_BENCHMARK.md
+finding D7 notes the DB already has `sources.source_reliability` but the appendix renderer doesn't
+show it yet.
+
+### Verification (round 5 QA package)
+
+- New file `tests/unit/test_qa_round5.py` (one pass/fail fixture pair per new check, plus the D4
+  regression test above) -- 32 tests, all passing alongside the full existing `tests/unit/
+  test_qa_score.py` suite (`pytest tests/unit -q -k "qa"`).
+- `ruff check`/`ruff format --check` clean on every touched file in `agent/eoa/qa/` and on
+  `tests/unit/test_qa_round5.py`.
+- `scripts/qa_score.py --round 4 --no-links` (read-only, `DATABASE_URL` from `runtime/eoa.env`, port
+  5432) run once against the live `output/reports/` files -- results and per-check evidence
+  documented in `docs/QA_CONTINUOUS_LOOP.md` section 7 and `docs/qa/loop/round_4_auto.json`. Several
+  failures are genuine live findings, not just "feature not built yet": D7's
+  `acquisition_watch_scoped_to_territory` (Elbit/IL rows undisclosed as non-territory in DE/EU/GB
+  reports), D8's `no_bogus_assignee` (a real "Europe" assignee profile) and
+  `no_unclassified_cluster_when_patents_exist` (a real unclassified cluster), and D4's
+  `blocked_distinct_from_not_found` (the exact DS3 regression the benchmark doc quotes, still live
+  in the current daily report).
+
+## Round 5 P5 (2026-09-06, patent survey benchmark gaps -- docs/REPORT_TEMPLATE_BENCHMARK.md 2.5/
+3.5/4 items 8-9, docs/qa/loop/round_3_fixes.md's patent nits, round_3_judge.md D8 #4)
+
+Resumed and completed after an API-rate-limit cutoff left partial edits (recovered from a `git
+stash`) in `agent/eoa/patents/survey.py`/`cluster.py`, `agent/eoa/llm/schemas/patents.py`, and
+`agent/eoa/llm/prompts/patent_survey.md`. All six benchmark gaps for the patent survey are now
+closed:
+
+1. **"שיטה והיקף" (methodology & scope) box, before the executive summary.**
+   `methodology_box_lines_he` (`survey.py`) builds one deterministic `list[str]`: search query,
+   sources scanned (`_sources_scanned_he`, honest about the keyless-Google-Patents-fallback vs.
+   EPO OPS/PatentsView), date range (`_date_range_he`, falling back publication -> filing ->
+   priority date, `None` disclosed rather than fabricated), record counts split fresh-this-run vs.
+   supplemented-from-store (`n_fresh`/`n_stored`, now tracked through `build_patent_survey`), the
+   assignee-coverage tag as its own prominent line ("כיסוי נתוני מקצה: NN% (k/n)",
+   `_assignee_coverage` reused), the CPC-coverage analogue (`_cpc_coverage`, new), and the
+   low-coverage caveat (`_coverage_caveat_he`) as the box's last line when coverage is under
+   `_ASSIGNEE_COVERAGE_THRESHOLD`. `eoa.report.docx_builder` has no "before the executive summary"
+   position (only `extra_sections`' `after_summary`/`after_outlook`) and stays untouched per this
+   task's file-ownership split -- three new `eoa.patents.render` functions
+   (`insert_section_before_summary_docx`/`_md_summary`/`_html_summary`) splice the box into the
+   already-rendered `Document`/markdown/HTML instead, the same post-render-splice pattern the
+   module already used for the ASCII/SVG timeline chart before the sources appendix. The docx
+   variant reuses `docx_builder.add_mixed_paragraph` (for correct Hebrew/Latin bidi run-splitting)
+   via a tiny `add_paragraph`-duck-typed shim around python-docx's own
+   `Paragraph.insert_paragraph_before`. The caveat sentence's old home (`_enforce_coverage_caveat`
+   force-appending it into `exec_summary`, round 3's own mechanism) is removed -- it now lives once,
+   in the box, per docs/REPORT_TEMPLATE_BENCHMARK.md 3.5/item 2 ("תקציר מנהלים: כפי שקיים, בלי
+   לחזור על נתון הכיסוי"); `_enforce_coverage_caveat` still guarantees the caveat in every
+   assignee-profile section, unchanged from round 3.
+2. **Bogus assignees dropped, never profiled** (already implemented in the recovered stash,
+   verified + tested here): `_is_real_company_assignee` rejects a bare generic corporate-suffix/
+   noun token (`_GENERIC_ASSIGNEE_RE` -- "Inc"/"Ltd"/"Systems"/etc., matched only when the *entire*
+   trimmed name is one of these, never a real distinct company name that merely contains one) and a
+   plain country name (`resolve_country_name`, English or Hebrew transliteration -- "United
+   States"/`ארה"ב`) before `resolve_canonical` is even consulted, in addition to round 3's existing
+   curated-non-company-record check ("Europe"/"NATO").
+3. **TF-IDF-lite sub-clustering of the "לא מסווג" bucket when CPC is missing** (already implemented
+   in the recovered stash, verified + tested here): `tfidf_subcluster_unclassified`
+   (`cluster.py`) -- pure-stdlib tf x smoothed-idf cosine-similarity greedy single-pass clustering
+   over each unclassified patent's title/abstract tokens (Latin `_WORD_RE` tokens plus a new
+   `_HEBREW_WORD_RE` for Hebrew-language keyless-search hits), at most
+   `UNCLASSIFIED_MAX_SUBCLUSTERS` (5) buckets, each labelled by its own top terms
+   (`_unclassified_label_he`) instead of one flat generic label -- a single-subcluster result (the
+   common small-sample case) still renders the plain `UNCLASSIFIED_LABEL_HE` unchanged, so no
+   existing test/behavior regresses for a small survey.
+4. **`_verify_relationship_edges` actually drops an untraceable edge** (already implemented in the
+   recovered stash, verified + tested here against the exact round_3_judge.md D8 #4 "Sigma 155"
+   regression): `_name_in_text` now delegates to
+   `eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text` (whole-word, strict-alias-safe --
+   a product-codename `strict_aliases` entry like Anduril's own "Anvil" only counts when the
+   company's own canonical name or a non-strict alias also co-occurs in the same text) instead of a
+   bare case-insensitive substring check over every alias, which is exactly what let an ordinary
+   English word ("anvil" in an unrelated Elbit personnel article) falsely register as "names
+   Anduril" and kept an unsupported Anduril<->Elbit edge alive. Edges are also now deduped by
+   canonical-party-pair (`_canonical_party_name`) + kind + citation number -- "Elbit" and "Elbit
+   Systems" naming the same real relationship off the same event collapse to one kept row, the
+   duplicate logged as an explicit drop note (never silent) rather than rendered twice.
+5. **`priority` + `confidence` on every business implication** (already implemented in the
+   recovered stash, verified + tested here): `PatentBizAction` gained `priority`
+   (`Literal["high", "medium", "low"]`, default `"medium"`) and `confidence` (`float`, `0.0-1.0`,
+   default `0.5`, pydantic-enforced range) fields; `patent_survey.md`'s `business_implications`
+   rule updated to require both from the model. Rendered two ways: a `[עדיפות: X | ביטחון: Y%]`
+   prefix on each cited narrative sentence (`_priority_confidence_prefix_he`,
+   `_business_action_sentences`) and a separate deterministic table ("השלכות עסקיות והמלצות --
+   עדיפות וביטחון", `business_implications_table`, sorted priority-first then confidence
+   descending) -- mirrors `eoa.report.bd_territory.recommended_actions_table`'s own priority-rated
+   table shape in this schema's high/medium/low + 0-1 convention.
+6. **CPC x assignee white-space matrix table** alongside the existing gap-list narrative table:
+   `_cpc_assignee_matrix` (new) returns a full `len(top_cpc) x len(top_assignees)` co-occurrence
+   count grid (a `0` cell is exactly one row of the existing `_white_spaces` gap list) rendered as
+   "מטריצת CPC x מקצה (White Space)" right after that gap-list table -- omitted honestly (per
+   docs/REPORT_TEMPLATE_BENCHMARK.md 4/item 7) whenever either axis (top CPC codes or top
+   assignees) is empty, since a matrix needs both axes to mean anything.
+
+**Verification:** new `tests/unit/test_patents_round5.py` (58 tests, one per behavior/boundary
+across all six items) + 3 tests in `tests/unit/test_patents_round3.py` updated to the new
+`_enforce_coverage_caveat` contract (no longer touches `exec_summary`). `pytest tests/unit -q -k
+"patent or d8"`: 314 passed, one pre-existing unrelated failure
+(`test_patents_scan.py::TestScanPatentsOrchestration::test_duplicate_pub_number_across_queries_counted_once`
+-- a real-DB-connection attempt failing on auth, in `agent/eoa/patents/scan.py` which this package
+does not own and did not touch; confirmed present before this package's changes too).
+`ruff check`/`ruff format --check` clean on every touched file (`survey.py`, `cluster.py`,
+`render.py`, `schemas/patents.py`, `test_patents_round5.py`, `test_patents_round3.py`) -- including
+two pre-existing lint issues in the recovered stash fixed along the way (`zip()` without
+`strict=` in `cluster.py`'s new TF-IDF loop, an unsorted import block in `survey.py`).
+
+**Depends on missing EPO/PatentsView keys:** the methodology box's own `sources_scanned_he` line
+honestly reports "Google Patents (חיפוש חסר-מפתחות)" whenever `EPO_OPS_KEY`/`EPO_OPS_SECRET`/
+`PATENTSVIEW_API_KEY` are unset (this dev machine) -- CPC/assignee coverage will typically stay low
+under the keyless fallback since it rarely surfaces either field; nothing in this package hides or
+fabricates that gap, it is only ever disclosed (consistent with the module's existing
+never-invent discipline).

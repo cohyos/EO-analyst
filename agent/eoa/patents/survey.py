@@ -76,7 +76,10 @@ from eoa.patents.render import (
     inject_advance_footnotes_html,
     inject_advance_footnotes_md,
     insert_section_before_html_appendix,
+    insert_section_before_html_summary,
     insert_section_before_md_appendix,
+    insert_section_before_md_summary,
+    insert_section_before_summary_docx,
     ltr_isolate,
     ltr_isolate_if_latin,
     ltr_join,
@@ -84,7 +87,11 @@ from eoa.patents.render import (
     svg_timeline_bar_chart,
 )
 from eoa.patents.valuation import score_and_persist
-from eoa.pipeline.entity_normalize import find_watchlist_aliases_in_text, resolve_canonical, resolve_country_name
+from eoa.pipeline.entity_normalize import (
+    find_watchlist_aliases_in_text,
+    resolve_canonical,
+    resolve_country_name,
+)
 from eoa.report.docx_builder import (
     build_docx,
     fmt_date,
@@ -518,6 +525,25 @@ def _white_spaces(
     return gaps[:10]
 
 
+def _cpc_assignee_matrix(
+    rows: list[dict[str, Any]], top_cpc: list[str], top_assignees: list[str]
+) -> list[list[int]]:
+    """Round 5 P5/item 6 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.5/item 7, 4/item 7 -- "White spaces:
+    add a deterministic CPC x assignee matrix alongside the narrative"): a full ``len(top_cpc)`` x
+    ``len(top_assignees)`` count grid (patents carrying both that CPC code and that assignee),
+    complementing :func:`_white_spaces`'s own flat gap-list table with the actual coverage picture
+    a reader needs to judge *how* white a "white space" cell really is (a cell of ``0`` here is
+    exactly one row of :func:`_white_spaces`'s gap list). Caller renders this only when both
+    ``top_cpc`` and ``top_assignees`` are non-empty (see :func:`build_patent_survey`) -- a matrix
+    needs both axes to mean anything; with either axis empty there is nothing honest to draw."""
+    counts: Counter[tuple[str, str]] = Counter()
+    for row in rows:
+        for cpc in row.get("cpc") or []:
+            for assignee in row.get("assignees") or []:
+                counts[(cpc, assignee)] += 1
+    return [[counts.get((c, a), 0) for a in top_assignees] for c in top_cpc]
+
+
 def _assignee_coverage(rows: list[dict[str, Any]]) -> tuple[int, int, float]:
     """``(missing, total, coverage)`` -- ``coverage`` is the fraction of ``rows`` (patents) that
     carry at least one real company assignee (:func:`_is_real_company_assignee`); ``missing`` is
@@ -537,6 +563,97 @@ def _assignee_coverage(rows: list[dict[str, Any]]) -> tuple[int, int, float]:
 
 def _coverage_caveat_he(missing: int, total: int) -> str:
     return _COVERAGE_CAVEAT_TEMPLATE_HE.format(missing=missing, total=total)
+
+
+# --------------------------------------------------------------------------
+# Round 5 P5/item 1 (2026-09-06, docs/REPORT_TEMPLATE_BENCHMARK.md 2.5/P1+P2, 3.5/item 1,
+# 4/item 8): a deterministic "שיטה והיקף" (methodology & scope) box, rendered *before* the
+# executive summary in every one of docx/md/html -- WIPO PLR-style disclosure of the search query,
+# sources scanned, date range, record counts (fresh-this-run vs. supplemented-from-store), and both
+# coverage percentages (assignee + CPC) as their own prominent lines, with the low-coverage caveat
+# (:func:`_coverage_caveat_he`) folded in as the box's own last line instead of a sentence buried
+# inside `exec_summary` (round 3 D8 finding 1's own mechanism). `eoa.report.docx_builder` has no
+# "before executive summary" hook (only `extra_sections`' `after_summary`/`after_outlook`
+# positions) and stays untouched per this task's ownership split -- the box is spliced into the
+# already-rendered docx ``Document``/md/html via ``eoa.patents.render``'s new
+# ``insert_section_before_summary_*`` helpers instead, mirroring how the ASCII/SVG timeline chart
+# is already spliced in before the sources appendix.
+# --------------------------------------------------------------------------
+
+METHODOLOGY_BOX_TITLE_HE = "שיטה והיקף"
+
+
+def _cpc_coverage(rows: list[dict[str, Any]]) -> tuple[int, int, float]:
+    """``(missing, total, coverage)`` -- the CPC-code analogue of :func:`_assignee_coverage`:
+    ``coverage`` is the fraction of ``rows`` that carry at least one CPC code. An empty sample
+    counts as full (vacuous) coverage, same convention as :func:`_assignee_coverage`."""
+    total = len(rows)
+    if total == 0:
+        return 0, 0, 1.0
+    with_cpc = sum(1 for r in rows if r.get("cpc"))
+    return total - with_cpc, total, with_cpc / total
+
+
+def _date_range_he(rows: list[dict[str, Any]]) -> tuple[dt.date, dt.date] | None:
+    """``(earliest, latest)`` across every row's ``publication_date`` (falling back to
+    ``filing_date``/``priority_date`` when publication is missing, the common keyless-search-
+    fallback case) -- ``None`` when not one row in ``rows`` carries any date at all."""
+    dates = [r.get("publication_date") or r.get("filing_date") or r.get("priority_date") for r in rows]
+    dates = [d for d in dates if d]
+    if not dates:
+        return None
+    return min(dates), max(dates)
+
+
+def _sources_scanned_he() -> str:
+    """Which patent data source(s) this gather actually used (:func:`eoa.patents.scan.
+    structured_sources_configured`) -- an honest label for the methodology box rather than always
+    implying the full EPO OPS/PatentsView structured search that most dev/CI environments never
+    have credentials for."""
+    if scan_mod.structured_sources_configured():
+        return "EPO OPS / PatentsView (מבני, עם השלמת Google Patents במקרה של תוצאה ריקה)"
+    return "Google Patents (חיפוש חסר-מפתחות -- ראו eoa.patents.scan)"
+
+
+def methodology_box_lines_he(
+    *,
+    topic: str,
+    sources_scanned_he: str,
+    date_range: tuple[dt.date, dt.date] | None,
+    n_fresh: int,
+    n_stored: int,
+    assignee_with: int,
+    assignee_total: int,
+    cpc_with: int,
+    cpc_total: int,
+    caveat_he: str | None,
+) -> list[str]:
+    """The ordered lines of the "שיטה והיקף" box (see the module note above) -- a plain
+    ``list[str]``, rendering-agnostic, so the same content reaches docx/md/html identically via
+    ``eoa.patents.render``'s insertion helpers. ``כיסוי נתוני מקצה`` is deliberately its own line
+    (never folded into the record-count line) so it reads as the prominent tag the spec asks for;
+    ``caveat_he`` (:func:`_coverage_caveat_he`, only non-``None`` under
+    :data:`_ASSIGNEE_COVERAGE_THRESHOLD`) is appended as the box's own last line -- this is now the
+    *only* place that sentence appears in the survey's opening (round 5: no longer duplicated into
+    `exec_summary`, see :func:`_enforce_coverage_caveat`'s own updated docstring)."""
+    assignee_pct = round((assignee_with / assignee_total) * 100) if assignee_total else 100
+    cpc_pct = round((cpc_with / cpc_total) * 100) if cpc_total else 100
+    date_range_text = (
+        f"{fmt_date(date_range[0])} – {fmt_date(date_range[1])}"
+        if date_range
+        else "לא זמין (חסרים תאריכי פרסום/הגשה במקור הנתונים)"
+    )
+    lines = [
+        f"שאילתת חיפוש: {ltr_isolate(topic)}",
+        f"מאגרים שנסרקו: {sources_scanned_he}",
+        f"טווח תאריכים: {ltr_isolate(date_range_text)}",
+        f"מספר רשומות: {n_fresh + n_stored} (חדשות מהסריקה: {n_fresh}, מהמאגר הקיים: {n_stored})",
+        f"כיסוי נתוני מקצה: {assignee_pct}% ({assignee_with}/{assignee_total})",
+        f"כיסוי קודי CPC: {cpc_pct}% ({cpc_with}/{cpc_total})",
+    ]
+    if caveat_he:
+        lines.append(caveat_he)
+    return lines
 
 
 def _israel_position(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
@@ -1285,14 +1402,20 @@ def _scrub_exclusivity_claims(
 
 
 def _enforce_coverage_caveat(draft: _RenderableSurveyDraft, missing: int, total: int) -> None:
-    """Guarantees the coverage caveat (:func:`_coverage_caveat_he`) is present verbatim in the
-    executive summary and in every assignee-profile section of ``draft`` -- required regardless of
-    whether the LLM (or the no-LLM fallback path) ever wrote an exclusivity claim to scrub, per the
-    round 3 D8 finding 1 spec ("the survey must carry an explicit caveat sentence in the executive
-    summary and the assignee-profile section")."""
+    """Guarantees the coverage caveat (:func:`_coverage_caveat_he`) is present verbatim in every
+    assignee-profile section of ``draft`` -- required regardless of whether the LLM (or the no-LLM
+    fallback path) ever wrote an exclusivity claim to scrub, per the round 3 D8 finding 1 spec ("the
+    survey must carry an explicit caveat sentence ... in the assignee-profile section").
+
+    Round 5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.5/item 2 -- "תקציר מנהלים: כפי שקיים, בלי לחזור על
+    נתון הכיסוי"): this no longer also force-appends the caveat to ``draft.exec_summary`` the way
+    round 3 did -- the caveat now has one single, prominent home (the "שיטה והיקף" box built by
+    :func:`methodology_box_lines_he` and rendered before the executive summary), and repeating it
+    verbatim inside the summary text as well is exactly the redundancy the round-5 spec asks to
+    drop. A genuinely false exclusivity *claim* the LLM wrote into the summary is still caught and
+    replaced by :func:`_scrub_exclusivity_claims` (a correction of bad content, not an addition of
+    a repeated disclosure line) -- that mechanism is unrelated to, and unchanged by, this one."""
     caveat = _coverage_caveat_he(missing, total)
-    if not any(s.text_he == caveat for s in draft.exec_summary):
-        draft.exec_summary.append(_CiteSentence(text_he=caveat))
     for section in draft.sections:
         if section.title_he.startswith("פרופיל מקצה:") and not any(
             s.text_he == caveat for s in section.sentences
@@ -1440,6 +1563,8 @@ def build_patent_survey(
             records = []
         pub_to_id = scan_mod.upsert_records(records)
         patent_ids = list(pub_to_id.values())
+        n_fresh = len(patent_ids)
+        n_stored = 0
         if len(patent_ids) < _MIN_SURVEY_PATENTS:
             stored = _stored_patent_ids_for_topic(topic, exclude=patent_ids)
             if stored:
@@ -1449,6 +1574,7 @@ def build_patent_survey(
                     fresh=len(patent_ids),
                     stored=len(stored),
                 )
+                n_stored = len(stored)
                 patent_ids = [*patent_ids, *stored]
 
         # Analyze/value only the freshest slice so a large gather doesn't blow the LLM budget --
@@ -1465,6 +1591,7 @@ def build_patent_survey(
 
         rows = _territory_filter(_fetch_patent_rows(patent_ids), territory)
         assignee_missing, assignee_total, assignee_coverage = _assignee_coverage(rows)
+        cpc_missing, cpc_total, _cpc_coverage_frac = _cpc_coverage(rows)
 
         registry: list[dict[str, Any]] = [
             {
@@ -1496,6 +1623,33 @@ def build_patent_survey(
             rows,
             [c for c, _ in top_cpc.most_common(5)],
             [a for a, _ in top_assignees.most_common(5)],
+        )
+        matrix_cpc = [c for c, _ in top_cpc.most_common(5)]
+        matrix_ws_assignees = [a for a, _ in top_assignees.most_common(5)]
+        cpc_assignee_matrix = (
+            _cpc_assignee_matrix(rows, matrix_cpc, matrix_ws_assignees)
+            if matrix_cpc and matrix_ws_assignees
+            else []
+        )
+
+        # Round 5 P5/item 1: the "שיטה והיקף" box (see methodology_box_lines_he's own docstring)
+        # -- spliced before the executive summary in every output format near the very end of this
+        # function, after doc/md/html are already rendered (see below).
+        methodology_box_lines = methodology_box_lines_he(
+            topic=topic,
+            sources_scanned_he=_sources_scanned_he(),
+            date_range=_date_range_he(rows),
+            n_fresh=n_fresh,
+            n_stored=n_stored,
+            assignee_with=assignee_total - assignee_missing,
+            assignee_total=assignee_total,
+            cpc_with=cpc_total - cpc_missing,
+            cpc_total=cpc_total,
+            caveat_he=(
+                _coverage_caveat_he(assignee_missing, assignee_total)
+                if assignee_coverage < _ASSIGNEE_COVERAGE_THRESHOLD
+                else None
+            ),
         )
 
         # A14b (2026-09-06): deterministic clustering (point 2), business relationships (point 3),
@@ -1706,6 +1860,20 @@ def build_patent_survey(
                     "rows": [[ltr_isolate(c), ltr_isolate(a)] for c, a in white_spaces],
                 }
             )
+        # Round 5 P5/item 6: the full CPC x assignee count matrix alongside the gap list above --
+        # see _cpc_assignee_matrix's own docstring for why a "0" cell here is exactly one row of
+        # the gap-list table, and why this is only ever rendered when both axes are non-empty.
+        if cpc_assignee_matrix:
+            tables.append(
+                {
+                    "title_he": "מטריצת CPC x מקצה (White Space)",
+                    "headers": ["קוד CPC"] + [ltr_isolate(a) for a in matrix_ws_assignees],
+                    "rows": [
+                        [ltr_isolate(c), *(n if n else "—" for n in counts)]
+                        for c, counts in zip(matrix_cpc, cpc_assignee_matrix, strict=True)
+                    ],
+                }
+            )
 
         # A14b point 2: cluster table + cluster x assignee matrix.
         tables.append(
@@ -1840,6 +2008,11 @@ def build_patent_survey(
             tables=tables,
             include_toc=True,
         )
+        # Round 5 P5/item 1: the "שיטה והיקף" box, spliced in right before the "תקציר מנהלים"
+        # heading -- plain python-docx paragraph insertion into the Document build_docx already
+        # returned (see eoa.patents.render.insert_section_before_summary_docx's own docstring for
+        # why this can't be a build_docx-side hook without touching that file).
+        insert_section_before_summary_docx(doc, METHODOLOGY_BOX_TITLE_HE, methodology_box_lines)
         # A14b point 6: docx table shading for the timeline table (python-docx cell shading --
         # matplotlib is not installed in this venv, so no embedded PNG; see eoa.patents.render's
         # own docstring). Never touches docx_builder.py -- plain post-processing of the Document it
@@ -1863,6 +2036,10 @@ def build_patent_survey(
         md_content = render_markdown(
             draft, items_for_appendix, [], period_end=period_end, title_text=title_text, tables=tables
         )
+        # Round 5 P5/item 1 (md-only splice, mirrors the docx insertion above).
+        md_content = insert_section_before_md_summary(
+            md_content, METHODOLOGY_BOX_TITLE_HE, methodology_box_lines
+        )
         # A14b point 6 (md-only): a monospace ASCII/Unicode timeline bar chart, right before the
         # sources appendix.
         md_content = insert_section_before_md_appendix(
@@ -1884,6 +2061,10 @@ def build_patent_survey(
             title_text=title_text,
             tables=tables,
             include_toc=True,
+        )
+        # Round 5 P5/item 1 (html-only splice, mirrors the docx insertion above).
+        html_content = insert_section_before_html_summary(
+            html_content, METHODOLOGY_BOX_TITLE_HE, methodology_box_lines
         )
         # A14b point 6 (html-only): a real, dependency-free inline SVG bar chart.
         html_content = insert_section_before_html_appendix(

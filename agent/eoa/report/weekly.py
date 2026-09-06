@@ -808,6 +808,8 @@ def _persist_report(
     html_path: Path,
     items: list[dict[str, Any]],
     qa: QAResult,
+    *,
+    report_state: dict[str, Any] | None = None,
 ) -> int:
     qa_report = {
         "passed": qa.passed,
@@ -817,10 +819,14 @@ def _persist_report(
         "duplicate_sentences": qa.duplicate_sentences,
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
+    # Round 5 P2: `report_state` is the raw material `eoa.report.deltas.previous_report_state`
+    # reads back for the *next* weekly report's delta (items + trend strengths) -- see
+    # `eoa.report.deltas.build_report_state`.
     sql = """
         INSERT INTO reports (kind, period_start, period_end, path_docx, path_md, path_html,
-                              items_included, qa_passed, qa_report)
-        VALUES ('weekly', %(start)s, %(end)s, %(docx)s, %(md)s, %(html)s, %(items)s, %(qa_passed)s, %(qa_report)s)
+                              items_included, qa_passed, qa_report, report_state)
+        VALUES ('weekly', %(start)s, %(end)s, %(docx)s, %(md)s, %(html)s, %(items)s, %(qa_passed)s,
+                %(qa_report)s, %(report_state)s)
         RETURNING id
     """
     with connection() as conn, conn.cursor() as cur:
@@ -835,6 +841,7 @@ def _persist_report(
                 "items": item_ids,
                 "qa_passed": qa.passed,
                 "qa_report": Json(qa_report),
+                "report_state": Json(report_state) if report_state is not None else None,
             },
         )
         report_id: int = cur.fetchone()["id"]
@@ -941,7 +948,35 @@ def build_weekly(
     meta_has_content = (
         bool(meta.get("lessons")) or bool(meta.get("feedback_deltas")) or bool(meta.get("feedback_total"))
     )
-    extra_sections = list(trend_sections)
+
+    # Round 5 P2 (docs/PLAN_ROUND5_REPORTS.md P2, D4/W3/D5): "מה השתנה מאז הדוח הקודם" (deterministic
+    # delta vs. the previous weekly report, including trend appeared/strengthened/weakened/vanished)
+    # comes first among the "after_summary" extras (right after the executive summary, before the
+    # trend sections above); the "מעקב אינדיקטורים" (I&W) watchlist table renders in the outlook
+    # area ("after_outlook", before the meta-summary section below). A failure in either must never
+    # break the weekly report.
+    extra_sections: list[dict[str, Any]] = []
+    indicator_rows: list[dict[str, Any]] = []
+    try:
+        from eoa.report import deltas
+
+        delta_result = deltas.compute_deltas(
+            "weekly", items, before_period_end=end, current_trends=trend_list, id_to_n=id_to_n
+        )
+        extra_sections.append(deltas.delta_extra_section(delta_result))
+    except Exception as exc:
+        log.warning("weekly_report_deltas_section_failed", error=str(exc)[:160])
+    extra_sections.extend(trend_sections)
+    try:
+        from eoa.report import indicators
+
+        indicator_section, indicator_rows = indicators.build_indicator_watchlist_section(
+            "weekly", draft.outlook, items, citation_items
+        )
+        if indicator_section:
+            extra_sections.append(indicator_section)
+    except Exception as exc:
+        log.warning("weekly_report_indicator_watchlist_failed", error=str(exc)[:160])
     if meta_has_content:
         extra_sections.append(
             {
@@ -1079,6 +1114,22 @@ def build_weekly(
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")
 
-    report_id = _persist_report(start, end, docx_path, md_path, html_path, items, qa)
+    # Round 5 P2: this issue's own state (items + trend strengths), persisted for the *next*
+    # weekly report's delta.
+    try:
+        from eoa.report import deltas
+
+        open_indicator_ids = [
+            r["id"]
+            for r in indicator_rows
+            if r.get("_row_status") in ("open", "new") and r.get("id") is not None
+        ]
+        report_state = deltas.build_report_state(items, trends=trend_list, indicator_ids=open_indicator_ids)
+    except Exception as exc:
+        log.warning("weekly_report_state_build_failed", error=str(exc)[:160])
+        report_state = None
+    report_id = _persist_report(
+        start, end, docx_path, md_path, html_path, items, qa, report_state=report_state
+    )
 
     return ReportPaths(docx=docx_path, md=md_path, html=html_path, report_id=report_id, qa=qa)

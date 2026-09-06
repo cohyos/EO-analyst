@@ -20,7 +20,7 @@ from eoa.llm.schemas.analysis import (
     Sentence,
     StructuredSection,
 )
-from eoa.llm.schemas.reports import MonthlyReportDraft, TrendParagraph, WeeklyReportDraft, WeeklyTrendSection
+from eoa.llm.schemas.reports import MonthlyReportDraftLegacy, TrendParagraph, WeeklyReportDraft, WeeklyTrendSection
 from eoa.qa import d6_daily_report as d6
 from eoa.report import daily, weekly
 from eoa.report import israel_section as isec
@@ -424,7 +424,7 @@ class TestNormalizeDraft:
         assert f"ארה{_GERSHAYIM}ב" in normalized.analyst_note_he.sentences_he[0]
 
     def test_legacy_monthly_draft(self):
-        draft = MonthlyReportDraft(
+        draft = MonthlyReportDraftLegacy(
             exec_summary_he='סיכום על ארה""ב.',
             trend_paragraphs=[TrendParagraph(title_he="מגמה", prose_he='התפתחות בארה""ב.')],
             sections=[ReportSection(title_he="סעיף", domain="secondary", prose_he='עוד על ארה""ב.')],
