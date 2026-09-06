@@ -74,6 +74,11 @@ def collect_israel_items(
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE i.security_status = 'clean' AND i.dedup_of IS NULL
           AND COALESCE(i.israel_relevance, 0) >= %(min_relevance)s
+          -- 2026-09-06 (C4 finding): Israeli relevance alone let out-of-scope/archived items
+          -- (op-eds, generic AI stories) into the section; require an in-scope, triaged item.
+          AND i.domain IS NOT NULL AND i.domain <> 'out_of_scope'
+          AND i.level IN ('red', 'orange', 'yellow')
+          AND NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)
           AND COALESCE(i.published_at, i.fetched_at, i.created_at) >= %(start)s
           AND COALESCE(i.published_at, i.fetched_at, i.created_at) < %(end)s
         ORDER BY i.israel_relevance DESC NULLS LAST, i.score DESC NULLS LAST
