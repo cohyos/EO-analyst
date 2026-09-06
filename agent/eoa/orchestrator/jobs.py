@@ -775,10 +775,11 @@ def run_patent_survey(job: dict[str, Any]) -> dict[str, Any]:
 
     payload = job.get("payload") or {}
     topic = (payload.get("topic") or "").strip()
+    territory = (payload.get("territory") or "").strip() or None
     if not topic:
         return {"patent_survey_error": "missing topic"}
     try:
-        paths = build_patent_survey(topic)
+        paths = build_patent_survey(topic, territory=territory)
         return {
             "patent_survey": {
                 "report_id": paths.report_id,

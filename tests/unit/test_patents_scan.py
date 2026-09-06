@@ -216,6 +216,81 @@ class TestUpsertRecords:
             ids = upsert_records([PatentRecord(pub_number="US1"), PatentRecord(pub_number="US2")])
         assert ids == {"US1": 100, "US2": 200}
 
+    def test_existing_record_with_no_new_fields_never_touches_db_for_backfill(self, monkeypatch):
+        """A repeat hit for an already-known pub_number whose new PatentRecord carries no
+        assignees/cpc at all (the common shape) must not issue any UPDATE -- _backfill_patent_fields
+        short-circuits before touching the connection at all."""
+
+        class _FakeCursor:
+            def execute(self, query, params=None):
+                assert "UPDATE patents" not in query
+                return self
+
+            def fetchone(self):
+                return {"id": 100}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _FakeConnection:
+            def cursor(self):
+                return _FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr("eoa.patents.scan.connection", lambda: _FakeConnection())
+        with patch("eoa.patents.scan._patent_exists", return_value=True):
+            ids = upsert_records([PatentRecord(pub_number="US1")])
+        assert ids == {"US1": 100}
+
+    def test_existing_record_backfills_empty_assignees_via_coalesce_nullif(self, monkeypatch):
+        """A repeat hit that *does* carry newly-found assignees/cpc issues a non-destructive
+        UPDATE (COALESCE(NULLIF(...), new-value) -- never overwrites an already-populated field)."""
+        update_calls = []
+
+        class _FakeCursor:
+            def execute(self, query, params=None):
+                if "UPDATE patents" in query:
+                    update_calls.append((query, params))
+                return self
+
+            def fetchone(self):
+                return {"id": 100}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _FakeConnection:
+            def cursor(self):
+                return _FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr("eoa.patents.scan.connection", lambda: _FakeConnection())
+        with patch("eoa.patents.scan._patent_exists", return_value=True):
+            ids = upsert_records([PatentRecord(pub_number="US1", assignees=["Anduril"], cpc=["G01J5"])])
+        assert ids == {"US1": 100}
+        assert len(update_calls) == 1
+        query, params = update_calls[0]
+        assert "NULLIF(assignees" in query
+        assert "NULLIF(cpc" in query
+        assert params["assignees"] == ["Anduril"]
+        assert params["cpc"] == ["G01J5"]
+
 
 class TestScanPatentsOrchestration:
     def test_topic_and_assignee_scans_insert_new_records(self):

@@ -250,14 +250,40 @@ def _any_patents_exist() -> bool:
         return cur.fetchone() is not None
 
 
+def _backfill_patent_fields(pub_number: str, rec: PatentRecord) -> None:
+    """Goal (2026-09-06, user feedback re: mostly-empty assignee/CPC columns): a non-destructive
+    backfill for an *existing* ``patents`` row whose ``assignees``/``cpc`` are still empty --
+    ``_insert_patent``'s ``ON CONFLICT (pub_number) DO NOTHING`` means a repeat scan of the same
+    ``pub_number`` (e.g. the routine watch-topic scan re-touching a row a keyless on-demand survey
+    first inserted, or vice versa) would otherwise never get a chance to fill in a field the first
+    scan happened not to find. Never overwrites a field that is already non-empty."""
+    if not rec.assignees and not rec.cpc:
+        return
+    sets: list[str] = []
+    params: dict[str, Any] = {"p": pub_number}
+    if rec.assignees:
+        sets.append("assignees = COALESCE(NULLIF(assignees, ARRAY[]::text[]), %(assignees)s)")
+        params["assignees"] = rec.assignees
+    if rec.cpc:
+        sets.append("cpc = COALESCE(NULLIF(cpc, ARRAY[]::text[]), %(cpc)s)")
+        params["cpc"] = rec.cpc
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE patents SET {', '.join(sets)} WHERE pub_number = %(p)s", params)
+
+
 def upsert_records(records: list[PatentRecord]) -> dict[str, int]:
     """Insert every record in ``records`` not already present (dedup by ``pub_number``), returning
     ``{pub_number: patent_id}`` for every record now on record (whether inserted just now or
     already existing) -- used by ``eoa.patents.survey`` to turn a gathered sample straight into
-    real ``patents.id`` values for its citation registry/tables."""
+    real ``patents.id`` values for its citation registry/tables. An already-existing row gets a
+    best-effort, non-destructive :func:`_backfill_patent_fields` pass first."""
     ids: dict[str, int] = {}
     for rec in records:
         if _patent_exists(rec.pub_number):
+            try:
+                _backfill_patent_fields(rec.pub_number, rec)
+            except Exception as exc:
+                log.warning("patents_backfill_failed", pub_number=rec.pub_number, error=str(exc)[:200])
             with connection() as conn, conn.cursor() as cur:
                 cur.execute("SELECT id FROM patents WHERE pub_number = %(p)s", {"p": rec.pub_number})
                 row = cur.fetchone()
