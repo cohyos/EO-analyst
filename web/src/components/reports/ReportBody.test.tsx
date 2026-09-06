@@ -66,6 +66,33 @@ describe("ReportBody (W4 footnote-to-source behavior)", () => {
     expect(openLink).toHaveAttribute("rel", "noopener noreferrer");
   });
 
+  // R6-ui (09-reports.spec.ts, desktop): `linked` used to be rebuilt into a brand-new string on
+  // every render, and React's DOM renderer diffs `dangerouslySetInnerHTML` by the *object
+  // reference* of the `{ __html }` wrapper -- not the string inside it -- before ever looking at
+  // its content. JSX allocates a fresh wrapper object every render no matter what string it
+  // holds, so even byte-identical markup got a "changed" prop and React tore down and rebuilt
+  // this node's entire subtree. `handleMouseOver` calls `setHover` on every mouseover, a purely
+  // local state update with no effect on the markup's content -- so the citation `<a>` the
+  // pointer was actually on got destroyed and rebuilt out from under itself mid-hover, which made
+  // a real `.hover()` (Playwright) or a repeated `mouseover` dispatch (here) see its target
+  // detach and never settle. Memoizing both `linked` (the string) and the `{ __html }` wrapper
+  // object keeps the DOM node stable across a hover-triggered re-render.
+  it("does not detach/recreate the citation node across a hover-triggered re-render", async () => {
+    getItem.mockResolvedValue({
+      title: "כותרת הפריט",
+      source_name: "מקור בדיקה",
+      published_at: "",
+    } as Partial<ItemDetail>);
+    renderBody(html, citations);
+    await waitFor(() => expect(document.querySelector("a.eo-citation[data-n]")).not.toBeNull());
+    const marker = document.querySelector("a.eo-citation[data-n]")!;
+
+    fireEvent.mouseOver(marker);
+
+    expect(marker.isConnected).toBe(true);
+    expect(document.querySelector("a.eo-citation[data-n]")).toBe(marker);
+  });
+
   it("hovering [n] shows a tooltip with a 'פתח מקור' link to the real source URL", async () => {
     getItem.mockResolvedValue({
       title: "כותרת הפריט",

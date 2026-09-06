@@ -96,6 +96,28 @@ describe("ConferencesPage", () => {
     expect(downloadConferenceIcs).toHaveBeenCalledWith(conf);
   });
 
+  // R6-ui (07-conferences.spec.ts, mobile-390x844 + iphone-safari): the name used to be the
+  // *entire* outbound-link anchor, so on narrow viewports (where the table's min-width forces the
+  // name column to dominate whatever's visible before any horizontal scroll) a plain tap meant to
+  // expand the row landed on the link and navigated away instead of toggling. The link is now a
+  // small icon-only affordance separate from the name text, so a click on the name itself must
+  // toggle the row, while a click on the link icon must still open the URL without toggling.
+  it("clicking the outbound-link icon does not toggle the row, but clicking the name text does", async () => {
+    getConferences.mockResolvedValue([
+      makeConference({ registration_url: "https://ausa.test/register" }),
+    ]);
+    renderPage();
+    const nameText = await screen.findByText("AUSA 2026");
+    const row = nameText.closest("tr")!;
+    const link = screen.getByTitle("פתח קישור הרשמה/מקור בכרטיסייה חדשה");
+
+    fireEvent.click(link);
+    expect(row).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(nameText);
+    expect(row).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("expands a details row on click showing thresholds/changes, and collapses on a second click", async () => {
     getConferences.mockResolvedValue([makeConference()]);
     renderPage();

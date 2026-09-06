@@ -76,4 +76,28 @@ describe("renderAskMarkdown", () => {
     expect(html).not.toContain("<bdi>");
     expect(html).toContain("const x = 1;");
   });
+
+  // R6-ui (06-ask.spec.ts, iphone-safari): the chat backend was observed emitting a heading
+  // marker glued onto the end of the previous sentence with no line break at all, which `marked`
+  // (correctly, per CommonMark) parses as plain paragraph text -- the literal "###" then leaked
+  // into the rendered answer instead of becoming a heading.
+  it("renders a ### heading marker as a real heading even when glued onto the previous sentence with no newline", () => {
+    const html = renderAskMarkdown("סיכום קצר.### עובדות מרכזיות\n\nפרט ראשון.");
+    expect(html).toContain("<h3");
+    expect(html).toContain("עובדות מרכזיות");
+    expect(html).not.toContain("###");
+  });
+
+  it("does not touch a heading that is already correctly on its own line", () => {
+    const html = renderAskMarkdown("פסקה.\n\n## כותרת תקינה\n\nעוד פסקה.");
+    expect(html).toContain("<h2");
+    expect(html).not.toContain("##");
+  });
+
+  it("does not mangle a bare '#' with no following space (e.g. a hashtag-like token)", () => {
+    const html = renderAskMarkdown("המספר #123 אינו כותרת.");
+    expect(html).not.toMatch(/<h[1-6]/);
+    // the digits may be <bdi>-wrapped by the bidi pass, same as the "[9]" case above.
+    expect(html).toMatch(/#(<bdi>)?123(<\/bdi>)?/);
+  });
 });

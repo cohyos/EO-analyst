@@ -156,17 +156,32 @@ export function ConferencesPage() {
                     </td>
                     <td className="p-2">
                       {outUrl ? (
-                        <a
-                          href={outUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="inline-flex items-center gap-1 text-fg hover:text-accent hover:underline"
-                          title="פתח קישור הרשמה/מקור בכרטיסייה חדשה"
-                        >
-                          <bdi>{c.name}</bdi>
-                          <ExternalLink size={12} aria-hidden="true" />
-                        </a>
+                        // The name itself is plain text (part of the row's click-to-expand
+                        // surface, below) with only a small icon-button carrying the outbound
+                        // link -- previously the whole name (often the widest thing in the row)
+                        // was wrapped in the `<a>`. On narrow viewports the table is wider than
+                        // the screen (min-w-[720px] in an overflow-x-auto strip) and the summary
+                        // row's *unscrolled* visible slice is exactly this leading (chevron+name)
+                        // portion, so a tap anywhere in that slice -- including a plain center
+                        // tap meant to expand the row -- landed on the full-width name link and
+                        // opened it instead of toggling `aria-expanded` (07-conferences.spec.ts,
+                        // mobile-390x844 + iphone-safari, R6-ui). Shrinking the link to just the
+                        // icon leaves the rest of the visible row (the name text) as plain,
+                        // non-navigating surface a tap can land on to expand/collapse.
+                        <span className="inline-flex min-w-0 items-center gap-1.5">
+                          <bdi className="truncate">{c.name}</bdi>
+                          <a
+                            href={outUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex shrink-0 items-center rounded p-0.5 text-fg-dim hover:bg-bg-sunken hover:text-accent"
+                            title="פתח קישור הרשמה/מקור בכרטיסייה חדשה"
+                            aria-label={`פתח קישור הרשמה עבור ${c.name}`}
+                          >
+                            <ExternalLink size={12} aria-hidden="true" />
+                          </a>
+                        </span>
                       ) : (
                         <span className="inline-flex items-center gap-1.5">
                           <bdi>{c.name}</bdi>

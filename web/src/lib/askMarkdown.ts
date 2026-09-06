@@ -81,6 +81,26 @@ const LATIN_RUN_RE = /[A-Za-z0-9][A-Za-z0-9._/:@+#=?&%-]*/g;
 // `[n]` citation markers, same shape CitationText/reportHtml already parse.
 const CITE_RE = /\[(\d+)\]/g;
 
+// A `#`..`######` ATX heading marker is only recognized by `marked` (like every CommonMark
+// parser) when it starts its own line. R6-chat's backend has been observed emitting a heading
+// run right onto the tail of the previous sentence with no line break at all -- e.g.
+// "...בהפעלת אמצעים[^1].### עובדות מרכזיות" -- which `marked` then parses as one ordinary
+// paragraph, leaving the literal "###" visible in the rendered answer instead of a heading
+// (06-ask.spec.ts "never a silent hang", iphone-safari, R6-ui bug report 2026-09-07). This is a
+// property of the raw text, not of any particular viewport/renderer, so fix it once here rather
+// than only on the branch that happened to reproduce it: insert the newline the heading is
+// missing before `marked` ever sees the text. Requires a space after the hashes (real prose
+// occasionally uses a bare "#" without one, e.g. a hashtag) and only fires when the marker isn't
+// already at the start of a line, so a normal heading is left untouched. The preceding-char class
+// excludes "#" itself (not just "\n") -- otherwise, for an *already* correctly-placed heading like
+// "## text", the class would happily match on the first "#" (it's not a newline) and split the
+// marker in two: a bare "#" heading followed by a "# text" heading.
+const GLUED_HEADING_RE = /([^\n#])(#{1,6}[ \t]+\S)/g;
+
+function normalizeGluedHeadings(markdown: string): string {
+  return markdown.replace(GLUED_HEADING_RE, "$1\n\n$2");
+}
+
 // Citation URLs come from ingested OSINT item rows, not from a fixed allowlist -- DOMPurify's
 // final sanitize pass strips a `javascript:` (or similar) scheme from `href`, but it does not
 // know `data-url` is meant to hold a URL our own click handler later opens via `window.open`, so
@@ -235,7 +255,7 @@ function wrapTablesForScroll(doc: Document, root: HTMLElement): void {
  * Safe to call on every streamed chunk (re-parses from scratch each time; cheap at this size).
  */
 export function renderAskMarkdown(markdown: string, citations: AskCitationLike[] = []): string {
-  const source = markdown ?? "";
+  const source = normalizeGluedHeadings(markdown ?? "");
   const rawHtml = marked.parse(source, { async: false }) as string;
   const safeHtml = sanitize(rawHtml);
 

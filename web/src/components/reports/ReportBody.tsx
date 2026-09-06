@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
 import { api } from "@/api";
@@ -89,9 +89,29 @@ export function ReportBody({
     staleTime: 5 * 60_000,
   });
 
-  const linked = enhanceSourceAppendixLinks(
-    linkifyReportCitations(html, citationsData?.citations),
+  // Memoized in two layers, both required. React's DOM renderer diffs a host node's
+  // `dangerouslySetInnerHTML` prop by *object reference* -- `lastProps.dangerouslySetInnerHTML
+  // !== nextProps.dangerouslySetInnerHTML` -- before it ever looks at `.__html`, and JSX allocates
+  // a brand-new `{ __html: ... }` object literal on every render no matter what string is inside
+  // it. So even a `linked` string that's byte-for-byte identical across renders still gets a new
+  // wrapper object each time, the reference check "changed", and React tears down and recreates
+  // this node's entire DOM subtree.
+  //
+  // That subtree includes every citation `<a>` in the article, and `handleMouseOver` calls
+  // `setHover` on essentially every pointer move over one -- a purely local state update with no
+  // effect on `linked`'s *content*. Without memoizing the wrapper object too, that alone was
+  // enough to detach the very element the pointer was hovering (and that a caller like
+  // Playwright's `.hover()` holds a handle to) out from under itself mid-gesture: `hover()` would
+  // see its target vanish and retry indefinitely against a page that keeps regenerating the same
+  // node (09-reports.spec.ts, desktop, R6-ui). Memoizing `linked` on its actual inputs (`html`,
+  // the citations map) keeps the *string* stable; memoizing the `{ __html }` object on `linked`
+  // keeps the *prop React actually diffs* stable too -- both layers are needed, since it's the
+  // outer object's identity, not the inner string's content, that React checks.
+  const linked = useMemo(
+    () => enhanceSourceAppendixLinks(linkifyReportCitations(html, citationsData?.citations)),
+    [html, citationsData?.citations],
   );
+  const dangerousHtml = useMemo(() => ({ __html: linked }), [linked]);
 
   useEffect(() => {
     return () => {
@@ -152,7 +172,7 @@ export function ReportBody({
       onMouseOut={handleMouseOut}
       onClick={handleClick}
     >
-      <div className={className} dangerouslySetInnerHTML={{ __html: linked }} />
+      <div className={className} dangerouslySetInnerHTML={dangerousHtml} />
       {hover && <CitationHoverCard {...hover} />}
     </div>
   );
