@@ -27,6 +27,7 @@ from mcp.types import TextContent
 
 from eoa.config import REPO_ROOT, McpServerCfg
 from eoa.errors import EOAError
+from eoa.security.redact import redact_secrets
 
 log = structlog.get_logger(__name__)
 
@@ -82,7 +83,10 @@ async def list_tools(server: McpServerCfg) -> list[McpToolInfo]:
     except McpConnectionError:
         raise
     except Exception as exc:
-        raise McpConnectionError(f"mcp server '{server.id}': list_tools failed: {exc}") from exc
+        # Q2-15 (2026-09-06): `exc`'s own text can echo a request URL (or other upstream detail)
+        # carrying an API key -- redact before it becomes an exception message that gets logged,
+        # persisted to `mcp_calls.error`, or returned to the model.
+        raise McpConnectionError(f"mcp server '{server.id}': list_tools failed: {redact_secrets(str(exc))}") from exc
 
 
 async def call_tool(server: McpServerCfg, tool_name: str, arguments: dict[str, Any]) -> McpCallResult:
@@ -98,7 +102,10 @@ async def call_tool(server: McpServerCfg, tool_name: str, arguments: dict[str, A
     except McpConnectionError:
         raise
     except Exception as exc:
-        raise McpConnectionError(f"mcp server '{server.id}' tool '{tool_name}' failed: {exc}") from exc
+        # Q2-15: same redaction as list_tools above.
+        raise McpConnectionError(
+            f"mcp server '{server.id}' tool '{tool_name}' failed: {redact_secrets(str(exc))}"
+        ) from exc
 
 
 async def _open_session(stack: AsyncExitStack, server: McpServerCfg) -> ClientSession:

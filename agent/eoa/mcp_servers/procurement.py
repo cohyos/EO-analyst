@@ -67,7 +67,6 @@ def sam_gov_search(
         posted_to = posted_to or now.strftime("%m/%d/%Y")
         posted_from = posted_from or (now - timedelta(days=90)).strftime("%m/%d/%Y")
     params: dict[str, Any] = {
-        "api_key": api_key,
         "postedFrom": posted_from,
         "postedTo": posted_to,
         "limit": max(1, min(limit, 100)),
@@ -78,7 +77,11 @@ def sam_gov_search(
         params["ncode"] = naics
     if psc:
         params["ccode"] = psc
-    resp = http_get_json(SAM_GOV_SEARCH_URL, params=params)
+    # Q2-15 (2026-09-06): api.sam.gov sits behind api.data.gov's key infrastructure, which accepts
+    # the key via either the `api_key` query parameter or an `X-Api-Key` header -- the header is
+    # used here so the key is never embedded in a URL that could end up in access logs, an
+    # exception message, or `mcp_calls.error`.
+    resp = http_get_json(SAM_GOV_SEARCH_URL, params=params, headers={"X-Api-Key": api_key})
     if resp["status"] != 200:
         return json_out({"error": f"sam.gov returned HTTP {resp['status']}", "body": resp.get("text")})
     data = resp["json"] or {}
@@ -240,8 +243,10 @@ def congress_gov_search(query: str, congress: int | None = None, limit: int = 10
     if not api_key:
         return not_configured("CONGRESS_GOV_API_KEY")
     url = f"{CONGRESS_GOV_BILL_URL}/{congress}" if congress else CONGRESS_GOV_BILL_URL
-    params = {"api_key": api_key, "format": "json", "limit": max(1, min(limit, 250)), "q": query}
-    resp = http_get_json(url, params=params)
+    params = {"format": "json", "limit": max(1, min(limit, 250)), "q": query}
+    # Q2-15 (2026-09-06): same api.data.gov-backed key infrastructure as SAM.gov above -- send the
+    # key as a header, never as a query parameter.
+    resp = http_get_json(url, params=params, headers={"X-Api-Key": api_key})
     if resp["status"] != 200:
         return json_out({"error": f"congress.gov returned HTTP {resp['status']}", "body": resp.get("text")})
     data = resp["json"] or {}

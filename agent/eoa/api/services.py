@@ -333,7 +333,13 @@ def list_items(
         where.append("i.domain = %(domain)s")
         params["domain"] = domain
     if since:
-        where.append("COALESCE(i.published_at, i.fetched_at) >= %(since)s")
+        # Q5-10 (docs/qa/findings_Q5_r2.md): the Morning KPI cards (`_night_summary`) count items
+        # by `COALESCE(fetched_at, created_at)` over a rolling last-24h window. This filter used to
+        # key off `COALESCE(published_at, fetched_at)` instead -- a different field (and different
+        # default) that made the KPI card's number and the feed count of the page it deep-links to
+        # (`/feed?since=24h`, `/feed?level=red&since=24h`) disagree. Same expression on both sides
+        # now so "23" on the card always means "23" items in the feed.
+        where.append("COALESCE(i.fetched_at, i.created_at) >= %(since)s")
         params["since"] = since
     if q:
         where.append("(i.title ILIKE %(q)s OR i.summary_he ILIKE %(q)s OR i.so_what_he ILIKE %(q)s)")
@@ -1485,7 +1491,7 @@ def list_tenders(
     country: str | None = None,
     q: str | None = None,
     min_relevance: int | None = DEFAULT_MIN_RELEVANCE,
-    since_days: int | None = DEFAULT_SINCE_DAYS,
+    since_days: int | None = None,
     include_closed: bool = False,
     include_archived: bool = False,
     limit: int = 100,
@@ -1495,9 +1501,19 @@ def list_tenders(
     whichever date the row actually has); ``include_closed``/``include_archived`` widen that
     default set. An explicit ``status=`` always wins outright and ignores ``since_days``/
     ``include_*`` -- an operator who asks for e.g. ``status=closed`` wants every closed tender, not
-    just recent ones. Returns both the (possibly capped) tender list AND a status -> count summary
-    (honoring ``country``/``q`` but not the status/since_days/include_* narrowing) for the UI's
-    header chips, since those need the true totals regardless of what the list itself shows."""
+    just recent ones.
+
+    Q5-11 (docs/qa/findings_Q5_r2.md): ``since_days`` here is ``None`` unless the caller passed one
+    explicitly (the route's own default is likewise ``None``, not ``DEFAULT_SINCE_DAYS`` -- see
+    ``routes/tenders.py``). Closed/archived tenders are old by definition, so when the caller asks
+    to see them (``include_closed``/``include_archived``) *without* also pinning an explicit
+    ``since_days``, the 90-day window is lifted entirely rather than silently re-hiding the very
+    rows the toggle was meant to reveal. An explicit ``since_days`` (whatever its value) always
+    applies, include_* or not -- the operator asked for a specific window and gets it.
+
+    Returns both the (possibly capped) tender list AND a status -> count summary (honoring
+    ``country``/``q`` but not the status/since_days/include_* narrowing) for the UI's header chips,
+    since those need the true totals regardless of what the list itself shows."""
     where = ["1 = 1"]
     params: dict[str, Any] = {"limit": min(max(limit, 1), 500)}
 
@@ -1512,9 +1528,12 @@ def list_tenders(
             statuses.append("archived")
         where.append("status = ANY(%(statuses)s)")
         params["statuses"] = statuses
-        if since_days is not None:
+        effective_since_days = since_days
+        if effective_since_days is None and not (include_closed or include_archived):
+            effective_since_days = DEFAULT_SINCE_DAYS
+        if effective_since_days is not None:
             where.append("COALESCE(deadline, published_at::date, created_at::date) >= (CURRENT_DATE - %(since_days)s)")
-            params["since_days"] = since_days
+            params["since_days"] = effective_since_days
 
     if country:
         where.append("country = %(country)s")
@@ -2316,13 +2335,29 @@ def list_mcp_servers() -> dict[str, Any]:
 
 
 def ping_mcp_server(server_id: str) -> dict[str, Any]:
-    """`POST /api/mcp/servers/{id}/ping` ("בדוק חיבור"): connect, list tools, disconnect."""
+    """`POST /api/mcp/servers/{id}/ping` ("בדוק חיבור"): connect, list tools, disconnect.
+
+    Q2-16 (2026-09-06): must respect the global `mcp.enabled` kill switch exactly like
+    `list_mcp_servers` above (`if cfg.enabled and server.enabled and not server.inherit_cli_only`)
+    -- the old version skipped that check and dialed the server regardless of the switch, the one
+    path in this module that could still reach an MCP server after an operator had globally
+    disabled MCP.
+    """
     from eoa.mcp.registry import ping_server
 
     cfg = eoa_config.settings().mcp
     server = cfg.server(server_id)
     if server is None:
         raise McpServerNotFound(server_id)
+    if not cfg.enabled:
+        return {
+            "id": server.id,
+            "ok": False,
+            "error": "not_enabled",
+            "tool_count": 0,
+            "tools": [],
+            "latency_ms": 0,
+        }
     if server.inherit_cli_only:
         return {
             "id": server.id,

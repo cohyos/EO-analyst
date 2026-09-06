@@ -36,6 +36,7 @@ class TestSamGovSearch:
         def fake_get(url, *, params=None, headers=None, timeout_s=20.0):
             captured["url"] = url
             captured["params"] = params
+            captured["headers"] = headers
             return {
                 "status": 200,
                 "json": {
@@ -60,7 +61,9 @@ class TestSamGovSearch:
         out = json.loads(p.sam_gov_search(keyword="night vision", limit=5))
         assert out["total_records"] == 1
         assert out["opportunities"][0]["notice_id"] == "N1"
-        assert captured["params"]["api_key"] == "test-key"
+        # Q2-15: the key travels as a header, never as a query parameter.
+        assert "api_key" not in captured["params"]
+        assert captured["headers"]["X-Api-Key"] == "test-key"
         assert captured["params"]["title"] == "night vision"
 
     def test_non_200_returns_error(self, monkeypatch: pytest.MonkeyPatch):
@@ -132,16 +135,22 @@ class TestCongressGovSearch:
 
     def test_success(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("CONGRESS_GOV_API_KEY", "k")
-        monkeypatch.setattr(
-            p,
-            "http_get_json",
-            lambda *a, **kw: {
+        captured = {}
+
+        def fake_get(url, *, params=None, headers=None, timeout_s=20.0):
+            captured["params"] = params
+            captured["headers"] = headers
+            return {
                 "status": 200,
                 "json": {"bills": [{"title": "NDAA FY26", "number": "1234", "type": "HR", "congress": 119}]},
-            },
-        )
+            }
+
+        monkeypatch.setattr(p, "http_get_json", fake_get)
         out = json.loads(p.congress_gov_search("NDAA"))
         assert out["bills"][0]["number"] == "1234"
+        # Q2-15: the key travels as a header, never as a query parameter.
+        assert "api_key" not in captured["params"]
+        assert captured["headers"]["X-Api-Key"] == "k"
 
 
 class TestDscaMajorArmsSalesParsing:

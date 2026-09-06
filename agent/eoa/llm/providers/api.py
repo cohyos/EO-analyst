@@ -18,7 +18,6 @@ from __future__ import annotations
 import copy
 import json
 import os
-import re
 import time
 from typing import Any
 
@@ -30,37 +29,14 @@ from eoa.config import settings
 from eoa.errors import CliProviderError, ProviderUnavailable
 from eoa.llm.providers.base import ProviderResult, strip_code_fences
 
+# Q2-15 (2026-09-06): moved to `eoa.security.redact` so `eoa.mcp_servers.*` / `eoa.mcp.client` /
+# `eoa.mcp.registry` share the exact same patterns instead of a second copy. Imported (not
+# redefined) here so `from eoa.llm.providers.api import redact_secrets` keeps working.
+from eoa.security.redact import redact_secrets
+
 log = structlog.get_logger(__name__)
 
 _TIMEOUT_S = 120.0
-
-# Q2-3 (2026-09-06): patterns for secrets that must never reach a log line or an
-# exception message surfaced to a caller -- a `key=` query param (the old Gemini
-# auth mechanism, now replaced by the `x-goog-api-key` header below, but still
-# worth scrubbing defensively from any upstream error body that happens to echo
-# the request URL back), raw API key literals (`AIza...`, `sk-...`), and bearer
-# tokens.
-_SECRET_QUERY_PARAM_RE = re.compile(r"(?i)([?&](?:key|api_key|token)=)[^&\s\"']+")
-_SECRET_AIZA_RE = re.compile(r"AIza[0-9A-Za-z_\-]{10,}")
-_SECRET_SK_RE = re.compile(r"sk-[A-Za-z0-9_\-]{10,}")
-_SECRET_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+")
-
-
-def redact_secrets(text: str) -> str:
-    """Scrub API keys/tokens out of text before it is logged or raised (Q2-3).
-
-    Applied in every ``except`` block below that turns an httpx exception or
-    response body into a log line / ``ApiProviderError`` message, so a key
-    leaked via a query string or echoed back verbatim by an upstream error
-    page never lands in ``runtime/*.log`` or a client-visible message.
-    """
-    if not text:
-        return text
-    redacted = _SECRET_QUERY_PARAM_RE.sub(r"\1[REDACTED]", text)
-    redacted = _SECRET_AIZA_RE.sub("[REDACTED]", redacted)
-    redacted = _SECRET_SK_RE.sub("[REDACTED]", redacted)
-    redacted = _SECRET_BEARER_RE.sub(r"\1[REDACTED]", redacted)
-    return redacted
 
 
 class ApiProviderError(CliProviderError):

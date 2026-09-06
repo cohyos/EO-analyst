@@ -35,6 +35,7 @@ import structlog
 from eoa.config import McpServerCfg, settings
 from eoa.errors import EOAError
 from eoa.mcp.client import McpCallResult, McpConnectionError, McpToolInfo, call_tool, list_tools
+from eoa.security.redact import redact_secrets
 
 log = structlog.get_logger(__name__)
 
@@ -106,7 +107,10 @@ def ping_server(server: McpServerCfg) -> McpServerStatus:
         )
     except McpConnectionError as exc:
         latency_ms = int((time.monotonic() - t0) * 1000)
-        log.warning("mcp_ping_failed", server=server.id, error=str(exc)[:300])
+        # Q2-15 (2026-09-06): `redact_secrets` before this reaches a log line or the status
+        # object a caller (e.g. `GET /api/mcp/servers`) returns to the UI.
+        safe_error = redact_secrets(str(exc))[:300]
+        log.warning("mcp_ping_failed", server=server.id, error=safe_error)
         return McpServerStatus(
             id=server.id,
             label=server.label or server.id,
@@ -115,7 +119,7 @@ def ping_server(server: McpServerCfg) -> McpServerStatus:
             tools=[],
             tool_count=0,
             ok=False,
-            error=str(exc)[:300],
+            error=safe_error,
             latency_ms=latency_ms,
         )
 
@@ -211,20 +215,29 @@ def call(full_tool_name: str, arguments: dict[str, Any], *, item_id: str = "mcp"
         result: McpCallResult = _run(call_tool(server, tool_name, arguments))
     except McpConnectionError as exc:
         duration_ms = int((time.monotonic() - t0) * 1000)
+        # Q2-15 (2026-09-06): `redact_secrets` before this reaches `mcp_calls.error` (persisted)
+        # or the string handed back to the model -- `eoa.mcp.client` already redacts its own
+        # exception text, but this is applied again defensively (idempotent, cheap) since a
+        # connection-layer failure could in principle raise from somewhere else too.
+        safe_error = redact_secrets(str(exc))[:300]
         _log_call(
             server=server_id, tool=tool_name, arguments=arguments, chars=0,
-            duration_ms=duration_ms, verdict="error", error=str(exc)[:300],
+            duration_ms=duration_ms, verdict="error", error=safe_error,
         )
-        return json.dumps({"error": f"mcp call failed: {str(exc)[:300]}"})
+        return json.dumps({"error": f"mcp call failed: {safe_error}"})
     duration_ms = int((time.monotonic() - t0) * 1000)
 
     text = result.text[: server.max_output_chars]
     if result.is_error:
+        # Q2-15: this is an error-reporting path (the tool itself reported failure) -- redact
+        # before persisting/returning, unlike the ordinary success path below which must not
+        # mangle legitimate tool output.
+        safe_error_text = redact_secrets(text)[:300]
         _log_call(
             server=server_id, tool=tool_name, arguments=arguments, chars=len(text),
-            duration_ms=duration_ms, verdict="tool_error", error=text[:300],
+            duration_ms=duration_ms, verdict="tool_error", error=safe_error_text,
         )
-        return json.dumps({"error": f"mcp tool reported an error: {text[:300]}"})
+        return json.dumps({"error": f"mcp tool reported an error: {safe_error_text}"})
 
     verdict = "clean"
     try:

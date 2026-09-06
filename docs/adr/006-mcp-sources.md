@@ -177,3 +177,22 @@ screening/audit-logging discipline every other untrusted-content path in this pr
 See `docs/MODULES.md`'s "MCP (Model Context Protocol) tool sources (A8, docs/adr/006-mcp-sources.md)"
 section for the concrete module/file map, the exact live-verification results, and the test
 inventory.
+
+## Security note, 2026-09-06 (Q2-14/Q2-15/Q2-16, `docs/qa/findings_Q2_r2.md`)
+
+The read-only sync HTTP client this ADR's tool families share (`eoa.mcp_servers._common`) had two
+gaps a security QA pass on the whole MCP layer found: it let `httpx` follow redirects internally
+with no per-hop SSRF re-check (Q2-14 -- the same class of TOCTOU/DNS-rebinding gap ADR-004's
+sibling fix, Q2-4, already closed for `eoa.fetch.remote._fetch_local`, just not carried over to
+this module's separate client), and `procurement.py`'s SAM.gov/Congress.gov calls put the API key
+in the query string, with no consistent redaction of error text on the way into `mcp_calls.error`
+or back to the model (Q2-15). Both are now fixed: `_common.py` validates every redirect hop before
+following it, refuses a cross-host hop outright, and routes every error through the shared
+`redact_secrets` helper (moved to `eoa.security.redact` so `eoa.mcp.client`/`eoa.mcp.registry`
+share it too); the two API keys now travel as an `X-Api-Key` header, never a query parameter.
+Q2-16 closed a smaller gap in the same pass: `ping_mcp_server` (`POST
+/api/mcp/servers/{id}/ping`) could still dial a server while the global `mcp.enabled` kill switch
+was off, unlike `list_mcp_servers`. None of this changes this ADR's architecture or its
+Consequences section above -- it hardens the transport/error-handling layer every tool family
+here already depends on. Full writeup: `docs/MODULES.md`'s "Security QA r2 fixes:
+Q2-14/Q2-15/Q2-16" section.

@@ -177,6 +177,28 @@ class TestCall:
         out = registry.call("mcp.procurement.ping", {})
         assert "mcp call failed" in out
 
+    def test_connection_error_with_a_key_in_it_never_leaks_into_json_or_the_log_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Q2-15 (2026-09-06): a failing request whose exception text embeds an API key (as if it
+        had leaked into a request URL) must never leak that key into the string returned to the
+        model, nor into the `mcp_calls` row `_log_call` writes."""
+        server = _server()
+        log_calls: list[dict] = []
+        self._patch_common(monkeypatch, cfg=McpCfg(enabled=True, servers=[server]), log_calls=log_calls)
+
+        async def boom(srv, tool_name, arguments):
+            raise McpConnectionError(
+                "mcp server 'procurement' tool 'sam_gov_search' failed: connect timeout for "
+                "https://api.sam.gov/opportunities/v2/search?api_key=SUPERSECRET123456"
+            )
+
+        monkeypatch.setattr(registry, "call_tool", boom)
+        out = registry.call("mcp.procurement.sam_gov_search", {})
+        assert "SUPERSECRET123456" not in out
+        assert len(log_calls) == 1
+        assert "SUPERSECRET123456" not in (log_calls[0]["error"] or "")
+
     def test_tool_reported_error(self, monkeypatch: pytest.MonkeyPatch):
         server = _server()
         self._patch_common(monkeypatch, cfg=McpCfg(enabled=True, servers=[server]), log_calls=[])
@@ -187,6 +209,27 @@ class TestCall:
         monkeypatch.setattr(registry, "call_tool", fake_call_tool)
         out = registry.call("mcp.procurement.ping", {})
         assert "mcp tool reported an error" in out
+
+    def test_tool_reported_error_with_a_key_in_it_never_leaks_into_json_or_the_log_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Q2-15: same redaction guarantee when the tool call itself (not the connection layer)
+        reports the error -- e.g. a stdio server whose own exception text echoed the request."""
+        server = _server()
+        log_calls: list[dict] = []
+        self._patch_common(monkeypatch, cfg=McpCfg(enabled=True, servers=[server]), log_calls=log_calls)
+
+        async def fake_call_tool(srv, tool_name, arguments):
+            return McpCallResult(
+                text="upstream rejected https://api.congress.gov/v3/bill?api_key=SUPERSECRET123456",
+                is_error=True,
+            )
+
+        monkeypatch.setattr(registry, "call_tool", fake_call_tool)
+        out = registry.call("mcp.procurement.ping", {})
+        assert "SUPERSECRET123456" not in out
+        assert len(log_calls) == 1
+        assert "SUPERSECRET123456" not in (log_calls[0]["error"] or "")
 
 
 class TestPingServer:

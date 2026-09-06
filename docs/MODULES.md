@@ -5988,3 +5988,165 @@ Q3-1/.../Q3-13 write-up above flagged as needing this guard's owner to reconcile
 Full `PYTHONPATH=agent pytest tests/unit -q` re-run clean after every change in this section
 (1565+ passed, 0 failed).
 
+## BD-1 fix pass: `eoa.report.bd_territory` (docs/qa/findings_Q3_r2.md, 2026-09-06)
+
+Six defects flagged by the Q3 r2 QA pass against a live `bd_us` build, all fixed in
+`agent/eoa/report/bd_territory.py` (plus `agent/eoa/config.py`, `config/config.yaml`,
+`agent/eoa/llm/prompts/report_bd_territory.md`) without changing `build_bd_territory`'s external
+signature:
+
+1. **Conference dates/status/organizer.** `collect_conferences_for_territory` already read real
+   `conferences.start_date`/`end_date` via `eoa.conferences.tracker.upcoming()` -- the actual gap
+   was that `format_conferences_block`/`conferences_table` dropped the row's `status`
+   (confirmed/estimated, via new `_conference_status_he`) and `organizer` on the floor. Both now
+   render alongside the real dates; `conferences_table`'s headers gained `סטטוס`/`מארגן` columns
+   (`["שם", "תאריכים", "עיר", "סטטוס", "מארגן", "רלוונטיות"]`). Nothing here ever synthesizes a
+   date -- ``tracker.upcoming()``'s own `WHERE start_date IS NOT NULL` already excludes datelesss
+   rows.
+2. **Empty sub-sections.** New `_drop_empty_sections(draft)`: strips any `ReportSection` whose
+   `prose_he` is blank/whitespace-only before every render. `sections` is documented as unused by
+   this report's schema/prompt, but nothing previously stopped a non-compliant model response from
+   returning one anyway with a domain heading and empty prose, rendered verbatim by
+   `docx_builder` as a heading with nothing under it. Applied after the initial draft and after
+   every retry.
+3. **Truncated fragments after citation stripping.** `_strip_uncited`'s inner `_clean` now cascades
+   the drop onto any *dependent fragment* immediately following a dropped sentence
+   (`_is_dependent_fragment`: starts with a bound "ו-" prefix or a standalone
+   או/אך/כי conjunction word (`_starts_with_conjunction`), or is under 6 words with no recognized
+   verb (`_has_verb_hint`, word-level match against `_FRAGMENT_VERB_HINTS` -- never a bare
+   substring check, which false-matched short hints like "יש" inside unrelated words). A sentence
+   starting with a conjunction is dropped unconditionally, regardless of what precedes it --
+   the hard invariant the fix targets.
+4. **Perspective (recommendations must be ours, never a competitor's).** New
+   `BdReportCfg.our_company` (`OurCompanyCfg`: `name`/`aliases`/`country`/`is_israeli_industry`,
+   default name is a visible "define me" placeholder) and `BdReportCfg.perspective_he` in
+   `agent/eoa/config.py` + `config/config.yaml`. The prompt (`report_bd_territory.md`) now embeds
+   `{our_company_block}`/`{perspective_he}` and an explicit rule: every action is ours (approach
+   buyers/partners, respond to RFIs, attend/present at conferences ourselves, counter/monitor
+   competitors), watchlist competitors are always named as competitors, and an action promoting one
+   is forbidden. Post-hoc, `_perspective_violations` flags any `BdAction` that both names a
+   watchlist competitor (`collect_active_competitors`'s `is_watchlist` flag) and uses a promotion
+   verb (להציג/לקדם/לשווק + inflections, `_action_promoted_competitor`); `build_bd_territory` runs
+   this before the citation QA gate, retries once via `_perspective_corrective_retry` (quoting the
+   exact offending action/competitor pair), and falls back to `_drop_perspective_violations`
+   (removes only the offending actions) if the retry still violates it -- mirroring the citation
+   QA gate's retry-then-strip shape.
+5. **Competitor table noise.** `collect_active_competitors` now excludes a candidate with zero
+   activity in the window (no `entities_mentioned` hit, no `contract_award` win, and no
+   `graph_edges` row evidenced by one of the window's market items, via new
+   `_entity_edge_activity`) -- previously any company merely headquartered in the territory was
+   included regardless of activity. New `collect_dormant_watchlist_competitors` reports the
+   watchlist names this filter drops; `build_bd_territory` adds a one-line "מתחרי מעקב ללא פעילות
+   בחלון הזמן" extra section only when the surviving active-competitor count is under 3 and at
+   least one dormant name exists.
+6. **Exec summary must not claim "no findings" when tables have content.** Mirrors
+   `eoa.report.daily`'s Q3-14 fix: new `BdTableCounts` (events/tenders/forecasts/competitors/
+   conferences counts + `context_he()`) and `_tables_only_draft(territory, counts)`, used by
+   `draft_bd_territory` when `has_items` is false but `table_counts.total` is not -- instead of
+   `_no_items_draft`'s blanket "no findings" contradicting non-empty tables rendered right below.
+
+### Tests
+
+`tests/unit/test_report_bd_territory.py` grew from 25 to 41 cases covering all six items above:
+conference status/organizer rendering, `_drop_empty_sections` (removes-blank / no-op-when-clean),
+fragment-cascade stripping (conjunction-led, short-verbless, and the "kept sentence followed by an
+unconditionally-dropped conjunction fragment" case), the perspective helpers
+(`_watchlist_competitor_names`, `_action_promoted_competitor`, `_perspective_violations`,
+`_drop_perspective_violations`) plus an end-to-end `build_bd_territory` case where a stubborn
+mocked retry still violates and the fallback drop is exercised, `collect_active_competitors`'s
+zero-activity exclusion and `collect_dormant_watchlist_competitors` (both via a monkeypatched
+`_fetchall`), `BdTableCounts`/`_tables_only_draft`/`_no_items_draft` selection, and the dormant-note
+extra-section's `<3`-competitors gate (both branches). `ruff check` clean on all changed files;
+`PYTHONPATH=agent pytest tests/unit/test_report_bd_territory.py tests/unit/test_config.py -q`
+green (41 + 30 passed).
+
+## Security QA r2 fixes: Q2-14/Q2-15/Q2-16 (`docs/qa/findings_Q2_r2.md`, 2026-09-06)
+
+Fixes for the three MCP-tool-layer findings opened by the r2 pass (Q2-13, the fetch-service SSRF
+gap, was fixed directly the same day per that finding doc's own note and is not part of this pass).
+
+**Q2-14 (P2) -- `eoa.mcp_servers._common` followed redirects with zero per-hop SSRF
+re-validation.** The old `http_get_json`/`http_post_json`/`http_post_form` validated only the
+initial URL with `assert_public_http_url` and then handed the request to `httpx.Client(...,
+follow_redirects=True)`, which connects to (and trusts) every redirect hop internally -- the exact
+TOCTOU/DNS-rebinding gap Q2-4 already closed for `eoa.fetch.remote._fetch_local`, just not carried
+over to this module's own, separate sync client. New `_request()` (used by all three public
+helpers) disables `httpx`'s automatic redirects and walks the chain itself, bounded to
+`_MAX_REDIRECT_HOPS = 3`: every hop -- the initial URL and every `Location` header -- is
+re-validated with the same `assert_public_http_url` *before* it is requested, and a redirect is
+refused outright if it points at a different host than the one the call started on (none of the
+documented API surfaces this project talks to through this module -- SAM.gov, Congress.gov,
+USAspending, Federal Register, DSCA, EPO OPS, PatentsView, Janes -- are known to need a cross-host
+redirect, so one appearing is treated as a reportable error, never silently followed or bypassed).
+Tests: `tests/unit/test_mcp_servers_common.py::TestRedirectGuard` (redirect to loopback refused
+before the target is ever requested -- asserted via `route.called is False`, mirroring
+`test_remote_fetch.py`'s pattern; cross-host redirect refused the same way; same-host redirect
+followed and its content returned; a 6-hop chain refused as "too many redirects"). Hosts in these
+tests are literal public/loopback IPs, not hostnames, since `assert_public_http_url` always
+resolves its host via `socket.getaddrinfo` -- a literal IP is answered locally, a fictitious
+hostname would depend on the test machine's resolver/network and be flaky.
+
+**Q2-15 (P2) -- SAM.gov/Congress.gov keys as query params; unredacted errors into
+`mcp_calls.error`.** Two independent fixes:
+
+1. `agent/eoa/mcp_servers/procurement.py`'s `sam_gov_search`/`congress_gov_search` no longer put
+   `api_key` in the query string. Both APIs sit behind api.data.gov's key infrastructure, which
+   accepts the key via either the `api_key` query parameter or an `X-Api-Key` header -- both now
+   send `X-Api-Key`, so the key is never embedded in a URL that could end up in access logs, an
+   exception's own text, or `mcp_calls.error`. `janes.py` and `patents.py` were scanned for the
+   same pattern and were already header-only (`Authorization`/`Ocp-Apim-Subscription-Key` for
+   Janes, `Authorization: Bearer`/Basic for EPO OPS, `X-Api-Key` for PatentsView) -- no change
+   needed there beyond the shared redaction fix below.
+2. `redact_secrets` (the Q2-3 helper, `?key=`/`?api_key=`/`?token=` query values plus `AIza...`/
+   `sk-...` literals and `Bearer <token>`) moved from `eoa.llm.providers.api` to a new shared
+   `agent/eoa/security/redact.py` (re-exported from `eoa.security.__init__` and still importable
+   as `from eoa.llm.providers.api import redact_secrets` -- that module now imports it rather than
+   redefining it) so every MCP error path can use the exact same patterns instead of a second
+   copy. Applied at every point an error can surface a leaked key: `_common.py`'s `_request`
+   (SSRF/redirect-guard rejections, transport/DNS errors -- all re-raised as a `FetchError` whose
+   message has already been redacted) and `_parse_response` (a non-JSON response body, truncated
+   to 4000 chars, redacted before being returned as `resp["text"]`); `eoa.mcp.client`'s two
+   `except Exception` blocks that wrap a failure into `McpConnectionError(f"... {exc}")`;
+   `eoa.mcp.registry.ping_server`'s `McpConnectionError` handling (log line + the `McpServerStatus.
+   error` field) and `call()`'s two error paths (a connection failure, and a tool that reported
+   `isError=True`) -- both redact before the text reaches `_log_call`'s `mcp_calls.error` column
+   *and* the JSON error string returned to the model. The ordinary success path (`call()`'s
+   `text = result.text[:max_output_chars]` handed to `wrap_data`) is deliberately left alone --
+   redacting legitimate tool output on every call would risk mangling real search results that
+   happen to contain a word like "token" in ordinary prose.
+
+   Tests: `tests/unit/test_mcp_servers_common.py::TestErrorRedaction` (a transport exception whose
+   own text embeds `?api_key=...`, and a mocked 500/403 response body echoing a key/bearer token
+   back, never leak the secret through `http_get_json`); `tests/unit/test_mcp_servers_procurement.
+   py` (both `sam_gov_search`/`congress_gov_search` success tests now assert `"api_key" not in
+   params` and `headers["X-Api-Key"] == <key>`); `tests/unit/test_mcp_registry.py`'s two new cases
+   -- a `McpConnectionError` and a tool-reported error, both with a key embedded in the message --
+   assert the key never appears in `registry.call()`'s returned string *or* in the `mcp_calls` row
+   `_log_call` would have written (captured via the existing monkeypatched `log_mcp_call`).
+
+**Q2-16 (P3) -- `ping_mcp_server` ignored the global `mcp.enabled` kill switch.**
+`agent/eoa/api/services.py`'s `list_mcp_servers` already gates its live connectivity check on
+`cfg.enabled and server.enabled and not server.inherit_cli_only`; `ping_mcp_server` (`POST
+/api/mcp/servers/{id}/ping`) checked only `inherit_cli_only` and would still dial a server via
+`eoa.mcp.registry.ping_server` even while MCP was globally disabled -- the one path in this module
+that could still reach out after an operator flipped the switch off. Now checks `cfg.enabled`
+first and returns `{"ok": False, "error": "not_enabled", "tool_count": 0, "tools": [],
+"latency_ms": 0}` without importing/calling `ping_server` at all, mirroring the existing
+`inherit_cli_only` short-circuit shape immediately below it. Tests: new
+`tests/unit/test_mcp_services.py` (`ping_mcp_server` raises `McpServerNotFound` for an unknown id;
+returns `not_enabled` and never calls `ping_server` when `mcp.enabled` is `False` -- the mock
+raises `AssertionError` if called, so the test fails loudly rather than silently passing on a
+no-op; the pre-existing `inherit_cli_only` short-circuit and the normal enabled-and-dials-out path
+both still work).
+
+### Tests
+
+`PYTHONPATH=agent pytest tests/unit/test_mcp_servers_common.py tests/unit/test_mcp_servers_
+procurement.py tests/unit/test_mcp_servers_janes.py tests/unit/test_mcp_servers_patents.py
+tests/unit/test_mcp_registry.py tests/unit/test_mcp_services.py tests/unit/test_mcp_api.py
+tests/unit/test_mcp_config.py tests/unit/test_cli_mcp_config.py tests/unit/test_deep_search_mcp_
+tools.py tests/unit/test_llm_api_providers.py -q` green (123 passed). `ruff check` clean on every
+touched file (`agent/eoa/mcp_servers/*.py`, `agent/eoa/mcp/client.py`, `agent/eoa/mcp/registry.py`,
+`agent/eoa/api/services.py`, `agent/eoa/security/redact.py`, `agent/eoa/security/__init__.py`,
+`agent/eoa/llm/providers/api.py`, and all new/changed test files).
+
