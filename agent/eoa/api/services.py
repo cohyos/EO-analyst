@@ -1781,6 +1781,91 @@ def list_tender_forecasts(*, limit: int = 100) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------
+# A15 (docs/TENDER_PORTALS.md): source coverage panel -- read-only, config + DB, no writes.
+# --------------------------------------------------------------------------
+
+
+def _tender_source_status(kind: str, verified: bool, needs_key_env_var: str | None) -> str:
+    """One of ``"integrated_keyless"`` (a real, currently-polled, keyless integration --
+    ``kind: rss``/``api_json`` with ``verified: true``, or ``kind: search`` which always rides the
+    already-verified SearXNG client), ``"waiting_for_key"`` (``verified: false`` with a known env
+    var name -- see ``TenderSource.needs_key_env_var``), or ``"not_integrated"`` (documented dead
+    end/deliberately out of scope: bot-blocked, wrong endpoint, JS-hydrated shell, ...).
+
+    ``kind: html`` is always ``"not_integrated"`` regardless of ``verified`` -- ``eoa.tenders.scan``
+    unconditionally skips every ``html`` source (``if src.kind == "html": continue``), so a
+    ``verified: true`` ``html`` entry (e.g. ``canada_buys`` -- the page itself loads fine, it's just
+    never scraped directly) still contributes nothing to ingestion and must not be counted as an
+    active integration."""
+    if kind == "html":
+        return "not_integrated"
+    if kind == "search":
+        return "integrated_keyless"
+    if verified:
+        return "integrated_keyless"
+    if needs_key_env_var:
+        return "waiting_for_key"
+    return "not_integrated"
+
+
+def tender_source_coverage() -> dict[str, Any]:
+    """A15: per-region source coverage for the tenders page's "כיסוי מקורות" panel -- combines
+    ``config/tenders.yaml`` (via ``eoa.tenders.scan.load_tender_sources``, the portal registry) with
+    the ``tenders`` table (notices actually stored per ``source`` id, and the most recent one's
+    ``created_at`` as a proxy "last successful fetch" -- there is no separate per-source fetch-log
+    table, so a source that has never yet produced a stored notice shows ``last_fetch_at: null``
+    even if it has been polled/scanned many times with zero matches).
+
+    Read-only; never raises on a config load hiccup (falls back to an empty source list, same
+    "a broken section never breaks the page" spirit as the rest of this module) -- the DB query
+    itself is allowed to raise (a genuine DB outage should surface as a 500, same as every other
+    endpoint in this module).
+    """
+    from eoa.tenders.scan import TenderSource, load_tender_sources
+
+    try:
+        sources: list[TenderSource] = load_tender_sources()
+    except Exception as exc:  # pragma: no cover -- config load should never actually fail in prod
+        log.warning("tender_source_coverage_config_load_failed", error=str(exc)[:200])
+        sources = []
+
+    stats_rows = _fetchall(
+        "SELECT source, count(*) AS n, max(created_at) AS last_created_at FROM tenders GROUP BY source"
+    )
+    stats_by_source = {r["source"]: r for r in stats_rows}
+
+    by_region: dict[str, list[dict[str, Any]]] = {}
+    totals = {"integrated_keyless": 0, "waiting_for_key": 0, "search_only": 0, "not_integrated": 0}
+    for s in sources:
+        status = _tender_source_status(s.kind, s.verified, s.needs_key_env_var)
+        # "search_only" is reported as its own bucket in the summary totals (coordinator
+        # requirement) even though it's a sub-case of "integrated_keyless" for the per-source
+        # `status` field above (a search source IS keyless/integrated, just via SearXNG rather than
+        # a direct feed) -- avoids double-counting while still giving the UI/report the distinction.
+        totals["search_only" if s.kind == "search" else status] += 1
+        row = stats_by_source.get(s.id)
+        by_region.setdefault(s.country, []).append(
+            {
+                "id": s.id,
+                "name": s.name,
+                "kind": s.kind,
+                "country": s.country,
+                "status": status,
+                "verified": s.verified,
+                "needs_key_env_var": s.needs_key_env_var,
+                "notices_stored": (row["n"] if row else 0),
+                "last_fetch_at": (row["last_created_at"] if row else None),
+            }
+        )
+
+    regions = [
+        {"region": region, "sources": sorted(rows, key=lambda r: r["id"])}
+        for region, rows in sorted(by_region.items())
+    ]
+    return {"regions": regions, "totals": totals, "source_count": len(sources)}
+
+
+# --------------------------------------------------------------------------
 # clarifications
 # --------------------------------------------------------------------------
 

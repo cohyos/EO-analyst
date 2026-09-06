@@ -41,3 +41,10 @@ def list_tenders(
 @router.get("/tenders/forecasts")
 def list_tender_forecasts(limit: int = Query(100, ge=1, le=500)) -> list[dict]:
     return services.list_tender_forecasts(limit=limit)
+
+
+@router.get("/tenders/coverage")
+def get_tender_source_coverage() -> dict:
+    """A15: read-only per-region tender-source coverage (config/tenders.yaml + the `tenders`
+    table) for the tenders page's "כיסוי מקורות" panel -- see services.tender_source_coverage."""
+    return services.tender_source_coverage()

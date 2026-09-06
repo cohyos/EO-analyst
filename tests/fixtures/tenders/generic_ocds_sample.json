@@ -1,0 +1,31 @@
+{
+  "uri": "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?stages=tender&limit=2",
+  "version": "1.1",
+  "publishedDate": "2026-09-05T14:27:56+01:00",
+  "releases": [
+    {
+      "id": "084056-2026",
+      "ocid": "ocds-h6vhtk-06f2a5",
+      "date": "2026-09-04T16:11:12+01:00",
+      "tag": ["tender"],
+      "tender": {
+        "title": "Supply of electro-optical counter-UAS surveillance towers",
+        "description": "Provision of electro-optical/infrared surveillance towers for perimeter counter-drone detection.",
+        "tenderPeriod": { "endDate": "2026-10-05T17:00:00+01:00" }
+      },
+      "buyer": { "id": "GB-FTS-7155", "name": "Ministry of Defence" }
+    },
+    {
+      "id": "084099-2026",
+      "ocid": "ocds-h6vhtk-07aa11",
+      "date": "2026-09-03T09:00:00+01:00",
+      "tag": ["award", "contract"],
+      "tender": {
+        "title": "Office catering framework",
+        "description": "Catering services for staff canteen.",
+        "tenderPeriod": { "endDate": "2026-07-01T12:00:00+01:00" }
+      },
+      "buyer": { "id": "GB-FTS-0001", "name": "Office for National Statistics" }
+    }
+  ]
+}

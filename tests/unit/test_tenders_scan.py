@@ -24,6 +24,7 @@ from eoa.tenders.scan import (
     _apply_domain_country_fallback,
     _apply_extraction_to_notice,
     _archive_stale_closed,
+    _collect_source_notices,
     _country_from_domain,
     _fetch_notice_text,
     _gate_reject_reason,
@@ -32,6 +33,8 @@ from eoa.tenders.scan import (
     _is_denylisted_domain,
     _matches_keywords,
     _parse_contracts_finder,
+    _parse_generic_json_list,
+    _parse_generic_ocds,
     _parse_search_hits,
     _parse_ted_notices,
     _passes_gate,
@@ -136,6 +139,50 @@ class TestLoadTenderSources:
         assert sources["sam_gov_api"].verified is False
         assert sources["il_mod"].verified is False
 
+    def test_a15_new_verified_keyless_sources_present(self):
+        """A15 (docs/TENDER_PORTALS.md): the global portal survey's new keyless, machine-readable
+        integrations must actually be loaded, verified, and (for api_json) carry a resolvable
+        generic parser format."""
+        sources = {s.id: s for s in load_tender_sources()}
+        for source_id in (
+            "ted_eu_cpv",
+            "uk_find_tender",
+            "fr_boamp",
+            "nl_tenderned",
+            "es_placsp_atom",
+            "us_grants_gov",
+        ):
+            assert source_id in sources, f"{source_id} missing from config/tenders.yaml"
+            assert sources[source_id].verified is True
+
+    def test_a15_keyed_or_blocked_sources_documented_not_verified(self):
+        """Portals needing a key, or blocked/out-of-scope on live probe, must stay verified: false
+        so eoa.tenders.scan never actually polls them (F24/A15 invariant: verified gates polling
+        for kind: api_json)."""
+        sources = {s.id: s for s in load_tender_sources()}
+        for source_id in (
+            "us_sbir_gov",
+            "no_doffin_api",
+            "pl_ezamowienia_api",
+            "eu_sedia_funding_tenders",
+            "us_usaspending",
+        ):
+            assert source_id in sources, f"{source_id} missing from config/tenders.yaml"
+            assert sources[source_id].verified is False
+
+    def test_a15_ted_cpv_source_uses_domain_keywords_for_gate_not_cpv_codes(self):
+        """The critical correctness requirement behind api_query_keywords: ted_eu_cpv's `keywords`
+        (used by the two-signal gate) must stay the normal domain vocabulary, never the raw CPV
+        codes used to build the API query -- a CPV code string never appears in a notice's actual
+        title/summary text, so using it as the gate's keyword list would silently reject every
+        notice this source ever returns."""
+        sources = {s.id: s for s in load_tender_sources()}
+        src = sources["ted_eu_cpv"]
+        assert "electro-optical" in src.keywords
+        assert src.api_query_keywords, "ted_eu_cpv must set api_query_keywords"
+        for code in src.api_query_keywords:
+            assert code.isdigit() and len(code) == 8, f"expected an 8-digit CPV code, got {code!r}"
+
 
 class TestLoadProcurementSignalsAndDenyDomains:
     def test_loads_real_procurement_signals(self):
@@ -215,6 +262,225 @@ class TestParseContractsFinder:
         notices = _parse_contracts_finder(self._payload(), _cf_source())
         assert notices[1].status_hint == "awarded"
         assert notices[0].status_hint is None
+
+
+# --------------------------------------------------------------------------
+# A15: generic OCDS / generic JSON-list parsers (config-driven, no bespoke per-source function)
+# --------------------------------------------------------------------------
+
+
+def _uk_find_tender_source(**overrides) -> TenderSource:
+    base = dict(
+        id="uk_find_tender",
+        name="UK Find a Tender Service",
+        kind="api_json",
+        country="UK",
+        url="https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
+        keywords=DOMAIN_KEYWORDS,
+        parse_hints={
+            "format": "ocds",
+            "notice_path": "releases",
+            "id_field": "id",
+            "title_field": "tender.title",
+            "summary_field": "tender.description",
+            "agency_field": "buyer.name",
+            "date_field": "date",
+            "deadline_field": "tender.tenderPeriod.endDate",
+            "url_pattern": "https://www.find-tender.service.gov.uk/Notice/{id}",
+        },
+        verified=True,
+    )
+    base.update(overrides)
+    return TenderSource(**base)
+
+
+class TestParseGenericOcds:
+    def _payload(self):
+        return json.loads((FIXTURES / "generic_ocds_sample.json").read_text(encoding="utf-8"))
+
+    def test_parses_all_releases(self):
+        notices = _parse_generic_ocds(self._payload(), _uk_find_tender_source())
+        assert len(notices) == 2
+
+    def test_fields_extracted_via_parse_hints(self):
+        notices = _parse_generic_ocds(self._payload(), _uk_find_tender_source())
+        n = notices[0]
+        assert n.external_ref == "uk_find_tender:084056-2026"
+        assert "electro-optical" in n.title.lower()
+        assert n.agency == "Ministry of Defence"
+        assert n.deadline == dt.date(2026, 10, 5)
+        assert n.published_at == dt.date(2026, 9, 4)
+        assert n.url == "https://www.find-tender.service.gov.uk/Notice/084056-2026"
+
+    def test_award_tag_maps_to_awarded_status_hint(self):
+        notices = _parse_generic_ocds(self._payload(), _uk_find_tender_source())
+        assert notices[1].status_hint == "awarded"
+        assert notices[0].status_hint is None
+
+    def test_defaults_used_when_parse_hints_omitted(self):
+        """Every parse_hints key is optional -- the plain-OCDS defaults (ocid/tender.title/...)
+        must still work, matching uk_contracts_finder's own shape."""
+        payload = json.loads((FIXTURES / "contracts_finder_sample.json").read_text(encoding="utf-8"))
+        src = TenderSource(
+            id="x", name="x", kind="api_json", country="UK", keywords=DOMAIN_KEYWORDS, verified=True
+        )
+        notices = _parse_generic_ocds(payload, src)
+        assert len(notices) == 2
+        assert notices[0].external_ref == "x:ocds-b5fd17-a1b2c3d4"
+        assert notices[0].agency == "Ministry of Defence"
+
+    def test_missing_id_skips_record(self):
+        src = _uk_find_tender_source()
+        notices = _parse_generic_ocds({"releases": [{"tag": [], "tender": {"title": "no id"}}]}, src)
+        assert notices == []
+
+
+def _grants_gov_source(**overrides) -> TenderSource:
+    base = dict(
+        id="us_grants_gov",
+        name="US Grants.gov",
+        kind="api_json",
+        country="US",
+        url="https://api.grants.gov/v1/api/search2",
+        method="POST",
+        keywords=DOMAIN_KEYWORDS,
+        parse_hints={
+            "format": "json_list",
+            "notice_path": "data.oppHits",
+            "id_field": "id",
+            "title_field": "title",
+            "agency_field": "agency",
+            "date_field": "openDate",
+            "deadline_field": "closeDate",
+            "url_pattern": "https://www.grants.gov/search-results-detail/{id}",
+        },
+        verified=True,
+    )
+    base.update(overrides)
+    return TenderSource(**base)
+
+
+class TestParseGenericJsonList:
+    def _payload(self):
+        return json.loads((FIXTURES / "generic_json_list_sample.json").read_text(encoding="utf-8"))
+
+    def test_parses_all_hits(self):
+        notices = _parse_generic_json_list(self._payload(), _grants_gov_source())
+        assert len(notices) == 2
+
+    def test_fields_extracted_via_parse_hints(self):
+        notices = _parse_generic_json_list(self._payload(), _grants_gov_source())
+        n = notices[0]
+        assert n.external_ref == "us_grants_gov:352741"
+        assert "electro-optical" in n.title.lower()
+        assert n.agency == "Naval Research Laboratory"
+        assert n.published_at == dt.date(2024, 3, 1)
+        assert n.deadline == dt.date(2026, 9, 30)
+        assert n.url == "https://www.grants.gov/search-results-detail/352741"
+
+    def test_empty_deadline_string_parses_to_none(self):
+        notices = _parse_generic_json_list(self._payload(), _grants_gov_source())
+        assert notices[1].deadline is None
+
+    def test_flat_records_with_nested_fields_dict(self):
+        """BOAMP's shape: {"records": [{"fields": {...}}]} -- notice_path='records',
+        every other field a dotted 'fields.X' path."""
+        payload = json.loads((FIXTURES / "generic_json_list_flat_sample.json").read_text(encoding="utf-8"))
+        src = TenderSource(
+            id="fr_boamp",
+            name="BOAMP",
+            kind="api_json",
+            country="FR",
+            keywords=DOMAIN_KEYWORDS,
+            parse_hints={
+                "format": "json_list",
+                "notice_path": "records",
+                "id_field": "fields.id",
+                "title_field": "fields.objet",
+                "summary_field": "fields.type_marche_facette",
+                "agency_field": "fields.nomacheteur",
+                "date_field": "fields.dateparution",
+                "deadline_field": "fields.datelimitereponse",
+                "url_field": "fields.url_avis",
+            },
+            verified=True,
+        )
+        notices = _parse_generic_json_list(payload, src)
+        assert len(notices) == 1
+        n = notices[0]
+        assert n.external_ref == "fr_boamp:24_30807"
+        assert "electro-optiques" in n.title.lower()
+        assert n.agency == "MINARM/SCA/PFC BREST"
+        assert n.published_at == dt.date(2026, 8, 15)
+        assert n.deadline == dt.date(2026, 10, 30)
+        assert n.url == "https://www.boamp.fr/pages/avis/?q=idweb:24-30807"
+
+    def test_bare_top_level_list_wrapped_as_root(self):
+        """_fetch_api_json wraps a bare-array JSON response as {"_root": [...]} before calling any
+        parser -- notice_path="" reads that wrapper key."""
+        src = TenderSource(
+            id="x",
+            name="x",
+            kind="api_json",
+            country="US",
+            keywords=DOMAIN_KEYWORDS,
+            parse_hints={"format": "json_list", "notice_path": "", "id_field": "id", "title_field": "title"},
+            verified=True,
+        )
+        payload = {"_root": [{"id": "1", "title": "electro-optical sensor RFI"}]}
+        notices = _parse_generic_json_list(payload, src)
+        assert len(notices) == 1
+        assert notices[0].external_ref == "x:1"
+
+    def test_missing_id_skips_record(self):
+        src = _grants_gov_source()
+        notices = _parse_generic_json_list({"data": {"oppHits": [{"title": "no id"}]}}, src)
+        assert notices == []
+
+    def test_non_dict_records_skipped(self):
+        src = _grants_gov_source()
+        notices = _parse_generic_json_list({"data": {"oppHits": ["not-a-dict", None]}}, src)
+        assert notices == []
+
+
+class TestCollectSourceNoticesApiQueryKeywordsOverride:
+    """A15: api_query_keywords (ted_eu_cpv) must drive the API-fetch loop while src.keywords (the
+    gate vocabulary) is left untouched."""
+
+    def test_api_query_keywords_used_for_fetch_loop(self):
+        src = TenderSource(
+            id="ted_eu_cpv",
+            name="TED CPV",
+            kind="api_json",
+            country="EU",
+            url="https://api.ted.europa.eu/v3/notices/search",
+            method="POST",
+            query_template='{"query":"classification-cpv={keyword}","fields":["ND","TI"],"limit":5}',
+            keywords=DOMAIN_KEYWORDS,
+            api_query_keywords=["38620000", "35120000"],
+            verified=True,
+        )
+        seen_keywords: list[str] = []
+
+        def fake_fetch(src_arg, keyword):
+            seen_keywords.append(keyword)
+            return []
+
+        with patch("eoa.tenders.scan._fetch_api_json", side_effect=fake_fetch):
+            _collect_source_notices(src, [])
+        assert seen_keywords == ["38620000", "35120000"]
+
+    def test_no_override_falls_back_to_keywords(self):
+        src = _ted_source()
+        seen_keywords: list[str] = []
+
+        def fake_fetch(src_arg, keyword):
+            seen_keywords.append(keyword)
+            return []
+
+        with patch("eoa.tenders.scan._fetch_api_json", side_effect=fake_fetch):
+            _collect_source_notices(src, [])
+        assert seen_keywords == DOMAIN_KEYWORDS[:5]
 
 
 # --------------------------------------------------------------------------

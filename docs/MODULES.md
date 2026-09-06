@@ -7868,15 +7868,27 @@ the live 16-sample (8 questions x 2 runs) verification table are in
   lines are split on sentence terminators):
   - **grounded-entity check** (`_grounding_violation`): every multi-word Latin proper noun
     (`_PROPER_NOUN_RE`, catches both space-separated names like "Kunat Pipatanakul" and
-    hyphen-joined compounds like "Wayu-Paxa-OCR-Zero"), ASCII-quoted multi-word phrase, money
-    figure, and year in a unit must appear in the question, in some retrieved source's title/text,
-    or resolve to a canonical watchlist/curated-org record
-    (`eoa.pipeline.entity_normalize.resolve_canonical`) -- `_proper_noun_grounded` also accepts a
-    paraphrased/reordered restatement of a real fact (every individual word of the candidate,
-    >= 3 chars, appears *somewhere* in the corpus) so a real fact restated in different word order
-    ("GDLS-built ... Lynx XM30" -> "GDLS Lynx") is not flagged, while a wholesale-invented name
-    (none of its words appear anywhere) still is -- a deliberate precision-over-recall trade-off,
-    see the function's own docstring;
+    hyphen-joined compounds like "Wayu-Paxa-OCR-Zero" -- each segment must be >= 2 chars, a live
+    fix below), ASCII-quoted multi-word phrase, money figure, and year in a unit must appear in the
+    question, in some retrieved source's title/text, or resolve to a canonical watchlist/curated-org
+    record (`eoa.pipeline.entity_normalize.resolve_canonical`) -- `_proper_noun_grounded` also
+    accepts a paraphrased/reordered restatement of a real fact (every individual word of the
+    candidate, >= 3 chars, appears *somewhere* in the corpus) so a real fact restated in different
+    word order ("GDLS-built ... Lynx XM30" -> "GDLS Lynx") is not flagged, while a
+    wholesale-invented name (none of its words appear anywhere) still is -- a deliberate
+    precision-over-recall trade-off, see the function's own docstring. Exempted entirely from the
+    `### הערכת האנליסט` section (`_ANALYST_ASSESSMENT_MARKER`), which `ask_answer_format.md` rule 3
+    already declares free of any
+    sourcing requirement ("זו דעה מבוססת, לא ציטוט") -- two live fixes on the actual golden
+    questions, both against the throwaway 8766 instance routed through the `agy` cloud provider
+    (see docs/qa/loop/round_3_chat_fixes.md section 5) to sidestep this session's concurrent-agent
+    GPU contention: (1) an early version's regex allowed a single-letter segment and flagged a real
+    answer's own "(C-UAS)" gloss -- a standard domain acronym named in `system_analyst.md`'s own
+    domain description -- as an invented two-segment entity ("C" + "UAS"); (2) before the
+    assessment-section exemption existed, a legitimate analyst-speculation sentence using standard
+    domain vocabulary ("Edge AI", "Sensor Fusion") was removed wholesale just because those exact
+    bigrams weren't literally in that specific retrieval's text. Both are now regression tests in
+    `tests/unit/test_ask_round3_grounding.py`;
   - **cross-source conflation guard** (`_conflation_violation`): a unit that cites `[n]` and names
     a watchlist-recognised company/system
     (`eoa.pipeline.entity_normalize.find_watchlist_aliases_in_text`) must have that same entity
@@ -8101,3 +8113,395 @@ Tests: `tests/unit/test_report_round3_d6.py` (new, 35 cases) plus a corrected pr
 `test_uncategorized_item_with_no_company_or_event_is_excluded` and its assertion flipped, since
 that was the exact behaviour this round's second finding fixes) and two new cases in the same file
 covering the two new admission paths.
+
+## A17 payloads (`agent/eoa/payloads/`, `agent/eoa/api/routes/payloads.py`, `web/src/pages/PayloadsPage.tsx`)
+
+User requirement (2026-09-06, verbatim intent): up-to-date documentation of EO payload (מטע"ד)
+specifications and reference prices, **with past versions kept** -- every spec/price change is a
+new append-only row, never an overwrite.
+
+### Data model (migration `0020_payloads.py`)
+
+- `payloads`: one row per canonical payload family (`canonical_name` UNIQUE), plus
+  `vendor_entity_name`, `family`, `category` (`gimbal|pod|thermal_camera|detector_core|lrf|seeker|
+  other`), `first_seen`/`last_seen`, `notes`. Mutable identity row (`updated_at` trigger) -- never
+  holds spec/price data itself.
+- `payload_spec_versions`: append-only. `(payload_id, version_no)` UNIQUE, `effective_date`,
+  `spec` JSONB (fixed vocabulary -- see `eoa.payloads.models.SPEC_KEYS`: `mass_kg`, `channels[]`,
+  `detector{type,resolution,pitch_um}`, `fov{wide_deg,narrow_deg}`,
+  `ranges_km{detect,recognize,identify,target_class}`, `stabilisation_urad`, `interfaces[]`, `trl`,
+  `other{}`), `source_item_id`/`source_url`/`source_quote`/`confidence`. A new version is only ever
+  inserted when `eoa.payloads.models.field_diff(latest_spec, new_spec)` is non-empty (or there is
+  no prior version at all) -- an identical re-extraction is a no-op.
+- `payload_price_refs`: append-only, no dedup against prior rows at all -- every price mention
+  found is its own dated observation (`price_kind`: `unit|contract|estimate`, `price_usd`,
+  `unit_price_usd`, `original_amount`, `currency`, `quantity`, `buyer`, `programme`,
+  `source_item_id`/`source_url`/`source_quote`).
+
+### Extraction (`agent/eoa/payloads/extract.py`, prompt `agent/eoa/llm/prompts/payload_extract.md`,
+schema `agent/eoa/llm/schemas/payloads.py::PayloadExtractOut`)
+
+`run_payload_extract(limit, item_ids=None)`: scans triaged (`level IN (red,orange,yellow)`),
+security-clean items whose text contains a payload-vocabulary trigger word
+(`eoa.payloads.models.VOCAB_TRIGGERS` -- gimbal/pod/EO-IR turret/thermal camera/detector/LRF/
+מטע"ד/מטען ייעודי/גימבל/פוד) and haven't completed the `payload_extract` stage, runs one
+`chat_structured` call per item, then **deterministically** re-checks every numeric field the
+model returned against the item's own text (`verify_numbers_verbatim`, reusing
+`eoa.pipeline.analyze.normalize_amount_from_source` for magnitude-word price scaling) -- any field
+whose value doesn't literally occur in the source text is nulled out and logged, never persisted
+(the rest of an otherwise-grounded extraction is still kept). `found=false` (an honest
+"not_found", never fabricated) short-circuits with no persistence. A single item's LLM/DB failure
+never stops the batch; on an LLM failure the item is left unmarked so it retries next run, on
+success/not-found it is marked done either way.
+
+Registered as job kind `"payload_extract"` in `agent/eoa/orchestrator/jobs.py` HANDLERS
+(`run_payload_extract_job`), and as an optional nightly scheduler job in
+`agent/eoa/orchestrator/main.py` (04:15 daily) gated on `config/config.yaml` `payloads.enabled`
+(default `true`; `payloads.nightly_limit` default 20) via `eoa.config.PayloadsCfg`.
+
+### API (`agent/eoa/api/routes/payloads.py`, registered in `app.py`) -- read-only
+
+`GET /api/payloads` (filters: `category`, `vendor`, `q`), `GET /api/payloads/{id}` (full version
+history + price refs), `GET /api/payloads/{id}/diff?a=<version_no>&b=<version_no>` (changed
+top-level spec keys via `field_diff`), `GET /api/payloads/export.csv` (one flattened row per
+payload: latest spec + latest price ref). No write endpoints -- all persistence happens in
+`eoa.payloads.extract`.
+
+### UI (`web/src/pages/PayloadsPage.tsx`, nav entry `/payloads`)
+
+Table with category/vendor/text filters, a detail drawer showing the version timeline and a
+side-by-side diff of any two selected versions, a price-reference table sorted by date, and a
+"ייצוא CSV" button hitting the export endpoint. Honest empty state before any extraction has run
+(no placeholder/fake rows). Mirrors `PatentsPage.tsx`'s tab/filter/drawer conventions.
+
+### Report hook (NOT wired into `bd_territory.py` -- that file is owned by another engineer)
+
+`agent/eoa/payloads/report_section.py::payload_price_table_md(territory: str | None, conn) -> str`
+is a pure function (never opens its own connection) returning a cited Hebrew markdown table of the
+latest reference price per payload, optionally filtered to vendors headquartered in `territory`
+(via `eoa.report.geography.normalize_country` + `eoa.pipeline.entity_normalize.resolve_canonical`,
+same convention as `eoa.patents.report_section.collect_patents_bd`). **One-line call site for the
+BD engineer to add** inside `eoa.report.bd_territory`'s own section-assembly step, wherever it
+already holds an open `conn` for the rest of its data collection:
+
+```python
+from eoa.payloads.report_section import payload_price_table_md
+extra_markdown_sections.append(payload_price_table_md(territory, conn))
+```
+
+### Seed (`config/payloads_seed.yaml`, `db/seed/seed_payloads.py`)
+
+20 well-known EO payload families seeded as **identity only** (`canonical_name`/
+`vendor_entity_name`/`family`/`category`) -- no invented spec numbers or prices; those only ever
+come from a cited extraction. Idempotent upsert by `canonical_name`, never overwrites an
+already-set vendor/family with a blank one. Run with `python db/seed/seed_payloads.py`.
+
+### Tests
+
+`tests/unit/test_payloads_round3.py`: `field_diff` append-only rules, verbatim-number post-check
+(full/partial rejection), price-date parsing, item-scan vocabulary filter, `run_payload_extract`'s
+persistence decisions (new version only on diff, price always appended, not-found/LLM-failure
+stage-marking behavior) via a fake DB cursor, and the API routes via `TestClient` with a
+monkeypatched connection. `web/src/pages/PayloadsPage.test.tsx` covers the empty state and a
+fetched payload's rendering.
+
+## A16 מעקב רכישות ושותפויות (`agent/eoa/pipeline/acquisition.py`, `agent/eoa/report/acquisition_watch.py`)
+
+User requirement 2026-09-06: companies like Teledyne (US) are of interest in an acquisition
+context; PVP Advanced EO Systems and its EO/IR competitors likewise. `config/watchlist.yaml`'s new
+top-level `acquisition_watch` list seeds this: Teledyne (acquirer/consolidator), PVP Advanced EO
+Systems (potential target) with `peers_of: [Opgal, SCD, "Ophir Optronics", Controp, Elbit, Lynred,
+Exosens, Hensoldt, "Leonardo DRS", Raytron, "Teledyne FLIR"]`, plus Opgal/SCD/"Ophir
+Optronics"/Lynred/Exosens/Raytron as their own entries.
+
+### Watchlist lookups (`eoa.pipeline.acquisition`)
+
+Pure config/text lookups, no DB, mirroring `eoa.pipeline.israel_focus`'s own contract (safe to unit
+test without a live DB connection):
+
+- `acquisition_watch_list()` / `acquisition_watch_names()` -- the raw `acquisition_watch` records /
+  their canonical names.
+- `peers_of(name)` -- an entry's `peers_of` list (resolves `name` via a `companies:` alias first).
+- `all_watch_and_peer_names()` -- every watch company name plus every name in any entry's
+  `peers_of`, deduplicated (e.g. `Elbit`/`Controp`/`Hensoldt`/`"Leonardo DRS"`/`"Teledyne FLIR"` are
+  only present here as PVP's peers, not as their own top-level `acquisition_watch` entries).
+- `canonicalize_name(name)` / `is_acquisition_watch_name(name)` / `acquisition_watch_hit(names)` --
+  resolve/test against the watch list itself; `canonicalize_watch_or_peer_name(name)` /
+  `watch_or_peer_hit(names)` -- the same against the broader watch+peers set. Every resolution goes
+  through that company's own `config/watchlist.yaml` `companies:` record `aliases` (never a
+  separately-maintained alias list) -- and, per the round-2 `strict_aliases` convention documented
+  there, a `strict_aliases` entry (e.g. PVP's own `PVP`) does **not** count on its own.
+- `has_ma_signal(text, *, event_kinds=None)` -- deterministic M&A/investment/partnership signal:
+  True if `event_kinds` contains `m_and_a`/`acquisition`/`investment`/`partnership`, or `text`
+  contains English vocabulary (acquire/acquisition/merger/buyout/stake/funding round/investment/
+  joint venture, word-boundary, case-insensitive) or Hebrew vocabulary (רכישה/רכישת/מיזוג/השקעה/
+  גיוס/שותפות, substring). Note: the `events.kind` DB CHECK constraint
+  (`db/migrations/versions/0001_core.py`) only actually allows `m_and_a`/`partnership`/`investment`
+  of these (not `acquisition`) -- kept in the set defensively per the user's own phrasing.
+- `clear_caches()` -- test helper to drop this module's `lru_cache`s after monkeypatching
+  `settings().watchlist`.
+
+### Triage rule (`eoa.pipeline.triage._apply_acquisition_watch_boost`)
+
+Deterministic, additive, applied *after* the model (and after the existing A13 israel-focus boost):
+an item whose `entities_mentioned` names an `acquisition_watch` company (`acquisition_watch_hit`)
+AND whose own text (title + `summary_he` + `so_what_he` + `clean_text`) carries an M&A/investment/
+partnership signal (`has_ma_signal` -- text only here, since `events` rows don't exist yet at
+triage time: `analyze`, which extracts them, runs *after* `triage` in
+`eoa.orchestrator.jobs`'s stage order) is raised to `config.acquisition_watch.alert_level`'s score
+threshold (default `red`, i.e. `config.triage.levels.red` = 8) via `max(out.score, threshold)` --
+**never lowers** `score`/`level`. `triage_reason` is prefixed with `"מעקב רכישות: <company>"` (kept
+under the field's 400-char cap) so the alert is visible in every downstream view without a schema
+change. Gated on `config.acquisition_watch.enabled`; never raises out of the function (best-effort,
+like the israel-focus boost it sits beside).
+
+### Weekly section (`agent/eoa/report/acquisition_watch.py`)
+
+`acquisition_watch_section_md(conn, since, until, registry) -> str` -- deterministic (no LLM),
+takes an **already-open** `conn` (rather than opening its own via `eoa.db.connection`, unlike most
+of this codebase's report-section modules) so `eoa.report.bd_territory` can call it unchanged with
+its own connection. `registry` (the report's citation-item list) is extended in place, same
+convention as `eoa.report.weekly`'s own registry-extension helpers, so every `[n]` printed here
+gets a real numbered entry in the report's source appendix. Returns a Markdown-table string (GFM
+syntax) -- renders as a real table in this report's `.md`/`.html` output, and as readable
+pipe-separated text in `.docx` (the `extra_sections` hook only ever renders plain paragraphs there
+-- the same limitation every other deterministic section in this codebase already has). Contents:
+
+1. **Events table** -- every `m_and_a`/`acquisition`/`investment`/`partnership` event in
+   `[since, until]` whose `parties` names a watch company or peer
+   (`eoa.pipeline.acquisition.all_watch_and_peer_names`): date, matched company, event kind,
+   counterparty, amount (`eoa.report.docx_builder.fmt_amount`), `[n]`.
+2. **Zero-activity lines** -- one deterministic line per `acquisition_watch_names()` company (the
+   primary list only, not peers) with no matching event this window: `"<company>: לא זוהתה
+   פעילות."`.
+3. **Patent-proxy value** -- one line per `acquisition_watch_names()` company with at least one
+   `patents` row carrying a `value_score` (`eoa.patents.valuation`): `"<company>: ציון-ערך פרוקסי
+   ממוצע <avg> (מבוסס על <n> פטנטים)"` -- **omitted entirely** (no placeholder) for a company with
+   no patent data.
+
+Returns `""` when `config.acquisition_watch.enabled` is false or no `acquisition_watch` companies
+are configured -- the caller skips adding the section in that case (same convention as every other
+`[]`/`""`-returning deterministic section here).
+
+### Wiring (`agent/eoa/report/weekly.py`)
+
+One additive block (own `try`/`except`, never breaks the weekly report on failure), alongside the
+existing tech-watch/israel-section/patents blocks:
+
+```python
+from eoa.report.acquisition_watch import SECTION_TITLE_HE, acquisition_watch_section_md
+
+with connection() as acq_conn:
+    acq_body = acquisition_watch_section_md(acq_conn, start, end, citation_items)
+if acq_body:
+    extra_sections.append({"title_he": SECTION_TITLE_HE, "body_he": acq_body, "position": "after_outlook"})
+```
+
+**One-line call site for the BD engineer to add** inside `eoa.report.bd_territory`'s own
+section-assembly step, wherever it already holds an open `conn` for the rest of its data
+collection (`bd_territory.py` is not touched by this change -- it is being migrated concurrently):
+
+```python
+from eoa.report.acquisition_watch import SECTION_TITLE_HE, acquisition_watch_section_md
+extra_sections.append({"title_he": SECTION_TITLE_HE, "body_he": acquisition_watch_section_md(conn, since, until, citation_items), "position": "after_outlook"})
+```
+
+### Config (`config/config.yaml` `acquisition_watch`, `eoa.config.AcquisitionWatchCfg`)
+
+```yaml
+acquisition_watch:
+  enabled: true       # gates the deterministic triage alert AND the weekly/BD section
+  alert_level: red    # triage.levels key the boost raises a matching item's score to
+```
+
+### Tests
+
+`tests/unit/test_acquisition_watch.py`: watchlist lookups (canonical name/alias/strict-alias
+resolution, `peers_of`, `all_watch_and_peer_names`), `has_ma_signal` (English + Hebrew vocabulary,
+event kinds, word-boundary false-positive avoidance), the triage boost (watch company without
+signal -> unchanged; signal without watch company -> unchanged; both -> raised to red with prefix;
+never lowers an already-higher score; disabled config -> unchanged; end-to-end via `triage_item`),
+and `acquisition_watch_section_md` against a fake DB connection/cursor (events table + citations,
+zero-activity lines, patent-proxy lines present/omitted, registry not duplicated, disabled config
+returns `""`).
+
+## A15 -- global tender-portal survey + generic parsers + source-coverage panel (2026-09-06)
+
+Coordinator requirement: *"Check which tender publication sites exist in the US, Europe and
+elsewhere and make sure they are integrated into the system."* Full survey (every portal
+considered, live HTTP probe result, integration status/reason) lives in
+`docs/TENDER_PORTALS.md`; this section covers only the code changes.
+
+### `docs/TENDER_PORTALS.md` (new)
+
+Hebrew-headed, per-region tables (US / Europe / Israel / Others) covering ~40 portals: URL, defence
+relevance, access type, key-needed, rate limits, the exact live probe result from 2026-09-06 (HTTP
+status + whether a keyless machine-readable listing was obtained), and either the
+`config/tenders.yaml` source id it maps to or the specific reason it was not integrated. Summary:
+**8** direct keyless `api_json`/`rss` integrations, **22** `kind: search` (SearXNG) fallbacks,
+**2** waiting on an API key, **9** documented-not-integrated (bot-blocked, wrong endpoint, or
+deliberately out of scope) -- 41 sources total.
+
+### `agent/eoa/tenders/scan.py` -- two generic, config-driven parsers
+
+Previously every `kind: api_json` source needed a bespoke Python parser function registered in
+`_API_PARSERS` by source id (`_parse_ted_notices`, `_parse_contracts_finder`). A15 adds two
+**generic** parsers driven entirely by a source's own `parse_hints` (no per-source Python needed):
+
+- `_parse_generic_ocds(payload, src)` -- any OCDS (Open Contracting Data Standard) release-package
+  response. `parse_hints`: `notice_path` (default `"releases"`), `id_field` (`"ocid"`),
+  `title_field` (`"tender.title"`), `summary_field` (`"tender.description"`), `agency_field`
+  (`"buyer.name"`), `date_field` (`"date"`), `deadline_field` (`"tender.tenderPeriod.endDate"`),
+  and either `url_field` (a dotted path already in the payload) or `url_pattern` (a
+  `"{ocid}"`/`"{id}"`/`"{uuid}"` format template -- `{uuid}` extracts a UUID out of `id`/`ocid` the
+  same way `_parse_contracts_finder` does, for portals that need it).
+- `_parse_generic_json_list(payload, src)` -- any keyless JSON API returning a flat list of
+  records (not OCDS). `parse_hints`: `notice_path` (dotted path to the list, or `""` for the
+  wrapped-bare-array case below), `id_field` (`"id"`), `title_field` (`"title"`), `summary_field`
+  (`"summary"`), `agency_field`, `date_field` (`"date"`), `deadline_field`, `url_field`/
+  `url_pattern`. Handles both a nested list (`{"data": {"oppHits": [...]}}` --
+  `notice_path: "data.oppHits"`, Grants.gov) and a flat-with-nested-fields shape
+  (`{"records": [{"fields": {...}}]}` -- `notice_path: "records"`, `id_field: "fields.id"`,
+  BOAMP).
+
+`_fetch_api_json` now: (1) wraps a bare top-level JSON **array** response as `{"_root": [...]}`
+before parsing (so `_parse_generic_json_list`'s `notice_path: ""` case has a dict to read, matching
+every other parser's `(dict, TenderSource) -> list[NoticeRaw]` signature); (2) falls back to
+`_GENERIC_API_PARSERS[(src.parse_hints or {}).get("format", "")]` (`"ocds"`/`"json_list"`) when
+`src.id` isn't in the bespoke `_API_PARSERS` dict.
+
+**New `TenderSource.api_query_keywords: list[str] | None`** (default `None`). `keywords` does
+double duty everywhere else in this module -- it's both the two-signal gate's DOMAIN vocabulary
+(`_matches_keywords`) AND, for `api_json` sources, the list of terms rotated into the API query
+itself (`_collect_source_notices`). That coupling breaks for a source whose query terms are not
+human-readable domain phrases -- `ted_eu_cpv`'s CPV classification codes (`"38620000"`) never
+literally appear in a notice's title/summary text, so using them as the gate's own keyword list
+would silently reject every notice the source ever returns. `api_query_keywords`, when set,
+overrides *only* the query-loop list; `keywords` (still the normal `*kw` domain vocabulary) keeps
+gating every source, including `ted_eu_cpv`, unchanged.
+
+**New `TenderSource.needs_key_env_var: str | None`** (default `None`) -- set only on an unverified
+source whose live probe showed the portal itself reachable/parseable but gated behind an API
+key/subscription this repo does not have (`sam_gov_api` -> `SAM_GOV_API_KEY`, `no_doffin_api` ->
+`DOFFIN_SUBSCRIPTION_KEY`). Lets the coverage panel (below) distinguish "waiting for a key" from
+"blocked/not integrated for another reason" without fragile text-matching over `notes`. Never read
+by `scan_tenders` itself.
+
+**New `config/tenders.yaml` sources** (see `docs/TENDER_PORTALS.md` for the full live-probe
+evidence behind each):
+
+- `ted_eu_cpv` (EU, `api_json`) -- TED's `classification-cpv=<code>` expert-query field (the plain
+  `CPV=`/`cpv=`/`classification=` field names all return `HTTP 400 QUERY_UNKNOWN_FIELD`; only
+  `classification-cpv` is accepted), rotating CPV codes `38620000`/`35120000`/`35125000` via
+  `api_query_keywords`; reuses `_parse_ted_notices` (registered under this id too in
+  `_API_PARSERS` -- identical response shape to `ted_eu`).
+- `uk_find_tender` (UK, `api_json`, generic OCDS) -- Find a Tender Service's bulk OCDS feed.
+  `stages=tender` is a real working filter; `q=`/`keywords=` are not (verified live: both silently
+  return zero releases for a term known present in the unfiltered feed) -- the two-signal gate does
+  100% of the real filtering over whatever page comes back, same page fetched up to
+  `MAX_KEYWORDS_PER_API_SOURCE` (5) times per scan (harmless, deduped by `external_ref`).
+- `fr_boamp` (FR, `api_json`, generic json_list) -- BOAMP open data (OpenDataSoft). The modern
+  EFORMS-era `donnees` field is a deeply-nested eForms/UBL JSON blob (not used); the flat sibling
+  fields (`objet`, `nomacheteur`, `dateparution`, `datelimitereponse`, `url_avis`) are stable and
+  simple. Live probe found a genuine MINARM (French MoD) notice for maritime-surveillance
+  electro-optical/infrared sensors.
+- `nl_tenderned` (NL, `api_json`, generic json_list) -- TenderNed's `papi` JSON endpoint; no
+  working keyword param found (every guess returned the identical first record) -- same
+  fixed-page-fetched-N-times situation as `uk_find_tender`.
+- `es_placsp_atom` (ES, `rss`) -- PLACSP's whole-platform Atom feed (~2MB). No new "atom" `kind`
+  needed -- `eoa.fetch.rss.parse_feed` (feedparser) already handles Atom and RSS 2.0 alike.
+- `us_grants_gov` (US, `api_json`, generic json_list, `POST`) -- Grants.gov's `search2` API.
+  Unlike the two sources above, server-side keyword filtering here genuinely works (verified: a
+  live "electro-optical" query returned real, relevant BAA/RFI hits from NRL, AFOSR, DEVCOM ARL).
+
+**Documented-not-integrated additions** (`verified: false`, kept for coordination per this file's
+existing convention): `us_sbir_gov` (403 Forbidden -- WAF/bot-protection despite SBIR.gov's own
+docs calling this keyless), `no_doffin_api` (401, needs `DOFFIN_SUBSCRIPTION_KEY`),
+`pl_ezamowienia_api` (200 but HTML app-shell, not JSON -- wrong endpoint path), and two deliberate
+exclusions despite a reachable/keyless live probe: `eu_sedia_funding_tenders` (a general-purpose
+search index mixing org/topic/call hits -- needs a `type=call` filter + `<b>`-tag stripping before
+it's tender-safe) and `us_usaspending` (already-awarded contracts, not open solicitations --
+exactly what the F24 gate rejects outright; a future award-tracking/BD feature is the right home
+for it, not `tenders`). Both of the latter two use `verified: false` *deliberately* even though
+their live probe succeeded, because `verified` doubles as `scan_tenders`'s own poll-or-skip gate
+for `kind: api_json` -- setting `true` would make the scan actually call them despite the caveats.
+
+**15 new `kind: search` sources** for broad geographic coverage where no direct feed/API exists
+(same SearXNG-fallback pattern as the pre-existing `sam_gov_search`/`il_mod_search`/`nato_search`/
+`canada_buys_search`/`austender_search`): `us_defense_innovation_search` (AFWERX/SOFWERX/DIU),
+`de_search`, `it_search`, `no_search`, `fi_search`, `dk_search`, `pl_search`, `jp_search`,
+`kr_search`, `in_search`, `sg_search`, `gcc_search` (UAE/Saudi), `nz_search`, `ungm_search` (UN),
+`eda_search` (NATO EDA / EU Defence Fund).
+
+### API (`agent/eoa/api/services.py` + `routes/tenders.py`) -- new read-only coverage endpoint
+
+`GET /api/tenders/coverage` (`routes.get_tender_source_coverage` -> `services.tender_source_coverage`):
+combines `config/tenders.yaml` (`load_tender_sources`) with a `tenders` DB rollup (`GROUP BY
+source`, notice count + `max(created_at)` as a "last successful fetch" proxy -- there's no
+separate per-source fetch-log table, so a source that has never yet produced a stored notice shows
+`last_fetch_at: null` even if scanned many times with zero matches) into
+`{"regions": [{"region", "sources": [...]}], "totals": {...}, "source_count": N}`.
+
+`_tender_source_status(kind, verified, needs_key_env_var)` -- pure classifier, one of
+`"integrated_keyless"` / `"waiting_for_key"` / `"not_integrated"`. `kind: html` is **always**
+`"not_integrated"` regardless of `verified` -- `scan_tenders` unconditionally skips every `html`
+source, so a `verified: true` html entry (`canada_buys` -- the page itself loads fine, it's just
+never scraped directly) must not be counted as an active integration. `kind: search` is always
+`"integrated_keyless"` (rides the already-verified SearXNG client). The totals dict additionally
+splits out a `"search_only"` bucket (distinct from `"integrated_keyless"` for `api_json`/`rss`) so
+the panel/report can show the "direct feed" vs. "via search" distinction the coordinator asked for.
+
+Read-only, no writes; never raises on a config-load hiccup (falls back to an empty source list).
+
+### Frontend (`web/src/`)
+
+- `types/api.ts`: `TenderSourceStatus`, `TenderSourceCoverageItem`, `TenderSourceCoverageRegion`,
+  `TenderSourceCoverageResponse` (mirror the backend shapes above).
+- `api/types.ts` / `api/real.ts` / `mocks/mockApi.ts`: `ApiClient.getTenderSourceCoverage()`.
+- `components/tenders/SourceCoveragePanel.tsx` (new) -- compact, collapsed-by-default panel: a
+  header row (title, total source count, four status-count chips) that expands on click into one
+  table per region (source name, access-type label, status chip + `needs_key_env_var` when set,
+  notices stored, last fetch). RTL (Hebrew labels via `useT()`/`i18n/dictionaries/{he,en}.ts`'s new
+  `tenders.coverage.*` namespace), responsive (`overflow-x-auto` per region table, `flex-wrap`
+  header). Renders nothing (`return null`) while loading or on a fetch error -- never blocks the
+  rest of `/tenders`. Wired into `TendersPage.tsx` right below the tab bar, visible on both tabs.
+- `i18n/dictionaries/{he,en}.ts`: new `tenders.coverage` namespace (title, per-status labels used
+  both for the summary chips and the per-row status chip -- kept as two label sets since the
+  summary chips read more naturally as "Integrated (keyless)" while a row's own chip just says
+  "Integrated", mirroring how `lib/tenders.ts`'s `TENDER_STATUS_LABEL` already keeps board-status
+  labels separate from ad-hoc prose elsewhere in the page). Note: `t()`'s `TranslationKey` type is
+  a literal-string union derived from the dictionary shape (`i18n/types.ts`'s `DotPaths`), so a
+  dynamically-interpolated key (`` `tenders.coverage.status.${status}` ``) does not type-check --
+  `SourceCoveragePanel.tsx` instead keeps a small `Record<TenderSourceStatus, TranslationKey>`
+  lookup (`STATUS_LABEL_KEY`) mapping each status to its own literal dictionary key.
+
+### Tests
+
+`tests/unit/test_tenders_scan.py`: `TestParseGenericOcds` (parses a real-shaped OCDS release
+package via `parse_hints`, defaults match plain-OCDS shape when `parse_hints` is empty, award tag
+-> `status_hint`, missing id skips the record), `TestParseGenericJsonList` (nested
+`data.oppHits`, BOAMP's flat-`fields`-dict shape, empty-string deadline -> `None`, a bare top-level
+array wrapped as `{"_root": [...]}`, missing id / non-dict records skipped),
+`TestCollectSourceNoticesApiQueryKeywordsOverride` (api_query_keywords drives the fetch loop;
+without it, falls back to `keywords`), plus `TestLoadTenderSources` additions asserting the new
+verified-keyless ids are present+verified, the keyed/blocked ids stay `verified: false`, and
+`ted_eu_cpv`'s own `keywords` (gate vocabulary) stays the normal domain phrases while
+`api_query_keywords` holds the 8-digit CPV codes. New fixtures: `tests/fixtures/tenders/
+generic_ocds_sample.json`, `generic_json_list_sample.json`, `generic_json_list_flat_sample.json`.
+
+`tests/unit/test_api_tenders_service.py`: `TestTenderSourceStatus` (all four classification
+branches, including the `kind: html` + `verified: true` edge case) and `TestTenderSourceCoverage`
+(totals sum to `source_count` against the real config, every source has a valid status, `sam_gov_api`
+flagged `waiting_for_key` with its env var name, DB notice-count/last-fetch merge, zero-notices
+source shows `0`/`null`, a config-load failure degrades to an empty response rather than raising).
+
+`web/src/pages/TendersPage.test.tsx`: new `"TendersPage — source coverage panel"` describe block
+(collapsed-by-default summary counts, expand shows per-region rows including the key env var name,
+collapses again on a second click, renders nothing without crashing when the coverage endpoint
+errors) plus a `getTenderSourceCoverage` mock added to the file's shared `vi.mock("@/api", ...)`.
+
+`PYTHONPATH=agent python -m pytest tests/unit -q -k tender` -- 278 passed (pre-existing, unrelated
+failures in `test_bd_tenders_round3.py`/`test_report_bd_territory.py`, owned by a concurrently
+active `agent/eoa/report/bd_territory.py` migration, are untouched by this change). `ruff check`
+clean on every file this change touches. `npm run lint` -- 0 errors (pre-existing warnings
+elsewhere, none new). `npx vitest run` -- 186 passed. `npm run build` -- succeeds.

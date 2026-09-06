@@ -1,0 +1,18 @@
+{
+  "nhits": 1,
+  "records": [
+    {
+      "datasetid": "boamp",
+      "recordid": "abc123",
+      "fields": {
+        "id": "24_30807",
+        "objet": "Fourniture de dispositifs electro-optiques / infrarouge de surveillance maritime",
+        "type_marche_facette": "Fournitures",
+        "nomacheteur": "MINARM/SCA/PFC BREST",
+        "dateparution": "2026-08-15",
+        "datelimitereponse": "2026-10-30T10:00:00+00:00",
+        "url_avis": "https://www.boamp.fr/pages/avis/?q=idweb:24-30807"
+      }
+    }
+  ]
+}

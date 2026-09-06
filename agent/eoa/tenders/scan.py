@@ -184,10 +184,27 @@ class TenderSource(BaseModel):
     queries: list[str] | None = None
     engine_lang: str = "en"
     keywords: list[str] = Field(default_factory=list)
+    # A15: ``keywords`` above does double duty everywhere else -- it's both the per-source DOMAIN
+    # vocabulary used by the two-signal gate (``_matches_keywords``) AND, for ``kind: api_json``
+    # sources, the list of terms rotated into the API query itself (``_collect_source_notices``).
+    # That coupling breaks for a source whose API query terms are NOT human-readable domain phrases
+    # -- e.g. ``ted_eu_cpv``'s CPV classification codes ("38620000") -- since a raw code string will
+    # never literally appear in a notice's title/summary text, so using it as the gate's keyword
+    # list too would silently reject every single notice the source ever returns. ``None`` (the
+    # default) means "no override, keep using ``keywords`` for the query loop too" -- every
+    # existing source is unaffected; only ``ted_eu_cpv`` sets this.
+    api_query_keywords: list[str] | None = None
     parse_hints: dict[str, Any] = Field(default_factory=dict)
     verified: bool = False
     verified_at: str | None = None
     notes: str | None = None
+    # A15 (docs/TENDER_PORTALS.md): set only on an unverified source whose live probe showed the
+    # portal itself is reachable/parseable but gated behind an API key/subscription this repo does
+    # not have (e.g. SAM.gov's Opportunities API v2, Doffin's Ocp-Apim-Subscription-Key) -- lets
+    # eoa.api.services.tender_source_coverage tell "waiting for a key" apart from "blocked/
+    # not integrated for another reason" (bot-protection, wrong endpoint, deliberately out of
+    # scope, ...) without fragile text-matching over `notes`. Never used by scan_tenders itself.
+    needs_key_env_var: str | None = None
 
 
 def _load_yaml(path: str | Path | None) -> dict[str, Any]:
@@ -332,9 +349,128 @@ def _parse_contracts_finder(payload: dict[str, Any], src: TenderSource) -> list[
     return out
 
 
+def _parse_generic_ocds(payload: dict[str, Any], src: TenderSource) -> list[NoticeRaw]:
+    """A15: generic OCDS (Open Contracting Data Standard, https://standard.open-contracting.org)
+    release-package parser, driven entirely by ``src.parse_hints`` -- so a new keyless OCDS-shaped
+    portal (UK Find a Tender Service, etc.) needs only a ``config/tenders.yaml`` entry, not a
+    bespoke Python function like :func:`_parse_contracts_finder` (kept separate above for its
+    UUID-in-``id`` URL-construction quirk, which is Contracts-Finder-specific).
+
+    ``parse_hints`` keys (all optional, defaults match the plain OCDS release-package shape):
+    ``notice_path`` (default ``"releases"``), ``id_field`` (default ``"ocid"``), ``title_field``
+    (default ``"tender.title"``), ``summary_field`` (default ``"tender.description"``),
+    ``agency_field`` (default ``"buyer.name"``), ``date_field`` (publish date; default ``"date"``),
+    ``deadline_field`` (default ``"tender.tenderPeriod.endDate"``), and either ``url_field`` (a
+    dotted path to a direct URL already in the payload) or ``url_pattern`` (a ``"{ocid}"``/
+    ``"{id}"`` format template) for the notice's public URL."""
+    hints = src.parse_hints or {}
+    notice_path = hints.get("notice_path", "releases")
+    id_field = hints.get("id_field", "ocid")
+    title_field = hints.get("title_field", "tender.title")
+    summary_field = hints.get("summary_field", "tender.description")
+    agency_field = hints.get("agency_field", "buyer.name")
+    date_field = hints.get("date_field", "date")
+    deadline_field = hints.get("deadline_field", "tender.tenderPeriod.endDate")
+    url_field = hints.get("url_field")
+    url_pattern = hints.get("url_pattern")
+
+    out: list[NoticeRaw] = []
+    for r in payload.get(notice_path) or []:
+        if not isinstance(r, dict):
+            continue
+        rid = _dig(r, id_field) or r.get("id")
+        if not rid:
+            continue
+        tags = r.get("tag") or []
+        status_hint = "awarded" if "award" in tags else ("closed" if "tenderCancellation" in tags else None)
+        url = _dig(r, url_field) if url_field else None
+        if not url and url_pattern:
+            m = _UUID_RE.search(str(r.get("id") or rid))
+            url = url_pattern.format(ocid=rid, id=r.get("id") or rid, uuid=m.group(0) if m else "")
+        out.append(
+            NoticeRaw(
+                source_id=src.id,
+                external_ref=f"{src.id}:{rid}",
+                title=_dig(r, title_field) or f"{src.name} {rid}",
+                summary=_dig(r, summary_field) or "",
+                agency=_dig(r, agency_field),
+                country=src.country,
+                published_at=_parse_date(_dig(r, date_field) or r.get(date_field)),
+                deadline=_parse_date(_dig(r, deadline_field)),
+                url=url,
+                status_hint=status_hint,
+                raw=r,
+            )
+        )
+    return out
+
+
+def _parse_generic_json_list(payload: dict[str, Any], src: TenderSource) -> list[NoticeRaw]:
+    """A15: generic parser for a keyless JSON API that returns a flat list of records (not OCDS) --
+    e.g. SBIR.gov, USAspending, the EU Funding & Tenders (SEDIA) search API, BOAMP open data.
+    Entirely driven by ``src.parse_hints``: ``notice_path`` (dotted path to the list, or ``""`` if
+    the top-level payload itself is the list -- see ``_fetch_api_json``, which wraps a bare list
+    response as ``{"_root": [...]}`` before calling any parser), ``id_field`` (default ``"id"``),
+    ``title_field`` (default ``"title"``), ``summary_field`` (default ``"summary"``),
+    ``agency_field``, ``date_field`` (default ``"date"``), ``deadline_field``, ``url_field`` (a
+    dotted path) or ``url_pattern`` (a ``"{id}"`` format template)."""
+    hints = src.parse_hints or {}
+    notice_path = hints.get("notice_path", "")
+    id_field = hints.get("id_field", "id")
+    title_field = hints.get("title_field", "title")
+    summary_field = hints.get("summary_field", "summary")
+    agency_field = hints.get("agency_field")
+    date_field = hints.get("date_field", "date")
+    deadline_field = hints.get("deadline_field")
+    url_field = hints.get("url_field")
+    url_pattern = hints.get("url_pattern")
+
+    records = _dig(payload, notice_path) if notice_path else payload.get("_root")
+    if records is None:
+        records = []
+
+    out: list[NoticeRaw] = []
+    for r in records or []:
+        if not isinstance(r, dict):
+            continue
+        rid = _dig(r, id_field)
+        if not rid:
+            continue
+        url = _dig(r, url_field) if url_field else None
+        if not url and url_pattern:
+            url = url_pattern.format(id=rid)
+        out.append(
+            NoticeRaw(
+                source_id=src.id,
+                external_ref=f"{src.id}:{rid}",
+                title=_dig(r, title_field) or f"{src.name} {rid}",
+                summary=_dig(r, summary_field) or "",
+                agency=_dig(r, agency_field) if agency_field else None,
+                country=src.country,
+                published_at=_parse_date(_dig(r, date_field)),
+                deadline=_parse_date(_dig(r, deadline_field)) if deadline_field else None,
+                url=url,
+                raw=r,
+            )
+        )
+    return out
+
+
 _API_PARSERS: dict[str, Callable[[dict[str, Any], TenderSource], list[NoticeRaw]]] = {
     "ted_eu": _parse_ted_notices,
+    # A15: TED's CPV-classification-code rotation (config/tenders.yaml `ted_eu_cpv`) hits the same
+    # /v3/notices/search endpoint with the same response shape -- only the query template differs
+    # (classification-cpv=<code> instead of FT ~ "<phrase>") -- so it reuses this parser verbatim.
+    "ted_eu_cpv": _parse_ted_notices,
     "uk_contracts_finder": _parse_contracts_finder,
+}
+
+# A15: fallback parsers for any `kind: api_json` source not in `_API_PARSERS` above, selected by
+# `parse_hints.format` -- lets a new keyless JSON portal be added as pure config (see
+# config/tenders.yaml's US/EU/other sections) rather than needing a bespoke Python parser function.
+_GENERIC_API_PARSERS: dict[str, Callable[[dict[str, Any], TenderSource], list[NoticeRaw]]] = {
+    "ocds": _parse_generic_ocds,
+    "json_list": _parse_generic_json_list,
 }
 
 
@@ -413,9 +549,16 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
         params = {k: v.format(keyword=keyword) for k, v in (src.query_params or {}).items()}
         resp = fetch_raw_remote(f"{src.url}?{urlencode(params)}", method=src.method or "GET")
     data = resp.get("json")
+    if isinstance(data, list):
+        # A15: some keyless JSON APIs (e.g. a bare-array response) return the list itself as the
+        # top-level payload -- wrap it so _parse_generic_json_list's `notice_path: ""` case (see
+        # its docstring) has a dict to read `_root` off of, matching every other parser's signature.
+        data = {"_root": data}
     if not isinstance(data, dict):
         return []
     parser = _API_PARSERS.get(src.id)
+    if parser is None:
+        parser = _GENERIC_API_PARSERS.get((src.parse_hints or {}).get("format", ""))
     return parser(data, src) if parser else []
 
 
@@ -444,7 +587,11 @@ def _collect_source_notices(src: TenderSource, deny_domains: list[str]) -> list[
     if src.kind == "api_json":
         seen: set[str] = set()
         out: list[NoticeRaw] = []
-        for kw in (src.keywords or DEFAULT_KEYWORDS)[:MAX_KEYWORDS_PER_API_SOURCE]:
+        # A15: api_query_keywords (when set -- currently only ted_eu_cpv) overrides which list is
+        # rotated into the API query itself; `src.keywords` (the domain-gate vocabulary) is
+        # untouched either way -- see the field's docstring on TenderSource.
+        query_terms = src.api_query_keywords if src.api_query_keywords else src.keywords
+        for kw in (query_terms or DEFAULT_KEYWORDS)[:MAX_KEYWORDS_PER_API_SOURCE]:
             for n in _fetch_api_json(src, kw):
                 if n.external_ref not in seen:
                     seen.add(n.external_ref)

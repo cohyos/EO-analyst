@@ -2,15 +2,23 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import type { ForecastCard, TenderCard, TenderStatus, TendersResponse } from "@/types/api";
+import type {
+  ForecastCard,
+  TenderCard,
+  TenderSourceCoverageResponse,
+  TenderStatus,
+  TendersResponse,
+} from "@/types/api";
 
 const getTenders = vi.fn();
 const getTenderForecasts = vi.fn();
+const getTenderSourceCoverage = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
     getTenders: (...args: unknown[]) => getTenders(...args),
     getTenderForecasts: (...args: unknown[]) => getTenderForecasts(...args),
+    getTenderSourceCoverage: (...args: unknown[]) => getTenderSourceCoverage(...args),
   },
 }));
 
@@ -79,9 +87,55 @@ function renderPage(initialEntries: string[] = ["/tenders"]) {
   );
 }
 
+function coverageResponse(
+  over: Partial<TenderSourceCoverageResponse> = {},
+): TenderSourceCoverageResponse {
+  return {
+    regions: [
+      {
+        region: "EU",
+        sources: [
+          {
+            id: "ted_eu",
+            name: "TED (Tenders Electronic Daily) -- EU",
+            kind: "api_json",
+            country: "EU",
+            status: "integrated_keyless",
+            verified: true,
+            needs_key_env_var: null,
+            notices_stored: 12,
+            last_fetch_at: "2026-09-06T04:00:00Z",
+          },
+        ],
+      },
+      {
+        region: "US",
+        sources: [
+          {
+            id: "sam_gov_api",
+            name: "SAM.gov Opportunities API v2 (US)",
+            kind: "api_json",
+            country: "US",
+            status: "waiting_for_key",
+            verified: false,
+            needs_key_env_var: "SAM_GOV_API_KEY",
+            notices_stored: 0,
+            last_fetch_at: null,
+          },
+        ],
+      },
+    ],
+    totals: { integrated_keyless: 1, waiting_for_key: 1, search_only: 0, not_integrated: 0 },
+    source_count: 2,
+    ...over,
+  };
+}
+
 beforeEach(() => {
   getTenders.mockReset();
   getTenderForecasts.mockReset();
+  getTenderSourceCoverage.mockReset();
+  getTenderSourceCoverage.mockResolvedValue(coverageResponse());
 });
 
 describe("TendersPage — open tenders tab", () => {
@@ -266,5 +320,52 @@ describe("TendersPage — forecasts tab", () => {
       "aria-selected",
       "true",
     );
+  });
+});
+
+// A15 (docs/TENDER_PORTALS.md): source-coverage panel, rendered on both tabs of /tenders.
+describe("TendersPage — source coverage panel", () => {
+  it("shows the panel title and summary counts collapsed by default", async () => {
+    getTenders.mockResolvedValue(tendersResponse([]));
+    renderPage();
+
+    expect(await screen.findByText("כיסוי מקורות")).toBeInTheDocument();
+    expect(screen.getByText("2 מקורות")).toBeInTheDocument();
+    expect(screen.getByText(/משולב \(ללא מפתח\): 1/)).toBeInTheDocument();
+    expect(screen.getByText(/ממתין למפתח API: 1/)).toBeInTheDocument();
+    // Collapsed: no per-source rows yet.
+    expect(screen.queryByText("TED (Tenders Electronic Daily) -- EU")).not.toBeInTheDocument();
+  });
+
+  it("expands to show per-region source rows including the needs-key env var", async () => {
+    getTenders.mockResolvedValue(tendersResponse([]));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /כיסוי מקורות/ }));
+
+    expect(await screen.findByText("TED (Tenders Electronic Daily) -- EU")).toBeInTheDocument();
+    expect(screen.getByText("SAM.gov Opportunities API v2 (US)")).toBeInTheDocument();
+    expect(screen.getByText("SAM_GOV_API_KEY")).toBeInTheDocument();
+  });
+
+  it("collapses again on a second click", async () => {
+    getTenders.mockResolvedValue(tendersResponse([]));
+    renderPage();
+
+    const toggle = await screen.findByRole("button", { name: /כיסוי מקורות/ });
+    fireEvent.click(toggle);
+    expect(await screen.findByText("TED (Tenders Electronic Daily) -- EU")).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(screen.queryByText("TED (Tenders Electronic Daily) -- EU")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing (no crash) when the coverage endpoint errors", async () => {
+    getTenders.mockResolvedValue(tendersResponse([]));
+    getTenderSourceCoverage.mockRejectedValue(new Error("network error"));
+    renderPage();
+
+    await screen.findByText("אין מכרזים פתוחים כרגע");
+    expect(screen.queryByText("כיסוי מקורות")).not.toBeInTheDocument();
   });
 });

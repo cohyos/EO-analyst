@@ -189,6 +189,7 @@ sources:
     parse_hints: { format: json, notice_path: opportunitiesData }
     verified: false
     verified_at: "2026-09-04"
+    needs_key_env_var: SAM_GOV_API_KEY
     notes: >
       curl GET with api_key=DEMO_KEY (SAM.gov's documented public demo key) -> HTTP 404 for both
       /opportunities/v2/search and /prod/opportunities/v2/search. The v2 DEMO_KEY path appears to
@@ -361,3 +362,523 @@ sources:
     verified: true
     verified_at: "2026-09-04"
     notes: "Duplicates some of il_mod_search's queries deliberately (broader defense-press hits, not just mod.gov.il)."
+
+  # ================================================================================================
+  # A15 (2026-09-06, docs/TENDER_PORTALS.md): global portal survey -- every source below was
+  # live-probed with a single polite GET/POST (20s timeout) on 2026-09-06. `verified: true` api_json/
+  # rss entries here were confirmed to return a real, parseable, keyless listing that day; api_json
+  # entries with `parse_hints.format: ocds`/`json_list` are parsed by the matching *generic*,
+  # config-driven parser in eoa.tenders.scan (`_parse_generic_ocds`/`_parse_generic_json_list`) --
+  # no bespoke Python needed per source. See docs/TENDER_PORTALS.md for the full survey table
+  # (every portal considered, including ones with no entry below because nothing useful could be
+  # added beyond what's already documented there).
+  # ================================================================================================
+
+  # ---------------------------------------------------------- TED CPV-code rotation (EU, api_json)
+  - id: ted_eu_cpv
+    name: "TED (Tenders Electronic Daily) -- EU, CPV classification codes"
+    kind: api_json
+    country: EU
+    url: "https://api.ted.europa.eu/v3/notices/search"
+    method: POST
+    # Coordinator requirement: extend TED coverage to CPV codes for optics/defence (35xxxxxx
+    # security/surveillance equipment, 38xxxxxx optical/precision instruments) rather than only
+    # free-text phrases -- TED v3's expert query field for this is `classification-cpv` (verified
+    # live 2026-09-06; the naive `CPV=...`/`cpv=...`/`classification=...` field names all return
+    # HTTP 400 QUERY_UNKNOWN_FIELD, only `classification-cpv` is accepted). Each "keyword" below is
+    # actually an 8-digit CPV code, rotated the same way ted_eu rotates free-text phrases.
+    query_template: '{"query":"classification-cpv={keyword}","fields":["ND","TI","PD","publication-number","links"],"limit":20}'
+    # `keywords` stays the normal domain vocabulary (*kw) -- it is what the two-signal gate checks
+    # against each returned notice's title+summary TEXT (_matches_keywords), which obviously never
+    # contains a raw CPV code. `api_query_keywords` below is the separate list actually rotated into
+    # the API query itself (see TenderSource.api_query_keywords's docstring, eoa.tenders.scan).
+    keywords: *kw
+    api_query_keywords:
+      - "38620000" # Optical instruments
+      - "35120000" # Surveillance and security systems and devices
+      - "35125000" # Detection equipment
+    parse_hints:
+      format: json
+      notice_path: notices
+      id_field: ND
+      title_field: "TI.eng"
+      title_fallback_any_lang: true
+      date_field: PD
+      url_field: "links.htmlDirect.ENG"
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      Verified via curl POST {"query":"classification-cpv=38620000","fields":["ND","TI"],"limit":2}
+      -> HTTP 200, real notices (a Hungary-Szeged laboratory/optical-equipment notice came back).
+      Same parser as `ted_eu` (registered under this source's own id in
+      eoa.tenders.scan._API_PARSERS -- identical response shape). No API key needed.
+
+  # ------------------------------------------------------- UK Find a Tender Service (api_json, OCDS)
+  - id: uk_find_tender
+    name: "UK Find a Tender Service (FTS, OCDS) -- above-threshold notices"
+    kind: api_json
+    country: UK
+    url: "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages"
+    method: GET
+    # FTS's bulk OCDS feed has no working full-text search param -- `q=`/`keywords=` were tested
+    # live (2026-09-06) against terms known to be present in the current unfiltered feed and both
+    # silently returned zero releases, so they are not wired here (unlike uk_contracts_finder,
+    # where `keyword=` at least returns *something*, just unreliably ranked). `stages=tender` is a
+    # real, working filter (limits to open/current tender-stage releases rather than every stage of
+    # the contracting lifecycle). This means every keyword-loop iteration in
+    # eoa.tenders.scan._collect_source_notices fetches the same page of the latest tender-stage
+    # releases regardless of which keyword is "active" -- harmless (deduped by external_ref; the
+    # two-signal gate, using this entry's own `keywords` list, does 100% of the real filtering over
+    # whatever page comes back) but means the endpoint is polled up to MAX_KEYWORDS_PER_API_SOURCE
+    # (5) times per scan for an unchanging response. Left as-is rather than special-casing the
+    # shared keyword-loop for one source; the page itself is small (~12KB for limit=100).
+    query_params: { stages: "tender", limit: "100" }
+    keywords: *kw
+    parse_hints:
+      format: ocds
+      notice_path: releases
+      id_field: id
+      title_field: "tender.title"
+      summary_field: "tender.description"
+      agency_field: "buyer.name"
+      date_field: date
+      deadline_field: "tender.tenderPeriod.endDate"
+      # Best-effort canonical notice URL (FTS's own citizen-facing page returned HTTP 403 to a
+      # curl probe on 2026-09-06 -- Cloudflare/bot-protection on the human UI, not proof the URL
+      # pattern itself is wrong; this is FTS's documented public notice-URL convention).
+      url_pattern: "https://www.find-tender.service.gov.uk/Notice/{id}"
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      Verified via curl GET ?limit=5&stages=tender -> HTTP 200, real OCDS 1.1 release package (5
+      releases, each with a populated `buyer`/`tender.title`/`tender.tenderPeriod.endDate`). Parsed
+      by the generic `_parse_generic_ocds` (eoa.tenders.scan), driven entirely by `parse_hints`
+      above -- no bespoke parser function needed. No API key needed.
+
+  # --------------------------------------------------------- France BOAMP open data (api_json, JSON)
+  - id: fr_boamp
+    name: "France BOAMP (Bulletin officiel des annonces des marchés publics) -- open data"
+    kind: api_json
+    country: FR
+    url: "https://boamp-datadila.opendatasoft.com/api/records/1.0/search/"
+    method: GET
+    query_params: { dataset: "boamp", rows: "20", q: "{keyword}" }
+    keywords: *kw
+    parse_hints:
+      format: json_list
+      notice_path: records
+      id_field: "fields.id"
+      title_field: "fields.objet"
+      summary_field: "fields.type_marche_facette"
+      agency_field: "fields.nomacheteur"
+      date_field: "fields.dateparution"
+      deadline_field: "fields.datelimitereponse"
+      url_field: "fields.url_avis"
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      Verified via curl GET ?dataset=boamp&rows=1&q=electro-optique -> HTTP 200, 22 real hits, incl.
+      a genuine MINARM (French Ministry of Defence)/PFC Brest notice for "dispositifs
+      électro-optiques / infrarouge de surveillance maritime". The dataset's modern EFORMS-era
+      `donnees` field is a deeply-nested eForms/UBL JSON blob (not used here); the flat sibling
+      fields (`objet`, `nomacheteur`, `dateparution`, `datelimitereponse`, `url_avis`) used by
+      `parse_hints` above are stable, simple, and present on every record. Parsed by the generic
+      `_parse_generic_json_list`. No API key needed.
+
+  # --------------------------------------------------------- Netherlands TenderNed (api_json, JSON)
+  - id: nl_tenderned
+    name: "Netherlands TenderNed -- publicaties (open data)"
+    kind: api_json
+    country: NL
+    url: "https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties"
+    method: GET
+    # Every `zoekterm=`/`trefwoord=`/`q=`/`aanbestedingNaam=` guess tried live (2026-09-06) returned
+    # the exact same first record regardless of value -- this endpoint has no working keyword filter
+    # from the outside (same situation as uk_find_tender above); `page` is the only param that
+    # actually changes the response. Client-side two-signal gate does all the real filtering.
+    query_params: { page: "1" }
+    keywords: *kw
+    parse_hints:
+      format: json_list
+      notice_path: content
+      id_field: publicatieId
+      title_field: aanbestedingNaam
+      summary_field: opdrachtBeschrijving
+      agency_field: opdrachtgeverNaam
+      date_field: publicatieDatum
+      deadline_field: sluitingsDatum
+      url_field: "link.href"
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      Verified via curl GET ?page=1 -> HTTP 200, real JSON (`content: [...]` publicaties with
+      `aanbestedingNaam`/`opdrachtgeverNaam`/`sluitingsDatum`/`link.href`). Parsed by the generic
+      `_parse_generic_json_list`. No API key needed.
+
+  # ------------------------------------------------------------- Spain PLACSP (rss/Atom, keyless)
+  - id: es_placsp_atom
+    name: "Spain PLACSP (Plataforma de Contratación del Sector Público) -- Atom feed"
+    kind: rss
+    country: ES
+    url: "https://contrataciondelestado.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      Verified via curl GET -> HTTP 200, `Content-Type: application/atom+xml`, a genuine (large,
+      ~2MB) Atom feed of all current licitaciones across every contracting-authority profile on the
+      platform. Parsed by the already-generic `_parse_rss_notices`/`eoa.fetch.rss.parse_feed`
+      (feedparser handles Atom and RSS 2.0 alike -- no separate "atom" `kind` needed). No API key
+      needed; the whole-platform feed means the two-signal gate carries all of the actual
+      relevance filtering (this is not a keyword-scoped feed).
+
+  # -------------------------------------------------------------------- US Grants.gov (api_json)
+  - id: us_grants_gov
+    name: "US Grants.gov -- search2 API"
+    kind: api_json
+    country: US
+    url: "https://api.grants.gov/v1/api/search2"
+    method: POST
+    query_template: '{"rows":15,"keyword":"{keyword}","oppStatuses":"forecasted|posted"}'
+    keywords: *kw
+    parse_hints:
+      format: json_list
+      notice_path: "data.oppHits"
+      id_field: id
+      title_field: title
+      agency_field: agency
+      date_field: openDate
+      deadline_field: closeDate
+      url_pattern: "https://www.grants.gov/search-results-detail/{id}"
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      Verified via curl POST {"rows":3,"keyword":"electro-optical","oppStatuses":"forecasted|posted"}
+      -> HTTP 200, 4 real, genuinely relevant hits (Naval Research Laboratory BAA, Air Force Office
+      of Scientific Research, DEVCOM Army Research Laboratory BAA) -- server-side keyword filtering
+      actually works here (unlike uk_find_tender/nl_tenderned above). Mostly broad-agency-announcement
+      research funding rather than narrow EO/IR procurement, but squarely within FR-5.2's RFI/BAA
+      scope. Parsed by the generic `_parse_generic_json_list`. No API key needed (Grants.gov's
+      search2 endpoint is public).
+
+  # ---------------------------------------------------- documented, needs a key / blocked (api_json)
+  - id: us_sbir_gov
+    name: "US SBIR.gov -- solicitations API"
+    kind: api_json
+    country: US
+    url: "https://api.www.sbir.gov/public/api/solicitations"
+    method: GET
+    query_params: { keyword: "{keyword}", rows: "10" }
+    keywords: *kw
+    parse_hints: { format: json_list, notice_path: "", id_field: solicitation_number, title_field: solicitation_title }
+    verified: false
+    verified_at: "2026-09-06"
+    notes: >
+      curl GET (both a plain research-bot User-Agent and a full browser UA + Referer:sbir.gov) ->
+      HTTP 403 {"message":"Forbidden"} every time. SBIR.gov's own documentation describes this API
+      as public/keyless, but it is not reliably reachable from this environment (WAF/bot-protection,
+      not a missing key) -- not polled directly; covered by `us_defense_innovation_search` below.
+
+  - id: no_doffin_api
+    name: "Norway Doffin -- search API"
+    kind: api_json
+    country: "NO"
+    url: "https://api.doffin.no/public/v2/search"
+    method: GET
+    query_params: { searchString: "{keyword}", limit: "20" }
+    keywords: *kw
+    parse_hints: { format: json_list, notice_path: "" }
+    verified: false
+    verified_at: "2026-09-06"
+    needs_key_env_var: DOFFIN_SUBSCRIPTION_KEY
+    notes: >
+      curl GET ?searchString=electro-optical -> HTTP 401 {"message":"Access denied due to missing
+      subscription key..."}. Needs a free Doffin/Mercell "Ocp-Apim-Subscription-Key" API
+      registration (env var not yet defined -- would be DOFFIN_SUBSCRIPTION_KEY). Not polled
+      directly; covered by `no_search` below.
+
+  - id: pl_ezamowienia_api
+    name: "Poland eZamówienia -- public notice search API"
+    kind: api_json
+    country: PL
+    url: "https://ezamowienia.gov.pl/mo-client-board/api/v1/notice/publicNoticeSimpleSearch"
+    method: GET
+    query_params: { PageNumber: "1", PageSize: "20", SearchPhrase: "{keyword}" }
+    keywords: *kw
+    parse_hints: { format: json_list, notice_path: "" }
+    verified: false
+    verified_at: "2026-09-06"
+    notes: >
+      curl GET -> HTTP 200 but `Content-Type: text/html` (the Angular app shell, not the JSON API --
+      the real API is likely versioned/pathed differently and not publicly documented well enough
+      to guess further within a single polite probe). Not polled directly; covered by `pl_search`
+      below.
+
+  - id: eu_sedia_funding_tenders
+    name: "EU Funding & Tenders Portal -- SEDIA search API"
+    kind: api_json
+    country: EU
+    url: "https://api.tech.ec.europa.eu/search-api/prod/rest/search"
+    method: GET
+    query_params: { apiKey: "SEDIA", text: "{keyword}", pageSize: "10" }
+    keywords: *kw
+    parse_hints: { format: json_list, notice_path: results, id_field: reference, title_field: summary, summary_field: content, url_field: url }
+    # Reachable and genuinely keyless (SEDIA is the documented public apiKey literal, not a secret)
+    # -- `verified: false` here is deliberate even though the live probe succeeded: this codebase's
+    # `verified` flag doubles as scan_tenders's own poll-or-skip gate for `kind: api_json`
+    # (`if src.kind == "api_json" and not src.verified: continue`), and this source is intentionally
+    # NOT polled yet (see notes) -- setting `verified: true` would make eoa.tenders.scan actually
+    # call this API on every scan despite the caveats below.
+    verified: false
+    verified_at: "2026-09-06"
+    notes: >
+      Verified reachable via curl GET ?apiKey=SEDIA&text=electro-optical&pageSize=2 -> HTTP 200,
+      real JSON (21,723 total hits reported) -- genuinely keyless, no registration needed. Still not
+      wired into eoa.tenders.scan (`verified: false` above is deliberate, not "this failed"):
+      this is a general-purpose search index across every content type on the Funding & Tenders
+      portal (organisation profiles, topics, news, calls all mixed in the same `results` array --
+      the live sample's first hit was a company profile page, "LIDAX ELECTRO-OPTICAL SYSTEMS S.L.",
+      not a call for proposals), and `content`/`summary` come back with embedded `<b>` highlight
+      tags. Since this is `kind: api_json`, the two-signal gate's procurement signal is implicit
+      (any domain-keyword hit passes straight to the LLM gate) -- feeding this heterogeneous index
+      in as-is would send a lot of non-tender company/topic noise to the LLM classifier. A future
+      follow-up should add a `type=call`-only filter (the SEDIA API supports faceting by content
+      type) and strip the highlight markup before wiring this in for real.
+
+  - id: us_usaspending
+    name: "US USAspending.gov -- awards search API"
+    kind: api_json
+    country: US
+    url: "https://api.usaspending.gov/api/v2/search/spending_by_award/"
+    method: POST
+    keywords: *kw
+    # `verified: false` is deliberate (see notes) even though the API itself is reachable/keyless --
+    # this codebase's `verified` flag doubles as scan_tenders's poll-or-skip gate for `kind:
+    # api_json`, and this source must never be polled by the tenders scan (out-of-scope by design).
+    verified: false
+    verified_at: "2026-09-06"
+    notes: >
+      Verified reachable/keyless: a curl POST with an incomplete body got a real, structured JSON
+      validation error ({"detail":"Missing value: 'filters|award_type_codes' is a required
+      field"}), confirming the endpoint is live and returns real JSON once a valid query is built.
+      NOT added as an active scan.py source: this API returns already-signed contract AWARDS, not
+      open solicitations -- exactly what eoa.tenders.scan's F24 gate rejects outright
+      (`notice_type == 'award'`, see the module docstring). Documented here per the coordinator's
+      request ("USAspending (keyless, awards)") as a BD/competitive-intelligence data source, not a
+      tenders-board one; a future award-tracking feature (not this one) is the right place to wire
+      it in, keyed off `agent/eoa/report/bd_territory.py`-style competitor intel, not `tenders`.
+
+  # ------------------------------------------------------------ additional SearXNG search fallbacks
+  # (A15): same pattern as sam_gov_search/il_mod_search/nato_search/canada_buys_search/
+  # austender_search above -- every portal below returned either a login-gated shell, a JS-hydrated
+  # SPA, a Cloudflare/WAF block, or (Germany/India/UAE) failed to connect at all on 2026-09-06 (see
+  # docs/TENDER_PORTALS.md for the exact per-portal probe result); a site-restricted SearXNG sweep
+  # is the only currently-viable lead-generation path for each.
+  - id: us_defense_innovation_search
+    name: "US defense innovation opportunities (AFWERX/SOFWERX/DIU) -- SearXNG fallback"
+    kind: search
+    country: US
+    engine_lang: en
+    queries:
+      - "site:afwerx.com solicitation OR topic electro-optical OR infrared OR counter-UAS"
+      - "site:sofwerx.org solicitation OR engagement electro-optical OR infrared"
+      - "site:diu.mil commercial solutions opening electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      AFWERX (curl -> HTTP 200, static marketing HTML with no discoverable open-opportunities feed)
+      and SOFWERX (redirect chain) and DIU (404 on the specific opportunities path; the site is a
+      large client-hydrated Nuxt SPA) are each not directly scraped; SearXNG fallback covers all
+      three with one entry.
+
+  - id: de_search
+    name: "Germany bund.de / service.bund.de / evergabe-online -- SearXNG fallback"
+    kind: search
+    country: DE
+    engine_lang: de
+    queries:
+      - "site:service.bund.de Ausschreibung elektro-optisch OR Infrarot OR Wärmebild"
+      - "site:evergabe-online.de elektro-optisch OR Infrarot Verteidigung"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      service.bund.de's tender-search form returned no response within the 20s probe timeout
+      (curl exit "000"); evergabe-online.de redirected (302) with an empty body captured. Neither
+      offers a documented public API/feed. SearXNG fallback.
+
+  - id: it_search
+    name: "Italy Consip/MePA/AcquistInRetePA -- SearXNG fallback"
+    kind: search
+    country: IT
+    engine_lang: it
+    queries:
+      - "site:acquistinretepa.it bando gara elettro-ottico OR infrarosso"
+      - "site:consip.it gara elettro-ottico OR sorveglianza infrarossi"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      Consip's own site (200, marketing HTML, no feed) and AcquistInRetePA (302 redirect into the
+      MePA login-gated marketplace) offer no public structured tender feed. SearXNG fallback.
+
+  - id: no_search
+    name: "Norway Doffin -- SearXNG fallback"
+    kind: search
+    country: "NO"
+    engine_lang: en
+    queries:
+      - "site:doffin.no electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "Complements no_doffin_api (verified: false, needs a subscription key) above."
+
+  - id: fi_search
+    name: "Finland Hilma -- SearXNG fallback"
+    kind: search
+    country: FI
+    engine_lang: en
+    queries:
+      - "site:hankintailmoitukset.fi electro-optical OR infrared OR thermal imaging"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      curl of both the Hilma homepage and its documented "/en/notice/rss" path returned the exact
+      same 9.7KB client-hydrated app-shell HTML (no actual feed content at that path). SearXNG
+      fallback.
+
+  - id: dk_search
+    name: "Denmark Udbud.dk -- SearXNG fallback"
+    kind: search
+    country: DK
+    engine_lang: en
+    queries:
+      - "site:udbud.dk electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "curl -> HTTP 302, empty body captured; no public API/feed found. SearXNG fallback."
+
+  - id: pl_search
+    name: "Poland eZamówienia/BZP -- SearXNG fallback"
+    kind: search
+    country: PL
+    engine_lang: en
+    queries:
+      - "site:ezamowienia.gov.pl electro-optical OR infrared OR thermal imaging"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "Complements pl_ezamowienia_api (verified: false, JSON API path not found) above."
+
+  - id: jp_search
+    name: "Japan ATLA/MoD procurement -- SearXNG fallback"
+    kind: search
+    country: JP
+    engine_lang: en
+    queries:
+      - "site:mod.go.jp procurement electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "curl of the guessed ATLA procurement path -> HTTP 404; no public English-language structured feed found. SearXNG fallback."
+
+  - id: kr_search
+    name: "Korea KONEPS / D2B defense procurement -- SearXNG fallback"
+    kind: search
+    country: KR
+    engine_lang: en
+    queries:
+      - "site:d2b.go.kr OR site:g2b.go.kr electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      g2b.go.kr (KONEPS) redirected (302, empty body); d2b.go.kr (the defense-specific D2B portal)
+      served a bare JS `location.href` redirect shell. Neither is directly scrapeable. SearXNG
+      fallback.
+
+  - id: in_search
+    name: "India GeM / MoD RFI -- SearXNG fallback"
+    kind: search
+    country: IN
+    engine_lang: en
+    queries:
+      - "site:gem.gov.in electro-optical OR infrared OR counter-UAS"
+      - "site:mod.gov.in RFI electro-optical OR infrared"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "Both gem.gov.in and mod.gov.in failed to connect at all within the 20s probe timeout (curl exit \"000\") from this network. SearXNG fallback."
+
+  - id: sg_search
+    name: "Singapore GeBIZ -- SearXNG fallback"
+    kind: search
+    country: SG
+    engine_lang: en
+    queries:
+      - "site:gebiz.gov.sg electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "curl -> HTTP 200 but a legacy XHTML app shell requiring a session/search form post; no public API found. SearXNG fallback."
+
+  - id: gcc_search
+    name: "UAE/Saudi Etimad -- SearXNG fallback"
+    kind: search
+    country: SA
+    engine_lang: en
+    queries:
+      - "site:etimad.sa electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "etimad.sa failed to connect at all within the 20s probe timeout (curl exit \"000\"). SearXNG fallback."
+
+  - id: nz_search
+    name: "New Zealand GETS -- SearXNG fallback"
+    kind: search
+    country: NZ
+    engine_lang: en
+    queries:
+      - "site:gets.govt.nz electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: "curl -> HTTP 200, a legacy classic-ASP portal with no public API/feed found. SearXNG fallback."
+
+  - id: ungm_search
+    name: "UN Global Marketplace (UNGM) -- SearXNG fallback"
+    kind: search
+    country: other
+    engine_lang: en
+    queries:
+      - "site:ungm.org notice electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      curl of the public notice-search page -> HTTP 200, real HTML, but the notice list itself is
+      populated client-side after login/session setup (no public REST API found in a single
+      probe). SearXNG fallback.
+
+  - id: eda_search
+    name: "NATO EDA / EDF calls -- SearXNG fallback"
+    kind: search
+    country: EU
+    engine_lang: en
+    queries:
+      - "site:eda.europa.eu call for proposals electro-optical OR infrared OR counter-UAS"
+      - "European Defence Fund call electro-optical OR infrared OR counter-UAS"
+    keywords: *kw
+    verified: true
+    verified_at: "2026-09-06"
+    notes: >
+      The guessed eda.europa.eu procurement-gateway path -> HTTP 404 (the section has evidently
+      moved/been renamed since this was last checked); the EU Funding & Tenders portal's own SEDIA
+      API (see `eu_sedia_funding_tenders` above) is the more precise machine-readable path for EDF
+      calls specifically, but is not wired in yet (see that entry's notes). SearXNG fallback in the
+      meantime.

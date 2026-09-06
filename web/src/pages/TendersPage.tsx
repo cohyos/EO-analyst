@@ -6,6 +6,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { TenderFilters, type TenderFiltersState } from "@/components/tenders/TenderFilters";
 import { TenderTable } from "@/components/tenders/TenderTable";
 import { ForecastList } from "@/components/tenders/ForecastList";
+import { SourceCoveragePanel } from "@/components/tenders/SourceCoveragePanel";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
 import { TENDER_STATUS_CHIP_CLASS, TENDER_STATUS_LABEL } from "@/lib/tenders";
@@ -146,6 +147,8 @@ export function TendersPage() {
           תחזית מכרזים
         </button>
       </div>
+
+      <SourceCoveragePanel />
 
       {tab === "open" && (
         <div className="space-y-3">

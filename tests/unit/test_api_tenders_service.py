@@ -124,3 +124,88 @@ class TestListTendersCounts:
         assert set(result.keys()) == {"tenders", "counts"}
         assert result["tenders"] == []
         assert result["counts"] == {}
+
+
+class TestTenderSourceStatus:
+    """Unit tests for the pure classification helper (A15, docs/TENDER_PORTALS.md)."""
+
+    def test_search_kind_always_integrated_keyless(self):
+        assert services._tender_source_status("search", False, None) == "integrated_keyless"
+        assert services._tender_source_status("search", True, None) == "integrated_keyless"
+
+    def test_verified_api_json_is_integrated_keyless(self):
+        assert services._tender_source_status("api_json", True, None) == "integrated_keyless"
+
+    def test_unverified_with_key_env_var_is_waiting_for_key(self):
+        assert services._tender_source_status("api_json", False, "SAM_GOV_API_KEY") == "waiting_for_key"
+
+    def test_unverified_without_key_env_var_is_not_integrated(self):
+        assert services._tender_source_status("api_json", False, None) == "not_integrated"
+        assert services._tender_source_status("html", False, None) == "not_integrated"
+
+    def test_html_kind_is_never_integrated_keyless_even_if_verified(self):
+        """scan_tenders unconditionally skips every kind: html source -- a verified: true html
+        entry (e.g. canada_buys, whose own page loads fine but is never scraped directly) must
+        still report not_integrated, not integrated_keyless."""
+        assert services._tender_source_status("html", True, None) == "not_integrated"
+
+
+class TestTenderSourceCoverage:
+    """A15 (docs/TENDER_PORTALS.md): the coverage panel's backing service -- combines the real
+    config/tenders.yaml registry with a (monkeypatched) DB rollup. Uses the real
+    load_tender_sources() (a config-file read, not a DB call) so a config typo would be caught."""
+
+    def test_totals_sum_to_source_count(self):
+        with patch("eoa.api.services._fetchall", return_value=[]):
+            cov = services.tender_source_coverage()
+        assert sum(cov["totals"].values()) == cov["source_count"]
+        assert cov["source_count"] > 30
+
+    def test_every_source_has_a_status_and_region(self):
+        with patch("eoa.api.services._fetchall", return_value=[]):
+            cov = services.tender_source_coverage()
+        all_ids = set()
+        for region in cov["regions"]:
+            assert region["sources"], f"region {region['region']} has no sources"
+            for src in region["sources"]:
+                assert src["status"] in ("integrated_keyless", "waiting_for_key", "not_integrated")
+                all_ids.add(src["id"])
+        assert "ted_eu" in all_ids
+        assert "uk_find_tender" in all_ids
+
+    def test_sam_gov_api_flagged_waiting_for_key(self):
+        with patch("eoa.api.services._fetchall", return_value=[]):
+            cov = services.tender_source_coverage()
+        us_sources = next(r["sources"] for r in cov["regions"] if r["region"] == "US")
+        sam = next(s for s in us_sources if s["id"] == "sam_gov_api")
+        assert sam["status"] == "waiting_for_key"
+        assert sam["needs_key_env_var"] == "SAM_GOV_API_KEY"
+
+    def test_notice_counts_and_last_fetch_merged_from_db(self):
+        fake_rows = [
+            {"source": "ted_eu", "n": 7, "last_created_at": "2026-09-05T10:00:00+00:00"},
+        ]
+        with patch("eoa.api.services._fetchall", return_value=fake_rows):
+            cov = services.tender_source_coverage()
+        eu_sources = next(r["sources"] for r in cov["regions"] if r["region"] == "EU")
+        ted = next(s for s in eu_sources if s["id"] == "ted_eu")
+        assert ted["notices_stored"] == 7
+        assert ted["last_fetch_at"] == "2026-09-05T10:00:00+00:00"
+
+    def test_source_with_no_stored_notices_shows_zero_and_null(self):
+        with patch("eoa.api.services._fetchall", return_value=[]):
+            cov = services.tender_source_coverage()
+        eu_sources = next(r["sources"] for r in cov["regions"] if r["region"] == "EU")
+        ted = next(s for s in eu_sources if s["id"] == "ted_eu")
+        assert ted["notices_stored"] == 0
+        assert ted["last_fetch_at"] is None
+
+    def test_config_load_failure_degrades_to_empty_not_an_exception(self):
+        with (
+            patch("eoa.tenders.scan.load_tender_sources", side_effect=RuntimeError("bad yaml")),
+            patch("eoa.api.services._fetchall", return_value=[]),
+        ):
+            cov = services.tender_source_coverage()
+        assert cov["source_count"] == 0
+        assert cov["regions"] == []
+        assert sum(cov["totals"].values()) == 0
