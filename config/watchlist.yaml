@@ -20,6 +20,8 @@ companies:
   - { name: "Northrop Grumman", aliases: [NOC], country: US, focus: [airborne_pods, air_defense] }
   - { name: L3Harris, aliases: [WESCAM, "L3Harris WESCAM", "MX-Series"], country: US, focus: [airborne_pods, naval_surveillance, land_surveillance] }
   - { name: "Teledyne FLIR", aliases: [FLIR, "FLIR Systems", "Teledyne FLIR Defense"], country: US, focus: [land_surveillance, naval_surveillance, c_uas, secondary] }
+  # A16 (מעקב רכישות, 2026-09-06): the parent group, tracked for M&A context separately from the FLIR unit.
+  - { name: "Teledyne", aliases: ["Teledyne Technologies", "Teledyne Technologies Incorporated", "טלדיין"], strict_aliases: [TDY], country: US, focus: [secondary, tech_dev] }
   - { name: "Leonardo DRS", aliases: [DRS], country: US, focus: [land_surveillance, secondary] }
   - { name: Anduril, aliases: [Lattice, Anvil, Roadrunner, "Anduril Industries"], strict_aliases: [Lattice, Anvil, Roadrunner], country: US, focus: [c_uas, computer_vision, air_defense] }
   - { name: "Shield AI", aliases: [Hivemind, "V-BAT"], country: US, focus: [computer_vision] }
@@ -47,6 +49,11 @@ companies:
   - { name: SCD, aliases: ["Semi Conductor Devices", "סמיקונדקטור דיוויסס", "סמיקונדקטור דיווייסס"], country: IL, focus: [secondary, tech_dev] }
   - { name: "Ophir Optronics", aliases: [Ophir, "Ophir Optics", "MKS Ophir", "אופיר אופטרוניקה"], country: IL, focus: [secondary, tech_dev] }
   - { name: Opgal, aliases: ["Opgal Optronic Industries", "אופגל"], country: IL, focus: [land_surveillance, naval_surveillance, secondary] }
+  # A16 (מעקב רכישות, 2026-09-06): thermal-camera / EO-module maker of interest in an acquisition context, with its direct competitors listed under `acquisition_watch` below.
+  - { name: "PVP Advanced EO Systems", aliases: ["PVP Advanced EO", "PVP EO Systems", "PVP Advanced Electro Optical Systems"], strict_aliases: [PVP], country: IL, focus: [land_surveillance, secondary, tech_dev] }
+  - { name: Lynred, aliases: ["LYNRED", Sofradir, ULIS], country: EU, focus: [secondary, tech_dev] }
+  - { name: Exosens, aliases: [Photonis, Xenics, Telops], country: EU, focus: [secondary, tech_dev] }
+  - { name: Raytron, aliases: ["Raytron Technology", IRay, InfiRay], country: CN, focus: [secondary, tech_dev] }
   - { name: Nextvision, aliases: ["Nextvision Stabilized Systems", "נקסטויז'ן"], country: IL, focus: [land_surveillance, naval_surveillance, airborne_pods] }
   - { name: Netline, aliases: ["Netline Communications Technologies", "נטליין"], country: IL, focus: [c_uas] }
   - { name: UVision, aliases: ["Hero-120", "Hero 120", "יו-ויז'ן"], country: IL, focus: [c_uas, air_defense] }
@@ -101,6 +108,21 @@ agencies:
   - { name: "חיל הים", aliases: ["Israeli Navy", "הצי הישראלי"], country: IL }
 
 people: []   # publications-level tracking only; populated dynamically
+
+# A16 (מעקב רכישות ושותפויות, user request 2026-09-06): companies of interest in an acquisition /
+# consolidation context. Readers: the weekly and BD "מעקב רכישות" section (m_and_a / investment /
+# partnership events on these names get their own table and a red-level alert), and the patents
+# valuation proxy. `role` explains why each name is here; `peers_of` groups a target with its
+# direct competitors so a move by any one of them is read against the others.
+acquisition_watch:
+  - { name: "Teledyne", role: "acquirer / consolidator (US) — user interest 2026-09-06; assumed Teledyne Technologies incl. Teledyne FLIR (spelling in the request was ambiguous)", country: US }
+  - { name: "PVP Advanced EO Systems", role: "potential target — thermal cameras / EO modules", country: IL, peers_of: [Opgal, SCD, "Ophir Optronics", Controp, Elbit, Lynred, Exosens, Hensoldt, "Leonardo DRS", Raytron, "Teledyne FLIR"] }
+  - { name: Opgal, role: "peer of PVP", country: IL }
+  - { name: SCD, role: "peer of PVP (detectors)", country: IL }
+  - { name: "Ophir Optronics", role: "peer of PVP (optics)", country: IL }
+  - { name: Lynred, role: "peer of PVP (detectors, EU)", country: EU }
+  - { name: Exosens, role: "peer of PVP (EU, consolidator: Photonis/Xenics/Telops)", country: EU }
+  - { name: Raytron, role: "peer of PVP (CN, low-cost thermal)", country: CN }
 
 conferences_seed:
   # Q4-4/Q4-5 (docs/qa/findings_Q4_r1.md, 2026-09-06): organizer/city/month corrected against

@@ -67,7 +67,9 @@ def load_sources(path: str | Path | None = None) -> list[Source]:
 
 
 def upsert_sources_to_db(sources: list[Source] | None = None) -> dict[str, int]:
-    """Upsert every configured source into the `sources` table.
+    """Upsert *every* configured source into the `sources` table -- including ones with
+    `enabled: false` (Q4-2/Q4-3: a dead feed / robots.txt-blocked source is never fetched, but its
+    DB row must still exist and be kept in sync).
 
     Returns a `{source.id (yaml slug): db_row_id}` map — the DB table keys
     sources by `name`, not by our yaml slug, so callers that need to resolve
@@ -75,6 +77,16 @@ def upsert_sources_to_db(sources: list[Source] | None = None) -> dict[str, int]:
 
     Imported lazily: unit tests for `sources_loader.load_sources()` never
     touch the DB.
+
+    Round-3 (D9 finding 5, docs/qa/loop/round_1_judge.md): every source's DB `active` flag is set
+    to `source.enabled` on every call (previously only ever `True` -- a source disabled in config
+    kept `active=true` in the DB forever, since ``run_ingest`` filtered disabled sources out
+    *before* calling this function at all, so `upsert_source` was simply never invoked for them).
+    Also deactivates any DB row whose `name` isn't among the sources passed here at all (see
+    `relational.deactivate_orphaned_sources` -- catches a renamed-in-config source's now-orphaned
+    old-name row, which would otherwise sit at `active=true`/`last_fetched_at=NULL` forever).
+    Callers that want this orphan/active-flag sync to see the *whole* config (including disabled
+    entries) must pass the unfiltered `load_sources()` result, not a pre-filtered subset.
     """
     from eoa.memory import relational
 
@@ -87,7 +99,9 @@ def upsert_sources_to_db(sources: list[Source] | None = None) -> dict[str, int]:
             kind=source.kind,
             lang=source.lang,
             reliability=source.reliability,
+            active=source.enabled,
         )
         id_map[source.id] = db_id
+    relational.deactivate_orphaned_sources({s.name for s in resolved})
     log.info("fetch.sources_upserted", count=len(id_map))
     return id_map

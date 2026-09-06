@@ -1562,8 +1562,9 @@ _CITATION_REPAIR_INSTRUCTION = (
     "התשובה שכתבת למעלה אינה מכילה אף סימון [n] אחד, למרות שסופקו לך מקורות ממוספרים. כתוב "
     "מחדש בדיוק את אותה תשובה -- זהה בתוכן, במבנה ובאורך -- אך הוסף סימון [n] בסוף כל משפט "
     "עובדתי המבוסס על אחד המקורות שסופקו למעלה (לפי מספורם [1]/[2]/וכו'). אם משפט מסוים אינו "
-    "מבוסס על אף מקור (למשל פרשנות אנליטית), השאר אותו ללא [n]. אל תוסיף הקדמות, הערות או הסברים "
-    "-- החזר אך ורק את גוף התשובה המתוקן."
+    "מבוסס על אף מקור (למשל פרשנות אנליטית), השאר אותו ללא [n]. הסימון [n] חייב להיות מספר ממשי "
+    "תואם מקור (למשל [1] או [3]) -- לעולם לא `[n]`, `[n=5]`, `{n}` או placeholder אחר לא ממומש. "
+    "אל תוסיף הקדמות, הערות או הסברים -- החזר אך ורק את גוף התשובה המתוקן."
 )
 
 
@@ -1720,9 +1721,17 @@ def list_tenders(
         where.append("relevance >= %(min_relevance)s")
         params["min_relevance"] = min_relevance
     where_sql = " AND ".join(where)
+    # Round-3 (D9 finding 4c, docs/qa/loop/round_1_judge.md): open rows first (earliest deadline
+    # first), then unknown rows (most-recently-published first, "unknown-recent"), then anything
+    # else (awarded/closed/archived, only reachable via an explicit `status=`/`include_*`) --
+    # closed/archived stay hidden from the default view entirely (see the WHERE-clause branch
+    # above), this ordering only matters once a caller explicitly asks to see them too.
     rows = _fetchall(
         f"SELECT * FROM tenders WHERE {where_sql} "
-        "ORDER BY deadline ASC NULLS LAST, published_at ASC NULLS LAST, "
+        "ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'unknown' THEN 1 "
+        "WHEN 'awarded' THEN 2 WHEN 'closed' THEN 3 WHEN 'archived' THEN 4 ELSE 5 END, "
+        "CASE WHEN status = 'open' THEN deadline END ASC NULLS LAST, "
+        "CASE WHEN status = 'unknown' THEN published_at END DESC NULLS LAST, "
         "relevance DESC NULLS LAST, id DESC LIMIT %(limit)s",
         params,
     )

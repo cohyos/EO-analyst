@@ -15,7 +15,7 @@ from typing import Any
 
 from eoa.config import settings
 from eoa.qa.types import Check, DomainScore, weighted_score
-from eoa.report.bd_territory import _COMPETITOR_PROMOTION_VERBS
+from eoa.report.bd_territory import _COMPETITOR_PROMOTION_VERBS, NO_ACTIVITY_MARKER_HE
 
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)$", re.MULTILINE)
 _CONFERENCES_HEADING = "כנסים"
@@ -49,6 +49,33 @@ def _empty_headings(sections: list[tuple[str, str]]) -> list[str]:
 
 def _actions_section_text(sections: list[tuple[str, str]]) -> str:
     return "\n".join(body for h, body in sections if any(kw in h for kw in _ACTIONS_HEADING_KEYWORDS))
+
+
+def _is_no_activity_actions_text(actions_text: str) -> bool:
+    """Round-3 (D7 finding 3): the report's actions/recommendations section carries the shared,
+    machine-detectable "no activity in this window" marker (``eoa.report.bd_territory.
+    NO_ACTIVITY_MARKER_HE``) -- an honest, deterministic statement that the market/table
+    collection all came back empty, listing every watchlist competitor checked. Imported from the
+    report builder itself (same convention as ``_COMPETITOR_PROMOTION_VERBS`` above) so this check
+    can never drift from what the renderer actually emits."""
+    return NO_ACTIVITY_MARKER_HE in actions_text
+
+
+def _actions_text_has_populated_rows(actions_text: str) -> bool:
+    """A markdown table data row (a ``|``-delimited line, not the header/separator row) inside the
+    actions section -- signals the report is *also* listing concrete recommended actions. Used to
+    catch a self-contradictory report that claims "no activity" while still fabricating a
+    populated actions table (D7 finding 3: stay strict about fabricated actions)."""
+    for line in actions_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if stripped.startswith("|---") or stripped.strip("|").strip() in ("", "---"):
+            continue
+        if all(c in "|- " for c in stripped):
+            continue
+        return True
+    return False
 
 
 def _competitor_promotion_hits(actions_text: str, competitor_names: list[str]) -> list[str]:
@@ -119,22 +146,34 @@ def score_D7(md_paths: list[Path], conn: Any = None) -> DomainScore:  # noqa: N8
         sections = _sections(text)
         empty_heading_hits.extend(f"{path.name}:{h}" for h in _empty_headings(sections))
         actions_text = _actions_section_text(sections)
-        promotion_hits.extend(f"{path.name}:{hit}" for hit in _competitor_promotion_hits(actions_text, competitor_names))
+        promotion_hits.extend(
+            f"{path.name}:{hit}" for hit in _competitor_promotion_hits(actions_text, competitor_names)
+        )
         mismatches, checked = _conference_dates_match_db(sections, conn)
         total_mismatch += mismatches
         total_checked += checked
-        has_actions = any(
+        # Round-3 (D7 finding 3): an honest "no activity this window" report (the shared marker
+        # from eoa.report.bd_territory) counts as a populated actions section -- it is a
+        # deterministic, machine-detectable statement that the section was checked and correctly
+        # found nothing, not a silently empty/omitted section. Still fails outright if the marker
+        # and an actual populated actions table both appear (self-contradictory / fabricated).
+        is_no_activity = _is_no_activity_actions_text(actions_text)
+        contradictory = is_no_activity and _actions_text_has_populated_rows(actions_text)
+        has_actions = is_no_activity or any(
             any(kw in h for kw in _ACTIONS_HEADING_KEYWORDS) and body.strip() for h, body in sections
         )
-        if not has_actions:
-            no_actions.append(path.name)
+        if not has_actions or contradictory:
+            tag = "contradictory (no-activity marker + populated table)" if contradictory else "empty"
+            no_actions.append(f"{path.name} ({tag})")
 
     checks = [
         Check(
             "conference_dates_match_db",
             passed=total_mismatch == 0,
             weight=1.5,
-            evidence=f"{total_checked - total_mismatch}/{total_checked} conference dates matched the DB" if total_checked else "no conference rows to check",
+            evidence=f"{total_checked - total_mismatch}/{total_checked} conference dates matched the DB"
+            if total_checked
+            else "no conference rows to check",
         ),
         Check(
             "no_empty_headings",

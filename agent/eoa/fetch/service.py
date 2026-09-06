@@ -403,11 +403,16 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
     """
     from eoa.fetch.sources_loader import load_sources, upsert_sources_to_db
 
-    # Q4-2/Q4-3: a source config can be `enabled: false` (dead feed with no replacement, or
-    # robots.txt blocks its only feed) -- excluded before it is even upserted to `sources`, so it
-    # neither gets fetched nor accumulates `fail_count` for a fetch path known not to work.
-    sources = [s for s in load_sources() if s.enabled]
-    id_map = upsert_sources_to_db(sources)
+    # Round-3 (D9 finding 5, docs/qa/loop/round_1_judge.md): upsert *every* configured source,
+    # enabled or not, so `sources.active` stays in sync with `config/sources.yaml` (a disabled
+    # source's row gets `active=false`, and a renamed/removed source's now-orphaned old row also
+    # gets deactivated -- see `upsert_sources_to_db`/`relational.deactivate_orphaned_sources`).
+    # Only *then* filter down to `enabled` sources for actual fetching (Q4-2/Q4-3: a source with
+    # `enabled: false` -- a dead feed with no replacement, or one robots.txt blocks entirely --
+    # still isn't fetched, so it never accumulates `fail_count` for a path known not to work).
+    all_sources = load_sources()
+    id_map = upsert_sources_to_db(all_sources)
+    sources = [s for s in all_sources if s.enabled]
 
     targets = [(id_map.get(s.id), s) for s in sources]
     if source_ids is not None:

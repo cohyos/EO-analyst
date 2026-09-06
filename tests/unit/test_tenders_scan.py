@@ -669,6 +669,7 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
+            patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
         ):
             notices = _parse_ted_notices(json.loads((FIXTURES / "ted_sample.json").read_text()), src)
             mock_collect.return_value = notices
@@ -695,6 +696,7 @@ class TestScanTendersGateAndDedup:
         with (
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
+            patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
         ):
             stats = scan_tenders(sources=[src])
         assert stats.sources_scanned == 0
@@ -712,6 +714,7 @@ class TestScanTendersGateAndDedup:
         with (
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
+            patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
         ):
             stats = scan_tenders(sources=[src])
         assert stats.sources_scanned == 0
@@ -731,6 +734,7 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._collect_source_notices") as mock_collect,
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
+            patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
         ):
 
             def side_effect(src, deny_domains):
@@ -755,6 +759,7 @@ class TestScanTendersGateAndDedup:
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
+            patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
         ):
             stats = scan_tenders(sources=[src])
         mock_insert.assert_not_called()
@@ -771,6 +776,7 @@ def _common_patches(notice: NoticeRaw) -> ExitStack:
     stack.enter_context(patch("eoa.tenders.scan._tender_exists", return_value=False))
     stack.enter_context(patch("eoa.tenders.scan._transition_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan._archive_stale_closed", return_value=0))
+    stack.enter_context(patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0))
     return stack
 
 

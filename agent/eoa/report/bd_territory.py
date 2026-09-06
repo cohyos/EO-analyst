@@ -48,6 +48,7 @@ from eoa.report.docx_builder import (
 )
 from eoa.report.geography import normalize_country
 from eoa.report.qa_citations import QAResult, check, citations_in, split_sentences
+from eoa.report.textnorm import normalize_hebrew_punctuation
 
 log = structlog.get_logger(__name__)
 
@@ -358,9 +359,16 @@ def collect_tenders_and_forecasts(territory: str, *, limit: int = 20) -> dict[st
     """Open/unknown tenders whose ``country`` normalizes to the territory, and forecasts whose
     ``buyer_country`` normalizes to the territory -- section 3 (מכרזים ותחזיות)."""
     code = normalize_country(territory)
+    # Round-3 (D9 finding 4c, docs/qa/loop/round_1_judge.md): open rows first (earliest deadline
+    # first), then unknown rows (most-recently-published first, "unknown-recent") -- closed/
+    # archived rows are excluded outright by the WHERE clause, never shown here at all. Mirrors
+    # ``eoa.api.services.list_tenders``'s identical ordering fix for the tenders API/UI.
     tenders = _fetchall(
         "SELECT * FROM tenders WHERE status IN ('open', 'unknown') "
-        "ORDER BY deadline ASC NULLS LAST, relevance DESC NULLS LAST, id DESC LIMIT 500"
+        "ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, "
+        "CASE WHEN status = 'open' THEN deadline END ASC NULLS LAST, "
+        "CASE WHEN status = 'unknown' THEN published_at END DESC NULLS LAST, "
+        "relevance DESC NULLS LAST, id DESC LIMIT 500"
     )
     tenders = [t for t in tenders if normalize_country(t.get("country")) == code][:limit]
 
@@ -1351,6 +1359,163 @@ def _strip_uncited(draft: BdTerritoryReportDraft, qa: QAResult) -> BdTerritoryRe
 
 
 # --------------------------------------------------------------------------
+# text normalization (D7 round-3 finding 2: doubled ASCII quotes in Hebrew abbreviations)
+# --------------------------------------------------------------------------
+
+
+def _normalize_text_list(values: list[str]) -> list[str]:
+    return [normalize_hebrew_punctuation(v) or v for v in values]
+
+
+def _normalize_draft_text(draft: BdTerritoryReportDraft) -> BdTerritoryReportDraft:
+    """Round-3 (D7 finding 2, docs/qa/loop/round_1_judge.md): apply the shared Hebrew-punctuation
+    normaliser (``eoa.report.textnorm.normalize_hebrew_punctuation``) to every LLM-authored text
+    field on ``draft`` -- collapses a doubled ASCII quote and converts a lone ASCII quote/
+    apostrophe between Hebrew letters to the correct gershayim/geresh mark (e.g. observed live:
+    'ארה""ב' -> 'ארה״ב'). Applied once, as late as possible (after every other draft mutation:
+    perspective gate, citation QA, length capping, placeholder stripping), so no upstream step
+    needs to know about it and normalization can never interfere with citation-marker matching
+    (``[n]`` tokens are untouched -- digits/brackets are never adjacent to Hebrew letters in a way
+    that would trigger either substitution)."""
+    return draft.model_copy(
+        update={
+            "exec_summary_he": normalize_hebrew_punctuation(draft.exec_summary_he),
+            "market_bullets_he": _normalize_text_list(draft.market_bullets_he),
+            "recommended_actions": [
+                a.model_copy(
+                    update={
+                        "action_he": normalize_hebrew_punctuation(a.action_he),
+                        "rationale_he": normalize_hebrew_punctuation(a.rationale_he),
+                        "owner_role_he": normalize_hebrew_punctuation(a.owner_role_he),
+                        "timing_he": normalize_hebrew_punctuation(a.timing_he),
+                    }
+                )
+                for a in draft.recommended_actions
+            ],
+            "risks_assumptions_he": normalize_hebrew_punctuation(draft.risks_assumptions_he),
+            "open_points_he": _normalize_text_list(draft.open_points_he),
+        }
+    )
+
+
+def _normalize_cell(value: Any) -> Any:
+    return normalize_hebrew_punctuation(value) if isinstance(value, str) else value
+
+
+def _normalize_table(table: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Same normalization, applied to a rendered deterministic table's string cells/note (the
+    other half of D7 finding 2's "prose *and table cells*") -- headers are static Hebrew strings
+    authored in this module and never need it, so only ``rows``/``note_he`` are touched."""
+    if table is None:
+        return None
+    normalized = dict(table)
+    if table.get("note_he"):
+        normalized["note_he"] = normalize_hebrew_punctuation(table["note_he"])
+    normalized["rows"] = [[_normalize_cell(v) for v in row] for row in table.get("rows") or []]
+    return normalized
+
+
+# --------------------------------------------------------------------------
+# conference-date prose correction (D7 round-3 finding 1: dates must be deterministic)
+# --------------------------------------------------------------------------
+
+_CONF_DATE_MENTION_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_CONF_DATE_MENTION_WINDOW = 40
+
+
+def _conferences_date_lookup(data: dict[str, Any]) -> dict[str, dt.date]:
+    """``{conference name: real conferences.start_date}`` for every conference
+    ``collect_conferences_for_territory`` returned (territory + international) -- the ground truth
+    the rendered table already reads directly off the DB row; used here to also check/correct any
+    free-prose mention of the same date."""
+    lookup: dict[str, dt.date] = {}
+    for c in (data.get("territory") or []) + (data.get("international") or []):
+        name, start = c.get("name"), c.get("start_date")
+        if name and start:
+            lookup[name] = start
+    return lookup
+
+
+def _correct_conference_date_mentions(
+    text: str, conferences_by_name: dict[str, dt.date]
+) -> tuple[str, list[str]]:
+    """D7 round-3 finding 1: defense-in-depth for LLM-authored prose (exec summary / market
+    bullets) that paraphrases a tracked conference's date. The rendered conferences *table* is
+    already 100% DB-sourced by construction (``conferences_table``/``format_conferences_block``
+    read ``start_date``/``end_date`` straight off the ``conferences`` row -- never synthesized) --
+    but nothing stops the model from also mentioning a date in free prose, which it can get wrong
+    (observed: AUSA 2026 cited as starting 2026-10-01 in prose vs. the DB's 2026-10-12). Scans for
+    every tracked conference name followed within a short window by an ISO date; a mismatching
+    date is replaced with the real one (corrected, never merely dropped -- a description with a
+    corrected date is more useful than silently deleting the whole sentence) and logged.
+    Returns ``(possibly-corrected text, correction log lines)``."""
+    if not text or not conferences_by_name:
+        return text, []
+    corrections: list[str] = []
+    search_from = 0
+    while True:
+        idx = -1
+        matched_name: str | None = None
+        for name in conferences_by_name:
+            pos = text.find(name, search_from)
+            if pos != -1 and (idx == -1 or pos < idx):
+                idx, matched_name = pos, name
+        if idx == -1 or matched_name is None:
+            break
+        window = text[idx : min(len(text), idx + len(matched_name) + _CONF_DATE_MENTION_WINDOW)]
+        m = _CONF_DATE_MENTION_RE.search(window)
+        if m:
+            real_start = conferences_by_name[matched_name]
+            mentioned = dt.date.fromisoformat(m.group(1))
+            if mentioned != real_start:
+                real_str = fmt_date(real_start)
+                abs_start, abs_end = idx + m.start(1), idx + m.end(1)
+                corrections.append(
+                    f"{matched_name}: '{m.group(1)}' -> '{real_str}' (DB start_date={real_start})"
+                )
+                text = text[:abs_start] + real_str + text[abs_end:]
+        search_from = idx + len(matched_name)
+    return text, corrections
+
+
+def _correct_draft_conference_dates(
+    draft: BdTerritoryReportDraft, conferences_by_name: dict[str, dt.date], *, territory: str
+) -> BdTerritoryReportDraft:
+    if not conferences_by_name:
+        return draft
+    all_corrections: list[str] = []
+    new_summary, corr = _correct_conference_date_mentions(draft.exec_summary_he, conferences_by_name)
+    all_corrections += corr
+    new_bullets = []
+    for bullet in draft.market_bullets_he:
+        corrected, corr = _correct_conference_date_mentions(bullet, conferences_by_name)
+        new_bullets.append(corrected)
+        all_corrections += corr
+    if not all_corrections:
+        return draft
+    log.warning("bd_territory_conference_date_corrected", territory=territory, corrections=all_corrections)
+    return draft.model_copy(update={"exec_summary_he": new_summary, "market_bullets_he": new_bullets})
+
+
+# --------------------------------------------------------------------------
+# no-activity marker (D7 round-3 finding 3: honest "no activity" reports must not fail
+# actions_table_nonempty)
+# --------------------------------------------------------------------------
+
+#: Machine-detectable marker sentence (``eoa.qa.d7_bd_report`` matches on this exact text) for a
+#: territory where the market-item collection AND every deterministic table (procurement events,
+#: tenders, forecasts, competitors, conferences) all came back empty for the lookback window --
+#: distinct from "the LLM/data pipeline failed to produce actions", which is a real gap, not an
+#: honest "nothing to report".
+NO_ACTIVITY_MARKER_HE = "לא זוהתה פעילות רלוונטית בטריטוריה בחלון זה — אין פעולות מומלצות."
+
+
+def _no_activity_actions_section_he(watchlist_checked: list[str]) -> str:
+    checked = "; ".join(watchlist_checked) if watchlist_checked else "לא הוגדרו מתחרי מעקב לטריטוריה זו"
+    return f"{NO_ACTIVITY_MARKER_HE} מתחרי מעקב שנבדקו בטריטוריה זו: {checked}."
+
+
+# --------------------------------------------------------------------------
 # rendering helpers
 # --------------------------------------------------------------------------
 
@@ -1659,6 +1824,16 @@ def build_bd_territory(
             duplicate_sentences=original_errors.duplicate_sentences,
         )
 
+    # D7 round-3 finding 2: normalize Hebrew punctuation (doubled ASCII quotes -> gershayim/geresh)
+    # on every LLM-authored text field before it feeds any of the extra-section bodies built below
+    # (which quote draft.market_bullets_he/risks_assumptions_he verbatim) -- applied again, below,
+    # after the deterministic-actions fallback so that path is covered too.
+    draft = _normalize_draft_text(draft)
+    # D7 round-3 finding 1: correct any prose mention of a tracked conference's date against the
+    # DB (the rendered table itself is already 100% DB-sourced by construction -- see
+    # conferences_table/format_conferences_block).
+    draft = _correct_draft_conference_dates(draft, _conferences_date_lookup(conferences_data), territory=code)
+
     extra_sections: list[dict[str, Any]] = []
     if draft.market_bullets_he:
         extra_sections.append(
@@ -1702,6 +1877,25 @@ def build_bd_territory(
             )
             draft = draft.model_copy(update={"recommended_actions": deterministic_actions})
             used_deterministic_actions = True
+    draft = _normalize_draft_text(draft)  # covers text injected by the deterministic fallback too
+
+    # D7 round-3 finding 3: a genuine "no activity in this territory in this window" report (no
+    # market items AND every deterministic table empty -- the bd_kr case) has nothing for either
+    # the LLM or the deterministic fallback above to produce, so the recommendations section would
+    # otherwise be silently omitted entirely (failing ``actions_table_nonempty`` despite the report
+    # being an honest, correctly-empty one). Render an explicit, machine-detectable marker instead
+    # -- naming every watchlist competitor that was actually checked -- so an analyst (and the
+    # deterministic QA check) can tell "checked, nothing found" apart from "the pipeline failed to
+    # produce a recommendations section at all".
+    if not items and table_counts.total == 0 and not draft.recommended_actions:
+        watchlist_checked = dormant_competitors or sorted({c["name"] for c in competitors})
+        extra_sections.append(
+            {
+                "title_he": "נקודות כניסה ופעולות מומלצות",
+                "body_he": _no_activity_actions_section_he(watchlist_checked),
+                "position": "after_outlook",
+            }
+        )
 
     tables: list[dict[str, Any]] = []
     for tbl in (
@@ -1712,7 +1906,7 @@ def build_bd_territory(
         recommended_actions_table(draft, deterministic=used_deterministic_actions),
     ):
         if tbl is not None:
-            tables.append(tbl)
+            tables.append(_normalize_table(tbl))
 
     # A14 (פטנטים ו-IP, 2026-09-06): competitor IP position in the territory, same additive
     # mechanism as the tables above. A failure here must never break the BD report.
