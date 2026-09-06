@@ -91,6 +91,43 @@ None of these four talk to the database or the LLM either; each takes the same
 ``(answer_text, question, retrieved)`` (the extended :func:`ground_and_filter_answer`) as the round-3
 guards, and each is a no-op on a blank answer or an empty ``retrieved`` list for the same reason
 documented on :func:`ground_and_filter_answer` itself.
+
+P10 (docs/qa/loop/round_5_chat_fixes.md, "New findings this round"): the round-5 write-up's own live
+8-question x 2-sample verification pass found five more residual gaps in the guards above -- each
+independently real, none a regression in what rounds 3/5 were built to fix:
+
+1. A single-digit money magnitude ("5" in "5 מיליארד דולר") bypassed :func:`_digits_grounded`'s own
+   ``< 2`` digit floor entirely -- extended via :func:`_money_figure_grounded`/
+   :func:`_money_magnitude_grounded`, which check a single-digit money candidate as a magnitude
+   (value + billion/million/thousand scale) against every money mention in the corpus instead of
+   auto-passing it; a non-money single-digit number (a plain count) never reaches this path at all,
+   since it was never matched by :data:`_MONEY_RE` in the first place.
+2. :func:`_equivalence_violation` treated the question's own acronym/expansion gloss ("DROIC" /
+   "Digital Read-Out Integrated Circuit") as a fabricated equivalence, because only a watchlist
+   entity resolves via :func:`entity_normalize.resolve_canonical` -- fixed via
+   :func:`_is_acronym_expansion_pair` (an acronym whose letters match the expansion's own initials)
+   and an optional ``question`` parameter (both :func:`_equivalence_violation` and
+   :func:`filter_entity_equivalence`; defaults to ``""`` so the existing call site in
+   ``routes/ask.py`` keeps working unchanged) so either side appearing in the question is never
+   treated as a fabricated claim either.
+3. Every proper-noun/entity pattern in this module was Latin-script-only, so a fabricated Hebrew
+   institution name (a live-found "מאוניברסיטת אריזונה סטייט" attributed to no real source) was
+   invisible to every guard. :func:`_hebrew_entity_violation` closes this narrowly: only the
+   institution/organisation head-noun shapes (אוניברסיטת/מכון/משרד/חיל/...), only on a ``[n]``-cited
+   unit, exempting the question's own entities, any retrieved source (not only the cited one), and a
+   small generic-institution allowlist -- reusing the existing citation-gated wiring so the
+   ``### הערכת האנליסט`` exemption (which never carries a citation) already applies for free.
+4. :func:`_iter_units` treated a numbered-list item (``1. ...``) as ordinary sentence-split prose,
+   so dropping a flagged item left the list truncated mid-item; it is now a numbered-list-aware unit
+   (the item line plus its continuation lines, mirroring the existing bullet handling), and
+   :func:`_renumber_lists` renumbers the surviving items of each list 1..k after a removal.
+5. :func:`retrieval_relevance_caveat` closes the Q3(LORA)/Q6(AUSA) "anchor-echo" pattern: the model
+   can satisfy the existing anchor-presence guard (``routes.ask``'s own anchor-miss check, which
+   looks at the *answer*) by repeating the question's own anchor term throughout an answer whose
+   *retrieved sources* never once mention it. Using the same anchor-extraction approach as
+   ``routes.ask``'s ``_strong_anchors``/``_primary_anchors`` (necessarily duplicated here, not
+   imported, since ``routes.ask`` itself imports this module), it prepends an explicit Hebrew caveat
+   paragraph -- never removing content -- when no retrieved source mentions any primary anchor.
 """
 
 from __future__ import annotations
@@ -101,6 +138,7 @@ from typing import Any
 
 from eoa.config import settings
 from eoa.pipeline import entity_normalize
+from eoa.search.deep_search import extract_anchors
 
 # A real citation is always a bare `[<digits>]` (see `eoa.api.routes.ask`'s own
 # `re.search(r"\[\d+\]", ...)` checks) -- anything shaped like `[n]`/`[n=5]`/`{n}` is always a
@@ -309,21 +347,62 @@ def sanitize_citation_markers(text: str) -> tuple[str, int]:
     return cleaned, count
 
 
+# P10 item 4 (docs/qa/loop/round_5_chat_fixes.md, "New findings this round" #5, live Q5): a plain
+# numbered-list item (``1. ...``) was previously just ordinary prose to `_iter_units` -- split on
+# sentence punctuation like any other line -- so dropping a flagged numbered item left the list
+# truncated mid-item rather than cleanly removing the whole entry, the same "not list-aware"
+# limitation round 3 already documented for markdown tables.
+_NUMBERED_ITEM_RE = re.compile(r"^\s*\d+[.)]\s")
+
+
 def _iter_units(text: str) -> list[tuple[int, int]]:
     """``(start, end)`` spans over ``text`` granular enough to drop individually without mangling
     the rest of the answer: a heading line is never a unit (structural, always kept as-is); a
     markdown bullet line (``-``/``*``) is one whole unit (dropping it removes the bullet marker
-    too, leaving no orphan ``- ``); any other line is split into sentences on ``.!?``/gershayim."""
+    too, leaving no orphan ``- ``); a numbered-list item (``1. ...``/``1) ...``) is one whole unit
+    together with its own continuation lines -- any following line that is itself neither blank,
+    a heading, another list item, nor a bullet -- so a wrapped numbered item is removed as a whole
+    entry too, not just its first physical line; any other line is split into sentences on
+    ``.!?``/gershayim. Callers that remove units from a numbered list should follow up with
+    :func:`_renumber_lists` so the surviving items stay sequential."""
     units: list[tuple[int, int]] = []
+    lines = text.splitlines(keepends=True)
+    line_starts: list[int] = []
     pos = 0
-    for line in text.splitlines(keepends=True):
-        start = pos
+    for line in lines:
+        line_starts.append(pos)
         pos += len(line)
+
+    i = 0
+    n_lines = len(lines)
+    while i < n_lines:
+        line = lines[i]
+        start = line_starts[i]
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
+            i += 1
             continue
         if stripped.startswith(("-", "*")):
             units.append((start, start + len(line)))
+            i += 1
+            continue
+        if _NUMBERED_ITEM_RE.match(line):
+            end = start + len(line)
+            j = i + 1
+            while j < n_lines:
+                nxt = lines[j]
+                nxt_stripped = nxt.strip()
+                if (
+                    not nxt_stripped
+                    or nxt_stripped.startswith("#")
+                    or nxt_stripped.startswith(("-", "*"))
+                    or _NUMBERED_ITEM_RE.match(nxt)
+                ):
+                    break
+                end = line_starts[j] + len(nxt)
+                j += 1
+            units.append((start, end))
+            i = j
             continue
         seg_start = 0
         for m in _SENTENCE_END_RE.finditer(line):
@@ -332,7 +411,34 @@ def _iter_units(text: str) -> list[tuple[int, int]]:
             seg_start = end
         if line[seg_start:].strip():
             units.append((start + seg_start, start + len(line)))
+        i += 1
     return units
+
+
+_NUMBERED_ITEM_PREFIX_RE = re.compile(r"^(\s*)(\d+)([.)])(\s)")
+
+
+def _renumber_lists(text: str) -> str:
+    """Renumber every numbered-list item in ``text`` sequentially (1..k) within each contiguous
+    list block -- called after a unit removal so a list that had an item dropped from its middle
+    (e.g. items 1/2/4 surviving out of an original 1/2/3/4) reads as a clean 1/2/3 again instead of
+    keeping the gap. A list block ends (and the next one restarts at 1) at a blank line, a heading,
+    or a bullet line; an ordinary continuation line of the current item is left untouched and does
+    not itself break the block."""
+    out: list[str] = []
+    counter = 0
+    for line in text.splitlines(keepends=True):
+        m = _NUMBERED_ITEM_PREFIX_RE.match(line)
+        if m:
+            counter += 1
+            leading_ws, _old_num, punct, sep = m.groups()
+            out.append(f"{leading_ws}{counter}{punct}{sep}{line[m.end() :]}")
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith(("-", "*")):
+            counter = 0
+        out.append(line)
+    return "".join(out)
 
 
 def _proper_noun_grounded(candidate: str, corpus_cf: str) -> bool:
@@ -366,6 +472,102 @@ def _digits_grounded(candidate: str, corpus: str) -> bool:
     return re.search(r"(?<!\d)" + re.escape(digits) + r"(?!\d)", corpus) is not None
 
 
+# ---------------------------------------------------------------------------------------------
+# P10 item 1: single-digit money-magnitude check (docs/qa/loop/round_5_chat_fixes.md, "New findings
+# this round" #1 -- live Q1: a real "$1.53bn" cited figure was restated as "5 מיליארד דולר" and
+# `_digits_grounded`'s own `< 2` digit floor (meant only to avoid flagging noise like a lone stray
+# digit) waved it through untouched). Deliberately scoped to money figures only -- the floor exists
+# specifically so a plain count ("3 מערכות") is never flagged, and a count is never even a candidate
+# here since it was never matched by `_MONEY_RE` (which requires a currency symbol or scale word) in
+# the first place.
+# ---------------------------------------------------------------------------------------------
+
+# Ordered longest-prefix-first so e.g. a "billion"/"bn" tail is matched before the bare "b" entry
+# would otherwise shadow it via `str.startswith`.
+_MONEY_SCALE_WORDS: tuple[tuple[str, float], ...] = (
+    ("מיליארד", 1_000_000_000.0),
+    ("billion", 1_000_000_000.0),
+    ("bn", 1_000_000_000.0),
+    ("b", 1_000_000_000.0),
+    ("מיליון", 1_000_000.0),
+    ("million", 1_000_000.0),
+    ("m", 1_000_000.0),
+    ("אלף", 1_000.0),
+    ("thousand", 1_000.0),
+    ("k", 1_000.0),
+)
+
+# A broader money-mention finder than `_MONEY_RE` (adds "£", "bn", "thousand"/"אלף" as scale
+# indicators) used only to scan the *corpus* for a compatible magnitude to compare a single-digit
+# money candidate against -- never used to decide what counts as a "money figure" candidate in the
+# answer itself (that stays `_MONEY_RE`, unchanged, so no existing behaviour shifts).
+_MONEY_MAGNITUDE_RE = re.compile(
+    r"[$€₪£]\s?\d[\d,]*\.?\d*\s?(?:מיליארד|מיליון|אלף|billion|million|thousand|bn|[MBK])?"
+    r"|\b\d[\d,]*\.?\d*\s?(?:מיליארד|מיליון|אלף|billion|million|thousand|bn)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_money_value_scale(text: str) -> tuple[float, float] | None:
+    """``(value, scale)`` for the first number in ``text`` -- ``scale`` is the billion/million/
+    thousand multiplier of whatever scale word or letter suffix immediately follows the number
+    (``1.0`` when none is present, i.e. a bare currency amount with no magnitude word at all).
+    ``None`` if ``text`` contains no parseable number."""
+    m = re.search(r"\d[\d,]*\.?\d*", text)
+    if not m:
+        return None
+    try:
+        value = float(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
+    tail = text[m.end() :].strip().lower()
+    for word, mult in _MONEY_SCALE_WORDS:
+        if tail.startswith(word):
+            return value, mult
+    return value, 1.0
+
+
+def _money_magnitude_grounded(figure: str, corpus: str) -> bool:
+    """Whether the money figure ``figure`` -- which must itself carry a recognisable billion/
+    million/thousand scale word or suffix -- is grounded in ``corpus`` as a *magnitude*: some money
+    mention in ``corpus``, converted to a common scale, rounds to the same value. This is how "5
+    מיליארד" is grounded by "$5bn"/"5 billion"/"5,000 million"/"5.0 billion" (all the same value,
+    however phrased) or by any corpus figure that itself rounds to 5 at the billion scale -- but NOT
+    by "$1.53 billion" (rounds to 2, not 5), which is the exact live fabrication this closes.
+    Returns ``False`` outright (never grounded by this check) when ``figure`` itself carries no
+    recognisable scale word at all -- a bare, unscaled amount is the caller's own fallback to make,
+    not this function's to guess at."""
+    parsed = _parse_money_value_scale(figure)
+    if parsed is None or parsed[1] <= 1.0:
+        return False
+    value, scale = parsed
+    for m in _MONEY_MAGNITUDE_RE.finditer(corpus):
+        corpus_parsed = _parse_money_value_scale(m.group(0))
+        if corpus_parsed is None or corpus_parsed[1] <= 1.0:
+            continue
+        corpus_value, corpus_scale = corpus_parsed
+        if round((corpus_value * corpus_scale) / scale) == round(value):
+            return True
+    return False
+
+
+def _money_figure_grounded(figure: str, corpus: str) -> bool:
+    """Whether a money-figure candidate ``figure`` (already matched by :data:`_MONEY_RE`) is
+    grounded in ``corpus``. A figure with >= 2 digits defers unchanged to :func:`_digits_grounded`
+    (the literal-substring check, exactly as before this fix). A single-digit magnitude is checked
+    as a magnitude-with-unit via :func:`_money_magnitude_grounded` instead of auto-passing on
+    :func:`_digits_grounded`'s own ``< 2`` digit floor -- unless ``figure`` itself carries no
+    recognisable scale word (a bare "$5" with nothing else), in which case there is no magnitude to
+    compare and this falls back to the original literal check rather than guessing."""
+    digits = re.sub(r"[^\d]", "", figure)
+    if len(digits) != 1:
+        return _digits_grounded(figure, corpus)
+    parsed = _parse_money_value_scale(figure)
+    if parsed is None or parsed[1] <= 1.0:
+        return _digits_grounded(figure, corpus)
+    return _money_magnitude_grounded(figure, corpus)
+
+
 def _grounding_violation(unit_text: str, corpus_cf: str) -> str | None:
     """The first ungrounded candidate entity/figure found in ``unit_text``, or ``None`` if every
     candidate it contains is grounded. Checked in this order: multi-word Latin proper nouns,
@@ -386,7 +588,7 @@ def _grounding_violation(unit_text: str, corpus_cf: str) -> str | None:
             return token
     for m in _MONEY_RE.finditer(unit_text):
         figure = m.group(0)
-        if not _digits_grounded(figure, corpus_cf):
+        if not _money_figure_grounded(figure, corpus_cf):
             return figure
     for m in _YEAR_RE.finditer(unit_text):
         year = m.group(0)
@@ -446,12 +648,165 @@ def _money_conflation_violation(
     for m in _MONEY_RE.finditer(unit_text):
         figure = m.group(0)
         digits = re.sub(r"[^\d]", "", figure)
+        if not digits:
+            continue
+        if len(digits) == 1:
+            # P10 item 1: a single-digit magnitude ("5 מיליארד") -- checked the same
+            # magnitude-with-unit way as `_money_figure_grounded`'s own single-digit branch, not
+            # skipped outright the way this loop used to. A wholly invented single-digit magnitude
+            # (grounded nowhere) is already this guard's cousin's job (`_grounding_violation`'s own
+            # money loop, above in `_grounding_violation`) to catch, so this only ever needs to act
+            # when the magnitude is real *somewhere* but not in its own citation.
+            if not _money_magnitude_grounded(figure, cited_cf) and _money_magnitude_grounded(
+                figure, corpus_cf
+            ):
+                return figure  # real magnitude, but reported by a *different* retrieved source
+            continue
         if len(digits) < 2:
             continue
         if _digits_grounded(figure, cited_cf):
             continue  # correctly grounded in its own citation
         if _digits_grounded(figure, corpus_cf):
             return figure  # real, but reported by a *different* retrieved source
+    return None
+
+
+# ---------------------------------------------------------------------------------------------
+# P10 item 3 (docs/qa/loop/round_5_chat_fixes.md, "New findings this round" #3, live Q4): every
+# proper-noun/entity pattern in this module (`_PROPER_NOUN_RE`, `_QUOTED_RE`, `_SINGLE_TOKEN_RE`) is
+# Latin-script-only, so a fabricated Hebrew institution name ("מאוניברסיטת אריזונה סטייט" -- Arizona
+# State University -- attributed to an arXiv paper that names no institution at all) is invisible to
+# every guard. Deliberately narrow: only the institution/organisation head-noun shapes below, never
+# a bare Hebrew word, and gated on the unit carrying a citation (mirroring `_conflation_violation`/
+# `_money_conflation_violation` above, both of which the `### הערכת האנליסט` section already
+# structurally never triggers, since that section carries no `[n]` at all by format rule 3 -- so
+# wiring this guard into the same `cited_ns`-gated call site the two guards above use gets that same
+# exemption for free, with no separate section check needed).
+# ---------------------------------------------------------------------------------------------
+
+_HEBREW_PREFIX_LETTERS = "בלמוהשכ"
+
+_HEBREW_HEAD_NOUNS = (
+    "אוניברסיטת",
+    "מכון",
+    "חברת",
+    "המכון",
+    "משרד",
+    "סוכנות",
+    "מעבדת",
+    "מעבדות",
+    "מרכז",
+    "קבוצת",
+    "תאגיד",
+    "מפעל",
+    "אגף",
+    "חיל",
+    "זרוע",
+    "פיקוד",
+)
+# Longest-first: a strict prefix relationship among the words above (e.g. "מעבדת"/"מעבדות") would
+# otherwise let the shorter alternative pre-empt a match of the longer one at the same position.
+_HEBREW_HEAD_NOUN_ALT = "|".join(sorted(_HEBREW_HEAD_NOUNS, key=len, reverse=True))
+
+# A small set of Hebrew function words excluded from the "1-3 following tokens" span below so a
+# genuine institution name doesn't greedily swallow the rest of its containing sentence (e.g.
+# "משרד ההגנה של פינלנד פרסם..." must stop at "משרד ההגנה", not continue through "של"/"פינלנד").
+_HEBREW_ENTITY_STOP_TOKENS = ("של", "עם", "על", "את", "אל", "כי", "גם", "רק", "לא", "כן", "זה", "זו")
+_HEBREW_ENTITY_TOKEN_RE = (
+    r"(?!(?:" + "|".join(_HEBREW_ENTITY_STOP_TOKENS) + r")\b)(?:[א-ת]+(?:[\"'][א-ת]+)?|[A-Za-z][A-Za-z0-9]*)"
+)
+
+# An optional single glued Hebrew prefix-preposition (ב/ל/מ/ו/ה/ש/כ -- Hebrew attaches these with no
+# separating space, e.g. "מ" + "אוניברסיטת" = "מאוניברסיטת") in front of the head noun, followed by
+# 1-3 Hebrew/Latin "name" tokens. `(?<![א-ת])` keeps the optional prefix letter from being consumed
+# out of the middle of some earlier, unrelated Hebrew word.
+_HEBREW_INSTITUTION_RE = re.compile(
+    rf"(?<![א-ת])[{_HEBREW_PREFIX_LETTERS}]?(?:{_HEBREW_HEAD_NOUN_ALT})"
+    rf"(?:\s+{_HEBREW_ENTITY_TOKEN_RE}){{1,3}}"
+)
+
+# Generic Israeli/US institutional names that are ordinary domain vocabulary, not a claim about any
+# specific retrieved source -- the same rationale as `_COMMON_DEFENSE_ACRONYMS` above, just for
+# Hebrew institution phrases instead of Latin acronyms.
+_HEBREW_INSTITUTION_ALLOWLIST = (
+    "משרד הביטחון",
+    "משרד ההגנה",
+    "חיל האוויר",
+    "חיל הים",
+    "חיל היבשה",
+    "הפנטגון",
+    'צה"ל',
+    "הצבא",
+    "הממשלה",
+    "הקונגרס",
+    "הסנאט",
+    'נאט"ו',
+    "האיחוד האירופי",
+)
+
+_HEBREW_FINAL_TO_REGULAR = {"ך": "כ", "ם": "מ", "ן": "נ", "ף": "פ", "ץ": "צ"}
+
+
+def _normalize_hebrew_finals(text: str) -> str:
+    """Map Hebrew final-letter forms (ך/ם/ן/ף/ץ) to their regular counterparts (כ/מ/נ/פ/צ) so a
+    name compared across two different grammatical positions still matches on its consonants."""
+    return "".join(_HEBREW_FINAL_TO_REGULAR.get(ch, ch) for ch in text)
+
+
+def _strip_hebrew_head_prefix(phrase: str) -> str:
+    """Strip a single leading Hebrew prefix-preposition letter glued directly onto the head noun of
+    ``phrase`` (e.g. "מאוניברסיטת אריזונה" -> "אוניברסיטת אריזונה") -- the source text a fabricated
+    mention like this would be checked against is very likely to spell the bare head noun with no
+    such prefix attached at all."""
+    if phrase and phrase[0] in _HEBREW_PREFIX_LETTERS:
+        candidate = phrase[1:]
+        if any(candidate.startswith(noun) for noun in _HEBREW_HEAD_NOUNS):
+            return candidate
+    return phrase
+
+
+def _hebrew_entity_grounded(phrase: str, corpus_cf: str, corpus_finals_cf: str) -> bool:
+    """Whether the Hebrew institution-shaped ``phrase`` (already stripped of its own outer
+    whitespace) is grounded in ``corpus_cf`` -- checked at every trailing-token length from the full
+    phrase down to just "head noun + first token", not only the full greedy match. The 1-3 trailing
+    tokens :data:`_HEBREW_INSTITUTION_RE` captures are a shape heuristic, not a guarantee that every
+    one of them is actually part of the institution's own name (Hebrew has no capitalisation to mark
+    where a proper noun ends) -- e.g. "מכון ויצמן פרסם" greedily includes the following verb
+    "פרסם" ("published"), which a real source would never itself repeat verbatim. Trying
+    progressively shorter prefixes lets a real, correctly-cited institution ("מכון ויצמן") still
+    ground even when the regex captured extra trailing words that happen not to be on the small
+    stop-word list -- while a genuinely fabricated name still fails at every length, since none of
+    its prefixes appear anywhere either."""
+    stripped = _strip_hebrew_head_prefix(phrase)
+    latin_m = re.search(r"[A-Za-z][A-Za-z0-9]*", phrase)
+    if latin_m and latin_m.group(0).casefold() in corpus_cf:
+        return True
+    words = stripped.split()
+    for length in range(len(words), 1, -1):
+        candidate = " ".join(words[:length])
+        if any(
+            candidate == entry or candidate.startswith(entry + " ") for entry in _HEBREW_INSTITUTION_ALLOWLIST
+        ):
+            return True
+        candidate_cf = candidate.casefold()
+        if candidate_cf in corpus_cf or _normalize_hebrew_finals(candidate_cf) in corpus_finals_cf:
+            return True
+    return False
+
+
+def _hebrew_entity_violation(unit_text: str, corpus_cf: str) -> str | None:
+    """The first Hebrew institution/organisation-shaped phrase in ``unit_text`` (see
+    :data:`_HEBREW_INSTITUTION_RE`) that :func:`_hebrew_entity_grounded` finds grounded nowhere in
+    ``corpus_cf`` (the question plus every retrieved source, already casefolded -- so a mention in
+    the question, or in *any* retrieved source and not only the ones this unit itself cites, counts
+    as grounded) -- else ``None``. Only ever called on a unit that carries a citation (see the
+    module docstring's P10 item 3 note for why that alone gives the ``### הערכת האנליסט`` exemption
+    for free)."""
+    corpus_finals_cf = _normalize_hebrew_finals(corpus_cf)
+    for m in _HEBREW_INSTITUTION_RE.finditer(unit_text):
+        phrase = m.group(0).strip()
+        if not _hebrew_entity_grounded(phrase, corpus_cf, corpus_finals_cf):
+            return phrase
     return None
 
 
@@ -527,9 +882,11 @@ def ground_and_filter_answer(
         if reason is None:
             cited_ns = _cited_ns(unit_text)
             if cited_ns:
-                reason = _conflation_violation(
-                    unit_text, cited_ns, sources_by_n
-                ) or _money_conflation_violation(unit_text, cited_ns, sources_by_n, corpus_cf)
+                reason = (
+                    _conflation_violation(unit_text, cited_ns, sources_by_n)
+                    or _money_conflation_violation(unit_text, cited_ns, sources_by_n, corpus_cf)
+                    or _hebrew_entity_violation(unit_text, corpus_cf)
+                )
         if reason:
             flagged.append((start, end, reason))
 
@@ -540,7 +897,7 @@ def ground_and_filter_answer(
     lead_end = heading_match.start() if heading_match else len(answer_text)
     lead_flag = next((f for f in flagged if f[0] < lead_end), None)
 
-    new_text = _tidy_whitespace(_remove_spans(answer_text, [(s, e) for s, e, _ in flagged]))
+    new_text = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, [(s, e) for s, e, _ in flagged])))
 
     if lead_flag is not None:
         new_heading = _FIRST_SECTION_HEADING_RE.search(new_text)
@@ -602,6 +959,50 @@ _EQUIV_PATTERNS = (_EQUIV_COPULA_RE, _EQUIV_KNOWN_AS_RE, _EQUIV_PAREN_RE)
 _EQUIV_GAP = "לא ניתן לאשר זהות בין {a} ל-{b} — המקורות אינם מזכירים את שניהם יחד."
 
 
+# P10 item 2 (docs/qa/loop/round_5_chat_fixes.md, "New findings this round" #2, live Q4): the
+# question's own acronym/expansion gloss ("DROIC" / "Digital Read-Out Integrated Circuit") was
+# treated as a fabricated equivalence claim, because the "same canonical entity" skip below only
+# ever fires when *both* sides resolve via `entity_normalize.resolve_canonical` -- which only knows
+# watchlist companies/systems, not a generic technical acronym like "DROIC". A true acronym paired
+# with its own expansion is a gloss, not a claim that two distinct things are the same.
+_ACRONYM_STOP_WORDS = frozenset({"of", "the", "and", "for", "a", "an", "in", "on", "to"})
+
+
+def _acronym_initials(expansion: str) -> str:
+    """The initial letter of each meaningful word in ``expansion`` -- hyphenated words counted
+    separately (``"Read-Out"`` contributes both "R" and "O"), common stop words ("of"/"the"/"and"/
+    "for"/...) ignored -- e.g. "Digital Read-Out Integrated Circuit" (Digital, Read, Out,
+    Integrated, Circuit) -> "DROIC"."""
+    letters: list[str] = []
+    for word in re.split(r"[-\s]+", expansion.strip()):
+        cleaned = word.strip(" ,.")
+        if not cleaned or cleaned.lower() in _ACRONYM_STOP_WORDS:
+            continue
+        if cleaned[0].isalpha():
+            letters.append(cleaned[0].upper())
+    return "".join(letters)
+
+
+def _is_acronym_expansion_pair(name_a: str, name_b: str) -> bool:
+    """Whether ``(name_a, name_b)`` -- checked in either order -- looks like an acronym paired with
+    its own gloss/expansion (e.g. "DROIC" / "Digital Read-Out Integrated Circuit", or "ROIC" /
+    "Read-Out Integrated Circuit"): the acronym's own letters equal, or appear as a contiguous run
+    within, the initials of the expansion's words (:func:`_acronym_initials`) -- "allowing partial"
+    per the brief, since a real gloss doesn't always spell out every word the acronym stands for.
+    This is a legitimate acronym=expansion gloss, not a fabricated equivalence claim between two
+    distinct things."""
+    for acronym, expansion in ((name_a, name_b), (name_b, name_a)):
+        letters = re.sub(r"[^A-Za-z]", "", acronym).upper()
+        if len(letters) < 2:
+            continue
+        if len(re.split(r"[-\s]+", expansion.strip())) < 2:
+            continue  # an expansion needs at least 2 words to have "initials" at all
+        initials = _acronym_initials(expansion)
+        if len(initials) >= 2 and (letters in initials or initials in letters):
+            return True
+    return False
+
+
 def _looks_like_named_system_or_company(candidate: str) -> bool:
     """Whether ``candidate`` looks like a real named system/company for the purposes of this guard:
     either it resolves on the watchlist/curated-org table on its own, or it has the shape of one (a
@@ -617,13 +1018,36 @@ def _looks_like_named_system_or_company(candidate: str) -> bool:
     return bool(re.fullmatch(_EQUIV_NAME, candidate))
 
 
-def _equivalence_violation(unit_text: str, sources_by_n: dict[int, str]) -> tuple[str, str] | None:
+def _question_asserts_gloss(question_cf: str, name_a: str, name_b: str) -> bool:
+    """True when the *question* itself presents ``name_a`` and ``name_b`` as one thing: one sits in a
+    parenthetical gloss right after the other (``DROIC (Digital Read-Out Integrated Circuit)``) or
+    they are joined by an explicit "/" or "או"/"or". Merely mentioning both ("what is the relation
+    between David's Sling and Skynex?") does NOT make an answer's "X is Y" claim the question's own --
+    that was the round-5 P10 false negative on the live David's Sling/Skynex true positive."""
+    a, b = re.escape(name_a.casefold()), re.escape(name_b.casefold())
+    for x, y in ((a, b), (b, a)):
+        if re.search(rf"{x}\s*[\(\[]\s*{y}\s*[\)\]]", question_cf):
+            return True
+        if re.search(rf"{x}\s*(?:/|\bאו\b|\bor\b)\s*{y}", question_cf):
+            return True
+    return False
+
+
+def _equivalence_violation(
+    unit_text: str, sources_by_n: dict[int, str], question: str = ""
+) -> tuple[str, str] | None:
     """The ``(name_a, name_b)`` pair of a false equivalence claim in ``unit_text``, or ``None``.
     Skips a pair that resolves to the *same* canonical watchlist record (a legitimate bilingual/
-    alias gloss, e.g. "Rafael (Rafael Advanced Defense Systems)"), and skips a pair grounded by at
-    least one retrieved source's own text mentioning both names together -- approximated here as
-    "the same source item's title+text", the closest available proxy for "the same paragraph" given
-    this module never sees the sources' own internal paragraph breaks."""
+    alias gloss, e.g. "Rafael (Rafael Advanced Defense Systems)"), a pair that is itself an
+    acronym/expansion gloss (:func:`_is_acronym_expansion_pair` -- e.g. "DROIC" / "Digital Read-Out
+    Integrated Circuit"), a pair where either side is named in ``question`` itself (the question's
+    own gloss is never a fabricated claim -- ``question`` defaults to ``""`` so an existing caller
+    that doesn't have it handy keeps working unchanged, just without this particular exemption),
+    and skips a pair grounded by at least one retrieved source's own text mentioning both names
+    together -- approximated here as "the same source item's title+text", the closest available
+    proxy for "the same paragraph" given this module never sees the sources' own internal paragraph
+    breaks."""
+    question_cf = question.casefold()
     for pattern in _EQUIV_PATTERNS:
         for m in pattern.finditer(unit_text):
             name_a, name_b = m.group("a").strip(), m.group("b").strip()
@@ -637,6 +1061,10 @@ def _equivalence_violation(unit_text: str, sources_by_n: dict[int, str]) -> tupl
             canon_b = entity_normalize.resolve_canonical(name_b)
             if canon_a is not None and canon_b is not None and canon_a["name"] == canon_b["name"]:
                 continue  # same entity via alias -- not an equivalence claim between two things
+            if _is_acronym_expansion_pair(name_a, name_b):
+                continue  # a gloss ("DROIC" / "Digital Read-Out Integrated Circuit"), not a claim
+            if question_cf and _question_asserts_gloss(question_cf, name_a, name_b):
+                continue  # the question itself glosses one as the other: "DROIC (Digital Read-Out ...)"
             a_cf, b_cf = name_a.casefold(), name_b.casefold()
             grounded = any(
                 a_cf in text.casefold() and b_cf in text.casefold() for text in sources_by_n.values()
@@ -646,11 +1074,15 @@ def _equivalence_violation(unit_text: str, sources_by_n: dict[int, str]) -> tupl
     return None
 
 
-def filter_entity_equivalence(answer_text: str, retrieved: list[dict[str, Any]]) -> tuple[str, int]:
+def filter_entity_equivalence(
+    answer_text: str, retrieved: list[dict[str, Any]], question: str = ""
+) -> tuple[str, int]:
     """Replace every unit of ``answer_text`` asserting a false equivalence between two distinct,
     real-looking named systems/companies (see :func:`_equivalence_violation`) with an explicit gap
     sentence naming both. A no-op on a blank answer or empty ``retrieved`` (same rationale as
-    :func:`ground_and_filter_answer`)."""
+    :func:`ground_and_filter_answer`). ``question`` is optional (defaults to ``""``) so the existing
+    call site in ``routes/ask.py`` keeps working unchanged; passing it lets the question's-own-gloss
+    exemption in :func:`_equivalence_violation` actually take effect."""
     if not answer_text or not answer_text.strip() or not retrieved:
         return answer_text, 0
     sources_by_n = _sources_by_n(retrieved)
@@ -659,7 +1091,7 @@ def filter_entity_equivalence(answer_text: str, retrieved: list[dict[str, Any]])
         unit_text = answer_text[start:end]
         if not unit_text.strip():
             continue
-        violation = _equivalence_violation(unit_text, sources_by_n)
+        violation = _equivalence_violation(unit_text, sources_by_n, question)
         if violation is not None:
             name_a, name_b = violation
             replacements.append((start, end, _EQUIV_GAP.format(a=name_a, b=name_b) + "\n"))
@@ -852,5 +1284,87 @@ def filter_self_contradictions(answer_text: str, retrieved: list[dict[str, Any]]
     if not drop:
         return answer_text, 0
     spans = [(units[k][0], units[k][1]) for k in drop]
-    new_text = _tidy_whitespace(_remove_spans(answer_text, spans))
+    new_text = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, spans)))
     return new_text, len(drop)
+
+
+# ---------------------------------------------------------------------------------------------
+# P10 item 5 (docs/qa/loop/round_5_chat_fixes.md, "New findings this round" #4, live Q3/LORA and
+# Q6/AUSA): the existing anchor-miss guard in `eoa.api.routes.ask` checks whether the *answer*
+# mentions the question's own anchor -- but a model can satisfy that trivially by repeating the
+# anchor term throughout an answer whose *retrieved sources* never once mention it (Q6/AUSA: the
+# model wrote about an unrelated "Commercial UAV Expo" source while framing the whole answer as if
+# it were about "AUSA", which the anchor-miss check never catches since "AUSA" genuinely appears
+# throughout the answer body). This is a retrieval-relevance problem, not an answer-wording one, so
+# it is checked the other way around: does *any retrieved source* mention the anchor at all.
+#
+# Reuses the same anchor-extraction approach as `eoa.api.routes.ask`'s own `_strong_anchors`/
+# `_primary_anchors` (Latin-script tokens embedded in each `extract_anchors` anchor, narrowed to the
+# non-parenthetical ones when any exist) -- necessarily duplicated here rather than imported, since
+# `routes.ask` itself imports this module (`from eoa.api import ask_grounding, services`), so the
+# reverse import would be circular.
+# ---------------------------------------------------------------------------------------------
+
+_CAVEAT_LATIN_ANCHOR_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+_CAVEAT_PAREN_SPAN_RE = re.compile(r"\(([^()]*)\)")
+
+
+def _caveat_strong_anchors(anchors: list[str]) -> list[str]:
+    """Same extraction as ``eoa.api.routes.ask._strong_anchors`` (duplicated, see the section note
+    above): embedded Latin-script tokens (len >= 2) pulled out of each raw ``extract_anchors``
+    anchor, deduplicated case-insensitively, in order of first appearance."""
+    strong: list[str] = []
+    seen: set[str] = set()
+    for anchor in anchors:
+        for m in _CAVEAT_LATIN_ANCHOR_RE.finditer(anchor):
+            token = m.group(0)
+            if len(token) < 2:
+                continue
+            key = token.casefold()
+            if key not in seen:
+                seen.add(key)
+                strong.append(token)
+    return strong
+
+
+def _caveat_primary_anchors(question: str, strong_anchors: list[str]) -> list[str]:
+    """Same logic as ``eoa.api.routes.ask._primary_anchors`` (duplicated, see the section note
+    above): ``strong_anchors`` that do not come from a parenthetical gloss in ``question`` --
+    falls back to every strong anchor when none of them is primary."""
+    gloss_text = " ".join(m.group(1) for m in _CAVEAT_PAREN_SPAN_RE.finditer(question)).casefold()
+    primary = [a for a in strong_anchors if a.casefold() not in gloss_text]
+    return primary or strong_anchors
+
+
+_RETRIEVAL_RELEVANCE_CAVEAT = (
+    '> ⚠️ אף אחד מהמקורות שאותרו אינו מזכיר במפורש את "{anchor}"; התשובה שלהלן מתבססת על מקורות '
+    "סמוכים בלבד ויש להתייחס אליה כהקשר כללי ולא כממצא ישיר."
+)
+
+
+def retrieval_relevance_caveat(
+    answer_text: str, question: str, retrieved: list[dict[str, Any]]
+) -> tuple[str, bool]:
+    """Prepend an explicit Hebrew caveat paragraph -- at the very top of ``answer_text``, before any
+    heading -- when there is at least one primary anchor (see the module-level note above) extracted
+    from ``question`` and *none* of ``retrieved``'s own title/summary/text (casefolded, same
+    normalisation the anchor guard uses) mentions any of them. Returns ``(new_text, caveat_added)``;
+    never removes any content, and is a no-op (``caveat_added == False``, ``new_text ==
+    answer_text``) when ``answer_text`` is blank, ``retrieved`` is empty (that case -- no sources at
+    all -- is a different, pre-existing guard's job), ``question`` yields no anchors at all, or any
+    retrieved source does mention some primary anchor."""
+    if not answer_text or not answer_text.strip() or not retrieved:
+        return answer_text, False
+    anchors = extract_anchors(question)
+    strong_anchors = _caveat_strong_anchors(anchors)
+    primary_anchors = _caveat_primary_anchors(question, strong_anchors) if strong_anchors else anchors
+    if not primary_anchors:
+        return answer_text, False
+    sources_cf = " ".join(
+        f"{row.get('title') or ''} {row.get('summary_he') or ''} {row.get('clean_text') or ''}"
+        for row in retrieved
+    ).casefold()
+    if any(a.casefold() in sources_cf for a in primary_anchors):
+        return answer_text, False
+    caveat = _RETRIEVAL_RELEVANCE_CAVEAT.format(anchor=primary_anchors[0])
+    return caveat + "\n\n" + answer_text.lstrip(), True

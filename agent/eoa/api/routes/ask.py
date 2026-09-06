@@ -461,7 +461,19 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 # live Q7 Finnish-RFI/"US government" mismatch), and a cross-sentence
                 # self-contradiction pass. Chained after the round-3 guard above so each reasons
                 # about the already-cleaned text, same as round 3 chained after round 2.
-                answer_text, _equiv_removed = ask_grounding.filter_entity_equivalence(answer_text, retrieved)
+                # Round 5 P10: the question's own acronym/expansion glosses (DROIC / Digital Read-Out
+                # Integrated Circuit) are not fabricated equivalences -- pass the question through.
+                answer_text, _equiv_removed = ask_grounding.filter_entity_equivalence(
+                    answer_text, retrieved, question=body.question
+                )
+                # Round 5 P10: when NO retrieved source mentions any primary anchor of the question
+                # (live Q3/LORA, Q6/AUSA: the model echoes the anchor over unrelated sources), say so
+                # explicitly at the top instead of letting the echo pass the anchor check below.
+                answer_text, _relevance_caveat = ask_grounding.retrieval_relevance_caveat(
+                    answer_text, body.question, retrieved
+                )
+                if _relevance_caveat:
+                    _removed_by_guard["retrieval_relevance_caveat"] = 1
                 ungrounded_removed += _equiv_removed
                 if _equiv_removed:
                     _removed_by_guard["entity_equivalence"] = _equiv_removed

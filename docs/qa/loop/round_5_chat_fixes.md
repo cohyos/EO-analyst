@@ -173,3 +173,73 @@ worst-list-#3/#8 shapes — jargon acronym, entity equivalence, attribution mism
 correct entity-equivalence *intent*, Q7's clean Finland/US attribution). They are genuine, live-found
 residual gaps and one live-found false positive, reported with the same honesty standard as every prior
 round's own writeup.
+
+### P10 status
+
+All five "New findings this round" gaps above are now closed in `agent/eoa/api/ask_grounding.py`
+(plus `tests/unit/test_ask_round5_grounding.py`, new — 27 tests). `routes/ask.py` was intentionally
+**not** touched (see the exact insertion snippet for finding 5, below) — every fix lives inside
+`ask_grounding.py`'s existing function surface or as one small additive function.
+
+1. **Single-digit money figures.** `_money_figure_grounded`/`_money_magnitude_grounded` (new) —
+   wired into `_grounding_violation`'s money loop and `_money_conflation_violation`. A money figure
+   with >= 2 digits is unchanged (still `_digits_grounded`'s literal-substring check); a single-digit
+   magnitude ("5" in "5 מיליארד") is now checked as a value+scale (billion/million/thousand,
+   Hebrew or English, `$`/`€`/`₪`/`£` or a bare word) against every money mention in the corpus,
+   converted to a common scale and compared with rounding tolerance — so "5 מיליארד" grounds against
+   "$5bn"/"5 billion"/"5,000 million"/"5.0 billion" but **not** against the real "$1.53 billion"
+   (rounds to 2, not 5) that caused the live Q1 miss. A plain count ("3 מערכות") is untouched — it
+   was never matched by `_MONEY_RE` (no currency symbol/scale word) and never reaches this path.
+2. **Entity-equivalence acronym/expansion false positive.** `_is_acronym_expansion_pair` (new) checks
+   whether the acronym's letters equal, or run contiguously within, the initials of the expansion's
+   own words (hyphenated words split, stop words ignored) — exempts "DROIC"/"Digital Read-Out
+   Integrated Circuit" and "ROIC"/"Read-Out Integrated Circuit" without touching the true-positive
+   David's Sling/Skynex case. `_equivalence_violation` and `filter_entity_equivalence` both gained an
+   optional `question: str = ""` parameter (default preserves the existing `routes/ask.py` call site
+   unchanged) — either side appearing in the question is also never treated as fabricated.
+3. **Hebrew-script fabricated entities.** New `_hebrew_entity_violation`, wired into
+   `ground_and_filter_answer`'s existing citation-gated block (alongside `_conflation_violation`/
+   `_money_conflation_violation`) — narrow institution/organisation head-noun shapes only
+   (אוניברסיטת/מכון/משרד/חיל/.../16 head nouns), Hebrew prefix-letter stripping + final-letter
+   normalisation on the head noun, an embedded-Latin-token check, a small generic-institution
+   allowlist, and a trailing-token "peeling" grounding check (`_hebrew_entity_grounded`) so a real,
+   correctly-cited institution still grounds even when the shape regex's own 1-3-trailing-token
+   greediness happens to capture an extra non-name word. Reusing the existing citation gate gives the
+   `### הערכת האנליסט` exemption for free (that section never carries `[n]` by format rule 3).
+4. **Numbered-list-aware removal.** `_iter_units` now treats a numbered-list item (`^\s*\d+[.)]\s`)
+   plus its continuation lines as one unit, mirroring the existing bullet handling; new
+   `_renumber_lists` renumbers the surviving items of each list block 1..k after a removal — wired
+   into both `ground_and_filter_answer` and `filter_self_contradictions` (the two functions that
+   fully drop units rather than replacing them in place).
+5. **Retrieval-relevance caveat.** New `retrieval_relevance_caveat(answer_text, question, retrieved)
+   -> tuple[str, bool]`, exposed but **not** wired into `routes/ask.py` per this package's own file
+   scope. It duplicates `routes.ask`'s own `_strong_anchors`/`_primary_anchors` anchor-extraction
+   logic locally (as `_caveat_strong_anchors`/`_caveat_primary_anchors` — a real import is circular,
+   since `routes.ask` itself imports `ask_grounding`) and prepends a single Hebrew caveat paragraph
+   when at least one primary anchor exists and no retrieved source's title/summary/text mentions any
+   of them. Never removes content. The lead should insert, immediately before the existing
+   `# Round 2 P2 topic-substitution guard` comment block (i.e. right before the
+   `from eoa.search.deep_search import extract_anchors` line, operating on the already-cleaned
+   `answer_text` and the in-scope `retrieved` variable):
+
+   ```python
+   answer_text, _ = ask_grounding.retrieval_relevance_caveat(
+       answer_text, body.question, retrieved
+   )
+   ```
+
+**Tests:** `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest
+tests/unit/test_ask_round3_grounding.py tests/unit/test_ask_round5_grounding.py -q` → **60 passed**
+(33 pre-existing round-3 tests, unchanged and still green; 27 new P10 tests). Broader regression
+sweep `pytest tests/unit -q -k "ask or ground or chat"` → **208 passed, 1 unrelated pre-existing
+failure** (`test_ollama_client_provider_dispatch.py::TestChatStructuredProviderThreading::
+test_provider_passed_through_to_chat` — does not import or reference `ask_grounding` at all; fails on
+a provider-default mismatch plus a live attempted DB connection to `127.0.0.1:5432`, consistent with
+config/env being edited concurrently elsewhere in this shared working tree, not a regression from this
+package). `ruff check` and `ruff format --check` both clean on `agent/eoa/api/ask_grounding.py` and
+`tests/unit/test_ask_round5_grounding.py`.
+
+**Known limitation not fully closed:** finding 5's fix is a standalone, tested function only — it has
+no effect on live answers until `routes/ask.py` is updated with the snippet above, since this
+package's scope forbade editing that file. Findings 1-4 are fully wired and active already (all four
+live inside `ask_grounding.py`'s own existing call graph).
