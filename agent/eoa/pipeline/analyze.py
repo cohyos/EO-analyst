@@ -19,7 +19,7 @@ from eoa.llm.ollama_client import (
     wrap_data,
 )
 from eoa.llm.prompts import render
-from eoa.llm.schemas.analysis import AnalyzeOut, EventOut
+from eoa.llm.schemas.analysis import AnalyzeOut, EventOut, SoWhatRepairOut
 from eoa.memory.relational import (
     get_items_for_stage,
     insert_event,
@@ -208,9 +208,77 @@ def _analyze_system() -> str:
     return render("system_analyst", data_guard=DATA_GUARD_SYSTEM)
 
 
+#: Round-3 D2 (docs/qa/loop/round_2_judge.md): the formulaic assessments the judge counted on 32
+#: items DB-wide. The prompt now forbids them, but a 12B model still reaches for them ("מחזקת את
+#: מעמדה של תעשייה אווירית כמובילה טכנולוגית" on item 39 after the prompt change), so a
+#: ``so_what_he`` matching any of these gets ONE targeted corrective pass that rewrites just that
+#: field around a concrete beneficiary / loser / change. Morphology-tolerant on purpose.
+_GENERIC_SO_WHAT_RES = (
+    re.compile(r"מחזק(?:ת|ים|ות)?\s+את\s+מעמד"),
+    re.compile(r"מהוו(?:ה|ים|ות)\s+צעד\s+משמעותי"),
+    re.compile(r"מעיד(?:ה|ים|ות)?\s+על\s+מגמה"),
+    re.compile(r"צפוי(?:ה|ים|ות)?\s+לחזק\s+את\s+מעמד"),
+)
+
+_SO_WHAT_REPAIR_INSTRUCTION_HE = (
+    "ה-so_what_he שכתבת משתמש בנוסחה גנרית ({phrase}). כתוב אותו מחדש (1-3 משפטים, מתחיל ב'להערכתנו') "
+    "כך שיאמר במפורש: מי מרוויח ומי נפגע (שם חברה/תוכנית/לקוח), מה משתנה בפועל (יכולת, עלות, לוח "
+    "זמנים, נתח שוק) ולמה זה נובע מהעובדות שבמקור. אסור לחזור על הביטוי הגנרי או על מקבילה שלו. "
+    "החזר JSON עם השדה so_what_he בלבד.\n\nהתקציר: {summary}\n\nה-so_what המקורי: {so_what}"
+)
+
+
+def generic_so_what_phrase(text: str | None) -> str | None:
+    """The first generic formula found in ``text`` (or ``None``)."""
+    for rx in _GENERIC_SO_WHAT_RES:
+        m = rx.search(text or "")
+        if m:
+            return m.group(0)
+    return None
+
+
+def _repair_generic_so_what(item: dict, out: AnalyzeOut, *, role: str, interactive: bool) -> AnalyzeOut:
+    phrase = generic_so_what_phrase(out.so_what_he)
+    if not phrase:
+        return out
+    try:
+        fixed = chat_structured(
+            role,
+            SoWhatRepairOut,
+            [
+                {"role": "system", "content": _analyze_system()},
+                {"role": "user", "content": _analyze_prompt(item)},
+                {"role": "assistant", "content": out.model_dump_json(exclude_none=True)[:6000]},
+                {
+                    "role": "user",
+                    "content": _SO_WHAT_REPAIR_INSTRUCTION_HE.format(
+                        phrase=phrase, summary=out.summary_he, so_what=out.so_what_he
+                    ),
+                },
+            ],
+            task="summarize",
+            interactive=interactive,
+            options={"temperature": 0.4},
+        )
+    except (LLMOutputError, ResourceUnavailable) as exc:
+        log.warning("so_what_repair_failed", item_id=item.get("id"), error=str(exc)[:120])
+        return out
+    text = (fixed.so_what_he or "").strip()
+    if not text or generic_so_what_phrase(text) or not text.startswith("להערכתנו"):
+        log.info(
+            "so_what_repair_rejected",
+            item_id=item.get("id"),
+            still_generic=bool(generic_so_what_phrase(text)),
+        )
+        return out
+    log.info("so_what_repaired", item_id=item.get("id"), phrase=phrase)
+    return out.model_copy(update={"so_what_he": text})
+
+
 def analyze_item(item: dict, *, role: str = "resident", interactive: bool = False) -> AnalyzeOut:
-    """Produce the AnalyzeOut for one item (does not persist)."""
-    return chat_structured(
+    """Produce the AnalyzeOut for one item (does not persist). A generic-formula ``so_what_he``
+    gets one targeted corrective pass (:func:`_repair_generic_so_what`)."""
+    out = chat_structured(
         role,
         AnalyzeOut,
         [
@@ -221,6 +289,7 @@ def analyze_item(item: dict, *, role: str = "resident", interactive: bool = Fals
         interactive=interactive,
         options={"temperature": 0.3},
     )
+    return _repair_generic_so_what(item, out, role=role, interactive=interactive)
 
 
 def analyze_batch(items: list[dict], *, role: str = "resident") -> dict[int, AnalyzeOut]:

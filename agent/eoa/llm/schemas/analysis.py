@@ -192,6 +192,18 @@ class EdgeOut(BaseModel):
     evidence_he: str = Field(description="משפט ראיה מהמקור")
 
 
+class SoWhatRepairOut(BaseModel):
+    """Round-3 D2: the one-field schema for the generic-phrase corrective pass on ``so_what_he``
+    (``eoa.pipeline.analyze._repair_generic_so_what``)."""
+
+    so_what_he: str = Field(
+        description=(
+            "ASSESSMENT mode, 1-3 משפטים, מתחיל ב'להערכתנו': מי מרוויח, מי נפגע, מה משתנה ולמה -- "
+            "בלי נוסחאות גנריות"
+        )
+    )
+
+
 class AnalyzeOut(BaseModel):
     """Stage: analyze (resident model). Everything cites the item implicitly (single-source)."""
 
