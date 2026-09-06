@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TenderExtract(BaseModel):
@@ -37,6 +37,16 @@ class TenderExtract(BaseModel):
         default_factory=list, max_length=10, description="שמות חברות/תוכניות/מערכות שמוזכרים"
     )
     confidence: float = Field(ge=0, le=1)
+
+    @field_validator("matched_terms", "entities", mode="before")
+    @classmethod
+    def _cap_lists(cls, v: object) -> object:
+        """Round-4 (weekly job 114): a cloud model returned 16 entities and the whole extraction
+        failed validation on ``max_length=10``. Keep the first 10 instead of losing the notice."""
+        if isinstance(v, list) and len(v) > 10:
+            return v[:10]
+        return v
+
     published_at: dt.date | None = Field(
         default=None, description="תאריך פרסום ההודעה, אם מצוין בטקסט במפורש; אחרת null (אסור לנחש)"
     )
