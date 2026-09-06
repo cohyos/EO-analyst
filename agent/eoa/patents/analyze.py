@@ -9,6 +9,7 @@ blocks the scan pipeline; the row simply stays unanalyzed until the next run.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,11 +20,18 @@ from eoa.db import connection
 from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.patents import PatentClaimsOut
+from eoa.llm.schemas.patents import PatentAdvanceOut, PatentClaimsOut
 from eoa.memory.relational import upsert_entity
 from eoa.pipeline.entity_normalize import resolve_canonical, resolve_company_country
 
 log = structlog.get_logger(__name__)
+
+# A14b point 4 (2026-09-06): the per-patent "advance" line/footnote is intentionally cheap --
+# generated (when it can't just be derived from an existing claims_summary_he, see
+# generate_advance_descriptions's own docstring) against the light role with a small predict cap,
+# never the full resident-role analysis pass this module otherwise uses.
+_ADVANCE_NUM_PREDICT = 220
+_NO_ADVANCE_HE = "תיאור התקדמות לא זמין (הפטנט טרם נותח והמודל המקומי אינו נגיש כרגע)."
 
 
 def _tech_dev_subdomain_keys() -> list[str]:
@@ -188,3 +196,84 @@ def analyze_patents(
 
     log.info("patents_analyze_done", **vars(stats))
     return stats
+
+
+# --------------------------------------------------------------------------
+# per-patent "advance" description (A14b point 4, 2026-09-06): "לכל פטנט מצוטט: תיאור קצר (2-3
+# משפטים בעברית) של ההתקדמות המתוארת -- מה הבעיה, מה הפתרון, מה חדש". Reused for the survey's
+# appendix "התקדמות" column and its md/html footnote-style first-citation line
+# (eoa.patents.render.inject_advance_footnotes_md/html).
+# --------------------------------------------------------------------------
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def derive_advance_from_claims(claims_summary_he: str, *, max_sentences: int = 3) -> str:
+    """A patent that already has a ``claims_summary_he`` (``eoa.patents.analyze.analyze_patents``'s
+    own 3-5-sentence legal-protection summary) never needs a fresh LLM call for its shorter
+    2-3-sentence "advance" line -- this just takes its first ``max_sentences`` sentences verbatim
+    (no re-synthesis, so nothing new can be invented here)."""
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(claims_summary_he.strip()) if s.strip()]
+    return " ".join(sentences[:max_sentences]) or claims_summary_he.strip()
+
+
+def _advance_prompt(row: dict[str, Any]) -> str:
+    return render(
+        "patent_advance",
+        pub_number=row.get("pub_number") or "",
+        assignees=", ".join(row.get("assignees") or []) or "לא ידוע",
+        data=wrap_data(
+            f"{row.get('title') or ''}\n\n{row.get('abstract') or ''}",
+            row.get("pub_number") or "",
+            row.get("url") or "",
+        ),
+    )
+
+
+def generate_advance_descriptions(
+    rows: list[dict[str, Any]], *, role: str = "light", interactive: bool = False, llm_limit: int = 15
+) -> dict[Any, str]:
+    """``{patent_id: advance_he}`` for every row in ``rows`` (each carrying at least ``id``;
+    ``claims_summary_he``/``title``/``abstract``/``assignees``/``pub_number``/``url`` used when
+    present). A row that already has ``claims_summary_he`` gets :func:`derive_advance_from_claims`
+    (free, deterministic, no LLM call). A row still missing it gets one small, capped LLM call
+    against ``role`` (``"light"`` by default -- this is meant to be cheap and bulk, not the full
+    per-patent analysis pass) -- but only for the first ``llm_limit`` such rows, to bound a large
+    survey's LLM cost; any row beyond that limit (or whose call fails/is deferred) gets the honest
+    :data:`_NO_ADVANCE_HE` placeholder rather than inventing a description (docs/CONVENTIONS.md
+    rule 5)."""
+    out: dict[Any, str] = {}
+    llm_calls_made = 0
+    for row in rows:
+        claims = row.get("claims_summary_he")
+        if claims:
+            out[row["id"]] = derive_advance_from_claims(claims)
+            continue
+        if llm_calls_made >= llm_limit:
+            out[row["id"]] = _NO_ADVANCE_HE
+            continue
+        llm_calls_made += 1
+        try:
+            result = chat_structured(
+                role,
+                PatentAdvanceOut,
+                [
+                    {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
+                    {"role": "user", "content": _advance_prompt(row)},
+                ],
+                task="summarize",
+                interactive=interactive,
+                options={"temperature": 0.2, "num_predict": _ADVANCE_NUM_PREDICT},
+            )
+            out[row["id"]] = result.advance_he
+        except ResourceUnavailable:
+            out[row["id"]] = _NO_ADVANCE_HE
+        except LLMOutputError as exc:
+            log.warning("patents_advance_llm_failed", pub_number=row.get("pub_number"), error=str(exc)[:200])
+            out[row["id"]] = _NO_ADVANCE_HE
+        except Exception as exc:
+            log.warning(
+                "patents_advance_unexpected_error", pub_number=row.get("pub_number"), error=str(exc)[:200]
+            )
+            out[row["id"]] = _NO_ADVANCE_HE
+    return out

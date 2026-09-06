@@ -199,7 +199,11 @@ def _assignee_candidates_in_text(text: str) -> list[str]:
     and country entries (e.g. "NATO", "Europe"/"אירופה") for unrelated report-entity-extraction
     purposes -- those are never real patent assignees, so a bare text mention of "Europe" must not
     turn into a fabricated assignee here."""
-    return [name for name in find_watchlist_aliases_in_text(text) if (resolve_canonical(name) or {}).get("kind") == "company"]
+    return [
+        name
+        for name in find_watchlist_aliases_in_text(text)
+        if (resolve_canonical(name) or {}).get("kind") == "company"
+    ]
 
 
 def _google_patents_records(query: str, *, lang: str = "en", max_results: int = 10) -> list[PatentRecord]:

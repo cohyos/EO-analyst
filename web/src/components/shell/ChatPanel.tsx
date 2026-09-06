@@ -49,7 +49,7 @@ export function ChatPanel() {
         onDrop={handleDrop}
         data-testid="chat-panel-fab-dropzone"
         className={cn(
-          "fixed bottom-14 start-4 z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90",
+          "fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] start-4 z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90",
           dragOver && "ring-2 ring-accent-fg ring-offset-2 ring-offset-bg",
         )}
         aria-label="פתח את פאנל שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"
@@ -75,14 +75,14 @@ export function ChatPanel() {
       )}
       aria-label="שאל את האנליסט — גרור לכאן פריט או ישות כדי להוסיף להקשר"
     >
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+      <div className="pt-safe flex min-h-12 shrink-0 items-center gap-2 border-b border-border px-3">
         <MessageSquareText size={16} className="text-accent" aria-hidden="true" />
         <h2 className="text-sm font-semibold">שאל את האנליסט</h2>
         <div className="flex-1" />
         <button
           type="button"
           onClick={() => setChatOpen(false)}
-          className="rounded p-1 text-fg-muted hover:bg-bg-sunken hover:text-fg"
+          className="tap-target inline-flex items-center justify-center rounded p-1 text-fg-muted hover:bg-bg-sunken hover:text-fg"
           aria-label="כווץ פאנל"
         >
           <PanelRightClose size={16} aria-hidden="true" />
@@ -90,7 +90,7 @@ export function ChatPanel() {
         <button
           type="button"
           onClick={() => setChatOpen(false)}
-          className="rounded p-1 text-fg-muted hover:bg-bg-sunken hover:text-fg md:hidden"
+          className="tap-target inline-flex items-center justify-center rounded p-1 text-fg-muted hover:bg-bg-sunken hover:text-fg md:hidden"
           aria-label="סגור"
         >
           <X size={16} aria-hidden="true" />

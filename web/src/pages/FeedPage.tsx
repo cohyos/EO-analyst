@@ -517,7 +517,10 @@ export function FeedPage() {
       </div>
 
       {openItemId != null && (
-        <div className="h-80 w-full shrink-0 border-t border-border bg-bg-raised md:h-auto md:w-[26rem] md:border-t-0 md:border-r">
+        // Tablet (768-1279) gets a narrower side panel than desktop's fixed
+        // 26rem — on an 820px-wide iPad portrait, 26rem (416px) would leave
+        // barely a third of the screen for the list itself.
+        <div className="h-80 w-full shrink-0 border-t border-border bg-bg-raised md:h-auto md:w-72 md:border-t-0 md:border-r xl:w-[26rem]">
           {openItemQuery.isLoading && <LoadingState />}
           {openItemQuery.data && (
             <FeedDetailPanel item={openItemQuery.data} onClose={closePanel} />

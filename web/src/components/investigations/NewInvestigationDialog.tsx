@@ -59,7 +59,7 @@ export function NewInvestigationDialog({
             type="button"
             onClick={onClose}
             aria-label="סגור"
-            className="rounded p-1 text-fg-muted hover:bg-bg-sunken"
+            className="tap-target inline-flex items-center justify-center rounded p-1 text-fg-muted hover:bg-bg-sunken"
           >
             <X size={16} aria-hidden="true" />
           </button>

@@ -279,36 +279,41 @@ export function SettingsPage() {
         )}
       </section>
 
-      <MCPCard />
+      {/* Tablet+ (md, 768px): these two small cards share a row instead of
+          each spanning the full max-w-4xl column — on a phone they still
+          stack (flex-col). */}
+      <div className="flex flex-col gap-6 md:grid md:grid-cols-2 md:items-start md:gap-4">
+        <MCPCard />
 
-      <section aria-label="בקרות מהירות" className="rounded-lg border border-border bg-bg-raised p-3">
-        <h2 className="mb-2 text-sm font-semibold text-fg-dim">בקרות מהירות</h2>
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-1 rounded-md border border-border-strong p-1">
-            {(["eco", "full"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={cn(
-                  "rounded px-2.5 py-1 text-xs font-medium",
-                  mode === m ? "bg-accent text-accent-fg" : "text-fg-muted hover:bg-bg-sunken",
-                )}
-              >
-                {m === "eco" ? "מצב חסכוני" : "מצב מלא"}
-              </button>
-            ))}
+        <section aria-label="בקרות מהירות" className="rounded-lg border border-border bg-bg-raised p-3">
+          <h2 className="mb-2 text-sm font-semibold text-fg-dim">בקרות מהירות</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1 rounded-md border border-border-strong p-1">
+              {(["eco", "full"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMode(m)}
+                  className={cn(
+                    "rounded px-2.5 py-1 text-xs font-medium",
+                    mode === m ? "bg-accent text-accent-fg" : "text-fg-muted hover:bg-bg-sunken",
+                  )}
+                >
+                  {m === "eco" ? "מצב חסכוני" : "מצב מלא"}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => runQuick.mutate(mode)}
+              disabled={runQuick.isPending}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50"
+            >
+              {runQuick.isPending ? "מריץ…" : `הרץ ריצה יומית (${mode})`}
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => runQuick.mutate(mode)}
-            disabled={runQuick.isPending}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50"
-          >
-            {runQuick.isPending ? "מריץ…" : `הרץ ריצה יומית (${mode})`}
-          </button>
-        </div>
-      </section>
+        </section>
+      </div>
 
       <section aria-label="עריכת הגדרות YAML">
         <h2 className="mb-2 text-sm font-semibold text-fg-dim">עריכת קבצי הגדרה</h2>

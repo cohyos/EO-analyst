@@ -59,5 +59,35 @@ export default defineConfig({
         hasTouch: true,
       },
     },
+    // iPad Air (gen 7-ish) portrait, WebKit/Safari engine — closest match to
+    // what the analyst will actually see on a real iPad over Tailscale.
+    {
+      name: "tablet-820x1180",
+      use: {
+        ...devices["iPad (gen 7)"],
+        viewport: { width: 820, height: 1180 },
+        screen: { width: 820, height: 1180 },
+      },
+    },
+    // Same device, landscape. 1180px still sits inside the explicit tablet
+    // band (768-1279px) the responsive rework targets — desktop-only 3-pane/
+    // expanded-rail layouts key off `xl` (1280px), not `lg` (1024px), so this
+    // project exercises the "wide tablet" 2-column layouts, not the desktop
+    // ones, even though 1180 > 1024.
+    {
+      name: "tablet-landscape-1180x820",
+      use: {
+        ...devices["iPad (gen 7)"],
+        viewport: { width: 1180, height: 820 },
+        screen: { width: 1180, height: 820 },
+      },
+    },
+    // iPhone 14, WebKit/Safari engine.
+    {
+      name: "iphone-safari",
+      use: {
+        ...devices["iPhone 14"],
+      },
+    },
   ],
 });

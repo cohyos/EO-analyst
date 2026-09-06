@@ -11,6 +11,8 @@ from pydantic import ValidationError
 from eoa.llm.schemas.patents import (
     GENERAL_KNOWLEDGE_LABEL_HE,
     AssigneeProfile,
+    ClusterNarrative,
+    PatentAdvanceOut,
     PatentBizAction,
     PatentCiteSentence,
     PatentSurveyDraft,
@@ -108,12 +110,14 @@ def _draft(**overrides) -> dict:
     base = dict(
         exec_summary=[_sentence()],
         landscape=[_sentence()],
+        tech_clusters=[ClusterNarrative(cluster_label_he="אשכול א", paragraph=[_sentence()])],
         assignee_profiles=[_profile()],
         business_implications=[
             PatentBizAction(action_he="פעולה 1.", rationale_he="נימוק 1.", rationale_cites=[1]),
             PatentBizAction(action_he="פעולה 2.", rationale_he="נימוק 2.", rationale_cites=[1]),
             PatentBizAction(action_he="פעולה 3.", rationale_he="נימוק 3.", rationale_cites=[1]),
         ],
+        timeline_narrative=[_sentence()],
     )
     base.update(overrides)
     return base
@@ -153,8 +157,51 @@ class TestPatentSurveyDraft:
 
     def test_optional_sections_default_empty(self):
         draft = PatentSurveyDraft(**_draft())
-        assert draft.tech_clusters == []
+        assert draft.relationships == []
         assert draft.white_spaces == []
         assert draft.israel_position == []
         assert draft.outlook == []
         assert draft.open_points_he == []
+
+    def test_requires_at_least_one_cluster_narrative(self):
+        with pytest.raises(ValidationError):
+            PatentSurveyDraft(**_draft(tech_clusters=[]))
+
+    def test_requires_at_least_one_timeline_narrative_sentence(self):
+        with pytest.raises(ValidationError):
+            PatentSurveyDraft(**_draft(timeline_narrative=[]))
+
+    def test_accepts_cluster_narratives(self):
+        draft = PatentSurveyDraft(
+            **_draft(
+                tech_clusters=[
+                    ClusterNarrative(cluster_label_he="אשכול א", paragraph=[_sentence()]),
+                ]
+            )
+        )
+        assert draft.tech_clusters[0].cluster_label_he == "אשכול א"
+
+
+class TestClusterNarrative:
+    def test_requires_at_least_one_paragraph_sentence(self):
+        with pytest.raises(ValidationError):
+            ClusterNarrative(cluster_label_he="אשכול א", paragraph=[])
+
+    def test_valid_cluster_narrative(self):
+        cn = ClusterNarrative(cluster_label_he="אשכול א", paragraph=[_sentence()])
+        assert cn.cluster_label_he == "אשכול א"
+        assert len(cn.paragraph) == 1
+
+
+class TestPatentAdvanceOut:
+    def test_valid_advance(self):
+        out = PatentAdvanceOut(advance_he="הבעיה היא X. הפתרון הוא Y. החידוש הוא Z.")
+        assert "X" in out.advance_he
+
+    def test_empty_text_rejected(self):
+        with pytest.raises(ValidationError):
+            PatentAdvanceOut(advance_he="   ")
+
+    def test_inline_citation_marker_rejected(self):
+        with pytest.raises(ValidationError):
+            PatentAdvanceOut(advance_he="הפתרון מתואר ב-[1].")

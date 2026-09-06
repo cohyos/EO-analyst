@@ -29,6 +29,32 @@ class PatentClaimsOut(BaseModel):
     )
 
 
+class PatentAdvanceOut(BaseModel):
+    """Stage: ``eoa.patents.analyze.generate_advance_descriptions`` (A14b, point 4, 2026-09-06 --
+    "לכל פטנט מצוטט: תיאור קצר (2-3 משפטים בעברית) של ההתקדמות המתוארת -- מה הבעיה, מה הפתרון, מה
+    חדש"). A smaller, cheaper, differently-framed sibling of :class:`PatentClaimsOut` -- that
+    schema's ``claims_summary_he`` is a 3-5-sentence *legal-protection-scope* summary; this one is
+    a 2-3-sentence *problem/solution/novelty* narrative for the per-patent appendix row/footnote,
+    generated only for a patent that :func:`eoa.patents.analyze.generate_advance_descriptions`
+    could not simply derive from an existing ``claims_summary_he`` (see that function's own
+    docstring) -- so it deliberately runs against the cheap ``light`` role with a small
+    ``num_predict`` cap, never the full ``resident`` analysis pass."""
+
+    advance_he: str = Field(
+        description=(
+            "2-3 משפטים בעברית: מה הבעיה שהפטנט פותר, מה הפתרון הטכני, ומה החדש/הייחודי בו -- "
+            "אם התקציר חלקי מדי לניתוח כזה, כתוב זאת במפורש ('התקציר אינו מספק מספיק מידע') ואל תמציא"
+        )
+    )
+
+    @model_validator(mode="after")
+    def _validate(self) -> PatentAdvanceOut:
+        _reject_inline_citation_markers(self.advance_he, field_name="advance_he")
+        if not self.advance_he.strip():
+            raise ValueError("advance_he must not be empty")
+        return self
+
+
 # --------------------------------------------------------------------------
 # survey synthesis (eoa.patents.survey.build_patent_survey) -- goal (2026-09-06):
 #
@@ -80,7 +106,7 @@ class PatentCiteSentence(BaseModel):
     is_general_knowledge: bool = Field(
         default=False,
         description=(
-            'True אם המשפט מבוסס על ידע כללי של המודל ולא על המאגר/רשימת הפטנטים -- במקרה זה '
+            "True אם המשפט מבוסס על ידע כללי של המודל ולא על המאגר/רשימת הפטנטים -- במקרה זה "
             f'הטקסט חייב להתחיל במילים "{GENERAL_KNOWLEDGE_LABEL_HE}" ו-cites יכול להיות ריק'
         ),
     )
@@ -146,6 +172,28 @@ class PatentBizAction(BaseModel):
         return self
 
 
+class ClusterNarrative(BaseModel):
+    """A14b point 1 (2026-09-06, "מפה טכנולוגית בשפת בני אדם"): one Hebrew-prose paragraph per
+    deterministic cluster (``eoa.patents.cluster.cluster_patents`` -- computed *before* this call,
+    never by the LLM itself; ``cluster_label_he`` is filled in from that computation, mirroring how
+    ``AssigneeProfile.assignee_name`` is a given, not a guess). Every factual sentence still carries
+    ``cites`` like any other :class:`PatentCiteSentence`; an inference not directly backed by a
+    registry record must instead be marked ``is_general_knowledge`` (never presented as a
+    database-backed finding) -- this is exactly the schema's own "הערכת האנליסט" labelling
+    requirement applied to cluster-level inference (trend direction, "where this is heading")."""
+
+    cluster_label_he: str = Field(description='תווית האשכול (מסופקת מראש, אינה מומצאת ע"י המודל)')
+    paragraph: list[PatentCiteSentence] = Field(
+        min_length=1,
+        description=(
+            "פסקה אחת (3-6 משפטים): מה ההתקדמות שהפטנטים באשכול מתארים, המשמעות הטכנולוגית "
+            "(ביצועים/עלות/ייצוריות/יישום מבצעי), לאן המגמה הולכת, ומה המפה מראה (מי מוביל, "
+            "היכן מתרכזים, היכן דליל) -- אבחנה שאינה מגובה ישירות ברשומה מסוימת מסומנת "
+            "is_general_knowledge=true"
+        ),
+    )
+
+
 class PatentSurveyDraft(BaseModel):
     """Stage: ``eoa.patents.survey.build_patent_survey``. Structured LLM synthesis over a numbered
     set of patent records + (for the top assignees) their recent database activity -- citation
@@ -156,19 +204,30 @@ class PatentSurveyDraft(BaseModel):
     structured-draft path (``eoa.patents.survey`` assembles a small duck-typed wrapper -- see its
     module docstring -- so ``docx_builder.py`` itself needed no changes)."""
 
-    exec_summary: list[PatentCiteSentence] = Field(
-        min_length=1, description="תקציר מנהלים מצוטט, 3-6 משפטים"
-    )
+    exec_summary: list[PatentCiteSentence] = Field(min_length=1, description="תקציר מנהלים מצוטט, 3-6 משפטים")
     landscape: list[PatentCiteSentence] = Field(
         min_length=1, description="נוף הפטנטים: היקף, ציר זמן, מוקדי טריטוריה, 3-6 משפטים"
     )
-    tech_clusters: list[PatentCiteSentence] = Field(
-        default_factory=list, description="אשכולות טכנולוגיה לפי CPC, מתורגם לעברית, 2-6 משפטים"
+    tech_clusters: list[ClusterNarrative] = Field(
+        min_length=1,
+        description=(
+            "מפה טכנולוגית בשפת בני אדם -- פסקה אחת לכל אשכול שסופק (ר' ClusterNarrative); "
+            "חובה לפחות אשכול אחד -- הדטרמיניסטי (eoa.patents.cluster) תמיד מספק לפחות אשכול אחד "
+            "(גם אם 'לא מסווג') כשיש פטנטים כלשהם, כך שהשדה הזה אף פעם לא באמת ריק מדעת"
+        ),
     )
     assignee_profiles: list[AssigneeProfile] = Field(
         min_length=1,
         max_length=5,
         description="פרופילי המקצים המובילים (2-5), עם שרשרת טכנולוגיה->מוצר->תוכנית",
+    )
+    relationships: list[PatentCiteSentence] = Field(
+        default_factory=list,
+        description=(
+            "יחסים עסקיים (A14b נקודה 3): מקצים משותפים (co-assignment), משפחות פטנט משותפות, "
+            "ושרשראות ספק->אינטגרטור->לקוח מהמאגר (סופקו כנתונים דטרמיניסטיים) -- 2-5 משפטים, פסקת "
+            "נרטיב מעל 'מפת היחסים' הדטרמיניסטית שכבר מוצגת כטבלה"
+        ),
     )
     white_spaces: list[PatentCiteSentence] = Field(
         default_factory=list, description="חורים והזדמנויות (white space), 2-4 משפטים"
@@ -179,7 +238,13 @@ class PatentSurveyDraft(BaseModel):
     business_implications: list[PatentBizAction] = Field(
         min_length=3, max_length=6, description="3-6 המלצות פעולה קונקרטיות עבור החברה שלנו"
     )
-    outlook: list[PatentCiteSentence] = Field(
-        default_factory=list, description="מבט קדימה קצר, 2-3 משפטים"
+    timeline_narrative: list[PatentCiteSentence] = Field(
+        min_length=1,
+        description=(
+            "A14b נקודה 6: מה נכנס/עומד להיכנס לנחלת הכלל ומה זה מאפשר, גלי הגשות בזמן, ופטנטים "
+            "חדשים שעדיין בבחינה -- 2-5 משפטים מעל טבלת ציר-הזמן הדטרמיניסטית שכבר מוצגת; חובה "
+            "לפחות משפט אחד -- לכל פטנט יש שורת ציר-זמן (גם אם רוב השדות ריקים/'בבחינה')"
+        ),
     )
+    outlook: list[PatentCiteSentence] = Field(default_factory=list, description="מבט קדימה קצר, 2-3 משפטים")
     open_points_he: list[str] = Field(default_factory=list, description="נקודות פתוחות")

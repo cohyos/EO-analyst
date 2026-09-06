@@ -58,10 +58,29 @@ from eoa.db import connection
 from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
-from eoa.llm.schemas.patents import AssigneeProfile, PatentBizAction, PatentCiteSentence, PatentSurveyDraft
+from eoa.llm.schemas.patents import (
+    AssigneeProfile,
+    ClusterNarrative,
+    PatentBizAction,
+    PatentCiteSentence,
+    PatentSurveyDraft,
+)
+from eoa.patents import cluster as cluster_mod
 from eoa.patents import scan as scan_mod
-from eoa.patents.analyze import analyze_patents
-from eoa.patents.render import ltr_isolate, ltr_isolate_if_latin, ltr_join
+from eoa.patents.analyze import analyze_patents, generate_advance_descriptions
+from eoa.patents.render import (
+    ascii_timeline,
+    find_table_by_headers,
+    inject_advance_footnotes_html,
+    inject_advance_footnotes_md,
+    insert_section_before_html_appendix,
+    insert_section_before_md_appendix,
+    ltr_isolate,
+    ltr_isolate_if_latin,
+    ltr_join,
+    shade_timeline_table_rows,
+    svg_timeline_bar_chart,
+)
 from eoa.patents.valuation import score_and_persist
 from eoa.pipeline.entity_normalize import resolve_canonical
 from eoa.report.docx_builder import (
@@ -173,8 +192,9 @@ def _fetch_patent_rows(patent_ids: list[int]) -> list[dict[str, Any]]:
         return []
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, pub_number, title, abstract, assignees, cpc, publication_date, "
-            "url, value_score, source FROM patents WHERE id = ANY(%(ids)s) "
+            "SELECT id, pub_number, title, abstract, assignees, cpc, priority_date, filing_date, "
+            "publication_date, grant_date, family_id, forward_citations, backward_citations, "
+            "url, value_score, source, claims_summary_he FROM patents WHERE id = ANY(%(ids)s) "
             "ORDER BY publication_date DESC NULLS LAST, id DESC",
             {"ids": patent_ids},
         )
@@ -419,9 +439,7 @@ def _assignee_profile_input_block(
     else:
         lines.append("לא נמצאה ישות קנונית ברשימת המעקב (watchlist) עבור מקצה זה.")
     lines.append("מספרי הפטנטים של מקצה זה ברשימה: " + (", ".join(f"[{n}]" for n in patent_ns) or "—"))
-    lines.append(
-        "אשכולות CPC של המקצה: " + (", ".join(f"{c} ({n})" for c, n in cpc_cluster) or "—")
-    )
+    lines.append("אשכולות CPC של המקצה: " + (", ".join(f"{c} ({n})" for c, n in cpc_cluster) or "—"))
     if market_items or events:
         lines.append(f"פעילות עסקית מהמאגר ({PROFILE_LOOKBACK_DAYS} יום אחרונים):")
         for it in market_items:
@@ -433,7 +451,9 @@ def _assignee_profile_input_block(
                 f"({fmt_date(ev.get('date'))})"
             )
     else:
-        lines.append(f"לא נמצאה פעילות עסקית במאגר בחלון {PROFILE_LOOKBACK_DAYS} הימים האחרונים עבור מקצה זה.")
+        lines.append(
+            f"לא נמצאה פעילות עסקית במאגר בחלון {PROFILE_LOOKBACK_DAYS} הימים האחרונים עבור מקצה זה."
+        )
     return "\n".join(lines)
 
 
@@ -460,6 +480,68 @@ def _registry_lines(registry: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _cluster_data_lines(clusters: list[cluster_mod.PatentCluster]) -> list[str]:
+    lines = ["אשכולות (דטרמיניסטי -- cluster_label_he חייב להעתיק את התווית המצוטטת כאן בדיוק):"]
+    for c in clusters:
+        lines.append(
+            f'- "{c.label_he}" | קוד CPC מוביל: {c.cpc_codes[0] if c.cpc_codes else "—"} | '
+            f"גודל: {c.size} | קצב הגשה שנתי ממוצע: {c.filing_velocity_per_year:.1f} | "
+            f"מקצה(י) דומיננטי: {', '.join(c.dominant_assignees) or '—'} | "
+            f"בגרות (יחס הענקה {c.grant_ratio:.0%}): {c.maturity_label_he}"
+        )
+    return lines
+
+
+def _relationship_data_lines(
+    co_assign: Counter[tuple[str, str]],
+    family_groups: dict[str, list[int]],
+    relationship_edges: list[dict[str, Any]],
+) -> list[str]:
+    lines = ["יחסים עסקיים (דטרמיניסטי):"]
+    for (a, b), n in co_assign.most_common(10):
+        lines.append(f"- מקצים משותפים (co-assignment): {a} <-> {b} ({n} פטנט(ים) משותפים)")
+    for fam, ns in list(family_groups.items())[:10]:
+        lines.append(f"- משפחת פטנט משותפת ({ltr_isolate(fam)}): רשומות " + ", ".join(f"[{n}]" for n in ns))
+    for edge in relationship_edges[:15]:
+        kind_he = _EVENT_KIND_HE.get(edge.get("kind"), edge.get("kind") or "אחר")
+        cite = f"[{edge['n']}]" if edge.get("n") is not None else "—"
+        program = f" | תוכנית/מוצר: {edge['program']}" if edge.get("program") else ""
+        lines.append(f"- {edge['from']} -> {edge['to']} ({kind_he}) {cite}{program}")
+    if len(lines) == 1:
+        lines.append("- לא זוהו קשרים עסקיים דטרמיניסטיים במדגם.")
+    return lines
+
+
+def _timeline_data_lines(
+    timeline_rows: list[cluster_mod.TimelineRow],
+    cluster_waves: dict[str, Counter[int]],
+    assignee_waves: dict[str, Counter[int]],
+) -> list[str]:
+    expired = [r for r in timeline_rows if r.flag_he == cluster_mod.FLAG_EXPIRED_HE]
+    expiring_soon = [r for r in timeline_rows if r.flag_he == cluster_mod.FLAG_EXPIRING_SOON_HE]
+    pending = [r for r in timeline_rows if r.flag_he == cluster_mod.FLAG_PENDING_HE]
+    lines = ["ציר זמן (דטרמיניסטי):"]
+    lines.append(
+        f"- פג תוקף (משוער): {len(expired)} "
+        + ("(" + ", ".join(f"[{r.n}]" for r in expired[:10]) + ")" if expired else "")
+    )
+    lines.append(
+        f"- עומד לפוג ב-3 השנים הקרובות: {len(expiring_soon)} "
+        + ("(" + ", ".join(f"[{r.n}]" for r in expiring_soon[:10]) + ")" if expiring_soon else "")
+    )
+    lines.append(
+        f"- בבחינה (טרם הענקה בפועל): {len(pending)} "
+        + ("(" + ", ".join(f"[{r.n}]" for r in pending[:10]) + ")" if pending else "")
+    )
+    lines.append("גלי הגשות לפי אשכול (שנה: כמות):")
+    for key, years in cluster_waves.items():
+        lines.append(f"- {key}: " + ", ".join(f"{y}:{n}" for y, n in sorted(years.items())))
+    lines.append("גלי הגשות לפי מקצה (שנה: כמות):")
+    for key, years in list(assignee_waves.items())[:10]:
+        lines.append(f"- {key}: " + ", ".join(f"{y}:{n}" for y, n in sorted(years.items())))
+    return lines
+
+
 def _synthesis_data_block(
     topic: str,
     registry: list[dict[str, Any]],
@@ -469,6 +551,13 @@ def _synthesis_data_block(
     israel_count: int,
     israel_companies: list[str],
     profile_blocks: list[str],
+    clusters: list[cluster_mod.PatentCluster],
+    co_assign: Counter[tuple[str, str]],
+    family_groups: dict[str, list[int]],
+    relationship_edges: list[dict[str, Any]],
+    timeline_rows: list[cluster_mod.TimelineRow],
+    cluster_waves: dict[str, Counter[int]],
+    assignee_waves: dict[str, Counter[int]],
 ) -> str:
     patent_count = sum(1 for it in registry if it.get("kind") != "db_item")
     lines = [
@@ -484,10 +573,24 @@ def _synthesis_data_block(
         "בעלי פטנטים מובילים: "
         + (", ".join(f"{a} ({n})" for a, n in top_assignees.most_common(TOP_N_ASSIGNEES)) or "—")
     )
+    # A14b point 6 (goal 2026-09-06): the FULL deterministic per-assignee count -- not just the
+    # top-N display list above -- so the model has an explicit, checkable ground truth for rule 7
+    # ("never claim a real assignee has zero patents"); this is also what
+    # eoa.patents.cluster.consistency_violations validates the returned draft against afterwards.
+    lines.append(
+        "ספירת פטנטים לפי מקצה (לבדיקת עקביות -- אסור לטעון 'אין פטנטים' עבור שם המופיע כאן עם מספר > 0): "
+        + (", ".join(f"{a}: {n}" for a, n in top_assignees.most_common(30)) or "—")
+    )
     lines.append(
         "ציר זמן (שנה: כמות): " + (", ".join(f"{y}: {n}" for y, n in sorted(timeline.items())) or "—")
     )
     lines.append(f"נוכחות ישראלית: {israel_count} רשומות; חברות: {', '.join(israel_companies) or 'אין'}")
+    lines.append("")
+    lines += _cluster_data_lines(clusters)
+    lines.append("")
+    lines += _relationship_data_lines(co_assign, family_groups, relationship_edges)
+    lines.append("")
+    lines += _timeline_data_lines(timeline_rows, cluster_waves, assignee_waves)
     lines.append("")
     lines.append("רשומות ממוספרות (פטנטים תחילה, ואז רשומות מאגר -- רצף מספור אחד):")
     lines += _registry_lines(registry)
@@ -534,6 +637,7 @@ def _run_synthesis(
 
 
 _NO_LLM_TEXT_HE = "ניתוח שפה טבעית לא זמין כרגע (המודל המקומי אינו נגיש) -- הטבלאות הכמותיות למעלה תקפות."
+_NO_ADVANCE_FALLBACK_HE = "תיאור התקדמות לא זמין."
 _NO_ASSIGNEE_DATA_HE = (
     "לא זוהה בעל-פטנטים (assignee) אחד לפחות הניתן לזיהוי במדגם שנאסף -- מגבלה של מקור החיפוש "
     "חסר-המפתחות (ראו eoa.patents.scan); הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY ב-.env לכיסוי בעלים "
@@ -599,6 +703,13 @@ def _business_action_sentences(actions: list[PatentBizAction]) -> list[_CiteSent
     return out
 
 
+def _cluster_narrative_section(cluster: ClusterNarrative) -> _RenderSection:
+    return _RenderSection(
+        title_he=f"אשכול טכנולוגי: {cluster.cluster_label_he}",
+        sentences=_to_cite_sentences(cluster.paragraph),
+    )
+
+
 def _build_draft_from_synthesis(
     synthesis: PatentSurveyDraft,
     open_points_extra: list[str],
@@ -606,13 +717,17 @@ def _build_draft_from_synthesis(
 ) -> _RenderableSurveyDraft:
     assignee_has_cpc = assignee_has_cpc or {}
     sections: list[_RenderSection] = [_RenderSection("נוף הפטנטים", _to_cite_sentences(synthesis.landscape))]
-    if synthesis.tech_clusters:
-        sections.append(_RenderSection("אשכולות טכנולוגיה", _to_cite_sentences(synthesis.tech_clusters)))
+    for cluster in synthesis.tech_clusters:
+        sections.append(_cluster_narrative_section(cluster))
     for profile in synthesis.assignee_profiles:
         sections.append(
             _assignee_profile_section(
                 profile, has_cpc_data=assignee_has_cpc.get(profile.assignee_name, False)
             )
+        )
+    if synthesis.relationships:
+        sections.append(
+            _RenderSection("יחסים עסקיים (מפת יחסים)", _to_cite_sentences(synthesis.relationships))
         )
     if synthesis.white_spaces:
         sections.append(
@@ -623,16 +738,74 @@ def _build_draft_from_synthesis(
             _RenderSection("עמדת התעשייה הישראלית", _to_cite_sentences(synthesis.israel_position))
         )
     sections.append(
-        _RenderSection(
-            "השלכות עסקיות והמלצות", _business_action_sentences(synthesis.business_implications)
-        )
+        _RenderSection("השלכות עסקיות והמלצות", _business_action_sentences(synthesis.business_implications))
     )
+    if synthesis.timeline_narrative:
+        sections.append(_RenderSection("ציר זמן -- ניתוח", _to_cite_sentences(synthesis.timeline_narrative)))
     return _RenderableSurveyDraft(
         exec_summary=_to_cite_sentences(synthesis.exec_summary),
         sections=sections,
         outlook=_to_cite_sentences(synthesis.outlook),
         open_points_he=list(synthesis.open_points_he) + open_points_extra,
     )
+
+
+# --------------------------------------------------------------------------
+# consistency scrub (A14b point 6, goal 2026-09-06): fix the internal-consistency slip P2
+# observed ("the summary said 'no Anduril patents' while patent 15 was Anduril") -- deterministic
+# per-assignee counts are injected into the prompt (see _synthesis_data_block's dedicated line and
+# patent_survey.md rule 7); this is the code-level backstop for when the model violates that rule
+# anyway. A violating sentence is never silently dropped (that could remove a real, correctly-cited
+# claim sitting next to the false one) -- its text is replaced with a short, honest, deterministic
+# correction and the violation is surfaced as an open point so it's never silently invisible either.
+# --------------------------------------------------------------------------
+
+
+def _iter_sentence_lists(synthesis: PatentSurveyDraft) -> list[list[PatentCiteSentence]]:
+    lists: list[list[PatentCiteSentence]] = [
+        synthesis.exec_summary,
+        synthesis.landscape,
+        synthesis.relationships,
+        synthesis.white_spaces,
+        synthesis.israel_position,
+        synthesis.timeline_narrative,
+        synthesis.outlook,
+    ]
+    for cluster in synthesis.tech_clusters:
+        lists.append(cluster.paragraph)
+    for profile in synthesis.assignee_profiles:
+        lists.append(profile.tech_product_chain)
+        lists.append(profile.recent_activity)
+        lists.append(profile.implications_he)
+    return lists
+
+
+def _consistency_replacement_he(violations: list[str]) -> str:
+    return "תוקן אוטומטית לפי נתוני הנספח (הטענה המקורית סתרה את ספירת הפטנטים בפועל): " + " ".join(
+        violations
+    )
+
+
+def _scrub_consistency_violations(synthesis: PatentSurveyDraft, assignee_counts: dict[str, int]) -> list[str]:
+    """Mutates ``synthesis`` in place, replacing the text of every sentence/rationale that falsely
+    claims a real, counted assignee has zero patents (:func:`eoa.patents.cluster.
+    consistency_violations`); returns the list of violation messages found (empty if none), which
+    the caller surfaces as explicit open points -- "rejected", per the user's own wording, means
+    detected-and-corrected here, not a silent drop (docs/CONVENTIONS.md rule 5: never invent, but
+    also never blocked or hidden)."""
+    notes: list[str] = []
+    for sentences in _iter_sentence_lists(synthesis):
+        for s in sentences:
+            violations = cluster_mod.consistency_violations(s.text_he, assignee_counts)
+            if violations:
+                notes.extend(violations)
+                s.text_he = _consistency_replacement_he(violations)
+    for action in synthesis.business_implications:
+        violations = cluster_mod.consistency_violations(action.rationale_he, assignee_counts)
+        if violations:
+            notes.extend(violations)
+            action.rationale_he = _consistency_replacement_he(violations)
+    return notes
 
 
 def _fallback_draft(open_points_extra: list[str]) -> _RenderableSurveyDraft:
@@ -739,8 +912,13 @@ def build_patent_survey(
                 "n": i + 1,
                 "id": row["id"],
                 "title": row.get("title") or row["pub_number"],
+                "abstract": row.get("abstract") or "",
                 "assignees": row.get("assignees") or [],
+                "priority_date": row.get("priority_date"),
+                "filing_date": row.get("filing_date"),
                 "publication_date": row.get("publication_date"),
+                "grant_date": row.get("grant_date"),
+                "family_id": row.get("family_id"),
                 "cpc": row.get("cpc") or [],
                 "value_score": row.get("value_score"),
                 "url": row.get("url"),
@@ -761,6 +939,19 @@ def build_patent_survey(
             [a for a, _ in top_assignees.most_common(5)],
         )
 
+        # A14b (2026-09-06): deterministic clustering (point 2), business relationships (point 3),
+        # and timeline/expiry math (point 6) -- all pure, DB-independent computation over the
+        # registry/rows already gathered above; see eoa.patents.cluster's own module docstring.
+        patent_registry_entries = [it for it in registry if it.get("kind") != "db_item"]
+        clusters = cluster_mod.cluster_patents(patent_registry_entries, topics=scan_mod.load_watch_topics())
+        cross_links = cluster_mod.cross_cluster_links(clusters)
+        co_assign = cluster_mod.co_assignment_pairs(rows)
+        family_groups = cluster_mod.same_family_groups(patent_registry_entries)
+        timeline_rows = cluster_mod.build_timeline_rows(patent_registry_entries, today=period_end)
+        id_to_cluster_label = {pid: c.label_he for c in clusters for pid in c.patent_ids if pid is not None}
+        cluster_waves = cluster_mod.filing_waves(rows, lambda r: id_to_cluster_label.get(r.get("id")))
+        assignee_waves = cluster_mod.filing_waves(rows, lambda r: next(iter(r.get("assignees") or []), None))
+
         open_points_extra = (
             []
             if scan_mod.structured_sources_configured()
@@ -770,6 +961,7 @@ def build_patent_survey(
         profile_names = _select_profile_assignees(top_assignees)
         synthesis: PatentSurveyDraft | None = None
         assignee_has_cpc: dict[str, bool] = {}
+        relationship_edges: list[dict[str, Any]] = []
         if profile_names:
             since = period_end - dt.timedelta(days=PROFILE_LOOKBACK_DAYS)
             profile_blocks: list[str] = []
@@ -785,6 +977,7 @@ def build_patent_survey(
                 events = _assignee_events(names_for_matching, since)
                 _extend_registry_with_db_records(registry, market_items, item_id_key="id")
                 _extend_registry_with_db_records(registry, events, item_id_key="item_id")
+                relationship_edges += cluster_mod.relationship_edges_from_events(name, events)
                 profile_blocks.append(
                     _assignee_profile_input_block(
                         name, canonical, cpc_cluster, patent_ns, market_items, events
@@ -792,25 +985,50 @@ def build_patent_survey(
                 )
 
             data_block = _synthesis_data_block(
-                topic, registry, top_cpc, top_assignees, timeline, israel_count, israel_companies,
+                topic,
+                registry,
+                top_cpc,
+                top_assignees,
+                timeline,
+                israel_count,
+                israel_companies,
                 profile_blocks,
+                clusters,
+                co_assign,
+                family_groups,
+                relationship_edges,
+                timeline_rows,
+                cluster_waves,
+                assignee_waves,
             )
             synthesis = _run_synthesis(topic, registry, data_block, role=role, interactive=interactive)
         else:
             log.info("patent_survey_no_real_assignees", topic=topic, patent_count=len(rows))
             open_points_extra = [*open_points_extra, _NO_ASSIGNEE_DATA_HE]
 
+        consistency_notes: list[str] = []
+        if synthesis is not None:
+            consistency_notes = _scrub_consistency_violations(synthesis, dict(top_assignees))
+            if consistency_notes:
+                log.warning("patent_survey_consistency_violations", topic=topic, count=len(consistency_notes))
+
         draft = (
-            _build_draft_from_synthesis(synthesis, open_points_extra, assignee_has_cpc)
+            _build_draft_from_synthesis(synthesis, open_points_extra + consistency_notes, assignee_has_cpc)
             if synthesis
-            else _fallback_draft(open_points_extra)
+            else _fallback_draft(open_points_extra + consistency_notes)
         )
 
-        patent_rows_for_table = [it for it in registry if it.get("kind") != "db_item"]
+        # A14b point 4: per-patent "advance" description (problem/solution/novelty), reused for the
+        # appendix table column below and the md/html footnote-style first-citation line.
+        advance_map = generate_advance_descriptions(rows, role="light", interactive=interactive)
+        advance_by_n = {
+            it["n"]: advance_map.get(it["id"], _NO_ADVANCE_FALLBACK_HE) for it in patent_registry_entries
+        }
+
         tables = [
             {
                 "title_he": "נספח פטנטים",
-                "headers": ["מספר", "כותרת EN", "מקצה", "CPC", "ציון ערך", "קישור"],
+                "headers": ["מספר", "כותרת EN", "מקצה", "CPC", "ציון ערך", "קישור", "התקדמות"],
                 "rows": [
                     [
                         it["n"],
@@ -819,8 +1037,9 @@ def build_patent_survey(
                         ltr_join(it["cpc"]),
                         it["value_score"] if it["value_score"] is not None else "—",
                         it.get("url") or "—",
+                        advance_by_n.get(it["n"], _NO_ADVANCE_FALLBACK_HE),
                     ]
-                    for it in patent_rows_for_table
+                    for it in patent_registry_entries
                 ],
             },
             {
@@ -848,6 +1067,115 @@ def build_patent_survey(
                 }
             )
 
+        # A14b point 2: cluster table + cluster x assignee matrix.
+        tables.append(
+            {
+                "title_he": "אשכולות טכנולוגיה",
+                "headers": ["אשכול", "קוד CPC מוביל", "גודל", "קצב הגשה שנתי", "מקצה דומיננטי", "בגרות"],
+                "rows": [
+                    [
+                        c.label_he,
+                        ltr_isolate(c.cpc_codes[0]) if c.cpc_codes else "—",
+                        c.size,
+                        f"{c.filing_velocity_per_year:.1f}",
+                        ltr_join(c.dominant_assignees),
+                        f"{c.maturity_label_he} ({c.grant_ratio:.0%})",
+                    ]
+                    for c in clusters
+                ],
+            }
+        )
+        matrix_assignees = [a for a, _n in top_assignees.most_common(TOP_N_ASSIGNEES)]
+        if matrix_assignees and clusters:
+            tables.append(
+                {
+                    "title_he": "מטריצת אשכול x מקצה",
+                    "headers": ["מקצה"] + [c.label_he for c in clusters],
+                    "rows": [
+                        [ltr_isolate(a)] + [c.assignees.get(a, 0) or "—" for c in clusters]
+                        for a in matrix_assignees
+                    ],
+                }
+            )
+        if cross_links:
+            tables.append(
+                {
+                    "title_he": "קשרים בין אשכולות (מקצים משותפים)",
+                    "headers": ["אשכול א׳", "אשכול ב׳", "מקצים משותפים"],
+                    "rows": [[a, b, ltr_join(shared)] for a, b, shared in cross_links],
+                }
+            )
+
+        # A14b point 3: "מפת יחסים" -- co-assignment, shared patent families, and DB-derived
+        # supplier/integrator/customer chains (all deterministic; the narrative in synthesis.
+        # relationships is the LLM's cited prose over the same data).
+        relationship_table_rows: list[list[Any]] = []
+        for (a, b), n in co_assign.most_common(15):
+            relationship_table_rows.append(
+                [ltr_isolate(a), ltr_isolate(b), "מקצים משותפים (co-assignment)", f"{n} פטנט(ים)"]
+            )
+        for fam, ns in family_groups.items():
+            relationship_table_rows.append(
+                [ltr_isolate(fam), "—", "משפחת פטנט משותפת", ", ".join(f"[{n}]" for n in ns)]
+            )
+        for edge in relationship_edges:
+            kind_he = _EVENT_KIND_HE.get(edge.get("kind"), edge.get("kind") or "אחר")
+            note = edge.get("program") or edge.get("title") or "—"
+            relationship_table_rows.append(
+                [ltr_isolate(edge["from"]), ltr_isolate(edge["to"]), kind_he, ltr_isolate_if_latin(note)]
+            )
+        if relationship_table_rows:
+            tables.append(
+                {
+                    "title_he": "מפת יחסים",
+                    "headers": ["צד א׳", "צד ב׳", "סוג קשר", "פרטים"],
+                    "rows": relationship_table_rows,
+                }
+            )
+
+        # A14b point 6: per-patent timeline/expiry table + filing waves.
+        timeline_headers = ["מספר", "עדיפות", "הגשה", "פרסום", "הענקה", "תפוגה משוערת (20 שנה)", "סטטוס"]
+        tables.append(
+            {
+                "title_he": "ציר זמן פטנטים",
+                "headers": timeline_headers,
+                "rows": [
+                    [
+                        t.n,
+                        fmt_date(t.priority_date),
+                        fmt_date(t.filing_date),
+                        fmt_date(t.publication_date),
+                        fmt_date(t.grant_date),
+                        fmt_date(t.expiry_date),
+                        t.flag_he or "בתוקף",
+                    ]
+                    for t in timeline_rows
+                ],
+            }
+        )
+        if cluster_waves:
+            tables.append(
+                {
+                    "title_he": "גלי הגשות לפי אשכול",
+                    "headers": ["אשכול", "שנה", "מספר פטנטים"],
+                    "rows": [
+                        [key, y, n] for key, years in cluster_waves.items() for y, n in sorted(years.items())
+                    ],
+                }
+            )
+        if assignee_waves:
+            tables.append(
+                {
+                    "title_he": "גלי הגשות לפי מקצה",
+                    "headers": ["מקצה", "שנה", "מספר פטנטים"],
+                    "rows": [
+                        [ltr_isolate(key), y, n]
+                        for key, years in assignee_waves.items()
+                        for y, n in sorted(years.items())
+                    ],
+                }
+            )
+
         title_text = f"סקר פטנטים: {topic}"
         items_for_appendix = [
             {
@@ -872,35 +1200,66 @@ def build_patent_survey(
             tables=tables,
             include_toc=True,
         )
+        # A14b point 6: docx table shading for the timeline table (python-docx cell shading --
+        # matplotlib is not installed in this venv, so no embedded PNG; see eoa.patents.render's
+        # own docstring). Never touches docx_builder.py -- plain post-processing of the Document it
+        # already returned.
+        timeline_table = find_table_by_headers(doc, timeline_headers)
+        if timeline_table is not None:
+            shade_timeline_table_rows(
+                timeline_table,
+                status_col_index=len(timeline_headers) - 1,
+                status_colors={
+                    cluster_mod.FLAG_EXPIRED_HE: "F4CCCC",
+                    cluster_mod.FLAG_EXPIRING_SOON_HE: "FFF2CC",
+                    cluster_mod.FLAG_PENDING_HE: "D9D9D9",
+                },
+            )
         docx_path, md_path, html_path = _report_paths(topic, period_end)
         save_docx(doc, docx_path)
         validate_docx(docx_path)
         md_path.parent.mkdir(parents=True, exist_ok=True)
-        md_path.write_text(
-            render_markdown(
-                draft, items_for_appendix, [], period_end=period_end, title_text=title_text, tables=tables
-            ),
-            encoding="utf-8",
+
+        md_content = render_markdown(
+            draft, items_for_appendix, [], period_end=period_end, title_text=title_text, tables=tables
         )
-        html_path.write_text(
-            render_html(
-                draft,
-                items_for_appendix,
-                [],
-                period_end=period_end,
-                title_text=title_text,
-                tables=tables,
-                include_toc=True,
-            ),
-            encoding="utf-8",
+        # A14b point 6 (md-only): a monospace ASCII/Unicode timeline bar chart, right before the
+        # sources appendix.
+        md_content = insert_section_before_md_appendix(
+            md_content,
+            "ציר זמן חזותי (ASCII)",
+            "```\n" + ascii_timeline(dict(timeline)) + "\n```",
         )
+        # A14b point 4 (md-only footnote): a short line right under the first body appearance of
+        # each patent's "[n]" citation -- the docx appendix already carries the same text as its
+        # own column instead (per the user's own spec).
+        md_content = inject_advance_footnotes_md(md_content, advance_by_n)
+        md_path.write_text(md_content, encoding="utf-8")
+
+        html_content = render_html(
+            draft,
+            items_for_appendix,
+            [],
+            period_end=period_end,
+            title_text=title_text,
+            tables=tables,
+            include_toc=True,
+        )
+        # A14b point 6 (html-only): a real, dependency-free inline SVG bar chart.
+        html_content = insert_section_before_html_appendix(
+            html_content,
+            "ציר זמן חזותי",
+            svg_timeline_bar_chart(dict(timeline), title_he="הגשות/פרסומים לפי שנה"),
+        )
+        html_content = inject_advance_footnotes_html(html_content, advance_by_n)
+        html_path.write_text(html_content, encoding="utf-8")
 
         report_id = _persist_report(topic, period_end, docx_path, md_path, html_path, patent_ids)
         _finish_survey_row(survey_id, status="done", report_id=report_id)
         log.info(
             "patent_survey_done",
             topic=topic,
-            patent_count=len(patent_rows_for_table),
+            patent_count=len(patent_registry_entries),
             report_id=report_id,
         )
         return PatentSurveyPaths(
@@ -910,7 +1269,7 @@ def build_patent_survey(
             report_id=report_id,
             survey_id=survey_id,
             topic=topic,
-            patent_count=len(patent_rows_for_table),
+            patent_count=len(patent_registry_entries),
         )
     except Exception:
         _finish_survey_row(survey_id, status="failed", report_id=None)

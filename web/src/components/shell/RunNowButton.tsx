@@ -85,7 +85,7 @@ function RunProgressPopover({
         <button
           type="button"
           onClick={onClose}
-          className="rounded p-0.5 text-fg-dim hover:bg-bg-sunken"
+          className="tap-target inline-flex items-center justify-center rounded p-0.5 text-fg-dim hover:bg-bg-sunken"
           aria-label={t("common.close")}
         >
           <X size={14} aria-hidden="true" />
@@ -164,7 +164,7 @@ function RunToast({ toast, onDismiss }: { toast: ToastState; onDismiss: () => vo
       role="status"
       aria-live="polite"
       className={cn(
-        "fixed bottom-4 start-4 z-50 flex items-center gap-3 rounded-lg border px-4 py-3 text-sm shadow-panel",
+        "fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] start-4 z-50 flex items-center gap-3 rounded-lg border px-4 py-3 text-sm shadow-panel",
         "bg-bg-raised",
         tone,
       )}
@@ -179,7 +179,7 @@ function RunToast({ toast, onDismiss }: { toast: ToastState; onDismiss: () => vo
         type="button"
         onClick={onDismiss}
         aria-label={t("topBar.runNowToastDismiss")}
-        className="rounded p-0.5 text-fg-dim hover:bg-bg-sunken"
+        className="tap-target inline-flex items-center justify-center rounded p-0.5 text-fg-dim hover:bg-bg-sunken"
       >
         <X size={14} aria-hidden="true" />
       </button>
@@ -276,7 +276,7 @@ export function RunNowButton() {
         aria-haspopup="true"
         aria-expanded={popoverOpen}
         aria-label={isBusy ? t("topBar.runningAriaLabel") : t("topBar.runNow")}
-        className="flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60 sm:px-3"
+        className="tap-target flex shrink-0 items-center gap-1.5 rounded-md bg-accent px-2 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60 sm:px-3"
       >
         {isBusy ? (
           <Loader2 size={14} aria-hidden="true" className="animate-spin" />

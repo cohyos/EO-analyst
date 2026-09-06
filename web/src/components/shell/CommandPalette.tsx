@@ -39,7 +39,7 @@ export function CommandPalette() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-24"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 px-4 pt-[max(1.5rem,env(safe-area-inset-top))] sm:pt-24"
       onClick={() => setOpen(false)}
     >
       <div

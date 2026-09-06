@@ -76,18 +76,57 @@
 
 * {
   border-color: var(--border);
+  /* iOS Safari draws a grey tap-highlight rect on every tap by default;
+     interactive elements below get their own hover/active states so this
+     flash only ever reads as a rendering glitch. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 html,
 body,
 #root {
   height: 100%;
+  /* iOS Safari's `100%`/`100vh` don't account for the collapsing address
+     bar; the shell itself pins to `100dvh` (see AppShell), this is just the
+     ancestor chain so percentage heights resolve sanely as a fallback. */
+  height: 100dvh;
 }
 
 body {
   background: var(--bg);
   color: var(--fg);
   font-feature-settings: "tnum" 1;
+  overscroll-behavior-y: none;
+}
+
+button,
+a,
+[role="button"],
+[role="tab"],
+summary {
+  touch-action: manipulation;
+}
+
+/* iOS Safari zooms the viewport on focus of any text input under 16px —
+   force real inputs (not checkboxes/radios/range, which iOS never zooms
+   for) up to 16px on touch-primary viewports only, so desktop's denser
+   `text-sm` inputs are untouched. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* Any scrollable container gets inertial scrolling + contained overscroll
+   on iOS (prevents a nested list's rubber-banding from also dragging the
+   page/shell behind it). */
+.overflow-y-auto,
+.overflow-x-auto,
+.no-scrollbar-x {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .font-tabular {
@@ -130,6 +169,38 @@ bdi {
 .no-scrollbar-x {
   overflow-x: auto;
   max-width: 100%;
+}
+
+/* Safe-area helpers for the iOS notch/home-indicator (viewport-fit=cover in
+   index.html makes env(safe-area-inset-*) resolve to non-zero values; on
+   every other browser these are 0 and the rules are no-ops). Additive to
+   the element's own padding via calc() so existing spacing is preserved. */
+.pt-safe {
+  padding-top: calc(env(safe-area-inset-top, 0px));
+}
+.pb-safe {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px));
+}
+.pb-safe-strip {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.ps-safe {
+  padding-inline-start: env(safe-area-inset-left, 0px);
+}
+.pe-safe {
+  padding-inline-end: env(safe-area-inset-right, 0px);
+}
+
+/* Minimum touch target size on real touch devices only — mouse/trackpad
+   (fine pointer) desktop keeps the denser padding these controls already
+   have. Scoped to the icon-only controls that opted in via this class
+   (rather than every button/link) to avoid distorting dense inline layouts
+   like table action cells or the status strip's meter row. */
+@media (pointer: coarse) {
+  .tap-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
 }
 
 .eo-citation {

@@ -61,7 +61,7 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
     return (
       <footer
         data-testid="status-strip-disconnected"
-        className="flex h-9 shrink-0 items-center gap-2 border-t border-border bg-bg-raised px-4 text-xs text-danger"
+        className="pb-safe flex min-h-9 shrink-0 items-center gap-2 border-t border-border bg-bg-raised px-4 text-xs text-danger"
         role="status"
       >
         <WifiOff size={14} aria-hidden="true" />
@@ -74,7 +74,7 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
     return (
       <footer
         data-testid="status-strip-connecting"
-        className="flex h-9 shrink-0 items-center gap-2 border-t border-border bg-bg-raised px-4 text-xs text-fg-dim"
+        className="pb-safe flex min-h-9 shrink-0 items-center gap-2 border-t border-border bg-bg-raised px-4 text-xs text-fg-dim"
         role="status"
       >
         <Loader2 size={14} aria-hidden="true" className="animate-spin" />
@@ -95,7 +95,7 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
       <footer
         role="status"
         aria-label="סטטוס משאבים — לחץ להיסטוריה"
-        className="flex h-9 items-center gap-4 overflow-x-auto border-t border-border bg-bg-raised px-4 font-mono text-xs no-scrollbar-x"
+        className="pb-safe flex min-h-9 items-center gap-4 overflow-x-auto border-t border-border bg-bg-raised px-4 font-mono text-xs no-scrollbar-x"
       >
         <button
           type="button"

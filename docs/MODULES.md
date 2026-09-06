@@ -7280,10 +7280,15 @@ prompts, ללא נגיעה ב-`docx_builder.py`.
 
 `ClusterNarrative` (תווית מסופקת מראש, פסקת `PatentCiteSentence` אחת עם אכיפת ציטוט "by
 construction" כרגיל) מחליפה את `tech_clusters: list[PatentCiteSentence]` הישן -- כעת
-`list[ClusterNarrative]`, פסקה נפרדת לכל אשכול אמיתי שסופק, במקום רשימת משפטים שטוחה. שני שדות
-חדשים על `PatentSurveyDraft`: `relationships` (נרטיב מעל "מפת היחסים" הדטרמיניסטית) ו-
-`timeline_narrative` (נרטיב מעל טבלת ציר-הזמן -- גלי הגשות, מה נכנס/עומד להיכנס לנחלת הכלל, מה
-עדיין בבחינה). `PatentAdvanceOut` (סכימה חדשה, שדה יחיד `advance_he`) הוא "אח קטן וזול" של
+`list[ClusterNarrative]`, פסקה נפרדת לכל אשכול אמיתי שסופק, במקום רשימת משפטים שטוחה --
+`min_length=1` (חובה, לא `default_factory=list`): הדטרמיניסטי (`eoa.patents.cluster.
+cluster_patents`) תמיד מחזיר לפחות אשכול אחד ("לא מסווג" בהיעדר סיווג) כשיש פטנטים כלשהם, כך שהשדה
+לעולם לא באמת ריק מדעת -- נצפה חי (2026-09-06) שכששדה זה היה אופציונלי, ה-LLM דילג עליו לגמרי
+בהרצה אחת אף שנתוני האשכולות היו מלאים; לאחר המעבר ל-`min_length=1` הרצה חוזרת הפיקה פסקה תקינה
+(ר' דוגמה בקטע "Tests" למטה). שני שדות חדשים על `PatentSurveyDraft`: `relationships`
+(`default_factory=list`, אופציונלי באמת -- יכולה שלא להיות כל פעילות עסקית) ו-`timeline_narrative`
+(`min_length=1`, אותה הנמקה כמו `tech_clusters`: לכל פטנט תמיד יש שורת ציר-זמן). `PatentAdvanceOut`
+(סכימה חדשה, שדה יחיד `advance_he`) הוא "אח קטן וזול" של
 `PatentClaimsOut` הקיים: 2-3 משפטים בעיה/פתרון/חידוש במקום 3-5 משפטי היקף-הגנה משפטי, לשימוש
 כשאין `claims_summary_he` קיים (ר' סעיף 3 להלן).
 

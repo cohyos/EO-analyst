@@ -41,6 +41,8 @@ function baseDetail(): InvestigationDetail {
     job_id: "10",
     item_id: null,
     question: "שאלת בדיקה",
+    item_title: null,
+    error: null,
     state: "running",
     rounds: 1,
     queries: 5,

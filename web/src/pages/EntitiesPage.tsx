@@ -461,7 +461,7 @@ function GraphPanel({ entityId }: { entityId: number }) {
               type="button"
               onClick={() => setExpanded(false)}
               aria-label="סגור גרף מלא"
-              className="absolute top-3 start-3 rounded-md p-1 text-fg-dim hover:bg-bg-sunken hover:text-fg"
+              className="tap-target absolute top-3 start-3 inline-flex items-center justify-center rounded-md p-1 text-fg-dim hover:bg-bg-sunken hover:text-fg"
             >
               <X size={16} aria-hidden="true" />
             </button>
@@ -487,14 +487,32 @@ export function EntitiesPage() {
         </p>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[22rem_1fr_20rem]">
+      {/*
+        Three breakpoints, on purpose:
+        - mobile (<768): single column, stacked list -> card -> graph.
+        - tablet (768-1279, `md`): 2 columns — card+list share a row, the
+          graph (least essential at a glance) drops to its own full-width row
+          below, rather than squeezing 3 desktop-width panes or falling back
+          to a single mobile column.
+        - desktop (>=1280, `xl`): the original 3-pane row.
+      */}
+      {/* `flex flex-col` (not CSS Grid) below `md` on purpose: a single-column
+          CSS Grid track here (`grid-cols-1`, auto-sized row, `min-h-0` items)
+          reproducibly collapses its panes to 0 height in WebKit/Safari —
+          `.overflow-y-auto` content (e.g. the entity list) then renders with
+          zero layout box, so real text is present in the DOM but
+          `innerText()`/visual hit-testing both see nothing there. Flexbox
+          doesn't have that failure mode, and mobile only ever needs simple
+          stacking anyway. Grid only kicks in from `md` up, where it's doing
+          actual multi-column placement (order/col-span). */}
+      <div className="flex min-h-0 flex-1 flex-col gap-4 md:grid md:grid-cols-2 xl:grid-cols-[22rem_1fr_20rem]">
         {/* Right pane (RTL first column): search + filters + list */}
-        <div className="min-h-0 lg:order-3">
+        <div className="min-h-0 md:order-2 xl:order-3">
           <EntityListPanel selectedId={entityId} onFiltersLoaded={setListCount} />
         </div>
 
         {/* Center pane: selected entity card */}
-        <div className="min-h-0 overflow-y-auto lg:order-2">
+        <div className="min-h-0 overflow-y-auto md:order-1 xl:order-2">
           {entityId == null || Number.isNaN(entityId) ? (
             <EmptyState
               title="בחר ישות מהרשימה"
@@ -509,8 +527,9 @@ export function EntitiesPage() {
           )}
         </div>
 
-        {/* Left pane: compact graph */}
-        <div className="min-h-0 overflow-y-auto lg:order-1">
+        {/* Left pane: compact graph — full-width row under the 2-column
+            tablet layout, back to its own column at xl/desktop. */}
+        <div className="min-h-0 overflow-y-auto md:order-3 md:col-span-2 xl:order-1 xl:col-span-1">
           {entityId == null || Number.isNaN(entityId) ? (
             <EmptyState title="אין ישות נבחרת" description="הגרף יופיע לאחר בחירת ישות." />
           ) : (

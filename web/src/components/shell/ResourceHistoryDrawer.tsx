@@ -136,7 +136,7 @@ export function ResourceHistoryDrawer({
           type="button"
           onClick={onClose}
           aria-label="סגור"
-          className="rounded-md p-1 text-fg-dim hover:bg-bg-sunken hover:text-fg"
+          className="tap-target inline-flex items-center justify-center rounded-md p-1 text-fg-dim hover:bg-bg-sunken hover:text-fg"
         >
           <X size={16} aria-hidden="true" />
         </button>

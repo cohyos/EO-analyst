@@ -118,7 +118,7 @@ export function InvestigationsListPage() {
                         (inv.item_title ? `אימות והרחבה: ${inv.item_title}` : `חקירה על פריט #${inv.item_id ?? "?"}`)}
                     </bdi>
                   </Link>
-                  {inv.state === "failed" && inv.error && (
+                  {inv.state === "error" && inv.error && (
                     <div className="mt-1 text-xs text-danger" title={inv.error}>
                       <bdi>שגיאה: {inv.error.length > 90 ? inv.error.slice(0, 90) + "…" : inv.error}</bdi>
                     </div>

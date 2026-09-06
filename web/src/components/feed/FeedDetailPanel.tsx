@@ -83,7 +83,7 @@ export function FeedDetailPanel({
         <button
           type="button"
           onClick={onClose}
-          className="rounded p-1.5 text-fg-muted hover:bg-bg-sunken"
+          className="tap-target inline-flex items-center justify-center rounded p-1.5 text-fg-muted hover:bg-bg-sunken"
           aria-label="סגור פרטים"
         >
           <X size={16} aria-hidden="true" />

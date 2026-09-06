@@ -219,7 +219,7 @@ export function EntityGraph({
               type="button"
               onClick={() => setSelectedEdge(null)}
               aria-label="סגור"
-              className="text-fg-dim hover:text-fg"
+              className="tap-target inline-flex items-center justify-center text-fg-dim hover:text-fg"
             >
               <X size={14} aria-hidden="true" />
             </button>

@@ -23,7 +23,7 @@ export function ToastStack({
 }) {
   if (toasts.length === 0) return null;
   return (
-    <div className="fixed bottom-4 start-4 z-50 flex flex-col gap-2">
+    <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] start-4 z-50 flex flex-col gap-2">
       {toasts.map((toast) => (
         <div
           key={toast.id}
@@ -48,7 +48,7 @@ export function ToastStack({
             type="button"
             onClick={() => onDismiss(toast.id)}
             aria-label="סגור התראה"
-            className="rounded p-0.5 text-fg-dim hover:bg-bg-sunken"
+            className="tap-target inline-flex items-center justify-center rounded p-0.5 text-fg-dim hover:bg-bg-sunken"
           >
             <X size={14} aria-hidden="true" />
           </button>

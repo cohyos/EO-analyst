@@ -5,8 +5,21 @@
 // always fetched from the network untouched — this is a live-data triage
 // tool, stale cached data would be actively misleading.
 
-const CACHE_NAME = "eoa-shell-v1";
-const SHELL_URLS = ["/", "/manifest.webmanifest", "/favicon.svg"];
+// v2: added the iOS/PWA icon set (apple-touch-icon + manifest 192/512 +
+// maskable) to the cached shell — bumping the cache name forces `install` to
+// re-run `addAll` so an already-installed SW picks up the new list instead
+// of quietly missing these on the next cold/offline start.
+const CACHE_NAME = "eoa-shell-v2";
+const SHELL_URLS = [
+  "/",
+  "/manifest.webmanifest",
+  "/favicon.svg",
+  "/apple-touch-icon.png",
+  "/icon-192.png",
+  "/icon-512.png",
+  "/icon-192-maskable.png",
+  "/icon-512-maskable.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

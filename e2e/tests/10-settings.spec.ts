@@ -30,7 +30,12 @@ test.describe("Settings screen (/settings)", () => {
         expect((await textarea.inputValue()).length).toBeGreaterThan(0);
       }).toPass({ timeout: 10_000 });
 
-      const saveBtn = page.getByRole("button", { name: "שמור" });
+      // exact: true -- the Models section above also has its own "שמור שרשראות"
+      // (ChainsEditor) button; a plain substring match against "שמור" resolves
+      // to both once ChainsEditor has rendered (a race the faster/Chromium
+      // projects usually win before this line runs, but not guaranteed —
+      // this locator should be deterministic regardless of engine/timing).
+      const saveBtn = page.getByRole("button", { name: "שמור", exact: true });
       const [response] = await Promise.all([
         page.waitForResponse(
           (r) => r.url().includes("/api/settings/config") && r.request().method() === "PUT",
