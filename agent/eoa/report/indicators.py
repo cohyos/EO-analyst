@@ -75,6 +75,75 @@ def extract_key_terms(text_he: str | None) -> set[str]:
     return {m.casefold() for m in _KEY_TERM_RE.findall(text_he or "")}
 
 
+_TOKEN_RE = re.compile(r"[A-Za-z֐-׿0-9][A-Za-z֐-׿0-9\-״\"]{2,}")
+_STOP_HE = {
+    "להערכתנו",
+    "צפויה",
+    "צפוי",
+    "צפויים",
+    "עשויה",
+    "עשוי",
+    "בהתאם",
+    "ממועד",
+    "הדיווח",
+    "הדוח",
+    "תוך",
+    "כחודשיים",
+    "מה",
+    "שמאפשר",
+    "לאור",
+    "אחר",
+    "על",
+    "פני",
+    "בין",
+    "של",
+    "את",
+    "עד",
+    "לא",
+    "פחות",
+    "יותר",
+    "זו",
+    "זה",
+    "עם",
+}
+
+
+def _content_tokens(text: str) -> set[str]:
+    toks = set()
+    for t in _TOKEN_RE.findall(text or ""):
+        t = t.strip('״"').casefold()
+        if t in _STOP_HE or len(t) < 3:
+            continue
+        # strip the Hebrew definite-article / conjunction prefixes so "הכטב״מים" ~ "כטב״מים"
+        for pref in ("וה", "שה", "ה", "ו", "ל", "ב", "מ"):
+            if t.startswith(pref) and len(t) - len(pref) >= 3:
+                t = t[len(pref) :]
+                break
+        toks.add(t)
+    return toks
+
+
+def same_indicator(a: str, b: str) -> bool:
+    """Round-6 judge (D6 worst #7): 10 watchlist rows for 3 distinct indicators -- the model
+    rewords the same indicator each issue ("אספקת 280 הכטב״מים לטייוואן צפויה להתפרס ... עד 2029"
+    vs "... להתבצע בהדרגה ... עד 2029"), and a pure character ratio at 0.85 misses that. Two texts
+    are the same indicator when their character similarity clears the old threshold OR their
+    content-token overlap coefficient (vs the smaller set; Hebrew prefixes stripped, numbers
+    included) is >= 0.5, or >= 0.3 when they also share two numbers (amount + year)."""
+    na, nb = _normalize_text(a), _normalize_text(b)
+    if not na or not nb:
+        return False
+    if _similarity(na, nb) >= _DEDUPE_SIMILARITY:
+        return True
+    ta, tb = _content_tokens(na), _content_tokens(nb)
+    if len(ta) < 3 or len(tb) < 3:
+        return False
+    shared = ta & tb
+    overlap = len(shared) / min(len(ta), len(tb))  # overlap coefficient: verbs/adverbs differ, subjects don't
+    shared_numbers = sum(1 for t in shared if t.isdigit())
+    return overlap >= 0.5 or (shared_numbers >= 2 and overlap >= 0.3)
+
+
 def _item_matches_indicator(text_he: str, item: dict[str, Any]) -> bool:
     terms = extract_key_terms(text_he)
     if not terms:
@@ -142,16 +211,19 @@ def _upsert_open(
     touched_ids: set[int] = set()
     newly_created: list[dict[str, Any]] = []
     with connection(timeout=5) as conn, conn.cursor() as cur:
+        accepted_this_issue: list[str] = []
         for text in texts:
             norm = _normalize_text(text)
             if not norm:
                 continue
+            if any(same_indicator(text, prev) for prev in accepted_this_issue):
+                continue  # the same issue's outlook restated one indicator twice
+            accepted_this_issue.append(text)
             match = next(
                 (
                     row
                     for row in still_open
-                    if row["id"] not in touched_ids
-                    and _similarity(norm, _normalize_text(row["text_he"])) >= _DEDUPE_SIMILARITY
+                    if row["id"] not in touched_ids and same_indicator(text, row["text_he"])
                 ),
                 None,
             )
