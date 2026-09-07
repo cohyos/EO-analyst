@@ -365,7 +365,7 @@ class LlmProvidersCfg(BaseModel):
 
     mode: str = "local"  # "local" | "cloud" -- global switch, applies pipeline-wide (U8-א)
     allow_cloud: bool = True
-    interactive_default: str = "ollama"  # "ollama" | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
+    interactive_default: str = "ollama"  # "ollama" | "chain" (the role's fallback chain) | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
     timeout_s: int = 120
     cli: dict[str, CliProviderCfg] = Field(
         default_factory=lambda: {
