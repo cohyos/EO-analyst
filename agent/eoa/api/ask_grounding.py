@@ -318,6 +318,7 @@ _PROPER_NOUN_RE = re.compile(r"\b[A-Z][A-Za-z0-9]{1,}(?:[-\s][A-Z][A-Za-z0-9]{1,
 # needing the model to follow the gershayim rule in the first place.
 _HEBREW_LETTERS = "א-ת"
 _QUOTED_RE = re.compile(rf'(?<![{_HEBREW_LETTERS}])"([^"\n]{{3,80}})"(?![{_HEBREW_LETTERS}])')
+_HEBREW_LETTER_RE = re.compile(f"[{_HEBREW_LETTERS}]")
 
 _MONEY_RE = re.compile(
     r"[$€₪]\s?\d[\d,.]*\s?(?:[MBK]\b)?"
@@ -604,6 +605,25 @@ def _is_real_sentence_terminator(line: str, pos: int) -> bool:
         return True
     if pos > 0 and pos + 1 < len(line) and line[pos - 1].isdigit() and line[pos + 1].isdigit():
         return False  # decimal point, e.g. the "." in "1.53" or "12.7"
+    # Round 12 (docs/qa/loop/round_11_judge.md worst #1, live Q6/AUSA 2026's "סי." fragment,
+    # logged unaddressed since round 7): a dotted, transliterated Hebrew acronym or place name
+    # ("די.סי." for "D.C.", "יו.אס.סי." for "U.S.C.", "אי.אר." for "A.R.") glues each 1-3-letter
+    # Hebrew segment straight onto the next with zero whitespace anywhere in the run -- e.g.
+    # "בוושינגטון, די.סי." has no space between "די." and "סי.". A "." sitting directly between
+    # two Hebrew letters (no space on either side, exactly like the digit-digit decimal case just
+    # above) is therefore never a real sentence boundary. This check runs independently at every
+    # "." in the run (each match is its own call from `_iter_units`'s loop), so a 3+-segment chain
+    # ("יו.אס.סי.") is handled the same way without any special-casing of chain length -- only the
+    # run's own final "." (followed by real whitespace, not another Hebrew letter) is left as the
+    # real terminator, so "בוושינגטון, די.סי." stays one glued token and the sentence around it
+    # stays intact end-to-end instead of shedding a bare "סי." fragment.
+    if (
+        pos > 0
+        and pos + 1 < len(line)
+        and _HEBREW_LETTER_RE.match(line[pos - 1])
+        and _HEBREW_LETTER_RE.match(line[pos + 1])
+    ):
+        return False
     j = pos
     while j > 0 and line[j - 1].isascii() and line[j - 1].isalpha():
         j -= 1
@@ -2085,7 +2105,18 @@ def strip_template_phrases(answer_text: str) -> tuple[str, int]:
             # it, or this unit's surviving text would glue directly onto the previous unit's own
             # trailing punctuation with no space at all.
             leading_ws = unit_text[: len(unit_text) - len(unit_text.lstrip())]
-            if leading_ws and not cleaned[:1].isspace():
+            # Round 12 (docs/qa/loop/round_11_judge.md worst #6, live Q7's "stray leading space
+            # before an otherwise complete sentence"): the re-attach above is only correct when
+            # `unit_text` truly follows *inline* content on the same physical line -- that is the
+            # only case where its own leading whitespace is a real separator from the previous
+            # unit. When this unit is instead the first thing on its own line (right after a
+            # heading or a blank line -- `answer_text[start - 1]` is a newline, or `start == 0`),
+            # any leading whitespace it carried was never a separator; it was incidental raw-model
+            # formatting noise the strippers above already discarded correctly, and blindly
+            # re-adding it here is exactly what produced the live bug -- a rendered line/paragraph
+            # starting with a bare stray space.
+            follows_inline_content = start > 0 and answer_text[start - 1] != "\n"
+            if leading_ws and follows_inline_content and not cleaned[:1].isspace():
                 cleaned = leading_ws + cleaned
             replacements.append((start, end, cleaned))
         else:
@@ -2128,6 +2159,56 @@ def ensure_headings_on_own_line(answer_text: str) -> str:
             out_lines.append(line[m.start() :])
         else:
             out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 12 (docs/qa/loop/round_11_judge.md worst #6, live Q7's "stray leading space before an
+# otherwise complete sentence"): the trace (see `strip_template_phrases`'s own round-12 fix above)
+# found and closed one concrete producer -- a phrase-stripper's leading-whitespace re-attachment
+# firing on a section's very first unit, where that whitespace was never a real separator. But the
+# module has several other unit-join/caveat-relocation/sanitizer call sites (see the module note
+# above `strip_template_phrases`, and the various `.lstrip()` call sites elsewhere in this module)
+# that each independently assemble text by concatenation, any one of which could produce the same
+# cosmetic shape in a way not yet found live. Belt-and-suspenders, content-blind, and
+# order-independent by design (never removes/rewrites real content, only trims whitespace at each
+# line's own two ends) -- meant to run last, after every other guard, exactly like
+# `ensure_headings_on_own_line` above. Skips code-fence content entirely (an odd leading/trailing
+# space inside a fenced block could be meaningful, e.g. inside a quoted snippet) and never touches
+# a line's *internal* spacing (table-cell padding, multi-word prose) -- only ever the two ends of
+# each line, which is exactly and only where the live artifact appeared.
+# ---------------------------------------------------------------------------------------------
+
+_CODE_FENCE_LINE_RE = re.compile(r"^\s*```")
+
+
+def strip_stray_line_edges(answer_text: str) -> str:
+    """Strip leading/trailing spaces and tabs from every line of ``answer_text``, except lines
+    inside a fenced code block (```` ``` ````-delimited, toggled on the fence marker lines
+    themselves, which are also left untouched). Never touches a line's own internal content --
+    only its two ends -- so table-row cell padding and ordinary multi-word prose are unaffected. A
+    no-op (returns ``answer_text`` unchanged, including identity for the common case) when nothing
+    would change."""
+    if not answer_text or "\n" not in answer_text:
+        return answer_text.strip(" \t") if answer_text else answer_text
+    lines = answer_text.split("\n")
+    out_lines: list[str] = []
+    in_fence = False
+    changed = False
+    for line in lines:
+        if _CODE_FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+            out_lines.append(line)
+            continue
+        if in_fence:
+            out_lines.append(line)
+            continue
+        stripped = line.strip(" \t")
+        if stripped != line:
+            changed = True
+        out_lines.append(stripped)
+    if not changed:
+        return answer_text
     return "\n".join(out_lines)
 
 
@@ -2190,6 +2271,78 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\S+", text))
 
 
+# ---------------------------------------------------------------------------------------------
+# Round 12 (docs/qa/loop/round_11_judge.md worst #1, live Q6/AUSA 2026's "סי." fragment, logged
+# unaddressed since round 7): the two leading-unit checks above (and `_is_real_sentence_terminator`
+# 's own new dotted-Hebrew-acronym rule, which closes the specific root cause -- "בוושינגטון,
+# די.סי." no longer splits at all) both only ever look at a *section's own first unit*. But the
+# live "סי." fragment itself sat mid-flow, "between the main paragraph and the gaps section" per
+# the round-11 judge -- an orphan left behind once an *earlier*, unrelated guard removed the unit
+# in front of it ("...בוושינגטון, די." was dropped elsewhere; "סי." itself, on its own, is a
+# syntactically complete-looking unit -- ends on real terminal punctuation, is not the section's
+# only remaining unit -- so neither check above ever had a reason to touch it). This is a second,
+# independent, content-blind safety net that runs over *every* plain-prose unit in the whole
+# answer (never a bullet or numbered-list item -- same exception as above, for the same reason: a
+# short-but-complete bullet like "- לא ידוע." is a normal, valid answer shape here): a unit is a
+# "meaningless short fragment" -- and is dropped outright, never merged (there's no way to guess
+# which neighbour it belonged to once it's already orphaned) -- when it is shorter than
+# :data:`_MIN_ORPHAN_FRAGMENT_WORDS` words, ends on a literal "." (never "!"/"?"/gershayim/a closing
+# quote -- those read as complete on their own even when short, e.g. a bare "לא!"), and contains no
+# word of at least :data:`_MIN_ORPHAN_FRAGMENT_WORD_LEN` Hebrew-or-Latin letters (digits, brackets,
+# and punctuation never count towards a word's length) -- i.e. no verb/noun long enough to carry
+# any meaning on its own. "סי." (one word, 2 letters) matches this exactly; "לא ידוע." (two words,
+# "ידוע" is 4 letters) does not, and is never touched, matching the exception documented above.
+# ---------------------------------------------------------------------------------------------
+
+_MIN_ORPHAN_FRAGMENT_WORDS = 3
+_MIN_ORPHAN_FRAGMENT_WORD_LEN = 3
+_FRAGMENT_LETTER_WORD_RE = re.compile(rf"[A-Za-z{_HEBREW_LETTERS}]+")
+
+
+def _is_meaningless_short_fragment(unit_text: str) -> bool:
+    """Whether ``unit_text`` (already an :func:`_iter_units` span, whitespace included) is a bare,
+    meaningless leftover -- see the module note above for the full rationale and the live "סי."
+    repro this exists to catch. Never true for a bullet/numbered-list item; callers filter those
+    out before calling this (see :func:`_drop_orphan_short_fragments`), matching every other check
+    in this module's own convention rather than re-checking it here."""
+    stripped = unit_text.strip()
+    if not stripped.endswith("."):
+        return False
+    if _word_count(stripped) >= _MIN_ORPHAN_FRAGMENT_WORDS:
+        return False
+    letter_words = _FRAGMENT_LETTER_WORD_RE.findall(stripped)
+    # No letter-word at all (bare punctuation left over from something else entirely, e.g. a lone
+    # "." out of a "(...)"-style ellipsis) is a different, out-of-scope cosmetic artifact -- this
+    # check only ever targets a unit that *has* a word, just not a long enough one (the live "סי."
+    # shape always has exactly one short letter-word).
+    if not letter_words:
+        return False
+    return not any(len(w) >= _MIN_ORPHAN_FRAGMENT_WORD_LEN for w in letter_words)
+
+
+def _drop_orphan_short_fragments(text: str) -> tuple[str, int]:
+    """Remove every :func:`_is_meaningless_short_fragment` unit anywhere in ``text`` -- not just a
+    section's leading unit, see the module note above. Returns ``(new_text, removed_count)``,
+    matching every other guard's contract in this module; a no-op (``removed_count == 0``,
+    ``new_text is text``... in value, not identity) on a blank ``text`` or when nothing qualifies."""
+    if not text or not text.strip():
+        return text, 0
+    to_replace: list[tuple[int, int, str]] = []
+    for s, e in _iter_units(text):
+        stripped = text[s:e].strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("-", "*")) or _NUMBERED_ITEM_RE.match(stripped):
+            continue
+        if _is_meaningless_short_fragment(stripped):
+            to_replace.append((s, e, ""))
+    if not to_replace:
+        return text, 0
+    new_text = _renumber_lists(_tidy_whitespace(_replace_spans(text, to_replace)))
+    new_text = _drop_empty_headings(new_text)
+    return new_text, len(to_replace)
+
+
 def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
     """Drop a dangling leading fragment from the very start of ``answer_text`` (the unheaded
     "תשובה ישירה" lead) or from immediately under any ``#``-heading, then drop any heading left with
@@ -2226,7 +2379,15 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
     removed. When the token is stripped and at least :data:`_MIN_CROSS_REF_REMAINDER_WORDS` words
     remain, the remainder replaces the unit in place (`"בנוסף, X" -> "X"`) -- the now-antecedent-free
     reference is gone, and the rest of the sentence stands on its own; when fewer words remain, the
-    whole unit is dropped instead, exactly like the two checks above."""
+    whole unit is dropped instead, exactly like the two checks above.
+
+    Round 12 (docs/qa/loop/round_11_judge.md worst #1): after the three leading-unit checks above
+    run, a final pass (:func:`_drop_orphan_short_fragments`) sweeps the *entire* resulting text --
+    not just each section's own first unit -- for a bare, meaningless leftover unit anywhere in the
+    flow (the live "סי." shape: a short, orphaned fragment some *other*, earlier guard's removal
+    left standing on its own, not this section's leading unit at all). See that function's own
+    docstring for the exact criteria; its removals are folded into this function's own
+    ``removed_count``."""
     if not answer_text or not answer_text.strip():
         return answer_text, 0
 
@@ -2266,12 +2427,20 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
             else:
                 to_replace.append((*span, ""))
 
-    if not to_replace:
-        return answer_text, 0
+    if to_replace:
+        new_text = _renumber_lists(_tidy_whitespace(_replace_spans(answer_text, to_replace)))
+        new_text = _drop_empty_headings(new_text)
+        removed = len(to_replace)
+    else:
+        new_text = answer_text
+        removed = 0
 
-    new_text = _renumber_lists(_tidy_whitespace(_replace_spans(answer_text, to_replace)))
-    new_text = _drop_empty_headings(new_text)
-    return new_text, len(to_replace)
+    new_text, orphan_removed = _drop_orphan_short_fragments(new_text)
+    removed += orphan_removed
+
+    if removed == 0:
+        return answer_text, 0
+    return new_text, removed
 
 
 def _drop_empty_headings(text: str) -> str:

@@ -866,6 +866,15 @@ async def ask(body: AskRequest) -> StreamingResponse:
             # the overwhelming common case, defense-in-depth for the one case this round's own live
             # sample actually hit.
             answer_text = _strip_residual_sources_block(answer_text)
+            # Round 12 (docs/qa/loop/round_11_judge.md worst #6, live Q7's "stray leading space
+            # before an otherwise complete sentence"): a belt-and-suspenders, content-blind pass
+            # that trims stray leading/trailing whitespace from every line -- see
+            # `ask_grounding.strip_stray_line_edges`'s own docstring for the mechanics and
+            # `ask_grounding.strip_template_phrases`'s round-12 fix for the one concrete producer
+            # this round traced and closed at the source. Never rewrites/removes real content, only
+            # trims each line's own two ends, so it is always safe to run last, after every guard
+            # above (including the two normalisation passes just above it).
+            answer_text = ask_grounding.strip_stray_line_edges(answer_text)
             # Round-6 judge (D5 worst #2/#3): the guards used to emit one `answer_final` per stage
             # that changed the text -- none at all when nothing changed (Q6), several with
             # intermediate/truncated texts when the anchor demotion and the citation repair both
