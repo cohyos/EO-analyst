@@ -235,3 +235,17 @@ product_line}.py`, `tests/unit/test_reports_round12.py`, `tests/unit/test_report
   (`no_row_repeated_across_tables`'s cross-table false positive; the duplicate-sentence scan not
   exempting the auto-generated cross-table dedup note) are untouched -- not this round's assigned
   findings.
+
+### Lead fixes (round 12) -- documentation of commits made outside the agent packages
+
+J12 flagged that two round-12 changes shipped without a status section. They were lead commits:
+
+- `11aeebc` -- patent cluster headings: `_cpc_label` now returns CPC-class Hebrew titles with the code in
+  parentheses (e.g. "מיגון והגנה אקטיבית (F41H11)") instead of a bare code, and no longer doubles the
+  "אשכול טכנולוגי:" prefix (J11 D8 worst #2: 8/9 headings were raw codes). Both surveys were rebuilt.
+- `485348d` + `02561e1` -- D8 checker: `no_unclassified_cluster_when_patents_exist` now treats a cluster as
+  unclassified when the label is in the heading or listed as a cluster bullet/table cell; prose that
+  mentions an unclassified assignee inside a classified cluster no longer trips it. Both surveys score 100.
+- `5fa572f` -- investigation detail normaliser passes security-review / blocked-reason / confidence fields
+  through (frontend), tested via the real request path.
+- `bb4edb9` -- test expectation for the unknown-CPC fallback label.
