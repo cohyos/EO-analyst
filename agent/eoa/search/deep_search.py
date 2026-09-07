@@ -822,7 +822,7 @@ def _low_quality_page_reason(text: str, title: str) -> str | None:
 #: fetched page itself still hedges the matter -- see ``_source_text_is_hedged``.
 _HEDGE_MARKERS_HE = ("צפוי", "שוקל", "טרם")
 _HEDGE_MARKERS_EN = ("expected", "considering", "not yet")
-_HEDGE_WORD_RE = re.compile(r"\bmay\b", re.IGNORECASE)
+_HEDGE_WORD_RE = re.compile(r"\bmay\b")  # lowercase only: "May 2026" is a month, not a hedge
 
 
 def _source_text_is_hedged(text: str) -> bool:
