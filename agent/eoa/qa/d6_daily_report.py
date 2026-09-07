@@ -64,6 +64,7 @@ _SECTION_ANCHORS = {
 # today's already-rendered files until the parallel work lands.
 # ---------------------------------------------------------------------------------------------
 
+_TABLES_ONLY_MARKER_HE = "לא זוהו בתקופה זו פריטי חדשות חדשים"  # eoa.report.daily tables-only system note
 _BLUF_HEADING_HE = "שורה תחתונה"
 _MAX_BLUF_SENTENCES = 2
 _MAX_BLUF_WORDS = 40
@@ -484,6 +485,26 @@ def score_D6(  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md namin
         _no_row_repeated_across_tables_check(text),
         _heading_budget_check(md_path, text),
     ]
+    # Round 10 (2026-09-07): a tables-only daily (no red/orange/yellow items in the window -- the
+    # builder's own honest marker) has no BLUF, exec-summary narrative, domain sections or outlook
+    # by design, exactly like an empty BD territory in D7; the structural checks are not applicable.
+    if _TABLES_ONLY_MARKER_HE in text:
+        na = {
+            "every_factual_exec_summary_sentence_cited",
+            "bluf_present_and_short",
+            "israel_tech_tenders_sections_present",
+            "israel_single_table_with_type_column",
+            "outlook_likelihood_and_confidence_separated",
+            "what_changed_section_present",
+            "exec_summary_no_filler_phrases",
+            "heading_count_within_budget",
+        }
+        checks = [
+            Check(c.name, True, weight=c.weight, evidence="tables-only daily -- not applicable")
+            if c.name in na and not c.passed
+            else c
+            for c in checks
+        ]
     if monthly_path is not None and monthly_path.exists():
         checks.append(_monthly_structured_check(monthly_path))
 

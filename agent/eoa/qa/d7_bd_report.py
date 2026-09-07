@@ -314,7 +314,12 @@ def _competitor_promotion_hits(actions_text: str, competitor_names: list[str]) -
     prose (which legitimately names competitors using the same verbs in a purely descriptive
     sense, e.g. "השוק מציג התעצמות טכנולוגית ... Leonardo DRS" -- not a recommendation at all)."""
     hits = []
-    for line in actions_text.splitlines():
+    for raw_line in actions_text.splitlines():
+        # round 10 (live bd_in): the competitor was named in the row's rationale column
+        # ('התרחבות תוכניות ה-AeroVironment'), not in the recommended action -- judge the
+        # priority + action cells only; prose lines are judged whole
+        cells = [c.strip() for c in raw_line.strip().strip("|").split("|")]
+        line = " ".join(cells[:2]) if raw_line.strip().startswith("|") and len(cells) >= 3 else raw_line
         if "המתחרה" in line or "מעקב" in line or "מתחרים" in line:
             # round 7 (live bd_de): an action that tracks/monitors a competitor's presence
             # ('למעקב אחר נוכחות המתחרה') names it without promoting it
