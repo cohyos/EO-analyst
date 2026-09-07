@@ -435,12 +435,43 @@ def render_delta_section_he(result: DeltaResult) -> str:
                 lines.append(
                     f"- {_label_raw_subdomain_keys(td.title_he)}: {status_he} (עוצמה {td.current_strength}){marker}"
                 )
-            else:  # vanished
-                lines.append(
-                    f"- {_label_raw_subdomain_keys(td.title_he)}: {status_he} (הייתה בעוצמה {td.previous_strength}){marker}"
-                )
+            else:  # vanished -- rendered after the loop (capped, see below)
+                continue
+
+    # CR round 14 (lead): vanished trends are re-displayed PREVIOUS titles -- after the trend
+    # engine rename and with an August issue built on a thin corpus, 54 of them appeared here
+    # (Hezbollah / Europe / IDF "clusters" in secondary domains). Drop vanished trends of the
+    # secondary/other domains, relabel the legacy "זינוק" prefix, cap at 5 by prior strength
+    # and summarise the rest in one line.
+    vanished = [td for td in result.trend_deltas if td.status == "vanished"]
+    vanished = [td for td in vanished if not _is_secondary_domain_title(td.title_he)]
+    vanished.sort(key=lambda td: (-(td.previous_strength or 0), td.title_he or ""))
+    for td in vanished[:_MAX_VANISHED_ROWS]:
+        lines.append(
+            f"- {_legacy_trend_title_he(_label_raw_subdomain_keys(td.title_he))}: "
+            f"{_STATUS_LABELS_HE['vanished']} (הייתה בעוצמה {td.previous_strength})"
+        )
+    if len(vanished) > _MAX_VANISHED_ROWS:
+        lines.append(f"- ועוד {len(vanished) - _MAX_VANISHED_ROWS} מגמות מהדוח הקודם לא חזרו בתקופה זו.")
 
     return "\n".join(lines)
+
+
+_MAX_VANISHED_ROWS = 5
+_SECONDARY_DOMAIN_MARKERS_HE = ("תחומים נוספים", "תחומים משיקים", "(Secondary)")
+
+
+def _is_secondary_domain_title(title: str | None) -> bool:
+    t = title or ""
+    return any(m in t for m in _SECONDARY_DOMAIN_MARKERS_HE)
+
+
+def _legacy_trend_title_he(title: str) -> str:
+    """Neutralise pre-round-14 trend titles that are re-displayed from an older issue."""
+    t = title.replace("מגמה: ", "", 1)
+    t = t.replace("זינוק בכמות הפריטים בתחום", "פעילות בתחום")
+    t = t.replace("פעילות מוגברת סביב", "דיווחים סביב")
+    return t
 
 
 def delta_extra_section(result: DeltaResult) -> dict[str, Any]:

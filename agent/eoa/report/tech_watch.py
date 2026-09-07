@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from eoa.db import connection
+from eoa.report.claims_gate import soften_text
 
 if TYPE_CHECKING:
     from eoa.pipeline.tech_watch import SubdomainAggregate
@@ -129,7 +130,7 @@ def daily_tech_watch_table(
             it.get("title") or "—",
             _actor_label(it.get("tech_actor_kind")),
             f"{it.get('trl') or '—'} / {_maturity_label(it.get('tech_maturity'))}",
-            it.get("so_what_he") or it.get("summary_he") or "—",
+            soften_text(it.get("so_what_he") or it.get("summary_he")) or "—",
             f"[{it['n']}]",
         ]
         for it in items
@@ -157,7 +158,7 @@ def weekly_tech_watch_tables(
                 str(agg.new_count),
                 ", ".join(agg.actors[:4]) or "—",
                 f"{arrow}{delta}",
-                agg.so_what_he or "—",
+                soften_text(agg.so_what_he) or "—",
             ]
         )
     if agg_rows:

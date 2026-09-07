@@ -34,6 +34,7 @@ from typing import Any
 import structlog
 
 from eoa.db import connection
+from eoa.report.claims_gate import soften_text
 
 log = structlog.get_logger(__name__)
 
@@ -210,7 +211,7 @@ def _merged_israel_table(
                 it.get("title") or "—",
                 type_cell,
                 ", ".join((it.get("entities_mentioned") or [])[:4]) or "—",
-                it.get("so_what_he") or it.get("summary_he") or "—",
+                soften_text(it.get("so_what_he") or it.get("summary_he")) or "—",
                 f"[{it['n']}]",
             ]
         )
