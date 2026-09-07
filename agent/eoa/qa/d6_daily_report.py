@@ -364,6 +364,14 @@ def _appendix_urls(sections: list[tuple[str, str]]) -> list[str]:
 
 
 def _uncited_factual_sentences(text: str) -> list[str]:
+    # Round 8 (2026-09-07, live daily): the italic '*הערכת האנליסט: ...*' note inside the executive
+    # summary is analyst judgement (format rule 3 exempts it in chat and the report QA gate alike);
+    # its restated counts are not sourced claims. Drop those lines before the sentence scan.
+    text = "\n".join(
+        ln
+        for ln in (text or "").splitlines()
+        if not ln.strip().startswith(("*הערכת האנליסט", "הערכת האנליסט"))
+    )
     bad = []
     for sentence in split_sentences(text):
         if is_factual(sentence) and not citations_in(sentence):

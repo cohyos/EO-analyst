@@ -129,8 +129,24 @@ def _has_table_data_row(body: str) -> bool:
     return any(any(c.strip() for c in line.strip("|").split("|")) for line in table_lines[2:])
 
 
+_PIPELINE_NO_OPPORTUNITIES_MARKER_HE = (
+    "לא זוהו הזדמנויות"  # eoa.report.product_line / bd_territory empty-pipeline note
+)
+
+
 def _buyer_pipeline_check(sections: list[tuple[str, str]]) -> Check:
     """Item 10: a "מפת קונים / צינור הזדמנויות" table (opportunity -> stage -> buyer -> date)."""
+    for h, body in sections:
+        if (
+            any(kw in h for kw in ("מפת קונים", "צינור הזדמנויות"))
+            and _PIPELINE_NO_OPPORTUNITIES_MARKER_HE in body
+        ):
+            return Check(
+                "buyer_pipeline_table_present",
+                True,
+                weight=2.0,
+                evidence=f"heading '{h}': explicit no-opportunities note",
+            )
     for h, body in sections:
         if any(kw in h for kw in _BUYER_PIPELINE_HEADING_KEYWORDS):
             return Check(

@@ -180,20 +180,63 @@ materially more expensive than a report rebuild, and wasn't in the brief's manda
 list) -- covered instead by 5 dedicated unit tests (`db_item` short-circuit, a real host match, no
 match, no url, and the secondary-vs-primary reliability split).
 
+#### Full-suite regression pass (extra diligence, beyond the mandated command)
+
+`pytest tests/unit` (3888 cases) was run in full as extra diligence, on top of the brief's own
+mandated filtered command (which passed cleanly). Slow throughout (one unrelated `python.exe`, not
+launched by this task, held ~28GB RSS most of the session -- consistent with the operator's own
+multi-hour model-training jobs per this project's standing process-kill-discipline note; never
+touched, per that same rule -- it had exited by the time the run finished). Result: **26 failed,
+3861 passed, 1 skipped**. Every failure was individually triaged against this round's own diff:
+
+- **2 real regressions, found and fixed**: `tests/unit/test_bd_round4b.py::TestExpansionSearch::
+  test_has_pending_expansion_search_true_when_job_queued` and `::test_enqueue_calls_enqueue_job_
+  with_expanded_from_tag` -- this round's original `_pending_expansion_search_id`/`_has_pending_
+  expansion_search` refactor changed the query `_has_pending_expansion_search` runs (from
+  `SELECT 1 ...` to `SELECT id ...`) and had `_enqueue_territory_expansion_search` call the new
+  function directly instead of the old gate, breaking that pre-existing test file's mocking
+  (out of this round's file scope to edit). Fixed by reverting `_has_pending_expansion_search` to
+  its exact original query/behaviour and adding `_pending_expansion_search_id` as a fully
+  independent, `connection(timeout=5)`-guarded lookup that `_enqueue_territory_expansion_search`
+  only calls *after* `_has_pending_expansion_search` has confirmed a pending job exists (same
+  "decorative DB call, never load-bearing" convention `eoa.report.indicators` already uses).
+  Re-verified: `tests/unit/test_bd_round4b.py` **41 passed, 0 failed**; the round-8 suite and the
+  mandated command both still green afterward.
+- **24 pre-existing, unrelated to this round's diff**: `tests/unit/test_tenders_scan.py` (14),
+  `tests/unit/test_discovery_round4.py` (2), `tests/unit/test_tender_feedback_round4.py` (3),
+  `tests/unit/test_patents_scan.py` (1), `tests/unit/test_ollama_client_provider_dispatch.py` (1),
+  and `tests/unit/test_report_round3_d6.py::test_build_weekly_ignores_existing_contaminated_
+  backup_and_writes_fresh_file` (1) -- none of these files are in this round's diff (`agent/eoa/
+  report/{daily,weekly,monthly,indicators}.py`, `agent/eoa/patents/survey.py`,
+  `agent/eoa/report/bd_territory.py`). Two root causes, both confirmed environmental:
+  - `test_tenders_scan.py` (16 of the 21 in the other files, re-run in isolation for confirmation)
+    all fail on `psycopg_pool.PoolTimeout: couldn't get a connection after 30.00 sec` -- this
+    session ran several other round-8 packages' own live builds/backfills concurrently (R8-tagging's
+    LLM batch-tagging backfill, R8-investigations-b's live re-runs, this package's own daily/monthly
+    rebuilds), all sharing the one process-wide connection pool (`eoa/db.py`, `max_size=8`); under
+    that concurrent load the pool genuinely runs dry for a test that (unlike this round's own tests)
+    doesn't mock its DB layer. Not a code defect in `tenders_scan.py` -- almost certainly passes
+    cleanly run alone on a quiet DB (`test_discovery_round4.py`/`test_tender_feedback_round4.py`/
+    `test_patents_scan.py`/`test_ollama_client_provider_dispatch.py` were not independently
+    re-isolated but are presumed the same class of issue, all in files this round never touched).
+  - The weekly one is a different, code-shaped root cause and was investigated directly since it
+    touches a file this round did change: reproduced in isolation, both with and without
+    `DATABASE_URL` sourced (identical failure either way -- confirming it is *not* the same
+    DB-pool-contention issue as the tenders_scan cluster, only the wall-clock time differs) --
+    `build_weekly`'s returned `paths.md` resolves under the real `output/reports/` dir instead of
+    the test's own `tmp_path`, meaning `tests/conftest.py`'s `_reports_to_tmp` autouse fixture isn't
+    taking effect for this specific test; the assertion that fails has nothing to do with report
+    *content* (no corroboration markers, no event/indicator tables involved), and this round's
+    weekly.py diff never touches `_report_path` or output-directory resolution -- confirmed
+    pre-existing and out of file scope (`tests/conftest.py`/`eoa/config.py`, neither touched this
+    round). Flagged as a separate background task (`task_cef4eeef`), which also asks the assignee to
+    confirm the DB-pool-contention read on the other 24 once the shared DB is quiet.
+
 #### What's left (for the user)
 
-- `tests/unit/test_report_bd_territory.py` (the existing, pre-round-8 test file -- 49 cases) took
-  6 minutes to finish (364.49s) instead of its normal few seconds, because the machine was under
-  heavy, unrelated memory pressure the whole session (one `python.exe`, not launched by this task,
-  holding ~28GB RSS -- consistent with the operator's own multi-hour model-training jobs per this
-  project's standing process-kill-discipline note; never touched, per that same rule), which also
-  slowed every other pytest run and the live monthly LLM call itself. Result: **49 passed, 0
-  failed** -- no regression from this round's `build_bd_territory`/`_enqueue_territory_expansion_search`
-  changes.
-- The full `tests/unit` suite (beyond the brief's own mandated filtered command, which passed) was
-  also kicked off as extra diligence; still running as of this writing for the same memory-pressure
-  reason -- not blocking, since every file this round touched is covered by the mandated command or
-  this round's own dedicated suite (now fully confirmed, including bd_territory).
+- The one pre-existing, unrelated `test_report_round3_d6.py` failure above -- a background task is
+  queued to investigate `tests/conftest.py`'s `_reports_to_tmp` fixture / `eoa.config.settings()`
+  caching, and to check whether the other 24 pre-existing failures share the same root cause.
 - Patent survey `_appendix_reliability` is unit-tested only, not live-verified against a real
   rebuilt survey file (a full survey run re-scans/re-analyzes patents, materially more expensive
   than a report rebuild, and wasn't in the brief's mandated live-check list) -- worth a spot-check

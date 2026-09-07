@@ -1302,7 +1302,11 @@ def build_product_line(
         tenders_table(tenders_data),
         forecasts_table(tenders_data),
         patents_table(patents),
-        pipeline_table(pipeline_rows, today=today),
+        pipeline_table(pipeline_rows, today=today)
+        or {
+            "title_he": _PIPELINE_TABLE_TITLE_HE,
+            "body_he": "לא זוהו הזדמנויות רכש, מכרזים או תחזיות בקו המוצר בחלון הזמן שנבדק.",
+        },
         recommended_actions_table(draft, deterministic=llm_draft_failed),
     ):
         if tbl:

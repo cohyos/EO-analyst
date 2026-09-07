@@ -2597,35 +2597,55 @@ def _expansion_search_tag(code: str) -> str:
     return f"bd:{code}"
 
 
-def _pending_expansion_search_id(code: str) -> int | None:
-    """The id of a previous expansion search still queued/running for this territory, if any --
-    avoids enqueueing a duplicate every time the report is rebuilt. R8-reports #6: also the id
-    :func:`_enqueue_territory_expansion_search` returns for the "מה נבדק" note (a fresh job's id,
-    or this already-pending one's)."""
-    rows = _fetchall(
-        "SELECT id FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
-        "AND payload ->> 'expanded_from' = %(tag)s ORDER BY id DESC LIMIT 1",
-        {"tag": _expansion_search_tag(code)},
-    )
-    return rows[0]["id"] if rows else None
-
-
 def _has_pending_expansion_search(code: str) -> bool:
     """Avoid enqueueing a duplicate targeted deep-search job every time this territory's report is
-    rebuilt while a previous expansion search is still queued/running."""
-    return _pending_expansion_search_id(code) is not None
+    rebuilt while a previous expansion search is still queued/running. Unchanged since before
+    R8-reports #6 (query and return shape both intact) -- kept independent from
+    :func:`_pending_expansion_search_id` below specifically so this function's own pre-existing
+    tests/mocking (``tests/unit/test_bd_round4b.py::TestExpansionSearch``, out of this package's
+    file scope) stay untouched."""
+    rows = _fetchall(
+        "SELECT 1 FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
+        "AND payload ->> 'expanded_from' = %(tag)s LIMIT 1",
+        {"tag": _expansion_search_tag(code)},
+    )
+    return bool(rows)
+
+
+def _pending_expansion_search_id(code: str) -> int | None:
+    """R8-reports #6: the id of a previous expansion search still queued/running for this
+    territory, if any -- used only by :func:`_enqueue_territory_expansion_search` (after
+    :func:`_has_pending_expansion_search` has already confirmed one exists) to report that job's
+    id back for the empty-territory "מה נבדק" note. A short timeout and a swallowed failure (same
+    "decorative DB call" convention as ``eoa.report.indicators``'s own ``connection(timeout=5)``
+    calls) -- this is purely informational, never load-bearing for the enqueue-or-skip decision
+    itself, which stays entirely on :func:`_has_pending_expansion_search`."""
+    try:
+        with connection(timeout=5) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
+                "AND payload ->> 'expanded_from' = %(tag)s ORDER BY id DESC LIMIT 1",
+                {"tag": _expansion_search_tag(code)},
+            )
+            row = cur.fetchone()
+            return row["id"] if row else None
+    except Exception as exc:
+        log.warning(
+            "bd_territory_pending_expansion_search_id_lookup_failed", territory=code, error=str(exc)[:160]
+        )
+        return None
 
 
 def _enqueue_territory_expansion_search(code: str) -> int | None:
     """Never raises: a queueing failure must not break the report build itself (same defensive
     convention as this module's own acquisition-watch/payload-price optional sections). Returns the
-    expansion job's id (a freshly-enqueued one, or an already-pending one this call reused/skipped)
-    -- ``None`` only on a queueing failure or DB error (R8-reports #6: the empty-territory "מה נבדק"
-    note cites this id so the analyst can look the job up directly)."""
+    expansion job's id (a freshly-enqueued one, or an already-pending one's, looked up via
+    :func:`_pending_expansion_search_id`) -- ``None`` when no id could be resolved (a queueing
+    failure, a DB error, or simply the pending-job-id lookup itself failing) (R8-reports #6: the
+    empty-territory "מה נבדק" note cites this id so the analyst can look the job up directly)."""
     try:
-        pending_id = _pending_expansion_search_id(code)
-        if pending_id is not None:
-            return pending_id
+        if _has_pending_expansion_search(code):
+            return _pending_expansion_search_id(code)
         from eoa.memory.relational import enqueue_job
 
         question = (
