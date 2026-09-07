@@ -719,6 +719,12 @@ async def ask(body: AskRequest) -> StreamingResponse:
                         # attempt now gets a second, cloud-routed chance instead of silently skipping
                         # every single time.
                         chain_fallback=True,
+                        # Round 11 (docs/qa/loop/round_10_judge.md worst #4): the same wall clock
+                        # `_MAX_ANSWER_SECONDS` above already uses -- lets `entailment_filter` grant
+                        # its own chain attempt extra headroom (60s vs. 40s) only when the main
+                        # answer itself came back quickly and this optional pass still has real
+                        # budget left, per that function's own docstring.
+                        answer_elapsed_s=time.monotonic() - t_answer_start,
                     )
                     ungrounded_removed += _entailment_removed
                     if _entailment_removed:

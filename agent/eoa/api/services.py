@@ -2006,6 +2006,101 @@ def ask_retrieve(
     return list(context.values()) + list(retrieved.values())[:retrieval_cap]
 
 
+# Round 11 (docs/qa/loop/round_10_judge.md worst #2, live Q5/Skyranger): item 1353's own
+# "Skyranger" mention and its rate-of-fire spec sit at characters 13493/7812 of a 15223-char
+# `clean_text` -- both entirely outside a naive `text[:4000]` prefix, which is exactly what
+# `ask_build_messages` used to send the model for a retrieved (non-context) item. The model never
+# fabricated or mis-cited anything -- it correctly reported that the slice of source [n] it was
+# actually shown said nothing about Skyranger, because that slice genuinely didn't. Round 10's own
+# retrieval-cap widening fix worked (the item *is* retrieved and cited); this round's fix is one
+# layer further down the same pipeline -- the item was in context, just not the part of it that
+# mattered.
+_ITEM_EXCERPT_BUDGET_RETRIEVED = 4000
+_ITEM_EXCERPT_BUDGET_CONTEXT = 1500
+_EXCERPT_ANCHOR_PAD = 600
+_EXCERPT_HEAD_RESERVE = 1200
+
+
+def _relevant_excerpt(text: str, anchors: list[str], budget: int) -> str:
+    """Up to ``budget`` chars of ``text``, prioritizing windows around any case-insensitive
+    occurrence of an ``anchors`` token (the question's own rare/salient tokens, from
+    :func:`_rare_tokens`) instead of blindly keeping only the document's head.
+
+    Keeps a small head window (title/lede context, so the excerpt still opens sensibly), then adds
+    one window per anchor around its own first occurrence -- **processed rarest-anchor-in-this-
+    document first** -- before any anchor gets a *second* window (also rarest-first), and so on.
+    This ordering matters: a live repro (item 1353, round 11) has a generic, frequent token ("UAS",
+    4 occurrences starting at char 1083) and a specific, sparse one ("Rheinmetall", 2 occurrences,
+    the first at char 13463, thirty chars from the document's own "Skyranger" mention) in the same
+    document -- a naive document-order or first-match-wins fill greedily spends the char budget on
+    "UAS"'s early, generic occurrences before ever reaching the specific pair of terms that actually
+    matter, silently dropping them again despite this function's whole purpose. Processing rarest-
+    first guarantees every anchor gets at least one window before any anchor gets a second, so a
+    single highly specific but late-occurring term is never crowded out by a common, early one.
+    Windows are only sorted back into document order (and merged where they overlap or sit close
+    together) once the budget-filling pass is done, so the final excerpt still reads top-to-bottom
+    rather than as shuffled fragments. Falls back to a plain head excerpt (``text[:budget]``, byte-
+    for-byte the previous behavior) when ``anchors`` is empty or none of them match anywhere in
+    ``text``, so every anchor-less document (the common case for a short/ordinary item, and every
+    existing test's own fixture text) is completely unaffected."""
+    if not text:
+        return text
+    if not anchors:
+        return text[:budget]
+    text_cf = text.casefold()
+    per_anchor_starts: dict[str, list[int]] = {}
+    for anchor in anchors:
+        if not anchor:
+            continue
+        starts = [m.start() for m in re.finditer(re.escape(anchor.casefold()), text_cf)]
+        if starts:
+            per_anchor_starts[anchor] = starts
+    if not per_anchor_starts:
+        return text[:budget]
+
+    # Rarest-in-this-document anchor first (fewest occurrences); a stable sort keeps the caller's
+    # own anchor ordering (already itself rarity-ranked corpus-wide, see `_rare_tokens`) as the
+    # tie-break for two anchors that happen to occur equally often in this one document.
+    ordered_anchors = sorted(per_anchor_starts, key=lambda a: len(per_anchor_starts[a]))
+    max_occurrences = max(len(starts) for starts in per_anchor_starts.values())
+    candidate_starts: list[int] = []
+    seen_starts: set[int] = set()
+    for occurrence_idx in range(max_occurrences):
+        for anchor in ordered_anchors:
+            starts = per_anchor_starts[anchor]
+            if occurrence_idx >= len(starts):
+                continue
+            start = starts[occurrence_idx]
+            if start not in seen_starts:
+                seen_starts.add(start)
+                candidate_starts.append(start)
+
+    head_len = min(_EXCERPT_HEAD_RESERVE, budget // 3, len(text))
+    accepted: list[list[int]] = [[0, head_len]]
+    used = head_len
+    for start in candidate_starts:
+        if used >= budget:
+            break
+        s, e = max(0, start - _EXCERPT_ANCHOR_PAD), min(len(text), start + _EXCERPT_ANCHOR_PAD)
+        if any(a_s <= s and e <= a_e for a_s, a_e in accepted):
+            continue  # already fully covered by a window accepted earlier (higher priority)
+        remaining = budget - used
+        if e - s > remaining:
+            e = s + remaining
+        accepted.append([s, e])
+        used += e - s
+
+    accepted.sort()
+    merged: list[list[int]] = []
+    for s, e in accepted:
+        if merged and s <= merged[-1][1] + 40:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    pieces = [text[s:e] for s, e in merged]
+    return "\n[...]\n".join(pieces)[:budget]
+
+
 def ask_build_messages(
     question: str, history: list[dict[str, str]] | None, retrieved: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2083,6 +2178,11 @@ def ask_build_messages(
         "ולפרט מה כן נמצא בכל מקור בנפרד.\n\n" + prompts.render("ask_answer_format")
     )
 
+    # Round 11 (worst #2, live Q5/Skyranger): anchors the per-item excerpt below on the question's
+    # own rare/salient tokens instead of always taking a document's naive prefix -- see
+    # `_relevant_excerpt`'s own docstring for the exact repro this closes.
+    excerpt_anchors = _rare_tokens(question)
+
     citations: list[dict[str, Any]] = []
     blocks: list[str] = []
     for i, row in enumerate(ordered, start=1):
@@ -2091,13 +2191,14 @@ def ask_build_messages(
         if is_context:
             key_facts = row.get("key_facts") or []
             facts_block = "\nעובדות מפתח:\n" + "\n".join(f"- {f}" for f in key_facts) if key_facts else ""
-            body = (
-                f"תקציר: {row.get('summary_he') or ''}{facts_block}\n\n"
-                f"טקסט מלא (קטע):\n{(row.get('clean_text') or '')[:1500]}"
+            context_excerpt = _relevant_excerpt(
+                row.get("clean_text") or "", excerpt_anchors, _ITEM_EXCERPT_BUDGET_CONTEXT
             )
+            body = f"תקציר: {row.get('summary_he') or ''}{facts_block}\n\nטקסט מלא (קטע):\n{context_excerpt}"
             label = f'הקשר מצורף (צוין ע"י המשתמש) | סוג מקור: {kind_label}'
         else:
-            body = (row.get("clean_text") or row.get("summary_he") or "")[:4000]
+            source_text = row.get("clean_text") or row.get("summary_he") or ""
+            body = _relevant_excerpt(source_text, excerpt_anchors, _ITEM_EXCERPT_BUDGET_RETRIEVED)
             label = f"מהמאגר (אוחזר לפי השאלה) | סוג מקור: {kind_label}"
         blocks.append(
             f"[{i}] ({label}) {row.get('title') or ''}\n{wrap_data(body, row['id'], src=row.get('url') or '')}"

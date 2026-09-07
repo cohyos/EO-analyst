@@ -2146,6 +2146,45 @@ def ensure_headings_on_own_line(answer_text: str) -> str:
 _MIN_LEADING_FRAGMENT_WORDS = 4
 _TERMINAL_UNIT_CHARS = ".!?״\"'”’)"  # ".", "!", "?", gershayim, closing quotes/paren
 
+# Round 11 (docs/qa/loop/round_10_judge.md worst #3, live Q6/AUSA 2026): a *structurally complete*,
+# correctly-punctuated opening unit can still be referentially dangling -- it opens with a
+# cross-reference/continuation token ("שאר המקורות...", "לעומת זאת...") whose antecedent was a
+# preceding sentence a guard removed earlier in the same pipeline. Neither existing check above
+# catches this: the unit is long enough (>= `_MIN_LEADING_FRAGMENT_WORDS`) and ends on real
+# terminal punctuation, so it reads as "complete" by every content-blind measure this module had
+# until now -- only the *reference itself*, which points at nothing in a fresh opening, gives it
+# away. This is a second, distinct heuristic (still content-blind: it only ever looks at the first
+# token of the unit, never tries to verify whether an antecedent genuinely existed) layered onto
+# the same leading-unit check `enforce_answer_coherence` already runs per section.
+_CROSS_REF_OPENING_TOKENS = (
+    "לעומת זאת",
+    "כמו כן",
+    "עם זאת",
+    "שאר",
+    "בנוסף",
+    "גם",
+    "מנגד",
+    "לכן",
+    "לפיכך",
+    "אולם",
+    "אך",
+    "the other",
+    "in addition",
+    "however",
+)
+# Longest-first alternation so a multi-word phrase ("לעומת זאת") is never shadowed by a shorter
+# token that happens to be one of its own words' prefix; `\b` on both sides (Python's `re` treats
+# Hebrew letters as `\w` under Unicode matching, so this works for the Hebrew tokens too) so e.g.
+# "אך" does not match inside an unrelated longer word, and the tokens are only ever tested at the
+# very start of the unit (`^`), never mid-sentence.
+_CROSS_REF_OPENING_RE = re.compile(
+    r"^("
+    + "|".join(re.escape(t) for t in sorted(_CROSS_REF_OPENING_TOKENS, key=len, reverse=True))
+    + r")\b[,:]?\s*",
+    re.IGNORECASE,
+)
+_MIN_CROSS_REF_REMAINDER_WORDS = 8
+
 
 def _word_count(text: str) -> int:
     return len(re.findall(r"\S+", text))
@@ -2176,7 +2215,18 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
     Dropping a section's only unit can leave a heading with nothing under it -- a second pass (see
     :func:`_drop_empty_headings`) then removes any heading immediately followed (modulo blank lines)
     by another heading or the end of the text, so this never trades a dangling sentence for an empty
-    section instead."""
+    section instead.
+
+    Round 11 (docs/qa/loop/round_10_judge.md worst #3, live Q6/AUSA 2026): a second, independent
+    check on that same leading unit -- gated behind an ``elif`` so it only ever runs when the unit
+    is *not* already caught by the two checks above -- catches a **referentially** dangling
+    opening: one that is structurally complete (long enough, real terminal punctuation) but opens
+    with a cross-reference/continuation token (:data:`_CROSS_REF_OPENING_TOKENS`, e.g. "שאר
+    המקורות...", "לעומת זאת...") whose antecedent was a preceding sentence some earlier guard
+    removed. When the token is stripped and at least :data:`_MIN_CROSS_REF_REMAINDER_WORDS` words
+    remain, the remainder replaces the unit in place (`"בנוסף, X" -> "X"`) -- the now-antecedent-free
+    reference is gone, and the rest of the sentence stands on its own; when fewer words remain, the
+    whole unit is dropped instead, exactly like the two checks above."""
     if not answer_text or not answer_text.strip():
         return answer_text, 0
 
@@ -2186,7 +2236,7 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
         next_start = headings[i + 1][0] if i + 1 < len(headings) else len(answer_text)
         bounds.append((h_end, next_start))
 
-    to_remove: list[tuple[int, int]] = []
+    to_replace: list[tuple[int, int, str]] = []
     for body_start, body_end in bounds:
         segment = answer_text[body_start:body_end]
         units = [(s, e) for s, e in _iter_units(segment) if segment[s:e].strip()]
@@ -2196,8 +2246,8 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
         stripped = segment[first_s:first_e].strip()
         # A bullet (`-`/`*`) or numbered-list item is always kept whole by `_iter_units` -- it can
         # never be a half-sentence artifact of the plain-prose sentence splitter this pass exists
-        # to catch, and a short-but-complete bullet ("- לא ידוע.") is a normal, valid answer shape
-        # in this domain -- so neither check below ever applies to one.
+        # to catch, and a short-but-complete bullet ("- לא ידוע.", "- גם ...") is a normal, valid
+        # answer shape in this domain -- so none of the checks below ever apply to one.
         if stripped.startswith(("-", "*")) or _NUMBERED_ITEM_RE.match(stripped):
             continue
         is_only_unit = len(units) == 1
@@ -2205,14 +2255,23 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
             is_only_unit and stripped[-1:] not in tuple(_TERMINAL_UNIT_CHARS)
         )
         if dangling:
-            to_remove.append((body_start + first_s, body_start + first_e))
+            to_replace.append((body_start + first_s, body_start + first_e, ""))
+            continue
+        cross_ref = _CROSS_REF_OPENING_RE.match(stripped)
+        if cross_ref:
+            remainder = stripped[cross_ref.end() :].strip()
+            span = (body_start + first_s, body_start + first_e)
+            if remainder and _word_count(remainder) >= _MIN_CROSS_REF_REMAINDER_WORDS:
+                to_replace.append((*span, remainder))
+            else:
+                to_replace.append((*span, ""))
 
-    if not to_remove:
+    if not to_replace:
         return answer_text, 0
 
-    new_text = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, to_remove)))
+    new_text = _renumber_lists(_tidy_whitespace(_replace_spans(answer_text, to_replace)))
     new_text = _drop_empty_headings(new_text)
-    return new_text, len(to_remove)
+    return new_text, len(to_replace)
 
 
 def _drop_empty_headings(text: str) -> str:
@@ -2439,7 +2498,10 @@ _ENTAILMENT_SYSTEM = (
     "אינו תומך בה כלל. החזר verdict אחד לכל טענה, לפי מספרה, ורק עבורה -- אל תוסיף טענות."
 )
 
-_ENTAILMENT_SOURCE_EXCERPT_CHARS = 1500
+# Round 11 (docs/qa/loop/round_10_judge.md worst #4): 1500 -> 800 -- see `entailment_filter`'s own
+# round-11 docstring note for why a smaller per-claim payload gives the light-role call a better
+# chance of finishing inside its own wall-clock budget.
+_ENTAILMENT_SOURCE_EXCERPT_CHARS = 800
 
 
 def _entailment_scope_candidates(
@@ -2526,6 +2588,8 @@ def entailment_filter(
     timeout_s: float = 30.0,
     chain_fallback: bool = False,
     chain_timeout_s: float = 40.0,
+    fast_chain_timeout_s: float = 60.0,
+    answer_elapsed_s: float | None = None,
 ) -> tuple[str, int]:
     """Optional light-model entailment check over up to ``max_claims`` `[n]`-cited units in the
     lead paragraph / "עובדות מרכזיות" section: asks the ``light`` role a single structured
@@ -2604,6 +2668,39 @@ def entailment_filter(
     must not edit. Flipping the fallback on only at the one real call site (``routes.ask``) keeps
     every existing caller's tested contract byte-for-byte unchanged while still shipping the actual
     live fix this round's brief asked for.
+
+    Round 11 (docs/qa/loop/round_10_judge.md worst #4, D5 finding 3): round 10's own live sample
+    found this check active on only 3/8 golden answers (up from 1/8, real progress, still short of
+    "well above 1/8"). Three further changes, all still gated behind ``chain_fallback``/only
+    reachable once the primary local leg has already failed, so round 9's pinned single-attempt
+    contract is unaffected either way:
+
+    1. **Smaller probe payload** (:data:`_ENTAILMENT_SOURCE_EXCERPT_CHARS` 1500 -> 800, plus the
+       caller-side 4-claim cap already in place, one call for the whole batch either way -- never
+       per-claim) -- a smaller request body gives a marginal/queued attempt a better chance of
+       finishing inside whatever time it does get, independent of which leg answers it.
+    2. **Elapsed-aware chain timeout**: ``chain_timeout_s`` (40s default) is only used when the
+       caller does not report ``answer_elapsed_s``, or reports one already >= 90s (little of this
+       question's own per-request budget left to spend). When the caller *does* report
+       ``answer_elapsed_s < 90.0`` -- i.e. the main answer itself streamed back quickly and this
+       optional housekeeping pass has real headroom before the request's own overall budget is at
+       risk -- the chain attempt gets :data:`fast_chain_timeout_s` (60s default) instead, per this
+       round's own brief. ``routes.ask`` computes this from the same ``t_answer_start`` wall clock
+       its own ``_MAX_ANSWER_SECONDS`` abort check already uses.
+    3. **Resident-chain fallback when the light role itself is unavailable, not merely slow**: the
+       ``light`` role's own configured chain (``config/config.yaml``'s ``llm_providers.chains.
+       light``) is deliberately ``agy(gemini-3.8-flash-medium) -> ollama`` with **no Claude entry
+       at all** (2026-09-06 decision: cheap-flash-first, to stop freezing chat behind a slow local
+       queue) -- so when *both* the direct-ollama attempt and the light-role-chain attempt fail,
+       that is not "one leg slow", it is the entire light role unavailable. A third, explicitly
+       paid attempt then goes out against the **resident** role's own chain instead (``chat_
+       structured("resident", ..., provider="chain")`` -- resident's chain does carry a Claude
+       entry first, per ``llm_providers.chains.resident``), logged as ``ask.entailment_resident_
+       fallback_used`` when it is the attempt that actually produces a result. Documented cost:
+       this is a real Claude call, not the light role's usual free/cheap flash-tier or local one --
+       acceptable here because it only ever fires as a last resort, after two cheaper legs have
+       already failed, on an optional pass that is skipped outright (no cost at all) when the
+       caller does not opt into ``chain_fallback``.
     """
     if not answer_text or not answer_text.strip() or not retrieved:
         return answer_text, 0
@@ -2621,16 +2718,18 @@ def entailment_filter(
         {"role": "user", "content": claims_block},
     ]
 
-    def _call(provider: str) -> _EntailmentResponse:
+    def _call(provider: str, *, role: str = "light") -> _EntailmentResponse:
         from eoa.llm.ollama_client import chat_structured
 
         # Round 9: an explicit `provider` is always passed (see the docstring above) -- an unset
         # `provider` resolves through `llm_providers.interactive_default` ("chain" as of round 7),
         # which round 10's own two-attempt strategy now controls explicitly instead. `interactive=
         # True` is still passed on both attempts so a real local RAM shortage fails fast via the
-        # resource gate instead of hanging.
+        # resource gate instead of hanging. Round 11: `role` defaults to "light" (unchanged for the
+        # first two attempts) but the resident-chain fallback below passes `role="resident"` so it
+        # reaches resident's own chain (which does carry a Claude entry) instead of light's.
         return chat_structured(
-            "light",
+            role,
             _EntailmentResponse,
             messages,
             task="classify",
@@ -2640,15 +2739,32 @@ def entailment_filter(
 
     result, error = _run_with_timeout(lambda: _call("ollama"), timeout_s)
     if result is None and chain_fallback:
-        # Round 10: the local leg failed/timed out -- try once more through the cloud chain, which
-        # never touches the local resource gate at all, before giving up. Gated behind
-        # `chain_fallback` (see the docstring above) so a caller that did not ask for this stays on
-        # round 9's exact single-attempt contract.
-        chain_result, chain_error = _run_with_timeout(lambda: _call("chain"), chain_timeout_s)
+        # Round 10: the local leg failed/timed out -- try once more through the light role's own
+        # configured cloud chain, which never touches the local resource gate at all, before giving
+        # up. Gated behind `chain_fallback` (see the docstring above) so a caller that did not opt
+        # in stays on round 9's exact single-attempt contract.
+        # Round 11: the chain-attempt budget itself is elapsed-aware -- see the docstring's point 2.
+        chain_budget = chain_timeout_s
+        if answer_elapsed_s is not None and answer_elapsed_s < 90.0:
+            chain_budget = fast_chain_timeout_s
+        chain_result, chain_error = _run_with_timeout(lambda: _call("chain"), chain_budget)
         if chain_result is not None:
             result, error = chain_result, None
         else:
             error = chain_error or error
+            # Round 11 (docstring point 3): both the direct-ollama and the light-role-chain
+            # attempts failed -- the light role as a whole is unavailable this call, not just one
+            # slow leg. One further, explicitly paid attempt against the resident role's own chain
+            # (which does carry a Claude entry, unlike light's agy-then-ollama chain) before giving
+            # up entirely.
+            resident_result, resident_error = _run_with_timeout(
+                lambda: _call("chain", role="resident"), chain_timeout_s
+            )
+            if resident_result is not None:
+                result, error = resident_result, None
+                log.info("ask.entailment_resident_fallback_used", claims=len(candidates))
+            else:
+                error = resident_error or error
     if result is None:
         global _ENTAILMENT_UNAVAILABLE_LOGGED
         if not _ENTAILMENT_UNAVAILABLE_LOGGED:
