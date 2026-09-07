@@ -564,6 +564,14 @@ class Investigation:
     #: ("הוחלט"/"נבחר"/"זכה"/"נחתם") that rests on a source which, read on its own terms, hasn't
     #: actually decided anything yet.
     hedged_read_urls: list[str] = field(default_factory=list)
+    #: R9-investigations (docs/qa/loop/round_8_judge.md finding 1c): every URL `_tool_read`
+    #: discarded via `_low_quality_page_reason` (a challenge/consent/paywall interstitial or a
+    #: near-empty body) -- kept even though such a URL is never added to `read_urls`/
+    #: `read_summaries` in the first place, purely as a belt-and-suspenders record so
+    #: `_finalize_outcome`'s `sources` assignment can assert the invariant explicitly (a
+    #: discarded page must never end up cited) instead of relying only on "nothing else ever
+    #: appends to `read_urls`" holding true across future changes to this module.
+    low_quality_read_urls: list[str] = field(default_factory=list)
 
 
 class StopRequested(Exception):
@@ -841,10 +849,49 @@ def _source_text_is_hedged(text: str) -> bool:
 #: R8-investigations-b: Hebrew decision/award verbs a settled-fact claim uses -- "הוחלט" (it was
 #: decided), "נבחר" (was chosen/selected), "זכה" (won), "נחתם" (was signed).
 _DECISION_VERBS_HE = ("הוחלט", "נבחר", "זכה", "נחתם")
+
+#: R9-investigations (job 147, docs/qa/loop/round_8_judge.md #3): job 147's own headline sentence
+#: -- "בחירת נורקין על פני אבולעפיה" ("the selection of Norkin over Abulafia") -- asserts exactly
+#: the same settled-fact claim as "נבחר נורקין" but uses a *nominalised* noun-phrase construction
+#: ("בחירת X", "the selection of X") rather than a finite decision verb, so it slipped straight
+#: past `_DECISION_VERBS_HE` on this round's own live rerun. These are the nominalised Hebrew
+#: decision/appointment phrasings the round-8 judge named explicitly, plus their common English
+#: equivalents (checked case-insensitively, since `answer_he` can still embed an English company/
+#: role clause): "בחירת X" / "the selection of" (X was chosen over Y), "הבחירה ב-" (the choice of),
+#: "ההחלטה על" (the decision on), "המינוי של" / "the appointment of" (X was appointed), "הזכייה
+#: של" (X was the winner of), "החתימה על" (the contract/deal was signed), "the decision to".
+#: Matched as substrings, same discipline as `_DECISION_VERBS_HE` above, so any suffix/prefix
+#: attached to the phrase (e.g. "בחירתו של", "הבחירה בנורקין") still trips the check.
+_DECISION_NOMINAL_PHRASES_HE = (
+    "בחירת",
+    "הבחירה ב",
+    "ההחלטה על",
+    "המינוי של",
+    "הזכייה של",
+    "החתימה על",
+)
+_DECISION_NOMINAL_PHRASES_EN = (
+    "the selection of",
+    "the appointment of",
+    "the decision to",
+)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _HEDGED_DECISION_REPLACEMENT_HE = (
     "לפי הדיווח, ההכרעה בנושא זה טרם אושרה סופית -- המקור המצוטט עצמו מתאר תהליך שעדיין לא הסתיים."
 )
+
+
+def _sentence_claims_settled_decision(sentence: str) -> bool:
+    """Whether ``sentence`` asserts a settled personnel/award decision as fact -- either via a
+    finite decision verb (:data:`_DECISION_VERBS_HE`) or a nominalised decision/appointment
+    phrase (:data:`_DECISION_NOMINAL_PHRASES_HE`/``_EN``, R9-investigations). Used by
+    :func:`_downgrade_unhedged_decision_claims` to flag sentences for downgrade."""
+    if any(v in sentence for v in _DECISION_VERBS_HE):
+        return True
+    if any(p in sentence for p in _DECISION_NOMINAL_PHRASES_HE):
+        return True
+    lowered = sentence.casefold()
+    return any(p in lowered for p in _DECISION_NOMINAL_PHRASES_EN)
 
 
 def _downgrade_unhedged_decision_claims(inv: Investigation) -> None:
@@ -855,12 +902,16 @@ def _downgrade_unhedged_decision_claims(inv: Investigation) -> None:
     ``InvestigationOut`` validation live in this round's file ownership (prompts under
     ``agent/eoa/llm/prompts/``, the schema in ``agent/eoa/llm/schemas/analysis.py``), so this is a
     deterministic, Python-level post-check run on the finished ``inv.result`` instead: any
-    sentence in ``answer_he`` using a decision-verb (``_DECISION_VERBS_HE``) is downgraded to a
-    single hedged placeholder sentence when at least one of the sources this investigation
-    actually read (``inv.read_urls``) was itself flagged as still-pending
-    (``inv.hedged_read_urls`` -- see ``_source_text_is_hedged``). Multiple flagged sentences
-    collapse into one placeholder rather than repeating it; the removed sentences are recorded in
-    ``contradictions_he`` so the "gaps" a reader sees says exactly what was downgraded and why.
+    sentence in ``answer_he`` flagged by :func:`_sentence_claims_settled_decision` (a finite
+    decision-verb per ``_DECISION_VERBS_HE``, or -- R9-investigations -- a nominalised decision/
+    appointment phrase per ``_DECISION_NOMINAL_PHRASES_HE``/``_EN``, which job 147's own live
+    rerun on this round's un-widened verb list would still have missed: "בחירת נורקין על פני
+    אבולעפיה" uses the noun "בחירת", not the verb "נבחר") is downgraded to a single hedged
+    placeholder sentence when at least one of the sources this investigation actually read
+    (``inv.read_urls``) was itself flagged as still-pending (``inv.hedged_read_urls`` -- see
+    ``_source_text_is_hedged``). Multiple flagged sentences collapse into one placeholder rather
+    than repeating it; the removed sentences are recorded in ``contradictions_he`` so the "gaps" a
+    reader sees says exactly what was downgraded and why.
 
     A no-op whenever there is no result, the outcome isn't a confident one, or no read source was
     ever flagged as hedged -- i.e. this never touches an answer with nothing to catch.
@@ -877,7 +928,7 @@ def _downgrade_unhedged_decision_claims(inv: Investigation) -> None:
     kept: list[str] = []
     placeholder_inserted = False
     for s in sentences:
-        if any(v in s for v in _DECISION_VERBS_HE):
+        if _sentence_claims_settled_decision(s):
             flagged.append(s.strip())
             if not placeholder_inserted:
                 kept.append(_HEDGED_DECISION_REPLACEMENT_HE)
@@ -919,6 +970,7 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
         # summarised, never added to `read_urls`/`read_summaries`, never citable.
         low_quality_reason = _low_quality_page_reason(text, title)
         if low_quality_reason:
+            inv.low_quality_read_urls.append(url)
             _log(
                 inv,
                 round_no,
@@ -1518,7 +1570,13 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
         )
 
     # Q3-5: ground truth for `sources` is what was actually read, never the model's own claim.
-    inv.result.sources = list(inv.read_urls)
+    # R9-investigations (finding 1c): `read_urls` should never contain a `low_quality_read_urls`
+    # entry in the first place (the only append site is gated by `_low_quality_page_reason`
+    # returning None -- see `_tool_read`), but this filter asserts that invariant explicitly
+    # rather than relying on that being the only way `read_urls` is ever populated -- a
+    # challenge/consent/paywall interstitial or near-empty body must never reach `sources`/
+    # citations, no matter which code path a future change routes it through.
+    inv.result.sources = [u for u in inv.read_urls if u not in inv.low_quality_read_urls]
 
     if inv.result.outcome == "partial":
         if not inv.result.sources and not inv.result.answer_he.startswith(UNVERIFIED_PREFIX_HE):

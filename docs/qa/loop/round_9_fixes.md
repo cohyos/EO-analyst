@@ -14,7 +14,28 @@ Re-queued via `eoa.memory.relational.enqueue_job("deep_search", payload)` with
 
 Outcomes (job id, outcome, confidence, whether the round-7/8 defects reproduced):
 
-<!-- FILLED IN BELOW ONCE 160/161 FINISH -->
+- **Job 160** (rerun of 146, item 44, AARGM-ER unit price / losing bidders): `outcome=partial`,
+  `confidence=0.1`, 1 page actually read (`https://breakingdefense.com/...`, a real article, no
+  interstitial), `security_review=true`/`security_flag_reason=search_heuristic` (a *search hit*
+  was screened out before any read, not a read page). Honest, low-confidence answer: the one
+  legitimate source it read explicitly says most budget-request line items (likely including this
+  missile) list no cost figures, and never mentions the U.S. Navy losing-bidder question at all --
+  `answer_he` says so directly rather than inventing a number. No Cloudflare/interstitial citation
+  anywhere in `sources` or `investigation_log`. This investigation ended via `_synthesize_from_
+  reads` (the model never called a valid `finish()`), not `_force_read_top_hits` or a hedge
+  downgrade -- neither of those defects was in play here, and none reproduced.
+- **Job 161** (rerun of 147, item 81, Norkin appointment): `outcome=found`, `confidence=0.95`, 1
+  page read (`https://en.globes.co.il/.../anduril-to-appoint-amiram-norkin-...`), `security_review
+  =false`. **The 1b fix fired live, on this exact rerun**: `answer_he` contains the hedge-downgrade
+  placeholder sentence ("לפי הדיווח, ההכרעה בנושא זה טרם אושרה סופית -- המקור המצוטט עצמו מתאר
+  תהליך שעדיין לא הסתיים.") in place of a nominalised decision claim, and `contradictions_he`
+  records the exact flagged sentence that was replaced: "בחירתו של נורקין על פני אבולעפיה נועדה
+  להבטיח ל-Anduril קשרים עמוקים עם משרד הביטחון וצה"ל, ..." -- caught by the new
+  `_DECISION_NOMINAL_PHRASES_HE` "בחירת" match (on "בחירתו של", the inflected form), which job
+  147's own un-widened round-8 verb list would have missed entirely (no הוחלט/נבחר/זכה/נחתם
+  appears in that sentence). `key_facts` still uses the finite verb "נבחר" in one bullet --
+  unaffected by design, since the downgrade only rewrites `answer_he` prose, not `key_facts` (same
+  scope as the existing round-8 behavior/tests).
 
 #### 1b. Hedge-downgrade guard widened to nominalised decision phrasing
 
@@ -80,7 +101,28 @@ the existing question-text/lineage passes.
 
 #### 3. Live daily/weekly re-render check
 
-<!-- FILLED IN BELOW -->
+Per the brief, checked by re-running `collect_deep_search` (which internally calls the now-fixed
+`reconcile_deep_search_reruns`) directly against the live DB, read-only, without rebuilding any
+report:
+
+- **Before (the currently-persisted `output/reports/weekly_2026-09-07.md`, rendered before this
+  round's fix):** item 10's job 156 ("Verify and expand: US Army launches laser production with
+  $465M contract award") renders as its own "חקירות עומק" bullet with `נמצא` (found) and the full
+  464.8M-dollar E-HEL answer -- **and**, separately, item 96's job 45 ("Verify and expand: צבא
+  ארה״ב מעניק לארוויירונמנט חוזה ייצור לייזר ראשון בהיקף כ־465 מיליון דולר", the same real-world
+  story in Hebrew) renders as its own bullet with `לא נמצא: לא נמצא מידע מספק במסגרת התקציב.` --
+  reproducing the item-96 finding exactly as reported.
+- **After (live `collect_deep_search()` call against the same DB rows, current code):** the item
+  10/96 group now returns a single entry: `job_id=156`, `outcome=found`, `rerun_count=4` (job 156
+  found + job 145/47 not_found for item 10 itself, **plus job 45 for item 96, folded in via the
+  new dedup_of pass**). Confirmed directly against `items`: `id=96` has `dedup_of=10` in the live
+  DB, and job 45's SQL-joined row correctly carries `trigger_item_dedup_of=10`. Item 96's stale
+  `not_found` no longer produces a separate report entry.
+- This confirms the fix without needing a full report rebuild (no `EOA_PIPELINE=1` run was
+  performed) -- the currently-on-disk `weekly_2026-09-07.md` still shows the pre-fix duplicate
+  bullets (it was rendered before this round's code landed); the next scheduled/triggered daily or
+  weekly rebuild will pick up the fix automatically since `collect_deep_search` is called fresh
+  each time.
 
 #### Tests / lint
 

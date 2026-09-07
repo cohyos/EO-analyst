@@ -567,7 +567,8 @@ def collect_deep_search(
     start, end, _label = _period(period_start, period_end)
     sql = """
         SELECT j.id AS job_id, j.payload, j.result, j.state, j.finished_at,
-               i.id AS trigger_item_id, i.title AS trigger_title, i.url AS trigger_url
+               i.id AS trigger_item_id, i.title AS trigger_title, i.url AS trigger_url,
+               i.dedup_of AS trigger_item_dedup_of
         FROM jobs j
         LEFT JOIN items i ON i.id = NULLIF(j.payload->>'item_id', '')::bigint
         WHERE j.kind = 'deep_search'
@@ -604,6 +605,12 @@ def collect_deep_search(
                 # itself no longer matches exactly (see `_normalize_question_for_grouping`).
                 "rerun_of_job_id": payload.get("rerun_of_job_id"),
                 "expanded_from_job_id": payload.get("expanded_from_job_id"),
+                # R9-investigations (docs/qa/loop/round_8_judge.md finding "item 96"): the
+                # trigger item's own `dedup_of` link (NULL when the item isn't itself a dedup of
+                # another item) -- `reconcile_deep_search_reruns` uses this to fold a duplicate
+                # item's investigation into its canonical item's group even when neither the
+                # question text nor any rerun/expansion lineage connects them.
+                "trigger_item_dedup_of": row.get("trigger_item_dedup_of"),
             }
         )
     return reconcile_deep_search_reruns(out)
@@ -665,9 +672,11 @@ def reconcile_deep_search_reruns(entries: list[dict[str, Any]]) -> list[dict[str
     in one report with contradictory outcomes ("found" with an answer vs "not_found" ×3). Group
     entries by normalised question (and trigger item) *and* by explicit rerun/expansion lineage
     (round-8 judge, R8-investigations-b -- see ``_normalize_question_for_grouping`` and
-    ``_RERUN_LINEAGE_KEYS``), keep the best-outcome run in each merged group (ties -> newest, i.e.
-    earliest in the ``finished_at DESC`` input order), and record ``rerun_count`` plus a Hebrew
-    note so the reader sees one reconciled answer, not a contradiction.
+    ``_RERUN_LINEAGE_KEYS``) *and* by an item's own ``dedup_of`` link (round-9 judge,
+    docs/qa/loop/round_8_judge.md -- see the Pass 3 comment below), keep the best-outcome run in
+    each merged group (ties -> newest, i.e. earliest in the ``finished_at DESC`` input order), and
+    record ``rerun_count`` plus a Hebrew note so the reader sees one reconciled answer, not a
+    contradiction.
 
     ``entries`` is assumed ordered newest-first (``collect_deep_search``'s ``finished_at DESC``);
     that order is what "newest" means below, via each entry's original index.
@@ -707,6 +716,31 @@ def reconcile_deep_search_reruns(entries: list[dict[str, Any]]) -> list[dict[str
             origin_idx = job_id_to_index.get(origin_job_id)
             if origin_idx is not None:
                 union(idx, origin_idx)
+
+    # Pass 3 (round-9 judge, docs/qa/loop/round_8_judge.md -- item 96, a plain `dedup_of=10`
+    # Hebrew duplicate of golden item 10): a duplicate item's own investigation can be worded
+    # entirely differently from the canonical item's (Pass 1 misses it) and was never itself a
+    # rerun/expansion of the canonical item's job (Pass 2 misses it too) -- e.g. item 96's job 45
+    # rendered a stale `not_found` beside item 10's own newly-fixed `found` answer in the same
+    # live report. Folds each item's `dedup_of` link into the union-find directly, transitively:
+    # unioning every entry whose trigger item is `X` with (one representative of) every entry
+    # whose trigger item is `X`'s own `dedup_of` target folds an entire dedup chain (A dedup_of B,
+    # B dedup_of C) into one group in both directions, since union is symmetric and the DSU
+    # already collapses chains via path compression -- not just a direct one-hop pair. A no-op
+    # whenever an item has no `dedup_of` target, or that target has no deep-search entry of its
+    # own in this period (nothing to merge with).
+    item_id_to_indices: dict[Any, list[int]] = {}
+    for idx, e in enumerate(entries):
+        trigger_item_id = e.get("trigger_item_id")
+        if trigger_item_id is not None:
+            item_id_to_indices.setdefault(trigger_item_id, []).append(idx)
+    for idx, e in enumerate(entries):
+        dedup_target = e.get("trigger_item_dedup_of")
+        if dedup_target is None:
+            continue
+        target_indices = item_id_to_indices.get(dedup_target)
+        if target_indices:
+            union(idx, target_indices[0])
 
     groups: dict[int, list[int]] = {}
     for idx in range(n):
