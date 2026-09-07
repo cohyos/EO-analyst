@@ -545,6 +545,14 @@ function normalizeInvestigationDetail(
           max_pages: r.answer.max_pages ?? undefined,
           rounds: r.answer.rounds ?? undefined,
           stopped_reason: r.answer.stopped_reason ?? undefined,
+          // Round 12 follow-up: these were declared on InvestigationOut and read by
+          // InvestigationDetailPage but never survived normalisation (the page tests bypassed it).
+          security_review: r.answer.security_review ?? undefined,
+          security_review_reason_he: r.answer.security_review_reason_he ?? undefined,
+          security_review_snippet: r.answer.security_review_snippet ?? undefined,
+          security_review_resolved: r.answer.security_review_resolved ?? undefined,
+          blocked_reason_he: r.answer.blocked_reason_he ?? undefined,
+          confidence: typeof r.answer.confidence === "number" ? r.answer.confidence : null,
         }
       : null,
     provenance: normalizeInvestigationProvenance(r.provenance),

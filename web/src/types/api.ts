@@ -417,6 +417,9 @@ export interface InvestigationOut {
    * `outcome === "blocked"` -- always set on a blocked result, absent/null otherwise. See
    * `agent/eoa/llm/schemas/analysis.py::InvestigationOut.blocked_reason_he`. */
   blocked_reason_he?: string | null;
+  /** Investigation confidence 0-1 as persisted in `jobs.result.confidence` (null when the
+   * engine did not set one). */
+  confidence?: number | null;
 }
 
 export interface InvestigationDetail extends InvestigationSummary {

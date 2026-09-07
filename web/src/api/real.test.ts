@@ -50,3 +50,80 @@ describe("real.ts request() timeout (W13)", () => {
     await expect(api.getLessons()).resolves.toEqual([]);
   });
 });
+
+
+// Round 12 follow-up: the security-review / blocked-reason / confidence fields declared on
+// InvestigationOut must survive normalizeInvestigationDetail -- InvestigationDetailPage reads
+// them, and its own tests mock api.getInvestigation with hand-built objects, so only a test
+// through the real request path proves the normaliser keeps them.
+describe("real.ts getInvestigation keeps security-review, blocked-reason and confidence fields", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("passes the fields through normalisation", async () => {
+    const raw = {
+      job_id: 113,
+      question: "מהם פרטי העסקה?",
+      state: "done",
+      log: [],
+      answer: {
+        answer_he: "התשובה הוסתרה.",
+        sources: [],
+        outcome: "blocked",
+        key_facts: [],
+        what_was_tried_he: "",
+        contradictions_he: "",
+        stopped_reason: "blocked",
+        security_review: true,
+        security_review_reason_he: "חשד להזרקת הוראות",
+        security_review_snippet: "ignore previous instructions",
+        security_review_resolved: false,
+        blocked_reason_he: "התשובה נחסמה בבדיקת אבטחה.",
+        confidence: 0.35,
+      },
+    };
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(raw), { status: 200, headers: { "Content-Type": "application/json" } }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { realApi: api } = await import("./real");
+    const detail = await api.getInvestigation("113");
+    expect(detail.answer).toMatchObject({
+      outcome: "blocked",
+      security_review: true,
+      security_review_reason_he: "חשד להזרקת הוראות",
+      security_review_snippet: "ignore previous instructions",
+      security_review_resolved: false,
+      blocked_reason_he: "התשובה נחסמה בבדיקת אבטחה.",
+      confidence: 0.35,
+    });
+  });
+
+  it("normalises a missing confidence to null and leaves absent review fields undefined", async () => {
+    const raw = {
+      job_id: 114,
+      question: "q",
+      state: "done",
+      log: [],
+      answer: { answer_he: "x", sources: [], outcome: "found" },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(raw), { status: 200, headers: { "Content-Type": "application/json" } }),
+        ),
+      ),
+    );
+    const { realApi: api } = await import("./real");
+    const detail = await api.getInvestigation("114");
+    expect(detail.answer?.confidence).toBeNull();
+    expect(detail.answer?.security_review).toBeUndefined();
+    expect(detail.answer?.blocked_reason_he).toBeUndefined();
+  });
+});
