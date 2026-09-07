@@ -1,16 +1,21 @@
 import { useMemo } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Search } from "lucide-react";
+import { ExternalLink, RefreshCw, Search } from "lucide-react";
+import type { ItemDetail } from "@/types/api";
 import { api } from "@/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { AddToContextButton } from "@/components/AddToContextButton";
 import { ExplainScorePopover } from "@/components/feed/ExplainScorePopover";
 import { SecurityStatusIcon } from "@/components/feed/SecurityStatusIcon";
+import { CorroborationBadge } from "@/components/feed/CorroborationBadge";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { ToastStack } from "@/components/ToastStack";
+import { useToastQueue } from "@/hooks/useToastQueue";
 import { domainLabel } from "@/lib/taxonomy";
 import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
+import { useT } from "@/i18n";
 
 const INV_STATE_LABEL: Record<string, string> = {
   queued: "בתור",
@@ -25,6 +30,8 @@ export function ItemDetailPage() {
   const { id } = useParams<{ id: string }>();
   const itemId = Number(id);
   const queryClient = useQueryClient();
+  const t = useT();
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
 
   const itemQuery = useQuery({
     queryKey: ["item", itemId],
@@ -66,6 +73,21 @@ export function ItemDetailPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["investigations"] }),
   });
 
+  // CORR (cross-source corroboration, 2026-09-07): "בדוק אימות מחדש" -- see FeedDetailPanel's
+  // twin mutation for the inline-drawer variant of this same action.
+  const recheckCorroboration = useMutation({
+    mutationFn: () => api.postItemCorroborate(itemId),
+    onSuccess: (corroboration) => {
+      queryClient.setQueryData<ItemDetail | undefined>(["item", itemId], (old) =>
+        old ? { ...old, corroboration } : old,
+      );
+      queryClient.invalidateQueries({ queryKey: ["items"] });
+    },
+    onError: () => {
+      pushToast(t("corr.recheckErrorToast"), { tone: "danger" });
+    },
+  });
+
   if (Number.isNaN(itemId)) return <ErrorState message="מזהה פריט לא תקין" />;
   if (itemQuery.isLoading) return <LoadingState label="טוען פריט…" />;
   if (itemQuery.isError || !itemQuery.data) {
@@ -84,6 +106,7 @@ export function ItemDetailPage() {
       <header className="space-y-2">
         <div className="flex flex-wrap items-start gap-2">
           <LevelBadge level={item.level} />
+          <CorroborationBadge corroboration={item.corroboration} showUnknown />
           <div className="min-w-0 flex-1">
             {hasUrl ? (
               <a
@@ -133,6 +156,20 @@ export function ItemDetailPage() {
           >
             <Search size={12} aria-hidden="true" />
             {investigate.isPending ? "פותח חקירה…" : "חקור לעומק"}
+          </button>
+          <button
+            type="button"
+            onClick={() => recheckCorroboration.mutate()}
+            disabled={recheckCorroboration.isPending}
+            data-testid="corroboration-recheck-button"
+            className="flex items-center gap-1 rounded-md border border-border-strong px-2 py-1 text-xs text-fg-muted hover:bg-bg-sunken disabled:opacity-50"
+          >
+            <RefreshCw
+              size={12}
+              aria-hidden="true"
+              className={cn(recheckCorroboration.isPending && "animate-spin")}
+            />
+            {recheckCorroboration.isPending ? t("corr.recheckPending") : t("corr.recheckButton")}
           </button>
         </div>
       </header>
@@ -276,6 +313,7 @@ export function ItemDetailPage() {
             description="הפריט נקלט אך טרם עבר את שלב הסיווג/הסיכום של הריצה הלילית."
           />
         )}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

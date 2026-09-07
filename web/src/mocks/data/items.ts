@@ -1,4 +1,11 @@
-import type { ItemCard, TechActorKind, TechMaturity, TriageLevel } from "@/types/api";
+import type {
+  Corroboration,
+  CorroborationSourceKind,
+  ItemCard,
+  TechActorKind,
+  TechMaturity,
+  TriageLevel,
+} from "@/types/api";
 
 // Deterministic PRNG (mulberry32) so mock data — and any test asserting on
 // it — is stable across runs.
@@ -106,6 +113,35 @@ function levelForScore(score: number): TriageLevel {
   return "archive";
 }
 
+const CORR_SOURCE_KINDS: CorroborationSourceKind[] = ["duplicate", "same_event", "official"];
+
+// CORR (cross-source corroboration, 2026-09-07): deterministic per-item mock data covering all
+// four statuses in rotation (i % 4) so mock mode (VITE_USE_MOCKS=true) exercises every
+// `CorroborationBadge` variant without needing the real backend, which doesn't populate this yet.
+function buildCorroboration(i: number, publishedAt: Date): Corroboration {
+  const bucket = i % 4;
+  const checkedAt = new Date(publishedAt.getTime() + 3600_000).toISOString();
+  if (bucket === 0) {
+    return { status: "single_source", count: 0, sources: [], checked_at: checkedAt };
+  }
+  if (bucket === 2) {
+    return { status: "official_primary", count: 0, sources: [], checked_at: checkedAt };
+  }
+  if (bucket === 3) {
+    // Not yet checked -- the pipeline hasn't run the corroboration pass on this item.
+    return { status: "unknown", count: 0, sources: [], checked_at: null };
+  }
+  const n = 2 + (i % 3); // 2..4 corroborating sources
+  const sources = Array.from({ length: n }, (_, j) => ({
+    item_id: 9000 + i * 10 + j,
+    source_name: pick(SOURCES, i * 41 + j * 7 + 3),
+    url: `https://example-source.test/corroborating/${i}-${j}`,
+    published_at: new Date(publishedAt.getTime() - j * 1800_000).toISOString(),
+    kind: pick(CORR_SOURCE_KINDS, i * 3 + j),
+  }));
+  return { status: "corroborated", count: n, sources, checked_at: checkedAt };
+}
+
 function buildItem(i: number): ItemCard {
   const domainInfo = pick(DOMAINS, i * 3 + 1);
   const entity = pick(ENTITY_NAMES, i * 5 + 2);
@@ -174,6 +210,7 @@ function buildItem(i: number): ItemCard {
     // score above the 0.5 threshold, a handful of others score just under it as noise.
     israel_relevance: geography === "IL" ? Math.round((0.55 + (i % 4) * 0.1) * 100) / 100 : i % 9 === 0 ? 0.35 : null,
     israel_reasons: geography === "IL" ? ["israeli_company_mentioned", "israeli_agency_or_customer"] : [],
+    corroboration: buildCorroboration(i, publishedAt),
   };
 }
 

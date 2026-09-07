@@ -1,14 +1,18 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, HelpCircle, Maximize2, Search, X } from "lucide-react";
-import type { ItemCard, TriageLevel } from "@/types/api";
+import { ExternalLink, HelpCircle, Maximize2, RefreshCw, Search, X } from "lucide-react";
+import type { ItemCard, ItemDetail, TriageLevel } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { AddToContextButton } from "@/components/AddToContextButton";
+import { CorroborationBadge } from "./CorroborationBadge";
+import { ToastStack } from "@/components/ToastStack";
+import { useToastQueue } from "@/hooks/useToastQueue";
 import { domainLabel } from "@/lib/taxonomy";
 import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { api } from "@/api";
+import { useT } from "@/i18n";
 
 const LEVEL_KEYS: Record<string, TriageLevel> = {
   "1": "red",
@@ -26,6 +30,8 @@ export function FeedDetailPanel({
 }) {
   const [showWhy, setShowWhy] = useState(false);
   const queryClient = useQueryClient();
+  const t = useT();
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
   const keyFacts = item.key_facts ?? [];
   const entitiesMentioned = item.entities_mentioned ?? [];
   // Real data (2026-09-04 QA against the live backend): a handful of
@@ -47,10 +53,27 @@ export function FeedDetailPanel({
     },
   });
 
+  // CORR (cross-source corroboration, 2026-09-07): "בדוק אימות מחדש" -- re-runs the check and
+  // patches both this item's own query cache (so the badge updates immediately, without waiting
+  // for a refetch) and invalidates the feed list (so the row's badge picks it up too).
+  const recheckCorroboration = useMutation({
+    mutationFn: () => api.postItemCorroborate(item.id),
+    onSuccess: (corroboration) => {
+      queryClient.setQueryData<ItemDetail | undefined>(["item", item.id], (old) =>
+        old ? { ...old, corroboration } : old,
+      );
+      queryClient.invalidateQueries({ queryKey: ["items"] });
+    },
+    onError: () => {
+      pushToast(t("corr.recheckErrorToast"), { tone: "danger" });
+    },
+  });
+
   return (
     <div className="flex h-full flex-col" data-testid="feed-detail-panel">
       <div className="flex items-start gap-2 border-b border-border p-3">
         <LevelBadge level={item.level} />
+        <CorroborationBadge corroboration={item.corroboration} showUnknown />
         <div className="min-w-0 flex-1">
           <bdi className={cn("block font-semibold", item.title ? "text-fg" : "italic text-fg-dim")}>
             {displayTitle}
@@ -113,6 +136,20 @@ export function FeedDetailPanel({
           >
             <Search size={12} aria-hidden="true" />
             {investigate.isPending ? "פותח חקירה…" : "חקור לעומק (I)"}
+          </button>
+          <button
+            type="button"
+            onClick={() => recheckCorroboration.mutate()}
+            disabled={recheckCorroboration.isPending}
+            data-testid="corroboration-recheck-button"
+            className="flex items-center gap-1 rounded-md border border-border-strong px-2 py-1 text-xs text-fg-muted hover:bg-bg-sunken disabled:opacity-50"
+          >
+            <RefreshCw
+              size={12}
+              aria-hidden="true"
+              className={cn(recheckCorroboration.isPending && "animate-spin")}
+            />
+            {recheckCorroboration.isPending ? t("corr.recheckPending") : t("corr.recheckButton")}
           </button>
         </div>
 
@@ -181,6 +218,7 @@ export function FeedDetailPanel({
           </button>
         ))}
       </div>
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

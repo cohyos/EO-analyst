@@ -146,6 +146,29 @@ export const he = {
     investigatingIndicator: "🔎 בחקירה",
     investigatingIndicatorAria: "חקירת עומק בתהליך עבור פריט זה",
   },
+  // CORR (cross-source corroboration, 2026-09-07): `CorroborationBadge` (feed row / item drawer /
+  // item detail header / chat sources list) + the item drawer's "בדוק אימות מחדש" re-check action
+  // + the feed's "מקור יחיד בלבד" filter. Frozen API contract: `item.corroboration.status` is one
+  // of "single_source" | "corroborated" | "official_primary" | "unknown" (absent -> "unknown").
+  corr: {
+    singleSourceLabel: "מקור יחיד",
+    singleSourceTooltip: "לא נמצאו מקורות עצמאיים נוספים המאמתים את הדיווח",
+    corroboratedLabel: "מאומת ב-{count} מקורות",
+    officialPrimaryLabel: "מקור ראשוני רשמי",
+    unknownLabel: "לא נבדק",
+    sourcesListTitle: "מקורות מאמתים ({count})",
+    sourcesListAriaLabel: "רשימת מקורות מאמתים",
+    toggleListAriaShow: "הצג מקורות מאמתים",
+    toggleListAriaHide: "הסתר מקורות מאמתים",
+    kindDuplicate: "כפילות",
+    kindSameEvent: "אותו אירוע",
+    kindOfficial: "רשמי",
+    openSource: "פתח מקור",
+    recheckButton: "בדוק אימות מחדש",
+    recheckPending: "בודק…",
+    recheckErrorToast: "בדיקת האימות נכשלה — נסה שוב",
+    filterSingleSourceOnly: "מקור יחיד בלבד",
+  },
   shortcuts: {
     navigate: "ניווט בין פריטים",
     rate: "דירוג רמה (אדום/כתום/צהוב/ארכיון)",

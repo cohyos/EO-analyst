@@ -8,6 +8,10 @@
 // /ws/status directly, outside the ApiClient) can both normalize incoming
 // data into the shapes web/src/types/api.ts promises the rest of the app.
 import type {
+  Corroboration,
+  CorroborationSource,
+  CorroborationSourceKind,
+  CorroborationStatus,
   CurrentRun,
   GateDecision,
   InvestigationLogLine,
@@ -335,6 +339,70 @@ export function normalizeStatus(
  * log line. This is the single place both call sites normalize into the
  * frontend's clean `InvestigationLogLine` view model.
  */
+// CORR (cross-source corroboration, 2026-09-07): normalizes the additive `ItemCard.corroboration`
+// / `AskCitation.corroboration` field. Missing/partial input (the field is entirely absent until
+// the backend lands it, and individual sub-fields may be partial even after) always normalizes to
+// a safe "unknown, nothing found" shape rather than throwing or rendering `undefined` -- see the
+// field's doc comment in web/src/types/api.ts.
+export const ZERO_CORROBORATION: Corroboration = {
+  status: "unknown",
+  count: 0,
+  sources: [],
+  checked_at: null,
+};
+
+const VALID_CORROBORATION_STATUSES: readonly CorroborationStatus[] = [
+  "single_source",
+  "corroborated",
+  "official_primary",
+  "unknown",
+];
+
+const VALID_CORROBORATION_SOURCE_KINDS: readonly CorroborationSourceKind[] = [
+  "duplicate",
+  "same_event",
+  "official",
+];
+
+function normalizeCorroborationStatus(value: unknown): CorroborationStatus {
+  return typeof value === "string" &&
+    (VALID_CORROBORATION_STATUSES as readonly string[]).includes(value)
+    ? (value as CorroborationStatus)
+    : "unknown";
+}
+
+function normalizeCorroborationSourceKind(value: unknown): CorroborationSourceKind {
+  return typeof value === "string" &&
+    (VALID_CORROBORATION_SOURCE_KINDS as readonly string[]).includes(value)
+    ? (value as CorroborationSourceKind)
+    : "same_event";
+}
+
+function normalizeCorroborationSource(
+  raw: Partial<CorroborationSource> | null | undefined,
+): CorroborationSource {
+  const r = raw ?? {};
+  return {
+    item_id: num(r.item_id),
+    source_name: str(r.source_name),
+    url: str(r.url),
+    published_at: r.published_at ?? null,
+    kind: normalizeCorroborationSourceKind(r.kind),
+  };
+}
+
+export function normalizeCorroboration(
+  raw: Partial<Corroboration> | null | undefined,
+): Corroboration {
+  if (!raw) return ZERO_CORROBORATION;
+  return {
+    status: normalizeCorroborationStatus(raw.status),
+    count: num(raw.count),
+    sources: arr(raw.sources).map(normalizeCorroborationSource),
+    checked_at: raw.checked_at ?? null,
+  };
+}
+
 export function normalizeInvestigationLogLine(
   raw:
     | (Partial<InvestigationLogLine> & { results_n?: number; created_at?: string })

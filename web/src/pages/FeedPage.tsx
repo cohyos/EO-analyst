@@ -56,6 +56,7 @@ export function FeedPage() {
     countries: [],
     groupByCountry: false,
     israel: false,
+    singleSourceOnly: false,
   });
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [openItemId, setOpenItemId] = useState<number | null>(null);
@@ -109,9 +110,21 @@ export function FeedPage() {
   // `dedup_of`) from different outlets into one card before anything else -- country grouping,
   // virtualization and keyboard nav all then operate on one row per story, same as they already do
   // for the raw list; `duplicatesById` is looked up per row by `FeedRow`'s "+N מקורות" chip.
-  const { primaries: items, duplicatesById } = useMemo(
+  const { primaries: dedupedItems, duplicatesById } = useMemo(
     () => groupDuplicateItems(rawItems),
     [rawItems],
+  );
+
+  // CORR (cross-source corroboration, 2026-09-07): "מקור יחיד בלבד" -- client-side only, applied
+  // to whatever page(s) are already loaded (see the `singleSourceOnly` doc comment in
+  // FeedFilters.tsx). Kept as its own step, after de-dup, so it doesn't interact with
+  // `duplicatesById`'s per-id lookups.
+  const items = useMemo(
+    () =>
+      filters.singleSourceOnly
+        ? dedupedItems.filter((it) => (it.corroboration?.status ?? "unknown") === "single_source")
+        : dedupedItems,
+    [dedupedItems, filters.singleSourceOnly],
   );
 
   // U7b: grouped display order -- a stable partition by normalized country

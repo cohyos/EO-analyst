@@ -5,6 +5,7 @@ import type {
   BdTerritoryOption,
   Clarification,
   Conference,
+  Corroboration,
   EntityDetail,
   EntitySummary,
   ForecastCard,
@@ -158,6 +159,9 @@ export interface ApiClient {
     id: number,
     body: { question: string | null },
   ): Promise<{ job_id: string; existing: boolean }>;
+  /** CORR (cross-source corroboration, 2026-09-07): "בדוק אימות מחדש" -- re-runs the check and
+   * returns the fresh `Corroboration` object (not a whole ItemCard). */
+  postItemCorroborate(id: number): Promise<Corroboration>;
 
   getEntities(query: EntitiesQuery): Promise<EntitySummary[]>;
   getEntity(id: number): Promise<EntityDetail>;

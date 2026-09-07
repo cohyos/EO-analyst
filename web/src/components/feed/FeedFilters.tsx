@@ -20,6 +20,11 @@ export interface FeedFiltersState {
   groupByCountry: boolean;
   /** A13 (מיקוד תעשייה ישראלית): filter to items with `israel_relevance >= 0.5`. */
   israel: boolean;
+  // CORR (cross-source corroboration, 2026-09-07): "מקור יחיד בלבד" -- the frozen API contract has
+  // no `single_source`-only query param, so `FeedPage` applies this client-side, on the currently
+  // loaded page(s), the same documented limitation as the country/level chips' server-side
+  // counterparts don't have (see docs/qa/loop/round_7_fixes.md "### CORR-ui status").
+  singleSourceOnly: boolean;
 }
 
 export function FeedFilters({
@@ -90,6 +95,23 @@ export function FeedFilters({
         )}
       >
         {t("feed.israelFilterLabel")}
+      </button>
+
+      {/* CORR (cross-source corroboration): client-side-only filter (see the `singleSourceOnly`
+          doc comment above) -- same toggle-button UX as the level/israel chips. */}
+      <button
+        type="button"
+        onClick={() => onChange({ ...value, singleSourceOnly: !value.singleSourceOnly })}
+        aria-pressed={value.singleSourceOnly}
+        data-testid="single-source-filter-toggle"
+        className={cn(
+          "flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
+          value.singleSourceOnly
+            ? "border-warn bg-warn/10 text-warn"
+            : "border-border-strong text-fg-dim hover:bg-bg-sunken",
+        )}
+      >
+        {t("corr.filterSingleSourceOnly")}
       </button>
 
       <select

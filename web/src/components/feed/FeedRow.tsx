@@ -4,6 +4,7 @@ import { LevelBadge } from "@/components/LevelBadge";
 import { SecurityStatusIcon } from "./SecurityStatusIcon";
 import { ExplainScorePopover } from "./ExplainScorePopover";
 import { DuplicateOutletsPopover } from "./DuplicateOutletsPopover";
+import { CorroborationBadge } from "./CorroborationBadge";
 import { domainLabel } from "@/lib/taxonomy";
 import { timeAgo } from "@/lib/time";
 import { cn } from "@/lib/cn";
@@ -72,6 +73,9 @@ export function FeedRow({
       )}
     >
       <LevelBadge level={item.level} size="sm" />
+      {/* CORR (cross-source corroboration): "unknown" renders nothing here (showUnknown=false) --
+          no layout shift for the majority of rows that haven't been checked yet. */}
+      <CorroborationBadge corroboration={item.corroboration} size="sm" />
       <span className="w-10 shrink-0 text-end font-mono font-tabular text-fg-muted">
         {item.score}
       </span>

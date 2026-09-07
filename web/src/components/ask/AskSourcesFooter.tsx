@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { AskCitation } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
+import { CorroborationBadge } from "@/components/feed/CorroborationBadge";
 
 /**
  * The compact "מקורות (n)" footer (U11, ask-answer-format rewrite): one row per source with
@@ -70,6 +71,14 @@ export function AskSourcesFooter({ sources }: { sources: AskCitation[] }) {
                   </button>
                 )}
               </div>
+              {/* CORR (2026-09-07): only rendered once the backend enriches this citation with a
+                  corroboration object -- absent on every citation until then, per the frozen API
+                  contract (the field isn't part of `AskCitation` before this feature). */}
+              {c.corroboration && (
+                <div className="flex items-center gap-1.5 px-2 pb-1.5">
+                  <CorroborationBadge corroboration={c.corroboration} size="sm" showUnknown />
+                </div>
+              )}
               {isOpen && c.note && (
                 <p dir="auto" className="border-t border-border px-2 py-1.5 text-xs text-fg-muted">
                   {c.note}

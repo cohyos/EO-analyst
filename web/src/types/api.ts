@@ -43,6 +43,35 @@ export interface ItemCard {
   // the pipeline hasn't scored the item. `GET /api/items?israel=true` filters to >= 0.5.
   israel_relevance: number | null;
   israel_reasons: string[];
+  // CORR (cross-source corroboration, 2026-09-07): additive — absent/null on any response built
+  // before the backend lands this means "not yet checked", never an error. The frontend always
+  // normalizes a missing/partial value to `{ status: "unknown", count: 0, sources: [], checked_at:
+  // null }` (see `normalizeCorroboration` in `web/src/api/normalize.ts`) so every consumer can read
+  // `item.corroboration.status` unconditionally instead of null-checking the whole object.
+  corroboration?: Corroboration | null;
+}
+
+export type CorroborationStatus =
+  | "single_source"
+  | "corroborated"
+  | "official_primary"
+  | "unknown";
+
+export type CorroborationSourceKind = "duplicate" | "same_event" | "official";
+
+export interface CorroborationSource {
+  item_id: number;
+  source_name: string;
+  url: string;
+  published_at: string | null;
+  kind: CorroborationSourceKind;
+}
+
+export interface Corroboration {
+  status: CorroborationStatus;
+  count: number;
+  sources: CorroborationSource[];
+  checked_at: string | null;
 }
 
 // A12 (מעקב טכנולוגי): "רדאר טכנולוגי" -- GET /api/tech/radar, GET /api/tech/items.
@@ -330,6 +359,9 @@ export interface AskCitation {
   level?: TriageLevel | null;
   source_name?: string | null;
   note?: string | null;
+  // CORR (2026-09-07): present once the backend enriches citations from the same `items` row's
+  // corroboration check -- same shape/absence convention as `ItemCard.corroboration` above.
+  corroboration?: Corroboration | null;
 }
 
 export type AskHistoryMessage = { role: "user" | "assistant"; content: string };

@@ -368,4 +368,50 @@ test.describe("Feed screen (/feed)", () => {
     await expect(page.locator('[data-testid^="feed-row-"]').first()).toBeVisible({ timeout: 20_000 });
     await assertNoBadText(page, testInfo, "Feed (/feed)");
   });
+
+  // CORR (cross-source corroboration, 2026-09-07): `CorroborationBadge` renders next to the
+  // level chip on a feed row whenever that item's `corroboration.status` is single_source/
+  // corroborated/official_primary ("unknown" -- the default when the field is entirely absent,
+  // i.e. on any backend build that predates this feature -- renders no chip in the row, by
+  // design, so most rows show nothing until the backend ships this). Only checks rows already
+  // rendered by the virtualized list (same technique as the "open source in a new tab" test
+  // above) rather than scrolling arbitrarily far to find one; skips cleanly when nothing
+  // currently on screen has a non-unknown status yet -- see docs/qa/loop/round_7_fixes.md
+  // "### CORR-ui status".
+  test("a corroboration badge renders on a visible row whose item has a non-unknown status", async ({
+    page,
+    request,
+  }) => {
+    await page.goto("/feed");
+    const firstRow = page.locator('[data-testid^="feed-row-"]').first();
+    await expect(firstRow).toBeVisible({ timeout: 20_000 });
+
+    const rows = page.locator('[data-testid^="feed-row-"]');
+    const n = await rows.count();
+    const ids: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const testId = await rows.nth(i).getAttribute("data-testid");
+      const id = Number(testId?.replace("feed-row-", ""));
+      if (Number.isFinite(id)) ids.push(id);
+    }
+    test.skip(ids.length === 0, "No rendered rows to check");
+
+    const data = await (
+      await request.get(`${API_BASE}/api/items?page_size=200`)
+    ).json();
+    const byId = new Map<number, { corroboration?: { status?: string } }>(
+      (data?.items ?? []).map((it: { id: number }) => [it.id, it]),
+    );
+    const targetId = ids.find((id) => {
+      const status = byId.get(id)?.corroboration?.status;
+      return status && status !== "unknown";
+    });
+    test.skip(
+      targetId === undefined,
+      "No currently-rendered row has a non-unknown corroboration.status yet (API may not have shipped the field)",
+    );
+
+    const row = page.locator(`[data-testid="feed-row-${targetId}"]`);
+    await expect(row.locator('[data-testid^="corroboration-badge-"]')).toBeVisible();
+  });
 });

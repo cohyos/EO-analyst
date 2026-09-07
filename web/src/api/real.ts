@@ -5,6 +5,7 @@ import type {
   BdTerritoryOption,
   Clarification,
   Conference,
+  Corroboration,
   EntityDetail,
   EntitySummary,
   ForecastCard,
@@ -64,6 +65,7 @@ import {
   arr,
   bool,
   idStr,
+  normalizeCorroboration,
   normalizeInvestigationLogLine,
   normalizeNightSummary,
   normalizeReportCitations,
@@ -254,6 +256,8 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     tech_readiness_note_he: r.tech_readiness_note_he ?? null,
     israel_relevance: typeof r.israel_relevance === "number" ? r.israel_relevance : null,
     israel_reasons: arr(r.israel_reasons),
+    // CORR: absent on any backend build that predates this feature -- normalizes to "unknown".
+    corroboration: normalizeCorroboration(r.corroboration),
   };
 }
 
@@ -713,6 +717,14 @@ export const realApi: ApiClient = {
     );
     return { job_id: idStr(data?.job_id), existing: bool(data?.existing) };
   },
+  // CORR: "בדוק אימות מחדש" -- re-runs the corroboration check and returns the same shape as
+  // `ItemCard.corroboration`, not a whole ItemCard.
+  postItemCorroborate: async (id) =>
+    normalizeCorroboration(
+      await request<Partial<Corroboration>>(`/api/items/${id}/corroborate`, {
+        method: "POST",
+      }),
+    ),
 
   getEntities: async (query: EntitiesQuery) => {
     const data = await request<Partial<EntitySummary>[] | null>(

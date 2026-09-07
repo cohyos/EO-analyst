@@ -499,6 +499,34 @@ export const mockApi: ApiClient = {
     return delay({ job_id: `inv-${investigateJobCounter}`, existing: false }, 350);
   },
 
+  // CORR (cross-source corroboration, 2026-09-07): "בדוק אימות מחדש" -- re-runs the mock check.
+  // Mock behaviour: bumps `checked_at` to now and, for an item that had no corroborating sources
+  // yet, occasionally "discovers" one so the re-check button visibly does something in mock mode.
+  postItemCorroborate: async (id) => {
+    const item = items.find((it) => it.id === id);
+    if (!item) throw new Error("not_found");
+    const current = item.corroboration ?? { status: "unknown", count: 0, sources: [], checked_at: null };
+    if (current.status === "single_source" && id % 2 === 0) {
+      item.corroboration = {
+        status: "corroborated",
+        count: 1,
+        sources: [
+          {
+            item_id: 9500 + id,
+            source_name: "Recheck Wire Service",
+            url: `https://example-source.test/recheck/${id}`,
+            published_at: new Date().toISOString(),
+            kind: "same_event",
+          },
+        ],
+        checked_at: new Date().toISOString(),
+      };
+    } else {
+      item.corroboration = { ...current, checked_at: new Date().toISOString() };
+    }
+    return delay({ ...item.corroboration }, 400);
+  },
+
   getEntities: async (query: EntitiesQuery) => {
     let filtered = mockEntities.slice();
     if (query.q) {

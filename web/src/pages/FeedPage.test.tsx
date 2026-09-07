@@ -333,6 +333,49 @@ describe("FeedPage Israel focus filter (A13)", () => {
   });
 });
 
+// CORR (cross-source corroboration, 2026-09-07): "מקור יחיד בלבד" is client-side only (the
+// frozen API contract has no matching query param) -- it filters whatever page(s) are already
+// loaded, without changing the `getItems` call itself.
+describe("FeedPage single-source-only filter (CORR)", () => {
+  it("shows all rows by default and does not send a filter param to getItems", async () => {
+    const single = { ...makeItem(1, "מקור יחיד"), corroboration: { status: "single_source" as const, count: 0, sources: [], checked_at: null } };
+    const corroborated = { ...makeItem(2, "מאומת"), corroboration: { status: "corroborated" as const, count: 2, sources: [], checked_at: null } };
+    getItems.mockResolvedValue({ total: 2, items: [single, corroborated] });
+
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+    expect(screen.getByTestId("feed-row-2")).toBeInTheDocument();
+    const lastCall = getItems.mock.calls.at(-1)![0];
+    expect(lastCall.singleSourceOnly).toBeUndefined();
+  });
+
+  it("toggling the filter chip hides every row that isn't single_source, client-side", async () => {
+    const single = { ...makeItem(1, "מקור יחיד"), corroboration: { status: "single_source" as const, count: 0, sources: [], checked_at: null } };
+    const corroborated = { ...makeItem(2, "מאומת"), corroboration: { status: "corroborated" as const, count: 2, sources: [], checked_at: null } };
+    const unknown = { ...makeItem(3, "לא נבדק") };
+    getItems.mockResolvedValue({ total: 3, items: [single, corroborated, unknown] });
+
+    renderFeedPage();
+    await screen.findByTestId("feed-row-1");
+    expect(screen.getByTestId("feed-row-2")).toBeInTheDocument();
+    expect(screen.getByTestId("feed-row-3")).toBeInTheDocument();
+
+    const chip = screen.getByTestId("single-source-filter-toggle");
+    expect(chip).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(chip);
+    expect(chip).toHaveAttribute("aria-pressed", "true");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("feed-row-1")).toBeInTheDocument();
+      expect(screen.queryByTestId("feed-row-2")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("feed-row-3")).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(chip);
+    await waitFor(() => expect(screen.getByTestId("feed-row-2")).toBeInTheDocument());
+  });
+});
+
 // W9 (docs/REVIEW_2026-09-06_evening.md round 4, feed side): the same story from several outlets
 // (linked via `dedup_of`) collapses into one row with a "+N מקורות" chip that expands to the
 // outlet list, instead of rendering one near-duplicate row per outlet.
