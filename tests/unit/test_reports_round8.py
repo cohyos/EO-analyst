@@ -519,11 +519,15 @@ class TestSurveyAppendixReliability:
         assert val == {"kind": "primary", "score": 1.0, "label": None}
 
     def test_no_host_match_returns_none(self, monkeypatch):
+        # R9-reports #4 (round-8 judge D8 #9): queries a host that is neither a monitored `sources`
+        # row nor one of `_PATENT_OFFICE_HOSTS` -- patents.google.com itself moved off this "no
+        # match at all" case once that fix shipped (see TestPatentOfficeHostReliability below), so
+        # this now uses a host distinct from both to keep testing the genuine no-match path.
         monkeypatch.setattr(survey, "_SOURCE_HOST_RELIABILITY_CACHE", None, raising=False)
         fake_cursor = _FakeCursor([{"url": "https://defensenews.com/x", "reliability": 5}])
         monkeypatch.setattr(survey, "connection", lambda timeout=5: _FakeConn(fake_cursor))
         val = survey._appendix_reliability(
-            {"kind": "patent", "url": "https://patents.google.com/patent/US999"}
+            {"kind": "patent", "url": "https://example-patent-registry.test/patent/US999"}
         )
         assert val is None
 

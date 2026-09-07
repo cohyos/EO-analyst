@@ -74,6 +74,34 @@ TITLE_TEMPLATE_HE = "דוח מעקב קו מוצר — {line}"
 _INSCOPE_LEVELS = ("red", "orange", "yellow")
 _PROCUREMENT_EVENT_KINDS = ("contract_award", "m_and_a", "deployment", "test")
 
+#: R9-reports #2 (round-8 judge D7 #8): this module's own ``format_events_block``/``events_table``
+#: rendered the raw DB ``events.kind`` literal untranslated (e.g. "contract_award"), while the same
+#: report's ``build_docx`` call (this module's own ``events`` passed straight to
+#: ``eoa.report.docx_builder.build_docx``) renders its own built-in events appendix through
+#: ``docx_builder._EVENT_KIND_LABELS_HE`` -- Hebrew there, English here, in two tables of the same
+#: report. Small local copy (same convention as ``eoa.report.daily``'s own
+#: ``_EVENT_KIND_LABELS_HE_FALLBACK`` -- see that module's docstring note) rather than importing a
+#: private name across a module boundary.
+_EVENT_KIND_LABELS_HE_FALLBACK = {
+    "contract_award": "זכייה בחוזה",
+    "m_and_a": "מיזוג/רכישה",
+    "partnership": "שותפות",
+    "investment": "השקעה",
+    "launch": "השקה",
+    "test": "ניסוי",
+    "deployment": "פריסה",
+    "regulation": "רגולציה",
+    "other": "אחר",
+}
+
+
+def _event_kind_label(kind: str | None) -> str:
+    """The Hebrew label for one ``events.kind`` value -- an unrecognised/missing kind falls back to
+    "אחר" (never the raw key, per the R9-reports #2 brief), matching this table's own headers'
+    convention of never showing an untranslated English literal."""
+    return _EVENT_KIND_LABELS_HE_FALLBACK.get(kind, "אחר") if kind else "אחר"
+
+
 #: The report's own "no findings" markers -- kept distinct from
 #: ``eoa.report.bd_territory``'s ``NO_ACTIVITY_MARKER_HE``/its empty-territory ``system_note_he``
 #: text so ``eoa.qa.d7_bd_report`` can recognize either report kind's honest-empty-report marker
@@ -204,7 +232,7 @@ def format_events_block(events: list[dict[str, Any]]) -> str:
         n = f"[{ev['n']}] " if ev.get("n") is not None else ""
         amount = f"{ev['amount_usd']:,.0f} {ev.get('currency') or 'USD'}" if ev.get("amount_usd") else "—"
         lines.append(
-            f"{n}{ev.get('kind') or '—'} | {ev.get('title') or ev.get('program') or '—'} | "
+            f"{n}{_event_kind_label(ev.get('kind'))} | {ev.get('title') or ev.get('program') or '—'} | "
             f"{ev.get('customer') or '—'} | {fmt_date(ev.get('date'))} | {amount}"
         )
     return "\n".join(lines)
@@ -238,7 +266,7 @@ def events_table(events: list[dict[str, Any]]) -> dict[str, Any] | None:
         n = f"[{ev['n']}]" if ev.get("n") is not None else "—"
         rows.append(
             [
-                ev.get("kind") or "—",
+                _event_kind_label(ev.get("kind")),
                 ev.get("title") or ev.get("program") or "—",
                 ev.get("customer") or "—",
                 fmt_date(ev.get("date")),

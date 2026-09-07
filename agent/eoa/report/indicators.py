@@ -33,6 +33,16 @@ R8-reports #3/#4 (round-7 judge D6 #7/#8): two more rendering rules, both in
   ties, the most recently seen; the table is then capped at 8 rows total, keeping the
   longest-tracked (oldest ``first_seen``) rows when trimming further. Not applied to the
   weekly/monthly tables, which the round-7 judge did not report as over-crowded.
+
+R9-reports #1 (round-8 judge D6 #5): the evidence column shipped in R8 but never actually
+populated live (daily 0/8, weekly 2/16) because the underlying match test
+(:func:`_item_matches_indicator`) only ever recognised a Latin key term (:data:`_KEY_TERM_RE`) --
+this corpus's indicators are almost always written entirely in Hebrew. :func:`_extract_indicator_terms`
+adds a Hebrew content-token match (reusing :func:`_content_tokens`, plus taxonomy-subdomain-label
+and watchlist-company-name phrases) alongside the existing Latin one; :func:`extract_key_terms`
+itself is untouched (still Latin-only, per its own docstring/tests) -- only the *match test* was
+widened, requiring 2+ Hebrew term hits (never a single generic word alone) to keep the same
+precision bar a lone, near-always-distinctive Latin term already met.
 """
 
 from __future__ import annotations
@@ -40,10 +50,12 @@ from __future__ import annotations
 import datetime as dt
 import difflib
 import re
+from functools import lru_cache
 from typing import Any
 
 import structlog
 
+from eoa.config import settings
 from eoa.db import connection
 from eoa.report.docx_builder import fmt_date
 
@@ -137,6 +149,147 @@ def _content_tokens(text: str) -> set[str]:
     return toks
 
 
+@lru_cache(maxsize=1)
+def _taxonomy_subdomain_labels_he() -> frozenset[str]:
+    """Hebrew subdomain-label phrases from ``config/taxonomy.yaml`` (English parenthetical
+    stripped), e.g. "פודי ציון מטרות" -- proper-noun-like phrases :func:`_extract_indicator_terms`
+    (R9-reports #1) treats as Hebrew key-term candidates on top of plain content-token splitting, so
+    a distinctive multi-word domain phrase is never missed just because one of its words happens to
+    be common. Never raises: a missing/malformed ``taxonomy.yaml`` yields an empty set, same
+    "degrade, don't invent" convention as this module's own DB helpers."""
+    try:
+        domains = settings().taxonomy.get("domains", {}) or {}
+    except Exception:
+        return frozenset()
+    labels: set[str] = set()
+    for domain in domains.values():
+        for label in (domain.get("sub") or {}).values():
+            he_part = re.sub(r"\([^)]*\)", "", label or "").strip()
+            if he_part:
+                labels.add(he_part)
+    return frozenset(labels)
+
+
+@lru_cache(maxsize=1)
+def _watchlist_hebrew_names() -> frozenset[str]:
+    """Hebrew-scripted company name/alias strings from ``config/watchlist.yaml`` (that file has no
+    separate ``name_he`` field -- Hebrew forms live inline in each company's own ``name``/
+    ``aliases``/``strict_aliases``, e.g. Elbit's "אלביט", "אלביט מערכות") -- the same proper-noun
+    widening as :func:`_taxonomy_subdomain_labels_he`, for watchlist company names specifically."""
+    try:
+        companies = settings().watchlist.get("companies", []) or []
+    except Exception:
+        return frozenset()
+    hebrew_re = re.compile(r"[א-ת]")
+    names: set[str] = set()
+    for company in companies:
+        candidates = [
+            company.get("name"),
+            *(company.get("aliases") or []),
+            *(company.get("strict_aliases") or []),
+        ]
+        for cand in candidates:
+            if cand and hebrew_re.search(cand):
+                names.add(cand.strip())
+    return frozenset(names)
+
+
+#: R9-reports #1: live verification against the real DB (see docs/qa/loop/round_9_fixes.md's "###
+#: R9-reports status") found that a plain :func:`_content_tokens` split, at the naive >=2-hit bar,
+#: over-matches badly -- "מערכות" ("systems") is close to the single most common noun in this
+#: corpus, "ישראל"/"אוויר"/calendar words are domain-ubiquitous, and (a separate latent
+#: ``_content_tokens`` quirk) its own stoplist check runs *before* prefix-stripping, so e.g.
+#: "הצפויה" strips to "צפויה" -- a real :data:`_STOP_HE` entry -- without ever being excluded.
+#: :func:`_extract_indicator_terms` applies a stricter, *count*-appropriate filter on top of
+#: :func:`_content_tokens`'s own (differently-tuned, overlap-*coefficient*-based, shared with
+#: :func:`same_indicator`/:func:`_cluster_key` -- left untouched) output: 5+ letters, re-excluded
+#: against :data:`_STOP_HE` (catches the prefix-stripped case above), never a bare, ordinary
+#: 1990-2099 "year" token (a calendar year alone is near-zero signal; a *different* number --
+#: amount, quantity, model number -- still counts), and never one of :data:`_MATCH_GENERIC_HE`'s
+#: own domain-ubiquitous words. A :func:`_taxonomy_subdomain_labels_he`/:func:`_watchlist_hebrew_names`
+#: *phrase* match bypasses this filter entirely -- a multi-word named phrase is distinctive by
+#: construction, regardless of whether one of its individual words is common.
+_MATCH_MIN_TERM_LEN_HE = 5
+
+_HEBREW_MONTHS_HE = frozenset(
+    {
+        "ינואר",
+        "פברואר",
+        "מרץ",
+        "אפריל",
+        "מאי",
+        "יוני",
+        "יולי",
+        "אוגוסט",
+        "ספטמבר",
+        "אוקטובר",
+        "נובמבר",
+        "דצמבר",
+    }
+)
+
+_MATCH_GENERIC_HE = frozenset(
+    {
+        "מערכת",
+        "מערכות",
+        "ערכות",  # "מערכות" itself strips to this via the "מ" prefix rule -- see the note above.
+        "ישראל",
+        "ישראלי",
+        "ישראלית",
+        "אוויר",
+        "יקרים",
+        "יקר",
+        "שנה",
+        "שנים",
+        "רבעון",
+        "רבעונים",
+        "קרוב",
+        "קרובה",
+        "קרובים",
+        "נוכח",
+        "מול",
+        "יום",
+        "ימים",
+        "מספר",
+        "חודשים",
+        "שבועות",
+        "בעניין",
+    }
+    | _HEBREW_MONTHS_HE
+)
+
+
+def _is_generic_year_he(token: str) -> bool:
+    return len(token) == 4 and token.isdigit() and 1990 <= int(token) <= 2099
+
+
+def _extract_indicator_terms(text_he: str | None) -> tuple[set[str], set[str]]:
+    """R9-reports #1 (round-8 judge D6 #5): the daily/weekly indicator evidence column matched 0/8
+    and 2/16 rows live because :func:`extract_key_terms` (this module's public, Latin-only term
+    extractor -- unchanged, still exactly what its own docstring/tests describe) never yields
+    anything for a Hebrew-only indicator line. Returns ``(latin_terms, hebrew_terms)`` for
+    :func:`_item_matches_indicator`'s own matching test only -- a Hebrew content-token split
+    (:func:`_content_tokens`, already used by :func:`same_indicator`/:func:`_cluster_key`),
+    filtered down to distinctive-enough candidates (see :data:`_MATCH_MIN_TERM_LEN_HE`'s own note),
+    plus any :func:`_taxonomy_subdomain_labels_he`/:func:`_watchlist_hebrew_names` phrase literally
+    present in ``text_he`` (added unconditionally, bypassing that filter)."""
+    latin_terms = extract_key_terms(text_he)
+    raw_hebrew = _content_tokens(_normalize_text(text_he))
+    hebrew_terms = {
+        t
+        for t in raw_hebrew
+        if t not in _STOP_HE
+        and not _is_generic_year_he(t)
+        and len(t) >= _MATCH_MIN_TERM_LEN_HE
+        and t not in _MATCH_GENERIC_HE
+    }
+    haystack_he = text_he or ""
+    for phrase in (*_taxonomy_subdomain_labels_he(), *_watchlist_hebrew_names()):
+        if phrase and phrase in haystack_he:
+            hebrew_terms.add(phrase)
+    return latin_terms, hebrew_terms
+
+
 def same_indicator(a: str, b: str) -> bool:
     """Round-6 judge (D6 worst #7): 10 watchlist rows for 3 distinct indicators -- the model
     rewords the same indicator each issue ("אספקת 280 הכטב״מים לטייוואן צפויה להתפרס ... עד 2029"
@@ -159,13 +312,24 @@ def same_indicator(a: str, b: str) -> bool:
 
 
 def _item_matches_indicator(text_he: str, item: dict[str, Any]) -> bool:
-    terms = extract_key_terms(text_he)
-    if not terms:
+    """R9-reports #1: a match requires either a single Latin key term (unchanged -- a Latin term is
+    almost always a distinctive company/system/programme name in this corpus, see
+    :data:`_KEY_TERM_RE`'s own docstring note, so one is already a strong-enough signal on its own,
+    same bar as before this fix) OR, for a Hebrew-only indicator with no Latin term at all, at least
+    2 of its own Hebrew key terms (:func:`_extract_indicator_terms`) -- a single generic Hebrew
+    content word is too weak alone (docs/CONVENTIONS.md rule 6: keep precision, never invent a
+    match), but two independent term hits in the same item is the same "not a coincidence" bar
+    :func:`same_indicator` already applies to its own overlap-coefficient test."""
+    latin_terms, hebrew_terms = _extract_indicator_terms(text_he)
+    if not latin_terms and not hebrew_terms:
         return False
     haystack = " ".join(
         filter(None, [item.get("title"), item.get("summary_he"), item.get("so_what_he")])
     ).casefold()
-    return any(term in haystack for term in terms)
+    if any(term in haystack for term in latin_terms):
+        return True
+    hebrew_hits = sum(1 for term in hebrew_terms if term.casefold() in haystack)
+    return hebrew_hits >= 2
 
 
 # --------------------------------------------------------------------------

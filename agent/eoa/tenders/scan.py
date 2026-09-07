@@ -87,6 +87,7 @@ from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.tenders import TenderExtract
 from eoa.memory.relational import insert_item, update_item_fields
+from eoa.product_lines.tagging import tag_product_lines
 from eoa.search.provider import SearchHit, search
 from eoa.tenders.feedback import get_relevance_threshold, get_source_priorities, tender_lessons_text
 
@@ -1306,19 +1307,32 @@ def _insert_tender_and_item(
     final_relevance_score = (
         relevance_score if relevance_score is not None else _RELEVANCE_SCORE_WHEN_LLM_UNAVAILABLE
     )
+    # R9-reports #3a (round-8 judge D9 #6): the open TED tender (id 42) carried no `product_lines`
+    # tag because tagging only ever ran for `items`/`events` (the live pipeline hook) and, one-off,
+    # for whatever already existed in `tenders` at backfill time (`scripts/backfill_product_lines
+    # .py`) -- a tender inserted after that backfill was never tagged at all. Tag every notice at
+    # intake instead, the same deterministic (no LLM, no DB) `tag_product_lines` call and
+    # title+description+CPV/entities input `scripts/backfill_product_lines.py`'s own tenders sweep
+    # uses (title/description as `text_en`, the LLM's own Hebrew summary as `text_he` when present).
+    product_lines = tag_product_lines(
+        text_he=summary_he or None,
+        text_en=" ".join(filter(None, [notice.title, notice.summary, " ".join(notice.cpv_naics or [])])),
+        entities=entities or [],
+        subdomain=None,
+    )
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO tenders (
                 source, external_ref, title, agency, country, published_at, deadline,
                 url, cpv_naics, summary_he, relevance, relevance_score, intake, matched_terms,
-                entities, status, item_id, raw
+                entities, status, item_id, raw, product_lines
             )
             VALUES (
                 %(source)s, %(external_ref)s, %(title)s, %(agency)s, %(country)s, %(published_at)s,
                 %(deadline)s, %(url)s, %(cpv_naics)s, %(summary_he)s, %(relevance)s,
                 %(relevance_score)s, %(intake)s, %(matched_terms)s,
-                %(entities)s, %(status)s, %(item_id)s, %(raw)s
+                %(entities)s, %(status)s, %(item_id)s, %(raw)s, %(product_lines)s
             )
             ON CONFLICT (external_ref) DO NOTHING
             RETURNING id
@@ -1340,6 +1354,7 @@ def _insert_tender_and_item(
                 "matched_terms": matched_terms or None,
                 "entities": entities or None,
                 "status": status,
+                "product_lines": product_lines,
                 "item_id": item_id,
                 "raw": Json(notice.raw),
             },

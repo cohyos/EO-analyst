@@ -1449,11 +1449,29 @@ def _enforce_coverage_caveat(draft: _RenderableSurveyDraft, missing: int, total:
 # is instead the comma-joined assignee list (never a real outlet, see `items_for_appendix` above),
 # so name-based lookup never matches it -- :func:`_appendix_reliability` derives a value for those
 # rows the way the round-7 brief calls for: a host match between the patent's own ``url`` and
-# ``sources.url`` (read-only). Most pure-patent rows (Google Patents / a national patent office,
-# never a monitored news source) will still legitimately render "—" -- honest, not a bug; a
-# genuine hit only happens when the same host also appears in ``sources``.
+# ``sources.url`` (read-only). R9-reports #4 (round-8 judge D8 #9): a host match against the
+# monitored ``sources`` table alone left every pure-patent row (Google Patents / a national patent
+# office -- never a monitored news source) rendering "—" live, even though a patent office's own
+# record page is itself an official primary source -- ``_appendix_reliability`` now also recognises
+# :data:`_PATENT_OFFICE_HOSTS` directly (patents.google.com / EPO Espacenet / USPTO PatFT/PPUBS) as
+# a primary source when the ``sources``-table host match above found nothing, still deferring to a
+# real ``sources`` row when one exists for that host.
 
 _SOURCE_HOST_RELIABILITY_CACHE: dict[str, int] | None = None
+
+# R9-reports #4 (round-8 judge D8 #9): every patent row's "אמינות" cell rendered "—" live because
+# the two fresh surveys' patents were exclusively Google-Patents-search-sourced (this codebase's
+# keyless fallback, see this module's own docstring) -- never a host also present in the monitored
+# ``sources`` table, so the host-match lookup above legitimately never hit. A national/international
+# patent office's own record page is itself an official primary source regardless of whether it's
+# also a monitored news outlet -- treated as such (kind='primary', full score) whenever the
+# host-match lookup above found nothing for that url's host (i.e. no *other*, ``sources``-derived
+# reliability value already applies -- that one still wins when present, e.g. a monitored outlet
+# that happens to share a domain with one of these).
+_PATENT_OFFICE_HOSTS = frozenset(
+    {"patents.google.com", "worldwide.espacenet.com", "patft.uspto.gov", "ppubs.uspto.gov"}
+)
+_PATENT_OFFICE_RELIABILITY_LABEL_HE = "רשומת פטנט רשמית"
 
 
 def _source_host_reliability_map() -> dict[str, int]:
@@ -1491,10 +1509,13 @@ def _appendix_reliability(it: dict[str, Any]) -> Any:
     url = it.get("url")
     if not url:
         return None
-    val = _source_host_reliability_map().get(_domain_from_url(url))
-    if val is None:
-        return None
-    return {"kind": "primary" if val >= 4 else "secondary", "score": round(val / 5, 2), "label": None}
+    host = _domain_from_url(url)
+    val = _source_host_reliability_map().get(host)
+    if val is not None:
+        return {"kind": "primary" if val >= 4 else "secondary", "score": round(val / 5, 2), "label": None}
+    if host.lower() in _PATENT_OFFICE_HOSTS:
+        return {"kind": "primary", "score": 1.0, "label": _PATENT_OFFICE_RELIABILITY_LABEL_HE}
+    return None
 
 
 # --------------------------------------------------------------------------
