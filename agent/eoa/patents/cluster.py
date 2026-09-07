@@ -173,6 +173,46 @@ _STOPWORDS = {
     "to",
     "an",
     "or",
+    # round 7 (live label "מעקב / not / has"): plain English function words that survived the
+    # boilerplate stoplist on a content-free metadata row
+    "not",
+    "has",
+    "have",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "by",
+    "at",
+    "as",
+    "from",
+    "that",
+    "this",
+    "these",
+    "those",
+    "it",
+    "its",
+    "which",
+    "can",
+    "may",
+    "will",
+    "one",
+    "more",
+    "than",
+    "into",
+    "such",
+    "also",
+    "said",
+    "wherein",
+    "thereof",
+    "therein",
+    "least",
+    "each",
+    "other",
+    "first",
+    "second",
 }
 
 
@@ -182,6 +222,99 @@ def _keyword_tokens(text: str) -> set[str]:
 
 def _topic_keyword_index(topics: list[_TopicLike]) -> list[tuple[_TopicLike, set[str]]]:
     return [(t, _keyword_tokens(t.query)) for t in topics]
+
+
+# --------------------------------------------------------------------------
+# round 7 D8 point 1/2 (2026-09-06/07, docs/qa/loop/round_6_judge.md D8 worst #10): the term pool
+# feeding a TF-IDF sub-cluster label must never be built from assignee names -- a keyless-search
+# abstract routinely embeds the raw USPTO assignment-record boilerplate verbatim (confirmed live
+# against the ``patents`` table 2026-09-07, e.g. patent id 62's entire abstract is "2019-03-07
+# Assigned to Anduril Industries Inc. reassignment Anduril Industries Inc. ASSIGNMENT OF
+# ASSIGNORS INTEREST (SEE DOCUMENT FOR DETAILS)." -- zero technical content), which previously let
+# a company name or plain assignment-paperwork jargon become the cluster's own displayed label
+# term. Two stoplists cover the two distinct failure modes: a corporate-suffix stoplist (a bare
+# suffix word that leaks out of an assignee name once the name itself is stripped, e.g. "Sabanci
+# Universitesi" -> "universitesi") and a patent-administrative-boilerplate stoplist (recurring
+# non-technical scrape/metadata noise that is not tied to any one assignee, e.g. "reassignment").
+# --------------------------------------------------------------------------
+
+_CORPORATE_SUFFIX_STOPWORDS = {
+    "inc",
+    "ltd",
+    "llc",
+    "corp",
+    "corporation",
+    "co",
+    "gmbh",
+    "ag",
+    "sa",
+    "systems",
+    "technologies",
+    "company",
+    "university",
+    "universitesi",
+    "institute",
+    "industries",
+}
+
+_PATENT_BOILERPLATE_STOPWORDS = {
+    "assigned",
+    "assignee",
+    "assignees",
+    "assignment",
+    "assignors",
+    "reassignment",
+    "interest",
+    "document",
+    "details",
+    "download",
+    "pdf",
+    "google",
+    "patents",
+    "patent",
+    "definitions",
+    "invention",
+    "inventionbelongs",
+    "inventionrefers",
+    "embodiment",
+    "embodiments",
+    "see",
+    # Google Patents' own standard "Legal status" disclaimer paragraph and per-record metadata
+    # fields (confirmed live 2026-09-07 against patents.id=70/29 -- e.g. "Legal status (The legal
+    # status is an assumption and is not a legal conclusion. Google has not performed a legal
+    # analysis and makes no representation as to the accuracy of the status listed.)" and "Free
+    # format text: JAPANESE INTERMEDIATE CODE: A523 - Effective date: 20190619") -- recurring
+    # scrape noise, never a technology term, and not tied to any one assignee so it belongs here
+    # rather than in the assignee-token strip.
+    "legal",
+    "status",
+    "assumption",
+    "conclusion",
+    "analysis",
+    "representation",
+    "accuracy",
+    "listed",
+    "inaccurate",
+    "performed",
+    "free",
+    "format",
+    "text",
+    "intermediate",
+    "effective",
+    "date",
+    "japanese",
+}
+
+
+def _assignee_name_tokens(assignees: list[str] | None) -> set[str]:
+    """Every lowercase word (``_WORD_RE``'s own ``{A-Za-z}{3,}`` shape) that appears in any of the
+    row's own real assignee names -- e.g. ``["Anduril Industries Inc"]`` -> ``{"anduril",
+    "industries", "inc"}`` -- so those tokens can be scrubbed out of the term pool wherever the
+    assignee name itself has leaked into the scraped title/abstract text (round 7 D8 point 1)."""
+    out: set[str] = set()
+    for name in assignees or []:
+        out.update(t.lower() for t in _WORD_RE.findall(name or ""))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -209,6 +342,166 @@ def _subcluster_tokens(text: str) -> list[str]:
     latin = [t.lower() for t in _WORD_RE.findall(text or "") if t.lower() not in _STOPWORDS]
     hebrew = list(_HEBREW_WORD_RE.findall(text or ""))
     return latin + hebrew
+
+
+# --------------------------------------------------------------------------
+# round 7 D8 point 2/3/4 (2026-09-06/07, docs/qa/loop/round_6_judge.md D8 worst #10): a curated
+# EO/IR technology vocabulary -- assembled from the *English* parts of config/taxonomy.yaml's own
+# subdomain labels (e.g. ``detectors_fpa``'s "SWIR/MWIR/LWIR, Uncooled" and ``uav_gimbals``'s
+# "EO/IR Gimbals") plus the round-6-judge finding's own worked example list -- so a TF-IDF
+# sub-cluster label prefers a genuine EO/IR technology noun over an equally-frequent but generic
+# word once one is present among the cluster's own top terms, and prefers a multi-word technical
+# phrase ("focal plane array") over either of its own bare component words ("focal", "array") when
+# that phrase actually occurs in the source text. Keys are lowercase; a term with no Hebrew entry
+# here is displayed in English rather than invented (point 3's "else keep the English term").
+# Deliberately NOT sourced by parsing ``config/taxonomy.yaml`` at runtime: this module stays
+# DB-free/LLM-free/dependency-free by design (see module docstring), and a curated constant is
+# exactly as auditable as a parsed one for a list this size.
+# --------------------------------------------------------------------------
+
+_EOIR_VOCAB_TERM_HE: dict[str, str] = {
+    "gimbal": "ג'ימבל",
+    "gimbals": "ג'ימבלים",
+    "thermal": "תרמי",
+    "detector": "גלאי",
+    "detectors": "גלאים",
+    "seeker": "ראש ביות",
+    "seekers": "ראשי ביות",
+    "tracking": "מעקב",
+    "tracker": "עוקב",
+    "laser": "לייזר",
+    "designator": "מציין מטרה",
+    "designators": "מציני מטרה",
+    "hyperspectral": "היפרספקטרלי",
+    "uncooled": "לא-מקורר",
+    "microbolometer": "מיקרו-בולומטר",
+    "lidar": "לידאר",
+    "infrared": "אינפרא-אדום",
+    "pixel": "פיקסל",
+    "roic": "ROIC",
+    "droic": "DROIC",
+    "swir": "SWIR",
+    "eswir": "eSWIR",
+    "mwir": "MWIR",
+    "lwir": "LWIR",
+    "atr": "ATR",
+    "metasurface": "מטא-משטח",
+    "optronic": "אופטרוני",
+}
+
+#: Multi-word EO/IR phrases (each a tuple of lowercase words, longest-first so a longer phrase is
+#: matched before a shorter one that is its own prefix, e.g. "focal plane array" before "focal
+#: plane") -- mirrors :data:`_EOIR_VOCAB_TERM_HE`'s "keep English if no Hebrew entry" rule.
+_EOIR_VOCAB_PHRASE_HE: dict[tuple[str, ...], str] = {
+    ("focal", "plane", "array"): "מערך מישור מוקד",
+    ("focal", "plane"): "מישור מוקד",
+    ("quantum", "dot"): "נקודת קוונטית",
+    ("quantum", "dots"): "נקודות קוונטיות",
+    ("night", "vision"): "ראיית לילה",
+    ("beam", "control"): "בקרת אלומה",
+    ("super", "resolution"): "רזולוציית-על",
+    ("target", "recognition"): "זיהוי מטרות",
+    ("sensor", "fusion"): "שילוב חיישנים",
+    ("edge", "ai"): "בינה מלאכותית קצה",
+}
+_EOIR_VOCAB_PHRASES: tuple[tuple[str, ...], ...] = tuple(sorted(_EOIR_VOCAB_PHRASE_HE, key=len, reverse=True))
+#: The same phrases as ``"word1 word2"``-joined strings (matching :func:`_phrase_tokens`'s own
+#: output shape) -- used by :func:`_term_boost` for membership testing, since a token flowing
+#: through a TF-IDF vector is always a joined string, never the tuple key itself.
+_EOIR_VOCAB_PHRASE_STRINGS: frozenset[str] = frozenset(" ".join(p) for p in _EOIR_VOCAB_PHRASE_HE)
+
+#: Round 7 D8 point 4: a short CPC-code -> (English title, Hebrew title) table for exactly the
+#: codes this project already tracks (``config/patents.yaml``'s own ``cpc:`` list and its trailing
+#: comments -- the only "CPC title text" actually present anywhere in this project's own data,
+#: since the ``patents`` table stores bare codes with no per-row title column). Used as a better
+#: fallback than the bare ``f"אשכול טכנולוגי {code}"`` in :func:`_cpc_label`, and to seed extra
+#: term-pool words for a row that does carry one of these CPC codes (point 1's "... + CPC-title
+#: text").
+_CPC_CODE_TITLES: dict[str, tuple[str, str]] = {
+    "G01J5": ("radiation pyrometry infrared detector", "פירומטריית קרינה, גלאי אינפרא-אדום"),
+    "G02B23": ("telescope binocular periscope observation", "טלסקופים ומכשירי תצפית"),
+    "G02B26": ("optical scanning beam control gimbal", "בקרת קרן אופטית, סריקה"),
+    "G02B27": ("optical system thermal sighting head-up", "מערכות אופטיות, כוונות תרמיות"),
+    "F41G3": ("aiming fire control weapon", "כיוון וכוונת אש"),
+    "F41G7": ("missile guidance seeker", "הנחיית טילים, ראשי ביות"),
+    "H04N23": ("camera image sensor thermal imaging", "מצלמות וחיישני תמונה תרמיים"),
+    "H01L27": ("semiconductor focal plane array", "רכיבי מוליכים למחצה, מערכי מישור מוקד"),
+    "G06V10": ("image pattern recognition target recognition", "זיהוי דפוסים בתמונה"),
+    "G06T7": ("image analysis target tracking sensor fusion", "ניתוח תמונה, מעקב מטרות"),
+    "G01S17": ("lidar laser rangefinding", "לידאר וטווח-לייזר"),
+    "B64D47": ("aircraft observation pod payload", "פודים ומטענים לתצפית ממטוסים"),
+}
+
+
+def _raw_words(text: str) -> list[str]:
+    """Sequential (order-preserved, repeats kept) lowercase Latin words from ``text`` -- unlike
+    :func:`_subcluster_tokens`/:func:`_keyword_tokens`, stopwords are NOT dropped here, since a
+    stopword can sit inside a real multi-word phrase (kept only long enough for
+    :func:`_phrase_tokens` to scan word-adjacency; the returned list is never itself fed straight
+    into a TF-IDF vector)."""
+    return [t.lower() for t in _WORD_RE.findall(text or "")]
+
+
+def _phrase_tokens(words: list[str]) -> list[str]:
+    """Every :data:`_EOIR_VOCAB_PHRASE_HE` phrase that actually occurs (word-adjacent, in order) in
+    ``words``, returned as ``"word1 word2"``-joined strings -- one entry per occurrence, so a
+    phrase appearing twice in a title+abstract contributes twice to that document's own term
+    frequency, same convention as :func:`_subcluster_tokens`'s repeats-kept unigrams."""
+    found: list[str] = []
+    n = len(words)
+    for i in range(n):
+        for phrase in _EOIR_VOCAB_PHRASES:
+            length = len(phrase)
+            if i + length <= n and tuple(words[i : i + length]) == phrase:
+                found.append(" ".join(phrase))
+    return found
+
+
+def _term_pool_tokens(row: dict[str, Any]) -> list[str]:
+    """Round 7 D8 point 1: the term pool for a TF-IDF sub-cluster, built from ``row``'s own
+    title + abstract + (when it carries a known CPC code -- see :data:`_CPC_CODE_TITLES`) that
+    code's own English title text -- and NEVER from ``row["assignees"]``. Every token matching a
+    word in one of the row's own assignee names, a :data:`_CORPORATE_SUFFIX_STOPWORDS` entry, or a
+    :data:`_PATENT_BOILERPLATE_STOPWORDS` entry (patent-administrative scrape noise, e.g.
+    "reassignment") is dropped before the vector is ever built -- neither a company-name fragment
+    nor paperwork jargon can become a displayed cluster label term. Known EO/IR technology phrases
+    (:data:`_EOIR_VOCAB_PHRASE_HE`) are additionally extracted as their own multi-word tokens
+    (point 2's "bigrams over unigrams") alongside the ordinary unigrams and any Hebrew words."""
+    title = row.get("title") or ""
+    abstract = row.get("abstract") or ""
+    cpc_title_text = " ".join(
+        _CPC_CODE_TITLES[code][0] for code in (row.get("cpc") or []) if code in _CPC_CODE_TITLES
+    )
+    text = f"{title} {abstract} {cpc_title_text}"
+    assignee_tokens = _assignee_name_tokens(row.get("assignees"))
+    drop = _STOPWORDS | _CORPORATE_SUFFIX_STOPWORDS | _PATENT_BOILERPLATE_STOPWORDS | assignee_tokens
+    words = _raw_words(text)
+    unigrams = [w for w in words if w not in drop]
+    phrases = _phrase_tokens(words)
+    hebrew = list(_HEBREW_WORD_RE.findall(text))
+    return unigrams + phrases + hebrew
+
+
+def _term_boost(term: str) -> float:
+    """Round 7 D8 point 2 ("prefer technology nouns... and bigrams over unigrams"): a multiplier
+    applied to a term's own TF-IDF weight purely for *label-term selection* (never for the
+    similarity/clustering math itself, which stays untouched) -- a known EO/IR phrase scores
+    highest, a known EO/IR unigram next, and every other term (still real title/abstract text --
+    just not in the curated vocabulary) keeps its own plain weight."""
+    if " " in term:
+        return 3.0 if term in _EOIR_VOCAB_PHRASE_STRINGS else 1.0
+    return 2.0 if term in _EOIR_VOCAB_TERM_HE else 1.0
+
+
+def _boosted_top_terms(vec: dict[str, float], n: int) -> list[str]:
+    """Same contract as :func:`_top_terms` (deterministic: ties broken alphabetically by term) but
+    ranks by ``weight * _term_boost(term)`` instead of the bare TF-IDF weight, so a real EO/IR
+    technology term or phrase wins a label slot over an equally- (or even somewhat more-) frequent
+    generic word once both survived :func:`_term_pool_tokens`'s stoplist filtering."""
+    return [
+        term
+        for term, _weight in sorted(vec.items(), key=lambda kv: (-(kv[1] * _term_boost(kv[0])), kv[0]))[:n]
+    ]
 
 
 def _tfidf_vectors(token_lists: list[list[str]]) -> list[dict[str, float]]:
@@ -271,12 +564,11 @@ def tfidf_subcluster_unclassified(
     being dropped -- ``docs/CONVENTIONS.md`` rule 5, never silently discard a patent from its own
     survey. Returns ``[]`` for an empty ``rows``; each returned item is
     ``{"patent_ns": [...], "patent_ids": [...], "label_terms": [...]}`` (``label_terms`` -- see
-    :func:`_top_terms` -- is ``[]`` only when every row in that sub-cluster had no tokens at all)."""
+    :func:`_boosted_top_terms` -- is ``[]`` only when every row in that sub-cluster had no tokens
+    at all)."""
     if not rows:
         return []
-    vectors = _tfidf_vectors(
-        [_subcluster_tokens(f"{r.get('title') or ''} {r.get('abstract') or ''}") for r in rows]
-    )
+    vectors = _tfidf_vectors([_term_pool_tokens(r) for r in rows])
     clusters: list[dict[str, Any]] = []
     for row, vec in zip(rows, vectors, strict=True):
         best_idx: int | None = None
@@ -296,7 +588,7 @@ def tfidf_subcluster_unclassified(
         {
             "patent_ns": [r["n"] for r in c["rows"]],
             "patent_ids": [r.get("id") for r in c["rows"]],
-            "label_terms": _top_terms(c["centroid"], _UNCLASSIFIED_LABEL_TOP_TERMS),
+            "label_terms": _boosted_top_terms(c["centroid"], _UNCLASSIFIED_LABEL_TOP_TERMS),
         }
         for c in clusters
     ]
@@ -312,23 +604,49 @@ def tfidf_subcluster_unclassified(
 _TERM_CLUSTER_LABEL_PREFIX_HE = "אשכול נושאי"
 
 
+def _is_hebrew_text(term: str) -> bool:
+    return bool(_HEBREW_WORD_RE.search(term))
+
+
+def _display_term_he(term: str) -> str:
+    """Round 7 D8 point 3: map a label term to its Hebrew equivalent when the curated EO/IR
+    vocabulary (:data:`_EOIR_VOCAB_TERM_HE`/:data:`_EOIR_VOCAB_PHRASE_HE`) has one, otherwise keep
+    the term exactly as given -- a term that is already Hebrew (from the tokenizer's own Hebrew
+    capture) passes through unchanged either way since it matches neither dict's (Latin) keys."""
+    key = tuple(term.split(" ")) if " " in term else term
+    if isinstance(key, tuple):
+        return _EOIR_VOCAB_PHRASE_HE.get(key, term)
+    return _EOIR_VOCAB_TERM_HE.get(key, term)
+
+
 def _unclassified_label_he(label_terms: list[str]) -> str:
     """A genuinely descriptive Hebrew label built from a TF-IDF sub-cluster's own top terms --
-    e.g. "אשכול נושאי: sensor / drone / counter" -- never the literal :data:`UNCLASSIFIED_LABEL_HE`
-    once there is at least one real term to name the cluster by (round 6 D8 finding 2: the old
-    "לא מסווג: <terms>" form still tripped the deterministic no-unclassified-cluster check on its
-    literal prefix, and read as a dead end to a human despite genuinely having real terms to show).
-    Falls back to :data:`UNCLASSIFIED_LABEL_HE` only when ``label_terms`` is empty -- a sub-cluster
-    whose patents carry no title/abstract tokens at all has nothing honest to derive a name from."""
+    e.g. "אשכול נושאי: גלאים / focal plane array / counter" -- never the literal
+    :data:`UNCLASSIFIED_LABEL_HE` once there is at least one real term to name the cluster by
+    (round 6 D8 finding 2: the old "לא מסווג: <terms>" form still tripped the deterministic
+    no-unclassified-cluster check on its literal prefix, and read as a dead end to a human despite
+    genuinely having real terms to show). Round 7 D8 point 3: each term is mapped through the
+    curated EO/IR vocabulary to Hebrew where one exists (:func:`_display_term_he`), else kept in
+    English rather than invented; the displayed terms are then ordered Hebrew-first (native Hebrew
+    tokens and vocabulary-translated terms before any term left in English), per the round-7 spec's
+    "up to 3 terms, Hebrew first" label shape. Falls back to :data:`UNCLASSIFIED_LABEL_HE` only when
+    ``label_terms`` is empty -- a sub-cluster whose patents carry no title/abstract tokens at all
+    has nothing honest to derive a name from."""
     if not label_terms:
         return UNCLASSIFIED_LABEL_HE
-    return f"{_TERM_CLUSTER_LABEL_PREFIX_HE}: " + " / ".join(label_terms)
+    displayed = [_display_term_he(t) for t in label_terms]
+    hebrew_first = [t for t in displayed if _is_hebrew_text(t)]
+    rest = [t for t in displayed if not _is_hebrew_text(t)]
+    return f"{_TERM_CLUSTER_LABEL_PREFIX_HE}: " + " / ".join(hebrew_first + rest)
 
 
 def _cpc_label(code: str, topics: list[_TopicLike]) -> str:
     for topic in topics:
         if code in (topic.cpc or []):
             return topic.name_he
+    known = _CPC_CODE_TITLES.get(code)
+    if known:
+        return f"אשכול טכנולוגי: {known[1]} ({code})"
     return f"אשכול טכנולוגי {code}"
 
 
