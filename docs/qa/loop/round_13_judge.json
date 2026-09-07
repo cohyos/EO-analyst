@@ -1,0 +1,141 @@
+{
+  "round": 13,
+  "judge": "independent read-only agent J13 (no pipeline runs, no report rebuilds, no fixes, no OMC skills/agents/tools, no DB writes, no git commands of any kind, no process kills, no stack start/stop, no Playwright). DATABASE_URL loaded exactly once per shell via `set -a; . runtime/eoa.env; set +a` and passed straight into short-lived .venv/Scripts/python.exe + psycopg scripts with PYTHONUTF8=1 -- the value itself was never cat/grep/type/echoed; every query confirmed port 5432 (inet_server_port()), db 'eoanalyst', alembic_version='0029'. All 8 golden chat questions were asked live, sequentially, in a background process, against POST http://127.0.0.1:8765/api/ask, each read to its answer_final SSE event -- 8/8 completed cleanly (0 errors, 0 gate_busy, 0 timeouts), 76.3-176.3s each (mean ~130s), well inside the 4-min/question and 45-min total budget; total elapsed ~17.3 min. api.remote_access.enabled=true (ADR-008) confirmed in config/config.yaml but every loopback 127.0.0.1 call (curl and the ask script) returned 200, never 401 auth_required. DB/file work was done first; chat was asked last, per the brief. Freshness: daily_2026-09-07.md (19:14), weekly_2026-09-07.md (19:27), monthly_2026-09-30.md (19:38), and pl_mws_eo_2026-09-07.md (18:45, report_id=138) all postdate the round-13 fixes described in round_13_fixes.md; the Anduril patent survey (patent_survey_Anduril_..._2026-09-07.md, rebuilt 18:59) also postdates its own fix (finding 4b) even though the brief characterized surveys as 'not rebuilt this round' -- verified directly in the file, not assumed. BD territories and the DROIC survey are genuinely unchanged since round 12 (mtimes 14:49-15:21 and 17:16 respectively) and were judged as carried over.",
+  "domains": {
+    "D1": {
+      "score": 92,
+      "n": 40,
+      "notes": [
+        "VERIFIED, durable, unchanged from round 12: all 40 golden items re-checked live for score<->level consistency (red>=8/orange>=6/yellow>=4; 'archive' is a separate lifecycle level, not a score tier, and was correctly excluded from the comparison) -- 0 mismatches; items 52/56/57 correctly excluded as dedup_of 10/2/50.",
+        "VERIFIED, durable, identical to rounds 7-12: entity orphan count (no graph_edges row AND no item.entities_mentioned mention) is 16/334 -- same 16 entities (15 watchlist + 'Hero 120'). An initial scan flagged a 17th ('David's Sling', id 1228) as orphaned; re-derivation found this was this judge's own SQL bug (unnecessary quote-doubling before a runtime `||` concatenation, not a dynamic-SQL context) -- corrected query confirms 'David's Sling' is genuinely mentioned in item 6163 and is not an orphan. Reported here so the false lead does not get repeated.",
+        "VERIFIED, durable: junk-entity scan returns only 'AV' (id 606), matching round 12 exactly.",
+        "VERIFIED, durable: item_corroboration coverage for recent (7d) in-scope items is 63/63 (100%), 58 single_source + 5 corroborated + 0 official_primary -- identical to rounds 7-12.",
+        "VERIFIED, durable: dedup chain is single-level everywhere (0 items whose dedup_of target itself has a dedup_of) -- 31 total dedup rows DB-wide, no chains.",
+        "Reported factually, unchanged: product_lines tag coverage remains thin (4 items DB-wide tagged; 2/9 tenders targeting_pods; 4/10 tender_forecasts tagged) -- same narrow-keyword-gated-tagger shape as rounds 11-12, not a regression."
+      ]
+    },
+    "D2": {
+      "score": 91,
+      "n": 15,
+      "notes": [
+        "MAJOR VERIFIED FIX (round 12 worst #5 / round_13_fixes.md finding #3): the 11 in-scope items (level red/orange/yellow, dedup_of null) with so_what_he IS NULL are now 0 -- confirmed via a fresh `SELECT count(*) FROM items WHERE level IN ('red','orange','yellow') AND so_what_he IS NULL` -> 0. Read all 11 repaired rows (ids 23, 55, 72, 83, 108, 168, 217, 281, 297, 5122, 6872) directly: every one is a substantive, specific, citation-grounded analytical judgment starting with 'להערכתנו', not boilerplate or a generic template phrase.",
+        "VERIFIED, durable: 0 items DB-wide match the banned filler-phrase regex (יש לציין/חשוב להדגיש/בהקשר זה/ראוי לציין) -- identical clean result to rounds 7-12.",
+        "Re-spot-checked items 39/44/9/33 (round 12's own sample): unchanged, still substantive analytical text, no regression.",
+        "Noted, not scored here (belongs to D5): the analyst-assessment sections of this round's 8 live chat answers are generally strong (see D5), reinforcing that the analytical-reasoning quality bar is being met consistently across both report so_what text and chat synthesis."
+      ]
+    },
+    "D3": {
+      "score": 96,
+      "n": 20,
+      "notes": [
+        "VERIFIED, durable: 'Operation Atlantic City' appears in monthly_2026-09-30.md's events table (line 89, via events.program) exactly as round 12's fix intended. Two additional narrative-prose mentions were found this round (lines 51, 69, inside 'מגמה חדשה החודש'-style narrative bullets describing the real Kongsberg StrikeMaster deployment) -- these are legitimate contextual references to a real event by name, not the entity-table leak round 11/12 fixed (players_map/watchlist_changes tables were re-checked and remain clean of any Atlantic City row), so this is reported as a non-issue, not a regression.",
+        "VERIFIED, durable: all 9 event kinds in use with identical distribution to rounds 7-12 (deployment 32, test 26, contract_award 19, partnership 17, launch 10, investment 10, m_and_a 8, regulation 2, other 1).",
+        "VERIFIED, durable: item 10/96 dedup chain intact (96.dedup_of=10, both orange/air_defense), renders as one entry with an honest rerun note in weekly_2026-09-07.md.",
+        "VERIFIED: no contradictory reruns (same question text appearing twice) in either daily or weekly's 'חקירות עומק' sections."
+      ]
+    },
+    "D4": {
+      "score": 94,
+      "n": 9,
+      "notes": [
+        "VERIFIED, live, unchanged from rounds 11-12: jobs 156 (found/1.0), 160 (partial/0.1), 161 (found/0.95) all render correctly in the fresh weekly_2026-09-07.md's 'חקירות עומק' section with honest Hebrew rerun-disclosure notes, quoted directly ('ריצה אחרת עם תוצאה \"טובה יותר\" לכאורה הושמטה כי מקורה היחיד... זוהו כדף חסימה/אימות אנושי').",
+        "VERIFIED, live: GET /api/investigations/156 and /173 both return populated provenance objects (job/trigger_item/lineage/reports keys) -- re-tested this round, still work, no 401 despite api.remote_access.enabled=true.",
+        "VERIFIED, durable: golden historical jobs 46/47/48/70/86/91 unchanged (5x not_found at confidences 0.3/0.1/0.1/0.0/0.0, 1x off_topic at 0.1) -- identical to round 7's baseline.",
+        "VERIFIED, live, in the fresh weekly.md: a genuinely blocked investigation renders as a distinct 'נחסם (לא נחקר בפועל): —' outcome, separate from 'לא נמצא' -- the blocked_distinct_from_not_found fix from earlier rounds holds. A source correctly identified as an interstitial/Cloudflare challenge page ('thedefensenews.com נחסם על-ידי הגנת בוט') is explicitly excluded from being used as evidence rather than being silently treated as real content -- no investigation in either fresh report cites an interstitial page as a source of fact."
+      ]
+    },
+    "D5": {
+      "score": 85,
+      "n": 8,
+      "notes": [
+        "MAJOR VERIFIED FIX HOLDS (round_13_fixes.md finding R13-chat #1, closing round 12 worst #2/D5): Q5 (Skyranger)'s live answer does not contain the fabricated '4,000 rounds per minute' corruption anywhere -- confirmed via direct text search of the live answer_final. Item 1353 is retrieved and cited ([2]), but this run's synthesis chose to honestly decline drawing a direct comparison ('לא נמצא מקור העורך השוואה בפועל') rather than state the real 1,000-rounds figure at all -- a defensible, non-fabricating outcome, but the full extraction-and-use of the spec that round 12 achieved is not consistently reproduced run-to-run (retrieval/ranking variance, not a regression of the round-13 guard fix itself, which is specifically about preventing corruption when the figure IS stated).",
+        "MAJOR VERIFIED FIX HOLDS (round_13_fixes.md finding R13-chat #2, closing round 12 worst #2): Q6 (AUSA 2026)'s live answer opens cleanly with a complete, coherent clause ('> ⚠️ התשובה מבוססת על מקורות מעטים/עקיפים...') -- the round-12 'מים, ודירוג הכנסות...' headless mid-clause opening does not reproduce. The answer also explicitly and honestly labels its general-knowledge portion as 'בהתבסס על ידע כללי, לא מהמאגר' (not from the corpus) -- a strong, transparent disclosure pattern.",
+        "NEW, real, concrete: Q1 (XM30)'s live answer contains a garbled mid-paragraph fusion -- '...לגבי הספקים המובילים שלהם.די תצפית. במקביל, קבוצת GDLS עובדת יחד עם ספקיות דוגמת AeroVironment.' -- where a guard-removed fragment ('...מערכות תצפית' or similar) is left glued directly onto the prior sentence's period with no space, followed by an uncited claim (GDLS-AeroVironment collaboration) that appears nowhere in any of the 8 listed sources. This is the same underlying 'guard-removal leaves an incoherent/truncated leftover' defect class chased across rounds 10-13, in a new mid-text (not leading-unit, not bare-short-line) shape that none of the existing coherence checks are scoped to catch.",
+        "NEW, real, concrete: Q7 (US EO/IR RFI)'s live answer contains a truncated-word + fused-sentence defect -- '...שפורסם בארה״ ה-RFI היחיד שמופיע בנתונים פורסם על ידי פינלנד...' -- 'בארה\"ב' (in the US) is cut mid-word to 'בארה\"' and the next sentence is appended with no period or space. `removed_by_guard: {'dangling_fragment': 1}` confirms a guard fired at exactly this boundary. Same defect class as Q1's issue above -- a second independent reproduction in the same 8-question sample.",
+        "NEW, real, reproducible formatting bug (2/8 answers, Q2 and Q4): a literal, verbatim boilerplate string '⚠ ללא ציטוטים: > ⚠️ התשובה מבוססת על מקורות מעטים/עקיפים; ראו רשימת המקורות.' renders with the off-topic-warning label and the caveat's own blockquote marker concatenated onto one line with no line break, breaking Markdown blockquote rendering (the '>' does not start its own line, so it displays as literal text instead of a blockquote). Appears to fire specifically when routes.ask._OFF_TOPIC_PREFIX and the low-citation-caveat blockquote both trigger together. Q6, which only hit the low-citation-caveat path alone, rendered its blockquote correctly -- isolating the combination as the trigger.",
+        "VERIFIED, durable: 0/8 answers leak '===SOURCES_JSON==='; every answer carries 5-10 valid, non-empty [n] citations; no leading-space lines; no short bare-fragment lines (the exact 'סי.'-shaped and round-10/11 leading-space bugs remain fixed).",
+        "VERIFIED, durable: Q2 (Iron Beam) and Q4 (DROIC) both correctly refuse to fabricate a bridging answer when retrieved sources are genuinely off-topic (Q4's 10 retrieved sources are entirely unrelated -- OpenAI news, drone-flight stories, cyclone forecasting -- and the model explicitly says none mention 'DROIC' rather than inventing a connection); Q3 (LORA/Greece) explicitly and correctly keeps the German-navy LORA test and the Greek air-defense deal separate, calling the conflation risk out by name; Q8 (SPECTRO ISR) is clean, accurate, and well-cited ($270M/6-year/MWIR-visible-SWIR/AI-analytics, all verified against item 321's own clean_text).",
+        "Item-title data-quality note (pre-existing, not a round-13 regression): item 90, cited in Q3, has title='Updated 13.30' in the DB (an extraction artifact -- the real headline per its own URL slug is 'Israel to sign biggest-ever defense deal with Greece') -- correctly used in context by the chat answer, but a source-list readability defect worth a future title-repair pass.",
+        "Entailment coverage: exactly 3 'ask.entailment_check_removed' events fired across today's full log, and all 3 correspond one-for-one to this judge's own Q1/Q3/Q5 calls (matched by their unique removed_by_guard claims/removed counts) -- 0 '_skipped'/'_unavailable' events. See the process-integrity finding below: round_13_fixes.md's own 'Live probes' section describes different removed_by_guard breakdowns for what it calls its own separate Q5/Q6 probe calls, and no log entries matching those specific numbers exist anywhere in today's file outside this judge's own run.",
+        "Process/documentation-integrity finding (moderate severity, in the spirit of the brief's 'never trust a status section'): round_13_fixes.md's 'R13-chat' section's 'Live probes' subsection claims two POST /api/ask calls with specific removed_by_guard breakdowns (Q5: {'uncited_factual_claim':3,'entailment_check':1}; Q6: {'entailment_check':1}) run against the live stack. A full decode of runtime/logs/api.2026-09-07.log (grep alone under-reports this file -- see method note) shows only 3 'ask.entailment_check_removed' events all day, and all 3 exactly match this judge's own Q1/Q3/Q5 calls' claims/removed counts, timing, and guard dictionaries -- leaving no log evidence anywhere for the fixes.md's own separately-described probe results. This does not call the underlying code fixes into question (both are independently unit-tested per the fixes doc, and both hold up live in this judge's own fresh sample -- see the two 'MAJOR VERIFIED FIX HOLDS' notes above) but the specific live-probe numbers quoted in the fixes doc could not be corroborated."
+      ]
+    },
+    "D6": {
+      "score": 97,
+      "n": 3,
+      "notes": [
+        "MAJOR VERIFIED FIX (round_13_fixes.md finding #2, closing round 12's last open D6 item): weekly_2026-09-07.md's indicator row for 'חתימה צפויה על חוזה הצטיידות רשמי של אסטוניה במערכות היירוט קלע דוד...' (previously '—') now shows a real citation ([3]) in the live file. The genuinely-unmatched row ('להערכתנו מגמת ההשקות תימשך ברבעון הקרוב') correctly still shows '—', confirming the fix (a short-name-bigram extractor for 'קלע דוד') adds precision without inventing spurious matches.",
+        "VERIFIED, durable: weekly's indicator table is exactly 8 rows (<=8 cap); daily's is 8 rows, all with populated evidence; monthly's is 8 rows, all with populated evidence (4 'חדש' + 4 'הבשיל', all citing real sources).",
+        "VERIFIED, durable: H2 heading counts within budget -- daily=7<=15, weekly=15<=16, monthly=13<=16.",
+        "VERIFIED, durable: monthly's single 'תעשייה ישראלית' table (not multiple sections) with a populated 'סוג' column, 5+ rows read directly, each with a real citation and specific analyst so_what text.",
+        "VERIFIED, durable: weekly's 'מבט קדימה' (outlook) items keep סבירות (likelihood) and ביטחון (confidence) in separate clauses, never merged, for every item read.",
+        "Noted, unchanged limitation from round 12 (not penalized, consistent with prior rounds): the daily and pl_mws_eo reports, when there is no red/orange/yellow content for the period, render 'תקציר מנהלים' directly with 'אין תקציר לתקופה זו' and skip the distinct '## שורה תחתונה' heading that weekly/monthly/BD/populated-PL reports carry -- a design pattern (BLUF heading appears only when there is BLUF-worthy content), not confirmed as a deliberate spec choice; worth a future round's explicit confirmation.",
+        "No '===SOURCES_JSON===' leak, no raw slugs, in any fresh report file."
+      ]
+    },
+    "D7": {
+      "score": 96,
+      "n": 15,
+      "notes": [
+        "MAJOR VERIFIED FIX (round_13_fixes.md finding #1, closing round 12's worst #1): output/reports/pl_mws_eo_2026-09-07.md (rebuilt 18:45, report_id=138) now shows exactly 3 unique patent rows (US7378626B2, US20030142005A1, US20070075182A1) -- both of round 12's exact duplicate pairs (US7378626/US7378626B2; US20030142005/US20030142005A1) now render exactly once each, confirmed by grepping the file for every one of the 5 raw pre-dedupe pub_number values.",
+        "VERIFIED across BD territory reports (us/il/eu full read, de/gb/gr/in/kr headings+BLUF spot-check): every BLUF is substantive and cited; bd_kr's informative-empty stub is intact; bd_de and bd_gb's acquisition-watch sections both correctly show zero Elbit rows without a 'גלobali' marker (the round-12 territory-scoping fix holds); bd_eu's buyer-pipeline table is populated with 5 real, cited opportunities.",
+        "VERIFIED, durable: the other 5 product-line reports (targeting_pods, lorop_pods, eo_air_defense_warning, ball_gimbals_16in, border_long_range_eo) all meet the D7 bar -- specific cited BLUFs where data exists (targeting_pods, lorop_pods, ball_gimbals_16in), honest empty framing where it does not (eo_air_defense_warning, border_long_range_eo)."
+      ]
+    },
+    "D8": {
+      "score": 96,
+      "n": 16,
+      "notes": [
+        "VERIFIED FIX, live, though outside the brief's own expectation for this round (round_13_fixes.md finding #4b, a follow-up spawned mid-round): the Anduril patent survey's doubled cluster-heading prefix ('## אשכול טכנולוגי: אשכול נושאי: lattice / mesh', round 12 worst #9) is fixed in the live, freshly-rebuilt file (mtime 18:59, strictly after the survey.py fix) -- now reads '## אשכול נושאי: lattice / mesh', a single un-doubled prefix. A file-wide grep for the doubled pattern returns 0 hits. The round-13 brief characterized the surveys as 'not rebuilt this round' -- this is factually superseded by the live file's own mtime and content; reported as a genuine fix, not scored as carried-over.",
+        "VERIFIED, durable: all 4 CPC-based cluster headers in the Anduril survey and all 4 in the DROIC survey still read '<technology-term label> (<CPC code>)', never a bare code.",
+        "VERIFIED, durable: appendix reliability populated on every row checked in both surveys ('מקור ראשוני · רשומת פטנט רשמית · 1.00'); no bogus assignee in either survey's profile sections (Raytheon Co, Sensors Unlimited Inc, Sabanci Universitesi, Anduril Industries Inc, Individual, Raytheon BBN Technologies Corp -- all legitimate); no unclassified cluster in either survey; CPC x assignee matrix present in the DROIC survey; methodology box before the summary with a populated 'כיסוי נתוני מקצה: 100%' coverage tag in both."
+      ]
+    },
+    "D9": {
+      "score": 93,
+      "n": 9,
+      "notes": [
+        "VERIFIED, stable, identical to rounds 9-12: tender 38 archived/candidate, tender 42 open/candidate (Finland/computer-vision, ted_eu_cpv); 9 tenders total, 1 open; 10 tender_forecasts (4/10 carry a product_lines tag: 7/eo_air_defense_warning, 6/targeting_pods, 55/targeting_pods, 56/eo_air_defense_warning); 28 conferences, 0 in the past.",
+        "VERIFIED, unchanged: security_status='blocked' count is 36, identical to rounds 11-12.",
+        "VERIFIED, unchanged (informational, not a live-content defect): tender id=34 (Dutch legal/HR consulting, no EO/IR/defense relevance) remains in the DB with status='archived' -- excluded from all active reports, same low-severity note as round 12, not new.",
+        "VERIFIED, live: GET /api/graph/overview?limit=300, /api/graph/search?q=Elbit, /api/graph/neighborhood/22, and /api/entities/22/detail all return 200 -- no 401 despite api.remote_access.enabled=true (loopback correctly unaffected per ADR-008).",
+        "VERIFIED: source-reliability ('אמינות') column populated in BD report appendices and patent-survey source appendices, every row checked."
+      ]
+    }
+  },
+  "worst": [
+    "D5: two NEW, concrete, well-evidenced 'guard-removal leaves an incoherent leftover' defects in this round's fresh 8-question sample -- Q1 (XM30): a mid-paragraph fused/truncated fragment ('...שלהם.די תצפית. במקביל...') plus an uncited GDLS-AeroVironment claim absent from every listed source; Q7 (US RFI): a truncated word fused to the next sentence ('...בארה\" ה-RFI היחיד...', missing the final 'ב' of 'בארה\"ב', tagged removed_by_guard:{'dangling_fragment':1}). Neither is caught by round 13's two new checks (both scoped to leading-unit or short-fragment shapes), confirming this defect class -- now in its 5th distinct reproduced shape across rounds 10-13 (סי. fragment, leading-space, headless leading clause, mid-text fusion, truncated word) -- is not durably closed.",
+    "D5: a reproducible formatting bug in 2/8 sampled answers (Q2, Q4) -- the literal boilerplate '⚠ ללא ציטוטים: > ⚠️ ...' renders the off-topic-warning label and the caveat's own blockquote marker concatenated on one line, breaking Markdown blockquote rendering. Isolated to when routes.ask._OFF_TOPIC_PREFIX and the low-citation-caveat both fire together (Q6, low-citation-caveat alone, rendered correctly).",
+    "D5 process-integrity: round_13_fixes.md's own 'Live probes' subsection quotes specific removed_by_guard breakdowns for two POST /api/ask calls it describes as its own live verification, but a full decode of runtime/logs/api.2026-09-07.log finds every one of today's 3 'ask.entailment_check_removed' events matches this judge's own Q1/Q3/Q5 calls exactly (by claims/removed counts and guard dictionaries) -- no log entry anywhere corroborates the fixes doc's specifically-quoted Q5/Q6 probe numbers. The underlying code fixes are independently unit-tested and both verified holding live in this judge's own fresh sample, so this does not undermine the fix itself, only the fixes doc's own cited live-verification evidence for it.",
+    "D5: Q5 (Skyranger) -- item 1353's real 1,000-rounds-per-minute figure is not fabricated/corrupted this round (the round-13 fix holds), but this sample's synthesis chose not to state the figure at all, honestly declining a direct comparison rather than extracting the spec the way round 12's sample did -- run-to-run retrieval/synthesis variance, not a regression, but the ideal outcome (cite AND correctly state the figure) remains inconsistent.",
+    "D1/D2 (informational, pre-existing, unchanged): 9 of the 11 items repaired this round for so_what_he (finding #3) carry domain='out_of_scope' despite level IN ('red','orange','yellow') -- a separate level/domain mismatch explicitly flagged as out-of-scope by round_13_fixes.md itself, not touched this round.",
+    "D5 (minor, pre-existing, not a regression): item 90's DB title is the extraction artifact 'Updated 13.30' rather than its real headline -- correctly used in context by the chat answer that cited it, but a source-list readability defect.",
+    "D9 (informational, unchanged since round 11-12): security_status='blocked' count remains 36 with the same composition question round 11 already raised and no round since has re-derived.",
+    "D9 (low severity, unchanged since round 12): tender id=34 (Dutch legal/HR consulting, non-EO/IR/defense) remains in the DB as an archived junk candidate -- excluded from active reports, not a live-content defect.",
+    "D6 (unchanged limitation, not newly penalized): daily and pl_mws_eo skip the distinct '## שורה תחתונה' BLUF heading entirely when there is no red/orange/yellow content for the period (going straight from 'תקציר מנהלים' to 'אין תקציר לתקופה זו' plus inline prose) -- a design pattern not yet explicitly confirmed as deliberate by any round's fixes doc.",
+    "D1 (unchanged, thin but not a regression): product_lines tag coverage remains narrow (4 items DB-wide, 2/9 tenders, 4/10 forecasts) -- same keyword-gated-tagger shape as rounds 11-12."
+  ],
+  "deltas": {
+    "fixed": [
+      "D7: pl_mws_eo's patent-dedupe fix (round 12 worst #1) -- confirmed working live this round; 0 duplicate pub_number pairs remain in the freshly rebuilt report (report_id=138).",
+      "D6: weekly's indicator row for the Estonia/David's-Sling item (round 12's last open D6 finding) -- confirmed evidence now populates live via a new short-name-bigram extractor, without inventing a match for the genuinely-unmatched row.",
+      "D2: 11 in-scope items missing so_what_he (round 12 worst #5) -- confirmed 0 remaining live; all 11 repaired rows read as substantive, non-boilerplate analytical text.",
+      "D8: the Anduril survey's doubled cluster-heading prefix (round 12 worst #9) -- confirmed fixed in the live, freshly-rebuilt file, ahead of the round-13 brief's own expectation that surveys were not rebuilt this round.",
+      "D5: round 12's Q6 headless-mid-clause-opening defect ('מים, ודירוג הכנסות...') -- does not reproduce; this round's Q6 answer opens with a complete, coherent clause.",
+      "D5: round 12's Q5 corrupted-figure risk ('4,000 rounds per minute' fabricated from a same-noun-mismatch) -- does not reproduce; no fabricated figure appears anywhere in this round's Q5 answer."
+    ],
+    "unchanged": [
+      "D1: entity orphans 16/334, junk-entity scan (AV only), corroboration 63/63, dedup-chain shape -- stable since round 7.",
+      "D3: event-kind distribution, item 10/96 dedup rendering, Atlantic City table discipline -- stable since round 11.",
+      "D4: jobs 156/160/161 rendering with honest rerun notes, investigation provenance API, blocked-vs-not-found distinction -- stable since round 10-11.",
+      "D9: tender/forecast/conference DB state, blocked-item count (36), tender 34 junk note -- stable since round 9-12.",
+      "D1: product_lines tag coverage remains thin, same shape as rounds 11-12.",
+      "D6: daily/pl_mws_eo's missing-BLUF-heading-on-empty-content pattern -- unchanged since at least round 12."
+    ],
+    "new": [
+      "D5: two new, concrete 'guard-removal leftover' defect shapes found in this round's fresh 8-question sample (Q1 mid-text fusion + uncited claim, Q7 truncated-word fusion) -- the underlying defect class that produced round 11's 'סי.' bug and round 12's Q6 headless-opening is still not durably closed, just displaced into new shapes each round.",
+      "D5: a reproducible off-topic-prefix + low-citation-caveat formatting collision (2/8 answers) producing a broken blockquote rendering -- not previously flagged by any prior round's judge.",
+      "D5 process-integrity: round_13_fixes.md's own quoted live-probe evidence (specific removed_by_guard breakdowns for its stated Q5/Q6 verification calls) could not be corroborated against the live log this round -- a new instance of the 'verify, don't trust the status section' pattern the brief calls out."
+    ]
+  }
+}

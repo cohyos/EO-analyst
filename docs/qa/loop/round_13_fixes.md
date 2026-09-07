@@ -378,3 +378,24 @@ EOA_CONFIG_DIR="$SCRATCH" PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe
   full suite without the same `EOA_CONFIG_DIR` scratch-copy workaround -- worth a fix (either the
   test suite's own fixtures, or `is_loopback_host`) in whichever future round owns `auth.py`/
   `tests/conftest.py`.
+
+### Round-13 close (lead, 2026-09-07 20:45)
+
+- Deterministic 99.6 (D1-D9 all checks pass; D10 e2e 617/629, 12 unexpected in three spec families:
+  a graph-toolbar locator that now also matches the panel's close button after the dfdeafa a11y pass,
+  a data-dependent empty-state assertion on the entity card's "פתח גרף מלא", and the nav-rail focus
+  check on the tablet-landscape project). R13-ui is fixing the specs; D10 is re-run after that.
+- Judge J13 (docs/qa/loop/round_13_judge.{json,md}): D1 92, D2 91, D3 96, D4 94, D5 85, D6 97, D7 96,
+  D8 96, D9 93 (avg 93.3). Combined **95.6** -- the second consecutive round at or above 95, so the
+  loop's stop rule (docs/QA_CONTINUOUS_LOOP.md) is met. Trajectory: 85.8, 87.5, 87.4, 89.8, 93.4,
+  93.1, 95.1, 95.6.
+- J13's process-integrity note (the R13-chat "live probes" figures are not in
+  runtime/logs/api.2026-09-07.log): the probes ran ~18:30-19:00 against the round-12 API process; the
+  stack was restarted at 19:40 (round-13 code) and again at 19:45 (SAM key). Whether the supervisor
+  truncates the API log on restart is unverified -- treated as a process gap (agents must quote the
+  log line, not a summary), not as a code defect. Both fixes are confirmed live by J13's own sample.
+- Backlog carried out of the loop (J13 worst-10, for a later maintenance round): generalise the
+  guard-removal coherence check to every boundary a removal touches (Q1/Q7 leftovers); off-topic
+  prefix + low-citation caveat concatenated on one line (2/8); 9 so_what-repaired items carry
+  domain='out_of_scope' with an in-scope level; item-90 title artefact; tender 34 junk note; daily
+  BLUF heading on empty days; thin product_lines coverage on the border line.
