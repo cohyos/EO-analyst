@@ -562,3 +562,195 @@ an immediate error too), but the live stack was never restarted to re-verify aga
   way `ask_grounding._strip_hebrew_head_prefix` does for institution names elsewhere in this module;
   out of scope for the two required test cases ("seven" -> "8", "שבעה" -> "8") but worth folding in
   if a future live sample shows a prefixed spelled-out number slipping past normalisation.
+
+### R8-investigations-b status
+
+Scope: `agent/eoa/search/deep_search.py`, `agent/eoa/report/daily.py` (`collect_deep_search` /
+`reconcile_deep_search_reruns` and helpers only), `agent/eoa/report/weekly.py` (deep-search section
+wiring only), `tests/unit/test_deep_search_round8.py` (new). Fixes `docs/qa/loop/round_7_judge_b.md`
+D4's three remaining defects (score 45): the report-selection gap, the live zero-page-read
+repro on job 145, and the two citation-integrity spot-check failures (jobs 146/147).
+
+#### 1. Reports don't surface fixed investigations (finding #1)
+
+Live-reproduced directly against the DB (`DATABASE_URL` from `runtime/eoa.env`, read-only) before
+touching any code: calling `collect_deep_search`/`_filter_deep_search_to_items_included` for the
+current weekly window returned **both** job 148 (item 1352, `partial`/0.5, real content,
+`rerun_of_job_id=140`) **and** job 86 (item 1352, `off_topic`, the stale answer the round-7b judge
+found in the rendered report) as two separate surviving entries -- `reconcile_deep_search_reruns`
+never merged them. Root cause, read directly off the two jobs' payloads: job 86's `question` is job
+148's `question` with an appended `" בהקשר: <asker's own context commentary>"` clause (a pattern
+several enqueue paths use to carry the analyst's own framing alongside the core question); the old
+grouping key compared the raw question text verbatim, so the two runs landed in different groups.
+(job 145/146/147/148 themselves -- the reruns of jobs 137/138/139/140 -- were *not* independently
+broken by this: 146/147 group and reconcile correctly today because their reruns' question text is
+byte-identical to the original; only the item-1352 pair had a divergent question.) Separately,
+`collect_deep_search` never even extracted `rerun_of_job_id`/`expanded_from_job_id` from the job
+payload into its entries, so lineage-based grouping wasn't possible at all regardless of question
+text.
+
+Fix, two independent, composable mechanisms in `reconcile_deep_search_reruns`:
+
+1. `_normalize_question_for_grouping` strips a trailing `" בהקשר: ..."` clause (and casefolds/
+   collapses whitespace, as before) before comparing questions.
+2. `collect_deep_search` now also extracts `rerun_of_job_id`/`expanded_from_job_id` from each job's
+   payload into the entry dict; `reconcile_deep_search_reruns` unions a job's group with the group
+   of the job it points back to (via a small union-find over the entries' original indices),
+   independent of whether the question text matches at all -- catching a rerun that meaningfully
+   reworded the question, not just one with an appended clause.
+
+Both mechanisms compose transitively (a chain of question-match + lineage-match links still ends up
+in one group) and neither changes the existing tie-break (best `_OUTCOME_RANK`, ties -> newest by
+original `finished_at DESC` position) or the existing `rerun_count`/`rerun_note_he` annotation
+behavior -- verified against the two pre-existing tests in `test_deep_search_reconcile_round4.py`
+(unchanged, still pass).
+
+**Live verification** (read-only, same DB, after the fix): re-running the identical
+`collect_deep_search`/`_filter_deep_search_to_items_included` call for the current weekly window now
+returns job 148 alone for item 1352 (`rerun_count=3`, folding in job 86 and one other same-question
+run), and jobs 145/146/147/130 unchanged (each already correctly reconciled with their own
+same-question prior runs). Total deep-search entries for the window dropped from 19 to 18, exactly
+the one entry eliminated by the 86/148 merge.
+
+#### 2. Zero-page-read -> blank not_found (finding #2)
+
+Job 145 (item 10, `"Verify and expand: US Army launches laser production with $465M contract
+award"` -- the exact question the round-7 fixes doc showcased as fixed via job 137) reproduces the
+original bug on today's live code, confirmed by reading `investigation_log` directly: 16 rows across
+3 full rounds, up to 8 hits per query, **zero** `read`/`fetch` rows, ending at the round-4 `final`
+catch-all with `outcome=not_found`/`confidence=0.0`/`pages_read=0` and the generic
+`"לא נמצא מידע מספק במסגרת התקציב."` message. Root cause read directly off the code (not just the
+symptom): `MIN_PAGES_BEFORE_NOT_FOUND`'s rejection of a lazy `finish(not_found)` only fires while
+`not budget.exhausted` -- once the query budget itself runs out (job 145 spent 15/15), that guard's
+own `not budget.exhausted` clause goes false and the whole rejection is skipped; and
+`_synthesize_from_reads` (round-7's fallback for "reads happened but no `finish()` call") is a
+no-op by its own docstring/contract when `inv.read_summaries` is empty, which it always is when the
+round loop *never once called* `read`. Neither of round 7's two safety nets assumes a loop that
+searches without ever reading at all.
+
+Fix: `_force_read_top_hits` (new), a last-resort safety net run once after the round loop ends, only
+when `inv.result` is still unset, no page was read, hits exist, and the investigation wasn't
+explicitly stopped by the user (`inv.stop_requested`). Ranks `inv.hits_seen` by the search
+provider's own relevance `score` and force-reads the best remaining, not-yet-attempted hit(s) via
+the same `_tool_read` the model itself would call (so a successful read is logged/summarised/
+budget-charged identically either way), trying up to `_FORCE_READ_MAX_ATTEMPTS=3` hits or until one
+succeeds or the page budget runs out. Wired into `investigate()` immediately before the existing
+`_synthesize_from_reads` call, so a successful forced read flows straight into that same salvage
+path instead of the blank not_found default -- an investigation with hits available now always ends
+with at least one real read, or an honest account of why every candidate failed.
+
+**Job 145 re-run**: queued (job 156, `rerun_of_job_id=145`, same item/question) via
+`eoa.memory.relational.enqueue_job` per this round's DB rules. **Caveat, same as R8-chat-b's own
+standing note above**: the live orchestrator is a long-running in-process worker (`claim_next_job`
+in a persistent loop, not a per-job subprocess) that already had `deep_search.py` imported before
+this fix was written to disk -- confirmed by watching job 156 start executing within seconds of being
+queued, well before this file was even written. Its outcome (below) therefore reflects the
+*pre-fix* code and cannot on its own demonstrate `_force_read_top_hits`; the fix is verified instead
+by the 12 new mocked unit tests in `TestForceReadTopHits` (best-score selection, quarantine
+fallback/retry, max-attempts cap, page-budget respect, no-op when reads/hits already
+present-or-absent, and a full `investigate()`-level integration test asserting a forced read
+prevents the blank not_found). A live re-check that job 145's *specific* symptom (zero reads despite
+hits) no longer reproduces needs a restart, which is outside this package's authorization this round
+(this package's own standing rule: the lead restarts).
+
+Job 156 outcome: still `running` as of this writing, ~35 minutes after being queued (picked up
+within seconds; 3 `search` rounds then 3 `fetch`/`read` rows logged, `pages_read=1` each -- unlike
+job 145 it did actually call `read` this time, a reminder that the zero-read failure isn't 100%
+deterministic run-to-run even under identical pre-fix code). No `finished_at`/`result` yet; likely
+resource contention on this shared machine (this package's own test runs plus concurrent activity)
+rather than anything code-related, since it is untouched pre-fix code either way. Left running --
+not killed/restarted per this round's standing rules -- outcome to be checked by the user
+separately from this report.
+
+#### 3. Citation integrity (finding #3)
+
+**(a) Uncited-quality gate.** Job 146 cited a Cloudflare bot-challenge interstitial
+(`investigation_log`'s own fetch row logged `title='Just a moment...'` for its sole source) as
+though it were the real article -- silently counted as `pages_read=1` and cited with no disclosure
+(re-fetching the same URL independently now returns HTTP 403, confirming it was never real content).
+`screen()` (the security guard) looks for prompt-injection signals, not "is this actually the
+article" -- a clean-but-wrong page sails straight through. Fix: `_low_quality_page_reason` (new),
+run in `_tool_read` immediately after fetch and *before* the (costlier) security guard -- rejects a
+page whose title+body matches a known challenge/consent/paywall interstitial signature (Cloudflare's
+"Just a moment"/"Enable JavaScript and cookies"/"Verify you are human" family, generic
+"Access Denied"/403, JS-required/paywall/cookie-wall phrasing) or whose body is under 400 characters.
+A rejected page is logged (`outcome=not_found`, `notes="discarded, low-quality page: ..."`) but never
+reaches `screen()`, `_summarise_page`, `read_urls`, or `read_summaries` -- structurally uncitable, not
+just discouraged.
+
+**(b) Decision-verb / hedge cross-check.** Job 147 stated as settled fact, at confidence 0.9, "בחירת
+נורקין על פני אבולעפיה" (Norkin chosen over Abulafia), citing a Globes article that (independently
+re-fetched) actually describes an **unresolved** process ("expected to meet next week... to
+determine who gets the role") -- job 147's own buried gaps section even admits "no final official
+appointment was stated," directly contradicting its own confident headline sentence. Neither the
+synthesis prompt (`agent/eoa/llm/prompts/deep_search_system.md`) nor `InvestigationOut`'s validation
+(`agent/eoa/llm/schemas/analysis.py`) are in this package's file ownership this round, so this is a
+deterministic, Python-level post-check instead: `_source_text_is_hedged` flags a fetched page whose
+raw text itself carries a hedge marker ("צפוי"/"שוקל"/"טרם", "expected"/"considering"/"not yet"/
+`\bmay\b`), recorded per-URL on the investigation (`inv.hedged_read_urls`) at read time.
+`_downgrade_unhedged_decision_claims`, run once `inv.result` is set (covers both a normal `finish()`
+call and the `_synthesize_from_reads` fallback) and before `_finalize_outcome`, collapses every
+sentence in `answer_he` using a decision verb ("הוחלט"/"נבחר"/"זכה"/"נחתם") into one hedged
+placeholder sentence whenever at least one of the sources actually read for this investigation was
+itself flagged as hedged -- the original flagged sentence(s) are preserved verbatim in
+`contradictions_he` so the reader still sees what was claimed and why it was downgraded, rather than
+the claim silently vanishing.
+
+#### Tests / lint
+
+- `tests/unit/test_deep_search_round8.py` -- new, 36 cases: question-normalization grouping (the
+  live job-86/job-148 repro plus order-independence, cross-item non-merging, and the normalize
+  helper in isolation), lineage-based grouping via `rerun_of_job_id`/`expanded_from_job_id`
+  (including a job pointed at that isn't in the entry set, and a 3-way transitive chain mixing both
+  mechanisms), `collect_deep_search`'s payload extraction (mocked cursor/connection, no DB),
+  `_force_read_top_hits` (best-score selection, quarantine-then-retry, max-attempts cap, remaining
+  page-budget respect, no-op when already satisfied/no hits, and a full `investigate()`-level
+  integration case), `_low_quality_page_reason` (Cloudflare interstitial, short body, a realistic
+  article passing, Access Denied, cookie wall) plus a `_tool_read`-level case asserting the security
+  guard is never even reached, and `_source_text_is_hedged`/`_downgrade_unhedged_decision_claims`
+  (Hebrew/English markers, the job-147 repro end-to-end, no-op when nothing is flagged/cited/a
+  decision verb is absent/the outcome isn't confident/`inv.result is None`, and multiple flagged
+  sentences collapsing into one placeholder). All mocked (`eoa.fetch.remote.fetch_remote`,
+  `eoa.security.guard.screen`, `_summarise_page`, `daily.connection`) -- no DB, no network, no live
+  LLM call, matching this round's unit-test rule.
+- One pre-existing fixture in `tests/unit/test_deep_search_round7.py`
+  (`TestToolReadUsesRetryAndLogsQuarantine.test_successful_read_after_one_transient_failure`) used a
+  14-character fetched-page stub, which the new < 400-char quality gate now correctly discards before
+  it reaches the retry-path assertions the test is actually about -- the fixture's `text` value was
+  padded to a realistic length (no other change) so it keeps exercising the transient-retry logic it
+  was written for. Flagging this explicitly since it's a one-line edit to a file outside this
+  package's normal ownership, made only because it was a direct, foreseeable consequence of shipping
+  finding #3's own explicitly-specified 400-char threshold.
+- `PYTHONPATH=agent PYTHONUTF8=1 EOA_SEARCH_NO_CACHE=1 .venv/Scripts/python.exe -m pytest
+  tests/unit/test_deep_search_round8.py tests/unit/test_deep_search_round7.py
+  tests/unit/test_deep_search_reconcile_round4.py -q -p no:cacheprovider` -- **75 passed** (39
+  pre-existing + 36 new, zero regressions after the one fixture fix above).
+- `PYTHONPATH=agent PYTHONUTF8=1 EOA_SEARCH_NO_CACHE=1 .venv/Scripts/python.exe -m pytest
+  tests/unit/test_deep_search_round8.py tests/unit -q -p no:cacheprovider -k "deep_search or
+  reconcile or rerun"` -- **222 passed**, 0 failed (186 pre-existing tests this filter matches
+  across the whole `tests/unit` tree + 36 new), confirming no collateral effect anywhere outside
+  the files this package touched.
+- `.venv/Scripts/ruff.exe check` / `ruff.exe format --check` on every touched Python file -- clean.
+- Daily rebuild (`build_daily(force=True)`) -- report id 105, `qa.passed=True`, no crash. The daily
+  window (trailing 24h) doesn't happen to include items 10/44/81/1352 (published 09-03..09-05, only
+  the weekly/monthly window covers them), so this run mainly verifies the changed code path executes
+  cleanly end-to-end on live data; finding #1's actual fix was verified directly via
+  `collect_deep_search`/`_filter_deep_search_to_items_included` against the live weekly window (see
+  "Live verification" above), since that's the window the original finding was reported against.
+
+#### What's left (for the user)
+
+- Job 156 (item 10's re-run) was queued but will run under the pre-fix code until the orchestrator
+  is restarted (see the caveat under finding #2) -- worth a quick live re-check of item 10's question
+  after a restart to directly confirm `_force_read_top_hits` fires on the exact showcased question,
+  not just the mocked unit coverage.
+- `_low_quality_page_reason`'s signature list is a fixed, hand-picked set of English-language
+  interstitial phrases; a non-English (e.g. Hebrew-language CDN/WAF) challenge page wouldn't match
+  any of them and would fall through to the <400-char check alone -- fine for the two live-observed
+  cases, but worth widening if a future round finds a non-English interstitial slipping through with
+  a body over 400 chars.
+- `_source_text_is_hedged`'s `\bmay\b` marker will also match the English month name "May" (e.g. a
+  source dated "May 2026") -- an accepted false-positive per the brief's literal marker list rather
+  than a bug; if this proves noisy in practice, gating it on proximity to a decision-topic noun
+  phrase (candidate/appointment/מועמד/מינוי) rather than presence anywhere in the page would tighten
+  it without dropping the marker the brief asked for.

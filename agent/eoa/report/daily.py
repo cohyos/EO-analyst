@@ -596,6 +596,14 @@ def collect_deep_search(
                 "sources": result.get("sources", []),
                 "key_facts": result.get("key_facts", []),
                 "contradictions_he": result.get("contradictions_he", ""),
+                # R8-investigations-b: lineage pointers a rerun/expansion payload may carry --
+                # `eoa.api.services.expand_investigation` and the security-review re-run path both
+                # write `expanded_from_job_id`; the orchestrator's queued re-runs (e.g. jobs 145-148,
+                # re-running the golden questions) write `rerun_of_job_id`. `reconcile_deep_search_
+                # reruns` uses these to group a rerun with its origin job even when the question text
+                # itself no longer matches exactly (see `_normalize_question_for_grouping`).
+                "rerun_of_job_id": payload.get("rerun_of_job_id"),
+                "expanded_from_job_id": payload.get("expanded_from_job_id"),
             }
         )
     return reconcile_deep_search_reruns(out)
@@ -622,29 +630,103 @@ _OUTCOME_RANK = {
 }  # round-5 judge: `blocked` (P7) must outrank not_found so job 113 renders as נחסם
 
 
+#: R8-investigations-b: some enqueue paths append the asker's own context commentary after the
+#: real investigation question using this separator (e.g. job 86's payload question ends "...
+#: ולתעשייה הישראלית. בהקשר: להערכתנו, המהלך משקף ..."), while a canonical rerun of the exact same
+#: question (job 148, ``rerun_of_job_id=140``) carries only the core question with no such suffix.
+#: Comparing the raw question text put the two in different groups, so job 148's real, useful
+#: "partial/0.5" answer never superseded job 86's stale "off_topic" one -- both survived into the
+#: report as separate entries for the same item. Only the text before the first such separator is
+#: the actual investigation question; the rest is commentary, never part of the grouping key.
+_QUESTION_CONTEXT_SEPARATOR_RE = re.compile(r"\s*בהקשר\s*:\s*")
+
+
+def _normalize_question_for_grouping(question: str | None) -> str:
+    """Casefolded, whitespace-collapsed question text with any trailing "בהקשר:" commentary
+    clause removed, for :func:`reconcile_deep_search_reruns` grouping only -- never used for
+    display."""
+    q = " ".join((question or "").split())
+    q = _QUESTION_CONTEXT_SEPARATOR_RE.split(q, maxsplit=1)[0].rstrip()
+    return q.casefold()
+
+
+#: Payload keys that link a rerun/expansion job back to the job it re-investigates.
+#: ``rerun_of_job_id`` (the orchestrator's queued golden-question re-runs, e.g. jobs 145-148) and
+#: ``expanded_from_job_id`` (``eoa.api.services.expand_investigation`` and the security-review
+#: re-run path) both mean "this entry is a later run of that earlier job's investigation" even
+#: when :func:`_normalize_question_for_grouping` doesn't consider their question text identical
+#: (the asker may have refined the question on rerun). Used as a second, independent way to merge
+#: groups -- on top of, not instead of, the question-text grouping above.
+_RERUN_LINEAGE_KEYS = ("rerun_of_job_id", "expanded_from_job_id")
+
+
 def reconcile_deep_search_reruns(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Round-3 judge (weekly 2026-09-06): the same investigation question appeared several times
     in one report with contradictory outcomes ("found" with an answer vs "not_found" ×3). Group
-    entries by normalised question (and trigger item), keep the best-outcome run (ties → newest,
-    i.e. first in the ``finished_at DESC`` order), and record ``rerun_count`` plus a Hebrew note
-    so the reader sees one reconciled answer, not a contradiction."""
-    groups: dict[tuple[Any, str], list[dict[str, Any]]] = {}
-    order: list[tuple[Any, str]] = []
-    for e in entries:
-        q = " ".join((e.get("question") or "").split()).casefold()
-        key = (e.get("trigger_item_id"), q)
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(e)
+    entries by normalised question (and trigger item) *and* by explicit rerun/expansion lineage
+    (round-8 judge, R8-investigations-b -- see ``_normalize_question_for_grouping`` and
+    ``_RERUN_LINEAGE_KEYS``), keep the best-outcome run in each merged group (ties -> newest, i.e.
+    earliest in the ``finished_at DESC`` input order), and record ``rerun_count`` plus a Hebrew
+    note so the reader sees one reconciled answer, not a contradiction.
+
+    ``entries`` is assumed ordered newest-first (``collect_deep_search``'s ``finished_at DESC``);
+    that order is what "newest" means below, via each entry's original index.
+    """
+    n = len(entries)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    # Pass 1: group by (trigger_item_id, normalized question) -- the common case, where a rerun
+    # asks the exact same question (or the same question plus appended commentary).
+    key_to_index: dict[tuple[Any, str], int] = {}
+    for idx, e in enumerate(entries):
+        key = (e.get("trigger_item_id"), _normalize_question_for_grouping(e.get("question")))
+        if key in key_to_index:
+            union(key_to_index[key], idx)
+        else:
+            key_to_index[key] = idx
+
+    # Pass 2: merge via explicit rerun/expansion lineage even when the question text itself
+    # doesn't normalize to the same key (e.g. the rerun meaningfully refined the question).
+    job_id_to_index = {e.get("job_id"): idx for idx, e in enumerate(entries) if e.get("job_id") is not None}
+    for idx, e in enumerate(entries):
+        for lineage_key in _RERUN_LINEAGE_KEYS:
+            origin_job_id = e.get(lineage_key)
+            if origin_job_id is None:
+                continue
+            origin_idx = job_id_to_index.get(origin_job_id)
+            if origin_idx is not None:
+                union(idx, origin_idx)
+
+    groups: dict[int, list[int]] = {}
+    for idx in range(n):
+        groups.setdefault(find(idx), []).append(idx)
+
     out: list[dict[str, Any]] = []
-    for key in order:
-        runs = groups[key]
-        best = max(runs, key=lambda r: (_OUTCOME_RANK.get(r.get("outcome") or "", 0), -runs.index(r)))
+    # Preserve the original (newest-first) order: a merged group is emitted where its newest
+    # (smallest-index) member would have appeared.
+    for root in sorted(groups, key=lambda r: min(groups[r])):
+        idxs = groups[root]
+        runs = [entries[i] for i in idxs]
+        best_pos = max(
+            range(len(runs)),
+            key=lambda k: (_OUTCOME_RANK.get(runs[k].get("outcome") or "", 0), -idxs[k]),
+        )
+        best = runs[best_pos]
         if len(runs) > 1:
             best = dict(best)
             best["rerun_count"] = len(runs)
-            others = [r.get("outcome") for r in runs if r is not best]
+            others = [r.get("outcome") for k, r in enumerate(runs) if k != best_pos]
             best["rerun_note_he"] = (
                 f"השאלה נחקרה {len(runs)} פעמים השבוע; מוצגת הריצה עם התוצאה הטובה ביותר "
                 f"(ריצות נוספות: {', '.join(_OUTCOME_LABEL_HE.get(str(o), str(o)) for o in others)})."

@@ -557,6 +557,13 @@ class Investigation:
     #: "every hit was security-screened out before any page could be read" (`blocked`) apart from
     #: "search genuinely returned nothing" (`insufficient_context`).
     security_flagged_search_hits: list[dict[str, str]] = field(default_factory=list)
+    #: R8-investigations-b (job 147): URLs among `read_urls` whose fetched page text itself
+    #: describes the matter as still pending/unresolved (a hedge marker -- see
+    #: `_source_text_is_hedged`) rather than settled. Used by
+    #: `_downgrade_unhedged_decision_claims` to catch a `finish`ed decision-verb claim
+    #: ("הוחלט"/"נבחר"/"זכה"/"נחתם") that rests on a source which, read on its own terms, hasn't
+    #: actually decided anything yet.
+    hedged_read_urls: list[str] = field(default_factory=list)
 
 
 class StopRequested(Exception):
@@ -755,6 +762,140 @@ def _fetch_with_retry(url: str) -> dict[str, Any]:
         return fetch_remote(url)
 
 
+# --------------------------------------------------------------------------
+# R8-investigations-b: citation-integrity checks (D-3 -- docs/qa/loop/round_7_judge_b.md)
+# --------------------------------------------------------------------------
+
+#: R8-investigations-b (job 146): job 146's `investigation_log` fetch row for its sole cited
+#: source literally logged `title='Just a moment...'` -- Cloudflare's bot-challenge interstitial,
+#: not the article -- yet it was silently counted as `pages_read=1` and cited with no disclosure
+#: (re-fetching the same URL independently now returns HTTP 403). A body under this many
+#: characters is on its own grounds for discarding a fetched page as not a real article.
+_MIN_BODY_CHARS = 400
+
+#: Case-insensitive substrings that mark a fetched page as a challenge/consent/paywall
+#: interstitial rather than real content -- checked against the title plus the first 2000 chars of
+#: body text (matching this early is cheap; a real article's boilerplate footer, if any, is
+#: irrelevant to whether the page IS one).
+_LOW_QUALITY_PAGE_SIGNATURES = (
+    # Cloudflare / generic bot-challenge interstitials
+    "just a moment",
+    "checking your browser",
+    "cf-browser-verification",
+    "enable javascript and cookies",
+    "verify you are human",
+    "verify you are a human",
+    "attention required! | cloudflare",
+    "sorry, you have been blocked",
+    # generic access-denial pages
+    "access denied",
+    "403 forbidden",
+    # JS-required / paywall / cookie-wall interstitials
+    "please enable javascript",
+    "please turn on javascript",
+    "this content is not available",
+    "subscribe to continue reading",
+    "subscribe to read",
+    "to continue, please accept cookies",
+    "we use cookies to",
+    "accept all cookies to continue",
+)
+
+
+def _low_quality_page_reason(text: str, title: str) -> str | None:
+    """``None`` when ``text``/``title`` look like a real fetched article; otherwise a short reason
+    string (used in ``investigation_log.notes``) for why ``_tool_read`` is discarding the page
+    unread -- never summarised, never added to ``read_urls``/``read_summaries``, never citable."""
+    body = (text or "").strip()
+    if len(body) < _MIN_BODY_CHARS:
+        return f"body too short ({len(body)} chars < {_MIN_BODY_CHARS})"
+    haystack = f"{title}\n{body[:2000]}".casefold()
+    for sig in _LOW_QUALITY_PAGE_SIGNATURES:
+        if sig in haystack:
+            return f"challenge/consent/paywall interstitial (matched {sig!r})"
+    return None
+
+
+#: R8-investigations-b (job 147): a source describing an *unresolved* process ("expected to meet
+#: next week to determine who gets the role") was cited as though it settled the question
+#: ("בחירת נורקין על פני אבולעפיה", confidence 0.9). These markers (Hebrew + English) indicate the
+#: fetched page itself still hedges the matter -- see ``_source_text_is_hedged``.
+_HEDGE_MARKERS_HE = ("צפוי", "שוקל", "טרם")
+_HEDGE_MARKERS_EN = ("expected", "considering", "not yet")
+_HEDGE_WORD_RE = re.compile(r"\bmay\b", re.IGNORECASE)
+
+
+def _source_text_is_hedged(text: str) -> bool:
+    """Whether a fetched page's raw body text itself describes its subject as still
+    pending/unresolved rather than decided."""
+    if not text:
+        return False
+    if any(m in text for m in _HEDGE_MARKERS_HE):
+        return True
+    if _HEDGE_WORD_RE.search(text):
+        return True
+    lowered = text.casefold()
+    return any(m in lowered for m in _HEDGE_MARKERS_EN)
+
+
+#: R8-investigations-b: Hebrew decision/award verbs a settled-fact claim uses -- "הוחלט" (it was
+#: decided), "נבחר" (was chosen/selected), "זכה" (won), "נחתם" (was signed).
+_DECISION_VERBS_HE = ("הוחלט", "נבחר", "זכה", "נחתם")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_HEDGED_DECISION_REPLACEMENT_HE = (
+    "לפי הדיווח, ההכרעה בנושא זה טרם אושרה סופית -- המקור המצוטט עצמו מתאר תהליך שעדיין לא הסתיים."
+)
+
+
+def _downgrade_unhedged_decision_claims(inv: Investigation) -> None:
+    """R8-investigations-b (job 147, docs/qa/loop/round_7_judge_b.md): ``answer_he`` asserted a
+    personnel decision as settled fact while its own cited source described an unresolved
+    process, and the investigation's own buried gaps section admitted as much -- the confident
+    headline sentence still reached the reader unchanged. Neither the synthesis prompt nor
+    ``InvestigationOut`` validation live in this round's file ownership (prompts under
+    ``agent/eoa/llm/prompts/``, the schema in ``agent/eoa/llm/schemas/analysis.py``), so this is a
+    deterministic, Python-level post-check run on the finished ``inv.result`` instead: any
+    sentence in ``answer_he`` using a decision-verb (``_DECISION_VERBS_HE``) is downgraded to a
+    single hedged placeholder sentence when at least one of the sources this investigation
+    actually read (``inv.read_urls``) was itself flagged as still-pending
+    (``inv.hedged_read_urls`` -- see ``_source_text_is_hedged``). Multiple flagged sentences
+    collapse into one placeholder rather than repeating it; the removed sentences are recorded in
+    ``contradictions_he`` so the "gaps" a reader sees says exactly what was downgraded and why.
+
+    A no-op whenever there is no result, the outcome isn't a confident one, or no read source was
+    ever flagged as hedged -- i.e. this never touches an answer with nothing to catch.
+    """
+    if inv.result is None or inv.result.outcome not in {"found", "partial"}:
+        return
+    if not inv.hedged_read_urls or not any(u in inv.hedged_read_urls for u in inv.read_urls):
+        return
+    answer = inv.result.answer_he or ""
+    if not answer:
+        return
+    sentences = _SENTENCE_SPLIT_RE.split(answer)
+    flagged: list[str] = []
+    kept: list[str] = []
+    placeholder_inserted = False
+    for s in sentences:
+        if any(v in s for v in _DECISION_VERBS_HE):
+            flagged.append(s.strip())
+            if not placeholder_inserted:
+                kept.append(_HEDGED_DECISION_REPLACEMENT_HE)
+                placeholder_inserted = True
+        else:
+            kept.append(s)
+    if not flagged:
+        return
+    inv.result.answer_he = " ".join(kept)
+    note = (
+        "משפט/ים שטענו הכרעה סופית הוחלפו בניסוח מסויג, כי לפחות אחד מהמקורות שנקראו בפועל "
+        "בחקירה זו מתאר את הנושא כטרם-הוכרע: " + " | ".join(flagged)
+    )
+    inv.result.contradictions_he = (
+        f"{inv.result.contradictions_he}\n{note}".strip() if inv.result.contradictions_he else note
+    )
+
+
 def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> str:
     if budget.pages >= budget.max_pages:
         return json.dumps({"error": "page budget exhausted"})
@@ -770,6 +911,28 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
         page = _fetch_with_retry(url)
         text = page.get("text") or ""
         title = page.get("title") or ""
+        # R8-investigations-b (job 146): a Cloudflare bot-challenge interstitial ("Just a
+        # moment...") was silently counted as a successful read and cited as the sole source for
+        # specific facts -- `screen()` below looks for prompt-injection signals, not "this isn't
+        # actually the article." Checked first, before the (costlier) security guard even runs:
+        # a challenge/consent/paywall interstitial or a near-empty body is discarded unread, never
+        # summarised, never added to `read_urls`/`read_summaries`, never citable.
+        low_quality_reason = _low_quality_page_reason(text, title)
+        if low_quality_reason:
+            _log(
+                inv,
+                round_no,
+                page.get("lang"),
+                None,
+                engine="fetch",
+                results_n=0,
+                pages_read=1,
+                outcome="not_found",
+                notes=f"discarded, low-quality page: {low_quality_reason}",
+                url=url,
+                title=title[:200],
+            )
+            return json.dumps({"url": url, "error": f"page discarded: {low_quality_reason}"})
         # Round-4 W10/W11 (docs/REVIEW_2026-09-06_evening.md): this call used to hardcode
         # `use_l2=False`, so any page whose heuristic/L1 score only rose to "suspicious" (not the
         # strong-signal quarantine threshold) skipped L2 arbitration entirely and fell straight to
@@ -817,6 +980,11 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
         inv.read_urls.append(url)  # only successfully read + summarised pages count as sources
         inv.read_sources.append({"url": url, "title": title[:200], "round": round_no})
         inv.read_summaries.append({"url": url, "title": title[:200], "summary": summary})
+        if _source_text_is_hedged(text):
+            # R8-investigations-b (job 147): this page itself describes the matter as still
+            # pending/unresolved -- record it so a later confident decision-verb claim resting on
+            # it gets caught by `_downgrade_unhedged_decision_claims`.
+            inv.hedged_read_urls.append(url)
         _log(
             inv,
             round_no,
@@ -1264,6 +1432,50 @@ def _synthesize_from_reads(inv: Investigation) -> InvestigationOut | None:
     return result
 
 
+#: R8-investigations-b: how many not-yet-attempted hits :func:`_force_read_top_hits` will try
+#: before giving up -- a small cap so the safety net costs at most a couple of extra page-budget
+#: units even when every top-ranked hit turns out to be quarantined/unfetchable.
+_FORCE_READ_MAX_ATTEMPTS = 3
+
+
+def _force_read_top_hits(
+    inv: Investigation, budget: Budget, *, max_attempts: int = _FORCE_READ_MAX_ATTEMPTS
+) -> None:
+    """R8-investigations-b (job 145): last-resort safety net, called once after the round loop
+    ends and only when ``inv.result`` is still unset and not a single page was read despite hits
+    existing (see the call site in :func:`investigate` for the full incident). Force-reads the
+    best remaining, not-yet-attempted hit(s) -- ranked by the search provider's own relevance
+    ``score`` (ties keep the provider's original, already-relevance-ordered, order since
+    :func:`sorted` is stable) -- via the same :func:`_tool_read` the model itself would call, so
+    a successful read is logged/summarised/budget-charged identically either way.
+
+    Mutates ``inv``/``budget`` in place (mirrors every other tool-call helper in this module) and
+    never raises -- a hit that turns out quarantined or unfetchable just costs one attempt/one
+    page of budget, exactly as it would if the model had picked it. Stops as soon as one read
+    succeeds (``inv.read_summaries`` gains an entry), the page budget is exhausted, or
+    ``max_attempts`` not-yet-attempted hits have been tried, whichever comes first.
+    """
+    if inv.read_summaries or not inv.hits_seen:
+        return
+    ranked = sorted(inv.hits_seen.values(), key=lambda h: h.score, reverse=True)
+    round_no = inv.rounds_done or 1
+    attempts = 0
+    for hit in ranked:
+        if inv.read_summaries or budget.pages >= budget.max_pages or attempts >= max_attempts:
+            break
+        if hit.url in inv.attempted_urls:
+            continue
+        attempts += 1
+        _tool_read(inv, budget, hit.url, round_no)
+    if not inv.read_summaries and attempts:
+        log.info(
+            "forced_read_exhausted_without_success",
+            job_id=inv.job_id,
+            attempts=attempts,
+            hits_available=len(ranked),
+        )
+
+
 def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
     """Settle `inv.result`/`inv.outcome` and the budget-accounting fields once the loop stops,
     whether by a model `finish` call or by running out of rounds/budget.
@@ -1611,6 +1823,21 @@ def investigate(
         )
         raise
 
+    if inv.result is None and not inv.read_summaries and inv.hits_seen and not inv.stop_requested:
+        # R8-investigations-b (job 145, reproducing job 46/137's original symptom): the round loop
+        # can spend its entire round/query budget on `search` and never once call `read`, even with
+        # plenty of on-topic hits sitting in `inv.hits_seen` -- job 145 logged 16 search rows across
+        # 3 full rounds, 56 cumulative hits, and zero reads. Neither `MIN_PAGES_BEFORE_NOT_FOUND`
+        # (only fires on an explicit `finish(not_found)` call the model never made here) nor
+        # `_synthesize_from_reads` just below (needs at least one summary to work from) catches a
+        # loop that never attempted a read at all. Last-resort safety net: force-read the best
+        # remaining hit(s) before giving up, so an investigation never ends with zero reads while
+        # hits exist -- see `_force_read_top_hits`.
+        try:
+            _force_read_top_hits(inv, budget)
+        except Exception as exc:  # a forced-read failure must never crash the investigation itself
+            log.warning("forced_read_crashed", job_id=job_id, error=str(exc)[:160])
+
     if inv.result is None and inv.read_summaries:
         # R7-investigations (job 91): every round ended without a valid `finish()` call, but real
         # pages WERE read -- try to salvage an honest answer from them before falling through to
@@ -1619,6 +1846,16 @@ def investigate(
             inv.result = _synthesize_from_reads(inv)
         except Exception as exc:  # a synthesis failure must never crash the investigation itself
             log.warning("fallback_synthesis_crashed", job_id=job_id, error=str(exc)[:160])
+
+    if inv.result is not None:
+        # R8-investigations-b (job 147): catches a settled-fact decision-verb claim resting on a
+        # source that, read on its own terms, hasn't decided anything yet -- see
+        # `_downgrade_unhedged_decision_claims`. Runs on both a normal `finish()` result and the
+        # `_synthesize_from_reads` fallback above.
+        try:
+            _downgrade_unhedged_decision_claims(inv)
+        except Exception as exc:  # must never crash the investigation itself
+            log.warning("hedge_downgrade_crashed", job_id=job_id, error=str(exc)[:160])
 
     _finalize_outcome(inv, budget)
     _log(

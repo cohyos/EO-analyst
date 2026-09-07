@@ -364,7 +364,11 @@ class TestToolReadUsesRetryAndLogsQuarantine:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise OSError("[Errno -3] Temporary failure in name resolution")
-            return {"text": "some page text", "title": "Title"}
+            # R8-investigations-b: `_tool_read` now discards a body under 400 chars as a
+            # low-quality/interstitial page (`_low_quality_page_reason`) before it ever reaches
+            # `screen()`/`_summarise_page` -- padded so this stays a real-looking article and the
+            # test still exercises the retry path it's actually about.
+            return {"text": "some page text. " * 30, "title": "Title"}
 
         monkeypatch.setattr("eoa.fetch.remote.fetch_remote", fake_fetch)
         monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
