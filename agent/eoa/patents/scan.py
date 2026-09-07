@@ -36,7 +36,7 @@ from eoa.config import CONFIG_DIR
 from eoa.db import connection
 from eoa.fetch.remote import fetch_raw_remote
 from eoa.patents.models import PatentRecord
-from eoa.pipeline.entity_normalize import find_watchlist_aliases_in_text, resolve_canonical
+from eoa.pipeline.entity_normalize import find_watchlist_company_names_in_text
 from eoa.search.provider import search
 
 log = structlog.get_logger(__name__)
@@ -204,17 +204,17 @@ def _clean_search_title(title: str) -> str:
 
 
 def _assignee_candidates_in_text(text: str) -> list[str]:
-    """Best-effort assignee extraction from a search hit's title+snippet: every watchlist-alias
-    hit (:func:`find_watchlist_aliases_in_text`), restricted to names that actually resolve to a
-    ``kind == "company"`` canonical record. The alias table also carries curated government/org
-    and country entries (e.g. "NATO", "Europe"/"אירופה") for unrelated report-entity-extraction
-    purposes -- those are never real patent assignees, so a bare text mention of "Europe" must not
-    turn into a fabricated assignee here."""
-    return [
-        name
-        for name in find_watchlist_aliases_in_text(text)
-        if (resolve_canonical(name) or {}).get("kind") == "company"
-    ]
+    """Best-effort assignee extraction from a search hit's title+snippet: every watchlist
+    *company*-name hit from the assignee-safe matcher (round 14, 2026-09-07,
+    docs/qa/content_review/CR-patents.md --
+    :func:`eoa.pipeline.entity_normalize.find_watchlist_company_names_in_text`), which already
+    restricts to ``kind == "company"`` records, never a product/system alias (a patent id 64,
+    CN112074705A, was previously misattributed to Anduril via its own "Lattice" product alias
+    naming an unrelated FPGA component), and never a match embedded in a longer/unrelated
+    organisation name or citation/component mention. This function is now a thin wrapper kept for
+    call-site stability and its own docstring context; the real logic (and its "never a program/
+    org/country" guarantee) lives in the shared, assignee-safe matcher."""
+    return find_watchlist_company_names_in_text(text)
 
 
 def _google_patents_records(query: str, *, lang: str = "en", max_results: int = 10) -> list[PatentRecord]:
@@ -234,15 +234,26 @@ def _google_patents_records(query: str, *, lang: str = "en", max_results: int = 
             continue
         seen.add(pub_number)
         text = f"{hit.title}\n{hit.snippet}"
+        assignees = _assignee_candidates_in_text(text)
+        # Round 14 (2026-09-07, docs/qa/content_review/CR-patents.md): an assignee inferred from a
+        # bare search snippet (never a detail page or a structured EPO OPS/USPTO ODP record) is
+        # marked low-confidence via raw.assignee_source -- eoa.patents.scan
+        # .enrich_stored_patents_missing_assignee (and scripts/repair_round14_patents.py for the
+        # historical backlog) treats this row as still needing confirmation and lets a genuine
+        # Google-Patents detail-page assignee overwrite it outright, unlike the routine
+        # never-overwrite-a-populated-field backfill path.
+        raw: dict[str, Any] = {"snippet": hit.snippet, "engine": hit.engine}
+        if assignees:
+            raw["assignee_source"] = "snippet"
         out.append(
             PatentRecord(
                 pub_number=pub_number,
                 title=_clean_search_title(hit.title),
                 abstract=hit.snippet or "",
-                assignees=_assignee_candidates_in_text(text),
+                assignees=assignees,
                 url=hit.url,
                 source="google_patents_search",
-                raw={"snippet": hit.snippet, "engine": hit.engine},
+                raw=raw,
             )
         )
     return out
@@ -265,7 +276,13 @@ def _any_patents_exist() -> bool:
         return cur.fetchone() is not None
 
 
-def _backfill_patent_fields(pub_number: str, rec: PatentRecord) -> None:
+def _backfill_patent_fields(
+    pub_number: str,
+    rec: PatentRecord,
+    *,
+    overwrite_assignees: bool = False,
+    overwrite_abstract: bool = False,
+) -> None:
     """Goal (2026-09-06, user feedback re: mostly-empty assignee/CPC columns): a non-destructive
     backfill for an *existing* ``patents`` row whose ``assignees``/``cpc``/``priority_date`` are
     still empty -- ``_insert_patent``'s ``ON CONFLICT (pub_number) DO NOTHING`` means a repeat scan
@@ -275,13 +292,36 @@ def _backfill_patent_fields(pub_number: str, rec: PatentRecord) -> None:
     get a chance to fill in a field the first scan happened not to find. Never overwrites a field
     that is already non-empty (``priority_date`` is a plain scalar column, so a bare
     ``COALESCE(priority_date, ...)`` is enough -- no ``NULLIF`` empty-sentinel needed the way the
-    two array columns require)."""
-    if not rec.assignees and not rec.cpc and not rec.priority_date:
+    two array columns require) -- *unless* ``overwrite_assignees``/``overwrite_abstract`` is set:
+
+    - ``overwrite_assignees`` (round 14, 2026-09-07, docs/qa/content_review/CR-patents.md): a
+      Google-Patents *detail-page* assignee always wins over whatever is currently stored, since
+      the caller (:func:`enrich_stored_patents_missing_assignee`) only ever sets this for a row it
+      just re-confirmed against the patent's own detail page -- replacing either an empty value or
+      a previously low-confidence, search-snippet-derived one (``raw.assignee_source ==
+      "snippet"``). The overwrite also stamps ``raw.assignee_source = "detail_page"`` so a later
+      pass never re-flags this row as still needing confirmation.
+    - ``overwrite_abstract`` (round 14, 2026-09-07, docs/qa/content_review/CR-patents.md's text-
+      grounding rule): the keyless-search fallback's ``abstract`` is only ever a *search-result
+      snippet* -- for a record like US10506436B1 that snippet is a bare USPTO assignment notice,
+      not the patent's own abstract. A caller (``scripts/repair_round14_patent_text.py``) that just
+      fetched the patent's real detail-page abstract (:func:`_parse_abstract_from_detail_html`)
+      sets this to replace that low-quality snippet outright, stamping
+      ``raw.abstract_source = 'detail_page'`` for the same "never re-flag as unconfirmed" reason.
+    """
+    if not rec.assignees and not rec.cpc and not rec.priority_date and not rec.abstract:
         return
     sets: list[str] = []
     params: dict[str, Any] = {"p": pub_number}
     if rec.assignees:
-        sets.append("assignees = COALESCE(NULLIF(assignees, ARRAY[]::text[]), %(assignees)s)")
+        if overwrite_assignees:
+            sets.append("assignees = %(assignees)s")
+            sets.append(
+                "raw = COALESCE(raw, '{}'::jsonb) "
+                "|| jsonb_build_object('assignee_source', 'detail_page')"
+            )
+        else:
+            sets.append("assignees = COALESCE(NULLIF(assignees, ARRAY[]::text[]), %(assignees)s)")
         params["assignees"] = rec.assignees
     if rec.cpc:
         sets.append("cpc = COALESCE(NULLIF(cpc, ARRAY[]::text[]), %(cpc)s)")
@@ -289,8 +329,34 @@ def _backfill_patent_fields(pub_number: str, rec: PatentRecord) -> None:
     if rec.priority_date:
         sets.append("priority_date = COALESCE(priority_date, %(priority_date)s)")
         params["priority_date"] = rec.priority_date
+    if rec.abstract:
+        if overwrite_abstract:
+            sets.append("abstract = %(abstract)s")
+            sets.append(
+                "raw = COALESCE(raw, '{}'::jsonb) "
+                "|| jsonb_build_object('abstract_source', 'detail_page')"
+            )
+        else:
+            sets.append("abstract = COALESCE(NULLIF(abstract, ''), %(abstract)s)")
+        params["abstract"] = rec.abstract
+    if not sets:
+        return
     with connection() as conn, conn.cursor() as cur:
         cur.execute(f"UPDATE patents SET {', '.join(sets)} WHERE pub_number = %(p)s", params)
+
+
+def _set_entity_ids(pub_number: str, entity_ids: list[int]) -> None:
+    """Round 14 (2026-09-07, docs/qa/content_review/CR-patents.md rule d): ``entity_ids`` must
+    always be derived from a patent's *final* ``assignees`` -- called right after
+    :func:`_backfill_patent_fields` overwrites ``assignees`` with a detail-page value for a row
+    that was already analyzed (``eoa.patents.analyze.analyze_patents`` only (re)computes
+    ``entity_ids`` for a row still missing ``claims_summary_he``, so an already-analyzed row would
+    otherwise keep stale ``entity_ids`` pointing at the old, wrong assignee's entity forever)."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE patents SET entity_ids = %(entity_ids)s WHERE pub_number = %(p)s",
+            {"entity_ids": entity_ids or None, "p": pub_number},
+        )
 
 
 # --------------------------------------------------------------------------
@@ -334,6 +400,31 @@ _CPC_CODE_ITEM_RE = re.compile(
 _PRIORITY_DATE_RE = re.compile(r'<time itemprop="priorityDate" datetime="([^"]+)">')
 _FILING_DATE_RE = re.compile(r'<time itemprop="filingDate" datetime="([^"]+)">')
 _PUBLICATION_DATE_RE = re.compile(r'<time itemprop="publicationDate" datetime="([^"]+)">')
+# Round 14 (2026-09-07, docs/qa/content_review/CR-patents.md rule "try to fetch the real abstract
+# for text-less records via the existing detail-page enrichment"): the keyless Google-Patents
+# *search* fallback only ever stores a search-result snippet as ``abstract`` -- for US10506436B1
+# ("Lattice mesh") that snippet is a bare USPTO assignment-transfer notice with zero technical
+# content, which is exactly what let the LLM invent a plausible-sounding description from nothing.
+# The patent's own *detail page*, unlike the search snippet, does carry a real abstract in a
+# ``<meta name="DC.description" content="...">`` tag (confirmed live 2026-09-07 against
+# US10506436B1: a genuine ~120-word "lattice mesh" networking/registration abstract, nothing to do
+# with optics). ``re.DOTALL`` because the content attribute's value legitimately spans multiple
+# lines in the page's own HTML formatting.
+_DC_DESCRIPTION_RE = re.compile(r'<meta name="DC\.description" content="(.*?)"\s*/?>', re.DOTALL)
+
+
+def _parse_abstract_from_detail_html(html_text: str) -> str | None:
+    """The patent's real abstract from its own Google Patents detail page (``None`` if the page
+    carries no ``DC.description`` meta tag at all -- never guessed). HTML entities unescaped and
+    interior whitespace/newlines collapsed to single spaces, matching how every other text field
+    already stored on a ``patents`` row is shaped."""
+    import html as _html_mod
+
+    m = _DC_DESCRIPTION_RE.search(html_text)
+    if not m:
+        return None
+    text = " ".join(_html_mod.unescape(m.group(1)).split())
+    return text or None
 
 
 def _normalize_cpc_codes(raw_codes: list[str]) -> list[str]:
@@ -355,8 +446,11 @@ def _normalize_cpc_codes(raw_codes: list[str]) -> list[str]:
 
 def _parse_google_patent_detail_html(html: str) -> dict[str, Any]:
     """Best-effort parse of one ``patents.google.com/patent/<pub>/en`` detail page into
-    ``{"assignees", "cpc", "priority_date", "filing_date", "publication_date"}``. Every value is
-    ``[]``/``None`` when the corresponding markup was not found on the page -- never guessed."""
+    ``{"assignees", "cpc", "priority_date", "filing_date", "publication_date", "abstract"}``. Every
+    value is ``[]``/``None`` when the corresponding markup was not found on the page -- never
+    guessed. ``abstract`` (round 14, 2026-09-07) is the patent's own real abstract
+    (:func:`_parse_abstract_from_detail_html`) -- never the keyless search snippet a
+    ``google_patents_search``-sourced row's ``abstract`` column may currently hold."""
     assignees = [a.strip() for a in _DC_CONTRIBUTOR_ASSIGNEE_RE.findall(html) if a.strip()]
     cpc = _normalize_cpc_codes(_CPC_CODE_ITEM_RE.findall(html))
 
@@ -370,6 +464,7 @@ def _parse_google_patent_detail_html(html: str) -> dict[str, Any]:
         "priority_date": _first_date(_PRIORITY_DATE_RE),
         "filing_date": _first_date(_FILING_DATE_RE),
         "publication_date": _first_date(_PUBLICATION_DATE_RE),
+        "abstract": _parse_abstract_from_detail_html(html),
     }
 
 
@@ -389,16 +484,23 @@ def _fetch_patent_detail_html(pub_number: str) -> str | None:
 
 
 def _patents_missing_assignee(patent_ids: list[int], limit: int) -> list[dict[str, Any]]:
-    """Up to ``limit`` ``{id, pub_number}`` rows among ``patent_ids`` whose ``assignees`` column is
-    still empty (``NULL`` or ``{}``) right now -- the DB is the source of truth here (not the
-    in-memory records the caller may also be holding), since ``patent_ids`` mixes freshly-inserted
-    and supplemented-from-store patents alike."""
+    """Up to ``limit`` ``{id, pub_number}`` rows among ``patent_ids`` that still need a confirmed
+    assignee right now -- either the ``assignees`` column is still empty (``NULL`` or ``{}``), or
+    it was only ever filled from a search snippet (round 14, 2026-09-07,
+    docs/qa/content_review/CR-patents.md rule c: ``raw.assignee_source = "snippet"`` is a
+    low-confidence value that must still be replaced by a genuine detail-page assignee whenever one
+    becomes available). The DB is the source of truth here (not the in-memory records the caller
+    may also be holding), since ``patent_ids`` mixes freshly-inserted and supplemented-from-store
+    patents alike."""
     if not patent_ids:
         return []
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id, pub_number FROM patents "
-            "WHERE id = ANY(%(ids)s) AND (assignees IS NULL OR assignees = ARRAY[]::text[]) "
+            "WHERE id = ANY(%(ids)s) AND ("
+            "  assignees IS NULL OR assignees = ARRAY[]::text[]"
+            "  OR raw->>'assignee_source' = 'snippet'"
+            ") "
             "ORDER BY id LIMIT %(limit)s",
             {"ids": patent_ids, "limit": limit},
         )
@@ -439,12 +541,42 @@ def enrich_stored_patents_missing_assignee(
             priority_date=detail["priority_date"],
         )
         try:
-            _backfill_patent_fields(row["pub_number"], rec)
+            # Round 14 (2026-09-07, docs/qa/content_review/CR-patents.md rule c): a genuine
+            # detail-page assignee always wins over whatever is currently stored -- whether that
+            # was empty or a low-confidence search-snippet guess -- so this pass, unlike the
+            # routine non-destructive scan-time backfill, overwrites outright.
+            _backfill_patent_fields(row["pub_number"], rec, overwrite_assignees=bool(detail["assignees"]))
         except Exception as exc:
             log.warning("patents_enrich_backfill_failed", pub_number=row["pub_number"], error=str(exc)[:200])
             continue
         enriched += 1
+        if detail["assignees"]:
+            # Rule (d): entity_ids must always be derived from the final assignees. An
+            # already-analyzed row's entity_ids were computed once, at analyze time, off the
+            # (possibly wrong or still-empty) assignee then on record; eoa.patents.analyze
+            # .analyze_patents never revisits a row once claims_summary_he is populated, so this is
+            # the only place a later assignee correction re-syncs entity_ids for such a row. A
+            # failure here is logged and skipped on its own (never rolls back the assignee/cpc
+            # backfill just applied, never aborts the rest of the batch, docs/CONVENTIONS.md rule
+            # 9) -- the row still counts as "enriched" since its assignee/cpc did get corrected.
+            try:
+                _set_entity_ids(row["pub_number"], _entity_ids_for_assignees(detail["assignees"]))
+            except Exception as exc:
+                log.warning(
+                    "patents_enrich_entity_ids_failed", pub_number=row["pub_number"], error=str(exc)[:200]
+                )
     return enriched
+
+
+def _entity_ids_for_assignees(assignees: list[str]) -> list[int]:
+    """Round 14 rule (d): resolve ``entity_ids`` from a *final* assignees list, reusing
+    ``eoa.patents.analyze``'s own assignee->entity resolution (``_resolve_entity_ids``) -- a
+    read-only import, not an edit to that module (other agents are concurrently editing it).
+    Imported lazily (inside this function, not at module scope) to avoid a hard import-time
+    dependency between the two sibling patents modules."""
+    from eoa.patents.analyze import _resolve_entity_ids
+
+    return _resolve_entity_ids(assignees)
 
 
 def upsert_records(records: list[PatentRecord]) -> dict[str, int]:

@@ -128,6 +128,9 @@ class TestParseGooglePatentDetailHtml:
             "priority_date": None,
             "filing_date": None,
             "publication_date": None,
+            # Round 14 (docs/qa/content_review/CR-patents.md text-grounding rule): the real
+            # detail-page abstract, None when the page carries no DC.description meta tag either.
+            "abstract": None,
         }
 
     def test_multiple_assignees_all_captured(self):
@@ -263,6 +266,11 @@ class TestEnrichStoredPatentsMissingAssignee:
             ),
             patch("eoa.patents.scan._backfill_patent_fields") as mocked_backfill,
             patch("eoa.patents.scan.time.sleep") as mocked_sleep,
+            # Round 14 (docs/qa/content_review/CR-patents.md rule d): a detail-page assignee also
+            # re-syncs entity_ids -- mocked out here (both the resolution and the write) so this
+            # test never attempts a real DB/entity lookup.
+            patch("eoa.patents.scan._entity_ids_for_assignees", return_value=[42]) as mocked_resolve,
+            patch("eoa.patents.scan._set_entity_ids") as mocked_set_ids,
         ):
             enriched = enrich_stored_patents_missing_assignee([1], cap=25)
         assert enriched == 1
@@ -271,6 +279,9 @@ class TestEnrichStoredPatentsMissingAssignee:
         assert pub_number == "US1"
         assert rec.assignees == ["Xidrone Systems Inc"]
         assert rec.cpc == ["G01S13"]
+        assert mocked_backfill.call_args.kwargs == {"overwrite_assignees": True}
+        mocked_resolve.assert_called_once_with(["Xidrone Systems Inc"])
+        mocked_set_ids.assert_called_once_with("US1", [42])
         mocked_sleep.assert_not_called()  # a single target never sleeps
 
     def test_sleeps_between_targets_but_not_before_the_first(self):
@@ -331,6 +342,8 @@ class TestEnrichStoredPatentsMissingAssignee:
             patch("eoa.patents.scan._parse_google_patent_detail_html", return_value=detail),
             patch("eoa.patents.scan._backfill_patent_fields", side_effect=[RuntimeError("db down"), None]),
             patch("eoa.patents.scan.time.sleep"),
+            patch("eoa.patents.scan._entity_ids_for_assignees", return_value=[]),
+            patch("eoa.patents.scan._set_entity_ids"),
         ):
             enriched = enrich_stored_patents_missing_assignee([1, 2])
         assert enriched == 1  # only the second target's backfill succeeded

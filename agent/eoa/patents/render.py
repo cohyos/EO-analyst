@@ -388,3 +388,36 @@ def shade_timeline_table_rows(table: Any, status_col_index: int, status_colors: 
             continue
         for cell in cells:
             shade_table_cell(cell, color)
+
+
+# --------------------------------------------------------------------------
+# Round 14 (2026-09-07, docs/qa/content_review/CR-editing.md defect #16 -- "hollow table column,
+# every row '—' for an entire column, no note explaining why"): a deterministic table sometimes
+# renders a column that is empty for most/all of its rows purely because the underlying source
+# genuinely didn't carry that data (e.g. a keyless-search patent record with no confirmed
+# assignee) -- silently leaving it blank reads as a data-quality problem to a reader, when it is
+# actually an honestly-reported gap. This adds a one-line Hebrew caption explaining the gap,
+# folded into the table's existing ``note_he`` (:func:`eoa.report.docx_builder._table_caption_text`
+# already renders that field identically across docx/md/html -- this only ever *sets* it, it never
+# touches that renderer).
+# --------------------------------------------------------------------------
+
+_EMPTY_CELL_VALUES = frozenset({None, "", "—"})
+
+
+def sparse_column_note_he(
+    headers: list[str], rows: list[list[Any]], column_he: str, *, threshold: float = 0.6
+) -> str | None:
+    """``None`` unless ``column_he`` is one of ``headers`` and at least ``threshold`` of ``rows``
+    carry an empty/placeholder value (``None``/``""``/``"—"``) in that column -- in which case a
+    one-line Hebrew note flagging the gap as a data-availability limitation, not a rendering bug."""
+    if column_he not in headers or not rows:
+        return None
+    idx = headers.index(column_he)
+    empty = sum(1 for r in rows if idx >= len(r) or r[idx] in _EMPTY_CELL_VALUES)
+    if empty / len(rows) < threshold:
+        return None
+    return (
+        f'לרוב הרשומות בטבלה זו אין נתון בעמודה "{column_he}" -- מקור הנתונים (חיפוש פטנטים '
+        "חסר-מפתחות) לא תמיד כולל מידע זה; זה אינו מעיד על היעדרו בפועל."
+    )

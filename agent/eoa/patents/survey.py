@@ -84,6 +84,7 @@ from eoa.patents.render import (
     ltr_isolate_if_latin,
     ltr_join,
     shade_timeline_table_rows,
+    sparse_column_note_he,
     svg_timeline_bar_chart,
 )
 from eoa.patents.valuation import score_and_persist
@@ -101,6 +102,20 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
+
+# Round 14 (2026-09-07, docs/qa/content_review/CR-editing.md defect #1 -- "bidi-isolate control
+# characters rendered as visible glyphs"): imported (never copied -- the CR's own instruction),
+# applied to every table this module builds right before it hands them to ``build_docx`` (see
+# ``_strip_bidi_isolates_from_tables`` below). ``eoa.patents.render.ltr_isolate``'s LRI/PDI
+# wrapping was added for a plain-Markdown table cell's benefit (that renderer has no per-run bidi
+# splitting of its own, unlike the docx/html paths) but the marks are not actually invisible in a
+# real Markdown viewer/plain-text read of the ``.md`` file -- confirmed live 2026-09-07 in
+# ``output/reports/patent_survey_Anduril_Lattice_..._2026-09-07.md`` ("⁦WO2023041813A1 ...⁩"). This
+# strips them back out at the point every table is finalized, for all three rendered formats alike
+# -- harmless for docx/html either way (this module's own docstring already documents that
+# ``docx_builder``'s run-level bidi splitting handles Latin-in-RTL correctly there without any
+# isolate marks at all).
+from eoa.report.textnorm import strip_bidi_isolates
 
 log = structlog.get_logger(__name__)
 
@@ -1262,6 +1277,55 @@ def business_implications_table(actions: list[PatentBizAction]) -> dict[str, Any
     }
 
 
+# --------------------------------------------------------------------------
+# Round 14 (2026-09-07, docs/qa/content_review/CR-editing.md): table-finishing helpers -- bidi-
+# isolate cleanup (defect #1) and a >6-column table's link-into-title merge (defect #7).
+# --------------------------------------------------------------------------
+
+
+def _strip_bidi_isolates_from_tables(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """:func:`eoa.report.textnorm.strip_bidi_isolates` applied to every string in every table's
+    ``title_he``/``note_he``/``headers``/``rows`` -- see the module-level import comment for why.
+    Returns a new list (the input is never mutated) so callers that already hold references to the
+    original dicts (e.g. ``timeline_headers`` used again below for
+    :func:`eoa.patents.render.find_table_by_headers`) keep seeing the pre-strip values, which is
+    fine: plain Hebrew/ASCII header strings never carried isolate marks in the first place, only
+    ``ltr_isolate``-wrapped cell *values* did."""
+
+    def _clean(value: Any) -> Any:
+        return strip_bidi_isolates(value) if isinstance(value, str) else value
+
+    cleaned = []
+    for tbl in tables:
+        new_tbl = dict(tbl)
+        if "title_he" in new_tbl:
+            new_tbl["title_he"] = _clean(new_tbl["title_he"])
+        if "note_he" in new_tbl:
+            new_tbl["note_he"] = _clean(new_tbl["note_he"])
+        if "headers" in new_tbl:
+            new_tbl["headers"] = [_clean(h) for h in new_tbl["headers"]]
+        if "rows" in new_tbl:
+            new_tbl["rows"] = [[_clean(c) for c in row] for row in new_tbl["rows"]]
+        cleaned.append(new_tbl)
+    return cleaned
+
+
+def _title_link_cell(title: str, url: str | None) -> str:
+    """Round 14 (CR-editing.md defect #7, "table >6 columns"): the patent-appendix table's old
+    standalone "קישור" (link) column merged into this one -- a plain Markdown link
+    ``[title](url)`` when a URL is on record, else the bare (isolate-wrapped) title. Written as a
+    Markdown link specifically per the CR's own instruction ("move the link into the title cell as
+    a markdown link"); the plain-Markdown report (the format the content-review pass actually
+    reads) renders it as a real clickable link. The docx/html paths do not special-case this
+    syntax (``docx_builder.py`` stays untouched per this task's ownership split), so there the cell
+    shows as plain text carrying the literal ``[title](url)`` markup rather than a live hyperlink --
+    an accepted, documented trade-off of keeping the fix inside this module alone."""
+    isolated_title = ltr_isolate(title) if title else "—"
+    if not url:
+        return isolated_title
+    return f"[{isolated_title}]({url})"
+
+
 #: J12 (round 12, D8 worst #9): a cluster label that already opens with its own Hebrew category word
 #: ("אשכול נושאי: lattice / mesh" from :func:`eoa.patents.cluster._unclassified_label_he`, or a
 #: label the LLM echoed back with the "אשכול טכנולוגי: " wrapper) must not be wrapped again -- the
@@ -1918,23 +1982,37 @@ def build_patent_survey(
             it["n"]: advance_map.get(it["id"], _NO_ADVANCE_FALLBACK_HE) for it in patent_registry_entries
         }
 
+        # Round 14 (CR-editing.md defect #7, "table >6 columns"): the old 7-column shape
+        # (מספר/כותרת EN/מקצה/CPC/ציון ערך/קישור/התקדמות) merges "קישור" into the title cell as a
+        # markdown link (see :func:`_title_link_cell`), bringing this down to 6 columns without
+        # losing any of the appendix's own information.
+        patents_appendix_headers = ["מספר", "כותרת EN", "מקצה", "CPC", "ציון ערך", "התקדמות"]
+        patents_appendix_rows = [
+            [
+                it["n"],
+                _title_link_cell(it["title"], it.get("url")),
+                ltr_join(it["assignees"]),
+                ltr_join(it["cpc"]),
+                it["value_score"] if it["value_score"] is not None else "—",
+                advance_by_n.get(it["n"], _NO_ADVANCE_FALLBACK_HE),
+            ]
+            for it in patent_registry_entries
+        ]
+        patents_appendix_table: dict[str, Any] = {
+            "title_he": "נספח פטנטים",
+            "headers": patents_appendix_headers,
+            "rows": patents_appendix_rows,
+        }
+        # Round 14 (CR-editing.md defect #16, "hollow table column, no note"): the keyless
+        # Google-Patents-search fallback frequently gathers a sample with no confirmed assignee for
+        # most patents -- when that is the case here, say so explicitly instead of a silent column
+        # of "—".
+        sparse_note = sparse_column_note_he(patents_appendix_headers, patents_appendix_rows, "מקצה")
+        if sparse_note:
+            patents_appendix_table["note_he"] = f"{sparse_note} ({len(patents_appendix_rows)} שורות)"
+
         tables = [
-            {
-                "title_he": "נספח פטנטים",
-                "headers": ["מספר", "כותרת EN", "מקצה", "CPC", "ציון ערך", "קישור", "התקדמות"],
-                "rows": [
-                    [
-                        it["n"],
-                        ltr_isolate(it["title"]),
-                        ltr_join(it["assignees"]),
-                        ltr_join(it["cpc"]),
-                        it["value_score"] if it["value_score"] is not None else "—",
-                        it.get("url") or "—",
-                        advance_by_n.get(it["n"], _NO_ADVANCE_FALLBACK_HE),
-                    ]
-                    for it in patent_registry_entries
-                ],
-            },
+            patents_appendix_table,
             {
                 "title_he": "בעלי פטנטים מובילים",
                 "headers": ["בעלים", "מספר פטנטים"],
@@ -2074,25 +2152,35 @@ def build_patent_survey(
             )
 
         # A14b point 6: per-patent timeline/expiry table + filing waves.
-        timeline_headers = ["מספר", "עדיפות", "הגשה", "פרסום", "הענקה", "תפוגה משוערת (20 שנה)", "סטטוס"]
-        tables.append(
-            {
-                "title_he": "ציר זמן פטנטים",
-                "headers": timeline_headers,
-                "rows": [
-                    [
-                        t.n,
-                        fmt_date(t.priority_date),
-                        fmt_date(t.filing_date),
-                        fmt_date(t.publication_date),
-                        fmt_date(t.grant_date),
-                        fmt_date(t.expiry_date),
-                        t.flag_he or "בתוקף",
-                    ]
-                    for t in timeline_rows
-                ],
-            }
-        )
+        # Round 14 (CR-editing.md defect #7, "table >6 columns"): this table also rendered at 7
+        # columns -- "עדיפות" (priority date) dropped as the least informative one, since
+        # :func:`eoa.patents.cluster.expiry_estimate` already falls back to it internally whenever
+        # ``filing_date`` (this table's own next column) is missing, so the priority date rarely
+        # carries information "הגשה"/"תפוגה משוערת" don't already reflect.
+        timeline_headers = ["מספר", "הגשה", "פרסום", "הענקה", "תפוגה משוערת (20 שנה)", "סטטוס"]
+        timeline_table_rows = [
+            [
+                t.n,
+                fmt_date(t.filing_date),
+                fmt_date(t.publication_date),
+                fmt_date(t.grant_date),
+                fmt_date(t.expiry_date),
+                t.flag_he or "בתוקף",
+            ]
+            for t in timeline_rows
+        ]
+        timeline_table: dict[str, Any] = {
+            "title_he": "ציר זמן פטנטים",
+            "headers": timeline_headers,
+            "rows": timeline_table_rows,
+        }
+        # Round 14 (CR-editing.md defect #16): "הענקה" (grant date) is frequently unavailable for
+        # a keyless-search-gathered sample (few of these publications have a confirmed grant on
+        # record) -- flagged explicitly rather than left as a silent column of "—".
+        timeline_sparse_note = sparse_column_note_he(timeline_headers, timeline_table_rows, "הענקה")
+        if timeline_sparse_note:
+            timeline_table["note_he"] = f"{timeline_sparse_note} ({len(timeline_table_rows)} שורות)"
+        tables.append(timeline_table)
         if cluster_waves:
             tables.append(
                 {
@@ -2115,6 +2203,11 @@ def build_patent_survey(
                     ],
                 }
             )
+
+        # Round 14 (CR-editing.md defect #1): strip any leaked bidi-isolate control characters from
+        # every table right before they reach any of the three renderers -- see the module-level
+        # import comment for ``strip_bidi_isolates`` above.
+        tables = _strip_bidi_isolates_from_tables(tables)
 
         title_text = f"סקר פטנטים: {topic}"
         items_for_appendix = [
@@ -2184,6 +2277,11 @@ def build_patent_survey(
         # each patent's "[n]" citation -- the docx appendix already carries the same text as its
         # own column instead (per the user's own spec).
         md_content = inject_advance_footnotes_md(md_content, advance_by_n)
+        # Round 14 (CR-editing.md defect #1): a final, whole-document safety net -- catches any
+        # LRI/PDI isolate mark that reached this string through a path other than the `tables`
+        # list already cleaned above (the sources appendix built from `items_for_appendix`, the
+        # "שאילתת חיפוש"/"טווח תאריכים" methodology lines, ...). A no-op wherever none is present.
+        md_content = strip_bidi_isolates(md_content)
         md_path.write_text(md_content, encoding="utf-8")
 
         html_content = render_html(
@@ -2206,6 +2304,8 @@ def build_patent_survey(
             svg_timeline_bar_chart(dict(timeline), title_he="הגשות/פרסומים לפי שנה"),
         )
         html_content = inject_advance_footnotes_html(html_content, advance_by_n)
+        # Round 14 (CR-editing.md defect #1): same whole-document safety net as the md path above.
+        html_content = strip_bidi_isolates(html_content)
         html_path.write_text(html_content, encoding="utf-8")
 
         report_id = _persist_report(

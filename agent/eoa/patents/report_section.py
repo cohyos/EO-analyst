@@ -15,6 +15,7 @@ import datetime as dt
 from typing import Any
 
 from eoa.db import connection
+from eoa.patents.render import sparse_column_note_he
 from eoa.pipeline.entity_normalize import resolve_canonical
 from eoa.report.geography import normalize_country
 
@@ -86,7 +87,14 @@ def patents_table(data: dict[str, Any]) -> dict[str, Any] | None:
         ]
         for i, p in enumerate(new_patents[:15])
     ]
-    return {"title_he": "פטנטים חדשים (EO/IR)", "headers": headers, "rows": rows}
+    table: dict[str, Any] = {"title_he": "פטנטים חדשים (EO/IR)", "headers": headers, "rows": rows}
+    # Round 14 (2026-09-07, docs/qa/content_review/CR-editing.md defect #16 -- "hollow table
+    # column, no note explaining why"): flag it explicitly when most of this table's own rows
+    # carry no confirmed assignee, rather than a silent column of "—".
+    note = sparse_column_note_he(headers, rows, "בעלים")
+    if note:
+        table["note_he"] = f"{note} ({len(rows)} שורות)"
+    return table
 
 
 # --------------------------------------------------------------------------
@@ -201,4 +209,9 @@ def patents_bd_table(data: dict[str, Any]) -> dict[str, Any] | None:
         ]
         for i, p in enumerate(matched[:15])
     ]
-    return {"title_he": "פטנטים של מתחרים בטריטוריה", "headers": headers, "rows": rows}
+    table: dict[str, Any] = {"title_he": "פטנטים של מתחרים בטריטוריה", "headers": headers, "rows": rows}
+    # Round 14 (CR-editing.md defect #16): same sparse-"בעלים"-column note as patents_table above.
+    note = sparse_column_note_he(headers, rows, "בעלים")
+    if note:
+        table["note_he"] = f"{note} ({len(rows)} שורות)"
+    return table

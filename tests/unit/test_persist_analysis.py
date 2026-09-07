@@ -181,7 +181,17 @@ def test_persist_analysis_inserts_events(monkeypatch: pytest.MonkeyPatch) -> Non
         edges=[],
     )
 
-    item = {"id": 100, "title": "Test", "url": "https://example.com"}
+    # CR-events (round 14): the event grounding keeps amount/customer/parties only when the item's
+    # own source text (title + clean_text) names them at the same magnitude.
+    item = {
+        "id": 100,
+        "title": "Test",
+        "url": "https://example.com",
+        "clean_text": (
+            "Company A and Company B were awarded a $1 million contract by Client X under Program Y "
+            "on 1 September 2026, the companies announced."
+        ),
+    }
 
     n_events, _n_edges = persist_analysis(item, out)
 
@@ -309,7 +319,16 @@ def test_persist_analysis_dedups_identical_events(monkeypatch: pytest.MonkeyPatc
         edges=[],
     )
 
-    item = {"id": 201, "title": "Test", "url": "https://example.com"}
+    item = {
+        "id": 201,
+        "title": "Test",
+        "url": "https://example.com",
+        # CR-events (round 14): grounded source text for both events' parties/customer/amount
+        "clean_text": (
+            "Elbit Systems won an $80 million targeting-pod contract from the USAF this week, while "
+            "Rafael launched a new counter-UAS system at the same show."
+        ),
+    }
     n_events, _ = persist_analysis(item, out)
 
     assert n_events == 2
