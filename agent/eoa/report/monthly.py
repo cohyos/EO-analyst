@@ -38,6 +38,7 @@ itself (:func:`_gone_trend_sections`).
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -100,6 +101,36 @@ MONTHLY_TITLE_TEXT = "דוח חודשי — אלקטרואופטיקה ובינ�
 
 _LEVELS_MAIN = ("red", "orange")
 _PLAYER_EDGE_LABELS = ("COMPETITOR_OF", "SUPPLIER_OF", "PARTNER_OF")
+
+#: R12-reports #3 (round-11 judge D3/D6 worst #9): "Operation Atlantic City" -- a NATO exercise
+#: name that lives correctly on ``events.program`` (rendered in :func:`top_events_by_amount`'s own
+#: table, "events" being exactly where an exercise belongs) -- also got extracted as its own
+#: ``entities`` row (``kind='program'``) by the upstream entity-extraction pipeline, which is out
+#: of this round's file scope (not ``eoa.report.*``). That spurious entity then leaked into two
+#: unrelated entity-shaped tables built straight from ``entities``: :func:`players_map` ("נוף
+#: תחרותי", a fake player with 0/0/0 competitor/supplier/partner edges — confirmed live on the
+#: 2026-09-30 monthly) and :func:`watchlist_changes` ("שינויים ברשימת המעקב", rendered as a
+#: glossary-style "Name — kind" bullet by :func:`format_watchlist_he` — confirmed live as
+#: "Operation Atlantic City — program"). Not every ``kind='program'`` entity is bogus (e.g. "Arctic
+#: Sentry"/"Defense Innovation Unit (DIU)" are legitimate named programs on the same live monthly),
+#: so this can't filter on ``kind`` -- it targets the specific exercise/operation *naming* pattern
+#: instead: an English "Operation ..." prefix, or a bare Hebrew "תרגיל"/"מבצע" token anywhere in the
+#: name. :func:`_is_exercise_or_operation_label` is the single shared test both collectors call.
+_EXERCISE_NAME_RE = re.compile(r"^operation\s", re.IGNORECASE)
+_EXERCISE_HEBREW_TOKENS = ("תרגיל", "מבצע")
+
+
+def _is_exercise_or_operation_label(name: str | None) -> bool:
+    """True for an entity name that is actually a military exercise/operation label (belongs only
+    in the events table, e.g. :func:`top_events_by_amount`'s ``events.program`` column) rather than
+    a real competitive-landscape/watchlist entity. See the module-level note above
+    :data:`_EXERCISE_NAME_RE` for the round-11 finding this fixes."""
+    if not name:
+        return False
+    if _EXERCISE_NAME_RE.match(name.strip()):
+        return True
+    return any(tok in name for tok in _EXERCISE_HEBREW_TOKENS)
+
 
 # round 5 P1 (2026-09-06): same input-side reduction rationale as weekly.py's own -- a month can
 # have hundreds of red/orange items, so only a reduced, still score-ordered subset is shown to the
@@ -223,6 +254,8 @@ def players_map() -> dict[str, list[dict[str, Any]]]:
         rows = cur.fetchall()
     best_domain: dict[int, dict[str, Any]] = {}
     for row in rows:
+        if _is_exercise_or_operation_label(row.get("name")):
+            continue
         eid = row["id"]
         if eid not in best_domain or row["n"] > best_domain[eid]["n"]:
             best_domain[eid] = row
@@ -267,7 +300,13 @@ def top_events_by_amount(period_start: dt.date, period_end: dt.date, limit: int 
 
 def watchlist_changes(period_start: dt.date, period_end: dt.date) -> list[dict[str, Any]]:
     """Entities first seen this month (``entities.created_at`` in the period — the schema has no
-    dedicated "first seen" date column beyond ``created_at``/``first_seen_item``)."""
+    dedicated "first seen" date column beyond ``created_at``/``first_seen_item``).
+
+    R12-reports #3: a row whose name is an exercise/operation label
+    (:func:`_is_exercise_or_operation_label`, e.g. "Operation Atlantic City") is dropped after the
+    fetch — :func:`format_watchlist_he` renders every remaining row as a "Name (country) — kind"
+    glossary-style bullet, and an exercise name is not a watchlist entity, same rationale as
+    :func:`players_map`'s identical filter."""
     sql = """
         SELECT e.id, e.name, e.kind, e.country, e.created_at
         FROM entities e
@@ -283,7 +322,8 @@ def watchlist_changes(period_start: dt.date, period_end: dt.date) -> list[dict[s
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": period_start, "end": period_end})
-        return cur.fetchall()
+        rows = cur.fetchall()
+    return [r for r in rows if not _is_exercise_or_operation_label(r.get("name"))]
 
 
 def full_horizon_table() -> list[dict[str, Any]]:
@@ -838,6 +878,28 @@ def build_monthly(
     # (P4) renders both natively from `draft.bluf`/`draft.assumptions` (docs/MODULES.md "Round 5
     # P3").
     extra_sections: list[dict[str, Any]] = list(trend_sections)
+
+    # R12-reports #1 (round-11 judge D6 worst #3): the monthly never rendered a "מעקב אינדיקטורים"
+    # (I&W watchlist) section at all -- `grep "אינדיקטור"` was 0 matches on a live monthly, while
+    # daily/weekly both have one (`eoa.report.weekly.build_weekly`'s identical block, which this
+    # mirrors). ``indicators.process_indicator_watchlist``/``check_maturation`` are already
+    # generic over ``kind`` (the ``indicator_watchlist`` table's own ``kind`` column just needs a
+    # third value here, "monthly", to key its own maturation/dedupe state independently of the
+    # daily/weekly rows -- see `eoa.report.indicators`'s module docstring) -- passing "monthly"
+    # here is the only wiring this needed. The per-story/8-row cap
+    # (`indicators.render_watchlist_table`, R12-reports #2) applies uniformly regardless of kind,
+    # so the monthly table starts out capped like the other two. A failure here must never break
+    # the monthly report, same as every other additive `extra_sections`/`tables` block below.
+    try:
+        from eoa.report import indicators
+
+        indicator_section, _indicator_rows = indicators.build_indicator_watchlist_section(
+            "monthly", draft.outlook, items, citation_items
+        )
+        if indicator_section:
+            extra_sections.append(indicator_section)
+    except Exception as exc:
+        log.warning("monthly_report_indicator_watchlist_failed", error=str(exc)[:160])
 
     tables: list[dict[str, Any]] = []
     # R6-weekly (docs/qa/loop/round_6_fixes.md): the players map used to render one top-level

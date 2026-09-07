@@ -27,12 +27,20 @@ R8-reports #3/#4 (round-7 judge D6 #7/#8): two more rendering rules, both in
   (:func:`_evidence_cell`) — not just a row that matured *this issue*; "—" only when truly no
   item in the report matches. A ``dropped`` row (by definition unmatched at drop time) always
   stays "—".
-- **Daily per-story cap** (:func:`_cap_watchlist_rows`, ``kind == "daily"`` only): at most 3 rows
-  per cluster of rows sharing the same top-2 content tokens (a coarser "same underlying story"
-  test than step 2's own reword-collapsing dedupe), preferring a row with evidence and, among
-  ties, the most recently seen; the table is then capped at 8 rows total, keeping the
-  longest-tracked (oldest ``first_seen``) rows when trimming further. Not applied to the
-  weekly/monthly tables, which the round-7 judge did not report as over-crowded.
+- **Per-story cap** (:func:`_cap_watchlist_rows`): at most 3 rows per cluster of rows sharing the
+  same top-2 content tokens (a coarser "same underlying story" test than step 2's own
+  reword-collapsing dedupe), preferring a row with evidence and, among ties, the most recently
+  seen; the table is then capped at 8 rows total, keeping the longest-tracked (oldest
+  ``first_seen``) rows when trimming further.
+
+  R12-reports #2 (round-11 judge D6 worst #4): originally daily-only ("not applied to the
+  weekly/monthly tables, which the round-7 judge did not report as over-crowded") -- round 11
+  then found the weekly table itself had grown to 10 rows against the brief's own <= 8-row cap
+  (2 with no evidence). :func:`render_watchlist_table` now runs the same cap for every ``kind``
+  (daily/weekly/monthly alike): a table that has grown past the cap is exactly the failure mode
+  the cap exists to prevent, regardless of report cadence, and the monthly table (newly wired in
+  this same round, see :mod:`eoa.report.monthly`) starts out under the same discipline rather than
+  needing its own follow-up fix later.
 
 R9-reports #1 (round-8 judge D6 #5): the evidence column shipped in R8 but never actually
 populated live (daily 0/8, weekly 2/16) because the underlying match test
@@ -743,8 +751,8 @@ def _cap_watchlist_rows(
 ) -> list[dict[str, Any]]:
     """R8-reports #4 (round-7 judge D6 #8): even after round-6's ``same_indicator`` reword-
     collapsing (dedupe at *insert* time), distinct-enough phrasings of the same underlying story
-    can each still get their own row and crowd the daily table. Two passes, daily table only (see
-    :func:`render_watchlist_table`'s ``kind`` gate):
+    can each still get their own row and crowd the table. Two passes (R12-reports #2: now run for
+    every ``kind`` -- daily/weekly/monthly alike, see :func:`render_watchlist_table`):
 
     1. Cluster rows by :func:`_cluster_key`; keep at most ``max_per_cluster`` rows per cluster,
        preferring a row with evidence (``matured`` or a ``matured_evidence_item_id``) and, among
@@ -794,13 +802,14 @@ def render_watchlist_table(
     ``rows`` is empty (same "nothing to show, render nothing" convention as
     ``eoa.report.israel_section``).
 
-    R8-reports #4: ``kind == "daily"`` additionally runs :func:`_cap_watchlist_rows` first — the
-    per-story clustering cap is scoped to the daily table (the round-7 judge's own finding), not
-    the weekly/monthly tables, which weren't reported as over-crowded."""
+    R8-reports #4: additionally runs :func:`_cap_watchlist_rows` first — the per-story clustering
+    cap (R12-reports #2, round-11 judge D6 worst #4: now applies to every ``kind``, not just
+    ``"daily"`` — the weekly table itself was found over its own <= 8-row cap this round, and the
+    cap is a table-hygiene rule that should hold for the monthly table too, not something to
+    re-discover per report kind)."""
     if not rows:
         return None
-    if kind == "daily":
-        rows = _cap_watchlist_rows(rows)
+    rows = _cap_watchlist_rows(rows)
     by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
     items = items or []
     lines = ["| אינדיקטור | מאז | סטטוס | ראיה |", "|---|---|---|---|"]

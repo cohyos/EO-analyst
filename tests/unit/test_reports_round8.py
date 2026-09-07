@@ -472,7 +472,13 @@ class TestIndicatorClusterCap:
         # the single newest first_seen row (id 9, offset 6+2=8) is the one trimmed
         assert 9 not in {r["id"] for r in kept}
 
-    def test_render_watchlist_table_daily_applies_cap_but_weekly_does_not(self):
+    def test_render_watchlist_table_daily_and_weekly_both_apply_cap(self):
+        # R12-reports #2 (round-11 judge D6 worst #4, docs/qa/loop/round_12_fixes.md): this test
+        # used to be named "..._but_weekly_does_not" and asserted the weekly table was left
+        # uncapped at 9 rows -- round 11 found a live weekly indicator table had grown to 10 rows
+        # against the brief's own <= 8-row cap, so `indicators.render_watchlist_table` now runs
+        # the same per-story/8-row cap for every ``kind`` (see that module's own updated
+        # docstring). Updated in place rather than left contradicting the new intended behavior.
         d0 = dt.datetime(2026, 8, 1, tzinfo=UTC)
         rows = []
         clusters = [
@@ -492,9 +498,11 @@ class TestIndicatorClusterCap:
 
         daily_section = indicators.render_watchlist_table(rows, [], [], kind="daily")
         weekly_section = indicators.render_watchlist_table(rows, [], [], kind="weekly")
-        # header (2 lines) + rows
+        monthly_section = indicators.render_watchlist_table(rows, [], [], kind="monthly")
+        # header (2 lines) + rows -- all three kinds capped at 8 now
         assert len(daily_section["body_he"].splitlines()) == 2 + 8
-        assert len(weekly_section["body_he"].splitlines()) == 2 + 9
+        assert len(weekly_section["body_he"].splitlines()) == 2 + 8
+        assert len(monthly_section["body_he"].splitlines()) == 2 + 8
 
 
 # --------------------------------------------------------------------------
