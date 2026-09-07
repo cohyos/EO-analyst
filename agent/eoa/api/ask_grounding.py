@@ -159,19 +159,77 @@ source actually supports), plus three smaller, independent hygiene gaps:
 10. :func:`ensure_headings_on_own_line` -- a final, no-op-safe normalisation pass (live-found on an
     iPhone Safari e2e run) that inserts a line break before any ``###``-style heading marker a prior
     guard's removal left glued onto the end of the preceding line.
+
+Round 7 (docs/qa/loop/round_6_judge.md D5, score 45): the round-6 judge's live sample found the
+fabrication class round 6 was supposed to close recurring in a new shape, plus a distinct
+weak-citation-confidence failure:
+
+11. :func:`filter_claim_grounding` (tightened in place, same public entry point and
+    ``(answer_text, question, retrieved)`` contract): round 6's own bar -- keep a `[n]`-cited unit
+    if *any one* of its distinctive tokens is grounded in its own citation -- is exactly why the
+    live Q1/XM30 fabrication ("MWIR, SWIR ו-VIS" attributed to item 257, whose text never mentions
+    any EO/IR technology) sailed through when the same unit also happened to name the genuinely
+    grounded "XM30" itself. Tightened to: a unit is now kept only when *either* (a) every
+    *technical* token it contains -- a Latin acronym/term of 3-6 uppercase letters, any Latin token
+    containing a digit (XM30, 640x512, 12µm), a digit-run (year/count), or a taxonomy subdomain
+    Hebrew term -- is grounded in its own citation, *or* (b) at least half of *all* its distinctive
+    tokens (technical or not) are grounded there. A unit with zero technical tokens falls back to
+    (b) alone (a vacuous "all technical grounded" would otherwise trivially keep a unit whose sole
+    ungrounded token is a fabricated proper noun, e.g. round 6's own "Zorblatt" test case -- (a) is
+    only ever a keeping condition when there is at least one technical token to actually check).
+    This closes the live MWIR/SWIR/VIS case (zero grounded technical tokens, 0% overall) while
+    deliberately *not* regressing round 6's own "one grounded token saves the bullet" test (XM30
+    grounded + HEL ungrounded is exactly 50%, still clears bar (b)) -- measured against every
+    quoted live answer in `docs/qa/loop/round_5_chat_fixes.md` and `docs/qa/loop/round_6_judge.md`
+    before picking the 50% threshold, per this round's own brief. Additionally now also checks a
+    unit with *no* citation at all inside the lead paragraph/key-facts scope: if it contains a
+    technical token grounded nowhere in the whole retrieved corpus (not just a citation, since
+    there is none to check against), it is removed too -- round 6 only ever looked at cited units.
+12. :func:`filter_uncited_factual_claims` (new) -- the live Q5/Skyranger finding: confident
+    factual claims in the direct-answer paragraph/key-facts section carrying almost no `[n]`,
+    correctly grounded when they do cite, but a distracting minority left uncited alongside cited
+    siblings in the same section. When a scope (lead paragraph, or the key-facts section) already
+    has at least one cited unit, every *factual* (`eoa.report.qa_citations.is_factual`) uncited
+    unit in that same scope is dropped -- a scope with *zero* citations at all is left alone here
+    (that is `retrieval_relevance_caveat`'s/the anchor guard's job, not this one's).
+13. :func:`relocate_source_admission_caveat` (new) -- the model's own "N of M sources unrelated"
+    admission (Q5 live: "6 of 8 sources have no direct connection") was buried in a trailing
+    footer, after the confident claims it should have qualified. Detects such an admission
+    sentence anywhere in the answer (Hebrew "אינם קשורים"/"לא רלוונטיים" or English "unrelated")
+    and moves it to the very top as the answer's leading caveat instead.
+14. :func:`low_citation_caveat` (new) -- when, after the two guards above have run, fewer than 2
+    factual sentences in the *whole* answer are actually `[n]`-cited, prepends a generic Hebrew
+    caveat ("mostly-uncited-or-indirect sources") once -- a no-op when
+    :func:`relocate_source_admission_caveat` already supplied a more specific, model-authored
+    caveat for the exact same underlying condition.
+15. :func:`entailment_filter` (new, config-gated via ``ask.entailment_check``/
+    ``ask.entailment_max_claims``, **chat only** -- never wired into the pipeline/report paths):
+    an optional, additive probabilistic check on top of guards 1-14's deterministic floor -- asks
+    the ``light`` role one structured yes/no/partial question per up to
+    ``ask.entailment_max_claims`` `[n]`-cited lead/key-facts unit, against that unit's own cited
+    source text (trimmed to 1500 chars each), and drops a unit answered "no". A hard 20s wall-clock
+    budget (a background thread, never the caller's own event loop) skips gracefully -- returning
+    the answer unchanged -- on a timeout or any LLM error, since this check is explicitly additive,
+    never a substitute for the deterministic guards above.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import re
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
+
+import structlog
+from pydantic import BaseModel
 
 from eoa.config import settings
 from eoa.pipeline import entity_normalize
-from eoa.report.qa_citations import strip_so_what_phrases
+from eoa.report.qa_citations import is_factual, strip_so_what_phrases
 from eoa.report.style import strip_filler_phrases
 from eoa.search.deep_search import extract_anchors
+
+log = structlog.get_logger(__name__)
 
 # A real citation is always a bare `[<digits>]` (see `eoa.api.routes.ask`'s own
 # `re.search(r"\[\d+\]", ...)` checks) -- anything shaped like `[n]`/`[n=5]`/`{n}` is always a
@@ -1540,23 +1598,52 @@ def _claim_token_grounded(
     return True  # unreachable for the kinds `_claim_distinctive_tokens` ever emits
 
 
+def _is_technical_claim_token(kind: str, token: str) -> bool:
+    """Round 7 (docs/qa/loop/round_6_judge.md D5, live Q1/XM30 recurrence): whether a
+    ``(kind, token)`` distinctive-token candidate (see :func:`_claim_distinctive_tokens`) counts as
+    the brief's "technical token" -- a Latin acronym/term of 3-6 uppercase letters, any Latin token
+    containing a digit (``XM30``, ``640x512``, ``12µm`` -- the digit run inside these is
+    matched separately by ``kind == "digit"``), a bare digit run (``kind == "digit"``, e.g. a
+    resolution/year/count), or a taxonomy subdomain Hebrew term (``kind == "taxonomy"``). An
+    ordinary Latin word/name (``kind == "latin"``, not all-caps, no digit -- "Program", "Textron")
+    is not technical: it still counts toward :func:`filter_claim_grounding`'s overall "at least
+    half of all distinctive tokens" bar, just not the stricter "every technical token" one."""
+    if kind in ("digit", "taxonomy"):
+        return True
+    if kind == "latin":
+        if token.isupper() and 3 <= len(token) <= 6:
+            return True
+        return any(c.isdigit() for c in token)
+    return False
+
+
 def filter_claim_grounding(
     answer_text: str, question: str, retrieved: list[dict[str, Any]]
 ) -> tuple[str, int]:
     """Drop every `[n]`-cited unit inside the "עובדות מרכזיות" section or the leading direct-answer
-    paragraph whose distinctive tokens (see :func:`_claim_distinctive_tokens`) are *all* ungrounded
-    in that unit's own cited source(s) and in the question (see :func:`_claim_token_grounded`) --
-    the round-6 closer for the live Q1/XM30 "HEL laser"/"ATR/GPS-denied navigation" fabrication (see
-    the section note above). A unit with no citation, or no distinctive token at all, is left alone
-    (nothing to check); a unit with at least one grounded token is kept even if it also carries an
-    ungrounded one (deliberately weak -- see the module docstring's round-6 note on measuring false
-    positives before tightening). A no-op on a blank answer or empty ``retrieved`` (same rationale
-    as every other guard in this module). The "### הערכת האנליסט" section is out of scope by
-    construction (it is never inside the lead paragraph or the key-facts section)."""
+    paragraph that fails the round-7-tightened claim-grounding bar (see the module docstring's
+    round-7 item 11 note for the full live-repro rationale): kept only when *either* every
+    "technical" token it contains (:func:`_is_technical_claim_token`) is grounded in its own `[n]`
+    citation (or the question), *or* at least half of *all* its distinctive tokens
+    (:func:`_claim_distinctive_tokens`) are -- round 6's own bar (kept if *any* token grounded at
+    all) is exactly what let the live Q1/XM30 "MWIR, SWIR ו-VIS" fabrication through when the same
+    unit also happened to name the genuinely grounded "XM30".
+
+    A unit with no citation is normally left alone (nothing to check against) -- *except* now
+    (round 7) also flagged when it sits in the same lead-paragraph/key-facts scope and contains a
+    technical token grounded nowhere in the whole retrieved corpus (there is no citation to check
+    it against specifically, so the whole corpus is the next-best check -- still far narrower than
+    letting an uncited technical claim through unexamined). A unit with no distinctive token at all
+    is always left alone (nothing to check either way). A no-op on a blank answer or empty
+    ``retrieved`` (same rationale as every other guard in this module). The "### הערכת האנליסט"
+    section is out of scope by construction (it is never inside the lead paragraph or the key-facts
+    section)."""
     if not answer_text or not answer_text.strip() or not retrieved:
         return answer_text, 0
     sources_by_n = _sources_by_n(retrieved)
     question_cf = question.casefold()
+    all_sources_text = " ".join(sources_by_n.values())
+    all_sources_text_cf = all_sources_text.casefold()
 
     section_titles: list[tuple[int, str]] = [
         (m.start(), m.group(1).strip()) for m in _SECTION_HEADING_TEXT_RE.finditer(answer_text)
@@ -1582,17 +1669,37 @@ def filter_claim_grounding(
         if not in_scope:
             continue
         cited_ns = _cited_ns(unit_text)
-        if not cited_ns:
-            continue
         tokens = _claim_distinctive_tokens(unit_text)
         if not tokens:
             continue
+
+        if not cited_ns:
+            # Round 7: an uncited claim in-scope is still checked, but only against the whole
+            # corpus (no specific citation to hold it to) and only its technical tokens (an
+            # uncited ordinary proper noun/word is not this guard's concern).
+            technical = [(k, t) for k, t in tokens if _is_technical_claim_token(k, t)]
+            if not technical:
+                continue
+            if any(
+                not _claim_token_grounded(k, t, all_sources_text, all_sources_text_cf, question, question_cf)
+                for k, t in technical
+            ):
+                flagged.append((start, end))
+            continue
+
         cited_text = " ".join(sources_by_n.get(n, "") for n in cited_ns)
         cited_text_cf = cited_text.casefold()
-        if any(
+        grounded_flags = [
             _claim_token_grounded(kind, token, cited_text, cited_text_cf, question, question_cf)
             for kind, token in tokens
-        ):
+        ]
+        technical = [(kind, token) for kind, token in tokens if _is_technical_claim_token(kind, token)]
+        all_technical_grounded = bool(technical) and all(
+            _claim_token_grounded(kind, token, cited_text, cited_text_cf, question, question_cf)
+            for kind, token in technical
+        )
+        half_or_more_grounded = sum(grounded_flags) * 2 >= len(tokens)
+        if all_technical_grounded or half_or_more_grounded:
             continue
         flagged.append((start, end))
 
@@ -1690,3 +1797,330 @@ def ensure_headings_on_own_line(answer_text: str) -> str:
         else:
             out_lines.append(line)
     return "\n".join(out_lines)
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 7 item 2 (docs/qa/loop/round_6_judge.md D5 worst-list #9, live Q5/Skyranger): confident
+# factual claims in the direct-answer paragraph / key-facts section, correctly cited when they do
+# carry a `[n]`, but a minority left uncited alongside their cited siblings in the same scope --
+# then a footer admission ("6 of 8 sources unrelated") the reader only reaches after already having
+# read the confident, uncited claims as if they were equally well-supported.
+# ---------------------------------------------------------------------------------------------
+
+
+def filter_uncited_factual_claims(answer_text: str, retrieved: list[dict[str, Any]]) -> tuple[str, int]:
+    """Drop every factual (:func:`eoa.report.qa_citations.is_factual`), `[n]`-less unit inside the
+    leading direct-answer paragraph or the "עובדות מרכזיות" section, *but only* in whichever of
+    those two scopes already has at least one `[n]`-cited unit of its own -- a scope with *zero*
+    citations at all is left alone here (that is the anchor guard's/
+    :func:`retrieval_relevance_caveat`'s job, not this one's: a wholesale uncited scope is a
+    retrieval-relevance problem, while a *mixed* scope -- some claims cited, others not -- is this
+    guard's live Q5 pattern, where the uncited claims read as if they carried the same evidentiary
+    weight as their cited neighbours). A non-factual uncited unit (a connector sentence, a list
+    intro) is left alone regardless -- this only ever removes a claim :func:`is_factual` itself
+    would flag as making a checkable assertion. A no-op on a blank answer or empty ``retrieved``
+    (same rationale as every other guard in this module).
+
+    Live-verified 2026-09-07 (throwaway offline replay against golden Q5/Skyranger's actual live
+    answer): the model rendered its comparison as a markdown *table* rather than the expected
+    bullet list -- `_iter_units`' plain sentence-splitter is not table-aware (a pre-existing,
+    documented limitation of this same helper elsewhere in this module, e.g.
+    :func:`ground_and_filter_answer`'s own docstring), so it chopped each table row into several
+    citation-less fragments and this guard, unlike the module's other more conservative checks,
+    would have deleted most of the table. Any unit containing a literal ``|`` (a table row or
+    separator) is therefore skipped outright here -- left for a future round to make this module's
+    shared unit-splitter table-aware everywhere, the same follow-up round 3/5 already flagged for
+    the removal guards."""
+    if not answer_text or not answer_text.strip() or not retrieved:
+        return answer_text, 0
+
+    section_titles: list[tuple[int, str]] = [
+        (m.start(), m.group(1).strip()) for m in _SECTION_HEADING_TEXT_RE.finditer(answer_text)
+    ]
+
+    def _section_at(pos: int) -> str:
+        title = ""
+        for heading_start, heading_title in section_titles:
+            if heading_start > pos:
+                break
+            title = heading_title
+        return title
+
+    heading_match = _FIRST_SECTION_HEADING_RE.search(answer_text)
+    lead_end = heading_match.start() if heading_match else len(answer_text)
+
+    def _scope_key(pos: int) -> str | None:
+        if pos < lead_end:
+            return "lead"
+        if _KEY_FACTS_MARKER in _section_at(pos):
+            return "key_facts"
+        return None
+
+    units = [
+        (s, e, answer_text[s:e])
+        for s, e in _iter_units(answer_text)
+        if answer_text[s:e].strip() and "|" not in answer_text[s:e]
+    ]
+    scoped: dict[str, list[tuple[int, int, str]]] = {}
+    for s, e, t in units:
+        key = _scope_key(s)
+        if key is not None:
+            scoped.setdefault(key, []).append((s, e, t))
+
+    flagged: list[tuple[int, int]] = []
+    for scope_units in scoped.values():
+        if not any(_CITATION_RE.search(t) for _, _, t in scope_units):
+            continue  # wholly-uncited scope -- not this guard's job (see docstring)
+        for s, e, t in scope_units:
+            if _CITATION_RE.search(t):
+                continue
+            if is_factual(t):
+                flagged.append((s, e))
+
+    if not flagged:
+        return answer_text, 0
+    new_text = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, flagged)))
+    return new_text, len(flagged)
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 7 item 2, continued: the model's own disclosed admission that most of its retrieved
+# sources are unrelated is genuinely useful information -- it just needs to be the *first* thing a
+# reader sees, not a footer discovered only after already reading confident-sounding claims above
+# it (the exact live Q5 shape).
+# ---------------------------------------------------------------------------------------------
+
+_ADMISSION_KEYWORDS = (
+    "אינם קשורים",
+    "אינו קשור",
+    "לא קשורים",
+    "לא קשור",
+    "לא רלוונטיים",
+    "לא רלוונטי",
+    "unrelated",
+)
+
+
+def _is_admission_unit(unit_text: str) -> bool:
+    lowered = unit_text.casefold()
+    return any(kw.casefold() in lowered for kw in _ADMISSION_KEYWORDS)
+
+
+def relocate_source_admission_caveat(answer_text: str) -> tuple[str, bool]:
+    """Move every unit of ``answer_text`` that reads as the model's own admission that some of its
+    retrieved sources are unrelated/irrelevant (see :data:`_ADMISSION_KEYWORDS`) to the very top of
+    the answer, as a single leading blockquote caveat -- instead of wherever it originally trailed
+    (live Q5: a footer, reached only after the confident claims above it). Returns
+    ``(new_text, moved)``; a no-op (``moved is False``, ``new_text == answer_text``) when no such
+    admission is found, on a blank answer, *or* when the only matching unit is already the very
+    first unit of the text (idempotent against being run a second time on text this function
+    already rewrote -- see the ``start > 0`` guard below: once relocated, the admission sits at
+    offset 0 and is never a candidate for relocation again)."""
+    if not answer_text or not answer_text.strip():
+        return answer_text, False
+    admission_spans = [
+        (s, e) for s, e in _iter_units(answer_text) if s > 0 and _is_admission_unit(answer_text[s:e])
+    ]
+    if not admission_spans:
+        return answer_text, False
+    admission_text = " ".join(answer_text[s:e].strip() for s, e in admission_spans)
+    remainder = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, admission_spans)))
+    new_text = f"> ⚠️ {admission_text}" + "\n\n" + remainder.lstrip()
+    return new_text, True
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 7 item 2, continued: even after the two guards above run, an answer can still end up with
+# almost nothing actually `[n]`-cited (live Q5: confident HEL-capability/EMCON-parallel claims with
+# "almost no inline citations") -- a generic, one-time caveat for whenever no more specific
+# model-authored admission (see above) already covers the same ground.
+# ---------------------------------------------------------------------------------------------
+
+_LOW_CITATION_CAVEAT = "> ⚠️ התשובה מבוססת על מקורות מעטים/עקיפים; ראו רשימת המקורות."
+
+
+_LOW_CITATION_MIN_FACTUAL_UNITS = 3
+
+
+def low_citation_caveat(answer_text: str) -> tuple[str, int]:
+    """Prepend :data:`_LOW_CITATION_CAVEAT` once, at the very top of ``answer_text``, when the
+    answer makes at least :data:`_LOW_CITATION_MIN_FACTUAL_UNITS` factual
+    (:func:`eoa.report.qa_citations.is_factual`) claims *and* fewer than 2 of them carry a `[n]`
+    citation. Returns ``(new_text, added)`` with ``added`` either ``0`` or ``1``.
+
+    The minimum-factual-units gate (round 7, added after live-verifying against the existing
+    round-3/round-5 e2e fixtures per this round's own brief) keeps a short, single-fact,
+    correctly-cited answer -- e.g. one "עובדות מרכזיות" bullet with its own `[n]` -- from being
+    flagged: "fewer than 2 factual sentences cited" is only a meaningful low-confidence signal once
+    the answer is actually making *several* claims and citing almost none of them (the live
+    Q5/Skyranger shape: many confident factual sentences, "almost no inline citations") -- not
+    when it is simply a short, complete answer with one fact and one citation.
+
+    A no-op (``added == 0``) on a blank answer, below the minimum-factual-units gate, when the
+    caveat is already present (idempotent against being run again on text this function already
+    rewrote, or against :func:`relocate_source_admission_caveat` having already supplied a more
+    specific caveat for the same underlying condition -- see the ``routes/ask.py`` wiring, which
+    only calls this one when that one found nothing to relocate), or when >= 2 factual units are
+    already cited."""
+    if not answer_text or not answer_text.strip():
+        return answer_text, 0
+    if _LOW_CITATION_CAVEAT in answer_text:
+        return answer_text, 0
+    total_factual = 0
+    cited_factual = 0
+    for start, end in _iter_units(answer_text):
+        unit_text = answer_text[start:end]
+        if not unit_text.strip() or not is_factual(unit_text):
+            continue
+        total_factual += 1
+        if _CITATION_RE.search(unit_text):
+            cited_factual += 1
+    if total_factual < _LOW_CITATION_MIN_FACTUAL_UNITS or cited_factual >= 2:
+        return answer_text, 0
+    return _LOW_CITATION_CAVEAT + "\n\n" + answer_text.lstrip(), 1
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 7 item 3: optional light-model entailment check (config-gated, ``ask.entailment_check`` /
+# ``ask.entailment_max_claims`` in ``config/config.yaml`` -- **chat only**, never wired into the
+# pipeline/report paths). A purely probabilistic, additive pass on top of every deterministic guard
+# above -- never a substitute for them, and always a silent no-op on any error, timeout, or empty
+# candidate list.
+# ---------------------------------------------------------------------------------------------
+
+
+class _ClaimVerdict(BaseModel):
+    index: int
+    verdict: Literal["yes", "no", "partial"]
+
+
+class _EntailmentResponse(BaseModel):
+    verdicts: list[_ClaimVerdict]
+
+
+_ENTAILMENT_SYSTEM = (
+    "אתה בודק עקביות עובדתית בין טענות ממוספרות לבין קטעי מקור שצורפו להן. עבור כל טענה, קבע האם "
+    'קטע המקור שלה תומך בה: "yes" -- תומך במלואה, "partial" -- תומך באופן חלקי/עקיף בלבד, "no" -- '
+    "אינו תומך בה כלל. החזר verdict אחד לכל טענה, לפי מספרה, ורק עבורה -- אל תוסיף טענות."
+)
+
+_ENTAILMENT_SOURCE_EXCERPT_CHARS = 1500
+
+
+def _entailment_scope_candidates(
+    answer_text: str, sources_by_n: dict[int, str], max_claims: int
+) -> list[tuple[int, int, str]]:
+    """``(start, end, cited_excerpt)`` for up to ``max_claims`` `[n]`-cited units inside the lead
+    paragraph or the "עובדות מרכזיות" section, in document order -- the same two citation-required
+    scopes :func:`filter_claim_grounding` checks. ``cited_excerpt`` is the unit's own cited
+    source(s) text, joined and trimmed to :data:`_ENTAILMENT_SOURCE_EXCERPT_CHARS` chars (a cost/
+    latency bound on what gets sent to the light model, not a grounding-precision one -- the
+    deterministic guards above already ran on the full text)."""
+    section_titles: list[tuple[int, str]] = [
+        (m.start(), m.group(1).strip()) for m in _SECTION_HEADING_TEXT_RE.finditer(answer_text)
+    ]
+
+    def _section_at(pos: int) -> str:
+        title = ""
+        for heading_start, heading_title in section_titles:
+            if heading_start > pos:
+                break
+            title = heading_title
+        return title
+
+    heading_match = _FIRST_SECTION_HEADING_RE.search(answer_text)
+    lead_end = heading_match.start() if heading_match else len(answer_text)
+
+    candidates: list[tuple[int, int, str]] = []
+    for start, end in _iter_units(answer_text):
+        unit_text = answer_text[start:end]
+        if not unit_text.strip():
+            continue
+        in_scope = start < lead_end or _KEY_FACTS_MARKER in _section_at(start)
+        if not in_scope:
+            continue
+        cited_ns = _cited_ns(unit_text)
+        if not cited_ns:
+            continue
+        excerpt = " ".join(sources_by_n.get(n, "") for n in cited_ns)[:_ENTAILMENT_SOURCE_EXCERPT_CHARS]
+        candidates.append((start, end, excerpt))
+        if len(candidates) >= max_claims:
+            break
+    return candidates
+
+
+def _run_with_timeout(fn: Any, timeout_s: float) -> Any:
+    """Run ``fn()`` (no args) on a background thread, returning its result -- or ``None`` on a
+    timeout *or any exception* (a failed/slow light-model call must never block or break the
+    caller's own request). Deliberately does not join the worker thread on timeout
+    (``shutdown(wait=False)``): the caller's hard budget must never itself wait on however much
+    longer the underlying (already-abandoned) call takes to actually return."""
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout_s)
+        except Exception:
+            return None
+    finally:
+        executor.shutdown(wait=False)
+
+
+def entailment_filter(
+    answer_text: str,
+    retrieved: list[dict[str, Any]],
+    *,
+    max_claims: int = 6,
+    timeout_s: float = 20.0,
+) -> tuple[str, int]:
+    """Optional light-model entailment check over up to ``max_claims`` `[n]`-cited units in the
+    lead paragraph / "עובדות מרכזיות" section: asks the ``light`` role a single structured
+    yes/no/partial question per candidate (see :data:`_ENTAILMENT_SYSTEM`), against that unit's own
+    cited source excerpt -- removing a unit only when the model answers "no" (a real
+    ``eoa.llm.ollama_client.chat_structured`` call is imported lazily, inside this function, purely
+    so a unit test can monkeypatch it without importing the whole ollama client eagerly at module
+    load, matching this project's existing lazy-import convention for optional LLM calls, e.g.
+    ``eoa.security.guard._l2_judge``).
+
+    This is a purely additive, probabilistic pass on top of every deterministic guard above --
+    never a substitute for them. Always a silent no-op (returns ``answer_text`` unchanged) on a
+    blank answer, empty ``retrieved``, no in-scope cited candidate at all, a timeout, or any LLM/
+    validation error (see :func:`_run_with_timeout`) -- the caller decides, via
+    ``ask.entailment_check``, whether to invoke this at all; this function itself does not read
+    that setting, so it stays fully testable/callable independent of config.
+    """
+    if not answer_text or not answer_text.strip() or not retrieved:
+        return answer_text, 0
+    sources_by_n = _sources_by_n(retrieved)
+    candidates = _entailment_scope_candidates(answer_text, sources_by_n, max_claims)
+    if not candidates:
+        return answer_text, 0
+
+    claims_block = "\n\n".join(
+        f"טענה {i}:\n{answer_text[s:e].strip()}\nקטע מקור מצוטט:\n{excerpt}"
+        for i, (s, e, excerpt) in enumerate(candidates, start=1)
+    )
+    messages = [
+        {"role": "system", "content": _ENTAILMENT_SYSTEM},
+        {"role": "user", "content": claims_block},
+    ]
+
+    def _call() -> _EntailmentResponse:
+        from eoa.llm.ollama_client import chat_structured
+
+        return chat_structured("light", _EntailmentResponse, messages, task="classify")
+
+    result = _run_with_timeout(_call, timeout_s)
+    if result is None:
+        log.info("ask.entailment_check_skipped", reason="timeout_or_error", claims=len(candidates))
+        return answer_text, 0
+
+    no_indices = {v.index for v in result.verdicts if v.verdict == "no"}
+    if not no_indices:
+        return answer_text, 0
+    flagged = [(s, e) for i, (s, e, _) in enumerate(candidates, start=1) if i in no_indices]
+    if not flagged:
+        return answer_text, 0
+    log.info("ask.entailment_check_removed", claims=len(candidates), removed=len(flagged))
+    new_text = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, flagged)))
+    return new_text, len(flagged)

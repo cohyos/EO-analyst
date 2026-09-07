@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from eoa.api import ask_grounding, services
+from eoa.config import settings
 from eoa.errors import ResourceUnavailable
 from eoa.llm import ollama_client
 
@@ -271,8 +272,9 @@ def _run_removal_guards(
     """Run every deterministic *removal/redaction* grounding guard from ``eoa.api.ask_grounding``
     over ``answer_text`` once, in a fixed order, returning ``(new_text, removed_count,
     removed_by_guard)``. Deliberately excludes ``sanitize_citation_markers`` (cheap enough to call
-    separately at every call site that needs it) and ``retrieval_relevance_caveat`` (a one-time
-    prepend, not safe to run a second time on the same text).
+    separately at every call site that needs it) and the one-time-prepend guards not safe to run a
+    second time on the same text (``retrieval_relevance_caveat``, ``relocate_source_admission_
+    caveat``, ``low_citation_caveat``).
 
     Round 6 (docs/qa/loop/round_5_judge.md D5 finding #2, live Q2/Iron Beam): factored out so the
     identical guard sequence can be re-applied at every point ``answer_text`` can still change
@@ -284,6 +286,12 @@ def _run_removal_guards(
     Calling this same sequence again after that rewrite, and once more on the fully-assembled
     demoted text, closes both the specific repair-pass gap and the general "guards only ever ran
     once, upstream of a later rewrite" risk with one fix -- see docs/qa/loop/round_6_fixes.md.
+
+    Round 7 (docs/qa/loop/round_6_judge.md D5, live Q1/XM30 recurrence + Q5/Skyranger): the
+    tightened ``filter_claim_grounding`` (see its own docstring) and the new
+    ``filter_uncited_factual_claims`` (live Q5: confident uncited claims left alongside cited
+    siblings) both join this same re-applied sequence for the identical reason round 6 factored it
+    out in the first place.
     """
     if not retrieved:
         return answer_text, 0, {}
@@ -299,6 +307,11 @@ def _run_removal_guards(
     if n:
         total += n
         removed_by_guard["claim_grounding"] = n
+
+    answer_text, n = ask_grounding.filter_uncited_factual_claims(answer_text, retrieved)
+    if n:
+        total += n
+        removed_by_guard["uncited_factual_claim"] = n
 
     answer_text, n = ask_grounding.filter_entity_equivalence(answer_text, retrieved, question=question)
     if n:
@@ -523,6 +536,16 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 ungrounded_removed += _claim_removed
                 if _claim_removed:
                     _removed_by_guard["claim_grounding"] = _claim_removed
+                # Round 7 item 2 (docs/qa/loop/round_6_judge.md D5 worst-list #9, live
+                # Q5/Skyranger): a confident, uncited claim left alongside cited siblings in the
+                # same direct-answer/key-facts scope reads as equally well-supported when it is
+                # not -- see `ask_grounding.filter_uncited_factual_claims`'s own docstring.
+                answer_text, _uncited_removed = ask_grounding.filter_uncited_factual_claims(
+                    answer_text, retrieved
+                )
+                ungrounded_removed += _uncited_removed
+                if _uncited_removed:
+                    _removed_by_guard["uncited_factual_claim"] = _uncited_removed
                 # Round 5 (docs/qa/loop/round_3_judge.md, worst-list items 3/8 and its own
                 # ranked-item-6 follow-up): three more deterministic, additive guards, all
                 # documented in full in `eoa.api.ask_grounding` -- an entity-equivalence guard (the
@@ -558,6 +581,33 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 ungrounded_removed += _contradiction_removed
                 if _contradiction_removed:
                     _removed_by_guard["self_contradiction"] = _contradiction_removed
+                # Round 7 item 2, continued (live Q5/Skyranger): the model's own "N of M sources
+                # unrelated" admission belongs at the top, as the answer's leading caveat, not
+                # trailing in a footer discovered only after the confident claims above it. When no
+                # such admission is present but the answer still ends up with fewer than 2 actually
+                # `[n]`-cited factual sentences overall, a generic caveat covers the same ground.
+                answer_text, _admission_moved = ask_grounding.relocate_source_admission_caveat(answer_text)
+                if _admission_moved:
+                    _removed_by_guard["source_admission_caveat"] = 1
+                else:
+                    answer_text, _low_citation_added = ask_grounding.low_citation_caveat(answer_text)
+                    if _low_citation_added:
+                        _removed_by_guard["low_citation_caveat"] = _low_citation_added
+                # Round 7 item 3 (config-gated, chat-only): an optional light-model entailment
+                # check on top of every deterministic guard above -- see
+                # `ask_grounding.entailment_filter`'s own docstring for the hard 20s timeout and
+                # graceful-skip-on-error contract. Never wired into the pipeline/report paths.
+                ask_cfg = settings().ask
+                if ask_cfg.entailment_check:
+                    answer_text, _entailment_removed = await run_in_threadpool(
+                        ask_grounding.entailment_filter,
+                        answer_text,
+                        retrieved,
+                        max_claims=ask_cfg.entailment_max_claims,
+                    )
+                    ungrounded_removed += _entailment_removed
+                    if _entailment_removed:
+                        _removed_by_guard["entailment_check"] = _entailment_removed
             if _leak_removed or _template_phrases_removed or ungrounded_removed:
                 log.warning(
                     "ask.grounding_repair",

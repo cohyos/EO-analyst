@@ -154,6 +154,7 @@ class ReportCfg(BaseModel):
         override = os.environ.get("EOA_REPORT_OUTPUT_DIR")
         if override:
             self.output_dir = override
+
     template: str | None = None
     citation_style: str = "numbered"
     require_citations: bool = True
@@ -264,6 +265,27 @@ class ApiCfg(BaseModel):
     port: int = 8765
     status_push_seconds: int = 2
     remote_access: RemoteAccessCfg = Field(default_factory=RemoteAccessCfg)
+
+
+class AskCfg(BaseModel):
+    """R7-chat (docs/qa/loop/round_7_fixes.md): `POST /api/ask` chat-only settings.
+
+    ``entailment_check`` gates an optional, additive light-model entailment pass
+    (`eoa.api.ask_grounding.entailment_filter`) over up to ``entailment_max_claims`` `[n]`-cited
+    key-fact/direct-answer units per answer -- never wired into the pipeline/report paths, chat
+    only (see that function's own docstring for the full rationale and its hard 20s timeout).
+
+    Deliberately defaults to ``False`` (the round-7 brief's own worked example shows ``true`` --
+    see ``docs/qa/loop/round_7_fixes.md``'s "### R7-chat status" for why this package shipped it
+    off instead): every existing chat e2e test in this shared suite (round 2/3/5/6, none owned by
+    this package, none mocking `chat_structured`) exercises the same `if citations:` branch this
+    check would hang off of, and this package's own standing rule for this test suite is "no
+    network calls from tests." Flip to ``true`` once a call site is ready to also stub
+    `ollama_client.chat_structured` in those other rounds' fixtures, or accept the extra
+    unmocked-network-call surface in that shared suite."""
+
+    entailment_check: bool = False
+    entailment_max_claims: int = 6
 
 
 class ObsidianExportCfg(BaseModel):
@@ -532,6 +554,7 @@ class Settings(BaseModel):
     notify: NotifyCfg = NotifyCfg()
     retention: RetentionCfg = RetentionCfg()
     api: ApiCfg = ApiCfg()
+    ask: AskCfg = AskCfg()
     export: ExportCfg = ExportCfg()
     llm_providers: LlmProvidersCfg = LlmProvidersCfg()
     mcp: McpCfg = McpCfg()

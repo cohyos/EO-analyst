@@ -1,121 +1,89 @@
-### R7-patents status
+### R7-investigations status
 
-Scope: `docs/qa/loop/round_6_judge.md` D8 worst #10 -- the term-derived "אשכול נושאי: <terms>"
-cluster label (introduced round 6 to replace the flat "לא מסווג" bucket) frequently surfaced
-assignee-name fragments (company names, "inc", "systems", "co", "universitesi") or generic
-scrape/legal-boilerplate words instead of real technology terms. Files touched (per this round's
-ownership -- `agent/eoa/patents/survey.py` and `scan.py` stayed frozen, untouched):
-`agent/eoa/patents/cluster.py`, `tests/unit/test_patents_round7.py` (new, 25 cases, no DB). Sampled
-the live `patents` table (86 rows, `127.0.0.1:5432` via `DATABASE_URL` from `runtime/eoa.env`,
-read-only) to find and verify against real garbage shapes -- no repair script, no writes.
+Scope: `docs/qa/loop` D4 (weight 12, judge 78) -- golden investigation content quality
+(jobs 91, 86, 70, 48, 47, 46, `jobs.kind='deep_search'`) reported not_found/off_topic with
+confidence 0.0-0.3, unchanged since round 3. Files touched: `agent/eoa/search/deep_search.py`,
+`agent/eoa/llm/schemas/analysis.py` (new `FallbackSynthesisOut` only), `tests/unit/test_deep_search_round7.py`
+(new, 37 cases, no DB/network/LLM). Diagnosed against `127.0.0.1:5432` (`runtime/eoa.env`) by
+reading each job's `payload`/`result` and every `investigation_log` row, plus the underlying
+`items` rows for their `title`/`entities_mentioned`/`summary_he`. Lint/format clean
+(`ruff check`/`ruff format --check`).
 
-#### What changed in `agent/eoa/patents/cluster.py`
+#### Diagnosis table
 
-1. **New term-pool builder (`_term_pool_tokens`)** replaces the raw `_subcluster_tokens(title +
-   abstract)` call feeding `tfidf_subcluster_unclassified`'s TF-IDF vectors. It now:
-   - **Never draws from `row["assignees"]`** -- every word of every assignee name is stripped via
-     `_assignee_name_tokens` (e.g. `["Anduril Industries Inc"]` -> `{"anduril", "industries",
-     "inc"}` scrubbed from the pool).
-   - Strips a **corporate-suffix stoplist** (`_CORPORATE_SUFFIX_STOPWORDS`): `inc, ltd, llc, corp,
-     corporation, co, gmbh, ag, sa, systems, technologies, company, university, universitesi,
-     institute, industries` -- catches a suffix word even when it leaked in from text that isn't
-     literally this row's own assignee.
-   - Strips a **patent-administrative-boilerplate stoplist** (`_PATENT_BOILERPLATE_STOPWORDS`):
-     the USPTO assignment-record jargon named in the finding (`assignment, assignors,
-     reassignment, interest, document, details, ...`) **plus** Google Patents' own recurring
-     "Legal status" disclaimer paragraph and per-record metadata fields discovered live against
-     real rows this round (`legal, status, assumption, conclusion, analysis, representation,
-     accuracy, listed, inaccurate, performed, free, format, text, intermediate, effective, date,
-     japanese`) -- real scrape noise the original finding's list didn't name but that dominated
-     several live unclassified clusters (see id 70/29 below).
-   - Adds a known CPC code's own English title text into the pool when the row carries one (point
-     1's "+ CPC-title text") via a new `_CPC_CODE_TITLES` table (see point 4 below).
-2. **Prefer technology nouns + bigrams (`_boosted_top_terms`, `_term_boost`)**: a curated EO/IR
-   vocabulary (`_EOIR_VOCAB_TERM_HE` unigrams + `_EOIR_VOCAB_PHRASE_HE` multi-word phrases,
-   assembled from `config/taxonomy.yaml`'s own English subdomain terms plus the finding's own
-   worked example list -- gimbal, focal plane [array], ROIC/DROIC, thermal, SWIR/MWIR/LWIR/eSWIR,
-   detector, seeker, tracking, laser, designator, hyperspectral, uncooled, microbolometer, lidar,
-   infrared, pixel, ATR, metasurface, optronic, plus phrases quantum dot / night vision / beam
-   control / super resolution / target recognition / sensor fusion / edge AI) boosts a matching
-   term's ranking weight (phrase x3, vocabulary unigram x2, everything else x1) purely for
-   *label-term selection* -- the underlying cosine-similarity clustering math is untouched.
-   `_phrase_tokens`/`_raw_words` extract an actually-occurring multi-word phrase
-   ("focal plane array") as its own token before ranking, so it can outrank its own bare component
-   words ("focal", "plane", "array").
-3. **Hebrew mapping + ordering (`_display_term_he`, updated `_unclassified_label_he`)**: each
-   selected label term is mapped through the vocabulary to Hebrew where one exists (e.g.
-   "detector" -> "גלאי", "focal plane array" -> "מערך מישור מוקד"), else kept in English rather
-   than invented; the (still-capped-at-3) displayed terms are then ordered Hebrew-first. Round 6's
-   own contract is unchanged and re-verified against the new pool: `_unclassified_label_he` never
-   emits "לא מסווג"/"ללא סיווג" once at least one real term exists, and falls back to the bare
-   label only when a sub-cluster's patents carry no title/abstract tokens at all.
-4. **CPC-title fallback (`_CPC_CODE_TITLES`, updated `_cpc_label`)**: a cluster whose CPC code
-   matches no configured watch topic but is one of the 12 codes `config/patents.yaml` itself
-   already tracks (its own `cpc:` list, sourced from that file's trailing comments -- the only
-   "CPC title text" this project's own data has anywhere, since the `patents` table stores bare
-   codes with no per-row title column) is now labelled `"אשכול טכנולוגי: <title> (<code>)"` instead
-   of the bare `"אשכול טכנולוגי <code>"`. A matching watch topic still wins over this fallback; a
-   truly unknown code keeps the old bare fallback (verified in
-   `TestCpcLabelTitleFallback::test_truly_unknown_code_keeps_the_bare_fallback`).
+| Job | Question (short) | Historical outcome | Root cause found | Fixed this round? |
+|---|---|---|---|---|
+| 46 | (garbage) "no further search needed, the article provides all necessary information" | not_found, conf 0.3, garbled Hebrew explaining a missing source it was never told about | Item 117 is an unrelated AI/IP-protection interview; triage enqueued a `deep_search` job whose "question" field is leftover meta-commentary, not a real question. Wasted the full query budget on 8 generic EO/IR/computer-vision searches with nothing to anchor to. | Yes -- `_is_degenerate_question` short-circuits before spending any budget; the real bug (triage enqueueing this at all) is in `eoa.pipeline.triage`, out of file ownership this round. |
+| 47 | "US Army launches laser production, $465M contract" | not_found, conf 0.1; 15 searches, **zero page reads** | Item 10's own `entities_mentioned` already named `AeroVironment` (the actual awardee) and the program is E-HEL -- but `job.payload` carried no `context_he`/entities at all, so the investigation searched blind on generic "$465M laser" phrasing that no engine matches, and (on this historical run, predating the round-5/6 MIN_PAGES_BEFORE_NOT_FOUND gate) gave up without ever reading a candidate page. | Partially -- `_fallback_item_context` now looks the item up directly and would have anchored "AeroVironment"/"E-HEL"; `MIN_PAGES_BEFORE_NOT_FOUND` (already landed pre-round-7) now forces at least 2 reads before an early not_found. Root propagation bug (job payload never carries `context_he`) is `eoa.orchestrator.jobs`, out of file ownership -- flagged as a follow-up task. |
+| 48 | AARGM-ER unit price in Japan FY2027 budget + losing bidders | not_found, conf 0.1; 9 searches, **zero page reads** | Item 44's own summary states plainly: "details on quantity or cost were not published... presented as a budget request without a price" -- the source article itself says this data isn't public. AARGM-ER is also not a competitively-bid program at this stage, so "losing bidders" may not exist as a real construct. This is a **genuinely unanswerable-from-open-sources** question. | Yes, honestly -- the fixed persistence/read-before-give-up rigor (`MIN_PAGES_BEFORE_NOT_FOUND`, pre-round-7) plus this round's context fallback still won't invent a number that was never published; the correct outcome is a well-justified `not_found` that says so explicitly, not a forced `found`. |
+| 70 | "Who were the other candidates for the role, and what's the strategic significance of choosing Norkin over them?" | not_found, conf 0.0; queries hallucinated "defense contract"/"EO/IR systems" framing; 2/6 page reads died on a transient DNS resolution failure with no retry | Item 81 is about Anduril appointing former IAF commander Amiram Norkin to head its Israel activity -- a **personnel appointment**, not a contract or product. `context_he` was empty (same missing-propagation bug as job 47), so the planner had zero domain grounding beyond the bare surname "נורקin" and confidently invented a "defense contract"/"competing systems" frame instead. Two of six `read` attempts failed outright on `"[Errno -3] Temporary failure in name resolution"` with no retry, permanently burning a page-budget slot each for zero information. | Yes for the DNS retry (`_fetch_with_retry`/`_is_transient_fetch_error`, one immediate retry on a transient network blip, never on a permanent failure). Partially for context -- `_fallback_item_context` would have anchored "Anduril"/"Rafael"/"IDF" this time; the root propagation bug is the same `eoa.orchestrator.jobs` gap as job 47. |
+| 86 | Verify/expand "US Air Force speeds Reaper successor timeline after Iran losses" | `found`/0.9 confidence -- entirely about Elbit's MOSP 5000, a system never mentioned in the question (the original job-86 regression) | Predates the anchor-gate/relevance-gate fix (landed 2026-09-06 evening, job 86 ran 04:30 that morning) -- round-2 queries drifted to generic EO/IR terms with zero connection to Reaper/Iran/USAF and the model `finish`'d confidently on an unrelated system. Already fixed by prior rounds' `extract_anchors`/`_query_anchor_ok`/`_relevance_gate` (verified via `tests/unit/test_deep_search_anchors.py`, all passing); nothing new to fix here. | N/A -- pre-existing fix from a prior round, confirmed still in place. |
+| 91 | Same question as 86 (expand-investigation retry, `budget_multiplier=2.0`) | not_found, conf 0.0, **blank generic message** despite reading 10 pages across 4 rounds, including twz.com's own on-topic "USAF wants MQ-9 Reaper successor" article | Ran with the anchor/relevance gate already active (queries were properly Reaper/Iran-grounded, real relevant pages were fetched) -- but every round's `_act` step budget (`max_steps=8`) was consumed by search/read overhead (several security-quarantined and robots.txt-disallowed fetches along the way, each costing a full model turn) before the model ever reached a `finish()` call. `_finalize_outcome`'s "no result" branch then discarded all 10 page summaries for a blank, 0-confidence not_found -- the exact "content quality remains not_found, confidence 0.0" symptom the round-7 judge flagged. | Yes -- `_act`'s `max_steps` raised 8 -> 12 (fewer rounds exhausted by overhead), and `_synthesize_from_reads` (new) salvages a `partial` answer from `inv.read_summaries` when every round ends without a `finish()` call, still gated through the same `_relevance_gate` a normal finish uses so an off-topic pile of reads (job 86's original failure mode) can't slip through this path either. |
 
-`_subcluster_tokens`/`_top_terms` (round 5's originals) are left in place, untouched and still
-correct as general-purpose primitives -- `tfidf_subcluster_unclassified` now calls
-`_term_pool_tokens`/`_boosted_top_terms` instead.
+#### Fixes (all in `agent/eoa/search/deep_search.py` unless noted)
 
-#### Before / after (8 examples, live `patents` table rows, 2026-09-07, read-only sample)
+1. **`_is_degenerate_question`** (job 46): recognizes a small set of Hebrew/English "no further
+   search needed" marker phrases; only fires when they account for essentially the whole question
+   text (not merely quoted inside a real, substantive question), and is deliberately **not** gated
+   on `extract_anchors` -- that function's Hebrew heuristic treats any content word (len >= 3, not
+   in its small curated stopword list) as an anchor, so ordinary words in the marker sentence
+   itself ("צורך", "בחיפוש", "המידע"...) would already defeat an anchors-based gate. Wired into
+   `investigate()` via `max_rounds=0` (a clean no-op for the round loop, everything else --
+   budget/`_finalize_outcome`/`_log`/`_learn` -- runs unchanged; zero hits ever seen naturally
+   classifies it as `insufficient_context`, the honest read).
 
-Computed by running round 6's own `cluster.py` (via `git show HEAD:...`) against this round's
-fixed version over the same 86 live rows + this project's real `config/patents.yaml` watch topics.
+2. **`_fallback_item_context` + `investigate()` wiring** (jobs 47/70, mitigates 48): when the
+   caller passes no `context_he` at all but does have an `item_id`, looks the item's own
+   `title`/`entities_mentioned`/`summary_he` up directly and formats it in the same
+   "כותרת הפריט: .. / ישויות: .. / תקציר: .." shape `extract_anchors` already parses. Never raises
+   on a DB hiccup (logged and swallowed). The actual propagation bug -- `eoa.orchestrator.jobs`'s
+   two job runners forward only `job.payload["context_he"]` verbatim -- is out of this round's file
+   ownership; flagged as a follow-up task (`task_0c46e731`).
 
-| # | Patent (assignee, if any) | BEFORE (round 6) | AFTER (round 7) |
-|---|---|---|---|
-| 1 | id 62, US10506436B1 "Lattice mesh" (assignee: **Anduril**) | `אשכול נושאי: anduril / inc / industries` | `אשכול נושאי: lattice / mesh` |
-| 2 | id 4, US12287242B2 "Readout circuit of infrared focal plane array..." | `אשכול נושאי: readout / circuit / unit` | `אשכול נושאי: מישור מוקד / מערך מישור מוקד / אינפרא-אדום` |
-| 3 | id 14, "...droic with extended counting..." (assignee: **Europe** -- bogus placeholder) | `אשכול נושאי: droic / modulated / pulse` | `אשכול נושאי: אינפרא-אדום / DROIC / modulated` |
-| 4 | id 17, US11050963B2 (assignee: **Massachusetts Institute of Technology**) | `אשכול נושאי: chip / block / circuit` | `אשכול נושאי: מישור מוקד / chip / DROIC` |
-| 5 | id 29, JP6771616B2 (abstract is pure JPO metadata: "Free format text: JAPANESE INTERMEDIATE CODE: A523 · Effective date: 20190619") | `אשכול נושאי: code / date / effective` | `אשכול נושאי: code` |
-| 6 | id 70, US3117231A "Optical tracking system" (abstract opens with Google's canned "Legal status..." disclaimer) | `אשכול נושאי: legal / not / status` | `אשכול נושאי: מעקב / not / has` |
-| 7 | id 66, US20140226024A1 "Camera control in presence of latency" (genuinely technical text -- stability check) | `אשכול נושאי: camera / command / messages` | `אשכול נושאי: camera / command / messages` (unchanged, as expected) |
-| 8 | Live 17-patent sub-cluster (ids incl. 30/41/42/51/56/58/63/65/67/70-79) | `אשכול נושאי: optical / sensor / tracking` | `אשכול נושאי: מעקב / לייזר / optical` |
+3. **`_synthesize_from_reads` + `FallbackSynthesisOut`** (job 91): when every round of the
+   persistence protocol ends without the model completing a `finish()` call but at least one page
+   WAS successfully read, asks the model (tools-less, DATA-framed, same discipline as
+   `_summarise_page`) to write a best-effort answer strictly from the page summaries already
+   gathered (`inv.read_summaries`, new field on `Investigation`) instead of discarding them.
+   Confidence/source-count capping is left to the existing `_finalize_outcome` pass; an off-topic
+   synthesis is downgraded to `not_found` by the same `_relevance_gate` a normal `finish` call
+   uses. Wired into `investigate()` right before `_finalize_outcome`, wrapped in `try/except` so a
+   synthesis failure can never crash the investigation.
 
-Row 7 is included deliberately: it shows the fix does not touch a cluster whose top terms were
-already genuine technical content, confirming the change is scoped to the actual defect rather
-than a blanket re-ranking.
+4. **`_act`'s `max_steps` raised 8 -> 12** (job 91): a round with 2-3 wasted turns (a
+   security-quarantined or robots.txt-disallowed fetch) still leaves enough turns to actually
+   synthesize and call `finish`.
 
-#### Tests
+5. **`_fetch_with_retry`/`_is_transient_fetch_error`** (job 70): exactly one immediate retry when
+   a page fetch fails on a transient-looking error (DNS resolution failure, connection
+   reset/refused, timeout) -- never retries a permanent failure (404, paywall, robots.txt
+   disallow). `_tool_read` now uses this instead of calling `fetch_remote` directly.
 
-`tests/unit/test_patents_round7.py`, 25 new cases (>= 12 required): `_assignee_name_tokens` (3),
-`_term_pool_tokens` (6, including the exact real Anduril/id-62 and Europe/id-14 shapes above),
-`_boosted_top_terms` (4), `_display_term_he` / `_unclassified_label_he` term-mapping (7, including
-an explicit regression guard reproducing round 6's own fixture verbatim), `_cpc_label` CPC-title
-fallback (3), and 2 end-to-end `cluster_patents`/`tfidf_subcluster_unclassified` regressions using
-the real garbage row shapes. All green together with the existing round 5 (50) and round 6 (41)
-patent-cluster suites -- 116 passed, 0 failed:
+6. **Diagnostic-accuracy fixes** (needed for this round's own diagnosis, not previously true):
+   `_tool_search`'s `investigation_log` entries hardcoded `engine="searxng"` regardless of which
+   backend (`ddgs`/`ddgs-news`/`searxng`) actually served the query -- now logs the real value off
+   the returned hit(s), falling back to the configured provider name only on a zero-hit query.
+   A security-quarantined page's URL was never logged at all (only a successful read passed `url=`
+   to `_log`) -- now logged too (content still never persisted, only the guard's already-truncated
+   `kind`/excerpt as before).
 
-```
-PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest \
-  tests/unit/test_patents_round7.py tests/unit/test_patents_round6.py tests/unit/test_patents_round5.py \
-  -q -p no:cacheprovider
-# 116 passed in 0.9s
-```
+7. **`plan_queries`'s `LLMOutputError` fallback**: used to dump the raw (often long, Hebrew)
+   question verbatim as the retry query in every fallback language including English -- a full
+   free-text sentence returns few or zero hits from a metasearch engine. Now uses the
+   already-extracted anchors (short, specific, engine-friendly) when any exist, falling back to the
+   full question only when there is truly nothing else to search on.
 
-`ruff check`/`ruff format --check` clean on both touched files.
+#### Verification
 
-#### Left for a follow-up round (not in this round's scope/ownership)
+- `ruff check` / `ruff format --check` on all three touched files: clean.
+- `tests/unit/test_deep_search_round7.py`: **37/37 passed** (mocked DB/network/LLM throughout).
+- Full existing deep-search suite (`test_deep_search_anchors.py`, `test_deep_search_outcomes.py`,
+  `test_deep_search_answer_format.py`, `test_deep_search_blocked_round5.py`,
+  `test_deep_search_budget.py`, `test_deep_search_cloud_batch.py`, `test_deep_search_mcp_tools.py`,
+  `test_deep_search_reconcile_round4.py`) + the new file: **159/159 passed**, no regressions.
 
-- `_CPC_CODE_TITLES` only covers the 12 CPC codes `config/patents.yaml` itself already tracks; the
-  live table also carries CPC codes outside that set (e.g. `H04N5`, `H03M1`, `G01S7`, `H04W4`,
-  `F41H11`, `G05D1`, `F41H3`, `H04N25`) that still fall through to the bare `"אשכול טכנולוגי
-  <code>"` label -- unchanged by design this round (no CPC title text exists anywhere in this
-  project's own data for those codes; inventing one would violate the no-fabrication rule). A
-  future round could add a small static CPC-code -> title reference table (WIPO/USPTO's own public
-  CPC scheme text) if broader coverage is wanted.
-- The "code / date / effective" -> "code" case (id 29, example 5 above) shows a genuinely
-  content-free row (the row's only real text is Japan Patent Office intermediate-code metadata)
-  still surfaces one residual non-technical term ("code") rather than falling back to
-  `UNCLASSIFIED_LABEL_HE` -- "code" was deliberately left out of the boilerplate stoplist (dual-use
-  word, e.g. "error-correcting code", "Gray code") rather than blanket-suppressed; this is a
-  correct, honest outcome (one weak term beats an invented one) but is called out here since it is
-  the least-improved of the 8 examples.
-- `agent/eoa/patents/survey.py`/`scan.py` were frozen this round; nothing in this fix required a
-  change there, so none was made or proposed.
+#### Re-run results (new investigations, cloud chain: claude-sonnet-5 -> gemini-3.1-pro-high -> local)
+
+_See the table appended below once the live re-runs complete -- `EOA_PIPELINE=1`,
+`PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/eo.exe investigate "<question>" --item-id <id>`,
+budget: up to 8 full investigations, job 46's is free (short-circuits before touching the cloud)._
