@@ -366,7 +366,7 @@ def _check_structured(draft: Any, valid_ns: set[int]) -> tuple[list[str], set[in
                 f'בתקציר המנהלים: המשפט "{sentence.text_he}" מועתק כלשונו מתוך גוף אחד הסעיפים — '
                 "התקציר חייב לסכם ולקשר בין ממצאי הסעיפים, לא לצטט אותם במדויק."
             )
-        if not sentence.cites and is_factual(sentence.text_he):
+        if not sentence.cites:  # round 9: every structured exec-summary sentence is a sourced claim by design
             # Round 5 (2026-09-07, live daily_2026-09-06 / D6 checker): the model closed the
             # summary with an uncited count sentence ("נרשמו בתקופה זו 8 אירועים ... 11 תחזיות");
             # a factual exec-summary sentence must carry at least one [n], same bar the legacy
