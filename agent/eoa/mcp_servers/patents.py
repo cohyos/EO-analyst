@@ -11,6 +11,16 @@ docs/adr/006-mcp-sources.md).
   legacy host) did resolve but serves a docs front-end, not raw JSON, at the paths tried --
   **unverified live; the query shape below follows PatentsView's documented Search API contract
   and may need ``PATENTSVIEW_API_BASE`` adjusted if your network resolves a different host.**
+
+  **2026-09-07 update: PatentsView is gone.** patentsview.org now redirects to the USPTO Open
+  Data Portal transition guide (https://data.uspto.gov/support/transition-guide/patentsview):
+  the PatentSearch API was taken down in the March-2026 ODP migration, ``search.patentsview.org``
+  no longer resolves at all, and PatentsView keys are explicitly not valid for ODP. ODP keys
+  need a USPTO.gov account linked to an ID.me identity (video-call verification for non-US
+  users) and the ODP Patent File Wrapper API (``https://api.uspto.gov/api/v1/patent/``,
+  ``X-API-KEY`` header) has a different query contract. Until this client is ported to ODP the
+  ``patentsview_search`` tool stays ``not_configured``; US publications are still reachable
+  through EPO OPS (Espacenet's worldwide coverage includes US grants and applications).
 """
 
 from __future__ import annotations
