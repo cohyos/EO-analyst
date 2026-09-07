@@ -141,8 +141,86 @@ def collect_items(
         row.setdefault("key_facts", [])
     for idx, row in enumerate(rows, start=1):
         row["n"] = idx
+    _append_item_corroboration_markers(rows)
     log.info("report_items_collected", count=len(rows), start=str(start), end=str(end))
     return rows
+
+
+# --------------------------------------------------------------------------
+# Cross-source corroboration markers (2026-09-07 user requirement): a compact, plain-text marker
+# appended to the end of an already-existing title/summary field -- never a new table column (the
+# D6 checker, agent/eoa/qa/d6_daily_report.py, counts columns/rows on the rendered report and is
+# out of this task's file scope, so row shapes here must stay exactly as they were).
+#
+# The daily events docx table (`docx_builder._add_events_table`) renders 6 fixed columns (date/
+# kind/parties/customer/amount/source) and has no title or summary cell at all -- out of this
+# task's file scope, so that table's own columns are untouched either way. The marker is appended
+# to `summary_he` instead (see :func:`_append_event_corroboration_markers`), which *is* a genuine
+# per-event field, so it renders correctly wherever the event's summary text is used, and carries
+# zero risk of shifting any existing table's shape.
+# --------------------------------------------------------------------------
+
+_CORROBORATION_MARKER_SINGLE_HE = " (מקור יחיד)"
+_CORROBORATION_MARKER_OFFICIAL_HE = " (מקור ראשוני רשמי)"
+
+
+def _corroboration_marker_he(payload: dict[str, Any] | None) -> str:
+    """The compact Hebrew marker for one item's/event's corroboration ``payload`` (the same shape
+    `eoa.pipeline.corroboration.corroboration_payload_map` / the API's ``corroboration`` object
+    use) -- empty string for ``unknown`` (design doc point 5: "do not add it when status is
+    unknown") or a missing payload."""
+    if not payload:
+        return ""
+    status = payload.get("status")
+    if status == "single_source":
+        return _CORROBORATION_MARKER_SINGLE_HE
+    if status == "official_primary":
+        return _CORROBORATION_MARKER_OFFICIAL_HE
+    if status == "corroborated":
+        return f" (מאומת ב-{payload.get('count') or 0} מקורות)"
+    return ""
+
+
+def _corroboration_payload_map_safe(item_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """`eoa.pipeline.corroboration.corroboration_payload_map`, degrading to "no markers" (empty
+    map) rather than breaking report generation if the lookup itself fails (e.g. migration 0026
+    not yet applied on an older DB)."""
+    ids = [i for i in item_ids if i is not None]
+    if not ids:
+        return {}
+    try:
+        from eoa.pipeline.corroboration import corroboration_payload_map
+
+        return corroboration_payload_map(ids)
+    except Exception as exc:
+        log.warning("report_corroboration_lookup_failed", error=str(exc)[:160])
+        return {}
+
+
+def _append_item_corroboration_markers(rows: list[dict[str, Any]]) -> None:
+    """Appends the corroboration marker to each item row's ``title`` in place -- the field that
+    renders both in the sources-appendix "כותרת" column (``docx_builder._add_sources_appendix``)
+    and in :func:`_format_items_block`'s own "כותרת: ..." item line."""
+    payloads = _corroboration_payload_map_safe([r.get("id") for r in rows])
+    if not payloads:
+        return
+    for row in rows:
+        marker = _corroboration_marker_he(payloads.get(row.get("id")))
+        if marker and row.get("title"):
+            row["title"] = f"{row['title']}{marker}"
+
+
+def _append_event_corroboration_markers(rows: list[dict[str, Any]]) -> None:
+    """Appends the corroboration marker (keyed off the event's own ``item_id``) to each event
+    row's ``summary_he`` in place -- see the module note above for why ``summary_he`` rather than
+    the fixed docx events table, which has no title/summary cell to begin with."""
+    payloads = _corroboration_payload_map_safe([r.get("item_id") for r in rows])
+    if not payloads:
+        return
+    for row in rows:
+        marker = _corroboration_marker_he(payloads.get(row.get("item_id")))
+        if marker and row.get("summary_he"):
+            row["summary_he"] = f"{row['summary_he']}{marker}"
 
 
 # W5 (round 4, docs/qa/loop/round_4_fixes.md): the analyze-stage classifier over-applies
@@ -371,6 +449,7 @@ def collect_events(
     rows.sort(key=_event_sort_key, reverse=True)
     if limit is not None:
         rows = rows[:limit]
+    _append_event_corroboration_markers(rows)
     return rows
 
 

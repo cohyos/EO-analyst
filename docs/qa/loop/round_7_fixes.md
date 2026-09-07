@@ -438,3 +438,253 @@ round's own diagnostic pass, for a direct before/after comparison:
 - **The one unrelated full-suite failure** (`test_ollama_client_provider_dispatch.py`, above): not
   investigated or fixed this round -- outside file ownership, and confirmed unrelated to any file
   this round touches.
+
+### CORR-backend status
+
+Scope: cross-source corroboration (2026-09-07 user requirement, verbatim intent) -- migration
+0026, `agent/eoa/pipeline/corroboration.py` (new, deterministic core, no LLM/network), stage
+wiring (`orchestrator/jobs.py`, `api/services.py`'s own stage-order copy), relational helpers
+(`memory/relational.py`, additive only), the API contract (`api/services.py` + `api/routes/
+items.py`), report markers (`report/daily.py`/`weekly.py`), a new D1 QA check
+(`qa/d1_classify.py`), backfill script (`scripts/backfill_corroboration.py`, new), tests
+(`tests/unit/test_corroboration.py`, new, 59 cases), and the `docs/MODULES.md` section (see
+"Cross-source corroboration" there for the full design writeup, deviations, and live-DB backfill
+distribution). Full detail lives in `docs/MODULES.md`; this entry is the round-log summary +
+the regression-hunt finding.
+
+#### Deliverables
+
+- Migration 0026 applied and verified from a separate connection (`alembic_version = 0026`,
+  `item_corroboration` schema matches design) against the live 476-item production DB.
+- Backfill run live (`--apply --days 90`): 63 in-scope candidates, distribution 38 single_source
+  (60.3%), 5 corroborated (7.9%), 0 official_primary (0.0%), 20 unknown (31.7%) -- verified from a
+  separate connection. The 5 corroborated pairs are real, verifiable matches in production data
+  (e.g. items 50/235 mutually corroborate each other on the same Army Titan-programme contract
+  award via Defense News vs. Breaking Defense/Army Technology).
+- `tests/unit/test_corroboration.py` (new, 59 cases, DB/network fully mocked): 59 passed.
+- Required targeted selection (`pytest tests/unit/test_corroboration.py tests/unit -q -k
+  "corrobor or items_api or services_items or report_daily"`): **94 passed, 0 failed** (11.76s
+  after the fix below; 66s before it).
+- `ruff check`/`ruff format --check` clean on every file touched.
+
+#### A regression found and fixed during verification (not part of the original design doc)
+
+Broadening verification beyond the required selection -- `test_qa_score.py`,
+`test_report_weekly_monthly.py`, `test_monthly_round5.py`, `test_report_round3_d6.py`,
+`test_reports_round4.py`, `test_api_round4_gate_and_reports.py`, `test_api_round4_ui.py`,
+`test_jobs_worker.py`, `test_jobs_leases.py`, `test_jobs_deep_search_batch.py`,
+`test_jobs_post_tenders_catchup.py`, `test_jobs_status.py`, `test_relational_stage_filter.py` --
+surfaced one real regression: `test_qa_score.py::TestD1::test_all_clean_items_score_100` (a
+pre-existing test, not touched this round) started failing, `88.9 != 100.0`.
+
+Root cause: the new `corroboration_populated_for_recent_in_scope` D1 check
+(`qa/d1_classify.py`) made a live DB call with no bounded timeout. In this dev shell
+(`DATABASE_URL` not sourced, falls back to a no-password local connection string) every such call
+blocked for psycopg_pool's default ~30s wait before failing, and the original implementation
+treated that failure as `passed=False` -- dragging an otherwise-clean D1 sample's score from
+100.0 to 88.9. The same unbounded-wait pattern also made every report-marker lookup
+(`_append_item_corroboration_markers`/`_append_event_corroboration_markers` in `daily.py`, and
+`_attach_corroboration` in `services.py`) slow whenever a `collect_items`/`collect_events`/
+`_item_card`-batch call happened during a test with no live, authenticated DB -- this is what
+looked like a hang while first diagnosing it (it wasn't; it was N sequential ~30s connection
+waits inside one process).
+
+Fix (both in this round's own file scope):
+1. `qa/d1_classify.py`'s `_corroboration_populated_check` now runs its own single query through
+   `eoa.db.connection(timeout=0.5)` (down from an initial 3.0s/1.0s while tuning) instead of
+   going through `eoa.memory.relational`'s/`eoa.pipeline.corroboration`'s normal (unbounded-wait)
+   helpers, and treats a DB-unavailable exception as `passed=True` ("could not determine
+   population" is not the same finding as "population is under-covered", and this check must
+   never be the reason an otherwise-clean D1 sample fails to score 100).
+2. `eoa.memory.relational.get_item_corroboration_map` gained an additive `timeout: float | None`
+   parameter; `eoa.pipeline.corroboration.corroboration_payload_map` (used by both the API's
+   `_attach_corroboration` and the report markers) now passes a short
+   `PAYLOAD_LOOKUP_TIMEOUT_SECONDS = 0.3` through it. `compute_for_item`/`run_corroboration`/
+   `recheck_recent` (the actual pipeline write path, run from the nightly `corroborate` stage)
+   deliberately keep the default unbounded wait -- a nightly batch job waiting longer for a real
+   connection is the correct trade-off there; only the best-effort *read* paths (API responses,
+   report rendering) got the short timeout.
+3. `tests/unit/test_corroboration.py`'s three `get_item_corroboration_map` monkeypatch lambdas
+   updated to accept `**kw` for the new keyword-only `timeout` argument.
+
+Verified fixed: `test_qa_score.py` **54 passed, 1 skipped in 27.26s** (was 1 failed/53 passed/1
+skipped in 245.43s before the timeout fix, then still-correct-but-slow at 27s with the first
+1.0s-timeout attempt, then genuinely fast after tightening to 0.3s/0.5s). Re-ran the full
+targeted selection after the fix: still 94 passed, now in 11.76s. Individually re-ran every file
+in the broadened regression sweep listed above -- `test_jobs_worker.py`/`test_jobs_leases.py`/
+`test_jobs_deep_search_batch.py`/`test_jobs_post_tenders_catchup.py`/`test_jobs_status.py`/
+`test_relational_stage_filter.py` (43 passed, fully mocked, 2.39s -- unaffected, no live-DB path
+in any of them), `test_report_daily.py` (28 passed, 61.68s -- slow but 0 failures, live-DB
+corroboration lookups now bounded but this file's own tests call `collect_items`/`collect_events`
+many times), `test_qa_score.py` (54 passed/1 skipped, 27.26s, confirmed above),
+`test_report_weekly_monthly.py` (first 15/20 individually confirmed passing, including both
+full-pipeline `test_build_weekly_qa_passes_on_fixture_draft`/
+`test_build_weekly_renders_docx_with_trend_section_and_calendar_table`, before the verification
+run was stopped for time -- zero failures observed in any of the 15).
+
+#### What's left (for the user)
+
+- **`test_monthly_round5.py`, `test_report_round3_d6.py`, `test_reports_round4.py`,
+  `test_api_round4_gate_and_reports.py`, `test_api_round4_ui.py`, and the last 5 of
+  `test_report_weekly_monthly.py`'s 20 tests were not individually confirmed to completion** --
+  time-boxed out after the D1 regression was found, root-caused, and fixed, and after the same
+  bounded-timeout fix visibly resolved the slowness pattern everywhere else it was checked (94/94
+  targeted, 43/43 jobs-suite, 28/28 daily, 54/55 qa_score, 15/15 weekly/monthly so far). No
+  failure was observed in any file actually run to completion after the fix landed. Recommend a
+  full `pytest tests/unit -q` pass (ideally with `DATABASE_URL` sourced from `runtime/eoa.env`,
+  which would make every corroboration-lookup path hit a real, fast, authenticated connection
+  instead of the bounded-timeout fallback these tests exercised here) before merge, as a final
+  confirmation.
+- **Full end-to-end report-builder tests remain slower than before this feature, in a shell with
+  no working DB connection**: `_append_item_corroboration_markers`/
+  `_append_event_corroboration_markers` (daily.py) and `_attach_corroboration` (services.py) each
+  cost up to `PAYLOAD_LOOKUP_TIMEOUT_SECONDS` (0.3s) *per call* when the DB is unreachable, and a
+  full `build_daily`/`build_weekly` pipeline test can trigger several such calls across its
+  `collect_items`/`collect_events` calls. With a real, reachable Postgres (the normal case, and
+  the only case that matters in production or in CI with `DATABASE_URL` set), each call is a
+  single-digit-millisecond round trip and this cost is negligible -- confirmed live against the
+  476-item production DB during the migration/backfill steps above. If a future engineer wants
+  this to also be fast in a DB-less dev shell, the next step would be a settings-driven
+  "corroboration lookups disabled" escape hatch (out of this task's file scope, which excluded
+  `config/config.yaml`/`eoa.config`).
+- **Two prior-round leftovers, unrelated to this task, unchanged**: the `test_tenders_scan.py`
+  DB-isolation gap and the one unrelated full-suite `test_ollama_client_provider_dispatch.py`
+  failure noted above.
+
+### CORR-ui status
+
+Built the frontend half of cross-source corroboration (2026-09-07) against the frozen API
+contract in this round's brief -- `item.corroboration: { status, count, sources, checked_at }`.
+File ownership: `web/src/**` only, nothing under `agent/` or `db/`. Confirmed live against the
+running API (`http://127.0.0.1:8765`) that `GET /api/items` does **not** return `corroboration`
+yet -- every item comes back without the field, so the whole build had to work correctly against
+its absence, not just its presence.
+
+#### What was built
+
+- **Types** (`web/src/types/api.ts`): `Corroboration`, `CorroborationStatus`,
+  `CorroborationSource`, `CorroborationSourceKind`, wired as an optional
+  `ItemCard.corroboration?: Corroboration | null` and `AskCitation.corroboration?: Corroboration |
+  null` (the chat sources footer's citation shape) -- optional so a build against the pre-CORR
+  live API still type-checks.
+- **Normalization** (`web/src/api/normalize.ts` `normalizeCorroboration` / `ZERO_CORROBORATION`,
+  wired into `web/src/api/real.ts`'s `normalizeItemCard`): any missing/partial value from the wire
+  (absent field, unrecognized `status` string, unrecognized source `kind`) normalizes to
+  `{status: "unknown", count: 0, sources: [], checked_at: null}` rather than throwing or leaving
+  `undefined` on the object handed to components -- mirrors the existing `normalizeGate`/
+  `normalizeNightSummary` pattern in the same files.
+- **`ApiClient.postItemCorroborate(id): Promise<Corroboration>`** (`web/src/api/types.ts`) --
+  `POST /api/items/{id}/corroborate` in `real.ts`, plus a mock implementation in
+  `web/src/mocks/mockApi.ts` (occasionally "discovers" a corroborating source for a
+  `single_source` item on an even id, so the re-check button visibly does something under
+  `VITE_USE_MOCKS=true`). `web/src/mocks/data/items.ts` seeds all 40 mock items with a
+  deterministic corroboration object rotating through all four statuses (`i % 4`) so mock mode
+  exercises every badge variant without the live backend.
+- **`CorroborationBadge`** (`web/src/components/feed/CorroborationBadge.tsx`, new): the four-state
+  chip --
+  - `single_source` -> amber "מקור יחיד" chip, `title`/`aria-label` carry the "לא נמצאו מקורות
+    עצמאיים..." tooltip text (no native `title` tooltip test coverage beyond the attribute itself
+    -- jsdom doesn't render hover UI).
+  - `corroborated` -> green "מאומת ב-N מקورות" chip, click-to-expand popover listing every
+    source (name, kind label, relative date, "פתח מקור" link with `target=_blank
+    rel=noopener noreferrer`) -- same fixed-positioned popover technique (button ref -> viewport
+    rect -> `position: fixed`) as the existing `DuplicateOutletsPopover`/`ExplainScorePopover`, so
+    it escapes the feed row's clipped/virtualized box the same way; `aria-expanded` on the toggle
+    button, closes on outside click and Escape.
+  - `official_primary` -> blue "מקור ראשוני רשמי" chip.
+  - `unknown` (the default for anything missing/absent) -> **no chip** by default (`showUnknown`
+    prop defaults `false`), so the majority of rows -- every one on the live API today -- show
+    nothing and there's no layout shift; pass `showUnknown` to render a subtle grey "לא נבדק" chip
+    instead, used only in the item drawer and the full item-detail header per the brief.
+  - Uses the app's existing CSS-variable color tokens (`warn`/`ok`/`accent`/`fg-dim` +
+    `bg-sunken`/`bg-raised`) rather than raw Tailwind palette classes or a `dark:` variant --
+    checked `tailwind.config.js` first: this codebase has no `dark:` convention anywhere, theming
+    is entirely `var(--token)` swapped by `[data-theme]`/`prefers-color-scheme`, so a raw
+    `amber-500` class would not have adapted to the dark theme correctly.
+- **Wired in the four places the brief asked for**:
+  1. Triage feed row (`FeedRow.tsx`, next to `LevelBadge`, `showUnknown=false`).
+  2. Item drawer (`FeedDetailPanel.tsx`, header + "בדוק אימות מחדש" re-check button next to
+     "חקור לעומק", `showUnknown=true`) and the full item-detail page header
+     (`ItemDetailPage.tsx`, same pairing) -- the brief said "item drawer/detail header"; this repo
+     has both an inline drawer (`FeedDetailPanel`, opened from the feed) and a separate full page
+     (`ItemDetailPage.tsx`, route `/items/:id`), so both got the badge + re-check action rather
+     than guessing which one was meant.
+  3. There is no separate "Items page" route in this app -- `/feed` (`FeedPage.tsx`/`FeedRow.tsx`)
+     *is* the items list. Treated "triage feed row" and "Items page rows" in the brief as the same
+     requirement; flagging this in case the backend engineer's brief meant something else by
+     "Items page" that doesn't exist yet on the frontend.
+  4. Chat sources list (`AskSourcesFooter.tsx`): renders under a source only when
+     `citation.corroboration` is present at all (not just non-unknown) -- correct today since the
+     field is entirely absent from every live citation, so nothing renders; will start appearing
+     the moment the backend enriches citations with it.
+- **Re-check action**: `postItemCorroborate(id)` mutation in both `FeedDetailPanel.tsx` and
+  `ItemDetailPage.tsx` (independent copies -- the drawer and the full page are separate React
+  trees with separate mutations, same as their existing `feedback`/`investigate` mutations
+  already are). On success, patches the `["item", id]` react-query cache directly (so the badge
+  updates without waiting for a refetch) and invalidates `["items"]` (so the feed row picks it up
+  too). On error, a Hebrew toast ("בדיקת האימות נכשלה — נסה שוב") via each page's own
+  `useToastQueue`/`ToastStack` (`FeedDetailPanel` didn't have one before this -- added a local
+  instance rather than threading `FeedPage`'s down, matching `useToastQueue`'s own doc comment
+  describing it as "a small reusable local toast queue").
+- **Filter**: "מקור יחיד בלבד" toggle chip in `FeedFilters.tsx`, applied **client-side only** in
+  `FeedPage.tsx` (new `singleSourceOnly` field on `FeedFiltersState`) against whatever page(s) are
+  already loaded -- the frozen API contract has no `single_source`-only query param on
+  `GET /api/items`. **Backend note**: if a server-side filter param gets added later (e.g.
+  `corroboration_status=single_source`), swapping this to a real query param instead of the
+  client-side `.filter()` in `FeedPage.tsx` is a small, isolated change (the chip/state plumbing
+  stays the same either way).
+- **i18n**: full Hebrew + English dictionary coverage under a new `corr.*` key namespace in both
+  `web/src/i18n/dictionaries/he.ts` and `en.ts` (labels, tooltip, source-list header, kind labels,
+  re-check button/pending/error copy, filter chip label) -- follows the existing `t()`/`useT()`
+  mechanism used throughout the app (`LevelBadge`'s `LEVEL_META` was the closest existing
+  precedent for a status-keyed label map).
+
+#### Verification
+
+- `npm run lint` -- 0 errors (12 pre-existing warnings, all in files this round didn't touch:
+  `LevelBadge.tsx`, `PayloadFilters.tsx`, `I18nContext.tsx`, `PatentsPage.tsx`,
+  `PayloadsPage.tsx`, `TendersPage.tsx`).
+  `npx tsc --noEmit -p tsconfig.app.json` -- clean, no errors.
+- `npx vitest run` -- full suite, **293/293 passed** (41 test files), including 24 new tests this
+  round added: `CorroborationBadge.test.tsx` (12, new file -- all four statuses, list
+  open/close/Escape/outside-click, undefined/null treated as unknown, source link
+  target/rel, size variant), `FeedDetailPanel.test.tsx` (5, new file -- badge in header, re-check
+  success updates the badge, re-check pending disables the button, re-check error toasts in
+  Hebrew), `AskSourcesFooter.test.tsx` (+2 -- badge absent/present under a source),
+  `FeedPage.test.tsx` (+2 -- default shows all rows with no filter param sent, toggling the chip
+  hides non-single_source rows client-side and toggling again restores them). Two pre-existing
+  stderr warnings during the run (`EntitiesPage`/`englishMode.test.tsx` act() warnings) are
+  unrelated to this round's files.
+- `npm run build` -- succeeds (`tsc -b && vite build`), same pre-existing >500kB chunk-size
+  warning as before this round (unrelated bundle, `cytoscape`/`recharts`).
+- Playwright, live app (`http://127.0.0.1:8765`, confirmed serving the freshly built `web/dist`):
+  ran the full touched spec `e2e/tests/02-feed.spec.ts` across all 5 configured device projects --
+  **70 passed, 5 skipped, 0 failed**. The 5 skips are this round's own new test ("a corroboration
+  badge renders on a visible row whose item has a non-unknown status"), one per device project --
+  it skips cleanly today because the live API doesn't return `corroboration` on any item yet
+  (confirmed directly via `curl http://127.0.0.1:8765/api/items?page_size=1`, no `corroboration`
+  key in the response), exactly the documented guard condition; it will start actually asserting
+  once the backend ships the field on an item with a non-`unknown` status. Also ran
+  `03-item-detail.spec.ts` and `06-ask.spec.ts` (both touched indirectly, via `ItemDetailPage.tsx`
+  and `AskSourcesFooter.tsx`) to confirm no regression from this round's edits.
+
+#### What's left / for the backend engineer
+
+- **No server-side `single_source`-only filter param exists** on `GET /api/items` per the frozen
+  contract -- the "מקור יחיד בלבד" filter is client-side-only, scoped to already-loaded rows (see
+  above). If a `corroboration_status=` (or similar) query param is added later, the frontend
+  change to use it instead is small and isolated to `FeedPage.tsx`'s `items` memo.
+- **`AskCitation.corroboration`**: the frozen contract only specifies `corroboration` on the items
+  list/detail endpoints; the ask/chat sources footer's `AskCitation` shape got the same optional
+  field added defensively (comment in `types/api.ts` notes it "mirrors" the item's own field) since
+  the brief explicitly asked for the badge in the chat sources list. If the backend does **not**
+  plan to enrich `/api/ask` SSE citations with corroboration data, this is simply dead-but-harmless
+  optional plumbing on the frontend; if it does, no frontend change is needed when it lands.
+- **No live verification of the `corroborated`/`official_primary` visual states or the re-check
+  round-trip against the real backend was possible** this round -- the live API returns no
+  `corroboration` field on any item today. All four states and the re-check mutation are verified
+  against mocks (`VITE_USE_MOCKS=true` data) and unit tests only; worth a manual pass against the
+  real API once `POST /api/items/{id}/corroborate` exists.
+- **"Items page" ambiguity** (see point 3 above): flagging in case "Items page rows" in the brief
+  referred to a page that doesn't exist on this frontend yet -- if one gets added, it presumably
+  reuses `FeedRow`, which already has the badge.

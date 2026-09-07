@@ -1,4 +1,4 @@
-"""`GET /api/items`, `GET /api/items/{id}`, feedback, investigate."""
+"""`GET /api/items`, `GET /api/items/{id}`, feedback, investigate, corroborate."""
 
 from __future__ import annotations
 
@@ -96,6 +96,17 @@ def investigate(item_id: int, body: InvestigateRequest) -> dict:
             "חקירה כבר רצה או ממתינה בתור עבור פריט זה",
             detail={"job_id": exc.job.get("id"), "state": exc.job.get("state")},
         ) from exc
+    if result is None:
+        raise not_found("הפריט לא נמצא")
+    return result
+
+
+@router.post("/items/{item_id}/corroborate")
+def corroborate(item_id: int) -> dict:
+    """Cross-source corroboration (2026-09-07 user requirement): re-run the deterministic
+    corroboration check for this one item on demand and return the same ``corroboration`` object
+    shape embedded in every item list/detail payload."""
+    result = services.recompute_corroboration(item_id)
     if result is None:
         raise not_found("הפריט לא נמצא")
     return result

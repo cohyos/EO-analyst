@@ -56,6 +56,7 @@ STAGE_ORDER = [
     "triage",
     "deep_search",
     "analyze",
+    "corroborate",
     "tenders",
     "post_tenders_catchup",
     "report",
@@ -210,6 +211,7 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
             "analyze",
             lambda: __import__("eoa.pipeline.analyze", fromlist=["run_analyze"]).run_analyze(role=role),
         )
+        _run_stage(rs, "corroborate", _run_corroboration)
         _run_stage(rs, "tenders", lambda: _as_dict(_run_tenders(role=role)))
         _run_stage(rs, "post_tenders_catchup", lambda: _post_tenders_catchup(role=role))
         paths = _run_stage(rs, "report", _build_report, mandatory=True)
@@ -246,6 +248,20 @@ def _ingest() -> Any:
     from eoa.fetch.remote import run_ingest_remote
 
     return run_ingest_remote()
+
+
+def _run_corroboration() -> dict[str, Any]:
+    """``corroborate`` stage (2026-09-07 user requirement): runs right after ``analyze`` so a
+    freshly-analyzed item's independent-corroboration status is available before the report is
+    drafted. Two passes in one stage call: the normal stage-marked sweep of items that haven't
+    been through ``corroborate`` yet (``run_corroboration``), then a nightly re-check of the last
+    7 days' in-scope items (``recheck_recent``) since a corroborating second article can land days
+    after the original was first checked."""
+    from eoa.pipeline.corroboration import recheck_recent, run_corroboration
+
+    checked = _as_dict(run_corroboration())
+    rechecked = _as_dict(recheck_recent())
+    return {"checked": checked, "rechecked": rechecked}
 
 
 def _investigation_result_payload(inv: Any) -> dict[str, Any]:

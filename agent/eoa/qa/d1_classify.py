@@ -41,6 +41,65 @@ _HE_LIST_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Every other D1 check is a pure function of an already-fetched sample row -- no DB round trip at
+#: all. This one genuinely needs live DB state (the corroboration population target is "recent
+#: in-scope items", which the caller's own `sample` may not represent), so it gets its own short,
+#: explicit connection timeout: a `score_D1` call must stay a fast, deterministic gate even when
+#: the DB is unreachable (an unconfigured `DATABASE_URL` in a bare unit-test environment, a down
+#: DB in CI) -- the pool's own default wait (psycopg_pool's ~30s per `.connection()` call) would
+#: otherwise make every `score_D1` call using a non-empty sample take up to 30s, and did, until
+#: this was caught by `test_qa_score.py::TestD1::test_all_clean_items_score_100` timing out at
+#: ~30s and then failing outright (`passed=False` on lookup failure previously dragged a clean
+#: sample's score from 100.0 to 88.9). DB-unavailable now degrades to `passed=True` -- "could not
+#: determine population" is not the same finding as "population is under-covered", and this check
+#: must never be the thing that makes an otherwise-clean D1 sample fail to score 100.
+_DB_TIMEOUT_SECONDS = 0.5
+
+
+def _corroboration_populated_check() -> Check:
+    """Cross-source corroboration (2026-09-07 user requirement): at least 90% of in-scope
+    (level red/orange/yellow) items from the last 7 days must have a non-``unknown``
+    ``item_corroboration`` status -- i.e. the ``corroborate`` pipeline stage
+    (``eoa.pipeline.corroboration``) actually reached them, not just that a row happens to exist.
+    Queries live DB state directly (like D3's own checks) rather than depending on this call's
+    ``sample`` -- the corroboration population target is "recent in-scope items", which may not
+    match whatever sample of items was selected for the rest of D1's checks. See
+    :data:`_DB_TIMEOUT_SECONDS` for why this uses its own short-timeout connection instead of
+    ``eoa.pipeline.corroboration``'s/``eoa.memory.relational``'s normal (unbounded-wait) helpers."""
+    from eoa.db import connection
+
+    name = "corroboration_populated_for_recent_in_scope"
+    try:
+        with connection(timeout=_DB_TIMEOUT_SECONDS) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    count(*) AS total,
+                    count(*) FILTER (
+                        WHERE c.status IS NOT NULL AND c.status <> 'unknown'
+                    ) AS known
+                FROM items i
+                LEFT JOIN item_corroboration c ON c.item_id = i.id
+                WHERE i.level IN ('red', 'orange', 'yellow')
+                  AND i.security_status = 'clean'
+                  AND i.dedup_of IS NULL
+                  AND COALESCE(i.published_at, i.fetched_at, i.created_at) >= now() - interval '7 days'
+                """
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        return Check(name, passed=True, weight=1.5, evidence=f"DB unavailable, skipped: {exc}"[:200])
+
+    total = (row.get("total") if row else 0) or 0
+    known = (row.get("known") if row else 0) or 0
+    if not total:
+        return Check(name, passed=True, weight=1.5, evidence="no in-scope items in the last 7 days")
+    rate = known / total
+    return Check(
+        name, passed=rate >= 0.9, weight=1.5, evidence=f"{known}/{total} ({rate:.0%}) non-unknown status"
+    )
+
+
 def _taxonomy_sub_keys() -> dict[str, set[str]]:
     domains = settings().taxonomy.get("domains", {}) or {}
     return {key: set((d.get("sub") or {}).keys()) for key, d in domains.items()}
@@ -186,5 +245,6 @@ def score_D1(sample: list[dict[str, Any]], conn: Any = None) -> DomainScore:  # 
                 else "no in-scope items in sample"
             ),
         ),
+        _corroboration_populated_check(),
     ]
     return DomainScore(domain="D1", score_0_100=weighted_score(checks), checks=checks, n=n)

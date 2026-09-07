@@ -37,7 +37,12 @@ from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.reports import WeeklyReportDraft
 from eoa.report import trends as trends_mod
-from eoa.report.daily import collect_deep_search, collect_events, collect_open_clarifications
+from eoa.report.daily import (
+    _append_item_corroboration_markers,
+    collect_deep_search,
+    collect_events,
+    collect_open_clarifications,
+)
 from eoa.report.docx_builder import (
     build_docx,
     fmt_amount,
@@ -232,6 +237,10 @@ def collect_week_items(
         row.setdefault("key_facts", [])
     for idx, row in enumerate(rows, start=1):
         row["n"] = idx
+    # Cross-source corroboration (2026-09-07): same marker convention as
+    # `eoa.report.daily.collect_items` -- see that module's note for why `title` and not a new
+    # column/field.
+    _append_item_corroboration_markers(rows)
     log.info("weekly_items_collected", count=len(rows), start=str(period_start), end=str(period_end))
     return rows
 

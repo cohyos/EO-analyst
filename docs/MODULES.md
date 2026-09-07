@@ -11484,3 +11484,166 @@ never mutated" pydantic `model_copy` guarantee. `pytest tests/unit -q -k "bluf o
 report_weekly or monthly or style"`: **165 passed, 0 failed** (includes P9's `test_qa_round5.py`
 and P4's `test_renderer_round5.py`, both green against this package's landed schema). `ruff check`/
 `ruff format --check` clean on every file touched.
+
+## Cross-source corroboration (2026-09-07 user requirement, migration 0026)
+
+**User requirement, verbatim intent (2026-09-07):** when an item is brought in, determine whether
+other independent sources corroborate it or it is a single-source report, and surface that
+everywhere the item appears.
+
+### Schema (`db/migrations/versions/0026_item_corroboration.py`)
+
+`item_corroboration(item_id BIGINT PK REFERENCES items(id) ON DELETE CASCADE, status TEXT CHECK
+IN ('single_source','corroborated','official_primary','unknown'), count INT, sources JSONB,
+method TEXT, checked_at TIMESTAMPTZ)`, one row per item, upserted (never appended) -- a re-check
+fully replaces the prior finding. `sources` is a JSON array of `{item_id, source_name, url,
+published_at, kind}` (`kind` in `duplicate`/`same_event`/`official`). Index on `status`.
+
+### Deterministic core (`agent/eoa/pipeline/corroboration.py`, new)
+
+No LLM, no network call. For an in-scope item `I` (`level` red/orange/yellow), candidates are
+other items `J` published within +/-7 days whose *own* registrable domain
+(`corroboration.registrable_domain`, same `netloc` simplification as
+`docx_builder._domain_from_url`) differs from `I`'s -- two articles from the same outlet never
+corroborate each other. `J` counts as a corroborating source when:
+
+- **duplicate** -- `J`/`I` are dedup-linked (`items.dedup_of`, either direction, or a shared
+  canonical) -- `relational.get_dedup_linked_item_ids` reuses `dedup_of` rather than
+  re-implementing `eoa.pipeline.dedup`'s own logic.
+- **same_event** -- `J` shares >= 2 *distinctive* entities with `I`
+  (`corroboration.distinctive_shared_entities`: a small generic stoplist -- "US Army", "DoD",
+  "Israel", "IDF", "NATO", ... -- doesn't count *unless* a third shared entity backs it up), the
+  two items share a taxonomy `domain`, and at least one of `J`'s own `events` rows matches one of
+  `I`'s on `kind` + (`customer` or `program` or `amount_usd` within 10%,
+  `corroboration._events_match`).
+- **official** -- `I`'s *own* source is itself an official/primary outlet
+  (`corroboration.is_official_primary_source`) -- sets `status='official_primary'` even with zero
+  corroborating items, since "does a primary release need corroboration" isn't what a
+  single-source flag is asking.
+
+Status: `corroborated` when >= 1 duplicate/same_event match was found (outranks official-ness),
+else `official_primary`, else `single_source`. `unknown` only when `I` itself has no
+`published_at` or no `domain` to key the check on.
+
+**Deviation from the design doc:** the brief said to derive the official/primary set by
+inspecting `sources.kind` -- but that column (migration 0001) only ever holds a fetch-mechanism
+value (`rss`/`html`/`api`/`search`), never a trust/officialness classification, and no such
+classification exists anywhere else in the schema or `config/sources.yaml`.
+`is_official_primary_source` instead applies a URL-hostname/path heuristic: gov/mil/EU-institution
+TLD suffixes (`.gov`, `.gov.il`, `.mil`, `.europa.eu`), the concrete portals the brief names
+(SAM.gov, TED) plus `mod.gov.il`/SIBAT, the major primary company-wire distribution hosts (PR
+Newswire, Business Wire, GlobeNewswire), and an `ir.`/`investors.` subdomain + a press-release
+path segment for a company's own investor-relations pages. Conservative by design -- a generic
+defense-trade outlet that happens to *carry* a press release is never "official" by this
+heuristic.
+
+The design doc's optional LLM/web-corroboration probe extension point was **not implemented** --
+the deterministic core fully satisfies the stated requirement with no network/LLM call, and this
+task's file scope excluded `config/config.yaml`/`eoa.config` (where its `corroboration.web_probe`
+flag would need to live).
+
+### Stage wiring (`agent/eoa/orchestrator/jobs.py`)
+
+New `"corroborate"` entry in `STAGE_ORDER`, right after `"analyze"` (also mirrored in
+`eoa.api.services._DAILY_RUN_STAGE_ORDER`, the run-status UI's own copy of the pipeline order --
+see that constant's own comment on why it's a local copy, not an import). `run_daily()`'s
+`corroborate` stage (`jobs._run_corroboration`) does two passes every night:
+
+1. `corroboration.run_corroboration()` -- the normal stage-marked sweep (`get_items_for_stage`/
+   `mark_stage`, same convention as `classify`/`triage`/`analyze`) over items that haven't been
+   through `corroborate` yet. Every match's linked item id is also recomputed (one hop, not a
+   recursive expansion) so both sides of a duplicate/same-event pair update in the same run.
+2. `corroboration.recheck_recent(days=7)` -- re-runs the check for every in-scope item from the
+   last 7 days *regardless* of `processed_stages`, since a corroborating second article can be
+   ingested well after the original was first checked.
+
+No config.yaml stage-budget entry was added (out of this task's file scope) -- the `corroborate`
+stage uses `jobs.py`'s existing `settings().stages.get(stage, 30)` default (30 minutes) until one
+is added under `stages:` in `config/config.yaml`.
+
+### Relational helpers (`agent/eoa/memory/relational.py`, additive only)
+
+`get_item_for_corroboration`, `get_corroboration_candidates`, `get_dedup_linked_item_ids`,
+`get_events_for_item`, `upsert_item_corroboration`, `get_item_corroboration`,
+`get_item_corroboration_map` (bulk), `get_recent_in_scope_item_ids` (the nightly recheck
+population and the D1 check's denominator, below).
+
+### API contract (frozen)
+
+Every item payload from the items list/detail endpoints (`eoa.api.services._item_card`, shared by
+`list_items`/`get_item`/`list_tech_items`) gains:
+
+```json
+"corroboration": {
+  "status": "single_source" | "corroborated" | "official_primary" | "unknown",
+  "count": 0,
+  "sources": [{"item_id": 52, "source_name": "Breaking Defense", "url": "...", "published_at": "...", "kind": "duplicate"}],
+  "checked_at": "2026-09-07T07:41:58+00:00"
+}
+```
+
+An item never checked defaults to `{"status": "unknown", "count": 0, "sources": [],
+"checked_at": null}` (`_item_card`'s own default; `_attach_corroboration` overwrites it in bulk
+for whichever ids actually have an `item_corroboration` row, degrading silently to the default on
+any lookup failure so migration 0026 not being applied yet on an older DB never breaks the item
+endpoints). New `POST /api/items/{id}/corroborate` (`agent/eoa/api/routes/items.py`) re-runs the
+check for one item on demand and returns the same object shape (`services.recompute_corroboration`
+-> `corroboration.compute_for_item` + `corroboration.corroboration_payload`).
+
+### Report markers (`agent/eoa/report/daily.py`/`weekly.py`)
+
+A compact Hebrew marker appended as **plain text at the end of an existing field** -- never a new
+table column (`eoa.qa.d6_daily_report`'s D6 checker counts columns/rows on the rendered report and
+is out of this task's file scope, so no row shape anywhere changes):
+
+| Status | Marker |
+|---|---|
+| `single_source` | ` (מקור יחיד)` |
+| `corroborated` | ` (מאומת ב-N מקורות)` |
+| `official_primary` | ` (מקור ראשוני רשמי)` |
+| `unknown` | *(no marker)* |
+
+Items: appended to `title` in `daily.collect_items`/`weekly.collect_week_items` -- the field that
+renders both in the sources-appendix "כותרת" column (`docx_builder._add_sources_appendix`) and in
+`_format_items_block`'s own "כותרת: ..." item line, so one mutation covers both. Events: appended
+to `summary_he` in `daily.collect_events` (shared by both reports, `weekly.py` imports it
+unchanged). The daily events docx table (`docx_builder._add_events_table`) renders 6 fixed columns
+(date/kind/parties/customer/amount/source) with **no title/summary cell at all** -- out of this
+task's file scope, so that table is visually unaffected; `summary_he` is a genuine per-event field
+regardless, so the marker is present wherever that text is otherwise used, at zero risk to any
+existing table's shape. Both helpers (`_corroboration_marker_he`,
+`_corroboration_payload_map_safe`, `_append_item_corroboration_markers`,
+`_append_event_corroboration_markers`, all in `daily.py`) degrade to "no markers" rather than
+breaking report generation if the corroboration lookup itself fails.
+
+### QA (`agent/eoa/qa/d1_classify.py`)
+
+New `corroboration_populated_for_recent_in_scope` check in `score_D1`: >= 90% of in-scope
+(red/orange/yellow) items from the last 7 days (`relational.get_recent_in_scope_item_ids`) must
+have a non-`unknown` `item_corroboration` status. Queries live DB state directly (like D3's own
+checks) rather than depending on `score_D1`'s `sample` argument, since "recent in-scope items"
+doesn't necessarily match whatever sample was picked for the rest of D1.
+
+### Backfill (`scripts/backfill_corroboration.py`, new)
+
+One-off sweep over existing in-scope items, **dry-run by default** -- pass `--apply` to write
+(the opposite default convention from a couple of older scripts in this directory, deliberately
+safer here). `--days N` (default 90) bounds the lookback window; `--limit N` caps it for testing.
+Run live (`--apply --days 90`) against the 476-item production DB, `alembic_version` verified at
+`0026` first: 63 in-scope items from the last 90 days were candidates; **distribution: 38
+single_source (60.3%), 5 corroborated (7.9%), 0 official_primary (0.0%), 20 unknown (31.7%)** --
+the unknowns are items missing `published_at`/`domain` (mostly search/deep-search-derived pages,
+consistent with `daily.collect_items`'s own "undated, source-less row" exclusion note). The 5
+corroborated pairs found are real, verifiable duplicates/same-event matches in the live data (e.g.
+items 50 and 235 mutually corroborate each other on the same Army Titan-programme contract award,
+one via Defense News, the other via Breaking Defense/Army Technology).
+
+### Tests (`tests/unit/test_corroboration.py`, new, 59 tests)
+
+Pure-function coverage (`registrable_domain`, `is_official_primary_source`,
+`distinctive_shared_entities`, `_events_match`/`_amounts_close`) plus `compute_for_item`/
+`run_corroboration`/`recheck_recent`/`corroboration_payload(_map)` with every relational helper
+monkeypatched at the module level (no DB, no network) -- same convention as
+`tests/unit/test_israel_focus.py`. `pytest tests/unit/test_corroboration.py tests/unit -q -k
+"corrobor or items_api or services_items or report_daily"`: **94 passed, 0 failed**. `ruff check`/
+`ruff format --check` clean on every file touched.

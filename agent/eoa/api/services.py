@@ -164,6 +164,7 @@ _DAILY_RUN_STAGE_ORDER = (
     "triage",
     "deep_search",
     "analyze",
+    "corroborate",
     "tenders",
     "post_tenders_catchup",
     "report",
@@ -308,7 +309,32 @@ def _item_card(row: dict[str, Any]) -> dict[str, Any]:
         # eoa.pipeline.israel_focus.
         "israel_relevance": row.get("israel_relevance"),
         "israel_reasons": row.get("israel_reasons") or [],
+        # Cross-source corroboration (2026-09-07 user requirement): default "never checked" shape
+        # per the frozen API contract -- `_attach_corroboration` overwrites this for every id that
+        # actually has an `item_corroboration` row (see eoa.pipeline.corroboration).
+        "corroboration": {"status": "unknown", "count": 0, "sources": [], "checked_at": None},
     }
+
+
+def _attach_corroboration(cards: list[dict[str, Any]]) -> None:
+    """Fill in the real ``corroboration`` object (in place) for every card whose id has an
+    ``item_corroboration`` row -- cards with none keep ``_item_card``'s ``unknown`` default. A
+    lookup failure (e.g. migration 0026 not yet applied on an older DB) must never break the item
+    list/detail endpoints -- degrade to the default instead."""
+    ids = [c["id"] for c in cards if c.get("id") is not None]
+    if not ids:
+        return
+    try:
+        from eoa.pipeline.corroboration import corroboration_payload_map
+
+        found = corroboration_payload_map(ids)
+    except Exception as exc:
+        log.warning("corroboration_lookup_failed", error=str(exc)[:200])
+        return
+    for card in cards:
+        payload = found.get(card.get("id"))
+        if payload is not None:
+            card["corroboration"] = payload
 
 
 def list_items(
@@ -383,7 +409,9 @@ def list_items(
         """,
         params,
     )
-    return total, [_item_card(r) for r in rows]
+    cards = [_item_card(r) for r in rows]
+    _attach_corroboration(cards)
+    return total, cards
 
 
 def items_by_country_groups(
@@ -406,6 +434,7 @@ def get_item(item_id: int) -> dict[str, Any] | None:
     if row is None:
         return None
     card = _item_card(row)
+    _attach_corroboration([card])
     card["clean_text"] = row.get("clean_text")
     card["events"] = _fetchall(
         "SELECT * FROM events WHERE item_id = %s ORDER BY date NULLS LAST, id", (item_id,)
@@ -464,6 +493,19 @@ def item_feedback(item_id: int, user_level: str, comment: str | None) -> dict[st
     )
     relational.update_item_fields(item_id, level=user_level)
     return get_item(item_id)
+
+
+def recompute_corroboration(item_id: int) -> dict[str, Any] | None:
+    """`POST /api/items/{id}/corroborate` (2026-09-07 user requirement): re-runs
+    `eoa.pipeline.corroboration.compute_for_item` for one item on demand, returning the same
+    ``corroboration`` object shape the item list/detail endpoints embed. ``None`` if the item
+    doesn't exist (the route maps that to 404)."""
+    from eoa.pipeline.corroboration import compute_for_item, corroboration_payload
+
+    record = compute_for_item(item_id)
+    if record is None:
+        return None
+    return corroboration_payload(item_id)
 
 
 class InvestigationAlreadyActive(Exception):
@@ -3213,4 +3255,6 @@ def list_tech_items(
         """,
         params,
     )
-    return total, [_item_card(r) for r in rows]
+    cards = [_item_card(r) for r in rows]
+    _attach_corroboration(cards)
+    return total, cards

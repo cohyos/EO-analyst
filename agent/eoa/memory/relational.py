@@ -1451,3 +1451,163 @@ def recent_feedback(days: int) -> list[dict[str, Any]]:
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"days": days})
         return cur.fetchall()
+
+
+# --------------------------------------------------------------------------
+# cross-source corroboration (2026-09-07 user requirement) -- db/migrations/versions/0026_...,
+# eoa.pipeline.corroboration. Every function below is a thin, parameterised-SQL wrapper; the
+# actual corroboration logic (candidate matching, official-source detection, status derivation)
+# lives entirely in eoa.pipeline.corroboration, which is the only caller of these helpers.
+# --------------------------------------------------------------------------
+
+
+def get_item_for_corroboration(item_id: int) -> dict[str, Any] | None:
+    """The subset of an ``items`` row `eoa.pipeline.corroboration` needs for one item: identity,
+    the fields the deterministic matcher keys on, and the joined source name/url (an item's own
+    ``sources`` row -- distinct from ``items.url``, which is the article's own URL)."""
+    query = """
+        SELECT i.id, i.url, i.published_at, i.domain, i.level, i.security_status,
+               i.entities_mentioned, i.dedup_of, i.source_id,
+               s.name AS source_name, s.url AS source_url
+        FROM items i
+        LEFT JOIN sources s ON s.id = i.source_id
+        WHERE i.id = %(item_id)s
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_id": item_id})
+        return cur.fetchone()
+
+
+def get_corroboration_candidates(item_id: int, start: Any, end: Any) -> list[dict[str, Any]]:
+    """Other clean, non-duplicate items published within ``[start, end]`` (the caller's own
+    ±7-day window around the subject item's ``published_at``) -- the raw candidate pool
+    `eoa.pipeline.corroboration` then filters in Python (different registrable domain, shared
+    distinctive entities, matching events, ...). Excludes ``item_id`` itself."""
+    query = """
+        SELECT i.id, i.url, i.published_at, i.domain, i.entities_mentioned, i.dedup_of,
+               i.source_id, s.name AS source_name, s.url AS source_url
+        FROM items i
+        LEFT JOIN sources s ON s.id = i.source_id
+        WHERE i.id != %(item_id)s
+          AND i.security_status = 'clean'
+          AND i.published_at IS NOT NULL
+          AND i.published_at BETWEEN %(start)s AND %(end)s
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_id": item_id, "start": start, "end": end})
+        return cur.fetchall()
+
+
+def get_dedup_linked_item_ids(item_id: int, dedup_of: int | None) -> list[int]:
+    """Every other item id logically linked to ``item_id`` by dedup: its own ``dedup_of`` target
+    (if any), every item pointing at ``item_id`` itself, and -- when ``item_id`` is itself a
+    dedup child -- every sibling pointing at the same canonical. Used by
+    `eoa.pipeline.corroboration` to classify a candidate as ``kind='duplicate'`` without
+    re-deriving dedup logic that already lives in `eoa.pipeline.dedup`."""
+    query = """
+        SELECT id FROM items
+        WHERE dedup_of = %(item_id)s
+           OR id = %(dedup_of)s
+           OR (%(dedup_of)s IS NOT NULL AND dedup_of = %(dedup_of)s AND id != %(item_id)s)
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_id": item_id, "dedup_of": dedup_of})
+        return [row["id"] for row in cur.fetchall()]
+
+
+def get_events_for_item(item_id: int) -> list[dict[str, Any]]:
+    """All ``events`` rows for one item -- used by `eoa.pipeline.corroboration`'s same-event
+    matcher (kind + customer/program/amount comparison against a candidate item's own events)."""
+    query = """
+        SELECT id, item_id, kind, title, date, amount_usd, currency, parties, customer, program
+        FROM events
+        WHERE item_id = %(item_id)s
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_id": item_id})
+        return cur.fetchall()
+
+
+def upsert_item_corroboration(
+    *,
+    item_id: int,
+    status: str,
+    count: int,
+    sources: list[dict[str, Any]],
+    method: str | None,
+) -> None:
+    """Insert or replace the single ``item_corroboration`` row for ``item_id`` (primary key is
+    ``item_id`` itself -- a re-check always fully replaces the prior finding, it never merges)."""
+    query = """
+        INSERT INTO item_corroboration (item_id, status, count, sources, method, checked_at)
+        VALUES (%(item_id)s, %(status)s, %(count)s, %(sources)s, %(method)s, now())
+        ON CONFLICT (item_id) DO UPDATE SET
+            status = EXCLUDED.status,
+            count = EXCLUDED.count,
+            sources = EXCLUDED.sources,
+            method = EXCLUDED.method,
+            checked_at = EXCLUDED.checked_at
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            query,
+            {
+                "item_id": item_id,
+                "status": status,
+                "count": count,
+                "sources": Json(sources),
+                "method": method,
+            },
+        )
+    log.debug("item_corroboration.upserted", item_id=item_id, status=status, count=count)
+
+
+def get_item_corroboration(item_id: int) -> dict[str, Any] | None:
+    """The stored corroboration record for one item, or ``None`` if it was never checked (the API
+    layer maps that to the contract's ``{"status": "unknown", "count": 0, "sources": [],
+    "checked_at": null}`` default -- see ``eoa.api.services``)."""
+    query = "SELECT item_id, status, count, sources, method, checked_at FROM item_corroboration WHERE item_id = %(item_id)s"
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_id": item_id})
+        return cur.fetchone()
+
+
+def get_item_corroboration_map(
+    item_ids: list[int], *, timeout: float | None = None
+) -> dict[int, dict[str, Any]]:
+    """Bulk form of :func:`get_item_corroboration` for a batch of ids (item list/report
+    rendering) -- one query instead of N. Ids never checked are simply absent from the result.
+
+    ``timeout`` (seconds) overrides the connection pool's own default wait -- passed by every
+    best-effort caller (``eoa.api.services._attach_corroboration``,
+    ``eoa.report.daily._corroboration_payload_map_safe``) via
+    ``eoa.pipeline.corroboration.corroboration_payload_map``'s own short default, so an item list/
+    report render degrades to "no markers" quickly instead of blocking on the pool's much longer
+    default wait when the DB is briefly unreachable."""
+    if not item_ids:
+        return {}
+    query = (
+        "SELECT item_id, status, count, sources, method, checked_at FROM item_corroboration "
+        "WHERE item_id = ANY(%(item_ids)s)"
+    )
+    with connection(timeout=timeout) as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_ids": item_ids})
+        return {row["item_id"]: row for row in cur.fetchall()}
+
+
+def get_recent_in_scope_item_ids(days: int = 7) -> list[int]:
+    """In-scope (``level`` red/orange/yellow), clean, non-duplicate item ids from the last
+    ``days`` days -- the nightly re-check population (corroboration arrives late: a corroborating
+    second article can be ingested days after the original) and the QA D1
+    ``corroboration_populated_for_recent_in_scope`` check's denominator."""
+    query = """
+        SELECT id FROM items
+        WHERE level IN ('red', 'orange', 'yellow')
+          AND security_status = 'clean'
+          AND dedup_of IS NULL
+          AND COALESCE(published_at, fetched_at, created_at) >= now() - (%(days)s || ' days')::interval
+        ORDER BY id
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"days": days})
+        return [row["id"] for row in cur.fetchall()]
