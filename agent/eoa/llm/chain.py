@@ -78,13 +78,28 @@ def run_chain(
     messages: list[dict[str, Any]],
     json_schema: dict[str, Any] | None = None,
     batch_size: int = 1,
+    tools: list[dict[str, Any]] | None = None,
 ) -> tuple[ProviderResult, list[ChainAttempt]]:
     """Try ``chain`` in order; return the first successful ``ProviderResult`` plus every attempt
     made (in order), for the caller to fold into its own result/logging. Raises
     :class:`ChainExhausted` only if the local terminal entry itself fails (there is nothing left
-    to fall back to at that point)."""
+    to fall back to at that point).
+
+    ``tools`` (round 7, 2026-09-07): a *tool-calling* turn (the deep-search ReAct loop's
+    search/read/finish tools) can only run on a leg that honours a caller-supplied tools schema.
+    No CLI provider (claude/agy/codex `-p` calls) and no API provider in this codebase does --
+    the API providers use tools internally for structured output only -- so such legs are
+    skipped with a warning (a provider may opt in by exposing ``supports_tools = True``) and the
+    turn runs on the local leg. Before this, `_dispatch_chain` dropped ``tools`` and returned
+    ``tool_calls=[]`` from a prose answer, so every cloud-mode investigation looped without a
+    single page read until its budget expired (golden jobs 47/48/70/86/91, round 7)."""
     attempts: list[ChainAttempt] = []
     fell_back_from: str | None = None
+    if tools and not any(e.provider == "ollama" for e in chain):
+        raise ProviderUnavailable(
+            f"llm chain for role={role!r} has no tool-capable leg for a tool-calling turn "
+            f"(legs: {[e.provider for e in chain]}); add the local 'ollama' terminal entry"
+        )
 
     for i, entry in enumerate(chain):
         attempt_no = i + 1
@@ -125,9 +140,16 @@ def run_chain(
 
         try:
             provider = _build_provider(entry)
+            if tools and not getattr(provider, "supports_tools", False):
+                raise ProviderUnavailable(
+                    f"{entry.provider} provider cannot run a tool-calling turn (no tools-schema support)"
+                )
             if not provider.is_available():
                 raise ProviderUnavailable(f"{entry.provider} provider unavailable (binary/key missing)")
-            result = provider.chat(messages, model=entry.model, json_schema=json_schema)
+            if tools:
+                result = provider.chat(messages, model=entry.model, json_schema=json_schema, tools=tools)
+            else:
+                result = provider.chat(messages, model=entry.model, json_schema=json_schema)
         except FALLBACK_EXCEPTIONS as exc:
             attempt = ChainAttempt(
                 provider=entry.provider,

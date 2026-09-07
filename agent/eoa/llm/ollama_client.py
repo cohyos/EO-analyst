@@ -203,6 +203,10 @@ def _log_cloud_call(*, provider: str, model: str, prompt_chars: int, duration_ms
         log.warning("llm_call_log_failed", provider=provider, error=str(exc)[:200])
 
 
+# roles already warned (once per process) that their cloud legs were skipped for a tool-calling turn
+_TOOL_TURN_WARNED_ROLES: set[str] = set()
+
+
 def _dispatch_chain(
     role: str,
     messages: list[dict[str, Any]],
@@ -213,6 +217,7 @@ def _dispatch_chain(
     think: bool | None,
     interactive: bool,
     keep_alive: str | None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> ChatResult:
     """U8-א/ה (Revision 2026-09-06): role-based dispatch through the global mode's fallback
     chain, used only for a `provider=None` call made from inside the pipeline/worker process
@@ -228,7 +233,7 @@ def _dispatch_chain(
             role,
             messages,
             task=task,
-            tools=None,
+            tools=tools,
             format_schema=format_schema,
             options=options,
             think=think,
@@ -242,13 +247,26 @@ def _dispatch_chain(
             duration_ms=res.duration_ms,
             prompt_chars=sum(len(m.get("content", "") or "") for m in messages),
             usage={"prompt_tokens": res.prompt_tokens, "eval_tokens": res.eval_tokens},
+            tool_calls=list(res.tool_calls or []),
         )
 
     chain = settings().llm_providers.effective_chain(role)
-    result, attempts = run_chain(role, chain, _call_ollama_leg, messages=messages, json_schema=format_schema)
+    if tools:
+        skipped = [e.provider for e in chain if e.provider != "ollama"]
+        if skipped and role not in _TOOL_TURN_WARNED_ROLES:
+            _TOOL_TURN_WARNED_ROLES.add(role)
+            log.warning(
+                "llm_chain_tools_local_only",
+                role=role,
+                skipped_legs=skipped,
+                reason="cloud legs do not accept a caller-supplied tools schema; tool-calling turns run locally",
+            )
+    result, attempts = run_chain(
+        role, chain, _call_ollama_leg, messages=messages, json_schema=format_schema, tools=tools
+    )
     return ChatResult(
         content=result.content,
-        tool_calls=[],
+        tool_calls=list(result.tool_calls or []),
         thinking=None,
         prompt_tokens=int(result.usage.get("input_tokens") or result.usage.get("prompt_tokens") or 0),
         eval_tokens=int(result.usage.get("output_tokens") or result.usage.get("eval_tokens") or 0),
@@ -304,6 +322,7 @@ def chat(
                 think=think,
                 interactive=interactive,
                 keep_alive=keep_alive,
+                tools=tools,
             )
     else:
         resolved = _resolve_provider(provider)

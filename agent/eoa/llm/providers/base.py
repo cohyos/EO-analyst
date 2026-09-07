@@ -16,6 +16,9 @@ class ProviderResult:
     duration_ms: int = 0
     prompt_chars: int = 0
     usage: dict[str, Any] = field(default_factory=dict)
+    # Round 7 (2026-09-07): tool calls made by the leg, in Ollama's ``tool_calls`` shape. Only the
+    # local leg produces them today -- no CLI/API provider accepts a caller-supplied tools schema.
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 @runtime_checkable
