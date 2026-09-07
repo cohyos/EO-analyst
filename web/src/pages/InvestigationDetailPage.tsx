@@ -11,6 +11,7 @@ import { useT } from "@/i18n";
 import { formatDateTime } from "@/lib/time";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
 import { cn } from "@/lib/cn";
+import { renderBidiText } from "@/lib/bidiText";
 
 export function InvestigationDetailPage() {
   const t = useT();
@@ -89,7 +90,7 @@ export function InvestigationDetailPage() {
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">
-              <bdi>{data.question}</bdi>
+              <bdi>{renderBidiText(data.question)}</bdi>
             </h2>
             {isRunning ? (
               <span className="flex items-center gap-1 rounded-full bg-accent-muted px-2 py-0.5 text-xs font-medium text-accent">
@@ -176,7 +177,12 @@ export function InvestigationDetailPage() {
               to={`/items/${data.provenance.trigger_item.id}`}
               className="flex min-w-0 items-center gap-1 text-sm text-accent hover:underline"
             >
-              <bdi className="truncate">{data.provenance.trigger_item.title || `פריט #${data.provenance.trigger_item.id}`}</bdi>
+              <bdi
+                className="truncate"
+                title={data.provenance.trigger_item.title || `פריט #${data.provenance.trigger_item.id}`}
+              >
+                {data.provenance.trigger_item.title || `פריט #${data.provenance.trigger_item.id}`}
+              </bdi>
               <ExternalLink size={12} className="shrink-0" aria-hidden="true" />
             </Link>
           </div>

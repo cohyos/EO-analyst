@@ -1,0 +1,198 @@
+{
+  "reports": {
+    "daily_2026-09-07.md": {
+      "claims_checked": 12,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": [
+        {"line": "26-39", "claim": "KR Cheongwang Block-I laser oscillator, 76%->90% localization, +50% power, engagement time 2-4s->1-2s, operational late 2024", "verdict": "OK-sampled", "evidence": "matches item id=149-investigation sources (thedefensenews.com)", "root_cause": null},
+        {"line": "66", "claim": "US Army $464.8M contract to AeroVironment for Locust X3 (E-HEL), first-of-kind", "verdict": "OK-sampled", "evidence": "confirmed vs items id=10 (Defense News) and id=47 (EDR)", "root_cause": null},
+        {"line": "53-59", "claim": "Estonia/David's Sling indicator rows (להערכתנו conclusions)", "verdict": "OK-sampled", "evidence": "grounded in src-2 Israel Defense content re Estonia RFI, Rafael/Raytheon co-production", "root_cause": null},
+        {"line": "60", "claim": "VW/Rafael plant deal scope/terms still unclear pending further official publication", "verdict": "OK-sampled", "evidence": "correctly hedged; contrast with bd_de/bd_eu which state it as concluded", "root_cause": null},
+        {"line": "67-72", "claim": "Tender-forecast table rows (C-UAS, air-defense seeker, RKM sight, MALE gimbal, targeting pod, submarine mast, micro-gimbal)", "verdict": "OK-sampled", "evidence": "spot-checked 4/7 rows vs cited items, e.g. row1 vs item 10/47", "root_cause": null},
+        {"line": "78-143", "claim": "Source appendix (66 rows) titles/outlets/URLs", "verdict": "OK-sampled", "evidence": "10 rows spot-checked against items.title/items.url", "root_cause": null}
+      ]
+    },
+    "weekly_2026-09-07.md": {
+      "claims_checked": 22,
+      "false": 3,
+      "unsupported": 0,
+      "misleading": 2,
+      "items": [
+        {"line": 133, "claim": "תע\"א, באמצעות Ophir Optronics, השיקה עדשת זום (Ophir framed as IAI's optics arm)", "verdict": "FALSE", "evidence": "Ophir Optronics is an MKS Instruments company (watchlist alias 'MKS Ophir'; source item id=39 clean_text ends 'photo courtesy MKS', never mentions IAI)", "root_cause": "item analysis fabrication (item 39 DB summary_he/key_facts already invent 'IAI subsidiary')"},
+        {"line": "460,475", "claim": "Patent CN112074705A attributed to Anduril, value-score 12", "verdict": "FALSE", "evidence": "DB abstract mentions 'Lattice Semiconductor Corporation' (FPGA vendor), unrelated to Anduril; entity_ids links to Anduril entity via alias collision", "root_cause": "entity/alias mismatch (Anduril alias 'Lattice')"},
+        {"line": "108,476", "claim": "US10506436B1 'Lattice mesh' described as optical lens/mirror/fiber array improving image quality", "verdict": "FALSE", "evidence": "DB abstract for this patent is a bare USPTO assignment notice with no technical content", "root_cause": "item analysis fabrication"},
+        {"line": 432, "claim": "Elbit | מיזוג/רכישה | Anduril (M&A row)", "verdict": "MISLEADING", "evidence": "source describes Elbit-Anduril Sigma 155 howitzer co-marketing partnership, not any M&A/ownership transaction", "root_cause": "pipeline event-type misclassification"},
+        {"line": "502-504", "claim": "Greece air-defense deal cited at $4B, EUR3.1B/$3.6B, and EUR3.5B in three different sections with no reconciliation", "verdict": "MISLEADING", "evidence": "three different Globes articles (items 155, 90, 150) about the same deal, presented without cross-reference or caveat", "root_cause": "unreconciled source contradiction"},
+        {"line": "225-229", "claim": "Norkin 'was selected' stated flatly vs investigation's own 'decision not yet officially confirmed' framing", "verdict": "OK-sampled", "evidence": "grounded in item 81's own 'selected' wording; only mild internal tension", "root_cause": null},
+        {"line": 230, "claim": "Anduril partnered with Elbit on Sigma 155 howitzer", "verdict": "OK-sampled", "evidence": "confirmed verbatim in item 81 clean_text", "root_cause": null},
+        {"line": "253,258", "claim": "AeroVironment $464.8M Locust X3 E-HEL details", "verdict": "OK-sampled", "evidence": "matches items 10/47 plus army.mil/avinc.com sourcing", "root_cause": null}
+      ]
+    },
+    "monthly_2026-09-30.md": {
+      "claims_checked": 18,
+      "false": 3,
+      "unsupported": 0,
+      "misleading": 3,
+      "items": [
+        {"line": 65, "claim": "תע\"א, באמצעות חברת הבת Ophir Optronics (explicit 'subsidiary company')", "verdict": "FALSE", "evidence": "same as weekly line 133, more emphatic phrasing", "root_cause": "item analysis fabrication (item 39)"},
+        {"line": 137, "claim": "מיזוג/רכישה | Anduril, Amikam Norkin | Israel Ministry of Defense and IDF | 10,000,000,000 USD", "verdict": "FALSE", "evidence": "source item 81 (Norkin appointment) has no transaction, only a ~$100B company valuation mention; no IMOD/IDF counterparty exists in source", "root_cause": "pipeline/structured-extraction fabrication"},
+        {"line": 499, "claim": "Top-10-events-by-value table: m_and_a | Anduril | 10,000,000,000 USD", "verdict": "FALSE", "evidence": "same fabricated figure as line 137, promoted into top-10 ranking table", "root_cause": "pipeline/structured-extraction fabrication"},
+        {"line": "120,138", "claim": "Two separate $270M Elbit business-event rows (src-24 2026-09-02 and src-57 2026-09-01)", "verdict": "MISLEADING", "evidence": "both articles describe the same underlying Elbit SPECTRO/AMPS-NG ISR deal, double-counted", "root_cause": "pipeline duplicate-event, no dedup across outlets"},
+        {"line": 497, "claim": "regulation | Elbit | 32,000,000,000 USD", "verdict": "MISLEADING", "evidence": "figure correct (matches item 114 backlog disclosure exactly) but event type 'regulation' is a category mismatch for an earnings/backlog announcement", "root_cause": "pipeline event-type classifier misfire"},
+        {"line": "682-691", "claim": "Monthly company summary table Ophir Optronics: 1 mention, 0 wins", "verdict": "OK-sampled", "evidence": "consistent with (fabricated) Ophir/IAI framing carried from line 65; not a separate distinct error", "root_cause": null}
+      ]
+    },
+    "bd_il_2026-09-07.md": {
+      "claims_checked": 14,
+      "false": 2,
+      "unsupported": 0,
+      "misleading": 1,
+      "items": [
+        {"line": 23, "claim": "תעשייה אווירית (Ophir Optronics) השיקה עדשת זום (IAI-Ophir parenthetical framing)", "verdict": "FALSE", "evidence": "same root as weekly/monthly Ophir claims", "root_cause": "item analysis fabrication (item 39)"},
+        {"line": 62, "claim": "Elbit | מיזוג/רכישה | Anduril (M&A row, no amount)", "verdict": "MISLEADING", "evidence": "same Sigma-155-partnership mislabeled as M&A", "root_cause": "pipeline event-type misclassification"},
+        {"line": 100, "claim": "רכש ופלטפורמות row: fighter jet, Israel Ministry of Defense and IDF buyer, Anduril supplier, $10,000,000,000, targeting pod need, source [13]", "verdict": "FALSE", "evidence": "source [13]/item 81 (Norkin appointment article) contains no fighter jet, no targeting pod, no IMOD/IDF procurement, and no $10B transaction of any kind -- wholly invented, most severe finding in corpus", "root_cause": "pipeline/structured-extraction fabrication cross-contaminated with unrelated fighter-jet/targeting-pod forecast template"},
+        {"line": 101, "claim": "רכש ופלטפורמות row: fighter jet, buyer=Israel, supplier=Israel, $3,600,000,000, source [8]", "verdict": "FALSE", "evidence": "garbled re-use of Greece-deal dollar-equivalent figure (item 90) into a nonsensical buyer=seller=Israel row for a nonexistent fighter jet platform", "root_cause": "pipeline/structured-extraction fabrication"},
+        {"line": "21-28", "claim": "Market-picture bullets: Elbit $270M ISR, Serbia JV 51%, IAI Blue Spear/Singapore, IAI-Germany LORA firing, Estonia David's Sling, Greece $4B deal", "verdict": "OK-sampled", "evidence": "6/8 checked against items 24, 28, 7, 18/44, 4, 15/155", "root_cause": null}
+      ]
+    },
+    "bd_de_2026-09-07.md": {
+      "claims_checked": 8,
+      "false": 0,
+      "unsupported": 6,
+      "misleading": 0,
+      "items": [
+        {"line": "7,11,23,45,70,97-98", "claim": "רפאל רכשה את מפעל פולקסווגן בגרמניה (Rafael has purchased the VW plant), repeated 6x", "verdict": "UNSUPPORTED", "evidence": "source item id=6872 (Israel Hayom) has empty clean_text/key_facts in DB, headline-only; a separate corpus item id=168 explicitly states negotiations are still ongoing ('המשך משא ומתן'); daily/weekly independently hedge this as unresolved", "root_cause": "data gap treated as fact (empty-content item read as concluded transaction)"},
+        {"line": "3-5,76-77", "claim": "German Navy LORA firing (Marine 2035), Rheinmetall/Hensoldt Skymaster demo, Hensoldt Ubifly e200X avionics", "verdict": "OK-sampled", "evidence": "confirmed against items 38/44/9", "root_cause": null}
+      ]
+    },
+    "bd_eu_2026-09-07.md": {
+      "claims_checked": 10,
+      "false": 0,
+      "unsupported": 4,
+      "misleading": 0,
+      "items": [
+        {"line": "11,22,77,117", "claim": "פרויקט כיפת ברזל בגרמניה מתקדם בפועל עם מכירת מפעל פולקסווגן לרפאל (VW plant sale to Rafael presented as done deal)", "verdict": "UNSUPPORTED", "evidence": "same empty-content item 6872 / contradicting 'talks continue' item 168 as bd_de", "root_cause": "data gap treated as fact"},
+        {"line": "21,25-26,30-35", "claim": "Estonia David's Sling 5 bidders, Leonardo Centauro II Brazil, Rheinmetall/Hensoldt Skymaster demo, Finland TED CV tender, UVision/Mistral $50M", "verdict": "OK-sampled", "evidence": "confirmed against items 4/11/10/15", "root_cause": null}
+      ]
+    },
+    "bd_gb_2026-09-07.md": {
+      "claims_checked": 6,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": [
+        {"line": "7,21-23", "claim": "UK MoD Project PANOPTES (multi-vendor RFI), Saab Giraffe 1X to RAF, Elbit/ESUK $370M CBP orders, Kongsberg StrikeMaster Arctic exercise", "verdict": "OK-sampled", "evidence": "confirmed against items 3/2/32/1; report correctly frames PANOPTES as RFI-stage", "root_cause": null}
+      ]
+    },
+    "bd_gr_2026-09-07.md": {
+      "claims_checked": 9,
+      "false": 1,
+      "unsupported": 0,
+      "misleading": 1,
+      "items": [
+        {"line": 13, "claim": "Analyst note flags $4B/EUR3.1B/EUR3.5B figures as sign of a deal still being finalized", "verdict": "OK-sampled", "evidence": "best-practice contrast with weekly/monthly which state all three figures as flat fact without reconciliation", "root_cause": null},
+        {"line": 84, "claim": "רכש ופלטפורמות row: fighter jet, buyer=Israel, supplier=Israel, $3,600,000,000, source [1]", "verdict": "FALSE", "evidence": "same garbled buyer=seller=Israel pattern as bd_il line 101, sourced from Greece-deal item 90", "root_cause": "pipeline/structured-extraction fabrication"},
+        {"line": "33-35", "claim": "מטוס קרב | Rafael | EUR3,500,000,000 | פוד כיוון, source [4]", "verdict": "MISLEADING", "evidence": "source item 150 is an air-defense package deal (David's Sling/Spyder/Barak MX), not a fighter jet or targeting pod, and IAI's co-supplier role is dropped", "root_cause": "pipeline/structured-extraction misclassification"},
+        {"line": "23-29", "claim": "Greece $4B deal, Omnisys BRO-API, three IIR/targeting-pod/MALE forecast rows at 60%", "verdict": "OK-sampled", "evidence": "confirmed against items 155/48 and forecast items", "root_cause": null}
+      ]
+    },
+    "bd_in_2026-09-07.md": {
+      "claims_checked": 7,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": [
+        {"line": "7,19,27", "claim": "Rafael 'planning'/'considering' Iron Dome (Tamir) production line in India", "verdict": "OK-sampled", "evidence": "source title itself is 'Rafael to produce Iron Dome interceptors in India - report' (unconfirmed); bd_in's hedged phrasing matches", "root_cause": null},
+        {"line": "20-23", "claim": "Hensoldt/Ubifly e200X avionics, AeroVironment $464.8M E-HEL, Elbit $370M CBP, Ultra Maritime sonobuoys", "verdict": "OK-sampled", "evidence": "confirmed against items 4/(10,47)/32/13", "root_cause": null}
+      ]
+    },
+    "bd_kr_2026-09-07.md": {
+      "claims_checked": 0,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": []
+    },
+    "bd_us_2026-09-07.md": {
+      "claims_checked": 12,
+      "false": 2,
+      "unsupported": 0,
+      "misleading": 1,
+      "items": [
+        {"line": 55, "claim": "Elbit | מיזוג/רכישה | Anduril (M&A row)", "verdict": "MISLEADING", "evidence": "same Sigma-155-partnership mislabeled as M&A, 4th recurrence in corpus", "root_cause": "pipeline event-type misclassification"},
+        {"line": "69-70,140-141", "claim": "CN112074705A and US10506436B1 listed as Anduril patents in US-territory competitor-IP section, value-score 12 each", "verdict": "FALSE", "evidence": "same two fabricated/mis-attributed patents as weekly", "root_cause": "entity/alias mismatch (CN patent) + item analysis fabrication (US10506436B1)"},
+        {"line": "11,23-36", "claim": "AeroVironment $464.8M, MMA $10M target, Halo_Shield 3-exercise proof, UVision/Mistral $50M, Shield AI Taiwan >$1B/280 V-BAT, Leonardo DRS Space Force prototype, XTEND $1.5B", "verdict": "OK-sampled", "evidence": "confirmed against items 10/47, 39/8, 11, 34, 58, 20, 2/45 (7/7 checked)", "root_cause": null}
+      ]
+    },
+    "patent_survey_Anduril_Lattice_counter-UAS_EO_IR_optical_tracking_patents_2026-09-07.md": {
+      "claims_checked": 9,
+      "false": 1,
+      "unsupported": 0,
+      "misleading": 1,
+      "items": [
+        {"line": "20,47,63,108", "claim": "US10506436B1 'Lattice mesh' described as optical lens/mirror/fiber array improving image quality/reducing distortion", "verdict": "FALSE", "evidence": "DB abstract is a bare USPTO assignment notice with no technical content; entire claims analysis invented; anchors the report's 'lattice/mesh' technology cluster", "root_cause": "item analysis fabrication"},
+        {"line": "17,27,39,51,124", "claim": "Strategic recommendations at 80-90% stated confidence built on 'Anduril's clear patent-filing lead'", "verdict": "MISLEADING", "evidence": "3 of 4 Anduril patents cited have abstracts the report itself repeatedly flags as insufficient for full claims analysis; 4th is the fabricated entry above", "root_cause": "confidence overstatement relative to acknowledged source thinness"},
+        {"line": "1-13", "claim": "Method/scope note: 2016-03-11-2021-09-15 range, 6 records, keyless Google Patents search caveat", "verdict": "OK-sampled", "evidence": "consistent with the 6 patents in the appendix; correctly flags keyless-search limitation", "root_cause": null}
+      ]
+    },
+    "patent_survey_FPA_עם_פיקסל_דיגיטלי_DROIC_2026-09-07.md": {
+      "claims_checked": 10,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": [
+        {"line": "17-26,99-108", "claim": "Per-patent claims analysis for all 10 patents (Raytheon, Sensors Unlimited, Sabanci Universitesi, MIT, Black Forest Engineering)", "verdict": "OK-sampled", "evidence": "every entry explicitly states abstract is insufficient for full claims analysis rather than inventing detail; opposite discipline from the Anduril/Lattice report", "root_cause": null},
+        {"line": "16,68-70", "claim": "No Israeli patent-holder found in sample, caveated as possible search-coverage gap", "verdict": "OK-sampled", "evidence": "appropriately hedged, does not overclaim absence", "root_cause": null}
+      ]
+    },
+    "pl_ball_gimbals_16in_2026-09-07.md": {
+      "claims_checked": 5,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": [
+        {"line": "7,11,72", "claim": "Elbit $270M ISR deal cited with explicit hedge that source does not specify 16in ball gimbal inclusion", "verdict": "OK-sampled", "evidence": "correctly attributes $270M to item 24/57 and avoids asserting product-specific inclusion", "root_cause": null}
+      ]
+    },
+    "pl_border_long_range_eo_2026-09-07.md": {
+      "claims_checked": 0,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": [
+        {"line": "7-9", "claim": "No items found in window", "verdict": "OK-sampled", "evidence": "correctly reports no findings", "root_cause": null}
+      ]
+    },
+    "pl_eo_air_defense_warning_2026-09-07.md": {
+      "claims_checked": 4,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 2,
+      "items": [
+        {"line": "23-24,30-31", "claim": "Two near-duplicate IIR Seeker/EO Tracker forecast rows at 60%, windows drifted by 1 day, sources [1] and [2]", "verdict": "MISLEADING", "evidence": "source appendix table (lines 33-37) is completely empty, so [1]/[2] cannot be traced to any item; date drift suggests un-deduplicated pipeline reruns", "root_cause": "pipeline duplicate forecast rows + broken source appendix"}
+      ]
+    },
+    "pl_mws_eo_2026-09-07.md": {
+      "claims_checked": 3,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 0,
+      "items": [
+        {"line": "19-25", "claim": "Three DIRCM patents listed with owner unknown ('—')", "verdict": "OK-sampled", "evidence": "report honestly declines to attribute an owner rather than inventing one", "root_cause": null}
+      ]
+    },
+    "pl_targeting_pods_2026-09-07.md": {
+      "claims_checked": 6,
+      "false": 0,
+      "unsupported": 0,
+      "misleading": 2,
+      "items": [
+        {"line": "23,48", "claim": "ניסוי | Rafael | US Department of Defense (business event row)", "verdict": "MISLEADING", "evidence": "source item 5122 is a Litening tender/RFP notice from the Department of the Air Force specifically; does not describe any Rafael-DoD trial/interaction", "root_cause": "pipeline event-type misclassification + imprecise agency attribution"},
+        {"line": "66-67,73-74", "claim": "Duplicate targeting-pod forecast rows at 60% [1] and 40% [2], windows drifted by 1 day", "verdict": "MISLEADING", "evidence": "[2] not present in source appendix (only src-1 listed, line 88) -- broken citation", "root_cause": "pipeline duplicate forecast rows + broken citation"},
+        {"line": "7,11", "claim": "Litening tender + 60% targeting-pod forecast summary", "verdict": "OK-sampled", "evidence": "consistent with valid src-1 tender listing", "root_cause": null}
+      ]
+    }
+  }
+}

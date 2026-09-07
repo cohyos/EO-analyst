@@ -103,7 +103,11 @@ describe("SettingsPage jobs table (W20)", () => {
     ]);
     renderPage();
     await screen.findByText("bd_report");
-    expect(screen.getByText("0:05")).toBeInTheDocument();
+    // Content review (docs/qa/content_review/CR-ui.md): formatDuration now wraps its output in
+    // invisible LRI/PDI bidi-isolation marks (lib/time.ts) so the duration renders correctly in
+    // the app's RTL flow -- an exact "0:05" match no longer finds the (still visibly identical)
+    // text node, so this matches on the substring instead.
+    expect(screen.getByText((_, el) => el?.textContent === "⁦0:05⁩")).toBeInTheDocument();
   });
 
   it("colours a failed job's state distinctly from a done one", async () => {

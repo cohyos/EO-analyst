@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type FocusEvent, type MouseEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api";
-import { enhanceSourceAppendixLinks, linkifyReportCitations } from "@/lib/reportHtml";
+import {
+  enhanceSourceAppendixLinks,
+  fixBdiSpacing,
+  linkifyReportCitations,
+  wrapReportTables,
+} from "@/lib/reportHtml";
 import { SourcePreviewCard } from "@/components/SourcePreviewCard";
 
 interface HoverState {
@@ -85,7 +90,10 @@ export function ReportBody({
   // keeps the *prop React actually diffs* stable too -- both layers are needed, since it's the
   // outer object's identity, not the inner string's content, that React checks.
   const linked = useMemo(
-    () => enhanceSourceAppendixLinks(linkifyReportCitations(html, citationsData?.citations)),
+    () =>
+      wrapReportTables(
+        fixBdiSpacing(enhanceSourceAppendixLinks(linkifyReportCitations(html, citationsData?.citations))),
+      ),
     [html, citationsData?.citations],
   );
   const dangerousHtml = useMemo(() => ({ __html: linked }), [linked]);

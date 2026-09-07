@@ -206,8 +206,12 @@ export function MorningPage() {
                 >
                   <LevelBadge level={h.level ?? "yellow"} size="sm" />
                   <div className="min-w-0 flex-1">
-                    <bdi className="block truncate font-medium">{h.title}</bdi>
-                    <bdi className="block truncate text-sm text-fg-muted">{h.summary_he}</bdi>
+                    <bdi className="block truncate font-medium" title={h.title ?? undefined}>
+                      {h.title}
+                    </bdi>
+                    <bdi className="block truncate text-sm text-fg-muted" title={h.summary_he ?? undefined}>
+                      {h.summary_he}
+                    </bdi>
                   </div>
                 </Link>
               </li>

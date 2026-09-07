@@ -338,15 +338,29 @@ def compute_deltas(
 
 _RAW_SUBDOMAIN_IN_TITLE_RE = re.compile(r'בתת-התחום "([a-z][a-z0-9_]*)"')
 
+# Round-14 (CR-editing.md): the domain-slug sibling of the bug the subdomain regex above already
+# repairs -- a "vanished"/"strengthened"/"weakened" trend delta re-displays a *previous* report's
+# already-persisted `title_he` verbatim (``compute_trend_deltas``, `prev_by_title`), so
+# `eoa.report.trends._domain_label`'s Round-14 fix (never fall back to the raw slug) only prevents
+# this for a trend generated *after* the fix landed -- a title stored before it (e.g.
+# "...בתחום out_of_scope") still carries the raw English key and needs the same render-time repair
+# this module already does for subdomain keys. No quotes around a domain slug (unlike the
+# subdomain case) -- `trends._domain_label`'s own callers never wrap it in quotes -- so matched by
+# the lowercase-ASCII-slug shape alone (a real Hebrew domain label never matches this pattern).
+_RAW_DOMAIN_IN_TITLE_RE = re.compile(r"בתחום ([a-z][a-z0-9_]*)\b")
+
 
 def _label_raw_subdomain_keys(title: str) -> str:
     """Trend titles stored in report_state by runs before 2026-09-07 carry raw subdomain keys
-    ('בתת-התחום "atr"'); map them to the taxonomy label at render time."""
-    from eoa.report.trends import _subdomain_label
+    ('בתת-התחום "atr"') and/or raw domain keys ('בתחום out_of_scope'); map both to their taxonomy
+    label at render time."""
+    from eoa.report.trends import _domain_label, _subdomain_label
 
-    return _RAW_SUBDOMAIN_IN_TITLE_RE.sub(
+    title = _RAW_SUBDOMAIN_IN_TITLE_RE.sub(
         lambda m: f'בתת-התחום "{_subdomain_label(m.group(1))}"', title or ""
     )
+    title = _RAW_DOMAIN_IN_TITLE_RE.sub(lambda m: f"בתחום {_domain_label(m.group(1))}", title)
+    return title
 
 
 def render_delta_section_he(result: DeltaResult) -> str:

@@ -123,3 +123,63 @@ export function enhanceSourceAppendixLinks(html: string | null | undefined): str
     },
   );
 }
+
+// Content review (docs/qa/content_review/CR-ui.md): `docx_builder.render_html` (Python side, out
+// of scope for this UI-only pass) wraps every embedded Latin/number run in
+// `<bdi dir="ltr">…</bdi>` for correct bidi isolation, e.g. `<bdi dir="ltr">JFB </bdi>האמריקאית`
+// -- but the run's separating space sits *inside* the tag. An isolate is atomic: that space ends
+// up glued to the LTR content's own trailing edge instead of separating it from the Hebrew word
+// that follows, so "JFB האמריקאית" visually renders as "JFBהאמריקאית" with no gap at all. Moving
+// the leading/trailing whitespace to outside the tag (same position in the flow, just no longer
+// inside the isolated run) fixes the spacing everywhere this pattern occurs in report bodies.
+const BDI_TRAILING_SPACE_RE = /(<bdi\b[^>]*>)([^<]*?)(\s+)(<\/bdi>)/g;
+const BDI_LEADING_SPACE_RE = /(<bdi\b[^>]*>)(\s+)([^<]*?)(<\/bdi>)/g;
+
+export function fixBdiSpacing(html: string | null | undefined): string {
+  const safeHtml = html ?? "";
+  return safeHtml
+    .replace(BDI_TRAILING_SPACE_RE, (_m, open, text, space, close) => `${open}${text}${close}${space}`)
+    .replace(BDI_LEADING_SPACE_RE, (_m, open, space, text, close) => `${space}${open}${text}${close}`);
+}
+
+// Content review: report tables (transaction ledgers, the sources appendix) ship as bare
+// `<table>` markup with nothing around them to scroll -- on a narrow viewport they either
+// overflow the page or get their columns crushed unreadably thin. Wraps each top-level `<table>`
+// in `.report-table-wrap` (globals.css: `overflow-x: auto`, a `min-width` on the table itself so
+// there's actually something to scroll) so it scrolls locally instead. Matches `<table ...>` with
+// any attributes and its balanced `</table>` close; report tables never nest a `<table>` inside
+// another, so a plain non-greedy match is safe here.
+const TABLE_RE = /<table\b[^>]*>[\s\S]*?<\/table>/g;
+
+export function wrapReportTables(html: string | null | undefined): string {
+  const safeHtml = html ?? "";
+  return safeHtml.replace(TABLE_RE, (match) => `<div class="report-table-wrap">${match}</div>`);
+}
+
+// Content review: `addHeadingIds` (ReportsPage.tsx) strips tags from a heading's inner HTML to
+// build the TOC's plain-text label, but doesn't decode entities -- a heading like
+// `Airborne Pods &amp; Payloads` (correctly HTML-escaped by the server, decodes fine when the
+// heading itself renders via `dangerouslySetInnerHTML`) came out of the tag-strip as the literal
+// string `Airborne Pods &amp; Payloads`, which React then escaped *again* as a plain text child,
+// rendering the raw entity text `&amp;` on screen instead of `&`. Covers the handful of named
+// entities report prose actually uses plus numeric/hex entities; anything else is left as-is
+// rather than guessed at.
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+
+export function decodeHtmlEntities(s: string): string {
+  return s.replace(/&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, ent: string) => {
+    if (ent[0] === "#") {
+      const isHex = ent[1] === "x" || ent[1] === "X";
+      const code = isHex ? parseInt(ent.slice(2), 16) : parseInt(ent.slice(1), 10);
+      return Number.isNaN(code) ? match : String.fromCodePoint(code);
+    }
+    return NAMED_ENTITIES[ent] ?? match;
+  });
+}

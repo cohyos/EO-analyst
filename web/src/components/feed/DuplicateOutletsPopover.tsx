@@ -100,11 +100,13 @@ export function DuplicateOutletsPopover({
               <li key={d.id} className="rounded-md p-1.5 hover:bg-bg-sunken">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <bdi className="block truncate font-medium text-fg">
+                    <bdi className="block truncate font-medium text-fg" title={d.title || "(ללא כותרת)"}>
                       {d.title || "(ללא כותרת)"}
                     </bdi>
                     <div className="flex items-center gap-1.5 text-fg-dim">
-                      <bdi className="truncate">{d.source_name || "—"}</bdi>
+                      <bdi className="truncate" title={d.source_name || undefined}>
+                        {d.source_name || "—"}
+                      </bdi>
                       <span>·</span>
                       <span className="font-mono">{timeAgo(d.published_at)}</span>
                     </div>

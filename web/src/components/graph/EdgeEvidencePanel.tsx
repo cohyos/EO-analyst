@@ -51,7 +51,9 @@ export function EdgeEvidencePanel({
                 to={`/feed?open=${ev.item_id}`}
                 className="block rounded-md p-1 text-xs hover:bg-bg-sunken"
               >
-                <bdi className="block truncate">{ev.title ?? `פריט #${ev.item_id}`}</bdi>
+                <bdi className="block truncate" title={ev.title ?? `פריט #${ev.item_id}`}>
+                  {ev.title ?? `פריט #${ev.item_id}`}
+                </bdi>
                 {ev.published_at && (
                   <span className="font-mono text-[10px] text-fg-dim">
                     {formatDate(ev.published_at)}

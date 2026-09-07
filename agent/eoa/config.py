@@ -567,6 +567,12 @@ class Settings(BaseModel):
     # optionally (like mcp.yaml) so a test fixture Settings() built without this key still
     # constructs -- eoa.product_lines.registry.product_line_defs() degrades to an empty tuple.
     product_lines: dict[str, Any] = {}
+    # Round-14 (2026-09-07, item-39 fabrication root-cause fix): config/company_facts.yaml -- a
+    # small, curated Israeli-EO/IR corporate-affiliation registry (subsidiary/owned-by/joint-
+    # venture facts) used by eoa.pipeline.analysis_grounding to hard-reject a contradicting
+    # ownership claim in LLM-generated analysis text. Loaded optionally, same rationale as
+    # product_lines/mcp above.
+    company_facts: dict[str, Any] = {}
 
     # ---- derived / env-driven -------------------------------------------------
     @property
@@ -635,9 +641,15 @@ def settings() -> Settings:
     taxonomy = _load_yaml("taxonomy.yaml")
     watchlist = _load_yaml("watchlist.yaml")
     product_lines = _load_yaml_optional("product_lines.yaml")
+    company_facts = _load_yaml_optional("company_facts.yaml")
     mcp_data = _load_yaml_optional("mcp.yaml")
     if "mcp" not in base and mcp_data:
         base = {**base, "mcp": mcp_data}
     return Settings(
-        registry=registry, taxonomy=taxonomy, watchlist=watchlist, product_lines=product_lines, **base
+        registry=registry,
+        taxonomy=taxonomy,
+        watchlist=watchlist,
+        product_lines=product_lines,
+        company_facts=company_facts,
+        **base,
     )

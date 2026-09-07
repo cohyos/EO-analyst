@@ -1,6 +1,9 @@
 import { Fragment } from "react";
 import type { PatentRecord } from "@/types/api";
 import { ValueScorePopover } from "./ValueScorePopover";
+import { subdomainLabel } from "@/lib/taxonomy";
+import { formatDate } from "@/lib/time";
+import { cn } from "@/lib/cn";
 
 export function PatentTable({
   patents,
@@ -15,7 +18,7 @@ export function PatentTable({
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[900px] border-collapse text-sm">
         <thead>
-          <tr className="border-b border-border bg-bg-raised text-fg-dim">
+          <tr className="sticky top-0 z-10 border-b border-border bg-bg-raised text-fg-dim">
             <th className="p-2 text-start font-medium">מספר פרסום</th>
             <th className="p-2 text-start font-medium">כותרת</th>
             <th className="p-2 text-start font-medium">בעלים</th>
@@ -26,13 +29,16 @@ export function PatentTable({
           </tr>
         </thead>
         <tbody>
-          {patents.map((p) => {
+          {patents.map((p, i) => {
             const isExpanded = expandedId === p.id;
             return (
               <Fragment key={p.id}>
                 <tr
                   onClick={() => onToggleExpand(p.id)}
-                  className="cursor-pointer border-b border-border last:border-0 hover:bg-bg-sunken"
+                  className={cn(
+                    "cursor-pointer border-b border-border last:border-0 hover:bg-bg-sunken",
+                    i % 2 === 1 && "bg-bg-sunken/40",
+                  )}
                 >
                   <td className="p-2 font-mono text-xs" dir="ltr">
                     {p.url ? (
@@ -51,7 +57,11 @@ export function PatentTable({
                   </td>
                   <td className="p-2 font-medium text-fg">{p.title || "—"}</td>
                   <td className="p-2 text-fg-muted">{p.assignees.join(", ") || "—"}</td>
-                  <td className="p-2 text-fg-muted">{p.subdomain || "—"}</td>
+                  <td className="p-2 text-fg-muted">
+                    <span className="block max-w-[14rem] truncate" title={subdomainLabel(p.subdomain)}>
+                      {subdomainLabel(p.subdomain)}
+                    </span>
+                  </td>
                   <td className="p-2 text-center">
                     {p.israel_relevance != null && p.israel_relevance >= 0.5 ? (
                       <span className="rounded-md bg-accent-muted px-2 py-0.5 text-xs text-fg">ישראל</span>
@@ -62,7 +72,7 @@ export function PatentTable({
                   <td className="p-2 text-center">
                     <ValueScorePopover score={p.value_score} reasons={p.value_reasons} />
                   </td>
-                  <td className="p-2 text-fg-muted">{p.publication_date ?? "—"}</td>
+                  <td className="p-2 text-fg-muted">{formatDate(p.publication_date)}</td>
                 </tr>
                 {isExpanded && (
                   <tr className="border-b border-border bg-bg-sunken last:border-0">

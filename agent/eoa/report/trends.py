@@ -42,11 +42,24 @@ _CONVERGENCE_MIN_EVENTS = 2
 _TECH_RACE_MIN_COMPANIES = 2
 
 
+#: Round-14 (CR-editing.md): matches ``eoa.report.daily._UNKNOWN_DOMAIN_LABEL_HE`` verbatim -- the
+#: fallback Hebrew label for a ``domain``/pseudo-domain value with no real taxonomy entry, never
+#: the raw slug itself.
+_UNKNOWN_DOMAIN_LABEL_HE = "תחומים נוספים"
+
+
 def _domain_label(domain: str | None) -> str:
+    """Round-14 (CR-editing.md, "headings that are English keys or taxonomy slugs"): never falls
+    back to the raw ``domain`` string itself -- this function feeds every trend ``title_he`` this
+    module generates (entity clusters, domain surges), so a stray ``out_of_scope``/``archive``
+    value used to leak straight into a Hebrew trend heading. Mirrors ``eoa.report.daily``'s own
+    ``_domain_label`` fix for the same bug (Q3-15)."""
+    if not domain:
+        return "כללי"
     domains = settings().taxonomy.get("domains", {})
-    entry = domains.get(domain or "", {})
+    entry = domains.get(domain, {})
     label = entry.get("label")
-    return label if isinstance(label, str) and label else (domain or "כללי")
+    return label if isinstance(label, str) and label else _UNKNOWN_DOMAIN_LABEL_HE
 
 
 def _clamp(n: float, lo: int = 1, hi: int = 5) -> int:
@@ -216,8 +229,12 @@ def _convergence_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
 
 def _subdomain_label(key: str | None) -> str:
     """Hebrew taxonomy label for a subdomain key -- the raw slug ("atr", "isr_pods") leaked into
-    monthly/weekly trend headings (live monthly_2026-09-30, 2026-09-07); fall back to the key only
-    when the taxonomy has no entry for it."""
+    monthly/weekly trend headings (live monthly_2026-09-30, 2026-09-07).
+
+    Round-14 (CR-editing.md): the docstring above already named this exact bug but the code still
+    fell back to the raw ``key`` itself when the taxonomy had no entry for it -- the same "English
+    key/taxonomy slug leaked into a Hebrew heading" defect :func:`_domain_label` had, now fixed the
+    same way (never the raw slug)."""
     if not key:
         return "כללי"
     for entry in (settings().taxonomy.get("domains") or {}).values():
@@ -227,7 +244,7 @@ def _subdomain_label(key: str | None) -> str:
             if isinstance(label, dict):
                 label = label.get("label_he") or label.get("label") or key
             return str(label)
-    return key
+    return _UNKNOWN_DOMAIN_LABEL_HE
 
 
 def _convergence_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

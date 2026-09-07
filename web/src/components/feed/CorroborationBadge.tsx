@@ -180,7 +180,7 @@ export function CorroborationBadge({
               <li key={`${s.item_id}-${i}`} className="rounded-md p-1.5 hover:bg-bg-sunken">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <bdi className="block truncate font-medium text-fg">
+                    <bdi className="block truncate font-medium text-fg" title={s.source_name || undefined}>
                       {s.source_name || "—"}
                     </bdi>
                     <div className="flex flex-wrap items-center gap-1.5 text-fg-dim">

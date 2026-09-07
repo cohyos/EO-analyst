@@ -238,7 +238,16 @@ def test_persist_analysis_backfills_entities_from_events_when_still_empty(monkey
     monkeypatch.setattr(analyze_mod, "insert_event", lambda **kw: None)
     monkeypatch.setattr(analyze_mod, "upsert_entity", lambda **kw: None)
 
-    item = {"id": 153, "domain": "tech_dev", "level": "orange", "entities_mentioned": []}
+    # CR-events (round 14): parties/customer must be grounded in the item's own source text or the
+    # event grounding drops them -- give the fixture item a source text that names them.
+    item = {
+        "id": 153,
+        "domain": "tech_dev",
+        "level": "orange",
+        "entities_mentioned": [],
+        "title": "TC-Next and WeatherNext complete a system test for NOAA",
+        "clean_text": "TC-Next and WeatherNext completed a joint system test for NOAA this week.",
+    }
     out = _out(
         events=[
             EventOut(
@@ -264,7 +273,17 @@ def test_persist_analysis_events_fallback_filters_junk_names(monkeypatch):
     monkeypatch.setattr(analyze_mod, "insert_event", lambda **kw: None)
     monkeypatch.setattr(analyze_mod, "upsert_entity", lambda **kw: None)
 
-    item = {"id": 22, "domain": "air_defense", "level": "orange", "entities_mentioned": []}
+    # CR-events (round 14): the event grounding keeps only parties named in the item's source text.
+    item = {
+        "id": 22,
+        "domain": "air_defense",
+        "level": "orange",
+        "entities_mentioned": [],
+        # no watchlist organisation in the text: the watchlist backfill must stay empty so the
+        # events fallback is what fills entities_mentioned (the customer, ungrounded, is dropped).
+        "title": "Ukraine deploys F-16s with Western Partners",
+        "clean_text": "Ukraine deployed its first F-16s this week together with Western Partners.",
+    }
     out = _out(
         events=[
             EventOut(
@@ -294,7 +313,18 @@ def test_persist_analysis_events_fallback_skipped_when_entities_already_present(
     # call so this test stays DB-free (see the note in the archived-item test above).
     monkeypatch.setattr("eoa.pipeline.israel_focus.score_and_persist_entity_israeli", lambda name: None)
 
-    item = {"id": 1, "domain": "air_defense", "level": "orange", "entities_mentioned": ["Elbit"]}
+    item = {
+        "id": 1,
+        "domain": "air_defense",
+        "level": "orange",
+        "entities_mentioned": ["Elbit"],
+        # Round-14 (2026-09-07): non-empty and actually mentioning Elbit -- the analysis-stage
+        # grounding guard (eoa.pipeline.analysis_grounding) now re-checks entities_mentioned
+        # against the item's own source text before persistence; a bare "" clean_text made that
+        # correct behavior indistinguishable from the events-fallback this test actually exercises
+        # (both would otherwise, for different reasons, leave entities_mentioned unwritten).
+        "clean_text": "Elbit Systems announced a new sensor program today.",
+    }
     out = _out(
         events=[
             EventOut(kind="test", title="t", parties=["Rafael"], customer="c", summary_he="e", confidence=0.8)

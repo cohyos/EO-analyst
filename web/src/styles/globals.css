@@ -252,26 +252,81 @@ bdi {
   }
 }
 
+/* Content review (docs/qa/content_review/CR-ui.md): report prose ("Reports" viewer, the
+   morning brief, BD territory reports) previously inherited only `text-sm` (14px) with no
+   measure cap, so a paragraph ran the full width of its container -- 100+ Hebrew characters per
+   line at desktop widths, well past comfortable reading measure. 15px/1.6/~70ch here match the
+   typography scale requested by the review; headings and the table styles below are unaffected
+   by the measure cap (a data table benefits from its full container width, not a prose column). */
+.report-body {
+  font-size: 0.9375rem;
+}
 .report-body h2 {
   font-size: 1.125rem;
   font-weight: 700;
   margin-bottom: 0.5rem;
+  max-width: 70ch;
 }
 .report-body h3 {
   font-size: 1rem;
   font-weight: 600;
   margin-top: 1rem;
   margin-bottom: 0.375rem;
+  max-width: 70ch;
 }
 .report-body p {
-  line-height: 1.7;
+  line-height: 1.6;
   margin-bottom: 0.75rem;
+  max-width: 70ch;
 }
 .report-body ul {
   list-style: disc;
   padding-inline-start: 1.5rem;
   margin-bottom: 0.75rem;
+  max-width: 70ch;
 }
 .report-body li {
+  line-height: 1.6;
   margin-bottom: 0.25rem;
+}
+
+/* Content review: every report table (transaction ledgers, the sources appendix, etc.) is
+   server-rendered `<table>` markup dropped in via `dangerouslySetInnerHTML` with no styling of
+   its own -- no zebra striping (rows blur together once a cell wraps to 2 lines), no sticky
+   header (scroll past the first screenful and the column labels are gone), and no horizontal
+   scroll affordance, so a wide table just overflows the page on mobile instead of scrolling
+   locally. `wrapReportTables` (lib/reportHtml.ts) wraps each `<table>` in `.report-table-wrap`
+   so `overflow-x` has something other than the whole prose column to apply to; `min-width` on
+   the table forces that scrollbar to appear rather than letting columns get crushed unreadably
+   thin. Deliberately NOT covered by the 70ch prose measure above -- a data table reads better at
+   its natural width. */
+.report-table-wrap {
+  margin-bottom: 1rem;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+.report-body table {
+  width: 100%;
+  min-width: 40rem;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+.report-body th,
+.report-body td {
+  padding: 0.5rem 0.625rem;
+  text-align: start;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+.report-body thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-raised);
+  font-weight: 600;
+  white-space: nowrap;
+  z-index: 1;
+}
+.report-body tbody tr:nth-child(even) {
+  background: var(--bg-sunken);
 }

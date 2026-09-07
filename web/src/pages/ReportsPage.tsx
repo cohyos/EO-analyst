@@ -6,6 +6,7 @@ import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ReportBody } from "@/components/reports/ReportBody";
 import { formatDateTime } from "@/lib/time";
+import { decodeHtmlEntities } from "@/lib/reportHtml";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
 import { cn } from "@/lib/cn";
 import type { ReportSummary } from "@/types/api";
@@ -171,7 +172,7 @@ function addHeadingIds(html: string): {
   const withIds = html.replace(/<h([23])>(.*?)<\/h\1>/g, (_m, level, text) => {
     i += 1;
     const id = `section-${i}`;
-    toc.push({ id, text: text.replace(/<[^>]+>/g, "") });
+    toc.push({ id, text: decodeHtmlEntities(text.replace(/<[^>]+>/g, "")) });
     return `<h${level} id="${id}">${text}</h${level}>`;
   });
   return { html: withIds, toc };

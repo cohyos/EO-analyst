@@ -68,7 +68,9 @@ export function PathFinderPanel({
           <div className="mb-1 text-fg-dim">מ:</div>
           {a ? (
             <div className="flex items-center justify-between rounded-md bg-bg-sunken px-2 py-1">
-              <bdi className="truncate">{a.name}</bdi>
+              <bdi className="truncate" title={a.name}>
+                {a.name}
+              </bdi>
               <button
                 type="button"
                 onClick={() => setA(null)}
@@ -86,7 +88,9 @@ export function PathFinderPanel({
           <div className="mb-1 text-fg-dim">אל:</div>
           {b ? (
             <div className="flex items-center justify-between rounded-md bg-bg-sunken px-2 py-1">
-              <bdi className="truncate">{b.name}</bdi>
+              <bdi className="truncate" title={b.name}>
+                {b.name}
+              </bdi>
               <button
                 type="button"
                 onClick={() => setB(null)}

@@ -17,7 +17,9 @@ def test_repeated_rows_dropped_with_note() -> None:
     out = dedupe_rows_across_tables([t1, t2])
     assert out[0]["rows"] == t1["rows"]
     assert out[1]["rows"] == [["Rafael [5]", "2026"]]
-    assert "1 שורות כבר הופיעו" in out[1]["note_he"]
+    # Round-14 (CR-editing.md): singular Hebrew phrasing for exactly one dropped row ("1 שורות
+    # כבר הופיעו" was a number/gender-agreement error -- שורה is feminine singular).
+    assert "שורה אחת כבר הופיעה" in out[1]["note_he"]
 
 
 def test_text_identity_when_no_citation_and_single_column_untouched() -> None:

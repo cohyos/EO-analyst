@@ -8,7 +8,7 @@ and a chain with no tool-capable leg fails loudly."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -94,7 +94,7 @@ class TestRunChainTools:
     ) -> None:
         fake = _FakeProvider()
         monkeypatch.setattr(chain_mod, "_build_provider", lambda entry: fake)
-        result, attempts = chain_mod.run_chain(
+        result, _attempts = chain_mod.run_chain(
             "resident", _entries("claude", "ollama"), lambda: pytest.fail("local must not run"), messages=[]
         )
         assert result.provider == "claude" and "tools" not in fake.calls[0]
@@ -166,7 +166,7 @@ class TestInteractiveChainDefault:
 
         class _S:
             llm_providers = _LP()
-            models: dict[str, str] = {"resident": "dictalm"}
+            models: ClassVar[dict[str, str]] = {"resident": "dictalm"}
 
         monkeypatch.setattr(ollama_client, "settings", lambda: _S())
         called: dict[str, Any] = {}

@@ -202,7 +202,9 @@ export function EntitySidePanel({
                       to={`/feed?open=${t.item_id}`}
                       className="block rounded-md p-1 text-xs hover:bg-bg-sunken"
                     >
-                      <bdi className="block truncate font-medium">{t.title}</bdi>
+                      <bdi className="block truncate font-medium" title={t.title ?? undefined}>
+                        {t.title}
+                      </bdi>
                       <span className="flex items-center gap-1.5 text-[10px] text-fg-dim">
                         <span className="font-mono">{formatDate(t.published_at)}</span>
                         <LevelBadge level={t.level as TriageLevel} size="sm" />
@@ -249,7 +251,7 @@ export function EntitySidePanel({
                     className="rounded-md border border-border bg-bg-sunken p-1.5"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <bdi className="min-w-0 flex-1 truncate">
+                      <bdi className="min-w-0 flex-1 truncate" title={inv.question ?? "ללא שאלה"}>
                         {inv.question ?? "ללא שאלה"}
                       </bdi>
                       <span className="shrink-0 rounded bg-bg-raised px-1 py-0.5 text-[10px]">

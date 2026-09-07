@@ -250,7 +250,14 @@ class TestPersistAnalysisIntegration:
         item = {
             "id": 702,
             "title": "Elbit Systems announces new sensor",
-            "clean_text": "",
+            # Round-14 (2026-09-07): non-empty and mentioning Rafael too -- the analysis-stage
+            # grounding guard (eoa.pipeline.analysis_grounding) now re-checks entities_mentioned
+            # against the item's own source text before persistence, so a name with nothing behind
+            # it in title/clean_text is correctly stripped as a possible classify-stage
+            # hallucination; a bare "" clean_text (as this fixture originally had) made that
+            # correct behavior indistinguishable from a bug in the union-backfill logic this test
+            # actually exercises.
+            "clean_text": "Rafael and Elbit Systems both presented new sensors at the show.",
             "entities_mentioned": ["Rafael"],
         }
         persist_analysis(item, out)

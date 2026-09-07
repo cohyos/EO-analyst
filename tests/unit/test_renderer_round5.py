@@ -428,7 +428,9 @@ class TestTableTrendNote:
         out = db.dedupe_rows_across_tables([t1, t2])
         assert out[0]["rows"] == t1["rows"]
         assert out[1]["rows"] == []
-        assert "1 שורות כבר הופיעו" in out[1]["note_he"]
+        # Round-14 (CR-editing.md): singular Hebrew phrasing for exactly one dropped row ("1
+        # שורות כבר הופיעו" was a number/gender-agreement error -- שורה is feminine singular).
+        assert "שורה אחת כבר הופיעה" in out[1]["note_he"]
 
     def test_plain_list_rows_dedupe_exactly_as_before(self):
         """Regression: existing plain-list-row dedupe behaviour must be unaffected by the

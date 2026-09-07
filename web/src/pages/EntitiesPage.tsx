@@ -51,7 +51,9 @@ function EntityRow({ entity, active }: { entity: EntitySummary; active: boolean 
     >
       <Link to={`/entities/${entity.id}`} className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <bdi className="truncate text-sm font-medium text-fg">{entity.name}</bdi>
+          <bdi className="truncate text-sm font-medium text-fg" title={entity.name}>
+            {entity.name}
+          </bdi>
           <span className="shrink-0 rounded bg-bg-sunken px-1.5 py-0.5 text-[10px] text-fg-dim">
             {entityKindLabel(entity.kind)}
           </span>

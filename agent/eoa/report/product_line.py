@@ -65,6 +65,7 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check
+from eoa.report.textnorm import trim_at_word_boundary
 
 log = structlog.get_logger(__name__)
 
@@ -250,6 +251,33 @@ def format_events_block(events: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+#: Round-14 (CR-editing.md, "headings that are English keys or taxonomy slugs"): matches
+#: ``eoa.report.daily``'s own ``_UNKNOWN_DOMAIN_LABEL_HE`` -- never the raw domain slug itself.
+_UNKNOWN_DOMAIN_LABEL_HE = "תחומים נוספים"
+
+
+def _domain_label(domain: str | None) -> str:
+    """Hebrew label for a ``domain`` key -- see ``eoa.report.daily``'s identical-purpose
+    ``_domain_label`` for the full rationale; a local copy per this module's own no-cross-import
+    convention (matches ``eoa.report.weekly``/``trends``/``bd_territory``)."""
+    if not domain:
+        return "כללי"
+    domains = settings().taxonomy.get("domains", {})
+    entry = domains.get(domain, {})
+    label = entry.get("label")
+    return label if isinstance(label, str) and label else _UNKNOWN_DOMAIN_LABEL_HE
+
+
+def _level_label(level: str | None) -> str:
+    """Hebrew label (with priority emoji) for a triage ``level`` key -- never the raw slug (e.g.
+    "orange") the way :func:`market_items_table` used to render it directly."""
+    levels = settings().taxonomy.get("triage_levels", {})
+    entry = levels.get(level or "", {})
+    emoji = entry.get("emoji", "")
+    label = entry.get("label", level or "—")
+    return f"{emoji} {label}".strip()
+
+
 def market_items_table(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not items:
         return None
@@ -258,10 +286,14 @@ def market_items_table(items: list[dict[str, Any]]) -> dict[str, Any] | None:
         [
             it["n"],
             it.get("title") or "—",
-            it.get("domain") or "—",
+            # Round-14 (CR-editing.md): the raw taxonomy `domain` key (e.g. "airborne_pods") and
+            # triage `level` key (e.g. "orange") were rendered verbatim -- confirmed live in
+            # pl_targeting_pods_2026-09-07.md's "תמונת שוק בקו המוצר" table -- now translated the
+            # same way every other report's tables already are.
+            _domain_label(it.get("domain")),
             it.get("source_name") or "—",
             fmt_date(it.get("published_at")),
-            it.get("level") or "—",
+            _level_label(it.get("level")),
         ]
         for it in items
     ]
@@ -944,7 +976,10 @@ _FALLBACK_TOP_EVENTS = 3
 def _fallback_top_item_sentences(items: list[dict[str, Any]], *, limit: int) -> list[Sentence]:
     out = []
     for it in items[:limit]:
-        text = (it.get("so_what_he") or it.get("summary_he") or it.get("title") or "—")[:200]
+        raw = it.get("so_what_he") or it.get("summary_he") or it.get("title") or "—"
+        # Round-14 (CR-editing.md): word-boundary trim (never mid-word) instead of a bare
+        # `text[:200]` slice, which silently cut sentences mid-token with no indication at all.
+        text = trim_at_word_boundary(raw, 200)
         out.append(Sentence(text_he=text, cites=[it["n"]]))
     return out
 
@@ -957,7 +992,7 @@ def _fallback_event_sentences(events: list[dict[str, Any]], *, limit: int) -> li
             continue
         amount = f"{ev['amount_usd']:,.0f} {ev.get('currency') or 'USD'}" if ev.get("amount_usd") else ""
         text = f"{ev.get('title') or ev.get('program') or 'אירוע עסקי'} — {ev.get('customer') or '—'} {amount}".strip()
-        out.append(Sentence(text_he=text[:200], cites=[int(n)]))
+        out.append(Sentence(text_he=trim_at_word_boundary(text, 200), cites=[int(n)]))
     return out
 
 

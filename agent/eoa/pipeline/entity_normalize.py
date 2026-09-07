@@ -142,6 +142,16 @@ def _alias_index() -> dict[str, dict[str, Any]]:
                 # in config/watchlist.yaml and `_strict_alias_records`/`_record_mentioned_non_
                 # strictly` below.
                 "strict_aliases": list(rec.get("strict_aliases") or []),
+                # Round 14 (2026-09-07, docs/qa/content_review/CR-patents.md, CN112074705A
+                # misattributed to Anduril via its own product alias "Lattice"): the subset of
+                # `aliases` that names a *product/system/programme*, not the company itself (e.g.
+                # Anduril's "Lattice"/"Anvil"/"Roadrunner", BlueHalo's "LOCUST"/"Titan"). Still a
+                # legitimate alias for topic/NER matching (`find_watchlist_aliases_in_text`,
+                # unchanged) but must never, on its own or via co-occurrence, resolve to an
+                # *assignee* -- a product name is never who owns the patent. See
+                # `find_watchlist_company_names_in_text` below, the assignee-safe variant used by
+                # `eoa.patents.scan._assignee_candidates_in_text`.
+                "product_aliases": list(rec.get("product_aliases") or []),
             }
             for surface in [rec.get("name", ""), *canonical["aliases"]]:
                 key = normalize_name_key(surface)
@@ -669,6 +679,152 @@ def find_watchlist_aliases_in_text(text: str) -> list[str]:
         if canonical_name in seen:
             continue
         if not re.search(r"\b" + re.escape(surface) + r"\b", text, re.IGNORECASE):
+            continue
+        strict_record = strict_index.get(normalize_name_key(surface))
+        if strict_record is not None and not _record_mentioned_non_strictly(text, strict_record):
+            continue
+        found.append(canonical_name)
+        seen.add(canonical_name)
+    return found
+
+
+# --------------------------------------------------------------------------
+# Round 14 (2026-09-07, docs/qa/content_review/CR-patents.md): patent id 64 (CN112074705A) was
+# attributed to Anduril purely because its Google-Patents search snippet named an unrelated
+# component, "(Lattice Semiconductor Corporation, USA)" -- "Lattice" is Anduril's own *product*
+# alias (config/watchlist.yaml), and at the time this row was scanned (2026-09-06 08:30) the
+# round-2 strict-alias co-occurrence gate above did not exist yet, so a bare product-name mention
+# was enough on its own. The gate added since (`_strict_alias_records`/`_record_mentioned_non_
+# strictly`) would still not have caught this case in general: it only requires the *company's*
+# own name/alias to also appear somewhere in the text, which says nothing about whether the
+# matched span itself is actually naming the company (a genuine, unrelated "Lattice Semiconductor
+# Corporation, USA" citation reads the same to that gate as a real Anduril mention that happens to
+# also cite "Lattice"). This section gives patent-assignee inference its own, stricter surface:
+# never a product/system alias at all (`product_aliases`, not just the generic-collision
+# `strict_aliases`), and never a match embedded in a longer, unrelated organisation name or a
+# citation/component mention.
+# --------------------------------------------------------------------------
+
+#: A bare company alias immediately followed by one of these (whole-word, case-insensitive) is
+#: almost always a *different*, longer organisation's name spelled out in full -- e.g. "Lattice
+#: Semiconductor Corporation" (Anduril's "Lattice" is not "Lattice Semiconductor"), "Titan
+#: University", "IPG GmbH". None of these ever legitimately follow a bare watchlist alias that is
+#: itself already the complete company-name surface (a real multi-word company name like "Lockheed
+#: Martin" or "Anduril Industries" is matched as its own, longer surface first -- see
+#: `_company_assignee_surfaces` -- so this guard only ever fires on a short/bare alias).
+_LONGER_ORG_SUFFIX_WORDS = frozenset(
+    {
+        "semiconductor",
+        "semiconductors",
+        "corporation",
+        "corp",
+        "inc",
+        "incorporated",
+        "ltd",
+        "limited",
+        "gmbh",
+        "university",
+        "llc",
+        "spa",
+        "s.p.a",
+        "ag",
+        "co",
+        "company",
+        "holdings",
+        "group",
+        "technologies",
+        "technology",
+        "electronics",
+        "industries",
+        "laboratories",
+        "labs",
+        "plc",
+    }
+)
+_TRAILING_CAP_WORD_RE = re.compile(r"([A-Za-z][A-Za-z.'-]*)\s*$")
+_LEADING_WORD_RE = re.compile(r"^([A-Za-z][A-Za-z.'-]*)")
+
+
+def _looks_like_longer_org_name_or_citation(text: str, start: int, end: int, surface: str) -> bool:
+    """True when the ``text[start:end]`` match looks like a fragment of a *different*, longer
+    organisation's name or a bare component/citation mention, not a standalone reference to the
+    matched company itself -- rule (b) of the round-14 assignee-inference fix. Two independent
+    signals, either enough on its own:
+
+    - the next word (skipping whitespace/punctuation) is a generic corporate-entity suffix
+      (:data:`_LONGER_ORG_SUFFIX_WORDS`) -- e.g. matched "Lattice" immediately followed by
+      "Semiconductor Corporation" names *Lattice Semiconductor Corporation*, not Anduril.
+    - the immediately preceding token is itself a capitalised word (and not just an opening
+      quote/bracket run) -- e.g. matched "Titan" immediately preceded by "US Army" reads as part
+      of a longer capitalised phrase the matched alias is only a fragment of.
+
+    Both signals are scoped to a *single-word* ``surface`` (no internal space) -- a short bare
+    token (e.g. "Lattice", "Titan", "POP") is genuinely ambiguous with an unrelated longer name
+    this way, but an already multi-word alias/canonical name (e.g. "Anduril Industries", "Lockheed
+    Martin") is specific enough on its own that a following corporate suffix ("... Inc.") or a
+    preceding capitalised word ("prime contractor **Anduril Industries** Inc.") is entirely normal
+    and must not be rejected."""
+    if " " in surface.strip():
+        return False
+    after = text[end : end + 40]
+    m_after = _LEADING_WORD_RE.match(after.lstrip(" \t"))
+    if m_after and m_after.group(1).strip(".").lower() in _LONGER_ORG_SUFFIX_WORDS:
+        return True
+    before = text[max(0, start - 40) : start].rstrip(" \t([{\"'‘“")
+    m_before = _TRAILING_CAP_WORD_RE.search(before)
+    return bool(
+        m_before and m_before.group(1)[:1].isupper() and m_before.group(1).lower() not in {"a", "an", "the"}
+    )
+
+
+@lru_cache(maxsize=1)
+def _company_assignee_surfaces() -> tuple[tuple[str, str], ...]:
+    """``[(surface, canonical company name), ...]`` for every watchlist *company* record (never a
+    program), restricted to each record's own canonical name plus its genuine company-name aliases
+    -- every ``product_aliases`` entry is excluded entirely, regardless of the general strict-alias
+    co-occurrence gate. Longest surface first, same convention as
+    :func:`_surface_to_canonical_name`."""
+    pairs: list[tuple[str, str]] = []
+    seen_names: set[str] = set()
+    for record in _alias_index().values():
+        if record["kind"] != "company" or record["name"] in seen_names:
+            continue
+        seen_names.add(record["name"])
+        product_keys = {normalize_name_key(a) for a in record.get("product_aliases") or []}
+        surfaces = [record["name"], *record["aliases"]]
+        for surface in surfaces:
+            if surface and normalize_name_key(surface) not in product_keys:
+                pairs.append((surface, record["name"]))
+    return tuple(sorted(pairs, key=lambda p: -len(p[0])))
+
+
+def find_watchlist_company_names_in_text(text: str) -> list[str]:
+    """Assignee-safe variant of :func:`find_watchlist_aliases_in_text` (round 14, see the module
+    note above): every watchlist canonical *company* name whose own name or a genuine company-name
+    alias -- never a ``product_aliases`` entry -- appears in ``text`` as a standalone mention (not
+    embedded in a longer, unrelated organisation name or a citation/component mention, rule (b),
+    :func:`_looks_like_longer_org_name_or_citation`). A surface still listed in
+    :func:`_strict_alias_records` (defense in depth -- today every ``strict_aliases`` entry is also
+    a ``product_aliases`` entry, so this rarely fires, but a future alias could be strict without
+    being product-flagged) additionally needs the company's own name/non-strict alias to
+    independently co-occur, same as the general-purpose function.
+
+    Used exclusively by ``eoa.patents.scan._assignee_candidates_in_text`` to infer a patent's
+    assignee from a Google-Patents search snippet -- never for the general ``entities_mentioned``
+    NER pass, which still wants product/programme aliases for topic relevance
+    (:func:`find_watchlist_aliases_in_text`, unchanged)."""
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    strict_index = _strict_alias_records()
+    for surface, canonical_name in _company_assignee_surfaces():
+        if canonical_name in seen:
+            continue
+        m = re.search(r"\b" + re.escape(surface) + r"\b", text, re.IGNORECASE)
+        if not m:
+            continue
+        if _looks_like_longer_org_name_or_citation(text, m.start(), m.end(), surface):
             continue
         strict_record = strict_index.get(normalize_name_key(surface))
         if strict_record is not None and not _record_mentioned_non_strictly(text, strict_record):

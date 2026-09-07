@@ -29,6 +29,7 @@ from lxml import etree
 
 from eoa.llm.schemas.analysis import DailyReportDraft
 from eoa.report.qa_citations import QAResult
+from eoa.report.textnorm import trim_at_word_boundary
 
 # -- constants -----------------------------------------------------------------
 
@@ -212,6 +213,43 @@ def _apply_row_trend_note(cells: list[Any], trend: str | None) -> list[Any]:
     return cells
 
 
+# Round-14 (CR-editing.md, "tables ... cells > ~25 words"): a generic-table cell over this length
+# is trimmed at render time -- applied *after* `_row_identity`/dedup (never inside `_row_cells`
+# itself) so cross-table row-dedup keeps comparing full, untrimmed text.
+_CELL_MAX_CHARS = 220
+_CELL_TRIM_SUFFIX = " … (פירוט במקורות)"
+
+
+def _trim_cell_text(value: Any) -> Any:
+    """Cap an over-long table-cell string at :data:`_CELL_MAX_CHARS`, cutting at a word boundary
+    (never mid-word/mid-token, unlike a bare ``value[:n]`` slice) and pointing the reader at the
+    row's own citations instead of leaving a bare mid-sentence "…". A no-op for non-string values,
+    short strings, and URLs (URLs are rendered as hyperlinks, never trimmed)."""
+    if not isinstance(value, str) or _looks_like_url(value):
+        return value
+    return trim_at_word_boundary(value, _CELL_MAX_CHARS, suffix=_CELL_TRIM_SUFFIX)
+
+
+def _trim_row_cells(cells: list[Any]) -> list[Any]:
+    """:func:`_trim_cell_text` applied to every cell in a row -- the one call site all three
+    renderers (docx/md/html) share, right before a row's cells are written to the page."""
+    return [_trim_cell_text(v) for v in cells]
+
+
+def _table_caption_text(tbl: dict[str, Any]) -> str | None:
+    """A short caption line for a rendered table (defect: "missing table captions",
+    CR-editing.md) -- the author-provided ``note_he`` when the table already carries one,
+    otherwise a synthesized row-count line so a reader always knows a table's size before reading
+    it. ``None`` (render nothing) only for a table with zero rows, which has nothing to caption."""
+    note = tbl.get("note_he")
+    if note:
+        return note
+    n = len(tbl.get("rows") or [])
+    if not n:
+        return None
+    return f"({n} שורות)"
+
+
 def _row_identity(row: Any) -> str:
     """Identity of a table row across a report: the sorted set of its [n] citations when it has
     any (the same item/event cited in two tables), else the whitespace-normalised cell text."""
@@ -252,7 +290,15 @@ def dedupe_rows_across_tables(tables: list[dict[str, Any]] | None) -> list[dict[
             kept.append(r)
         if dropped:
             note = (tbl.get("note_he") or "").strip()
-            extra = f"{dropped} שורות כבר הופיעו בטבלאות קודמות בדוח ולא חזרו כאן."
+            # Round-14 (CR-editing.md, "Hebrew grammar and register"): "1 שורות כבר הופיעו" is a
+            # number/gender-agreement error (שורה is feminine singular; a bare count-prefix template
+            # only ever produces the plural verb/noun form, wrong for count == 1) -- singular
+            # phrasing for exactly one dropped row, the existing plural phrasing otherwise.
+            extra = (
+                "שורה אחת כבר הופיעה בטבלה קודמת בדוח ולא חזרה כאן."
+                if dropped == 1
+                else f"{dropped} שורות כבר הופיעו בטבלאות קודמות בדוח ולא חזרו כאן."
+            )
             tbl = {**tbl, "rows": kept, "note_he": f"{note} {extra}".strip()}
         out.append(tbl)
     return out
@@ -440,6 +486,25 @@ def _draft_system_note_text(draft: Any) -> str:
     """A deterministic, non-LLM-authored notice (goal 1) -- e.g. "no items this period" or the
     two-failure QA fallback message. Empty for a draft that doesn't carry this field."""
     return getattr(draft, "system_note_he", "") or ""
+
+
+def _exec_summary_display_text(draft: Any) -> str | None:
+    """The "תקציר מנהלים" paragraph to render, or ``None`` to render nothing under that heading.
+
+    Round-14 (CR-editing.md): the "אין תקציר לתקופה זו." placeholder used to appear even when
+    ``system_note_he`` (rendered right below it) *did* carry real substance -- e.g.
+    pl_mws_eo_2026-09-07.md read "אין תקציר לתקופה זו." immediately followed by a system note
+    listing 3 patents found in the period, flatly contradicting the placeholder's own claim that
+    there was nothing to summarize. The placeholder is now shown only when there is truly nothing
+    to say anywhere in this slot -- no exec_summary sentence *and* no system note either; when a
+    system note exists, it alone carries this slot's content (rendered immediately after, by every
+    caller of this function)."""
+    text = _draft_exec_summary_text(draft)
+    if text:
+        return text
+    if _draft_system_note_text(draft):
+        return None
+    return "אין תקציר לתקופה זו."
 
 
 # -- Round 5 P4 (2026-09-06) BLUF / likelihood-confidence / assumptions ------------------------
@@ -1175,7 +1240,9 @@ def _add_generic_table_body(doc: DocxDocument, headers: list[str], rows: list[li
         _fill_cell(cell, text, bold=True)
     _shade_header_row(table)
     for row_values in rows:
-        cell_values = _apply_row_trend_note(_row_cells(row_values), _row_related_trend(row_values))
+        cell_values = _trim_row_cells(
+            _apply_row_trend_note(_row_cells(row_values), _row_related_trend(row_values))
+        )
         row = table.add_row().cells
         for cell, value in zip(row, cell_values, strict=True):
             if _looks_like_url(value):
@@ -1373,8 +1440,11 @@ def build_docx(
 
     def _render_table_entry_docx(doc: DocxDocument, tbl: dict[str, Any]) -> None:
         if "headers" in tbl or "rows" in tbl:
-            if tbl.get("note_he"):
-                add_mixed_paragraph(doc, tbl["note_he"])
+            caption = _table_caption_text(tbl)
+            if caption:
+                cap_p = add_mixed_paragraph(doc, caption, size_pt=9)
+                for run in cap_p.runs:
+                    run.font.italic = True
             _add_generic_table_body(doc, tbl.get("headers") or [], tbl.get("rows") or [])
         elif tbl.get("body_he"):
             _add_md_body_docx(doc, tbl["body_he"])
@@ -1421,7 +1491,9 @@ def build_docx(
     _render_extra_group(doc, "before_summary")
 
     _heading1(doc, "תקציר מנהלים")
-    add_mixed_paragraph(doc, _draft_exec_summary_text(draft) or "אין תקציר לתקופה זו.")
+    exec_summary_display = _exec_summary_display_text(draft)
+    if exec_summary_display:
+        add_mixed_paragraph(doc, exec_summary_display)
 
     system_note = _draft_system_note_text(draft)
     if system_note:
@@ -1571,14 +1643,28 @@ def _extra_sections_md(lines: list[str], sections: list[dict[str, Any]], positio
             ]
 
 
+def _escape_md_table_cell(text: str) -> str:
+    """Round-14 (CR-editing.md): a literal ``|`` inside cell text (most often a scraped page title
+    of the common "Headline | Site Name" shape -- confirmed live in bd_il_2026-09-07.md's sources
+    appendix) is a GFM table *column separator*, not data -- left unescaped it silently splits one
+    cell into two, shifting every following cell in the row one column to the right and corrupting
+    the whole table. Escaped to ``\\|`` (GFM's own escape), same treatment a real newline inside a
+    cell gets (collapsed to a space -- a raw newline would just as surely break the row)."""
+    if not text:
+        return text
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
 def _md_cell(value: Any) -> str:
     """A markdown table cell: a bare URL becomes a real ``[url](url)`` link (never a raw URL
     string sitting in running text), per F10. W17 (round 4b, docs/REVIEW_2026-09-06_evening.md):
     a non-URL cell still gets its ``[n]`` citation markers turned into real links to the sources
-    appendix (``_md_citations``), same as prose -- a cell that was previously plain "[10]" text."""
+    appendix (``_md_citations``), same as prose -- a cell that was previously plain "[10]" text.
+    Round-14: a literal ``|``/newline in the cell text is escaped first (:func:`_escape_md_table_cell`)
+    so it can never split the row into extra columns."""
     if value is None:
         return "—"
-    text = str(value)
+    text = _escape_md_table_cell(str(value))
     return f"[{text}]({text})" if _looks_like_url(text) else _md_citations(text)
 
 
@@ -1589,10 +1675,11 @@ def _md_citations(text: str) -> str:
 
 
 def _render_one_table_md(lines: list[str], tbl: dict[str, Any]) -> None:
-    """One table's body (note/trend line + header/rows) -- no heading; see :func:`_tables_md`."""
+    """One table's body (caption/trend line + header/rows) -- no heading; see :func:`_tables_md`."""
     headers = tbl.get("headers") or []
-    if tbl.get("note_he"):
-        lines += [_md_citations(tbl["note_he"]), ""]
+    caption = _table_caption_text(tbl)
+    if caption:
+        lines += [f"*{_md_citations(caption)}*", ""]
     if tbl.get("related_trend_he"):
         # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
         lines += [_md_citations(f"מגמה: {tbl['related_trend_he']}"), ""]
@@ -1601,7 +1688,7 @@ def _render_one_table_md(lines: list[str], tbl: dict[str, Any]) -> None:
         "|" + "---|" * len(headers),
     ]
     for row in tbl.get("rows") or []:
-        cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
+        cells = _trim_row_cells(_apply_row_trend_note(_row_cells(row), _row_related_trend(row)))
         lines.append("| " + " | ".join(_md_cell(v) for v in cells) + " |")
     lines.append("")
 
@@ -1666,12 +1753,10 @@ def render_markdown(
 
     _extra_sections_md(lines, extra_sections, "before_summary")
 
-    lines += [
-        "## תקציר מנהלים",
-        "",
-        _md_citations(_draft_exec_summary_text(draft)) or "אין תקציר לתקופה זו.",
-        "",
-    ]
+    lines += ["## תקציר מנהלים", ""]
+    exec_summary_display = _exec_summary_display_text(draft)
+    if exec_summary_display:
+        lines += [_md_citations(exec_summary_display), ""]
 
     system_note = _draft_system_note_text(draft)
     if system_note:
@@ -1705,11 +1790,16 @@ def render_markdown(
                 if n is not None
                 else source_label(ev.get("source_name"), ev.get("item_url"))
             )
+            # Round-14 (CR-editing.md): `parties`/`customer`/`program` are free scraped text and,
+            # same as the sources appendix, can carry a literal "|" that would otherwise split this
+            # hand-built row into extra columns (see `_escape_md_table_cell`).
+            parties_cell = _escape_md_table_cell(", ".join(ev.get("parties") or []) or "—")
+            customer_cell = _escape_md_table_cell(ev.get("customer") or ev.get("program") or "—")
             lines.append(
                 f"| {fmt_date(ev.get('date'))} "
                 f"| {_EVENT_KIND_LABELS_HE.get(ev.get('kind'), ev.get('kind') or '—')} "
-                f"| {', '.join(ev.get('parties') or []) or '—'} "
-                f"| {ev.get('customer') or ev.get('program') or '—'} "
+                f"| {parties_cell} "
+                f"| {customer_cell} "
                 f"| {fmt_amount(ev)} | {src} |"
             )
         lines.append("")
@@ -1794,8 +1884,14 @@ def render_markdown(
         # `rehype-raw`); in a renderer that doesn't, the anchor is simply invisible and the row
         # number cell still reads correctly.
         n_cell = f'<a id="src-{n}"></a>{n}' if n is not None else ""
+        # Round-14 (CR-editing.md): a scraped item title routinely carries a literal "|" (the
+        # common "Headline | Site Name" page-title convention -- confirmed live in
+        # bd_il_2026-09-07.md) -- escaped so it can never split this row into extra columns (see
+        # `_escape_md_table_cell`).
+        title_cell = _escape_md_table_cell(it.get("title") or "—")
+        source_cell = _escape_md_table_cell(source_label(it.get("source_name"), url))
         lines.append(
-            f"| {n_cell} | {it.get('title') or '—'} | {source_label(it.get('source_name'), url)} "
+            f"| {n_cell} | {title_cell} | {source_cell} "
             f"| {reliability_label(_reliability_for(it))} "
             f"| {fmt_date(it.get('published_at'))} | {link} |"
         )
@@ -1887,10 +1983,11 @@ def _extra_sections_html(parts: list[str], sections: list[dict[str, Any]], posit
 
 
 def _render_one_table_html(parts: list[str], tbl: dict[str, Any]) -> None:
-    """One table's body (note/trend line + header/rows) -- no heading; see :func:`_tables_html`."""
+    """One table's body (caption/trend line + header/rows) -- no heading; see :func:`_tables_html`."""
     headers = tbl.get("headers") or []
-    if tbl.get("note_he"):
-        parts.append(f"<p>{_bidi_html(tbl['note_he'])}</p>")
+    caption = _table_caption_text(tbl)
+    if caption:
+        parts.append(f"<p><em>{_bidi_html(caption)}</em></p>")
     table_trend = tbl.get("related_trend_he")
     if table_trend:
         # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
@@ -1899,7 +1996,7 @@ def _render_one_table_html(parts: list[str], tbl: dict[str, Any]) -> None:
         "<table><thead><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in headers) + "</tr></thead><tbody>"
     )
     for row in tbl.get("rows") or []:
-        row_cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
+        row_cells = _trim_row_cells(_apply_row_trend_note(_row_cells(row), _row_related_trend(row)))
         cells = "".join(f"<td>{_html_cell(v)}</td>" for v in row_cells)
         parts.append(f"<tr>{cells}</tr>")
     parts.append("</tbody></table>")
@@ -2107,7 +2204,9 @@ def render_html(
     _extra_sections_html(parts, extra_sections, "before_summary", h2)
 
     parts.append(h2("תקציר מנהלים"))
-    parts.append(f"<p>{cite_links(_draft_exec_summary_text(draft) or 'אין תקציר לתקופה זו.')}</p>")
+    exec_summary_display = _exec_summary_display_text(draft)
+    if exec_summary_display:
+        parts.append(f"<p>{cite_links(exec_summary_display)}</p>")
 
     system_note = _draft_system_note_text(draft)
     if system_note:

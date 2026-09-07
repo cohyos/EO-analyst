@@ -89,7 +89,13 @@ export function FeedRow({
             if (!hasUrl) e.preventDefault();
           }}
           data-testid={`feed-row-title-link-${item.id}`}
-          title={hasUrl ? "פתח מקור בכרטיסייה חדשה" : undefined}
+          // Content review (docs/qa/content_review/CR-ui.md): this link's own text truncates
+          // (`block truncate`) at the row's fixed height, but `title` used to be a fixed action
+          // hint ("פתח מקור בכרטיסייה חדשה") instead of the title itself -- hovering a cut-off
+          // headline surfaced no way to read the rest of it. Keeps the action hint (still useful,
+          // still distinct from the row's own click-to-open behavior) alongside the full title,
+          // since an element only gets one `title` attribute.
+          title={hasUrl ? `${displayTitle} — פתח מקור בכרטיסייה חדשה` : displayTitle}
           className={cn(
             "block truncate font-medium",
             item.title ? "text-fg" : "italic text-fg-dim",
@@ -99,7 +105,9 @@ export function FeedRow({
           <bdi>{displayTitle}</bdi>
         </a>
         <div className="flex items-center gap-2 text-xs text-fg-dim">
-          <bdi className="truncate">{item.source_name}</bdi>
+          <bdi className="truncate" title={item.source_name || undefined}>
+            {item.source_name}
+          </bdi>
           <span>·</span>
           <span className="font-mono">{timeAgo(item.published_at)}</span>
         </div>

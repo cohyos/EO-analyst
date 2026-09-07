@@ -1,6 +1,63 @@
 // Shared display helpers for the /tenders screen (section 5.2 / FR-5.2).
 import type { TenderIntake, TenderStatus } from "@/types/api";
 
+// Content review (docs/qa/content_review/CR-ui.md): `tender.source` (`GET /api/tenders`) is the
+// raw connector id from `config/tenders.yaml` (Python side, out of scope for this UI-only pass) --
+// e.g. `rfi_rfp_news`, `ted_eu`, `jp_search` -- not a display name. The table used to render that
+// slug as-is, which read as a raw untranslated key sitting right next to properly-labeled columns.
+// Mirrors each connector's own `name:` from `config/tenders.yaml` (shortened to the part before
+// " -- ", which is usually already a recognizable outlet/portal name on its own); an id added to
+// the config after this map was written falls back to the raw slug rather than guessing at a
+// label. `tenderSourceLabel` always returns a short label meant to sit in a table cell.
+const TENDER_SOURCE_LABEL: Record<string, string> = {
+  ted_eu: "TED (Tenders Electronic Daily)",
+  ted_eu_cpv: "TED (Tenders Electronic Daily)",
+  uk_contracts_finder: "UK Contracts Finder (OCDS)",
+  uk_find_tender: "UK Find a Tender Service (FTS)",
+  sam_gov_api: "SAM.gov Opportunities API (US)",
+  sam_gov_search: "SAM.gov opportunities",
+  il_mod: "אתר מכרזים — משרד הביטחון",
+  il_mod_search: "מכרזי משרד הביטחון",
+  nato_nspa: "NATO Support and Procurement Agency (NSPA)",
+  nato_ncia: "NATO Communications and Information Agency (NCIA)",
+  nato_search: "NATO NSPA/NCIA procurement",
+  canada_buys: "CanadaBuys",
+  canada_buys_search: "CanadaBuys",
+  austender: "AusTender",
+  austender_search: "AusTender",
+  rfi_rfp_news: "RFI/RFP defense news",
+  rfi_rfp_news_he: "RFI/RFP הודעות ביטחוניות",
+  fr_boamp: "France BOAMP",
+  nl_tenderned: "Netherlands TenderNed",
+  es_placsp_atom: "Spain PLACSP",
+  us_grants_gov: "US Grants.gov",
+  us_sbir_gov: "US SBIR.gov",
+  no_doffin_api: "Norway Doffin",
+  pl_ezamowienia_api: "Poland eZamówienia",
+  eu_sedia_funding_tenders: "EU Funding & Tenders Portal",
+  us_usaspending: "US USAspending.gov",
+  us_defense_innovation_search: "US defense innovation opportunities",
+  de_search: "Germany bund.de / evergabe-online",
+  it_search: "Italy Consip/MePA",
+  no_search: "Norway Doffin",
+  fi_search: "Finland Hilma",
+  dk_search: "Denmark Udbud.dk",
+  pl_search: "Poland eZamówienia/BZP",
+  jp_search: "Japan ATLA/MoD procurement",
+  kr_search: "Korea KONEPS / D2B",
+  in_search: "India GeM / MoD RFI",
+  sg_search: "Singapore GeBIZ",
+  gcc_search: "UAE/Saudi Etimad",
+  nz_search: "New Zealand GETS",
+  ungm_search: "UN Global Marketplace (UNGM)",
+  eda_search: "NATO EDA / EDF calls",
+};
+
+export function tenderSourceLabel(source: string | null | undefined): string {
+  if (!source) return "—";
+  return TENDER_SOURCE_LABEL[source] ?? source;
+}
+
 export const TENDER_STATUS_LABEL: Record<TenderStatus, string> = {
   open: "פתוח",
   closed: "סגור",

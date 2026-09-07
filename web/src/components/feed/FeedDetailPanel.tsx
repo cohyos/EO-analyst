@@ -71,10 +71,16 @@ export function FeedDetailPanel({
 
   return (
     <div className="flex h-full flex-col" data-testid="feed-detail-panel">
-      <div className="flex items-start gap-2 border-b border-border p-3">
+      <div className="flex flex-wrap items-start gap-2 border-b border-border p-3">
         <LevelBadge level={item.level} />
         <CorroborationBadge corroboration={item.corroboration} showUnknown />
-        <div className="min-w-0 flex-1">
+        {/* Content review (docs/qa/content_review/CR-ui.md): same fix as ItemDetailPage's header
+            -- `min-w-0` let `flex-1` shrink the (non-truncated, wraps-to-multiple-lines) title
+            down to whatever the two badges above left over in this already-narrow drawer/sheet,
+            producing an unreadable single-word-per-line column. `flex-wrap` on the row + a real
+            minimum here lets the title drop to its own full-width line once the badges leave it
+            under ~9rem, instead of being crushed next to them. */}
+        <div className="min-w-[9rem] flex-1">
           <bdi className={cn("block font-semibold", item.title ? "text-fg" : "italic text-fg-dim")}>
             {displayTitle}
           </bdi>

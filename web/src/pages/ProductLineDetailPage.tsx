@@ -10,6 +10,7 @@ import { TenderTable } from "@/components/tenders/TenderTable";
 import { ProductLineReportList } from "@/components/productLines/ProductLineReportList";
 import type { ProductLinePendingState } from "@/components/productLines/ProductLineCard";
 import { cn } from "@/lib/cn";
+import { domainSubdomainLabel } from "@/lib/taxonomy";
 import { useI18n, useT } from "@/i18n";
 import type { TenderFeedbackVerdict, TriageLevel } from "@/types/api";
 
@@ -98,8 +99,8 @@ export function ProductLineDetailPage() {
               <span className="flex flex-wrap items-center gap-1">
                 <span className="text-fg-dim">{t("productLines.subdomainsLabel")}:</span>
                 {pl.subdomains.map((s) => (
-                  <span key={s} className="rounded-full bg-bg-sunken px-2 py-0.5">
-                    <bdi>{s}</bdi>
+                  <span key={s} className="rounded-full bg-bg-sunken px-2 py-0.5" title={s}>
+                    <bdi>{domainSubdomainLabel(s)}</bdi>
                   </span>
                 ))}
               </span>

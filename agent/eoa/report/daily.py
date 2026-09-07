@@ -36,8 +36,8 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
-from eoa.report.style import apply_style_guard
-from eoa.report.textnorm import normalize_draft
+from eoa.report.style import apply_style_guard, dedupe_exact_sentences_across_sections
+from eoa.report.textnorm import normalize_draft, normalize_hebrew_punctuation, trim_at_word_boundary
 
 log = structlog.get_logger(__name__)
 
@@ -594,13 +594,21 @@ def collect_deep_search(
                 "item_id": row.get("trigger_item_id"),
                 "trigger_title": row.get("trigger_title"),
                 "trigger_url": row.get("trigger_url"),
-                "question": payload.get("question"),
+                # Round-14 (CR-editing.md): `answer_he`/`contradictions_he`/`question`/`key_facts`
+                # are pre-formatted markdown produced upstream (`eoa.search.deep_search`/
+                # `eoa.api.routes.ask` -- not owned by the report layer) and embedded here close to
+                # verbatim by every downstream renderer (`docx_builder._add_deep_search_section`
+                # and its md/html siblings). They routinely carry embedded bidi-isolate control
+                # characters and unescaped `\"` sequences (see `eoa.report.textnorm`'s module
+                # docstring) that render as visible artifacts -- normalized once here, at
+                # collection time, so all three renderers get clean text for free.
+                "question": normalize_hebrew_punctuation(payload.get("question")),
                 "outcome": result.get("outcome") or row.get("state"),
-                "answer_he": result.get("answer_he", ""),
+                "answer_he": normalize_hebrew_punctuation(result.get("answer_he", "")) or "",
                 "confidence": result.get("confidence"),
                 "sources": result.get("sources", []),
-                "key_facts": result.get("key_facts", []),
-                "contradictions_he": result.get("contradictions_he", ""),
+                "key_facts": [normalize_hebrew_punctuation(f) or f for f in (result.get("key_facts") or [])],
+                "contradictions_he": normalize_hebrew_punctuation(result.get("contradictions_he", "")) or "",
                 # R8-investigations-b: lineage pointers a rerun/expansion payload may carry --
                 # `eoa.api.services.expand_investigation` and the security-review re-run path both
                 # write `expanded_from_job_id`; the orchestrator's queued re-runs (e.g. jobs 145-148,
@@ -1538,8 +1546,19 @@ def _tenders_forecast_table(
         pct = f"{likelihood:.0%}" if isinstance(likelihood, int | float) else "—"
         window = f"{fmt_date(f.get('window_from'))} - {fmt_date(f.get('window_to'))}"
         rationale = (f.get("rationale_he") or "").strip() or "—"
-        if len(rationale) > 200:
-            rationale = rationale[:199] + "…"
+        # Round-14 (CR-editing.md): the forecast-drafting stage sometimes cites its own internal
+        # item ids inline (e.g. "...[item 12][item 47]...") -- an artifact of the prompt's own
+        # data labelling, never meant for a reader (this table already has a real "מקורות" [n]
+        # citation column). Stripped here rather than at the source (`eoa.tenders.report_section`,
+        # not owned by the report layer) since this is display cleanup for this table specifically.
+        # Also swallows an enclosing "(...)" the marker sits alone in (e.g. "Defense ([item 12])
+        # מצביע") so no dangling empty "( )" is left behind; a lone marker with no parens is
+        # removed the same way.
+        rationale = re.sub(r"\(?\s*\[item\s+\d+\]\s*\)?", "", rationale)
+        rationale = re.sub(r" {2,}", " ", rationale).strip() or "—"
+        # Word-boundary trim (never mid-word/mid-token) instead of a bare char-count slice -- see
+        # `eoa.report.textnorm.trim_at_word_boundary`.
+        rationale = trim_at_word_boundary(rationale, 200, suffix=" … (פירוט במקורות)")
         citation_ns = f.get("_citation_ns") or []
         sources_cell = "".join(f"[{n}]" for n in citation_ns) or "—"
         rows.append(
@@ -1665,6 +1684,13 @@ def build_daily(
     draft, _style_report = apply_style_guard(draft, report_kind="daily")
     _style_report.log_all(report_kind="daily")
     draft, _so_what_removed = strip_so_what_phrases_from_draft(draft, report_kind="daily")
+    # Round-14 (CR-editing.md, "repeated sentences across sections"): drop an exact-duplicate
+    # sentence repeated verbatim in a later section/outlook row -- see
+    # `eoa.report.style.dedupe_exact_sentences_across_sections`'s own docstring for why this is
+    # safe (never rewrites, never orphans citations, never empties a section).
+    draft, _n_dupes_dropped = dedupe_exact_sentences_across_sections(draft)
+    if _n_dupes_dropped:
+        log.info("daily_report_exact_duplicate_sentences_dropped", n=_n_dupes_dropped)
 
     # Round 5 P2 (docs/PLAN_ROUND5_REPORTS.md P2, D4/D5): "מה השתנה מאז הדוח הקודם" (deterministic
     # delta vs. the previous daily report) and the "מעקב אינדיקטורים" (I&W) watchlist table -- both

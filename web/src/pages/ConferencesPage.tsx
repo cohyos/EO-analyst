@@ -169,7 +169,9 @@ export function ConferencesPage() {
                         // icon leaves the rest of the visible row (the name text) as plain,
                         // non-navigating surface a tap can land on to expand/collapse.
                         <span className="inline-flex min-w-0 items-center gap-1.5">
-                          <bdi className="truncate">{c.name}</bdi>
+                          <bdi className="truncate" title={c.name}>
+                            {c.name}
+                          </bdi>
                           <a
                             href={outUrl}
                             target="_blank"

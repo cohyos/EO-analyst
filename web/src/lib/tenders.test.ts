@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEADLINE_URGENT_DAYS, daysLeft, likelihoodBand } from "./tenders";
+import { DEADLINE_URGENT_DAYS, daysLeft, likelihoodBand, tenderSourceLabel } from "./tenders";
 
 describe("daysLeft", () => {
   const now = new Date("2026-09-04T10:00:00Z");
@@ -56,5 +56,27 @@ describe("likelihoodBand", () => {
   it("treats a null/undefined likelihood as 0 (low)", () => {
     expect(likelihoodBand(null)).toBe("low");
     expect(likelihoodBand(undefined)).toBe("low");
+  });
+});
+
+// Content review (docs/qa/content_review/CR-ui.md): `GET /api/tenders` returns the raw connector
+// id from config/tenders.yaml (e.g. `rfi_rfp_news`) as `tender.source`, not a display name -- the
+// table used to render that slug as-is next to properly-labeled columns.
+describe("tenderSourceLabel", () => {
+  it("maps a known connector id to its short display label", () => {
+    expect(tenderSourceLabel("ted_eu")).toBe("TED (Tenders Electronic Daily)");
+    expect(tenderSourceLabel("rfi_rfp_news")).toBe("RFI/RFP defense news");
+    expect(tenderSourceLabel("jp_search")).toBe("Japan ATLA/MoD procurement");
+  });
+
+  it("falls back to the raw id for an unmapped source (e.g. mock/legacy display names)", () => {
+    expect(tenderSourceLabel("SAM.gov")).toBe("SAM.gov");
+    expect(tenderSourceLabel("some_future_connector")).toBe("some_future_connector");
+  });
+
+  it("returns an em dash placeholder for a missing source", () => {
+    expect(tenderSourceLabel(null)).toBe("—");
+    expect(tenderSourceLabel(undefined)).toBe("—");
+    expect(tenderSourceLabel("")).toBe("—");
   });
 });

@@ -49,7 +49,9 @@ export function ChatThread({
               key={`${c.kind}-${c.id}`}
               className="flex items-center gap-1 rounded-full bg-bg-sunken px-2 py-0.5 text-xs text-fg-muted"
             >
-              <bdi className="max-w-[10rem] truncate">{c.label}</bdi>
+              <bdi className="max-w-[10rem] truncate" title={c.label}>
+                {c.label}
+              </bdi>
               <button
                 type="button"
                 aria-label={`הסר את ${c.label} מההקשר`}

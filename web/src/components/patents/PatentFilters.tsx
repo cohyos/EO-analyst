@@ -1,4 +1,5 @@
 import { Search } from "lucide-react";
+import { subdomainLabel } from "@/lib/taxonomy";
 
 export interface PatentFiltersState {
   assignee: string;
@@ -53,7 +54,7 @@ export function PatentFilters({
         <option value="">כל תתי-התחום</option>
         {subdomains.map((s) => (
           <option key={s} value={s}>
-            {s}
+            {subdomainLabel(s)}
           </option>
         ))}
       </select>

@@ -27,6 +27,8 @@ from eoa.memory.relational import (
     update_item_fields,
     upsert_entity,
 )
+from eoa.pipeline.analysis_grounding import ground_analysis_fields, is_too_thin
+from eoa.pipeline.event_grounding import ground_event
 
 log = structlog.get_logger(__name__)
 
@@ -330,6 +332,14 @@ def repair_so_what_text(
     text = (fixed.so_what_he or "").strip()
     if not text or not text.startswith("להערכתנו"):
         log.info("so_what_round6_repair_rejected", item_id=item.get("id"), text=text[:160])
+        return None
+    # Round-14 (2026-09-07): this repaired so_what_he is a fresh LLM output about to be persisted
+    # directly by the caller (it does not itself go through persist_analysis's own grounding call)
+    # -- ground it here so a round-6/13/14-style repair pass can never reintroduce an ungrounded
+    # organisation/affiliation/competitor claim.
+    text = ground_analysis_fields(item, so_what_he=text).so_what_he
+    if is_too_thin(text, require_prefix="להערכתנו"):
+        log.info("so_what_round6_repair_rejected_ungrounded", item_id=item.get("id"), text=text[:160])
         return None
     return text
 
@@ -750,11 +760,51 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
         log.debug("israel_relevance_refresh_failed", item_id=item["id"], error=str(exc)[:120])
     # --- A13 -- END --------------------------------------------------------------------------
 
-    update_item_fields(
-        item["id"],
+    # Round-14 (2026-09-07, item-39 fabrication root-cause fix): the analysis-stage grounding
+    # guard -- summary_he/so_what_he/key_facts/entities_mentioned must never assert an
+    # organisation/affiliation/competitor/number the item's own source text (or the watchlist, for
+    # a company it actually mentions) doesn't support. Every removal is logged by
+    # analysis_grounding itself (analysis.ungrounded_<category>_removed); a field left too thin by
+    # stripping is persisted as-is here (never blocks the pipeline) and picked up for a fresh
+    # LLM re-analysis by scripts/repair_round14_grounding.py's own sweep.
+    # entities_mentioned is only ever ground-checked (and possibly rewritten) when entity
+    # persistence is allowed at all -- an out-of-scope/archived item's entities_mentioned must
+    # never be touched, matching _entity_persistence_allowed's own contract elsewhere in this
+    # function (round-6 D3/D9).
+    entities_for_grounding = (
+        extra_fields.get("entities_mentioned") or item.get("entities_mentioned")
+        if entity_persistence_ok
+        else None
+    )
+    grounding = ground_analysis_fields(
+        item,
         summary_he=out.summary_he,
         so_what_he=out.so_what_he,
         key_facts=_dedupe_key_facts(list(out.key_facts)),
+        entities_mentioned=entities_for_grounding,
+    )
+    if grounding.removed:
+        log.info(
+            "analyze_grounding_stripped",
+            item_id=item["id"],
+            n_removed=len(grounding.removed),
+            categories=sorted({r["category"] for r in grounding.removed}),
+        )
+    if is_too_thin(grounding.summary_he) or is_too_thin(grounding.so_what_he, require_prefix="להערכתנו"):
+        log.warning(
+            "analyze_grounding_left_too_thin",
+            item_id=item["id"],
+            summary_he=grounding.summary_he[:160],
+            so_what_he=grounding.so_what_he[:160],
+        )
+    if entity_persistence_ok and grounding.entities_mentioned != (entities_for_grounding or []):
+        extra_fields["entities_mentioned"] = grounding.entities_mentioned
+
+    update_item_fields(
+        item["id"],
+        summary_he=grounding.summary_he,
+        so_what_he=grounding.so_what_he,
+        key_facts=grounding.key_facts,
         uncertainty_he=_with_partial_content_note(item, out.uncertainty_he or None),
         # A12 (מעקב טכנולוגי): additive, only ever non-null for domain == "tech_dev" -- the LLM
         # is instructed (prompts/analyze.md) to leave these null/empty for every other domain.
@@ -782,23 +832,43 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 scaled=amount_usd,
                 magnitude=magnitude,
             )
+        # CR-events (2026-09-07, docs/qa/content_review/CR-events.md): ground every extracted event
+        # against the item's own source text before it is persisted -- amount magnitude, customer,
+        # parties and kind vocabulary must be traceable to the source (events 22/23: an Anduril
+        # appointment article became a fabricated $10B m_and_a against the Israeli MoD).
+        grounded = ground_event(
+            item,
+            {
+                "kind": ev.kind, "title": ev.title, "date": ev.date, "amount_usd": amount_usd,
+                "currency": ev.currency, "parties": event_parties, "customer": ev.customer,
+                "program": ev.program, "summary_he": ev.summary_he, "confidence": ev.confidence,
+            },
+        )
+        if grounded is None:
+            log.info("event.dropped", item_id=item["id"], title=(ev.title or "")[:160])
+            continue
+        if grounded.dropped_fields:
+            log.info(
+                "event.ungrounded_field_dropped",
+                item_id=item["id"], title=(ev.title or "")[:160], fields=grounded.dropped_fields,
+            )
         try:
             event_id = insert_event(
                 item_id=item["id"],
-                kind=ev.kind,
-                title=ev.title,
-                date=_parse_date(ev.date),
-                amount_usd=amount_usd,
-                currency=ev.currency,
-                parties=event_parties,
-                customer=ev.customer,
-                program=ev.program,
-                summary_he=ev.summary_he,
-                confidence=ev.confidence,
+                kind=grounded.kind,
+                title=grounded.title,
+                date=_parse_date(grounded.date),
+                amount_usd=grounded.amount_usd,
+                currency=grounded.currency,
+                parties=grounded.parties,
+                customer=grounded.customer,
+                program=grounded.program,
+                summary_he=grounded.summary_he,
+                confidence=grounded.confidence,
             )
             n_events += 1
             persisted_event_ids.append(event_id)
-            persisted_event_party_names.extend(p for p in (event_parties or []) if p)
+            persisted_event_party_names.extend(p for p in (grounded.parties or []) if p)
         except Exception as exc:
             log.warning("event_insert_failed", item_id=item["id"], error=str(exc)[:160])
     n_edges = 0
@@ -882,7 +952,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
         from eoa.product_lines.tagging import tag_product_lines
 
         entities_for_tagging = extra_fields.get("entities_mentioned") or item.get("entities_mentioned") or []
-        text_he = " ".join(filter(None, [out.summary_he, out.so_what_he]))
+        text_he = " ".join(filter(None, [grounding.summary_he, grounding.so_what_he]))
         product_lines = tag_product_lines(
             text_he=text_he,
             text_en=item.get("title"),

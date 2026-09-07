@@ -58,11 +58,13 @@ export function AskSourcesFooter({ sources }: { sources: AskCitation[] }) {
                     onClick={() => openSource(c)}
                     className="min-w-0 flex-1 text-start text-xs text-fg hover:underline"
                   >
-                    <bdi className="block truncate">{c.title || "(ללא כותרת)"}</bdi>
+                    <bdi className="block truncate" title={c.title || "(ללא כותרת)"}>
+                      {c.title || "(ללא כותרת)"}
+                    </bdi>
                   </button>
                 </SourcePreviewPopover>
                 {c.source_name && (
-                  <bdi className="max-w-[8rem] shrink-0 truncate text-[10px] text-fg-dim">
+                  <bdi className="max-w-[8rem] shrink-0 truncate text-[10px] text-fg-dim" title={c.source_name}>
                     {c.source_name}
                   </bdi>
                 )}

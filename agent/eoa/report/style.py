@@ -360,3 +360,121 @@ def apply_style_guard(
 
     updated = draft.model_copy(update=updates) if updates else draft
     return updated, report
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-14 (CR-editing.md, "repeated sentences across sections"): `apply_style_guard` above is
+# deliberately detection-only for duplicates (see the module docstring's CONVENTIONS.md rule 4
+# rationale -- rewriting/splitting a sentence risks orphaning its `cites`). This pass is narrower
+# and safe to actually apply: it only ever *drops* a whole `Sentence` object whose `text_he` is
+# byte-identical (after whitespace/case normalization) to one already kept earlier in the draft --
+# never rewrites, merges, or touches a near-duplicate. Dropping an exact repeat can never orphan a
+# claim's citations (the earlier, surviving occurrence already carries the identical `cites` for
+# the identical sentence) and never leaves a section/trend with zero sentences (the first sentence
+# in a collection is always kept even if it duplicates an earlier one, rather than emptying the
+# collection -- see :func:`dedupe_exact_sentences_across_sections`'s own docstring).
+# ---------------------------------------------------------------------------------------------
+
+
+def dedupe_exact_sentences_across_sections(draft: _M) -> tuple[_M, int]:
+    """Drop a later exact-duplicate ``Sentence`` (same normalized ``text_he``) that repeats one
+    already kept earlier in reading order: ``bluf`` -> ``exec_summary`` -> ``sections[].sentences``
+    -> ``trends[].sentences`` (weekly/monthly only) -> ``outlook``. Legacy free-prose ``*_he`` string fields
+    (monthly/bd_territory-old) are left untouched -- slicing a sentence out of a paragraph string
+    is exactly the unsafe rewrite this function's narrower, structured-``Sentence``-only scope
+    avoids (:func:`apply_style_guard`'s detection-only duplicate check still covers that shape).
+
+    A collection (a section's/trend's own ``sentences`` list, or ``outlook``) never ends up empty
+    because of this pass: its first sentence is always kept, even when it repeats something from an
+    earlier collection, so no section goes blank as a side effect of deduping.
+
+    Returns ``(possibly-updated draft, n_dropped)`` -- ``n_dropped == 0`` (draft returned as-is)
+    when nothing repeated.
+    """
+    seen: set[str] = set()
+    dropped = 0
+
+    def _dedupe_list(sentences: list[Any]) -> list[Any]:
+        # Two-phase, not a single pass: phase 1 filters out every exact repeat of a
+        # already-``seen`` sentence; only *after* seeing the whole collection do we know whether
+        # that left it non-empty. A single-pass "keep the first sentence in this collection
+        # unconditionally" rule would also protect a repeat that happens to come first even when a
+        # later, non-duplicate sentence in the same collection would have kept it non-empty anyway
+        # (e.g. trend.sentences == [<repeat of an exec_summary sentence>, <a real, unique
+        # sentence>] should still drop the repeat -- only the *all-of-it-is-a-repeat* case needs
+        # the empty-collection guard).
+        nonlocal dropped
+        kept: list[Any] = []
+        removed: list[Any] = []
+        for s in sentences:
+            text = getattr(s, "text_he", None)
+            if not isinstance(text, str) or not text:
+                kept.append(s)
+                continue
+            key = _normalize_for_dup_check(text)
+            if not key:
+                kept.append(s)
+                continue
+            if key in seen:
+                removed.append(s)
+                continue
+            seen.add(key)
+            kept.append(s)
+        if not kept and sentences:
+            # Every sentence in this collection was an exact repeat of something kept earlier --
+            # restore the very first one rather than leave the collection (and its heading) with
+            # nothing under it; that one sentence is no longer counted as "dropped".
+            kept = [sentences[0]]
+            removed = [r for r in removed if r is not sentences[0]]
+        dropped += len(removed)
+        return kept
+
+    updates: dict[str, Any] = {}
+
+    # bluf: list[Sentence] ("שורה תחתונה") -- read first by design (BLUF-first structure), so
+    # processed first here too: a sentence repeated later in exec_summary/a section is what gets
+    # dropped, never the BLUF line itself.
+    bluf = getattr(draft, "bluf", None)
+    if isinstance(bluf, list) and bluf:
+        updates["bluf"] = _dedupe_list(bluf)
+
+    exec_summary = getattr(draft, "exec_summary", None)
+    if isinstance(exec_summary, list) and exec_summary:
+        updates["exec_summary"] = _dedupe_list(exec_summary)
+
+    sections = getattr(draft, "sections", None)
+    if isinstance(sections, list) and sections:
+        new_sections = []
+        for section in sections:
+            if hasattr(section, "sentences") and isinstance(section.sentences, list):
+                new_sentences = _dedupe_list(section.sentences)
+                new_sections.append(
+                    section.model_copy(update={"sentences": new_sentences})
+                    if new_sentences != section.sentences
+                    else section
+                )
+            else:
+                new_sections.append(section)
+        updates["sections"] = new_sections
+
+    trends = getattr(draft, "trends", None)
+    if isinstance(trends, list) and trends:
+        new_trends = []
+        for trend in trends:
+            if hasattr(trend, "sentences") and isinstance(trend.sentences, list):
+                new_sentences = _dedupe_list(trend.sentences)
+                new_trends.append(
+                    trend.model_copy(update={"sentences": new_sentences})
+                    if new_sentences != trend.sentences
+                    else trend
+                )
+            else:
+                new_trends.append(trend)
+        updates["trends"] = new_trends
+
+    outlook = getattr(draft, "outlook", None)
+    if isinstance(outlook, list) and outlook:
+        updates["outlook"] = _dedupe_list(outlook)
+
+    updated = draft.model_copy(update=updates) if updates else draft
+    return updated, dropped

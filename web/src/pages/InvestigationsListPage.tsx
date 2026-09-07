@@ -10,6 +10,7 @@ import { useToastQueue } from "@/hooks/useToastQueue";
 import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
+import { renderBidiText } from "@/lib/bidiText";
 
 // F17 (docs/REVIEW_2026-09-05.md): job #70 ran for a long time in `running` state without the
 // operator noticing -- "רץ עכשיו" (running now) makes an in-flight investigation visually loud
@@ -141,10 +142,12 @@ export function InvestigationsListPage() {
                       className="text-accent hover:underline"
                     >
                       <bdi>
-                        {inv.question?.trim() ||
-                          (inv.item_title
-                            ? `אימות והרחבה: ${inv.item_title}`
-                            : `חקירה על פריט #${inv.item_id ?? "?"}`)}
+                        {renderBidiText(
+                          inv.question?.trim() ||
+                            (inv.item_title
+                              ? `אימות והרחבה: ${inv.item_title}`
+                              : `חקירה על פריט #${inv.item_id ?? "?"}`),
+                        )}
                       </bdi>
                     </Link>
                     {inv.state === "error" && inv.error && (
@@ -193,7 +196,10 @@ export function InvestigationsListPage() {
                         to={`/items/${provenanceByJobId.get(inv.job_id)!.trigger_item!.id}`}
                         className="text-accent hover:underline"
                       >
-                        <bdi className="block max-w-[10rem] truncate">
+                        <bdi
+                          className="block max-w-[10rem] truncate"
+                          title={provenanceByJobId.get(inv.job_id)!.trigger_item!.title || "פריט"}
+                        >
                           {provenanceByJobId.get(inv.job_id)!.trigger_item!.title || "פריט"}
                         </bdi>
                       </Link>
@@ -206,7 +212,9 @@ export function InvestigationsListPage() {
                       const lastReport = provenanceByJobId.get(inv.job_id)?.reports?.[0];
                       return lastReport ? (
                         <Link to={`/reports?id=${lastReport.id}`} className="text-accent hover:underline">
-                          <bdi className="block max-w-[10rem] truncate">{lastReport.title_he}</bdi>
+                          <bdi className="block max-w-[10rem] truncate" title={lastReport.title_he}>
+                            {lastReport.title_he}
+                          </bdi>
                         </Link>
                       ) : (
                         <span className="text-fg-muted">—</span>

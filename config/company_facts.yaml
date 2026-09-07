@@ -1,0 +1,69 @@
+# Round-14 (2026-09-07): a small, curated corporate-affiliation registry for the Israeli EO/IR
+# industry, used by `eoa.pipeline.analysis_grounding` to hard-reject an ownership/affiliation
+# claim in LLM-generated analysis text (summary_he/so_what_he/patents.so_what_he) that contradicts
+# a fact we are actually confident in -- independent of whether the item's own source text happens
+# to mention the (wrong) parent too (co-occurrence alone is not enough to save a claim that
+# directly contradicts a known fact here).
+#
+# Root cause this exists for: item 39 (edrmagazine.eu, "15-300 mm f/4 MWIR zoom") -- the analysis
+# stage invented "Ophir Optronics, חברה בת של תעשייה אווירית (תע"א)" (a subsidiary of Israel
+# Aerospace Industries). Ophir Optronics is in fact a subsidiary of MKS Instruments (US) -- IAI has
+# no ownership relationship with it at all. The item's own source text never mentions IAI, but even
+# if some future item's text *did* pair "Ophir Optronics" with "IAI" in one sentence, this registry
+# entry means the co-occurrence guard alone would not save the claim: a `parents` entry is an
+# affirmative, hard fact, not merely "nothing to contradict it".
+#
+# Schema per entry:
+#   name        -- canonical company name (matches config/watchlist.yaml `name` where the company
+#                  is itself tracked there; free text otherwise).
+#   parents     -- list of canonical parent-company names (1 entry for a straightforward subsidiary,
+#                  2 for a joint venture / dual ownership). A claim naming a parent NOT in this list
+#                  (and not an alias of one that is) is rejected outright by
+#                  eoa.pipeline.analysis_grounding, regardless of source co-occurrence.
+#   confidence  -- "high" (publicly documented, verified against >=1 primary/reliable source) or
+#                  "medium" (well-sourced but with some residual uncertainty -- see note). Only
+#                  "high"/"medium" entries are used for the hard-reject; there is no "low" entry
+#                  below (an unconfirmed guess is left out of this file entirely rather than risking
+#                  a false hard-reject of a claim that might actually be true).
+#   note        -- provenance / rationale, free text.
+entries:
+  - name: "Ophir Optronics"
+    parents: ["MKS Instruments"]
+    confidence: high
+    note: >
+      Ophir Optronics Solutions Ltd. (Israel) has operated as a subsidiary of MKS Instruments
+      Inc. (US, Nasdaq: MKSI) since MKS acquired Ophir Optronics Ltd. in 2011 (lead check 2026-09-07);
+      products are marketed today as "MKS Ophir" / "MKS Photonics" (matches the existing
+      watchlist.yaml alias "MKS Ophir" under the Ophir Optronics entry). NOT part of Israel
+      Aerospace Industries (IAI) -- confirmed by item 39's own source text photo credit
+      ("photo courtesy MKS") and general public record. Root-cause fixture for this registry
+      (item 39 fabrication, 2026-09-07): the analysis stage invented "חברה בת של תעשייה אווירית"
+      (subsidiary of IAI), which this entry now hard-rejects.
+
+  - name: "Elop"
+    parents: ["Elbit Systems"]
+    confidence: high
+    note: >
+      El-Op Electro-Optics Industries Ltd. merged into Elbit Systems in 2000 and now operates as
+      Elbit Systems Electro-Optics (ELOP); already tracked as an alias of "Elbit" in
+      config/watchlist.yaml ("Elop", "El-Op"). A grounded affiliation claim ("Elop, part of
+      Elbit Systems") when the source text actually says so is the module's own regression test
+      for the case this registry must NOT over-reject.
+
+  - name: "Elta"
+    parents: ["IAI"]
+    confidence: high
+    note: >
+      ELTA Systems Ltd. is a wholly-owned subsidiary of Israel Aerospace Industries (IAI);
+      already tracked as an alias of "IAI" in config/watchlist.yaml ("ELTA").
+
+  - name: "Opgal"
+    parents: ["Rafael", "Elbit Systems"]
+    confidence: medium
+    note: >
+      Opgal Optronic Industries Ltd. was founded in 1983 as a Rafael-Elron joint venture; Elbit
+      Systems (via Elop) later took over the Elron side, so Rafael and Elbit Systems are the two
+      plausible parents -- not a subsidiary of any third company (lead check 2026-09-07). Listed at "medium" confidence (current exact ownership split
+      not independently re-verified for this round) rather than "high": a claim naming Rafael OR
+      Elbit Systems as a parent/co-owner is NOT hard-rejected (either is plausibly true per this
+      entry), but a claim naming any THIRD company (e.g. IAI, Thales) as Opgal's parent still is.

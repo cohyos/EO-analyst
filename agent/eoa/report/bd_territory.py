@@ -395,12 +395,26 @@ def territory_label(territory: str) -> str:
 # comment: this module doesn't depend on daily.py/weekly.py's internals, docs/CONVENTIONS.md rule 6)
 # --------------------------------------------------------------------------
 
+#: Round-14 (CR-editing.md): matches ``eoa.report.daily._UNKNOWN_DOMAIN_LABEL_HE`` verbatim -- the
+#: fallback Hebrew label for a ``domain``/pseudo-domain value with no real taxonomy entry, never
+#: the raw slug itself.
+_UNKNOWN_DOMAIN_LABEL_HE = "תחומים נוספים"
+
 
 def _domain_label(domain: str | None) -> str:
+    """Round-14 (CR-editing.md, "headings that are English keys or taxonomy slugs"): never falls
+    back to the raw ``domain`` string itself -- ``out_of_scope``/``archive`` (and any other
+    non-taxonomy pseudo-domain value that reaches this report layer) are not real
+    ``config/taxonomy.yaml`` domain keys, so returning them verbatim leaked an English key straight
+    into a Hebrew heading (e.g. "...בתחום out_of_scope"). Mirrors ``eoa.report.daily``'s own
+    ``_domain_label`` fix for the same bug (Q3-15), kept as a local copy per this module's existing
+    no-cross-import convention rather than importing daily's fuzzy-match version."""
+    if not domain:
+        return "כללי"
     domains = settings().taxonomy.get("domains", {})
-    entry = domains.get(domain or "", {})
+    entry = domains.get(domain, {})
     label = entry.get("label")
-    return label if isinstance(label, str) and label else (domain or "כללי")
+    return label if isinstance(label, str) and label else _UNKNOWN_DOMAIN_LABEL_HE
 
 
 def _group_by_domain(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -579,7 +593,24 @@ def collect_platform_events(
 
     W16(c): an event whose ``customer``/``parties`` textually names the territory (e.g. "German
     Navy") is included even when the underlying item's ``geography`` didn't resolve to it -- same
-    defense as :func:`collect_market_items`'s own text-mention fallback."""
+    defense as :func:`collect_market_items`'s own text-mention fallback.
+
+    Round-14 (CR-events.md, ``docs/qa/content_review/CR-factcheck.md`` bd_il line 101 / bd_gr line
+    84): the platform match text used to also include the item's full ``clean_text`` body, which
+    produced a self-contradictory "buyer=supplier=Israel, מטוס קרב (fighter jet), $3.6B" row on the
+    Greece air-defense-deal item (id 90) -- that item's ``clean_text`` mentions "F-16" once, in an
+    unrelated sentence about Turkish drone incidents ("A pair of Greek Air Force F-16s were
+    scrambled..."), nothing to do with the air-defense sale the event itself describes, and the
+    substring match against the whole body picked it up anyway. The match text is now the event's
+    *own* extracted fields (``title``/``summary_he``/``program``) plus the item's headline
+    (``item_title``) only -- never the full body -- so a platform category is attached only when it
+    is actually named in the text describing *this* event, not merely mentioned somewhere else in a
+    long article (the same "check the event's own text, not the whole corpus" scoping
+    ``eoa.pipeline.event_grounding._reclassify_kind`` uses for the identical reason). A ``match is
+    None`` now correctly falls back to the event's own ``program``/``title`` (as before) instead of
+    a wrong category -- for item 90 that fallback is exactly right, since the event's own title
+    already says "מכירת שלושה מערכות הגנה אווירית ליוון" (sale of three air-defense systems to
+    Greece), not "fighter jet"."""
     code = normalize_country(territory)
     rows = _fetchall(
         """
@@ -611,16 +642,29 @@ def collect_platform_events(
 
     out: list[dict[str, Any]] = []
     for ev in rows:
+        # Round-14: the event's own text + the item's headline only -- see the docstring above for
+        # why ``clean_text`` (the full body) is deliberately excluded from this match.
         text = " ".join(
-            str(x)
-            for x in (ev.get("title"), ev.get("item_title"), ev.get("clean_text"), ev.get("summary_he"))
-            if x
+            str(x) for x in (ev.get("title"), ev.get("summary_he"), ev.get("program"), ev.get("item_title")) if x
         )
         match = next((p for p in platforms if p.matches(text)), None)
+
+        # Round-14 (CR-events.md, bd_il line 101 / bd_gr line 84): the previous "buyer = customer or
+        # parties[0]; vendor = first party != customer" derivation produced buyer == vendor whenever
+        # ``customer`` was null -- ``parties[0] != None`` is always true, so ``vendor`` fell back to
+        # the very same ``parties[0]`` the ``buyer`` fallback had just picked (e.g. event 25:
+        # customer=None, parties=['Israel','Greece'] -> buyer='Israel', vendor='Israel'). A buyer is
+        # only ever taken from the event's own grounded ``customer`` field now -- never guessed from
+        # ``parties`` -- and a vendor is only ever a *different* named party than the buyer; either
+        # side missing (or, defensively, still equal) renders as "לא ידוע" rather than a guess.
+        customer = ev.get("customer")
         parties = ev.get("parties") or []
-        vendor = next((p for p in parties if p != ev.get("customer")), None) or (
-            parties[0] if parties else None
-        )
+        buyer = customer or "לא ידוע"
+        vendor = next((p for p in parties if p and p != customer), None) or (
+            parties[0] if parties and not customer else None
+        ) or "לא ידוע"
+        if buyer != "לא ידוע" and vendor != "לא ידוע" and buyer == vendor:
+            vendor = "לא ידוע"
         out.append(
             {
                 "item_id": ev.get("item_id"),
@@ -631,8 +675,11 @@ def collect_platform_events(
                 "date": ev.get("date"),
                 "platform_he": match.category_he if match else (ev.get("program") or ev.get("title") or "—"),
                 "payload_need_he": match.payload_need_he if match else None,
-                "buyer": ev.get("customer") or (parties[0] if parties else None) or "—",
-                "vendor": vendor or "—",
+                "buyer": buyer,
+                "vendor": vendor,
+                # Round-14: amount/currency come straight from the (by now already grounded, once
+                # eoa.pipeline.event_grounding is wired into persist_analysis -- see that module's
+                # docstring) events row -- never re-derived or inferred here.
                 "amount_usd": ev.get("amount_usd"),
                 "currency": ev.get("currency"),
                 # Round 5 P6 (B1): the real events.kind, additive -- platform_events_table/existing
@@ -648,17 +695,23 @@ def collect_platform_events(
 def platform_events_table(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not events:
         return None
-    headers = ["תאריך", "פלטפורמה/תוכנית", "רוכש", "ספק", "סכום", "צורך EO/IR נגזר", "מקור"]
+    # Round-14 (CR-editing.md, "tables that are too wide, >6 columns"): "רוכש"/"ספק" merged into
+    # one "רוכש / ספק" column (7 -> 6 columns) -- the same buyer/vendor-in-one-cell convention the
+    # events table (`docx_builder._add_events_table`'s "צדדים" column) already uses elsewhere in
+    # this report family, so this isn't a new pattern for the reader.
+    headers = ["תאריך", "פלטפורמה/תוכנית", "רוכש / ספק", "סכום", "צורך EO/IR נגזר", "מקור"]
     rows = []
     for ev in events:
         amount = f"{ev['amount_usd']:,.0f} {ev.get('currency') or 'USD'}" if ev.get("amount_usd") else "—"
         src = f"[{ev['n']}]" if ev.get("n") is not None else "—"
+        buyer = ev.get("buyer") or "—"
+        vendor = ev.get("vendor") or "—"
+        buyer_vendor = buyer if buyer == vendor else f"{buyer} / {vendor}"
         rows.append(
             [
                 fmt_date(ev.get("date") or ev.get("published_at")),
                 ev.get("platform_he") or "—",
-                ev.get("buyer") or "—",
-                ev.get("vendor") or "—",
+                buyer_vendor,
                 amount,
                 ev.get("payload_need_he") or "—",
                 src,

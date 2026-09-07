@@ -368,7 +368,15 @@ class TestDeterministicTables:
             }
         ]
         table = pl_report.market_items_table(items)
-        assert table["rows"] == [[1, "כותרת", "airborne_pods", "Janes", "2026-09-01", "red"]]
+        # Round-14 (CR-editing.md): "תחום"/"רמה" render the Hebrew taxonomy label, never the raw
+        # English key/slug ("airborne_pods"/"red") -- confirmed live in pl_targeting_pods_2026-09-07.md.
+        row = table["rows"][0]
+        assert row[0] == 1
+        assert row[1] == "כותרת"
+        assert row[2] != "airborne_pods" and "פודים" in row[2]
+        assert row[3] == "Janes"
+        assert row[4] == "2026-09-01"
+        assert row[5] != "red" and "קריטי" in row[5]
 
     def test_events_table_none_when_empty(self):
         assert pl_report.events_table([]) is None

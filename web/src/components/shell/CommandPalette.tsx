@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useUiStore } from "@/store/uiStore";
 import { api } from "@/api";
 import { LevelBadge } from "@/components/LevelBadge";
+import { entityKindLabel } from "@/components/entities/eventKindLabel";
 import { useT } from "@/i18n";
 
 export function CommandPalette() {
@@ -82,7 +83,9 @@ export function CommandPalette() {
                   className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-start text-sm hover:bg-bg-sunken"
                 >
                   <LevelBadge level={it.level} size="sm" />
-                  <bdi className="truncate">{it.title}</bdi>
+                  <bdi className="truncate" title={it.title ?? undefined}>
+                    {it.title}
+                  </bdi>
                 </button>
               ))}
             </div>
@@ -100,8 +103,10 @@ export function CommandPalette() {
                   }}
                   className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-start text-sm hover:bg-bg-sunken"
                 >
-                  <bdi className="truncate">{e.name}</bdi>
-                  <span className="text-xs text-fg-dim">{e.kind}</span>
+                  <bdi className="truncate" title={e.name}>
+                    {e.name}
+                  </bdi>
+                  <span className="text-xs text-fg-dim">{entityKindLabel(e.kind)}</span>
                 </button>
               ))}
             </div>

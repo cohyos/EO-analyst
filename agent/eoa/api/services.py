@@ -22,6 +22,7 @@ import html as html_lib
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -3034,7 +3035,17 @@ def write_settings_yaml(name: str, yaml_text: str, *, expected_revision: str | N
     try:
         with open(fd, "w", encoding="utf-8") as fh:
             fh.write(yaml_text)
-        tmp_path.replace(path)
+        # Windows: os.replace fails with WinError 5 while another process (a settings()
+        # reload, an editor, a scanner) briefly holds config.yaml open -- seen once live
+        # 2026-09-07 20:28 (PUT /api/settings/config -> 500). Retry a few times before giving up.
+        for attempt in range(6):
+            try:
+                tmp_path.replace(path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)

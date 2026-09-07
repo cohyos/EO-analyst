@@ -100,7 +100,9 @@ export function EntitySearchBox({
                 }}
                 className="flex w-full items-center gap-1.5 px-2 py-1.5 text-start text-sm hover:bg-bg-sunken"
               >
-                <bdi className="min-w-0 flex-1 truncate">{r.name}</bdi>
+                <bdi className="min-w-0 flex-1 truncate" title={r.name}>
+                  {r.name}
+                </bdi>
                 {r.country && (
                   <span className="shrink-0 text-xs">{countryFlagEmoji(r.country)}</span>
                 )}

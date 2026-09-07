@@ -74,7 +74,7 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
-from eoa.report.style import apply_style_guard
+from eoa.report.style import apply_style_guard, dedupe_exact_sentences_across_sections
 from eoa.report.textnorm import normalize_draft
 from eoa.report.weekly import (
     _TREND_KIND_LABELS_HE,
@@ -849,6 +849,11 @@ def build_monthly(
     draft, _style_report = apply_style_guard(draft, report_kind="monthly")
     _style_report.log_all(report_kind="monthly")
     draft, _so_what_removed = strip_so_what_phrases_from_draft(draft, report_kind="monthly")
+    # Round-14 (CR-editing.md, "repeated sentences across sections") -- see
+    # `eoa.report.daily.build_daily`'s identical wiring for the full rationale.
+    draft, _n_dupes_dropped = dedupe_exact_sentences_across_sections(draft)
+    if _n_dupes_dropped:
+        log.info("monthly_report_exact_duplicate_sentences_dropped", n=_n_dupes_dropped)
 
     # M2: a previous-month trend with no matching evidence this month is never left for the model
     # to notice -- appended deterministically, after QA (these carry no cites to validate) and

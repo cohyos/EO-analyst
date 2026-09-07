@@ -55,7 +55,7 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
-from eoa.report.style import apply_style_guard
+from eoa.report.style import apply_style_guard, dedupe_exact_sentences_across_sections
 from eoa.report.textnorm import normalize_draft
 
 log = structlog.get_logger(__name__)
@@ -115,12 +115,24 @@ def _week_range(period_end: dt.date | None = None) -> tuple[dt.date, dt.date]:
 # module doesn't depend on daily.py's internals — see docs/CONVENTIONS.md "config, not code")
 # --------------------------------------------------------------------------
 
+#: Round-14 (CR-editing.md): matches ``eoa.report.daily._UNKNOWN_DOMAIN_LABEL_HE`` verbatim -- the
+#: fallback Hebrew label for a ``domain``/pseudo-domain value with no real taxonomy entry, never
+#: the raw slug itself.
+_UNKNOWN_DOMAIN_LABEL_HE = "תחומים נוספים"
+
 
 def _domain_label(domain: str | None) -> str:
+    """Round-14 (CR-editing.md, "headings that are English keys or taxonomy slugs"): never falls
+    back to the raw ``domain`` string itself -- ``out_of_scope``/``archive`` (and any other
+    non-taxonomy pseudo-domain value that reaches this report layer) leaked straight into a Hebrew
+    heading (e.g. "...בתחום out_of_scope", seen live in the weekly trend-delta list). Mirrors
+    ``eoa.report.daily``'s own ``_domain_label`` fix for the same bug (Q3-15)."""
+    if not domain:
+        return "כללי"
     domains = settings().taxonomy.get("domains", {})
-    entry = domains.get(domain or "", {})
+    entry = domains.get(domain, {})
     label = entry.get("label")
-    return label if isinstance(label, str) and label else (domain or "כללי")
+    return label if isinstance(label, str) and label else _UNKNOWN_DOMAIN_LABEL_HE
 
 
 def _level_label(level: str | None) -> str:
@@ -967,6 +979,11 @@ def build_weekly(
     draft, _style_report = apply_style_guard(draft, report_kind="weekly")
     _style_report.log_all(report_kind="weekly")
     draft, _so_what_removed = strip_so_what_phrases_from_draft(draft, report_kind="weekly")
+    # Round-14 (CR-editing.md, "repeated sentences across sections") -- see
+    # `eoa.report.daily.build_daily`'s identical wiring for the full rationale.
+    draft, _n_dupes_dropped = dedupe_exact_sentences_across_sections(draft)
+    if _n_dupes_dropped:
+        log.info("weekly_report_exact_duplicate_sentences_dropped", n=_n_dupes_dropped)
 
     trend_sections = [
         {

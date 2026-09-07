@@ -13,6 +13,7 @@ import {
   TENDER_STATUS_LABEL,
   daysLeft,
   relevanceScorePercent,
+  tenderSourceLabel,
 } from "@/lib/tenders";
 import { EmptyState } from "@/components/states";
 import { SourcePreviewPopover } from "@/components/SourcePreviewPopover";
@@ -287,7 +288,9 @@ export function TenderTable({
                     <bdi className="block truncate text-xs">{t.agency ?? "—"}</bdi>
                   </td>
                   <td className="p-2 text-fg-muted">
-                    <bdi>{t.source ?? "—"}</bdi>
+                    <bdi className="block max-w-[10rem] truncate" title={t.source ?? undefined}>
+                      {tenderSourceLabel(t.source)}
+                    </bdi>
                   </td>
                   <td className="p-2">
                     <div className="flex flex-col gap-0.5">

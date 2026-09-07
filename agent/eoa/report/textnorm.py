@@ -8,18 +8,27 @@ punctuation mark. This module is a small, pure, idempotent set of string-normali
 report renderer can apply to *display* text right before it reaches the page.
 
 Applied only to rendered/display text -- never to raw DB fields at rest, citation markers
-(``[n]``), URLs, or file paths. Three passes, always run in this order:
+(``[n]``), URLs, or file paths. Six passes, always run in this order (Round-14, CR-editing.md,
+added the first, second and last of the six -- see each function's own docstring):
 
-1. :func:`collapse_doubled_quotes` -- two-or-more literal ASCII ``"`` in a row collapse to one.
+1. :func:`unescape_stray_backslash_quotes` -- a literal ``\"``/``\'`` (an unescaped JSON/string
+   escape that leaked into display text, most often inside a Hebrew acronym like כטב\"ם) drops its
+   backslash, leaving the quote/apostrophe for passes 3-4 below to normalize properly.
+2. :func:`strip_bidi_isolates` -- removes embedded LRI/RLI/FSI/PDI bidi-isolate control characters
+   (U+2066-U+2069), pure noise this renderer's own paragraph/run-level bidi handling never needed.
+3. :func:`collapse_doubled_quotes` -- two-or-more literal ASCII ``"`` in a row collapse to one.
    Always safe: a correctly-typed doubled quote never occurs in Hebrew or English prose.
-2. :func:`ascii_quote_to_gershayim` -- a single ASCII ``"`` directly between two Hebrew-script
+4. :func:`ascii_quote_to_gershayim` -- a single ASCII ``"`` directly between two Hebrew-script
    characters becomes the Hebrew gershayim character (U+05F4) -- the correct punctuation mark for
    a Hebrew acronym/abbreviation, for which a plain ``"`` is only ever a keyboard stand-in.
-3. :func:`ascii_apostrophe_to_geresh` -- an ASCII apostrophe directly after a Hebrew-script
+5. :func:`ascii_apostrophe_to_geresh` -- an ASCII apostrophe directly after a Hebrew-script
    character becomes the Hebrew geresh character (U+05F3), same rationale for the
    single-character mark.
+6. :func:`collapse_space_before_closing_punctuation` -- a stray space between a closing
+   bracket/paren/quote and the sentence punctuation right after it (often left behind by passes
+   1-2 above) collapses away, so ``"[1, 5, 6] ."`` reads ``"[1, 5, 6]."``.
 
-:func:`normalize_hebrew_punctuation` runs all three in order and is the one function report
+:func:`normalize_hebrew_punctuation` runs all six in order and is the one function report
 renderers should actually call.
 
 Hebrew-script detection uses raw Unicode codepoint ranges (the Hebrew block and the Hebrew
@@ -42,6 +51,34 @@ GERESH = chr(0x05F3)
 
 _DOUBLED_QUOTE_RE = re.compile(r'"{2,}')
 
+# Round-14 (content-review editing pass, docs/qa/content_review/CR-editing.md): the LRI/PDI
+# bidi-isolate pair (U+2066 LEFT-TO-RIGHT ISOLATE / U+2069 POP DIRECTIONAL ISOLATE) shows up
+# wrapped around every English/number token inside `deep_search`/`ask` investigation answers
+# (``eoa.search.deep_search``/``eoa.api.routes.ask`` -- upstream of this module, not owned by the
+# report layer). They are meant to be invisible formatting characters, but (a) several viewers /
+# copy-paste paths render them as visible glyphs, and (b) this renderer's own bidi handling
+# (per-paragraph ``w:bidi``, per-run RTL font direction -- see ``docx_builder.split_runs``)
+# already produces correct bidi presentation without them, so the embedded isolates are pure
+# redundant noise that (worse) sit between a token and adjacent punctuation and produce a visible
+# stray space before a following ``.``/``,`` (e.g. ``"...% [3, 6] ."``). Stripped outright, never
+# reinterpreted -- this is display cleanup, not a bidi-correctness fix (the paragraph/run-level
+# handling already carries that).
+_BIDI_ISOLATE_RE = re.compile("[\u2066\u2067\u2068\u2069]")
+
+# A stray ``\"``/``\'`` (a literal backslash immediately before a quote/apostrophe) is a JSON/string
+# escape sequence that leaked into rendered text unescaped -- most often inside a Hebrew acronym
+# like כטב\"ם (should read כטב"ם, i.e. כטב״ם after :func:`ascii_quote_to_gershayim`). A legitimate
+# Hebrew or English sentence never contains a literal backslash directly before a quote mark, so
+# this is always safe to strip (the backslash), leaving the quote for the existing
+# ascii_quote_to_gershayim/ascii_apostrophe_to_geresh passes to normalize properly.
+_STRAY_BACKSLASH_QUOTE_RE = re.compile(r"\\([\"'])")
+
+# A sentence-final period (or comma/colon/semicolon) directly after a closing bracket/paren with a
+# stray space in between (e.g. ``"...כטב\"מים [1, 5, 6] ."``) -- collapse the space so the mark
+# hugs the bracket the way normal punctuation does. Scoped to *right after* `)`/`]`/`"` specifically
+# (never touches a mid-sentence space) so it can never merge two otherwise-unrelated words.
+_SPACE_BEFORE_CLOSING_PUNCT_RE = re.compile(r'([\]\)"])\s+([.,;:!?])')
+
 
 def _is_hebrew_char(ch: str) -> bool:
     cp = ord(ch)
@@ -53,6 +90,47 @@ def collapse_doubled_quotes(text: str) -> str:
     if not text:
         return text
     return _DOUBLED_QUOTE_RE.sub('"', text)
+
+
+def strip_bidi_isolates(text: str) -> str:
+    """Remove embedded LRI/RLI/FSI/PDI bidi-isolate control characters (U+2066-U+2069) -- see the
+    module-level note above :data:`_BIDI_ISOLATE_RE`. A no-op (returns ``text`` unchanged) for text
+    that carries none, so it is always safe to call."""
+    if not text:
+        return text
+    return _BIDI_ISOLATE_RE.sub("", text)
+
+
+def unescape_stray_backslash_quotes(text: str) -> str:
+    """Drop a literal backslash sitting directly before a ``"``/``'`` (an unescaped JSON/string
+    escape sequence that leaked into display text), leaving the quote mark itself for the
+    gershayim/geresh passes below to normalize."""
+    if not text:
+        return text
+    return _STRAY_BACKSLASH_QUOTE_RE.sub(r"\1", text)
+
+
+def collapse_space_before_closing_punctuation(text: str) -> str:
+    """Collapse a stray space between a closing bracket/paren/quote and the sentence punctuation
+    that immediately follows it (e.g. ``"[1, 5, 6] ."`` -> ``"[1, 5, 6]."``)."""
+    if not text:
+        return text
+    return _SPACE_BEFORE_CLOSING_PUNCT_RE.sub(r"\1\2", text)
+
+
+def trim_at_word_boundary(text: str, max_chars: int, *, suffix: str = "…") -> str:
+    """Cap ``text`` at ``max_chars``, cutting at the nearest preceding word boundary (space) so a
+    trimmed value never ends mid-word -- unlike a bare ``text[:n] + "…"`` slice, which routinely
+    cuts through a word (or even through an internal ``[item N]`` marker). ``text`` at or under the
+    cap is returned unchanged (no suffix appended). ``suffix`` is appended once, after trimming
+    trailing whitespace/punctuation from the cut point."""
+    if not text or len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_space = cut.rfind(" ")
+    if last_space > max_chars * 0.6:
+        cut = cut[:last_space]
+    return cut.rstrip(" ,;:.\u2013\u2014") + suffix
 
 
 def ascii_quote_to_gershayim(text: str) -> str:
@@ -83,16 +161,25 @@ def ascii_apostrophe_to_geresh(text: str) -> str:
 
 
 def normalize_hebrew_punctuation(text: str | None) -> str | None:
-    """Apply all three normalisation passes, in order, idempotently.
+    """Apply every normalisation pass, in order, idempotently.
+
+    Round-14 (CR-editing.md): extended from the original three quote-only passes to also strip
+    stray backslash-escapes and embedded bidi-isolate control characters, and to collapse the
+    stray space they and similar leaks left before closing sentence punctuation -- run first (in
+    that order) since the quote/gershayim passes below reason about *adjacent* characters, which
+    only makes sense once the backslash/isolate noise between them is gone.
 
     ``None``/empty input is returned unchanged (falsy short-circuit), so this is always safe to
     call on an optional field without a separate ``is None`` check at the call site.
     """
     if not text:
         return text
+    text = unescape_stray_backslash_quotes(text)
+    text = strip_bidi_isolates(text)
     text = collapse_doubled_quotes(text)
     text = ascii_quote_to_gershayim(text)
     text = ascii_apostrophe_to_geresh(text)
+    text = collapse_space_before_closing_punctuation(text)
     return text
 
 

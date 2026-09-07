@@ -376,7 +376,9 @@ def test_collect_items_sql_excludes_undated_sourceless_rows(monkeypatch):
 
 
 def test_tenders_forecast_table_shape_and_rationale_cap():
-    long_rationale = "א" * 250
+    # Round-14 (CR-editing.md): word-boundary rationale (real words, not a single 250-char run) so
+    # the word-boundary trim has somewhere to cut -- a bare `text[:200]` slice used to cut mid-word.
+    long_rationale = " ".join(["מילה"] * 60)  # far past the 200-char cap, real word boundaries
     data = {
         "new_forecasts": [
             {
@@ -395,5 +397,33 @@ def test_tenders_forecast_table_shape_and_rationale_cap():
     row = tbl["rows"][0]
     assert row[0] == "MQ-9 Reaper"
     assert row[2] == "72%"
-    assert len(row[4]) <= 200
+    # Trimmed well short of the full (300-char) rationale, cut at a word boundary (never mid-word)
+    # and pointed at the row's own sources, not a bare "…".
+    assert len(row[4]) < len(long_rationale)
+    assert row[4].startswith("מילה מילה")
+    assert not row[4].split(" … ")[0].endswith("מיל")  # never cut mid-word
+    assert "פירוט במקורות" in row[4]
     assert row[5] == "—"  # no `sources` on this forecast fixture -> nothing to cite
+
+
+def test_tenders_forecast_table_strips_internal_item_markers():
+    """Round-14 (CR-editing.md): a forecast's `rationale_he` sometimes carries the forecast
+    prompt's own internal "[item N]" data labels verbatim -- never meant for a reader (this table
+    already has a real "מקורות" [n] citation column) -- stripped from the rendered cell."""
+    data = {
+        "new_forecasts": [
+            {
+                "platform": "מטוס קרב",
+                "payload_need": "פוד כיוון",
+                "likelihood": 0.6,
+                "window_from": dt.date(2027, 3, 1),
+                "window_to": dt.date(2028, 3, 1),
+                "rationale_he": "המאמר ([item 12]) מצביע על כך שהמטוסים [item 47] יזדקקו לפוד חדש.",
+            }
+        ]
+    }
+    tbl = daily._tenders_forecast_table(data, [])
+    row = tbl["rows"][0]
+    assert "[item" not in row[4]
+    assert "( )" not in row[4]  # the parens the marker sat alone in are removed too, not left empty
+    assert "  " not in row[4]  # no doubled space left where the marker was cut out

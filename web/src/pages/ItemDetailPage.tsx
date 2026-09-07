@@ -116,7 +116,17 @@ export function ItemDetailPage() {
         <div className="flex flex-wrap items-start gap-2">
           <LevelBadge level={item.level} />
           <CorroborationBadge corroboration={item.corroboration} showUnknown />
-          <div className="min-w-0 flex-1">
+          {/* Content review (docs/qa/content_review/CR-ui.md): with `min-w-0`, this flex item
+              had no minimum size to defend, so on a narrow viewport where the two badges above
+              already ate most of the row's width, `flex-1` shrank the title down to whatever was
+              left (confirmed live: 85px of a 269px row) instead of the wrapping row moving the
+              title to its own full-width line -- flex-wrap only wraps an item that *can't* fit
+              its minimum, and `min-w-0` means anything fits. The title isn't truncated (it wraps
+              to multiple lines, no `truncate`/`line-clamp` here), so there's no reason for
+              `min-w-0` in the first place -- a real minimum lets the row wrap the title down to
+              its own line once the badges leave it under ~12rem, instead of rendering it as a
+              near-unreadable single-word-per-line column. */}
+          <div className="min-w-[12rem] flex-1">
             {hasUrl ? (
               <a
                 href={item.url}
@@ -292,7 +302,9 @@ export function ItemDetailPage() {
                 className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-bg-raised p-2 text-xs"
               >
                 <Link to={`/investigations/${inv.job_id}`} className="min-w-0 flex-1 text-accent hover:underline">
-                  <bdi className="block truncate">{inv.question || `חקירה #${inv.job_id}`}</bdi>
+                  <bdi className="block truncate" title={inv.question || `חקירה #${inv.job_id}`}>
+                    {inv.question || `חקירה #${inv.job_id}`}
+                  </bdi>
                 </Link>
                 <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                   <span className="rounded bg-bg-sunken px-1.5 py-0.5 text-fg-dim">

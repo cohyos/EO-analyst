@@ -257,7 +257,9 @@ def test_build_bd_territory_renders_expected_tables(patch_bd_collectors):
     doc = docx.Document(str(paths.docx))
     table_headers = [[c.text for c in t.rows[0].cells] for t in doc.tables]
 
-    assert ["תאריך", "פלטפורמה/תוכנית", "רוכש", "ספק", "סכום", "צורך EO/IR נגזר", "מקור"] in table_headers
+    # Round-14 (CR-editing.md): "רוכש"/"ספק" merged into one "רוכש / ספק" column (7 -> 6 columns,
+    # the report-wide table-width cap).
+    assert ["תאריך", "פלטפורמה/תוכנית", "רוכש / ספק", "סכום", "צורך EO/IR נגזר", "מקור"] in table_headers
     assert ["כותרת", "גורם מזמין", "דדליין", "סטטוס", "קישור"] in table_headers
     # Round 5 P6 (B2): competitors_table gained a trailing "דרג" (tier A/B/C) column.
     assert ["מתחרה", "מדינה", "אזכורים בחלון", "תעשייה ישראלית", "זכייה אחרונה", "דרג"] in table_headers
