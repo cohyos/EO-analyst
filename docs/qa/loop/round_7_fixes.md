@@ -688,3 +688,123 @@ its absence, not just its presence.
 - **"Items page" ambiguity** (see point 3 above): flagging in case "Items page rows" in the brief
   referred to a page that doesn't exist on this frontend yet -- if one gets added, it presumably
   reuses `FeedRow`, which already has the badge.
+
+### PL-ui status
+
+Built the frontend for "קווי מוצר" (product-line status & business-development tracking, 2026-09-07)
+against the frozen contract in this round's brief -- six fixed EO/IR product-line ids
+(`targeting_pods`, `mws_eo`, `lorop_pods`, `eo_air_defense_warning`, `ball_gimbals_16in`,
+`border_long_range_eo`), `GET /api/product-lines`, `GET /api/product-lines/{id}`, `POST
+/api/product-lines/{id}/report`, plus an additive optional `product_lines: string[]` on
+`ItemCard`/`TenderCard`. File ownership: `web/src/**` only, nothing under `agent/`, `db/` or
+`config/`. Confirmed live against the running API (`http://127.0.0.1:8765`) that `GET
+/api/product-lines` returns **404** -- the endpoint doesn't exist on the backend yet, so the whole
+build had to degrade gracefully rather than assume the contract is live.
+
+#### What was built
+
+- **Types** (`web/src/types/api.ts`): `ProductLineStats`, `ProductLineReportRef`, `ProductLine`,
+  `ProductLineDetail` (extends `ProductLine` with `recent_items: ItemCard[]`, `open_tenders:
+  TenderCard[]`, `reports: ReportSummary[]`), `ProductLineReportCreateResponse`. `ItemCard` and
+  `TenderCard` both gained an optional `product_lines?: string[]` field -- optional so a build
+  against the pre-PL-ui live API still type-checks and every existing mock/test fixture that
+  doesn't set it keeps compiling.
+- **Catalog** (`web/src/lib/productLines.ts`, new): the fixed six-id/name catalog
+  (`PRODUCT_LINE_CATALOG`) plus `productLineOption`/`productLineLabel` helpers (same
+  defensive-fallback shape as `lib/countries.ts`'s `countryOption`) -- lets the Feed/Tenders
+  filters and the nav entry render the six names without waiting on `GET /api/product-lines` to
+  resolve, and gives a stable id list independent of the API response.
+- **API client** (`web/src/api/types.ts` + `web/src/api/real.ts`): `getProductLines()`,
+  `getProductLine(id)`, `postProductLineReport(id)` calling the three contract endpoints.
+  `normalizeProductLine`/`normalizeProductLineDetail` in `real.ts` coerce every
+  missing/malformed field to its zero shape (empty arrays, zero stats, `latest_report: null`)
+  rather than throwing, mirroring the existing `normalizeReportSummary`/`normalizeBdTerritories`
+  pattern -- a 404/5xx is the only way this surfaces as a page-level error. `normalizeItemCard`/
+  `normalizeTenderCard` both gained `product_lines: arr(r.product_lines)` so an item/tender from a
+  backend build that predates this feature normalizes to `[]`, never `undefined`.
+- **Mocks** (`web/src/mocks/data/productLines.ts`, new; `web/src/mocks/mockApi.ts`;
+  `web/src/mocks/data/items.ts`; `web/src/mocks/data/tenders.ts`): `mockItems`' `buildItem` and six
+  specific `mockTenders` rows (ids 1, 2, 3, 6, 7, 13) are tagged with `product_lines` at their own
+  source (a `SUBDOMAIN_TO_PRODUCT_LINES` map for items, per-row comments for tenders) so the same
+  mock rows shown as a product line's "recent items"/"open tenders" are also the ones the
+  Feed/Tenders pages' own "קו מוצר" filter matches -- one source of truth, no duplicated/drifting
+  mock data. `postProductLineReport` mutates a per-line mock report store (flips the old
+  `is_latest` off, unshifts a fresh row) so the "צור דוח" flow has something real to poll for, same
+  mock behavior class as `postBdReport`.
+- **`ProductLinesPage`** (`web/src/pages/ProductLinesPage.tsx`, new) at `/product-lines`: one
+  `ProductLineCard` per line (name, `ProductLineStatsGrid` compact KPIs -- items 7d/30d, open
+  tenders, active competitors, patents 90d -- latest-report QA status + "פתח דוח" link into
+  `/reports?id=`, a "צור דוח" button) in a responsive grid. "צור דוח" queues a build and polls the
+  list every 4s for up to 3 minutes (same `setInterval`/`setTimeout` shape as `BdPage`'s own
+  queued-report flow), with per-card queued/failed status text.
+- **`ProductLineDetailPage`** (`web/src/pages/ProductLineDetailPage.tsx`, new) at
+  `/product-lines/:id`: header (name + subdomains/exemplar-systems/competitors chips, all
+  Latin-heavy values wrapped in `<bdi>` per the app's existing bidi convention), a 7-tile
+  `StatTile` KPI row, its own "צור דוח" + poll flow, and three tabs -- **recent items** (reuses
+  `FeedRow` directly, one non-virtualized row per item exactly like `FeedPage`'s grouped-by-country
+  view does, wired to the same `postItemFeedback` rating mutation), **open tenders** (reuses
+  `TenderTable` directly, wired to `postTenderFeedback`), **reports** (`ProductLineReportList`, a
+  lighter sibling of `ReportsPage`'s own `ReportRow` -- title/preview/QA chips, each row linking to
+  `/reports?id=` so "open" always lands on the same full report viewer the Reports/BD pages use).
+- **Nav + routes**: `/product-lines` and `/product-lines/:id` added to `App.tsx`; a "קווי מוצר" nav
+  entry added to `nav.ts` immediately after "פיתוח עסקי" per the brief, with a matching
+  `usePageTitle` entry.
+- **Feed/Tenders "קו מוצר" filter**: `ProductLineFilter` (`web/src/components/productLines/`, new)
+  -- a multi-select popover, structurally identical to `FeedFilters`' existing country-filter
+  popover. Added to both `FeedFiltersState`/`TenderFiltersState` and wired into `FeedPage`/
+  `TendersPage` as a **client-side-only** filter (documented in both state interfaces' doc
+  comments) -- the frozen contract has no server-side `product_lines` query param for `GET
+  /api/items`/`GET /api/tenders`, only the additive `product_lines` field on each row, same
+  documented limitation class as this round's own `singleSourceOnly` filter.
+- **`ReportsPage`**: added a `product_line` -> "קו מוצר" entry to the existing `KIND_LABEL` map so
+  a report queued from this feature shows a real Hebrew label in the general Reports list's kind
+  filter, instead of falling through unlabeled.
+- i18n: a new `productLines` namespace (`he.ts`/`en.ts`, both dictionaries kept in lockstep per the
+  existing convention) plus `nav.productLines`.
+
+#### Verification
+
+- `npx tsc --noEmit` and `npm run build` (`tsc -b && vite build`) -- both clean; one fix needed
+  along the way (`normalizeProductLine`'s `r.stats ?? {}` needed an explicit
+  `Partial<ProductLine["stats"]>` annotation -- `tsc -b`'s project-reference build caught a `{}`
+  inference that plain `tsc --noEmit -p .` did not).
+- `npm run lint` -- 0 errors (12 pre-existing warnings, all in files this round didn't touch:
+  `LevelBadge.tsx`, `PayloadFilters.tsx`, `I18nContext.tsx`, `PatentsPage.tsx`, `PayloadsPage.tsx`,
+  `TendersPage.tsx`'s pre-existing `tenders` memo-dependency warning).
+- `npx vitest run` -- **315 passed** (293 pre-existing + 22 new): `productLines.test.ts` (4, catalog
+  shape/fallback/label), `ProductLinesPage.test.tsx` (7, card rendering/KPIs/report
+  link/empty/error/create-report-queued/detail-link), `ProductLineDetailPage.test.tsx` (7,
+  header/chips/stat-tiles/default-tab-reuses-FeedRow/tenders-tab-reuses-TenderTable/reports-tab-
+  links-to-Reports/create-report-queued/empty/error), `ProductLineFilter.test.tsx` (4,
+  popover-lists-six/toggle-on/toggle-off/clear-control). No pre-existing test file needed changes
+  (`FeedPage.test.tsx`/`TendersPage.test.tsx` continued passing unmodified with the new
+  `productLines: []` field added to both pages' initial filter state).
+- Playwright, live app (`http://127.0.0.1:8765`, confirmed serving the current build): ran the new
+  guarded spec `e2e/tests/20-product-lines.spec.ts` across all 5 configured device projects --
+  **25 passed, 10 skipped, 0 failed**. The 10 skips are this spec's two endpoint-gated tests (one
+  per device project x 5), both guarded on `GET /api/product-lines` returning 404 on this backend
+  today (confirmed directly via `curl http://127.0.0.1:8765/api/product-lines` -> 404) -- exactly
+  the documented guard condition. The other five tests (header renders, nav-rail link, Feed/Tenders
+  filter popovers list all six lines, no-bad-text) don't depend on the endpoint and passed for
+  real against the live app.
+
+#### What's left / for the backend engineer
+
+- **The three `/api/product-lines*` endpoints don't exist on the live API yet** -- this build is
+  entirely against mocks (`VITE_USE_MOCKS=true`) plus the frozen contract; nothing here has been
+  verified against a real response. Once the backend lands the endpoints, worth a manual pass
+  (especially `latest_report`/`reports` field naming and the `POST .../report` -> `job_id` ->
+  eventual `reports` update round-trip, which today is only exercised against the mock's simulated
+  report store).
+- **No server-side `product_lines` filter param exists** on `GET /api/items`/`GET /api/tenders` per
+  the frozen contract -- the Feed/Tenders "קו מוצר" filters are client-side-only, scoped to
+  already-loaded rows/pages, same limitation class as this round's `singleSourceOnly` filter. If a
+  `product_lines=` query param is added later, the frontend change is small and isolated to each
+  page's own filter memo.
+- **`stats.events_30d`/`stats.forecasts`** are shown on `ProductLineDetailPage`'s `StatTile` row
+  but not on the `ProductLinesPage` card grid (the brief's card KPI list names only items 7d/30d,
+  open tenders, active competitors, patents 90d) -- intentional, not an oversight; flagging in case
+  the card should show all seven.
+- **Mock `product_lines` tagging is illustrative, not authoritative** -- `items.ts`'s
+  subdomain-to-product-line map and `tenders.ts`'s per-row tags are plausible placeholders for mock
+  mode only; the real backend presumably has its own (likely LLM- or rule-based) tagging logic.

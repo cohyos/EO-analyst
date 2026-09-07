@@ -34,6 +34,9 @@ import type {
   PayloadDiffResponse,
   PayloadRecord,
   PayloadTreeResponse,
+  ProductLine,
+  ProductLineDetail,
+  ProductLineReportCreateResponse,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -258,6 +261,10 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     israel_reasons: arr(r.israel_reasons),
     // CORR: absent on any backend build that predates this feature -- normalizes to "unknown".
     corroboration: normalizeCorroboration(r.corroboration),
+    // PL-ui (2026-09-07): absent on any backend build that predates this feature -- normalizes to
+    // "no product lines tagged" rather than undefined, so `FeedFilters`' client-side filter can
+    // read `item.product_lines` unconditionally.
+    product_lines: arr(r.product_lines),
   };
 }
 
@@ -420,6 +427,52 @@ function normalizeReportDetail(
   };
 }
 
+// PL-ui (2026-09-07): mirrors the frozen contract in docs/qa/loop/round_7_fixes.md "### PL-ui
+// status" -- a backend build that predates this feature (or omits a field) normalizes to empty
+// arrays/zero stats/no report, never throws, so the page can render its empty states instead of
+// an error screen.
+function normalizeProductLine(raw: Partial<ProductLine> | null | undefined): ProductLine {
+  const r = raw ?? {};
+  const s: Partial<ProductLine["stats"]> = r.stats ?? {};
+  return {
+    id: str(r.id),
+    name_he: str(r.name_he),
+    name_en: str(r.name_en),
+    subdomains: arr(r.subdomains),
+    exemplar_systems: arr(r.exemplar_systems),
+    competitors: arr(r.competitors),
+    stats: {
+      items_7d: num(s.items_7d),
+      items_30d: num(s.items_30d),
+      events_30d: num(s.events_30d),
+      open_tenders: num(s.open_tenders),
+      forecasts: num(s.forecasts),
+      patents_90d: num(s.patents_90d),
+      active_competitors: num(s.active_competitors),
+    },
+    latest_report: r.latest_report
+      ? {
+          id: num(r.latest_report.id),
+          created_at: str(r.latest_report.created_at),
+          qa_passed: bool(r.latest_report.qa_passed),
+          path_html: str(r.latest_report.path_html),
+        }
+      : null,
+  };
+}
+
+function normalizeProductLineDetail(
+  raw: Partial<ProductLineDetail> | null | undefined,
+): ProductLineDetail {
+  const r = raw ?? {};
+  return {
+    ...normalizeProductLine(r),
+    recent_items: arr(r.recent_items).map(normalizeItemCard),
+    open_tenders: arr(r.open_tenders).map(normalizeTenderCard),
+    reports: arr(r.reports).map(normalizeReportSummary),
+  };
+}
+
 function normalizeConference(raw: Partial<Conference> | null | undefined): Conference {
   const r = raw ?? {};
   return {
@@ -473,6 +526,8 @@ function normalizeTenderCard(raw: Partial<TenderCard> | null | undefined): Tende
     item_id: r.item_id ?? null,
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
+    // PL-ui (2026-09-07): see the matching comment on `normalizeItemCard` above.
+    product_lines: arr(r.product_lines),
   };
 }
 
@@ -1092,6 +1147,27 @@ export const realApi: ApiClient = {
       error: data?.error ?? null,
       report: data?.report ? normalizeReportDetail(data.report) : undefined,
     };
+  },
+
+  // PL-ui (2026-09-07): built against a frozen contract (docs/qa/loop/round_7_fixes.md "### PL-ui
+  // status") that may not exist on the live API yet -- every call here degrades to the
+  // normalizers' empty-shape defaults (see `normalizeProductLine`/`normalizeProductLineDetail`
+  // above) rather than throwing on a missing/malformed field, so a 404 is the only way this
+  // surfaces as an error to the page (same as every other list/detail endpoint in this file).
+  getProductLines: async () =>
+    arr(await request<Partial<ProductLine>[] | null>("/api/product-lines")).map(
+      normalizeProductLine,
+    ),
+  getProductLine: async (id) =>
+    normalizeProductLineDetail(
+      await request<Partial<ProductLineDetail>>(`/api/product-lines/${id}`),
+    ),
+  postProductLineReport: async (id) => {
+    const data = await request<Partial<ProductLineReportCreateResponse>>(
+      `/api/product-lines/${id}/report`,
+      { method: "POST" },
+    );
+    return { job_id: idStr(data?.job_id) };
   },
 
   getSettings: async (name: SettingsName) => {

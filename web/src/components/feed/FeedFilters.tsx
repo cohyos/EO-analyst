@@ -4,6 +4,7 @@ import type { TriageLevel } from "@/types/api";
 import { LEVEL_META } from "@/components/LevelBadge";
 import { DOMAIN_OPTIONS } from "@/lib/taxonomy";
 import { COUNTRY_CATALOG, OTHER_COUNTRY, countryLabel } from "@/lib/countries";
+import { ProductLineFilter } from "@/components/productLines/ProductLineFilter";
 import { cn } from "@/lib/cn";
 import { useI18n, useT } from "@/i18n";
 
@@ -25,6 +26,11 @@ export interface FeedFiltersState {
   // loaded page(s), the same documented limitation as the country/level chips' server-side
   // counterparts don't have (see docs/qa/loop/round_7_fixes.md "### CORR-ui status").
   singleSourceOnly: boolean;
+  // PL-ui (2026-09-07): selected product-line ids (empty = all). The frozen API contract has no
+  // server-side `product_lines` query param for `GET /api/items` -- `FeedPage` applies this
+  // client-side, on the currently loaded page(s), same documented limitation as
+  // `singleSourceOnly` above (see docs/qa/loop/round_7_fixes.md "### PL-ui status").
+  productLines: string[];
 }
 
 export function FeedFilters({
@@ -190,6 +196,13 @@ export function FeedFilters({
           </div>
         )}
       </div>
+
+      {/* PL-ui (2026-09-07): "קו מוצר" -- client-side-only filter, same popover pattern as the
+          country filter above. */}
+      <ProductLineFilter
+        value={value.productLines}
+        onChange={(productLines) => onChange({ ...value, productLines })}
+      />
 
       <label className="flex items-center gap-1.5 text-sm text-fg-muted">
         <input

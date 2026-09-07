@@ -14,6 +14,9 @@ const KIND_LABEL: Record<string, string> = {
   weekly: "שבועי",
   monthly: "חודשי",
   bd_territory: "פיתוח עסקי",
+  // PL-ui (2026-09-07): reports queued from `ProductLinesPage`/`ProductLineDetailPage`'s
+  // "צור דוח" -- see docs/qa/loop/round_7_fixes.md "### PL-ui status".
+  product_line: "קו מוצר",
   patent_survey: "סקר פטנטים",
   adhoc: "אד-הוק",
 };

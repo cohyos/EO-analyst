@@ -1,6 +1,7 @@
 import { Search } from "lucide-react";
 import type { TenderStatus } from "@/types/api";
 import { TENDER_STATUS_LABEL } from "@/lib/tenders";
+import { ProductLineFilter } from "@/components/productLines/ProductLineFilter";
 import { useT } from "@/i18n";
 
 const ALL_STATUSES: TenderStatus[] = ["open", "closed", "awarded", "unknown", "archived"];
@@ -9,6 +10,10 @@ export interface TenderFiltersState {
   status: TenderStatus | "";
   country: string;
   q: string;
+  // PL-ui (2026-09-07): selected product-line ids (empty = all) -- client-side only, same
+  // reasoning as `FeedFiltersState.productLines` (no server-side `product_lines` query param on
+  // `GET /api/tenders` in the frozen contract; see docs/qa/loop/round_7_fixes.md "### PL-ui status").
+  productLines: string[];
 }
 
 export function TenderFilters({
@@ -64,6 +69,13 @@ export function TenderFilters({
           </option>
         ))}
       </select>
+
+      {/* PL-ui (2026-09-07): "קו מוצר" -- client-side-only filter, same popover component the
+          Feed filters use. */}
+      <ProductLineFilter
+        value={value.productLines}
+        onChange={(productLines) => onChange({ ...value, productLines })}
+      />
 
       <div className="relative min-w-[10rem] flex-1">
         <Search

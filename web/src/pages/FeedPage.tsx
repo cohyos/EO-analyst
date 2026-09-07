@@ -57,6 +57,7 @@ export function FeedPage() {
     groupByCountry: false,
     israel: false,
     singleSourceOnly: false,
+    productLines: [],
   });
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [openItemId, setOpenItemId] = useState<number | null>(null);
@@ -119,12 +120,24 @@ export function FeedPage() {
   // to whatever page(s) are already loaded (see the `singleSourceOnly` doc comment in
   // FeedFilters.tsx). Kept as its own step, after de-dup, so it doesn't interact with
   // `duplicatesById`'s per-id lookups.
-  const items = useMemo(
+  const singleSourceFiltered = useMemo(
     () =>
       filters.singleSourceOnly
         ? dedupedItems.filter((it) => (it.corroboration?.status ?? "unknown") === "single_source")
         : dedupedItems,
     [dedupedItems, filters.singleSourceOnly],
+  );
+
+  // PL-ui (2026-09-07): "קו מוצר" -- client-side only, same reasoning as `singleSourceOnly` above
+  // (see the `productLines` doc comment in `FeedFiltersState`).
+  const items = useMemo(
+    () =>
+      filters.productLines.length === 0
+        ? singleSourceFiltered
+        : singleSourceFiltered.filter((it) =>
+            (it.product_lines ?? []).some((id) => filters.productLines.includes(id)),
+          ),
+    [singleSourceFiltered, filters.productLines],
   );
 
   // U7b: grouped display order -- a stable partition by normalized country

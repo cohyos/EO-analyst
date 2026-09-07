@@ -49,6 +49,10 @@ export interface ItemCard {
   // null }` (see `normalizeCorroboration` in `web/src/api/normalize.ts`) so every consumer can read
   // `item.corroboration.status` unconditionally instead of null-checking the whole object.
   corroboration?: Corroboration | null;
+  // PL-ui (2026-09-07): additive -- ids from `web/src/lib/productLines.ts`'s fixed catalog.
+  // Absent/undefined means "not yet tagged," normalized to `[]` by both API clients so every
+  // consumer can read it unconditionally.
+  product_lines?: string[];
 }
 
 export type CorroborationStatus =
@@ -564,6 +568,53 @@ export interface BdReportCreateResponse {
   report?: ReportDetail;
 }
 
+// PL-ui (2026-09-07): "קווי מוצר" -- product-line status & business-development tracking for the
+// six EO/IR product lines the frozen contract (docs/qa/loop/round_7_fixes.md "### PL-ui status")
+// defines. `id` is a stable key the backend also uses -- see `web/src/lib/productLines.ts` for the
+// fixed catalog of the six ids + Hebrew/English names.
+export interface ProductLineStats {
+  items_7d: number;
+  items_30d: number;
+  events_30d: number;
+  open_tenders: number;
+  forecasts: number;
+  patents_90d: number;
+  active_competitors: number;
+}
+
+/** Subset of `ReportSummary` carried inline on `GET /api/product-lines` list rows, per the frozen
+ * contract -- the full row (for the "open" link) is fetched via the normal `getReport`/`getReports`
+ * endpoints using this `id`. */
+export interface ProductLineReportRef {
+  id: number;
+  created_at: string;
+  qa_passed: boolean;
+  path_html: string;
+}
+
+export interface ProductLine {
+  id: string;
+  name_he: string;
+  name_en: string;
+  subdomains: string[];
+  exemplar_systems: string[];
+  competitors: string[];
+  stats: ProductLineStats;
+  latest_report: ProductLineReportRef | null;
+}
+
+export interface ProductLineDetail extends ProductLine {
+  recent_items: ItemCard[];
+  open_tenders: TenderCard[];
+  reports: ReportSummary[];
+}
+
+/** `POST /api/product-lines/{id}/report` -- queues a report build; poll `getProductLine(id)` for
+ * `reports`/`latest_report` to update, same pattern as the BD page's own report-creation flow. */
+export interface ProductLineReportCreateResponse {
+  job_id: string | number;
+}
+
 export interface ReportDetail extends ReportSummary {
   html: string;
   open_points: OpenPoint[];
@@ -690,6 +741,10 @@ export interface TenderCard {
   item_id: number | null;
   created_at: string;
   updated_at: string;
+  // PL-ui (2026-09-07): additive -- ids from `web/src/lib/productLines.ts`'s fixed catalog.
+  // Absent/undefined means "not yet tagged," normalized to `[]` by both API clients so every
+  // consumer can read it unconditionally.
+  product_lines?: string[];
 }
 
 // W2b: one 👍/👎 an operator gave a tender. Mirrors `tender_feedback`

@@ -35,6 +35,9 @@ import type {
   PayloadDiffResponse,
   PayloadsResponse,
   PayloadTreeResponse,
+  ProductLine,
+  ProductLineDetail,
+  ProductLineReportCreateResponse,
   ReportCitationsResponse,
   ReportDetail,
   ReportSummary,
@@ -301,6 +304,16 @@ export interface ApiClient {
   /** Builds synchronously if the underlying job finishes within ~55s (returns `report`), else
    * returns just a `job_id` to poll via `getBdReports`. */
   postBdReport(territory: string, lookbackDays: number): Promise<BdReportCreateResponse>;
+
+  // PL-ui (2026-09-07): "קווי מוצר" -- product-line status & business-development tracking for
+  // the six EO/IR product lines (see `web/src/lib/productLines.ts` for the fixed id/name catalog).
+  // Built against a frozen contract that may not exist on the live API yet -- callers must degrade
+  // gracefully (see docs/qa/loop/round_7_fixes.md "### PL-ui status").
+  getProductLines(): Promise<ProductLine[]>;
+  getProductLine(id: string): Promise<ProductLineDetail>;
+  /** Queues a report build; poll `getProductLine(id)` (same pattern as the BD page) to see
+   * `reports`/`latest_report` update once it finishes. */
+  postProductLineReport(id: string): Promise<ProductLineReportCreateResponse>;
 
   getSettings(name: SettingsName): Promise<SettingsGetResponse>;
   putSettings(name: SettingsName, yaml: string): Promise<SettingsPutResponse>;

@@ -17,6 +17,8 @@ import { PayloadsPage } from "@/pages/PayloadsPage";
 import { InboxPage } from "@/pages/InboxPage";
 import { ReportsPage } from "@/pages/ReportsPage";
 import { BdPage } from "@/pages/BdPage";
+import { ProductLinesPage } from "@/pages/ProductLinesPage";
+import { ProductLineDetailPage } from "@/pages/ProductLineDetailPage";
 import { TechRadarPage } from "@/pages/TechRadarPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -58,6 +60,8 @@ export default function App() {
                 <Route path="inbox" element={<InboxPage />} />
                 <Route path="reports" element={<ReportsPage />} />
                 <Route path="bd" element={<BdPage />} />
+                <Route path="product-lines" element={<ProductLinesPage />} />
+                <Route path="product-lines/:id" element={<ProductLineDetailPage />} />
                 <Route path="tech-radar" element={<TechRadarPage />} />
                 <Route path="settings" element={<SettingsPage />} />
                 <Route path="*" element={<NotFoundPage />} />

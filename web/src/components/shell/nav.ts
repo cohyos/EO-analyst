@@ -6,6 +6,7 @@ import {
   Gavel,
   Inbox,
   LayoutDashboard,
+  Layers,
   MessageSquareText,
   Network,
   Radar,
@@ -41,6 +42,7 @@ const NAV_ROUTES: NavItem[] = [
   { to: "/inbox", labelKey: "nav.inbox", icon: Inbox },
   { to: "/reports", labelKey: "nav.reports", icon: FileText },
   { to: "/bd", labelKey: "nav.bd", icon: Briefcase },
+  { to: "/product-lines", labelKey: "nav.productLines", icon: Layers },
   { to: "/tech-radar", labelKey: "nav.techRadar", icon: Radar },
   { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon },
 ];
@@ -67,6 +69,7 @@ export function usePageTitle(pathname: string): string {
   if (pathname.startsWith("/inbox")) return t("nav.inbox");
   if (pathname.startsWith("/reports")) return t("nav.reports");
   if (pathname.startsWith("/bd")) return t("nav.bd");
+  if (pathname.startsWith("/product-lines")) return t("nav.productLines");
   if (pathname.startsWith("/tech-radar")) return t("nav.techRadar");
   if (pathname.startsWith("/settings")) return t("nav.settings");
   return t("nav.shellFallback");

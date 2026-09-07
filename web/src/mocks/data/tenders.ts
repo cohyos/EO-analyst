@@ -26,6 +26,8 @@ export const mockTenders: TenderCard[] = [
     item_id: 12,
     created_at: "2026-08-20T14:05:00+00:00",
     updated_at: "2026-09-03T06:00:00+00:00",
+    // PL-ui (2026-09-07).
+    product_lines: ["targeting_pods"],
   },
   {
     id: 2,
@@ -48,6 +50,8 @@ export const mockTenders: TenderCard[] = [
     item_id: null,
     created_at: "2026-08-25T09:35:00+00:00",
     updated_at: "2026-09-02T11:00:00+00:00",
+    // PL-ui (2026-09-07).
+    product_lines: ["border_long_range_eo"],
   },
   {
     id: 3,
@@ -70,6 +74,8 @@ export const mockTenders: TenderCard[] = [
     item_id: 7,
     created_at: "2026-08-28T16:05:00+00:00",
     updated_at: "2026-09-04T08:00:00+00:00",
+    // PL-ui (2026-09-07).
+    product_lines: ["eo_air_defense_warning"],
   },
   {
     id: 4,
@@ -136,6 +142,8 @@ export const mockTenders: TenderCard[] = [
     item_id: null,
     created_at: "2026-08-30T10:05:00+00:00",
     updated_at: "2026-09-01T09:00:00+00:00",
+    // PL-ui (2026-09-07).
+    product_lines: ["mws_eo"],
   },
   {
     id: 7,
@@ -158,6 +166,8 @@ export const mockTenders: TenderCard[] = [
     item_id: null,
     created_at: "2026-08-18T05:05:00+00:00",
     updated_at: "2026-09-03T07:00:00+00:00",
+    // PL-ui (2026-09-07).
+    product_lines: ["ball_gimbals_16in"],
   },
   {
     id: 8,
@@ -294,6 +304,8 @@ export const mockTenders: TenderCard[] = [
     item_id: null,
     created_at: "2026-09-06T09:00:00+00:00",
     updated_at: "2026-09-06T09:00:00+00:00",
+    // PL-ui (2026-09-07).
+    product_lines: ["lorop_pods"],
   },
 ];
 

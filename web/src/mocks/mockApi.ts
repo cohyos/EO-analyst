@@ -34,6 +34,9 @@ import type {
   PayloadSpecVersion,
   PayloadsResponse,
   PayloadTreeResponse,
+  ProductLine,
+  ProductLineDetail,
+  ProductLineReportCreateResponse,
   ReportCitationsResponse,
   ReportDetail,
   RunsCurrentResponse,
@@ -67,6 +70,11 @@ import { findMockItem, mockItems } from "./data/items";
 import { findMockInvestigation, mockInvestigations } from "./data/investigations";
 import { mockReport } from "./data/reports";
 import { mockBdReports, mockBdTerritories } from "./data/bd";
+import {
+  buildMockProductLineDetail,
+  buildMockProductLines,
+  mockProductLineReports,
+} from "./data/productLines";
 import { mockForecasts, mockTenders } from "./data/tenders";
 import {
   mockClarifications,
@@ -306,6 +314,7 @@ let investigateJobCounter = 9000;
 // exactly like the live backend (eoa.tenders.feedback.record_feedback).
 const mockTenderFeedback: TenderFeedback[] = [];
 let mockTenderFeedbackId = 1;
+let nextProductLineReportId = 970;
 
 // W10 (docs/REVIEW_2026-09-06_evening.md round 4): one seeded pending review so
 // `VITE_USE_MOCKS=true` exercises the banner/inbox UI end to end even before the deep-search
@@ -1174,6 +1183,29 @@ export const mockApi: ApiClient = {
     const existing = mockBdReports.find((r) => r.territory === territory);
     if (existing) return delay({ job_id: "mock-bd-job", report: existing }, 400);
     return delay({ job_id: "mock-bd-job", status: "queued" as const }, 300);
+  },
+
+  // PL-ui (2026-09-07): "קווי מוצר" -- see web/src/mocks/data/productLines.ts.
+  getProductLines: async (): Promise<ProductLine[]> => delay(buildMockProductLines()),
+  getProductLine: async (id: string): Promise<ProductLineDetail> => {
+    const detail = buildMockProductLineDetail(id);
+    if (!detail) throw new Error("not_found");
+    return delay(detail, 250);
+  },
+  postProductLineReport: async (id: string): Promise<ProductLineReportCreateResponse> => {
+    const rows = mockProductLineReports[id];
+    if (!rows) throw new Error("not_found");
+    for (const r of rows) r.is_latest = false;
+    const newId = nextProductLineReportId++;
+    const now = new Date().toISOString();
+    rows.unshift({
+      ...rows[0],
+      id: newId,
+      created_at: now,
+      built_at: now,
+      is_latest: true,
+    });
+    return delay({ job_id: `mock-pl-job-${newId}` }, 400);
   },
 
   getSettings: async (name: SettingsName): Promise<SettingsGetResponse> =>

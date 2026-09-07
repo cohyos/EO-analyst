@@ -42,7 +42,12 @@ export function TendersPage() {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab: Tab = searchParams.get("tab") === "forecast" ? "forecast" : "open";
-  const [filters, setFilters] = useState<TenderFiltersState>({ status: "", country: "", q: "" });
+  const [filters, setFilters] = useState<TenderFiltersState>({
+    status: "",
+    country: "",
+    q: "",
+    productLines: [],
+  });
   const [showClosedArchived, setShowClosedArchived] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
@@ -107,6 +112,13 @@ export function TendersPage() {
     // Status is already applied server-side (filters.status, when set); country/q stay
     // client-side since the server call is shared across the country/q-agnostic count summary.
     if (filters.country) list = list.filter((tender) => tender.country === filters.country);
+    // PL-ui (2026-09-07): "קו מוצר" -- client-side only (see the `productLines` doc comment on
+    // `TenderFiltersState`), same shape as the country filter just above.
+    if (filters.productLines.length > 0) {
+      list = list.filter((tender) =>
+        (tender.product_lines ?? []).some((id) => filters.productLines.includes(id)),
+      );
+    }
     if (filters.q) {
       const needle = filters.q.toLowerCase();
       list = list.filter(
@@ -130,7 +142,7 @@ export function TendersPage() {
       const bp = b.published_at ?? "";
       return bp.localeCompare(ap);
     });
-  }, [tenders, filters.country, filters.q]);
+  }, [tenders, filters.country, filters.productLines, filters.q]);
 
   const sortedForecasts = useMemo(
     () => [...(forecastsQuery.data ?? [])].sort((a, b) => (b.likelihood ?? 0) - (a.likelihood ?? 0)),
@@ -204,6 +216,7 @@ export function TendersPage() {
                   !filters.status &&
                   !filters.country &&
                   !filters.q &&
+                  filters.productLines.length === 0 &&
                   !showClosedArchived ? (
                     // Default view (open + unknown, no user filters) is empty. Q5-11: if
                     // closed/archived rows exist, the "show closed/archived" toggle above would

@@ -59,6 +59,21 @@ const DOMAINS: Array<{ domain: string; sub: string; label: string }> = [
   { domain: "tech_dev", sub: "cv_atr", label: "ראייה ממוחשבת לזיהוי מטרות" },
 ];
 
+// PL-ui (2026-09-07): deterministic subdomain -> product-line tagging, one plausible product line
+// per DOMAINS row above (a handful map to none) -- gives every mock product line at least a few
+// "recent items" and lets the Feed's "קו מוצר" filter show real matches in mock mode. Ids mirror
+// `web/src/lib/productLines.ts`'s fixed catalog.
+const SUBDOMAIN_TO_PRODUCT_LINES: Record<string, string[]> = {
+  targeting_pods: ["targeting_pods"],
+  isr_pods: ["lorop_pods"],
+  uav_gimbals: ["ball_gimbals_16in"],
+  eo_warfare: ["mws_eo"],
+  border_towers: ["border_long_range_eo"],
+  iir_seekers: ["eo_air_defense_warning"],
+  hel: ["eo_air_defense_warning"],
+  detect_track: ["eo_air_defense_warning"],
+};
+
 // A12 (מעקב טכנולוגי): only used for DOMAINS rows with domain === "tech_dev".
 const TECH_MATURITIES: TechMaturity[] = ["lab", "prototype", "qualified", "fielded"];
 const TECH_ACTOR_KINDS: TechActorKind[] = ["academia", "lab", "startup", "prime", "government"];
@@ -211,6 +226,8 @@ function buildItem(i: number): ItemCard {
     israel_relevance: geography === "IL" ? Math.round((0.55 + (i % 4) * 0.1) * 100) / 100 : i % 9 === 0 ? 0.35 : null,
     israel_reasons: geography === "IL" ? ["israeli_company_mentioned", "israeli_agency_or_customer"] : [],
     corroboration: buildCorroboration(i, publishedAt),
+    // PL-ui (2026-09-07): see SUBDOMAIN_TO_PRODUCT_LINES above.
+    product_lines: SUBDOMAIN_TO_PRODUCT_LINES[domainInfo.sub] ?? [],
   };
 }
 
