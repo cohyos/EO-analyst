@@ -35,6 +35,7 @@ with no FK/CHECK tying it to a country code).
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -393,6 +394,35 @@ def forecasts_table(data: dict[str, Any]) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------
 
 
+#: R13-reports #1 (round-12 judge D7 worst #1): WIPO/USPTO kind-code letters that can trail a
+#: publication number (A1/A2/A9 published application, B1/B2 granted patent, C1/C2 correction,
+#: U1 utility model, S1 design, P1-P4 plant patent, T design/statutory-invention-registration, W/H
+#: rarer regional variants) -- see :func:`_normalize_pub_number`.
+_KIND_CODE_LETTERS = "ABCUSPTWHY"
+_PUB_NUMBER_KIND_CODE_RE = re.compile(rf"^(?P<base>.+\d)(?P<kind>[{_KIND_CODE_LETTERS}]\d{{0,2}})$")
+
+
+def _normalize_pub_number(pub_number: str | None) -> str | None:
+    """R13-reports #1 (round-12 judge D7 worst #1): :func:`_dedupe_patents_by_pub_number` used to
+    key on the raw ``pub_number`` string, so kind-code variants of the *same* patent --
+    ``'US7378626'`` vs ``'US7378626B2'``, ``'US20230082239A1'`` vs ``'US20230082239'`` (the
+    round-12 judge's own reproduction case, live in ``pl_mws_eo_2026-09-07.md``, DB ids 57/55 and
+    45/77) -- were never recognised as duplicates of each other. Uppercases and strips internal
+    whitespace/slashes/hyphens (some upstream sources format as ``'US 2023/0082239 A1'``), then
+    drops a trailing kind-code suffix (:data:`_KIND_CODE_LETTERS`, optionally followed by 1-2
+    digits -- A1/A2/B1/B2/U1 etc.) *only* when what remains still ends in a digit, i.e. is still
+    plausibly a real publication number rather than a false strip of a trailing letter+digit that
+    is genuinely part of the base number. Returns ``None`` unchanged for a falsy input (a patent
+    with no ``pub_number`` can't be identified as a duplicate of anything by this key)."""
+    if not pub_number:
+        return None
+    s = re.sub(r"[\s/\-]", "", pub_number.strip().upper())
+    if not s:
+        return None
+    m = _PUB_NUMBER_KIND_CODE_RE.match(s)
+    return m.group("base") if m else s
+
+
 def _dedupe_patents_by_pub_number(patents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """R12-reports #4 (round-11 judge D7 worst #8): pl_mws_eo's live patents table showed
     duplicate rows -- the same patent (same ``pub_number``) appearing more than once, most likely
@@ -401,15 +431,21 @@ def _dedupe_patents_by_pub_number(patents: list[dict[str, Any]]) -> list[dict[st
     (``COALESCE(publication_date, filing_date) DESC``), so keeping the first row seen per
     ``pub_number`` keeps the newest one, per the brief. A row with no ``pub_number`` (``None``)
     can't be identified as a duplicate of anything by this key, so every such row is kept as-is
-    rather than being collapsed into a single "no pub_number" bucket."""
+    rather than being collapsed into a single "no pub_number" bucket.
+
+    R13-reports #1: the identity key is now :func:`_normalize_pub_number`'s output, not the raw
+    ``pub_number`` string, so kind-code variants of the same patent collapse into one row (keeping
+    the first -- i.e. newest, per :func:`collect_patents`'s own ordering -- row seen); the row's own
+    ``pub_number`` field is left untouched (only the *dedup key* is normalized), so the rendered
+    table still shows whichever variant's row survived, unchanged."""
     seen: set[str] = set()
     kept: list[dict[str, Any]] = []
     for p in patents:
-        pub_number = p.get("pub_number")
-        if pub_number:
-            if pub_number in seen:
+        key = _normalize_pub_number(p.get("pub_number"))
+        if key:
+            if key in seen:
                 continue
-            seen.add(pub_number)
+            seen.add(key)
         kept.append(p)
     return kept
 

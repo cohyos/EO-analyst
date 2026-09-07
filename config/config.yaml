@@ -167,7 +167,7 @@ api:
   # (writes EOA_ACCESS_PASSCODE into runtime\eoa.env, read once at process start and hashed in
   # memory -- never stored here in plaintext) rather than editing passcode_hash by hand.
   remote_access:
-    enabled: false
+    enabled: true
     passcode_hash: ""
     token_required_for_writes: true
     trusted_local_only: true
@@ -197,7 +197,7 @@ export:
 llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — global local/cloud switch + fallback chains
   mode: cloud   # user decision 2026-09-06 16:20: cloud chain for analysis/reports, local fallback (docs/qa/loop/MODEL_DECISION.md)
   allow_cloud: true                 # kill switch: false disables every cloud provider everywhere, chat falls back to ollama
-  interactive_default: "chain"   # 2026-09-07 round-7 judge: chat follows the role chain (Claude -> Gemini -> local); "ollama" queued the chat behind the local model for 28 min
+  interactive_default: "agy:gemini-3.1-pro-high"
   timeout_s: 360   # bake-off: one claude analyze call exceeded 120 s on 11k chars; 2026-09-07 weekly/monthly report drafts (20-80k chars, power=high) exceeded 240 s twice each and fell back to agy
   cli:
     agy:

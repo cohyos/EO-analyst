@@ -59,6 +59,7 @@ import datetime as dt
 import difflib
 import re
 from functools import lru_cache
+from itertools import pairwise
 from typing import Any
 
 import structlog
@@ -271,6 +272,63 @@ def _is_generic_year_he(token: str) -> bool:
     return len(token) == 4 and token.isdigit() and 1990 <= int(token) <= 2099
 
 
+#: R13-reports #2 (round-12 judge D6 worst-list weekly-indicator item): a raw Hebrew word (2+
+#: letters, no prefix-stripping -- see :func:`_short_name_phrases_he`'s own docstring for why).
+_HEBREW_WORD_ONLY_RE = re.compile(r"[א-ת]{2,}")
+
+#: Two adjacent words this short (each 3-4 letters) can together read as a real two-word
+#: system/programme name (e.g. "קלע דוד" -- David's Sling) even though neither word alone clears
+#: :data:`_MATCH_MIN_TERM_LEN_HE`. Below 3 the word is almost always a bare function word already
+#: covered by :data:`_STOP_HE`; above 4 the single-word filter already handles it on its own.
+_SHORT_PHRASE_WORD_LEN = range(3, 5)
+
+#: Same Hebrew definite-article/conjunction prefixes :func:`_content_tokens` strips (kept as a
+#: separate copy, not imported from there, since :func:`_short_name_phrases_he` needs the
+#: *stripped* form only for the stopword check below while keeping the phrase's own original,
+#: unstripped word for the literal-substring match against the haystack).
+_HE_PHRASE_STOPWORD_PREFIXES = ("וה", "שה", "ה", "ו", "ל", "ב", "מ")
+
+
+def _strip_he_prefix_for_stopword_check(word: str) -> str:
+    for pref in _HE_PHRASE_STOPWORD_PREFIXES:
+        if word.startswith(pref) and len(word) - len(pref) >= 2:
+            return word[len(pref) :]
+    return word
+
+
+def _short_name_phrases_he(text_he: str | None) -> set[str]:
+    """R13-reports #2 (round-12 judge D6 worst-list weekly-indicator item): live verification
+    found a weekly "open" indicator row (id 16, Estonia/David's Sling equipping-contract signing)
+    stayed evidence-less against its own genuinely-matching item (id 6163) because the only shared
+    distinctive entity, "קלע דוד" (David's Sling), is written as two 3-letter words -- each too
+    short to clear :data:`_MATCH_MIN_TERM_LEN_HE` alone -- and the phrase is in neither
+    :func:`_taxonomy_subdomain_labels_he` (not a taxonomy sub-domain) nor
+    :func:`_watchlist_hebrew_names` (not a company), so it was invisible to
+    :func:`_item_matches_indicator` even though both texts contain it verbatim. Returns every
+    adjacent-word bigram (original order, single space between) where both words fall in
+    :data:`_SHORT_PHRASE_WORD_LEN` and neither word's stopword-check form (prefix stripped via
+    :func:`_strip_he_prefix_for_stopword_check` -- e.g. "בתוך" -> "תוך", a real :data:`_STOP_HE`
+    entry) is in :data:`_STOP_HE`/:data:`_MATCH_GENERIC_HE`, and neither is a bare calendar year --
+    i.e. a candidate two-word proper-name shape, not just any two short words in sequence. Each
+    returned phrase is folded into :func:`_extract_indicator_terms`'s own ``hebrew_terms`` set
+    (same weight as any other Hebrew term -- still needs a second independent hit to clear
+    :func:`_item_matches_indicator`'s 2-term bar, not treated as sufficient alone), keeping the
+    same "never invent a match from one weak signal" precision bar this module already applies
+    everywhere else."""
+    words = _HEBREW_WORD_ONLY_RE.findall(_normalize_text(text_he))
+    phrases: set[str] = set()
+    for a, b in pairwise(words):
+        if len(a) not in _SHORT_PHRASE_WORD_LEN or len(b) not in _SHORT_PHRASE_WORD_LEN:
+            continue
+        if _is_generic_year_he(a) or _is_generic_year_he(b):
+            continue
+        sa, sb = _strip_he_prefix_for_stopword_check(a), _strip_he_prefix_for_stopword_check(b)
+        if sa in _STOP_HE or sb in _STOP_HE or sa in _MATCH_GENERIC_HE or sb in _MATCH_GENERIC_HE:
+            continue
+        phrases.add(f"{a} {b}")
+    return phrases
+
+
 def _extract_indicator_terms(text_he: str | None) -> tuple[set[str], set[str]]:
     """R9-reports #1 (round-8 judge D6 #5): the daily/weekly indicator evidence column matched 0/8
     and 2/16 rows live because :func:`extract_key_terms` (this module's public, Latin-only term
@@ -280,7 +338,8 @@ def _extract_indicator_terms(text_he: str | None) -> tuple[set[str], set[str]]:
     (:func:`_content_tokens`, already used by :func:`same_indicator`/:func:`_cluster_key`),
     filtered down to distinctive-enough candidates (see :data:`_MATCH_MIN_TERM_LEN_HE`'s own note),
     plus any :func:`_taxonomy_subdomain_labels_he`/:func:`_watchlist_hebrew_names` phrase literally
-    present in ``text_he`` (added unconditionally, bypassing that filter)."""
+    present in ``text_he`` (added unconditionally, bypassing that filter), plus
+    (R13-reports #2) any :func:`_short_name_phrases_he` two-word candidate name."""
     latin_terms = extract_key_terms(text_he)
     raw_hebrew = _content_tokens(_normalize_text(text_he))
     hebrew_terms = {
@@ -295,6 +354,7 @@ def _extract_indicator_terms(text_he: str | None) -> tuple[set[str], set[str]]:
     for phrase in (*_taxonomy_subdomain_labels_he(), *_watchlist_hebrew_names()):
         if phrase and phrase in haystack_he:
             hebrew_terms.add(phrase)
+    hebrew_terms |= _short_name_phrases_he(text_he)
     return latin_terms, hebrew_terms
 
 

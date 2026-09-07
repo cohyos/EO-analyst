@@ -744,6 +744,21 @@ def _proper_noun_grounded(candidate: str, corpus_cf: str) -> bool:
     return len(words) >= 2 and all(w.casefold() in corpus_cf for w in words)
 
 
+def _grouped_digit_pattern(digits: str) -> str:
+    """A regex fragment matching ``digits`` either bare or thousands-grouped (comma or period
+    inserted every 3 digits from the right, e.g. "1,000"/"1.000" for ``digits == "1000"``) -- see
+    :func:`_digits_grounded`'s own round-13 note for the live gap this closes. A no-op (returns
+    ``digits`` re-escaped, unchanged) for a 1-3 digit run, which has no thousands-grouping position
+    to begin with."""
+    groups: list[str] = []
+    i = len(digits)
+    while i > 0:
+        groups.append(digits[max(0, i - 3) : i])
+        i -= 3
+    groups.reverse()
+    return r"[,.]?".join(re.escape(g) for g in groups)
+
+
 def _digits_grounded(candidate: str, corpus: str) -> bool:
     """Whether the digit run inside ``candidate`` (a money figure or a year) appears, as a
     standalone number (not a substring of a longer one), anywhere in ``corpus``.
@@ -757,11 +772,27 @@ def _digits_grounded(candidate: str, corpus: str) -> bool:
     a match immediately preceded by "<digit>." or followed by ".<digit>" -- i.e. the digit run is
     itself a fragment of a longer decimal number in the corpus -- so a number is only ever grounded
     by a genuine standalone occurrence of the same digits, never a substring of a larger or
-    differently-scaled figure like 1.53 or 2534."""
+    differently-scaled figure like 1.53 or 2534.
+
+    Round 13 (docs/qa/loop/round_12_judge.md worst #3, investigated for live Q5/Skyranger's "1,000
+    rounds per minute" -- ultimately traced to a different bug, :func:`_count_mismatch_violation`'s
+    own round-13 fix, since a bare rate-of-fire figure with no currency symbol or scale word never
+    reaches this function via :data:`_MONEY_RE` in the first place; documented here as a genuine,
+    independently-verified latent gap this investigation surfaced along the way, not the Q5 root
+    cause itself): ``candidate``'s own digits are stripped of every non-digit character before the
+    comparison (`"1,000"` -> `"1000"`), but ``corpus`` was never normalised the same way -- so a
+    candidate grounded by a corpus occurrence that itself uses a thousands separator ("$1,000",
+    "€1.000") never matched, because the literal substring search for the separator-stripped digit
+    run can never find a comma or period sitting in the middle of it. :func:`_grouped_digit_pattern`
+    now builds a pattern that accepts an *optional* comma or period at every thousands-grouping
+    position (from the right, standard convention for both comma- and period-grouped numbers) --
+    from ``"1000"`` for example, matches ``"1000"``, ``"1,000"``, or ``"1.000"`` in ``corpus`` alike.
+    A no-op for any candidate under 1000 (<= 3 digits, i.e. no possible grouping position), so the
+    round-9 decimal-boundary fix's own behaviour for short numbers is completely unchanged."""
     digits = re.sub(r"[^\d]", "", candidate)
     if len(digits) < 2:
         return True  # too short a number to carry any grounding signal on its own
-    pattern = r"(?<!\d)(?<!\d\.)" + re.escape(digits) + r"(?!\d)(?!\.\d)"
+    pattern = r"(?<!\d)(?<!\d\.)" + _grouped_digit_pattern(digits) + r"(?!\d)(?!\.\d)"
     return re.search(pattern, corpus) is not None
 
 
@@ -1999,7 +2030,32 @@ def _count_mismatch_violation(
     correct the digit in place only when it is. Returns ``None`` -- deliberately left alone, same
     precision-first stance as every other guard in this module -- when ``unit_text`` carries no
     citation, no count candidate at all, or its own citation(s) mention no comparable count for the
-    same noun phrase (unverifiable is not the same as contradicted)."""
+    same noun phrase (unverifiable is not the same as contradicted).
+
+    Round 13 (docs/qa/loop/round_12_judge.md worst #3, live Q5/Skyranger): a cited source that
+    discusses *more than one* system under the same generic noun ("rounds", "prototypes", ...) can
+    carry several same-noun counts at different values -- item 1353's own article states both
+    "Centurion, at a rate of fire of 4,500 rounds per minute" (an unrelated system, appearing
+    earlier in the document) and "[Skyranger] ... a firing rate of 1,000 rounds per minute" (the
+    actually-cited figure). A comma-grouped number is itself split into two separate count
+    candidates by :func:`_count_candidates` (the "1" and the "000" of "1,000" are two different
+    1-3-digit runs), so a correctly-quoted "1,000 rounds per minute [n]" claim has *both* a "1" and
+    a "000" candidate, each independently compared against the source. The previous version of this
+    function took the *first* same-noun source candidate in document order as ``exact_hit`` and
+    declared a mismatch whenever it merely differed from the claim -- so the claim's "1" was
+    compared only against the *earlier*, unrelated "4,500" mention (source noun "rounds" matches
+    exactly), never checked against the *correct*, later "1,000" mention naming the same noun, and
+    was "corrected" to "4", corrupting a verbatim-correct "1,000 rounds per minute" into a
+    fabricated "4,000 rounds per minute" -- silently, with no guard afterwards able to tell the
+    difference (the corrected figure carries a real citation and passes every other check). Fixed by
+    checking *every* same-noun source candidate before deciding: if the claim's own digit already
+    equals *any* of them, the claim is grounded and this candidate is not a mismatch at all,
+    regardless of what any other same-noun occurrence elsewhere in a multi-topic source says. Only
+    when the claim's digit matches *none* of the same-noun source candidates is it flagged, and the
+    correction offered is still the first (document-order) same-noun value, unchanged from before --
+    this only ever *narrows* when a mismatch fires, it never widens it, so every pre-existing
+    single-value-per-noun repro (the "seven"/"8" prototypes case, docs/qa/loop/round_7_judge_b.md)
+    is unaffected."""
     if not cited_ns:
         return None
     claim_candidates = _count_candidates(unit_text)
@@ -2012,19 +2068,20 @@ def _count_mismatch_violation(
 
     fallback: tuple[int, int, str, bool] | None = None
     for c_start, c_end, c_digit, c_noun in claim_candidates:
-        exact_hit: str | None = None
-        fuzzy_hit: str | None = None
+        exact_hits: list[str] = []
+        fuzzy_hits: list[str] = []
         for _s_start, _s_end, s_digit, s_noun in source_candidates:
             kind = _count_noun_match_kind(c_noun, s_noun)
             if kind == "exact":
-                exact_hit = s_digit
-                break
-            if kind == "fuzzy" and fuzzy_hit is None:
-                fuzzy_hit = s_digit
-        if exact_hit is not None and exact_hit != c_digit:
-            return c_start, c_end, exact_hit, True
-        if fallback is None and fuzzy_hit is not None and fuzzy_hit != c_digit:
-            fallback = (c_start, c_end, fuzzy_hit, False)
+                exact_hits.append(s_digit)
+            elif kind == "fuzzy":
+                fuzzy_hits.append(s_digit)
+        if exact_hits:
+            if c_digit in exact_hits:
+                continue  # grounded by at least one same-noun occurrence -- not a mismatch
+            return c_start, c_end, exact_hits[0], True
+        if fallback is None and fuzzy_hits and c_digit not in fuzzy_hits:
+            fallback = (c_start, c_end, fuzzy_hits[0], False)
     return fallback
 
 
@@ -2343,6 +2400,333 @@ def _drop_orphan_short_fragments(text: str) -> tuple[str, int]:
     return new_text, len(to_replace)
 
 
+# ---------------------------------------------------------------------------------------------
+# Round 13 (docs/qa/loop/round_12_judge.md worst #2, live Q6/AUSA 2026): the round-12 "סי." fix
+# closes one *shape* of guard-removal leftover -- a short (<3-word), letter-poor orphan -- but the
+# live round-12 answer still opened with `מים, ודירוג הכנסות של חברות ביטחון גלובליות)...`, a
+# *longer* leftover that is not short (round 12's own orphan-fragment sweep only ever fires under
+# :data:`_MIN_ORPHAN_FRAGMENT_WORDS` == 3 words; this is 7) and is not the module's other leading-
+# unit shape either (long enough, ends on real terminal punctuation as far as this module's own
+# `_iter_units` can tell). It is nonetheless headless: a bare chain of nouns/conjunctions with no
+# predicate at all -- "מים," itself the truncated tail of an earlier removed word ("...דו|מים,"),
+# then "ודירוג" (noun, "and-the-ranking-of"), "הכנסות" ("revenues"), "של" ("of"), "חברות ביטחון
+# גלובליות" ("global defense companies") -- a parenthetical noun phrase with zero finite verb or
+# copula anywhere in it, exactly the *same underlying defect class* as the old "סי." bug (a guard
+# upstream removed the sentence that used to introduce this list, leaving the list itself stranded
+# as if it were a sentence) in a new, longer shape neither of round 12's two checks was scoped to
+# catch.
+#
+# This is a third, independent leading-unit check -- gated behind its own ``elif`` in
+# :func:`enforce_answer_coherence`, same convention as the round-11 cross-reference check -- that
+# asks a more general question than either round-12 check: does the section's own leading unit
+# still read as one complete, independent clause at all, not just "long enough" or "not a short
+# orphan"? Three content-blind, approximate (never true syntactic parsing -- this module has never
+# attempted that, see every earlier round's own docstring) signals combine to answer that -- a
+# section's own 4-word dangling-fragment floor (:data:`_MIN_LEADING_FRAGMENT_WORDS`, the ``if``
+# above this ``elif`` in the same chain) already screens out anything shorter before this check ever
+# runs, so it deliberately carries no separate word-count floor of its own (an earlier version did
+# -- 6 words -- and wrongly dropped legitimate 5-word answers this project's own round-10/11 test
+# suite already asserts must survive, e.g. "התוכנית אושרה השבוע במלואה [1]."):
+#
+# 1. **Opening character** -- the unit's first *real* character (see :data:`_LEADING_DECORATION_RE`
+#    -- a leading blockquote marker or warning glyph this module's own guards prepend is stripped
+#    first, never counted against the unit) must itself plausibly *start* a word: a capitalised
+#    Latin letter, a Hebrew letter, a digit, or (handled by the caller, same as every other check in
+#    this function) a bullet/numbered-list marker. Anything else -- a lowercase Latin letter, a
+#    stray punctuation mark left dangling by an upstream removal -- fails outright.
+# 2. **Not a bare continuation** -- the unit must not *open* with a conjunction/relative/adversative
+#    token whose antecedent lives in a sentence that came before it: a Hebrew word glued with a
+#    leading ו-/ש- conjunction prefix, a standalone "כי"/"אשר"/"אך", or an English "and"/"but"/
+#    "which". This is deliberately narrower than round 11's own :data:`_CROSS_REF_OPENING_RE` (which
+#    also matches "בנוסף", "גם", ...) -- it only ever looks at the unit's own *first word*, not a
+#    curated phrase list, so it is a cheap, independent second opinion rather than a duplicate.
+# 3. **Contains a finite verb or copula-like structure** -- see :func:`_has_finite_verb_or_copula`'s
+#    own docstring for the exact (deliberately narrow, admittedly incomplete -- Hebrew has far more
+#    verb morphology than any short heuristic can cover, see that function's own caveat) heuristic.
+#    A number or colon anywhere in the unit also satisfies this on its own (a factual, data-bearing
+#    opening -- "נכון ל-2026, קיימות 4 מערכות..." -- reads as complete even without a recognisable
+#    verb form).
+#
+# The live "מים, ודירוג הכנסות..." repro fails specifically on (3): none of its words begins with
+# one of the future/hifil/piel present prefixes י/ת/נ/מ at all, and its one plural-suffixed word
+# ("הכנסות", ending "-ות") is preceded by "ודירוג" -- a bare noun, not a definite-article-marked one
+# -- so the construct-chain fallback (a suffixed word immediately preceded by a ה-prefixed word,
+# e.g. "המערכות פועלות") does not fire either. The round-
+# 11 "שאר המקורות..." shape (docs/qa/loop/round_10_judge.md worst #3) is unaffected by this new
+# check -- it is still caught first, and rewritten (not dropped outright), by the existing
+# :data:`_CROSS_REF_OPENING_RE` branch in the same ``elif`` chain, which this check never reaches
+# for that shape.
+#
+# Per this round's own brief: a unit failing this check is dropped outright, *unless* the section's
+# very next unit is itself continuation-shaped (see point 2 above, reused via
+# :func:`_starts_as_continuation`) -- dropping the first unit in that case would only crown the
+# second, equally headless unit as the new leading fragment, trading one incoherent opening for
+# another. When that happens, both units are left exactly as they were (a deliberate no-op, not a
+# merge that rewrites anything) -- the module's precision-first convention throughout: prefer
+# leaving a borderline case alone over compounding one guard's uncertain judgement with another's.
+# ---------------------------------------------------------------------------------------------
+
+_CLAUSE_NOUN_SUFFIXES = ("ים", "ות", "ה")
+_HEBREW_WORD_RUN_RE = re.compile(rf"[{_HEBREW_LETTERS}]+")
+_CLAUSE_VERB_PREFIXES = "יתנמ"
+
+# A leading run of characters that are neither a Latin/Hebrew letter nor a digit -- a blockquote
+# marker, a warning glyph, stray punctuation -- stripped once from the very start of a unit before
+# :func:`_is_incoherent_leading_unit` looks at its first "real" character. See that function's own
+# docstring for the two live end-to-end reproductions (the admission-caveat blockquote, the off-
+# topic warning prefix) this exists to stop misclassifying as incoherent.
+_LEADING_DECORATION_RE = re.compile(rf"^[^A-Za-z0-9{_HEBREW_LETTERS}]+")
+
+# A handful of common Hebrew past-tense reporting verbs that carry none of the four future/hifil/
+# piel present prefixes :data:`_CLAUSE_VERB_PREFIXES` covers (Hebrew past tense largely does not
+# prefix at all) and are not reliably caught by the suffix-plus-preceding-ה-word fallback either --
+# live-verified 2026-09-07 (this section's own end-to-end test suite): "Rheinmetall חתמה חוזה חדש
+# [1]" ("Rheinmetall signed a new deal") was wrongly flagged as incoherent, because its verb
+# ("חתמה", "signed") starts with ח (no prefix match) and the word immediately before it in the text
+# is the Latin "Rheinmetall" -- invisible to :data:`_HEBREW_WORD_RUN_RE`, which only ever scans
+# Hebrew letter runs, so the suffix fallback's own "preceded by a ה-word" check never had a Hebrew
+# predecessor to look at. Matched via `str.startswith` so one stem also covers its own gender/number
+# agreement suffix ("חתם"/"חתמה"/"חתמו" all share the "חת" stem -- kept as full words below rather
+# than bare 2-letter stems, which would be too short to avoid coincidental matches elsewhere).
+_CLAUSE_PAST_TENSE_VERB_STEMS_HE: tuple[str, ...] = (
+    "חתם", "חתמה", "חתמו",
+    "פרסם", "פרסמה", "פרסמו",
+    "הודיע", "הודיעה", "הודיעו",
+    "דיווח", "דיווחה", "דיווחו",
+    "הכריז", "הכריזה", "הכריזו",
+    "פיתח", "פיתחה", "פיתחו",
+    "רכש", "רכשה", "רכשו",
+    "השיק", "השיקה", "השיקו",
+    "זכה", "זכתה", "זכו",
+    "נחתם", "נחתמה", "נחתמו",
+    "הוצג", "הוצגה", "הוצגו",
+    "כלל", "כללה", "כללו",
+)  # fmt: skip
+
+# A bare "starts with one of the future/hifil/piel present prefixes י/ת/נ/מ" rule is the brief's own
+# starting heuristic, but this project's own domain vocabulary is full of מ-initial *nouns* built on
+# the identical templatic shape as a Hifil/Piel present-tense verb ("מערכת", "מטרה", "מרכזי",
+# "מבחינת") -- a bare prefix-letter check would flag nearly any sentence that merely mentions a
+# system or a target as "verb-shaped", whether or not it actually has a predicate, defeating this
+# whole check's purpose (verified live against an early version of this section's own repro
+# fixture, which slipped through specifically because it contained the unrelated noun "מבחינת").
+# Rather than a curated *allowlist* of conjugated verb forms (which would have the opposite,
+# arguably worse failure mode for a live guard -- silently dropping real content the moment a real
+# verb happens not to be on the list, e.g. "מפתחת"/"develops", one of the single most common verbs
+# in this exact domain), this keeps the broad prefix rule but carves out a small, curated
+# *blocklist* of common domain nouns/adjectives sharing the same prefixes -- an incomplete blocklist
+# only ever fails *open* (an unlisted noun is still wrongly treated as verb-shaped, same as the bare
+# rule), never *closed* (a real verb is never wrongly excluded just for not being enumerated),
+# matching this module's precision-first bias throughout: prefer under-flagging incoherence over
+# over-deleting real content.
+_CLAUSE_VERB_PREFIX_NOUN_BLOCKLIST_HE = frozenset(
+    {
+        "מערכת",
+        "מערכות",
+        "מערכתי",
+        "מערכתית",
+        "מערכתיים",
+        "מערכתיות",
+        "מטרה",
+        "מטרות",
+        "מרכז",
+        "מרכזים",
+        "מרכזי",
+        "מרכזית",
+        "מרכזיים",
+        "מרכזיות",
+        "מבחינת",
+        "מבחינה",
+        "מגזר",
+        "מגזרים",
+        "מגן",
+        "מסגרת",
+        "מסגרות",
+        "מכרז",
+        "מכרזים",
+        "מוצר",
+        "מוצרים",
+        "מדינה",
+        "מדינות",
+        "מידע",
+        "מקור",
+        "מקורות",
+        "נושא",
+        "נושאים",
+        "נושאות",
+        "נתון",
+        "נתונים",
+        "תוכנית",
+        "תוכניות",
+        "תכנית",
+        "תכניות",
+        "תעשייה",
+        "תעשיות",
+        "יכולת",
+        "יכולות",
+        "ידע",
+        "תחום",
+        "תחומים",
+        "תפקיד",
+        "תפקידים",
+        "נשק",
+        "תקציב",
+        "תקציבים",
+        "מחיר",
+        "מחירים",
+        "מספר",
+        "מספרים",
+        "מבנה",
+        "מבנים",
+        "תוצאה",
+        "תוצאות",
+        "נתח",
+        "תקן",
+        "תקנים",
+        "נציג",
+        "נציגים",
+        "נציגות",
+        "יעד",
+        "יעדים",
+        "יתרון",
+        "יתרונות",
+        "תקופה",
+        "תקופות",
+        "מדד",
+        "מדדים",
+        "תחזית",
+        "תחזיות",
+        "מהלך",
+        "מהלכים",
+        "מודל",
+        "מודלים",
+        "תקדים",
+    }
+)
+
+# A small stoplist of short, purely-functional Hebrew words -- excluded from the "at least one real
+# content word" floor (point 4 above) so a unit made up entirely of prepositions/pronouns/generic
+# fillers never counts as carrying a predicate just because one of those words happens to be >= 3
+# letters long.
+_CLAUSE_CONTENT_STOPWORDS_HE = frozenset(
+    {
+        "אשר", "אבל", "אולם", "למרות", "בנוסף", "כמו", "בין", "מתוך", "לגבי",
+        "לפני", "אחרי", "כדי", "הזה", "הזו", "האלה", "הללו", "וכן", "וגם",
+        "זאת", "זה", "זו", "הוא", "היא", "הם", "הן", "היה", "היתה", "כבר",
+        "עדיין", "כלל", "כמובן", "כאמור", "כלומר", "למעשה", "בעיקר", "בפרט",
+    }
+)  # fmt: skip
+
+# The unit's own first *word* only (never mid-unit, same convention as `_CROSS_REF_OPENING_RE`):
+# a standalone Hebrew "כי"/"אשר"/"אך", or an English "and"/"but"/"which".
+_CLAUSE_CONTINUATION_WORD_RE = re.compile(
+    r"^(?:" + "|".join(("כי", "אשר", "אך", "and", "but", "which")) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _starts_as_continuation(text: str) -> bool:
+    """Whether ``text`` (already stripped of leading whitespace) *opens* with a conjunction/
+    relative/adversative token that reads as a continuation of something before it -- either one of
+    :data:`_CLAUSE_CONTINUATION_WORD_RE`'s standalone words, or a Hebrew word carrying a glued
+    leading ו-/ש- conjunction prefix (e.g. "ודירוג", "שהוצג") -- see the section note above for why
+    this is a narrower, independent second opinion alongside round 11's own
+    :data:`_CROSS_REF_OPENING_RE`, not a replacement for it. An empty/blank ``text`` counts as a
+    continuation too (nothing to open a clause with in the first place)."""
+    if not text:
+        return True
+    if _CLAUSE_CONTINUATION_WORD_RE.match(text):
+        return True
+    first_word = _HEBREW_WORD_RUN_RE.match(text)
+    return bool(first_word and len(first_word.group(0)) >= 2 and first_word.group(0)[0] in "וש")
+
+
+def _has_finite_verb_or_copula(unit_text: str) -> bool:
+    """Whether ``unit_text`` plausibly contains a finite verb or copula-like structure, per the
+    deliberately narrow heuristic this whole check is built on (see the section note above and
+    :data:`_CLAUSE_VERB_PREFIX_NOUN_BLOCKLIST_HE`'s own docstring for why a bare prefix rule needs
+    that blocklist): first, at least one Hebrew word of >= 3 letters that is not in
+    :data:`_CLAUSE_CONTENT_STOPWORDS_HE` (a floor against a unit made of nothing but prepositions/
+    pronouns) -- and then either a digit or a colon anywhere in the unit outside of a `[n]` citation
+    marker itself (a data-bearing statement reads as complete on its own; a trailing citation's own
+    digit does not count -- a headless fragment can carry one just as easily as a real sentence
+    can), or a Hebrew word of >= 4 letters that begins with one of the
+    future/hifil/piel present prefixes :data:`_CLAUSE_VERB_PREFIXES` (י/ת/נ/מ) and is *not* one of
+    :data:`_CLAUSE_VERB_PREFIX_NOUN_BLOCKLIST_HE`'s curated common domain nouns sharing that same
+    templatic shape, or a word starting with one of :data:`_CLAUSE_PAST_TENSE_VERB_STEMS_HE`'s
+    curated common past-tense reporting verbs (Hebrew past tense mostly carries none of the four
+    prefixes above), or a plural/construct-suffixed word (:data:`_CLAUSE_NOUN_SUFFIXES`) immediately
+    preceded by a definite-article-marked word (begins with "ה", >= 3 letters -- the "ה-subject
+    ...-suffix predicate" agreement shape common to both present-tense and feminine past-tense
+    Hebrew predicates alike, e.g. "המערכות פועלות", "החברה פרסמה").
+
+    Known, accepted gap (documented rather than silently wrong): Hebrew verb morphology is far
+    richer than four prefix letters, one curated past-tense stem list, and three suffix shapes -- a
+    legitimate masculine-singular past-tense predicate whose verb is on none of these lists and
+    whose subject is not ה-prefixed ("מכרז פורסם השבוע") matches none of these signals and would be
+    judged to lack a verb. This check is one heuristic signal among the four this section's caller
+    combines, applied only to a section's own *leading* unit (never every unit in the answer), with
+    the same precision-first bias as every other guard in this module."""
+    words = _HEBREW_WORD_RUN_RE.findall(unit_text)
+    if not any(len(w) >= 3 and w not in _CLAUSE_CONTENT_STOPWORDS_HE for w in words):
+        return False
+    # A `[n]` citation marker's own digit does not count as a "data-bearing" number -- a bare,
+    # headless fragment can carry a trailing citation just as easily as a real sentence can, and
+    # `_CITATION_RE` is stripped first so the digit/colon check below only ever fires on a genuine
+    # figure inside the unit's own prose.
+    if re.search(r"[:0-9]", _CITATION_RE.sub("", unit_text)):
+        return True
+    for i, w in enumerate(words):
+        if len(w) >= 4 and w[0] in _CLAUSE_VERB_PREFIXES and w not in _CLAUSE_VERB_PREFIX_NOUN_BLOCKLIST_HE:
+            return True
+        if w.startswith(_CLAUSE_PAST_TENSE_VERB_STEMS_HE):
+            return True
+        if (
+            w.endswith(_CLAUSE_NOUN_SUFFIXES)
+            and i > 0
+            and words[i - 1].startswith("ה")
+            and len(words[i - 1]) >= 3
+        ):
+            return True
+    return False
+
+
+def _is_incoherent_leading_unit(stripped_unit: str) -> bool:
+    """Whether ``stripped_unit`` (a section's own leading :func:`_iter_units` span, already
+    ``.strip()``-ed, never a bullet/numbered-list item -- callers filter those out the same way
+    every other check in :func:`enforce_answer_coherence` does) fails to read as one complete,
+    independent clause -- see the section note above for the full signal rationale and the live
+    repro this exists to catch.
+
+    The "starts with a capital Latin letter / Hebrew letter / digit" and "not a bare continuation"
+    checks below run against ``stripped_unit`` with any leading *decoration* stripped first (see
+    :data:`_LEADING_DECORATION_RE`) -- a run of characters that are neither Latin/Hebrew letters nor
+    digits, e.g. a blockquote marker ("> ⚠️ ...", :func:`relocate_source_admission_caveat`'s own
+    prepended admission caveat) or a bare warning glyph (``routes.ask._OFF_TOPIC_PREFIX``, "⚠
+    ייתכן..."). Both are deliberate, this module/project's *own* leading markers, not a guard-
+    removal artifact -- an earlier version of this check evaluated the raw first character instead
+    and wrongly flagged both as incoherent, dropping the admission caveat and the off-topic gap
+    statement outright (live-verified via this section's own end-to-end test suite). A unit that is
+    *nothing but* decoration once stripped is left alone here (not this check's concern -- some
+    other guard's, or simply an edge case no live round has ever produced)."""
+    if not stripped_unit:
+        return False
+    core = _LEADING_DECORATION_RE.sub("", stripped_unit, count=1)
+    if not core:
+        return False
+    first_char = core[0]
+    starts_ok = (
+        (first_char.isascii() and first_char.isalpha() and first_char.isupper())
+        or bool(_HEBREW_LETTER_RE.match(first_char))
+        or first_char.isdigit()
+    )
+    if not starts_ok:
+        return True
+    if _starts_as_continuation(core):
+        return True
+    return not _has_finite_verb_or_copula(stripped_unit)
+
+
 def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
     """Drop a dangling leading fragment from the very start of ``answer_text`` (the unheaded
     "תשובה ישירה" lead) or from immediately under any ``#``-heading, then drop any heading left with
@@ -2387,7 +2771,18 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
     flow (the live "סי." shape: a short, orphaned fragment some *other*, earlier guard's removal
     left standing on its own, not this section's leading unit at all). See that function's own
     docstring for the exact criteria; its removals are folded into this function's own
-    ``removed_count``."""
+    ``removed_count``.
+
+    Round 13 (docs/qa/loop/round_12_judge.md worst #2, live Q6/AUSA 2026): a fourth leading-unit
+    check -- gated behind its own ``elif``, so it only ever runs on a unit none of the three checks
+    above already flagged -- catches a *longer*, structurally-complete-looking leading unit that
+    still reads as headless: a bare noun/conjunction chain with no finite verb or copula anywhere in
+    it (see :func:`_is_incoherent_leading_unit`'s own docstring and the module note above it for the
+    full four-signal rationale and the live "מים, ודירוג הכנסות..." repro this closes). A unit this
+    check flags is dropped outright, unless the section's very *next* unit is itself continuation-
+    shaped (:func:`_starts_as_continuation`) -- in that case both units are left alone entirely
+    (dropping only the first would just crown the second, equally headless unit as the new leading
+    fragment)."""
     if not answer_text or not answer_text.strip():
         return answer_text, 0
 
@@ -2426,6 +2821,15 @@ def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
                 to_replace.append((*span, remainder))
             else:
                 to_replace.append((*span, ""))
+        elif _is_incoherent_leading_unit(stripped):
+            if len(units) > 1:
+                second_s, second_e = units[1]
+                second_stripped = segment[second_s:second_e].strip()
+                if not (
+                    second_stripped.startswith(("-", "*")) or _NUMBERED_ITEM_RE.match(second_stripped)
+                ) and _starts_as_continuation(second_stripped):
+                    continue  # next unit is itself continuation-shaped -- leave both alone
+            to_replace.append((body_start + first_s, body_start + first_e, ""))
 
     if to_replace:
         new_text = _renumber_lists(_tidy_whitespace(_replace_spans(answer_text, to_replace)))

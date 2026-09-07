@@ -301,6 +301,25 @@ def _source_reliability_isolation(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _remote_access_gate_off(monkeypatch, clear_settings_cache, _reports_to_tmp):
+    """ADR-008 / iPhone access (user decision 2026-09-07): `api.remote_access.enabled` is ON in
+    production. `RemoteAccessMiddleware` reads the flag per request, and Starlette's TestClient
+    reports its peer as the non-loopback pseudo-host "testclient", so every TestClient-based test
+    would get 401 `auth_required` -- force the gate off here. `tests/unit/test_remote_access_auth.py`
+    exercises the gate through its own fake settings object and is unaffected."""
+    try:
+        from eoa.config import settings
+
+        cfg = settings()
+        ra = getattr(getattr(cfg, "api", None), "remote_access", None)
+        if ra is not None:
+            monkeypatch.setattr(ra, "enabled", False, raising=False)
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _ask_entailment_off(monkeypatch, clear_settings_cache, _reports_to_tmp):
     """R7-chat: `ask.entailment_check` is ON in production (user decision 2026-09-07) but the pass
     calls the light LLM role; unit tests must never make that call -- force it off here.
