@@ -507,7 +507,7 @@
     },
     "D10": {
       "domain": "D10",
-      "score_0_100": 92.8,
+      "score_0_100": 94.6,
       "n": 665,
       "note": "",
       "checks": [
@@ -515,7 +515,7 @@
           "name": "e2e_pass_ratio",
           "passed": false,
           "weight": 1.0,
-          "evidence": "617/665 passed (92.8%)"
+          "evidence": "629/665 passed (94.6%)"
         }
       ]
     }
@@ -531,5 +531,5 @@
     "D8": 96.0,
     "D9": 93.0
   },
-  "weighted_total": 95.6
+  "weighted_total": 95.7
 }

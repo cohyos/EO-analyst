@@ -384,7 +384,7 @@ EOA_CONFIG_DIR="$SCRATCH" PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe
 - Deterministic 99.6 (D1-D9 all checks pass; D10 e2e 617/629, 12 unexpected in three spec families:
   a graph-toolbar locator that now also matches the panel's close button after the dfdeafa a11y pass,
   a data-dependent empty-state assertion on the entity card's "פתח גרף מלא", and the nav-rail focus
-  check on the tablet-landscape project). R13-ui is fixing the specs; D10 is re-run after that.
+  check on the tablet-landscape project). Specs fixed (c59d27d); the D10 re-run is fully green, 629/629 expected, 0 unexpected, 36 skipped -> D10 94.6, combined **95.7** final.
 - Judge J13 (docs/qa/loop/round_13_judge.{json,md}): D1 92, D2 91, D3 96, D4 94, D5 85, D6 97, D7 96,
   D8 96, D9 93 (avg 93.3). Combined **95.6** -- the second consecutive round at or above 95, so the
   loop's stop rule (docs/QA_CONTINUOUS_LOOP.md) is met. Trajectory: 85.8, 87.5, 87.4, 89.8, 93.4,
