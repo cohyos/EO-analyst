@@ -42,6 +42,11 @@ DAILY_MIN_RELEVANCE = 0.5
 DAILY_MAX_ITEMS_PER_CATEGORY = 12
 WEEKLY_MAX_ITEMS_PER_CATEGORY = 20
 WEEKLY_MAX_COMPANIES = 15
+#: R11-reports (round-10 judge D6 worst #5): the monthly window is ~4x the weekly one -- a plain
+#: reuse of ``WEEKLY_MAX_ITEMS_PER_CATEGORY`` would under-represent a month's worth of Israeli-
+#: industry activity, so the monthly gets its own, larger cap via the same merged-table renderer
+#: (see :func:`weekly_israel_tables`'s new ``max_items_per_category``/``period_label_he`` params).
+MONTHLY_MAX_ITEMS_PER_CATEGORY = 30
 
 _CATEGORY_WINS = "wins"
 _CATEGORY_COMPETITION = "competition"
@@ -270,10 +275,17 @@ def weekly_israel_tables(
     *,
     min_relevance: float = DAILY_MIN_RELEVANCE,
     max_items_per_category: int = WEEKLY_MAX_ITEMS_PER_CATEGORY,
+    period_label_he: str = "שבועי",
 ) -> list[dict[str, Any]]:
     """Additive `tables=[...]` entries for the weekly report: the same single merged table as the
     daily report (over the week; D6), plus the per-company mentions/wins/competitors summary
-    table. `[]` when nothing qualifies for the week."""
+    table. `[]` when nothing qualifies for the week.
+
+    `period_label_he` (R11-reports, round-10 judge D6 worst #5): the company-summary table's
+    title suffix -- "שבועי" (weekly, default, unchanged call sites) or "חודשי" (monthly, via
+    :mod:`eoa.report.monthly`) -- the merged item table's own title is unaffected (it is always
+    just :data:`_MERGED_TABLE_TITLE_HE`, matched by ``eoa.qa.d6_daily_report``'s
+    ``israel_single_table_with_type_column`` check regardless of report kind)."""
     items = collect_israel_items(start, end, min_relevance=min_relevance)
     table = _merged_israel_table(citation_items, items, max_items=max_items_per_category)
     tables: list[dict[str, Any]] = [table] if table else []
@@ -281,7 +293,7 @@ def weekly_israel_tables(
     if company_rows:
         tables.append(
             {
-                "title_he": "תעשייה ישראלית — סיכום שבועי לפי חברה",
+                "title_he": f"תעשייה ישראלית — סיכום {period_label_he} לפי חברה",
                 "headers": ["חברה", "אזכורים", "זכיות", "מתחרים פעילים"],
                 "rows": company_rows,
             }

@@ -227,3 +227,162 @@ ending in `ask.entailment_check_skipped`); this replay reached **8/8**.
   live `/api/ask` traffic after the restart, the same way round 10's own "3/8" figure was obtained.
 - The monthly report / "תעשייה ישראלית" table question (round 10's worst #5, D6) is out of this
   package's file ownership and untouched.
+
+
+### R11-reports status
+
+**Package:** R11-reports (docs/qa/loop/round_10_judge.md worst #5 and #9).
+**Files owned/changed:** `agent/eoa/report/monthly.py` (new `_ISRAEL_GROUP_HE` constant + new
+`_israel_month_tables` helper, wired into `build_monthly`'s `tables` list), `agent/eoa/report/israel_section.py`
+(new `MONTHLY_MAX_ITEMS_PER_CATEGORY` constant, `weekly_israel_tables`'s new `period_label_he`
+parameter -- additive, default-preserving), `tests/unit/test_reports_round11.py` (new, 13 tests).
+`agent/eoa/report/docx_builder.py` was investigated for finding 2 (see below) but **not changed**
+-- no reproducible bug was found in it this round.
+
+#### 1. Monthly report had no "תעשייה ישראלית" section at all (worst #5)
+
+**Root cause confirmed:** `eoa.report.monthly.build_monthly` never called into
+`eoa.report.israel_section` for its `tables=[...]` list -- unlike `eoa.report.daily`/`eoa.report.weekly`,
+which both render the single merged item table (one row per item, a "סוג" type column) plus a
+per-company summary table. Israeli-industry content only ever showed up incidentally inside the
+LLM-drafted "סקירה לפי תחום" narrative prose, with no dedicated heading for a reader -- or the D6
+`israel_single_table_with_type_column` checker -- to find. (The monthly's QA-fallback path already
+called `collect_israel_items` for its own deterministic-fallback exec-summary sentences, but that
+is a different code path that never touches `tables=[...]` and only fires when the LLM draft fails
+QA twice.)
+
+**Fixed:** added `eoa.report.monthly._israel_month_tables(citation_items, start, end)`, mirroring
+`eoa.report.weekly`'s identical wiring exactly: calls `israel_section.weekly_israel_tables` over
+the month's own `[start, end)` window, tags both returned tables with a new `_ISRAEL_GROUP_HE =
+"תעשייה ישראלית"` group (own top-level `##` heading, per `docx_builder`'s `group_he` mechanism --
+`docs/REPORT_TEMPLATE_BENCHMARK.md`'s "same grouping as weekly" convention already used for
+trends/market-landscape/tech-IP in this file), and strips the company-summary table's redundant
+"תעשייה ישראלית — " title prefix so it renders as a child under the same parent rather than a
+second, competing heading (would otherwise fail the D6 check's "exactly one Israel heading" rule).
+Wired into `build_monthly` right after the market-landscape tables (players/top-events/horizon/
+watchlist), wrapped in the same bare `try/except` + `log.warning` convention every other additive
+monthly table block already uses, so an `israel_section` failure never breaks the monthly build.
+
+Extracted into a standalone helper (rather than inlined in `build_monthly` like the weekly's own
+block) specifically so it is unit-testable without the full collect/draft/QA orchestration
+`build_monthly` otherwise requires -- see `tests/unit/test_reports_round11.py`.
+
+**`israel_section.py` reuse required one parameter** (the brief's own allowance): the monthly
+window is ~4x the weekly one, so a plain reuse of `WEEKLY_MAX_ITEMS_PER_CATEGORY` (20) would
+under-represent a month's worth of qualifying items -- added `MONTHLY_MAX_ITEMS_PER_CATEGORY = 30`.
+Also added `weekly_israel_tables`'s new `period_label_he: str = "שבועי"` parameter (the company-
+summary table's title suffix), so the monthly can pass `"חודשי"` instead of hardcoding a second,
+diverging copy of the summary-table title string; the default is unchanged, so every existing
+(weekly) call site renders byte-identical to before -- pinned by
+`TestWeeklyIsraelTablesPeriodLabel.test_default_period_label_is_weekly_unchanged`.
+
+**Live-verified (2026-09-07, one `build_monthly(period_end=date(2026, 9, 7))` run, ~13 min,
+`report_id=131`, `qa.passed=True`):**
+
+- `output/reports/monthly_2026-09-30.md` now has exactly **one** `תעשייה ישראלית` heading (was:
+  zero) with a single merged table whose header row is
+  `כותרת | סוג | ישויות | מה זה אומר | מקור` and **16 data rows** (well under the new 30-item
+  monthly cap) plus the per-company summary table underneath, both under the same `##` parent.
+- `eoa.qa.d6_daily_report._israel_single_table_check` against the live file: **passed** (`"single
+  israel heading found; header cells: ['כותרת', 'סוג', 'ישויות', 'מה זה אומר', 'מקור']"`).
+- `eoa.qa.d6_daily_report.score_D6(md_path, run_link_check=False)` (the checker's signature only
+  scores `monthly_is_structured` for a *separate* `monthly_path=` argument -- it doesn't have a
+  monthly-shaped overall rubric, so this run passed the monthly file itself as the primary
+  `md_path`, which correctly exercises every content check including the Israel one; a few checks
+  are daily/weekly-only by design -- `bluf_present_and_short`, `what_changed_section_present`,
+  `indicator_watchlist_table_present` -- and are expected fails on a monthly, not defects):
+  **before (2026-08-31, pre-R11): 46.2** (`israel_single_table_with_type_column=False`, "no israel
+  heading found"; `israel_tech_tenders_sections_present=False`) → **after (2026-09-30, live):
+  71.8** (`israel_single_table_with_type_column=True`; `israel_tech_tenders_sections_present=True`).
+- `heading_count_within_budget`: **12 H2 headings** (budget 15 or 16 either way) -- comfortably within
+  the brief's "Keep monthly H2 <= 16" requirement; the new Israel section added exactly one H2.
+
+**Two pre-existing checker findings, unrelated to this fix, left as-is (out of this package's
+scope):** `no_row_repeated_across_tables` already failed on the pre-R11 monthly (46.2 baseline,
+same class of cross-table citation-sharing false-positive over a top-event row) and
+`no_duplicate_sentences` newly flags the auto-generated cross-table dedup boilerplate note
+("N שורות כבר הופיעו בטבלאות קודמות") appearing twice this cycle -- once from the top-events table,
+once from the new Israel table, because `docx_builder.dedupe_rows_across_tables` happened to drop
+exactly one row from each this month (an M&A event item that is both a top-event and Israel-
+relevant). This is `docx_builder`'s generic, pre-existing cross-table dedup mechanism working as
+designed (same as weekly's), not a citation or factual defect -- flagged here for a future round to
+consider exempting the auto-generated note text from the D6 duplicate-sentence scan (the same way
+the sources appendix already is exempted), rather than fixed now, since it is a checker-precision
+question about `docx_builder`'s shared dedup helper, not part of this round's "no Israel table"
+finding.
+
+#### 2. Cosmetic leading-space artefact (worst #9) -- investigated, not reproducible in owned files
+
+The round-10 judge's finding #9 ("Q7 has a stray leading space before an otherwise complete
+sentence") is a D5 (chat/"ask the analyst") observation, not a D6/report one. The brief asked to
+locate and fix it at the source in `docx_builder` if it showed up in reports too. Exhaustive search
+performed, all negative:
+
+- Grepped every fresh `output/reports/*.md` (daily/weekly/monthly/patent_survey/bd_*/pl_*, both
+  2026-09-06 and 2026-09-07 builds) for a line starting with a bare space (`^ [^\s]`), an empty-
+  looking table cell (`\| +\|`), and a leading-space paragraph opener -- **zero matches** beyond
+  ordinary nested Markdown list indentation (`  - ...`), which is correct, expected structure, not
+  a defect.
+- Loaded every `output/reports/*.docx` (all 31 on disk, daily/weekly/monthly/bd/pl/patent-survey)
+  with `python-docx` and checked every paragraph's and every table cell's `.text` for a leading
+  whitespace character -- **zero matches** across the entire corpus.
+- Grepped `agent/eoa/report/{docx_builder,monthly,weekly,daily,israel_section,deltas}.py` for the
+  classic "leading-space template" bug shape (an f-string segment like `f" {x}"` used as a
+  *prefix*, which produces a leading space whenever a preceding element is empty) -- the only hits
+  found (`deltas.py`'s `marker = f" {marker}" if marker else ""`,
+  `docx_builder.py`'s `f"{text} {markers}".rstrip()`) are all **suffix** markers appended after
+  real text, not prefixes, and both are already guarded (`if marker else ""` / `.rstrip()`).
+
+**Conclusion:** this defect does not exist anywhere in the report-rendering code this round's
+brief assigns (`monthly.py`/`israel_section.py`/`docx_builder.py`'s owned scope). It traces to the
+`ask`/grounding answer-synthesis path (`agent/eoa/api/*`), explicitly out of this round's file
+scope ("agent/eoa/api/* belongs to another engineer this round"). No fix was made to
+`docx_builder.py` -- a global `.strip()` at the render layer was considered and rejected per the
+brief's own instruction not to risk touching code-block/verbatim content for a bug that isn't
+reproducible in this file at all. A regression guard was added instead
+(`TestNoLeadingSpaceArtifact.test_israel_month_table_cells_never_start_with_whitespace`) pinning
+that the new Israel-table cells this round's fix adds never carry the artifact themselves.
+
+#### 3. Monthly exec-summary citation gate (finding 3) -- confirmed already correct, no code needed
+
+`MonthlyReportDraft` (`agent/eoa/llm/schemas/reports.py`) was migrated in round 5 P1 to the same
+structured `Sentence{text_he, cites}` shape `DailyReportDraft`/`WeeklyReportDraft` use (see its own
+docstring) -- `eoa.report.qa_citations.check` dispatches on `_is_structured_draft(draft)` and runs
+`_check_structured` for it exactly like daily/weekly, so every factual exec-summary/section/trend
+sentence is already gated by "every sentence cited" at QA-check time (and structurally, at pydantic
+construction, since `Sentence.cites` is non-empty by schema). `MonthlyReportDraftLegacy` (the old
+free-prose shape) is dead code kept only to deserialize a report persisted before that migration --
+nothing in the live pipeline constructs it. **No change needed; documented per the brief.**
+
+#### Tests
+
+New: `tests/unit/test_reports_round11.py`, 13 tests, covering (1) `weekly_israel_tables`'s new
+`period_label_he` param (default-unchanged regression + monthly override + merged-table title
+unaffected), (2) `MONTHLY_MAX_ITEMS_PER_CATEGORY` (larger than weekly's, actually applied), (3)
+`monthly._israel_month_tables` (merged table + summary grouped correctly, empty when nothing
+qualifies, uses the monthly cap not the weekly one, extends the citation registry in place, the
+try/except-swallow contract), (4) end-to-end: the D6 `_israel_single_table_check` accepts the
+rendered markdown and exactly one `##` Israel heading appears, (5) the leading-space regression
+guard.
+
+**Full required run, green:**
+
+```
+PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest \
+  tests/unit/test_reports_round11.py tests/unit/test_report_weekly_monthly.py \
+  tests/unit/test_weekly_round6.py tests/unit/test_docx_builder.py -q -p no:cacheprovider
+# 114 passed, 1 warning (pre-existing zipfile duplicate-name UserWarning in an
+# unrelated corruption-detection test) in 781.70s
+```
+
+`ruff check`/`ruff format --check` on all three changed/new files: clean.
+
+#### What remains for a future round
+
+- The two pre-existing D6 checker findings noted in section 1 (`no_row_repeated_across_tables`,
+  the dedup-note double-count) -- checker-precision refinements to `docx_builder`'s shared cross-
+  table dedup helper and/or the D6 duplicate-sentence scan, not report-content defects.
+- `eoa.qa.d6_daily_report.score_D6`'s `heading_count_within_budget`/other daily-vs-weekly branching
+  has no dedicated "monthly" kind (it falls into the `daily` branch by filename-prefix fallback);
+  worth an explicit monthly budget/rubric if the monthly report is to be D6-scored routinely going
+  forward, rather than only via the narrow `monthly_path=`/`monthly_is_structured` check.

@@ -116,6 +116,10 @@ _TRENDS_GROUP_HE = "מגמות החודש"
 _DOMAIN_SECTIONS_GROUP_HE = "סקירה לפי תחום"
 _MARKET_LANDSCAPE_GROUP_HE = "נוף השוק החודשי"
 _TECH_IP_GROUP_HE = "טכנולוגיה ו-IP"
+# R11-reports (round-10 judge D6 worst #5): the monthly never wired the "תעשייה ישראלית" section
+# the daily/weekly both render -- see ``eoa.report.israel_section``'s module docstring and
+# ``eoa.report.weekly``'s identical ``_ISRAEL_GROUP_HE`` constant/wiring, reused verbatim here.
+_ISRAEL_GROUP_HE = "תעשייה ישראלית"
 
 # re-exported so callers/tests importing eoa.report.monthly don't need to know these live in weekly.py
 __all__ = [
@@ -666,6 +670,52 @@ def _persist_report(
     return report_id
 
 
+def _israel_month_tables(
+    citation_items: list[dict[str, Any]], start: dt.date, end: dt.date
+) -> list[dict[str, Any]]:
+    """R11-reports (round-10 judge D6 worst #5, docs/qa/loop/round_10_judge.md sec 2 "D6"): the
+    daily/weekly both render a single merged "תעשייה ישראלית" table (one row per item, a "סוג"
+    type column -- see `eoa.report.israel_section`'s module docstring and the D6
+    `israel_single_table_with_type_column` check); the monthly report never called into
+    `eoa.report.israel_section` for its own `tables=[...]` list at all, so it rendered no
+    Israeli-industry section whatsoever (Israeli-industry content only ever showed up
+    incidentally inside the LLM-drafted "סקירה לפי תחום" narrative, with no dedicated heading a
+    reader -- or the D6 checker -- could find).
+
+    Mirrors `eoa.report.weekly`'s identical block (`weekly_israel_tables` + the same `group_he`/
+    title-stripping dance so the merged table's own title equals the group heading and renders
+    with no redundant child heading -- see `eoa.report.docx_builder`'s `_group_entries` note),
+    over the month's own `[start, end)` window instead of a week's, with a monthly-sized item cap
+    (`israel_section.MONTHLY_MAX_ITEMS_PER_CATEGORY`, 30 vs weekly's 20 -- a month has roughly
+    4x a week's worth of qualifying items) and a "חודשי" (monthly) company-summary title suffix
+    instead of weekly's "שבועי" (both via `weekly_israel_tables`'s new `period_label_he` param;
+    the merged item table's own title is unaffected either way -- it is always exactly
+    `israel_section._MERGED_TABLE_TITLE_HE`, matched by the D6 check regardless of report kind).
+
+    Returns `[]` (never raises to the caller) when nothing qualifies for the month; the caller
+    wraps this in its own try/except so an israel_section failure never breaks the monthly build,
+    matching every other additive `tables` block in `build_monthly`.
+    """
+    from eoa.report.israel_section import MONTHLY_MAX_ITEMS_PER_CATEGORY, weekly_israel_tables
+
+    month_start_ts = dt.datetime.combine(start, dt.time.min, tzinfo=JERUSALEM).astimezone(dt.UTC)
+    month_end_ts = dt.datetime.combine(end, dt.time.max, tzinfo=JERUSALEM).astimezone(dt.UTC)
+    tables: list[dict[str, Any]] = []
+    for tbl in weekly_israel_tables(
+        citation_items,
+        month_start_ts,
+        month_end_ts,
+        max_items_per_category=MONTHLY_MAX_ITEMS_PER_CATEGORY,
+        period_label_he="חודשי",
+    ):
+        tbl["group_he"] = _ISRAEL_GROUP_HE
+        title = tbl.get("title_he") or ""
+        if title and title != _ISRAEL_GROUP_HE:
+            tbl["title_he"] = title.split("— ", 1)[-1]
+        tables.append(tbl)
+    return tables
+
+
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
@@ -859,6 +909,18 @@ def build_monthly(
                 "group_he": _MARKET_LANDSCAPE_GROUP_HE,
             }
         )
+
+    # R11-reports (round-10 judge D6 worst #5): the daily/weekly both render a single merged
+    # "תעשייה ישראלית" table (headers + a "סוג" type column, per `eoa.report.israel_section`'s
+    # module docstring and the D6 `israel_single_table_with_type_column` check) -- the monthly
+    # never wired it in at all. Same mechanism as `eoa.report.weekly`'s identical block, factored
+    # out into :func:`_israel_month_tables` so it's unit-testable without the full collect/draft/
+    # QA orchestration this function otherwise requires. A failure here must never break the
+    # monthly report.
+    try:
+        tables.extend(_israel_month_tables(citation_items, start, end))
+    except Exception as exc:
+        log.warning("monthly_report_israel_section_failed", error=str(exc)[:160])
 
     # A14 (פטנטים ו-IP, 2026-09-06): monthly landscape summary by subdomain + top assignees, same
     # additive mechanism as the tables above. A failure here must never break the monthly report.
