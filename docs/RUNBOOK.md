@@ -108,6 +108,44 @@ longer applies.)
 runtime\pgsql\bin\pg_dump -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -Fc -f output\backups\eoanalyst_$(Get-Date -Format yyyyMMdd_HHmmss).dump
 ```
 
+### Data hygiene
+
+`scripts\cleanup_round10.py` sweeps nine categories of stale/corrupted rows and files: stale-worker
+job failures (+ their empty investigation-log trails), bot-challenge/cookie-wall items,
+`dedup_of` chain drift, orphaned/out-of-scope events, superseded failed-QA report rows,
+stale/duplicate tenders, a dead indicator watchlist, an old search-result cache, and orphaned
+report files on disk with no DB row. Always dry-run first, review the printed inventory, back up
+every affected table, then re-run with `--apply` and verify from a separate connection -- see
+`docs\qa\loop\round_10_fixes.md`'s "### R10-cleanup status" section for the worked example.
+
+```powershell
+Get-Content runtime\eoa.env | ForEach-Object {
+    if ($_ -match '^([^#=]+)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] }
+}
+$env:PYTHONPATH = "agent"; $env:PYTHONUTF8 = "1"
+
+# Dry run one category (jobs, interstitial, dedup, events, reports, tenders, watchlist, cache,
+# orphan-files) or everything at once with `all` -- always dry-run before --apply.
+.venv\Scripts\python.exe scripts\cleanup_round10.py all
+
+# Back up every affected table before writing anything (pg_dump --data-only, one file per table).
+$ts = Get-Date -Format yyyyMMdd_HHmmss
+foreach ($t in "jobs","investigation_log","items","events","reports","tenders","indicator_watchlist","feedback_surveys") {
+    runtime\pgsql\bin\pg_dump -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst --data-only -t $t `
+        -f "runtime\backups\cleanup_round10_${t}_${ts}.sql"
+}
+
+# Apply one category (repeat per category, or pass `all`), then verify from a fresh psql session --
+# never trust the same connection the --apply run used.
+.venv\Scripts\python.exe scripts\cleanup_round10.py jobs --apply
+runtime\pgsql\bin\psql -h 127.0.0.1 -p 5432 -U eoa -d eoanalyst -c "select count(*) from investigation_log where job_id = any(array[131,132,133,135,136,137,138,139,140]);"
+```
+
+Search-cache purge (category 8) and the orphan-report-files sweep (category 9) are pure filesystem
+operations -- they need `DATABASE_URL` too (category 9 checks what's still referenced), but write
+nothing to the DB. Category 9 always **moves** orphan files to `output\reports\_archive\` rather
+than deleting them.
+
 ### One-time Docker -> native data migration
 
 ```powershell

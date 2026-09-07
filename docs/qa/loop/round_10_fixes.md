@@ -426,3 +426,103 @@ a reader who already knows they want to leave is never blocked on the fetch.
 - **`npm run build` should be re-run once the concurrent investigations/lineage package (`real.ts`/
   `mockApi.ts`) lands cleanly**, to get a fresh `dist/` reflecting both packages together -- this
   package's own files do not need any further change for that to succeed.
+
+### R10-cleanup status
+
+**Package:** R10-cleanup ("נקה רשומות ישנות פגומות מתוך המערכת" -- clean old corrupted records out
+of the system, 2026-09-07).
+**Files owned/changed:** `scripts/cleanup_round10.py` (new), `tests/unit/test_cleanup_round10.py`
+(new, 39 tests), `docs/RUNBOOK.md` ("Data hygiene" section), this section. Deliberately did NOT
+touch `entities`/`graph_edges` (owned by a separate in-flight package this round) or anything under
+`agent/`/`web/` (other engineers editing those live).
+
+Nine independent, idempotent cleanup categories, each dry-run first, backed up, applied in a
+transaction per category, then verified from a fresh connection. Every backup lives under
+`runtime/backups/cleanup_round10_<table>_20260907_120950.sql` (`pg_dump --data-only`, one file per
+affected table: jobs, investigation_log, items, events, reports, tenders, indicator_watchlist,
+feedback_surveys).
+
+#### Dry-run inventory (before any write)
+
+| # | Category | Count | Sample ids |
+|---|---|---|---|
+| 1 | Stale-worker `deep_search` failures (today, ImportError/TypeError) | 9 jobs (131-133,135-140) | superseded (has rerun): 137,138,139,140; no rerun yet: 131,132,133,135,136 |
+| 1b | Their disposable `investigation_log` rows (zero reads, zero answer) | 68 rows across 8 of those 9 jobs (132 had none logged) | job 131: 16 rows, job 133: 16, job 135: 16, job 136: 16, jobs 137-140: 1 each |
+| 2a | Interstitial/cookie-wall items (`security_status='clean'` but boilerplate, not real content) | 19 items | all `israelhayom.co.il`, nav-shell fingerprint "אנחנו מגייסים" -- ids 6172,6173,6180,6182,6315,6597,6604,6612,6872(level=red),7270,7273,7394,7649,8114,8336,8577,8581,8690,8691 |
+| 2b | Title+text empty, >2 days old, unreferenced | 0 | -- |
+| 3 | `dedup_of` chains > 1 hop | 1 (item 317: 309 -> 269, collapsed to point at 269 directly) | -- |
+| 3b | `dedup_of` pointing at a missing item | 0 | -- |
+| 4 | Orphaned/out-of-scope/duplicate `events` | 1 (event 265, item 22, `level='archive'`) | -- |
+| 5 | `reports` rows with no file on disk | 0 | -- |
+| 5b | Superseded failed-QA `reports` rows (newer pass exists) | 16 rows (ids 5,6,10,12-17,19-22,28,38,54) | files: all 16 rows' `path_md`/`path_html`/`path_docx` were shared with a still-surviving passed row (same-day reruns overwrite one date-named file in place) -- 0 files eligible for deletion |
+| 6a | Stale `status='unknown'` tenders failing the live gate | 0 (repair_round9.py already resolved every `unknown` tender to open/archived) | -- |
+| 6b | Duplicate tender URLs | 0 | -- |
+| 7 | `indicator_watchlist` dropped>30d / empty text | 0 | -- |
+| 8 | `runtime/cache/search/*` files >14 days old | 0 of 180 files (all newer) | -- |
+| 9 | Orphan `output/reports/*` files (no DB row, >1 day old) | 1 (`sample_daily.docx`, 3 days old, no DB reference at all) | -- |
+
+#### Apply + separate-connection verification
+
+Ran `scripts/cleanup_round10.py <category> --apply` per category, in order 1-9, then re-queried
+from a fresh `eoa.db.connection()` (a new pooled connection, not the one the apply used):
+
+- **jobs**: `error` on jobs 137/138/139/140 confirmed literally `[superseded by rerun 145/146/147/
+  148]`; jobs 131/132/133/135/136 confirmed unchanged (no rerun exists for them -- left as-is per
+  the brief). `SELECT count(*) FROM investigation_log WHERE job_id = ANY(...)` for all 9 jobs
+  confirmed 0 (was 68).
+- **interstitial**: all 19 ids confirmed `security_status='blocked'`, `clean_text IS NULL`,
+  `summary_he IS NULL`. Item 6872 (`level='red'`) is referenced by 30 historical `reports` rows
+  (informational only -- those are static past snapshots on disk; the DB change only affects future
+  retrieval/report builds, matching the brief's intent).
+- **dedup**: item 317 confirmed `dedup_of = 269`.
+- **events**: `SELECT id FROM events WHERE id=265` confirmed empty (row gone).
+- **reports**: all 16 ids confirmed gone from `reports`; total `reports` row count 121 -> 105;
+  cascaded `feedback_surveys` rows for those 16 ids confirmed 0 remaining. Confirmed on disk that
+  `output\reports\bd_us_2026-09-06.md` and `output\reports\daily_2026-09-06.md` (the files shared
+  with the surviving passed rows) are still present -- the shared-path guard worked as designed.
+- **tenders / watchlist / cache**: no-ops, nothing to verify.
+- **orphan-files**: `output\reports\sample_daily.docx` confirmed gone from `output\reports\`,
+  present at `output\reports\_archive\sample_daily.docx`.
+
+A final `scripts/cleanup_round10.py all` dry run after all nine `--apply` runs came back all-zero
+except category 1's `failed_job_ids` (the 5 jobs with no rerun, correctly still listed but with
+empty `superseded`/`disposable_log_job_ids` -- confirming idempotency).
+
+#### Judgment calls (schema/data didn't match the brief's literal wording)
+
+See the script's own module docstring (`scripts/cleanup_round10.py`) for the full reasoning behind
+each one; in short:
+
+- `jobs_state_check` has no `'superseded'` value -- used the brief's documented fallback
+  (`error = '[superseded by rerun <id>]'`, `state` left as `'failed'`).
+- `items_security_status_check` has no `'fetch_failed'` value -- used `'blocked'`, the exact value
+  `eoa.fetch.sanitize.detect_block_page`/`eoa.fetch.service` already stamp on this same class of
+  page at fetch time; every pipeline stage already skips it.
+- "< 400 chars body" alone (no phrase match) hit 57 legitimate short items in a live check (TED/RFI
+  teasers, encyclopedia snippets, one already-`level='red'` item) -- category 2 requires an actual
+  boilerplate phrase match instead (Cloudflare/WAF markers, cookie-consent phrasing, or the
+  empirically-confirmed `israelhayom.co.il` nav-shell fingerprint), with a 2000-char cap so a real
+  long article that happens to mention cookies (`en.globes.co.il`'s own 16.7k-char privacy-policy
+  article) isn't wrongly flagged.
+- Report retention grouping added `patent_surveys.topic` (joined by `report_id`) for
+  `kind='patent_survey'` -- a live check found 17 passed rows sharing one
+  `(patent_survey, 2026-09-06, NULL)` tuple across 3 genuinely different survey topics; grouping by
+  the brief's literal `(kind, period_end, territory)` alone would have paired a failed run of one
+  topic against a passed run of a different one.
+- Report file deletion is guarded against deleting a path still referenced by any surviving row --
+  every one of this run's 16 candidate rows turned out to share its exact file path with the
+  group's kept row (same-day reruns overwrite one date-named file rather than writing a new one),
+  so deleting "the file" naively would have destroyed the live, passing report.
+
+#### What was deliberately not touched
+
+- `entities`/`graph_edges` -- explicitly out of scope (separate in-flight package this round).
+- `agent/`/`web/` -- explicitly out of scope (other engineers editing live).
+- Jobs 131, 132, 133, 135, 136 (`deep_search`, failed, `FallbackSynthesisOut` ImportError) -- no
+  rerun exists yet for these, so per the brief their `error` was left untouched; their
+  `investigation_log` rows WERE cleaned up (zero reads, zero answer, independent of the rerun
+  check). They will pick up a `[superseded by rerun <id>]` note automatically on a future run of
+  this same idempotent script once/if a rerun is queued for them.
+- `patent_surveys`/`indicator_watchlist` rows that were merely `SET NULL`'d by the `reports`
+  cascade (`confdeltype='n'` on both FKs, verified via `pg_constraint`) -- not separately edited,
+  just a side effect of the 16 `reports` row deletions, not itself "corrupted".
