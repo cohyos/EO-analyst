@@ -14,6 +14,7 @@ import { ToastStack } from "@/components/ToastStack";
 import { useToastQueue } from "@/hooks/useToastQueue";
 import { domainLabel } from "@/lib/taxonomy";
 import { formatDateTime } from "@/lib/time";
+import { outcomeLabel, outcomeTone } from "@/lib/investigations";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
 
@@ -36,6 +37,14 @@ export function ItemDetailPage() {
   const itemQuery = useQuery({
     queryKey: ["item", itemId],
     queryFn: () => api.getItem(itemId),
+    enabled: !Number.isNaN(itemId),
+  });
+
+  // R10-links: richer than `item.investigations` (job_id/question/state/dates only) -- adds
+  // outcome/confidence/lineage pointers for the badge this block shows below.
+  const itemInvestigationsQuery = useQuery({
+    queryKey: ["item-investigations", itemId],
+    queryFn: () => api.getItemInvestigations(itemId),
     enabled: !Number.isNaN(itemId),
   });
 
@@ -270,21 +279,37 @@ export function ItemDetailPage() {
         </section>
       )}
 
-      {item.investigations.length > 0 && (
+      {(itemInvestigationsQuery.data ?? item.investigations).length > 0 && (
         <section aria-label="חקירות עומק לפריט">
           <h3 className="mb-1 text-xs font-semibold text-fg-dim">חקירות עומק</h3>
           <ul className="space-y-1.5 text-sm">
-            {item.investigations.map((inv) => (
+            {/* R10-links: prefer the richer `itemInvestigationsQuery` (outcome/confidence/date) --
+                falls back to the plain `item.investigations` list while that query is loading or
+                on an older backend that doesn't have the endpoint yet. */}
+            {(itemInvestigationsQuery.data ?? item.investigations).map((inv) => (
               <li
                 key={inv.job_id}
-                className="flex items-center justify-between gap-2 rounded-md border border-border bg-bg-raised p-2 text-xs"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-bg-raised p-2 text-xs"
               >
                 <Link to={`/investigations/${inv.job_id}`} className="min-w-0 flex-1 text-accent hover:underline">
                   <bdi className="block truncate">{inv.question || `חקירה #${inv.job_id}`}</bdi>
                 </Link>
-                <span className="shrink-0 rounded bg-bg-sunken px-1.5 py-0.5 text-fg-dim">
-                  {INV_STATE_LABEL[inv.state] ?? inv.state}
-                </span>
+                <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                  <span className="rounded bg-bg-sunken px-1.5 py-0.5 text-fg-dim">
+                    {INV_STATE_LABEL[inv.state] ?? inv.state}
+                  </span>
+                  {"outcome" in inv && inv.outcome && (
+                    <span className={cn("rounded-full px-1.5 py-0.5 font-medium", outcomeTone(inv.outcome))}>
+                      {outcomeLabel(inv.outcome)}
+                    </span>
+                  )}
+                  {"confidence" in inv && typeof inv.confidence === "number" && (
+                    <span className="font-mono text-fg-dim">{inv.confidence.toFixed(2)}</span>
+                  )}
+                  {"finished_at" in inv && inv.finished_at && (
+                    <span className="font-mono text-fg-dim">{formatDateTime(inv.finished_at)}</span>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

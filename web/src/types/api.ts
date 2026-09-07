@@ -56,10 +56,7 @@ export interface ItemCard {
 }
 
 export type CorroborationStatus =
-  | "single_source"
-  | "corroborated"
-  | "official_primary"
-  | "unknown";
+  "single_source" | "corroborated" | "official_primary" | "unknown";
 
 export type CorroborationSourceKind = "duplicate" | "same_event" | "official";
 
@@ -243,6 +240,97 @@ export interface GraphResponse {
   edges: GraphEdgeRow[];
 }
 
+// R10-graph (docs/qa/loop/round_10_fixes.md): the analyst-facing entity graph explorer
+// (`web/src/components/graph/**`) is built on five new read endpoints layered on top of the
+// U10 `GraphNode`/`GraphEdgeRow` shapes above (which the original `/entities/{id}/graph` and
+// `/graph` endpoints keep returning unchanged).
+
+/** A graph node enriched with the stats an analyst actually needs at a glance: mention volume,
+ * recency, a corroboration-status breakdown across every item mentioning it, and the distinct
+ * product lines those items carry (entities themselves don't carry a `product_lines` column --
+ * this is aggregated server-side from the items that mention the entity). */
+export interface GraphNodeStats extends GraphNode {
+  mention_count: number;
+  last_seen: string | null;
+  corroboration: {
+    corroborated: number;
+    official_primary: number;
+    single_source: number;
+    unknown: number;
+  };
+  product_lines: string[];
+}
+
+export interface GraphEdgeEvidence {
+  item_id: number;
+  title: string | null;
+  published_at: string | null;
+}
+
+/** A `graph_edges` group, collapsed by (src, dst, relation): `weight` is the number of distinct
+ * items backing the relation, `first_seen`/`last_seen` bound its evidence dates, `evidence` is
+ * up to 3 of its most recent supporting items. */
+export interface GraphEdgeAgg {
+  src: number;
+  dst: number;
+  relation: string;
+  weight: number;
+  first_seen: string | null;
+  last_seen: string | null;
+  evidence: GraphEdgeEvidence[];
+}
+
+export interface NeighborhoodResponse {
+  nodes: GraphNodeStats[];
+  edges: GraphEdgeAgg[];
+  center_id: number;
+  /** true when the neighborhood had more than 300 nodes and was capped -- the UI shows a
+   * "הצג עוד" control rather than silently truncating. */
+  truncated?: boolean;
+}
+
+export interface GraphOverviewResponse {
+  nodes: GraphNodeStats[];
+  edges: GraphEdgeAgg[];
+}
+
+export interface GraphPathResponse {
+  nodes: GraphNode[];
+  edges: GraphEdgeAgg[];
+  hops: number;
+}
+
+export interface GraphSearchResult {
+  id: number;
+  name: string;
+  kind: string;
+  country: string | null;
+  mention_count: number;
+}
+
+export interface EntityInvestigationRef {
+  job_id: number | string;
+  state: string;
+  question: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface EntityReportRef {
+  id: number;
+  kind: string;
+  period_start: string | null;
+  period_end: string | null;
+  created_at: string | null;
+}
+
+/** `GET /api/entities/{id}/detail`: `EntityDetail` (below) plus the investigations and reports
+ * that cite the entity -- neither is exposed by the original `GET /api/entities/{id}`. */
+export interface EntityDetailFull extends EntityDetail {
+  investigations: EntityInvestigationRef[];
+  reports: EntityReportRef[];
+}
+
 export type InvestigationState =
   "queued" | "running" | "done" | "failed" | "stopped" | "error" | "not_found";
 
@@ -334,6 +422,86 @@ export interface InvestigationOut {
 export interface InvestigationDetail extends InvestigationSummary {
   log: InvestigationLogLine[];
   answer: InvestigationOut | null;
+  // R10-links (docs/qa/loop/round_10_fixes.md): trigger item / rerun-expansion lineage / citing
+  // reports, in one nested object -- additive, absent/null on any response built before the
+  // backend lands this.
+  provenance?: InvestigationProvenance | null;
+}
+
+/** R10-links: the item that triggered an investigation -- `null` for a free-standing question
+ * (U12, no `item_id` on the original request). */
+export interface InvestigationTriggerItem {
+  id: number;
+  title: string | null;
+  url: string | null;
+  source_name: string | null;
+  published_at: string | null;
+}
+
+/** R10-links: one node of an investigation's own rerun/expansion chain (oldest-first). `kind`
+ * describes how *that* job relates to its own immediate predecessor -- exactly one entry in a
+ * non-trivial chain is `"original"`. */
+export interface InvestigationLineageEntry {
+  job_id: string;
+  outcome: string | null;
+  confidence: number | null;
+  finished_at: string | null;
+  kind: "rerun" | "expansion" | "original";
+}
+
+/** R10-links: one report whose "חקירות עומק" section cites this investigation. */
+export interface InvestigationReportRef {
+  id: number;
+  kind: string | null;
+  period_end: string | null;
+  territory: string | null;
+  title_he: string;
+  path_html: string | null;
+}
+
+/** R10-links: `GET /api/investigations/{id}`'s nested `provenance` object. */
+export interface InvestigationProvenance {
+  job: {
+    job_id: string;
+    state: string | null;
+    question: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+  };
+  trigger_item: InvestigationTriggerItem | null;
+  lineage: InvestigationLineageEntry[];
+  reports: InvestigationReportRef[];
+}
+
+/** R10-links: `GET /api/items/{id}/investigations` -- richer than the plain `investigations`
+ * array embedded in `ItemDetail` (job_id/question/state/dates only): outcome, confidence, and
+ * rerun/expansion lineage pointers, for the outcome badge + confidence + date the item page's
+ * investigations block shows. */
+export interface ItemInvestigationRef {
+  job_id: string;
+  question: string | null;
+  state: InvestigationState;
+  error: string | null;
+  outcome: string | null;
+  confidence: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  rerun_of_job_id: string | null;
+  expanded_from_job_id: string | null;
+}
+
+/** R10-links: `GET /api/reports/{id}/investigations` -- one entry per investigation the report's
+ * own "חקירות עומק" section actually rendered (the same shape
+ * `eoa.report.daily.collect_deep_search` produces; only the fields the "חקירות בדוח" side list
+ * needs are declared here -- the response may carry more). */
+export interface ReportInvestigationRef {
+  job_id: string;
+  item_id: number | null;
+  trigger_title: string | null;
+  question: string | null;
+  outcome: string | null;
+  confidence: number | null;
+  rerun_of_job_id: string | null;
 }
 
 /** W10: one row of `GET /api/security-reviews` (agent/eoa/api/routes/security_review.py) -- a

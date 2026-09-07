@@ -526,3 +526,137 @@ each one; in short:
 - `patent_surveys`/`indicator_watchlist` rows that were merely `SET NULL`'d by the `reports`
   cascade (`confdeltype='n'` on both FKs, verified via `pg_constraint`) -- not separately edited,
   just a side effect of the 16 `reports` row deletions, not itself "corrupted".
+
+### R10-links status
+
+**Package:** R10-links ("are the deep investigations linked to the reports or to their origin
+points?" -- audit and complete the provenance links between a deep-search investigation, the item
+that triggered it, and the reports that cite it, in both directions).
+**Files owned/changed:** `agent/eoa/investigations/links.py` (new), `agent/eoa/investigations/
+__init__.py` (new), `agent/eoa/api/routes/investigations.py` (`get_investigation` gains
+`provenance`; two new routes, `GET /items/{item_id}/investigations` and `GET /reports/{report_id}/
+investigations`, added to this router rather than `routes/items.py`/`routes/reports.py` to stay
+inside this round's file scope -- FastAPI routers don't care which file registers a path),
+`agent/eoa/report/daily.py` (`collect_deep_search`'s entry dict only: added `"item_id"`, an
+explicit alias of the existing `"trigger_item_id"` -- additive, nothing renamed or removed;
+`reconcile_deep_search_reruns` untouched), `agent/eoa/report/docx_builder.py` (deep-search section
+rendering only: `_add_deep_search_section` gained an `items` parameter; the md/html inline blocks
+gained the same trigger-item lookup -- no other section touched), `web/src/pages/
+InvestigationDetailPage.tsx`, `web/src/pages/InvestigationsListPage.tsx`, `web/src/pages/
+ItemDetailPage.tsx` (investigations block only), `web/src/pages/ReportsPage.tsx` ("חקירות בדוח"
+side list only), `web/src/types/api.ts` (new `InvestigationTriggerItem`/`InvestigationLineageEntry`/
+`InvestigationReportRef`/`InvestigationProvenance`/`ItemInvestigationRef`/`ReportInvestigationRef`,
+`InvestigationDetail.provenance` -- additive), `web/src/api/types.ts` + `web/src/api/real.ts` (two
+new `ApiClient` methods + normalizers), `web/src/mocks/mockApi.ts` (mock implementations of the
+same two methods), `tests/unit/test_investigation_links.py` (new, 28 tests),
+`tests/unit/test_deep_search_provenance_links.py` (new, 13 tests), plus tests added to the four
+existing page test files (`InvestigationDetailPage.test.tsx` +6, `InvestigationsListPage.test.tsx`
++3, `ItemDetailPage.test.tsx` +3, `ReportsPage.test.tsx` +3) -- 41 new Python tests, 15 new/changed
+vitest tests. Did not touch `agent/eoa/api/services.py`, `agent/eoa/search/deep_search.py`,
+`web/src/components/reports/ReportBody.tsx`, or `web/src/components/ask/*` (other engineers'
+scope this round).
+
+#### Audit: were investigations linked to their reports, or to their origin items?
+
+**Short answer going in: neither direction existed.** The three entities (item, investigation,
+report) each knew about themselves but carried no live link to the other two anywhere the UI or
+the rendered report could follow.
+
+| Link | Before | After |
+|---|---|---|
+| Item → its investigations | `ItemDetailPage`'s "חקירות עומק" block existed and linked to `/investigations/{job_id}` (`item.investigations`, from `services.get_item`'s own join) -- but only `job_id`/`question`/`state`, no outcome, confidence, or date. | New `GET /api/items/{id}/investigations` (`links.item_investigations`) adds outcome/confidence/date/rerun-lineage pointers; the block now shows an outcome badge, confidence, and finished-date, falling back to the plain embedded list while the richer query loads. |
+| Investigation → its trigger item | **Missing entirely.** `GET /api/investigations/{id}` (`services.get_investigation`) returned only `item_id` (a bare int inside the job payload) -- no title, url, or source. `InvestigationDetailPage` never rendered a "פריט מקור" block at all. | New `provenance.trigger_item` (`{id, title, url, source_name, published_at}`) on `GET /api/investigations/{id}`; `InvestigationDetailPage` now shows a "פריט מקור" card (title + source + date, linking to `/items/{id}`). `null` for a free-standing question (U12), by design. |
+| Investigation → reports that cite it | **Missing entirely** -- no column on `jobs` or `reports` ever recorded this; nothing computed it either. | New `provenance.reports` (reconstructed after the fact -- see "Report-linkage limitation" below) + a "מופיע בדוחות" list on `InvestigationDetailPage`, linking to `/reports?id=`. |
+| Report's deep-search section → investigation page / trigger item | The rendered "חקירות עומק" section (md/html/docx) showed only the question text and outcome/answer -- no link to `/investigations/{id}`, no link to the trigger item, despite `collect_deep_search`'s entries already carrying `job_id` and `trigger_item_id` internally. | md/html now render a real `[חקירה #<id>](/investigations/<id>)` link plus a `פריט מקור [n]` citation (the existing `[n]`→sources-appendix convention) when the trigger item is one of the report's own numbered items; docx renders the id as plain text (a static file can't open the app's `/investigations/<id>` route) but the `[n]` citation still becomes a real internal jump via the existing citation-run mechanism. |
+| Report → list of investigations it cites | **Missing entirely** -- `ReportDetail` never listed them; nothing on `ReportsPage` did either. | New `GET /api/reports/{id}/investigations` (`links.investigations_for_report`, which replays the *exact* `collect_deep_search` + `_filter_deep_search_to_items_included` call the report itself used) + a collapsible "חקירות בדוח" side list on `ReportsPage`, each entry linking to its investigation and (when it has one) its trigger item. |
+| Rerun/expansion lineage (`rerun_of_job_id`, `expanded_from_job_id`) | The data existed (`eoa.report.daily.reconcile_deep_search_reruns` already used it to fold reruns together for the report renderer) but was never surfaced to a human as a chain -- a reader could not tell, from either the investigation page or the list, that job 148 was a rerun of job 140. | New `provenance.lineage` (`links.investigation_lineage`, walking `rerun_of_job_id`/`expanded_from_job_id` in both directions) + a "שרשרת חקירות" chain on `InvestigationDetailPage`, one entry per job in the chain with its own outcome/confidence/date, the current job highlighted. Shown only when the chain has more than one member. |
+
+#### Report-linkage limitation (documented, not silently papered over)
+
+Two different techniques back the "reports" direction, deliberately:
+
+- **`GET /api/reports/{id}/investigations`** (report → its investigations) calls the real
+  `eoa.report.daily.collect_deep_search`/`_filter_deep_search_to_items_included` against the
+  report's own stored `period_start`/`period_end`/`items_included` -- the *exact* computation the
+  report builder itself ran, including `reconcile_deep_search_reruns`'s rerun-collapsing. This
+  direction is fully accurate.
+- **`provenance.reports`/`reports_for_item`** (investigation/item → the reports citing it) cannot
+  reuse that same call cheaply for an arbitrary investigation (it would mean recomputing
+  `collect_deep_search` for every report in the system to find which ones happen to include a given
+  job). Instead `eoa.investigations.links._reports_covering` reapplies the period-window +
+  `items_included` membership rule directly against the `reports` table. This reconstruction has
+  two known gaps, documented in the module's own docstring:
+  1. It does not replay `reconcile_deep_search_reruns`'s rerun-group-collapsing or its `dedup_of`
+     item-folding (Pass 3) -- an investigation whose own trigger item is a plain `dedup_of`
+     duplicate of the item actually listed in a report's `items_included` will not be matched here
+     even though the live report's own reconciliation would have folded it into the same entry.
+  2. It only considers `daily`/`weekly`/`monthly` reports (the only three kinds that ever render a
+     "חקירות עומק" section) -- `bd_territory`/`patent_survey`/`product_line` reports can enqueue a
+     `deep_search` job but never render one, so they are correctly excluded, not missed.
+
+  No column on `jobs` or `reports` records this link directly; a future schema addition (e.g. a
+  `report_investigations` join table populated at report-build time) would close this gap for real
+  instead of reconstructing it after the fact, and was out of scope for this round (it would touch
+  `agent/eoa/report/daily.py`'s persistence path and the `reports` migration, both outside this
+  package's file scope).
+
+#### Other things noticed during the audit (not fixed here, out of scope)
+
+- `web/src/api/real.ts`'s `normalizeInvestigationDetail` never copies `security_review`/
+  `security_review_reason_he`/`security_review_snippet`/`security_review_resolved`/
+  `blocked_reason_he` from the raw response into `answer`, despite `InvestigationOut` declaring all
+  five fields -- the W10 security-review banner and the Round-5 P7 blocked-reason callout on
+  `InvestigationDetailPage` only work today because the *type* claims those fields exist, not
+  because the real client actually forwards them. Every existing test that exercises those UI paths
+  passes a hand-built `InvestigationDetail` object directly to a mocked `api.getInvestigation`,
+  bypassing `normalizeInvestigationDetail` entirely, so the gap has no test coverage either way.
+  Flagged as a follow-up task rather than fixed here -- `real.ts` is shared with several other
+  in-flight packages this round and the fix is unrelated to provenance linking.
+- `InvestigationOut` (`web/src/types/api.ts`) has no `confidence` field at all, even though the
+  backend's `InvestigationOut`/`jobs.result` schema carries one (used throughout this package's own
+  new provenance/lineage/item-investigations types). `InvestigationDetailPage`'s "תשובה" section
+  therefore cannot show the final answer's own confidence today; only the newly-added
+  provenance/lineage/item-investigations surfaces can, because they read `confidence` from
+  `jobs.result` server-side rather than through this incomplete client type.
+- `InvestigationsListPage`'s new "פריט מקור"/"דוח אחרון" columns are the one place this package
+  accepts an N+1 tradeoff: `GET /api/investigations` (the list endpoint, owned by `services.py`,
+  out of scope to extend) doesn't carry provenance, so each row's own `GET /api/investigations/{id}`
+  is fetched separately via `useQueries`, capped at the list's existing 30-row page size and cached/
+  deduped by react-query the same way visiting each row's own detail page already would be. A bulk
+  `GET /api/investigations?include=provenance` (or similar) would remove this if `services.py`
+  becomes available to another round.
+
+#### Verification
+
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/
+  test_investigation_links.py tests/unit/test_deep_search_provenance_links.py -q`: 41 passed.
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit -q -k
+  "investigation or deep_search_section or docx"`: 162 passed, 1 pre-existing failure unrelated to
+  this package (`test_discovery_round4.py::TestToolReadUsesL2Arbitration::
+  test_quarantined_page_recorded_on_investigation_for_final_security_review_flag`, in
+  `eoa.search.deep_search` -- another engineer's file this round, not touched here).
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_qa_round5.py
+  tests/unit/test_qa_score.py tests/unit/test_report_round3_d6.py -q`: 120 passed, 1 skipped, 1
+  pre-existing failure unrelated to this package (`test_report_round3_d6.py::
+  test_build_weekly_ignores_existing_contaminated_backup_and_writes_fresh_file` -- requires a live
+  Postgres connection this host doesn't have right now; fails identically with this package's
+  changes reverted). The D4 (`eoa.qa.d4_investigations`) and D6 (`eoa.qa.d6_daily_report`) checkers
+  themselves are unedited; their own report-rendering regexes (`_ENTRY_RE`, `_INLINE_CITATION_RE`)
+  were re-verified by hand against the new provenance line's exact text (an indented `  - [חקירה
+  #<id>](...)`  line, matching the existing `rerun_note_he` convention already exempted from both
+  regexes) and by the new `test_markdown_provenance_line_is_indented_not_a_new_entry` test.
+- `.venv/Scripts/ruff.exe check`/`format --check` on every owned Python file: clean.
+- `npx tsc --noEmit`, `npx eslint .`, `npx vitest run` (full suite): clean -- 48 files, 350 tests,
+  all passing (the pre-existing `act()`/`setState`-in-render console warnings in
+  `englishMode.test.tsx`/`EntitiesPage.test.tsx` are unrelated, present before this package's
+  changes).
+- `npm run build`: clean production build (`tsc -b && vite build`), no new chunk-size regressions.
+
+#### What remains
+
+- The `report_investigations` join-table idea above (closes the "Report-linkage limitation" gap for
+  real, at report-build time, instead of reconstructing it after the fact).
+- The two "noticed, not fixed" items above (`real.ts`'s missing `security_review`/
+  `blocked_reason_he` forwarding; `InvestigationOut`'s missing `confidence` field).
+- `InvestigationsListPage`'s N+1 provenance fetch could become one bulk call if `GET /api/
+  investigations` itself grows a `provenance` field -- needs `services.py`, out of scope this round.

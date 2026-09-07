@@ -7,13 +7,18 @@ import type {
   Conference,
   Corroboration,
   EntityDetail,
+  EntityDetailFull,
   EntitySummary,
   ForecastCard,
+  GraphOverviewResponse,
+  GraphPathResponse,
   GraphResponse,
+  GraphSearchResult,
   InvestigationDetail,
   InvestigationSummary,
   ItemCard,
   ItemDetail,
+  ItemInvestigationRef,
   ItemsByCountryResponse,
   ItemsResponse,
   Job,
@@ -26,6 +31,7 @@ import type {
   McpPingResponse,
   McpServersResponse,
   MorningResponse,
+  NeighborhoodResponse,
   PatentHeatmapResponse,
   PatentSurveyCard,
   PatentSurveyCreateResponse,
@@ -40,6 +46,7 @@ import type {
   ProductLineReportCreateResponse,
   ReportCitationsResponse,
   ReportDetail,
+  ReportInvestigationRef,
   ReportSummary,
   RunsCurrentResponse,
   SecurityReviewCard,
@@ -95,6 +102,18 @@ export interface GraphQuery {
   entity_id: number;
   depth?: number;
   labels?: string;
+}
+
+/** R10-graph: `GET /api/graph/neighborhood/{id}` filters. */
+export interface NeighborhoodQuery {
+  depth?: number;
+  kinds?: string[];
+  relationTypes?: string[];
+  since?: string;
+  /** Node cap (default/server-side 300, max 1500) -- the graph explorer's "הצג עוד" control
+   * re-requests with a larger value rather than the response silently truncating with no way
+   * to see more. */
+  limit?: number;
 }
 
 export interface TendersQuery {
@@ -165,11 +184,35 @@ export interface ApiClient {
   /** CORR (cross-source corroboration, 2026-09-07): "בדוק אימות מחדש" -- re-runs the check and
    * returns the fresh `Corroboration` object (not a whole ItemCard). */
   postItemCorroborate(id: number): Promise<Corroboration>;
+  /** R10-links: the item's own investigations with outcome/confidence/lineage -- richer than the
+   * `investigations` array embedded in `ItemDetail`. */
+  getItemInvestigations(id: number): Promise<ItemInvestigationRef[]>;
 
   getEntities(query: EntitiesQuery): Promise<EntitySummary[]>;
   getEntity(id: number): Promise<EntityDetail>;
   getGraph(query: GraphQuery): Promise<GraphResponse>;
   getGraphNamedQuery(name: string, arg: string): Promise<unknown[]>;
+
+  // R10-graph (docs/qa/loop/round_10_fixes.md): the analyst-facing entity graph explorer
+  // (web/src/components/graph/**) -- five read endpoints on top of the U10 surface above.
+  /** Autocomplete for the graph's entity search box. */
+  searchGraphEntities(q: string, limit?: number): Promise<GraphSearchResult[]>;
+  /** The "map of the map" shown before an analyst picks a center entity. */
+  getGraphOverview(limit?: number, since?: string): Promise<GraphOverviewResponse>;
+  /** The center entity's neighborhood, filterable by node kind / relation type / evidence date. */
+  getGraphNeighborhood(
+    entityId: number,
+    query?: NeighborhoodQuery,
+  ): Promise<NeighborhoodResponse>;
+  /** Shortest path between two entities (undirected, over `graph_edges`), or `null` if none
+   * exists within `maxDepth` hops. */
+  getGraphPath(
+    a: number,
+    b: number,
+    maxDepth?: number,
+  ): Promise<GraphPathResponse | null>;
+  /** `EntityDetail` (above) plus the investigations and reports that cite the entity. */
+  getEntityDetail(id: number): Promise<EntityDetailFull>;
 
   getInvestigations(limit?: number): Promise<InvestigationSummary[]>;
   getInvestigation(jobId: string): Promise<InvestigationDetail>;
@@ -296,6 +339,9 @@ export interface ApiClient {
   getReportFileUrl(id: number, fmt: "docx" | "md" | "html"): string;
   /** U3: `n -> {item_id, url, title}` for every `[n]` citation marker the report contains. */
   getReportCitations(id: number): Promise<ReportCitationsResponse>;
+  /** R10-links: the investigations this report's own "חקירות עומק" section actually rendered --
+   * feeds the "חקירות בדוח" side list. */
+  getReportInvestigations(id: number): Promise<ReportInvestigationRef[]>;
 
   // A11 "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (eoa.report.bd_territory).
   /** Candidate territories for the selector, with item/tender/forecast counts, most active first. */

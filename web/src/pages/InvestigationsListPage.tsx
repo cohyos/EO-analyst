@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import { Plus } from "lucide-react";
 import { api } from "@/api";
@@ -42,6 +42,22 @@ export function InvestigationsListPage() {
     queryFn: () => api.getInvestigations(30),
     refetchInterval: 5000,
   });
+
+  // R10-links: "פריט מקור" (trigger item) and "דוח אחרון" (last report) columns need the same
+  // `provenance` object the detail page shows -- `GET /api/investigations` itself doesn't carry
+  // it (that would mean an N+1 provenance query for every row on every list poll), so it's
+  // fetched per-row here instead, capped at this page's own 30-row limit and cached/deduped by
+  // react-query the same way navigating into each row's own detail page already would be.
+  const provenanceQueries = useQueries({
+    queries: (data ?? []).map((inv) => ({
+      queryKey: ["investigation", inv.job_id],
+      queryFn: () => api.getInvestigation(inv.job_id),
+      staleTime: 60_000,
+    })),
+  });
+  const provenanceByJobId = new Map(
+    (data ?? []).map((inv, i) => [inv.job_id, provenanceQueries[i]?.data?.provenance ?? null]),
+  );
 
   const startNew = useMutation({
     mutationFn: (question: string) => api.postInvestigationNew({ question }),
@@ -108,6 +124,9 @@ export function InvestigationsListPage() {
                 <th className="p-2 text-start">עמודים</th>
                 <th className="p-2 text-start">תוצאה</th>
                 <th className="p-2 text-start">התחיל</th>
+                {/* R10-links */}
+                <th className="p-2 text-start">פריט מקור</th>
+                <th className="p-2 text-start">דוח אחרון</th>
               </tr>
             </thead>
             <tbody>
@@ -167,6 +186,32 @@ export function InvestigationsListPage() {
                   </td>
                   <td className="p-2 font-mono text-xs text-fg-dim">
                     {formatDateTime(inv.started_at)}
+                  </td>
+                  <td className="p-2 text-xs">
+                    {provenanceByJobId.get(inv.job_id)?.trigger_item ? (
+                      <Link
+                        to={`/items/${provenanceByJobId.get(inv.job_id)!.trigger_item!.id}`}
+                        className="text-accent hover:underline"
+                      >
+                        <bdi className="block max-w-[10rem] truncate">
+                          {provenanceByJobId.get(inv.job_id)!.trigger_item!.title || "פריט"}
+                        </bdi>
+                      </Link>
+                    ) : (
+                      <span className="text-fg-muted">—</span>
+                    )}
+                  </td>
+                  <td className="p-2 text-xs">
+                    {(() => {
+                      const lastReport = provenanceByJobId.get(inv.job_id)?.reports?.[0];
+                      return lastReport ? (
+                        <Link to={`/reports?id=${lastReport.id}`} className="text-accent hover:underline">
+                          <bdi className="block max-w-[10rem] truncate">{lastReport.title_he}</bdi>
+                        </Link>
+                      ) : (
+                        <span className="text-fg-muted">—</span>
+                      );
+                    })()}
                   </td>
                 </tr>
               ))}

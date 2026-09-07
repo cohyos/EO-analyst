@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronUp, Download } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ReportBody } from "@/components/reports/ReportBody";
 import { formatDateTime } from "@/lib/time";
+import { outcomeLabel, outcomeTone } from "@/lib/investigations";
 import { cn } from "@/lib/cn";
 import type { ReportSummary } from "@/types/api";
 
@@ -194,6 +195,14 @@ export function ReportsPage() {
     enabled: !!selectedId,
   });
 
+  // R10-links: the investigations this report's own "חקירות עומק" section actually cites --
+  // a separate call (not embedded in ReportDetail) so it stays out of `services.py`'s scope.
+  const investigationsQuery = useQuery({
+    queryKey: ["report-investigations", selectedId],
+    queryFn: () => api.getReportInvestigations(Number(selectedId)),
+    enabled: !!selectedId,
+  });
+
   // Heading ids (for the TOC) are added to the raw server HTML; citation
   // `[n]` markers are linkified separately, inside <ReportBody>, so this
   // effect never double-wraps an already-linkified `[n]` token.
@@ -278,19 +287,56 @@ export function ReportsPage() {
               </div>
               <ReportBody html={processed.html} reportId={detailQuery.data.id} />
             </article>
-            {processed.toc.length > 0 && (
-              <nav aria-label="תוכן עניינים" className="hidden w-48 shrink-0 lg:block">
-                <p className="mb-2 text-xs font-semibold text-fg-dim">תוכן עניינים</p>
-                <ul className="space-y-1 text-sm">
-                  {processed.toc.map((t) => (
-                    <li key={t.id}>
-                      <a href={`#${t.id}`} className="text-accent hover:underline">
-                        {t.text}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </nav>
+            {(processed.toc.length > 0 || (investigationsQuery.data?.length ?? 0) > 0) && (
+              <aside className="hidden w-48 shrink-0 space-y-4 lg:block">
+                {processed.toc.length > 0 && (
+                  <nav aria-label="תוכן עניינים">
+                    <p className="mb-2 text-xs font-semibold text-fg-dim">תוכן עניינים</p>
+                    <ul className="space-y-1 text-sm">
+                      {processed.toc.map((t) => (
+                        <li key={t.id}>
+                          <a href={`#${t.id}`} className="text-accent hover:underline">
+                            {t.text}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </nav>
+                )}
+                {/* R10-links: "חקירות בדוח" -- the investigations this report's own "חקירות עומק"
+                    section rendered, each linking to its own detail page and (when it has one)
+                    its trigger item. */}
+                {(investigationsQuery.data?.length ?? 0) > 0 && (
+                  <details open>
+                    <summary className="mb-2 cursor-pointer select-none text-xs font-semibold text-fg-dim">
+                      חקירות בדוח ({investigationsQuery.data!.length})
+                    </summary>
+                    <ul className="space-y-1.5 text-xs">
+                      {investigationsQuery.data!.map((inv) => (
+                        <li key={inv.job_id} className="rounded-md border border-border bg-bg-raised p-1.5">
+                          <Link to={`/investigations/${inv.job_id}`} className="block text-accent hover:underline">
+                            <bdi className="line-clamp-2">
+                              {inv.question?.trim() || inv.trigger_title || `חקירה #${inv.job_id}`}
+                            </bdi>
+                          </Link>
+                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                            {inv.outcome && (
+                              <span className={cn("rounded-full px-1.5 py-0.5 text-[10px] font-medium", outcomeTone(inv.outcome))}>
+                                {outcomeLabel(inv.outcome)}
+                              </span>
+                            )}
+                            {inv.item_id != null && (
+                              <Link to={`/items/${inv.item_id}`} className="text-[10px] text-fg-dim hover:underline">
+                                פריט מקור
+                              </Link>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </aside>
             )}
           </div>
         )}

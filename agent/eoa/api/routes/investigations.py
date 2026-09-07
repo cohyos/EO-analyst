@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from eoa.api import services
 from eoa.api.errors import bad_request, not_found
 from eoa.config import settings
+from eoa.investigations import links
 
 log = structlog.get_logger(__name__)
 
@@ -56,7 +57,31 @@ def get_investigation(job_id: int) -> dict:
     investigation = services.get_investigation(job_id)
     if investigation is None:
         raise not_found("החקירה לא נמצאה")
+    # R10-links: trigger item / lineage / citing-reports, in one nested object so the detail page
+    # doesn't need a second round trip (see eoa.investigations.links for how each part is derived).
+    investigation["provenance"] = links.investigation_provenance(job_id)
     return investigation
+
+
+@router.get("/items/{item_id}/investigations")
+def get_item_investigations(item_id: int) -> list[dict]:
+    """R10-links: an item's own investigations with outcome/confidence/lineage pointers -- the
+    same rows `ItemDetailPage`'s "חקירות עומק" block renders, as a standalone endpoint so other
+    callers (and this endpoint's own tests) don't need the full `/items/{id}` payload."""
+    result = links.item_investigations(item_id)
+    if result is None:
+        raise not_found("הפריט לא נמצא")
+    return result
+
+
+@router.get("/reports/{report_id}/investigations")
+def get_report_investigations(report_id: int) -> list[dict]:
+    """R10-links: the investigations a report's own "חקירות עומק" section shows -- feeds
+    `ReportsPage`'s "חקירות בדוח" side list."""
+    result = links.investigations_for_report(report_id)
+    if result is None:
+        raise not_found("הדוח לא נמצא")
+    return result
 
 
 @router.post("/investigations/{job_id}/stop")

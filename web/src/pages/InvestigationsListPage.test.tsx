@@ -6,11 +6,15 @@ import type { InvestigationSummary } from "@/types/api";
 
 const getInvestigations = vi.fn();
 const postInvestigationNew = vi.fn();
+// R10-links: the list page fetches each row's own `provenance` (trigger item + last report) via
+// `api.getInvestigation` -- mocked here the same way `InvestigationDetailPage.test.tsx` does.
+const getInvestigation = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
     getInvestigations: (...args: unknown[]) => getInvestigations(...args),
     postInvestigationNew: (...args: unknown[]) => postInvestigationNew(...args),
+    getInvestigation: (...args: unknown[]) => getInvestigation(...args),
   },
 }));
 
@@ -53,7 +57,11 @@ function renderPage() {
 beforeEach(() => {
   getInvestigations.mockReset();
   postInvestigationNew.mockReset();
+  getInvestigation.mockReset();
   getInvestigations.mockResolvedValue([makeSummary("1")]);
+  // Default: no provenance (older-backend shape) -- the "פריט מקור"/"דוח אחרון" columns fall
+  // back to the "—" placeholder unless a test overrides this.
+  getInvestigation.mockResolvedValue({ ...makeSummary("1"), log: [], answer: null, provenance: null });
 });
 
 // Round-5 P7 (docs/REPORT_TEMPLATE_BENCHMARK.md DS3): `blocked` must render as a distinct amber
@@ -95,5 +103,51 @@ describe("InvestigationsListPage new-investigation flow (Q5-6)", () => {
 
     expect(await screen.findByText(/נכשל/)).toBeInTheDocument();
     expect(screen.queryByTestId("investigation-detail-stub")).not.toBeInTheDocument();
+  });
+});
+
+// R10-links: "פריט מקור" (trigger item) and "דוח אחרון" (last report) columns.
+describe("InvestigationsListPage trigger item / last report columns (R10-links)", () => {
+  it("shows a '—' placeholder in both new columns while there is no provenance", async () => {
+    renderPage();
+    await screen.findByText("שאלת בדיקה קיימת");
+    const dashes = screen.getAllByText("—");
+    expect(dashes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("links the trigger item column to /items/:id once its provenance loads", async () => {
+    getInvestigation.mockResolvedValue({
+      ...makeSummary("1"),
+      log: [],
+      answer: null,
+      provenance: {
+        job: { job_id: "1", state: "done", question: null, started_at: null, finished_at: null },
+        trigger_item: { id: 42, title: "כותרת הפריט", url: null, source_name: null, published_at: null },
+        lineage: [],
+        reports: [],
+      },
+    });
+    renderPage();
+    const link = await screen.findByRole("link", { name: /כותרת הפריט/ });
+    expect(link).toHaveAttribute("href", "/items/42");
+  });
+
+  it("links the last-report column to /reports?id= (reports[0], the newest)", async () => {
+    getInvestigation.mockResolvedValue({
+      ...makeSummary("1"),
+      log: [],
+      answer: null,
+      provenance: {
+        job: { job_id: "1", state: "done", question: null, started_at: null, finished_at: null },
+        trigger_item: null,
+        lineage: [],
+        reports: [
+          { id: 9, kind: "daily", period_end: "2026-09-05", territory: null, title_he: "דוח יומי — 05.09", path_html: null },
+        ],
+      },
+    });
+    renderPage();
+    const link = await screen.findByRole("link", { name: "דוח יומי — 05.09" });
+    expect(link).toHaveAttribute("href", "/reports?id=9");
   });
 });

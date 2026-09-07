@@ -10,6 +10,7 @@ import type {
   InvestigationSummary,
   ItemCard,
   ItemDetail,
+  ItemInvestigationRef,
   Job,
   JobState,
   Lesson,
@@ -39,6 +40,7 @@ import type {
   ProductLineReportCreateResponse,
   ReportCitationsResponse,
   ReportDetail,
+  ReportInvestigationRef,
   RunsCurrentResponse,
   SecurityReviewCard,
   SettingsGetResponse,
@@ -58,10 +60,20 @@ import type {
   EntitiesQuery,
   GraphQuery,
   ItemsQuery,
+  NeighborhoodQuery,
   PatentsQuery,
   PayloadsQuery,
   TendersQuery,
 } from "@/api/types";
+import type {
+  EntityDetailFull,
+  GraphEdgeAgg,
+  GraphNodeStats,
+  GraphOverviewResponse,
+  GraphPathResponse,
+  GraphSearchResult,
+  NeighborhoodResponse,
+} from "@/types/api";
 import type { CountryGroup } from "@/types/api";
 import { normalizeCountryCode } from "@/lib/countries";
 import { buildPayloadTree } from "@/lib/payloadFamilies";
@@ -406,6 +418,93 @@ function itemToEvents(item: ItemCard): EventRow[] {
   ];
 }
 
+// --------------------------------------------------------------------------
+// R10-graph (docs/qa/loop/round_10_fixes.md) mock helpers -- everything below builds on
+// `mockEntities`/`mockGraph`/`items` (the mutable `mockItems` clone above) rather than adding a
+// parallel fixture, so the graph explorer's mock data always agrees with the entity list/card
+// and the feed it's built from.
+// --------------------------------------------------------------------------
+
+function itemsForEntityName(name: string): ItemCard[] {
+  return items.filter((it) => it.entities_mentioned.includes(name));
+}
+
+function toGraphNodeStats(node: {
+  id: number;
+  name: string;
+  kind: string;
+  country: string | null;
+}): GraphNodeStats {
+  const related = itemsForEntityName(node.name);
+  let lastSeen: string | null = null;
+  const corroboration = {
+    corroborated: 0,
+    official_primary: 0,
+    single_source: 0,
+    unknown: 0,
+  };
+  for (const it of related) {
+    if (!lastSeen || it.published_at > lastSeen) lastSeen = it.published_at;
+    const status = it.corroboration?.status ?? "unknown";
+    if (status === "corroborated") corroboration.corroborated += 1;
+    else if (status === "official_primary") corroboration.official_primary += 1;
+    else if (status === "single_source") corroboration.single_source += 1;
+    else corroboration.unknown += 1;
+  }
+  const product_lines = Array.from(
+    new Set(related.flatMap((it) => it.product_lines ?? [])),
+  );
+  return {
+    id: node.id,
+    name: node.name,
+    kind: node.kind,
+    country: node.country,
+    mention_count: related.length,
+    last_seen: lastSeen,
+    corroboration,
+    product_lines,
+  };
+}
+
+/** Groups `mockGraph.edges` by (src, dst, label) into the `GraphEdgeAgg` shape the real API
+ * returns -- the fixture already has at most one row per combo, but grouping stays correct if
+ * that ever changes. */
+function mockEdgeAggs(): GraphEdgeAgg[] {
+  const groups = new Map<string, typeof mockGraph.edges>();
+  for (const e of mockGraph.edges) {
+    const key = `${e.src}:${e.dst}:${e.label}`;
+    const list = groups.get(key) ?? [];
+    list.push(e);
+    groups.set(key, list);
+  }
+  const out: GraphEdgeAgg[] = [];
+  for (const rows of groups.values()) {
+    const evidence = rows
+      .map((r) => {
+        const item = findMockItem(r.item_id);
+        return item
+          ? { item_id: item.id, title: item.title, published_at: item.published_at }
+          : null;
+      })
+      .filter(
+        (x): x is { item_id: number; title: string; published_at: string } => x !== null,
+      )
+      .sort((a, b) => (a.published_at < b.published_at ? 1 : -1))
+      .slice(0, 3);
+    const dates = evidence.map((e) => e.published_at);
+    out.push({
+      src: rows[0].src,
+      dst: rows[0].dst,
+      relation: rows[0].label,
+      weight: rows.length,
+      first_seen: dates.length ? dates[dates.length - 1] : null,
+      last_seen: dates.length ? dates[0] : null,
+      evidence,
+    });
+  }
+  return out;
+}
+
 export const mockApi: ApiClient = {
   getMorning: async (): Promise<MorningResponse> =>
     delay({
@@ -514,7 +613,12 @@ export const mockApi: ApiClient = {
   postItemCorroborate: async (id) => {
     const item = items.find((it) => it.id === id);
     if (!item) throw new Error("not_found");
-    const current = item.corroboration ?? { status: "unknown", count: 0, sources: [], checked_at: null };
+    const current = item.corroboration ?? {
+      status: "unknown",
+      count: 0,
+      sources: [],
+      checked_at: null,
+    };
     if (current.status === "single_source" && id % 2 === 0) {
       item.corroboration = {
         status: "corroborated",
@@ -535,6 +639,27 @@ export const mockApi: ApiClient = {
     }
     return delay({ ...item.corroboration }, 400);
   },
+
+  // R10-links: mock data has no rerun/expansion chains or a numeric `confidence` field, so those
+  // always come back null -- the shapes below still let the UI (outcome badge/date) exercise the
+  // real endpoint's contract in mock mode.
+  getItemInvestigations: async (id: number): Promise<ItemInvestigationRef[]> =>
+    delay(
+      mockInvestigations
+        .filter((inv) => inv.item_id === id)
+        .map((inv) => ({
+          job_id: inv.job_id,
+          question: inv.question,
+          state: inv.state,
+          error: inv.error,
+          outcome: inv.outcome,
+          confidence: null,
+          started_at: inv.started_at,
+          finished_at: inv.finished_at,
+          rerun_of_job_id: null,
+          expanded_from_job_id: null,
+        })),
+    ),
 
   getEntities: async (query: EntitiesQuery) => {
     let filtered = mockEntities.slice();
@@ -654,6 +779,173 @@ export const mockApi: ApiClient = {
       );
     }
     return delay([]);
+  },
+
+  // R10-graph (docs/qa/loop/round_10_fixes.md) -----------------------------------------------
+
+  searchGraphEntities: async (q: string, limit = 20): Promise<GraphSearchResult[]> => {
+    const query = q.trim().toLowerCase();
+    if (!query) return delay([]);
+    const matches = mockEntities.filter(
+      (e) =>
+        e.name.toLowerCase().includes(query) ||
+        e.aliases.some((a) => a.toLowerCase().includes(query)),
+    );
+    return delay(
+      matches.slice(0, limit).map((e) => ({
+        id: e.id,
+        name: e.name,
+        kind: e.kind,
+        country: e.country,
+        mention_count: itemsForEntityName(e.name).length,
+      })),
+    );
+  },
+
+  getGraphOverview: async (
+    limit = 30,
+    _since?: string,
+  ): Promise<GraphOverviewResponse> => {
+    const ranked = mockEntities
+      .map((e) => ({ e, n: itemsForEntityName(e.name).length }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, limit)
+      .map((x) => x.e);
+    const ids = new Set(ranked.map((e) => e.id));
+    return delay({
+      nodes: ranked.map(toGraphNodeStats),
+      edges: mockEdgeAggs().filter((e) => ids.has(e.src) && ids.has(e.dst)),
+    });
+  },
+
+  getGraphNeighborhood: async (
+    entityId: number,
+    query: NeighborhoodQuery = {},
+  ): Promise<NeighborhoodResponse> => {
+    const center = mockEntities.find((e) => e.id === entityId);
+    if (!center) return delay({ nodes: [], edges: [], center_id: entityId });
+
+    const depth = Math.min(query.depth ?? 1, 2);
+    const allEdges = mockEdgeAggs();
+    const nodeIds = new Set<number>([entityId]);
+    for (let d = 0; d < depth; d++) {
+      for (const e of allEdges) {
+        if (nodeIds.has(e.src)) nodeIds.add(e.dst);
+        if (nodeIds.has(e.dst)) nodeIds.add(e.src);
+      }
+    }
+    let edges = allEdges.filter((e) => nodeIds.has(e.src) && nodeIds.has(e.dst));
+    if (query.relationTypes?.length) {
+      const wanted = new Set(query.relationTypes);
+      edges = edges.filter((e) => wanted.has(e.relation));
+    }
+    if (query.since) {
+      const since = query.since;
+      edges = edges.filter((e) => (e.last_seen ?? "") >= since);
+    }
+    const keepIds = new Set<number>([entityId]);
+    for (const e of edges) {
+      keepIds.add(e.src);
+      keepIds.add(e.dst);
+    }
+    let nodes = Array.from(keepIds)
+      .map((id) => (id === entityId ? center : mockEntities.find((e) => e.id === id)))
+      .filter((n): n is MockEntitySeed => !!n)
+      .map(toGraphNodeStats);
+    if (query.kinds?.length) {
+      const wantedKinds = new Set(query.kinds);
+      nodes = nodes.filter((n) => n.id === entityId || wantedKinds.has(n.kind));
+      const survivingIds = new Set(nodes.map((n) => n.id));
+      edges = edges.filter((e) => survivingIds.has(e.src) && survivingIds.has(e.dst));
+    }
+    // "הצג עוד": the mock fixture is far smaller than 300 nodes, but a small `limit` is still
+    // honored (center always kept, rest by mention_count desc) so the control is exercisable in
+    // mock mode too.
+    const limit = query.limit ?? 300;
+    if (nodes.length > limit) {
+      const rest = nodes
+        .filter((n) => n.id !== entityId)
+        .sort((a, b) => b.mention_count - a.mention_count)
+        .slice(0, Math.max(0, limit - 1));
+      const keptIds = new Set([entityId, ...rest.map((n) => n.id)]);
+      nodes = nodes.filter((n) => keptIds.has(n.id));
+      edges = edges.filter((e) => keptIds.has(e.src) && keptIds.has(e.dst));
+    }
+    return delay({ nodes, edges, center_id: entityId, truncated: false });
+  },
+
+  getGraphPath: async (
+    a: number,
+    b: number,
+    maxDepth = 4,
+  ): Promise<GraphPathResponse | null> => {
+    if (a === b) {
+      const node = mockEntities.find((e) => e.id === a);
+      if (!node) return delay(null);
+      return delay({
+        nodes: [{ id: node.id, name: node.name, kind: node.kind, country: node.country }],
+        edges: [],
+        hops: 0,
+      });
+    }
+    const adjacency = new Map<number, { to: number; edge: GraphEdgeAgg }[]>();
+    for (const e of mockEdgeAggs()) {
+      if (!adjacency.has(e.src)) adjacency.set(e.src, []);
+      if (!adjacency.has(e.dst)) adjacency.set(e.dst, []);
+      adjacency.get(e.src)!.push({ to: e.dst, edge: e });
+      adjacency.get(e.dst)!.push({ to: e.src, edge: e });
+    }
+    const visited = new Set<number>([a]);
+    const queue: { id: number; path: number[]; edges: GraphEdgeAgg[] }[] = [
+      { id: a, path: [a], edges: [] },
+    ];
+    while (queue.length) {
+      const cur = queue.shift()!;
+      if (cur.path.length - 1 >= maxDepth) continue;
+      for (const { to, edge } of adjacency.get(cur.id) ?? []) {
+        if (visited.has(to)) continue;
+        visited.add(to);
+        const nextPath = [...cur.path, to];
+        const nextEdges = [...cur.edges, edge];
+        if (to === b) {
+          const nodes = nextPath
+            .map((id) => mockEntities.find((e) => e.id === id))
+            .filter((n): n is MockEntitySeed => !!n)
+            .map((e) => ({ id: e.id, name: e.name, kind: e.kind, country: e.country }));
+          return delay({ nodes, edges: nextEdges, hops: nextEdges.length });
+        }
+        queue.push({ id: to, path: nextPath, edges: nextEdges });
+      }
+    }
+    return delay(null);
+  },
+
+  getEntityDetail: async (id: number): Promise<EntityDetailFull> => {
+    const entity = mockEntities.find((e) => e.id === id);
+    if (!entity) throw new Error("not_found");
+    const detail = await mockApi.getEntity(id);
+    const relatedItemIds = new Set(itemsForEntityName(entity.name).map((it) => it.id));
+    const investigations = mockInvestigations
+      .filter((inv) => inv.item_id != null && relatedItemIds.has(inv.item_id))
+      .map((inv) => ({
+        job_id: inv.job_id,
+        state: inv.state,
+        question: inv.question,
+        started_at: inv.started_at,
+        finished_at: inv.finished_at,
+      }));
+    const reports = mockReport.items_included.some((iid) => relatedItemIds.has(iid))
+      ? [
+          {
+            id: mockReport.id,
+            kind: mockReport.kind ?? "adhoc",
+            period_start: mockReport.period_start,
+            period_end: mockReport.period_end,
+            created_at: mockReport.created_at,
+          },
+        ]
+      : [];
+    return delay({ ...detail, investigations, reports });
   },
 
   getInvestigations: async (_limit = 20): Promise<InvestigationSummary[]> =>
@@ -1007,7 +1299,8 @@ export const mockApi: ApiClient = {
   },
   // W19b: mirrors the real API's `GET /api/payloads/tree`, built from the same mock rows via the
   // shared client-side grouping helper (`@/lib/payloadFamilies`).
-  getPayloadTree: async (): Promise<PayloadTreeResponse> => delay(buildPayloadTree(mockPayloads)),
+  getPayloadTree: async (): Promise<PayloadTreeResponse> =>
+    delay(buildPayloadTree(mockPayloads)),
   getPayloadDiff: async (
     id: number,
     a: number,
@@ -1175,6 +1468,24 @@ export const mockApi: ApiClient = {
         }),
       ),
     }),
+  // R10-links.
+  getReportInvestigations: async (id: number): Promise<ReportInvestigationRef[]> => {
+    if (id !== mockReport.id) throw new Error("not_found");
+    const includedIds = new Set(mockReport.items_included);
+    return delay(
+      mockInvestigations
+        .filter((inv) => inv.item_id != null && includedIds.has(inv.item_id))
+        .map((inv) => ({
+          job_id: inv.job_id,
+          item_id: inv.item_id,
+          trigger_title: inv.item_title,
+          question: inv.question,
+          outcome: inv.outcome,
+          confidence: null,
+          rerun_of_job_id: null,
+        })),
+    );
+  },
 
   getBdTerritories: async (): Promise<BdTerritoryOption[]> => delay(mockBdTerritories),
   getBdReports: async (territory?: string) =>

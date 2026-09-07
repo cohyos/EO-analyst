@@ -325,3 +325,110 @@ describe("InvestigationDetailPage expand ('הרחב חקירה')", () => {
     expect(log).not.toHaveTextContent("stopped_budget");
   });
 });
+
+// R10-links: trigger item / rerun-expansion lineage / citing reports.
+describe("InvestigationDetailPage provenance (R10-links)", () => {
+  it("does not render any provenance section when provenance is absent (older backend)", async () => {
+    getInvestigation.mockResolvedValue(baseDetail());
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.queryByLabelText("פריט מקור")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("שרשרת חקירות")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("מופיע בדוחות")).not.toBeInTheDocument();
+  });
+
+  it("shows the trigger item card with title, source, date and a link to /items/:id", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      provenance: {
+        job: { job_id: "10", state: "running", question: "שאלת בדיקה", started_at: null, finished_at: null },
+        trigger_item: {
+          id: 42,
+          title: "כותרת הפריט",
+          url: "https://example.test/42",
+          source_name: "Defense News",
+          published_at: "2026-09-01T10:00:00+03:00",
+        },
+        lineage: [],
+        reports: [],
+      },
+    });
+    renderPage();
+    const section = await screen.findByLabelText("פריט מקור");
+    expect(section).toHaveTextContent("כותרת הפריט");
+    expect(section).toHaveTextContent("Defense News");
+    const link = screen.getByRole("link", { name: /כותרת הפריט/ });
+    expect(link).toHaveAttribute("href", "/items/42");
+  });
+
+  it("does not show a trigger item card for a free-standing question (no trigger_item)", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      provenance: {
+        job: { job_id: "10", state: "running", question: "שאלה כללית", started_at: null, finished_at: null },
+        trigger_item: null,
+        lineage: [],
+        reports: [],
+      },
+    });
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.queryByLabelText("פריט מקור")).not.toBeInTheDocument();
+  });
+
+  it("shows the lineage chain with a link per job and highlights the current job", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      provenance: {
+        job: { job_id: "10", state: "done", question: "שאלת בדיקה", started_at: null, finished_at: null },
+        trigger_item: null,
+        lineage: [
+          { job_id: "8", outcome: "not_found", confidence: 0.1, finished_at: "2026-09-01T10:00:00+03:00", kind: "original" },
+          { job_id: "10", outcome: "found", confidence: 0.8, finished_at: "2026-09-02T10:00:00+03:00", kind: "rerun" },
+        ],
+        reports: [],
+      },
+    });
+    renderPage();
+    const section = await screen.findByLabelText("שרשרת חקירות");
+    expect(section).toHaveTextContent("חקירה #8");
+    expect(section).toHaveTextContent("חקירה #10");
+    expect(screen.getByRole("link", { name: /חקירה #8/ })).toHaveAttribute("href", "/investigations/8");
+  });
+
+  it("does not show the lineage chain for a single-job (no rerun/expansion) investigation", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      provenance: {
+        job: { job_id: "10", state: "done", question: "שאלת בדיקה", started_at: null, finished_at: null },
+        trigger_item: null,
+        lineage: [{ job_id: "10", outcome: "found", confidence: 0.8, finished_at: null, kind: "original" }],
+        reports: [],
+      },
+    });
+    renderPage();
+    await screen.findByTestId("investigation-log");
+    expect(screen.queryByLabelText("שרשרת חקירות")).not.toBeInTheDocument();
+  });
+
+  it("shows the 'מופיע בדוחות' list with links to /reports?id=", async () => {
+    getInvestigation.mockResolvedValue({
+      ...baseDetail(),
+      provenance: {
+        job: { job_id: "10", state: "done", question: "שאלת בדיקה", started_at: null, finished_at: null },
+        trigger_item: null,
+        lineage: [],
+        reports: [
+          { id: 5, kind: "daily", period_end: "2026-09-01", territory: null, title_he: "דוח יומי — 01.09.2026", path_html: null },
+        ],
+      },
+    });
+    renderPage();
+    const section = await screen.findByLabelText("מופיע בדוחות");
+    expect(section).toHaveTextContent("דוח יומי — 01.09.2026");
+    expect(screen.getByRole("link", { name: "דוח יומי — 01.09.2026" })).toHaveAttribute(
+      "href",
+      "/reports?id=5",
+    );
+  });
+});

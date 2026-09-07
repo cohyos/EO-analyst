@@ -7,13 +7,21 @@ import type {
   Conference,
   Corroboration,
   EntityDetail,
+  EntityDetailFull,
   EntitySummary,
   ForecastCard,
+  GraphEdgeAgg,
+  GraphNodeStats,
+  GraphOverviewResponse,
+  GraphPathResponse,
   GraphResponse,
+  GraphSearchResult,
   InvestigationDetail,
+  InvestigationProvenance,
   InvestigationSummary,
   ItemCard,
   ItemDetail,
+  ItemInvestigationRef,
   ItemsByCountryResponse,
   ItemsResponse,
   Job,
@@ -39,6 +47,7 @@ import type {
   ProductLineReportCreateResponse,
   ReportCitationsResponse,
   ReportDetail,
+  ReportInvestigationRef,
   ReportSummary,
   RunsCurrentResponse,
   SecurityReviewCard,
@@ -59,6 +68,7 @@ import type {
   EntitiesQuery,
   GraphQuery,
   ItemsQuery,
+  NeighborhoodQuery,
   PatentsQuery,
   PayloadsQuery,
   TechItemsQuery,
@@ -341,6 +351,117 @@ function normalizeGraph(raw: Partial<GraphResponse> | null | undefined): GraphRe
   return { nodes: arr(r.nodes), edges: arr(r.edges) };
 }
 
+// R10-graph normalizers -------------------------------------------------
+
+function normalizeGraphNodeStats(
+  raw: Partial<GraphNodeStats> | null | undefined,
+): GraphNodeStats {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    name: str(r.name),
+    kind: str(r.kind),
+    country: r.country ?? null,
+    mention_count: num(r.mention_count),
+    last_seen: r.last_seen ?? null,
+    corroboration: {
+      corroborated: num(r.corroboration?.corroborated),
+      official_primary: num(r.corroboration?.official_primary),
+      single_source: num(r.corroboration?.single_source),
+      unknown: num(r.corroboration?.unknown),
+    },
+    product_lines: arr(r.product_lines),
+  };
+}
+
+function normalizeGraphEdgeAgg(
+  raw: Partial<GraphEdgeAgg> | null | undefined,
+): GraphEdgeAgg {
+  const r = raw ?? {};
+  return {
+    src: num(r.src),
+    dst: num(r.dst),
+    relation: str(r.relation),
+    weight: num(r.weight, 1),
+    first_seen: r.first_seen ?? null,
+    last_seen: r.last_seen ?? null,
+    evidence: arr(r.evidence).map((e) => ({
+      item_id: num(e.item_id),
+      title: e.title ?? null,
+      published_at: e.published_at ?? null,
+    })),
+  };
+}
+
+function normalizeNeighborhood(
+  raw:
+    | Partial<{
+        nodes: unknown[];
+        edges: unknown[];
+        center_id: number;
+        truncated: boolean;
+      }>
+    | null
+    | undefined,
+) {
+  const r = raw ?? {};
+  return {
+    nodes: arr(r.nodes as Partial<GraphNodeStats>[]).map(normalizeGraphNodeStats),
+    edges: arr(r.edges as Partial<GraphEdgeAgg>[]).map(normalizeGraphEdgeAgg),
+    center_id: num(r.center_id),
+    truncated: bool(r.truncated),
+  };
+}
+
+function normalizeGraphOverview(
+  raw: Partial<GraphOverviewResponse> | null | undefined,
+): GraphOverviewResponse {
+  const r = raw ?? {};
+  return {
+    nodes: arr(r.nodes).map(normalizeGraphNodeStats),
+    edges: arr(r.edges).map(normalizeGraphEdgeAgg),
+  };
+}
+
+function normalizeGraphPath(
+  raw: Partial<GraphPathResponse> | null | undefined,
+): GraphPathResponse {
+  const r = raw ?? {};
+  return {
+    nodes: arr(r.nodes).map((n) => ({
+      id: num(n.id),
+      name: str(n.name),
+      kind: str(n.kind),
+      country: n.country ?? null,
+    })),
+    edges: arr(r.edges).map(normalizeGraphEdgeAgg),
+    hops: num(r.hops),
+  };
+}
+
+function normalizeEntityDetailFull(
+  raw: Partial<EntityDetailFull> | null | undefined,
+): EntityDetailFull {
+  const r = raw ?? {};
+  return {
+    ...normalizeEntityDetail(r),
+    investigations: arr(r.investigations).map((i) => ({
+      job_id: i.job_id ?? "",
+      state: str(i.state),
+      question: i.question ?? null,
+      started_at: i.started_at ?? null,
+      finished_at: i.finished_at ?? null,
+    })),
+    reports: arr(r.reports).map((rp) => ({
+      id: num(rp.id),
+      kind: str(rp.kind),
+      period_start: rp.period_start ?? null,
+      period_end: rp.period_end ?? null,
+      created_at: rp.created_at ?? null,
+    })),
+  };
+}
+
 function normalizeInvestigationSummary(
   raw: Partial<InvestigationSummary> | null | undefined,
 ): InvestigationSummary {
@@ -358,6 +479,48 @@ function normalizeInvestigationSummary(
     outcome: r.outcome ?? null,
     started_at: r.started_at ?? null,
     finished_at: r.finished_at ?? null,
+  };
+}
+
+// R10-links: `GET /api/investigations/{id}`'s nested `provenance` object -- trigger item /
+// rerun-expansion lineage / citing reports, additive and possibly absent on an older backend.
+function normalizeInvestigationProvenance(
+  raw: Partial<InvestigationProvenance> | null | undefined,
+): InvestigationProvenance | null {
+  if (!raw) return null;
+  const job: Partial<InvestigationProvenance["job"]> = raw.job ?? {};
+  return {
+    job: {
+      job_id: idStr(job.job_id),
+      state: job.state ?? null,
+      question: job.question ?? null,
+      started_at: job.started_at ?? null,
+      finished_at: job.finished_at ?? null,
+    },
+    trigger_item: raw.trigger_item
+      ? {
+          id: num(raw.trigger_item.id),
+          title: raw.trigger_item.title ?? null,
+          url: raw.trigger_item.url ?? null,
+          source_name: raw.trigger_item.source_name ?? null,
+          published_at: raw.trigger_item.published_at ?? null,
+        }
+      : null,
+    lineage: arr(raw.lineage).map((l) => ({
+      job_id: idStr(l.job_id),
+      outcome: l.outcome ?? null,
+      confidence: typeof l.confidence === "number" ? l.confidence : null,
+      finished_at: l.finished_at ?? null,
+      kind: l.kind === "rerun" || l.kind === "expansion" ? l.kind : "original",
+    })),
+    reports: arr(raw.reports).map((rp) => ({
+      id: num(rp.id),
+      kind: rp.kind ?? null,
+      period_end: rp.period_end ?? null,
+      territory: rp.territory ?? null,
+      title_he: str(rp.title_he),
+      path_html: rp.path_html ?? null,
+    })),
   };
 }
 
@@ -384,6 +547,43 @@ function normalizeInvestigationDetail(
           stopped_reason: r.answer.stopped_reason ?? undefined,
         }
       : null,
+    provenance: normalizeInvestigationProvenance(r.provenance),
+  };
+}
+
+// R10-links: `GET /api/items/{id}/investigations`.
+function normalizeItemInvestigationRef(
+  raw: Partial<ItemInvestigationRef> | null | undefined,
+): ItemInvestigationRef {
+  const r = raw ?? {};
+  return {
+    job_id: idStr(r.job_id),
+    question: r.question ?? null,
+    state: r.state ?? "not_found",
+    error: r.error ?? null,
+    outcome: r.outcome ?? null,
+    confidence: typeof r.confidence === "number" ? r.confidence : null,
+    started_at: r.started_at ?? null,
+    finished_at: r.finished_at ?? null,
+    rerun_of_job_id: r.rerun_of_job_id != null ? idStr(r.rerun_of_job_id) : null,
+    expanded_from_job_id:
+      r.expanded_from_job_id != null ? idStr(r.expanded_from_job_id) : null,
+  };
+}
+
+// R10-links: `GET /api/reports/{id}/investigations`.
+function normalizeReportInvestigationRef(
+  raw: Partial<ReportInvestigationRef> | null | undefined,
+): ReportInvestigationRef {
+  const r = raw ?? {};
+  return {
+    job_id: idStr(r.job_id),
+    item_id: r.item_id ?? null,
+    trigger_title: r.trigger_title ?? null,
+    question: r.question ?? null,
+    outcome: r.outcome ?? null,
+    confidence: typeof r.confidence === "number" ? r.confidence : null,
+    rerun_of_job_id: r.rerun_of_job_id != null ? idStr(r.rerun_of_job_id) : null,
   };
 }
 
@@ -531,7 +731,9 @@ function normalizeTenderCard(raw: Partial<TenderCard> | null | undefined): Tende
   };
 }
 
-function normalizeTenderFeedback(raw: Partial<TenderFeedback> | null | undefined): TenderFeedback {
+function normalizeTenderFeedback(
+  raw: Partial<TenderFeedback> | null | undefined,
+): TenderFeedback {
   const r = raw ?? {};
   return {
     id: num(r.id),
@@ -780,6 +982,13 @@ export const realApi: ApiClient = {
         method: "POST",
       }),
     ),
+  // R10-links.
+  getItemInvestigations: async (id: number) =>
+    arr(
+      await request<Partial<ItemInvestigationRef>[] | null>(
+        `/api/items/${id}/investigations`,
+      ),
+    ).map(normalizeItemInvestigationRef),
 
   getEntities: async (query: EntitiesQuery) => {
     const data = await request<Partial<EntitySummary>[] | null>(
@@ -810,6 +1019,62 @@ export const realApi: ApiClient = {
     ),
   getGraphNamedQuery: async (name: string, arg: string) =>
     arr(await request<unknown[] | null>(`/api/graph/query${qs({ name, arg })}`)),
+
+  searchGraphEntities: async (q: string, limit?: number) =>
+    arr(
+      await request<Partial<GraphSearchResult>[] | null>(
+        `/api/graph/search${qs({ q, limit })}`,
+      ),
+    ).map((r) => ({
+      id: num(r.id),
+      name: str(r.name),
+      kind: str(r.kind),
+      country: r.country ?? null,
+      mention_count: num(r.mention_count),
+    })),
+  getGraphOverview: async (limit?: number, since?: string) =>
+    normalizeGraphOverview(
+      await request<Partial<GraphOverviewResponse>>(
+        `/api/graph/overview${qs({ limit, since })}`,
+      ),
+    ),
+  getGraphNeighborhood: async (entityId: number, query: NeighborhoodQuery = {}) =>
+    normalizeNeighborhood(
+      await request<
+        Partial<{
+          nodes: unknown[];
+          edges: unknown[];
+          center_id: number;
+          truncated: boolean;
+        }>
+      >(
+        `/api/graph/neighborhood/${entityId}${qs({
+          depth: query.depth,
+          kinds: query.kinds?.length ? query.kinds.join(",") : undefined,
+          relation_types: query.relationTypes?.length
+            ? query.relationTypes.join(",")
+            : undefined,
+          since: query.since,
+          limit: query.limit,
+        })}`,
+      ),
+    ),
+  getGraphPath: async (a: number, b: number, maxDepth?: number) => {
+    try {
+      return normalizeGraphPath(
+        await request<Partial<GraphPathResponse>>(
+          `/api/graph/path${qs({ a, b, max_depth: maxDepth })}`,
+        ),
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "not_found") return null;
+      throw err;
+    }
+  },
+  getEntityDetail: async (id: number) =>
+    normalizeEntityDetailFull(
+      await request<Partial<EntityDetailFull>>(`/api/entities/${id}/detail`),
+    ),
 
   getInvestigations: async (limit = 20) =>
     arr(
@@ -974,7 +1239,9 @@ export const realApi: ApiClient = {
     ),
   getTenderFeedback: async (tenderId) =>
     arr(
-      await request<Partial<TenderFeedback>[] | null>(`/api/tenders/${tenderId}/feedback`),
+      await request<Partial<TenderFeedback>[] | null>(
+        `/api/tenders/${tenderId}/feedback`,
+      ),
     ).map(normalizeTenderFeedback),
 
   // A14: פטנטים ו-IP.
@@ -1116,6 +1383,13 @@ export const realApi: ApiClient = {
     normalizeReportCitations(
       await request<Partial<ReportCitationsResponse>>(`/api/reports/${id}/citations`),
     ),
+  // R10-links.
+  getReportInvestigations: async (id: number) =>
+    arr(
+      await request<Partial<ReportInvestigationRef>[] | null>(
+        `/api/reports/${id}/investigations`,
+      ),
+    ).map(normalizeReportInvestigationRef),
 
   getBdTerritories: async () =>
     arr(await request<Partial<BdTerritoryOption>[] | null>("/api/bd/territories")).map(

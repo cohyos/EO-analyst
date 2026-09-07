@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pause, Square } from "lucide-react";
+import { ExternalLink, Pause, Square } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { CitationText } from "@/components/CitationText";
@@ -163,6 +163,83 @@ export function InvestigationDetailPage() {
           approving={approveSecurityReview.isPending}
           dismissing={dismissSecurityReview.isPending}
         />
+      )}
+
+      {/* R10-links: trigger item / rerun-expansion lineage / citing reports -- absent/null on an
+          older backend response (no `provenance` key yet), so every block below degrades to
+          simply not rendering rather than erroring. */}
+      {data.provenance?.trigger_item && (
+        <section aria-label="פריט מקור" className="rounded-lg border border-border bg-bg-raised p-3">
+          <h3 className="mb-1 text-xs font-semibold text-fg-dim">פריט מקור</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to={`/items/${data.provenance.trigger_item.id}`}
+              className="flex min-w-0 items-center gap-1 text-sm text-accent hover:underline"
+            >
+              <bdi className="truncate">{data.provenance.trigger_item.title || `פריט #${data.provenance.trigger_item.id}`}</bdi>
+              <ExternalLink size={12} className="shrink-0" aria-hidden="true" />
+            </Link>
+          </div>
+          <p className="mt-1 text-xs text-fg-dim">
+            {data.provenance.trigger_item.source_name && (
+              <bdi>{data.provenance.trigger_item.source_name}</bdi>
+            )}
+            {data.provenance.trigger_item.source_name && data.provenance.trigger_item.published_at && " · "}
+            {data.provenance.trigger_item.published_at && (
+              <span className="font-mono">{formatDateTime(data.provenance.trigger_item.published_at)}</span>
+            )}
+          </p>
+        </section>
+      )}
+
+      {data.provenance && data.provenance.lineage.length > 1 && (
+        <section aria-label="שרשרת חקירות" className="rounded-lg border border-border bg-bg-raised p-3">
+          <h3 className="mb-2 text-xs font-semibold text-fg-dim">שרשרת חקירות (הרצות/הרחבות)</h3>
+          <ol className="space-y-1 text-xs">
+            {data.provenance.lineage.map((entry) => (
+              <li
+                key={entry.job_id}
+                className={cn(
+                  "flex flex-wrap items-center gap-2 rounded-md border border-border p-1.5",
+                  entry.job_id === data.job_id && "bg-accent-muted/40",
+                )}
+              >
+                <Link to={`/investigations/${entry.job_id}`} className="text-accent hover:underline">
+                  חקירה #{entry.job_id}
+                </Link>
+                <span className="rounded bg-bg-sunken px-1.5 py-0.5 text-fg-dim">
+                  {entry.kind === "original" ? "מקורית" : entry.kind === "rerun" ? "הרצה חוזרת" : "הרחבה"}
+                </span>
+                {entry.outcome && (
+                  <span className={cn("rounded-full px-1.5 py-0.5 font-medium", outcomeTone(entry.outcome))}>
+                    {outcomeLabel(entry.outcome)}
+                  </span>
+                )}
+                {entry.finished_at && (
+                  <span className="ms-auto font-mono text-fg-dim">{formatDateTime(entry.finished_at)}</span>
+                )}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      {data.provenance && data.provenance.reports.length > 0 && (
+        <section aria-label="מופיע בדוחות" className="rounded-lg border border-border bg-bg-raised p-3">
+          <h3 className="mb-2 text-xs font-semibold text-fg-dim">מופיע בדוחות</h3>
+          <ul className="flex flex-wrap gap-1.5 text-xs">
+            {data.provenance.reports.map((r) => (
+              <li key={r.id}>
+                <Link
+                  to={`/reports?id=${r.id}`}
+                  className="rounded-full bg-bg-sunken px-2 py-0.5 text-accent hover:underline"
+                >
+                  <bdi>{r.title_he}</bdi>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       <section aria-label="לוג חקירה חי">

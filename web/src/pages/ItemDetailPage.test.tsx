@@ -8,6 +8,8 @@ const getItem = vi.fn();
 const getEntities = vi.fn();
 const postItemFeedback = vi.fn();
 const postItemInvestigate = vi.fn();
+// R10-links: the investigations block prefers this richer (outcome/confidence/date) endpoint.
+const getItemInvestigations = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
@@ -15,6 +17,7 @@ vi.mock("@/api", () => ({
     getEntities: (...args: unknown[]) => getEntities(...args),
     postItemFeedback: (...args: unknown[]) => postItemFeedback(...args),
     postItemInvestigate: (...args: unknown[]) => postItemInvestigate(...args),
+    getItemInvestigations: (...args: unknown[]) => getItemInvestigations(...args),
   },
 }));
 
@@ -124,9 +127,14 @@ beforeEach(() => {
   getEntities.mockReset();
   postItemFeedback.mockReset();
   postItemInvestigate.mockReset();
+  getItemInvestigations.mockReset();
   getEntities.mockResolvedValue(ENTITIES);
   postItemFeedback.mockResolvedValue(baseItem());
   postItemInvestigate.mockResolvedValue({ job_id: "99" });
+  // Default: left permanently pending (never resolves) -- `itemInvestigationsQuery.data` stays
+  // `undefined` so the block falls back to the plain `item.investigations` array embedded in
+  // ItemDetail, matching every pre-R10-links test's expectations unless overridden below.
+  getItemInvestigations.mockReturnValue(new Promise(() => {}));
 });
 
 describe("ItemDetailPage", () => {
@@ -188,5 +196,47 @@ describe("ItemDetailPage", () => {
     const btn = await screen.findByText("חקור לעומק");
     btn.click();
     await waitFor(() => expect(postItemInvestigate).toHaveBeenCalledWith(3, { question: null }));
+  });
+});
+
+// R10-links: the investigations block shows outcome badge/confidence/date once the richer
+// `getItemInvestigations` endpoint resolves (falling back to the plain embedded list until then).
+describe("ItemDetailPage investigations block (R10-links)", () => {
+  it("shows outcome badge, confidence and date once getItemInvestigations resolves", async () => {
+    getItem.mockResolvedValue(baseItem());
+    getItemInvestigations.mockResolvedValue([
+      {
+        job_id: "28",
+        question: "מי הזוכה במכרז?",
+        state: "done",
+        error: null,
+        outcome: "found",
+        confidence: 0.87,
+        started_at: null,
+        finished_at: "2026-09-04T09:10:00+03:00",
+        rerun_of_job_id: null,
+        expanded_from_job_id: null,
+      },
+    ]);
+    renderPage();
+    await screen.findByRole("link", { name: /מי הזוכה במכרז/ });
+    expect(await screen.findByText("נמצא")).toBeInTheDocument();
+    expect(screen.getByText("0.87")).toBeInTheDocument();
+  });
+
+  it("falls back to the plain embedded investigations list while getItemInvestigations is pending", async () => {
+    getItem.mockResolvedValue(baseItem());
+    getItemInvestigations.mockReturnValue(new Promise(() => {})); // never resolves in this test
+    renderPage();
+    const link = await screen.findByRole("link", { name: /מי הזוכה במכרז/ });
+    expect(link).toHaveAttribute("href", "/investigations/28");
+  });
+
+  it("does not show an empty investigations section when the item has none", async () => {
+    getItem.mockResolvedValue(baseItem({ investigations: [] }));
+    getItemInvestigations.mockResolvedValue([]);
+    renderPage();
+    await screen.findByText("General Atomics MQ-9B upgrade");
+    expect(screen.queryByLabelText("חקירות עומק לפריט")).not.toBeInTheDocument();
   });
 });

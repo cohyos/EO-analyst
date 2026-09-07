@@ -1186,7 +1186,11 @@ def _add_generic_table_body(doc: DocxDocument, headers: list[str], rows: list[li
                 _fill_cell(cell, "—" if value is None else str(value))
 
 
-def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None:
+def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict], items: list[dict]) -> None:
+    # R10-links: `items` is the same numbered registry `_add_sources_appendix` renders below --
+    # a deep-search entry's trigger item is only ever a report's own item (R9's
+    # `_filter_deep_search_to_items_included`), so when it's present it already carries an `n`.
+    item_by_id = {it.get("id"): it for it in items if it.get("id") is not None}
     for entry in deep_search:
         heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
         add_mixed_paragraph(doc, heading, style="Heading 2")
@@ -1195,6 +1199,20 @@ def _add_deep_search_section(doc: DocxDocument, deep_search: list[dict]) -> None
         confidence = entry.get("confidence")
         conf_str = f"{confidence:.0%}" if isinstance(confidence, int | float) else "—"
         add_mixed_paragraph(doc, f"תוצאה: {outcome} | רמת ביטחון: {conf_str}", size_pt=10)
+        # R10-links: "חקירה #<id>" -- plain text; a docx has no live app to open
+        # `/investigations/<id>` in, unlike the md/html renderers below, which link it for real.
+        # "פריט מקור [n]" -- when the trigger item has a registry number, written as a plain `[n]`
+        # token so `add_mixed_paragraph`'s own citation handling (`_emit_mixed_runs`/
+        # `_CITATION_RE`) turns it into the same real internal jump-to-appendix every other `[n]`
+        # in this document gets, for free -- no direct `add_citation_run` call needed here.
+        job_id = entry.get("job_id")
+        if job_id is not None:
+            trigger_item_id = entry.get("item_id") or entry.get("trigger_item_id")
+            trigger_n = item_by_id.get(trigger_item_id, {}).get("n") if trigger_item_id is not None else None
+            meta_text = f"חקירה #{job_id}"
+            if trigger_n is not None:
+                meta_text += f" · פריט מקור [{trigger_n}]"
+            add_mixed_paragraph(doc, meta_text, size_pt=9)
         if outcome_key == "blocked":
             # DS3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.6): a blocked investigation never ran
             # at all -- shown here, never as "לא נמצא".
@@ -1435,7 +1453,7 @@ def build_docx(
 
     if deep_search:
         _heading1(doc, "חקירות עומק")
-        _add_deep_search_section(doc, deep_search)
+        _add_deep_search_section(doc, deep_search, items)
 
     if not open_points_in_outlook and open_points:
         _heading1(doc, "נקודות פתוחות")
@@ -1698,6 +1716,10 @@ def render_markdown(
 
     if deep_search:
         lines += ["## חקירות עומק", ""]
+        # R10-links: same numbered registry the sources appendix (below) renders -- a deep-search
+        # entry's trigger item is always one of this report's own items (R9's
+        # `_filter_deep_search_to_items_included`), so when present it already carries an `n`.
+        item_by_id = {it.get("id"): it for it in items if it.get("id") is not None}
         for entry in deep_search:
             heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
             outcome_key = entry.get("outcome")
@@ -1710,6 +1732,20 @@ def render_markdown(
                 else entry.get("answer_he", "")
             )
             lines.append(f"- **{heading}** — {outcome}: {_md_citations(body)}")
+            # R10-links: a real link to the investigation's own detail page, plus a `[n]` citation
+            # to the trigger item's sources-appendix row when it has one -- indented (like the
+            # rerun note below) so eoa.qa.d4_investigations's `^-\s+\*\*...` entry regex, which only
+            # matches un-indented lines, never mistakes it for a second investigation entry.
+            job_id = entry.get("job_id")
+            if job_id is not None:
+                trigger_item_id = entry.get("item_id") or entry.get("trigger_item_id")
+                trigger_n = (
+                    item_by_id.get(trigger_item_id, {}).get("n") if trigger_item_id is not None else None
+                )
+                meta = f"[חקירה #{job_id}](/investigations/{job_id})"
+                if trigger_n is not None:
+                    meta += f" · פריט מקור {_md_citations(f'[{trigger_n}]')}"
+                lines.append(f"  - {meta}")
             if entry.get("rerun_note_he"):
                 # eoa.report.daily.reconcile_deep_search_reruns -- indented, so it is never
                 # mistaken for a new investigation entry by eoa.qa.d4_investigations's `^-` regex.
@@ -2123,6 +2159,10 @@ def render_html(
     if deep_search:
         parts.append(h2("חקירות עומק"))
         parts.append("<ul>")
+        # R10-links: same numbered registry the sources appendix renders -- a deep-search entry's
+        # trigger item is always one of this report's own items (R9's
+        # `_filter_deep_search_to_items_included`), so when present it already carries an `n`.
+        item_by_id = {it.get("id"): it for it in items if it.get("id") is not None}
         for entry in deep_search:
             heading = entry.get("question") or entry.get("trigger_title") or "חקירת עומק"
             outcome_key = entry.get("outcome")
@@ -2138,6 +2178,20 @@ def render_html(
                 else html.escape(outcome_label)
             )
             li = f"<li><strong>{_bidi_html(heading)}</strong> — {outcome_html}: {_bidi_html(body)}"
+            # R10-links: a real link to the investigation's own detail page, plus the trigger
+            # item's own `[n]` citation (via the same `cite_links` closure every other citation in
+            # this document goes through) when it has one.
+            job_id = entry.get("job_id")
+            if job_id is not None:
+                trigger_item_id = entry.get("item_id") or entry.get("trigger_item_id")
+                trigger_n = (
+                    item_by_id.get(trigger_item_id, {}).get("n") if trigger_item_id is not None else None
+                )
+                inv_link = f'<a href="/investigations/{job_id}">{_bidi_html(f"חקירה #{job_id}")}</a>'
+                li += f'<br><span class="ds-provenance">{inv_link}'
+                if trigger_n is not None:
+                    li += f" · פריט מקור {cite_links(f'[{trigger_n}]')}"
+                li += "</span>"
             rerun_note = entry.get("rerun_note_he")
             if rerun_note:
                 li += f'<br><em class="ds-rerun-note">{_bidi_html(rerun_note)}</em>'

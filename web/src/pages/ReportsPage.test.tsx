@@ -8,6 +8,8 @@ const getReports = vi.fn();
 const getReport = vi.fn();
 const getReportFileUrl = vi.fn();
 const getReportCitations = vi.fn();
+// R10-links: "חקירות בדוח" side list.
+const getReportInvestigations = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
@@ -15,6 +17,7 @@ vi.mock("@/api", () => ({
     getReport: (...args: unknown[]) => getReport(...args),
     getReportFileUrl: (...args: unknown[]) => getReportFileUrl(...args),
     getReportCitations: (...args: unknown[]) => getReportCitations(...args),
+    getReportInvestigations: (...args: unknown[]) => getReportInvestigations(...args),
   },
 }));
 
@@ -66,8 +69,10 @@ beforeEach(() => {
   getReport.mockReset();
   getReportFileUrl.mockReset();
   getReportCitations.mockReset();
+  getReportInvestigations.mockReset();
   getReportFileUrl.mockReturnValue("#mock");
   getReportCitations.mockResolvedValue({ report_id: 1, citations: {} });
+  getReportInvestigations.mockResolvedValue([]);
 });
 
 describe("ReportsPage list rows (W14)", () => {
@@ -198,6 +203,88 @@ describe("ReportsPage detail selection", () => {
 
     await waitFor(() => expect(getReport).toHaveBeenCalledWith(1));
     expect(await screen.findByText(/סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/, { selector: "h2" })).toBeInTheDocument();
+  });
+});
+
+describe("ReportsPage 'חקירות בדוח' side list (R10-links)", () => {
+  it("shows the investigations the report cites, each linking to its own detail page", async () => {
+    const summary = report();
+    getReports.mockResolvedValue([summary]);
+    getReport.mockResolvedValue({
+      ...summary,
+      html: "<section><h2>תקציר מנהלים</h2><p>תוכן</p></section>",
+      open_points: [],
+      items_included: [1, 2, 3],
+    });
+    getReportInvestigations.mockResolvedValue([
+      {
+        job_id: "17",
+        item_id: 1,
+        trigger_title: "פריט מקור לדוגמה",
+        question: "מה סטטוס ההזמנה?",
+        outcome: "found",
+        confidence: 0.9,
+        rerun_of_job_id: null,
+      },
+    ]);
+    renderPage();
+
+    const row = await screen.findByRole("button", {
+      name: /סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/,
+    });
+    fireEvent.click(row);
+
+    const link = await screen.findByRole("link", { name: /מה סטטוס ההזמנה/ });
+    expect(link).toHaveAttribute("href", "/investigations/17");
+    expect(screen.getByText("חקירות בדוח (1)")).toBeInTheDocument();
+  });
+
+  it("shows a link to the trigger item alongside the investigation", async () => {
+    const summary = report();
+    getReports.mockResolvedValue([summary]);
+    getReport.mockResolvedValue({
+      ...summary,
+      html: "<section><h2>תקציר מנהלים</h2><p>תוכן</p></section>",
+      open_points: [],
+      items_included: [1],
+    });
+    getReportInvestigations.mockResolvedValue([
+      {
+        job_id: "17",
+        item_id: 1,
+        trigger_title: "פריט מקור לדוגמה",
+        question: "מה סטטוס ההזמנה?",
+        outcome: "found",
+        confidence: 0.9,
+        rerun_of_job_id: null,
+      },
+    ]);
+    renderPage();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/ }),
+    );
+    const itemLink = await screen.findByRole("link", { name: "פריט מקור" });
+    expect(itemLink).toHaveAttribute("href", "/items/1");
+  });
+
+  it("does not render the side list when the report cites no investigations", async () => {
+    const summary = report();
+    getReports.mockResolvedValue([summary]);
+    getReport.mockResolvedValue({
+      ...summary,
+      html: "<section><h2>תקציר מנהלים</h2><p>תוכן</p></section>",
+      open_points: [],
+      items_included: [1, 2, 3],
+    });
+    getReportInvestigations.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/ }),
+    );
+    await waitFor(() => expect(getReportInvestigations).toHaveBeenCalledWith(1));
+    expect(screen.queryByText(/חקירות בדוח/)).not.toBeInTheDocument();
   });
 });
 
