@@ -200,27 +200,39 @@ def _corroboration_payload_map_safe(item_ids: list[int]) -> dict[int, dict[str, 
 def _append_item_corroboration_markers(rows: list[dict[str, Any]]) -> None:
     """Appends the corroboration marker to each item row's ``title`` in place -- the field that
     renders both in the sources-appendix "כותרת" column (``docx_builder._add_sources_appendix``)
-    and in :func:`_format_items_block`'s own "כותרת: ..." item line."""
+    and in :func:`_format_items_block`'s own "כותרת: ..." item line.
+
+    R8-reports (round-7 judge D6 #4/#5): idempotent by construction (a title already ending with
+    the exact marker string is left alone) -- ``collect_items``/``collect_week_items`` already call
+    this on their own ~10/~N-row result, and ``build_daily``/``build_weekly``/``build_monthly`` now
+    call it *again* on the fully-extended ``citation_items`` registry (which picks up further rows
+    from event fallbacks, tender-forecast citations, and the tech-watch/Israel-industry additive
+    tables -- none of which went through this function before, which is why the sources appendix
+    used to show a marker on only a small minority of its rows) -- the same item dict can
+    legitimately pass through here more than once."""
     payloads = _corroboration_payload_map_safe([r.get("id") for r in rows])
     if not payloads:
         return
     for row in rows:
         marker = _corroboration_marker_he(payloads.get(row.get("id")))
-        if marker and row.get("title"):
-            row["title"] = f"{row['title']}{marker}"
+        title = row.get("title")
+        if marker and title and not title.endswith(marker):
+            row["title"] = f"{title}{marker}"
 
 
 def _append_event_corroboration_markers(rows: list[dict[str, Any]]) -> None:
     """Appends the corroboration marker (keyed off the event's own ``item_id``) to each event
     row's ``summary_he`` in place -- see the module note above for why ``summary_he`` rather than
-    the fixed docx events table, which has no title/summary cell to begin with."""
+    the fixed docx events table, which has no title/summary cell to begin with. Idempotent, same
+    convention as :func:`_append_item_corroboration_markers`."""
     payloads = _corroboration_payload_map_safe([r.get("item_id") for r in rows])
     if not payloads:
         return
     for row in rows:
         marker = _corroboration_marker_he(payloads.get(row.get("item_id")))
-        if marker and row.get("summary_he"):
-            row["summary_he"] = f"{row['summary_he']}{marker}"
+        summary = row.get("summary_he")
+        if marker and summary and not summary.endswith(marker):
+            row["summary_he"] = f"{summary}{marker}"
 
 
 # W5 (round 4, docs/qa/loop/round_4_fixes.md): the analyze-stage classifier over-applies
@@ -341,6 +353,95 @@ def _item_amount_kind_key(ev: dict[str, Any]) -> tuple[int, str, Any, float] | N
     return (item_id, ev.get("kind") or "", ev.get("date"), amount_val)
 
 
+#: R8-reports #2 (round-7 judge D3/D6 #6, "Operation Atlantic City" triple-listed): the analyze
+#: stage can extract more than one facet of the same underlying story from a single item as
+#: separate events with *different* ``kind`` values (a deployment note, a live-fire test, and a
+#: partnership announcement, all sharing ``program='Operation Atlantic City'``) -- none of these
+#: collide on :func:`_normalize_event_key` (``kind`` is its first field) or
+#: :func:`_item_amount_kind_key` (requires a matching ``amount_usd``), so both existing dedupe
+#: passes let all three through. Priority order used by :func:`_merge_program_group` to pick the
+#: surviving row's ``kind`` -- lower number wins (more specific/newsworthy first): a contract award
+#: or M&A is the story; a bare "test"/"other" row is the least specific framing of it.
+_EVENT_KIND_PRIORITY = {
+    "contract_award": 0,
+    "m_and_a": 1,
+    "deployment": 2,
+    "partnership": 3,
+    "investment": 4,
+    "launch": 5,
+    "regulation": 6,
+    "test": 7,
+    "other": 8,
+}
+
+
+def _event_kind_priority(kind: str | None) -> int:
+    return _EVENT_KIND_PRIORITY.get(kind or "other", 8)
+
+
+def _program_group_key(ev: dict[str, Any]) -> tuple[Any, ...] | None:
+    """The grouping key for :func:`_merge_same_program_events`: same item + same non-empty
+    ``program`` (case-insensitive), or -- when ``program`` is empty -- same item + same
+    customer + same date. ``None`` when neither is available (nothing to safely group on)."""
+    item_id = ev.get("item_id")
+    if item_id is None:
+        return None
+    program = (ev.get("program") or "").strip().casefold()
+    if program:
+        return (item_id, "program", program)
+    customer = (ev.get("customer") or "").strip().casefold()
+    date = ev.get("date")
+    if customer and date:
+        return (item_id, "customer_date", customer, date)
+    return None
+
+
+def _merge_program_group(members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge a group of same-item/same-program (or same-item/customer+date) event rows into one:
+    the most specific ``kind`` (:data:`_EVENT_KIND_PRIORITY`) wins as the base row, its ``parties``
+    replaced by the union of every member's parties (case-insensitive dedup, first-seen order), and
+    any of ``amount_usd``/``currency``/``customer``/``date`` the base row is missing backfilled
+    from the first member that has it."""
+    base = min(members, key=lambda e: (_event_kind_priority(e.get("kind")), -_event_richness(e)))
+    merged = dict(base)
+    parties: list[str] = []
+    seen_cf: set[str] = set()
+    for ev in members:
+        for p in ev.get("parties") or []:
+            p = (p or "").strip()
+            if p and p.casefold() not in seen_cf:
+                seen_cf.add(p.casefold())
+                parties.append(p)
+    if parties:
+        merged["parties"] = parties
+    for key in ("amount_usd", "currency", "customer", "date"):
+        if not merged.get(key):
+            for ev in members:
+                if ev.get(key):
+                    merged[key] = ev[key]
+                    break
+    return merged
+
+
+def _merge_same_program_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """R8-reports #2: collapse events sharing :func:`_program_group_key` into one row per group --
+    see that function and :func:`_merge_program_group` for the grouping/merge rules, and the
+    module-level :data:`_EVENT_KIND_PRIORITY` note for the motivating "Operation Atlantic City"
+    triplication (three rows, three different ``kind`` values, one program, one item)."""
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for ev in rows:
+        key = _program_group_key(ev)
+        if key is None:
+            passthrough.append(ev)
+            continue
+        groups.setdefault(key, []).append(ev)
+    merged_rows = [
+        _merge_program_group(members) if len(members) > 1 else members[0] for members in groups.values()
+    ]
+    return passthrough + merged_rows
+
+
 def _dedup_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse events sharing :func:`_normalize_event_key` across the whole report window,
     keeping the richest (most fields populated) row per group (F9/F16).
@@ -349,7 +450,10 @@ def _dedup_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     :func:`_item_amount_kind_key` (same trigger item + date + amount + kind) -- see that function's
     docstring for the motivating near-duplicate this catches that the content key above misses.
     Rows with no ``item_id``/``amount_usd`` to key on (the key function returns ``None``) are never
-    touched by this second pass and pass through unchanged."""
+    touched by this second pass and pass through unchanged.
+
+    R8-reports #2: a third pass then collapses any rows still sharing the same item + program (or
+    item + customer + date) -- see :func:`_merge_same_program_events`."""
     best: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for ev in rows:
         key = _normalize_event_key(ev)
@@ -368,7 +472,9 @@ def _dedup_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cur = merged.get(key2)
         if cur is None or _event_richness(ev) > _event_richness(cur):
             merged[key2] = ev
-    return list(merged.values())
+    stage2 = list(merged.values())
+
+    return _merge_same_program_events(stage2)
 
 
 def _event_has_signal(ev: dict[str, Any]) -> bool:
@@ -1398,6 +1504,12 @@ def build_daily(
         tender_tables.extend(daily_israel_tables(citation_items, start_ts, _end_ts))
     except Exception as exc:
         log.warning("daily_report_israel_section_failed", error=str(exc)[:160])
+
+    # R8-reports #1 (round-7 judge D6 #4/#5): re-mark the *fully extended* citation registry right
+    # before rendering -- see the updated docstrings on both marker functions above for why this
+    # second pass is needed (and safe) on top of `collect_items`'s own early one.
+    _append_item_corroboration_markers(citation_items)
+    _append_event_corroboration_markers(events_with_n)
 
     docx_path = _report_path(label, "docx")
     md_path = _report_path(label, "md")

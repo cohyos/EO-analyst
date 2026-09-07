@@ -19,6 +19,20 @@ the moment the next issue is drafted (docs/REPORT_TEMPLATE_BENCHMARK.md D5). Per
 The LLM never sees or writes this table: it only ever supplies the ``outlook`` text lines fed into
 step 2, exactly as it always has — this module (and the two report builders' additive-hook calls
 into it) is the only thing that reads/writes ``indicator_watchlist``.
+
+R8-reports #3/#4 (round-7 judge D6 #7/#8): two more rendering rules, both in
+:func:`render_watchlist_table`:
+
+- **Evidence column.** ``[n]`` cites the item(s) whose key terms match the indicator's own text
+  (:func:`_evidence_cell`) — not just a row that matured *this issue*; "—" only when truly no
+  item in the report matches. A ``dropped`` row (by definition unmatched at drop time) always
+  stays "—".
+- **Daily per-story cap** (:func:`_cap_watchlist_rows`, ``kind == "daily"`` only): at most 3 rows
+  per cluster of rows sharing the same top-2 content tokens (a coarser "same underlying story"
+  test than step 2's own reword-collapsing dedupe), preferring a row with evidence and, among
+  ties, the most recently seen; the table is then capped at 8 rows total, keeping the
+  longest-tracked (oldest ``first_seen``) rows when trimming further. Not applied to the
+  weekly/monthly tables, which the round-7 judge did not report as over-crowded.
 """
 
 from __future__ import annotations
@@ -353,29 +367,132 @@ def outlook_indicator_texts(outlook: list[Any]) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+def _evidence_cell(
+    row: dict[str, Any],
+    by_id: dict[int, dict[str, Any]],
+    items: list[dict[str, Any]],
+    *,
+    limit: int = 3,
+) -> str:
+    """R8-reports #3 (round-7 judge D6 #7): the "ראיה" column used to cite ``[n]`` only for a row
+    that matured this issue (``matured_evidence_item_id``), leaving every ``open``/``new``/
+    ``dropped`` row blank even when this issue's own ``items`` plainly carry a matching story —
+    the weekly watchlist's evidence column was "—" on all 13 rows. A ``matured`` row keeps its
+    precise, deterministic evidence item first; otherwise this falls back to a fresh
+    :func:`_item_matches_indicator` search over ``items`` (up to ``limit`` distinct citations,
+    report order) — a ``dropped`` row (by definition unmatched at drop time) and a row with no
+    match at all correctly stay "—"."""
+    eid = row.get("matured_evidence_item_id")
+    if eid is not None:
+        entry = by_id.get(eid)
+        n = entry.get("n") if entry else row.get("_evidence_n")
+        if n is not None:
+            return f"[{n}]"
+    if row.get("_row_status") == "dropped":
+        return "—"
+    text = row.get("text_he") or ""
+    if not text:
+        return "—"
+    ns: list[int] = []
+    seen_ids: set[int] = set()
+    for it in items:
+        iid = it.get("id")
+        if iid is None or iid in seen_ids:
+            continue
+        if not _item_matches_indicator(text, it):
+            continue
+        entry = by_id.get(iid)
+        n = entry.get("n") if entry else it.get("n")
+        if n is None:
+            continue
+        seen_ids.add(iid)
+        ns.append(n)
+        if len(ns) >= limit:
+            break
+    return "".join(f"[{n}]" for n in ns) if ns else "—"
+
+
+def _cluster_key(text_he: str) -> tuple[str, str]:
+    """A coarse "story" key for :func:`_cap_watchlist_rows`: the two longest content tokens in
+    ``text_he`` (:func:`_content_tokens`, tie-broken alphabetically so the key is stable) —
+    deliberately coarser than :func:`same_indicator`'s own overlap test (which already collapses
+    near-identical rewordings at insert time, see :data:`_DEDUPE_SIMILARITY`): two rows phrased
+    distinctly enough to both stay open can still, in substance, be the same underlying story
+    (round-7 judge D6 #8: 10 of 11 daily rows resting on just 2 stories)."""
+    toks = sorted(_content_tokens(_normalize_text(text_he)), key=lambda t: (-len(t), t))
+    return (toks[0], toks[1]) if len(toks) >= 2 else (toks[0], "") if toks else ("", "")
+
+
+def _cap_watchlist_rows(
+    rows: list[dict[str, Any]], *, max_per_cluster: int = 3, max_total: int = 8
+) -> list[dict[str, Any]]:
+    """R8-reports #4 (round-7 judge D6 #8): even after round-6's ``same_indicator`` reword-
+    collapsing (dedupe at *insert* time), distinct-enough phrasings of the same underlying story
+    can each still get their own row and crowd the daily table. Two passes, daily table only (see
+    :func:`render_watchlist_table`'s ``kind`` gate):
+
+    1. Cluster rows by :func:`_cluster_key`; keep at most ``max_per_cluster`` rows per cluster,
+       preferring a row with evidence (``matured`` or a ``matured_evidence_item_id``) and, among
+       ties, the most recently seen (``last_seen``, falling back to ``first_seen``).
+    2. Cap the surviving rows at ``max_total`` total, keeping the oldest-open ones (ascending
+       ``first_seen``) when trimming further — a longer-tracked indicator is more, not less,
+       reader-relevant than one just opened.
+    """
+
+    def _has_evidence(r: dict[str, Any]) -> bool:
+        return r.get("_row_status") == "matured" or r.get("matured_evidence_item_id") is not None
+
+    _epoch = dt.datetime.min.replace(tzinfo=dt.UTC)
+
+    def _recency(r: dict[str, Any]) -> Any:
+        return r.get("last_seen") or r.get("first_seen") or _epoch
+
+    clusters: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        clusters.setdefault(_cluster_key(row.get("text_he") or ""), []).append(row)
+
+    kept: list[dict[str, Any]] = []
+    for members in clusters.values():
+        if len(members) <= max_per_cluster:
+            kept.extend(members)
+            continue
+        ordered = sorted(members, key=lambda r: (_has_evidence(r), _recency(r)), reverse=True)
+        kept.extend(ordered[:max_per_cluster])
+
+    if len(kept) <= max_total:
+        return kept
+    _future = dt.datetime.max.replace(tzinfo=dt.UTC)
+    return sorted(kept, key=lambda r: r.get("first_seen") or _future)[:max_total]
+
+
 def render_watchlist_table(
-    rows: list[dict[str, Any]], citation_items: list[dict[str, Any]]
+    rows: list[dict[str, Any]],
+    citation_items: list[dict[str, Any]],
+    items: list[dict[str, Any]] | None = None,
+    *,
+    kind: str | None = None,
 ) -> dict[str, Any] | None:
     """The "מעקב אינדיקטורים" markdown table body — headers אינדיקטור | מאז | סטטוס | ראיה.
     ``citation_items`` is the report's own citation registry (already extended with every
-    ``items`` entry passed to :func:`process_indicator_watchlist`); a ``matured`` row's evidence
-    item is looked up there by id for its ``[n]`` — never fabricated, since the evidence item is
-    always one of the report's own numbered items already. ``None`` when ``rows`` is empty (same
-    "nothing to show, render nothing" convention as ``eoa.report.israel_section``)."""
+    ``items`` entry passed to :func:`process_indicator_watchlist`); ``items`` (this issue's own
+    report items, same list) feeds :func:`_evidence_cell`'s fresh-match fallback. ``None`` when
+    ``rows`` is empty (same "nothing to show, render nothing" convention as
+    ``eoa.report.israel_section``).
+
+    R8-reports #4: ``kind == "daily"`` additionally runs :func:`_cap_watchlist_rows` first — the
+    per-story clustering cap is scoped to the daily table (the round-7 judge's own finding), not
+    the weekly/monthly tables, which weren't reported as over-crowded."""
     if not rows:
         return None
+    if kind == "daily":
+        rows = _cap_watchlist_rows(rows)
     by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
+    items = items or []
     lines = ["| אינדיקטור | מאז | סטטוס | ראיה |", "|---|---|---|---|"]
     for row in sorted(rows, key=lambda r: _ROW_STATUS_ORDER.get(r.get("_row_status", ""), 9)):
         status_he = _ROW_STATUS_LABELS_HE.get(row.get("_row_status", ""), "—")
         since = fmt_date(row.get("first_seen"))
-        evidence = "—"
-        eid = row.get("matured_evidence_item_id")
-        if eid is not None:
-            entry = by_id.get(eid)
-            n = entry.get("n") if entry else row.get("_evidence_n")
-            if n is not None:
-                evidence = f"[{n}]"
+        evidence = _evidence_cell(row, by_id, items)
         text_cell = (row.get("text_he") or "—").replace("|", "/").replace("\n", " ")
         lines.append(f"| {text_cell} | {since} | {status_he} | {evidence} |")
     return {"title_he": SECTION_TITLE_HE, "body_he": "\n".join(lines), "position": "after_outlook"}
@@ -397,7 +514,7 @@ def build_indicator_watchlist_section(
     ``eoa.report.deltas.build_report_state``)."""
     texts = outlook_indicator_texts(outlook)
     rows = process_indicator_watchlist(kind, texts, items, source_report_id=source_report_id, now=now)
-    return render_watchlist_table(rows, citation_items), rows
+    return render_watchlist_table(rows, citation_items, items, kind=kind), rows
 
 
 __all__ = [

@@ -2597,23 +2597,35 @@ def _expansion_search_tag(code: str) -> str:
     return f"bd:{code}"
 
 
+def _pending_expansion_search_id(code: str) -> int | None:
+    """The id of a previous expansion search still queued/running for this territory, if any --
+    avoids enqueueing a duplicate every time the report is rebuilt. R8-reports #6: also the id
+    :func:`_enqueue_territory_expansion_search` returns for the "מה נבדק" note (a fresh job's id,
+    or this already-pending one's)."""
+    rows = _fetchall(
+        "SELECT id FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
+        "AND payload ->> 'expanded_from' = %(tag)s ORDER BY id DESC LIMIT 1",
+        {"tag": _expansion_search_tag(code)},
+    )
+    return rows[0]["id"] if rows else None
+
+
 def _has_pending_expansion_search(code: str) -> bool:
     """Avoid enqueueing a duplicate targeted deep-search job every time this territory's report is
     rebuilt while a previous expansion search is still queued/running."""
-    rows = _fetchall(
-        "SELECT 1 FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
-        "AND payload ->> 'expanded_from' = %(tag)s LIMIT 1",
-        {"tag": _expansion_search_tag(code)},
-    )
-    return bool(rows)
+    return _pending_expansion_search_id(code) is not None
 
 
-def _enqueue_territory_expansion_search(code: str) -> None:
+def _enqueue_territory_expansion_search(code: str) -> int | None:
     """Never raises: a queueing failure must not break the report build itself (same defensive
-    convention as this module's own acquisition-watch/payload-price optional sections)."""
+    convention as this module's own acquisition-watch/payload-price optional sections). Returns the
+    expansion job's id (a freshly-enqueued one, or an already-pending one this call reused/skipped)
+    -- ``None`` only on a queueing failure or DB error (R8-reports #6: the empty-territory "מה נבדק"
+    note cites this id so the analyst can look the job up directly)."""
     try:
-        if _has_pending_expansion_search(code):
-            return
+        pending_id = _pending_expansion_search_id(code)
+        if pending_id is not None:
+            return pending_id
         from eoa.memory.relational import enqueue_job
 
         question = (
@@ -2627,8 +2639,10 @@ def _enqueue_territory_expansion_search(code: str) -> None:
             priority=3,
         )
         log.info("bd_territory_expansion_search_enqueued", territory=code, job_id=job_id)
+        return job_id
     except Exception as exc:  # pragma: no cover -- defensive, see docstring
         log.warning("bd_territory_expansion_search_enqueue_failed", territory=code, error=str(exc)[:160])
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -2662,8 +2676,9 @@ def build_bd_territory(
     # `collect_market_items` came back with nothing at all.
     has_watchlist_here = bool(dormant_competitors) or any(c.get("is_watchlist") for c in competitors)
     expansion_triggered = not items and has_watchlist_here
+    expansion_job_id: int | None = None
     if expansion_triggered:
-        _enqueue_territory_expansion_search(code)
+        expansion_job_id = _enqueue_territory_expansion_search(code)
 
     citation_items = list(items)
     _extend_registry_with_source_items(citation_items, events)
@@ -2742,6 +2757,30 @@ def build_bd_territory(
                 if note
                 else EXPANDED_SEARCH_NOTE_HE
             }
+        )
+
+    # R8-reports #6 (round-7 judge D7 #10): the genuinely empty-territory stub (`_no_items_draft`:
+    # no market items *and* every deterministic table also empty -- e.g. the live bd_kr) used to
+    # render only that one system-note sentence. Prepend an explicit BLUF-style bottom line here
+    # (never a `bluf: list[Sentence]` -- there is no item in an empty registry for it to cite); the
+    # matching "מה נבדק" bullet list is added as a plain extra_sections entry below, once
+    # `extra_sections` exists. D7's own empty-territory exemption
+    # (`eoa.qa.d7_bd_report._EMPTY_TERRITORY_MARKER_HE`) only requires that marker string to stay
+    # present in the rendered text, which it does -- it is `_no_items_draft`'s own `system_note_he`
+    # base sentence, still intact inside the now-longer note.
+    is_empty_stub = not items and not table_counts.total
+    if is_empty_stub:
+        # The brief's own exact wording assumes a focused investigation was activated (the live
+        # bd_kr case, `expansion_triggered=True`); an empty-but-irrelevant territory (no watchlist
+        # competitor here either, so no expansion search) gets the honest variant instead.
+        bluf_line_he = (
+            "שורה תחתונה: לא זוהתה פעילות בטריטוריה בחלון הנבדק; הופעלה חקירה ממוקדת."
+            if expansion_triggered
+            else "שורה תחתונה: לא זוהתה פעילות בטריטוריה בחלון הנבדק."
+        )
+        note = (draft.system_note_he or "").strip()
+        draft = draft.model_copy(
+            update={"system_note_he": f"{bluf_line_he} {note}".strip() if note else bluf_line_he}
         )
 
     if items and not llm_draft_failed:
@@ -2872,6 +2911,31 @@ def build_bd_territory(
         draft = draft.model_copy(update={"bluf": replacement})
 
     extra_sections: list[dict[str, Any]] = []
+    # R8-reports #6: the "מה נבדק" counterpart to the BLUF-style line prepended to `system_note_he`
+    # above -- what was actually scanned, so the empty stub reads as a documented negative result
+    # rather than an unexplained gap. Deterministic, no citations needed (matches the BLUF line's
+    # own reasoning for skipping `Sentence`/`bluf`).
+    if is_empty_stub:
+        watchlist_checked = sorted({*dormant_competitors, *(c["name"] for c in competitors if c.get("name"))})
+        what_checked_lines = [
+            "- מקורות: כל פריטי החדשות הנקיים (רמה צהוב ומעלה) שפורסמו בחלון הזמן, מסוננים לפי "
+            f"זיהוי גיאוגרפי/ישויות/טקסט לטריטוריה {territory_label(code)}.",
+            f"- חלון זמן שנבדק: {fmt_date(start)} עד {fmt_date(end)} ({lookback_days} ימים).",
+            "- חברות מעקב (watchlist) שנבדקו: "
+            + (", ".join(watchlist_checked) if watchlist_checked else "לא הוגדרו חברות מעקב לטריטוריה זו")
+            + ".",
+            "- חקירה ממוקדת: "
+            + (
+                f"הופעלה (מזהה משימה #{expansion_job_id})."
+                if expansion_job_id is not None
+                else "לא הופעלה (אין חברות מעקב מוגדרות לטריטוריה זו)."
+                if not expansion_triggered
+                else "ניסיון ההפעלה נכשל; ראו לוג המערכת."
+            ),
+        ]
+        extra_sections.append(
+            {"title_he": "מה נבדק", "body_he": "\n".join(what_checked_lines), "position": "after_summary"}
+        )
     # BLUF itself needs no extra_sections entry -- eoa.report.docx_builder renders "שורה תחתונה"
     # natively straight from draft.bluf (see the module-level "BLUF note" comment above).
     # B4 (territory delta): decorative/optional, mirrors this module's own acquisition-watch/
