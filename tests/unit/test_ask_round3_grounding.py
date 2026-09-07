@@ -480,7 +480,10 @@ class TestGroundingGuardEndToEnd:
         )
         r = client.post("/api/ask", json={"question": question})
         events = _sse_events(r.text)
-        assert not [e for e in events if e["type"] == "answer_final" and "ungrounded_removed" in e]
+        # round 6: exactly one answer_final is always emitted; a clean answer carries zero removals
+        finals = [e for e in events if e["type"] == "answer_final"]
+        assert len(finals) == 1 and finals[0].get("ungrounded_removed", 0) == 0
+        assert not finals[0].get("removed_by_guard")
 
     def test_template_leak_is_sanitized_end_to_end(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

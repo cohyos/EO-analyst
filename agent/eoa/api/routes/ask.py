@@ -567,14 +567,7 @@ async def ask(body: AskRequest) -> StreamingResponse:
                     ungrounded_removed=ungrounded_removed,
                     removed_by_guard=_removed_by_guard,
                 )
-                yield _sse(
-                    {
-                        "type": "answer_final",
-                        "text": answer_text,
-                        "ungrounded_removed": ungrounded_removed,
-                        "removed_by_guard": _removed_by_guard,
-                    }
-                )
+                pass  # answer_final is emitted exactly once below (round-6 judge: duplicates/missing)
 
             # Round 2 P2 (docs/qa/loop/round_2_chat_fixes.md): live-verified 2026-09-06 that 3/5
             # cleanly-completed answers had zero inline [n] despite a populated sources array.
@@ -606,14 +599,7 @@ async def ask(body: AskRequest) -> StreamingResponse:
                         )
                 else:
                     answer_text = _NO_CITATION_PREFIX + answer_text
-                yield _sse(
-                    {
-                        "type": "answer_final",
-                        "text": answer_text,
-                        "ungrounded_removed": ungrounded_removed,
-                        "removed_by_guard": _removed_by_guard,
-                    }
-                )
+                pass  # answer_final is emitted exactly once below (round-6 judge: duplicates/missing)
 
             # Round 2 P2 topic-substitution guard (docs/qa/loop/round_2_chat_fixes.md, D5 Q3
             # Greece/LORA finding): the answer must mention at least one deterministic anchor
@@ -672,24 +658,27 @@ async def ask(body: AskRequest) -> StreamingResponse:
                         ungrounded_removed=_demoted_removed,
                         removed_by_guard=_demoted_by_guard,
                     )
-                yield _sse(
-                    {
-                        "type": "answer_final",
-                        "text": answer_text,
-                        "ungrounded_removed": ungrounded_removed,
-                        "removed_by_guard": _removed_by_guard,
-                    }
-                )
+                pass  # answer_final is emitted exactly once below (round-6 judge: duplicates/missing)
 
             # Round 6 item 5 (live-found on an iPhone Safari e2e run): a final, order-independent
             # normalisation pass -- a prior guard's unit removal can leave a `###`-style heading
             # glued onto the tail of the preceding line (the newline that used to separate them
             # belonged to the removed unit). Never rewrites/removes content, only re-inserts a line
             # break, so it is always safe to run last, after every guard above.
-            _fixed_headings = ask_grounding.ensure_headings_on_own_line(answer_text)
-            if _fixed_headings != answer_text:
-                answer_text = _fixed_headings
-                yield _sse({"type": "answer_final", "text": answer_text})
+            answer_text = ask_grounding.ensure_headings_on_own_line(answer_text)
+            # Round-6 judge (D5 worst #2/#3): the guards used to emit one `answer_final` per stage
+            # that changed the text -- none at all when nothing changed (Q6), several with
+            # intermediate/truncated texts when the anchor demotion and the citation repair both
+            # fired (Q3/Q4). Contract now: exactly one `answer_final`, always, carrying the fully
+            # guarded text and the aggregated guard counters.
+            yield _sse(
+                {
+                    "type": "answer_final",
+                    "text": answer_text,
+                    "ungrounded_removed": ungrounded_removed,
+                    "removed_by_guard": _removed_by_guard,
+                }
+            )
 
             notes = _parse_source_notes(sources_buf) if in_sources else {}
             sources: list[dict[str, Any]] = [{**c, "note": notes.get(c["n"])} for c in citations]
