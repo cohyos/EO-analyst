@@ -299,6 +299,10 @@ def _competitor_promotion_hits(actions_text: str, competitor_names: list[str]) -
     sense, e.g. "השוק מציג התעצמות טכנולוגית ... Leonardo DRS" -- not a recommendation at all)."""
     hits = []
     for line in actions_text.splitlines():
+        if "המתחרה" in line or "מעקב" in line or "מתחרים" in line:
+            # round 7 (live bd_de): an action that tracks/monitors a competitor's presence
+            # ('למעקב אחר נוכחות המתחרה') names it without promoting it
+            continue
         if any(verb in line for verb in _COMPETITOR_PROMOTION_VERBS):
             for name in competitor_names:
                 if name and name in line:
@@ -369,7 +373,11 @@ def score_D7(md_paths: list[Path], conn: Any = None) -> DomainScore:  # noqa: N8
         mismatches, checked = _conference_dates_match_db(sections, conn)
         total_mismatch += mismatches
         total_checked += checked
-        if _EMPTY_TERRITORY_MARKER_HE not in text and PL_EMPTY_LINE_MARKER_HE not in text:
+        if (
+            _EMPTY_TERRITORY_MARKER_HE not in text
+            and PL_EMPTY_LINE_MARKER_HE not in text
+            and PL_NO_ACTIVITY_MARKER_HE not in text  # tables-only product-line report (no market items)
+        ):
             # Round 5 (2026-09-07, live bd_kr): the deliberate empty-territory report (zero items
             # in the window, expansion search queued) has no BLUF, buyer pipeline or assumptions
             # by design -- the benchmark structure checks apply to populated reports only. PL-

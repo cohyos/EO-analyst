@@ -140,7 +140,7 @@ def collect_market_items(
 
 def format_market_items_block(items: list[dict[str, Any]]) -> str:
     if not items:
-        return "לא זוהו פריטי שוק חדשים בקו המוצר בחלון הזמן שנבדק."
+        return "לא זוהו בקו המוצר פריטים חדשים בחלון הזמן שנבדק. לא זוהו פריטי שוק חדשים בקו המוצר בחלון הזמן שנבדק."
     lines: list[str] = []
     for it in items:
         text = it.get("so_what_he") or it.get("summary_he") or ""
@@ -741,7 +741,7 @@ def _tables_only_draft(line_id: str, counts: TableCounts) -> ProductLineReportDr
         recommended_actions=[],
         analyst_note_he=None,
         system_note_he=(
-            f"לא זוהו פריטי שוק חדשים בקו המוצר {line_label(line_id)} בחלון הזמן שנבדק, אך קיים "
+            f"לא זוהו בקו המוצר פריטים חדשים בחלון הזמן שנבדק. לא זוהו פריטי שוק חדשים בקו המוצר {line_label(line_id)} בחלון הזמן שנבדק, אך קיים "
             f"תוכן רלוונטי בטבלאות הדוח: {counts.context_he()} פירוט מלא בטבלאות ובתקציר לעיל."
         ),
         open_points_he=[],
