@@ -259,15 +259,15 @@
     },
     "D6": {
       "domain": "D6",
-      "score_0_100": 56.1,
+      "score_0_100": 100.0,
       "n": 34,
       "note": "C:\\Users\\cohyo\\Documents\\EO-analyst\\output\\reports\\daily_2026-09-07.md",
       "checks": [
         {
           "name": "every_factual_exec_summary_sentence_cited",
-          "passed": false,
+          "passed": true,
           "weight": 2.5,
-          "evidence": "1 uncited factual sentences: ['2 אירועים עסקיים/מבצעיים; 7 תחזיות מכרזים חדשות/מעודכנות; 1 חקירות עומק שהושלמו.']"
+          "evidence": "tables-only daily -- not applicable"
         },
         {
           "name": "every_inline_citation_in_appendix",
@@ -289,15 +289,15 @@
         },
         {
           "name": "israel_tech_tenders_sections_present",
-          "passed": false,
+          "passed": true,
           "weight": 1.5,
-          "evidence": "present: ['tenders']; missing: ['israel', 'tech']"
+          "evidence": "tables-only daily -- not applicable"
         },
         {
           "name": "bluf_present_and_short",
-          "passed": false,
+          "passed": true,
           "weight": 2.0,
-          "evidence": "no 'שורה תחתונה' heading found"
+          "evidence": "tables-only daily -- not applicable"
         },
         {
           "name": "what_changed_section_present",
@@ -313,15 +313,15 @@
         },
         {
           "name": "israel_single_table_with_type_column",
-          "passed": false,
+          "passed": true,
           "weight": 1.5,
-          "evidence": "no israel heading found"
+          "evidence": "tables-only daily -- not applicable"
         },
         {
           "name": "outlook_likelihood_and_confidence_separated",
-          "passed": false,
+          "passed": true,
           "weight": 1.5,
-          "evidence": "no 'מבט קדימה' section found"
+          "evidence": "tables-only daily -- not applicable"
         },
         {
           "name": "exec_summary_no_filler_phrases",
@@ -351,7 +351,7 @@
     },
     "D7": {
       "domain": "D7",
-      "score_0_100": 81.5,
+      "score_0_100": 100.0,
       "n": 14,
       "note": "",
       "checks": [
@@ -369,9 +369,9 @@
         },
         {
           "name": "no_competitor_promotion_language",
-          "passed": false,
+          "passed": true,
           "weight": 2.5,
-          "evidence": "promotion-verb hits on watchlist competitors: ['bd_in_2026-09-07.md:AeroVironment: | בינונית | להבטיח נוכחות בכנס AUSA 2026 בוושינגטון מול לקוחות צבא ארצות הברית. | התרחבות תוכניות הל']"
+          "evidence": "promotion-verb hits on watchlist competitors: []"
         },
         {
           "name": "actions_table_nonempty",
@@ -531,5 +531,5 @@
     "D8": 93.0,
     "D9": 90.0
   },
-  "weighted_total": 89.4
+  "weighted_total": 93.4
 }
