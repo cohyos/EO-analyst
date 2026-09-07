@@ -18,6 +18,15 @@ domains:
       small_gimbals: "מטע\"דים זעירים (Micro-Gimbals)"
       eo_warfare: "לוחמה אלקטרו-אופטית (DIRCM, Laser Dazzlers)"
       strategic_isr: "מטע\"די ISR אסטרטגיים (WAMI, Hyperspectral, SAR+EO fusion)"
+      # PL-backend (2026-09-07, config/product_lines.yaml): additive sub-keys for two of the six
+      # tracked product lines that don't map cleanly onto an existing sub-key alone -- `mws_eo`
+      # (missile-warning) sits next to the existing `eo_warfare` (DIRCM/dazzlers) sub-key rather
+      # than replacing it (a missile-warning sensor is a distinct payload from a jam/dazzle
+      # emitter, even though both fall under "EO self-protection"); `lorop_pods` similarly sits
+      # next to `isr_pods` (LOROP is one specific, named ISR-pod product category).
+      mws: "מערכות התראת טילים (MWS)"
+      lorop: "פודי LOROP"
+      large_gimbals_16in: "מטע\"דים כדוריים גדולים (16 אינץ')"
   land_surveillance:
     label: "מטע\"די תצפית ומעקב יבשתיים (Land EO/IR Surveillance)"
     sub:
@@ -31,6 +40,11 @@ domains:
       vehicle_sights: "כוונות מפקד ותותחן ומטע\"די רק\"ם (Commander/Gunner Sights, Vehicle EO/IR Payloads)"
       night_vision: "ראיית לילה אישית (Fused/Digital Night Vision)"
       site_security: "אבטחת מתקנים משולבת EO/מכ\"ם (Perimeter Security)"
+      # PL-backend (2026-09-07, config/product_lines.yaml): additive sub-key for the
+      # `border_long_range_eo` product line -- sits next to the existing `border_towers` sub-key
+      # (fixed border towers) to also cover long-range mobile/vehicle-mounted border surveillance
+      # systems that aren't themselves a fixed tower.
+      border_lrs: "תצפית ארוכת-טווח להגנת גבולות (Long-Range Border Surveillance)"
   naval_surveillance:
     label: "מטע\"די תצפית ימיים (Naval & Coastal EO/IR)"
     sub:
@@ -45,6 +59,11 @@ domains:
       eo_trackers: "עוקבים אלקטרואופטיים במערכות יירוט (EO Trackers)"
       sensor_fusion: "שילוב EO/מכ\"ם (Sensor Fusion)"
       hel: "לייזר בעוצמה גבוהה (High-Energy Laser, HEL)"
+      # PL-backend (2026-09-07, config/product_lines.yaml): additive sub-key for the
+      # `eo_air_defense_warning` product line -- distinct from the existing `eo_trackers` (an
+      # EO tracker embedded in an interceptor fire-control loop) in that this covers standalone
+      # EO detection/warning sensors surveying airspace for an air-defense system to cue onto.
+      eo_air_surveillance: "גילוי והתראה EO להגנה אווירית (EO Air-Defense Surveillance)"
   # Round-4b W24 (docs/REVIEW_2026-09-06_evening.md, 2026-09-06): new domain for the HEL/DEW
   # technology stack itself (laser sources, beam control, thermal/power) -- airborne and ground,
   # any platform -- as distinct from `air_defense.hel` (kept unchanged), which stays scoped to HEL

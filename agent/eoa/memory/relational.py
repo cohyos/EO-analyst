@@ -65,6 +65,9 @@ _ITEM_UPDATABLE_FIELDS = {
     # eoa.pipeline.israel_focus.israel_relevance() / classify.py + analyze.py's "# --- A13" blocks.
     "israel_relevance",
     "israel_reasons",
+    # PL-backend (2026-09-07): additive, see migration 0027 and eoa.product_lines.tagging /
+    # eoa.pipeline.analyze's post-analyze tagging hook.
+    "product_lines",
 }
 
 

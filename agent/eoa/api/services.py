@@ -313,6 +313,8 @@ def _item_card(row: dict[str, Any]) -> dict[str, Any]:
         # per the frozen API contract -- `_attach_corroboration` overwrites this for every id that
         # actually has an `item_corroboration` row (see eoa.pipeline.corroboration).
         "corroboration": {"status": "unknown", "count": 0, "sources": [], "checked_at": None},
+        # PL-backend (2026-09-07): additive, see migration 0027 and eoa.product_lines.tagging.
+        "product_lines": row.get("product_lines") or [],
     }
 
 
@@ -1929,6 +1931,8 @@ def _tender_card(row: dict[str, Any]) -> dict[str, Any]:
         "item_id": row.get("item_id"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
+        # PL-backend (2026-09-07): additive, see migration 0027 and eoa.product_lines.tagging.
+        "product_lines": row.get("product_lines") or [],
     }
 
 
@@ -3142,6 +3146,108 @@ def build_or_enqueue_bd_report(territory: str, lookback_days: int = 90) -> dict[
             return {"job_id": job_id, "status": "failed", "error": job.get("error")}
         time.sleep(_BD_POLL_INTERVAL_SECONDS)
     return {"job_id": job_id, "status": "queued"}
+
+
+# --------------------------------------------------------------------------
+# product lines / קווי מוצר (PL-backend, user request 2026-09-07) -- frozen contract per
+# web/src/types/api.ts ProductLine/ProductLineDetail/ProductLineReportCreateResponse and
+# web/src/api/real.ts getProductLines/getProductLine/postProductLineReport. A generated report is
+# a normal `reports` row (`kind='product_line'`, the line id in the existing `territory` column --
+# see eoa.report.product_line's module docstring), so its full detail/download/citations continue
+# to be served by the existing generic GET /api/reports/{id} etc.
+# --------------------------------------------------------------------------
+
+
+def _product_line_card(pl: Any, stats: dict[str, Any]) -> dict[str, Any]:
+    latest = _fetchone(
+        "SELECT id, created_at, qa_passed, path_html FROM reports "
+        "WHERE kind = 'product_line' AND territory = %(line)s ORDER BY created_at DESC LIMIT 1",
+        {"line": pl.id},
+    )
+    latest_report = None
+    if latest is not None:
+        latest_report = {
+            "id": latest["id"],
+            "created_at": latest["created_at"],
+            "qa_passed": bool(latest.get("qa_passed")),
+            "path_html": latest.get("path_html"),
+        }
+    return {
+        "id": pl.id,
+        "name_he": pl.name_he,
+        "name_en": pl.name_en,
+        "subdomains": list(pl.subdomains),
+        "exemplar_systems": list(pl.exemplar_systems),
+        "competitors": list(pl.competitors),
+        "stats": stats,
+        "latest_report": latest_report,
+    }
+
+
+def list_product_lines() -> list[dict[str, Any]]:
+    """`GET /api/product-lines`: every configured product line (``config/product_lines.yaml``)
+    with its deterministic stats and latest report ref."""
+    from eoa.product_lines.registry import product_line_defs
+    from eoa.product_lines.stats import product_line_stats
+
+    return [_product_line_card(pl, product_line_stats(pl.id)) for pl in product_line_defs()]
+
+
+def list_product_line_reports(line_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+    rows = _fetchall(
+        "SELECT * FROM reports WHERE kind = 'product_line' AND territory = %(line)s "
+        "ORDER BY created_at DESC LIMIT %(limit)s",
+        {"line": line_id, "limit": min(max(limit, 1), 200)},
+    )
+    return [_report_card(r) for r in rows]
+
+
+def product_line_detail(line_id: str) -> dict[str, Any] | None:
+    """`GET /api/product-lines/{id}`: the list card plus ``recent_items`` (the same ItemCard shape
+    the feed uses, last 30 days), ``open_tenders`` (the tenders page shape) and ``reports`` (the
+    report card shape) -- ``None`` when ``line_id`` isn't one of the configured product lines (the
+    route raises 404)."""
+    from eoa.product_lines.registry import get_product_line
+    from eoa.product_lines.stats import product_line_stats
+
+    pl = get_product_line(line_id)
+    if pl is None:
+        return None
+    card = _product_line_card(pl, product_line_stats(line_id))
+    since = dt.date.today() - dt.timedelta(days=30)
+    recent_rows = _fetchall(
+        "SELECT i.*, s.name AS source_name FROM items i LEFT JOIN sources s ON s.id = i.source_id "
+        "WHERE i.product_lines @> ARRAY[%(line)s]::text[] AND i.security_status = 'clean' "
+        "AND i.dedup_of IS NULL AND COALESCE(i.published_at, i.fetched_at, i.created_at)::date >= %(since)s "
+        "ORDER BY COALESCE(i.score, 0) DESC, COALESCE(i.published_at, i.fetched_at) DESC LIMIT 30",
+        {"line": line_id, "since": since},
+    )
+    recent_items = [_item_card(r) for r in recent_rows]
+    _attach_corroboration(recent_items)
+    today = dt.date.today()
+    tender_rows = _fetchall(
+        "SELECT * FROM tenders WHERE product_lines @> ARRAY[%(line)s]::text[] "
+        "AND status IN ('open', 'unknown') AND (deadline IS NULL OR deadline >= %(today)s) "
+        "ORDER BY deadline ASC NULLS LAST LIMIT 30",
+        {"line": line_id, "today": today},
+    )
+    card["recent_items"] = recent_items
+    card["open_tenders"] = [_tender_card(r) for r in tender_rows]
+    card["reports"] = list_product_line_reports(line_id)
+    return card
+
+
+def enqueue_product_line_report(line_id: str) -> dict[str, Any]:
+    """`POST /api/product-lines/{id}/report`: enqueue the ``product_line_report`` job kind
+    (``eoa.orchestrator.jobs.HANDLERS``) -- unlike ``build_or_enqueue_bd_report`` this never waits
+    synchronously (frozen contract: ``ProductLineReportCreateResponse`` is ``{job_id}`` only), the
+    client polls ``GET /api/product-lines/{id}`` for ``reports``/``latest_report`` to update."""
+    from eoa.product_lines.registry import get_product_line
+
+    if get_product_line(line_id) is None:
+        raise ValueError(f"unrecognized product line: {line_id!r}")
+    job_id = relational.enqueue_job("product_line_report", {"line_id": line_id}, priority=4)
+    return {"job_id": job_id}
 
 
 # --------------------------------------------------------------------------

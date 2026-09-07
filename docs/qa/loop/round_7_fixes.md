@@ -808,3 +808,91 @@ build had to degrade gracefully rather than assume the contract is live.
 - **Mock `product_lines` tagging is illustrative, not authoritative** -- `items.ts`'s
   subdomain-to-product-line map and `tenders.ts`'s per-row tags are plausible placeholders for mock
   mode only; the real backend presumably has its own (likely LLM- or rule-based) tagging logic.
+
+### PL-backend status
+
+Scope: product-line status & business-development reporting (user request 2026-09-07) for the six
+frozen EO/IR product lines the PL-ui build above was built against -- `config/product_lines.yaml`
+(new), five new taxonomy sub-keys (`config/taxonomy.yaml`, additive only), migrations 0027 (tagging
+column) + 0028 (a follow-up fix, see below), `agent/eoa/product_lines/` (new package: registry/
+tagging/stats), `agent/eoa/report/product_line.py` (new, modeled on `eoa.report.bd_territory`),
+`agent/eoa/llm/schemas/product_line.py` + `agent/eoa/llm/prompts/report_product_line.md` (new), the
+three frozen API endpoints (`agent/eoa/api/routes/product_lines.py` + `services.py` +
+`app.py` registration), the `product_line_report` job kind + weekly schedule
+(`orchestrator/jobs.py`/`main.py`), the tagging hook (`pipeline/analyze.py`), the backfill script
+(`scripts/backfill_product_lines.py`, new), the D7 extension (`qa/d7_bd_report.py`, wired via
+`qa/report_files.py`/`qa/scorer.py`), tests (`tests/unit/test_product_lines.py`, new, 68 cases),
+and this entry + the `docs/MODULES.md` "Product-line status & business-development reporting"
+section (full design writeup, deviations, and live-build detail live there).
+
+#### Deliverables
+
+- Migration 0027 applied and verified from a separate connection (`alembic_version = 0027`, all
+  five `product_lines` columns + GIN indexes present).
+- **Bug found by the first live report build, fixed same-round**: `reports.kind`'s CHECK
+  constraint (widened by 0014/0018 for `bd_territory`/`patent_survey`) was never widened for
+  `product_line` -- migration 0028 fixes it, applied and verified from a separate connection
+  (`alembic_version = 0028`). Documented as a deviation from "your migration is 0027" in the task
+  brief: a genuine bug only surfaced by an actual live persist, not something a unit test (DB
+  mocked, as required) could have caught -- a second, small, tightly-scoped migration was the
+  correct fix rather than editing an already-applied 0027.
+- Deterministic tagging (`eoa.product_lines.tagging.tag_product_lines`) + backfill script, dry-run
+  by default: live `--dry-run` and `--apply` runs against the development DB matched exactly --
+  **2 items tagged** (`targeting_pods`), plus the events/tenders/tender_forecasts rows tied to
+  those same two items, and **2 patents tagged** (`mws_eo`) -- verified from a separate connection.
+  The DB's current content is overwhelmingly outside these six narrowly-scoped product lines, so a
+  low tag count is expected (see the tagging unit tests for coverage of the matching rules
+  themselves, independent of live-DB content volume).
+- Report builder, API, job kind, D7 extension: see `docs/MODULES.md` for the full design.
+- Tests: **380 passed** (`pytest tests/unit/test_product_lines.py tests/unit -q -k "product_line or
+  bd_round or d7"`), DB mocked throughout (module-level `_fetchall`/`_fetchone`/`settings`
+  monkeypatched, no Postgres, no Ollama, no network). Full suite: **3849 passed, 3 pre-existing
+  failures unrelated to this feature** (verified by running each alone -- two are order-dependent
+  flakes elsewhere in the suite, one is a live-GPU-gate trip in `eoa.report.weekly`, a module this
+  round never touches). `ruff check`/`ruff format --check` clean on every file touched.
+- Two live report builds (`EOA_PIPELINE=1`, resident model via the configured CLI provider chain),
+  at most two per the task brief:
+  - `targeting_pods` (has market data): **report id 89, QA passed, 14 sections rendered,
+    `score_D7` on this file alone: 100.0/100**. The draft failed citation QA once on the first
+    attempt (model conflated a tender-forecast's own local display number with the citation-
+    registry `[n]`) and the existing one-shot corrective retry fixed it cleanly both times the
+    build was run -- the QA gate worked exactly as designed.
+  - `mws_eo` (no market items, patents only): **report id 90, QA passed** (tables-only path, no
+    LLM narrative call), 5 sections. By design (mirrors `eoa.report.bd_territory`'s own
+    tables-only shape) this report has no BLUF/buyer-pipeline/assumptions sections --
+    `eoa.qa.d7_bd_report`'s empty-report exemption only covers the fully-empty case, not the
+    tables-only one, matching the documented BD-territory precedent for an analogous sparse
+    territory -- not a defect, an honestly-scored thin-data product line.
+  - Combined `score_D7` over both files: **63.0/100**, pulled down entirely by `mws_eo`'s expected
+    tables-only gap on 3 of 8 checks; every other check (including the two genuinely
+    territory-scoped ones, which correctly no-op for a non-territory report) passes on both files.
+  - Both reports verified present in `reports` (`kind='product_line'`, `territory`=line id) from a
+    separate connection after the builds.
+
+#### Deviations from the design doc (documented, not silent)
+
+- The product line id is stored in the existing `reports.territory` column (the brief's own
+  offered default, "unless a cleaner `subject` column is trivial") rather than a new `subject`
+  column -- reusing the column BD-territory already established this role for, no query/API path
+  needs widening for one more report kind.
+- `POST /api/product-lines/{id}/report` never waits synchronously (unlike `POST /api/bd/reports`'s
+  up-to-~55s poll) -- the frozen `ProductLineReportCreateResponse` contract is `{job_id}` only, so
+  there was no response shape to put a synchronous report payload into; the client polls
+  `GET /api/product-lines/{id}` instead, same pattern the PL-ui build's own report-creation flow
+  already expects.
+- Migration 0028 (see above) -- a genuine bug, not a design choice, but flagged here since the
+  brief named "0027" as *the* migration.
+
+#### What's left (for the user)
+
+- The DB's current content only lightly overlaps these six product lines (2/2 items/patents tagged
+  out of 491 items) -- worth revisiting `config/product_lines.yaml`'s `keywords_he`/`keywords_en`
+  coverage once more real EO/IR ingestion has run, if the tag rate still looks too low for the
+  live catalog's actual content mix.
+- `our_products` is empty for every line in `config/product_lines.yaml` (per the task brief's own
+  instruction, "empty unless config `bd_report.our_company` is set") -- populate it once the
+  operator names real products, so the "מיצוב התעשייה הישראלית" table can show our own offerings
+  alongside competitor rows.
+- The weekly `product_line_report` scheduler job (Sundays 06:45) has not yet run on its own
+  schedule (only invoked directly for this round's verification) -- worth confirming it fires
+  correctly at the next scheduled window.

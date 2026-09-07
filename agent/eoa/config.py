@@ -562,6 +562,11 @@ class Settings(BaseModel):
     registry: ModelsRegistry
     taxonomy: dict[str, Any] = {}
     watchlist: dict[str, Any] = {}
+    # PL-backend (2026-09-07): config/product_lines.yaml -- the six EO/IR product lines' keyword/
+    # alias/subdomain/exemplar-system/competitor definitions (eoa.product_lines.registry). Loaded
+    # optionally (like mcp.yaml) so a test fixture Settings() built without this key still
+    # constructs -- eoa.product_lines.registry.product_line_defs() degrades to an empty tuple.
+    product_lines: dict[str, Any] = {}
 
     # ---- derived / env-driven -------------------------------------------------
     @property
@@ -629,7 +634,10 @@ def settings() -> Settings:
     registry = ModelsRegistry(**_load_yaml("models.yaml"))
     taxonomy = _load_yaml("taxonomy.yaml")
     watchlist = _load_yaml("watchlist.yaml")
+    product_lines = _load_yaml_optional("product_lines.yaml")
     mcp_data = _load_yaml_optional("mcp.yaml")
     if "mcp" not in base and mcp_data:
         base = {**base, "mcp": mcp_data}
-    return Settings(registry=registry, taxonomy=taxonomy, watchlist=watchlist, **base)
+    return Settings(
+        registry=registry, taxonomy=taxonomy, watchlist=watchlist, product_lines=product_lines, **base
+    )

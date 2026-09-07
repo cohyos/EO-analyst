@@ -765,6 +765,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     )
     n_events = 0
     persisted_event_party_names: list[str] = []
+    persisted_event_ids: list[int] = []
     for ev in _dedup_events(out.events):
         ev = _reclassify_exercise_kind(ev)
         if _is_narrative_event_title(ev.title, ev):
@@ -782,7 +783,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 magnitude=magnitude,
             )
         try:
-            insert_event(
+            event_id = insert_event(
                 item_id=item["id"],
                 kind=ev.kind,
                 title=ev.title,
@@ -796,6 +797,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 confidence=ev.confidence,
             )
             n_events += 1
+            persisted_event_ids.append(event_id)
             persisted_event_party_names.extend(p for p in (event_parties or []) if p)
         except Exception as exc:
             log.warning("event_insert_failed", item_id=item["id"], error=str(exc)[:160])
@@ -867,6 +869,38 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 log.info(
                     "analyze_entities_backfilled_from_events", item_id=item["id"], entities=fallback_names
                 )
+
+    # --- PL-backend (user request 2026-09-07) -- BEGIN --------------------------------------
+    # Deterministic (no LLM) product-line tagging, run last so it sees every field this function
+    # may have just refreshed (summary/so_what, entities_mentioned incl. any watchlist/event
+    # backfill above, subdomain from classify). Tags this item's own `product_lines` column plus
+    # every event just persisted for it (an event has no domain/subdomain of its own -- it inherits
+    # its parent item's tags, since it was extracted from the same text). Never breaks the pipeline
+    # on failure (same defensive convention as the A13 israel_relevance block above).
+    try:
+        from eoa.db import connection
+        from eoa.product_lines.tagging import tag_product_lines
+
+        entities_for_tagging = extra_fields.get("entities_mentioned") or item.get("entities_mentioned") or []
+        text_he = " ".join(filter(None, [out.summary_he, out.so_what_he]))
+        product_lines = tag_product_lines(
+            text_he=text_he,
+            text_en=item.get("title"),
+            entities=entities_for_tagging,
+            subdomain=item.get("subdomain"),
+        )
+        if product_lines:
+            update_item_fields(item["id"], product_lines=product_lines)
+            if persisted_event_ids:
+                with connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE events SET product_lines = %(lines)s WHERE id = ANY(%(ids)s)",
+                        {"lines": product_lines, "ids": persisted_event_ids},
+                    )
+            log.info("product_lines_tagged", item_id=item["id"], product_lines=product_lines)
+    except Exception as exc:
+        log.debug("product_lines_tagging_failed", item_id=item["id"], error=str(exc)[:160])
+    # --- PL-backend -- END ----------------------------------------------------------------
 
     return n_events, n_edges
 

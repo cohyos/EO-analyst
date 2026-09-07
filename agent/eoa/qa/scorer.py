@@ -30,6 +30,7 @@ from eoa.qa.report_files import (
     latest_monthly_md,
     latest_patent_survey_html,
     latest_patent_survey_md,
+    latest_product_line_reports,
     latest_weekly_md,
 )
 from eoa.qa.sample import ResolvedSample
@@ -74,14 +75,18 @@ def score_all_domains(
         "D4": score_D4(resolved.investigation_job_ids, conn, report_path=daily_or_weekly),
         "D5": score_D5(golden_questions, conn),
         "D6": score_D6(daily_or_weekly, run_link_check=run_link_check, monthly_path=latest_monthly_md()),
-        "D7": score_D7(latest_bd_reports(), conn),
+        # PL-backend (2026-09-07): product-line reports score under the same D7 domain as BD-
+        # territory reports (eoa.qa.d7_bd_report's module docstring) -- one combined file list.
+        "D7": score_D7(latest_bd_reports() + latest_product_line_reports(), conn),
         "D8": score_D8(latest_patent_survey_md(), latest_patent_survey_html()),
         "D9": score_D9(conn, report_path=daily_or_weekly),
         "D10": score_D10(run_e2e=run_e2e),
     }
 
 
-def weighted_total(scores: dict[str, DomainScore], *, judge_scores: dict[str, float] | None = None) -> float | None:
+def weighted_total(
+    scores: dict[str, DomainScore], *, judge_scores: dict[str, float] | None = None
+) -> float | None:
     """Overall weighted total per section 1: domain score = 0.5*auto + 0.5*judge (when a judge
     score exists for that domain); a domain with ``score_0_100=None`` and no judge score is
     excluded from both the numerator and the weight denominator (never silently counted as 0)."""

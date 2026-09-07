@@ -556,6 +556,47 @@ def run_bd_report(job: dict[str, Any]) -> dict[str, Any]:
     return {"bd_reports": results}
 
 
+def run_product_line_report(job: dict[str, Any]) -> dict[str, Any]:
+    """``product_line_report`` job kind (PL-backend, user request 2026-09-07): builds one product
+    line's status & business-development report when the payload names a ``line_id`` (API-enqueued,
+    ``eoa.api.services.enqueue_product_line_report``) -- returning ``{"product_line_report":
+    {"report_id", "qa_passed", "line_id"}}``. With no ``line_id`` in the payload (the weekly
+    scheduler job, mirrors ``bd_report``'s own convention) it instead builds one for every
+    configured product line (``config/product_lines.yaml``), returning
+    ``{"product_line_reports": {line_id: {...}}}`` -- a failure for one line never blocks the others
+    (docs/CONVENTIONS.md rule 9)."""
+    from eoa.product_lines.registry import product_line_ids
+    from eoa.report.product_line import build_product_line
+
+    payload = job.get("payload") or {}
+    lookback_days = int(payload.get("lookback_days") or 90)
+    line_id = payload.get("line_id")
+
+    if line_id:
+        try:
+            paths = build_product_line(line_id, lookback_days)
+            return {
+                "product_line_report": {
+                    "report_id": paths.report_id,
+                    "qa_passed": paths.qa.passed,
+                    "line_id": paths.line_id,
+                }
+            }
+        except Exception as exc:
+            log.error("product_line_report_failed", line_id=line_id, error=str(exc)[:300])
+            return {"product_line_report_error": str(exc)[:300]}
+
+    results: dict[str, Any] = {}
+    for line in product_line_ids():
+        try:
+            paths = build_product_line(line, lookback_days)
+            results[line] = {"report_id": paths.report_id, "qa_passed": paths.qa.passed}
+        except Exception as exc:
+            log.error("product_line_report_failed", line_id=line, error=str(exc)[:300])
+            results[line] = {"error": str(exc)[:300]}
+    return {"product_line_reports": results}
+
+
 def _backup() -> dict[str, Any]:
     """Obsidian vault export (if enabled) + pg_dump via docker (best effort) + retention prune."""
     out: dict[str, Any] = {}
@@ -836,6 +877,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "conference_scan": run_conference_scan,
     "tender_scan": run_tender_scan,
     "bd_report": run_bd_report,
+    "product_line_report": run_product_line_report,
     "patent_scan": run_patent_scan,
     "patent_survey": run_patent_survey,
     "payload_extract": run_payload_extract_job,

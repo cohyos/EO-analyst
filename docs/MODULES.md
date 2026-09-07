@@ -11647,3 +11647,241 @@ monkeypatched at the module level (no DB, no network) -- same convention as
 `tests/unit/test_israel_focus.py`. `pytest tests/unit/test_corroboration.py tests/unit -q -k
 "corrobor or items_api or services_items or report_daily"`: **94 passed, 0 failed**. `ruff check`/
 `ruff format --check` clean on every file touched.
+
+## Product-line status & business-development reporting (PL-backend, user request 2026-09-07, migration 0027)
+
+**User requirement, verbatim intent (2026-09-07):** track six named EO/IR product lines
+(`targeting_pods`, `mws_eo`, `lorop_pods`, `eo_air_defense_warning`, `ball_gimbals_16in`,
+`border_long_range_eo` -- frozen ids, matching `web/src/lib/productLines.ts`'s fixed catalog, which
+a frontend engineer built the whole UI against in the same round, see "PL-ui status" in
+`docs/qa/loop/round_7_fixes.md`) for status/business-development purposes: what's happening in the
+market, who the active competitors are, open procurement, patents, and a buyer-opportunity pipeline,
+per product line.
+
+### Config (`config/product_lines.yaml`, new)
+
+One entry per line: `id` (frozen), `name_he`/`name_en`, `keywords_he`/`keywords_en`/`aliases`
+(deterministic tagging signals), `subdomains` (`config/taxonomy.yaml` `domain.sub` keys this line
+maps onto), `exemplar_systems` (named real systems -- a strong signal on their own),
+`competitors` (named companies -- **not** a strong signal on their own, see tagging below),
+`our_products` (empty by default; populate alongside `bd_report.our_company` if/when the operator
+names a real product). Loaded via `Settings.product_lines` (`eoa.config`, additive, optional load
+like `mcp.yaml` -- a missing file degrades to an empty catalog rather than raising) and read
+through `eoa.product_lines.registry` (typed `ProductLineDef`, cached against `settings()`'s own
+identity so `settings.cache_clear()` in a test transparently invalidates it too).
+
+`config/taxonomy.yaml` gained five new sub-keys the six lines' `subdomains` reference (additive
+only, no existing sub-key renamed/removed): `airborne_pods.mws`, `airborne_pods.lorop`,
+`airborne_pods.large_gimbals_16in`, `air_defense.eo_air_surveillance`,
+`land_surveillance.border_lrs`.
+
+### Schema (`db/migrations/versions/0027_product_lines.py`, `0028_reports_kind_product_line.py`)
+
+0027: `product_lines TEXT[] NOT NULL DEFAULT '{}'` (+ a GIN index for `@> ARRAY[...]` containment
+queries) added to `items`, `events`, `tenders`, `tender_forecasts`, `patents`. No DB-level CHECK
+constraining the value set -- the six-id catalog is config-driven (`config/product_lines.yaml`),
+validated in Python, same convention as `domain`/`subdomain` (validated against
+`config/taxonomy.yaml`, not a SQL CHECK). Applied and verified live (`alembic_version = 0027`,
+all five columns + five GIN indexes confirmed present from a separate connection).
+
+0028 (follow-up, same day, caught by the first live report build -- see "Live report builds"
+below): widens `reports.kind`'s own CHECK constraint (originally 'daily'/'weekly'/'monthly'/
+'adhoc', widened by 0014/0018 for 'bd_territory'/'patent_survey') to admit `'product_line'` -- 0027
+added the tagging column but never touched this separate constraint, so the very first
+`kind='product_line'` insert failed with `CheckViolation` until this follow-up landed. Applied and
+verified live (`alembic_version = 0028`; `pg_get_constraintdef` confirms `'product_line'` in the
+allowed set).
+
+### Deterministic tagging (`agent/eoa/product_lines/tagging.py`, new; no LLM, no network)
+
+`tag_product_lines(text_he, text_en, entities, subdomain) -> list[str]`. A line is tagged when
+**any** of: (1) a Hebrew `keywords_he` substring hit; (2) a word-boundary-delimited (not bare
+substring -- matters for short Latin acronyms like `MWS`/`ATP`) hit of `keywords_en`/`aliases`
+against `text_en`; (3) a word-boundary text hit, or an exact `entities` hit, of an
+`exemplar_systems` entry; (4) the item/patent's own `subdomain` is one of this line's configured
+`subdomains`. A **competitor** name (word-boundary text hit or exact `entities` hit) is
+deliberately **not**, on its own, one of those four signals -- `Rafael`/`Elbit`/etc. recur across
+many unrelated stories -- it only contributes tagging weight when a subdomain match (4) also holds
+(which alone would already tag the line; the competitor check is kept as its own explicit,
+independently-tested branch per the module's own docstring, not folded away as dead code).
+
+Hook: `agent/eoa/pipeline/analyze.py`'s `persist_analysis`, run last (after summary/so_what/
+entities/subdomain are all final for this pass, including any watchlist/event-derived entity
+backfill earlier in the same function) -- tags the item's own `product_lines` column, then copies
+the same tags onto every event just persisted for it in the same pass (an `events` row has no
+`domain`/`subdomain` of its own; it was extracted from the same text as its item, so it inherits
+that item's product-line tags rather than being independently re-tagged). Wrapped in a bare
+`try/except` (logged at `debug`), same defensive convention as the neighboring A13
+`israel_relevance` refresh block -- a tagging failure never breaks the pipeline.
+`eoa.memory.relational._ITEM_UPDATABLE_FIELDS` gained `product_lines` (additive).
+
+### Stats (`agent/eoa/product_lines/stats.py`, new)
+
+`product_line_stats(line_id) -> {items_7d, items_30d, events_30d, open_tenders, forecasts,
+patents_90d, active_competitors}` -- every count scoped to `product_lines @> ARRAY[line_id]`.
+`active_competitors` is the distinct count of this line's *configured* `competitors` names actually
+present in `entities_mentioned` across the line's own items in the last 30 days (not every entity
+ever mentioned -- a configured, named competitor list, matching the frozen `stats.
+active_competitors` field's own name). A DB failure degrades to an all-zero dict rather than
+raising (mirrors `eoa.api.services._attach_corroboration`'s degrade-to-default convention) -- a
+zero-stats card is an honest, normal UI state; a 500 on the product-lines list page is not.
+
+### Report (`agent/eoa/report/product_line.py`, new; modeled on `eoa.report.bd_territory`)
+
+Same citations-by-construction structured-schema pattern the BD-territory report migrated to in
+round 3 (`eoa.llm.schemas.product_line.ProductLineReportDraft` -- a new, sibling schema module, not
+a change to `eoa.llm.schemas.bd_territory`, which this feature never touches): every factual claim
+is a `Sentence{text_he, cites[]}`; an uncited claim is a pydantic validation error the model must
+fix, not a post-hoc regex strip. Sections: BLUF; תקציר מנהלים; מה השתנה מאז הדוח הקודם
+(`eoa.report.deltas`, `kind='product_line'`, scoped by the line id via the existing `territory`
+delta-lookup parameter -- `_KIND_LABELS_HE` gained a `"product_line": "קו מוצר"` entry, additive);
+תמונת שוק בקו המוצר (a deterministic items table + a deterministic events table, alongside the
+LLM's cited `market_bullets` narrative); מהלכי מתחרים (LLM `competitor_moves`, cited, over
+configured competitors actually mentioned by the line's own items in the window); מכרזים ו-RFI
+פתוחים + תחזיות (deterministic tables, `no_dedupe: true`); פטנטים ומגמות טכנולוגיות (a
+deterministic 90-day patents table); מיצוב התעשייה הישראלית (deterministic -- Israeli-industry
+competitors already surfaced, plus any configured `our_products`); מפת קונים / צינור הזדמנויות
+(deterministic, A/B/C-tiered -- see below); הנחות והפרכות (LLM, `cites` optional); פעולות מומלצות
+(LLM, cited rationale); נספח מקורות (native to `eoa.report.docx_builder`).
+
+**Buyer-pipeline tier scoring** (`_magnitude_score`/`_recency_score`/`_tier_score`/`tier_label`/
+`PipelineRow`/`pipeline_table`) is a **local, self-contained copy** of `eoa.report.bd_territory`'s
+own B2 formula -- deliberately *not* imported from `bd_territory.py` (out of scope to touch this
+round per the task brief, and it is a private-prefixed set of helpers there besides), following
+this codebase's own established "small local copy over cross-module private-name import"
+convention (the same rationale `eoa.llm.schemas.bd_territory`'s own module docstring states for why
+its citation-marker regex is a local copy rather than an import from `eoa.llm.schemas.analysis`).
+Same three-input formula: `magnitude` (amount/likelihood/level) + `recency` (<=30d: 2, <=90d: 1) +
+1 if a named competitor is involved; A >= 4, B >= 2, else C.
+
+Pipeline: collect -> draft (resident model) -> `qa_citations.check` + a local `_run_qa` (validates
+`market_bullets`/`competitor_moves`/`bluf`/`recommended_actions[].rationale`/`assumptions[].cites`
+-- the BD-territory-shaped fields `qa_citations.check` itself doesn't know about, same reason
+`eoa.report.bd_territory._run_qa` exists) -> one corrective retry on failure -> on a second
+failure, a deterministic substitute synthesis built straight from the data (top items/events,
+deterministic candidate actions from competitor wins/open tenders/the top event) -> when
+`recommended_actions` still ends up empty (a genuinely quiet product line), an honest,
+machine-detectable "no activity" marker section (`PL_NO_ACTIVITY_MARKER_HE`, naming every
+configured competitor checked) instead of silently omitting the section -> render via
+`eoa.report.docx_builder`'s additive `extra_sections`/`tables` hooks (unchanged, shared with every
+other report kind) -> persist a `reports` row, `kind='product_line'`.
+
+**Deviation from the design doc, documented rather than silently deviating:** the line id is stored
+in the existing `reports.territory` column (a plain nullable `TEXT`, no FK/CHECK tying it to a
+country code) rather than adding a parallel `subject` column for one more report kind -- the brief
+explicitly offered this as the default choice ("unless a cleaner `subject` column is trivial"); a
+new column would mean widening every `reports`-reading query/API path that assumes `territory`
+covers "the report's scope key", for no behavioral gain over reusing the column BD-territory
+already established that role for.
+
+### API (frozen contract, `agent/eoa/api/routes/product_lines.py` + `agent/eoa/api/services.py`)
+
+`GET /api/product-lines`, `GET /api/product-lines/{id}` (404 for an unknown id),
+`POST /api/product-lines/{id}/report` -> `{job_id}` (queues job kind `product_line_report`, never
+waits synchronously -- unlike `POST /api/bd/reports`, the frozen `ProductLineReportCreateResponse`
+contract is `{job_id}` only; the client polls `GET /api/product-lines/{id}` for `reports`/
+`latest_report` to update). `ItemCard`/`TenderCard` gained an additive `product_lines: string[]`
+field (`_item_card`/`_tender_card` in `eoa.api.services`) -- both already `SELECT *`/`SELECT i.*`
+from their tables, so the new column flows through with no query change beyond the dict literal.
+Registered in `eoa.api.app`'s router list.
+
+### Job kind + schedule (`agent/eoa/orchestrator/jobs.py`/`main.py`)
+
+`product_line_report` (mirrors `bd_report`'s own two-shape convention: a `line_id` in the payload
+builds one line, no `line_id` loops over every configured line, one line's failure never blocks the
+others). Weekly scheduler job `product_line_report_weekly`, Sundays 06:45 (15 minutes after
+`bd_report_weekly`'s 06:30, so the two don't contend for the resident model at the same instant).
+
+### Backfill (`scripts/backfill_product_lines.py`, new)
+
+Five independent sweeps (items, events -- inherits the parent item's tags, tenders, tender
+forecasts, patents), **dry-run by default** (per the task brief's explicit instruction -- the
+opposite default from a couple of older scripts in this directory) -- pass `--apply` to write.
+Live dry-run against the (small, 491-item) development DB matched the live `--apply` run exactly:
+**2 items tagged** (`targeting_pods`, both Sniper-ATP/Litening targeting-pod tender listings), plus
+the events/tenders/tender_forecasts rows tied to those same two items, and **2 patents tagged**
+(`mws_eo`, a directional-infrared-countermeasure patent family) -- verified from a separate
+connection after `--apply`. The DB's current content is overwhelmingly general EO/IR/defense news
+outside these six narrowly-defined product lines, so a low tag rate here is expected, not a sign of
+a broken matcher (see the tagging unit tests for coverage of the matching rules themselves).
+
+### QA (`agent/eoa/qa/d7_bd_report.py` extended; `report_files.py`/`scorer.py` wired)
+
+`score_D7` now scores `output/reports/pl_<line_id>_<date>.md` files alongside
+`bd_<territory>_<date>.md` ones (`eoa.qa.report_files.latest_product_line_reports`, new, same
+one-file-per-key shape as `latest_bd_reports`; `eoa.qa.scorer.score_all_domains` passes the
+concatenation of both to `score_D7`). Every check already generalizes across both report kinds via
+their shared Hebrew heading conventions (שורה תחתונה / תקציר מנהלים / פעולות מומלצות / מפת קונים /
+הנחות והפרכות) with zero code change -- the two checks genuinely scoped to a *territory*
+(`conference_dates_match_db`, gated on a "כנסים" heading the product-line report never renders;
+`acquisition_watch_scoped_to_territory`, gated on extracting an ISO-2 code via `_BD_FILENAME_RE`,
+which simply never matches a `pl_*` filename) already no-op cleanly for a product-line report file,
+no branch needed. The two markers that DO need to recognize either report kind explicitly --
+`_is_no_activity_actions_text` (now checks `NO_ACTIVITY_MARKER_HE` OR `PL_NO_ACTIVITY_MARKER_HE`)
+and the genuinely-empty-report skip (`_EMPTY_TERRITORY_MARKER_HE` OR `PL_EMPTY_LINE_MARKER_HE`) --
+were updated explicitly.
+
+### Live report builds (verification, `EOA_PIPELINE=1`, resident model)
+
+**Bug caught by the first live build, fixed in a follow-up migration**: `build_product_line`'s
+first live run failed at persist time -- `psycopg.errors.CheckViolation: new row for relation
+"reports" violates check constraint "reports_kind_check"`. Migration 0027 added the tagging column
+but never widened `reports.kind`'s own CHECK (originally 'daily'/'weekly'/'monthly'/'adhoc',
+widened by 0014/0018 for 'bd_territory'/'patent_survey') to admit `'product_line'`. Fixed in
+`db/migrations/versions/0028_reports_kind_product_line.py` (same widen-the-CHECK pattern as
+0014/0018) -- applied and verified from a separate connection (`alembic_version = 0028`;
+`pg_get_constraintdef` confirms `'product_line'` is now in the allowed set).
+
+Two live builds, `EOA_PIPELINE=1`, resident model (Claude via the configured CLI provider chain),
+against the (small, 491-item) development DB after the migration fix and the backfill `--apply`
+run above:
+
+- **`targeting_pods`** (has market data: 1 item, 1 event, tenders) -- **report id 89, QA passed
+  (`qa_passed=True`, zero errors on the final draft)**, 14 `##` sections rendered (שורה תחתונה,
+  תקציר מנהלים with an "הערכת האנליסט" note, מה השתנה מאז הדוח הקודם, טבלת אירועים עסקיים, נקודות
+  פתוחות, הנחות והפרכות, the two market-picture tables, מתחרים פעילים, מיצוב התעשייה הישראלית,
+  תחזיות רכש, מפת קונים / צינור הזדמנויות, פעולות מומלצות, נספח מקורות). **`score_D7` on this file
+  alone: 100.0/100** (all 8 checks pass). The draft failed citation QA once on the first attempt
+  (the model twice conflated a tender-forecast's own local display number with the citation
+  registry's `[n]`) and was fixed cleanly by the existing one-shot corrective retry both times --
+  the QA gate itself worked exactly as designed, this is model variance the retry already absorbs,
+  not a code defect.
+- **`mws_eo`** (no market items in the window, 2 tagged patents only) -- **report id 90, QA passed
+  (trivially -- the tables-only path takes no LLM narrative pass at all)**, 5 `##` sections (תקציר
+  מנהלים with the honest "אין תקציר לתקופה זו" + tables-only explanation, מה השתנה, the
+  machine-detectable "no activity" actions marker naming the four configured competitors checked,
+  the patents table, נספח מקורות). By design (`_tables_only_draft`, mirrors
+  `eoa.report.bd_territory`'s own tables-only shape exactly) this report has no BLUF/buyer-pipeline/
+  assumptions sections -- `eoa.qa.d7_bd_report`'s empty-report exemption only covers the fully-empty
+  case (`_no_items_draft`/`PL_EMPTY_LINE_MARKER_HE`), not the tables-only one, matching the
+  documented precedent for an analogous sparse BD-territory report (see that module's own "Round 5"
+  comment on `bd_kr`) -- not a defect, a genuinely thin-data product line scoring honestly low on
+  those three structural checks.
+- **Combined `score_D7([...targeting_pods, ...mws_eo])`: 63.0/100** -- pulled down entirely by
+  `mws_eo`'s expected, by-design tables-only gap on 3 of 8 checks (weight 5.0/13.5); every other
+  check (no empty headings, no competitor-promotion language, actions section always populated —
+  including the honest "no activity" marker, conference/acquisition-watch checks correctly no-op
+  for a non-territory report) passes on both files.
+
+Both reports verified present in `reports` (`kind='product_line'`, `territory` = the line id) from
+a separate connection after the builds.
+
+### Tests (`tests/unit/test_product_lines.py`, new)
+
+**68 test cases** -- registry (config parsing/fallbacks), tagging (every match rule
+independently, including the "competitor alone is not enough" / "competitor + subdomain is enough"
+distinction and word-boundary short-acronym edge cases), stats (happy path + DB-failure
+degradation, mocked), pydantic schema validation (`Sentence` cites/inline-marker rejection, BLUF
+length cap, assumption optional cites), the local tier-scoring formula, every deterministic table
+helper's empty/populated shapes, the local `_run_qa` citation check, the no-items/tables-only draft
+shapes, and the `eoa.qa.d7_bd_report` marker-recognition extension (including a full `score_D7`
+pass over a synthetic `pl_*.md` fixture file). `pytest tests/unit/test_product_lines.py tests/unit
+-q -k "product_line or bd_round or d7"`: **380 passed, 0 failed**. Full suite
+(`pytest tests/unit -q`): **3849 passed, 3 failed** -- all three failures pre-existing and
+unrelated to this feature (confirmed by running each in isolation): a concurrency-timing test
+(`test_api_round4_gate_and_reports.py`) and a provider-dispatch test
+(`test_ollama_client_provider_dispatch.py`) both pass alone (order-dependent flakes elsewhere in
+the suite); `test_report_round3_d6.py`'s weekly-report backup-contamination test still fails alone
+too, in `eoa.report.weekly` (a module this round never touches) under a live GPU/polite-mode gate
+this environment happened to trip during that run -- not a regression from this work. `ruff check`/
+`ruff format --check` clean on every file touched.

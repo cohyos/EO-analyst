@@ -4,6 +4,18 @@ Operates on rendered ``output/reports/bd_<territory>_<date>.md`` files. Reuses
 ``eoa.report.bd_territory._COMPETITOR_PROMOTION_VERBS`` (the exact verb list the report builder
 itself uses to reject a perspective violation before ever rendering) so this QA check can never
 drift from what the live "BD-1" perspective gate already enforces.
+
+PL-backend (2026-09-07): ``score_D7`` also scores ``output/reports/pl_<line_id>_<date>.md`` files
+(``eoa.report.product_line``, the product-line status & business-development report) -- the same
+Hebrew section-heading conventions (שורה תחתונה / תקציר מנהלים / פעולות מומלצות / מפת קונים /
+הנחות והפרכות) apply to both report kinds, so every check here already generalizes; the only checks
+genuinely scoped to a *territory* (``conference_dates_match_db``, which looks for a "כנסים" heading
+the product-line report never renders, and ``acquisition_watch_scoped_to_territory``, gated on
+extracting an ISO-2 territory code from the filename via ``_BD_FILENAME_RE``) already no-op cleanly
+for a ``pl_*`` file -- no code branch needed for those two. The only two markers that DO need to
+recognize either report kind explicitly are the "no activity" actions-section marker
+(``NO_ACTIVITY_MARKER_HE``/``PL_NO_ACTIVITY_MARKER_HE``) and the genuinely-empty-report marker
+(``_EMPTY_TERRITORY_MARKER_HE``/``PL_EMPTY_LINE_MARKER_HE``) -- see both usages below.
 """
 
 from __future__ import annotations
@@ -17,6 +29,7 @@ from eoa.config import settings
 from eoa.qa.types import Check, DomainScore, weighted_score
 from eoa.report.bd_territory import _COMPETITOR_PROMOTION_VERBS, NO_ACTIVITY_MARKER_HE
 from eoa.report.geography import normalize_country
+from eoa.report.product_line import PL_EMPTY_LINE_MARKER_HE, PL_NO_ACTIVITY_MARKER_HE
 
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)$", re.MULTILINE)
 _CONFERENCES_HEADING = "כנסים"
@@ -252,11 +265,13 @@ def _actions_section_text(sections: list[tuple[str, str]]) -> str:
 def _is_no_activity_actions_text(actions_text: str) -> bool:
     """Round-3 (D7 finding 3): the report's actions/recommendations section carries the shared,
     machine-detectable "no activity in this window" marker (``eoa.report.bd_territory.
-    NO_ACTIVITY_MARKER_HE``) -- an honest, deterministic statement that the market/table
-    collection all came back empty, listing every watchlist competitor checked. Imported from the
-    report builder itself (same convention as ``_COMPETITOR_PROMOTION_VERBS`` above) so this check
-    can never drift from what the renderer actually emits."""
-    return NO_ACTIVITY_MARKER_HE in actions_text
+    NO_ACTIVITY_MARKER_HE`` for a BD-territory report, ``eoa.report.product_line.
+    PL_NO_ACTIVITY_MARKER_HE`` for a product-line report -- PL-backend, 2026-09-07) -- an honest,
+    deterministic statement that the market/table collection all came back empty, listing every
+    watchlist competitor checked. Imported from the report builder itself (same convention as
+    ``_COMPETITOR_PROMOTION_VERBS`` above) so this check can never drift from what the renderer
+    actually emits."""
+    return NO_ACTIVITY_MARKER_HE in actions_text or PL_NO_ACTIVITY_MARKER_HE in actions_text
 
 
 def _actions_text_has_populated_rows(actions_text: str) -> bool:
@@ -354,10 +369,12 @@ def score_D7(md_paths: list[Path], conn: Any = None) -> DomainScore:  # noqa: N8
         mismatches, checked = _conference_dates_match_db(sections, conn)
         total_mismatch += mismatches
         total_checked += checked
-        if _EMPTY_TERRITORY_MARKER_HE not in text:
+        if _EMPTY_TERRITORY_MARKER_HE not in text and PL_EMPTY_LINE_MARKER_HE not in text:
             # Round 5 (2026-09-07, live bd_kr): the deliberate empty-territory report (zero items
             # in the window, expansion search queued) has no BLUF, buyer pipeline or assumptions
-            # by design -- the benchmark structure checks apply to populated reports only.
+            # by design -- the benchmark structure checks apply to populated reports only. PL-
+            # backend (2026-09-07): a genuinely empty product-line report (eoa.report.product_line
+            # ._no_items_draft) is the same honest case, just a different marker string.
             bluf_checks.append(_bluf_check(sections))
             buyer_pipeline_checks.append(_buyer_pipeline_check(sections))
             assumptions_checks.append(_assumptions_falsifiers_check(sections))

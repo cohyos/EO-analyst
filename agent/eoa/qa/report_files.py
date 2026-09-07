@@ -20,7 +20,9 @@ def _reports_dir() -> Path:
 
 def _latest_by_date(pattern: str, reports_dir: Path | None = None) -> Path | None:
     base = reports_dir or _reports_dir()
-    candidates = sorted(base.glob(pattern), key=lambda p: _DATE_RE.search(p.name).group(1) if _DATE_RE.search(p.name) else "")
+    candidates = sorted(
+        base.glob(pattern), key=lambda p: _DATE_RE.search(p.name).group(1) if _DATE_RE.search(p.name) else ""
+    )
     return candidates[-1] if candidates else None
 
 
@@ -55,6 +57,23 @@ def latest_bd_reports(reports_dir: Path | None = None) -> list[Path]:
         if existing is None or path.name > existing.name:
             by_territory[territory] = path
     return list(by_territory.values())
+
+
+def latest_product_line_reports(reports_dir: Path | None = None) -> list[Path]:
+    """One latest file per product-line id (``pl_<line_id>_<date>.md``) -- PL-backend (2026-09-07),
+    same shape/convention as :func:`latest_bd_reports`, feeding the same D7 scorer
+    (``eoa.qa.d7_bd_report.score_D7``, see that module's docstring)."""
+    base = reports_dir or _reports_dir()
+    by_line: dict[str, Path] = {}
+    for path in base.glob("pl_*.md"):
+        m = re.match(r"pl_([a-z0-9_]+)_\d{4}-\d{2}-\d{2}\.md$", path.name)
+        if not m:
+            continue
+        line_id = m.group(1)
+        existing = by_line.get(line_id)
+        if existing is None or path.name > existing.name:
+            by_line[line_id] = path
+    return list(by_line.values())
 
 
 def latest_patent_survey_md(reports_dir: Path | None = None) -> Path | None:

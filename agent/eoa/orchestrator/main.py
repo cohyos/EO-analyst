@@ -174,6 +174,20 @@ def build_scheduler() -> BackgroundScheduler:
         misfire_grace_time=3600,
         coalesce=True,
     )
+    # PL-backend (user request 2026-09-07): weekly product-line status & business-development
+    # reports for every configured product line (config/product_lines.yaml) -- no `line_id` in the
+    # payload, mirroring `bd_report_weekly`'s own convention (eoa.orchestrator.jobs.
+    # run_product_line_report distinguishes this loop-over-all-lines run from an on-demand
+    # single-line run, eoa.api.services.enqueue_product_line_report). Offset 15 minutes after the
+    # BD-territory weekly job (06:30) so the two don't contend for the resident model at once.
+    sched.add_job(
+        lambda: enqueue_job("product_line_report", {}, priority=4),
+        _cron(tz, "06:45", day_of_week="sun"),
+        id="product_line_report_weekly",
+        name="דוח מעקב קו מוצר -- שבועי (PL-backend)",
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
     # A14: weekly patent/IP scan (config/patents.yaml: schedule.weekday/start, default Tue 05:30).
     sched.add_job(
         lambda: enqueue_job("patent_scan", {}, priority=4),
@@ -192,7 +206,7 @@ def build_scheduler() -> BackgroundScheduler:
             lambda: enqueue_job("payload_extract", {"limit": s.payloads.nightly_limit}, priority=5),
             CronTrigger(hour=4, minute=15, timezone=tz),
             id="payload_extract_nightly",
-            name="מטע\"דים -- סריקת מפרט/מחיר לילית (A17)",
+            name='מטע"דים -- סריקת מפרט/מחיר לילית (A17)',
             misfire_grace_time=3600,
             coalesce=True,
         )

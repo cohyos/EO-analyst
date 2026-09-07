@@ -52,7 +52,13 @@ _NO_PREVIOUS_TEXT_HE = (
     "זהו הדוח הראשון מסוג זה שנבנה עבור {label} — אין דוח קודם להשוואה, ולכן לא ניתן להציג דלתא."
 )
 
-_KIND_LABELS_HE = {"daily": "יומי", "weekly": "שבועי", "bd_territory": "מיקוד טריטוריאלי"}
+_KIND_LABELS_HE = {
+    "daily": "יומי",
+    "weekly": "שבועי",
+    "bd_territory": "מיקוד טריטוריאלי",
+    # PL-backend (2026-09-07): eoa.report.product_line.build_product_line's own delta section.
+    "product_line": "קו מוצר",
+}
 
 
 @dataclass

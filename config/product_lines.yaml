@@ -1,0 +1,187 @@
+# Six EO/IR product lines tracked for status & business-development reporting (PL-backend,
+# user request 2026-09-07). `id`s are FROZEN -- the frontend (web/src/lib/productLines.ts) uses
+# these exact ids as a fixed catalog and the API contract keys every response on them; never
+# rename/remove an id here without coordinating a frontend change first.
+#
+# Fields per line:
+#   id                stable key (frozen, matches web/src/lib/productLines.ts)
+#   name_he/name_en   display names (kept in sync with web/src/lib/productLines.ts by convention,
+#                     not read from there -- this file is the backend's own source of truth)
+#   keywords_he       Hebrew substring keywords (matched as plain substrings against summary/so_what)
+#   keywords_en       English/Latin keywords (matched with word-boundary regex, see
+#                     eoa.product_lines.tagging -- short acronyms like "MWS" need this to avoid
+#                     matching inside an unrelated longer word)
+#   aliases           additional English/Latin alias phrases, matched the same way as keywords_en
+#   subdomains        config/taxonomy.yaml domain.sub keys this product line maps onto -- an item
+#                     classified into one of these subdomains is tagged by construction
+#   exemplar_systems  named real-world systems in this product line (strong signal on their own,
+#                     matched by text word-boundary or by an exact entities_mentioned hit)
+#   competitors       named companies competing in this product line -- NOT enough on their own
+#                     (see eoa.product_lines.tagging docstring): only tags when a subdomain match
+#                     also holds, since a bare company name recurs across many unrelated stories
+#   our_products      empty unless config.yaml's bd_report.our_company names a real product line
+#                     (left empty here; the operator can populate this alongside our_company)
+
+product_lines:
+  - id: targeting_pods
+    name_he: "פודי ציון מטרות / תקיפה"
+    name_en: "Targeting Pods"
+    keywords_he:
+      - "פוד ציון מטרות"
+      - "פוד תקיפה"
+      - "פוד כיוון"
+      - "כיוון תקיפה"
+    keywords_en:
+      - "targeting pod"
+      - "advanced targeting pod"
+      - "laser designator pod"
+    aliases: ["ATP", "NGTP"]
+    subdomains: ["airborne_pods.targeting_pods"]
+    exemplar_systems:
+      - Litening
+      - "Sniper ATP"
+      - ATFLIR
+      - "ATP-SE"
+      - Damocles
+      - Talios
+      - LANTIRN
+    competitors:
+      - Rafael
+      - "Lockheed Martin"
+      - Thales
+      - "L3Harris"
+    our_products: []
+
+  - id: mws_eo
+    name_he: "מערכות התראה להגנה עצמית מבוססות EO (MWS)"
+    name_en: "EO-based Missile Warning Systems (MWS)"
+    keywords_he:
+      - "מערכת התראת טילים"
+      - "התראה להגנה עצמית"
+      - "מערכת הגנה עצמית אלקטרו-אופטית"
+    keywords_en:
+      - "missile warning system"
+      - "missile warning sensor"
+      - "self-protection system"
+    aliases: ["MWS", "CMWS", "EOSS"]
+    subdomains: ["airborne_pods.eo_warfare", "airborne_pods.mws"]
+    exemplar_systems:
+      - PAWS
+      - "AN/AAR-57"
+      - CMWS
+      - "AN/AAR-47"
+      - MILDS
+      - EOSS
+    competitors:
+      - Elbit
+      - "BAE Systems"
+      - "Northrop Grumman"
+      - Hensoldt
+    our_products: []
+
+  - id: lorop_pods
+    name_he: "פודי LOROP (צילום אלכסוני ארוך-טווח)"
+    name_en: "LOROP Pods (Long-Range Oblique Photography)"
+    keywords_he:
+      - "פוד LOROP"
+      - "צילום אלכסוני ארוך טווח"
+      - "פוד סיור ארוך טווח"
+    keywords_en:
+      - "long-range oblique photography"
+      - "LOROP pod"
+      - "reconnaissance pod"
+    aliases: ["LOROP"]
+    subdomains: ["airborne_pods.isr_pods", "airborne_pods.lorop"]
+    exemplar_systems:
+      - "DB-110"
+      - "MS-110"
+      - "Condor 2"
+      - RecceLite
+      - "RecceLite XR"
+    competitors:
+      - "Collins Aerospace"
+      - Elbit
+      - Rafael
+    our_products: []
+
+  - id: eo_air_defense_warning
+    name_he: "גילוי והתראה אלקטרו-אופטיים להגנה אווירית"
+    name_en: "EO Detection & Warning for Air Defense"
+    keywords_he:
+      - "גילוי והתראה אלקטרו-אופטיים"
+      - "התראה אווירית אלקטרו-אופטית"
+      - "עוקב אלקטרואופטי"
+    keywords_en:
+      - "EO air defense warning"
+      - "electro-optical air surveillance"
+      - "IRST ground system"
+    aliases: ["IRST"]
+    subdomains:
+      - "air_defense.eo_trackers"
+      - "air_defense.eo_air_surveillance"
+      - "c_uas.detect_track"
+    exemplar_systems:
+      - SkySpotter
+      - "SupIR"
+    competitors:
+      - Elbit
+      - Rheinmetall
+      - Hensoldt
+    our_products: []
+
+  - id: ball_gimbals_16in
+    name_he: "מטע\"דים כדוריים 16 אינץ'"
+    name_en: "16-inch Ball Gimbals"
+    keywords_he:
+      - "מטע\"ד כדורי 16 אינץ'"
+      - "גימבל כדורי 16 אינץ'"
+      - "מטען כדורי גדול"
+    keywords_en:
+      - "16-inch ball gimbal"
+      - "16in gimbal"
+      - "large gimbal"
+    aliases: ["MX-15", "MX-20"]
+    subdomains: ["airborne_pods.uav_gimbals", "airborne_pods.large_gimbals_16in"]
+    exemplar_systems:
+      - "MX-15"
+      - "MX-20"
+      - DCoMPASS
+      - AMPS
+      - Toplite
+      - "Star SAFIRE"
+      - Argos
+    competitors:
+      - "L3Harris"
+      - Elbit
+      - Rafael
+      - "Teledyne FLIR"
+      - Hensoldt
+    our_products: []
+
+  - id: border_long_range_eo
+    name_he: "תצפית ארוכת-טווח להגנת גבולות"
+    name_en: "Long-Range Border EO Surveillance"
+    keywords_he:
+      - "תצפית ארוכת טווח"
+      - "הגנת גבולות"
+      - "מגדל תצפית גבולות"
+    keywords_en:
+      - "long-range border surveillance"
+      - "border security EO"
+      - "long-range surveillance system"
+    aliases: ["LORROS"]
+    subdomains: ["land_surveillance.border_towers", "land_surveillance.border_lrs"]
+    exemplar_systems:
+      - LORROS
+      - "Long-View"
+      - Margot
+      - Cerberus
+      - "SPECTRO XR"
+      - "Ranger HDC"
+    competitors:
+      - Elbit
+      - Safran
+      - "Chess Dynamics"
+      - Controp
+      - "Teledyne FLIR"
+    our_products: []
