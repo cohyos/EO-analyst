@@ -454,8 +454,19 @@ class TestEntailmentFilter:
 
 class TestAskConfig:
     def test_default_config_values(self) -> None:
+        # The pydantic default is off; the shipped config turns it ON (user decision 2026-09-07),
+        # and tests/conftest.py forces it off inside the test process so no LLM call ever runs here.
+        from pathlib import Path
+
+        import yaml
+
+        from eoa.config import AskCfg
+
+        assert AskCfg().entailment_check is False
+        shipped = yaml.safe_load(Path("config/config.yaml").read_text(encoding="utf-8"))["ask"]
+        assert shipped["entailment_check"] is True
         cfg = settings().ask
-        assert cfg.entailment_check is False
+        assert cfg.entailment_check is False  # forced off under pytest
         assert cfg.entailment_max_claims == 6
 
 

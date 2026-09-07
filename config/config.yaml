@@ -174,9 +174,8 @@ api:
 
 ask:   # R7-chat (docs/qa/loop/round_7_fixes.md): POST /api/ask chat-only settings -- never read by
        # the pipeline/report paths.
-  entailment_check: false        # optional light-model entailment pass over cited key-fact claims;
-                                  # off by default -- see AskCfg's own docstring in agent/eoa/config.py
-                                  # for why (shared test-suite network-call safety), flip to true when ready
+  entailment_check: true         # user decision 2026-09-07 06:50: ON. Light-model (Gemini Flash in cloud mode) entailment pass over cited key-fact claims;
+                                  # unit tests force it off via tests/conftest.py (no network from tests);
   entailment_max_claims: 6       # cap on claims sent to the light model per answer
 
 export:

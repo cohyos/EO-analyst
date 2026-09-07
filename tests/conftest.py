@@ -290,3 +290,19 @@ def _source_reliability_isolation(monkeypatch):
         return
     monkeypatch.setattr(docx_builder, "_SOURCE_RELIABILITY_CACHE", {}, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _ask_entailment_off(monkeypatch, clear_settings_cache):
+    """R7-chat: `ask.entailment_check` is ON in production (user decision 2026-09-07) but the pass
+    calls the light LLM role; unit tests must never make that call -- force it off here."""
+    try:
+        from eoa.config import settings
+
+        cfg = settings()
+        ask = getattr(cfg, "ask", None)
+        if ask is not None:
+            monkeypatch.setattr(ask, "entailment_check", False, raising=False)
+    except Exception:
+        pass
+    yield
