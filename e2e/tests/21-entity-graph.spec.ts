@@ -83,7 +83,7 @@ test.describe("Entity graph explorer (/entities, 'סייר גרף' tab) -- R10-g
 
   test("path finder panel opens and closes", async ({ page }) => {
     await page.goto("/entities?view=graph");
-    const pathButton = page.getByRole("button", { name: "מוצא מסלולים" });
+    const pathButton = page.getByRole("button", { name: "מוצא מסלולים", exact: true });
     await expect(pathButton).toBeVisible({ timeout: 15_000 });
     await pathButton.click();
     await expect(page.getByText("מ:")).toBeVisible();
@@ -102,12 +102,39 @@ test.describe("Entity graph explorer (/entities, 'סייר גרף' tab) -- R10-g
     test.skip(!(await firstLink.isVisible({ timeout: 5_000 }).catch(() => false)), "no entity seeded to open");
     await firstLink.click();
 
+    // Capture which entity we're on (from the URL path, e.g. /entities/123) so we can confirm
+    // the explorer re-centers on that same id, without depending on whether this entity happens
+    // to have documented relations in the live DB.
+    const entityIdMatch = page.url().match(/\/entities\/(\d+)/);
+    const entityId = entityIdMatch ? entityIdMatch[1] : null;
+
     const expandButton = page.getByRole("button", { name: "פתח גרף מלא" });
-    const noEdges = page.getByText("אין קשרים מתועדים");
-    if (await expandButton.isVisible({ timeout: 10_000 }).catch(() => false)) {
-      await expandButton.click();
+    // GraphPanel's OWN empty state carries a description; the detail page's "קשרים" section
+    // renders the same "אין קשרים מתועדים" title from a different (earlier-resolving) query, so
+    // matching on the bare title raced: it was visible for a moment, then the section filled in
+    // while GraphPanel was still loading, and the else-branch below waited for text that had
+    // already gone (round-13 D10). Match GraphPanel's description text instead.
+    const noEdges = page.getByText("לא נמצאו קשרי גרף לישות זו עדיין");
+    // GraphPanel's `entity-graph` query can take a while (real backend fetch, no seeded
+    // fixture) -- wait for EITHER outcome to actually render, via `.or()`, rather than racing a
+    // fixed isVisible(timeout) against it.
+    await expect(expandButton.or(noEdges)).toBeVisible({ timeout: 30_000 });
+    if (await expandButton.isVisible().catch(() => false)) {
+      // The button sits absolutely inside the compact canvas, which keeps re-laying out while
+      // the force simulation settles -- on the touch projects Playwright's "stable" actionability
+      // check never passed within 15 s. The assertion that matters is the navigation below.
+      await expandButton.scrollIntoViewIfNeeded();
+      await expandButton.click({ force: true });
       await expect(page).toHaveURL(/view=graph/);
+      if (entityId) await expect(page).toHaveURL(new RegExp(`/entities/${entityId}\\?`));
       await expect(page.getByRole("tab", { name: "סייר גרף" })).toHaveAttribute("aria-selected", "true");
+
+      // Data-independent: this entity may or may not have documented relations in the live DB.
+      // Either the explorer's own empty state renders, or a real neighbourhood (canvas/table)
+      // does -- never a blank/broken screen.
+      const canvas = page.getByLabel(/גרף ישויות/);
+      const emptyState = page.getByText("אין קשרים מתועדים");
+      await expect(canvas.or(emptyState)).toBeVisible({ timeout: 15_000 });
     } else {
       await expect(noEdges).toBeVisible();
     }

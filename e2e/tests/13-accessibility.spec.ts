@@ -40,9 +40,27 @@ test.describe("Accessibility smoke", () => {
 
   test("focus is visible when tabbing through the nav rail", async ({ page }) => {
     await page.goto("/");
-    // Tab from the top of the document into the nav rail's first link.
-    await page.keyboard.press("Tab");
+    // Wait for the shell to be interactive before tabbing: on the WebKit tablet projects the
+    // very first Tab occasionally landed before React finished mounting, leaving `:focus`
+    // empty (round-13 D10 flake). Then tab forward in a bounded loop until *some* element holds
+    // focus. Deliberately not "until focus is inside the nav rail": WebKit does not put links in
+    // the Tab order at all (Safari's Option+Tab convention), so on the iPad/iPhone projects the
+    // first focusable stop is the skip link / a button, and the focus-ring check below is what
+    // this test is actually about. Nothing ever receiving focus still fails the loop.
+    const nav = page.getByRole("navigation").first();
+    await expect(nav.locator("a").first()).toBeVisible({ timeout: 15_000 });
+
     const focused = page.locator(":focus");
+    let landed = false;
+    for (let i = 0; i < 5; i++) {
+      await page.keyboard.press("Tab");
+      if (await focused.count()) {
+        landed = true;
+        break;
+      }
+    }
+    expect(landed, "Tabbing never moved focus to any element").toBeTruthy();
+
     await expect(focused).toBeVisible();
     const outline = await focused.evaluate((el) => {
       const cs = getComputedStyle(el);
