@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Pause, Square } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
-import { CitationText } from "@/components/CitationText";
+import { AnswerText } from "@/components/AnswerText";
 import { SecurityReviewBanner } from "@/components/investigations/SecurityReviewBanner";
 import { useInvestigationSocket } from "@/hooks/useInvestigationSocket";
 import { useT } from "@/i18n";
@@ -302,18 +302,31 @@ export function InvestigationDetailPage() {
           className="rounded-lg border border-border bg-bg-raised p-4"
         >
           <h3 className="mb-2 text-sm font-semibold text-fg-dim">תשובה</h3>
-          <bdi className="block text-sm leading-relaxed" dir="auto">
-            <CitationText
-              text={data.answer.answer_he ?? ""}
-              citations={data.answer.sources ?? []}
-            />
-          </bdi>
+          <AnswerText text={data.answer.answer_he} citations={data.answer.sources ?? []} />
           {data.answer.what_was_tried_he && (
             <div className="mt-3 border-t border-border pt-3">
               <h4 className="mb-1 text-xs font-semibold text-fg-dim">מה נוסה</h4>
-              <bdi className="block text-xs text-fg-muted" dir="auto">
-                {data.answer.what_was_tried_he}
-              </bdi>
+              <AnswerText
+                text={data.answer.what_was_tried_he}
+                citations={data.answer.sources ?? []}
+                className="text-fg-muted"
+                size="xs"
+              />
+            </div>
+          )}
+          {/* CR-invest.md: `contradictions_he` is normally already folded into `answer_he`'s own
+              "פערים / מה לא ידוע" section by `format_investigation_answer_he` (W27) -- shown again
+              here only for an answer that predates that fold-in or skipped it (the cloud-batch
+              path never sets `contradictions_he` at all, so this simply never fires there). */}
+          {data.answer.contradictions_he && !(data.answer.answer_he ?? "").includes("פערים") && (
+            <div className="mt-3 border-t border-border pt-3">
+              <h4 className="mb-1 text-xs font-semibold text-fg-dim">פערים / מה לא ידוע</h4>
+              <AnswerText
+                text={data.answer.contradictions_he}
+                citations={data.answer.sources ?? []}
+                className="text-fg-muted"
+                size="xs"
+              />
             </div>
           )}
         </section>

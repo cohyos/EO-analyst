@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
-import { renderBidiText } from "./bidiText";
+import { renderBidiRuns, renderBidiText } from "./bidiText";
 
 // Content review (docs/qa/content_review/CR-ui.md): a plain-text field like
 // `investigation.question` embeds a quoted English title inline inside Hebrew prose
@@ -43,5 +43,58 @@ describe("renderBidiText", () => {
     expect(renderBidiText(null)).toBe(null);
     expect(renderBidiText(undefined)).toBe(undefined);
     expect(renderBidiText("")).toBe("");
+  });
+});
+
+// CR-invest.md: investigation answers embed unquoted Latin/number runs constantly ("Ophir
+// Optronics", "MWIR", "15-300 mm") with no quotes to anchor a bidi fix to -- renderBidiRuns
+// isolates every such run, not just a quoted one.
+describe("renderBidiRuns", () => {
+  it("wraps a bare (unquoted) Latin run adjacent to Hebrew in a dir=ltr bdi", () => {
+    // A trailing space right before the next Hebrew word stays *inside* the isolated run (it
+    // inherits the still-open Latin run's class, same as the backend's own
+    // `eoa.search.deep_search._split_bidi_runs`) -- the visible text is unaffected either way.
+    const { container } = render(<div>{renderBidiRuns("המוצר Ophir Optronics נמכר")}</div>);
+    const bdi = container.querySelector("bdi");
+    expect(bdi).not.toBeNull();
+    expect(bdi!.getAttribute("dir")).toBe("ltr");
+    expect(bdi!.textContent).toBe("Ophir Optronics ");
+    expect(container.textContent).toBe("המוצר Ophir Optronics נמכר");
+  });
+
+  it("wraps a bare digit/number run the same way", () => {
+    const { container } = render(<div>{renderBidiRuns("טווח 15-300 מ\"מ")}</div>);
+    const bdi = container.querySelector("bdi");
+    expect(bdi).not.toBeNull();
+    expect(bdi!.textContent).toBe("15-300 ");
+  });
+
+  it("keeps a parenthesized English term's brackets in the surrounding Hebrew run", () => {
+    // Mirrors eoa.search.deep_search._split_bidi_runs' bracket-pair symmetry: "(" and ")" land in
+    // the Hebrew run, and the isolated run is the bare "Targeting Pods" with no bracket attached.
+    const { container } = render(<div>{renderBidiRuns("פודים (Targeting Pods) חדשים")}</div>);
+    const bdis = container.querySelectorAll("bdi");
+    expect(bdis.length).toBe(1);
+    expect(bdis[0].textContent).toBe("Targeting Pods");
+    expect(container.textContent).toBe("פודים (Targeting Pods) חדשים");
+  });
+
+  it("wraps multiple separate Latin runs independently", () => {
+    const { container } = render(<div>{renderBidiRuns("Elbit זכתה מול Rafael בתחרות")}</div>);
+    const bdis = container.querySelectorAll("bdi");
+    expect(bdis.length).toBe(2);
+    expect(bdis[0].textContent).toBe("Elbit ");
+    expect(bdis[1].textContent).toBe("Rafael ");
+  });
+
+  it("leaves pure Hebrew text completely untouched (returns the original string)", () => {
+    const result = renderBidiRuns("טקסט עברי בלבד ללא תוכן לועזי");
+    expect(result).toBe("טקסט עברי בלבד ללא תוכן לועזי");
+  });
+
+  it("passes through null/undefined/empty", () => {
+    expect(renderBidiRuns(null)).toBe(null);
+    expect(renderBidiRuns(undefined)).toBe(undefined);
+    expect(renderBidiRuns("")).toBe("");
   });
 });

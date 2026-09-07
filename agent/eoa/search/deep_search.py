@@ -1221,28 +1221,43 @@ def plan_queries(
 # directly against a Hebrew letter with no space (a real bidi rendering bug the user hit reading
 # investigation answers, distinct from the report-rendering bidi handling `eoa.report.docx_builder`
 # already has for docx output). `format_investigation_answer_he` is a deterministic safety net that
-# re-assembles the final text as five sections, in this fixed order, skipping any that are empty:
+# re-assembles the final text as four sections, in this fixed order, skipping any that are empty:
 #   1. תשובה ישירה   -- no header; the model's own direct-answer prose (first paragraph of its
-#                        `answer_he`, blank-line-separated from an optional 2nd context paragraph).
+#                        `answer_he`, blank-line-separated from an optional 2nd context paragraph),
+#                        capped at :data:`_MAX_PROSE_SENTENCES` sentences (see
+#                        :func:`_cap_prose_sentences`).
 #   2. עובדות מרכזיות -- bullets, sourced from the existing `InvestigationOut.key_facts` field the
-#                        model already fills in via `finish()` (never re-derived from `answer_he`).
-#   3. הקשר          -- any paragraph(s) after the first blank line in the model's `answer_he`.
+#                        model already fills in via `finish()` (never re-derived from `answer_he`),
+#                        minus any bullet that mostly restates a sentence already present in the
+#                        direct-answer prose (see :func:`_bullet_restates_prose` -- CR-invest.md,
+#                        docs/qa/content_review/CR-invest.md): job 175's key_facts were an almost
+#                        word-for-word repeat of its own direct paragraph, so the UI showed every
+#                        fact twice.
+#   3. הקשר          -- any paragraph(s) after the first blank line in the model's `answer_he`,
+#                        also capped at :data:`_MAX_PROSE_SENTENCES` sentences.
 #   4. פערים / מה לא ידוע -- sourced from the existing `contradictions_he` field (broadened by the
 #                        updated `deep_search_system.md` to also cover open gaps/unknowns, not only
 #                        source-vs-source contradictions -- no schema change needed).
-#   5. מקורות        -- NEVER written by the model; generated here from `sources` (the ground-truth
-#                        URL list, same "never trust the model's own list" doctrine as `_finalize_
-#                        outcome`'s Q3-5 fix above `sources = list(inv.read_urls)`).
+# There used to be a 5th "מקורות" section generated here from the ground-truth `sources` list --
+# removed (CR-invest.md): `InvestigationOut.sources` is already a separate, structured field the
+# UI renders on its own (citation chips + a dedicated sources list), so repeating it as a flat URL
+# dump at the end of `answer_he` itself was pure duplication -- and, per the same content review,
+# the exact block a screenshot of job 175 showed trailing an otherwise-Hebrew answer.
 # A bidi-safe spacing pass then runs once over the assembled text: it inserts a space at any
 # Hebrew/Latin-or-digit run boundary that has none, and wraps every Latin/digit run in Unicode
 # isolate marks (U+2066 LRI / U+2069 PDI) -- a plain-text analogue of `eoa.report.docx_builder`'s
 # own per-run bidi handling (`split_runs`/`_bidi_html`) for the same problem in HTML/docx output;
 # reimplemented locally (rather than importing `docx_builder`, which pulls in python-docx) since
 # the underlying classification (Hebrew-block codepoint ranges) is tiny and self-contained. Finally
-# `eoa.report.textnorm.normalize_hebrew_punctuation` runs once for the gershayim/geresh fixes it
-# already provides report renderers. This function is NOT idempotent by design (re-running it on
-# its own output would double-wrap the isolate marks) -- it is meant to run exactly once, at the
-# point `InvestigationOut.answer_he` is finalized, never on already-formatted text.
+# `eoa.report.textnorm.normalize_hebrew_punctuation` runs once -- it strips those isolate marks
+# back out again (a plain-text field has no per-run markup to preserve them meaningfully; the
+# frontend does its own bidi isolation for display, see `web/src/components/AnswerText.tsx`) and
+# also applies the gershayim/geresh/stray-backslash/doubled-quote fixes it already provides report
+# renderers, leaving only the plain-space spacing fix from the previous pass in the final text.
+# This function is NOT idempotent by design (re-running it on its own output would re-cap already-
+# capped prose and re-run bullet dedup against text that no longer contains the original wording)
+# -- it is meant to run exactly once, at the point `InvestigationOut.answer_he` is finalized, never
+# on already-formatted text.
 # =================================================================================================
 
 _LRI = "⁦"  # Left-to-Right Isolate
@@ -1253,8 +1268,72 @@ _ANSWER_SECTION_TITLES_HE = {
     "facts": "עובדות מרכזיות",
     "context": "הקשר",
     "gaps": "פערים / מה לא ידוע",
-    "sources": "מקורות",
 }
+
+#: CR-invest.md: cap on how many sentences a single prose block (the direct-answer paragraph, or
+#: the הקשר block) may keep -- a long-winded model answer otherwise reads as a wall of text even
+#: after headings/bullets are applied. ~6 sentences is generous enough for the two-paragraph
+#: direct-answer + Israel-context structure `deep_search_system.md` rule 7/10 already asks for.
+_MAX_PROSE_SENTENCES = 6
+
+#: Sentence splitter for :func:`_cap_prose_sentences` -- deliberately local (rather than sharing
+#: either of the module's other two `_SENTENCE_SPLIT_RE` definitions used for security-guard
+#: sentence screening) so a future change to those doesn't silently change how prose is capped
+#: here. Splits after a Hebrew/Latin sentence-final mark followed by whitespace; a trailing
+#: fragment with no terminal punctuation is kept as its own "sentence" rather than dropped.
+_PROSE_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?׃])\s+")
+
+#: CR-invest.md: a key_facts bullet whose own tokens overlap the direct-answer prose at or above
+#: this ratio is dropped as a near-duplicate restatement (see :func:`_bullet_restates_prose`).
+_BULLET_RESTATEMENT_OVERLAP_THRESHOLD = 0.7
+
+#: Word tokens for overlap comparison: Hebrew letters or Latin letters/digits, 2+ characters (a
+#: lone "-" or single digit is too common to be a meaningful signal either way).
+_OVERLAP_TOKEN_RE = re.compile(r"[א-ת]{2,}|[A-Za-z0-9]{2,}")
+
+
+def _overlap_tokens(text: str) -> set[str]:
+    """Normalized token set for :func:`_bullet_restates_prose`: casefolds Latin tokens (Hebrew has
+    no case) and strips ``[n]``/``[n,m]`` citation markers first so a shared citation number never
+    counts as "shared content"."""
+    text = re.sub(r"\[\d+(?:\s*,\s*\d+)*\]", " ", text or "")
+    return {t.casefold() for t in _OVERLAP_TOKEN_RE.findall(text)}
+
+
+def _bullet_restates_prose(bullet: str, prose: str) -> bool:
+    """True when ``bullet`` mostly just repeats content already present in ``prose``.
+
+    CR-invest.md (job 175): the model's `key_facts` bullets were near-verbatim restatements of
+    sentences already in its own direct-answer paragraph ("העדשה מציעה טווח זום רציף של 15-300
+    מ"מ..." as both a `key_facts` bullet AND a clause of the direct paragraph) -- the assembled
+    answer showed every fact twice, once as prose and once as a bullet. Overlap is measured as the
+    fraction of the *bullet's own* tokens that also appear somewhere in the prose (not a symmetric
+    Jaccard score) since the bullet is normally much shorter than the full prose block it may be
+    restating -- a short bullet entirely contained in a much longer paragraph should still count
+    as a full restatement even though the paragraph itself shares only a small fraction of its own
+    tokens with that one bullet.
+    """
+    bullet_tokens = _overlap_tokens(bullet)
+    if not bullet_tokens:
+        return False
+    prose_tokens = _overlap_tokens(prose)
+    if not prose_tokens:
+        return False
+    overlap = len(bullet_tokens & prose_tokens) / len(bullet_tokens)
+    return overlap >= _BULLET_RESTATEMENT_OVERLAP_THRESHOLD
+
+
+def _cap_prose_sentences(text: str, *, max_sentences: int = _MAX_PROSE_SENTENCES) -> str:
+    """Trim ``text`` to at most ``max_sentences`` sentences, rejoined with a single space.
+
+    A no-op (returns ``text`` unchanged, whitespace included) when it is already at or under the
+    cap -- so this never reformats/re-spaces a short block that didn't need trimming."""
+    if not text:
+        return text
+    sentences = [s for s in _PROSE_SENTENCE_SPLIT_RE.split(text.strip()) if s]
+    if len(sentences) <= max_sentences:
+        return text
+    return " ".join(sentences[:max_sentences])
 
 
 def _is_hebrew_char(ch: str) -> bool:
@@ -1377,37 +1456,43 @@ def format_investigation_answer_he(
     *,
     key_facts: list[str] | None = None,
     contradictions_he: str = "",
-    sources: list[str] | None = None,
 ) -> str:
     """Deterministic safety-net assembly of the final ``InvestigationOut.answer_he`` (W27).
 
     Degrades gracefully when the model didn't follow `deep_search_system.md`'s structure: a
-    single-paragraph ``answer_he`` with no ``key_facts``/``contradictions_he``/``sources`` (e.g.
-    the not_found fallback messages built in `_finalize_outcome`/`investigate_batch_cloud`) comes
-    back as just that one paragraph, bidi-spaced -- no empty headers.
+    single-paragraph ``answer_he`` with no ``key_facts``/``contradictions_he`` (e.g. the not_found
+    fallback messages built in `_finalize_outcome`/`investigate_batch_cloud`) comes back as just
+    that one paragraph, bidi-spaced -- no empty headers.
+
+    CR-invest.md no longer takes a ``sources`` argument: ``InvestigationOut.sources`` is a
+    separate, already-structured field the UI renders on its own (citation chips in the answer
+    text plus a dedicated sources list) -- this function used to also flatten that same list into
+    a trailing "### מקורות" block inside the returned text, which was pure duplication.
     """
     key_facts = [f.strip() for f in (key_facts or []) if f and f.strip()]
-    sources = [s for s in (sources or []) if s]
     raw = (answer_he or "").strip()
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
-    direct = paragraphs[0] if paragraphs else ""
+    direct = _cap_prose_sentences(paragraphs[0]) if paragraphs else ""
     context_paragraphs = paragraphs[1:]
+
+    # CR-invest.md: drop any key_facts bullet that mostly just restates a sentence already in the
+    # direct-answer prose -- compared against the *original* (pre-cap) direct paragraph, since a
+    # bullet can restate a sentence that capping later removes just as easily as one that survives.
+    kept_facts = [f for f in key_facts if not _bullet_restates_prose(f, paragraphs[0] if paragraphs else "")]
 
     blocks: list[str] = []
     if direct:
         blocks.append(direct)
-    if key_facts:
-        facts_lines = "\n".join(f"- {f}" for f in key_facts)
+    if kept_facts:
+        facts_lines = "\n".join(f"- {f}" for f in kept_facts)
         blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['facts']}\n{facts_lines}")
     if context_paragraphs:
-        blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['context']}\n" + "\n\n".join(context_paragraphs))
+        context_text = _cap_prose_sentences("\n\n".join(context_paragraphs))
+        blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['context']}\n{context_text}")
     gaps = (contradictions_he or "").strip()
     if gaps:
         blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['gaps']}\n{gaps}")
-    if sources:
-        src_lines = "\n".join(f"- [{i}] {u}" for i, u in enumerate(sources, start=1))
-        blocks.append(f"### {_ANSWER_SECTION_TITLES_HE['sources']}\n{src_lines}")
 
     assembled = "\n\n".join(blocks)
     assembled = _bidi_space_and_isolate(assembled)
@@ -1646,7 +1731,6 @@ def _finalize_outcome(inv: Investigation, budget: Budget) -> None:
         inv.result.answer_he,
         key_facts=inv.result.key_facts,
         contradictions_he=inv.result.contradictions_he,
-        sources=inv.result.sources,
     )
 
 
@@ -2535,9 +2619,11 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
             # Round-4b W27: same deterministic section assembly as the local ReAct path
             # (`_finalize_outcome`) -- the cloud-delegated `CloudInvestigationAnswer` schema carries
             # no `key_facts`/`contradictions_he` (the delegated CLI's own answer contract, U8-6b,
-            # doesn't ask for them), so those two sections simply don't appear here; direct-answer
-            # (+ optional context paragraph) and מקורות (from `source_urls`, ground truth) still do.
-            answer_he = format_investigation_answer_he(answer_he, sources=source_urls)
+            # doesn't ask for them), so those two sections simply don't appear here; the
+            # direct-answer (+ optional context paragraph) still gets the spacing/sentence-cap
+            # pass. `sources` (CR-invest.md) is never part of this text -- it is `source_urls`,
+            # set on `InvestigationOut.sources` below, same as always.
+            answer_he = format_investigation_answer_he(answer_he)
             inv.result = InvestigationOut(
                 outcome=outcome,
                 answer_he=answer_he,

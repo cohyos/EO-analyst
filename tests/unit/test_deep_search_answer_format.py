@@ -8,6 +8,10 @@ Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_deep_search_answer
 
 from __future__ import annotations
 
+import re
+
+import pytest
+
 from eoa.search.deep_search import (
     _LRI,
     _PDI,
@@ -109,13 +113,11 @@ class TestFormatInvestigationAnswerHe:
     def test_sections_appear_in_fixed_order_and_skip_when_empty(self) -> None:
         out = format_investigation_answer_he(
             "תשובה ישירה כלשהי.",
-            key_facts=["עובדה אחת [1]"],
+            key_facts=["עובדה שונה לגמרי [1]"],
             contradictions_he="",  # no gaps to report -- section must not appear
-            sources=["https://example.com/a"],
         )
         facts_pos = out.index("עובדות מרכזיות")
-        sources_pos = out.index("מקורות")
-        assert out.index("תשובה ישירה כלשהי.") < facts_pos < sources_pos
+        assert out.index("תשובה ישירה כלשהי.") < facts_pos
         assert "פערים" not in out  # contradictions_he was empty -> section skipped
         assert "הקשר" not in out  # no second paragraph -> section skipped
 
@@ -124,18 +126,55 @@ class TestFormatInvestigationAnswerHe:
         assert "### הקשר" in out
         assert "פסקה שנייה עם הקשר נוסף." in out.split("### הקשר", 1)[1]
 
-    def test_sources_section_is_built_from_ground_truth_list_never_from_model_text(self) -> None:
-        """Even if the model's own answer_he mentions a URL, the מקורות section must reflect only
-        the `sources` argument -- ground-truth doctrine, same as `_finalize_outcome`'s
-        `sources = list(inv.read_urls)` (Q3-5)."""
+    def test_no_sources_argument_and_no_sources_section_is_ever_emitted(self) -> None:
+        """CR-invest.md: `InvestigationOut.sources` is a separate, already-structured field the
+        UI renders on its own -- `format_investigation_answer_he` must never build a "### מקורות"
+        block inside `answer_he` itself, even when the model's own prose mentions a URL, and no
+        longer accepts a `sources` argument at all (the old ground-truth-only מקורות block this
+        replaced is gone, not just re-sourced)."""
         out = format_investigation_answer_he(
             "התשובה מבוססת על https://not-a-real-source.example.",
-            sources=["https://real-source.example/a", "https://real-source.example/b"],
+            key_facts=["עובדה נבדלת שאינה מוזכרת בפסקה [1]"],
+            contradictions_he="פער כלשהו.",
         )
-        sources_block = out.split("### מקורות", 1)[1]
-        assert "real-source.example/a" in sources_block
-        assert "real-source.example/b" in sources_block
-        assert sources_block.count("- [") == 2
+        assert "מקורות" not in out
+        with pytest.raises(TypeError):
+            format_investigation_answer_he("טקסט", sources=["https://example.com/a"])  # type: ignore[call-arg]
+
+    def test_key_fact_restating_the_direct_prose_is_dropped(self) -> None:
+        """CR-invest.md (job 175): a key_facts bullet that mostly repeats a sentence already in
+        the direct-answer paragraph must not also appear as a bullet -- the exact "same facts
+        twice" bug the content review flagged."""
+        direct = "העדשה מציעה טווח זום רציף של 15-300 מ\"מ עם פתיחת עדשה קבועה של f/4."
+        out = format_investigation_answer_he(
+            direct,
+            key_facts=[
+                "העדשה מציעה טווח זום רציף של 15-300 מ\"מ עם פתיחת עדשה קבועה של f/4 [1,2]",
+                "העדשה כוללת מנגנון סגירת תריס מכני (NUC shutter) לשמירה על איכות התמונה [1,2]",
+            ],
+        )
+        assert "עובדות מרכזיות" in out
+        assert "מנגנון סגירת תריס מכני" in out  # the genuinely new fact survives
+        # the restating bullet is gone; its distinctive tail ("NUC shutter" bullet is unrelated)
+        # must not appear a second time as a "- " bullet line.
+        bullet_lines = [ln for ln in out.splitlines() if ln.startswith("- ")]
+        assert len(bullet_lines) == 1
+        assert "מנגנון סגירת תריס מכני" in bullet_lines[0]
+
+    def test_direct_prose_capped_at_max_sentences(self) -> None:
+        sentences = [f"משפט מספר {i} בפרוזה הישירה." for i in range(1, 10)]
+        out = format_investigation_answer_he(" ".join(sentences))
+        assert "משפט מספר 6" in out
+        assert "משפט מספר 7" not in out
+        assert "משפט מספר 9" not in out
+
+    def test_context_paragraph_capped_at_max_sentences_independently_of_direct(self) -> None:
+        direct = " ".join(f"ישיר {i}." for i in range(1, 8))
+        context = " ".join(f"הקשר {i}." for i in range(1, 8))
+        out = format_investigation_answer_he(f"{direct}\n\n{context}")
+        direct_block, context_block = out.split("### הקשר", 1)
+        assert "ישיר 6" in direct_block and "ישיר 7" not in direct_block
+        assert "הקשר 6" in context_block and "הקשר 7" not in context_block
 
     def test_run_on_sample_produces_readable_structured_output(self) -> None:
         """A deliberately run-on, unpunctuated-transition, bidi-messy sample -- the kind of raw
@@ -149,12 +188,13 @@ class TestFormatInvestigationAnswerHe:
             raw,
             key_facts=["ערך החוזה 650 מיליון דולר [1]", "תקופת האספקה 10 שנים [1]"],
             contradictions_he="לא צוין מועד המסירה הראשון של המערכת.",
-            sources=["https://example.com/contract-award"],
         )
-        # Structural checks: fixed section order, all present given the rich input above.
-        for marker in ("עובדות מרכזיות", "הקשר", "פערים / מה לא ידוע", "מקורות"):
+        # Structural checks: fixed section order, all present given the rich input above; no
+        # מקורות section (CR-invest.md -- sources are never part of this text any more).
+        for marker in ("עובדות מרכזיות", "הקשר", "פערים / מה לא ידוע"):
             assert f"### {marker}" in out
-        order = [out.index(f"### {m}") for m in ("עובדות מרכזיות", "הקשר", "פערים / מה לא ידוע", "מקורות")]
+        assert "מקורות" not in out
+        order = [out.index(f"### {m}") for m in ("עובדות מרכזיות", "הקשר", "פערים / מה לא ידוע")]
         assert order == sorted(order)
         # No dangling/unterminated section: every "### " line is followed by non-empty content.
         for block in out.split("\n\n"):
@@ -164,6 +204,89 @@ class TestFormatInvestigationAnswerHe:
         # letter anywhere in the final text (every such boundary must have a space between them).
         import re
 
+        hebrew_re = re.compile(r"[֐-׿]")
+        latin_re = re.compile(r"[A-Za-z0-9]")
+        for i in range(len(out) - 1):
+            a, b = out[i], out[i + 1]
+            if (latin_re.match(a) and hebrew_re.match(b)) or (hebrew_re.match(a) and latin_re.match(b)):
+                raise AssertionError(f"unspaced bidi boundary at {i}: ...{out[max(0, i - 10) : i + 10]!r}...")
+
+
+class TestJob175Fixture:
+    """CR-invest.md: job 175's stored ``answer_he`` (docs/qa/content_review/CR-invest.md) is the
+    exact case the user reported ("look at the poor language of the report") -- literal LRI/PDI
+    isolate characters (U+2066/U+2069) embedded mid-word, stray ``\\"`` backslash-escapes that
+    leaked from JSON, and `key_facts` bullets that near-verbatim repeat the direct-answer prose.
+
+    These fixtures reconstruct the *pre-assembly* inputs (the direct-answer paragraph and
+    `key_facts`/`contradictions_he` as the model would have produced them, artifacts and all --
+    `format_investigation_answer_he` runs on raw model output, not on its own already-assembled
+    text) from job 175's DB row, to prove the current assembly logic actually cleans this exact
+    real-world sample rather than only synthetic examples above."""
+
+    #: Job 175's direct-answer paragraph, verbatim (isolate marks and stray backslash-quotes
+    #: included) -- the first paragraph of the stored `answer_he`, before its own
+    #: "### עובדות מרכזיות" heading.
+    DIRECT_HE = (
+        "המוצר החדש, ⁦Ophir® SupIR-X, ⁩הוא עדשת זום מוטורית רציפה "
+        "(⁦Continuous Zoom⁩) בטווח ⁦15-300 ⁩מ\\\"מ ובעדשה קבועה ⁦f/4, "
+        "⁩המיועדת ספציפית לגלאי ⁦MWIR ⁩מסוג ⁦10 µm SXGA. ⁩העדשה מיוצרת "
+        "על ידי חברת ⁦Ophir Optronics (⁩שייכת לקונצרניט ⁦MKS Instruments) "
+        "⁩ומיועדת למשימות ⁦ISR (⁩מודיעין, תצפית וסימון⁦) ⁩במרחקים "
+        "ארוכים באוויר, ביבשה ובים. המערכת מאפשרת זיהוי כלי רכב מעבר ל-⁦26 ⁩ק\\\"מ "
+        "וניתנת להרחבה (⁦Scalability⁩) עד למרחק מוקד של ⁦1200 ⁩מ\\\"מ "
+        "באמצעות מתאמי המערכת של ⁦Ophir.⁩"
+    )
+
+    #: Job 175's `key_facts`, verbatim -- every one of these restates a clause already present in
+    #: `DIRECT_HE` above except the NUC-shutter and air/land/sea-usage bullets.
+    KEY_FACTS = [
+        "העדשה מיועדת לגלאי MWIR מסוג 10 µm SXGA המיועדים למשימות ISR [1]",
+        'העדשה מציעה טווח זום רציף של 15-300 מ\\"מ עם פתיחת עדשה קבועה של f/4 [1,2]',
+        'העדשה תומכת בהרחבה (Scalability) עד ל-1200 מ"מ באמצעות מתאמי המערכת של Ophir [1,2]',
+        'העדשה מאפשרת זיהוי כלי רכב מעבר ל-26 ק"מ בתנאי שטח סטנדרטיים [1,2]',
+        "המוצר מיוצר על ידי Ophir Optronics, חברה של קונצרניט MKS Instruments [1,2]",
+        "העדשה כוללת מנגנון סגירת תריס מכני (NUC shutter) לשמירה על איכות התמונה [1,2]",
+        "העדשה מיועדת לשימוש באוויר, ביבשה וביים [1,2]",
+    ]
+
+    CONTRADICTIONS_HE = (
+        "אין נתונים ספציפיים על סכומי חוזה, לקוחות ספציפיים או לוחות זמנים מסחריים "
+        '(הדיווחים הם על השקת המוצר). אין אישור ישיר על קשר מסחרי עם תע\\"א, אך המוצר '
+        "מיועד למשימות המוגדרות כליבת פעילותה."
+    )
+
+    def test_no_bidi_isolate_characters_survive(self) -> None:
+        out = format_investigation_answer_he(self.DIRECT_HE, key_facts=self.KEY_FACTS)
+        assert "⁦" not in out and "⁩" not in out
+
+    def test_stray_backslash_quotes_become_gershayim(self) -> None:
+        out = format_investigation_answer_he(self.DIRECT_HE)
+        assert '\\"' not in out
+        assert "מ״מ" in out  # U+05F4 GERSHAYIM, the correct mark for "מ"מ"
+
+    def test_restating_key_facts_are_dropped_genuinely_new_ones_kept(self) -> None:
+        out = format_investigation_answer_he(self.DIRECT_HE, key_facts=self.KEY_FACTS)
+        bullet_lines = [ln for ln in out.splitlines() if ln.startswith("- ")]
+        # Job 175 showed all 7 facts as bullets, every one a near-repeat of the prose; only the
+        # two genuinely additional facts (NUC shutter, air/land/sea usage) should survive.
+        assert len(bullet_lines) < len(self.KEY_FACTS)
+        assert any("NUC shutter" in ln for ln in bullet_lines)
+        assert any("באוויר, ביבשה" in ln for ln in bullet_lines)
+        assert not any("מסוג 10" in ln and "SXGA" in ln for ln in bullet_lines)  # pure repeat, dropped
+
+    def test_no_sources_section_and_gaps_section_present(self) -> None:
+        out = format_investigation_answer_he(
+            self.DIRECT_HE, key_facts=self.KEY_FACTS, contradictions_he=self.CONTRADICTIONS_HE
+        )
+        assert "מקורות" not in out
+        assert "### פערים / מה לא ידוע" in out
+        assert "לוחות זמנים מסחריים" in out.split("### פערים / מה לא ידוע", 1)[1]
+
+    def test_no_unspaced_bidi_boundary_in_final_output(self) -> None:
+        out = format_investigation_answer_he(
+            self.DIRECT_HE, key_facts=self.KEY_FACTS, contradictions_he=self.CONTRADICTIONS_HE
+        )
         hebrew_re = re.compile(r"[֐-׿]")
         latin_re = re.compile(r"[A-Za-z0-9]")
         for i in range(len(out) - 1):

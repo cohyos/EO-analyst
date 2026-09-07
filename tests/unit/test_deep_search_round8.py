@@ -437,8 +437,13 @@ class TestForceReadTopHits:
 
         assert inv.read_urls == ["https://found.example.com"]
         assert inv.result is not None
-        # a forced read produced real content -- must not be the blank not_found default
-        assert inv.result.answer_he != "לא נמצא מידע מספק במסגרת התקציב."
+        # a forced read produced real content: `sources` (ground truth, from `read_urls`) is
+        # populated even though the outcome itself is a plain not_found -- synthesis crashed above
+        # (mocked `chat_structured` always raises), so `answer_he` legitimately IS the blank
+        # not_found default text here (CR-invest.md: `format_investigation_answer_he` no longer
+        # appends a "### מקורות" block to `answer_he` itself -- `sources` is the only place this
+        # shows up now, not a side effect of the answer text changing).
+        assert inv.result.sources == ["https://found.example.com"]
 
 
 # =================================================================================================

@@ -34,9 +34,13 @@ describe("CitationText", () => {
   });
 
   it("leaves an [n] marker as plain text when no matching citation exists", () => {
-    renderWithRouter(<CitationText text="ציטוט חסר [9]" citations={citations} />);
+    const { container } = renderWithRouter(<CitationText text="ציטוט חסר [9]" citations={citations} />);
     expect(screen.queryByRole("button", { name: "9" })).not.toBeInTheDocument();
-    expect(screen.getByText(/\[9\]/)).toBeInTheDocument();
+    // CR-invest.md: the "9" is still plain text (not a clickable chip), but per-run bidi
+    // isolation (`renderBidiRuns`) now wraps the bare digit in its own <bdi dir="ltr"> -- so the
+    // visible text is unbroken ("[9]") but split across DOM nodes; assert on `textContent`
+    // rather than a single-node text match.
+    expect(container.textContent).toBe("ציטוט חסר [9]");
   });
 
   it("shows a hover tooltip with the source title and URL", () => {

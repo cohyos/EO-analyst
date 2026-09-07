@@ -45,3 +45,119 @@ export function renderBidiText(text: string | null | undefined): React.ReactNode
   }
   return parts;
 }
+
+// =================================================================================================
+// CR-invest.md (docs/qa/content_review/CR-invest.md): `renderBidiText` above only isolates a
+// *quoted* Latin span -- deliberately narrow, per its own docstring. Investigation answers
+// (`answer_he`/`key_facts`/`what_was_tried_he`, rendered by `AnswerText`/`CitationText`) embed
+// unquoted Latin/number runs constantly ("Ophir Optronics", "MKS Instruments", "15-300 mm",
+// "MWIR") with nothing marking their boundaries either -- the exact bug behind the reported
+// "Ophir® SupIR-Xהוא"/"MKS Instruments) לקונצרן" glued-together text. `renderBidiRuns` below
+// generalizes: it segments text into Hebrew-script vs. Latin-letter/digit ("other") runs -- the
+// same algorithm as `eoa.search.deep_search._split_bidi_runs` (Hebrew-block codepoint ranges,
+// punctuation inherits the surrounding run, a closing bracket takes its matching opening
+// bracket's class for symmetry) -- and wraps every "other" run in a real `<bdi dir="ltr">`,
+// instead of the backend's own invisible-Unicode-isolate-mark approach (which several
+// viewers/fonts render as a visible glyph -- see `eoa.report.textnorm`'s docstring for that
+// exact caveat, and CR-invest.md for why that's the display-time fix here rather than a change to
+// what the backend emits). Deliberately a *separate* function from `renderBidiText` rather than a
+// generalization of it: `renderBidiText`'s narrower quoted-span contract (and its existing tests)
+// stay exactly as they are for its own call sites (`InvestigationsListPage`'s question rendering).
+// =================================================================================================
+
+const _BIDI_HEBREW_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x0590, 0x05ff],
+  [0xfb1d, 0xfb4f],
+];
+
+function isHebrewChar(ch: string): boolean {
+  const cp = ch.codePointAt(0) ?? 0;
+  return _BIDI_HEBREW_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+}
+
+function isLatinOrDigitChar(ch: string): boolean {
+  return /[A-Za-z0-9]/.test(ch);
+}
+
+type BidiRunClass = "he" | "other";
+
+function bidiRunClass(ch: string): BidiRunClass | null {
+  if (isHebrewChar(ch)) return "he";
+  if (isLatinOrDigitChar(ch)) return "other";
+  return null;
+}
+
+const _BIDI_BRACKET_OPEN_TO_CLOSE: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+const _BIDI_BRACKET_CLOSE_TO_OPEN: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+
+/** Segment `text` into (class, chunk) runs -- see the module note above. Ports
+ * `eoa.search.deep_search._split_bidi_runs` to TypeScript, minus its bidi-space-insertion
+ * sibling (`_bidi_space_and_isolate`): the frontend only isolates for display, it never mutates
+ * the underlying text (that would risk inserting a space into content a citation-marker regex
+ * downstream still needs to match verbatim). */
+function splitBidiRuns(text: string): Array<[BidiRunClass, string]> {
+  const runs: Array<[BidiRunClass, string]> = [];
+  let cur: BidiRunClass | null = null;
+  let buf: string[] = [];
+  const bracketStack: Array<[string, BidiRunClass]> = [];
+
+  for (const ch of text) {
+    const base = bidiRunClass(ch);
+    let c: BidiRunClass;
+    if (base !== null) {
+      c = base;
+    } else if (ch in _BIDI_BRACKET_OPEN_TO_CLOSE) {
+      c = cur ?? "he";
+    } else if (
+      ch in _BIDI_BRACKET_CLOSE_TO_OPEN &&
+      bracketStack.length > 0 &&
+      bracketStack[bracketStack.length - 1][0] === _BIDI_BRACKET_CLOSE_TO_OPEN[ch]
+    ) {
+      c = bracketStack[bracketStack.length - 1][1];
+    } else {
+      c = cur ?? "he";
+    }
+
+    if (cur !== null && c !== cur && buf.length > 0) {
+      runs.push([cur, buf.join("")]);
+      buf = [];
+    }
+    cur = c;
+    buf.push(ch);
+
+    if (base === null) {
+      if (ch in _BIDI_BRACKET_OPEN_TO_CLOSE) {
+        bracketStack.push([ch, cur]);
+      } else if (
+        ch in _BIDI_BRACKET_CLOSE_TO_OPEN &&
+        bracketStack.length > 0 &&
+        bracketStack[bracketStack.length - 1][0] === _BIDI_BRACKET_CLOSE_TO_OPEN[ch]
+      ) {
+        bracketStack.pop();
+      }
+    }
+  }
+  if (buf.length > 0 && cur !== null) runs.push([cur, buf.join("")]);
+  return runs;
+}
+
+/** Wrap every Latin-letter/digit run in `text` in a real `<bdi dir="ltr">`, leaving Hebrew runs
+ * (and punctuation, which inherits its surrounding run -- see `splitBidiRuns`) as plain text. A
+ * no-op passthrough for `null`/`undefined`/empty input, and for text with no Latin/digit run at
+ * all (returns the original string unchanged rather than a single-element array, so a caller
+ * doing a plain string comparison/length check on non-Latin text still works). */
+export function renderBidiRuns(text: string | null | undefined): React.ReactNode {
+  if (!text) return text;
+  const runs = splitBidiRuns(text);
+  if (runs.length === 0) return text;
+  if (runs.length === 1 && runs[0][0] === "he") return text;
+  return runs.map(([cls, chunk], i) =>
+    cls === "other" ? (
+      <bdi key={i} dir="ltr">
+        {chunk}
+      </bdi>
+    ) : (
+      <Fragment key={i}>{chunk}</Fragment>
+    ),
+  );
+}

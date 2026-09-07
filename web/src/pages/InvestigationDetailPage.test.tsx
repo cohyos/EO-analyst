@@ -432,3 +432,75 @@ describe("InvestigationDetailPage provenance (R10-links)", () => {
     );
   });
 });
+
+// CR-invest.md (docs/qa/content_review/CR-invest.md): job 175's answer_he rendered as one wall of
+// text -- literal "###"/"- " markup, Latin terms glued to Hebrew, a trailing "### מקורות" URL
+// dump the page already shows separately. The "תשובה" section now goes through `AnswerText`.
+describe("InvestigationDetailPage structured answer rendering (CR-invest.md)", () => {
+  // Job 175's stored answer_he, verbatim (isolate marks and stray backslash-quotes included).
+  const JOB_175_ANSWER_HE =
+    'המוצר החדש, ⁦Ophir® SupIR-X, ⁩הוא עדשת זום מוטורית רציפה (⁦Continuous Zoom⁩) בטווח ⁦15-300 ⁩מ\\"מ ' +
+    "ובעדשה קבועה ⁦f/4, ⁩המיועדת ספציפית לגלאי ⁦MWIR ⁩מסוג ⁦10 µm SXGA.⁩\n\n" +
+    "### עובדות מרכזיות\n" +
+    "- העדשה מיועדת לגלאי ⁦MWIR ⁩מסוג ⁦10 µm SXGA ⁩המיועדים למשימות ⁦ISR [1]⁩\n" +
+    "- העדשה כוללת מנגנון סגירת תריס מכני (⁦NUC shutter⁩) לשמירה על איכות התמונה [1,2]\n\n" +
+    "### פערים / מה לא ידוע\n" +
+    'אין נתונים ספציפיים על סכומי חוזה. אין אישור ישיר על קשר מסחרי עם תע\\"א.\n\n' +
+    "### מקורות\n" +
+    "- [⁦1⁩] ⁦https://hiwars.com/en/intel/the-all-new-15-300-mm-f4-mwir-zoom-engineered-for⁩";
+
+  function detailWithJob175Answer() {
+    return {
+      ...baseDetail(),
+      state: "done" as const,
+      answer: {
+        answer_he: JOB_175_ANSWER_HE,
+        sources: [{ n: 1, item_id: null, title: "hiwars", url: "https://hiwars.com/x" }],
+        outcome: "partial",
+      },
+    };
+  }
+
+  it("renders '### <title>' markers as real headings instead of literal text", async () => {
+    getInvestigation.mockResolvedValue(detailWithJob175Answer());
+    renderPage();
+    expect(await screen.findByRole("heading", { level: 4, name: "עובדות מרכזיות" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 4, name: "פערים / מה לא ידוע" })).toBeInTheDocument();
+    // the literal "### " marker itself must never appear as visible text anywhere on the page.
+    expect(document.body.textContent).not.toContain("###");
+  });
+
+  it("renders '- ' bullet lines as a real list, not literal dashes", async () => {
+    getInvestigation.mockResolvedValue(detailWithJob175Answer());
+    renderPage();
+    await screen.findByRole("heading", { level: 4, name: "עובדות מרכזיות" });
+    const list = document.querySelector('[aria-label="תשובה סופית"] ul');
+    expect(list).not.toBeNull();
+    expect(list!.querySelectorAll("li").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("never shows the trailing מקורות block from the raw answer text (the page's own sources list is canonical)", async () => {
+    getInvestigation.mockResolvedValue(detailWithJob175Answer());
+    renderPage();
+    await screen.findByRole("heading", { level: 4, name: "עובדות מרכזיות" });
+    const answerSection = document.querySelector('[aria-label="תשובה סופית"]') as HTMLElement;
+    expect(answerSection.textContent).not.toContain("hiwars.com/en/intel");
+    expect(screen.queryByText("מקורות")).not.toBeInTheDocument();
+  });
+
+  it("shows no raw bidi-isolate control characters or stray backslash-quotes anywhere in the answer", async () => {
+    getInvestigation.mockResolvedValue(detailWithJob175Answer());
+    renderPage();
+    await screen.findByRole("heading", { level: 4, name: "עובדות מרכזיות" });
+    const answerSection = document.querySelector('[aria-label="תשובה סופית"]') as HTMLElement;
+    expect(answerSection.textContent).not.toMatch(/[⁦-⁩]/);
+    expect(answerSection.textContent).not.toContain('\\"');
+  });
+
+  it("still renders the [1] citation marker as a clickable chip inside a bullet", async () => {
+    getInvestigation.mockResolvedValue(detailWithJob175Answer());
+    renderPage();
+    await screen.findByRole("heading", { level: 4, name: "עובדות מרכזיות" });
+    expect(screen.getAllByRole("button", { name: "1" }).length).toBeGreaterThanOrEqual(1);
+  });
+});

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/cn";
+import { renderBidiRuns } from "@/lib/bidiText";
 
 /** Structural shape shared by AskCitation and InvestigationSource. */
 export interface CitationLike {
@@ -35,10 +36,15 @@ export function CitationText({
     <span>
       {parts.map((part, i) => {
         const match = part.match(/^\[(\d+)\]$/);
-        if (!match) return <span key={i}>{part}</span>;
+        // CR-invest.md: a non-citation segment still embeds unquoted Latin/number runs (company
+        // names, model numbers, units) glued against Hebrew with no bidi markup of its own --
+        // isolate them the same way `AnswerText` does for headings/paragraphs/bullets, so a plain
+        // sentence rendered through `CitationText` alone (this component's only real contract) is
+        // just as bidi-safe as one that went through the fuller section parser.
+        if (!match) return <span key={i}>{renderBidiRuns(part)}</span>;
         const n = Number(match[1]);
         const citation = byN.get(n);
-        if (!citation) return <span key={i}>{part}</span>;
+        if (!citation) return <span key={i}>{renderBidiRuns(part)}</span>;
         return (
           <CitationChip key={i} n={n} citation={citation} onOpenItem={onOpenItem} />
         );
