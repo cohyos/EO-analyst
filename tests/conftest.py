@@ -285,7 +285,7 @@ def _source_reliability_isolation(monkeypatch):
     ``reliability`` must render "—" regardless of what the developer's DB holds."""
     try:
         from eoa.report import docx_builder
-    except Exception:  # noqa: BLE001
+    except Exception:
         yield
         return
     monkeypatch.setattr(docx_builder, "_SOURCE_RELIABILITY_CACHE", {}, raising=False)
