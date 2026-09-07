@@ -260,14 +260,14 @@
     "D6": {
       "domain": "D6",
       "score_0_100": 87.8,
-      "n": 47,
+      "n": 44,
       "note": "C:\\Users\\cohyo\\Documents\\EO-analyst\\output\\reports\\daily_2026-09-07.md",
       "checks": [
         {
           "name": "every_factual_exec_summary_sentence_cited",
           "passed": false,
           "weight": 2.5,
-          "evidence": "1 uncited factual sentences: ['בנוסף לפריט שנותח, נרשמו בתקופה 2 אירועים עסקיים/מבצעיים, 7 תחזיות מכרזים חדשות ']"
+          "evidence": "2 uncited factual sentences: ['רפאל רכשה מפעל שהיה בבעלות פולקסווגן בגרמניה, ובכך פרויקט כיפת ברזל המקומי במדינ', 'בנוסף לפריט המנותח, נרשמו בתקופה 2 אירועים עסקיים/מבצעיים ו-7 תחזיות מכרזים חדשו']"
         },
         {
           "name": "every_inline_citation_in_appendix",
@@ -297,7 +297,7 @@
           "name": "bluf_present_and_short",
           "passed": true,
           "weight": 2.0,
-          "evidence": "1 sentence(s), 14 words, cited=True, before_exec_summary=True"
+          "evidence": "1 sentence(s), 16 words, cited=True, before_exec_summary=True"
         },
         {
           "name": "what_changed_section_present",
@@ -309,7 +309,7 @@
           "name": "indicator_watchlist_table_present",
           "passed": true,
           "weight": 1.5,
-          "evidence": "status words found: ['חדש', 'פתוח']"
+          "evidence": "status words found: ['פתוח']"
         },
         {
           "name": "israel_single_table_with_type_column",
@@ -524,12 +524,12 @@
     "D1": 91.0,
     "D2": 87.0,
     "D3": 87.0,
-    "D4": 30.0,
-    "D5": 40.0,
+    "D4": 45.0,
+    "D5": 80.0,
     "D6": 74.0,
     "D7": 86.0,
     "D8": 94.0,
     "D9": 91.0
   },
-  "weighted_total": 82.6
+  "weighted_total": 87.5
 }
