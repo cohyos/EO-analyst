@@ -1702,7 +1702,10 @@ def ask_retrieve(
 
     # hybrid retrieval 2/2: vector-nearest on the question embedding.
     try:
-        vec = ollama_client.embed([question])[0]
+        # Round-8 judge (D5): the embed call queued behind the resource gate for 15+ min ("ram 783MB
+        # too low; retry in 60s") while the user's own job held RAM, so the chat streamed zero bytes.
+        # The interactive budget (20 s) turns that into a lexical-only retrieval instead of a hang.
+        vec = ollama_client.embed([question], interactive=True)[0]
         for item_id, _similarity in vector.nearest(vec, limit=16):
             if item_id in context or item_id in retrieved:
                 continue

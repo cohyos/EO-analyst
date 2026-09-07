@@ -60,7 +60,7 @@ class TestAskRetrieveContextAlwaysIncluded:
 
         monkeypatch.setattr(services, "_fetchone", fake_fetchone)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda *a, **kw: [])
 
         out = services.ask_retrieve("מה זה XM30?", [1], [])
@@ -79,7 +79,9 @@ class TestAskRetrieveContextAlwaysIncluded:
         )
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
         monkeypatch.setattr(
-            services.ollama_client, "embed", lambda texts: (_ for _ in ()).throw(RuntimeError("no embed"))
+            services.ollama_client,
+            "embed",
+            lambda texts, **kw: (_ for _ in ()).throw(RuntimeError("no embed")),
         )
 
         out = services.ask_retrieve("מה זה XM30?", [7], [])
@@ -92,7 +94,7 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
 
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: quarantined if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda vec, limit=16: [(2, 0.9)])
 
         out = services.ask_retrieve("מה זה XM30?", [], [])
@@ -102,7 +104,7 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         oos = _item(3, title="Unrelated", domain="out_of_scope")
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: oos if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda vec, limit=16: [(3, 0.9)])
 
         out = services.ask_retrieve("מה זה XM30?", [], [])
@@ -112,7 +114,7 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         empty = _item(4, title="Fetch failed", clean_text="", summary_he="")
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: empty if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda vec, limit=16: [(4, 0.9)])
 
         out = services.ask_retrieve("מה זה XM30?", [], [])
@@ -127,7 +129,7 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         )
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: unsummarized if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda vec, limit=16: [(6, 0.9)])
 
         out = services.ask_retrieve("מה קורה?", [], [])
@@ -147,7 +149,7 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         )
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: blocked if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda vec, limit=16: [(8, 0.9)])
 
         out = services.ask_retrieve("מה קורה?", [], [])
@@ -159,7 +161,7 @@ class TestAskRetrieveExcludesUnsafeRetrieval:
         )
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: clean if "id = %s" in q else None)
         monkeypatch.setattr(services, "_fetchall", lambda *a, **kw: [])
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda vec, limit=16: [(5, 0.9)])
 
         out = services.ask_retrieve("מה קורה?", [], [])
@@ -192,7 +194,7 @@ class TestAskRetrieveHybridKeyword:
         monkeypatch.setattr(services, "_fetchone", lambda q, p=None: None)
         monkeypatch.setattr(services, "_fetchall", fake_fetchall)
         # vector search deliberately returns nothing relevant (simulates it missing the item)
-        monkeypatch.setattr(services.ollama_client, "embed", lambda texts: [[0.1, 0.2]])
+        monkeypatch.setattr(services.ollama_client, "embed", lambda texts, **kw: [[0.1, 0.2]])
         monkeypatch.setattr(services.vector, "nearest", lambda vec, limit=16: [])
 
         out = services.ask_retrieve("מה זה XM30?", [], [])
@@ -271,5 +273,5 @@ class TestAskBuildMessages:
         messages, citations = services.ask_build_messages("שאלה עם מקורות ריקים", [], [])
         assert citations == []
         system = messages[0]["content"]
-        assert "רשימת \"מקורות\" שסופקה לך ריקה" in system or 'רשימת "מקורות" שסופקה לך ריקה' in system
+        assert 'רשימת "מקורות" שסופקה לך ריקה' in system or 'רשימת "מקורות" שסופקה לך ריקה' in system
         assert "אסור" in system
