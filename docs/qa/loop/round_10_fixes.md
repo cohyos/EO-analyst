@@ -188,3 +188,241 @@ survive the final cut.
   is currently recognised as non-terminal). This is a smaller, lower-confidence residual risk than
   the decimal-point bug the live evidence actually pointed at; `enforce_answer_coherence`'s
   content-blind safety net is the backstop for whatever this narrower list does not cover.
+
+### R10-reports status
+
+**Package:** R10-reports (docs/qa/loop/round_9_judge.md worst-list #2, #6, #7, #9).
+**Files owned/changed:** `agent/eoa/report/daily.py` (`collect_deep_search`'s new
+`_fetch_source_titles`/`_entry_has_low_quality_source`/`_title_is_low_quality_signature`/
+`_LOW_QUALITY_SOURCE_TITLE_SIGNATURES`, `reconcile_deep_search_reruns`'s new `_rank_key`/
+`_CLEAN_OVERRIDE_MIN_OUTCOME_RANK`, `rerun_note_he`'s new override clause -- `_OUTCOME_RANK`
+itself unchanged), `agent/eoa/report/product_line.py` (no code change -- verified already-closed,
+see finding 2 below), `agent/eoa/report/indicators.py` (new `_fetch_recent_evidence_items`/
+`_fetch_recent_evidence_events`/`_widen_daily_evidence_candidates`/
+`_extend_registry_with_candidates`, `build_indicator_watchlist_section`'s daily-only widening),
+`scripts/repair_round10.py` (new), `tests/unit/test_reports_round10.py` (new, 43 tests).
+
+#### 1. Rerun reconciliation prefers a badly-sourced "found" over a clean rerun (worst #2)
+
+**Root cause confirmed live**, exactly as the judge described: job 146's sole cited source
+(`https://easternherald.com/.../japan-fy2027-defense-budget-aargm-er-mq9-drones-missiles/`) is a
+Cloudflare bot-challenge interstitial -- its `investigation_log` fetch row (id 602) literally logged
+`title='Just a moment...'`, `notes=None` (the pre-round-9 code silently counted it as a real read).
+Its clean rerun, job 160 (`investigation_log` row 658, *same URL*), correctly discarded it
+post-round-9-fix (`notes='discarded, low-quality page: body too short (16 chars < 400)'`), settled
+for a different, clean source (`breakingdefense.com`) and produced an honest `partial`/0.1 answer.
+The old `_OUTCOME_RANK`-only tie-break still picked job 146's `found`/0.85 over job 160's
+`partial`/0.1 -- exactly the architectural gap the judge named.
+
+**Fixed:** `collect_deep_search` now looks up each cited source URL's own `investigation_log.title`
+(`_fetch_source_titles`, one extra read-only query scoped to the period's own job ids) and flags an
+entry `has_low_quality_source=True` when it has zero sources or any cited source's title matches a
+local copy of `deep_search._LOW_QUALITY_PAGE_SIGNATURES` (`_title_is_low_quality_signature` --
+never imported from the frozen `eoa.search.deep_search` module; a documented local copy, same
+convention this file's own `_EVENT_KIND_LABELS_HE_FALLBACK` already uses). `reconcile_deep_search_
+reruns`'s selection key is now `(clean_and_decent, outcome_rank, confidence, newest)` where
+`clean_and_decent = (not has_low_quality_source) and outcome_rank >= partial` -- a clean run at
+outcome >= partial beats *any* unclean run regardless of the unclean run's own tier; a clean run
+*below* partial (e.g. a clean `blocked`) does **not** get the override and still loses to a
+higher-tier unclean run, per the finding's own "loses to any clean run with outcome >= partial"
+wording; among equally-ranked runs, higher confidence then newest (unchanged tie-break). The
+`rerun_note_he` now adds an explicit Hebrew clause when the override actually fired (a higher-tier
+run was passed over for being low-quality/zero-sourced), so a reader sees *why* a lower-tier answer
+is the one shown, not just that "several reruns happened."
+
+**Live-verified result (2026-09-07, DB read-only, no rebuild):** re-running `collect_deep_search`
+for the period covering both jobs now reconciles trigger item 44's group to **job 160** (`partial`,
+`breakingdefense.com`), not job 146 -- confirmed directly against `agent.eoa.report.daily
+.reconcile_deep_search_reruns` fed the live `investigation_log`-derived quality flag for both jobs.
+The next weekly/daily rebuild covering this period will show the honest, clean rerun instead of the
+stale interstitial-sourced answer.
+
+#### 2. `pl_targeting_pods` raw "test" beside "ניסוי" (worst #7)
+
+**Verified already fully closed by round 9's own commit** (`5f66f79`, 13:49:30) -- both rendering
+sites in `product_line.py` that ever emitted `events.kind` (`format_events_block`, `events_table`)
+already route through `_event_kind_label`/`_EVENT_KIND_LABELS_HE_FALLBACK` (added by that exact
+commit); no other call site in the file renders `ev.get('kind')` un-translated (grepped the full
+module: the only two hits are already wrapped, plus one unrelated hardcoded `kind = 'contract_award'`
+SQL literal in `collect_active_competitors` that is never displayed as text). The stale `"test"` the
+judge saw was purely an artifact-freshness issue: `pl_targeting_pods_2026-09-07.md`/`.html` were
+last built 11:39-12:58, *before* `5f66f79` (13:49:30); the report-rebuild lane running this round has
+since regenerated both files (14:45:57) and neither now contains a raw `"test"` anywhere (grepped
+both). No code change was needed or made to `product_line.py` this round -- only defensive regression
+tests were added (`TestProductLineEventKindSingleFunnel` in `tests/unit/test_reports_round10.py`)
+locking in that `_event_kind_label`/`format_events_block`/`events_table` never leak a raw kind
+literal for any known kind (including `"test"` specifically), an unmapped future kind, or a missing
+kind.
+
+#### 3. Daily indicator evidence column weak (1/8) while weekly is 17/19 (worst #9)
+
+**Root cause:** the daily table's evidence fresh-match fallback (`indicators._evidence_cell`) only
+ever searched `eoa.report.daily.collect_items`'s own ~24h window (today's items) -- a day simply
+doesn't contain enough candidates for a 30-day-lived indicator to keep matching, even after round 9's
+own Hebrew-term-matching fix (which took weekly from 2/16 to 17/19 but left daily essentially
+unchanged). Events were never searched at all (only `items`).
+
+**Fixed:** `build_indicator_watchlist_section`, for `kind == "daily"` only (weekly/monthly untouched,
+consistent with round 8's own daily-only `_cap_watchlist_rows` scoping), now widens the evidence
+fresh-match candidate pool with the trailing 7 days (`_DAILY_EVIDENCE_WINDOW_DAYS`) of both items
+(`_fetch_recent_evidence_items`, same clean/dedup/in-scope-level filter as `daily.collect_items`) and
+business events (`_fetch_recent_evidence_events`, matched on the event's *own* title/summary, cited
+through its trigger item's id -- the same "an event cites through its source item" convention
+`daily._extend_citation_registry` already uses for events, so no second id space is invented). Every
+widened match is folded into `citation_items` in place with a fresh registry number
+(`_extend_registry_with_candidates`, idempotent, a local copy of `daily._extend_registry_with_rows`'s
+own convention) before rendering, so a widened-window match is a real, appendix-backed `[n]`
+citation, never a dangling reference. Maturation/drop (`check_maturation`) is computed *before* this
+widening and is untouched by it -- only the evidence column's own fresh-match fallback sees the wider
+pool. Decorative throughout (DB failure on either widened query degrades to "no extra candidates",
+same fail-soft convention as every other DB call in this module).
+
+**Live-verified before/after (2026-09-07, DB read-only, no rebuild)** -- re-rendered the daily
+indicator table directly against the live DB (`daily.collect_items()` + the live open `daily`
+indicator rows + `indicators._evidence_cell` per row):
+
+| | candidate pool | matched / total |
+|---|---|---|
+| **Before** (today's items only) | 1 item | **1/14** |
+| **After** (widened: +145 trailing-week items/events) | 146 candidates | **14/14** |
+
+A bigger live win than round 9's own weekly fix (2/16 -> 17/19).
+
+#### 4. Entity orphan rate 25/334 vs 16/334 (worst #6, methodology-uncertain)
+
+**Both definitions computed live, separately** (`scripts/repair_round10.py entity_orphans`,
+2026-09-07):
+
+| Definition | Result |
+|---|---|
+| Population 1 -- zero item mentions (loose; `entities_mentioned` never contains the name, in-scope or not) | **214/334** |
+| Population 2 -- zero item mentions **and** zero `graph_edges` (strict; the one this repair acts on) | **16/334** |
+
+Population 2's **16/334 exactly matches round 8's own reported figure** (no regression under a
+reproducible definition) -- round 9's 25/334 does not reproduce against either definition computed
+this way, consistent with that judge's own "methodology-uncertain... could not reproduce the
+original scoring script's exact definition" caveat. Round 6's own `entities_cleanup` population
+(`scripts/repair_round6.py:find_out_of_scope_only_entities`) requires >=1 mention (just not an
+in-scope one) and by construction can never catch a *fully* orphaned entity (its own "Western
+Burrowing Owl" follow-up finding) -- population 2 above is exactly that missing, stricter measure.
+
+**New orphans since round 6:** `list_new_orphans_since_round6` (population 2 filtered to
+`created_at` after round 6's own `entities_cleanup --apply`, commit `9f9ff91`,
+2026-09-07 00:19-00:23) returns **zero** rows -- every one of the 16 population-2 entities was
+already present (`created_at` 2026-09-04, the initial watchlist seed) before round 6 ever ran; round
+6's query structurally could never have caught them (see above), not because anything created since
+went unmanaged.
+
+**Repair applied (round-6 rules reused unchanged: not a watchlist/payload-vendor name, not
+referenced in `reports.report_state`):** all 16 population-2 rows (BlueHalo, Epirus, Fortem, Terma,
+Controp, Smart Shooter, LIG Nex1, Mitsubishi Electric, Norinco, CETC, Replicator, JCO C-UAS, ESSI,
+Iron Beam, NATO C-UAS, Hero 120) are watchlist/payload-vendor names, confirmed against
+`config/watchlist.yaml` -- every one is a config-seeded company/program/system simply not yet
+mentioned by any item, not pollution. `--apply` run 2026-09-07: **0 protected-list entities
+deleted, 16/16 protected**, `entities` row count unchanged at 334 -- verified from a separate
+connection. The honest outcome this round is that the strict orphan population is fully accounted
+for and fully protected; `scripts/repair_round10.py`'s deletion path is exercised and tested
+(`TestRepairEntityOrphansApply`) but had nothing to actually delete this round.
+
+#### Tests / lint
+
+- `tests/unit/test_reports_round10.py`: **43 new tests** (`TestTitleLowQualitySignature`/
+  `TestEntryHasLowQualitySource`/`TestFetchSourceTitles`/`TestReconcileCitationQualityOverride` for
+  finding 1, including the exact 146-vs-160 shape and the "clean run below partial doesn't earn the
+  override" boundary case; `TestProductLineEventKindSingleFunnel` for finding 2;
+  `TestWidenDailyEvidenceCandidates`/`TestExtendRegistryWithCandidates`/
+  `TestBuildIndicatorWatchlistSectionWidensOnlyDaily` for finding 3, including a test proving the
+  widening never runs for `kind != "daily"`; `TestWatchlistProtection`/
+  `TestRepairEntityOrphansDryRun`/`TestRepairEntityOrphansApply` for finding 4).
+- `.venv/Scripts/ruff.exe check` / `format --check`: clean on all four changed/new files.
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_reports_round10.py
+  tests/unit/test_reports_round9.py tests/unit -q -p no:cacheprovider -k "reconcile or rerun or
+  indicator or product_line"`: run to completion this round (see final report for the exact pass
+  count) -- `tests/unit/test_reports_round10.py` alone (43/43) and
+  `tests/unit/test_deep_search_reconcile_round4.py`/`test_deep_search_round8.py`/
+  `test_deep_search_round9.py` (61/61, the pre-existing reconcile/rerun suites) both independently
+  confirmed green with zero regressions from the `_rank_key` change.
+
+#### What remains
+
+- **Live re-verification against a rebuilt weekly/daily report** (out of this package's DB-read-only
+  scope -- a rebuild lane is already running for every report kind this round, per the standing
+  rule): confirm job 160 (not 146) actually renders in the next weekly covering this period, and that
+  the daily indicator table's evidence column stays populated post-rebuild.
+- **`_LOW_QUALITY_SOURCE_TITLE_SIGNATURES` is a title-only subset** of `deep_search
+  ._LOW_QUALITY_PAGE_SIGNATURES` (the longer body-text-only phrases like "please enable javascript"
+  essentially never appear in a page's own `<title>`) -- a future interstitial that free-texts its
+  challenge message *into the title* in an unseen phrasing would still slip through; the "zero
+  sources" half of the rule is unaffected.
+- **Population 1 (214/334, the loose "zero mentions" measure) was computed and reported for
+  transparency but is not itself a repair target** -- it includes every legitimately watchlist-seeded
+  company/program not yet mentioned by any item, which is expected steady-state, not pollution; only
+  population 2 (the strict, zero-edges measure) drives `--apply`.
+
+### R10-preview status
+
+**Package:** R10-preview -- "read an article's summary before being sent to the article" (2026-09-07
+user request). Frontend-only; `agent/` frozen for this package, existing endpoints only
+(`GET /api/items/{id}`).
+**Files owned/changed:** `web/src/components/SourcePreviewCard.tsx` (new -- the shared preview:
+title, source+date, `CorroborationBadge`, `summary_he` clamped to 4 lines with "עוד"/"פחות",
+up to 3 key facts, product-line chips, "פתח פריט"/"פתח מקור" actions), `web/src/components
+/SourcePreviewPopover.tsx` (new -- wraps a trigger; desktop hover/focus opens a `role="tooltip"`
+card after a 150ms delay without touching the trigger's own click; touch intercepts the first tap
+and opens the card as a bottom-sheet dialog instead), `web/src/components/reports/ReportBody.tsx`
+(citation-marker hover/focus tooltip now renders `SourcePreviewCard`; sources-appendix rows also
+show it on hover, resolved via the existing `report-citations` map keyed off the row's
+`id="src-N"` -- no new backend call), `web/src/components/ask/AskSourcesFooter.tsx` (title button
+wrapped in the popover), `web/src/components/tenders/TenderTable.tsx` and `.../ForecastList.tsx`
+(source links wrapped the same way; `ForecastList`'s `useResolvedSources` now also threads through
+the resolved `itemId` it already had), `web/src/i18n/dictionaries/{he,en}.ts` (new `sourcePreview.*`
+keys). Tests: `SourcePreviewCard.test.tsx` (9, new), `SourcePreviewPopover.test.tsx` (8, new),
+`tenders/TenderTable.test.tsx` (3, new -- no prior test file existed for this component),
+`ReportBody.test.tsx` (4, updated to wrap in `MemoryRouter` -- the tooltip now renders an internal
+`Link`), `AskSourcesFooter.test.tsx` (5) and `tenders/ForecastList.test.tsx` (6) unchanged and still
+green against the wrapped components.
+
+**Design:** on desktop the trigger's own click behavior (navigate internally / open externally) is
+left completely alone -- hovering or tab-focusing shows the summary on the way to clicking, so
+reading happens before leaving without changing how anyone already clicks. On touch, where there is
+no hover, the first tap is intercepted and opens the same card as a bottom sheet; its own "פתח
+פריט"/"פתח מקור" buttons are then the deliberate second action that actually leaves the app.
+`GET /api/items/{id}` is fetched lazily through react-query keyed by item id (`staleTime: 5 min`),
+which is both the "small in-memory cache" the spec asked for and the cache-sharing behavior
+`ForecastList`'s existing `useResolvedSources` already relied on. The "פתח מקור"/"פתח פריט" action
+row renders from `fallback` data immediately, independent of the summary fetch's loading state, so
+a reader who already knows they want to leave is never blocked on the fetch.
+
+**Verification:**
+- `npx tsc --noEmit`: clean (0 errors) for this package's files in isolation. Note: `npm run
+  build` (`tsc -b`) is currently failing on unrelated, concurrently-edited files this package never
+  touches -- `web/src/api/real.ts`, `web/src/api/types.ts`, `web/src/mocks/mockApi.ts`
+  (`getItemInvestigations`/`getReportInvestigations`/`InvestigationLineageEntry` shape mismatches,
+  another in-flight round-10 slice's work on investigation lineage). `git diff --stat` confirms zero
+  overlap with the files this package owns. A `npm run build` that produced the `dist/` the e2e run
+  below actually exercised was captured earlier, before that other package's edits landed; it was
+  clean.
+- `npm run lint`: 0 errors (12 pre-existing warnings, none in this package's files).
+- `npx vitest run`: **335 passed**, 0 failed, 48 files (of which 20 are this package's new/changed
+  tests: 9 + 8 + 3 new files, plus 4 updated in `ReportBody.test.tsx`).
+- `cd e2e && npx playwright test tests/09-reports.spec.ts tests/06-ask.spec.ts --reporter=line`
+  against the live app (http://127.0.0.1:8765, real backend): **35/35 passed** (7 tests x 5 device
+  projects), 7.2m, including "a resolved [n] scrolls to its appendix row ... and exposes a real
+  open-source link" -- the tooltip contract this package changed the internals of.
+
+#### What remains
+
+- **A citation resolved only by URL (no `item_id`) still has no summary to show** -- the report
+  citation tooltip and appendix already resolve this from the same `report-citations` map every
+  marker uses, so it only ever affects a citation the backend genuinely never linked to an item;
+  `SourcePreviewCard` falls back to the citation's own `title`/`url` in that case (still gets a
+  working "פתח מקור" action) rather than fetching by URL, since no items-by-URL lookup endpoint
+  exists in `web/src/api/real.ts` today. If that gap turns out to matter in practice, the fix is a
+  backend endpoint (`GET /api/items?url=...` or similar), not a client-side workaround.
+- **Backend/`agent/` frozen this round, as scoped** -- no server-side change was needed or made;
+  every surface wired in this package already had item ids or URLs on hand from the existing
+  contracts (`ReportCitation`, `AskCitation.item_id`, `TenderCard.item_id`, `ForecastCard.sources`'s
+  `item:N` tokens).
+- **`npm run build` should be re-run once the concurrent investigations/lineage package (`real.ts`/
+  `mockApi.ts`) lands cleanly**, to get a fresh `dist/` reflecting both packages together -- this
+  package's own files do not need any further change for that to succeed.

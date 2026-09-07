@@ -1,58 +1,34 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FocusEvent, type MouseEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink } from "lucide-react";
 import { api } from "@/api";
 import { enhanceSourceAppendixLinks, linkifyReportCitations } from "@/lib/reportHtml";
-import { formatDate } from "@/lib/time";
+import { SourcePreviewCard } from "@/components/SourcePreviewCard";
 
 interface HoverState {
   itemId: number | null;
   url: string | null;
+  title: string | null;
   x: number;
   y: number;
 }
 
-function CitationHoverCard({ itemId, url, x, y }: HoverState) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["report-citation-item", itemId],
-    queryFn: () => api.getItem(itemId!),
-    enabled: itemId != null,
-    staleTime: 5 * 60_000,
-  });
-
+/**
+ * R10-preview (2026-09-07, "read the summary before you're sent to the article"): the bare
+ * title/source/date + "פתח מקור" this used to render inline is now the shared `SourcePreviewCard`
+ * (summary_he, key facts, corroboration, product lines, "פתח פריט"/"פתח מקור" actions) -- same
+ * `role="tooltip"` wrapper and fixed positioning as before, which is the contract
+ * ReportBody.test.tsx and 09-reports.spec.ts assert against (a `role="tooltip"` element
+ * containing a `target="_blank" rel="noopener noreferrer"` "פתח מקור" link once a citation
+ * carries a URL).
+ */
+function CitationHoverCard({ itemId, url, title, x, y }: HoverState) {
   return (
     <div
       role="tooltip"
-      className="pointer-events-auto fixed z-30 w-64 -translate-x-1/2 rounded-md border border-border-strong bg-bg-raised p-2 text-xs shadow-panel"
+      className="pointer-events-auto fixed z-30 -translate-x-1/2 rounded-md border border-border-strong bg-bg-raised p-2.5 shadow-panel"
       style={{ insetInlineStart: x, top: y + 8 }}
     >
-      {itemId != null && (isLoading || !data) ? (
-        <span className="text-fg-dim">טוען…</span>
-      ) : itemId != null && data ? (
-        <>
-          <bdi className="block truncate font-medium text-fg">
-            {data.title || "(ללא כותרת)"}
-          </bdi>
-          <div className="mt-0.5 flex items-center gap-1.5 text-fg-dim">
-            <bdi className="min-w-0 truncate">{data.source_name || "—"}</bdi>
-            <span>·</span>
-            <span className="shrink-0 font-mono">{formatDate(data.published_at)}</span>
-          </div>
-        </>
-      ) : null}
-      {/* W4: the tooltip's real job -- a direct, always-visible way to open the actual source,
-          independent of whether the citation also resolves to an internal item page. */}
-      {url && (
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-1.5 flex items-center gap-1 font-medium text-accent hover:underline"
-        >
-          <ExternalLink size={11} aria-hidden="true" />
-          פתח מקור
-        </a>
-      )}
+      <SourcePreviewCard itemId={itemId} fallback={{ title, url }} />
     </div>
   );
 }
@@ -67,8 +43,9 @@ const HIGHLIGHT_MS = 2200;
  * behavior below): clicking a `[n]` marker no longer navigates away -- it scrolls the report's own
  * sources appendix into view and highlights the cited row for a couple of seconds, exactly like a
  * footnote jump is expected to behave. Actually *opening* the source is now an explicit, always
- * available "פתח מקור" action: on hover (`CitationHoverCard`, above) and on the appendix row
- * itself (`enhanceSourceAppendixLinks`), both `target="_blank" rel="noopener"`.
+ * available "פתח מקור" action: on hover/focus (`CitationHoverCard`, above), on the sources
+ * appendix row itself while hovering it (same card, R10-preview below), and on the appendix row's
+ * own always-visible link (`enhanceSourceAppendixLinks`) -- all `target="_blank" rel="noopener"`.
  */
 export function ReportBody({
   html,
@@ -123,25 +100,66 @@ export function ReportBody({
     return (e.target as HTMLElement).closest<HTMLElement>(".eo-citation");
   }
 
-  function handleMouseOver(e: MouseEvent<HTMLDivElement>) {
-    const target = citationTargetOf(e);
-    if (!target) {
-      setHover(null);
-      return;
+  // R10-preview: hovering (or, via handleFocus/handleBlur below, keyboard-focusing) a `[n]`
+  // marker shows the preview card as before; hovering the sources-appendix row a marker points to
+  // shows the very same card, resolved from the same `report-citations` map keyed by the row's
+  // `id="src-N"` rather than from `data-item-id`/`data-url` attributes (the appendix row itself
+  // carries none -- only its inner "פתח מקור" link has a bare `href`). Appendix rows aren't
+  // wired for keyboard focus here: the row's own always-visible link is already a normal,
+  // independently focusable/actionable element.
+  function hoverStateFromTarget(target: HTMLElement): HoverState | null {
+    const citationEl = target.closest<HTMLElement>(".eo-citation");
+    if (citationEl) {
+      const idAttr = citationEl.getAttribute("data-item-id");
+      const urlAttr = citationEl.getAttribute("data-url");
+      if (!idAttr && !urlAttr) return null;
+      const rect = citationEl.getBoundingClientRect();
+      return {
+        itemId: idAttr ? Number(idAttr) : null,
+        url: urlAttr,
+        title: citationEl.getAttribute("title"),
+        x: rect.left + rect.width / 2,
+        y: rect.bottom,
+      };
     }
-    const idAttr = target.getAttribute("data-item-id");
-    const urlAttr = target.getAttribute("data-url");
-    if (!idAttr && !urlAttr) return;
-    const rect = target.getBoundingClientRect();
-    setHover({
-      itemId: idAttr ? Number(idAttr) : null,
-      url: urlAttr,
-      x: rect.left + rect.width / 2,
-      y: rect.bottom,
-    });
+    const rowEl = target.closest<HTMLElement>('tr[id^="src-"]');
+    if (rowEl) {
+      const n = rowEl.id.slice("src-".length);
+      const citation = citationsData?.citations?.[n];
+      if (!citation || (citation.item_id == null && !citation.url)) return null;
+      const rect = rowEl.getBoundingClientRect();
+      return {
+        itemId: citation.item_id,
+        url: citation.url,
+        title: citation.title,
+        x: rect.left + 32,
+        y: rect.top,
+      };
+    }
+    return null;
+  }
+
+  function handleMouseOver(e: MouseEvent<HTMLDivElement>) {
+    setHover(hoverStateFromTarget(e.target as HTMLElement));
   }
 
   function handleMouseOut(e: MouseEvent<HTMLDivElement>) {
+    const related = e.relatedTarget as HTMLElement | null;
+    if (related?.closest(".eo-citation") || related?.closest('tr[id^="src-"]')) return;
+    setHover(null);
+  }
+
+  // Keyboard a11y for markers ("hover/focus tooltip"): a `[n]` anchor is a real, tabbable `<a>`,
+  // so focusing it via Tab shows the same preview a mouse hover would. React's synthetic focus
+  // events bubble (unlike native `focus`/`blur`), so this works the same delegated way as
+  // mouseover/mouseout above.
+  function handleFocus(e: FocusEvent<HTMLDivElement>) {
+    const citationEl = (e.target as HTMLElement).closest<HTMLElement>(".eo-citation");
+    if (!citationEl) return;
+    setHover(hoverStateFromTarget(citationEl));
+  }
+
+  function handleBlur(e: FocusEvent<HTMLDivElement>) {
     const related = e.relatedTarget as HTMLElement | null;
     if (related?.closest(".eo-citation")) return;
     setHover(null);
@@ -170,6 +188,8 @@ export function ReportBody({
       className="relative"
       onMouseOver={handleMouseOver}
       onMouseOut={handleMouseOut}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
       onClick={handleClick}
     >
       <div className={className} dangerouslySetInnerHTML={dangerousHtml} />

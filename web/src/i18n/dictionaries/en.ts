@@ -160,6 +160,16 @@ export const en: Dictionary = {
     recheckErrorToast: "Corroboration re-check failed — try again",
     filterSingleSourceOnly: "Single source only",
   },
+  sourcePreview: {
+    noTitle: "(no title)",
+    loading: "Loading…",
+    more: "More",
+    less: "Less",
+    openItem: "Open item",
+    openSource: "Open source",
+    previewAria: "Source preview",
+    close: "Close",
+  },
   shortcuts: {
     navigate: "Move between items",
     rate: "Rate level (red/orange/yellow/archive)",

@@ -15,6 +15,7 @@ import {
   relevanceScorePercent,
 } from "@/lib/tenders";
 import { EmptyState } from "@/components/states";
+import { SourcePreviewPopover } from "@/components/SourcePreviewPopover";
 import { useT } from "@/i18n";
 
 function DeadlineChip({ deadline }: { deadline: string | null }) {
@@ -243,16 +244,24 @@ export function TenderTable({
                   <td className="p-2">
                     <div className="flex items-start gap-1.5">
                       {t.url ? (
-                        <a
-                          href={t.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="inline-flex items-start gap-1 text-fg hover:text-accent hover:underline"
+                        // R10-preview (2026-09-07): hovering/focusing shows the summary before the
+                        // link's own click still opens the source directly -- reading first,
+                        // leaving second. On touch the first tap opens the preview instead.
+                        <SourcePreviewPopover
+                          itemId={t.item_id}
+                          fallback={{ title: t.title, sourceName: t.source, url: t.url }}
                         >
-                          <bdi>{t.title || "(ללא כותרת)"}</bdi>
-                          <ExternalLink size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
-                        </a>
+                          <a
+                            href={t.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-start gap-1 text-fg hover:text-accent hover:underline"
+                          >
+                            <bdi>{t.title || "(ללא כותרת)"}</bdi>
+                            <ExternalLink size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
+                          </a>
+                        </SourcePreviewPopover>
                       ) : (
                         <bdi>{t.title || "(ללא כותרת)"}</bdi>
                       )}

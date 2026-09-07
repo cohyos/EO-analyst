@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ItemDetail, ReportCitationsResponse } from "@/types/api";
 
@@ -15,13 +16,18 @@ vi.mock("@/api", () => ({
 
 import { ReportBody } from "./ReportBody";
 
+// R10-preview: the citation hover card now renders the shared `SourcePreviewCard`, which links to
+// `/items/:id` via react-router's `Link` -- needs a router context, same as every real render of
+// this component (always mounted inside the app's own `<BrowserRouter>`).
 function renderBody(html: string, citations: ReportCitationsResponse["citations"]) {
   getReportCitations.mockResolvedValue({ report_id: 40, citations });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <ReportBody html={html} reportId={40} />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <ReportBody html={html} reportId={40} />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 

@@ -12,6 +12,7 @@ import {
   likelihoodBand,
 } from "@/lib/tenders";
 import { EmptyState } from "@/components/states";
+import { SourcePreviewPopover } from "@/components/SourcePreviewPopover";
 
 const RATIONALE_ITEM_RE = /(\[item \d+\])/g;
 const RATIONALE_ITEM_MATCH_RE = /^\[item (\d+)\]$/;
@@ -26,6 +27,7 @@ const ITEM_SOURCE_RE = /^item:(\d+)$/;
 
 interface ResolvedSource {
   key: string;
+  itemId: number | null;
   url: string | null;
   label: string;
   title: string | undefined;
@@ -63,17 +65,18 @@ function useResolvedSources(sources: string[]): ResolvedSource[] {
     if (data) byId.set(id, data);
   });
   return sources.map((s) => {
-    const itemId = s.match(ITEM_SOURCE_RE)?.[1];
-    if (itemId !== undefined) {
-      const item = byId.get(Number(itemId));
+    const itemIdStr = s.match(ITEM_SOURCE_RE)?.[1];
+    if (itemIdStr !== undefined) {
+      const item = byId.get(Number(itemIdStr));
       return {
         key: s,
+        itemId: Number(itemIdStr),
         url: item?.url ?? null,
-        label: item ? `${item.source_name} · ${formatDate(item.published_at)}` : `פריט ${itemId}`,
+        label: item ? `${item.source_name} · ${formatDate(item.published_at)}` : `פריט ${itemIdStr}`,
         title: item?.title,
       };
     }
-    return { key: s, url: s, label: domainOf(s), title: s };
+    return { key: s, itemId: null, url: s, label: domainOf(s), title: s };
   });
 }
 
@@ -168,18 +171,25 @@ function ForecastSources({ sources }: { sources: string[] }) {
     <div className="flex flex-wrap gap-3 border-t border-border pt-2 text-xs">
       {resolved.map((r, i) =>
         r.url ? (
-          <a
+          // R10-preview (2026-09-07): read the summary before leaving -- hover/focus (desktop) or
+          // a first tap (touch) shows it before the link's own click actually opens the source.
+          <SourcePreviewPopover
             key={r.key + i}
-            href={r.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={r.title}
-            className="flex items-center gap-1 text-accent hover:underline"
-            dir="ltr"
+            itemId={r.itemId}
+            fallback={{ title: r.title, url: r.url }}
           >
-            <bdi dir="auto">{r.label}</bdi>
-            <ExternalLink size={11} aria-hidden="true" />
-          </a>
+            <a
+              href={r.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={r.title}
+              className="flex items-center gap-1 text-accent hover:underline"
+              dir="ltr"
+            >
+              <bdi dir="auto">{r.label}</bdi>
+              <ExternalLink size={11} aria-hidden="true" />
+            </a>
+          </SourcePreviewPopover>
         ) : (
           <span key={r.key + i} title={r.title} className="text-fg-dim">
             <bdi dir="auto">{r.label}</bdi>

@@ -170,6 +170,19 @@ export const he = {
     recheckErrorToast: "בדיקת האימות נכשלה — נסה שוב",
     filterSingleSourceOnly: "מקור יחיד בלבד",
   },
+  // R10-preview (2026-09-07): "read the summary before you're sent to the article" -- the shared
+  // `SourcePreviewCard`/`SourcePreviewPopover` wired into the report citation tooltip/appendix,
+  // the chat sources footer, tenders, and tender forecasts.
+  sourcePreview: {
+    noTitle: "(ללא כותרת)",
+    loading: "טוען…",
+    more: "עוד",
+    less: "פחות",
+    openItem: "פתח פריט",
+    openSource: "פתח מקור",
+    previewAria: "תצוגה מקדימה של המקור",
+    close: "סגור",
+  },
   shortcuts: {
     navigate: "ניווט בין פריטים",
     rate: "דירוג רמה (אדום/כתום/צהוב/ארכיון)",

@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import type { AskCitation } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { CorroborationBadge } from "@/components/feed/CorroborationBadge";
+import { SourcePreviewPopover } from "@/components/SourcePreviewPopover";
 
 /**
  * The compact "מקורות (n)" footer (U11, ask-answer-format rewrite): one row per source with
@@ -11,6 +12,11 @@ import { CorroborationBadge } from "@/components/feed/CorroborationBadge";
  * one-line relevance note (`source_notes` in the prompt contract) -- the per-source relevance
  * the previous UI dumped straight into the answer body ("הערת איכות", "ציטוט מדויק" blocks) now
  * lives only here, never inline.
+ *
+ * R10-preview (2026-09-07): the title button is wrapped in `SourcePreviewPopover` -- desktop
+ * hover/focus shows the summary before the button's own click still opens it (internal item page
+ * or, if none, the external source); on touch, the first tap opens the preview as a bottom sheet
+ * instead, so a summary is always read before actually leaving the app.
  */
 export function AskSourcesFooter({ sources }: { sources: AskCitation[] }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -43,13 +49,18 @@ export function AskSourcesFooter({ sources }: { sources: AskCitation[] }) {
               <div className="flex items-center gap-1.5 px-2 py-1.5">
                 <span className="shrink-0 font-mono text-[10px] text-fg-dim">[{c.n}]</span>
                 {c.level && <LevelBadge level={c.level} size="sm" />}
-                <button
-                  type="button"
-                  onClick={() => openSource(c)}
-                  className="min-w-0 flex-1 text-start text-xs text-fg hover:underline"
+                <SourcePreviewPopover
+                  itemId={c.item_id}
+                  fallback={{ title: c.title, sourceName: c.source_name, url: c.url }}
                 >
-                  <bdi className="block truncate">{c.title || "(ללא כותרת)"}</bdi>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => openSource(c)}
+                    className="min-w-0 flex-1 text-start text-xs text-fg hover:underline"
+                  >
+                    <bdi className="block truncate">{c.title || "(ללא כותרת)"}</bdi>
+                  </button>
+                </SourcePreviewPopover>
                 {c.source_name && (
                   <bdi className="max-w-[8rem] shrink-0 truncate text-[10px] text-fg-dim">
                     {c.source_name}
