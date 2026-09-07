@@ -248,7 +248,7 @@ class TestCpcLabelTitleFallback:
         assert _cpc_label("G01S17", topics=[topic]) == "שם מוגדר מראש"
 
     def test_truly_unknown_code_keeps_the_bare_fallback(self):
-        assert _cpc_label("Z99Z99", topics=[]) == "אשכול טכנולוגי Z99Z99"
+        assert _cpc_label("Z99Z99", topics=[]) == "קוד CPC Z99Z99"
 
 
 # --------------------------------------------------------------------------
