@@ -2621,14 +2621,12 @@ def _pending_expansion_search_id(code: str) -> int | None:
     calls) -- this is purely informational, never load-bearing for the enqueue-or-skip decision
     itself, which stays entirely on :func:`_has_pending_expansion_search`."""
     try:
-        with connection(timeout=5) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT id FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
-                "AND payload ->> 'expanded_from' = %(tag)s ORDER BY id DESC LIMIT 1",
-                {"tag": _expansion_search_tag(code)},
-            )
-            row = cur.fetchone()
-            return row["id"] if row else None
+        rows = _fetchall(
+            "SELECT id FROM jobs WHERE kind = 'deep_search' AND state IN ('queued', 'running') "
+            "AND payload ->> 'expanded_from' = %(tag)s ORDER BY id DESC LIMIT 1",
+            {"tag": _expansion_search_tag(code)},
+        )
+        return rows[0]["id"] if rows else None
     except Exception as exc:
         log.warning(
             "bd_territory_pending_expansion_search_id_lookup_failed", territory=code, error=str(exc)[:160]
