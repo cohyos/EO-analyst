@@ -627,8 +627,14 @@ def _source_reliability_map() -> dict[str, int]:
                 cur.execute(
                     "SELECT name, reliability FROM sources WHERE name IS NOT NULL AND reliability IS NOT NULL"
                 )
-                _SOURCE_RELIABILITY_CACHE = {str(name): int(rel) for name, rel in cur.fetchall()}
-        except Exception:  # noqa: BLE001 -- decorative column; never break a report over it
+                rows = cur.fetchall()
+                _SOURCE_RELIABILITY_CACHE = {
+                    str(r["name"] if isinstance(r, dict) else r[0]): int(
+                        r["reliability"] if isinstance(r, dict) else r[1]
+                    )
+                    for r in rows
+                }
+        except Exception:
             _SOURCE_RELIABILITY_CACHE = {}
     return _SOURCE_RELIABILITY_CACHE
 
