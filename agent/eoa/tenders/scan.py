@@ -273,6 +273,31 @@ class TenderSource(BaseModel):
     # not integrated for another reason" (bot-protection, wrong endpoint, deliberately out of
     # scope, ...) without fragile text-matching over `notes`. Never used by scan_tenders itself.
     needs_key_env_var: str | None = None
+    # R7-tenders-b: per-source page/pace tuning for a `kind: api_json` source (finding 1: TED's
+    # date-filtered/sorted query needs to page past a single response's `limit` to actually reach
+    # recent notices; finding 2: UK Contracts Finder/Find a Tender 429'd live 2026-09-07 under this
+    # repo's keyword-rotation loop, which had no inter-request pacing at all). Every
+    # manually-constructed TenderSource in the existing test suites (which never set these) and
+    # every config/tenders.yaml entry not touched this round gets `max_pages=1` (a single request,
+    # exactly the pre-round behaviour) and `pace_seconds=0.0` (`time.sleep(0.0)` is a real no-op --
+    # zero added latency for a source that was never rate-limited) -- a config entry opts into
+    # paging/pacing explicitly, nothing changes silently underneath an existing source.
+    max_pages: int = 1
+    pace_seconds: float = 0.0
+    # R7-tenders-b (finding 1): 0 (the default) means "no {since_date} substitution -- exactly the
+    # pre-round query, every source except ted_eu/ted_eu_cpv". A positive value tells
+    # `_fetch_api_json` to embed a `PD>=<today - N days>` clause (TED expert-query syntax,
+    # confirmed live 2026-09-07: `FT ~ "x" AND PD>=20260801` -> HTTP 200) via the template's own
+    # `{since_date}` placeholder. Deliberately a static per-source config value, NOT the caller's
+    # own `since_days` (`scan_tenders(since_days=...)`) -- it only needs to be a generous buffer
+    # comfortably wider than every `since_days` this repo actually calls scan_tenders with (3 in
+    # production, up to 14 for a backfill), narrowing TED's full-text search down from its entire
+    # archive (~2016-present, the round's own diagnosed root cause) without threading since_days
+    # through `_fetch_api_json`'s signature -- that function is monkeypatched by name with a
+    # `(src, keyword)`-only stub in existing tests (tests/unit/test_tenders_scan.py's
+    # TestCollectSourceNoticesApiQueryKeywordsOverride), so its outward signature must stay exactly
+    # as it was.
+    query_lookback_days: int = 0
 
 
 def _load_yaml(path: str | Path | None) -> dict[str, Any]:
@@ -392,6 +417,18 @@ def _parse_ted_notices(payload: dict[str, Any], src: TenderSource) -> list[Notic
         # (e.g. ``["38600000"]``); absent/empty leaves ``cpv_naics`` at its default ``[]``, which
         # the CPV pre-filter (``_cpv_gate_reject_reason``) treats as "no signal, don't reject".
         cpv = n.get("classification-cpv") or []
+        # R7-tenders-b (finding 1): TED's own field name for a notice's submission deadline
+        # (confirmed live 2026-09-07, only returned when explicitly requested in the query's
+        # `fields` list -- see config/tenders.yaml's ted_eu/ted_eu_cpv `query_template`) is
+        # `deadline-receipt-request`, a *list* of per-lot ISO datetimes (almost always one entry
+        # for these single-lot-heavy defence/optronics notices) -- the first is used as the
+        # notice's own deadline, the same "good enough, not authoritative" treatment every other
+        # source's own `deadline_field` parse_hint already gets. Absent/empty leaves `deadline` at
+        # its default `None` (never itself a rejection -- W2b open intake is unchanged); now also
+        # feeds `_within_window`'s new "deadline already passed" check downstream.
+        deadline_raw = n.get("deadline-receipt-request")
+        if isinstance(deadline_raw, list):
+            deadline_raw = deadline_raw[0] if deadline_raw else None
         out.append(
             NoticeRaw(
                 source_id=src.id,
@@ -399,6 +436,7 @@ def _parse_ted_notices(payload: dict[str, Any], src: TenderSource) -> list[Notic
                 title=title or f"TED notice {nd}",
                 country=src.country,
                 published_at=_parse_date(n.get("PD")),
+                deadline=_parse_date(deadline_raw),
                 url=url,
                 cpv_naics=list(cpv) if isinstance(cpv, list) else [str(cpv)],
                 raw=n,
@@ -640,6 +678,59 @@ def _parse_rss_notices(raw_text: str, src: TenderSource, deny_domains: list[str]
 # --------------------------------------------------------------------------
 
 
+_RATE_LIMIT_STATUS_CODES = (429, 503)
+_RATE_LIMIT_MAX_ATTEMPTS = 3
+_RATE_LIMIT_DEFAULT_BASE_SLEEP_S = 2.0
+_RATE_LIMIT_STATUS_RE = re.compile(r"(?<!\d)(429|503)(?!\d)")
+
+
+def _is_rate_limited_error(exc: Exception) -> bool:
+    """R7-tenders-b (finding 2): true only for an HTTP 429 (Too Many Requests) or 503 (Service
+    Unavailable) -- the two codes UK Contracts Finder/Find a Tender returned live 2026-09-07 under
+    this repo's keyword-rotation loop, which had no inter-request pacing at all. Never true for
+    anything else (a 400 query-syntax error, a 404, a DNS/connection failure, ...) -- those still
+    propagate and fail that one request immediately, exactly as before this round (a single
+    source's failure is caught by ``scan_tenders``'s own per-source ``try/except``, never stops the
+    others). Two exception shapes are checked: a direct ``httpx.HTTPStatusError`` (host/dev role,
+    in-process fetch -- carries ``.response.status_code``), and the isolated ``agent`` role's own
+    ``FetchError``/generic exception, which instead surfaces the fetcher container's error as a
+    plain string that still names the numeric status code (``eoa.fetch.remote._wait_job``) --
+    matched as a standalone number (word-boundary-style, via a negative lookaround since ``\\b``
+    doesn't stop at a digit) so it can't misfire on an unrelated "...4295..." substring."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in _RATE_LIMIT_STATUS_CODES:
+        return True
+    return bool(_RATE_LIMIT_STATUS_RE.search(str(exc)))
+
+
+def _call_with_rate_limit_backoff(
+    src: TenderSource, do_request: Callable[[], dict[str, Any]]
+) -> dict[str, Any]:
+    """R7-tenders-b (finding 2): retries one HTTP round trip (``do_request``) up to
+    ``_RATE_LIMIT_MAX_ATTEMPTS`` times total when it fails with :func:`_is_rate_limited_error`,
+    sleeping an exponentially growing multiple of the source's own ``pace_seconds`` (or
+    ``_RATE_LIMIT_DEFAULT_BASE_SLEEP_S`` when a source has no pacing configured at all, i.e.
+    ``pace_seconds`` left at its ``0.0`` default) before each retry -- 1x, 2x, 4x. Any other error,
+    or the final attempt, re-raises immediately."""
+    base_sleep = src.pace_seconds if src.pace_seconds > 0 else _RATE_LIMIT_DEFAULT_BASE_SLEEP_S
+    for attempt in range(_RATE_LIMIT_MAX_ATTEMPTS):
+        try:
+            return do_request()
+        except Exception as exc:
+            if attempt == _RATE_LIMIT_MAX_ATTEMPTS - 1 or not _is_rate_limited_error(exc):
+                raise
+            sleep_s = base_sleep * (2**attempt)
+            log.debug(
+                "tender_api_json_rate_limited_retry",
+                source=src.id,
+                attempt=attempt + 1,
+                sleep_s=sleep_s,
+                error=str(exc)[:200],
+            )
+            time.sleep(sleep_s)
+    raise AssertionError("unreachable -- loop above always returns or raises")
+
+
 def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
     """Requirement: the EO keyword set must ride in the API query itself, not just a post-filter
     -- ``query_template``/``query_params`` (config/tenders.yaml) both embed ``{keyword}`` directly
@@ -652,35 +743,71 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
     ``SAM_GOV_API_KEY``) at request time, never a hardcoded placeholder in the YAML. Empty string
     when no such variable is configured/set -- harmless for a source without an ``{api_key}``
     placeholder at all, and this function is only ever reached for a source
-    ``_api_json_source_enabled`` already confirmed has a real, non-empty key when one is required."""
+    ``_api_json_source_enabled`` already confirmed has a real, non-empty key when one is required.
+
+    R7-tenders-b (finding 1): also embeds ``{since_date}`` (a ``YYYYMMDD`` string,
+    ``src.query_lookback_days`` before today -- empty string, a harmless no-op substitution, when
+    that field is ``0``) and ``{page}`` (1-indexed) the same way. Pages ``src.max_pages`` times
+    (default 1 -- a single request, unchanged from before this round), stopping early the moment a
+    page comes back with zero notices (no more results, or -- since TED's own ``SORT BY PD DESC``
+    means a later page is strictly older -- genuinely exhausted). This function's own outward
+    signature (``src``, ``keyword``, nothing else) is unchanged from before this round on purpose:
+    it is monkeypatched by name with a bare ``(src_arg, keyword)`` stub in
+    ``tests/unit/test_tenders_scan.py``'s ``TestCollectSourceNoticesApiQueryKeywordsOverride``."""
     if not src.url:
         return []
     api_key = os.environ.get(src.needs_key_env_var, "") if src.needs_key_env_var else ""
-    if src.query_template:
-        # NOT str.format(): query_template is a JSON literal ('{"query":"...","fields":[...]}') --
-        # its own braces would be misparsed as format fields. Substitute the placeholder directly,
-        # JSON-string-escaping the keyword first so it can't break the surrounding JSON syntax.
-        escaped_keyword = json.dumps(keyword)[1:-1]
-        escaped_api_key = json.dumps(api_key)[1:-1]
-        body = json.loads(
-            src.query_template.replace("{keyword}", escaped_keyword).replace("{api_key}", escaped_api_key)
-        )
-        resp = fetch_raw_remote(src.url, method=src.method or "POST", json_body=body)
-    else:
-        params = {k: v.format(keyword=keyword, api_key=api_key) for k, v in (src.query_params or {}).items()}
-        resp = fetch_raw_remote(f"{src.url}?{urlencode(params)}", method=src.method or "GET")
-    data = resp.get("json")
-    if isinstance(data, list):
-        # A15: some keyless JSON APIs (e.g. a bare-array response) return the list itself as the
-        # top-level payload -- wrap it so _parse_generic_json_list's `notice_path: ""` case (see
-        # its docstring) has a dict to read `_root` off of, matching every other parser's signature.
-        data = {"_root": data}
-    if not isinstance(data, dict):
-        return []
-    parser = _API_PARSERS.get(src.id)
-    if parser is None:
-        parser = _GENERIC_API_PARSERS.get((src.parse_hints or {}).get("format", ""))
-    return parser(data, src) if parser else []
+    since_date = (
+        (dt.date.today() - dt.timedelta(days=src.query_lookback_days)).strftime("%Y%m%d")
+        if src.query_lookback_days
+        else ""
+    )
+    out: list[NoticeRaw] = []
+    for page in range(1, max(1, src.max_pages) + 1):
+        if page > 1 and src.pace_seconds:
+            time.sleep(src.pace_seconds)
+
+        def _do_request(page: int = page) -> dict[str, Any]:
+            if src.query_template:
+                # NOT str.format(): query_template is a JSON literal
+                # ('{"query":"...","fields":[...]}') -- its own braces would be misparsed as
+                # format fields. Substitute each placeholder directly, JSON-string-escaping the
+                # keyword/api_key first so neither can break the surrounding JSON syntax
+                # (since_date is always a plain 8-digit string, page a plain integer -- neither
+                # needs escaping).
+                escaped_keyword = json.dumps(keyword)[1:-1]
+                escaped_api_key = json.dumps(api_key)[1:-1]
+                body = json.loads(
+                    src.query_template.replace("{keyword}", escaped_keyword)
+                    .replace("{api_key}", escaped_api_key)
+                    .replace("{since_date}", since_date)
+                    .replace("{page}", str(page))
+                )
+                return fetch_raw_remote(src.url, method=src.method or "POST", json_body=body)
+            params = {
+                k: v.format(keyword=keyword, api_key=api_key, since_date=since_date, page=str(page))
+                for k, v in (src.query_params or {}).items()
+            }
+            return fetch_raw_remote(f"{src.url}?{urlencode(params)}", method=src.method or "GET")
+
+        resp = _call_with_rate_limit_backoff(src, _do_request)
+        data = resp.get("json")
+        if isinstance(data, list):
+            # A15: some keyless JSON APIs (e.g. a bare-array response) return the list itself as
+            # the top-level payload -- wrap it so _parse_generic_json_list's `notice_path: ""` case
+            # (see its docstring) has a dict to read `_root` off of, matching every other parser's
+            # signature.
+            data = {"_root": data}
+        if not isinstance(data, dict):
+            break
+        parser = _API_PARSERS.get(src.id)
+        if parser is None:
+            parser = _GENERIC_API_PARSERS.get((src.parse_hints or {}).get("format", ""))
+        page_notices = parser(data, src) if parser else []
+        out.extend(page_notices)
+        if not page_notices:
+            break
+    return out
 
 
 def _fetch_search(src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
@@ -712,7 +839,14 @@ def _collect_source_notices(src: TenderSource, deny_domains: list[str]) -> list[
         # rotated into the API query itself; `src.keywords` (the domain-gate vocabulary) is
         # untouched either way -- see the field's docstring on TenderSource.
         query_terms = src.api_query_keywords if src.api_query_keywords else src.keywords
-        for kw in (query_terms or DEFAULT_KEYWORDS)[:MAX_KEYWORDS_PER_API_SOURCE]:
+        for i, kw in enumerate((query_terms or DEFAULT_KEYWORDS)[:MAX_KEYWORDS_PER_API_SOURCE]):
+            if i > 0 and src.pace_seconds:
+                # R7-tenders-b (finding 2): UK Contracts Finder/Find a Tender 429'd live
+                # 2026-09-07 under exactly this per-keyword rotation loop -- it had no
+                # inter-request pacing at all. Configurable per source (`pace_seconds`); a real
+                # no-op (`time.sleep(0.0)`) for the many sources that were never rate-limited,
+                # since that field's Pydantic default is 0.0.
+                time.sleep(src.pace_seconds)
             for n in _fetch_api_json(src, kw):
                 if n.external_ref not in seen:
                     seen.add(n.external_ref)
@@ -786,7 +920,22 @@ def _within_window(notice: NoticeRaw, since_days: int, today: dt.date) -> bool:
     worth filtering on -- TED's full-text search returns its entire archive back to ~2016, so
     without this filter every scan would re-touch thousands of old notices. Search-hit/RSS
     "published" dates are unreliable enough (often missing or the crawl date) that they're never
-    filtered out on age -- an undated or old-looking lead is still worth a look."""
+    filtered out on age -- an undated or old-looking lead is still worth a look.
+
+    R7-tenders-b (finding 1): also excludes a notice whose own submission deadline has already
+    passed. TED's own diagnosis this round was stark -- once the archive/no-date-filter bug was
+    fixed, every remaining "recent enough by published_at" TED notice this repo had ever accepted
+    still had a passed deadline, making it useless for BD purposes despite clearing every other
+    gate. `deadline` is only ever populated by a structured source's own parser (TED's
+    `deadline-receipt-request`, Contracts Finder/FTS's `tender.tenderPeriod.endDate`, ...) at parse
+    time -- never by the LLM extraction pass, which runs after this filter -- so this reuses the
+    same "trustworthy date, worth filtering on" reasoning as the `published_at` check right below
+    it, and is exactly as harmless when absent: a notice with no deadline at all (most search/rss
+    sources, or a structured source whose deadline field wasn't populated for this notice) is
+    completely untouched, same open-intake philosophy (W2b) as before this round. A deadline of
+    exactly `today` still counts as open (last day to submit)."""
+    if notice.deadline is not None and notice.deadline < today:
+        return False
     if notice.published_at is None:
         return True
     return (today - notice.published_at).days <= since_days

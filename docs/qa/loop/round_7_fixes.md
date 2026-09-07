@@ -227,3 +227,175 @@ actually closes it.
   `_candidate_duplicate_exists` (a round-6 addition), so several of its tests silently depend on a
   reachable `DATABASE_URL` rather than being true DB-free unit tests. Pre-existing, confirmed not a
   round-7 regression; whoever next owns that file should add the missing mock.
+
+### R7-tenders-b status
+
+Scope: the R7-tenders round's own two flagged follow-ups -- TED returning its archive instead of
+recent notices (finding 1), and UK Contracts Finder/Find a Tender 429-ing under this repo's
+no-pacing keyword-rotation loop (finding 2). Files touched: `agent/eoa/tenders/scan.py`,
+`config/tenders.yaml`, `tests/unit/test_tenders_round7b.py` (new, 37 cases, no DB/network). Ran
+against `127.0.0.1:5432/eoanalyst` (`runtime/eoa.env`). Lint/format clean (`ruff check`/`ruff
+format --check`).
+
+#### Finding 1: TED's working date-filter/sort/pagination query shape
+
+Live-probed 2026-09-07 (all against `https://api.ted.europa.eu/v3/notices/search`, POST):
+
+- **Date filter**: `AND PD>=YYYYMMDD` appended directly inside the `query` expert-query string
+  (not a separate top-level JSON field) -- `{"query":"FT ~ \"electro-optical\" AND
+  PD>=20260801",...}` -> HTTP 200, only notices with `PD >= 2026-08-01` (confirmed: 4 notices, all
+  dated Aug 3 - Aug 21 2026, none from the archive).
+- **Sort**: `SORT BY PD DESC` -- also inside the `query` string itself, not a top-level field.
+  `sortField`/`sortOrder` (top-level JSON keys) and a top-level `"sort":[...]`/`"sort":{...}`
+  object were all tried first and rejected with HTTP 400 `"Unrecognized field"`, naming the full
+  list of fields the endpoint's `PublicExpertSearchRequestV1` actually accepts (none of them are a
+  sort key). Only `SORT BY <field> DESC` inside the query's own grammar works; there is no `ASC`
+  keyword -- ascending is simply the default, and an explicit `SORT BY PD ASC` returns HTTP 400
+  `QUERY_SYNTAX_ERROR "extraneous input 'ASC'"`. Confirmed live: `FT ~ "electro-optical" AND
+  PD>=20260801 SORT BY PD DESC` returned the same 4 notices newest-first (`2026-08-21,
+  2026-08-21, 2026-08-12, 2026-08-03`) instead of the default oldest-first order.
+- **Pagination**: a plain top-level `"page": N` (1-indexed) integer field works alongside `query`/
+  `fields`/`limit` -- `page=1` and `page=2` at the same `limit` returned different, non-overlapping
+  notice ID sets. `iterationNextToken` (present in every response, `null` when the current page's
+  results fit under `totalNoticeCount`) looked like the "real" v3 cursor mechanism but was never
+  populated with a usable value in any probe; `page` is simpler and confirmed working, so that's
+  what's wired.
+- **Deadline field**: `deadline-receipt-request` (NOT `deadline-receipt-tenders`, which the
+  endpoint rejects with HTTP 400 `"Unrecognized field"` naming ~200 valid alternatives) -- a list
+  of per-lot ISO datetimes, first element used. Confirmed combined with the CPV query too:
+  `{"query":"classification-cpv=38620000 AND PD>=20260701 SORT BY PD DESC",
+  "fields":[...,"deadline-receipt-request"],...}` -> HTTP 200, 48 real notices (a 68-day window,
+  one CPV code), several carrying real future deadlines (e.g. `2026-09-15T09:00:00+02:00`,
+  `2026-10-02T23:59:59+03:00`).
+
+#### Fixes
+
+1. **`TenderSource` gains three new fields** (`max_pages: int = 1`, `pace_seconds: float = 0.0`,
+   `query_lookback_days: int = 0`), every default chosen so a source that doesn't opt in behaves
+   *exactly* as before this round -- `max_pages=1` is a single request, `pace_seconds=0.0` makes
+   `time.sleep(0.0)` a real no-op, `query_lookback_days=0` disables the `{since_date}`
+   substitution entirely. `config/tenders.yaml`'s `ted_eu`/`ted_eu_cpv` set `max_pages: 3`,
+   `pace_seconds: 2.0`, `query_lookback_days: 30`; `uk_contracts_finder`/`uk_find_tender` set only
+   `pace_seconds: 2.0`. `query_lookback_days` is deliberately a static per-source config value,
+   *not* the caller's own `since_days` (see the field's own docstring) -- it only needs to be a
+   generous buffer wider than any `since_days` this repo actually calls `scan_tenders` with (3 in
+   production, 14 for this round's backfill), which lets it live entirely inside `_fetch_api_json`
+   (computed from `dt.date.today()`) without threading `since_days` through that function's
+   signature at all.
+2. **`_fetch_api_json`'s outward signature is unchanged** (`(src, keyword)`, exactly as before) --
+   pagination, since-date substitution, and pacing/backoff all live *inside* it, reading
+   `max_pages`/`pace_seconds`/`query_lookback_days` off the `src` argument it already receives.
+   This was a hard constraint, not a style choice: `tests/unit/test_tenders_scan.py`'s
+   `TestCollectSourceNoticesApiQueryKeywordsOverride` (owned by a different round, not editable
+   this round) monkeypatches `_fetch_api_json` with a bare `def fake_fetch(src_arg, keyword)`
+   stub -- any extra positional or keyword argument added at the `_collect_source_notices` call
+   site would have broken it immediately (`TypeError: unexpected keyword argument`). Internally,
+   `_fetch_api_json` now loops `page` from 1 to `max(1, src.max_pages)`, substituting
+   `{since_date}`/`{page}` into `query_template`/`query_params` alongside the existing
+   `{keyword}`/`{api_key}` (a plain `.replace()`/`.format()` no-op for every source whose template
+   doesn't reference them), and stops paging early the moment a page returns zero notices.
+3. **`_is_rate_limited_error` / `_call_with_rate_limit_backoff`** (finding 2): every per-page HTTP
+   round trip now goes through a retry wrapper that catches exactly HTTP 429/503 (checked both as
+   a direct `httpx.HTTPStatusError.response.status_code`, host/dev role, and as a standalone
+   `429`/`503` number inside a plain exception's string, the shape the isolated `agent` role's own
+   `FetchError` surfaces) and retries up to 3 attempts total with exponential backoff (1x, 2x, 4x
+   the source's own `pace_seconds`, or a 2.0s default for a source with no pacing configured). Any
+   other error (400, 404, DNS/connection failure, ...) still propagates immediately on the first
+   attempt, unchanged from before this round.
+4. **`_collect_source_notices` gains inter-keyword pacing**: `time.sleep(src.pace_seconds)`
+   between each of the (up to `MAX_KEYWORDS_PER_API_SOURCE`=5) keyword-rotation requests, skipped
+   before the first one. A no-op for any source that doesn't set `pace_seconds` (every existing
+   test fixture, every config entry not touched this round).
+5. **`_parse_ted_notices` extracts `deadline`** from the newly-requested
+   `deadline-receipt-request` field (first element when it's a list, which it always is live;
+   defensively handles a bare scalar too). Absent/empty leaves `deadline` at its default `None`,
+   same as every other TED notice before this round -- never itself a rejection (W2b open intake
+   is unchanged).
+6. **`_within_window` also excludes a notice whose deadline has already passed** (`notice.deadline
+   < today`), generalized to every `kind: api_json` source, not just TED -- `deadline` is only
+   ever populated by a structured source's own parser at parse time (TED's
+   `deadline-receipt-request`, Contracts Finder/FTS's `tender.tenderPeriod.endDate`, ...), the
+   same "trustworthy date, worth filtering on" class of field the function's pre-existing
+   `published_at` check already relies on. A notice with no deadline at all (most search/rss
+   sources, or a structured source whose deadline field wasn't populated for that particular
+   notice) is completely untouched -- same open-intake philosophy (W2b) as before. A deadline of
+   exactly today still counts as open. This directly targets the round's own diagnosed symptom:
+   once the archive/no-date-filter bug (finding 1, above) was fixed, every remaining
+   "recent-enough by `published_at`" TED notice this repo had ever accepted *still* had a passed
+   deadline, making it useless for BD purposes despite clearing every other gate.
+
+#### Verification
+
+- `ruff check` / `ruff format --check` on all touched Python files: clean.
+- `tests/unit/test_tenders_round7b.py`: **37/37 passed** (HTTP/DB mocked throughout, `time.sleep`
+  mocked in every backoff/pacing test so none of them actually wait).
+- Full tender suite (`test_tenders_round7b.py` + `-k tender` across `tests/unit`, `DATABASE_URL`
+  sourced from `runtime/eoa.env` per the pre-existing `test_tenders_scan.py` DB-isolation gap
+  noted above): **414/414 passed** (377 pre-existing + 37 new), no regressions.
+- Full `tests/unit` suite: **3702 passed, 1 failed** -- the one failure
+  (`test_ollama_client_provider_dispatch.py::TestChatStructuredProviderThreading::
+  test_provider_passed_through_to_chat`) is unrelated to this round (LLM provider-dispatch
+  threading, a file this round never touches) and was not investigated further, per file
+  ownership.
+
+#### Live run + verification (2026-09-07, `DATABASE_URL` from `runtime/eoa.env`, `EOA_PIPELINE=1`)
+
+Ran `scan_tenders(since_days=14, sources=<the same 7 verified structured sources R7-tenders'
+own diagnostic pass used: ted_eu, uk_contracts_finder, ted_eu_cpv, uk_find_tender, fr_boamp,
+nl_tenderned, us_grants_gov>, llm_budget_s=0)` -- zero LLM calls, same methodology as the prior
+round's own diagnostic pass, for a direct before/after comparison:
+
+- **368 notices fetched** (up from 354 pre-round, from TED's added pagination and this run
+  reaching every source without a rate-limit failure), **1 matched, 1 inserted** (`intake=
+  'candidate'`, `status='open'`) -- `Finland - Security cameras - Computer Vision Technology for
+  Airport Operations` (TED notice `593909-2026`, source `ted_eu_cpv`, published 2026-08-28, no
+  deadline in TED's own response for this particular notice -- confirmed by reading the stored
+  `raw` JSON directly, genuinely absent from the source, not a parsing gap).
+  `sources_scanned=7, sources_failed=0` -- neither UK source failed outright this run (no 429
+  propagated past the new backoff).
+- This is the first TED-sourced row in the `tenders` table with `status='open'` since the table
+  has existed -- every prior TED row (id 13, a 2016 EORF notice) is `archived` with a
+  long-since-passed deadline. Not a large number (1 new candidate against a narrow
+  domain-keyword + 14-day window intersection, which is realistic, not a bug -- the two-signal
+  gate is intentionally strict), but a structural first, not a fluke: the mechanism (fetch, date
+  filter, sort, page, parse deadline, gate) is now demonstrably working end-to-end, which is what
+  finding 1 asked for.
+- **Verified from a separate connection**: `tenders` table has 9 total rows (up from 7 pre-round
+  -- 2 new: id 34/35 from R7-tenders' own repair pass were already there; this round adds only id
+  42). Id 42 is the only row with `status='open'` and a source touched this round; every other
+  row's status/intake is unchanged from before this round's run (ids 13, 15, 18, 20, 30, 34, 35,
+  38 -- read directly, not just diffed against a stats counter), confirming this round's insert-
+  only discipline (no `UPDATE`/`DELETE` of pre-existing rows).
+- 6 sample notices were requested; only 1 new one was inserted this run (see above) -- the table's
+  other 8 rows (all pre-existing, from earlier rounds) are, for completeness: id 13 (`ted_eu`,
+  Belgium EORF, archived/accepted), id 15/18/20/30 (`rfi_rfp_news`, US ATP/EO-IR RFIs, all
+  archived/accepted with deadlines 2015-2025), id 34 (`nl_tenderned`, Rotterdam HR contract,
+  archived/candidate -- R7-tenders' own repair target), id 35 (`us_defense_innovation_search`,
+  Northrop Grumman product page, archived/candidate), id 38 (`jp_search`, Counter-UAS listing,
+  status unknown/candidate).
+
+#### What's left (for the user)
+
+- **UK portal pacing reduces but does not eliminate 429 risk under sustained load**: this run's
+  2s inter-keyword pacing plus 3-attempt exponential backoff got through `uk_contracts_finder`/
+  `uk_find_tender` cleanly, but a much larger production scan across every source in
+  `config/tenders.yaml` (41 total) run back-to-back could still occasionally exhaust the 3-attempt
+  budget on a bad day -- the backoff caps out at a `pace_seconds`-scaled 4x sleep on the last
+  retry, not an unbounded wait.
+- **TED's per-notice deadline coverage is partial**: `deadline-receipt-request` is genuinely
+  absent from some TED notices (confirmed live, id 42 above) -- not every notice type carries a
+  submission deadline (e.g. prior information notices, market consultations). `_within_window`'s
+  new filter only excludes a notice with an explicit *past* deadline; an undated-deadline TED
+  notice still passes through on `published_at` alone, same open-intake treatment as any other
+  source.
+- **`query_lookback_days` is a static buffer, not since_days-aware**: 30 days was chosen to
+  comfortably cover both the production default (`since_days=3`) and this round's 14-day
+  backfill; if a future caller ever needs `since_days` meaningfully larger than 30 (e.g. a 60-day
+  backfill), TED's own server-side date filter would need widening too (`config/tenders.yaml`'s
+  `query_lookback_days`), since the client-side `_within_window` check can only narrow a
+  server-side result set, never widen it back out.
+- **`test_tenders_scan.py` DB-isolation gap** (carried over from R7-tenders, unchanged this
+  round): still not fixed, same reasoning as before -- out of this round's file ownership.
+- **The one unrelated full-suite failure** (`test_ollama_client_provider_dispatch.py`, above): not
+  investigated or fixed this round -- outside file ownership, and confirmed unrelated to any file
+  this round touches.

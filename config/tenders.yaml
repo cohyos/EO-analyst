@@ -168,8 +168,34 @@ sources:
     # TED v3 "expert query" syntax: `FT ~ "<term>"` is a full-text search operator. One request
     # per keyword (rotated by eoa.tenders.scan, capped) -- the API has no native OR-of-phrases
     # syntax that stayed inside the 400-safe subset we could verify.
-    query_template: '{"query":"FT ~ \"{keyword}\"","fields":["ND","TI","PD","publication-number","links","classification-cpv"],"limit":20}'
+    # R7-tenders-b (finding 1): `AND PD>={since_date}` (a date-constraint clause, `{since_date}`
+    # substituted at request time from `query_lookback_days` below) and `SORT BY PD DESC` (a
+    # sort clause inside the expert-query grammar itself -- `sortField`/`sortOrder`/`sort` as
+    # top-level JSON keys were all probed live 2026-09-07 and rejected with HTTP 400
+    # "Unrecognized field") are both confirmed live 2026-09-07: combined with the existing
+    # classification-cpv query below, `{"query":"classification-cpv=38620000 AND PD>=20260701
+    # SORT BY PD DESC", ...}` -> HTTP 200, 48 real notices newest-first, several with a real
+    # future `deadline-receipt-request`. This is the fix for round 1-7's own diagnosed root
+    # cause: TED's full-text search alone returns its archive back to ~2016 with no implicit
+    # recency ordering, so a `limit:20` response was essentially never inside any practical
+    # `since_days` window. `deadline-receipt-request` (a list of per-lot ISO datetimes) is also
+    # now requested -- feeds `eoa.tenders.scan._parse_ted_notices`' new `deadline` extraction /
+    # `_within_window`'s "deadline already passed" exclusion. `"page":{page}` (a top-level
+    # integer field, confirmed live 2026-09-07 -- `page=1` and `page=2` returned different,
+    # non-overlapping notice sets at the same `limit`) lets `max_pages` below actually page past
+    # a single response.
+    query_template: '{"query":"FT ~ \"{keyword}\" AND PD>={since_date} SORT BY PD DESC","fields":["ND","TI","PD","publication-number","links","classification-cpv","deadline-receipt-request"],"limit":20,"page":{page}}'
     keywords: *kw
+    # R7-tenders-b: 30-day static server-side lookback (see TenderSource.query_lookback_days'
+    # docstring, eoa.tenders.scan, for why this is intentionally NOT the caller's own
+    # `since_days`) -- comfortably wider than production's `since_days=3` and this round's
+    # `since_days=14` backfill, while still cutting TED's ~2016-present archive down to a query
+    # that returns real, recent, mostly-still-open notices. 3 pages x 20/page = up to 60 notices
+    # per keyword per scan, newest-first; live-probed to stop well short of that in practice (see
+    # eoa.tenders.scan._fetch_api_json's early-stop-on-empty-page).
+    max_pages: 3
+    pace_seconds: 2.0
+    query_lookback_days: 30
     parse_hints:
       format: json
       notice_path: notices
@@ -179,7 +205,7 @@ sources:
       date_field: PD
       url_field: "links.htmlDirect.ENG"
     verified: true
-    verified_at: "2026-09-04"
+    verified_at: "2026-09-07"
     notes: >
       Verified via curl POST with body {"query":"FT ~ \"electro-optical\"","fields":["ND","TI","PD"],"limit":2} ->
       HTTP 200, real notices (TI is a per-language dict, "eng" present on most EU-wide notices).
@@ -187,6 +213,14 @@ sources:
       quoted phrase is required. No API key needed. R7-tenders (2026-09-07): re-verified with
       "classification-cpv" added to `fields` -> HTTP 200, a real CPV code list per notice (e.g.
       ["38000000"]) -- feeds eoa.tenders.scan._parse_ted_notices' cpv_naics / the CPV pre-filter.
+      R7-tenders-b (2026-09-07): re-verified again with the `PD>=YYYYMMDD` date clause, `SORT BY
+      PD DESC`, `page`, and `deadline-receipt-request` all live -- see query_template's own
+      comment above for the exact probed request/response. `sortField`/`sortOrder`/`sort` (all
+      tried as top-level JSON keys, not inside the query string) are NOT valid on this endpoint --
+      HTTP 400 "Unrecognized field" naming the full accepted top-level field list, which does not
+      include any of them; the sort has to live inside the `query` string's own expert-query
+      grammar as `SORT BY <field> DESC` (no `ASC` keyword -- ascending is simply the default, and
+      an explicit `SORT BY PD ASC` returns HTTP 400 QUERY_SYNTAX_ERROR "extraneous input 'ASC'").
 
   # ---------------------------------------------------------- UK Contracts Finder -- api_json, verified working
   - id: uk_contracts_finder
@@ -197,6 +231,12 @@ sources:
     method: GET
     query_params: { keyword: "{keyword}" }
     keywords: *kw
+    # R7-tenders-b (finding 2): live-probed 2026-09-07, this source and uk_find_tender below both
+    # returned HTTP 429 (rate-limited) partway through a scan's keyword-rotation loop -- there was
+    # no inter-request pacing at all for `kind: api_json` sources. 2s between each keyword's
+    # request; eoa.tenders.scan._call_with_rate_limit_backoff also retries a 429/503 up to 3 times
+    # with exponential backoff (2s, 4s) before giving up on that one request.
+    pace_seconds: 2.0
     parse_hints:
       format: json
       notice_path: releases
@@ -438,7 +478,12 @@ sources:
     # live 2026-09-06; the naive `CPV=...`/`cpv=...`/`classification=...` field names all return
     # HTTP 400 QUERY_UNKNOWN_FIELD, only `classification-cpv` is accepted). Each "keyword" below is
     # actually an 8-digit CPV code, rotated the same way ted_eu rotates free-text phrases.
-    query_template: '{"query":"classification-cpv={keyword}","fields":["ND","TI","PD","publication-number","links","classification-cpv"],"limit":20}'
+    # R7-tenders-b (finding 1): same `AND PD>={since_date} SORT BY PD DESC` / `deadline-receipt-
+    # request` / `{page}` additions as `ted_eu` above (see that entry's comment for the exact
+    # live-probed request/response -- re-verified combined with a real CPV code 2026-09-07:
+    # {"query":"classification-cpv=38620000 AND PD>=20260701 SORT BY PD DESC", ...} -> HTTP 200,
+    # 48 real notices, several with a future deadline-receipt-request).
+    query_template: '{"query":"classification-cpv={keyword} AND PD>={since_date} SORT BY PD DESC","fields":["ND","TI","PD","publication-number","links","classification-cpv","deadline-receipt-request"],"limit":20,"page":{page}}'
     # `keywords` stays the normal domain vocabulary (*kw) -- it is what the two-signal gate checks
     # against each returned notice's title+summary TEXT (_matches_keywords), which obviously never
     # contains a raw CPV code. `api_query_keywords` below is the separate list actually rotated into
@@ -448,6 +493,10 @@ sources:
       - "38620000" # Optical instruments
       - "35120000" # Surveillance and security systems and devices
       - "35125000" # Detection equipment
+    # R7-tenders-b: same page/pace/lookback tuning as `ted_eu` above -- see that entry's comments.
+    max_pages: 3
+    pace_seconds: 2.0
+    query_lookback_days: 30
     parse_hints:
       format: json
       notice_path: notices
@@ -457,12 +506,14 @@ sources:
       date_field: PD
       url_field: "links.htmlDirect.ENG"
     verified: true
-    verified_at: "2026-09-06"
+    verified_at: "2026-09-07"
     notes: >
       Verified via curl POST {"query":"classification-cpv=38620000","fields":["ND","TI"],"limit":2}
       -> HTTP 200, real notices (a Hungary-Szeged laboratory/optical-equipment notice came back).
       Same parser as `ted_eu` (registered under this source's own id in
-      eoa.tenders.scan._API_PARSERS -- identical response shape). No API key needed.
+      eoa.tenders.scan._API_PARSERS -- identical response shape). No API key needed. R7-tenders-b
+      (2026-09-07): re-verified again combined with the date/sort/page/deadline additions -- see
+      query_template's own comment above.
 
   # ------------------------------------------------------- UK Find a Tender Service (api_json, OCDS)
   - id: uk_find_tender
@@ -485,6 +536,9 @@ sources:
     # shared keyword-loop for one source; the page itself is small (~12KB for limit=100).
     query_params: { stages: "tender", limit: "100" }
     keywords: *kw
+    # R7-tenders-b (finding 2): see uk_contracts_finder's own comment above -- this source 429'd
+    # in the same live probing session (2026-09-07).
+    pace_seconds: 2.0
     parse_hints:
       format: ocds
       notice_path: releases
