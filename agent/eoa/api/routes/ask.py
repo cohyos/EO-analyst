@@ -252,6 +252,76 @@ def _parse_source_notes(buf: str) -> dict[int, str]:
     return notes
 
 
+# ---------------------------------------------------------------------------------------------
+# Round 8 (package R8-chat-b, docs/qa/loop/round_7_judge_b.md D5 finding #2): a leaked internal
+# delimiter reached 2 of 8 sampled `answer_final.text` values -- both ended with the literal
+# `===SOURCES_JSON===\n"}]}` glued onto otherwise-clean content. The token-streaming loop below
+# already does an exact-substring `_SOURCES_SENTINEL` split as it goes (kept unchanged below, as a
+# low-latency optimisation only -- U11's own note above still applies) but that path is bypassed
+# entirely whenever `answer_text` is replaced wholesale by a fresh, non-streamed LLM completion
+# after the loop already finished -- exactly what `_run_citation_repair` does (reusing the same
+# system+sources messages, which carry the same `ask_answer_format.md` instructions telling the
+# model to always append the sentinel+JSON tail, so a repaired rewrite is just as likely to carry
+# it as the original streamed answer was). `_split_sources_json` is applied twice below: once to
+# the fully-assembled streamed `answer_text` (belt-and-suspenders for the "whole response arrived
+# as one chunk" case the round-7b judge's own diagnosis raised) and once to the citation repair's
+# own `corrected` text -- both *before* any grounding guard runs and before the `answer_final`
+# event, per this round's own brief. `_strip_residual_sources_block` is the last-resort sanitizer
+# the brief also asks for, run immediately before `answer_final` is yielded, independent of whether
+# either `_split_sources_json` call above already caught it.
+#
+# Tolerant of the exact live-found leak shape (a bare sentinel with no valid JSON at all after it --
+# `\n"}]}` is not parseable JSON, so `_parse_source_notes`'s own `\{.*\}` search correctly finds
+# nothing there and just yields an empty notes dict, same as today) as well as the variants the
+# brief calls out: extra/fewer `=` characters, a stray leading `#` heading marker, and the sentinel
+# line wrapped in a markdown code fence (```` ```json ... ``` ````) -- none of which the streaming
+# loop's exact-literal match would catch even when it does run.
+# ---------------------------------------------------------------------------------------------
+
+_SOURCES_SENTINEL_RE = re.compile(
+    r"(?:```(?:json)?\s*)?"  # an opening code fence directly before the sentinel, if any
+    r"#{0,6}\s*"  # a stray markdown heading marker glued onto the sentinel, if any
+    r"=+\s*SOURCES_JSON\s*=+",  # the sentinel itself, tolerant of whitespace and the '=' count
+    re.IGNORECASE,
+)
+
+
+def _split_sources_json(text: str) -> tuple[str, str]:
+    """Split ``text`` at the first (tolerant) match of :data:`_SOURCES_SENTINEL_RE`. Returns
+    ``(answer, sources_tail)`` -- ``answer`` is everything before the sentinel, right-trimmed;
+    ``sources_tail`` is everything after it, handed to :func:`_parse_source_notes` exactly like the
+    streaming loop's own ``sources_buf`` (which already tolerates a surrounding code fence or extra
+    prose around the JSON blob itself via its own ``\\{.*\\}`` search, and safely yields no notes at
+    all on a garbled/absent JSON blob -- see the section note above). Returns ``(text, "")``
+    unchanged when no sentinel is found at all."""
+    m = _SOURCES_SENTINEL_RE.search(text)
+    if not m:
+        return text, ""
+    return text[: m.start()].rstrip(), text[m.end() :]
+
+
+def _strip_residual_sources_block(text: str) -> str:
+    """Last-resort sanitizer (round 8): strip a residual ``===SOURCES_JSON===`` sentinel -- and
+    everything after it to the end of ``text`` -- that somehow survived every earlier split. A
+    no-op when no sentinel is present."""
+    m = _SOURCES_SENTINEL_RE.search(text)
+    if not m:
+        return text
+    return text[: m.start()].rstrip()
+
+
+# Round 8 item 3 (docs/qa/loop/round_7_judge_b.md, verified via `runtime/logs/api.2026-09-07.log`):
+# live-sampled 5 of 5 real `ask.entailment_check` attempts on 2026-09-07 all skipped on
+# `reason=timeout_or_error` -- see `ask_grounding.entailment_filter`'s own docstring for the root
+# cause (a missing `interactive=True`, fixed there) and this round's own brief for the prescribed
+# mitigation (raise the timeout, cap claims to 4). The cap is enforced *here*, not by lowering
+# `config/config.yaml`'s `ask.entailment_max_claims` value itself, because that value is asserted
+# `== 6` by `tests/unit/test_ask_round7.py`'s `TestAskConfig.test_default_config_values` -- a
+# shared-suite test this package does not own and must not edit -- so the effective per-call cap is
+# applied at the call site below instead, independent of whatever the raw config value is.
+_ENTAILMENT_MAX_CLAIMS_CAP = 4
+
+
 class AskRequest(BaseModel):
     # Q2-9: bounded so an oversized question can't be used to force an
     # unreasonably large retrieval/LLM-context payload.
@@ -292,6 +362,10 @@ def _run_removal_guards(
     ``filter_uncited_factual_claims`` (live Q5: confident uncited claims left alongside cited
     siblings) both join this same re-applied sequence for the identical reason round 6 factored it
     out in the first place.
+
+    Round 8 (docs/qa/loop/round_7_judge_b.md D5 finding #1, live "seven" -> "8" recurrence on item
+    257): the new ``filter_claim_count_mismatch`` joins the same re-applied sequence, right after
+    ``filter_claim_grounding``, for the identical reason.
     """
     if not retrieved:
         return answer_text, 0, {}
@@ -307,6 +381,11 @@ def _run_removal_guards(
     if n:
         total += n
         removed_by_guard["claim_grounding"] = n
+
+    answer_text, n = ask_grounding.filter_claim_count_mismatch(answer_text, retrieved)
+    if n:
+        total += n
+        removed_by_guard["count_mismatch"] = n
 
     answer_text, n = ask_grounding.filter_uncited_factual_claims(answer_text, retrieved)
     if n:
@@ -498,6 +577,22 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 yield _sse({"type": "token", "text": pending})
                 answer_text += pending
 
+            # Round 8 (docs/qa/loop/round_7_judge_b.md D5 finding #2): a robust, tolerant pass over
+            # the now fully-assembled `answer_text` -- independent of whatever the streaming loop's
+            # own exact-literal match already did -- catches a sentinel (or a tolerant variant of
+            # it) that arrived in a single chunk, or in a form the streaming match didn't
+            # recognise. A no-op when `in_sources` is already True (the streaming loop already
+            # split it out correctly) or no sentinel is present at all.
+            if not in_sources:
+                _stripped_answer, _tail = _split_sources_json(answer_text)
+                if _tail:
+                    log.warning(
+                        "ask.sources_sentinel_leak_recovered", question_hash=_question_hash(body.question)
+                    )
+                    answer_text = _stripped_answer
+                    sources_buf = _tail
+                    in_sources = True
+
             # Round 3 (docs/qa/loop/round_2_judge.md, D5 new findings): two independent,
             # deterministic post-generation guards, run before the round-2 citation/anchor guards
             # below so those reason about the already-cleaned text.
@@ -536,6 +631,17 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 ungrounded_removed += _claim_removed
                 if _claim_removed:
                     _removed_by_guard["claim_grounding"] = _claim_removed
+                # Round 8 item 2 (docs/qa/loop/round_7_judge_b.md D5 finding #1, live "seven" ->
+                # "8" recurrence on item 257): a plain-count mismatch for the same noun phrase
+                # against the unit's own citation -- see `ask_grounding.filter_claim_count_mismatch`
+                # for the full rationale (corrects the digit in place on an exact noun match, drops
+                # the unit on a fuzzy-only match).
+                answer_text, _count_removed = ask_grounding.filter_claim_count_mismatch(
+                    answer_text, retrieved
+                )
+                ungrounded_removed += _count_removed
+                if _count_removed:
+                    _removed_by_guard["count_mismatch"] = _count_removed
                 # Round 7 item 2 (docs/qa/loop/round_6_judge.md D5 worst-list #9, live
                 # Q5/Skyranger): a confident, uncited claim left alongside cited siblings in the
                 # same direct-answer/key-facts scope reads as equally well-supported when it is
@@ -603,7 +709,10 @@ async def ask(body: AskRequest) -> StreamingResponse:
                         ask_grounding.entailment_filter,
                         answer_text,
                         retrieved,
-                        max_claims=ask_cfg.entailment_max_claims,
+                        # Round 8 item 3: capped to `_ENTAILMENT_MAX_CLAIMS_CAP` regardless of the
+                        # raw config value -- see that constant's own docstring for why the cap
+                        # lives here instead of in `config/config.yaml` itself.
+                        max_claims=min(ask_cfg.entailment_max_claims, _ENTAILMENT_MAX_CLAIMS_CAP),
                     )
                     ungrounded_removed += _entailment_removed
                     if _entailment_removed:
@@ -626,6 +735,18 @@ async def ask(body: AskRequest) -> StreamingResponse:
                     _run_citation_repair, messages, answer_text, body.provider
                 )
                 if corrected:
+                    # Round 8 finding #2: `_run_citation_repair` reuses the same system+sources
+                    # messages `services.ask_build_messages` built the original answer from --
+                    # which carry the same `ask_answer_format.md` instructions telling the model to
+                    # always append the sentinel+JSON tail -- so a repaired rewrite is just as
+                    # likely to carry a leaked sentinel as the original streamed answer was, and
+                    # this one-shot non-streamed call never goes through the streaming loop's own
+                    # split at all. Split it here, before the `[n]` check below, so a trailing tail
+                    # never reaches `answer_text`/`answer_final`.
+                    corrected, _repair_tail = _split_sources_json(corrected)
+                    if _repair_tail and not in_sources:
+                        sources_buf = _repair_tail
+                        in_sources = True
                     corrected, _ = ask_grounding.sanitize_citation_markers(corrected)
                 if corrected and re.search(r"\[\d+\]", corrected):
                     answer_text = corrected
@@ -716,6 +837,11 @@ async def ask(body: AskRequest) -> StreamingResponse:
             # belonged to the removed unit). Never rewrites/removes content, only re-inserts a line
             # break, so it is always safe to run last, after every guard above.
             answer_text = ask_grounding.ensure_headings_on_own_line(answer_text)
+            # Round 8 last-resort sanitizer (docs/qa/loop/round_7_judge_b.md D5 finding #2): strip
+            # any residual sentinel/JSON tail that somehow survived every split above -- a no-op in
+            # the overwhelming common case, defense-in-depth for the one case this round's own live
+            # sample actually hit.
+            answer_text = _strip_residual_sources_block(answer_text)
             # Round-6 judge (D5 worst #2/#3): the guards used to emit one `answer_final` per stage
             # that changed the text -- none at all when nothing changed (Q6), several with
             # intermediate/truncated texts when the anchor demotion and the citation repair both

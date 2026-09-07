@@ -211,6 +211,36 @@ weak-citation-confidence failure:
     budget (a background thread, never the caller's own event loop) skips gracefully -- returning
     the answer unchanged -- on a timeout or any LLM error, since this check is explicitly additive,
     never a substitute for the deterministic guards above.
+
+Round 8 (package R8-chat-b, docs/qa/loop/round_7_judge_b.md D5 findings #1-2, score 80): a leaked
+internal delimiter reaching the user-facing answer, and a numeric slip in a cited count.
+
+16. :func:`_normalize_spelled_numbers` (new) + the count-mismatch half of this round's fix (wired
+    into ``eoa.api.routes.ask`` as ``filter_claim_count_mismatch`` -- see that module for the
+    ``[n]``-scoped guard itself): live finding #1, item 257's own text says the company plans to
+    deliver "**seven** additional prototypes", the chat answer said "eight" -- a single digit
+    changed from a real, cited fact, invisible to every existing guard above because both numbers
+    are independently plausible small integers, not an invented entity/money-figure/year. This
+    function normalises every spelled-out cardinal number word (English "one".."twenty", Hebrew
+    "אחד".."עשרים", including the separate masculine/feminine forms and two-word teens) to its
+    digit form wherever it appears in a *source*'s text, so a claimed digit count can be compared
+    against a source that spells the same number out in words (exactly item 257's own shape: "seven"
+    in English prose, or a Hebrew source spelling "שבעה"/"שמונה" the same way) -- without this, the
+    two sides of the comparison are never in the same form to begin with.
+17. ``ask.entailment_check`` live-verified (docs/qa/loop/round_8_fixes.md "### R8-chat-b status"):
+    all 5 of 5 sampled live entailment attempts on 2026-09-07 logged
+    ``ask.entailment_check_skipped reason=timeout_or_error`` -- zero successes, zero removals ever
+    observed. Root cause found by reading :func:`entailment_filter`'s own ``_call`` closure: its
+    ``chat_structured("light", ...)`` call never passed ``interactive=True``, so every attempt
+    queued behind the resource gate's *batch* budget (``queue_timeout_min``, minutes) while this
+    function's own outer :func:`_run_with_timeout` wall-clock (20s) was always going to expire
+    first, regardless of how fast the light model itself would have answered once admitted -- the
+    same "batch queue vs. interactive budget" gap ``routes.ask``'s own P1 fix (2026-09-06) already
+    documented and fixed for the main chat generation, just never applied to this later addition.
+    Fixed in place: ``_call`` now passes ``interactive=True``; separately, per this round's own
+    brief, the outer wall-clock default is raised 20s -> 30s (extra headroom once actually admitted
+    under the interactive budget) and ``config/config.yaml``'s ``ask.entailment_max_claims`` is
+    lowered 6 -> 4 (fewer claims batched into one call, so each admitted call finishes faster).
 """
 
 from __future__ import annotations
@@ -1710,6 +1740,222 @@ def filter_claim_grounding(
 
 
 # ---------------------------------------------------------------------------------------------
+# Round 8 item 2 (docs/qa/loop/round_7_judge_b.md D5 finding #1, live Q1/XM30 recurrence, again):
+# item 257's own text says the company plans to deliver "seven" additional prototypes; the chat
+# answer said "eight" -- both are plausible small integers naming the *same* noun phrase from the
+# *same* citation, so none of `_grounding_violation`'s digit/year/money checks above ever fire (a
+# lone 1-digit number is explicitly auto-passed there -- see `_digits_grounded`'s own `< 2` digit
+# floor, unaffected by this new, separate guard). This is a plain-count mismatch, not an invented
+# entity/money-figure/year, and needs its own narrow check: for the *same* noun phrase, does this
+# unit's own `[n]` citation actually say a *different* number?
+# ---------------------------------------------------------------------------------------------
+
+_COUNT_NUMBER_WORDS_EN: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+}  # fmt: skip
+
+# Hebrew cardinals -- both grammatical genders where they differ, and the two-word teens (11-19)
+# listed before the bare units below so the alternation (built longest-first) tries the compound
+# first; "עשרים" (20) has no gendered/compound form to worry about.
+_COUNT_NUMBER_WORDS_HE: dict[str, int] = {
+    "אחד עשר": 11, "אחת עשרה": 11,
+    "שנים עשר": 12, "שתים עשרה": 12,
+    "שלושה עשר": 13, "שלוש עשרה": 13,
+    "ארבעה עשר": 14, "ארבע עשרה": 14,
+    "חמישה עשר": 15, "חמש עשרה": 15,
+    "שישה עשר": 16, "שש עשרה": 16,
+    "שבעה עשר": 17, "שבע עשרה": 17,
+    "שמונה עשר": 18, "שמונה עשרה": 18,
+    "תשעה עשר": 19, "תשע עשרה": 19,
+    "עשרים": 20,
+    "עשרה": 10, "עשר": 10,
+    "תשעה": 9, "תשע": 9,
+    "שמונה": 8,
+    "שבעה": 7, "שבע": 7,
+    "שישה": 6, "שש": 6,
+    "חמישה": 5, "חמש": 5,
+    "ארבעה": 4, "ארבע": 4,
+    "שלושה": 3, "שלוש": 3,
+    "שניים": 2, "שתיים": 2, "שני": 2, "שתי": 2,
+    "אחד": 1, "אחת": 1,
+}  # fmt: skip
+
+_COUNT_NUMBER_WORD_TO_DIGIT: dict[str, str] = {
+    word.casefold(): str(value)
+    for word, value in {**_COUNT_NUMBER_WORDS_EN, **_COUNT_NUMBER_WORDS_HE}.items()
+}
+# Longest-first so a two-word Hebrew teen ("שבעה עשר") is matched whole, not as its own bare-unit
+# prefix ("שבעה") followed by a separately-matched, nonsensical leftover "עשר".
+_COUNT_NUMBER_WORD_RE = re.compile(
+    r"\b("
+    + "|".join(re.escape(w) for w in sorted(_COUNT_NUMBER_WORD_TO_DIGIT, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_spelled_numbers(text: str) -> str:
+    """Replace every spelled-out cardinal number word in ``text`` -- English "one".."twenty",
+    Hebrew "אחד".."עשרים" (both genders, two-word teens) -- with its digit form, so a claimed digit
+    count can be compared against a source that spells the same number out in words instead (see
+    the section note above for the live "seven" vs. "8" finding this exists for)."""
+    if not text:
+        return text
+    return _COUNT_NUMBER_WORD_RE.sub(lambda m: _COUNT_NUMBER_WORD_TO_DIGIT[m.group(0).casefold()], text)
+
+
+# A small hedge/filler vocabulary skipped when walking forward from a count digit to find the noun
+# phrase it actually quantifies ("up to eight **additional** prototypes" / "שמונה אב-טיפוסים
+# **נוספים**" -- the noun sits on the far side of the filler word in either language/word order).
+_COUNT_FILLER_WORDS = frozenset(
+    {
+        "up",
+        "to",
+        "additional",
+        "more",
+        "another",
+        "some",
+        "about",
+        "עד",
+        "כ",
+        "כמעט",
+        "נוספים",
+        "נוספות",
+        "עוד",
+    }
+)
+_COUNT_DIGIT_RE = re.compile(r"(?<![\d.])\b(\d{1,3})\b(?!\d)")
+_COUNT_WORD_TOKEN_RE = re.compile(r"[A-Za-zא-ת][A-Za-z0-9א-ת\-']*")
+
+
+def _count_next_content_word(text: str, pos: int) -> str | None:
+    """The first non-filler word token in ``text`` starting at or after ``pos`` (looking at most 6
+    tokens ahead) -- the noun phrase a preceding count digit quantifies, skipping past a small
+    hedge/filler word in between (see :data:`_COUNT_FILLER_WORDS`)."""
+    for tok in list(_COUNT_WORD_TOKEN_RE.finditer(text, pos))[:6]:
+        if tok.group(0).casefold() not in _COUNT_FILLER_WORDS:
+            return tok.group(0)
+    return None
+
+
+def _count_candidates(text: str) -> list[tuple[int, int, str, str]]:
+    """``(digit_start, digit_end, digit_str, noun)`` for every plain count-shaped digit token in
+    ``text``: a 1-3 digit run that is not a citation marker (``[7]``), not part of a money figure
+    (:data:`_MONEY_RE` -- that's `_money_conflation_violation`'s job, not this guard's), paired
+    with the first substantive word found within a few tokens after it. A 4+-digit run (a year or a
+    larger figure) is never a candidate here -- this guard is specifically about a plain count."""
+    money_spans = [m.span() for m in _MONEY_RE.finditer(text)]
+    candidates: list[tuple[int, int, str, str]] = []
+    for m in _COUNT_DIGIT_RE.finditer(text):
+        start, end = m.span()
+        if start > 0 and text[start - 1] == "[":
+            continue  # a citation marker digit, e.g. `[7]`
+        if any(ms <= start < me for ms, me in money_spans):
+            continue  # a money figure -- a different guard's job
+        noun = _count_next_content_word(text, end)
+        if noun:
+            candidates.append((start, end, m.group(1), noun))
+    return candidates
+
+
+def _count_noun_match_kind(claim_noun: str, source_noun: str) -> str | None:
+    """``"exact"``, ``"fuzzy"``, or ``None`` for how well ``claim_noun`` and ``source_noun`` (each
+    a single word token from :func:`_count_candidates`) name the same thing: exact on an identical
+    casefolded word (Hebrew final letters normalised, so a construct/plain-form pair like "אב-טיפוס"
+    still matches "אב-טיפוסים" only if they share the same *prefix* relationship -- final-letter
+    normalisation alone does not bridge a genuine plural, that is the fuzzy case below); fuzzy when
+    one is a >= 4-char prefix of the other (a plural/construct-state variant of the same noun,
+    e.g. "prototype" vs. "prototypes") but the two are not identical."""
+    a, b = claim_noun.casefold(), source_noun.casefold()
+    a_fin, b_fin = _normalize_hebrew_finals(a), _normalize_hebrew_finals(b)
+    if a == b or a_fin == b_fin:
+        return "exact"
+    if len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a)):
+        return "fuzzy"
+    if len(a_fin) >= 4 and len(b_fin) >= 4 and (a_fin.startswith(b_fin) or b_fin.startswith(a_fin)):
+        return "fuzzy"
+    return None
+
+
+def _count_mismatch_violation(
+    unit_text: str, cited_ns: list[int], sources_by_n: dict[int, str]
+) -> tuple[int, int, str, bool] | None:
+    """``(digit_start, digit_end, corrected_digit, exact)`` -- relative to ``unit_text`` -- for the
+    first claimed count in ``unit_text`` that names the same noun phrase as a *different* count
+    found in its own ``[n]`` citation(s) (spelled-out source numbers normalised via
+    :func:`_normalize_spelled_numbers` first, so "seven" in the source is compared against a
+    claimed "8" on equal footing). ``exact`` is true only when the claim's and the citation's noun
+    words match exactly (:func:`_count_noun_match_kind`); a fuzzy-only match (e.g. a plural/
+    construct-state variant) still counts as a mismatch but is reported as inexact, per this
+    section's own brief: prefer dropping the claim outright when the noun match is not exact,
+    correct the digit in place only when it is. Returns ``None`` -- deliberately left alone, same
+    precision-first stance as every other guard in this module -- when ``unit_text`` carries no
+    citation, no count candidate at all, or its own citation(s) mention no comparable count for the
+    same noun phrase (unverifiable is not the same as contradicted)."""
+    if not cited_ns:
+        return None
+    claim_candidates = _count_candidates(unit_text)
+    if not claim_candidates:
+        return None
+    cited_text_norm = _normalize_spelled_numbers(" ".join(sources_by_n.get(n, "") for n in cited_ns))
+    source_candidates = _count_candidates(cited_text_norm)
+    if not source_candidates:
+        return None
+
+    fallback: tuple[int, int, str, bool] | None = None
+    for c_start, c_end, c_digit, c_noun in claim_candidates:
+        exact_hit: str | None = None
+        fuzzy_hit: str | None = None
+        for _s_start, _s_end, s_digit, s_noun in source_candidates:
+            kind = _count_noun_match_kind(c_noun, s_noun)
+            if kind == "exact":
+                exact_hit = s_digit
+                break
+            if kind == "fuzzy" and fuzzy_hit is None:
+                fuzzy_hit = s_digit
+        if exact_hit is not None and exact_hit != c_digit:
+            return c_start, c_end, exact_hit, True
+        if fallback is None and fuzzy_hit is not None and fuzzy_hit != c_digit:
+            fallback = (c_start, c_end, fuzzy_hit, False)
+    return fallback
+
+
+def filter_claim_count_mismatch(answer_text: str, retrieved: list[dict[str, Any]]) -> tuple[str, int]:
+    """For every ``[n]``-cited unit of ``answer_text``, when :func:`_count_mismatch_violation`
+    finds a claimed count that disagrees with its own citation's count for the same noun phrase:
+    correct just the digit in place (keeping the rest of the sentence) when the noun match was
+    exact, or drop the whole unit when it was only a fuzzy match -- see
+    :func:`_count_mismatch_violation`'s own docstring for the full rationale (live "seven" vs. "8"
+    finding, docs/qa/loop/round_7_judge_b.md D5 finding #1). Returns ``(new_text, count)`` where
+    ``count`` tallies both corrected and dropped units; a no-op (``count == 0``) on a blank answer,
+    empty ``retrieved``, or when nothing is flagged."""
+    if not answer_text or not answer_text.strip() or not retrieved:
+        return answer_text, 0
+    sources_by_n = _sources_by_n(retrieved)
+    replacements: list[tuple[int, int, str]] = []
+    count = 0
+    for start, end in _iter_units(answer_text):
+        unit_text = answer_text[start:end]
+        if not unit_text.strip():
+            continue
+        violation = _count_mismatch_violation(unit_text, _cited_ns(unit_text), sources_by_n)
+        if violation is None:
+            continue
+        rel_start, rel_end, corrected, exact = violation
+        count += 1
+        if exact:
+            replacements.append((start + rel_start, start + rel_end, corrected))
+        else:
+            replacements.append((start, end, ""))
+    if not replacements:
+        return answer_text, 0
+    new_text = _renumber_lists(_tidy_whitespace(_replace_spans(answer_text, replacements)))
+    return new_text, count
+
+
+# ---------------------------------------------------------------------------------------------
 # Round 6 item 3 (docs/qa/loop/round_5_judge.md D2/D5, live Q8/SPECTRO finding): the so_what
 # template-phrase crutch this project already bans from report prose (`eoa.report.qa_citations`'s
 # `SO_WHAT_TEMPLATE_PHRASES_HE`) and the generic analyst-filler phrases banned from report prose
@@ -2071,7 +2317,7 @@ def entailment_filter(
     retrieved: list[dict[str, Any]],
     *,
     max_claims: int = 6,
-    timeout_s: float = 20.0,
+    timeout_s: float = 30.0,
 ) -> tuple[str, int]:
     """Optional light-model entailment check over up to ``max_claims`` `[n]`-cited units in the
     lead paragraph / "עובדות מרכזיות" section: asks the ``light`` role a single structured
@@ -2088,6 +2334,20 @@ def entailment_filter(
     validation error (see :func:`_run_with_timeout`) -- the caller decides, via
     ``ask.entailment_check``, whether to invoke this at all; this function itself does not read
     that setting, so it stays fully testable/callable independent of config.
+
+    Round 8 (docs/qa/loop/round_7_judge_b.md / round_8_fixes.md "### R8-chat-b status"): live-found
+    2026-09-07 that this check skipped on 5 of 5 sampled real answers (100%), every one logged
+    ``reason=timeout_or_error`` -- root-caused to the ``_call`` closure below never passing
+    ``interactive=True`` to ``chat_structured``, so every attempt queued behind the resource gate's
+    *batch* budget (minutes) while this function's own :func:`_run_with_timeout` wall-clock was
+    always going to expire first regardless of how fast the light model would have answered once
+    actually admitted -- the exact same "batch queue vs. interactive budget" gap ``routes.ask``'s
+    own P1 fix (2026-09-06) already closed for the main chat generation, just never applied here.
+    Fixed below; ``timeout_s``'s default is also raised 20.0 -> 30.0 (extra headroom once actually
+    admitted under the interactive budget, per this round's own brief) and the caller
+    (``routes.ask``) now passes ``ask.entailment_max_claims`` lowered 6 -> 4 in
+    ``config/config.yaml`` (fewer claims batched into one call, so each admitted call finishes
+    faster).
     """
     if not answer_text or not answer_text.strip() or not retrieved:
         return answer_text, 0
@@ -2108,7 +2368,10 @@ def entailment_filter(
     def _call() -> _EntailmentResponse:
         from eoa.llm.ollama_client import chat_structured
 
-        return chat_structured("light", _EntailmentResponse, messages, task="classify")
+        # Round 8: `interactive=True` is the actual fix (see the docstring above) -- without it
+        # this call queued behind the resource gate's patient batch budget, not the short
+        # interactive one, and skipped on every single sampled live answer as a result.
+        return chat_structured("light", _EntailmentResponse, messages, task="classify", interactive=True)
 
     result = _run_with_timeout(_call, timeout_s)
     if result is None:

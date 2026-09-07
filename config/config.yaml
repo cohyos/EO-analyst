@@ -176,7 +176,20 @@ ask:   # R7-chat (docs/qa/loop/round_7_fixes.md): POST /api/ask chat-only settin
        # the pipeline/report paths.
   entailment_check: true         # user decision 2026-09-07 06:50: ON. Light-model (Gemini Flash in cloud mode) entailment pass over cited key-fact claims;
                                   # unit tests force it off via tests/conftest.py (no network from tests);
-  entailment_max_claims: 6       # cap on claims sent to the light model per answer
+  # R8-chat-b (docs/qa/loop/round_7_judge_b.md, docs/qa/loop/round_8_fixes.md "### R8-chat-b
+  # status"): live-verified 2026-09-07 via runtime/logs/api.2026-09-07.log that all 5 of 5 sampled
+  # real entailment attempts that day skipped on `reason=timeout_or_error` -- 0 successes, 0
+  # removals ever observed. Root cause: the light-model call never passed `interactive=True`, so it
+  # queued behind the resource gate's patient *batch* budget instead of the short interactive one
+  # -- fixed in `agent/eoa/api/ask_grounding.py`'s `entailment_filter` (its own `_call` closure now
+  # passes `interactive=True`), and that function's own wall-clock default is raised 20s -> 30s
+  # (extra headroom once actually admitted) per this round's brief. The brief also asked to cap
+  # claims to 4 -- left at 6 *here* on purpose: `tests/unit/test_ask_round7.py`'s
+  # `TestAskConfig.test_default_config_values` asserts this value `== 6` and is a shared-suite test
+  # package R8-chat-b does not own/may not edit, so the effective per-call cap of 4 is instead
+  # enforced in `agent/eoa/api/routes/ask.py` (`_ENTAILMENT_MAX_CLAIMS_CAP`), independent of this
+  # raw value -- change this number only alongside updating that pinned test in the same change.
+  entailment_max_claims: 6       # cap on claims sent to the light model per answer (see note above: effective cap is 4, enforced in routes/ask.py, not here)
 
 export:
   obsidian: { enabled: true, vault_dir: output/obsidian, entities: true, items: true, reports: true, min_level: yellow }

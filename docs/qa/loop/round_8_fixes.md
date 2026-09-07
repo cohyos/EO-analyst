@@ -405,3 +405,160 @@ API process) `stats` field per line, rebuilt after the backfill:
   difference) -- re-running `--llm --apply` later will likely pick up a slightly different subset
   of the same untagged candidates each time, which is expected, not a bug, given
   `LLM_TAG_MIN_CONFIDENCE = 0.6` deliberately accepts borderline-confidence guesses.
+
+### R8-chat-b status
+
+Package scope: `agent/eoa/api/routes/ask.py`, `agent/eoa/api/ask_grounding.py`,
+`agent/eoa/api/services.py` (ask message-building/sources-footer helpers only),
+`agent/eoa/llm/prompts/ask_answer_format.md`, `tests/unit/test_ask_round8.py`, plus the `ask:` keys
+in `config/config.yaml`. Fixes `docs/qa/loop/round_7_judge_b.md`'s D5 findings #1/#2 (score 80) and
+verifies the round-7 entailment check's actual live behaviour.
+
+#### 1. Leaked internal delimiter (D5 finding #2)
+
+`===SOURCES_JSON===\n"}]}` reached the end of `answer_final.text` in 2 of 8 sampled answers (Q4/
+DROIC, Q6/AUSA). Root-caused by reading the code, not just the symptom: `_run_citation_repair`
+(`routes/ask.py`) is a one-shot, non-streamed corrective rewrite fired whenever the streamed answer
+has zero `[n]` citations -- it reuses the exact same system+sources messages the original answer
+saw, which carry the same `ask_answer_format.md` instructions telling the model to always append
+the sentinel+JSON tail, but that rewritten text (`corrected`) never passed through the streaming
+loop's own sentinel-split logic at all, so a leaked tail sailed straight into
+`answer_text`/`answer_final` unfiltered. This is almost certainly the actual mechanism behind both
+of the round-7b judge's 2 live samples (Q4/Q6 are exactly the kind of answer -- unusual/niche
+subject -- most likely to have started with zero `[n]` on the first pass and gone through repair).
+
+Fix, three layers (per the round-8 brief: "a single robust split ... before any guard runs and
+before the `answer_final` event", "keep the streaming path's early split as an optimisation only",
+"a last-resort sanitizer"):
+
+1. `_SOURCES_SENTINEL_RE` / `_split_sources_json` (new, `routes/ask.py`) -- a single tolerant regex
+   match (optional markdown code fence, optional stray `#` heading marker, any `=` count/
+   whitespace around `SOURCES_JSON`), applied to the fully-assembled `answer_text` right after the
+   streaming loop ends (before every grounding guard) *and* to `_run_citation_repair`'s own
+   `corrected` text (the actual live root cause) before it is ever assigned to `answer_text`.
+2. The streaming loop's own exact-literal `_SOURCES_SENTINEL` match is unchanged -- still the
+   low-latency common-case path, now demoted to "an optimisation" rather than the only defence.
+3. `_strip_residual_sources_block` (new) -- a last-resort sanitizer run unconditionally,
+   immediately before `answer_final` is yielded.
+
+Also strengthened `ask_answer_format.md` itself: an explicit instruction that the sentinel must be
+emitted exactly as specified (no heading marker, no code fence, exact `=` count) -- a
+prompt-side mitigation on top of the code-side fix, not a replacement for it.
+
+#### 2. Numeric slip (D5 finding #1, "seven" -> "eight")
+
+Item 257's own text says the company plans to deliver "seven" additional prototypes; the answer
+said "eight" -- both single, independently-plausible small integers naming the same citation, so
+none of the existing entity/money/year grounding checks ever fired (a lone 1-digit number is
+explicitly auto-passed by `_digits_grounded`'s own `< 2`-digit floor, and that pass-through is
+*unchanged* -- this is a new, separate, narrower guard, not a tightening of the old one; see
+`test_single_digit_non_money_still_auto_passes_the_older_grounding_guard` in the new test file).
+
+New in `ask_grounding.py`:
+
+- `_normalize_spelled_numbers` -- maps every spelled-out cardinal number word (English "one" ..
+  "twenty", Hebrew "אחד" .. "עשרים", both grammatical genders, two-word teens) to its digit form,
+  so a source's "seven"/"שבעה" and a claim's "8" are compared on equal footing.
+- `filter_claim_count_mismatch` -- for every `[n]`-cited unit, finds a claimed digit count and the
+  noun phrase it quantifies, and checks that same noun phrase against its own citation (source
+  spelled numbers normalised first). An **exact** noun-phrase match with a different count gets the
+  digit corrected in place (kept, not dropped); a **fuzzy**-only match (e.g. "prototype" vs.
+  "prototypes") gets the whole unit dropped instead, per the brief's "prefer removal ... unless the
+  noun phrase match is exact, then correct". No comparable count anywhere in the citation is left
+  alone (unverifiable, not contradicted -- same precision-first stance as every other guard in this
+  module).
+
+Wired into the main `if citations:` guard chain (right after `filter_claim_grounding`) and into
+`_run_removal_guards` (the repair/demotion re-apply helper), so a count mismatch introduced or
+reintroduced by a citation-repair rewrite or an anchor-demotion is still caught.
+
+Also added a numeric-accuracy rule to `ask_answer_format.md` (copy quantities from the source
+exactly, never round/guess) as a prompt-side mitigation alongside the guard.
+
+#### 3. Entailment check live-log audit (round-7 `ask.entailment_check`)
+
+Grepped `runtime/logs/api.2026-09-07.log` for `ask.entailment_check_*` event names only (never
+dumped the log): 9 `POST /api/ask` requests that day, 5 `ask.entailment_check_skipped
+reason=timeout_or_error` lines, **0** `ask.entailment_check_removed` lines ever. That is a 100%
+skip rate among every attempt that had an in-scope candidate at all -- zero observed successes.
+
+```
+2026-09-07 09:08:48 [info] ask.entailment_check_skipped claims=6 reason=timeout_or_error
+2026-09-07 09:11:06 [info] ask.entailment_check_skipped claims=4 reason=timeout_or_error
+2026-09-07 09:13:41 [info] ask.entailment_check_skipped claims=5 reason=timeout_or_error
+2026-09-07 09:15:44 [info] ask.entailment_check_skipped claims=3 reason=timeout_or_error
+2026-09-07 09:17:02 [info] ask.entailment_check_skipped claims=6 reason=timeout_or_error
+```
+
+Root cause (found by reading `entailment_filter`'s own `_call` closure, not guessed): the
+`chat_structured("light", ...)` call never passed `interactive=True`, so every attempt queued
+behind the resource gate's patient *batch* budget (`queue_timeout_min`, minutes) instead of the
+short interactive one -- the function's own 20s outer wall-clock (`_run_with_timeout`) was
+essentially guaranteed to expire first regardless of how fast the light model itself would have
+answered once actually admitted. This is the same "batch queue vs. interactive budget" gap
+`routes.ask`'s own P1 fix (2026-09-06, `_MAX_ANSWER_SECONDS`/`gate_busy` handling) already closed
+for the main chat generation -- it was just never applied to this later addition.
+
+Fix, per this round's own brief ("raise its budget to 30s and cap claims to 4"):
+
+- `entailment_filter`'s `_call` now passes `interactive=True` -- the actual root-cause fix.
+- `entailment_filter`'s `timeout_s` default raised `20.0 -> 30.0`.
+- Claims-per-call capped at 4 via a new `_ENTAILMENT_MAX_CLAIMS_CAP = 4` constant in `routes/ask.py`,
+  applied at the call site (`min(ask_cfg.entailment_max_claims, _ENTAILMENT_MAX_CLAIMS_CAP)`) --
+  **not** by lowering `config/config.yaml`'s `ask.entailment_max_claims` value itself (left at 6),
+  because that raw value is asserted `== 6` by `tests/unit/test_ask_round7.py`'s
+  `TestAskConfig.test_default_config_values`, a shared-suite test this package does not own and may
+  not edit. `config/config.yaml`'s `ask:` block comment documents this decision explicitly (why the
+  number itself didn't move even though the effective cap did).
+
+This audit could not distinguish an actual >20s wall-clock timeout from an instant provider/HTTP
+error under the same `reason=timeout_or_error` bucket (both funnel through the same
+`except Exception: return None` in `_run_with_timeout`) -- the `interactive=True` fix is correct
+either way (a non-interactive call queuing behind a patient batch budget explains both a slow
+admit-then-succeed case and, if the "light" role's provider itself is misconfigured for batch mode,
+an immediate error too), but the live stack was never restarted to re-verify against real traffic
+(this package's own standing rule: the lead restarts, not sub-packages) -- see "What's left" below.
+
+#### Tests / lint
+
+- `tests/unit/test_ask_round8.py` -- new, 33 cases: `_split_sources_json`/
+  `_strip_residual_sources_block` unit tests (single-chunk whole-text, the exact live-found
+  no-valid-JSON leak shape, code-fence-wrapped, `=`-count/`#`-prefix variant, no-delimiter no-op,
+  offline replay of both live-captured Q4/Q6 leak tails), `_normalize_spelled_numbers` (English
+  1-20, Hebrew bare units, non-number text no-op), `filter_claim_count_mismatch` (the live
+  "seven"->"8" repro in English and in Hebrew, fuzzy-match removal, matching-count no-op,
+  unverifiable-count no-op, uncited no-op, the 1-digit-auto-pass regression guard), the
+  entailment timeout/interactive/cap fixes (default-value introspection, mocked-call kwarg
+  assertion, config-value-vs-effective-cap design-decision guard), and 6 end-to-end
+  `TestClient`-through-the-real-route cases (whole-response-single-chunk leak, delimiter split
+  across two streamed chunks, the citation-repair leak reproduced end-to-end, no-delimiter
+  regression, count-mismatch corrected end-to-end, entailment call capped at 4 even with the
+  config value at 6). All mocked (`chat_stream`/`chat`/`chat_structured`/`db.get_pool`) -- no DB,
+  no network, no live LLM call; at most 4 live `POST /api/ask` probes were budgeted for this
+  package and none were needed since the offline replay + TestClient coverage above reproduced
+  and verified the fix directly against the live-captured leak text.
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_ask_round8.py
+  tests/unit/test_ask_round7.py tests/unit/test_ask_round6_grounding.py tests/unit/test_ask_round5.py
+  tests/unit/test_ask_round3_grounding.py tests/unit/test_ask_round2_chat_fixes.py
+  tests/unit/test_ask_sse_sources.py -q -p no:cacheprovider` -- **217 passed** (184 pre-existing +
+  33 new, zero regressions).
+- `.venv/Scripts/ruff.exe check` / `format --check` on every touched Python file -- clean.
+
+#### What's left (for the user)
+
+- The live stack is still running pre-round-8 code (this package's own standing rule: the lead
+  restarts, sub-packages verify offline). Once restarted, worth a quick live re-check of
+  `ask.entailment_check_removed`/`ask.entailment_check_skipped` counts against real traffic to
+  confirm the `interactive=True` fix actually clears the 100% skip rate found above, not just that
+  the unit-level wiring is correct.
+- The `entailment_check_skipped reason=timeout_or_error` log bucket does not distinguish a real
+  timeout from an instant error -- if skips persist after the restart, splitting that reason string
+  in `entailment_filter`'s own log call (`ask_grounding.py`, owned by this package) into e.g.
+  `timeout` vs. `error` would make the next round's diagnosis faster; not done this round since it
+  wasn't necessary to reach or verify the fix itself.
+- `filter_claim_count_mismatch`'s noun-phrase matching is deliberately narrow (a single word token,
+  optionally fuzzy on a >= 4-char prefix relationship) -- it does not resolve a Hebrew number word
+  glued to a `ו`/`ה`/`ב`/`ל` conjunction/prefix letter (e.g. "ושמונה עשר" written as one token) the
+  way `ask_grounding._strip_hebrew_head_prefix` does for institution names elsewhere in this module;
+  out of scope for the two required test cases ("seven" -> "8", "שבעה" -> "8") but worth folding in
+  if a future live sample shows a prefixed spelled-out number slipping past normalisation.
