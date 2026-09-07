@@ -1,0 +1,133 @@
+{
+  "round": 8,
+  "judge": "independent read-only agent (no pipeline runs, no fixes, no OMC skills/agents/tools, no DB writes, no git commands, no process kills, no stack start/stop). DATABASE_URL loaded once per shell via `set -a; . runtime/eoa.env; set +a` and passed straight into short-lived python/psycopg scripts (os.environ['DATABASE_URL']) -- never cat/grep/type/echoed; every query confirmed port 5432, db 'eoanalyst'. The live API process restarted at 10:05:23 today (api.startup) and daily/weekly/monthly/pl_*/bd_* reports were rebuilt after that restart (weekly_2026-09-07.md rebuilt 12:21, i.e. AFTER this judge's own DB checks began), so round-8's code changes were live for both the DB/report inspection and the chat test. D10 skipped per brief (deterministic e2e). Chat (D5) budget was largely consumed by a live, reproducible failure mode: the first of 8 golden questions completed normally (real answer_final, ~4 min); all 7 subsequent POST /api/ask calls returned HTTP 200 immediately but then streamed zero bytes and hung past a 240s client timeout on both the original attempt and one retry -- the api log shows no POST /api/ask access-log line at all after ~10:59 (i.e. none of my 8 calls between 12:27-13:04 were logged, despite one genuinely completing), and api.2026-09-07.log.err shows heavy concurrent /ws/status WebSocket churn plus repeated 'async generator ignored GeneratorExit' asyncio errors during the same window -- consistent with the brief's disclosed concurrent Playwright e2e run rather than a specific round-8 code regression, but not proven either way; reported as a live finding, not swept under 'environmental noise'.",
+  "domains": {
+    "D1": {
+      "score": 92,
+      "n": 44,
+      "notes": [
+        "VERIFIED, durable: 0 score<->level mismatches DB-wide on all 40 golden items (config/config.yaml thresholds red:8/orange:6/yellow:4) -- identical clean result to round 7.",
+        "VERIFIED, durable: entity orphan rate stable at 16/334 (4.8%), same as round 7's post-fix state (no regression); a broad scan for junk-shaped entity names (length<=3, 'partners'/'unknown' substrings) returns only legitimate short designators (IAI, RTX, HAL, BEL, IDF, MHI, AV, NSM, etc.) -- zero junk survives.",
+        "VERIFIED, durable: corroboration_populated_for_recent_in_scope replicated live -- 63/63 (100%) of recent (90d) in-scope (red/orange/yellow, clean, non-dedup) items have a non-unknown item_corroboration.status, same as round 7, comfortably above the >=90% bar.",
+        "NEW, real fix, but thin: product_lines tags on items went from 1 line covered (targeting_pods=2) pre-round-8 to 4/6 lines covered (targeting_pods=2, mws_eo=1, lorop_pods=1, ball_gimbals_16in=1) after the deterministic-keyword-broadening + LLM-fallback work, confirmed by a live GROUP BY unnest(product_lines) query matching the round-8 fixes doc's own claimed counts exactly. eo_air_defense_warning and border_long_range_eo remain at 0 items DB-wide -- the fixes doc's own honest assessment (corpus-size limit, not a tagger defect) holds up under a live recheck."
+      ]
+    },
+    "D2": {
+      "score": 86,
+      "n": 40,
+      "notes": [
+        "VERIFIED, durable: re-scanned items.so_what_he DB-wide against the 4 banned filler phrases named in the brief ('יש לציין'/'חשוב להדגיש'/'בהקשר זה'/'ראוי לציין') -- 0 matches, same clean result as rounds 6-7.",
+        "Not independently re-sampled this round beyond the template-phrase DB scan and the one live chat answer (Q1) that surfaced as a byproduct of D5 testing -- that single sample (XM30/EO-IR) showed genuine analytical reasoning, no template structure, and an honest refusal to bridge two unrelated retrieved documents rather than paraphrase or fabricate a link. Score held near round 7's 87 rather than moved, since this domain was not the round's stated target and time was reallocated to D4/D5/D6 verification."
+      ]
+    },
+    "D3": {
+      "score": 90,
+      "n": 50,
+      "notes": [
+        "MAJOR VERIFIED FIX, closes round 6/7's carried-over #6 worst-list item: 'Operation Atlantic City' now renders as exactly ONE row in the live weekly_2026-09-07.md business-events table ('2026-09-05 | פריסה | Kongsberg | Operation Atlantic City | — | [8]'), down from 3 near-duplicate rows sharing one citation across rounds 6-7. The new _merge_same_program_events pass (grouping by item_id+program, kind-priority tie-break) works as designed on live data, not just in the 5 new unit tests.",
+        "VERIFIED, durable: 0 events belong to an out_of_scope-domain or archive-level item; 0 events with kind='ניסוי' as a mislabeled test-event; all distinct event kinds in use remain valid enum values -- same clean baseline as round 7.",
+        "Minor, unrelated cosmetic nit spotted in a product-line report (not scored down, D7-adjacent): pl_targeting_pods_2026-09-07.md renders one business-event row with the literal untranslated English kind label 'test' instead of a Hebrew label, inconsistent with the same report's other row ('ניסוי')."
+      ]
+    },
+    "D4": {
+      "score": 63,
+      "n": 12,
+      "notes": [
+        "MAJOR VERIFIED FIX, closes round 7/7b's #1 and #2 worst-list items: job 156 (a rerun of job 145, itself a rerun of job 47/item 10/47 -- the exact AeroVironment E-HEL laser question that reproduced a zero-page-read blank not_found on live code as recently as this morning) now shows outcome='found', confidence=1.0, 3 real page reads logged in investigation_log (army.mil official release, avinc.com company announcement, militarytimes.com), a substantive multi-paragraph Hebrew answer with 8 cited key facts, and an honest contradictions_he note (official DoD release omits the exact dollar figure that press/company sources give). The new _force_read_top_hits safety net demonstrably works on a live rerun, not just in mocked unit tests. This result is already reflected in the live weekly_2026-09-07.md's 'חקירות עומק' section (first entry).",
+        "NEW, real, moderate-severity finding not caught by round 8's own fix: item 96 (dedup_of=10, the Hebrew-language duplicate of the same AeroVironment story) has its OWN separate, never-rerun investigation (job 45) that still renders 'לא נמצא: לא נמצא מידע מספק במסגרת התקציב' in the SAME weekly report, directly beside job 156's fixed, fully-sourced answer for the primary item (10). The round-8 reconcile fix groups reruns by question-text-normalization and rerun_of_job_id lineage, but item 96's job 45 was never identified as a rerun target and its own item is a plain dedup_of the golden item -- a reader sees a 'found' and a 'not_found' answer for the identical real-world fact in one report.",
+        "UNCHANGED, live: job 146 (AARGM-ER rerun) still cites, as its ONLY source, a URL (easternherald.com) whose own fetch log records title='Just a moment...' (a Cloudflare bot-challenge interstitial, independently reconfirmed to 403 on a fresh fetch) -- cited with confidence 0.85 and zero disclosure, unchanged from J7b's finding. The round-8 fix (_low_quality_page_reason, screens interstitials before citation) exists in code but only applies to a NEW investigate() run; job 146 itself was never rerun, so this specific citation-integrity gap is still live in today's rendered weekly report exactly as J7b found it.",
+        "UNCHANGED, live: job 147 (Norkin/Anduril rerun) still asserts as settled fact in its headline answer, at confidence 0.9, 'בחירת נורקין על פני אבולעפיה' (Norkin chosen over Abulafia), while its own contradictions_he field (independently re-read) admits 'לא צוין מינוי רשמי סופי... אלא תהליך בחירה' (no final official appointment was stated, only a selection process) -- the identical internal inconsistency J7b flagged, still live and unchanged (job 147 was never rerun after the hedge-downgrade fix landed). Additionally, on inspection the new _downgrade_unhedged_decision_claims guard's decision-verb list (הוחלט/נבחר/זכה/נחתם) would likely NOT have caught this exact phrasing even on a fresh rerun, since 'בחירת X על פני Y' is a nominalized noun phrase, not one of the four listed verbs -- a real, narrower design gap in the fix itself, not just a rerun-timing issue.",
+        "VERIFIED: the blocked-vs-not_found distinction works live -- the Volkswagen-Rafael factory investigation renders as 'נחסם (לא נחקר בפועל): —' in weekly_2026-09-07.md, correctly separated from the generic not_found bucket, matching the brief's own D4 check.",
+        "VERIFIED: job 130 (rerun of degenerate job 46/item 117, 'no further search needed') correctly reproduces the honest short-circuit outcome, unchanged and expected.",
+        "No SOURCES_JSON leak or malformed section observed in any rendered 'חקירות עומק' entry sampled in the weekly report."
+      ]
+    },
+    "D5": {
+      "score": 45,
+      "n": 1,
+      "notes": [
+        "SEVERE LIVE FINDING, this round's own testing: only 1 of the 8 golden questions (Q1/XM30) produced a real answer_final within a 240s window; the other 7 (Q2-Q8) each returned HTTP 200 immediately but then streamed zero bytes for the full 240s client timeout, reproduced identically on a fresh retry of Q2. The api log shows NO POST /api/ask access-log line at all for any of these 8 calls (12:27-13:04), even though Q1 genuinely completed with real content -- and api.2026-09-07.log.err shows sustained /ws/status WebSocket churn plus repeated asyncio 'async generator ignored GeneratorExit' errors through the same window, consistent with (but not proof of) the brief's disclosed concurrent Playwright e2e load rather than a code-level regression in the ask pipeline itself. Cannot be scored as a clean pass: this is a materially worse user-facing outcome than round 7's uniform, at-least-explicit gate_busy signal -- a hang with no error surfaced to the client is a worse failure mode, whatever its cause.",
+        "The single completed sample (Q1/XM30) is genuinely clean on both round-8 target defects: zero occurrences of the '===SOURCES_JSON===' leak (0/1, vs. 2/8 in J7b's sample), and no numeric-count fabrication -- the answer correctly declines to name an EO/IR vendor for XM30 at all ('המקורות אינם מפרטים...') rather than repeat J7b's 'seven'->'eight' slip on the same underlying item (257), because it does not restate the prototype count this time.",
+        "The same sample also shows good honest-refusal behavior consistent with round 7's positive characterization: retrieval surfaced an unrelated Finnish EO/IR RFI document (item 5721, actually the correct source for golden Q7) as citation [3] alongside the two real XM30 items, and the model correctly refused to bridge XM30 and the Finnish RFI into one story rather than fabricating a connection.",
+        "NEW, minor, cosmetic: the same answer renders an empty '### עובדות מרכזיות' (key facts) section header with zero bullets beneath it before the '### הערכת האנליסט' section -- a rendering/synthesis oddity a reader would notice, not present in J7b's sampled answers.",
+        "Could not check the entailment-check log claim (ask.entailment_check_removed vs. ask.entailment_check_skipped rates) against fresh traffic: the api log's structured event stream (the format `ask.entailment_check_*` lines depend on) stops emitting entirely after 11:04:25 today -- well before this judge's own testing window started at 12:27 -- so zero entailment-check log lines exist for any of today's 8 calls, including the one that completed successfully. This is itself circumstantial evidence for the same log/observability gap noted above, separate from the interactive=True code fix, which could not be independently confirmed live this round."
+      ]
+    },
+    "D6": {
+      "score": 85,
+      "n": 100,
+      "notes": [
+        "MAJOR VERIFIED FIX, closes round 7's #4/#5 worst-list items: cross-source corroboration markers now reach nearly every appendix row -- daily_2026-09-07.md 19/21 (90%, up from round 7's 1/21), weekly_2026-09-07.md 56/59 (95%, up from 40/59), monthly_2026-09-30.md 56/59 (95%, up from 0/59). The remaining unmarked rows in daily are legitimately status='unknown' by the feature's own original rule, not a bug. monthly.py now demonstrably imports and calls both marker functions live.",
+        "VERIFIED, real fix: daily's indicator-watchlist table is capped at exactly 8 rows (down from round 7's 11), matching the new per-story clustering cap; heading budgets hold across all three report kinds (daily 13<=15, weekly 15<=16, monthly 11<=16).",
+        "NOT DELIVERED as claimed, live: the indicator-watchlist 'evidence' column remains almost entirely blank -- daily_2026-09-07.md: 0/8 rows populated (100% '—'); weekly_2026-09-07.md: 2/16 rows populated. This directly contradicts the brief's D6 bar ('evidence column populated where matches exist') and is barely better than round 7's uniformly-blank weekly column (round 7: 0/13; this round: 2/16) -- the round-8 fixes doc's own live verification only checked weekly and found the same weak result (1/13 at the time), never checked daily's evidence column at all despite claiming the row-cap fix as done. The _evidence_cell fallback-matching mechanism exists in code and unit tests but is not meaningfully populating real report output.",
+        "VERIFIED, durable, unchanged from round 7: no malformed `[n]]` citation markers, no banned analyst-filler phrases in any exec summary, single 'תעשייה ישראלית' heading with populated 'סוג' column in daily and weekly."
+      ]
+    },
+    "D7": {
+      "score": 90,
+      "n": 15,
+      "notes": [
+        "NEW, strong, first-appearance report type: all 6 product-line reports (pl_targeting_pods, pl_mws_eo, pl_lorop_pods, pl_eo_air_defense_warning, pl_ball_gimbals_16in, pl_border_long_range_eo, all dated 2026-09-07) meet the D7 bar well. Spot-checked pl_targeting_pods_2026-09-07.md in full: BLUF ('שורה תחתונה') present and short, real exec summary with an explicit analyst caveat about thin data, populated business-events table, 5 genuinely falsifiable 'הנחות והפרכות' entries (each with a concrete disconfirming condition), populated competitor/Israeli-positioning tables. The two empty-line reports (border_long_range_eo, eo_air_defense_warning-items) render an honest empty path ('לא זוהו... פריטים חדשים... אין ממצאים') rather than padding or fabricating content, and still list the competitors actually checked.",
+        "VERIFIED, real fix, matches round-8 fixes doc's claim exactly: bd_kr_2026-09-07.md (rebuilt 10:41) now carries a deterministic BLUF-style opening line ('שורה תחתונה: לא זוהתה פעילות בטריטוריה בחלון הנבדק; הופעלה חקירה ממוקדת') plus a new 'מה נבדק' section (sources scanned, exact time window, watchlist companies, expansion-search job id #149) -- a real upgrade from round 7's bare one-sentence stub, D7's own empty-territory exemption marker survives inside the longer text.",
+        "Not independently re-verified this round beyond bd_kr and bd_il (already confirmed fixed in round 7): the other 6 BD territory reports (US/DE/GR/EU/GB/IN) were not re-read in full this round; assumed stable per round 7's own thorough pass and the fixes doc's claim of no other BD changes this round.",
+        "Minor cosmetic nit (not scored down materially): pl_targeting_pods_2026-09-07.md's business-events table mixes a Hebrew-translated event kind ('ניסוי') with a literal untranslated 'test' label in a second table on the same report."
+      ]
+    },
+    "D8": {
+      "score": 93,
+      "n": 16,
+      "notes": [
+        "VERIFIED, durable: both fresh patent surveys (DROIC 2026-09-07, Anduril 2026-09-07) carry real, technology-grounded cluster labels -- CPC-code clusters (H04N5, H03M1, G01S7, H04N25 / H04W4, F41H3, G05D1, F41H11) each with substantive per-cluster prose about the underlying technology, plus the round-6-fixed thematic fallback ('אשכול נושאי: lattice / mesh') for the one non-CPC-mapped Anduril patent -- zero assignee-fragment or generic-country-name junk cluster labels found in either survey, same clean state as round 7.",
+        "VERIFIED, unchanged, honest per the fixes doc's own framing: the patent-survey source appendix 'אמינות' (reliability) column remains '—' for all 10/10 DROIC and 6/6 Anduril patent rows -- every row is a Google Patents URL (never a monitored news host), so a blank value is the documented, correct behavior of the new host-matching logic rather than a bug; not independently re-verified against a live rebuild carrying a genuine host match (the fixes doc itself only unit-tested this path)."
+      ]
+    },
+    "D9": {
+      "score": 89,
+      "n": 19,
+      "notes": [
+        "UNCHANGED, durable: tender id 42 (the TED Finland/CPV notice) remains status='open' in the live tenders table -- still the only open row, no new TED-sourced open notices appeared this round; candidates id 34 (Dutch HR false-positive) and id 35 (Northrop Grumman product page) remain correctly status='archived', intake untouched from round 7's repair.",
+        "NEW, real, small improvement: 2 tenders (ids 15, 20 -- both Litening/Sniper targeting-pod tenders) now carry product_lines=['targeting_pods'], up from 0 tagged tenders pre-round-8, matching the round-8 fixes doc's own claimed 'tenders 0->2' count for targeting_pods exactly.",
+        "NEW, minor, not previously checked: the one open TED tender (id 42, 'Computer Vision Technology for Airport Operations') itself carries an EMPTY product_lines array despite plausibly belonging to eo_air_defense_warning or border_long_range_eo -- the brief's own D9 bar ('tenders tagged with product lines where relevant') is not fully met for the single most notable live tender in the table.",
+        "UNCHANGED: tender id 38 still carries the non-standard status='unknown' -- same low-severity data-quality nit round 7 noted, not investigated further; tender_forecasts (10 rows) remains free of near-duplicate groups."
+      ]
+    }
+  },
+  "worst": [
+    "D5: only 1 of 8 golden questions could be tested this round -- the other 7 POST /api/ask calls returned HTTP 200 immediately but then hung with zero streamed bytes past a 240s timeout, reproduced on retry; no access-log line was ever written for any of the 8 calls, and the api error log shows heavy concurrent WebSocket churn plus repeated asyncio GeneratorExit errors during the same window. Content quality for 7/8 questions is simply unverified this round, and the failure mode itself (silent hang, no gate_busy signal reaching the client) is a worse user experience than round 7's own finding.",
+    "D4: job 146 (AARGM-ER) still cites, with confidence 0.85 and zero disclosure, a Cloudflare bot-challenge interstitial page as its sole source -- unchanged, live, in today's rendered weekly report; the round-8 low-quality-page fix exists in code but was never applied to this already-computed job.",
+    "D4: job 147 (Norkin/Anduril) still asserts as settled fact at confidence 0.9 a personnel decision that its own contradictions_he field admits was never finalized in the source -- unchanged, live; moreover the new hedge-downgrade guard's fixed decision-verb list likely would not have caught this exact 'בחירת X על פני Y' phrasing even on a fresh rerun.",
+    "D4: item 96 (a Hebrew-language dedup_of the golden item 10/AeroVironment laser story) still renders a stale, never-rerun 'not_found' investigation immediately alongside item 10's own now-fixed, fully-sourced 'found' investigation in the same weekly report -- a reader sees contradictory answers to the identical real-world fact in one document; not caught by the round-8 reconciliation fix, which groups by question text/lineage, not by item dedup_of chains.",
+    "D6: the indicator-watchlist 'evidence' column remains almost entirely blank in the live daily report (0/8 rows) and mostly blank in weekly (2/16) -- the brief's 'evidence column populated where matches exist' bar is not meaningfully met despite a real, tested code fix (_evidence_cell) shipping this round.",
+    "D9: the single open, most-newsworthy live tender (TED id 42) itself carries no product_lines tag despite plausible EO/IR-relevant content -- the one row where this feature would most matter to a reader is the one row it misses.",
+    "D5: the one successfully-completed answer (Q1) renders an empty '### עובדות מרכזיות' section header with zero bullets beneath it -- a new, minor synthesis/rendering defect not present in J7b's sample.",
+    "D7: a business-events table in a product-line report (pl_targeting_pods) renders one event's kind as the literal untranslated English string 'test' alongside a properly-translated 'ניסוי' in the same report -- cosmetic but visible.",
+    "D8: patent-survey appendix reliability column remains blank for every row in both fresh surveys -- documented as expected/honest behavior rather than a defect, but still a real, unclosed gap relative to the daily/weekly news appendices.",
+    "D9: tender id 38 remains status='unknown', a non-standard value, unchanged since round 7 -- low severity, not investigated further this round either."
+  ],
+  "deltas": {
+    "fixed": [
+      "D4: the item-10/47 zero-page-read bug (round 7/7b's single most severe finding) is demonstrably fixed on a live rerun (job 156: found/1.0, 3 real reads, honest contradiction disclosure) and the fixed result already renders correctly in today's live weekly report.",
+      "D3/D6: 'Operation Atlantic City' triple-listing collapsed to exactly one row in the live weekly business-events table -- closes a finding carried over unaddressed since round 6.",
+      "D6: cross-source corroboration markers now reach 90-95% of appendix rows across daily/weekly/monthly, up from 5%/68%/0% in round 7 -- the monthly report's total absence of markers is specifically closed.",
+      "D6: daily's indicator-watchlist table capped at 8 rows via new per-story clustering, down from round 7's 11 over-clustered rows.",
+      "D5: zero '===SOURCES_JSON===' delimiter leaks in the one sample completed this round, vs. 2/8 in J7b's sample.",
+      "D7: bd_kr's empty-territory stub upgraded with a real BLUF line and a 'מה נבדק' methodology section, closing round 7's #10 worst-list item.",
+      "D1: product_lines tagging expanded from 1 of 6 lines covered to 4 of 6 (items table), plus new coverage on events/tenders/forecasts/patents tables, via a combined deterministic-keyword-broadening + LLM-fallback package with 34 new passing unit tests.",
+      "D9: 2 tenders now carry product_lines=['targeting_pods'], up from 0 tagged tenders."
+    ],
+    "unchanged": [
+      "D4: job 146's undisclosed citation of a Cloudflare interstitial page -- the fix exists in code but was never applied retroactively to this already-computed job.",
+      "D4: job 147's settled-fact/hedge inconsistency on the Norkin appointment -- unchanged live, and the new guard's verb list may not even catch this specific phrasing on a future rerun.",
+      "D8: patent-survey appendix reliability column blank for every row -- documented as expected, not closed.",
+      "D9: tender id 38's non-standard 'unknown' status.",
+      "D2: so_what template-phrase family remains at zero DB-wide (durable clean, re-verified)."
+    ],
+    "new": [
+      "D4: item 96 (dedup_of the golden item 10) surfaces a stale, never-rerun 'not_found' investigation directly beside item 10's own newly-fixed 'found' investigation in the same live weekly report -- a narrower, previously-unnoticed instance of the contradictory-reruns problem that the round-8 reconciliation fix does not cover (item dedup_of chains, not question-text/lineage grouping).",
+      "D5 (severe): 7 of 8 golden questions could not be answered at all this round -- HTTP 200 followed by a silent, unbounded hang with zero streamed bytes, reproduced on retry, with no access-log entry ever written for any of the 8 calls despite one genuinely completing; correlated with (but not proven caused by) heavy concurrent WebSocket churn and asyncio GeneratorExit errors visible in the same window's error log.",
+      "D5 (minor): an empty, bullet-less '### עובדות מרכזיות' section header in the one completed sample.",
+      "D6: the indicator-watchlist evidence-column fix, while real and tested, is not meaningfully populating live report output (daily 0/8, weekly 2/16) -- a gap between what shipped and what the brief's bar requires.",
+      "D9: the single open TED tender (id 42) itself carries no product_lines tag, despite plausible relevance -- the one row this feature would most matter for."
+    ]
+  }
+}
