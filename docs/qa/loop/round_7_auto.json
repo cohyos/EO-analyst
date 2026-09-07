@@ -351,7 +351,7 @@
     },
     "D7": {
       "domain": "D7",
-      "score_0_100": 44.4,
+      "score_0_100": 100.0,
       "n": 10,
       "note": "",
       "checks": [
@@ -369,9 +369,9 @@
         },
         {
           "name": "no_competitor_promotion_language",
-          "passed": false,
+          "passed": true,
           "weight": 2.5,
-          "evidence": "promotion-verb hits on watchlist competitors: ['bd_de_2026-09-07.md:Hensoldt: | בינונית | לתכנן נוכחות בכנס DSEI 2027 בלונדון לפגישות עם גורמי רכש גרמנים ולמעקב אחר נוכחות המתחרה', 'bd_de_2026-09-07.md:Hensoldt: | נמוכה | להשתתף בכנס SPIE Defense + Commercial Sensing 2027 באורלנדו לצורך בנצ׳מרק מול טכנולוגיית ה']"
+          "evidence": "promotion-verb hits on watchlist competitors: []"
         },
         {
           "name": "actions_table_nonempty",
@@ -381,19 +381,19 @@
         },
         {
           "name": "bluf_present_and_short",
-          "passed": false,
+          "passed": true,
           "weight": 1.5,
           "evidence": "bd_de_2026-09-07.md: 1 sentence(s), 33 words, cited=True, before_exec_summary=True; bd_eu_2026-09-07.md: 1 sentence(s), 28 words, cited=True, before_exec_summary=True; bd_gb_2026-09-07.md: 1 sentence(s), 39 words, cited=True, before_exec_summary=True; bd_gr_2026-09-07.md: 1 sentence(s), 31 words, cited=True, before_exec_summary=True; bd_il_2026-09-07.md: 1 sentence(s), 28 words, cited=True, before_exec_summary=True; bd_in_2026-09-07.md: 1 sentence(s), 38 words, cited=True, before_exec_summary=Tr"
         },
         {
           "name": "buyer_pipeline_table_present",
-          "passed": false,
+          "passed": true,
           "weight": 2.0,
           "evidence": "bd_de_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_eu_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_gb_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_gr_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_il_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_in_2026-09-07.md: heading 'מפת ק"
         },
         {
           "name": "assumptions_falsifiers_list_present",
-          "passed": false,
+          "passed": true,
           "weight": 1.5,
           "evidence": "bd_de_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_eu_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_gb_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_gr_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_il_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_in_2026-09-07.md: heading 'הנחות והפרכות': falsifier_lang"
         },
@@ -531,5 +531,5 @@
     "D8": 94.0,
     "D9": 91.0
   },
-  "weighted_total": 80.4
+  "weighted_total": 82.6
 }
