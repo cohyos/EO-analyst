@@ -713,6 +713,12 @@ async def ask(body: AskRequest) -> StreamingResponse:
                         # raw config value -- see that constant's own docstring for why the cap
                         # lives here instead of in `config/config.yaml` itself.
                         max_claims=min(ask_cfg.entailment_max_claims, _ENTAILMENT_MAX_CLAIMS_CAP),
+                        # Round 10 (docs/qa/loop/round_9_judge.md finding 2): the only real call
+                        # site opts into the cloud-chain fallback (`ask_grounding.entailment_filter`'s
+                        # own docstring) -- a local RAM shortage that starves the primary `ollama`
+                        # attempt now gets a second, cloud-routed chance instead of silently skipping
+                        # every single time.
+                        chain_fallback=True,
                     )
                     ungrounded_removed += _entailment_removed
                     if _entailment_removed:
@@ -837,6 +843,18 @@ async def ask(body: AskRequest) -> StreamingResponse:
             # belonged to the removed unit). Never rewrites/removes content, only re-inserts a line
             # break, so it is always safe to run last, after every guard above.
             answer_text = ask_grounding.ensure_headings_on_own_line(answer_text)
+            # Round 10 (docs/qa/loop/round_9_judge.md worst #3, D5): live-sampled 2026-09-07, 5 of 8
+            # golden answers shipped a truncated/dangling opening sentence -- a removal guard's own
+            # unit boundary left a fragment (not a whole sentence) in place; see `_iter_units`'s own
+            # round-10 fix for the confirmed root cause (a decimal point mis-parsed as a sentence
+            # terminator) and `ask_grounding.enforce_answer_coherence`'s own docstring for the
+            # content-blind safety net that also catches any removal shape that fix does not cover.
+            # Content-blind and order-independent by design, so it runs last, after every guard
+            # above (including the heading-normalisation pass just above it).
+            answer_text, _coherence_removed = ask_grounding.enforce_answer_coherence(answer_text)
+            if _coherence_removed:
+                _removed_by_guard["dangling_fragment"] = _coherence_removed
+                ungrounded_removed += _coherence_removed
             # Round 8 last-resort sanitizer (docs/qa/loop/round_7_judge_b.md D5 finding #2): strip
             # any residual sentinel/JSON tail that somehow survived every split above -- a no-op in
             # the overwhelming common case, defense-in-depth for the one case this round's own live

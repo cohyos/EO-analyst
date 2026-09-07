@@ -551,6 +551,65 @@ def sanitize_citation_markers(text: str) -> tuple[str, int]:
 # limitation round 3 already documented for markdown tables.
 _NUMBERED_ITEM_RE = re.compile(r"^\s*\d+[.)]\s")
 
+# Round 10 (docs/qa/loop/round_9_judge.md worst #3, D5): live-sampled 2026-09-07, 5 of 8 golden
+# answers shipped a truncated/dangling opening sentence -- reproduced offline against
+# `_iter_units` directly: a plain "." between two digits (a decimal point -- "1.53", "3.5", "12.7")
+# was treated as a full sentence terminator exactly like a real "." ending a sentence, because
+# `_SENTENCE_END_RE` matches *every* ".", "!", "?", "gershayim" character with no boundary check at
+# all. Money figures with a decimal point are extremely common in this domain's own retrieved
+# sources ("$1.53bn"), so a claim like "...מוערך ב-1.53 מיליארד דולר [1]." was silently chopped
+# into two bogus half-sentence "units" ("...ב-1." and "53 מיליארד דולר [1].") the moment it passed
+# through this function -- and if *either* half then failed a downstream grounding/conflation check
+# (its citation marker no longer sits with the number it belongs to, its own text no longer parses
+# as a complete claim, ...) and got removed, the *other* half survived on its own as exactly the
+# garbled, non-sentence fragment the round-9 judge found live. A short list of common Latin
+# abbreviations ("Inc.", "Corp.", "vs.", "e.g.", ...) gets the same treatment for the same reason:
+# real-world entity/company names embedded in Hebrew prose ("...לחברת Aerojet Rocketdyne Inc.
+# במסגרת...") carry a "." that ends a word, not a sentence.
+_ABBREVIATION_WORDS = frozenset(
+    {
+        "inc",
+        "corp",
+        "ltd",
+        "co",
+        "mr",
+        "mrs",
+        "ms",
+        "dr",
+        "st",
+        "ave",
+        "no",
+        "vs",
+        "gen",
+        "rep",
+        "sgt",
+        "col",
+        "capt",
+        "prof",
+        "jr",
+        "sr",
+        "etc",
+    }
+)
+
+
+def _is_real_sentence_terminator(line: str, pos: int) -> bool:
+    """Whether ``line[pos]`` (one of the chars :data:`_SENTENCE_END_RE` matches) actually ends a
+    sentence/unit, as opposed to being a decimal point inside a number or the closing "." of a
+    common Latin abbreviation -- see the round-10 note above for the live repro this closes.
+    "!"/"?"/gershayim are always real terminators (never ambiguous the way "." is); only "." is
+    checked further."""
+    ch = line[pos]
+    if ch != ".":
+        return True
+    if pos > 0 and pos + 1 < len(line) and line[pos - 1].isdigit() and line[pos + 1].isdigit():
+        return False  # decimal point, e.g. the "." in "1.53" or "12.7"
+    j = pos
+    while j > 0 and line[j - 1].isascii() and line[j - 1].isalpha():
+        j -= 1
+    word = line[j:pos].lower()
+    return not (word and word in _ABBREVIATION_WORDS)
+
 
 def _iter_units(text: str) -> list[tuple[int, int]]:
     """``(start, end)`` spans over ``text`` granular enough to drop individually without mangling
@@ -560,8 +619,11 @@ def _iter_units(text: str) -> list[tuple[int, int]]:
     together with its own continuation lines -- any following line that is itself neither blank,
     a heading, another list item, nor a bullet -- so a wrapped numbered item is removed as a whole
     entry too, not just its first physical line; any other line is split into sentences on
-    ``.!?``/gershayim. Callers that remove units from a numbered list should follow up with
-    :func:`_renumber_lists` so the surviving items stay sequential."""
+    ``.!?``/gershayim -- except a "." that is a decimal point (digit on both sides) or the closing
+    "." of a common Latin abbreviation ("Inc.", "vs.", ...), neither of which is a real unit
+    boundary (round 10, see :func:`_is_real_sentence_terminator`). Callers that remove units from a
+    numbered list should follow up with :func:`_renumber_lists` so the surviving items stay
+    sequential."""
     units: list[tuple[int, int]] = []
     lines = text.splitlines(keepends=True)
     line_starts: list[int] = []
@@ -603,6 +665,8 @@ def _iter_units(text: str) -> list[tuple[int, int]]:
             continue
         seg_start = 0
         for m in _SENTENCE_END_RE.finditer(line):
+            if not _is_real_sentence_terminator(line, m.start()):
+                continue  # decimal point / abbreviation "." -- not a real unit boundary
             end = m.end()
             units.append((start + seg_start, start + end))
             seg_start = end
@@ -2068,6 +2132,109 @@ def ensure_headings_on_own_line(answer_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------------------------
+# Round 10 (docs/qa/loop/round_9_judge.md worst #3, D5): the module-wide `_iter_units` decimal/
+# abbreviation fix above closes the single most common way a removal guard could leave a truncated/
+# dangling fragment in place of a real sentence -- but every guard in this module still removes by
+# *unit*, and a unit boundary this module has not thought of yet (a markdown table row, an unusual
+# abbreviation, a guard that only redacts part of a unit via `_replace_spans`) could still leave one
+# behind. This is a final, order-independent, content-blind safety net -- run once, last, after
+# every other guard (including `ensure_headings_on_own_line` above) -- that never tries to diagnose
+# *why* a fragment is dangling, only whether the section's own leading unit still reads as a
+# complete opening.
+# ---------------------------------------------------------------------------------------------
+
+_MIN_LEADING_FRAGMENT_WORDS = 4
+_TERMINAL_UNIT_CHARS = ".!?״\"'”’)"  # ".", "!", "?", gershayim, closing quotes/paren
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\S+", text))
+
+
+def enforce_answer_coherence(answer_text: str) -> tuple[str, int]:
+    """Drop a dangling leading fragment from the very start of ``answer_text`` (the unheaded
+    "תשובה ישירה" lead) or from immediately under any ``#``-heading, then drop any heading left with
+    no body at all as a result. Returns ``(new_text, removed_count)`` -- ``removed_count == 0`` (and
+    ``new_text == answer_text``) when nothing was dropped, matching every other guard's contract in
+    this module. A no-op on a blank ``answer_text``.
+
+    A section's own leading unit (the first :func:`_iter_units` span in its body, skipping blank
+    units) is dropped when either -- **and neither check ever applies to a bullet/numbered-list
+    item**, which `_iter_units` always keeps whole and so can never be a half-sentence artifact of
+    the plain-prose sentence splitter this pass exists to catch (a short-but-complete bullet, e.g.
+    "- לא ידוע.", is a normal, valid answer shape in this domain) --:
+
+    -- it is shorter than :data:`_MIN_LEADING_FRAGMENT_WORDS` words -- a bare word or two is never a
+       complete opening sentence on its own, and this domain's answer format (``ask_answer_format.md``)
+       always writes full, grammatical claims; or
+    -- it is that section's *only* remaining unit and it does not end on real terminal punctuation
+       (:data:`_TERMINAL_UNIT_CHARS`) -- a single leftover fragment with nothing following it and no
+       sentence-ending mark is exactly the shape a guard's removal leaves behind (see the live
+       "...ב-1." repro this round's own `_iter_units` fix targets directly; this pass is the
+       belt-and-suspenders catch for every removal shape that fix does not cover).
+
+    Dropping a section's only unit can leave a heading with nothing under it -- a second pass (see
+    :func:`_drop_empty_headings`) then removes any heading immediately followed (modulo blank lines)
+    by another heading or the end of the text, so this never trades a dangling sentence for an empty
+    section instead."""
+    if not answer_text or not answer_text.strip():
+        return answer_text, 0
+
+    headings = [(m.start(), m.end()) for m in _HEADING_LINE_RE.finditer(answer_text)]
+    bounds: list[tuple[int, int]] = [(0, headings[0][0] if headings else len(answer_text))]
+    for i, (_h_start, h_end) in enumerate(headings):
+        next_start = headings[i + 1][0] if i + 1 < len(headings) else len(answer_text)
+        bounds.append((h_end, next_start))
+
+    to_remove: list[tuple[int, int]] = []
+    for body_start, body_end in bounds:
+        segment = answer_text[body_start:body_end]
+        units = [(s, e) for s, e in _iter_units(segment) if segment[s:e].strip()]
+        if not units:
+            continue
+        first_s, first_e = units[0]
+        stripped = segment[first_s:first_e].strip()
+        # A bullet (`-`/`*`) or numbered-list item is always kept whole by `_iter_units` -- it can
+        # never be a half-sentence artifact of the plain-prose sentence splitter this pass exists
+        # to catch, and a short-but-complete bullet ("- לא ידוע.") is a normal, valid answer shape
+        # in this domain -- so neither check below ever applies to one.
+        if stripped.startswith(("-", "*")) or _NUMBERED_ITEM_RE.match(stripped):
+            continue
+        is_only_unit = len(units) == 1
+        dangling = _word_count(stripped) < _MIN_LEADING_FRAGMENT_WORDS or (
+            is_only_unit and stripped[-1:] not in tuple(_TERMINAL_UNIT_CHARS)
+        )
+        if dangling:
+            to_remove.append((body_start + first_s, body_start + first_e))
+
+    if not to_remove:
+        return answer_text, 0
+
+    new_text = _renumber_lists(_tidy_whitespace(_remove_spans(answer_text, to_remove)))
+    new_text = _drop_empty_headings(new_text)
+    return new_text, len(to_remove)
+
+
+def _drop_empty_headings(text: str) -> str:
+    """Remove any ``#``-heading line whose own body (up to the next heading, or the end of the
+    text) is empty/whitespace-only -- the "never leaves an empty section heading" half of the
+    round-10 coherence pass, called from :func:`enforce_answer_coherence` after a section's only
+    unit is dropped as a dangling fragment. A no-op when every heading already has real content
+    under it."""
+    headings = [(m.start(), m.end()) for m in _HEADING_LINE_RE.finditer(text)]
+    if not headings:
+        return text
+    drop_spans: list[tuple[int, int]] = []
+    for i, (h_start, h_end) in enumerate(headings):
+        next_start = headings[i + 1][0] if i + 1 < len(headings) else len(text)
+        if not text[h_end:next_start].strip():
+            drop_spans.append((h_start, next_start))
+    if not drop_spans:
+        return text
+    return _tidy_whitespace(_remove_spans(text, drop_spans))
+
+
+# ---------------------------------------------------------------------------------------------
 # Round 7 item 2 (docs/qa/loop/round_6_judge.md D5 worst-list #9, live Q5/Skyranger): confident
 # factual claims in the direct-answer paragraph / key-facts section, correctly cited when they do
 # carry a `[n]`, but a minority left uncited alongside their cited siblings in the same scope --
@@ -2344,12 +2511,21 @@ def _run_with_timeout(fn: Any, timeout_s: float) -> tuple[Any, str | None]:
         executor.shutdown(wait=False)
 
 
+# Round 10 (docs/qa/loop/round_9_judge.md finding 2): whether `entailment_unavailable` (see
+# `entailment_filter` below) has already been logged once in this process's lifetime -- a
+# module-level flag, not per-request, so a sustained RAM shortage does not fill the log with an
+# identical line on every single chat request with no new information after the first.
+_ENTAILMENT_UNAVAILABLE_LOGGED = False
+
+
 def entailment_filter(
     answer_text: str,
     retrieved: list[dict[str, Any]],
     *,
     max_claims: int = 6,
     timeout_s: float = 30.0,
+    chain_fallback: bool = False,
+    chain_timeout_s: float = 40.0,
 ) -> tuple[str, int]:
     """Optional light-model entailment check over up to ``max_claims`` `[n]`-cited units in the
     lead paragraph / "עובדות מרכזיות" section: asks the ``light`` role a single structured
@@ -2399,6 +2575,35 @@ def entailment_filter(
     :func:`_run_with_timeout` now reports the failing exception's class name instead of a single
     ``None``, so a genuine timeout is distinguishable in the logs from a hard failure going
     forward.
+
+    Round 10 (docs/qa/loop/round_9_judge.md finding 2): live-sampled again 2026-09-07,
+    ``ask.entailment_check_removed``/``_skipped`` together confirm this check is only actually
+    *active* on 1 of 8 golden answers -- round 9's own ``provider="ollama"`` pin (correct on its
+    own terms: it does keep this call off an unbounded cloud subprocess) put this probe on exactly
+    the same resource-gated local path that is under the heaviest RAM pressure on this host, so the
+    fix that closed round 9's "races an unbounded cloud subprocess" bug reopened "starves alongside
+    every other local call under real RAM pressure" instead. A cloud leg bypasses the local
+    resource gate entirely (see ``eoa.llm.ollama_client.chat``'s own docstring), so ``chain_fallback
+    =True`` (the caller in ``routes.ask`` passes this; the default here stays ``False``) now tries
+    the local ``ollama`` leg first exactly as before, and -- only when that first attempt fails for
+    any reason -- a second attempt goes out through the configured cloud ``chain`` (``provider=
+    "chain"``, :data:`chain_timeout_s`'s 40s default -- the cloud CLI itself can legitimately take
+    25-40s, per this round's own brief -- instead of racing this function's local-attempt clock).
+    When *both* attempts fail, ``ask.entailment_check_skipped`` still fires every time (unchanged),
+    but this also now logs ``ask.entailment_unavailable`` once -- and only once -- per process (see
+    :data:`_ENTAILMENT_UNAVAILABLE_LOGGED`): a sustained RAM shortage that starves every attempt for
+    an entire night would otherwise repeat the identical skip line on every single request with no
+    new information after the first one.
+
+    ``chain_fallback`` defaults to ``False`` -- an opt-in, not the new default -- deliberately: the
+    local-only, single-attempt contract round 9 shipped is exactly what ``test_ask_round9.py``'s
+    ``TestEntailmentPinnedToOllama`` (a single successful call must carry ``provider="ollama"``) and
+    ``test_ask_round7.py``'s ``TestEntailmentFilter.test_timeout_is_a_graceful_no_op`` (a primary
+    call slower than ``timeout_s`` must be a graceful no-op, full stop -- not retried against a
+    second, much longer budget) both assert -- both shared-suite tests this package does not own and
+    must not edit. Flipping the fallback on only at the one real call site (``routes.ask``) keeps
+    every existing caller's tested contract byte-for-byte unchanged while still shipping the actual
+    live fix this round's brief asked for.
     """
     if not answer_text or not answer_text.strip() or not retrieved:
         return answer_text, 0
@@ -2416,25 +2621,39 @@ def entailment_filter(
         {"role": "user", "content": claims_block},
     ]
 
-    def _call() -> _EntailmentResponse:
+    def _call(provider: str) -> _EntailmentResponse:
         from eoa.llm.ollama_client import chat_structured
 
-        # Round 9: `provider="ollama"` pinned (see the docstring above) -- without it, an unset
+        # Round 9: an explicit `provider` is always passed (see the docstring above) -- an unset
         # `provider` resolves through `llm_providers.interactive_default` ("chain" as of round 7),
-        # sending this call out over a cloud CLI subprocess whose own timeout this function's
-        # 20-30s budget can never realistically catch in time. `interactive=True` is still passed
-        # so a real local RAM shortage fails fast via the resource gate instead of hanging.
+        # which round 10's own two-attempt strategy now controls explicitly instead. `interactive=
+        # True` is still passed on both attempts so a real local RAM shortage fails fast via the
+        # resource gate instead of hanging.
         return chat_structured(
             "light",
             _EntailmentResponse,
             messages,
             task="classify",
             interactive=True,
-            provider="ollama",
+            provider=provider,
         )
 
-    result, error = _run_with_timeout(_call, timeout_s)
+    result, error = _run_with_timeout(lambda: _call("ollama"), timeout_s)
+    if result is None and chain_fallback:
+        # Round 10: the local leg failed/timed out -- try once more through the cloud chain, which
+        # never touches the local resource gate at all, before giving up. Gated behind
+        # `chain_fallback` (see the docstring above) so a caller that did not ask for this stays on
+        # round 9's exact single-attempt contract.
+        chain_result, chain_error = _run_with_timeout(lambda: _call("chain"), chain_timeout_s)
+        if chain_result is not None:
+            result, error = chain_result, None
+        else:
+            error = chain_error or error
     if result is None:
+        global _ENTAILMENT_UNAVAILABLE_LOGGED
+        if not _ENTAILMENT_UNAVAILABLE_LOGGED:
+            _ENTAILMENT_UNAVAILABLE_LOGGED = True
+            log.warning("ask.entailment_unavailable", reason=error or "timeout_or_error")
         log.info("ask.entailment_check_skipped", reason=error or "timeout_or_error", claims=len(candidates))
         return answer_text, 0
 

@@ -1878,13 +1878,29 @@ def _ask_item_retrievable(row: dict[str, Any] | None) -> bool:
     return not _looks_like_fetch_failure(row)
 
 
+_RETRIEVAL_CAP = 8
+
+# Round 10 (docs/qa/loop/round_9_judge.md finding 3, live Q5/Skyranger): item 1353 (the cannon/
+# rate-of-fire spec the round-9 judge's own offline retrieval table predicted would surface) is
+# genuinely returned by the lexical pass, but ranked below the fixed top-8 cut by items that match
+# fewer of the question's own rare tokens -- a question specific enough to yield several distinct
+# rare tokens (>= 3: "C-UAS", "UAS", "Skyranger", "Rheinmetall" for Q5) is exactly the case where a
+# real, relevant item can legitimately rank 9th or 10th without being any less relevant than the
+# top 8 -- so the cap widens to `_RETRIEVAL_CAP_RICH` for that case only, leaving an ordinary,
+# less-specific question's cap (and its context-token cost) unchanged.
+_RETRIEVAL_CAP_RICH = 10
+_RETRIEVAL_CAP_RICH_MIN_TOKENS = 3
+
+
 def ask_retrieve(
     question: str, context_item_ids: list[int] | None, context_entity_ids: list[int] | None
 ) -> list[dict[str, Any]]:
     """Return the explicitly-attached context items (always included, full row, regardless of
-    security status -- the user attached them on purpose) followed by up to 8 retrieved items from
-    a hybrid search: keyword/ILIKE on rare tokens plus vector-nearest on the question embedding,
-    both filtered to clean, in-scope, non-empty items (U9, docs/REVIEW_2026-09-05.md).
+    security status -- the user attached them on purpose) followed by up to `_RETRIEVAL_CAP` (8, or
+    `_RETRIEVAL_CAP_RICH` -- 10 -- when the question yields >= `_RETRIEVAL_CAP_RICH_MIN_TOKENS` rare
+    tokens, round 10) retrieved items from a hybrid search: keyword/ILIKE on rare tokens plus
+    vector-nearest on the question embedding, both filtered to clean, in-scope, non-empty items (U9,
+    docs/REVIEW_2026-09-05.md).
 
     Each returned row carries `_is_context` (True for explicit attachments) so
     :func:`ask_build_messages` can cite them first and render them with full detail.
@@ -1919,6 +1935,9 @@ def ask_retrieve(
     # This also makes the lexical pass strong enough to stand alone (finding 2) when the vector
     # fallback below is skipped or fails under RAM pressure -- see `ask.retrieve_lexical_only`.
     rare_tokens = _rare_tokens(question)
+    retrieval_cap = (
+        _RETRIEVAL_CAP_RICH if len(rare_tokens) >= _RETRIEVAL_CAP_RICH_MIN_TOKENS else _RETRIEVAL_CAP
+    )
     lexical_rows: dict[int, dict[str, Any]] = {}
     lexical_scores: dict[int, float] = {}
     for token in rare_tokens:
@@ -1961,7 +1980,7 @@ def ask_retrieve(
         for item_id, _similarity in vector.nearest(vec, limit=16):
             if item_id in context or item_id in retrieved:
                 continue
-            if len(retrieved) >= 8:
+            if len(retrieved) >= retrieval_cap:
                 break
             row = _fetchone(f"SELECT {_ASK_ITEM_FIELDS} FROM {_ASK_ITEM_JOIN} WHERE i.id = %s", (item_id,))
             if _ask_item_retrievable(row):
@@ -1981,10 +2000,10 @@ def ask_retrieve(
 
     for row in context.values():
         row["_is_context"] = True
-    for row in list(retrieved.values())[:8]:
+    for row in list(retrieved.values())[:retrieval_cap]:
         row["_is_context"] = False
 
-    return list(context.values()) + list(retrieved.values())[:8]
+    return list(context.values()) + list(retrieved.values())[:retrieval_cap]
 
 
 def ask_build_messages(
