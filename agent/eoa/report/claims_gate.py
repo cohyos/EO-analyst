@@ -79,6 +79,10 @@ _PHRASE_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"יוצא(ת)?\s+דופן\s*"), ""),
     (re.compile(r"היסטורי(ת|ים)?\s*"), ""),
     (re.compile(r"ענק(ית|ים)?\s*"), ""),
+    # lead additions 2026-09-08 (live monthly 172: "התכנסות בולטת", "בהיקפים גדולים")
+    (re.compile(r"בולט(ת|ים|ות)?\s*"), ""),
+    (re.compile(r"בהיקפים\s+גדולים\s*"), ""),
+    (re.compile(r"חסר(ת|י)?\s+תקדים\s*"), ""),
 ]
 
 #: Same list, used purely for detection (does the sentence carry ANY trigger word at all) -- kept
@@ -270,3 +274,63 @@ __all__ = [
     "gate_sentences",
     "gate_text",
 ]
+
+# --------------------------------------------------------------------------
+# Lead additions 2026-09-08: the gate also covers QUOTED content the reports embed verbatim --
+# item summary/so-what cells and deep-search answers -- because the user reads those inside the
+# report and cannot tell they came from another module ("מעבר היסטורי", "קפיצת מדרגה טכנולוגית",
+# "יתרון משמעותי" survived monthly 172 in exactly those places). Display-time softening only:
+# the stored rows are never rewritten.
+# --------------------------------------------------------------------------
+
+
+_SENT_END_RE = re.compile(r"(?<=[.!?؟])\s+(?=\S)")
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Sentence split on terminal punctuation followed by whitespace; keeps citation markers with
+    their sentence. Newlines are treated as boundaries too (bullets / short lines)."""
+    out: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        out.extend(p for p in _SENT_END_RE.split(line) if p.strip())
+    return out
+
+
+def soften_text(text: str | None) -> str | None:
+    """Sentence-wise :func:`gate_text` over a free-text field; drops sentences the gate drops."""
+    if not text:
+        return text
+    parts = _split_sentences(text)
+    kept: list[str] = []
+    for p in parts:
+        g = gate_text(p)
+        if not g:
+            continue
+        g = g.strip()
+        if g[-1] not in ".!?:؟" and p.rstrip()[-1] in ".!?:؟":
+            g += p.rstrip()[-1]  # keep the sentence-final punctuation the rewrite dropped
+        kept.append(g)
+    return " ".join(kept).strip() or None
+
+
+def gate_item_texts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Soften ``summary_he``/``so_what_he`` of collected report items in place (returns the list)."""
+    for it in items:
+        for key in ("summary_he", "so_what_he"):
+            if it.get(key):
+                it[key] = soften_text(it[key]) or it[key]
+    return items
+
+
+def gate_deep_search_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Soften the deep-search entries' answer/context/contradiction text and key facts."""
+    for e in entries:
+        for key in ("answer_he", "contradictions_he", "what_was_tried_he"):
+            if e.get(key):
+                e[key] = soften_text(e[key]) or e[key]
+        if e.get("key_facts"):
+            e["key_facts"] = [g for g in (gate_text(f) for f in e["key_facts"]) if g]
+    return entries

@@ -56,7 +56,7 @@ from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.reports import MonthlyReportDraft, MonthlyTrendSection
 from eoa.memory import graph as graph_mod
 from eoa.report import trends as trends_mod
-from eoa.report.claims_gate import apply_claims_gate
+from eoa.report.claims_gate import apply_claims_gate, gate_deep_search_entries, gate_item_texts
 from eoa.report.daily import (
     _append_event_corroboration_markers,
     _append_item_corroboration_markers,
@@ -440,11 +440,14 @@ def format_monthly_trends_block(
         refs = "".join(f"[{n}]" for n in ns) or "—"
         entities = ", ".join(t.get("entities") or []) or "—"
         prev = _match_previous_trend(t.get("title_he", ""), previous_trends)
-        prev_note = (
-            f"חוזק בדוח החודשי הקודם: {prev['strength']}/5"
-            if prev
-            else "לא הופיעה בדוח החודשי הקודם — מגמה חדשה"
-        )
+        if prev:
+            prev_note = f"חוזק בדוח החודשי הקודם: {prev['strength']}/5"
+        elif not previous_trends:
+            # CR round 14: with no previous monthly report there is no comparison basis -- the
+            # model must not call the trend "new" (it wrote "מגמה חדשה החודש" for all ten).
+            prev_note = "אין דוח חודשי קודם להשוואה (אל תכתוב 'מגמה חדשה'; change='new' רק כי אין בסיס)"
+        else:
+            prev_note = "לא הופיעה בדוח החודשי הקודם — מגמה חדשה"
         lines.append(
             f"{i}. [{_TREND_KIND_LABELS_HE.get(t['kind'], t['kind'])}] {t['title_he']} | "
             f"חוזק החודש: {t['strength']}/5 | נתונים: {_format_trend_numbers_he(t)} | {prev_note} | "
@@ -460,7 +463,17 @@ def _has_previous_monthly_report(period_start: dt.date) -> bool:
     which is exactly why every trend on the very first monthly ever built got mislabelled
     "מגמה חדשה החודש" ("new trend this month") instead of the honest "no prior report to compare
     to". Used only by :func:`_render_trend_body`."""
-    sql = "SELECT 1 FROM reports WHERE kind = 'monthly' AND period_end < %(period_start)s LIMIT 1"
+    # Lead fix 2026-09-08: an earlier monthly built for an EMPTY period (0 items -- e.g. the
+    # accidental August 2026 row) is not a comparison basis; only a previous monthly that
+    # actually covered items counts, otherwise every trend is again mislabelled "new".
+    # `items_included` is `bigint[]` (the item-id list), not a count -- `cardinality()` is the
+    # array-length function; comparing it directly to an integer (as a prior attempt at this same
+    # fix did) raises `psycopg.errors.DatatypeMismatch` ("COALESCE types bigint[] and integer
+    # cannot be matched"), confirmed live against the real DB on 2026-09-08.
+    sql = (
+        "SELECT 1 FROM reports WHERE kind = 'monthly' AND period_end < %(period_start)s "
+        "AND COALESCE(cardinality(items_included), 0) > 0 LIMIT 1"
+    )
     with connection() as conn, conn.cursor() as cur:
         cur.execute(sql, {"period_start": period_start})
         return cur.fetchone() is not None
@@ -815,9 +828,11 @@ def build_monthly(
     start, end = _month_range(period_end)
 
     items = collect_month_items(start, end)
+    items = gate_item_texts(items)  # claims gate on quoted item text (lead, 2026-09-08)
     yellow_summary = collect_yellow_domain_summary(start, end)
     events = collect_events(start, end)
     deep_search = collect_deep_search(start, end)
+    deep_search = gate_deep_search_entries(deep_search)
     open_clarifications = collect_open_clarifications()
     trend_list = trends_mod.detect_trends((start, end))
     previous_trends = collect_previous_monthly_trends(start)

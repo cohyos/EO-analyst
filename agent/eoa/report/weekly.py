@@ -37,7 +37,7 @@ from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.reports import WeeklyReportDraft
 from eoa.report import trends as trends_mod
-from eoa.report.claims_gate import apply_claims_gate
+from eoa.report.claims_gate import apply_claims_gate, gate_deep_search_entries, gate_item_texts
 from eoa.report.daily import (
     _append_event_corroboration_markers,
     _append_item_corroboration_markers,
@@ -980,9 +980,11 @@ def build_weekly(
     start, end = _week_range(period_end)
 
     items = collect_week_items(start, end)
+    items = gate_item_texts(items)  # claims gate on quoted item text (lead, 2026-09-08)
     yellow_summary = collect_yellow_domain_summary(start, end)
     events = collect_events(start, end, limit=40)  # F9/F16: cap the weekly events table at 40 rows
     deep_search = collect_deep_search(start, end)
+    deep_search = gate_deep_search_entries(deep_search)
     open_clarifications = collect_open_clarifications()
     trend_list = trends_mod.detect_trends((start, end))
     meta = collect_meta_summary(start, end)

@@ -140,9 +140,15 @@ class TestMonthOverMonthHelpers:
                 "strength": 3,
             }
         ]
+        # CR round 14: with NO previous monthly at all the block must not call the trend "new" --
+        # there is simply no comparison basis (the model wrote "מגמה חדשה החודש" for all ten).
         block = monthly.format_monthly_trends_block(trend_list, {1: 1}, previous_trends=[])
-        assert "מגמה חדשה" in block
-        assert "לא הופיעה בדוח החודשי הקודם — מגמה חדשה" in block
+        assert "אין דוח חודשי קודם להשוואה" in block
+        assert "לא הופיעה בדוח החודשי הקודם — מגמה חדשה" not in block
+        # ...but when a previous monthly exists and lacks this trend, it IS new.
+        previous = [{"title_he": "מגמה אחרת לגמרי", "domain": "c_uas", "strength": 2}]
+        block2 = monthly.format_monthly_trends_block(trend_list, {1: 1}, previous_trends=previous)
+        assert "לא הופיעה בדוח החודשי הקודם — מגמה חדשה" in block2
 
     def test_format_monthly_trends_block_carries_previous_strength(self):
         trend_list = [

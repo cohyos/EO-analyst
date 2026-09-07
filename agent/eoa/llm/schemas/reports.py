@@ -8,7 +8,8 @@ sections/tables built straight from the database, per rule 5 ("Never invent").
 
 from __future__ import annotations
 
-from typing import Literal
+import re
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -209,6 +210,19 @@ class MonthlyTrendSection(BaseModel):
         le=5,
         description="חוזק אותה מגמה בדוח החודשי הקודם אם סופק כנתון; null אם המגמה חדשה החודש",
     )
+    @field_validator("strength_now", "strength_prev", mode="before")
+    @classmethod
+    def _coerce_strength(cls, v: Any) -> Any:
+        """Live 2026-09-08 (monthly rebuild, Gemini fallback leg): the model echoed the prompt's
+        "3/5" notation as a string for every trend -> 10 validation errors and a wasted 9-minute
+        draft. Accept "3/5", "3 מתוך 5", " 4 " and plain digits; anything else falls through to
+        pydantic's own error."""
+        if isinstance(v, str):
+            m = re.match(r"\s*([1-5])\s*(?:/\s*5|מתוך\s*5)?\s*$", v)
+            if m:
+                return int(m.group(1))
+        return v
+
     change: Literal["new", "stronger", "weaker", "gone"] = Field(
         description=(
             "'new' אם המגמה לא הופיעה בדוח החודשי הקודם; 'stronger'/'weaker' לפי strength_now מול "
