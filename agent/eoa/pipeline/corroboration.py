@@ -246,7 +246,10 @@ def compute_for_item(item_id: int) -> dict[str, Any] | None:
     own_url = item.get("url") or item.get("source_url")
     is_official = is_official_primary_source(own_url)
 
-    if item.get("published_at") is None or item.get("domain") is None:
+    # 2026-09-07 follow-up: 20 of 63 backfilled items were 'unknown' only because their outlet
+    # (Globes) publishes no date -- anchor the window on fetched_at/created_at in that case.
+    anchor_date = item.get("published_at") or item.get("fetched_at") or item.get("created_at")
+    if anchor_date is None or item.get("domain") is None:
         status = "unknown"
         count = 0
         sources: list[dict[str, Any]] = []
@@ -256,7 +259,7 @@ def compute_for_item(item_id: int) -> dict[str, Any] | None:
 
         dedup_ids = set(get_dedup_linked_item_ids(item_id, item.get("dedup_of")))
 
-        published_at = item["published_at"]
+        published_at = anchor_date
         window = dt.timedelta(days=WINDOW_DAYS)
         start, end = published_at - window, published_at + window
         candidates = get_corroboration_candidates(item_id, start, end)

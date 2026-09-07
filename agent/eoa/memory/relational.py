@@ -1466,7 +1466,7 @@ def get_item_for_corroboration(item_id: int) -> dict[str, Any] | None:
     the fields the deterministic matcher keys on, and the joined source name/url (an item's own
     ``sources`` row -- distinct from ``items.url``, which is the article's own URL)."""
     query = """
-        SELECT i.id, i.url, i.published_at, i.domain, i.level, i.security_status,
+        SELECT i.id, i.url, i.published_at, i.fetched_at, i.created_at, i.domain, i.level, i.security_status,
                i.entities_mentioned, i.dedup_of, i.source_id,
                s.name AS source_name, s.url AS source_url
         FROM items i
@@ -1484,7 +1484,7 @@ def get_corroboration_candidates(item_id: int, start: Any, end: Any) -> list[dic
     `eoa.pipeline.corroboration` then filters in Python (different registrable domain, shared
     distinctive entities, matching events, ...). Excludes ``item_id`` itself."""
     query = """
-        SELECT i.id, i.url, i.published_at, i.domain, i.entities_mentioned, i.dedup_of,
+        SELECT i.id, i.url, i.published_at, i.fetched_at, i.created_at, i.domain, i.entities_mentioned, i.dedup_of,
                i.source_id, s.name AS source_name, s.url AS source_url
         FROM items i
         LEFT JOIN sources s ON s.id = i.source_id
