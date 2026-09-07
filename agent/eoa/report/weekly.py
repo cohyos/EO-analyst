@@ -73,6 +73,16 @@ _TREND_KIND_LABELS_HE = {
 _PROMPT_ITEMS_PER_DOMAIN = 6
 _PROMPT_SUMMARY_TRUNC_CHARS = 500
 
+# R6-weekly (docs/qa/loop/round_6_fixes.md, docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.2): the weekly
+# report's per-item top-level headings (one per trend, one per Israel/tech/patents/BD table or
+# prose block) are grouped under these five parent headings -- see
+# ``eoa.report.docx_builder``'s ``group_he``/``domain_group_he`` support.
+_TRENDS_GROUP_HE = "מגמות השבוע"
+_DOMAIN_SECTIONS_GROUP_HE = "סקירה לפי תחום"
+_ISRAEL_GROUP_HE = "תעשייה ישראלית"
+_TECH_IP_GROUP_HE = "טכנולוגיה ו-IP"
+_BD_GROUP_HE = "פיתוח עסקי"
+
 
 @dataclass
 class ReportPaths:
@@ -953,6 +963,10 @@ def build_weekly(
             "title_he": tp.title_he,
             "body_he": _render_trend_sentences(tp.sentences),
             "position": "after_summary",
+            # R6-weekly (docs/qa/loop/round_6_fixes.md): every trend used to get its own top-level
+            # heading (5 on the live 2026-09-07 weekly) -- grouped under one "מגמות השבוע" parent,
+            # each trend as an "###" child, to bring the report's H2 count within budget.
+            "group_he": _TRENDS_GROUP_HE,
         }
         for tp in draft.trends
     ]
@@ -1014,18 +1028,21 @@ def build_weekly(
             ]
             for c in conferences_90
         ]
+        # R6-weekly: grouped under "פיתוח עסקי" together with the acquisition-watch prose below
+        # (docx_builder's `group_he`; see the module-level `_BD_GROUP_HE` note).
         tables.append(
             {
                 "title_he": "לוח 90 הימים הקרובים",
                 "headers": ["שם", "תאריכים", "עיר", "רלוונטיות"],
                 "rows": rows,
+                "group_he": _BD_GROUP_HE,
             }
         )
 
     # A12 (מעקב טכנולוגי): per-subdomain radar aggregation (new papers/actors/momentum/so-what) +
     # a short "developments to follow" pick, deterministic tables extending `citation_items` in
     # place -- same additive mechanism as the conferences table above. A failure here must never
-    # break the weekly report.
+    # break the weekly report. R6-weekly: both tables grouped under "טכנולוגיה ו-IP" (see below).
     try:
         from eoa.pipeline.tech_watch import run_tech_watch_weekly
         from eoa.report.tech_watch import weekly_tech_watch_tables
@@ -1033,32 +1050,59 @@ def build_weekly(
         week_start_ts = dt.datetime.combine(start, dt.time.min, tzinfo=JERUSALEM).astimezone(dt.UTC)
         week_end_ts = dt.datetime.combine(end, dt.time.max, tzinfo=JERUSALEM).astimezone(dt.UTC)
         tech_aggregates = run_tech_watch_weekly(week_start_ts, week_end_ts, role=role)
-        tables.extend(weekly_tech_watch_tables(citation_items, tech_aggregates))
+        for tbl in weekly_tech_watch_tables(citation_items, tech_aggregates):
+            tbl["group_he"] = _TECH_IP_GROUP_HE
+            tables.append(tbl)
     except Exception as exc:
         log.warning("weekly_report_tech_watch_section_failed", error=str(exc)[:160])
 
     # A13 (מיקוד תעשייה ישראלית, 2026-09-06): "תעשייה ישראלית" section (category tables + the
     # per-company mentions/wins/competitors summary table), same additive mechanism as the
     # tech-watch tables above. A failure here must never break the weekly report.
+    #
+    # R6-weekly (docs/qa/loop/round_6_fixes.md): grouped under one "תעשייה ישראלית" heading (the
+    # D6 `israel_single_table_with_type_column` check used to see this as *two* separate
+    # top-level "תעשייה ישראלית" headings and fail). The merged table's own `title_he` already
+    # equals `_ISRAEL_GROUP_HE` -- docx_builder renders it directly under the group heading with
+    # no "###" of its own (see its `_group_entries` note) -- so only the per-company summary
+    # table's title is stripped of its redundant "תעשייה ישראלית — " prefix (it would otherwise
+    # give that same D6 check a second heading match).
     try:
         from eoa.report.israel_section import weekly_israel_tables
 
         week_start_ts_il = dt.datetime.combine(start, dt.time.min, tzinfo=JERUSALEM).astimezone(dt.UTC)
         week_end_ts_il = dt.datetime.combine(end, dt.time.max, tzinfo=JERUSALEM).astimezone(dt.UTC)
-        tables.extend(weekly_israel_tables(citation_items, week_start_ts_il, week_end_ts_il))
+        for tbl in weekly_israel_tables(citation_items, week_start_ts_il, week_end_ts_il):
+            tbl["group_he"] = _ISRAEL_GROUP_HE
+            title = tbl.get("title_he") or ""
+            if title and title != _ISRAEL_GROUP_HE:
+                tbl["title_he"] = title.split("— ", 1)[-1]
+            tables.append(tbl)
     except Exception as exc:
         log.warning("weekly_report_israel_section_failed", error=str(exc)[:160])
 
     # A14 (פטנטים ו-IP, 2026-09-06): "פטנטים ו-IP" section (new filings/grants this week +
     # a value-score table), same additive mechanism as the tech-watch/israel-section tables above.
-    # A failure here must never break the weekly report.
+    # A failure here must never break the weekly report. R6-weekly: both the prose and the table
+    # join the "טכנולוגיה ו-IP" group -- the prose becomes a `tables`-list *prose* member (a dict
+    # with `body_he` but no `headers`/`rows`; see docx_builder's `_group_entries` note) rather than
+    # an `extra_sections` entry, so it can share a parent heading with the tech-watch/new-patents
+    # tables above (an `extra_sections` group and a `tables` group render as two separate parents).
     try:
         from eoa.patents.report_section import collect_patents_window, patents_extra_section, patents_table
 
         patents_data = collect_patents_window(start, end)
-        extra_sections.append(patents_extra_section(patents_data))
+        patents_prose = patents_extra_section(patents_data)
+        tables.append(
+            {
+                "title_he": patents_prose["title_he"],
+                "body_he": patents_prose["body_he"],
+                "group_he": _TECH_IP_GROUP_HE,
+            }
+        )
         patents_tbl = patents_table(patents_data)
         if patents_tbl:
+            patents_tbl["group_he"] = _TECH_IP_GROUP_HE
             tables.append(patents_tbl)
     except Exception as exc:
         log.warning("weekly_report_patents_section_failed", error=str(exc)[:160])
@@ -1068,15 +1112,16 @@ def build_weekly(
     # same additive mechanism as the tech-watch/israel-section/patents sections above. A failure
     # here must never break the weekly report. See docs/MODULES.md's "A16" section for the
     # equivalent one-line call ``eoa.report.bd_territory`` can add to reuse this.
+    #
+    # R6-weekly: a `tables`-list prose member (see the patents/IP note above) grouped with the
+    # 90-day calendar table under "פיתוח עסקי".
     try:
         from eoa.report.acquisition_watch import SECTION_TITLE_HE, acquisition_watch_section_md
 
         with connection() as acq_conn:
             acq_body = acquisition_watch_section_md(acq_conn, start, end, citation_items)
         if acq_body:
-            extra_sections.append(
-                {"title_he": SECTION_TITLE_HE, "body_he": acq_body, "position": "after_outlook"}
-            )
+            tables.append({"title_he": SECTION_TITLE_HE, "body_he": acq_body, "group_he": _BD_GROUP_HE})
     except Exception as exc:
         log.warning("weekly_report_acquisition_watch_section_failed", error=str(exc)[:160])
 
@@ -1096,6 +1141,8 @@ def build_weekly(
         extra_sections=extra_sections,
         tables=tables or None,
         include_toc=True,
+        domain_group_he=_DOMAIN_SECTIONS_GROUP_HE,
+        open_points_in_outlook=True,
     )
     save_docx(doc, docx_path)
     validate_docx(docx_path)
@@ -1111,6 +1158,8 @@ def build_weekly(
         title_text=WEEKLY_TITLE_TEXT,
         extra_sections=extra_sections,
         tables=tables or None,
+        domain_group_he=_DOMAIN_SECTIONS_GROUP_HE,
+        open_points_in_outlook=True,
     )
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(md_text, encoding="utf-8")
@@ -1127,6 +1176,8 @@ def build_weekly(
         extra_sections=extra_sections,
         tables=tables or None,
         include_toc=True,
+        domain_group_he=_DOMAIN_SECTIONS_GROUP_HE,
+        open_points_in_outlook=True,
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")

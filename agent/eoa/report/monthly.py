@@ -101,6 +101,16 @@ _PLAYER_EDGE_LABELS = ("COMPETITOR_OF", "SUPPLIER_OF", "PARTNER_OF")
 # allowance than a week since it spans roughly 4x the time.
 _PROMPT_ITEMS_PER_DOMAIN = 10
 
+# R6-weekly (docs/qa/loop/round_6_fixes.md, docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.2): "same
+# grouping as weekly" -- the monthly report's own per-item top-level headings (one per trend, one
+# per domain section, one per competitive-landscape/tech table) are grouped under these parent
+# headings; see ``eoa.report.docx_builder``'s ``group_he``/``domain_group_he`` support and
+# ``eoa.report.weekly``'s identical constants.
+_TRENDS_GROUP_HE = "מגמות החודש"
+_DOMAIN_SECTIONS_GROUP_HE = "סקירה לפי תחום"
+_MARKET_LANDSCAPE_GROUP_HE = "נוף השוק החודשי"
+_TECH_IP_GROUP_HE = "טכנולוגיה ו-IP"
+
 # re-exported so callers/tests importing eoa.report.monthly don't need to know these live in weekly.py
 __all__ = [
     "MonthlyReportDraft",
@@ -759,25 +769,29 @@ def build_monthly(
     watchlist_new = watchlist_changes(start, end)
 
     trend_sections = [
-        {"title_he": tp.title_he, "body_he": _render_trend_body(tp), "position": "after_summary"}
+        {
+            "title_he": tp.title_he,
+            "body_he": _render_trend_body(tp),
+            "position": "after_summary",
+            # R6-weekly: grouped under one "מגמות החודש" parent, each trend as an "###" child.
+            "group_he": _TRENDS_GROUP_HE,
+        }
         for tp in draft.trends
     ]
     # Round 5 P3: BLUF ("שורה תחתונה") and "הנחות והפרכות" need no wiring here -- `docx_builder`
     # (P4) renders both natively from `draft.bluf`/`draft.assumptions` (docs/MODULES.md "Round 5
     # P3").
     extra_sections: list[dict[str, Any]] = list(trend_sections)
-    # U13 (same class of issue fixed for the weekly report): suppress the watchlist section when
-    # nothing changed this month, rather than a heading over a "nothing new" placeholder line.
-    if watchlist_new:
-        extra_sections.append(
-            {
-                "title_he": "שינויים ברשימת המעקב (Watchlist) — ישויות חדשות החודש",
-                "body_he": format_watchlist_he(watchlist_new),
-                "position": "after_outlook",
-            }
-        )
 
     tables: list[dict[str, Any]] = []
+    # R6-weekly (docs/qa/loop/round_6_fixes.md): the players map used to render one top-level
+    # "נוף תחרותי — {domain}" heading per domain (plus top-events/horizon/watchlist each getting
+    # their own), 36 H2s total on the live 2026-09-30 monthly. All four now group under one
+    # "נוף השוק החודשי" parent, each as an "###" child (docx_builder's `group_he`) -- the
+    # watchlist prose becomes a `tables`-list *prose* member (a dict with `body_he`, no
+    # `headers`/`rows`) so it can share the parent with the real tables (see
+    # `eoa.report.weekly`'s identical patents/IP note for why: an `extra_sections` group and a
+    # `tables` group would otherwise render as two separate parent headings).
     for domain, rows in players.items():
         domain = canonical_domain_key(domain) or domain
         if domain == "out_of_scope":
@@ -789,6 +803,7 @@ def build_monthly(
                 "title_he": f"נוף תחרותי — {_domain_label(domain)}",
                 "headers": ["ישות", "מתחרים", "ספקים", "שותפים"],
                 "rows": [[r["name"], r["COMPETITOR_OF"], r["SUPPLIER_OF"], r["PARTNER_OF"]] for r in rows],
+                "group_he": _MARKET_LANDSCAPE_GROUP_HE,
             }
         )
     if top_events:
@@ -806,6 +821,7 @@ def build_monthly(
                     ]
                     for e in top_events
                 ],
+                "group_he": _MARKET_LANDSCAPE_GROUP_HE,
             }
         )
     if horizon:
@@ -824,11 +840,24 @@ def build_monthly(
                     ]
                     for c in horizon
                 ],
+                "group_he": _MARKET_LANDSCAPE_GROUP_HE,
+            }
+        )
+    # U13 (same class of issue fixed for the weekly report): suppress the watchlist section when
+    # nothing changed this month, rather than a heading over a "nothing new" placeholder line.
+    if watchlist_new:
+        tables.append(
+            {
+                "title_he": "שינויים ברשימת המעקב (Watchlist) — ישויות חדשות החודש",
+                "body_he": format_watchlist_he(watchlist_new),
+                "group_he": _MARKET_LANDSCAPE_GROUP_HE,
             }
         )
 
     # A14 (פטנטים ו-IP, 2026-09-06): monthly landscape summary by subdomain + top assignees, same
     # additive mechanism as the tables above. A failure here must never break the monthly report.
+    # R6-weekly: both grouped under "טכנולוגיה ו-IP" -- the prose again as a `tables`-list prose
+    # member (see the market-landscape note above).
     try:
         from eoa.patents.report_section import (
             collect_patents_landscape,
@@ -837,9 +866,17 @@ def build_monthly(
         )
 
         patents_landscape_data = collect_patents_landscape()
-        extra_sections.append(patents_landscape_extra_section(patents_landscape_data))
+        patents_prose = patents_landscape_extra_section(patents_landscape_data)
+        tables.append(
+            {
+                "title_he": patents_prose["title_he"],
+                "body_he": patents_prose["body_he"],
+                "group_he": _TECH_IP_GROUP_HE,
+            }
+        )
         patents_landscape_tbl = patents_landscape_table(patents_landscape_data)
         if patents_landscape_tbl:
+            patents_landscape_tbl["group_he"] = _TECH_IP_GROUP_HE
             tables.append(patents_landscape_tbl)
     except Exception as exc:
         log.warning("monthly_report_patents_section_failed", error=str(exc)[:160])
@@ -860,6 +897,8 @@ def build_monthly(
         extra_sections=extra_sections,
         tables=tables or None,
         include_toc=True,
+        domain_group_he=_DOMAIN_SECTIONS_GROUP_HE,
+        open_points_in_outlook=True,
     )
     save_docx(doc, docx_path)
     validate_docx(docx_path)
@@ -875,6 +914,8 @@ def build_monthly(
         title_text=MONTHLY_TITLE_TEXT,
         extra_sections=extra_sections,
         tables=tables or None,
+        domain_group_he=_DOMAIN_SECTIONS_GROUP_HE,
+        open_points_in_outlook=True,
     )
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(md_text, encoding="utf-8")
@@ -891,6 +932,8 @@ def build_monthly(
         extra_sections=extra_sections,
         tables=tables or None,
         include_toc=True,
+        domain_group_he=_DOMAIN_SECTIONS_GROUP_HE,
+        open_points_in_outlook=True,
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")

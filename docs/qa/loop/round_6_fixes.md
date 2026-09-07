@@ -453,3 +453,109 @@ failed**. `ruff check`/`ruff format --check` clean on `scripts/repair_round6.py`
 - `entities_cleanup` is not yet wired into any scheduled/routine job -- it is a manual, on-demand
   repair subcommand like `events`/`tenders`, run the same way (`--apply` after reviewing the dry
   run).
+
+### R6-weekly status
+
+Scope: `docs/REPORT_TEMPLATE_BENCHMARK.md` sec 3.2 (weekly budget ~14 H2, the D6
+`heading_count_within_budget` check allows 16) -- the live weekly/monthly had drifted to 33/36 H2
+headings (one per trend, one per domain section, one per Israel/tech/patents/BD table or prose
+block). Files touched: `agent/eoa/report/docx_builder.py` (section-level rendering only),
+`agent/eoa/report/weekly.py`, `agent/eoa/report/monthly.py`, `tests/unit/test_weekly_round6.py`
+(new, 26 cases, no DB/LLM). `agent/eoa/llm/prompts/report_weekly.md`/`report_monthly.md` needed no
+change -- the draft schema's section list is unchanged, only how `docx_builder` renders the
+already-existing `extra_sections`/`tables`/`draft.sections` data was restructured.
+
+#### Grouping mechanism (docx_builder.py)
+
+**Fix:** an optional `group_he` key on any `extra_sections` or `tables` dict: every entry sharing
+the same non-empty `group_he` now collapses into one `##`/Heading-1 parent (the `group_he` text)
+with each member rendered one level down (`###`/Heading-2, `docx`'s `Heading 2` style via a new
+`_heading2` helper) -- in markdown, html, *and* docx consistently (`_group_entries`/`_group_title`,
+new pure helpers; `_extra_sections_md/_html`, `_tables_md/_html`, and `build_docx`'s own
+extra-sections/tables loops all rewritten to use them). A member whose own `title_he` equals the
+group's `group_he` (the Israel report's pre-existing merged table) renders directly under the
+parent with no `###` of its own -- everyone else in the group gets one. A `tables`-list entry may
+also now be a *prose* member (`body_he`, no `headers`/`rows`), so a previously-`extra_sections` item
+(patents/IP writeup, acquisition watch, the monthly watchlist) can join a group whose other members
+are real tables, without leaving the `tables` list (which would have skipped
+`dedupe_rows_across_tables`'s cross-table row de-duplication and the per-row `related_trend_he`
+note). Two more additive, default-off hooks: `domain_group_he` (wraps `draft.sections` -- the
+per-domain narrative sections -- under one parent) and `open_points_in_outlook` (nests "נקודות
+פתוחות" as a child of "מבט קדימה" instead of its own top-level heading, right after the outlook
+text). Every hook defaults to `None`/`False`, so the **daily report call sites are byte-for-byte
+unaffected** (`eoa.report.daily` never passes any of them).
+
+**Wiring (weekly.py/monthly.py):** trend sections -> "מגמות השבוע"/"מגמות החודש"; domain sections ->
+"סקירה לפי תחום"; the Israel merged table + per-company summary table -> "תעשייה ישראלית" (the
+per-company table's title had its redundant "תעשייה ישראלית — " prefix stripped in `weekly.py`
+after receiving it from `israel_section.py`, since keeping it would give the D6
+`israel_single_table_with_type_column` check two headings matching the keyword again -- the exact
+failure mode this round fixes); tech-radar + developments-to-watch + patents/IP (now a `tables`-list
+prose member instead of an `extra_sections` entry) + new-patents table -> "טכנולוגיה ו-IP";
+acquisition-watch prose (also moved into `tables`) + the 90-day conference calendar -> "פיתוח עסקי".
+Monthly: the players-map table (one per domain), top-10-events table, 24-month conference horizon,
+and watchlist-changes prose (moved into `tables`) all group under "נוף השוק החודשי"; the patents
+landscape prose + table group under "טכנולוגיה ו-IP". Both reports also get `domain_group_he` and
+`open_points_in_outlook=True`.
+
+#### Live verification
+
+`set -a; . runtime/eoa.env; set +a; PYTHONPATH=agent PYTHONUTF8=1 EOA_PIPELINE=1
+.venv/Scripts/python.exe -c "from eoa.report.weekly import build_weekly; r=build_weekly();
+print(r.md, r.qa.passed)"` -> `output/reports/weekly_2026-09-07.md True` (qa_passed, report_id=76,
+cloud chain per `EOA_PIPELINE=1`, ~12 min). **H2 count: 15** (`grep -c "^## "` on the rendered
+markdown), down from 33, matching the brief's target structure exactly: שורה תחתונה, תקציר מנהלים,
+מה השתנה מאז הדוח הקודם, מגמות השבוע, סקירה לפי תחום, טבלת אירועים עסקיים, חקירות עומק, מבט קדימה,
+הנחות והפרכות, מעקב אינדיקטורים, סיכום מטא שבועי, פיתוח עסקי, טכנולוגיה ו-IP, תעשייה ישראלית, נספח
+מקורות. The docx sibling shows 16 Heading-1 paragraphs (the same 15 plus the TOC page's own "תוכן
+עניינים" heading, which `_planned_headings` never counts) and 40 Heading-2 children, confirming
+every group actually nested its members (8 trends under "מגמות השבוע", 6 domains under "סקירה לפי
+תחום", "לוח 90 הימים הקרובים" under "פיתוח עסקי", "רדאר טכנולוגי"/"התפתחויות שכדאי לעקוב"/"פטנטים
+ו-IP"/"פטנטים חדשים" under "טכנולוגיה ו-IP", "סיכום שבועי לפי חברה" under "תעשייה ישראלית" with no
+duplicate "תעשייה ישראלית" child heading).
+
+`score_D6` on that file (`run_link_check=False`): **87.2/100**, one failing check --
+`every_factual_exec_summary_sentence_cited` (one uncited sentence in the model-drafted executive
+summary, an `eoa.report.qa_citations`/prompt content matter, unrelated to this round's heading
+restructuring and outside this round's scope). `heading_count_within_budget` (15 <= 16) and
+`israel_single_table_with_type_column` (the exact D6 check this round's Israel-grouping fix
+targets) both **pass**, along with `bluf_present_and_short`, `what_changed_section_present`,
+`indicator_watchlist_table_present`, `outlook_likelihood_and_confidence_separated`,
+`exec_summary_no_filler_phrases`, `no_duplicate_sentences`, `no_row_repeated_across_tables`.
+
+#### Tests / lint
+
+`PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_weekly_round6.py
+tests/unit/test_report_weekly_monthly.py tests/unit/test_docx_builder.py
+tests/unit/test_renderer_round5.py tests/unit/test_bluf_round5.py -q -p no:cacheprovider` ->
+**26 new + 133 existing = 159 passed, 2 failed** (both in `test_report_weekly_monthly.py`, see
+"Known conflict" below). `ruff check`/`ruff format --check` clean on every touched file.
+
+**Known conflict with existing tests (not fixed, out of this round's file ownership):**
+`tests/unit/test_report_weekly_monthly.py::test_build_weekly_renders_docx_with_trend_section_and_calendar_table`
+asserts `"לוח 90 הימים הקרובים"` and the trend's own title are top-level (`Heading 1`) headings, and
+`::test_build_monthly_renders_players_map_table_per_domain` asserts a `"נוף תחרותי"`-prefixed
+top-level heading -- exactly the three heading classes this round intentionally demotes to
+`Heading 2` children (of "פיתוח עסקי"/"מגמות השבוע"/"נוף השוק החודשי" respectively). Confirmed: `2
+failed, 18 passed` running that file alone; every other test in it (citation counts, table cell
+values, QA pass/persist, month-range math, etc. -- the actual *content* those two tests also check)
+is unaffected. `test_report_weekly_monthly.py` is outside this round's file ownership (only
+`weekly.py`/`monthly.py`/`docx_builder.py` section-level rendering/`report_weekly.md`/
+`report_monthly.md`/a *new* `test_weekly_round6.py` are) -- **needs**: update those two
+assertions' `heading_texts` checks to look for the new group headings ("פיתוח עסקי"/"מגמות
+השבוע"/"נוף השוק החודשי") instead of the now-nested child headings, and/or additionally assert the
+child appears as a `Heading 2` under that parent (`tests/unit/test_weekly_round6.py`'s own grouping
+tests demonstrate the exact pattern).
+
+#### What's left
+
+- The two `test_report_weekly_monthly.py` assertions above need updating by whoever owns that file
+  (see "Known conflict").
+- `every_factual_exec_summary_sentence_cited` failed on this round's live rebuild -- a
+  `qa_citations`/prompt content issue (one uncited sentence slipped past the citation gate into the
+  exec summary), unrelated to and outside the scope of this round's heading-grouping work.
+- The monthly report's own live rebuild (`build_monthly()`) was not separately run this round (the
+  brief scoped the single live build to weekly); its grouping is exercised by
+  `test_weekly_round6.py`'s synthetic-draft tests and the unchanged `test_report_weekly_monthly.py`
+  monthly QA/persist tests (`test_build_monthly_qa_passes_and_persists` passes), but a live
+  `EOA_PIPELINE=1` monthly rebuild would be a good end-to-end confirmation in a future round.

@@ -253,7 +253,13 @@ def test_build_weekly_renders_docx_with_trend_section_and_calendar_table(patch_w
     paths = weekly.build_weekly(period_end=dt.date(2026, 9, 4))
     assert paths.docx.exists()
     doc = docx.Document(str(paths.docx))
-    heading_texts = {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"}
+    # Round 6 (R6-weekly): the calendar and the trend sections are H3 children under the grouped
+    # "פיתוח עסקי" / "מגמות השבוע" H2 parents -- collect both heading levels.
+    h1 = {p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"}
+    heading_texts = {
+        p.text for p in doc.paragraphs if p.style is not None and p.style.name in ("Heading 1", "Heading 2")
+    }
+    assert "פיתוח עסקי" in h1 and "מגמות השבוע" in h1
     assert "לוח 90 הימים הקרובים" in heading_texts
     assert "מגמה: פעילות מוגברת סביב Elbit Systems" in heading_texts
     assert "סיכום מטא שבועי — משוב משתמש (FR-11.4)" in heading_texts
@@ -392,7 +398,12 @@ def test_build_monthly_qa_passes_and_persists(patch_monthly_collectors):
 def test_build_monthly_renders_players_map_table_per_domain(patch_monthly_collectors):
     paths = monthly.build_monthly(period_end=dt.date(2026, 8, 31))
     doc = docx.Document(str(paths.docx))
-    heading_texts = [p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"]
+    # Round 6 (R6-weekly): players-map tables are H3 children of the "נוף השוק החודשי" H2 group.
+    h1 = [p.text for p in doc.paragraphs if p.style is not None and p.style.name == "Heading 1"]
+    heading_texts = [
+        p.text for p in doc.paragraphs if p.style is not None and p.style.name in ("Heading 1", "Heading 2")
+    ]
+    assert "נוף השוק החודשי" in h1
     assert any(t.startswith("נוף תחרותי") for t in heading_texts)
 
     players_table = next(

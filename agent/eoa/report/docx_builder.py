@@ -258,6 +258,57 @@ def dedupe_rows_across_tables(tables: list[dict[str, Any]] | None) -> list[dict[
     return out
 
 
+# R6-weekly (docs/qa/loop/round_6_fixes.md): the weekly/monthly reports had grown to 33-36 ``##``
+# headings (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.2 budgets ~14, the D6 heading-budget check
+# allows 16) -- most of them one-per-item lists (a trend, a domain section, a tech-radar table, a
+# patents table, ...) that read better grouped under one parent heading. ``group_he`` is an
+# optional key on an ``extra_sections`` dict OR a ``tables`` dict: every entry sharing the same
+# non-empty ``group_he`` value renders as ONE ``##``/Heading-1 parent (the group_he text itself)
+# with each member indented one level (``###``/Heading-2) under it, instead of each getting its own
+# top-level heading. A member whose own ``title_he`` equals the group's ``group_he`` (the "primary"
+# item in the group, e.g. the Israel report's pre-existing merged table) renders directly under the
+# parent with no ``###`` of its own -- everyone else in the group gets one. Entries with no
+# ``group_he`` (every existing caller, unchanged) render exactly as before. A ``tables`` entry may
+# also be a *prose* member -- no ``headers``/``rows``, just a ``body_he`` string -- so a
+# previously-``extra_sections`` item (e.g. the patents/IP writeup) can join a group whose other
+# members are real tables (which must stay in the ``tables`` list, not become inline Markdown, to
+# keep :func:`dedupe_rows_across_tables`'s cross-table row de-duplication and per-row
+# ``related_trend_he`` notes working on it).
+def _group_entries(
+    entries: list[dict[str, Any]], position: str | None = None
+) -> list[dict[str, Any] | list[dict[str, Any]]]:
+    """``entries`` (an ``extra_sections`` or ``tables`` list) with every run of same-``group_he``
+    items collapsed into one ``list[dict]`` (first-appearance order) alongside the untouched,
+    ungrouped dicts -- see module note above. ``position`` (``extra_sections`` only) first filters
+    to ``(entry.get("position") or "after_summary") == position``; leave it ``None`` for ``tables``,
+    which carry no ``position`` field of their own."""
+    if position is not None:
+        entries = [e for e in entries if (e.get("position") or "after_summary") == position]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    out: list[Any] = []
+    for entry in entries:
+        group_he = entry.get("group_he")
+        if not group_he:
+            out.append(entry)
+            continue
+        members = groups.get(group_he)
+        if members is None:
+            members = [entry]
+            groups[group_he] = members
+            out.append(members)  # same list object `members` -- later appends show up in `out` too
+        else:
+            members.append(entry)
+    return out
+
+
+def _group_title(entry: dict[str, Any] | list[dict[str, Any]]) -> str:
+    """The one heading text `entry` (a :func:`_group_entries` element) contributes to the report:
+    a group's own ``group_he``, or an ungrouped entry's ``title_he``."""
+    if isinstance(entry, list):
+        return entry[0].get("group_he") or ""
+    return entry.get("title_he") or ""
+
+
 def _md_blocks(text: str) -> list[tuple[str, Any]]:
     """Split a section body into render blocks: ``("table", (headers, rows))`` for a Markdown
     pipe table, ``("bullets", [items])`` for a run of ``- `` lines, ``("para", text)`` otherwise.
@@ -1126,45 +1177,46 @@ def _planned_headings(
     open_points: list[str],
     extra_sections: list[dict[str, Any]],
     tables: list[dict[str, Any]] | None,
+    *,
+    domain_group_he: str | None = None,
+    open_points_in_outlook: bool = False,
 ) -> list[str]:
     """The ordered list of top-level ("Heading 1") section titles this draft will actually render
     — computed once so a real table of contents (docx bookmarks / html anchors) can be built
-    without duplicating each renderer's own conditionals (F10)."""
+    without duplicating each renderer's own conditionals (F10).
+
+    R6-weekly: ``domain_group_he`` (default ``None``, the unchanged daily-report behaviour) wraps
+    ``draft.sections`` under one parent heading instead of listing each domain's own; a truthy
+    ``group_he`` on an ``extra_sections``/``tables`` entry likewise collapses same-group entries to
+    one heading (:func:`_group_entries`/:func:`_group_title`). ``open_points_in_outlook`` (default
+    ``False``) folds the "נקודות פתוחות" heading into "מבט קדימה" as a child instead of its own
+    top-level heading."""
     headings: list[str] = []
     if _draft_bluf_text(draft):
         # Round 5 P4 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.1#1): the native BLUF, when present,
         # always leads -- before any `before_summary` extra_sections and before the summary itself.
         headings.append("שורה תחתונה")
-    headings += [
-        sec.get("title_he") or ""
-        for sec in extra_sections
-        if (sec.get("position") or "after_summary") == "before_summary"
-    ]
+    headings += [_group_title(e) for e in _group_entries(extra_sections, "before_summary")]
     headings.append("תקציר מנהלים")
-    headings += [
-        sec.get("title_he") or ""
-        for sec in extra_sections
-        if (sec.get("position") or "after_summary") == "after_summary"
-    ]
-    headings += [section.title_he for section in draft.sections]
+    headings += [_group_title(e) for e in _group_entries(extra_sections, "after_summary")]
+    if domain_group_he and draft.sections:
+        headings.append(domain_group_he)
+    else:
+        headings += [section.title_he for section in draft.sections]
     if events:
         headings.append("טבלת אירועים עסקיים")
     if deep_search:
         headings.append("חקירות עומק")
-    if open_points:
+    if not open_points_in_outlook and open_points:
         headings.append("נקודות פתוחות")
-    if _draft_outlook_text(draft):
+    if _draft_outlook_text(draft) or (open_points_in_outlook and open_points):
         headings.append("מבט קדימה")
     if _draft_assumptions(draft):
         # Round 5 P4 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.4#10): rendered right after the outlook,
         # before the after_outlook extra_sections (indicator watchlist, etc.).
         headings.append("הנחות והפרכות")
-    headings += [
-        sec.get("title_he") or ""
-        for sec in extra_sections
-        if (sec.get("position") or "after_summary") == "after_outlook"
-    ]
-    headings += [t.get("title_he") or "" for t in (tables or [])]
+    headings += [_group_title(e) for e in _group_entries(extra_sections, "after_outlook")]
+    headings += [_group_title(e) for e in _group_entries(tables or [])]
     headings.append("נספח מקורות")
     return headings
 
@@ -1183,6 +1235,8 @@ def build_docx(
     extra_sections: list[dict[str, Any]] | None = None,
     tables: list[dict[str, Any]] | None = None,
     include_toc: bool = False,
+    domain_group_he: str | None = None,
+    open_points_in_outlook: bool = False,
 ) -> DocxDocument:
     """Build the full report ``Document`` in memory (caller saves it).
 
@@ -1197,6 +1251,9 @@ def build_docx(
     ``TOC`` field that displays nothing until the reader manually updates fields in Word; the
     weekly/monthly builders pass ``True`` to get a real, immediately-clickable bookmark-based TOC
     (:func:`_add_real_toc`) instead.
+
+    ``domain_group_he``/``open_points_in_outlook`` (R6-weekly, default off -- the daily report is
+    unaffected): see :func:`_planned_headings` for what each does.
     """
     tables = dedupe_rows_across_tables(tables) or None
     deep_search = deep_search or []
@@ -1208,7 +1265,16 @@ def build_docx(
     open_points = list(draft.open_points_he or [])
     open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
 
-    headings = _planned_headings(draft, events, deep_search, open_points, extra_sections, tables)
+    headings = _planned_headings(
+        draft,
+        events,
+        deep_search,
+        open_points,
+        extra_sections,
+        tables,
+        domain_group_he=domain_group_he,
+        open_points_in_outlook=open_points_in_outlook,
+    )
     bookmark_names = [f"eoa_toc_{i}" for i in range(len(headings))]
     bookmarks = iter(bookmark_names)
     toc_entries = list(zip(headings, bookmark_names, strict=True))
@@ -1220,6 +1286,33 @@ def build_docx(
             if name:
                 _add_bookmark(paragraph, name)
         return paragraph
+
+    def _heading2(doc: DocxDocument, text: str):
+        # R6-weekly: the ``###``/child heading under a grouped ``##`` parent -- not part of the
+        # TOC's own bookmark list (only top-level `_heading1` headings are).
+        return add_mixed_paragraph(doc, text, style="Heading 2")
+
+    def _render_extra_group(doc: DocxDocument, position: str) -> None:
+        for entry in _group_entries(extra_sections, position):
+            if isinstance(entry, list):
+                group_he = entry[0].get("group_he") or ""
+                _heading1(doc, group_he)
+                for sec in entry:
+                    title = sec.get("title_he") or ""
+                    if title and title != group_he:
+                        _heading2(doc, title)
+                    _add_md_body_docx(doc, sec.get("body_he") or "")
+            else:
+                _heading1(doc, entry.get("title_he") or "")
+                _add_md_body_docx(doc, entry.get("body_he") or "")
+
+    def _render_table_entry_docx(doc: DocxDocument, tbl: dict[str, Any]) -> None:
+        if "headers" in tbl or "rows" in tbl:
+            if tbl.get("note_he"):
+                add_mixed_paragraph(doc, tbl["note_he"])
+            _add_generic_table_body(doc, tbl.get("headers") or [], tbl.get("rows") or [])
+        elif tbl.get("body_he"):
+            _add_md_body_docx(doc, tbl["body_he"])
 
     doc = docx.Document()
     _configure_document_defaults(doc)
@@ -1260,11 +1353,7 @@ def build_docx(
         for run in bluf_p.runs:
             run.font.bold = True
 
-    for sec in extra_sections:
-        if (sec.get("position") or "after_summary") != "before_summary":
-            continue
-        _heading1(doc, sec.get("title_he") or "")
-        _add_md_body_docx(doc, sec.get("body_he") or "")
+    _render_extra_group(doc, "before_summary")
 
     _heading1(doc, "תקציר מנהלים")
     add_mixed_paragraph(doc, _draft_exec_summary_text(draft) or "אין תקציר לתקופה זו.")
@@ -1279,16 +1368,19 @@ def build_docx(
         for run in note_p.runs:
             run.font.italic = True
 
-    for sec in extra_sections:
-        if (sec.get("position") or "after_summary") != "after_summary":
-            continue
-        _heading1(doc, sec.get("title_he") or "")
-        _add_md_body_docx(doc, sec.get("body_he") or "")
+    _render_extra_group(doc, "after_summary")
 
-    for section in draft.sections:
-        _heading1(doc, section.title_he)
-        for para in _split_paragraphs(_section_prose(section)):
-            add_mixed_paragraph(doc, para)
+    if domain_group_he and draft.sections:
+        _heading1(doc, domain_group_he)
+        for section in draft.sections:
+            _heading2(doc, section.title_he)
+            for para in _split_paragraphs(_section_prose(section)):
+                add_mixed_paragraph(doc, para)
+    else:
+        for section in draft.sections:
+            _heading1(doc, section.title_he)
+            for para in _split_paragraphs(_section_prose(section)):
+                add_mixed_paragraph(doc, para)
 
     if events:
         _heading1(doc, "טבלת אירועים עסקיים")
@@ -1298,15 +1390,20 @@ def build_docx(
         _heading1(doc, "חקירות עומק")
         _add_deep_search_section(doc, deep_search)
 
-    if open_points:
+    if not open_points_in_outlook and open_points:
         _heading1(doc, "נקודות פתוחות")
         for point in open_points:
             add_mixed_paragraph(doc, point, style="List Bullet")
 
     outlook_text = _draft_outlook_text(draft)
-    if outlook_text:
+    if outlook_text or (open_points_in_outlook and open_points):
         _heading1(doc, "מבט קדימה")
-        add_mixed_paragraph(doc, outlook_text)
+        if outlook_text:
+            add_mixed_paragraph(doc, outlook_text)
+        if open_points_in_outlook and open_points:
+            _heading2(doc, "נקודות פתוחות")
+            for point in open_points:
+                add_mixed_paragraph(doc, point, style="List Bullet")
 
     assumptions = _draft_assumptions(draft)
     if assumptions:
@@ -1314,17 +1411,20 @@ def build_docx(
         for assumption in assumptions:
             add_mixed_paragraph(doc, _render_assumption(assumption), style="List Bullet")
 
-    for sec in extra_sections:
-        if (sec.get("position") or "after_summary") != "after_outlook":
-            continue
-        _heading1(doc, sec.get("title_he") or "")
-        _add_md_body_docx(doc, sec.get("body_he") or "")
+    _render_extra_group(doc, "after_outlook")
 
-    for tbl in tables or []:
-        _heading1(doc, tbl.get("title_he") or "")
-        if tbl.get("note_he"):
-            add_mixed_paragraph(doc, tbl["note_he"])
-        _add_generic_table_body(doc, tbl.get("headers") or [], tbl.get("rows") or [])
+    for entry in _group_entries(tables or []):
+        if isinstance(entry, list):
+            group_he = entry[0].get("group_he") or ""
+            _heading1(doc, group_he)
+            for tbl in entry:
+                title = tbl.get("title_he") or ""
+                if title and title != group_he:
+                    _heading2(doc, title)
+                _render_table_entry_docx(doc, tbl)
+        else:
+            _heading1(doc, entry.get("title_he") or "")
+            _render_table_entry_docx(doc, entry)
 
     _heading1(doc, "נספח מקורות")
     _add_sources_appendix(doc, items)
@@ -1388,10 +1488,22 @@ def _qa_warning_line(qa: QAResult | None) -> str | None:
 
 
 def _extra_sections_md(lines: list[str], sections: list[dict[str, Any]], position: str) -> None:
-    for sec in sections:
-        if (sec.get("position") or "after_summary") != position:
-            continue
-        lines += [f"## {sec.get('title_he') or ''}", "", _md_citations(sec.get("body_he") or ""), ""]
+    for entry in _group_entries(sections, position):
+        if isinstance(entry, list):
+            group_he = entry[0].get("group_he") or ""
+            lines += [f"## {group_he}", ""]
+            for sec in entry:
+                title = sec.get("title_he") or ""
+                if title and title != group_he:
+                    lines += [f"### {title}", ""]
+                lines += [_md_citations(sec.get("body_he") or ""), ""]
+        else:
+            lines += [
+                f"## {entry.get('title_he') or ''}",
+                "",
+                _md_citations(entry.get("body_he") or ""),
+                "",
+            ]
 
 
 def _md_cell(value: Any) -> str:
@@ -1411,23 +1523,46 @@ def _md_citations(text: str) -> str:
     return _CITATION_RE.sub(lambda m: f"[{m.group(1)}](#src-{m.group(1)})", text or "")
 
 
+def _render_one_table_md(lines: list[str], tbl: dict[str, Any]) -> None:
+    """One table's body (note/trend line + header/rows) -- no heading; see :func:`_tables_md`."""
+    headers = tbl.get("headers") or []
+    if tbl.get("note_he"):
+        lines += [_md_citations(tbl["note_he"]), ""]
+    if tbl.get("related_trend_he"):
+        # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
+        lines += [_md_citations(f"מגמה: {tbl['related_trend_he']}"), ""]
+    lines += [
+        "| " + " | ".join(headers) + " |",
+        "|" + "---|" * len(headers),
+    ]
+    for row in tbl.get("rows") or []:
+        cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
+        lines.append("| " + " | ".join(_md_cell(v) for v in cells) + " |")
+    lines.append("")
+
+
+def _render_table_entry_md(lines: list[str], tbl: dict[str, Any]) -> None:
+    """A ``tables``-list entry's body: a real table, or (R6-weekly, a grouped member only) plain
+    Markdown prose (``body_he``, no ``headers``/``rows``) -- see :func:`_group_entries`'s note."""
+    if "headers" in tbl or "rows" in tbl:
+        _render_one_table_md(lines, tbl)
+    elif tbl.get("body_he"):
+        lines += [_md_citations(tbl["body_he"]), ""]
+
+
 def _tables_md(lines: list[str], tables: list[dict[str, Any]]) -> None:
-    for tbl in tables:
-        headers = tbl.get("headers") or []
-        lines += [f"## {tbl.get('title_he') or ''}", ""]
-        if tbl.get("note_he"):
-            lines += [_md_citations(tbl["note_he"]), ""]
-        if tbl.get("related_trend_he"):
-            # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
-            lines += [_md_citations(f"מגמה: {tbl['related_trend_he']}"), ""]
-        lines += [
-            "| " + " | ".join(headers) + " |",
-            "|" + "---|" * len(headers),
-        ]
-        for row in tbl.get("rows") or []:
-            cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
-            lines.append("| " + " | ".join(_md_cell(v) for v in cells) + " |")
-        lines.append("")
+    for entry in _group_entries(tables):
+        if isinstance(entry, list):
+            group_he = entry[0].get("group_he") or ""
+            lines += [f"## {group_he}", ""]
+            for tbl in entry:
+                title = tbl.get("title_he") or ""
+                if title and title != group_he:
+                    lines += [f"### {title}", ""]
+                _render_table_entry_md(lines, tbl)
+        else:
+            lines += [f"## {entry.get('title_he') or ''}", ""]
+            _render_table_entry_md(lines, entry)
 
 
 def render_markdown(
@@ -1442,9 +1577,12 @@ def render_markdown(
     title_text: str | None = None,
     extra_sections: list[dict[str, Any]] | None = None,
     tables: list[dict[str, Any]] | None = None,
+    domain_group_he: str | None = None,
+    open_points_in_outlook: bool = False,
 ) -> str:
     """Render the report as GitHub-flavoured Markdown (see :func:`build_docx` for the shared,
-    additive ``title_text``/``extra_sections``/``tables`` hooks)."""
+    additive ``title_text``/``extra_sections``/``tables``/``domain_group_he``/
+    ``open_points_in_outlook`` hooks)."""
     tables = dedupe_rows_across_tables(tables) or None
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
@@ -1480,8 +1618,13 @@ def render_markdown(
 
     _extra_sections_md(lines, extra_sections, "after_summary")
 
-    for section in draft.sections:
-        lines += [f"## {section.title_he}", "", _md_citations(_section_prose(section)), ""]
+    if domain_group_he and draft.sections:
+        lines += [f"## {domain_group_he}", ""]
+        for section in draft.sections:
+            lines += [f"### {section.title_he}", "", _md_citations(_section_prose(section)), ""]
+    else:
+        for section in draft.sections:
+            lines += [f"## {section.title_he}", "", _md_citations(_section_prose(section)), ""]
 
     if events:
         lines += [
@@ -1528,14 +1671,20 @@ def render_markdown(
 
     open_points = list(draft.open_points_he or [])
     open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
-    if open_points:
+    if not open_points_in_outlook and open_points:
         lines += ["## נקודות פתוחות", ""]
         lines += [f"- {_md_citations(p)}" for p in open_points]
         lines.append("")
 
     outlook_text = _draft_outlook_text(draft)
-    if outlook_text:
-        lines += ["## מבט קדימה", "", _md_citations(outlook_text), ""]
+    if outlook_text or (open_points_in_outlook and open_points):
+        lines += ["## מבט קדימה", ""]
+        if outlook_text:
+            lines += [_md_citations(outlook_text), ""]
+        if open_points_in_outlook and open_points:
+            lines += ["### נקודות פתוחות", ""]
+            lines += [f"- {_md_citations(p)}" for p in open_points]
+            lines.append("")
 
     assumptions = _draft_assumptions(draft)
     if assumptions:
@@ -1615,48 +1764,86 @@ def _html_cell(value: Any) -> str:
     return _html_link(text) if _looks_like_url(text) else _bidi_html_with_citations(text)
 
 
+def _h3_html(title: str) -> str:
+    """R6-weekly: a grouped member's child heading -- no anchor id (only top-level ``h2()``
+    headings get one, for the TOC/heading-count list)."""
+    return f"<h3>{_bidi_html(title)}</h3>"
+
+
+def _render_prose_body_html(parts: list[str], body_he: str) -> None:
+    for kind, payload in _md_blocks(body_he or ""):
+        if kind == "table":
+            headers, rows = payload
+            parts.append(
+                "<table><thead><tr>"
+                + "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+                + "</tr></thead><tbody>"
+            )
+            for row in rows:
+                parts.append("<tr>" + "".join(f"<td>{_html_cell(v)}</td>" for v in row) + "</tr>")
+            parts.append("</tbody></table>")
+        elif kind == "bullets":
+            parts.append("<ul>" + "".join(f"<li>{_bidi_html(it)}</li>" for it in payload) + "</ul>")
+        elif payload:
+            parts.append(f"<p>{_bidi_html(payload)}</p>")
+
+
 def _extra_sections_html(parts: list[str], sections: list[dict[str, Any]], position: str, h2) -> None:
-    for sec in sections:
-        if (sec.get("position") or "after_summary") != position:
-            continue
-        parts.append(h2(sec.get("title_he") or ""))
-        for kind, payload in _md_blocks(sec.get("body_he") or ""):
-            if kind == "table":
-                headers, rows = payload
-                parts.append(
-                    "<table><thead><tr>"
-                    + "".join(f"<th>{html.escape(h)}</th>" for h in headers)
-                    + "</tr></thead><tbody>"
-                )
-                for row in rows:
-                    parts.append("<tr>" + "".join(f"<td>{_html_cell(v)}</td>" for v in row) + "</tr>")
-                parts.append("</tbody></table>")
-            elif kind == "bullets":
-                parts.append("<ul>" + "".join(f"<li>{_bidi_html(it)}</li>" for it in payload) + "</ul>")
-            elif payload:
-                parts.append(f"<p>{_bidi_html(payload)}</p>")
+    for entry in _group_entries(sections, position):
+        if isinstance(entry, list):
+            group_he = entry[0].get("group_he") or ""
+            parts.append(h2(group_he))
+            for sec in entry:
+                title = sec.get("title_he") or ""
+                if title and title != group_he:
+                    parts.append(_h3_html(title))
+                _render_prose_body_html(parts, sec.get("body_he") or "")
+        else:
+            parts.append(h2(entry.get("title_he") or ""))
+            _render_prose_body_html(parts, entry.get("body_he") or "")
+
+
+def _render_one_table_html(parts: list[str], tbl: dict[str, Any]) -> None:
+    """One table's body (note/trend line + header/rows) -- no heading; see :func:`_tables_html`."""
+    headers = tbl.get("headers") or []
+    if tbl.get("note_he"):
+        parts.append(f"<p>{_bidi_html(tbl['note_he'])}</p>")
+    table_trend = tbl.get("related_trend_he")
+    if table_trend:
+        # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
+        parts.append(f"<p>{_bidi_html('מגמה: ' + str(table_trend))}</p>")
+    parts.append(
+        "<table><thead><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in headers) + "</tr></thead><tbody>"
+    )
+    for row in tbl.get("rows") or []:
+        row_cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
+        cells = "".join(f"<td>{_html_cell(v)}</td>" for v in row_cells)
+        parts.append(f"<tr>{cells}</tr>")
+    parts.append("</tbody></table>")
+
+
+def _render_table_entry_html(parts: list[str], tbl: dict[str, Any]) -> None:
+    """A ``tables``-list entry's body: a real table, or (R6-weekly, a grouped member only) plain
+    prose (``body_he``, no ``headers``/``rows``) -- see :func:`_group_entries`'s note."""
+    if "headers" in tbl or "rows" in tbl:
+        _render_one_table_html(parts, tbl)
+    elif tbl.get("body_he"):
+        _render_prose_body_html(parts, tbl["body_he"])
 
 
 def _tables_html(parts: list[str], tables: list[dict[str, Any]], h2) -> None:
-    for tbl in tables:
-        headers = tbl.get("headers") or []
-        parts.append(h2(tbl.get("title_he") or ""))
-        if tbl.get("note_he"):
-            parts.append(f"<p>{_bidi_html(tbl['note_he'])}</p>")
-        table_trend = tbl.get("related_trend_he")
-        if table_trend:
-            # W5 (docs/REPORT_TEMPLATE_BENCHMARK.md 3.2#9): a table-level trend cross-reference.
-            parts.append(f"<p>{_bidi_html('מגמה: ' + str(table_trend))}</p>")
-        parts.append(
-            "<table><thead><tr>"
-            + "".join(f"<th>{html.escape(h)}</th>" for h in headers)
-            + "</tr></thead><tbody>"
-        )
-        for row in tbl.get("rows") or []:
-            row_cells = _apply_row_trend_note(_row_cells(row), _row_related_trend(row))
-            cells = "".join(f"<td>{_html_cell(v)}</td>" for v in row_cells)
-            parts.append(f"<tr>{cells}</tr>")
-        parts.append("</tbody></table>")
+    for entry in _group_entries(tables):
+        if isinstance(entry, list):
+            group_he = entry[0].get("group_he") or ""
+            parts.append(h2(group_he))
+            for tbl in entry:
+                title = tbl.get("title_he") or ""
+                if title and title != group_he:
+                    parts.append(_h3_html(title))
+                _render_table_entry_html(parts, tbl)
+        else:
+            parts.append(h2(entry.get("title_he") or ""))
+            _render_table_entry_html(parts, entry)
 
 
 _EOA_HTML_STYLE = """
@@ -1761,6 +1948,8 @@ def render_html(
     extra_sections: list[dict[str, Any]] | None = None,
     tables: list[dict[str, Any]] | None = None,
     include_toc: bool = False,
+    domain_group_he: str | None = None,
+    open_points_in_outlook: bool = False,
 ) -> str:
     """Render the report as a self-contained, standalone RTL HTML document — a full
     ``<!doctype html>`` page with its own embedded stylesheet (scoped under the ``.eoa-report``
@@ -1793,7 +1982,16 @@ def render_html(
     open_points = list(draft.open_points_he or [])
     open_points += [c.get("question") or "" for c in open_clarifications if c.get("question")]
 
-    headings = _planned_headings(draft, events, deep_search, open_points, extra_sections, tables)
+    headings = _planned_headings(
+        draft,
+        events,
+        deep_search,
+        open_points,
+        extra_sections,
+        tables,
+        domain_group_he=domain_group_he,
+        open_points_in_outlook=open_points_in_outlook,
+    )
     heading_ids = [f"sec-{i}" for i in range(len(headings))]
     id_iter = iter(heading_ids)
 
@@ -1838,10 +2036,17 @@ def render_html(
 
     _extra_sections_html(parts, extra_sections, "after_summary", h2)
 
-    for section in draft.sections:
-        parts.append(h2(section.title_he))
-        for para in _split_paragraphs(_section_prose(section)):
-            parts.append(f"<p>{cite_links(para)}</p>")
+    if domain_group_he and draft.sections:
+        parts.append(h2(domain_group_he))
+        for section in draft.sections:
+            parts.append(_h3_html(section.title_he))
+            for para in _split_paragraphs(_section_prose(section)):
+                parts.append(f"<p>{cite_links(para)}</p>")
+    else:
+        for section in draft.sections:
+            parts.append(h2(section.title_he))
+            for para in _split_paragraphs(_section_prose(section)):
+                parts.append(f"<p>{cite_links(para)}</p>")
 
     if events:
         parts.append(h2("טבלת אירועים עסקיים"))
@@ -1893,16 +2098,22 @@ def render_html(
             parts.append(li)
         parts.append("</ul>")
 
-    if open_points:
+    if not open_points_in_outlook and open_points:
         parts.append(h2("נקודות פתוחות"))
         parts.append("<ul>")
         parts += [f"<li>{_bidi_html(p)}</li>" for p in open_points]
         parts.append("</ul>")
 
     outlook_text = _draft_outlook_text(draft)
-    if outlook_text:
+    if outlook_text or (open_points_in_outlook and open_points):
         parts.append(h2("מבט קדימה"))
-        parts.append(f"<p>{cite_links(outlook_text)}</p>")
+        if outlook_text:
+            parts.append(f"<p>{cite_links(outlook_text)}</p>")
+        if open_points_in_outlook and open_points:
+            parts.append(_h3_html("נקודות פתוחות"))
+            parts.append("<ul>")
+            parts += [f"<li>{_bidi_html(p)}</li>" for p in open_points]
+            parts.append("</ul>")
 
     assumptions = _draft_assumptions(draft)
     if assumptions:
