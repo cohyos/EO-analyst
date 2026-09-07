@@ -527,6 +527,157 @@ def outlook_indicator_texts(outlook: list[Any]) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# R10-reports #3 (round-9 judge D6 #9): widened evidence candidates for the daily table
+# --------------------------------------------------------------------------
+
+#: The daily report's own items window is ~24h (`eoa.report.daily.collect_items`), which starves
+#: `_evidence_cell`'s fresh-match fallback of candidates: even after R9's Hebrew-term-matching fix
+#: (weekly 2/16 -> 17/19), daily stayed at 1/8 because a day simply doesn't contain enough items
+#: for a 30-day-lived indicator to keep matching. Widens the *evidence-matching* candidate pool
+#: only (never the maturation/drop test in :func:`check_maturation`, never the table's own row
+#: selection) to this many trailing days of items **and** business events, for ``kind == "daily"``
+#: only (weekly/monthly already have a naturally wider per-issue item window and were not the
+#: round-9 judge's finding here).
+_DAILY_EVIDENCE_WINDOW_DAYS = 7
+
+#: Cap on each widened-candidate DB query -- purely a defensive bound (this is a decorative,
+#: best-effort widening, never load-bearing for report correctness), not a claim that 400 is the
+#: "right" number of trailing-week items/events.
+_DAILY_EVIDENCE_CANDIDATE_LIMIT = 400
+
+#: Same in-scope level filter `eoa.report.daily.collect_items` itself uses at its widest fallback
+#: (`_LEVELS_FALLBACK`) -- a local copy (not an import) per this module's/`eoa.report.product_line`'s
+#: own "small local copy, not a cross-module private import" convention.
+_EVIDENCE_INSCOPE_LEVELS = ("red", "orange", "yellow")
+
+
+def _fetch_recent_evidence_items(
+    now: dt.datetime, *, days: int = _DAILY_EVIDENCE_WINDOW_DAYS
+) -> list[dict[str, Any]]:
+    """Items published in the trailing ``days`` days (in-scope levels only, same clean/dedup
+    filter as `eoa.report.daily.collect_items`), shaped for :func:`_item_matches_indicator`'s own
+    ``title``/``summary_he``/``so_what_he`` haystack *and* directly usable as a citation-registry
+    entry (``id``/``title``/``source_name``/``url``/``published_at``). Decorative: any DB failure
+    returns ``[]`` (no widened candidates), same fail-soft convention as every other DB call in
+    this module."""
+    start = now - dt.timedelta(days=days)
+    try:
+        with connection(timeout=5) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.id, i.title, i.summary_he, i.so_what_he, i.published_at,
+                       COALESCE(src.name, i.url) AS source_name, i.url
+                FROM items i
+                LEFT JOIN sources src ON src.id = i.source_id
+                WHERE i.security_status = 'clean'
+                  AND i.dedup_of IS NULL
+                  AND i.level = ANY(%(levels)s)
+                  AND COALESCE(i.published_at, i.fetched_at, i.created_at) BETWEEN %(start)s AND %(end)s
+                ORDER BY i.published_at DESC NULLS LAST
+                LIMIT %(limit)s
+                """,
+                {
+                    "levels": list(_EVIDENCE_INSCOPE_LEVELS),
+                    "start": start,
+                    "end": now,
+                    "limit": _DAILY_EVIDENCE_CANDIDATE_LIMIT,
+                },
+            )
+            return cur.fetchall()
+    except Exception as exc:
+        log.warning("indicator_evidence_recent_items_failed", error=str(exc)[:160])
+        return []
+
+
+def _fetch_recent_evidence_events(
+    now: dt.datetime, *, days: int = _DAILY_EVIDENCE_WINDOW_DAYS
+) -> list[dict[str, Any]]:
+    """Business events in the trailing ``days`` days, shaped like :func:`_fetch_recent_evidence_items`
+    -- ``id``/``source_name``/``url``/``published_at`` are the event's *own trigger item*'s
+    (``e.item_id``), matching ``eoa.report.daily._extend_citation_registry``'s own "an event cites
+    through its source item" convention, so a match here can be registered into ``citation_items``
+    without inventing a second, event-scoped id space. ``title``/``summary_he`` are the event's own
+    (an indicator about a decision/deployment often only ever appears in the structured events
+    table, worded quite differently from the triggering item's own headline). Decorative, same
+    fail-soft convention as :func:`_fetch_recent_evidence_items`."""
+    start_date, end_date = (now - dt.timedelta(days=days)).date(), now.date()
+    try:
+        with connection(timeout=5) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.item_id AS id, e.title AS ev_title, e.program, e.summary_he AS ev_summary_he,
+                       i.title AS item_title, i.published_at,
+                       COALESCE(src.name, i.url) AS source_name, i.url
+                FROM events e
+                JOIN items i ON i.id = e.item_id
+                LEFT JOIN sources src ON src.id = i.source_id
+                WHERE COALESCE(e.date, i.published_at::date) BETWEEN %(start)s AND %(end)s
+                  AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
+                ORDER BY e.date DESC NULLS LAST, e.id DESC
+                LIMIT %(limit)s
+                """,
+                {"start": start_date, "end": end_date, "limit": _DAILY_EVIDENCE_CANDIDATE_LIMIT},
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        log.warning("indicator_evidence_recent_events_failed", error=str(exc)[:160])
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        title = r.get("ev_title") or r.get("program") or r.get("item_title")
+        out.append(
+            {
+                "id": r.get("id"),
+                "title": title,
+                "summary_he": r.get("ev_summary_he"),
+                "so_what_he": None,
+                "source_name": r.get("source_name"),
+                "url": r.get("url"),
+                "published_at": r.get("published_at"),
+            }
+        )
+    return out
+
+
+def _widen_daily_evidence_candidates(now: dt.datetime | None) -> list[dict[str, Any]]:
+    """Combined trailing-week items + events candidate pool for the daily table's evidence
+    fresh-match fallback (see :data:`_DAILY_EVIDENCE_WINDOW_DAYS`'s own docstring note). ``[]`` on
+    any failure -- the caller then simply falls back to today's own ``items``, exactly as before
+    this fix."""
+    now = now or dt.datetime.now(dt.UTC)
+    return _fetch_recent_evidence_items(now) + _fetch_recent_evidence_events(now)
+
+
+def _extend_registry_with_candidates(
+    citation_items: list[dict[str, Any]], candidates: list[dict[str, Any]]
+) -> None:
+    """Mutate ``citation_items`` in place, appending any ``candidates`` entry (``id``/``title``/
+    ``source_name``/``url``/``published_at``) not already present by ``id``, stamping it with a
+    fresh registry number -- a local copy of ``eoa.report.daily._extend_registry_with_rows``'s own
+    exact convention (never imported: a report-module-to-report-module private import; this
+    module already keeps its own local copies elsewhere, e.g. :data:`_KEY_TERM_RE`'s sibling
+    Hebrew constants). Idempotent: an ``id`` already in ``citation_items`` is left untouched (kept
+    at its existing ``n``), so calling this more than once per build is always safe."""
+    by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
+    next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
+    for cand in candidates:
+        cid = cand.get("id")
+        if cid is None or cid in by_id:
+            continue
+        entry = {
+            "id": cid,
+            "n": next_n,
+            "title": cand.get("title"),
+            "source_name": cand.get("source_name"),
+            "url": cand.get("url"),
+            "published_at": cand.get("published_at"),
+        }
+        citation_items.append(entry)
+        by_id[cid] = entry
+        next_n += 1
+
+
+# --------------------------------------------------------------------------
 # rendering
 # --------------------------------------------------------------------------
 
@@ -675,10 +826,25 @@ def build_indicator_watchlist_section(
     :func:`process_indicator_watchlist` on ``draft.outlook``'s own text and renders the table.
     Returns ``(extra_section_or_none, rows)`` — the caller folds ``rows`` (ids tagged ``new``/
     ``open``) into its own ``reports.report_state.indicator_ids`` (see
-    ``eoa.report.deltas.build_report_state``)."""
+    ``eoa.report.deltas.build_report_state``).
+
+    R10-reports #3: for ``kind == "daily"`` only, additionally widens the evidence-matching
+    candidate pool with the trailing week's items + events (:func:`_widen_daily_evidence_candidates`)
+    -- folded into ``citation_items`` in place (fresh registry numbers, see
+    :func:`_extend_registry_with_candidates`) so a widened-window match is a real, appendix-backed
+    ``[n]`` citation like any other, never a dangling reference. Maturation/drop
+    (:func:`process_indicator_watchlist`, above) is computed *before* this widening and is
+    untouched by it -- only the evidence column's own fresh-match fallback sees the wider pool."""
     texts = outlook_indicator_texts(outlook)
     rows = process_indicator_watchlist(kind, texts, items, source_report_id=source_report_id, now=now)
-    return render_watchlist_table(rows, citation_items, items, kind=kind), rows
+    evidence_items = items
+    if kind == "daily":
+        candidates = _widen_daily_evidence_candidates(now)
+        if candidates:
+            _extend_registry_with_candidates(citation_items, candidates)
+            seen_ids = {it.get("id") for it in items if it.get("id") is not None}
+            evidence_items = items + [c for c in candidates if c.get("id") not in seen_ids]
+    return render_watchlist_table(rows, citation_items, evidence_items, kind=kind), rows
 
 
 __all__ = [

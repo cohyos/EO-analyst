@@ -588,6 +588,10 @@ def collect_deep_search(
             {
                 "job_id": row["job_id"],
                 "trigger_item_id": row.get("trigger_item_id"),
+                # R10-links: alias of `trigger_item_id` under the name
+                # `eoa.investigations.links`/the API layer expect -- added, never replacing
+                # `trigger_item_id` itself (other callers/tests already depend on that name).
+                "item_id": row.get("trigger_item_id"),
                 "trigger_title": row.get("trigger_title"),
                 "trigger_url": row.get("trigger_url"),
                 "question": payload.get("question"),
@@ -613,7 +617,98 @@ def collect_deep_search(
                 "trigger_item_dedup_of": row.get("trigger_item_dedup_of"),
             }
         )
+    job_ids = [entry["job_id"] for entry in out]
+    titles_by_job_url = _fetch_source_titles(job_ids)
+    for entry in out:
+        entry["has_low_quality_source"] = _entry_has_low_quality_source(entry, titles_by_job_url)
     return reconcile_deep_search_reruns(out)
+
+
+#: R10-reports #1 (round-9 judge worst #2): job 146's sole cited source
+#: (``sources[0]``) was a Cloudflare bot-challenge interstitial -- its one ``engine='fetch'``
+#: ``investigation_log`` row logged ``title='Just a moment...'`` -- that the pre-round-9 code
+#: silently counted as a real read and cited at confidence 0.85. Its clean rerun, job 160, ran
+#: after round-9's ``eoa.search.deep_search._low_quality_page_reason`` fix landed and correctly
+#: discarded that exact URL (``investigation_log.notes`` for the same URL/job: "discarded,
+#: low-quality page: body too short (16 chars < 400)"), settling for an honest ``partial``/0.1
+#: answer from a different, clean source instead. Yet the *old* reconciliation (`_OUTCOME_RANK`
+#: tier only) still preferred job 146's stale, badly-sourced `found` over job 160's honest,
+#: clean `partial` -- an architectural gap, not a timing gap (docs/qa/loop/round_9_judge.md).
+#:
+#: This local copy of ``deep_search._LOW_QUALITY_PAGE_SIGNATURES`` (never imported -- for a
+#: report-layer module to import a private name from the search/agent-layer `eoa.search.deep_search`
+#: module -- itself frozen this round -- would pull that heavy module's own LLM/search
+#: dependencies into every report build's import path for a nine-string tuple; same "local copy,
+#: not a cross-module private import" convention this module's own
+#: :data:`_EVENT_KIND_LABELS_HE_FALLBACK` already follows, see its docstring note) is matched
+#: only against each cited source URL's own ``investigation_log.title`` -- never re-fetched live
+#: at report-build time. That title is persisted at fetch time regardless of whether the
+#: discard-logic existed when the job ran, so this catches job 146's pre-fix run exactly as well
+#: as any future one. A short subset of the full signature list is enough here: a fetched page's
+#: ``<title>`` is what actually carries an interstitial's own tell ("Just a moment...", "Attention
+#: Required! | Cloudflare", ...); the longer body-text-only signatures
+#: (:data:`_low_quality_page_reason`'s "please enable javascript" etc.) essentially never appear
+#: in a page's ``<title>`` and are omitted here as noise, not coverage.
+_LOW_QUALITY_SOURCE_TITLE_SIGNATURES = (
+    "just a moment",
+    "checking your browser",
+    "cf-browser-verification",
+    "verify you are human",
+    "verify you are a human",
+    "attention required! | cloudflare",
+    "sorry, you have been blocked",
+    "access denied",
+    "403 forbidden",
+)
+
+
+def _title_is_low_quality_signature(title: str | None) -> bool:
+    """Whether a fetched page's own ``<title>`` (as logged to ``investigation_log.title`` at
+    fetch time) reads as a challenge/consent/access-denial interstitial rather than a real
+    article -- see :data:`_LOW_QUALITY_SOURCE_TITLE_SIGNATURES`'s own docstring note."""
+    if not title:
+        return False
+    haystack = title.casefold()
+    return any(sig in haystack for sig in _LOW_QUALITY_SOURCE_TITLE_SIGNATURES)
+
+
+def _fetch_source_titles(job_ids: list[int]) -> dict[tuple[int, str], str | None]:
+    """``{(job_id, url): title}`` for every ``engine='fetch'`` ``investigation_log`` row (title
+    may itself be ``None``/empty for a page that had no ``<title>``) belonging to one of
+    ``job_ids`` -- decorative, same DB-optional convention as this module's other report-time
+    lookups (:func:`_corroboration_payload_map_safe` etc.): a DB failure here degrades to "no
+    quality signal for any source" (every entry's :func:`_entry_has_low_quality_source` then only
+    ever trips on the zero-sources case) rather than breaking the whole report build."""
+    if not job_ids:
+        return {}
+    try:
+        with connection(timeout=5) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT job_id, url, title FROM investigation_log "
+                "WHERE job_id = ANY(%(ids)s) AND engine = 'fetch' AND url IS NOT NULL",
+                {"ids": job_ids},
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        log.warning("deep_search_source_titles_failed", error=str(exc)[:160])
+        return {}
+    return {(r["job_id"], r["url"]): r.get("title") for r in rows}
+
+
+def _entry_has_low_quality_source(
+    entry: dict[str, Any], titles_by_job_url: dict[tuple[int, str], str | None]
+) -> bool:
+    """R10-reports #1: ``True`` when ``entry`` (one :func:`collect_deep_search` row, before
+    reconciliation) has zero cited sources, or any cited source URL's own fetched-page title
+    matches :func:`_title_is_low_quality_signature`. A source URL with no matching
+    ``investigation_log`` fetch row (e.g. an older job predating that logging, or a DB-lookup
+    failure) is never treated as low-quality on that absence alone -- only a positive signature
+    match, or having no sources at all, counts."""
+    sources = entry.get("sources") or []
+    if not sources:
+        return True
+    job_id = entry.get("job_id")
+    return any(_title_is_low_quality_signature(titles_by_job_url.get((job_id, url))) for url in sources)
 
 
 #: Outcome rank for :func:`reconcile_deep_search_reruns` -- a "found" answer beats a later
@@ -635,6 +730,11 @@ _OUTCOME_RANK = {
     "off_topic": 1,
     "not_found": 0,
 }  # round-5 judge: `blocked` (P7) must outrank not_found so job 113 renders as נחסם
+
+#: R10-reports #1: the minimum outcome tier a *clean* (see :func:`_entry_has_low_quality_source`)
+#: run must clear to earn the citation-quality override below -- "partial" (an honest, low-
+#: confidence answer from a real source), same bar the finding itself names ("outcome >= partial").
+_CLEAN_OVERRIDE_MIN_OUTCOME_RANK = _OUTCOME_RANK["partial"]
 
 
 #: R8-investigations-b: some enqueue paths append the asker's own context commentary after the
@@ -752,10 +852,26 @@ def reconcile_deep_search_reruns(entries: list[dict[str, Any]]) -> list[dict[str
     for root in sorted(groups, key=lambda r: min(groups[r])):
         idxs = groups[root]
         runs = [entries[i] for i in idxs]
-        best_pos = max(
-            range(len(runs)),
-            key=lambda k: (_OUTCOME_RANK.get(runs[k].get("outcome") or "", 0), -idxs[k]),
-        )
+
+        # R10-reports #1 (round-9 judge worst #2, job 146 vs job 160): rank each run by
+        # (a) "clean and decent" first -- no low-quality-sourced/zero-sourced answer (see
+        # :func:`_entry_has_low_quality_source`) at outcome tier >= partial always beats *any*
+        # unclean run, regardless of the unclean run's own (possibly higher) outcome tier; a
+        # clean run below the partial bar (e.g. a clean `blocked`) does *not* get this override --
+        # it still loses to a higher-tier unclean run, exactly as before this fix, since the
+        # finding's own rule is "loses to any clean run with outcome >= partial", not "clean
+        # always wins". (b) among runs tied on that, the existing outcome-tier order.
+        # (c) among runs also tied on tier, higher reported confidence. (d) newest (unchanged
+        # tie-break from every earlier round).
+        def _rank_key(k: int, runs=runs, idxs=idxs) -> tuple[bool, int, float, int]:
+            run = runs[k]
+            outcome_rank = _OUTCOME_RANK.get(run.get("outcome") or "", 0)
+            is_clean = not run.get("has_low_quality_source", False)
+            clean_and_decent = is_clean and outcome_rank >= _CLEAN_OVERRIDE_MIN_OUTCOME_RANK
+            confidence = run.get("confidence") or 0.0
+            return (clean_and_decent, outcome_rank, confidence, -idxs[k])
+
+        best_pos = max(range(len(runs)), key=_rank_key)
         best = runs[best_pos]
         if len(runs) > 1:
             best = dict(best)
@@ -765,6 +881,22 @@ def reconcile_deep_search_reruns(entries: list[dict[str, Any]]) -> list[dict[str
                 f"השאלה נחקרה {len(runs)} פעמים השבוע; מוצגת הריצה עם התוצאה הטובה ביותר "
                 f"(ריצות נוספות: {', '.join(_OUTCOME_LABEL_HE.get(str(o), str(o)) for o in others)})."
             )
+            # R10-reports #1: tell the reader when the shown run has a *lower* outcome tier than
+            # a rejected run in the same group -- i.e. the citation-quality override actually
+            # fired (a higher-tier run was passed over for being low-quality/zero-sourced), not
+            # just the ordinary "several reruns, best one shown" case.
+            rejected_higher_tier_unclean = any(
+                k != best_pos
+                and run.get("has_low_quality_source", False)
+                and _OUTCOME_RANK.get(run.get("outcome") or "", 0)
+                > _OUTCOME_RANK.get(best.get("outcome") or "", 0)
+                for k, run in enumerate(runs)
+            )
+            if rejected_higher_tier_unclean:
+                best["rerun_note_he"] += (
+                    ' ריצה אחרת עם תוצאה "טובה יותר" לכאורה הושמטה כי מקורה היחיד (או מקורותיה) '
+                    "זוהו כדף חסימה/אימות אנושי ולא כתוכן אמיתי."
+                )
         out.append(best)
     return out
 
