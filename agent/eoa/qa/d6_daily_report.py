@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 from eoa.qa.links import check_links
 from eoa.qa.types import Check, DomainScore, weighted_score
+from eoa.report.claims_gate import TRIGGER_RE as _INTENSIFIER_TRIGGER_RE
+from eoa.report.claims_gate import _has_quantity as _claim_has_quantity
 from eoa.report.qa_citations import (
     _normalize_for_dup_check,
     citations_in,
@@ -247,6 +250,68 @@ def _no_filler_check(sections: list[tuple[str, str]]) -> Check:
     )
 
 
+#: A rendered ``[3]`` or linked ``[3](#src-3)`` citation marker carries a digit that must NOT count
+#: as a "supporting quantity" for the intensifier check below -- unlike a pre-render ``Sentence.
+#: text_he`` (which the schema forbids from ever containing "[n]" literally, see
+#: ``eoa.llm.schemas.analysis.Sentence``), the rendered Markdown always has these appended.
+_CITATION_MARKER_RE = re.compile(r"\[\d+\](?:\(#src-\d+\))?")
+
+
+def _unsupported_intensifier_check(
+    sections: list[tuple[str, str]], *, name: str = "unsupported_intensifier_count_zero"
+) -> Check:
+    """CR-monthly.md items 3/5 (monthly/weekly only -- see the module-level ``is_weekly``/
+    ``monthly_path`` gating in :func:`score_D6`): no evaluative/intensifier phrase ("ניכר/ניכרת",
+    "זינוק", "קפיצת מדרגה", "מגמה" used as a bare adjective, ...) may survive in the report's
+    narrative prose without a supporting quantity in the SAME sentence. ``eoa.report.claims_gate``
+    is the deterministic gate that is supposed to prevent this before render (wired into
+    ``eoa.report.weekly.build_weekly``/``eoa.report.monthly.build_monthly``); this is the D6-level
+    backstop confirming it actually worked, the same "gate + independent QA re-check" pattern this
+    module already uses for filler phrases (:func:`_no_filler_check` next to
+    ``eoa.report.style.strip_filler_phrases``). Excludes the sources appendix (a citation index,
+    not narrative prose -- see the module docstring's "Round 3" note for why that section is always
+    excluded from a sentence-level scan)."""
+    bad: list[str] = []
+    for h, body in sections:
+        if _APPENDIX_HEADING in h:
+            continue
+        for s in split_sentences(body):
+            s_no_citations = _CITATION_MARKER_RE.sub(" ", s)
+            if _INTENSIFIER_TRIGGER_RE.search(s_no_citations) and not _claim_has_quantity(s_no_citations):
+                bad.append(s[:100])
+    return Check(
+        name,
+        len(bad) == 0,
+        weight=1.5,
+        evidence=f"{len(bad)} sentence(s) with an unsupported intensifier and no quantity: {bad[:5]}",
+    )
+
+
+def _trend_membership_check(qa_report: dict[str, Any] | None, *, report_kind: str) -> Check:
+    """CR-monthly.md item 2: a trend section may cite ONLY its own evidence items --
+    ``eoa.report.weekly.strip_trend_out_of_scope_sentences`` (reused by ``eoa.report.monthly``)
+    strips any sentence that violates this before render and persists the count it had to strip
+    onto the report's own ``reports.qa_report`` (see ``monthly.py``/``weekly.py``'s
+    ``_persist_report``). This check reads that persisted count back -- 0 means the draft never
+    violated trend membership in the first place (the final rendered report is clean either way,
+    by construction, since the stripping already ran; a nonzero count here is a signal the drafting
+    prompt/model still needs attention, not a defect in the delivered report).
+
+    ``qa_report=None`` (the caller didn't have one to pass -- e.g. an older report round, or this
+    round produced no report of this kind) reads as "not checked", never as a fabricated pass or
+    fail."""
+    n = (qa_report or {}).get("trend_sentences_out_of_scope")
+    name = f"{report_kind}_trend_sections_cite_only_member_items"
+    if n is None:
+        return Check(name, True, weight=1.0, evidence="no qa_report provided for this round -- not checked")
+    return Check(
+        name,
+        n == 0,
+        weight=1.0,
+        evidence=f"{n} trend sentence(s) had to be stripped for citing a non-member item",
+    )
+
+
 def _extract_tables(md_text: str) -> list[list[str]]:
     tables: list[list[str]] = []
     current: list[str] = []
@@ -386,7 +451,12 @@ def _orphan_citations(text: str, appendix_ns: set[int]) -> list[int]:
 
 
 def score_D6(  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md naming
-    md_path: Path | None, *, run_link_check: bool = True, monthly_path: Path | None = None
+    md_path: Path | None,
+    *,
+    run_link_check: bool = True,
+    monthly_path: Path | None = None,
+    weekly_qa_report: dict[str, Any] | None = None,
+    monthly_qa_report: dict[str, Any] | None = None,
 ) -> DomainScore:
     """D6: deterministic checks over one rendered daily/weekly report Markdown file.
 
@@ -397,6 +467,12 @@ def score_D6(  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md namin
     checked only for ``monthly_is_structured`` (see :func:`_monthly_structured_check`), a concern
     independent of the daily/weekly file above. Omitted from the check list entirely (not scored as
     a fail) when no monthly report has been produced this round -- there's nothing to critique yet.
+
+    ``weekly_qa_report``/``monthly_qa_report`` (CR-monthly.md, optional): the persisted
+    ``reports.qa_report`` dict for this round's weekly/monthly report (when one of those kinds was
+    built), read back by :func:`_trend_membership_check` for the "trend section cites non-member
+    item" check -- see that function's own docstring. Omitted (``None``) is a normal, backward-
+    compatible "not checked this round", not a failure.
     """
     if md_path is None or not md_path.exists():
         return DomainScore(domain="D6", score_0_100=None, checks=[], n=0, note="no report file found")
@@ -485,6 +561,21 @@ def score_D6(  # noqa: N802 -- score_Dn matches docs/QA_CONTINUOUS_LOOP.md namin
         _no_row_repeated_across_tables_check(text),
         _heading_budget_check(md_path, text),
     ]
+    # CR-monthly.md items 3/5: monthly/weekly only (a daily report was never in scope for the
+    # 2026-09-08 user feedback this fixes) -- `md_path` here is the daily-or-weekly file per the
+    # module docstring, gated the same way `_heading_budget_check` already gates its own budget.
+    is_weekly = md_path.name.startswith("weekly")
+    if is_weekly:
+        checks.append(_unsupported_intensifier_check(sections))
+        checks.append(_trend_membership_check(weekly_qa_report, report_kind="weekly"))
+    if monthly_path is not None and monthly_path.exists():
+        monthly_text = monthly_path.read_text(encoding="utf-8")
+        checks.append(
+            _unsupported_intensifier_check(
+                _sections(monthly_text), name="monthly_unsupported_intensifier_count_zero"
+            )
+        )
+        checks.append(_trend_membership_check(monthly_qa_report, report_kind="monthly"))
     # Round 10 (2026-09-07): a tables-only daily (no red/orange/yellow items in the window -- the
     # builder's own honest marker) has no BLUF, exec-summary narrative, domain sections or outlook
     # by design, exactly like an empty BD territory in D7; the structural checks are not applicable.

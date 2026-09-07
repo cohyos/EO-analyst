@@ -187,7 +187,7 @@ class TestMonthOverMonthHelpers:
             strength_prev=3,
             change="gone",
         )
-        body = monthly._render_trend_body(trend)
+        body = monthly._render_trend_body(trend, has_previous_report=True)
         assert "לא נמצאו לה ראיות חדשות החודש" in body
         assert "3/5" in body
 
@@ -200,7 +200,7 @@ class TestMonthOverMonthHelpers:
             strength_prev=2,
             change="stronger",
         )
-        body = monthly._render_trend_body(trend)
+        body = monthly._render_trend_body(trend, has_previous_report=True)
         assert "התחזקה מ-2/5" in body
         assert "ל-4/5" in body
         assert "הפעילות גברה. [1]" in body
@@ -213,8 +213,24 @@ class TestMonthOverMonthHelpers:
             strength_now=3,
             change="new",
         )
-        body = monthly._render_trend_body(trend)
+        body = monthly._render_trend_body(trend, has_previous_report=True)
         assert "מגמה חדשה החודש." in body
+
+    def test_render_trend_body_new_with_no_previous_report_is_labeled_honestly(self):
+        """CR-monthly.md item 1(c): the FIRST monthly report ever built has no previous report at
+        all -- every trend's ``change`` is "new" by construction (nothing to compare to), but that
+        must never read as "מגמה חדשה החודש" (a claim about THIS month vs. a previous one); it must
+        say plainly there was no previous report to compare against."""
+        trend = MonthlyTrendSection(
+            title_he="מגמה",
+            domain="c_uas",
+            sentences=[Sentence(text_he="נתגלתה מגמה.", cites=[1])],
+            strength_now=3,
+            change="new",
+        )
+        body = monthly._render_trend_body(trend, has_previous_report=False)
+        assert "מגמה חדשה החודש" not in body
+        assert "לא נמדדה בחודש הקודם (אין דוח קודם)" in body
 
 
 # --------------------------------------------------------------------------
@@ -374,12 +390,15 @@ def patch_monthly_collectors(monkeypatch, tmp_path):
         ],
     )
     monkeypatch.setattr(monthly, "collect_previous_monthly_trends", lambda period_start: [])
+    # CR-monthly.md item 1(c): this DB lookup isn't mocked elsewhere in this fixture -- default to
+    # "no previous report" (matches collect_previous_monthly_trends's own empty default above).
+    monkeypatch.setattr(monthly, "_has_previous_monthly_report", lambda period_start: False)
     monkeypatch.setattr(monthly, "players_map", lambda: {})
     monkeypatch.setattr(monthly, "top_events_by_amount", lambda s, e, limit=10: [])
     monkeypatch.setattr(monthly, "full_horizon_table", lambda: [])
     monkeypatch.setattr(monthly, "watchlist_changes", lambda s, e: [])
 
-    def _fake_persist(start, end, docx_path, md_path, html_path, items, qa, draft):
+    def _fake_persist(start, end, docx_path, md_path, html_path, items, qa, draft, **kwargs):
         captured["draft"] = draft
         captured["qa"] = qa
         return 888

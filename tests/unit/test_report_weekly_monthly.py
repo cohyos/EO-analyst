@@ -22,37 +22,90 @@ from eoa.report import monthly, trends, weekly
 
 
 def test_entity_clusters_from_rows_builds_a_trend():
-    rows = [{"entity": "Elbit Systems", "domain": "airborne_pods", "item_ids": [3, 1, 2], "n": 3}]
+    rows = [
+        {
+            "entity": "Elbit Systems",
+            "domain": "airborne_pods",
+            "item_ids": [3, 1, 2],
+            "n": 3,
+            "n_sources": 2,
+        }
+    ]
     out = trends._entity_clusters_from_rows(rows)
     assert len(out) == 1
     t = out[0]
     assert t["kind"] == "entity_cluster"
     assert t["entities"] == ["Elbit Systems"]
-    assert t["evidence_item_ids"] == [1, 2, 3]
+    assert t["evidence_item_ids"] == [3, 1, 2]  # preserves the SQL's score-desc order
+    assert t["n_items"] == 3
+    assert t["n_sources"] == 2
     assert 1 <= t["strength"] <= 5
 
 
-def test_entity_clusters_filters_below_threshold():
-    rows = [{"entity": "X", "domain": "d", "item_ids": [1, 2], "n": 2}]
+def test_entity_clusters_filters_below_item_threshold():
+    rows = [{"entity": "X", "domain": "d", "item_ids": [1, 2], "n": 2, "n_sources": 2}]
     assert trends._entity_clusters_from_rows(rows) == []
 
 
-def test_domain_surge_detected_when_ratio_exceeds_2x_baseline():
+def test_entity_clusters_filters_below_source_diversity_threshold():
+    """CR-monthly.md item 1(b): 3 items from a single outlet is not "ריכוז דיווחים" -- needs >=2
+    distinct sources too."""
+    rows = [{"entity": "X", "domain": "d", "item_ids": [1, 2, 3], "n": 3, "n_sources": 1}]
+    assert trends._entity_clusters_from_rows(rows) == []
+
+
+def test_domain_surge_detected_when_baseline_and_ratio_and_floor_all_clear():
+    """CR-monthly.md item 1(a): a real rise needs baseline avg >= 2/week AND ratio >= 2x AND >= 5
+    items this period -- all three, not just the ratio."""
     counts = {"c_uas": 10}
     baseline = {"c_uas": 2.0}
     items_by_domain = {"c_uas": [1, 2, 3, 4, 5]}
-    out = trends._domain_surges_from_counts(counts, baseline, items_by_domain)
+    out = trends._domain_surges_from_counts(counts, baseline, items_by_domain, {"c_uas": 3})
     assert len(out) == 1
     assert out[0]["kind"] == "domain_surge"
     assert out[0]["strength"] == 5  # ratio 5x -> top strength
+    assert out[0]["n_items"] == 10
+    assert out[0]["n_sources"] == 3
+    assert out[0]["baseline_avg"] == 2.0
+    assert out[0]["ratio"] == 5.0
+    assert "עלייה בפעילות בתחום" in out[0]["title_he"]
 
 
-def test_domain_surge_falls_back_to_floor_when_no_baseline_history():
+def test_domain_surge_below_item_floor_is_dropped_even_with_high_ratio():
+    counts = {"c_uas": 4}  # ratio would be 4x but under the 5-item floor for a "rise"
+    baseline = {"c_uas": 1.0}
+    out = trends._domain_surges_from_counts(counts, baseline, {"c_uas": [1, 2, 3, 4]})
+    assert out == []
+
+
+def test_domain_surge_below_baseline_avg_floor_is_dropped():
+    counts = {"c_uas": 10}  # ratio 5x, 10 items -- but baseline avg itself is too thin to trust
+    baseline = {"c_uas": 1.5}
+    out = trends._domain_surges_from_counts(counts, baseline, {"c_uas": list(range(10))})
+    assert out == []
+
+
+def test_domain_with_no_baseline_is_labeled_active_not_a_surge():
+    """CR-monthly.md item 1(a): the old code fell back to a bare 3-item floor and called this a
+    'surge' ('זינוק') -- now it's an honestly-labelled 'active domain, no comparison basis' entry,
+    a different kind entirely."""
     counts = {"computer_vision": 3}
     baseline: dict[str, float] = {}
     items_by_domain = {"computer_vision": [10, 11, 12]}
-    out = trends._domain_surges_from_counts(counts, baseline, items_by_domain)
+    out = trends._domain_surges_from_counts(counts, baseline, items_by_domain, {"computer_vision": 2})
     assert len(out) == 1
+    t = out[0]
+    assert t["kind"] == "domain_active"
+    assert t["baseline_avg"] == 0.0
+    assert t["ratio"] is None
+    assert "אין בסיס השוואה מחודש קודם" in t["title_he"]
+    assert "3 פריטים מ-2 מקורות" in t["title_he"]
+
+
+def test_domain_with_no_baseline_and_too_few_items_is_dropped():
+    counts = {"computer_vision": 1}
+    out = trends._domain_surges_from_counts(counts, {}, {"computer_vision": [10]})
+    assert out == []
 
 
 def test_domain_surge_not_triggered_below_2x_ratio():
@@ -62,26 +115,52 @@ def test_domain_surge_not_triggered_below_2x_ratio():
     assert out == []
 
 
-def test_market_convergence_from_rows_builds_a_trend():
-    rows = [{"subdomain": "targeting_pods", "n": 2, "item_ids": [2, 1], "parties": ["Elbit", "Rafael"]}]
+def test_market_convergence_from_rows_builds_a_trend(monkeypatch):
+    monkeypatch.setattr(trends, "_source_count_for_items", lambda ids: 2)
+    rows = [
+        {
+            "subdomain": "targeting_pods",
+            "n": 3,
+            "item_ids": [2, 1, 3],
+            "event_parties": [["Elbit", "Rafael"], ["Elbit", "IAI"], ["Elbit", "Rafael"]],
+        }
+    ]
     out = trends._convergence_from_rows(rows)
     assert len(out) == 1
     assert out[0]["kind"] == "market_convergence"
-    assert out[0]["entities"] == ["Elbit", "Rafael"]
-    assert out[0]["evidence_item_ids"] == [1, 2]
+    assert out[0]["entities"] == ["Elbit", "IAI", "Rafael"]
+    assert out[0]["evidence_item_ids"] == [1, 2, 3]
+    assert out[0]["n_sources"] == 2
 
 
-def test_market_convergence_filters_below_threshold():
-    rows = [{"subdomain": "x", "n": 1, "item_ids": [1], "parties": ["A"]}]
+def test_market_convergence_filters_below_event_threshold():
+    rows = [{"subdomain": "x", "n": 1, "item_ids": [1], "event_parties": [["A", "B"]]}]
     assert trends._convergence_from_rows(rows) == []
 
 
-def test_tech_race_from_rows_builds_a_trend():
+def test_market_convergence_filters_below_party_set_diversity():
+    """CR-monthly.md item 1(d): >=3 events is no longer enough on its own -- 3 events all involving
+    the exact same two parties is one relationship, not a market-wide convergence."""
+    rows = [
+        {
+            "subdomain": "x",
+            "n": 3,
+            "item_ids": [1, 2, 3],
+            "event_parties": [["A", "B"], ["A", "B"], ["A", "B"]],
+        }
+    ]
+    assert trends._convergence_from_rows(rows) == []
+
+
+def test_tech_race_from_rows_builds_a_trend(monkeypatch):
+    monkeypatch.setattr(trends, "_source_count_for_items", lambda ids: 2)
     rows = [{"subdomain": "c_uas_effectors", "item_ids": [1, 2], "companies": ["Rafael", "Elbit"]}]
     out = trends._tech_race_from_rows(rows)
     assert len(out) == 1
     assert out[0]["kind"] == "tech_race"
     assert set(out[0]["entities"]) == {"Rafael", "Elbit"}
+    assert out[0]["n_items"] == 2
+    assert out[0]["n_sources"] == 2
 
 
 def test_tech_race_filters_single_company():
@@ -93,25 +172,36 @@ def test_detect_trends_combines_all_four_kinds(monkeypatch):
     monkeypatch.setattr(
         trends,
         "_entity_cluster_rows",
-        lambda s, e: [{"entity": "A", "domain": "d1", "item_ids": [1, 2, 3], "n": 3}],
+        lambda s, e: [{"entity": "A", "domain": "d1", "item_ids": [1, 2, 3], "n": 3, "n_sources": 2}],
     )
     monkeypatch.setattr(trends, "_domain_counts", lambda s, e: {"d2": 10})
-    monkeypatch.setattr(trends, "_domain_baseline_counts", lambda s, e: {"d2": 1.0})
+    monkeypatch.setattr(trends, "_domain_baseline_counts", lambda s, e: {"d2": 2.0})
     monkeypatch.setattr(trends, "_domain_item_ids", lambda s, e: {"d2": [4, 5, 6]})
+    monkeypatch.setattr(trends, "_domain_source_counts", lambda s, e: {"d2": 3})
     monkeypatch.setattr(
         trends,
         "_convergence_rows",
-        lambda s, e: [{"subdomain": "sd1", "n": 2, "item_ids": [7, 8], "parties": ["X", "Y"]}],
+        lambda s, e: [
+            {
+                "subdomain": "sd1",
+                "n": 3,
+                "item_ids": [7, 8],
+                "event_parties": [["X", "Y"], ["X", "Z"], ["X", "Y"]],
+            }
+        ],
     )
     monkeypatch.setattr(
         trends,
         "_tech_race_rows",
         lambda s, e: [{"subdomain": "sd2", "item_ids": [9, 10], "companies": ["P", "Q"]}],
     )
+    monkeypatch.setattr(trends, "_source_count_for_items", lambda ids: 2)
     out = trends.detect_trends((dt.date(2026, 8, 25), dt.date(2026, 8, 31)))
     kinds = {t["kind"] for t in out}
     assert kinds == {"entity_cluster", "domain_surge", "market_convergence", "tech_race"}
     assert [t["strength"] for t in out] == sorted((t["strength"] for t in out), reverse=True)
+    for t in out:
+        assert {"n_items", "n_sources", "baseline_avg", "ratio"} <= t.keys()
 
 
 def test_weekly_stats_assembles_all_four_aggregates(monkeypatch):
@@ -128,6 +218,57 @@ def test_weekly_stats_assembles_all_four_aggregates(monkeypatch):
     out = trends.weekly_stats((dt.date(2026, 8, 25), dt.date(2026, 8, 31)))
     assert set(out) == {"items_by_domain_level", "top_entities", "events_by_kind", "deep_search_outcomes"}
     assert out["top_entities"][0]["entity"] == "A"
+
+
+# --------------------------------------------------------------------------
+# weekly.strip_trend_out_of_scope_sentences (CR-monthly.md item 2, last sentence): a trend section
+# may cite only its own evidence.
+# --------------------------------------------------------------------------
+
+
+class _StubTrendSection:
+    def __init__(self, title_he, sentences):
+        self.title_he = title_he
+        self.sentences = sentences
+
+    def model_copy(self, update):
+        merged = {"title_he": self.title_he, "sentences": self.sentences}
+        merged.update(update)
+        return _StubTrendSection(merged["title_he"], merged["sentences"])
+
+
+def test_strip_trend_out_of_scope_drops_sentence_citing_another_trends_item():
+    trend_list = [
+        {"title_he": "מגמה א", "evidence_item_ids": [101]},
+        {"title_he": "מגמה ב", "evidence_item_ids": [102]},
+    ]
+    id_to_n = {101: 1, 102: 2}
+    sections = [
+        _StubTrendSection(
+            "מגמה א",
+            [
+                Sentence(text_he="עובדה תקינה.", cites=[1]),
+                Sentence(text_he="עובדה שאולה ממגמה אחרת.", cites=[2]),
+            ],
+        )
+    ]
+    out, n_dropped = weekly.strip_trend_out_of_scope_sentences(
+        sections, trend_list, id_to_n, report_kind="weekly"
+    )
+    assert n_dropped == 1
+    assert len(out[0].sentences) == 1
+    assert out[0].sentences[0].text_he == "עובדה תקינה."
+
+
+def test_strip_trend_out_of_scope_leaves_untouched_when_title_has_no_match():
+    trend_list = [{"title_he": "מגמה אחרת לגמרי", "evidence_item_ids": [101]}]
+    id_to_n = {101: 1, 999: 9}
+    sections = [_StubTrendSection("מגמה שלא קיימת ברשימה", [Sentence(text_he="טענה.", cites=[999])])]
+    out, n_dropped = weekly.strip_trend_out_of_scope_sentences(
+        sections, trend_list, id_to_n, report_kind="weekly"
+    )
+    assert n_dropped == 0
+    assert out[0].sentences[0].cites == [999]
 
 
 # --------------------------------------------------------------------------
@@ -371,6 +512,7 @@ def patch_monthly_collectors(monkeypatch, tmp_path):
     monkeypatch.setattr(monthly, "collect_open_clarifications", lambda: [])
     monkeypatch.setattr(monthly.trends_mod, "detect_trends", lambda period: [])
     monkeypatch.setattr(monthly, "collect_previous_monthly_trends", lambda period_start: [])
+    monkeypatch.setattr(monthly, "_has_previous_monthly_report", lambda period_start: False)
     monkeypatch.setattr(monthly, "draft_monthly", lambda *a, **k: _monthly_draft_fixture())
     monkeypatch.setattr(
         monthly,

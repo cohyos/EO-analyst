@@ -56,6 +56,7 @@ from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.reports import MonthlyReportDraft, MonthlyTrendSection
 from eoa.memory import graph as graph_mod
 from eoa.report import trends as trends_mod
+from eoa.report.claims_gate import apply_claims_gate
 from eoa.report.daily import (
     _append_event_corroboration_markers,
     _append_item_corroboration_markers,
@@ -85,12 +86,14 @@ from eoa.report.weekly import (
     _fallback_event_sentences,
     _fallback_israel_item_sentences,
     _fallback_top_item_sentences,
+    _format_trend_numbers_he,
     _normalize_section_titles,
     canonical_domain_key,
     collect_yellow_domain_summary,
     format_items_block,
     format_yellow_summary_block,
     select_items_for_prompt,
+    strip_trend_out_of_scope_sentences,
 )
 
 log = structlog.get_logger(__name__)
@@ -444,9 +447,23 @@ def format_monthly_trends_block(
         )
         lines.append(
             f"{i}. [{_TREND_KIND_LABELS_HE.get(t['kind'], t['kind'])}] {t['title_he']} | "
-            f"חוזק החודש: {t['strength']}/5 | {prev_note} | ישויות: {entities} | ראיות: {refs}"
+            f"חוזק החודש: {t['strength']}/5 | נתונים: {_format_trend_numbers_he(t)} | {prev_note} | "
+            f"ישויות: {entities} | ראיות: {refs}"
         )
     return "\n".join(lines)
+
+
+def _has_previous_monthly_report(period_start: dt.date) -> bool:
+    """CR-monthly.md item 1(c): distinguishes "no previous monthly report exists at all" (this is
+    the first one) from "a previous report exists but this particular trend wasn't in it" (a
+    genuinely new trend) -- :func:`collect_previous_monthly_trends` returns ``[]`` in BOTH cases,
+    which is exactly why every trend on the very first monthly ever built got mislabelled
+    "מגמה חדשה החודש" ("new trend this month") instead of the honest "no prior report to compare
+    to". Used only by :func:`_render_trend_body`."""
+    sql = "SELECT 1 FROM reports WHERE kind = 'monthly' AND period_end < %(period_start)s LIMIT 1"
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(sql, {"period_start": period_start})
+        return cur.fetchone() is not None
 
 
 def _gone_trend_sections(
@@ -487,17 +504,24 @@ def _render_sentence(sentence: Sentence) -> str:
     return f"{text} {markers}".rstrip() if markers else text
 
 
-def _render_trend_body(trend: MonthlyTrendSection) -> str:
+def _render_trend_body(trend: MonthlyTrendSection, *, has_previous_report: bool) -> str:
     """Deterministic prose for one :class:`MonthlyTrendSection`'s ``extra_sections`` body (M2):
     the model's own cited sentences, preceded by a deterministic, code-authored month-over-month
     change note derived from ``strength_now``/``strength_prev``/``change`` — never itself a
     factual claim requiring a citation, since it only restates numbers already computed from
-    ``eoa.report.trends``/the previous report's own persisted snapshot."""
+    ``eoa.report.trends``/the previous report's own persisted snapshot.
+
+    CR-monthly.md item 1(c): ``change == "new"`` covers both "a previous monthly report exists but
+    didn't have this trend" (a real new-trend claim) and "there is no previous monthly report at
+    all" (nothing to compare to, ever) -- the model can't tell these apart (both look identical in
+    :func:`format_monthly_trends_block`'s "לא הופיעה בדוח החודשי הקודם" line), so ``has_previous_
+    report`` (:func:`_has_previous_monthly_report`, computed once per build) disambiguates here,
+    deterministically, instead of trusting the model to have inferred it."""
     if trend.change == "gone":
         prev = f"{trend.strength_prev}/5" if trend.strength_prev is not None else "—"
         return f"מגמה זו הופיעה בדוח החודשי הקודם (חוזק {prev}) ולא נמצאו לה ראיות חדשות החודש."
     if trend.change == "new":
-        note = "מגמה חדשה החודש."
+        note = "מגמה חדשה החודש." if has_previous_report else "לא נמדדה בחודש הקודם (אין דוח קודם)."
     elif trend.change == "stronger":
         note = f"התחזקה מ-{trend.strength_prev}/5 בחודש הקודם ל-{trend.strength_now}/5 החודש."
     else:  # weaker
@@ -683,6 +707,8 @@ def _persist_report(
     items: list[dict[str, Any]],
     qa: QAResult,
     draft: MonthlyReportDraft,
+    *,
+    extra_qa_fields: dict[str, Any] | None = None,
 ) -> int:
     # M2 (round 5 P1): persist a small trend snapshot (title/domain/strength) alongside the usual
     # QA fields, purely so the *next* monthly report's :func:`collect_previous_monthly_trends` can
@@ -700,6 +726,9 @@ def _persist_report(
         "bad_refs": qa.bad_refs,
         "duplicate_sentences": qa.duplicate_sentences,
         "trends": trend_snapshot,
+        # CR-monthly.md items 2/3/5 (D6 "unsupported intensifier"/"trend cites non-member item"
+        # checks) -- see eoa.qa.d6_daily_report._trend_membership_check.
+        **(extra_qa_fields or {}),
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
     sql = """
@@ -792,6 +821,7 @@ def build_monthly(
     open_clarifications = collect_open_clarifications()
     trend_list = trends_mod.detect_trends((start, end))
     previous_trends = collect_previous_monthly_trends(start)
+    has_previous_report = _has_previous_monthly_report(start)
 
     all_evidence_ids = {iid for t in trend_list for iid in t.get("evidence_item_ids", [])}
     citation_items = _extend_registry_with_ids(items, all_evidence_ids)
@@ -872,6 +902,26 @@ def build_monthly(
     if _n_dupes_dropped:
         log.info("monthly_report_exact_duplicate_sentences_dropped", n=_n_dupes_dropped)
 
+    # CR-monthly.md item 2 (last sentence): a trend section may only cite its OWN evidence -- strip
+    # any sentence that leaked a citation from another trend or from outside any trend's evidence.
+    new_trends, _n_trend_sentences_out_of_scope = strip_trend_out_of_scope_sentences(
+        draft.trends, trend_list, id_to_n, report_kind="monthly"
+    )
+    if _n_trend_sentences_out_of_scope:
+        log.info("monthly_report_trend_sentences_out_of_scope_dropped", n=_n_trend_sentences_out_of_scope)
+    draft = draft.model_copy(update={"trends": new_trends})
+
+    # CR-monthly.md item 3: deterministic claims gate -- an evaluative/intensifier sentence
+    # ("ניכרת התעצמות דרמטית", "מגמה חדשה" as a bare adjective, "קפיצת מדרגה"...) with no supporting
+    # quantity in the same sentence gets softened or, if nothing evidentiary survives, dropped.
+    draft, _claims_gate_report = apply_claims_gate(draft, report_kind="monthly")
+    if _claims_gate_report.softened or _claims_gate_report.dropped:
+        log.info(
+            "monthly_report_claims_gate_applied",
+            softened=_claims_gate_report.softened,
+            dropped=_claims_gate_report.dropped,
+        )
+
     # M2: a previous-month trend with no matching evidence this month is never left for the model
     # to notice -- appended deterministically, after QA (these carry no cites to validate) and
     # after normalization (their own text is already normalized-clean, code-authored).
@@ -889,7 +939,7 @@ def build_monthly(
     trend_sections = [
         {
             "title_he": tp.title_he,
-            "body_he": _render_trend_body(tp),
+            "body_he": _render_trend_body(tp, has_previous_report=has_previous_report),
             "position": "after_summary",
             # R6-weekly: grouped under one "מגמות החודש" parent, each trend as an "###" child.
             "group_he": _TRENDS_GROUP_HE,
@@ -1103,6 +1153,20 @@ def build_monthly(
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html_text, encoding="utf-8")
 
-    report_id = _persist_report(start, end, docx_path, md_path, html_path, items, qa, draft)
+    report_id = _persist_report(
+        start,
+        end,
+        docx_path,
+        md_path,
+        html_path,
+        items,
+        qa,
+        draft,
+        extra_qa_fields={
+            "trend_sentences_out_of_scope": _n_trend_sentences_out_of_scope,
+            "claims_gate_softened": _claims_gate_report.softened,
+            "claims_gate_dropped": _claims_gate_report.dropped,
+        },
+    )
 
     return ReportPaths(docx=docx_path, md=md_path, html=html_path, report_id=report_id, qa=qa)

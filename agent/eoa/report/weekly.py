@@ -37,6 +37,7 @@ from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.reports import WeeklyReportDraft
 from eoa.report import trends as trends_mod
+from eoa.report.claims_gate import apply_claims_gate
 from eoa.report.daily import (
     _append_event_corroboration_markers,
     _append_item_corroboration_markers,
@@ -67,8 +68,12 @@ WEEKLY_TITLE_TEXT = "דוח שבועי — אלקטרואופטיקה ובינה
 _LEVELS_MAIN = ("red", "orange")
 
 _TREND_KIND_LABELS_HE = {
-    "entity_cluster": "מגמה סביב ישות",
-    "domain_surge": "זינוק בתחום",
+    "entity_cluster": "ריכוז דיווחים",
+    # CR-monthly.md item 1(a): "domain_surge" now means a genuine, baseline-backed rise (not the
+    # old bare-floor "surge") -- and "domain_active" is the new, honestly-labelled "no baseline to
+    # compare to" sibling (eoa.report.trends._domain_surges_from_counts).
+    "domain_surge": "עלייה בתחום",
+    "domain_active": "תחום פעיל",
     "market_convergence": "התכנסות שוק",
     "tech_race": "מירוץ טכנולוגי",
 }
@@ -458,6 +463,26 @@ def format_yellow_summary_block(yellow_summary: list[dict[str, Any]]) -> str:
     return "\n".join(f"- {_domain_label(row['domain'])}: {row['n']} פריטים" for row in yellow_summary)
 
 
+def _format_trend_numbers_he(t: dict[str, Any]) -> str:
+    """CR-monthly.md item 1(e): every trend dict carries ``n_items``/``n_sources``/``baseline_avg``/
+    ``ratio`` -- surfaced here so the drafting prompt always shows the model the real numbers behind
+    a trend, instead of leaving it to infer "how big" a trend is from the title text alone."""
+    n_items = t.get("n_items")
+    n_sources = t.get("n_sources")
+    parts = []
+    if n_items is not None:
+        parts.append(f"{n_items} פריטים")
+    if n_sources is not None:
+        parts.append(f"{n_sources} מקורות")
+    baseline_avg = t.get("baseline_avg")
+    ratio = t.get("ratio")
+    if baseline_avg:
+        parts.append(f"ממוצע בסיס {baseline_avg:g}/שבוע")
+    if ratio:
+        parts.append(f"יחס {ratio:.1f}x")
+    return ", ".join(parts) or "—"
+
+
 def format_trends_block(trend_list: list[dict[str, Any]], id_to_n: dict[int, int]) -> str:
     if not trend_list:
         return "לא זוהו מגמות רוחב מובהקות בתקופה זו."
@@ -468,9 +493,61 @@ def format_trends_block(trend_list: list[dict[str, Any]], id_to_n: dict[int, int
         entities = ", ".join(t.get("entities") or []) or "—"
         lines.append(
             f"{i}. [{_TREND_KIND_LABELS_HE.get(t['kind'], t['kind'])}] {t['title_he']} | "
-            f"חוזק: {t['strength']}/5 | ישויות: {entities} | ראיות: {refs}"
+            f"חוזק: {t['strength']}/5 | נתונים: {_format_trend_numbers_he(t)} | ישויות: {entities} | "
+            f"ראיות: {refs}"
         )
     return "\n".join(lines)
+
+
+def _normalize_trend_title(title: str | None) -> str:
+    return " ".join((title or "").split()).strip().casefold()
+
+
+def strip_trend_out_of_scope_sentences(
+    trend_sections: list[Any],
+    trend_list: list[dict[str, Any]],
+    id_to_n: dict[int, int],
+    *,
+    report_kind: str,
+) -> tuple[list[Any], int]:
+    """CR-monthly.md item 2 (last sentence): a trend section may cite ONLY the ids that were given
+    to the model as THAT trend's own evidence (``detect_trends``'s own ``evidence_item_ids``) — not
+    another trend's, and not an item outside any trend's evidence at all. Matches each drafted
+    trend section back to its ``detect_trends`` source entry by normalized ``title_he`` (the model
+    is instructed to echo it, possibly rephrased but not renumbered); when no match is found (a
+    rare paraphrase miss), the section is left untouched rather than stripped wholesale — under-
+    enforcing on a title-match miss is safer than deleting a section's entire narrative.
+
+    Removed sentences are logged as ``f"{report_kind}.trend_sentence_out_of_scope"`` (per the task,
+    never silently dropped) and returned as a count so the caller can persist it for the D6
+    ``trend section cites non-member item`` QA check."""
+    by_title = {_normalize_trend_title(t.get("title_he")): t for t in trend_list}
+    n_dropped = 0
+    out: list[Any] = []
+    for sec in trend_sections:
+        sentences = getattr(sec, "sentences", None)
+        match = by_title.get(_normalize_trend_title(getattr(sec, "title_he", None)))
+        if match is None or not sentences:
+            out.append(sec)
+            continue
+        allowed_ns = {id_to_n[i] for i in match.get("evidence_item_ids", []) if i in id_to_n}
+        if not allowed_ns:
+            out.append(sec)
+            continue
+        kept = []
+        for s in sentences:
+            if not set(s.cites) <= allowed_ns:
+                n_dropped += 1
+                log.info(
+                    f"{report_kind}.trend_sentence_out_of_scope",
+                    title_he=getattr(sec, "title_he", None),
+                    cites=s.cites,
+                    allowed=sorted(allowed_ns),
+                )
+                continue
+            kept.append(s)
+        out.append(sec.model_copy(update={"sentences": kept}))
+    return out, n_dropped
 
 
 def _truncate_prompt_text(text: str | None, limit: int = _PROMPT_SUMMARY_TRUNC_CHARS) -> str | None:
@@ -847,6 +924,7 @@ def _persist_report(
     qa: QAResult,
     *,
     report_state: dict[str, Any] | None = None,
+    extra_qa_fields: dict[str, Any] | None = None,
 ) -> int:
     qa_report = {
         "passed": qa.passed,
@@ -854,6 +932,10 @@ def _persist_report(
         "uncited_sentences": qa.uncited_sentences,
         "bad_refs": qa.bad_refs,
         "duplicate_sentences": qa.duplicate_sentences,
+        # CR-monthly.md items 2/3/5 (D6 "unsupported intensifier"/"trend cites non-member item"
+        # checks): trend_sentences_out_of_scope / claims_gate_softened / claims_gate_dropped counts,
+        # merged in by the caller -- see eoa.qa.d6_daily_report._trend_membership_check.
+        **(extra_qa_fields or {}),
     }
     item_ids = [it["id"] for it in items if it.get("id") is not None]
     # Round 5 P2: `report_state` is the raw material `eoa.report.deltas.previous_report_state`
@@ -984,6 +1066,28 @@ def build_weekly(
     draft, _n_dupes_dropped = dedupe_exact_sentences_across_sections(draft)
     if _n_dupes_dropped:
         log.info("weekly_report_exact_duplicate_sentences_dropped", n=_n_dupes_dropped)
+
+    # CR-monthly.md item 2 (last sentence): a trend section may only cite its OWN evidence -- strip
+    # any sentence that leaked a citation from another trend or from outside any trend's evidence,
+    # before the claims gate below (order doesn't matter between these two -- neither touches the
+    # other's target text).
+    new_trends, _n_trend_sentences_out_of_scope = strip_trend_out_of_scope_sentences(
+        draft.trends, trend_list, id_to_n, report_kind="weekly"
+    )
+    if _n_trend_sentences_out_of_scope:
+        log.info("weekly_report_trend_sentences_out_of_scope_dropped", n=_n_trend_sentences_out_of_scope)
+    draft = draft.model_copy(update={"trends": new_trends})
+
+    # CR-monthly.md item 3: deterministic claims gate -- an evaluative/intensifier sentence
+    # ("ניכרת התעצמות דרמטית", "מגמה חדשה" as a bare adjective, "קפיצת מדרגה"...) with no supporting
+    # quantity in the same sentence gets softened or, if nothing evidentiary survives, dropped.
+    draft, _claims_gate_report = apply_claims_gate(draft, report_kind="weekly")
+    if _claims_gate_report.softened or _claims_gate_report.dropped:
+        log.info(
+            "weekly_report_claims_gate_applied",
+            softened=_claims_gate_report.softened,
+            dropped=_claims_gate_report.dropped,
+        )
 
     trend_sections = [
         {
@@ -1233,7 +1337,19 @@ def build_weekly(
         log.warning("weekly_report_state_build_failed", error=str(exc)[:160])
         report_state = None
     report_id = _persist_report(
-        start, end, docx_path, md_path, html_path, items, qa, report_state=report_state
+        start,
+        end,
+        docx_path,
+        md_path,
+        html_path,
+        items,
+        qa,
+        report_state=report_state,
+        extra_qa_fields={
+            "trend_sentences_out_of_scope": _n_trend_sentences_out_of_scope,
+            "claims_gate_softened": _claims_gate_report.softened,
+            "claims_gate_dropped": _claims_gate_report.dropped,
+        },
     )
 
     return ReportPaths(docx=docx_path, md=md_path, html=html_path, report_id=report_id, qa=qa)

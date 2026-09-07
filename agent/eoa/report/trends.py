@@ -7,15 +7,25 @@ an arbitrary ``period = (start, end)``. Despite the name (kept verbatim from the
 names this exact signature), it is period-length agnostic and ``eoa.report.monthly`` calls it with
 a full-month range.
 
-``detect_trends(period)`` looks for four FR-4.3 pattern kinds over the same period:
+``detect_trends(period)`` looks for five FR-4.3 pattern kinds over the same period (CR-monthly.md,
+2026-09-08 user feedback: the original four's thresholds were loose enough to fire unsupported
+"surge"/"increased activity" claims off a bare item-count floor with no real comparison behind
+them — see each function's own docstring for the specific root cause it fixes):
 
-(a) **entity clusters** — >=3 items about the same entity+domain in the period ("מגמה")
-(b) **domain surge** — a domain's item count in the period >=2x its 4-week baseline average
-(c) **market convergence** — >=2 M&A/partnership events touching the same subdomain
-(d) **tech race** — >=2 different companies with launch/test events in the same subdomain
+(a) **entity clusters** — >=3 items about the same entity+domain, from >=2 distinct sources
+(b) **domain active** — a domain has >=3 triaged items this period but no baseline to compare to
+    (never called a "surge" -- see :func:`_domain_surges_from_counts`)
+(c) **domain surge** — a domain's item count is >=2x a real (>=2/week) baseline AND >=5 items
+(d) **market convergence** — >=3 M&A/partnership events touching the same subdomain, spanning >=2
+    distinct party sets (not the same two companies' deal reported three times)
+(e) **tech race** — >=2 different companies with launch/test events in the same subdomain
+
+Every returned trend dict also carries ``n_items``/``n_sources``/``baseline_avg``/``ratio`` (the
+last two ``None`` where not applicable) so the drafting prompt always has the real numbers behind
+the claim to write from, instead of only a pre-composed Hebrew title.
 
 Each row-fetching helper (``_*_rows`` / ``_*_counts``) below is a single, thin DB query; each
-``_*_from_*`` function is pure Python over already-fetched rows, so the four detectors are
+``_*_from_*`` function is pure Python over already-fetched rows, so the five detectors are
 unit-testable against synthetic rows without a database — see
 ``tests/unit/test_report_weekly_monthly.py``.
 """
@@ -37,9 +47,21 @@ Period = tuple[dt.date, dt.date]
 
 _BASELINE_WEEKS = 4
 _ENTITY_CLUSTER_MIN_ITEMS = 3
+_ENTITY_CLUSTER_MIN_SOURCES = 2
 _DOMAIN_SURGE_MIN_ITEMS = 3
-_CONVERGENCE_MIN_EVENTS = 2
+_DOMAIN_SURGE_MIN_BASELINE_AVG = 2.0
+_DOMAIN_SURGE_MIN_RATIO = 2.0
+_DOMAIN_SURGE_MIN_ITEMS_FOR_RISE = 5
+#: CR-monthly.md (2026-09-08 user feedback): >=3 events is no longer enough on its own -- see
+#: :func:`_convergence_from_rows`'s docstring.
+_CONVERGENCE_MIN_EVENTS = 3
+_CONVERGENCE_MIN_PARTY_SETS = 2
 _TECH_RACE_MIN_COMPANIES = 2
+#: CR-monthly.md item 2 ("keep at most the 8 most relevant"): every trend's own
+#: ``evidence_item_ids`` is capped at this many entries for display/citation purposes -- the
+#: underlying ``n_items``/``n_sources`` counts (item e) still reflect the FULL matching set, not
+#: just the capped sample.
+_MAX_EVIDENCE_ITEMS_PER_TREND = 8
 
 
 #: Round-14 (CR-editing.md): matches ``eoa.report.daily._UNKNOWN_DOMAIN_LABEL_HE`` verbatim -- the
@@ -72,18 +94,27 @@ def _clamp(n: float, lo: int = 1, hi: int = 5) -> int:
 
 
 def _entity_cluster_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
+    """CR-monthly.md item 1(b): an entity cluster now also needs source diversity (>=2 distinct
+    outlets), not just >=3 items -- three items from the same wire-service rewrite is not "ריכוז
+    דיווחים". ``item_ids`` is ordered by score (desc) so the caller can keep only the most relevant
+    ones (item 2, "keep at most the 8 most relevant") without a second query."""
     sql = """
-        SELECT unnest(entities_mentioned) AS entity, domain,
-               array_agg(DISTINCT id) AS item_ids, count(*) AS n
-        FROM items
-        WHERE security_status = 'clean'
-          AND dedup_of IS NULL
-          AND entities_mentioned IS NOT NULL
-          AND COALESCE(domain, '') <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
-          AND cardinality(entities_mentioned) > 0
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+        SELECT entity, domain,
+               array_agg(id ORDER BY score DESC NULLS LAST) AS item_ids,
+               count(DISTINCT id) AS n,
+               count(DISTINCT source_id) AS n_sources
+        FROM (
+            SELECT id, score, source_id, domain, unnest(entities_mentioned) AS entity
+            FROM items
+            WHERE security_status = 'clean'
+              AND dedup_of IS NULL
+              AND entities_mentioned IS NOT NULL
+              AND COALESCE(domain, '') <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
+              AND cardinality(entities_mentioned) > 0
+              AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+        ) sub
         GROUP BY entity, domain
-        HAVING count(*) >= %(min)s
+        HAVING count(DISTINCT id) >= %(min)s
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end, "min": _ENTITY_CLUSTER_MIN_ITEMS})
@@ -91,21 +122,32 @@ def _entity_cluster_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
 
 
 def _entity_clusters_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """CR-monthly.md item 1(b): title now states the real counts ("ריכוז דיווחים: X בתחום Y (N
+    פריטים, M מקורות)") instead of the unsupported "פעילות מוגברת" ("increased activity") framing
+    that used to fire on a bare 3-item floor with no comparison to anything. Requires >=3 items
+    FROM >=2 distinct sources -- either threshold missed means this is not a reportable cluster."""
     out: list[dict[str, Any]] = []
     for row in rows:
-        item_ids = sorted(set(row.get("item_ids") or []))
+        # de-dupe while preserving the SQL's score-desc order (see the query's own ORDER BY) --
+        # a plain `set()` would lose that ordering.
+        item_ids = list(dict.fromkeys(row.get("item_ids") or []))
         n = row.get("n") or len(item_ids)
-        if n < _ENTITY_CLUSTER_MIN_ITEMS or not item_ids:
+        n_sources = row.get("n_sources") or 0
+        if n < _ENTITY_CLUSTER_MIN_ITEMS or n_sources < _ENTITY_CLUSTER_MIN_SOURCES or not item_ids:
             continue
         entity = row.get("entity") or ""
         domain = row.get("domain")
         out.append(
             {
                 "kind": "entity_cluster",
-                "title_he": f"מגמה: פעילות מוגברת סביב {entity} בתחום {_domain_label(domain)}",
-                "evidence_item_ids": item_ids,
+                "title_he": f"ריכוז דיווחים: {entity} בתחום {_domain_label(domain)} ({n} פריטים, {n_sources} מקורות)",
+                "evidence_item_ids": item_ids[:_MAX_EVIDENCE_ITEMS_PER_TREND],
                 "entities": [entity] if entity else [],
                 "strength": _clamp(n),
+                "n_items": n,
+                "n_sources": n_sources,
+                "baseline_avg": None,
+                "ratio": None,
             }
         )
     return out
@@ -116,18 +158,41 @@ def _entity_clusters_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
 # --------------------------------------------------------------------------
 
 
+#: CR-monthly.md item 1(a): domain trend evidence (both the count basis and the membership) is
+#: restricted to triaged, meaningful items -- a domain full of un-triaged noise should never read
+#: as "active"/"rising". Shared by every domain-scoped query below.
+_DOMAIN_TREND_LEVELS = ("red", "orange", "yellow")
+
+
 def _domain_counts(start: dt.date, end: dt.date) -> dict[str, int]:
     sql = """
         SELECT domain, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
-          AND domain <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
+          AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, {"start": start, "end": end})
+        cur.execute(sql, {"start": start, "end": end, "levels": list(_DOMAIN_TREND_LEVELS)})
         return {r["domain"]: r["n"] for r in cur.fetchall()}
+
+
+def _domain_source_counts(start: dt.date, end: dt.date) -> dict[str, int]:
+    """CR-monthly.md item 1(e): every domain trend dict carries ``n_sources`` -- distinct outlets
+    covering the domain in the period, over the FULL matching set (not the capped evidence sample
+    the trend dict displays)."""
+    sql = """
+        SELECT domain, count(DISTINCT source_id) AS n
+        FROM items
+        WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
+          AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
+          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+        GROUP BY domain
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, {"start": start, "end": end, "levels": list(_DOMAIN_TREND_LEVELS)})
+        return {r["domain"]: r["n"] or 0 for r in cur.fetchall()}
 
 
 def _domain_baseline_counts(start: dt.date, end: dt.date) -> dict[str, float]:
@@ -139,26 +204,29 @@ def _domain_baseline_counts(start: dt.date, end: dt.date) -> dict[str, float]:
         SELECT domain, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
-          AND domain <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
+          AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, {"start": baseline_start, "end": baseline_end})
+        cur.execute(sql, {"start": baseline_start, "end": baseline_end, "levels": list(_DOMAIN_TREND_LEVELS)})
         return {r["domain"]: (r["n"] or 0) / _BASELINE_WEEKS for r in cur.fetchall()}
 
 
 def _domain_item_ids(start: dt.date, end: dt.date) -> dict[str, list[int]]:
+    """CR-monthly.md item 2 ("item.domain == domain and level in red/orange/yellow"): restricted to
+    the same triaged levels as :func:`_domain_counts`; ``item_ids`` ordered by score (desc) so the
+    caller keeps only the most relevant ones (item 2, "at most the 8 most relevant")."""
     sql = """
-        SELECT domain, array_agg(id) AS item_ids
+        SELECT domain, array_agg(id ORDER BY score DESC NULLS LAST) AS item_ids
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
-          AND domain <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
+          AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
           AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, {"start": start, "end": end})
+        cur.execute(sql, {"start": start, "end": end, "levels": list(_DOMAIN_TREND_LEVELS)})
         return {r["domain"]: list(r["item_ids"] or []) for r in cur.fetchall()}
 
 
@@ -170,32 +238,82 @@ def _surge_strength(ratio: float) -> int:
     return 3
 
 
+def _fmt_avg(avg: float) -> str:
+    """``2`` for a whole number, ``2.3`` otherwise -- avoids a misleadingly precise "ממוצע 2.00"."""
+    return f"{avg:g}"
+
+
 def _domain_surges_from_counts(
     counts: dict[str, int],
     baseline: dict[str, float],
     items_by_domain: dict[str, list[int]],
+    source_counts: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    """``counts``/``baseline``/``items_by_domain`` are keyed by domain — see ``_domain_counts``,
-    ``_domain_baseline_counts``, ``_domain_item_ids``. When a domain has no baseline history at all
-    (``avg == 0``, e.g. a brand-new domain), the 2x-ratio test is meaningless, so the surge
-    threshold falls back to the plain ``_DOMAIN_SURGE_MIN_ITEMS`` floor instead of firing on any
-    nonzero count."""
+    """CR-monthly.md item 1(a) (2026-09-08 user feedback on monthly_2026-09-30.md): the old
+    "no baseline -> fall back to a bare 3-item floor" rule is exactly the root cause the user
+    flagged -- every domain in a first-ever monthly corpus (no baseline by construction) got
+    labelled "זינוק" ("surge") off a bare item count with nothing to compare it to. Two distinct,
+    honestly-labelled outcomes now:
+
+    * **no baseline at all** (``avg == 0``) -- never a "surge": an informational "תחום פעיל החודש"
+      entry (``kind="domain_active"``) naming the real counts and saying explicitly there is no
+      comparison basis, gated only by the plain item-count floor (``_DOMAIN_SURGE_MIN_ITEMS``) so a
+      domain with a single item still doesn't get a mention.
+    * **has a real baseline** -- only a genuine rise (``kind="domain_surge"``) counts: baseline
+      average >= 2/week AND ratio >= 2x AND at least 5 items this period. Anything below that bar is
+      simply dropped (not relabeled), since a small blip around a small baseline is not a reportable
+      rise either.
+
+    ``source_counts`` (new, item 1(e)) is optional only so existing callers/tests that don't pass it
+    still work (``n_sources`` falls back to 0 in that case)."""
+    source_counts = source_counts or {}
     out: list[dict[str, Any]] = []
     for domain, week_count in counts.items():
-        if week_count < _DOMAIN_SURGE_MIN_ITEMS:
-            continue
         avg = baseline.get(domain, 0.0)
-        is_surge = (week_count >= avg * 2) if avg > 0 else week_count >= _DOMAIN_SURGE_MIN_ITEMS
-        if not is_surge:
+        n_sources = source_counts.get(domain, 0)
+        item_ids = list(dict.fromkeys(items_by_domain.get(domain) or []))[:_MAX_EVIDENCE_ITEMS_PER_TREND]
+        if avg <= 0:
+            if week_count < _DOMAIN_SURGE_MIN_ITEMS:
+                continue
+            out.append(
+                {
+                    "kind": "domain_active",
+                    "title_he": (
+                        f"תחום פעיל החודש: {_domain_label(domain)} — {week_count} פריטים מ-{n_sources} "
+                        "מקורות (אין בסיס השוואה מחודש קודם)"
+                    ),
+                    "evidence_item_ids": item_ids,
+                    "entities": [],
+                    "strength": _clamp(week_count),
+                    "n_items": week_count,
+                    "n_sources": n_sources,
+                    "baseline_avg": 0.0,
+                    "ratio": None,
+                }
+            )
             continue
-        ratio = (week_count / avg) if avg > 0 else float(week_count)
+        ratio = week_count / avg
+        is_rise = (
+            avg >= _DOMAIN_SURGE_MIN_BASELINE_AVG
+            and ratio >= _DOMAIN_SURGE_MIN_RATIO
+            and week_count >= _DOMAIN_SURGE_MIN_ITEMS_FOR_RISE
+        )
+        if not is_rise:
+            continue
         out.append(
             {
                 "kind": "domain_surge",
-                "title_he": f"זינוק בכמות הפריטים בתחום {_domain_label(domain)}",
-                "evidence_item_ids": sorted(items_by_domain.get(domain) or [])[:20],
+                "title_he": (
+                    f"עלייה בפעילות בתחום {_domain_label(domain)}: {week_count} פריטים לעומת ממוצע "
+                    f"{_fmt_avg(avg)}"
+                ),
+                "evidence_item_ids": item_ids,
                 "entities": [],
                 "strength": _surge_strength(ratio),
+                "n_items": week_count,
+                "n_sources": n_sources,
+                "baseline_avg": avg,
+                "ratio": ratio,
             }
         )
     return out
@@ -206,21 +324,49 @@ def _domain_surges_from_counts(
 # --------------------------------------------------------------------------
 
 
+def _source_count_for_items(item_ids: list[int]) -> int:
+    """CR-monthly.md item 1(e): ``n_sources`` for a trend kind that isn't keyed by a single
+    domain/entity (market convergence, tech race) -- distinct outlets among its own evidence items.
+    A trivial one-shot query; the number of trends per period is always small (single digits), so
+    one extra round-trip per trend is not a real cost."""
+    if not item_ids:
+        return 0
+    sql = "SELECT count(DISTINCT source_id) AS n FROM items WHERE id = ANY(%(ids)s)"
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, {"ids": list(item_ids)})
+        row = cur.fetchone()
+    return (row or {}).get("n") or 0
+
+
 def _convergence_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
+    """CR-monthly.md item 1(d): raised from >=2 to >=3 events, AND now also requires >=2 distinct
+    *party sets* among them (see :func:`_convergence_from_rows`) -- three deals all involving the
+    same two companies is one ongoing relationship, not a market-wide convergence. ``event_parties``
+    is kept one entry per event (not flattened, unlike the old query) so the caller can tell distinct
+    deals apart by their own party sets."""
     sql = """
-        SELECT i.subdomain AS subdomain, count(DISTINCT e.id) AS n,
-               array_agg(DISTINCT e.item_id) AS item_ids,
-               array_agg(DISTINCT p) FILTER (WHERE p IS NOT NULL) AS parties
-        FROM events e
-        JOIN items i ON i.id = e.item_id
-        LEFT JOIN LATERAL unnest(e.parties) AS p ON true
-        WHERE e.kind IN ('m_and_a', 'partnership')
-          AND i.subdomain IS NOT NULL AND i.subdomain <> ''
-          AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
-          AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
-              BETWEEN %(start)s AND %(end)s
-        GROUP BY i.subdomain
-        HAVING count(DISTINCT e.id) >= %(min)s
+        WITH ev AS (
+            SELECT e.id AS event_id, e.item_id, e.parties, i.subdomain
+            FROM events e
+            JOIN items i ON i.id = e.item_id
+            WHERE e.kind IN ('m_and_a', 'partnership')
+              AND i.subdomain IS NOT NULL AND i.subdomain <> ''
+              AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
+              AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
+                  BETWEEN %(start)s AND %(end)s
+        )
+        SELECT subdomain, count(DISTINCT event_id) AS n,
+               array_agg(DISTINCT item_id) AS item_ids,
+               -- `array_agg(parties)` raised "cannot accumulate arrays of different
+               -- dimensionality" (confirmed live, EOA_PIPELINE=1 monthly rebuild 2026-09-08): an
+               -- empty text[] (whether from a NULL COALESCE or a literally-stored '{}') reports 0
+               -- dimensions in Postgres, which can't accumulate alongside a populated 1-D array in
+               -- the same array_agg. jsonb_agg has no such dimension constraint -- psycopg decodes
+               -- each element back into a plain Python list (or [] for a null/empty one).
+               jsonb_agg(COALESCE(to_jsonb(parties), '[]'::jsonb)) AS event_parties
+        FROM ev
+        GROUP BY subdomain
+        HAVING count(DISTINCT event_id) >= %(min)s
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, {"start": start, "end": end, "min": _CONVERGENCE_MIN_EVENTS})
@@ -247,22 +393,42 @@ def _subdomain_label(key: str | None) -> str:
     return _UNKNOWN_DOMAIN_LABEL_HE
 
 
+def _distinct_party_sets(event_parties: list[list[str] | None] | None) -> list[frozenset[str]]:
+    """One ``frozenset`` per event's own ``parties`` list (empty/``None`` parties count as the
+    empty set, which is still one distinct "set" if every event in the group has no parties at
+    all — that case can never reach 2 distinct sets, so it simply won't qualify)."""
+    return [frozenset(p or []) for p in (event_parties or [])]
+
+
 def _convergence_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """CR-monthly.md item 1(d): >=3 events AND >=2 distinct party sets among them -- three deals
+    that are all really the same two companies (e.g. a staged acquisition reported three times) is
+    one relationship, not "market convergence"."""
     out: list[dict[str, Any]] = []
     for row in rows:
         n = row.get("n") or 0
-        if n < _CONVERGENCE_MIN_EVENTS:
+        party_sets = _distinct_party_sets(row.get("event_parties"))
+        distinct_sets = {s for s in party_sets if s}
+        if n < _CONVERGENCE_MIN_EVENTS or len(distinct_sets) < _CONVERGENCE_MIN_PARTY_SETS:
             continue
         subdomain = row.get("subdomain") or ""
+        item_ids = sorted(set(row.get("item_ids") or []))
+        entities = sorted({p for s in distinct_sets for p in s})
+        n_sources = _source_count_for_items(item_ids)
         out.append(
             {
                 "kind": "market_convergence",
                 "title_he": (
-                    f'התכנסות שוק בתת-התחום "{_subdomain_label(subdomain)}" — {n} עסקאות מיזוג/רכישה ושותפות בתקופה'
+                    f'התכנסות שוק בתת-התחום "{_subdomain_label(subdomain)}" — {n} עסקאות מיזוג/רכישה '
+                    f"ושותפות בתקופה, {len(distinct_sets)} קבוצות צדדים נבדלות"
                 ),
-                "evidence_item_ids": sorted(set(row.get("item_ids") or [])),
-                "entities": sorted(set(row.get("parties") or [])),
+                "evidence_item_ids": item_ids[:_MAX_EVIDENCE_ITEMS_PER_TREND],
+                "entities": entities,
                 "strength": _clamp(n + 1, lo=3, hi=5),
+                "n_items": len(item_ids),
+                "n_sources": n_sources,
+                "baseline_avg": None,
+                "ratio": None,
             }
         )
     return out
@@ -301,15 +467,21 @@ def _tech_race_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if len(companies) < _TECH_RACE_MIN_COMPANIES:
             continue
         subdomain = row.get("subdomain") or ""
+        item_ids = sorted(set(row.get("item_ids") or []))
+        n_sources = _source_count_for_items(item_ids)
         out.append(
             {
                 "kind": "tech_race",
                 "title_he": (
                     f'מירוץ טכנולוגי בתת-התחום "{_subdomain_label(subdomain)}" — {len(companies)} חברות עם השקות/ניסויים בתקופה'
                 ),
-                "evidence_item_ids": sorted(set(row.get("item_ids") or [])),
+                "evidence_item_ids": item_ids[:_MAX_EVIDENCE_ITEMS_PER_TREND],
                 "entities": companies,
                 "strength": _clamp(len(companies) + 1, lo=3, hi=5),
+                "n_items": len(item_ids),
+                "n_sources": n_sources,
+                "baseline_avg": None,
+                "ratio": None,
             }
         )
     return out
@@ -323,15 +495,23 @@ def _tech_race_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def detect_trends(period: Period) -> list[dict[str, Any]]:
     """Cross-item pattern detection per FR-4.3 over ``period = (start, end)``. No LLM call.
 
-    Each returned dict: ``{kind, title_he, evidence_item_ids, entities, strength}`` — ``kind`` in
-    ``{"entity_cluster", "domain_surge", "market_convergence", "tech_race"}``, ``strength`` an int
-    1-5. Sorted strongest-first.
+    Each returned dict: ``{kind, title_he, evidence_item_ids, entities, strength, n_items,
+    n_sources, baseline_avg, ratio}`` — ``kind`` in ``{"entity_cluster", "domain_active",
+    "domain_surge", "market_convergence", "tech_race"}`` (CR-monthly.md item 1(a): "domain_active"
+    is new -- an honestly-labelled "active domain, no comparison basis" entry, never called a
+    surge), ``strength`` an int 1-5. ``baseline_avg``/``ratio`` are ``None`` for every kind except
+    ``domain_surge``/``domain_active`` (item 1(e): the field is always present, even when not
+    applicable, so the prompt formatter never needs a ``kind``-specific branch just to print it).
+    Sorted strongest-first.
     """
     start, end = period
     trends: list[dict[str, Any]] = []
     trends += _entity_clusters_from_rows(_entity_cluster_rows(start, end))
     trends += _domain_surges_from_counts(
-        _domain_counts(start, end), _domain_baseline_counts(start, end), _domain_item_ids(start, end)
+        _domain_counts(start, end),
+        _domain_baseline_counts(start, end),
+        _domain_item_ids(start, end),
+        _domain_source_counts(start, end),
     )
     trends += _convergence_from_rows(_convergence_rows(start, end))
     trends += _tech_race_from_rows(_tech_race_rows(start, end))
