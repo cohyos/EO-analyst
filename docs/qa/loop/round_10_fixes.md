@@ -660,3 +660,168 @@ Two different techniques back the "reports" direction, deliberately:
   `blocked_reason_he` forwarding; `InvestigationOut`'s missing `confidence` field).
 - `InvestigationsListPage`'s N+1 provenance fetch could become one bulk call if `GET /api/
   investigations` itself grows a `provenance` field -- needs `services.py`, out of scope this round.
+
+### R10-graph status
+
+**Package:** R10-graph (user finding 2026-09-07, Hebrew: "גרף ישויות - נראה שחסרה פונקציונאליות" --
+"the entity graph seems to lack functionality"). Audited the existing `/entities` graph surface and
+built the analyst tool it was missing: a full entity graph explorer with search, multi-facet
+filtering, a detail side panel, path finding, layout/export controls, and an accessible table-view
+alternative to the cytoscape canvas.
+**Files owned/changed:** `agent/eoa/graph/__init__.py` (new), `agent/eoa/graph/queries.py` (new --
+all new SQL for this package lives here, `agent/eoa/api/services.py` untouched), `agent/eoa/api/
+routes/entities.py` (five new routes added, the four pre-existing U10 routes unchanged), `web/src/
+pages/EntitiesPage.tsx` (adds the "רשימה ופרטים"/"סייר גרף" tab switcher; `GraphPanel`'s "פתח גרף
+מלא" now opens the explorer tab, centered on that entity, instead of the old fixed-size modal),
+`web/src/components/graph/**` (new package: `EntityGraphExplorer.tsx` the orchestrator,
+`GraphCanvas.tsx` the cytoscape wrapper, `GraphFilterBar.tsx`, `EntitySearchBox.tsx`,
+`EntitySidePanel.tsx`, `EdgeEvidencePanel.tsx`, `PathFinderPanel.tsx`, `GraphTableView.tsx`,
+`GraphLegend.tsx`, `graphColors.ts`, `exportGraph.ts`), `web/src/types/api.ts` (`GraphNodeStats`,
+`GraphEdgeAgg`, `GraphEdgeEvidence`, `NeighborhoodResponse`, `GraphOverviewResponse`,
+`GraphPathResponse`, `GraphSearchResult`, `EntityInvestigationRef`, `EntityReportRef`,
+`EntityDetailFull` -- all additive, existing `GraphNode`/`GraphEdgeRow`/`GraphResponse`/
+`EntityDetail` untouched), `web/src/api/types.ts` (`NeighborhoodQuery`, five new `ApiClient`
+methods), `web/src/api/real.ts` (five new methods + normalizers), `web/src/mocks/mockApi.ts` (mock
+implementations of the same five, built from the existing `mockEntities`/`mockGraph`/`items`
+fixtures so the mock graph always agrees with the entity list/card), `tests/unit/
+test_graph_round10.py` (new, 37 tests), `web/src/components/graph/*.test.ts(x)` (new, 30 tests
+across four files), `e2e/tests/21-entity-graph.spec.ts` (new, guarded). Did not touch `agent/eoa/
+api/services.py`, `web/src/components/reports/**`, `web/src/components/ask/**`, `web/src/pages/
+Investigation*.tsx`, or `web/src/pages/ItemDetailPage.tsx` (other engineers' scope this round).
+
+#### Audit: what the graph actually had before this package
+
+`GET /entities/{id}/graph` (`services.build_graph`) returned only `{nodes: [{id,name,kind,
+country}], edges: [{src,dst,label,item_id,evidence}]}` for a single center entity out to depth<=4 --
+no aggregation (a src/dst/label pair repeated across N items was N separate edges, not one edge
+with weight N), no per-node mention/recency/corroboration/product-line stats, and no way to reach
+the graph for an entity not already selected in the list. `EntitiesPage.tsx`'s `GraphPanel` rendered
+this via `EntityGraph.tsx` (still used, unchanged) at a fixed depth-1/2 selector, with a "פתח גרף
+מלא" button opening the *same* component larger in a modal -- same data, same lack of controls,
+just bigger. Concretely missing against an analyst's actual needs: a search box to jump to any
+entity without leaving the graph; any filter beyond depth (no kind/relation/country/product-line/
+time-window narrowing); a way to see *why* a node or edge mattered beyond a single edge's one-line
+"evidence" string (no mention counts, no corroboration status, no product-line tags, no dates); an
+"expand this neighbor"/"center here"/"hide this node" workflow (clicking a node only navigated away
+to its own `/entities/:id` card, losing the graph); a path finder between two arbitrary entities;
+alternate layouts (only `cose`, no `concentric`/`breadthfirst`); PNG/CSV export; and any
+non-cytoscape way to read the graph (a `<canvas>`-backed widget is opaque to a screen reader, and
+`04-entities.spec.ts`'s own test comment already flags "either a canvas renders or the empty state
+does" as the only thing checkable). `GET /api/graph/query`'s three named analytic queries
+(`partners_of_competitors`, `suppliers_of_program_bidders`, `startups_linked_to_majors`) existed but
+had no UI at all. Node/edge counts on the live backend at audit time (via `/api/graph?entity_id=`
+for a few seeded entities): typically 1-8 nodes, 1-6 edges per entity, all `kind="company"` -- the
+schema supports `program`/`system`/`person`/`org`/`country` and 7 relation labels
+(`eoa.memory.graph.EDGE_LABELS`), but the live seed data barely exercises that range, which is why
+several e2e tests in `21-entity-graph.spec.ts` below tolerate an empty/near-empty graph rather than
+asserting specific node/edge counts.
+
+#### Build
+
+Backend (`agent/eoa/graph/queries.py`, all read-only, all parameterized SQL): `search_entities(q,
+limit)` for the autocomplete box; `overview(limit, since)` -- top entities by mention volume plus
+the edges between them, the graph shown before any entity is centered; `neighborhood(entity_id,
+depth<=2, kinds, relation_types, since, limit)` -- the analyst's main view, nodes carrying
+`mention_count`/`last_seen`/a `corroboration` status breakdown (via `item_corroboration`)/
+`product_lines` (aggregated from the items that mention the entity -- `entities` itself has no such
+column), edges collapsed by (src, dst, relation) into `weight` (distinct items)/`first_seen`/
+`last_seen`/up to 3 evidence items, capped at `limit` nodes (default 300, max 1500 -- the UI's "הצג
+עוד" button re-requests with `limit+300` rather than a fixed cap silently truncating with no way to
+see more); `path(a, b, max_depth<=4)` -- a recursive-CTE BFS shortest path, `None` when none exists
+(never a fabricated/partial path); `entity_detail(id)` -- reuses `services.get_entity` (imported
+lazily, read-only) and adds `investigations`/`reports` citing the entity, neither of which any
+existing endpoint surfaced. Five new routes on `agent/eoa/api/routes/entities.py`: `GET /api/graph/
+search`, `/api/graph/overview`, `/api/graph/neighborhood/{id}`, `/api/graph/path`, `/api/entities/
+{id}/detail`.
+
+Frontend: `EntityGraphExplorer.tsx` is the analyst workspace, reachable via a new "סייר גרף" tab on
+`/entities` (state lives in the `view` URL param, so it's linkable/bookmarkable) or via any entity
+card's "פתח גרף מלא". It owns: `EntitySearchBox` (debounced autocomplete, also reused by the path
+finder's two pickers); `GraphFilterBar` (entity-kind and relation-type toggle chips, a country
+select, a product-line select from the existing `PRODUCT_LINE_CATALOG`, a since-window select, a
+depth select -- kind/relation/since are sent to `neighborhood`, country/product-line are refined
+client-side since the backend doesn't index on them); `GraphCanvas` (cytoscape: node size by
+`mention_count`, edge width by `weight`, color by kind with a `GraphLegend`, double-click an edge
+for `EdgeEvidencePanel`'s up-to-3 supporting items linking to `/feed?open=`, `cose`/`concentric`/
+`breadthfirst` layouts, fit/zoom controls); `EntitySidePanel` (click a node -> `GET /api/entities/
+{id}/detail`'s mentions/events/investigations/reports/relations, plus corroboration and
+product-line tags read straight off the canvas's own `GraphNodeStats` node since `entity_detail`
+doesn't repeat those, and "הרחב שכנים"/"מרכז"/"הסתר" actions); `PathFinderPanel` (pick two entities,
+highlight the shortest path -- edges/nodes on the path get a distinct highlight color + z-index in
+`GraphCanvas`); `GraphTableView` (the `role="button"`/table-view toggle: the same nodes/edges as two
+real HTML tables with working links, the keyboard/screen-reader alternative to the canvas);
+`exportGraph.ts` (`cy.png()` for PNG, a hand-rolled CSV -- both nodes and edges -- for CSV, both as
+real browser downloads via a blob/object URL, no server round-trip). Hebrew RTL throughout, matching
+this page's existing convention: `<bdi>` around every entity/relation name, hardcoded Hebrew strings
+(not routed through `useT()`/the i18n dictionaries) -- the same convention every existing sibling
+component in `web/src/components/entities/**` already uses, including the compact `EntityGraph.tsx`
+this package left unedited.
+
+#### Other things noticed during the audit (not fixed here, out of scope)
+
+- `web/src/api/real.ts`'s `normalizeInvestigationProvenance` (R10-links, another engineer's package
+  this round) defaulted `raw.job ?? {}` without a type annotation, which `npm run build`'s stricter
+  `tsc -b` project-reference check rejected (`Property 'job_id' does not exist on type '{}'`) --
+  this blocked the whole repo's production build, not anything owned by this package. Fixed with a
+  one-line type annotation (`const job: Partial<InvestigationProvenance["job"]> = raw.job ?? {}`),
+  no behavior change, so this package's own `npm run build` verification could actually run.
+  Likewise `web/src/mocks/mockApi.ts`'s new `getEntityDetail` mock (this package's own code) needed
+  an `inv.item_id != null` guard before `Set<number>.has(inv.item_id)` since `InvestigationSummary.
+  item_id` is `number | null` -- caught by the same build pass, fixed inline.
+- The live backend's seed data barely exercises `entities.kind`/`graph_edges.label` beyond `company`/
+  a couple of labels (see Audit above) -- the kind/relation filter chips and the color legend are
+  fully wired but will look sparse against this particular seed until more varied entities/edges
+  exist. Not a code gap, a data-coverage one.
+- `overview()`'s "top entities by mentions" query does one `JOIN items` per call rather than reusing
+  `list_entities`'s pre-computed `mention_count` subquery shape -- fine at today's data volume (a
+  few thousand items), would want an index/materialized-view pass if the corpus grows by orders of
+  magnitude. Flagged, not addressed, since `services.py` (where `list_entities` lives) was off
+  limits this round.
+- `neighborhood()`'s node cap (`limit`, default 300) is enforced by re-sorting the already-fetched
+  candidate set in Python, not by a `LIMIT` in SQL -- correct (the cap has to happen after
+  `_node_stats` computes `mention_count`, which is not something the recursive-CTE walk itself
+  knows), but means a center entity with a truly enormous neighborhood pays the full walk cost
+  before truncating. Bounded today by `_NEIGHBORHOOD_ROW_CAP = 4000` on the raw edge walk and
+  `depth<=2`; would need real pagination (not just a bigger `limit`) to scale further.
+
+#### Verification
+
+- `.venv/Scripts/ruff.exe check`/`format --check` on `agent/eoa/graph/queries.py`, `agent/eoa/graph/
+  __init__.py`, `agent/eoa/api/routes/entities.py`, `tests/unit/test_graph_round10.py`: clean.
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/
+  test_graph_round10.py -q`: 37 passed (validation helpers, `search_entities`, `neighborhood`
+  including depth/limit clamping and kind/relation/since filtering, `overview`, `path` including the
+  a==b and no-path-found cases, `entity_detail`, and 8 `TestClient`-level route tests covering the
+  csv-split params, the `ValueError` -> 400 mapping, the `path` 404-on-`None` mapping, and that the
+  pre-existing `/entities/{id}/graph` route is unaffected).
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/
+  test_graph_round10.py tests/unit -q -k "graph or entities"`: 226 passed (no regressions in any
+  other graph/entities-touching test in the suite).
+- `npx tsc --noEmit -p tsconfig.json`, `npx eslint .`: clean (0 errors; only pre-existing warnings
+  in files this package didn't touch, e.g. `LevelBadge.tsx`'s fast-refresh warning).
+- `npx vitest run` (full suite): 52 files, 380 tests, all passing -- 30 of them new
+  (`exportGraph.test.ts` 6, `GraphFilterBar.test.tsx` 7, `GraphTableView.test.tsx` 6,
+  `EntityGraphExplorer.test.tsx` 11; cytoscape itself is stubbed out in
+  `EntityGraphExplorer.test.tsx` since jsdom has no 2D canvas context and no existing test in this
+  repo mounts a cytoscape canvas either).
+- `npm run build`: clean production build (`tsc -b && vite build`).
+- `e2e/tests/21-entity-graph.spec.ts` run live against the current (pre-restart) backend at
+  `127.0.0.1:8765`: all 8 tests × 5 device projects (40 total) skip cleanly on `GET /api/graph/
+  overview` returning 404, confirming the guard works -- these five routes go live once the lead
+  restarts the backend serving `web/dist` (already rebuilt with this package's frontend). Re-ran
+  `04-entities.spec.ts` (the pre-existing U10 suite) against the same live server: 5/5 still pass,
+  confirming the tab-switcher addition doesn't disturb the existing "רשימה ופרטים" flow.
+
+#### What remains
+
+- Re-run `21-entity-graph.spec.ts` for real (not just the guard path) once the backend is restarted
+  with these five routes live, ideally against a DB seeded with a few `program`/`person`/`org`/
+  `country` entities and a wider spread of relation labels so the kind/relation filters and color
+  legend get real coverage.
+- `overview()`'s per-call `JOIN items` (see "Other things noticed") if the corpus grows materially.
+- True pagination for `neighborhood()` beyond "a bigger `limit`" if any real entity's neighborhood
+  ever approaches the `_NEIGHBORHOOD_ROW_CAP`/`_NODE_LIMIT_MAX` ceilings.
+- The three pre-existing named analytic queries (`GET /api/graph/query`) still have no UI -- out of
+  scope for this package (it was asked to build the neighborhood/search/path/overview surface, not
+  wire up the older named-query endpoint), but a natural follow-up given they're the one part of the
+  original graph surface this audit didn't touch at all.

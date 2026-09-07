@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search, X } from "lucide-react";
+import { Search } from "lucide-react";
 import { api } from "@/api";
 import type { EntitySummary } from "@/types/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
@@ -9,7 +9,12 @@ import { AddToContextButton } from "@/components/AddToContextButton";
 import { StatTile } from "@/components/StatTile";
 import { LevelBadge } from "@/components/LevelBadge";
 import { EntityGraph } from "@/components/entities/EntityGraph";
-import { entityKindLabel, eventKindLabel, edgeLabelHe } from "@/components/entities/eventKindLabel";
+import { EntityGraphExplorer } from "@/components/graph/EntityGraphExplorer";
+import {
+  entityKindLabel,
+  eventKindLabel,
+  edgeLabelHe,
+} from "@/components/entities/eventKindLabel";
 import { domainLabel } from "@/lib/taxonomy";
 import { countryFlagEmoji } from "@/lib/countryFlag";
 import { countryLabel } from "@/lib/countries";
@@ -18,7 +23,10 @@ import type { TriageLevel } from "@/types/api";
 import { useT } from "@/i18n";
 
 const KIND_OPTIONS = ["company", "program", "org", "system", "person", "country"];
-const SORT_OPTIONS: { value: "last_seen" | "mentions_7d" | "mentions_30d" | "name"; label: string }[] = [
+const SORT_OPTIONS: {
+  value: "last_seen" | "mentions_7d" | "mentions_30d" | "name";
+  label: string;
+}[] = [
   { value: "last_seen", label: "נראה לאחרונה" },
   { value: "mentions_7d", label: "אזכורים ב-7 ימים" },
   { value: "mentions_30d", label: "אזכורים ב-30 יום" },
@@ -101,7 +109,8 @@ function EntityListPanel({
   const showAll = params.get("all") === "1";
   // A13 (מיקוד תעשייה ישראלית): same URL-param toggle pattern as `watchlist` above.
   const israelOnly = params.get("israel") === "1";
-  const sort = (params.get("sort") as (typeof SORT_OPTIONS)[number]["value"]) || "last_seen";
+  const sort =
+    (params.get("sort") as (typeof SORT_OPTIONS)[number]["value"]) || "last_seen";
   const t = useT();
 
   function setParam(key: string, value: string | null) {
@@ -127,7 +136,10 @@ function EntityListPanel({
   });
 
   const countries = useMemo(
-    () => Array.from(new Set((data ?? []).map((e) => e.country).filter((c): c is string => !!c))).sort(),
+    () =>
+      Array.from(
+        new Set((data ?? []).map((e) => e.country).filter((c): c is string => !!c)),
+      ).sort(),
     [data],
   );
 
@@ -305,7 +317,9 @@ function EntityCardPanel({ entityId }: { entityId: number }) {
             </bdi>
           )}
           {aliases.length > 0 && (
-            <bdi className="mt-0.5 block text-xs text-fg-dim">כינויים: {aliases.join(", ")}</bdi>
+            <bdi className="mt-0.5 block text-xs text-fg-dim">
+              כינויים: {aliases.join(", ")}
+            </bdi>
           )}
         </div>
         <AddToContextButton kind="entity" id={entity.id} label={entity.name} />
@@ -338,7 +352,10 @@ function EntityCardPanel({ entityId }: { entityId: number }) {
             {timeline.map((t) => (
               <li key={t.item_id} className="relative">
                 <span className="absolute -end-[1.15rem] top-1.5 h-2 w-2 rounded-full bg-accent" />
-                <Link to={`/feed?open=${t.item_id}`} className="block rounded-md p-1.5 hover:bg-bg-sunken">
+                <Link
+                  to={`/feed?open=${t.item_id}`}
+                  className="block rounded-md p-1.5 hover:bg-bg-sunken"
+                >
                   <bdi className="block text-sm font-medium">{t.title}</bdi>
                   <span className="flex items-center gap-2 text-xs text-fg-dim">
                     {t.source_name && <bdi>{t.source_name}</bdi>}
@@ -359,10 +376,15 @@ function EntityCardPanel({ entityId }: { entityId: number }) {
         ) : (
           <ul className="space-y-1.5">
             {businessEvents.map((e) => (
-              <li key={e.id} className="rounded-md border border-border bg-bg-raised p-2 text-sm">
+              <li
+                key={e.id}
+                className="rounded-md border border-border bg-bg-raised p-2 text-sm"
+              >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-medium">{eventKindLabel(e.kind)}</span>
-                  <span className="font-mono text-xs text-fg-dim">{formatDate(e.date)}</span>
+                  <span className="font-mono text-xs text-fg-dim">
+                    {formatDate(e.date)}
+                  </span>
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
                   {e.counterpart && <bdi>מול: {e.counterpart}</bdi>}
@@ -372,12 +394,17 @@ function EntityCardPanel({ entityId }: { entityId: number }) {
                     </span>
                   )}
                   {e.item_id != null && (
-                    <Link to={`/feed?open=${e.item_id}`} className="text-accent hover:underline">
+                    <Link
+                      to={`/feed?open=${e.item_id}`}
+                      className="text-accent hover:underline"
+                    >
                       מקור →
                     </Link>
                   )}
                 </div>
-                {e.summary_he && <bdi className="mt-1 block text-xs text-fg-dim">{e.summary_he}</bdi>}
+                {e.summary_he && (
+                  <bdi className="mt-1 block text-xs text-fg-dim">{e.summary_he}</bdi>
+                )}
               </li>
             ))}
           </ul>
@@ -414,8 +441,13 @@ function EntityCardPanel({ entityId }: { entityId: number }) {
   );
 }
 
-function GraphPanel({ entityId }: { entityId: number }) {
-  const [expanded, setExpanded] = useState(false);
+function GraphPanel({
+  entityId,
+  onOpenExplorer,
+}: {
+  entityId: number;
+  onOpenExplorer: () => void;
+}) {
   const [depth, setDepth] = useState(1);
 
   const graphQuery = useQuery({
@@ -444,31 +476,18 @@ function GraphPanel({ entityId }: { entityId: number }) {
       {graphQuery.isLoading && <LoadingState label="בונה גרף…" />}
       {graphQuery.data &&
         (hasEdges ? (
-          <EntityGraph graph={graphQuery.data} focusEntityId={entityId} compact onExpand={() => setExpanded(true)} />
+          <EntityGraph
+            graph={graphQuery.data}
+            focusEntityId={entityId}
+            compact
+            onExpand={onOpenExplorer}
+          />
         ) : (
-          <EmptyState title="אין קשרים מתועדים" description="לא נמצאו קשרי גרף לישות זו עדיין." />
+          <EmptyState
+            title="אין קשרים מתועדים"
+            description="לא נמצאו קשרי גרף לישות זו עדיין."
+          />
         ))}
-
-      {expanded && graphQuery.data && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
-          role="dialog"
-          aria-modal="true"
-          aria-label="גרף מלא"
-        >
-          <div className="relative w-full max-w-4xl rounded-lg border border-border-strong bg-bg-raised p-4 shadow-panel">
-            <button
-              type="button"
-              onClick={() => setExpanded(false)}
-              aria-label="סגור גרף מלא"
-              className="tap-target absolute top-3 start-3 inline-flex items-center justify-center rounded-md p-1 text-fg-dim hover:bg-bg-sunken hover:text-fg"
-            >
-              <X size={16} aria-hidden="true" />
-            </button>
-            <EntityGraph graph={graphQuery.data} focusEntityId={entityId} />
-          </div>
-        </div>
-      )}
     </section>
   );
 }
@@ -477,17 +496,72 @@ export function EntitiesPage() {
   const { id } = useParams<{ id: string }>();
   const entityId = id ? Number(id) : null;
   const [listCount, setListCount] = useState<number | null>(null);
+  // R10-graph (docs/qa/loop/round_10_fixes.md): the compact per-entity `GraphPanel` below covers
+  // "glance at this entity's neighbors while reading its card" -- an analyst who actually needs
+  // to explore (search, filter by kind/relation/country/product-line/time, a side panel, path
+  // finding, layouts, PNG/CSV export, a table-view alternative to the canvas) switches to this
+  // tab instead of a cramped modal. `view` lives in the URL (not local state) so a link into
+  // "סייר גרף" is shareable/bookmarkable, same convention as every other filter on this page.
+  const [params, setParams] = useSearchParams();
+  const view = params.get("view") === "graph" ? "graph" : "list";
+  function openExplorer() {
+    const next = new URLSearchParams(params);
+    next.set("view", "graph");
+    setParams(next);
+  }
+  function setView(next: "list" | "graph") {
+    const nextParams = new URLSearchParams(params);
+    if (next === "graph") nextParams.set("view", "graph");
+    else nextParams.delete("view");
+    setParams(nextParams);
+  }
 
   return (
     <div className="flex h-full flex-col gap-4 p-4 md:p-6">
-      <div>
-        <h1 className="text-base font-semibold text-fg">ישויות וגרף</h1>
-        <p className="text-sm text-fg-muted">
-          מפת השחקנים: מי עובד עם מי, מי מתחרה במי, ומה קרה לאחרונה.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-base font-semibold text-fg">ישויות וגרף</h1>
+          <p className="text-sm text-fg-muted">
+            מפת השחקנים: מי עובד עם מי, מי מתחרה במי, ומה קרה לאחרונה.
+          </p>
+        </div>
+        <div
+          role="tablist"
+          aria-label="תצוגת ישויות"
+          className="flex gap-1 rounded-md border border-border-strong p-0.5 text-xs"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "list"}
+            onClick={() => setView("list")}
+            className={`rounded px-2.5 py-1 ${view === "list" ? "bg-accent/15 text-accent" : "text-fg-muted"}`}
+          >
+            רשימה ופרטים
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "graph"}
+            onClick={() => setView("graph")}
+            className={`rounded px-2.5 py-1 ${view === "graph" ? "bg-accent/15 text-accent" : "text-fg-muted"}`}
+          >
+            סייר גרף
+          </button>
+        </div>
       </div>
 
-      {/*
+      {view === "graph" ? (
+        <div className="min-h-0 flex-1">
+          <EntityGraphExplorer
+            initialCenterId={
+              entityId != null && !Number.isNaN(entityId) ? entityId : null
+            }
+          />
+        </div>
+      ) : (
+        <>
+          {/*
         Three breakpoints, on purpose:
         - mobile (<768): single column, stacked list -> card -> graph.
         - tablet (768-1279, `md`): 2 columns — card+list share a row, the
@@ -496,7 +570,7 @@ export function EntitiesPage() {
           to a single mobile column.
         - desktop (>=1280, `xl`): the original 3-pane row.
       */}
-      {/* `flex flex-col` (not CSS Grid) below `md` on purpose: a single-column
+          {/* `flex flex-col` (not CSS Grid) below `md` on purpose: a single-column
           CSS Grid track here (`grid-cols-1`, auto-sized row, `min-h-0` items)
           reproducibly collapses its panes to 0 height in WebKit/Safari —
           `.overflow-y-auto` content (e.g. the entity list) then renders with
@@ -505,38 +579,43 @@ export function EntitiesPage() {
           doesn't have that failure mode, and mobile only ever needs simple
           stacking anyway. Grid only kicks in from `md` up, where it's doing
           actual multi-column placement (order/col-span). */}
-      <div className="flex min-h-0 flex-1 flex-col gap-4 md:grid md:grid-cols-2 xl:grid-cols-[22rem_1fr_20rem]">
-        {/* Right pane (RTL first column): search + filters + list */}
-        <div className="min-h-0 md:order-2 xl:order-3">
-          <EntityListPanel selectedId={entityId} onFiltersLoaded={setListCount} />
-        </div>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 md:grid md:grid-cols-2 xl:grid-cols-[22rem_1fr_20rem]">
+            {/* Right pane (RTL first column): search + filters + list */}
+            <div className="min-h-0 md:order-2 xl:order-3">
+              <EntityListPanel selectedId={entityId} onFiltersLoaded={setListCount} />
+            </div>
 
-        {/* Center pane: selected entity card */}
-        <div className="min-h-0 overflow-y-auto md:order-1 xl:order-2">
-          {entityId == null || Number.isNaN(entityId) ? (
-            <EmptyState
-              title="בחר ישות מהרשימה"
-              description={
-                listCount === 0
-                  ? "לא נמצאו ישויות בסינון הנוכחי."
-                  : "לחצו על ישות ברשימה מימין כדי לראות פרטים, ציר זמן, אירועים וקשרים."
-              }
-            />
-          ) : (
-            <EntityCardPanel entityId={entityId} />
-          )}
-        </div>
+            {/* Center pane: selected entity card */}
+            <div className="min-h-0 overflow-y-auto md:order-1 xl:order-2">
+              {entityId == null || Number.isNaN(entityId) ? (
+                <EmptyState
+                  title="בחר ישות מהרשימה"
+                  description={
+                    listCount === 0
+                      ? "לא נמצאו ישויות בסינון הנוכחי."
+                      : "לחצו על ישות ברשימה מימין כדי לראות פרטים, ציר זמן, אירועים וקשרים."
+                  }
+                />
+              ) : (
+                <EntityCardPanel entityId={entityId} />
+              )}
+            </div>
 
-        {/* Left pane: compact graph — full-width row under the 2-column
+            {/* Left pane: compact graph — full-width row under the 2-column
             tablet layout, back to its own column at xl/desktop. */}
-        <div className="min-h-0 overflow-y-auto md:order-3 md:col-span-2 xl:order-1 xl:col-span-1">
-          {entityId == null || Number.isNaN(entityId) ? (
-            <EmptyState title="אין ישות נבחרת" description="הגרף יופיע לאחר בחירת ישות." />
-          ) : (
-            <GraphPanel entityId={entityId} />
-          )}
-        </div>
-      </div>
+            <div className="min-h-0 overflow-y-auto md:order-3 md:col-span-2 xl:order-1 xl:col-span-1">
+              {entityId == null || Number.isNaN(entityId) ? (
+                <EmptyState
+                  title="אין ישות נבחרת"
+                  description="הגרף יופיע לאחר בחירת ישות."
+                />
+              ) : (
+                <GraphPanel entityId={entityId} onOpenExplorer={openExplorer} />
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
