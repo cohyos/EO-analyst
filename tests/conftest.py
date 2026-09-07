@@ -276,3 +276,17 @@ def _search_isolation(monkeypatch):
         circuit.reset_all()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _source_reliability_isolation(monkeypatch):
+    """Round 7: the appendix reliability column looks up ``sources.reliability`` once per process;
+    unit tests must never reach the live DB for it, and a test fixture item with no
+    ``reliability`` must render "—" regardless of what the developer's DB holds."""
+    try:
+        from eoa.report import docx_builder
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    monkeypatch.setattr(docx_builder, "_SOURCE_RELIABILITY_CACHE", {}, raising=False)
+    yield
