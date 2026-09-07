@@ -1,0 +1,42 @@
+{
+  "round": 8,
+  "judge": "J8b re-judge of D5 after the retrieval-gate fix",
+  "domains": {
+    "D5": {
+      "score": 48,
+      "n": 8,
+      "notes": [
+        "Availability/hang defect J8 flagged (7/8 questions streaming zero bytes, no answer_final) is genuinely FIXED: all 8 golden questions completed today with exactly one answer_final each, no gate_busy, no hangs. first_event_s was remarkably uniform across all 8 (48.4-48.74s), and answer_final_s ranged 72.5-159.5s (avg ~89s, well under the 2-3 min estimate and the 5-min per-question timeout).",
+        "But a full n=8 sample surfaces a different, still-live and arguably more damaging defect that a single-sample judge could not have seen: retrieval returned ZERO citations/sources for 7 of 8 questions, including at least 3 where the DB holds directly relevant, fully retrievable (clean, in-scope, summarized) content -- most strikingly Q8 (SPECTRO ISR), where item 321 'Elbit Systems wins $270m contract for SPECTRO ISR & targeting payloads' is an exact title match, yet the chat answered 'I don't recognize this term, may be a wrong name.'",
+        "Root cause (code-level, confirmed): services.py's `_rare_tokens` regex (line 1613) only matches tokens containing a digit, so lexical retrieval structurally can never match pure-letter proper nouns like SPECTRO, Skyranger, LORA, DROIC, AUSA, or Iron Beam/מגן אור -- only Q1's 'XM30' (letters+digits) matched lexically. The vector/embedding fallback that's supposed to cover this gap is failing almost every call tonight: `ask.retrieve_embedding_failed` appears 9 times in today's log, essentially 1:1 with this test's 8 calls. The round-8 fix that stopped the 15-minute hang (bounding the embed call to a 20s interactive budget) appears to now fail the embed call outright on nearly every request under current host memory pressure, rather than hang -- a faster failure, but still a failure, and it silently degrades the chat to keyword-only retrieval that structurally misses most entity names in this domain's vocabulary.",
+        "Q5 (Skyranger vs Israeli C-UAS) misses item 1353 (literal Skyranger-35 cannon/rate-of-fire spec, directly answering the comparison) and item 183 (Rheinmetall/HENSOLDT release mentioning 'mobile Skyranger solutions', level=orange, in-scope) -- both DB-retrievable, neither surfaced; the chat says 'no relevant items found in the corpus.'",
+        "Q3 (LORA Greece) reports zero retrieved sources at all, rather than surfacing the real, retrievable German-navy LORA firing items (ids 62/278/37/84, one at level=yellow) as 'found but not about Greece' -- a regression from round 2's documented anti-conflation design intent for this exact golden question (round-2 fixes doc: 'the DB genuinely holds real LORA items... AND a real Greek air-defense item... side by side'), which required those items to actually reach the model to be correctly disambiguated. Now they never reach it.",
+        "Q1 -- the one question with real citations, and the one round-8's n=1 judge scored clean -- is not actually clean under DB cross-check: it states the current XM30 program phase is valued at '53 מיליארד דולר' ($53B), while its own cited source (item 257) states '$1.53bn' -- a ~34x inflation delivered as a flatly cited [1][2] fact with no hedge. The answer text also opens abruptly mid-sentence on this dollar figure with no lead-in/direct-answer sentence, suggesting a truncation at the very start of the streamed answer rather than (or in addition to) a pure model error. This is a genuine, previously unflagged numeric-fabrication-or-truncation defect in exactly the sample round 8 graded as clean.",
+        "Entailment guard is still inert this round: `ask.entailment_check_skipped`=2, `ask.entailment_check_removed`=0 in today's log -- the guard architecture nominally responsible for catching this kind of numeric drift never actually removed anything during the test window. `ask.grounding_repair`=2 fired but had no visible effect on Q1's ungrounded_removed counter (0 across all 8 answers).",
+        "Positives that DO hold up: zero `===SOURCES_JSON===` leaks in any of the 8 raw answer_text values; no [n] citation markers used without a matching source; the round-7/8 'empty עובדות מרכזיות' heading-with-zero-bullets defect did not recur (Q1 has substantive bullets; Q2-Q8 skip the heading rather than rendering it empty). Honest-refusal prose quality for Q2/Q3/Q4/Q6/Q7 is good where the underlying premise genuinely has no DB coverage (DROIC: 0 DB matches at all; AUSA 2026: 0 DB matches; Iron Beam/מגן אור: 0 Hebrew-term DB matches) -- those three refusals are honestly earned, not retrieval bugs.",
+        "Net: the specific artefact J8 diagnosed (hang caused by the embedding call queuing 15+ min behind the resource gate) is fixed and verified live -- 8/8 sample, fast, uniform first-event timing. But D5's overall health is not restored to round 7's level; a different failure mode (near-total retrieval blindness to proper-noun-only queries, masked as honest 'not in corpus' refusals) plus one real numeric-fabrication/truncation defect in the one grounded answer keep the score well below round 7's 80."
+      ]
+    }
+  },
+  "artefact_confirmed": {
+    "D5": true
+  },
+  "worst": [
+    "Q8 (SPECTRO ISR): chat says it doesn't recognize the term / no DB info, while item 321 ('Elbit Systems wins $270m contract for SPECTRO ISR & targeting payloads', level=orange, fully retrievable) is an exact match sitting in the corpus -- caused by the `_rare_tokens` regex requiring a digit in the token (services.py:1613), so pure-letter proper nouns never lexically match, combined with vector retrieval failing (`ask.retrieve_embedding_failed` x9 tonight).",
+    "Q1 (XM30): the only cited/grounded answer this round states the current program phase value as '53 מיליארד דולר' ($53B) against a cited source that says $1.53bn -- a ~34x numeric inflation with no hedge, plus the answer opens mid-sentence with no direct-answer lead-in, suggesting a truncation at the start of the stream.",
+    "Retrieval returns zero citations for 7 of 8 golden questions -- structurally, not just for lack of corpus data: at least 3 of the 7 (Q3/LORA, Q5/Skyranger, Q8/SPECTRO) have real, in-scope, retrievable DB content that never reached the model.",
+    "Q3 (LORA Greece) no longer surfaces the real German-navy LORA items as disambiguating context, a regression from round 2's documented anti-conflation fix for this exact question -- the items that fix depends on now never reach the model at all.",
+    "Entailment-check guard remains inert (`ask.entailment_check_removed`=0 today) -- the mechanism meant to catch numeric fabrication like Q1's is not functioning, consistent with prior rounds' finding.",
+    "Q5 (Skyranger) misses item 1353's literal cannon/rate-of-fire spec content, directly answering the requested comparison, despite it being DB-retrievable."
+  ],
+  "timing": {
+    "q1": {"first_event_s": 48.48, "answer_final_s": 159.47},
+    "q2": {"first_event_s": 48.74, "answer_final_s": 72.53},
+    "q3": {"first_event_s": 48.40, "answer_final_s": 84.65},
+    "q4": {"first_event_s": 48.64, "answer_final_s": 84.84},
+    "q5": {"first_event_s": 48.60, "answer_final_s": 94.47},
+    "q6": {"first_event_s": 48.47, "answer_final_s": 73.98},
+    "q7": {"first_event_s": 48.67, "answer_final_s": 75.09},
+    "q8": {"first_event_s": 48.46, "answer_final_s": 78.77}
+  }
+}
