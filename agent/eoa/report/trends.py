@@ -255,7 +255,7 @@ def _domain_surges_from_counts(
     labelled "זינוק" ("surge") off a bare item count with nothing to compare it to. Two distinct,
     honestly-labelled outcomes now:
 
-    * **no baseline at all** (``avg == 0``) -- never a "surge": an informational "תחום פעיל החודש"
+    * **no baseline at all** (``avg == 0``) -- never a "surge": an informational "תחום פעיל בתקופה"
       entry (``kind="domain_active"``) naming the real counts and saying explicitly there is no
       comparison basis, gated only by the plain item-count floor (``_DOMAIN_SURGE_MIN_ITEMS``) so a
       domain with a single item still doesn't get a mention.
@@ -279,7 +279,7 @@ def _domain_surges_from_counts(
                 {
                     "kind": "domain_active",
                     "title_he": (
-                        f"תחום פעיל החודש: {_domain_label(domain)} — {week_count} פריטים מ-{n_sources} "
+                        f"תחום פעיל בתקופה: {_domain_label(domain)} — {week_count} פריטים מ-{n_sources} "
                         "מקורות (אין בסיס השוואה מחודש קודם)"
                     ),
                     "evidence_item_ids": item_ids,

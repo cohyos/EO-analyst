@@ -199,8 +199,35 @@ def compute_item_deltas(current_items: list[dict[str, Any]], previous_state: dic
 # --------------------------------------------------------------------------
 
 
+_LEGACY_TREND_PREFIXES = (
+    "מגמה:",
+    "זינוק בכמות הפריטים בתחום",
+    "תחום פעיל החודש:",
+    "תחום פעיל בתקופה:",
+    "ריכוז דיווחים:",
+    "פעילות מוגברת סביב",
+    "עלייה בפעילות בתחום",
+)
+
+
 def _normalize_trend_title(text: str | None) -> str:
-    return " ".join((text or "").split()).casefold()
+    """Canonical key for matching a trend across issues. CR round 14 renamed every trend title
+    ("זינוק בכמות הפריטים בתחום X" -> "תחום פעיל בתקופה: X — N פריטים ..."), so a plain
+    whitespace/case normalisation reported all eight previous titles as "vanished" in the
+    first weekly after the rename. Strip the known prefixes and any trailing " — N פריטים ..."
+    count suffix, keeping the domain / entity part that identifies the trend."""
+    t = " ".join((text or "").split())
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _LEGACY_TREND_PREFIXES:
+            if t.startswith(prefix):
+                t = t[len(prefix) :].strip()
+                changed = True
+    t = t.split(" — ")[0].split(" -- ")[0].strip()
+    # trailing "(4 פריטים, 3 מקורות)" count suffix of the entity-cluster title
+    t = re.sub(r"\s*\([^()]*פריטים[^()]*\)\s*$", "", t).strip()
+    return t.casefold()
 
 
 def compute_trend_deltas(
