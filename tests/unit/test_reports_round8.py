@@ -35,6 +35,9 @@ class _FakeCursor:
     def fetchall(self):
         return list(self._rows)
 
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
     def __enter__(self):
         return self
 
@@ -539,6 +542,8 @@ class TestSurveyAppendixReliability:
 
 class TestBdTerritoryEmptyStub:
     def test_pending_expansion_search_id_returns_latest_job_id(self, monkeypatch):
+        # `_pending_expansion_search_id` goes through `_fetchall` (its own "SELECT id ..." query,
+        # a separate query shape from `_has_pending_expansion_search`'s "SELECT 1 ...").
         monkeypatch.setattr(bdt, "_fetchall", lambda q, p=None: [{"id": 555}])
         assert bdt._pending_expansion_search_id("KR") == 555
 
@@ -547,7 +552,16 @@ class TestBdTerritoryEmptyStub:
         assert bdt._pending_expansion_search_id("KR") is None
 
     def test_enqueue_reuses_pending_job_id_without_enqueueing_again(self, monkeypatch):
-        monkeypatch.setattr(bdt, "_fetchall", lambda q, p=None: [{"id": 42}])
+        # `_has_pending_expansion_search` (the gate) and `_pending_expansion_search_id` (the id
+        # report-back) both go through `_fetchall`, but with different query shapes/row keys
+        # ("SELECT 1 ..." vs "SELECT id ...") -- the fake distinguishes them by query text, same
+        # as the two real queries do.
+        def fake_fetchall(query, params=None):
+            if "SELECT id" in query:
+                return [{"id": 42}]
+            return [{"1": 1}]
+
+        monkeypatch.setattr(bdt, "_fetchall", fake_fetchall)
 
         def _fail(*a, **k):
             raise AssertionError("enqueue_job should not be called when a job is already pending")

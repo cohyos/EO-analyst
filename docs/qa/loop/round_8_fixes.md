@@ -55,6 +55,27 @@ every `open`/`new`/`dropped` row showed "—" even when this issue's own items p
 `dropped` row (unmatched by definition at drop time) still correctly stays "—". `render_
 watchlist_table` and `build_indicator_watchlist_section` now thread `items` through for this.
 
+**Round-8 J8 judge follow-up** (`docs/qa/loop/round_8_judge.md`, worst-list #5): confirmed live
+that the fix genuinely works (weekly rows 1 and 15 both now cite real `[n]`s, e.g. `[5][12][17]` --
+matches this round's own live verification below almost exactly, one Latin-term row apart) but
+population is still low (daily 0/8, weekly 2/16) -- root-caused by re-reading the live files, not
+guessed: every populated row's indicator text contains an English/Latin term ("Locust X3",
+"AeroVironment", "E-HEL"); every blank row's text is pure Hebrew with zero embedded Latin characters
+("קלע דוד", "אסטוניה", "עמירם נורקין", ...). `_item_matches_indicator`'s underlying `extract_key_
+terms` (`_KEY_TERM_RE`, pre-existing, not touched this round) only ever extracts Latin-alphabet
+tokens (3+ chars) -- a pure-Hebrew indicator sentence always yields an empty term set and therefore
+can never match anything, by that function's own long-standing design (its docstring already says
+so: a company/system/programme name in this corpus is "almost always the English term inside the
+Hebrew sentence"). This daily/weekly pair's indicator texts simply happen to be mostly pure-Hebrew
+analyst framing this issue, not a code defect in this round's own wiring -- the fix correctly shows
+`[n]` exactly where a Latin-term match exists and correctly shows "—" everywhere else, which is
+what the brief asked for ("show citations when a match exists... '—' only when none"), but doesn't
+raise the *rate* of matches, since that's gated by a pre-existing, out-of-scope function's
+Latin-only extraction. Extending `extract_key_terms`/`_item_matches_indicator` to also recognise a
+Hebrew content phrase (not just a transliterated Latin proper noun) would be the real fix, and is
+the judge's own round-9 recommendation #3 -- left for that round rather than expanded into
+unrequested scope here.
+
 #### 4. Daily indicator-table per-story clustering (D6 #8)
 
 New `_cluster_key` (top-2 longest content tokens, reusing the existing `_content_tokens` helper) +
@@ -200,8 +221,18 @@ touched, per that same rule -- it had exited by the time the run finished). Resu
   independent, `connection(timeout=5)`-guarded lookup that `_enqueue_territory_expansion_search`
   only calls *after* `_has_pending_expansion_search` has confirmed a pending job exists (same
   "decorative DB call, never load-bearing" convention `eoa.report.indicators` already uses).
-  Re-verified: `tests/unit/test_bd_round4b.py` **41 passed, 0 failed**; the round-8 suite and the
-  mandated command both still green afterward.
+  Re-verified: `tests/unit/test_bd_round4b.py` **41 passed, 0 failed**. That fix itself then broke
+  2 of *this round's own* new tests the same way (`_pending_expansion_search_id` now goes through a
+  direct `connection(timeout=5)` call instead of `_fetchall`, so the two tests mocking `_fetchall`
+  for it silently fell through to a real, failing DB connection attempt, caught internally and
+  returning `None` instead of the mocked id) -- fixed in `tests/unit/test_reports_round8.py` itself
+  (in scope): `_FakeCursor` gained a `fetchone()` method, and
+  `test_pending_expansion_search_id_returns_latest_job_id`/
+  `test_enqueue_reuses_pending_job_id_without_enqueueing_again` now mock `bdt.connection` (the
+  `_FakeConn`/`_FakeCursor` pair already used for the survey.py reliability tests) instead of
+  `_fetchall` for the id-lookup path, while still mocking `_fetchall` for the separate
+  `_has_pending_expansion_search` gate call. Round-8 suite re-verified **35 passed, 0 failed**
+  after this; the mandated command and `test_bd_round4b.py` both still green.
 - **24 pre-existing, unrelated to this round's diff**: `tests/unit/test_tenders_scan.py` (14),
   `tests/unit/test_discovery_round4.py` (2), `tests/unit/test_tender_feedback_round4.py` (3),
   `tests/unit/test_patents_scan.py` (1), `tests/unit/test_ollama_client_provider_dispatch.py` (1),
