@@ -60,7 +60,7 @@
 | `outlook_likelihood_and_confidence_separated` | 1.5 | כל פריט ב"מבט קדימה" נושא גם "סבירות" וגם "ביטחון", ולעולם לא באותו פסוקית (clause) |
 | `exec_summary_no_filler_phrases` | 1.0 | ללא ניסוחי מילוי אנליסטיים ("יש לציין"/"חשוב להדגיש"/"בהקשר זה"/"ראוי לציין", או `eoa.report.style.BANNED_FILLER_PHRASES_HE` אם קיים) בתקציר המנהלים |
 | `no_row_repeated_across_tables` | 1.0 | אין שתי שורות בטבלאות **שונות** שחולקות בדיוק את אותה קבוצת ציטוטים `[n]` |
-| `heading_count_within_budget` | 1.0 | ≤16 כותרות H2 בדוח שבועי, ≤12 בדוח יומי |
+| `heading_count_within_budget` | 1.0 | ≤16 כותרות H2 בדוח שבועי, ≤15 בדוח יומי (סבב 5: BLUF, מה השתנה, אינדיקטורים, הנחות נוספו למבנה) |
 | `monthly_is_structured` | 1.0 | (רק כשקיים דוח חודשי השבוע) ציטוטים בדוח החודשי מוצגים כקישור `[n](#src-n)`, לעולם לא `[n]` חשוף |
 
 ### D7 -- דוח פיתוח עסקי (`agent/eoa/qa/d7_bd_report.py`)
