@@ -83,7 +83,7 @@ export function EntityGraphExplorer({
 
   const overviewQuery = useQuery({
     queryKey: ["graph-overview", nodeLimit],
-    queryFn: () => api.getGraphOverview(nodeLimit),
+    queryFn: () => api.getGraphOverview(Math.min(nodeLimit, 300)),
     enabled: centerId == null,
   });
 

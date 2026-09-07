@@ -88,7 +88,7 @@ def graph_search(q: str, limit: int = Query(20, ge=1, le=100)) -> list[dict]:
 
 
 @router.get("/graph/overview")
-def graph_overview(limit: int = Query(30, ge=1, le=200), since: str | None = None) -> dict:
+def graph_overview(limit: int = Query(30, ge=1, le=300), since: str | None = None) -> dict:  # le=300: the explorer lands with its 300-node cap (J10 worst #1: 422)
     """The "map of the map" shown before an analyst picks a center entity: top entities by
     mention volume and the edges between them."""
     return graph_queries.overview(limit=limit, since=since)
