@@ -130,6 +130,33 @@ deny_domains: &deny
   - pdfcoffee.com
   - coursehero.com
 
+# R7-tenders (round-6 D9 finding 2, docs/qa/loop/round_6_judge.md -- candidate id 34, a Dutch
+# legal/HR consulting contract that cleared the keyword gate on a fluke substring match): a CPV
+# (Common Procurement Vocabulary -- the classification code TED/Contracts Finder/OCDS-shaped
+# notices carry; eoa.tenders.scan._parse_ted_notices/_parse_contracts_finder/_parse_generic_ocds)
+# pre-filter, matched by code *prefix*. A notice whose CPV code(s) are ALL within
+# cpv_deny_prefixes and NONE within cpv_allow_prefixes is a hard rejection
+# (eoa.tenders.scan._gate_reject_reason) regardless of keyword/LLM relevance; a code in
+# cpv_allow_prefixes always wins even alongside a deny-family code on the same notice. A notice
+# with no CPV data at all (most sources -- TenderNed's API, as probed 2026-09-06, exposes none)
+# is completely unaffected either way.
+cpv_allow_prefixes: &cpv_allow
+  # 35: security, firefighting, police, defence equipment (includes 35700000 electronic defence
+  # systems). 38: laboratory, optical and precision instruments (includes 38600000 optical
+  # instruments, 38630000 astronomical/optical instruments, 38651000 photographic equipment,
+  # 38127000 infrared detection equipment).
+  - "35"
+  - "38"
+cpv_deny_prefixes: &cpv_deny
+  # 79: business services (subsumes 79100000-79140000 legal services, 79600000-79635000
+  # recruitment/HR services -- candidate id 34's own family, "Diensten"/services). 80:
+  # education/training services. 85: health and social work services. 98: other
+  # community/personal/household services.
+  - "79"
+  - "80"
+  - "85"
+  - "98"
+
 sources:
   # ---------------------------------------------------------------- TED (EU) -- api_json, verified working
   - id: ted_eu
@@ -141,7 +168,7 @@ sources:
     # TED v3 "expert query" syntax: `FT ~ "<term>"` is a full-text search operator. One request
     # per keyword (rotated by eoa.tenders.scan, capped) -- the API has no native OR-of-phrases
     # syntax that stayed inside the 400-safe subset we could verify.
-    query_template: '{"query":"FT ~ \"{keyword}\"","fields":["ND","TI","PD","publication-number","links"],"limit":20}'
+    query_template: '{"query":"FT ~ \"{keyword}\"","fields":["ND","TI","PD","publication-number","links","classification-cpv"],"limit":20}'
     keywords: *kw
     parse_hints:
       format: json
@@ -157,7 +184,9 @@ sources:
       Verified via curl POST with body {"query":"FT ~ \"electro-optical\"","fields":["ND","TI","PD"],"limit":2} ->
       HTTP 200, real notices (TI is a per-language dict, "eng" present on most EU-wide notices).
       A bare/undelimited query string returns HTTP 400 QUERY_SYNTAX_ERROR -- the FT operator with
-      quoted phrase is required. No API key needed.
+      quoted phrase is required. No API key needed. R7-tenders (2026-09-07): re-verified with
+      "classification-cpv" added to `fields` -> HTTP 200, a real CPV code list per notice (e.g.
+      ["38000000"]) -- feeds eoa.tenders.scan._parse_ted_notices' cpv_naics / the CPV pre-filter.
 
   # ---------------------------------------------------------- UK Contracts Finder -- api_json, verified working
   - id: uk_contracts_finder
@@ -186,7 +215,10 @@ sources:
     notes: >
       Verified via curl GET ?keyword=electro-optical -> HTTP 200, real OCDS JSON (100 releases
       returned). The server-side `keyword` filter is not reliable (unrelated releases came back
-      first) -- client-side keyword re-filtering in eoa.tenders.scan is mandatory. No API key needed.
+      first) -- client-side keyword re-filtering in eoa.tenders.scan is mandatory. No API key
+      needed. R7-tenders (2026-09-07): CPV lives at `tender.classification.id` with
+      `tender.classification.scheme == "CPV"` (single code string, e.g. "60000000") -- feeds
+      eoa.tenders.scan._parse_contracts_finder's cpv_naics / the CPV pre-filter.
 
   # ---------------------------------------------------------------- SAM.gov (US) -- documented, currently dead
   - id: sam_gov_api
@@ -195,7 +227,13 @@ sources:
     country: US
     url: "https://api.sam.gov/opportunities/v2/search"
     method: GET
-    query_params: { api_key: DEMO_KEY, keyword: "{keyword}", limit: "25" }
+    # R7-tenders (finding 1c): `{api_key}` is resolved at request time from the real
+    # SAM_GOV_API_KEY environment variable (eoa.tenders.scan._fetch_api_json), never a literal
+    # value here -- eoa.tenders.scan._api_json_source_enabled only ever attempts this source when
+    # that variable is actually set to something non-empty, so this source springs to life
+    # automatically the moment a real per-user key is added to the environment, no config edit
+    # (flipping `verified: true` by hand) required.
+    query_params: { api_key: "{api_key}", keyword: "{keyword}", limit: "25" }
     keywords: *kw
     parse_hints: { format: json, notice_path: opportunitiesData }
     verified: false
@@ -205,7 +243,9 @@ sources:
       curl GET with api_key=DEMO_KEY (SAM.gov's documented public demo key) -> HTTP 404 for both
       /opportunities/v2/search and /prod/opportunities/v2/search. The v2 DEMO_KEY path appears to
       have been retired/moved behind a real per-user key since this doc's endpoint was written.
-      Not polled directly by eoa.tenders.scan; covered instead by `sam_gov_search` below.
+      `verified: false` so it is never polled with no key at all (covered instead by
+      `sam_gov_search` below) -- but per finding 1c it is no longer permanently disabled: with a
+      real SAM_GOV_API_KEY in the environment, eoa.tenders.scan attempts it directly.
 
   - id: sam_gov_search
     name: "SAM.gov opportunities -- SearXNG fallback"
@@ -398,7 +438,7 @@ sources:
     # live 2026-09-06; the naive `CPV=...`/`cpv=...`/`classification=...` field names all return
     # HTTP 400 QUERY_UNKNOWN_FIELD, only `classification-cpv` is accepted). Each "keyword" below is
     # actually an 8-digit CPV code, rotated the same way ted_eu rotates free-text phrases.
-    query_template: '{"query":"classification-cpv={keyword}","fields":["ND","TI","PD","publication-number","links"],"limit":20}'
+    query_template: '{"query":"classification-cpv={keyword}","fields":["ND","TI","PD","publication-number","links","classification-cpv"],"limit":20}'
     # `keywords` stays the normal domain vocabulary (*kw) -- it is what the two-signal gate checks
     # against each returned notice's title+summary TEXT (_matches_keywords), which obviously never
     # contains a raw CPV code. `api_query_keywords` below is the separate list actually rotated into

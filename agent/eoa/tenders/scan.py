@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 import time
 from collections.abc import Callable
@@ -177,6 +178,49 @@ DEFAULT_DENY_DOMAINS = [
 
 MAX_KEYWORDS_PER_API_SOURCE = 5
 
+# R7-tenders (round-6 D9 finding 2, docs/qa/loop/round_6_judge.md): a deterministic CPV
+# (Common Procurement Vocabulary, the EU/OCDS classification code every TED/Contracts-Finder/OCDS
+# notice carries -- see ``_parse_ted_notices``/``_parse_contracts_finder``/``_parse_generic_ocds``
+# below) pre-filter, layered on top of the pre-existing keyword two-signal gate. Candidate id 34
+# ("Expert / Coach Transformatie en Contracten Juridisch", Gemeente Rotterdam -- a Dutch legal/HR
+# consulting contract) is the concrete case this targets: it slipped past the keyword gate on a
+# spurious substring match (the acronym keyword "ATR" matching inside the unrelated Dutch word
+# "priva-ATR-echtelijke" -- fixed separately by the word-boundary check in
+# :func:`_matches_keywords`), but a CPV-aware source carrying an explicit non-defence
+# classification code (this one had none -- TenderNed's API doesn't expose CPV at all in the
+# shape probed 2026-09-06) would clear that keyword bug entirely on the CPV signal alone. Two
+# lists, both matched by CPV *prefix* (a CPV code's leading digits name its broad family; e.g.
+# "79100000" (legal services) and "79000000" (business services) both start with "79"):
+#
+# - ``DEFAULT_CPV_ALLOW_PREFIXES``: known defence/security/optronics families -- 35 (security,
+#   firefighting, police, defence equipment -- includes 35700000 electronic defence systems), 38
+#   (laboratory, optical and precision equipment -- includes 38600000 optical instruments,
+#   38630000 astronomical/optical instruments, 38651000 photographic equipment, 38127000 infrared
+#   detection). A code in this family is never rejected by the CPV pre-filter regardless of the
+#   deny list below (an EO/IR-coded notice always wins).
+# - ``DEFAULT_CPV_DENY_PREFIXES``: obvious non-defence families the user's finding named
+#   explicitly -- 79 (business services, which subsumes 79100000-79140000 legal services and
+#   79600000-79635000 recruitment/HR services), plus the adjacent families a coach/consulting/HR
+#   notice like candidate 34 would actually carry: 80 (education/training services), 85 (health
+#   and social work services), 98 (other community/personal/household services).
+#
+# Only applied via :func:`_cpv_gate_reject_reason` when the notice actually carries CPV code(s)
+# (``NoticeRaw.cpv_naics``, populated by the structured parsers above) AND every one of them falls
+# in the deny list with none in the allow list -- a notice with no CPV data at all (every source
+# except TED/Contracts Finder/OCDS-shaped ones, and TenderNed as probed) is completely unaffected,
+# same as before this fix; a notice with a mixed/ambiguous CPV set (one deny-family code alongside
+# one allow-family code) is never rejected on CPV alone either -- the allow signal wins.
+DEFAULT_CPV_ALLOW_PREFIXES = ["35", "38"]
+DEFAULT_CPV_DENY_PREFIXES = ["79", "80", "85", "98"]
+
+# R7-tenders: keywords this short are prone to matching as a substring *inside* an unrelated word
+# (candidate id 34's "ATR" matching inside the Dutch "privaatrechtelijke") -- see
+# :func:`_matches_keywords`'s word-boundary handling below. Deliberately conservative (<=4 chars,
+# alphanumeric-only): a longer phrase ("computer vision", "seeker") keeps plain substring matching
+# so a genuine plural ("seekers") still matches, which is the majority of the existing keyword
+# vocabulary and every existing scan test's expectation.
+_SHORT_KEYWORD_MAX_LEN = 4
+
 # RELEVANCE_MIN_ACCEPT / VALID_NOTICE_TYPES: no longer a hard rejection floor (see the module
 # docstring's W2b section -- a notice below this is stored as intake='candidate', not dropped).
 # Still meaningful as the deterministic-minimum relevance the thin-snippet rescue grants a rescued
@@ -262,6 +306,21 @@ def load_deny_domains(path: str | Path | None = None) -> list[str]:
     return list(raw.get("deny_domains") or DEFAULT_DENY_DOMAINS)
 
 
+def load_cpv_allow_prefixes(path: str | Path | None = None) -> list[str]:
+    """R7-tenders: top-level ``cpv_allow_prefixes`` -- CPV code prefixes that are always treated
+    as on-topic defence/optronics families (see ``DEFAULT_CPV_ALLOW_PREFIXES``'s docstring)."""
+    raw = _load_yaml(path)
+    return list(raw.get("cpv_allow_prefixes") or DEFAULT_CPV_ALLOW_PREFIXES)
+
+
+def load_cpv_deny_prefixes(path: str | Path | None = None) -> list[str]:
+    """R7-tenders: top-level ``cpv_deny_prefixes`` -- CPV code prefixes that name an obviously
+    non-defence family (business/legal/HR consulting, education, health/social work, other
+    community services -- see ``DEFAULT_CPV_DENY_PREFIXES``'s docstring)."""
+    raw = _load_yaml(path)
+    return list(raw.get("cpv_deny_prefixes") or DEFAULT_CPV_DENY_PREFIXES)
+
+
 # --------------------------------------------------------------------------
 # NoticeRaw + parsing
 # --------------------------------------------------------------------------
@@ -327,6 +386,12 @@ def _parse_ted_notices(payload: dict[str, Any], src: TenderSource) -> list[Notic
         elif isinstance(ti, str):
             title = ti
         url = _dig(n, "links.htmlDirect.ENG") or _dig(n, "links.html.ENG")
+        # R7-tenders: TED's own field name for its CPV classification, confirmed live 2026-09-07
+        # (only returned when explicitly requested in the query's `fields` list -- see
+        # config/tenders.yaml's ted_eu/ted_eu_cpv `query_template`). A list of code strings
+        # (e.g. ``["38600000"]``); absent/empty leaves ``cpv_naics`` at its default ``[]``, which
+        # the CPV pre-filter (``_cpv_gate_reject_reason``) treats as "no signal, don't reject".
+        cpv = n.get("classification-cpv") or []
         out.append(
             NoticeRaw(
                 source_id=src.id,
@@ -335,6 +400,7 @@ def _parse_ted_notices(payload: dict[str, Any], src: TenderSource) -> list[Notic
                 country=src.country,
                 published_at=_parse_date(n.get("PD")),
                 url=url,
+                cpv_naics=list(cpv) if isinstance(cpv, list) else [str(cpv)],
                 raw=n,
             )
         )
@@ -355,6 +421,11 @@ def _parse_contracts_finder(payload: dict[str, Any], src: TenderSource) -> list[
         status_hint = "awarded" if "award" in tags else ("closed" if "tenderCancellation" in tags else None)
         m = _UUID_RE.search(str(r.get("id") or ocid))
         url = f"https://www.contractsfinder.service.gov.uk/Notice/{m.group(0)}" if m else None
+        # R7-tenders: OCDS's classification lives at `tender.classification.id` with
+        # `tender.classification.scheme == "CPV"` (confirmed live 2026-09-07) -- a single code
+        # string, not a list, unlike TED; wrapped in a list here so ``NoticeRaw.cpv_naics`` has one
+        # consistent shape for ``_cpv_gate_reject_reason`` to check regardless of source.
+        cpv = _dig(r, "tender.classification.id")
         out.append(
             NoticeRaw(
                 source_id=src.id,
@@ -366,6 +437,7 @@ def _parse_contracts_finder(payload: dict[str, Any], src: TenderSource) -> list[
                 published_at=_parse_date(r.get("date")),
                 deadline=_parse_date(_dig(r, "tender.tenderPeriod.endDate")),
                 url=url,
+                cpv_naics=[str(cpv)] if cpv else [],
                 status_hint=status_hint,
                 raw=r,
             )
@@ -384,9 +456,12 @@ def _parse_generic_ocds(payload: dict[str, Any], src: TenderSource) -> list[Noti
     ``notice_path`` (default ``"releases"``), ``id_field`` (default ``"ocid"``), ``title_field``
     (default ``"tender.title"``), ``summary_field`` (default ``"tender.description"``),
     ``agency_field`` (default ``"buyer.name"``), ``date_field`` (publish date; default ``"date"``),
-    ``deadline_field`` (default ``"tender.tenderPeriod.endDate"``), and either ``url_field`` (a
+    ``deadline_field`` (default ``"tender.tenderPeriod.endDate"``), either ``url_field`` (a
     dotted path to a direct URL already in the payload) or ``url_pattern`` (a ``"{ocid}"``/
-    ``"{id}"`` format template) for the notice's public URL."""
+    ``"{id}"`` format template) for the notice's public URL, and (R7-tenders) ``cpv_field``
+    (default ``"tender.classification.id"``, matching plain OCDS's CPV classification path --
+    confirmed live against UK Contracts Finder 2026-09-07) feeding ``NoticeRaw.cpv_naics`` for the
+    CPV pre-filter (``_cpv_gate_reject_reason``)."""
     hints = src.parse_hints or {}
     notice_path = hints.get("notice_path", "releases")
     id_field = hints.get("id_field", "ocid")
@@ -397,6 +472,7 @@ def _parse_generic_ocds(payload: dict[str, Any], src: TenderSource) -> list[Noti
     deadline_field = hints.get("deadline_field", "tender.tenderPeriod.endDate")
     url_field = hints.get("url_field")
     url_pattern = hints.get("url_pattern")
+    cpv_field = hints.get("cpv_field", "tender.classification.id")
 
     out: list[NoticeRaw] = []
     for r in payload.get(notice_path) or []:
@@ -411,6 +487,7 @@ def _parse_generic_ocds(payload: dict[str, Any], src: TenderSource) -> list[Noti
         if not url and url_pattern:
             m = _UUID_RE.search(str(r.get("id") or rid))
             url = url_pattern.format(ocid=rid, id=r.get("id") or rid, uuid=m.group(0) if m else "")
+        cpv = _dig(r, cpv_field)
         out.append(
             NoticeRaw(
                 source_id=src.id,
@@ -422,6 +499,7 @@ def _parse_generic_ocds(payload: dict[str, Any], src: TenderSource) -> list[Noti
                 published_at=_parse_date(_dig(r, date_field) or r.get(date_field)),
                 deadline=_parse_date(_dig(r, deadline_field)),
                 url=url,
+                cpv_naics=[str(cpv)] if cpv else [],
                 status_hint=status_hint,
                 raw=r,
             )
@@ -437,7 +515,11 @@ def _parse_generic_json_list(payload: dict[str, Any], src: TenderSource) -> list
     response as ``{"_root": [...]}`` before calling any parser), ``id_field`` (default ``"id"``),
     ``title_field`` (default ``"title"``), ``summary_field`` (default ``"summary"``),
     ``agency_field``, ``date_field`` (default ``"date"``), ``deadline_field``, ``url_field`` (a
-    dotted path) or ``url_pattern`` (a ``"{id}"`` format template)."""
+    dotted path) or ``url_pattern`` (a ``"{id}"`` format template), and (R7-tenders) ``cpv_field``
+    (a dotted path; ``None`` by default -- unlike OCDS, a flat JSON-list API has no conventional
+    CPV field name/shape, so this parser never guesses one; a source that does carry a CPV code
+    opts in explicitly via its own ``parse_hints.cpv_field``) feeding ``NoticeRaw.cpv_naics`` for
+    the CPV pre-filter (``_cpv_gate_reject_reason``)."""
     hints = src.parse_hints or {}
     notice_path = hints.get("notice_path", "")
     id_field = hints.get("id_field", "id")
@@ -448,6 +530,7 @@ def _parse_generic_json_list(payload: dict[str, Any], src: TenderSource) -> list
     deadline_field = hints.get("deadline_field")
     url_field = hints.get("url_field")
     url_pattern = hints.get("url_pattern")
+    cpv_field = hints.get("cpv_field")
 
     records = _dig(payload, notice_path) if notice_path else payload.get("_root")
     if records is None:
@@ -463,6 +546,8 @@ def _parse_generic_json_list(payload: dict[str, Any], src: TenderSource) -> list
         url = _dig(r, url_field) if url_field else None
         if not url and url_pattern:
             url = url_pattern.format(id=rid)
+        cpv = _dig(r, cpv_field) if cpv_field else None
+        cpv_list = cpv if isinstance(cpv, list) else ([str(cpv)] if cpv else [])
         out.append(
             NoticeRaw(
                 source_id=src.id,
@@ -474,6 +559,7 @@ def _parse_generic_json_list(payload: dict[str, Any], src: TenderSource) -> list
                 published_at=_parse_date(_dig(r, date_field)),
                 deadline=_parse_date(_dig(r, deadline_field)) if deadline_field else None,
                 url=url,
+                cpv_naics=[str(c) for c in cpv_list],
                 raw=r,
             )
         )
@@ -559,18 +645,29 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
     -- ``query_template``/``query_params`` (config/tenders.yaml) both embed ``{keyword}`` directly
     in the request TED/Contracts Finder actually receive; the client-side gate below is a
     (necessary, per each source's own notes on unreliable server-side filtering) second pass, not
-    the only one."""
+    the only one.
+
+    R7-tenders (finding 1c): a ``query_params`` value may also embed ``{api_key}`` -- resolved from
+    the actual environment variable named in ``src.needs_key_env_var`` (e.g. ``sam_gov_api``'s
+    ``SAM_GOV_API_KEY``) at request time, never a hardcoded placeholder in the YAML. Empty string
+    when no such variable is configured/set -- harmless for a source without an ``{api_key}``
+    placeholder at all, and this function is only ever reached for a source
+    ``_api_json_source_enabled`` already confirmed has a real, non-empty key when one is required."""
     if not src.url:
         return []
+    api_key = os.environ.get(src.needs_key_env_var, "") if src.needs_key_env_var else ""
     if src.query_template:
         # NOT str.format(): query_template is a JSON literal ('{"query":"...","fields":[...]}') --
         # its own braces would be misparsed as format fields. Substitute the placeholder directly,
         # JSON-string-escaping the keyword first so it can't break the surrounding JSON syntax.
         escaped_keyword = json.dumps(keyword)[1:-1]
-        body = json.loads(src.query_template.replace("{keyword}", escaped_keyword))
+        escaped_api_key = json.dumps(api_key)[1:-1]
+        body = json.loads(
+            src.query_template.replace("{keyword}", escaped_keyword).replace("{api_key}", escaped_api_key)
+        )
         resp = fetch_raw_remote(src.url, method=src.method or "POST", json_body=body)
     else:
-        params = {k: v.format(keyword=keyword) for k, v in (src.query_params or {}).items()}
+        params = {k: v.format(keyword=keyword, api_key=api_key) for k, v in (src.query_params or {}).items()}
         resp = fetch_raw_remote(f"{src.url}?{urlencode(params)}", method=src.method or "GET")
     data = resp.get("json")
     if isinstance(data, list):
@@ -633,22 +730,40 @@ def _collect_source_notices(src: TenderSource, deny_domains: list[str]) -> list[
 # --------------------------------------------------------------------------
 
 
+def _term_present(term: str, text_casefold: str) -> bool:
+    """R7-tenders (round-6 D9 finding 2, candidate id 34): plain casefold substring match for
+    ``term`` in the already-casefolded ``text_casefold`` -- *except* for a short term (at most
+    ``_SHORT_KEYWORD_MAX_LEN`` characters), which additionally requires the match to sit at a word
+    boundary (not embedded inside a longer, unrelated word). A short acronym-shaped term ("ATR",
+    "RFI", ...) is exactly the shape prone to matching as a fragment *inside* an unrelated longer
+    word in the same or another language -- the concrete bug this fixes: the EO/IR domain keyword
+    "ATR" matched inside the Dutch word "privaatrechtelijke" ("under private law"), letting a
+    Rotterdam legal/HR coaching contract (candidate id 34) clear the domain-signal check on pure
+    accident. A longer phrase ("computer vision", "seeker") is left on plain substring matching so
+    a genuine plural ("seekers") or compound still matches, unchanged from before this fix."""
+    term_cf = term.casefold()
+    if len(term) > _SHORT_KEYWORD_MAX_LEN:
+        return term_cf in text_casefold
+    return re.search(rf"\b{re.escape(term_cf)}\b", text_casefold) is not None
+
+
 def _matches_keywords(notice: NoticeRaw, keywords: list[str]) -> list[str]:
-    """DOMAIN signal: EO/IR/CV terms actually present (casefold substring) in title+summary."""
+    """DOMAIN signal: EO/IR/CV terms actually present (see ``_term_present``) in title+summary."""
     text = f"{notice.title} {notice.summary}".casefold()
-    return [kw for kw in (keywords or DEFAULT_KEYWORDS) if kw.casefold() in text]
+    return [kw for kw in (keywords or DEFAULT_KEYWORDS) if _term_present(kw, text)]
 
 
 def _has_procurement_signal(notice: NoticeRaw, src_kind: str, procurement_signals: list[str]) -> bool:
-    """PROCUREMENT signal: explicit tender/RFI/RFP/... language in title+summary for a general
-    source (search/rss -- could be any web content), or implicitly satisfied for a structured
-    procurement-portal API (``api_json`` -- TED/Contracts Finder notices *are*, by construction,
-    real tender/contract records; most don't literally spell "tender" in their title text, so
-    requiring the word there would reject the overwhelming majority of genuine notices)."""
+    """PROCUREMENT signal: explicit tender/RFI/RFP/... language (see ``_term_present``) in
+    title+summary for a general source (search/rss -- could be any web content), or implicitly
+    satisfied for a structured procurement-portal API (``api_json`` -- TED/Contracts Finder
+    notices *are*, by construction, real tender/contract records; most don't literally spell
+    "tender" in their title text, so requiring the word there would reject the overwhelming
+    majority of genuine notices)."""
     if src_kind == "api_json":
         return True
     text = f"{notice.title} {notice.summary}".casefold()
-    return any(sig.casefold() in text for sig in (procurement_signals or DEFAULT_PROCUREMENT_SIGNALS))
+    return any(_term_present(sig, text) for sig in (procurement_signals or DEFAULT_PROCUREMENT_SIGNALS))
 
 
 def _passes_gate(
@@ -1157,7 +1272,37 @@ def _llm_classify(
     return extract, page_verified
 
 
-def _gate_reject_reason(notice: NoticeRaw, *, deny_domains: list[str]) -> str | None:
+def _cpv_gate_reject_reason(
+    cpv_naics: list[str] | None, *, allow_prefixes: list[str], deny_prefixes: list[str]
+) -> str | None:
+    """R7-tenders (round-6 D9 finding 2): CPV-code family pre-filter. ``None`` (never rejected) when
+    ``cpv_naics`` is empty -- most sources carry no CPV data at all, and this must never invent a
+    rejection reason from an absent signal. Otherwise: ``None`` if *any* code starts with an
+    ``allow_prefixes`` entry (a defence/optronics family always wins, even alongside a deny-family
+    code on the same multi-classified notice); ``"cpv_non_defence_<prefix>"`` only when *every*
+    code starts with a ``deny_prefixes`` entry and none matches ``allow_prefixes`` -- an obviously
+    non-defence family (business/legal/HR consulting, education, health/social work, ...) with no
+    countervailing defence signal at all. A code matching neither list (an ordinary, CPV-neutral
+    family) is left alone -- this is a pre-filter for the *obvious* non-defence case named in the
+    finding, not a whitelist requiring every notice to carry a recognised defence CPV code."""
+    codes = [c for c in (cpv_naics or []) if c]
+    if not codes:
+        return None
+    if any(code.startswith(p) for code in codes for p in allow_prefixes):
+        return None
+    denied = [p for code in codes for p in deny_prefixes if code.startswith(p)]
+    if denied and len(denied) >= len(codes):
+        return f"cpv_non_defence_{denied[0]}"
+    return None
+
+
+def _gate_reject_reason(
+    notice: NoticeRaw,
+    *,
+    deny_domains: list[str],
+    cpv_allow_prefixes: list[str] | None = None,
+    cpv_deny_prefixes: list[str] | None = None,
+) -> str | None:
     """W2b (open intake, docs/REVIEW_2026-09-06_evening.md, user requirement 2026-09-06 18:55,
     verbatim: "be open"): the only rejections that still drop a notice outright -- never inserted,
     ``tender_rejected`` logged with a reason. Returns ``None`` if the notice may be stored (which,
@@ -1170,7 +1315,7 @@ def _gate_reject_reason(notice: NoticeRaw, *, deny_domains: list[str]) -> str | 
     fetch (docs/MODULES.md "Round 4 discovery" W2). None of those are grounds to discard a notice
     any more -- they only shape ``relevance_score``/``intake`` (see ``scan_tenders``), which the
     operator's own 👍/👎 feedback and the self-tuning threshold then correct over time
-    (``eoa.tenders.feedback``). Only four HARD cases remain, none of which any amount of relevance
+    (``eoa.tenders.feedback``). Five HARD cases remain, none of which any amount of relevance
     feedback should override:
 
     - an explicit awarded/closed ``status_hint`` -- the source itself says this opportunity is
@@ -1178,7 +1323,10 @@ def _gate_reject_reason(notice: NoticeRaw, *, deny_domains: list[str]) -> str | 
     - a denylisted document-hosting/aggregator domain (Scribd, DocPlayer, ...) -- never itself the
       authoritative notice, regardless of content;
     - a dead link -- no URL at all, so there is nothing for an analyst to open or verify;
-    - an exact duplicate -- checked earlier, via ``_tender_exists``, before this gate ever runs.
+    - an exact duplicate -- checked earlier, via ``_tender_exists``, before this gate ever runs;
+    - (R7-tenders) an unambiguous non-defence CPV code family (``_cpv_gate_reject_reason``) -- a
+      structural classification signal, not a relevance judgment, so it belongs alongside the other
+      four rather than only shaping ``relevance_score``.
     """
     if notice.status_hint in ("awarded", "closed"):
         return f"status_hint_{notice.status_hint}"
@@ -1186,6 +1334,13 @@ def _gate_reject_reason(notice: NoticeRaw, *, deny_domains: list[str]) -> str | 
         return "denylisted_domain"
     if not notice.url:
         return "dead_link"
+    cpv_reason = _cpv_gate_reject_reason(
+        notice.cpv_naics,
+        allow_prefixes=cpv_allow_prefixes if cpv_allow_prefixes is not None else DEFAULT_CPV_ALLOW_PREFIXES,
+        deny_prefixes=cpv_deny_prefixes if cpv_deny_prefixes is not None else DEFAULT_CPV_DENY_PREFIXES,
+    )
+    if cpv_reason is not None:
+        return cpv_reason
     return None
 
 
@@ -1273,6 +1428,118 @@ def _archive_stale_closed() -> int:
 
 
 # --------------------------------------------------------------------------
+# R7-tenders (round-6 D9 finding 2): repair path for existing candidates that predate the
+# word-boundary keyword fix / CPV pre-filter above
+# --------------------------------------------------------------------------
+
+
+def _recheck_prefilter(
+    text: str,
+    cpv_naics: list[str] | None,
+    src_kind: str,
+    domain_keywords: list[str],
+    procurement_signals: list[str],
+    cpv_allow_prefixes: list[str],
+    cpv_deny_prefixes: list[str],
+) -> str | None:
+    """Re-applies today's gate (post-R7-tenders word-boundary keyword matching + the CPV
+    pre-filter) to an already-stored candidate's persisted text -- used only by the repair path
+    below (:func:`find_prefilter_violations`), never by the live scan itself (which re-checks a
+    fresh ``NoticeRaw`` via ``_passes_gate``/``_gate_reject_reason`` directly). ``text`` is expected
+    to be ``items.clean_text`` (``"<title>\\n\\n<summary>"``, set at insert time by
+    ``_insert_tender_and_item``) -- equivalent for matching purposes to the ``f"{title} {summary}"``
+    string ``_matches_keywords``/``_has_procurement_signal`` build from a live ``NoticeRaw``, since
+    both are casefolded before any comparison. Returns the violation reason, or ``None`` if the row
+    would still clear today's gate."""
+    text_cf = text.casefold()
+    domain_terms = [kw for kw in (domain_keywords or DEFAULT_KEYWORDS) if _term_present(kw, text_cf)]
+    if not domain_terms:
+        return "keyword_gate_no_domain_term"
+    if src_kind != "api_json":
+        signals = procurement_signals or DEFAULT_PROCUREMENT_SIGNALS
+        if not any(_term_present(sig, text_cf) for sig in signals):
+            return "keyword_gate_no_procurement_signal"
+    return _cpv_gate_reject_reason(
+        cpv_naics, allow_prefixes=cpv_allow_prefixes, deny_prefixes=cpv_deny_prefixes
+    )
+
+
+@dataclass
+class PrefilterViolation:
+    """One existing ``tenders`` row that :func:`find_prefilter_violations` found no longer clears
+    today's gate."""
+
+    id: int
+    source: str
+    title: str
+    reason: str
+
+
+def find_prefilter_violations() -> list[PrefilterViolation]:
+    """R7-tenders repair path (round-6 D9 finding 2, candidate id 34): every ``intake='candidate'``
+    ``tenders`` row that would no longer clear today's gate -- read-only, always safe to call (a
+    dry-run listing). Deliberately scoped to ``intake='candidate'`` only, exactly like
+    ``scripts/repair_round6.py``'s own tender dedupe: an ``'accepted'`` row already carries operator
+    trust (its own 👍, or the learned relevance threshold, promoted it) or predates this filter
+    entirely, and re-litigating it here would contradict the module docstring's W2b open-intake
+    philosophy ("through the relevance feedback given to each tender, the system tunes itself") --
+    a filter *tightening* must never silently override an operator's own accept. A row whose
+    ``source`` is no longer present in ``config/tenders.yaml`` is skipped (nothing to re-check
+    the keyword vocabulary/kind against)."""
+    sources_by_id = {s.id: s for s in load_tender_sources()}
+    procurement_signals = load_procurement_signals()
+    cpv_allow = load_cpv_allow_prefixes()
+    cpv_deny = load_cpv_deny_prefixes()
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.id, t.source, t.title, t.cpv_naics, i.clean_text "
+            "FROM tenders t JOIN items i ON i.id = t.item_id "
+            "WHERE t.intake = 'candidate'"
+        )
+        rows = cur.fetchall()
+    violations: list[PrefilterViolation] = []
+    for row in rows:
+        src = sources_by_id.get(row["source"])
+        if src is None:
+            continue
+        reason = _recheck_prefilter(
+            row.get("clean_text") or row.get("title") or "",
+            row.get("cpv_naics"),
+            src.kind,
+            src.keywords or DEFAULT_KEYWORDS,
+            procurement_signals,
+            cpv_allow,
+            cpv_deny,
+        )
+        if reason is not None:
+            violations.append(
+                PrefilterViolation(
+                    id=row["id"], source=row["source"], title=row["title"] or "", reason=reason
+                )
+            )
+    return violations
+
+
+def repair_relevance_prefilter(*, apply: bool = False) -> list[PrefilterViolation]:
+    """Finds every current prefilter violation (:func:`find_prefilter_violations``); with
+    ``apply=True`` also archives those rows (``status='archived'`` -- F1: no fetched-content row is
+    ever deleted outright, same convention as ``_archive_stale_closed``). ``apply=False``
+    (the default): dry run, no writes at all. The ``UPDATE``'s own ``WHERE ... AND intake =
+    'candidate'`` is a second, defence-in-depth guard against ever touching an ``'accepted'`` row
+    even if the violation list were somehow stale by the time this runs; ``tender_feedback`` is a
+    separate table this function never references, so it is untouched either way."""
+    violations = find_prefilter_violations()
+    if apply and violations:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tenders SET status = 'archived', updated_at = now() "
+                "WHERE id = ANY(%(ids)s::bigint[]) AND intake = 'candidate'",
+                {"ids": [v.id for v in violations]},
+            )
+    return violations
+
+
+# --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
 
@@ -1300,6 +1567,23 @@ class TenderStats:
 
 
 LLM_BUDGET_SECONDS_DEFAULT = 15 * 60
+
+
+def _api_json_source_enabled(src: TenderSource) -> bool:
+    """R7-tenders (finding 1c): an ``api_json`` source is scanned when it is ``verified: true``
+    (the pre-existing rule -- a live-probed, keyless, working endpoint), OR when it is marked
+    ``needs_key_env_var`` (round-6 D9's SAM.gov Opportunities API v2 case, ``config/tenders.yaml``'s
+    ``sam_gov_api``) AND that environment variable is actually set to a non-empty value at scan
+    time. This makes a key-gated source spring to life automatically the moment its key is added to
+    the environment -- no code or config change (flipping ``verified: true`` by hand) required --
+    while still never attempting a request without one (the brief's "skip silently otherwise").
+    Every other unverified source (bot-protected, wrong endpoint, deliberately out of scope --
+    see each entry's own ``notes``) stays skipped exactly as before."""
+    if src.verified:
+        return True
+    if src.needs_key_env_var:
+        return bool(os.environ.get(src.needs_key_env_var, "").strip())
+    return False
 
 
 def _order_sources_by_priority(sources: list[TenderSource]) -> list[TenderSource]:
@@ -1339,12 +1623,14 @@ def scan_tenders(
     seen_refs: set[str] = set()
     procurement_signals = load_procurement_signals()
     deny_domains = load_deny_domains()
+    cpv_allow_prefixes = load_cpv_allow_prefixes()
+    cpv_deny_prefixes = load_cpv_deny_prefixes()
 
     ordered_sources = _order_sources_by_priority(sources if sources is not None else load_tender_sources())
     for src in ordered_sources:
         if src.kind == "html":
             continue
-        if src.kind == "api_json" and not src.verified:
+        if src.kind == "api_json" and not _api_json_source_enabled(src):
             continue
         try:
             notices = _collect_source_notices(src, deny_domains)
@@ -1429,7 +1715,12 @@ def scan_tenders(
                 )
                 extract = rescued
 
-            reject_reason = _gate_reject_reason(notice, deny_domains=deny_domains)
+            reject_reason = _gate_reject_reason(
+                notice,
+                deny_domains=deny_domains,
+                cpv_allow_prefixes=cpv_allow_prefixes,
+                cpv_deny_prefixes=cpv_deny_prefixes,
+            )
             if reject_reason is not None:
                 stats.gate_rejected += 1
                 log.info(

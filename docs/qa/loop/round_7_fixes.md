@@ -87,3 +87,143 @@ reading each job's `payload`/`result` and every `investigation_log` row, plus th
 _See the table appended below once the live re-runs complete -- `EOA_PIPELINE=1`,
 `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/eo.exe investigate "<question>" --item-id <id>`,
 budget: up to 8 full investigations, job 46's is free (short-circuits before touching the cloud)._
+
+### R7-tenders status
+
+Scope: `docs/qa/loop/round_6_judge.md` D9 finding 2 (candidate id 34, "Expert / Coach Transformatie
+en Contracten Juridisch", Gemeente Rotterdam -- a Dutch legal/HR consulting contract that cleared
+the keyword gate on a fluke substring match) plus finding 1's SAM.gov key-gating piece. Files
+touched: `agent/eoa/tenders/scan.py`, `config/tenders.yaml`, `scripts/repair_round7_tenders.py`
+(new), `tests/unit/test_tenders_round7.py` (new, 54 cases, no DB/network). `agent/eoa/tenders/
+feedback.py` was left unmodified -- nothing in either finding needed it.
+Ran against `127.0.0.1:5432/eoanalyst` (`runtime/eoa.env`). Lint/format clean (`ruff check`/`ruff
+format --check`).
+
+#### Root cause of candidate id 34 (finding 2)
+
+Traced live: id 34's `raw` payload (`nl_tenderned`, TenderNed's own `opdrachtBeschrijving` field)
+reads "...via de **priva­atr­echtelijke** weg..." ("under private law") -- the EO/IR domain
+keyword **"ATR"** (Automatic Target Recognition) matched as a bare casefold substring *inside* the
+unrelated Dutch word "privaatrechtelijke". `_matches_keywords`/`_has_procurement_signal` never
+required a word boundary, so any short (2-4 char) keyword/procurement-signal token was silently
+exposed to this class of false positive in any language. TenderNed's own API (probed live
+2026-09-06/07) exposes no CPV classification field at all in this response shape, so the CPV
+pre-filter alone would not have caught this specific row -- the word-boundary fix is the one that
+actually closes it.
+
+#### Fixes
+
+1. **Word-boundary matching for short keywords/signals** (`_term_present`, `agent/eoa/tenders/
+   scan.py`): a term of at most `_SHORT_KEYWORD_MAX_LEN` (4) characters must now sit at a word
+   boundary (`\bterm\b`, Unicode-aware -- works the same for Hebrew) rather than matching as a bare
+   substring; a longer phrase (`"seeker"`, `"computer vision"`) is untouched, so a genuine plural
+   ("seekers") still matches -- confirmed no regression against the full existing suite. Wired into
+   both `_matches_keywords` (the DOMAIN signal) and `_has_procurement_signal` (the PROCUREMENT
+   signal, since `RFP`/`RFI`/`RFQ` are exactly as short as `ATR`).
+
+2. **CPV-code-family pre-filter** (`_cpv_gate_reject_reason`, wired into `_gate_reject_reason` as a
+   fifth hard-rejection case): a notice whose CPV code(s) are *all* within `cpv_deny_prefixes`
+   (`79`/`80`/`85`/`98` -- business/legal/HR consulting, education, health/social work, other
+   community services) and *none* within `cpv_allow_prefixes` (`35`/`38` -- security/defence,
+   laboratory/optical/precision instruments) is now a hard, structural rejection, independent of
+   keyword/LLM relevance -- exactly the "reject obvious non-defence CPV families like 79xxxxxx"
+   ask. A code in neither list, or no CPV data at all (most sources), is left alone; a mixed
+   allow+deny set is never rejected (the allow signal wins). Both lists are config-driven
+   (`config/tenders.yaml`'s new `cpv_allow_prefixes`/`cpv_deny_prefixes`, with the same values as
+   in-code defaults as a fallback).
+
+3. **`cpv_naics` extraction, previously dead code**: `NoticeRaw.cpv_naics` existed and was already
+   persisted to the `tenders` table, but no parser ever populated it. Fixed for all four structured
+   parsers -- TED (`classification-cpv`, a list, confirmed live -- also added to the `fields` param
+   TED's query itself requests, which it silently omitted before), UK Contracts Finder / generic
+   OCDS (`tender.classification.id`, a single code, confirmed live against Contracts Finder), and
+   generic JSON-list (opt-in `parse_hints.cpv_field`, since a flat JSON API has no conventional CPV
+   field/shape to guess).
+
+4. **Dynamic key-gated `api_json` source enabling** (finding 1c, SAM.gov): `_api_json_source_enabled`
+   replaces the old static `verified` check -- a source stays enabled when `verified: true`
+   (unchanged), OR becomes enabled the moment its `needs_key_env_var` (e.g. `sam_gov_api`'s
+   `SAM_GOV_API_KEY`) is actually set to a non-empty value in the environment, with no config edit
+   required. `_fetch_api_json` now resolves a `{api_key}` placeholder in `query_params`/
+   `query_template` from that real environment variable at request time (`config/tenders.yaml`'s
+   `sam_gov_api` entry updated from a hardcoded `DEMO_KEY` literal to `"{api_key}"`) -- `SAM_GOV_API_KEY`
+   is not present in this environment, so `sam_gov_api` stays skipped exactly as before; this is
+   forward-looking so the moment a real per-user key is added, no further code/config change is
+   needed.
+
+5. **Repair path** (`find_prefilter_violations`/`repair_relevance_prefilter`,
+   `scripts/repair_round7_tenders.py`): re-checks every `intake='candidate'` row's persisted
+   `items.clean_text` + `cpv_naics` against today's gate; `--apply` archives (`status='archived'`,
+   never deleted) only the rows that fail, scoped by SQL to `intake = 'candidate'` -- an
+   `'accepted'` row or `tender_feedback` is never touched.
+
+#### Verification
+
+- `ruff check` / `ruff format --check` on all touched Python files: clean.
+- `tests/unit/test_tenders_round7.py`: **54/54 passed** (HTTP/DB mocked throughout).
+- Full existing tender suite + the new file (`-k tender` across `tests/unit`): **377/377 passed**,
+  no regressions. (Note: this needs `DATABASE_URL` sourced from `runtime/eoa.env` to run in
+  seconds -- `eoa.tenders.scan._candidate_duplicate_exists`, a round-6 addition, is not mocked by
+  `test_tenders_scan.py`'s `_common_patches` helper, so several pre-existing `TestScanTendersOpenIntake`/
+  `test_tender_feedback_round4.py` tests fall through to a real (fast, since the DB is reachable)
+  connection when a notice carries a URL. Confirmed this is pre-existing, not a round-7 regression:
+  the same tests fail identically on the pre-round-7 code with `DATABASE_URL` unset. Flagged as a
+  test-isolation gap for whoever next touches `test_tenders_scan.py`, not fixed here since that file
+  is outside this round's ownership.)
+
+#### Live run + repair, applied and verified (2026-09-07, `DATABASE_URL` from `runtime/eoa.env`)
+
+- Ran `scan_tenders` live (`EOA_PIPELINE=1`) restricted to the verified structured `api_json`
+  sources (`ted_eu`, `uk_contracts_finder`, `ted_eu_cpv`, `uk_find_tender`, `fr_boamp`,
+  `nl_tenderned`, `us_grants_gov`; `llm_budget_s=0` to spend zero LLM calls on this diagnostic
+  pass): **354 real notices fetched across all 7 sources, 0 matched/inserted** under the
+  production default `since_days=3`.
+- Diagnosed why: re-evaluating the same fetched TED notices (106 across `ted_eu`+`ted_eu_cpv`, all
+  with `cpv_naics` correctly populated -- e.g. `["38000000"]`) against wider windows found **0
+  matches at 90 days, 1 at 3650 days** (a 2016 Belgium EORF optronics notice already in the table
+  as id 13). TED's `FT ~ "<phrase>"` full-text search endpoint is returning its historical archive
+  for these EO/IR keyword queries, not recent-first results -- a real, disclosed limitation:
+  fetching/parsing/CPV-extraction all work correctly, but this endpoint alone will not surface a
+  newly-published EO/IR notice without either a date-range query parameter or a
+  "sort by publication date descending" option (not yet found in a 400-safe query subset). This is
+  the concrete explanation for round 1-6's "5 accepted rows, all with past deadlines" pattern
+  persisting -- **not fetcher bugs**, a recency/sort gap in how TED is queried. Left as a follow-up
+  (needs another live-probe session against TED's query DSL, out of this round's time budget).
+- **UK government portals rate-limited this session's live probing**: `uk_find_tender` and (on a
+  second pass) `uk_contracts_finder` both returned HTTP 429 after repeated keyword-rotation
+  requests in quick succession -- `eoa.tenders.scan._collect_source_notices`'s per-keyword loop
+  (`MAX_KEYWORDS_PER_API_SOURCE=5`) has no inter-request delay for `api_json` sources (only
+  `kind: search` has a query budget counter, `eoa.search.budget`, and that's a call-count cap, not
+  a pacing delay). Not fixed this round (out of scope for either finding, and risked burning the
+  round's live-request budget chasing it) -- **flagged for the user**: a real operational gap
+  worth a small follow-up (a `time.sleep` between `_fetch_api_json` calls, or reusing
+  `eoa.search.budget`'s pattern for `api_json` sources too).
+- **Repair applied and verified from a separate connection**: `repair_round7_tenders.py --apply`
+  found and archived exactly the 2 rows the fixed gate no longer clears -- id 34 (`nl_tenderned`,
+  the Rotterdam HR contract, `keyword_gate_no_domain_term` -- the finding's own named target) and
+  id 35 (`us_defense_innovation_search`, a generic Northrop Grumman EO/IR product page,
+  `keyword_gate_no_procurement_signal` -- a bonus catch: it never carried real "tender"/"RFI"/...
+  language either, an unrelated pre-existing gap this same repair pass happens to close). Both now
+  `status='archived'`, `intake` left untouched at `'candidate'` per the repair's own scoping. All 5
+  `accepted` rows unchanged (still `archived` status, deadlines already past, as before). Id 38
+  (`jp_search`, a Counter-UAS category-listing page) correctly NOT flagged -- its text contains the
+  plain word "tenders", which still substring-matches at its length (>4 chars), so it remains a
+  legitimate (if borderline) candidate for the operator's own feedback to judge.
+  `tender_feedback` row count confirmed unchanged (0 before, 0 after -- no feedback exists yet).
+
+#### What's left (for the user)
+
+- **No API keys added this round**: `SAM_GOV_API_KEY` remains unset (per `docs/qa/loop/
+  qa-loop-state` pending decisions) -- `sam_gov_api` stays skipped, though it will now activate
+  itself automatically the moment a real key is added, no further code change needed.
+- **TED recency/sort gap** (above): the live fetchers are structurally correct (fetch, parse, CPV
+  extraction, gate, dedupe all verified working), but TED's full-text search endpoint alone won't
+  surface genuinely new open notices without a date-range or sort parameter -- needs another
+  live-probe session against TED's query DSL to find one that stays inside the 400-safe subset.
+- **UK portal rate limiting** (above): `uk_find_tender`/`uk_contracts_finder` 429'd during this
+  round's live testing from request-rate, not code correctness -- a pacing delay between
+  `api_json` keyword-rotation requests would fix it; not implemented this round.
+- **`test_tenders_scan.py` DB-isolation gap** (above): `_common_patches` doesn't mock
+  `_candidate_duplicate_exists` (a round-6 addition), so several of its tests silently depend on a
+  reachable `DATABASE_URL` rather than being true DB-free unit tests. Pre-existing, confirmed not a
+  round-7 regression; whoever next owns that file should add the missing mock.
