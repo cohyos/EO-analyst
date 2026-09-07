@@ -138,6 +138,27 @@ def _no_bogus_assignee_check(sections: list[tuple[str, str]]) -> Check:
     )
 
 
+def _heading_or_listed_unclassified(heading: str, body: str) -> bool:
+    """Round 12: an unclassified cluster is one whose *heading* carries the label, or whose body
+    *lists* it as a cluster (a bullet / table cell starting with the label). Prose that merely
+    mentions an unclassified assignee inside a classified cluster does not count."""
+    h = heading.casefold()
+    if any(lbl in h for lbl in _UNCLASSIFIED_LABELS_HE):
+        return True
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if line.startswith(("- ", "* ")):
+            cell = line[2:].strip().casefold()
+        elif line.startswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            cell = (cells[0] if cells else "").casefold()
+        else:
+            continue
+        if any(cell.startswith(lbl) for lbl in _UNCLASSIFIED_LABELS_HE):
+            return True
+    return False
+
+
 def _no_unclassified_cluster_check(sections: list[tuple[str, str]]) -> Check:
     """A survey with real patent data shouldn't dump everything into an unclassified bucket."""
     has_patent_data = any(
@@ -154,10 +175,7 @@ def _no_unclassified_cluster_check(sections: list[tuple[str, str]]) -> Check:
     unclassified_hits = [
         h
         for h, body in sections
-        if _CLUSTER_HEADING_KEYWORD_HE in h
-        and any(
-            lbl in h.casefold() for lbl in _UNCLASSIFIED_LABELS_HE
-        )  # round 12: heading only -- a classified cluster may legitimately discuss an unclassified assignee in its prose
+        if _CLUSTER_HEADING_KEYWORD_HE in h and _heading_or_listed_unclassified(h, body)
     ]
     return Check(
         "no_unclassified_cluster_when_patents_exist",
