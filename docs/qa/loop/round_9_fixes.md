@@ -317,3 +317,165 @@ generic-host case, and the real-source-row-wins case.
 - Daily-kind live verification could only use a proxy day (no items had published in the report
   window at verification time) — worth re-checking against a live daily rebuild once fresh items
   land.
+
+### R9-chat status
+
+**Package:** R9-chat (docs/qa/loop/round_8_judge_b.md, D5 = 48).
+**Files owned/changed:** `agent/eoa/api/services.py` (ask-retrieval block only: `_RARE_TOKEN_RE` and
+the new extractor regexes/stoplist, `_rare_tokens`, `_rare_token_candidates`,
+`_hebrew_rare_candidate`, `_token_match_count`, `_keyword_where_clause`, `_sort_ts_key`, and
+`ask_retrieve`'s lexical/vector stages), `agent/eoa/api/ask_grounding.py` (`_digits_grounded`,
+`_money_figure_grounded`, `_run_with_timeout`, `entailment_filter`), `tests/unit/test_ask_round9.py`
+(new, 35 tests). `agent/eoa/api/routes/ask.py`'s entailment call site did not need a change — the
+fix landed entirely inside `entailment_filter` itself (see finding 4 below).
+
+#### 1. Retrieval blind to proper-noun-only questions
+
+Root cause confirmed exactly as diagnosed: `_rare_tokens`'s only extractor (`_RARE_TOKEN_RE`,
+services.py ~line 1613) required a digit inside every token, so 7 of 8 golden questions' key terms
+— pure-letter proper nouns/acronyms ("SPECTRO", "Skyranger", "LORA", "DROIC", "AUSA") — could never
+match; only "XM30" (digit-mixed) ever got a lexical hit.
+
+Extended with four more candidate shapes (`_rare_token_candidates`): an ALL-CAPS acronym (>= 3
+letters), a Capitalized word (>= 4 letters), a hyphenated designation with no digit ("C-UAS",
+"E-HEL" — "MX-15"/"F-35" already matched the pre-existing digit regex), and a non-stopword Hebrew
+word (>= 4 letters, one leading ו/ה/ב/ל/מ/ש/כ prefix stripped before the stoplist check). A
+best-effort `_HEBREW_STOPWORDS` set (~90 entries: pronouns, prepositions, question words, and the
+generic analyst-question vocabulary this domain's own questions are built from — "המצב", "תוכנית",
+"מוביל", "אותה", etc.) keeps the Hebrew extractor from treating ordinary question phrasing as a
+proper noun; verified against all 8 golden questions plus the shared-suite's own
+`_rare_tokens("שאלה כללית בלי שום מספר דגם") == []` assertion (still `[]`, unchanged).
+
+When there are more than 8 candidates, `_rare_tokens` now ranks them by actual corpus rarity — a
+`COUNT(*)` of ILIKE matches over `items.title`/`summary_he` per candidate, ascending, with a
+zero-hit candidate sorted *after* every candidate that matches at least once (a term absent from the
+whole corpus contributes nothing to retrieval and must not crowd out a real rare term) — and keeps
+the rarest 8. Pure extraction with no DB call at all when the candidate count is already within the
+cap (the common case), preserving `_rare_tokens`'s original pure-function contract for small
+questions; a DB failure during ranking degrades to the original extraction order rather than
+raising.
+
+A short (<= 4 char), pure-letter token ("LORA", "AUSA", "RFI") now matches via a Postgres
+word-boundary regex (`~* \yTOKEN\y`) instead of a plain `ILIKE %TOKEN%` substring — closing the same
+false-positive class the tenders package found live ("ATR" matching inside an unrelated Dutch word).
+A longer or digit/hyphen-bearing token ("XM30", "SPECTRO", "C-UAS") keeps the original substring
+`ILIKE`.
+
+**Offline per-question retrieval table** (read-only, live DB via `runtime/eoa.env`, lexical stage
+only — no LLM/embedding call — script run against the current code; item ids cross-checked against
+`docs/qa/loop/round_8_judge_b.md`'s own "Items cross-checked" list):
+
+| Q | Topic | rare_tokens | top lexical hits (id, score, title) |
+|---|---|---|---|
+| 1 | XM30/Bradley | `XM30`, `Bradley` | **257** (2.5, "Rheinmetall and GDLS deliver first XM30 prototypes..."), **61** (3.0, "Competing Bradley Fighting Vehicle Replacement Prototypes...") |
+| 2 | Iron Beam (מגן אור) | `Iron`, `Beam` | 172/97 (Iron Dome items, score 2.0 each) — genuinely 0 real Iron Beam/מגן אור rows in the corpus (round-8 judge already confirmed this refusal is correct); the cross-source conflation guard (tested in `test_ask_round3_grounding.py`) already exists specifically to stop an Iron Dome item from being misattributed to an Iron Beam claim if the model tries |
+| 3 | LORA/Greece | `LORA`, `Greece` | **37** (2.0, "Israeli LORA Ballistic Missiles Fired From German Frigate"), **155** (2.0, "Greece approves \$4b Israel air defense procurement") — both now reach the model together, restoring round 2's own anti-conflation disambiguation ("found separately, not the same story") |
+| 4 | DROIC trend | `DROIC` + generic English expansion words | no DROIC-relevant hits (0 real rows for this term, confirmed by round-8 judge; the correct behavior is still "not found") |
+| 5 | Skyranger vs. Israeli C-UAS | `C-UAS`, `UAS`, `Skyranger`, `Rheinmetall` | **183** (2.5, "Rheinmetall and HENSOLDT demonstrate successful integration..."), **1353** (1.0, "U.S. Air Force Seeks Anti-Aircraft Guns...", contains the Skyranger-35 spec detail) — both items the round-8 judge named as missed now retrieved |
+| 6 | AUSA 2026 | `AUSA` | no real AUSA-2026 hits (0 rows, confirmed correct refusal by round-8 judge) |
+| 7 | Latest EO/IR RFI (US) | `RFI` | **5721** ("Request For Information: Electro-Optical / Infra-Red-Sensor...") — the one technically-retrievable row the round-8 judge flagged as a minor completeness gap now surfaces |
+| 8 | SPECTRO ISR (Elbit) | `SPECTRO`, `ISR`, `Elbit` | **321** (2.0, "Elbit Systems wins \$270m contract for SPECTRO ISR & targeting payloads") — the round-8 judge's single worst finding ("I've never heard of this term" for an item the corpus already has) now retrieves the exact item |
+
+#### 2. Lexical pass strong enough to stand alone
+
+`ask_retrieve`'s lexical stage now gathers all per-token hits first, then scores each candidate item
+by how many distinct rare tokens it matches — a title match weighs 2x per token, a summary match 1x,
+a `clean_text`-only match 0.5x — summed across tokens, with recency (`published_at`/`fetched_at`,
+newly selected as `_sort_ts`) as the tie-break, instead of the previous first-token-wins insertion
+order. This directly answers the brief's "score candidates by number of distinct rare tokens
+matched" without changing the interactive embedding budget (commit e16e3e4) at all.
+
+A new `ask.retrieve_lexical_only` log line (structlog, `lexical_items`/`rare_token_count`) fires
+whenever the embedding step did not succeed (exception or otherwise), alongside the existing
+`ask.retrieve_embedding_failed` — a judge grepping a run can now tell "embedding failed but lexical
+still found N items" apart from "embedding failed and retrieval came back empty".
+
+#### 3. Numeric grounding hole ("53 billion" vs. real "$1.53bn")
+
+Root cause confirmed exactly as diagnosed and reproduced offline (see below): `_digits_grounded`'s
+boundary check (`(?<!\d)...(?!\d)`) treated a decimal point as a valid boundary, so a claimed "53"
+matched *inside* a corpus "$1.53bn" — the digit run really is surrounded by non-digit characters
+('.' before, 'b' after), even though it is the fractional part of a ~34x-smaller, unrelated number.
+Fixed two ways:
+- `_digits_grounded` also rejects a match immediately preceded by `<digit>.` or followed by
+  `.<digit>` (the digit run is itself a fragment of a longer decimal number in the corpus) — a
+  number is now only grounded by a genuine standalone occurrence, never a substring of "1.53" or
+  "2534".
+- `_money_figure_grounded` now routes **any** money figure carrying a recognisable scale word
+  (billion/million/thousand, any spelling `_parse_money_value_scale` understands) through the
+  existing unit-aware `_money_magnitude_grounded` comparison, not just a single-digit magnitude as
+  before — a multi-digit figure sharing raw digits with an unrelated, differently-scaled corpus
+  number ("53" vs. "1.53bn") no longer defers to the literal digit-substring check that let it
+  through. A bare, unscaled figure ("$1,234" with nothing else) still falls back to the literal
+  check, since there is no magnitude to compare.
+
+**Offline replay of Q1's "53 billion" answer** (read-only, `ground_and_filter_answer` called
+directly against the exact live shape — item 257's real text, the fabricated claim, both citation
+markers):
+```
+text   = "### עובדות מרכזיות\n- שלב התוכנית הנוכחי מוערך ב-53 מיליארד דולר [1][2]."
+source = item 257: "The program is worth $1.53bn split equally between the two firms."
+-> removed = 1, "53 מיליארד" no longer present in the answer  (was: removed = 0, live-shipped unhedged)
+
+text2  = same shape, but the *correct* figure ("1.53 מיליארד דולר")
+-> removed = 0, text unchanged  (the real, correctly-cited figure is never touched)
+```
+
+#### 4. Entailment check still never removes anything
+
+Diagnosed from the code path per the brief's own three questions:
+- **Does it run only when there are cited key-fact bullets?** No — `_entailment_scope_candidates`
+  already scopes to `start < lead_end` (the unheaded "תשובה ישירה" lead paragraph) **or** the
+  "עובדות מרכזיות" section, so a cited lead-paragraph sentence was already in scope before this
+  round; added `TestEntailmentCoversTheDirectAnswerParagraph` to `test_ask_round9.py` as a
+  regression guard confirming this explicitly (the brief's "run it on the direct-answer paragraph
+  too when it carries citations" — already correct, now pinned down by a test).
+- **Is the light-role call failing/skipped?** Yes, on every sampled attempt — live-verified again
+  2026-09-07, `ask.entailment_check_skipped reason=timeout_or_error` despite round 8's own
+  `interactive=True` fix (still present, still correct on its own terms).
+- **Root cause, one level up from round 8's:** `llm_providers.interactive_default` is `"chain"`
+  (Claude -> Gemini -> local) as of round 7's own fix for the main chat path (`config/config.yaml`).
+  The `_call` closure inside `entailment_filter` passed no explicit `provider`, so `chat()` resolved
+  the cloud chain instead of the local Ollama path round 8's `interactive=True` fix assumed it was
+  reaching — a cloud CLI leg's own budget (`llm_providers.timeout_s`, 360s) has nothing to do with,
+  and is routinely far longer than, this function's own 30s wall-clock, so every real attempt raced
+  an unbounded subprocess it could never win against.
+
+**Fixed** (both changes inside `entailment_filter`/`_run_with_timeout`, no `routes/ask.py` change
+needed): the `_call` closure now pins `provider="ollama"` explicitly, keeping this optional,
+additive, best-effort probe on the local, resource-gated path — bounded by
+`resources.interactive_wait_s` (20s) on a real RAM shortage instead of an unbounded cloud
+subprocess — and cheaper (no cloud call for a housekeeping check) as a side effect.
+`_run_with_timeout` now returns `(result, error)` instead of just `result`; `error` is the failing
+exception's class name (`"TimeoutError"` for a genuine wall-clock expiry, or e.g.
+`"ConnectionError"`/`"ValidationError"` for a real failure), so `ask.entailment_check_skipped`'s
+`reason` field is no longer a single undifferentiated `"timeout_or_error"` string going forward.
+
+**What remains (out of this package's file ownership):** whether the local `light` role
+(`gemma4_e4b`) can actually complete within the local resource-gate's 20s interactive window under
+tonight's own RAM pressure is a runtime condition this package cannot verify without a live restart
++ sampled `/api/ask` run (the standing rules cap live probes at 3, already spent verifying finding
+1's DB reality above) — a future round's judge should re-check `ask.entailment_check_removed`/
+`ask.entailment_check_skipped reason=` after the lead restarts with this fix live, since a hard RAM
+shortage would now show up as `reason=ResourceUnavailable`/`TimeoutError` rather than a silent,
+undifferentiated skip.
+
+#### Tests / lint
+
+- `tests/unit/test_ask_round9.py`: 35 new tests, all passing (retrieval-token extraction,
+  word-boundary query shape, rarity ranking incl. DB-failure fallback, lexical scoring + recency
+  tie-break, `ask.retrieve_lexical_only` logging, decimal-boundary digit grounding, unit-aware money
+  magnitude grounding, entailment `provider="ollama"` pinning, `_run_with_timeout` exception-class
+  reporting, direct-answer-paragraph entailment coverage).
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_ask_round9.py
+  tests/unit/test_ask_retrieval.py tests/unit/test_ask_round8.py tests/unit/test_ask_round7.py
+  tests/unit/test_ask_round5.py tests/unit/test_ask_round3_grounding.py
+  tests/unit/test_ask_sse_sources.py -q`: **189 passed**. Also spot-checked (not in the mandated
+  list, but exercises the same money-grounding functions): `tests/unit/test_ask_round5_grounding.py`
+  + `tests/unit/test_ask_round6_grounding.py` + `tests/unit/test_ask_round2_chat_fixes.py` +
+  `tests/unit/test_events_round3.py` — **152 passed**, unaffected.
+- `.venv/Scripts/ruff.exe check` / `format --check` on all four changed/added files: clean.
+- Live DB verification (read-only, `runtime/eoa.env`): the per-question retrieval table above (#1)
+  and the offline `ground_and_filter_answer` replay (#3); no live `/api/ask` POST calls were needed
+  for either (both verified without the LLM/network in the loop), so the 3-live-probe budget was not
+  spent.

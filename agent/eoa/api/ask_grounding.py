@@ -662,11 +662,23 @@ def _proper_noun_grounded(candidate: str, corpus_cf: str) -> bool:
 
 def _digits_grounded(candidate: str, corpus: str) -> bool:
     """Whether the digit run inside ``candidate`` (a money figure or a year) appears, as a
-    standalone number (not a substring of a longer one), anywhere in ``corpus``."""
+    standalone number (not a substring of a longer one), anywhere in ``corpus``.
+
+    Round 9 (docs/qa/loop/round_8_judge_b.md finding 3): the boundary check used to be just
+    ``(?<!\\d)...(?!\\d)`` -- a plain digit-adjacency test. That treats a decimal point as a valid
+    boundary, so a claimed "53" matched *inside* a corpus "$1.53bn": the digit run "53" really is
+    surrounded by non-digit characters ('.' before, 'b' after), even though it is actually the
+    fractional part of an entirely different, much smaller number (a live-found ~34x fabrication:
+    "53 billion" cited against a source whose real figure was "$1.53bn"). Extended to also reject
+    a match immediately preceded by "<digit>." or followed by ".<digit>" -- i.e. the digit run is
+    itself a fragment of a longer decimal number in the corpus -- so a number is only ever grounded
+    by a genuine standalone occurrence of the same digits, never a substring of a larger or
+    differently-scaled figure like 1.53 or 2534."""
     digits = re.sub(r"[^\d]", "", candidate)
     if len(digits) < 2:
         return True  # too short a number to carry any grounding signal on its own
-    return re.search(r"(?<!\d)" + re.escape(digits) + r"(?!\d)", corpus) is not None
+    pattern = r"(?<!\d)(?<!\d\.)" + re.escape(digits) + r"(?!\d)(?!\.\d)"
+    return re.search(pattern, corpus) is not None
 
 
 # ---------------------------------------------------------------------------------------------
@@ -750,19 +762,29 @@ def _money_magnitude_grounded(figure: str, corpus: str) -> bool:
 
 def _money_figure_grounded(figure: str, corpus: str) -> bool:
     """Whether a money-figure candidate ``figure`` (already matched by :data:`_MONEY_RE`) is
-    grounded in ``corpus``. A figure with >= 2 digits defers unchanged to :func:`_digits_grounded`
-    (the literal-substring check, exactly as before this fix). A single-digit magnitude is checked
-    as a magnitude-with-unit via :func:`_money_magnitude_grounded` instead of auto-passing on
-    :func:`_digits_grounded`'s own ``< 2`` digit floor -- unless ``figure`` itself carries no
-    recognisable scale word (a bare "$5" with nothing else), in which case there is no magnitude to
-    compare and this falls back to the original literal check rather than guessing."""
+    grounded in ``corpus``. A single-digit magnitude is checked as a magnitude-with-unit via
+    :func:`_money_magnitude_grounded` instead of auto-passing on :func:`_digits_grounded`'s own
+    ``< 2`` digit floor. ``figure`` carrying no recognisable scale word (a bare "$5"/"$1,234" with
+    nothing else) has no magnitude to compare, so this falls back to the literal digit-substring
+    check (:func:`_digits_grounded`) rather than guessing.
+
+    Round 9 (docs/qa/loop/round_8_judge_b.md finding 3): previously only a *single-digit*
+    magnitude took the magnitude-aware path above -- a multi-digit one (e.g. "53" in "53 מיליארד
+    דולר") fell straight through to the literal digit-substring check instead, which a differently
+    -scaled figure sharing the same digits can satisfy even after :func:`_digits_grounded`'s own
+    decimal-boundary fix, since "53" can genuinely be a standalone number somewhere unrelated in a
+    large corpus. Any figure that carries a recognisable scale word (billion/million/thousand, any
+    spelling/suffix :func:`_parse_money_value_scale` understands) now always compares as a
+    magnitude, unit-aware, regardless of digit count -- closing the live-found "53 מיליארד דולר"
+    vs. a real "$1.53bn" cited source (~34x off, no hedge) that a bare digit-count check never
+    should have let through in the first place."""
     digits = re.sub(r"[^\d]", "", figure)
-    if len(digits) != 1:
+    if not digits:
         return _digits_grounded(figure, corpus)
     parsed = _parse_money_value_scale(figure)
-    if parsed is None or parsed[1] <= 1.0:
-        return _digits_grounded(figure, corpus)
-    return _money_magnitude_grounded(figure, corpus)
+    if parsed is not None and parsed[1] > 1.0:
+        return _money_magnitude_grounded(figure, corpus)
+    return _digits_grounded(figure, corpus)
 
 
 def _grounding_violation(unit_text: str, corpus_cf: str) -> str | None:
@@ -2295,19 +2317,29 @@ def _entailment_scope_candidates(
     return candidates
 
 
-def _run_with_timeout(fn: Any, timeout_s: float) -> Any:
-    """Run ``fn()`` (no args) on a background thread, returning its result -- or ``None`` on a
-    timeout *or any exception* (a failed/slow light-model call must never block or break the
-    caller's own request). Deliberately does not join the worker thread on timeout
-    (``shutdown(wait=False)``): the caller's hard budget must never itself wait on however much
-    longer the underlying (already-abandoned) call takes to actually return."""
+def _run_with_timeout(fn: Any, timeout_s: float) -> tuple[Any, str | None]:
+    """Run ``fn()`` (no args) on a background thread, returning ``(result, None)`` on success or
+    ``(None, error)`` on a timeout *or any exception* (a failed/slow light-model call must never
+    block or break the caller's own request). Deliberately does not join the worker thread on
+    timeout (``shutdown(wait=False)``): the caller's hard budget must never itself wait on however
+    much longer the underlying (already-abandoned) call takes to actually return.
+
+    Round 9 (docs/qa/loop/round_8_judge_b.md finding 4): ``error`` is the failing exception's
+    class name (``"TimeoutError"`` for a genuine wall-clock timeout, or e.g.
+    ``"ValidationError"``/``"ConnectError"``/``"ResourceUnavailable"`` for a real failure) instead
+    of a single undifferentiated ``None`` -- so the caller's own skip-reason log line can tell a
+    timeout apart from a hard failure rather than collapsing both into the same
+    ``reason="timeout_or_error"`` string, which round 8's own live sample could never actually
+    distinguish."""
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         future = executor.submit(fn)
         try:
-            return future.result(timeout=timeout_s)
-        except Exception:
-            return None
+            return future.result(timeout=timeout_s), None
+        except concurrent.futures.TimeoutError:
+            return None, "TimeoutError"
+        except Exception as exc:
+            return None, type(exc).__name__
     finally:
         executor.shutdown(wait=False)
 
@@ -2348,6 +2380,25 @@ def entailment_filter(
     (``routes.ask``) now passes ``ask.entailment_max_claims`` lowered 6 -> 4 in
     ``config/config.yaml`` (fewer claims batched into one call, so each admitted call finishes
     faster).
+
+    Round 9 (docs/qa/loop/round_8_judge_b.md finding 4): the round-8 fix above did not hold --
+    live-sampled again 2026-09-07, this check still skipped on every attempt with
+    ``reason=timeout_or_error``. Root cause this time is one level up: ``llm_providers.
+    interactive_default`` is ``"chain"`` as of round 7 (Claude -> Gemini -> local, `config/
+    config.yaml`), and the ``_call`` closure below passed no explicit ``provider`` -- so
+    ``chat()`` resolved the *cloud* chain instead of the plain local Ollama path the round-8 fix
+    assumed it was reaching. A cloud CLI leg's own budget (``llm_providers.timeout_s``, 360s) has
+    nothing to do with this function's own hard wall-clock, and is routinely far longer than it --
+    so every real attempt was, in effect, racing a subprocess it could never win against, and
+    ``interactive=True`` (still passed, still correct) never even got the chance to matter, since
+    it only governs the *local* resource-gate path this call no longer reached. Fixed by pinning
+    ``provider="ollama"`` explicitly below: this optional, additive, best-effort probe now always
+    stays on the local, resource-gated path -- bounded by ``resources.interactive_wait_s`` (20s)
+    on a real RAM shortage rather than an unbounded cloud subprocess -- which is also cheaper and
+    keeps this housekeeping check off the cloud provider entirely. Separately,
+    :func:`_run_with_timeout` now reports the failing exception's class name instead of a single
+    ``None``, so a genuine timeout is distinguishable in the logs from a hard failure going
+    forward.
     """
     if not answer_text or not answer_text.strip() or not retrieved:
         return answer_text, 0
@@ -2368,14 +2419,23 @@ def entailment_filter(
     def _call() -> _EntailmentResponse:
         from eoa.llm.ollama_client import chat_structured
 
-        # Round 8: `interactive=True` is the actual fix (see the docstring above) -- without it
-        # this call queued behind the resource gate's patient batch budget, not the short
-        # interactive one, and skipped on every single sampled live answer as a result.
-        return chat_structured("light", _EntailmentResponse, messages, task="classify", interactive=True)
+        # Round 9: `provider="ollama"` pinned (see the docstring above) -- without it, an unset
+        # `provider` resolves through `llm_providers.interactive_default` ("chain" as of round 7),
+        # sending this call out over a cloud CLI subprocess whose own timeout this function's
+        # 20-30s budget can never realistically catch in time. `interactive=True` is still passed
+        # so a real local RAM shortage fails fast via the resource gate instead of hanging.
+        return chat_structured(
+            "light",
+            _EntailmentResponse,
+            messages,
+            task="classify",
+            interactive=True,
+            provider="ollama",
+        )
 
-    result = _run_with_timeout(_call, timeout_s)
+    result, error = _run_with_timeout(_call, timeout_s)
     if result is None:
-        log.info("ask.entailment_check_skipped", reason="timeout_or_error", claims=len(candidates))
+        log.info("ask.entailment_check_skipped", reason=error or "timeout_or_error", claims=len(candidates))
         return answer_text, 0
 
     no_indices = {v.index for v in result.verdicts if v.verdict == "no"}
