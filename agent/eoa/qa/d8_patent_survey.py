@@ -155,7 +155,9 @@ def _no_unclassified_cluster_check(sections: list[tuple[str, str]]) -> Check:
         h
         for h, body in sections
         if _CLUSTER_HEADING_KEYWORD_HE in h
-        and any(lbl in (h + body).casefold() for lbl in _UNCLASSIFIED_LABELS_HE)
+        and any(
+            lbl in h.casefold() for lbl in _UNCLASSIFIED_LABELS_HE
+        )  # round 12: heading only -- a classified cluster may legitimately discuss an unclassified assignee in its prose
     ]
     return Check(
         "no_unclassified_cluster_when_patents_exist",
