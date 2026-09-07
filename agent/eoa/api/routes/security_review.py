@@ -110,6 +110,11 @@ def approve_security_review(job_id: int) -> dict[str, Any]:
     payload = dict(job.get("payload") or {})
     payload["security_override"] = True
     payload["expanded_from_job_id"] = job_id
+    from eoa.pipeline.investigation_context import ensure_context_he
+
+    refreshed = ensure_context_he(payload)
+    if refreshed:
+        payload["context_he"] = refreshed
     new_job_id = enqueue_job("deep_search", payload, priority=0)
     _mark_resolved(job_id, dismissed=False)
     return {"job_id": new_job_id}

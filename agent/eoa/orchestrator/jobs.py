@@ -21,6 +21,7 @@ from eoa.config import settings
 from eoa.errors import DeadlineExceeded, ResourceUnavailable
 from eoa.memory.relational import claim_next_job, enqueue_job, finish_job, heartbeat, reap_stale_jobs
 from eoa.notify import ntfy
+from eoa.pipeline.investigation_context import ensure_context_he
 
 log = structlog.get_logger(__name__)
 
@@ -278,7 +279,7 @@ def _run_deep_search_job_local(job: dict[str, Any]) -> str:
             p.get("question", ""),
             item_id=p.get("item_id"),
             job_id=job["id"],
-            context_he=p.get("context_he", ""),
+            context_he=ensure_context_he(p),
             budget_multiplier=float(p.get("budget_multiplier") or 1.0),
             prior_findings_he=p.get("prior_findings_he", ""),
         )
@@ -334,7 +335,7 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
                 "question": (job.get("payload") or {}).get("question", ""),
                 "entities": [],
                 "seed_en": "",
-                "context_he": (job.get("payload") or {}).get("context_he", ""),
+                "context_he": ensure_context_he(job.get("payload") or {}),
             }
             for job in claimed
         ]
@@ -398,14 +399,16 @@ def run_deep_search_job(job: dict[str, Any]) -> dict[str, Any]:
         from eoa.db import connection
 
         with connection() as conn:
-            row = conn.execute("SELECT title, so_what_he FROM items WHERE id = %s", (p["item_id"],)).fetchone()
+            row = conn.execute(
+                "SELECT title, so_what_he FROM items WHERE id = %s", (p["item_id"],)
+            ).fetchone()
         if row:
             question = default_investigation_question(row["title"] or "", row.get("so_what_he"))
     inv = investigate(
         question,
         item_id=p.get("item_id"),
         job_id=job["id"],
-        context_he=p.get("context_he", ""),
+        context_he=ensure_context_he(p),
         budget_multiplier=float(p.get("budget_multiplier") or 1.0),
         prior_findings_he=p.get("prior_findings_he", ""),
     )
@@ -760,7 +763,9 @@ def run_patent_scan(job: dict[str, Any]) -> dict[str, Any]:
 
     payload = job.get("payload") or {}
     topic = payload.get("topic")
-    scan_stats = scan_patents(topics=[WatchTopic(name_he=topic, query=topic)] if topic else None, assignees=[] if topic else None)
+    scan_stats = scan_patents(
+        topics=[WatchTopic(name_he=topic, query=topic)] if topic else None, assignees=[] if topic else None
+    )
     analyze_stats = analyze_patents(30)
     scored = score_and_persist(limit=100)
     return {"scan": _as_dict(scan_stats), "analyze": _as_dict(analyze_stats), "valued": scored}

@@ -382,6 +382,8 @@ def _apply_israel_focus_boost(item: dict, out: TriageOut) -> TriageOut:
     except Exception as exc:
         log.debug("israel_focus_triage_boost_failed", item_id=item.get("id"), error=str(exc)[:120])
     return out
+
+
 # --- A13 -- END ----------------------------------------------------------------------------
 
 
@@ -432,6 +434,8 @@ def _apply_acquisition_watch_boost(item: dict, out: TriageOut) -> TriageOut:
     except Exception as exc:
         log.debug("acquisition_watch_triage_boost_failed", item_id=item.get("id"), error=str(exc)[:120])
     return out
+
+
 # --- A16 -- END ------------------------------------------------------------------------------
 
 
@@ -586,12 +590,10 @@ def _enqueue_deep_search(item: dict, out: TriageOut) -> None:
     if (item.get("israel_relevance") or 0) >= _ISRAEL_DEEP_SEARCH_THRESHOLD:
         question = f"{question}{_ISRAEL_DEEP_SEARCH_SUBQUESTION_HE}"
     # --- A13 -- END --------------------------------------------------------------------------
-    entities = ", ".join(item.get("entities_mentioned") or []) or "—"
-    context_he = (
-        f"כותרת הפריט: {item.get('title') or ''}\n"
-        f"ישויות: {entities}\n"
-        f"תקציר: {item.get('summary_he') or ''}\n"
-        f"זרע חיפוש באנגלית מוצע: {seed_en}"
+    from eoa.pipeline.investigation_context import format_item_context_he
+
+    context_he = format_item_context_he(
+        item.get("title"), item.get("entities_mentioned"), item.get("summary_he"), seed_en
     )
     enqueue_job(
         "deep_search",

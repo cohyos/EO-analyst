@@ -544,7 +544,13 @@ def start_investigation(question: str, item_id: int | None = None) -> int | None
         exists = _fetchone("SELECT id FROM items WHERE id = %s", (item_id,))
         if exists is None:
             return None
-    return relational.enqueue_job("deep_search", {"item_id": item_id, "question": question}, priority=0)
+    from eoa.pipeline.investigation_context import item_context_he_from_db
+
+    payload: dict[str, Any] = {"item_id": item_id, "question": question}
+    context_he = item_context_he_from_db(item_id)
+    if context_he:
+        payload["context_he"] = context_he
+    return relational.enqueue_job("deep_search", payload, priority=0)
 
 
 def expand_investigation(job_id: int) -> int | None:
