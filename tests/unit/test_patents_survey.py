@@ -364,3 +364,63 @@ def _profile(name: str = "Anduril") -> AssigneeProfile:
         tech_product_chain=[_sentence()],
         implications_he=[_sentence()],
     )
+
+
+class TestClusterHeadingPrefix:
+    """J12 (round 12, D8 worst #9): the Anduril survey rendered one cluster heading as
+    "אשכול טכנולוגי: אשכול נושאי: lattice / mesh" -- cluster.py's ``_unclassified_label_he`` bakes
+    its own "אשכול נושאי: " prefix into the label while ``_cluster_narrative_section`` wrapped every
+    label in "אשכול טכנולוגי: " unconditionally. A label that already opens with a category word
+    is used verbatim; a bare CPC-style label still gets the single wrapper."""
+
+    def test_term_cluster_label_is_not_double_prefixed(self):
+        from eoa.patents.cluster import _TERM_CLUSTER_LABEL_PREFIX_HE, _unclassified_label_he
+        from eoa.patents.survey import _cluster_heading_he
+
+        label = _unclassified_label_he(["lattice", "mesh"])
+        assert label.startswith(f"{_TERM_CLUSTER_LABEL_PREFIX_HE}: ")  # cluster.py's pinned shape
+        heading = _cluster_heading_he(label)
+        assert heading == label
+        assert heading.count("אשכול ") == 1
+
+    def test_cpc_label_still_gets_single_wrapper(self):
+        from eoa.patents.survey import _cluster_heading_he
+
+        assert _cluster_heading_he("מערכות ראייה ממוחשבת (G06T7)") == "אשכול טכנולוגי: מערכות ראייה ממוחשבת (G06T7)"
+        # a bare label that merely begins with the word "אשכול" (no category word + colon) is not a prefix
+        assert _cluster_heading_he("אשכול X") == "אשכול טכנולוגי: אשכול X"
+
+    def test_llm_echoed_wrapper_is_not_doubled(self):
+        from eoa.patents.survey import _cluster_heading_he
+
+        assert _cluster_heading_he("אשכול טכנולוגי: גלאים (G01S17)") == "אשכול טכנולוגי: גלאים (G01S17)"
+
+    def test_no_rendered_heading_carries_two_category_words(self):
+        import re
+
+        synthesis = _PatentSurveyDraftAlias(
+            exec_summary=[_sentence()],
+            landscape=[_sentence()],
+            tech_clusters=[
+                ClusterNarrative(cluster_label_he="גלאים (G01S17)", paragraph=[_sentence()]),
+                ClusterNarrative(cluster_label_he="אשכול נושאי: lattice / mesh", paragraph=[_sentence()]),
+                ClusterNarrative(cluster_label_he="אשכול טכנולוגי: H04N5", paragraph=[_sentence()]),
+            ],
+            assignee_profiles=[
+                AssigneeProfile(
+                    assignee_name="Anduril", tech_product_chain=[_sentence()], implications_he=[_sentence()]
+                )
+            ],
+            business_implications=[
+                PatentBizAction(action_he=f"פעולה {i}.", rationale_he="נימוק.", rationale_cites=[1])
+                for i in range(3)
+            ],
+            timeline_narrative=[_sentence()],
+        )
+        draft = _build_draft_from_synthesis(synthesis, open_points_extra=[])
+        titles = [s.title_he for s in draft.sections]
+        assert "אשכול טכנולוגי: גלאים (G01S17)" in titles
+        assert "אשכול נושאי: lattice / mesh" in titles
+        assert "אשכול טכנולוגי: H04N5" in titles
+        doubled = re.compile(r"אשכול [\u0590-\u05FF]+: אשכול ")
+        assert not [t for t in titles if doubled.search(t)], titles

@@ -1262,9 +1262,27 @@ def business_implications_table(actions: list[PatentBizAction]) -> dict[str, Any
     }
 
 
+#: J12 (round 12, D8 worst #9): a cluster label that already opens with its own Hebrew category word
+#: ("אשכול נושאי: lattice / mesh" from :func:`eoa.patents.cluster._unclassified_label_he`, or a
+#: label the LLM echoed back with the "אשכול טכנולוגי: " wrapper) must not be wrapped again -- the
+#: Anduril survey rendered "אשכול טכנולוגי: אשכול נושאי: lattice / mesh". CPC labels come back from
+#: :func:`eoa.patents.cluster._cpc_label` deliberately bare (J11 D8) and still get the single wrapper;
+#: a bare label that merely starts with the word "אשכול" (no category word + colon) is not a prefix.
+_CLUSTER_CATEGORY_PREFIX_RE = re.compile(r"^אשכול [\u0590-\u05FF]+: ")
+
+
+def _cluster_heading_he(label_he: str) -> str:
+    """The rendered cluster heading: "אשכול טכנולוגי: <label>" unless ``label_he`` already carries a
+    category prefix of the same shape, in which case it is used verbatim (never doubled)."""
+    label = label_he.strip()
+    if _CLUSTER_CATEGORY_PREFIX_RE.match(label):
+        return label
+    return f"אשכול טכנולוגי: {label}"
+
+
 def _cluster_narrative_section(cluster: ClusterNarrative) -> _RenderSection:
     return _RenderSection(
-        title_he=f"אשכול טכנולוגי: {cluster.cluster_label_he}",
+        title_he=_cluster_heading_he(cluster.cluster_label_he),
         sentences=_to_cite_sentences(cluster.paragraph),
     )
 
