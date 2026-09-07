@@ -277,11 +277,28 @@ def players_map() -> dict[str, list[dict[str, Any]]]:
     return out
 
 
+def _top_event_kind_he(event: dict[str, Any]) -> str:
+    """Hebrew label for the top-events-by-amount table's ``סוג`` cell, with a ``(לא סופי)``
+    suffix when the persisted confidence is below 0.75 (CR round 14: an in-progress $10B funding
+    round was rendered as a bare ``investment`` row in the monthly's most prominent table)."""
+    from eoa.report.docx_builder import _EVENT_KIND_LABELS_HE
+
+    kind = event.get("kind") or ""
+    label = _EVENT_KIND_LABELS_HE.get(kind, kind) or "—"
+    conf = event.get("confidence")
+    try:
+        if conf is not None and float(conf) < 0.75:
+            label = f"{label} (לא סופי)"
+    except (TypeError, ValueError):
+        pass
+    return label
+
+
 def top_events_by_amount(period_start: dt.date, period_end: dt.date, limit: int = 10) -> list[dict[str, Any]]:
     """FR-5.4: the 10 largest business events (by ``amount_usd``) in the month."""
     sql = """
         SELECT e.id, e.kind, e.title, e.date, e.amount_usd, e.currency, e.parties, e.customer,
-               e.program, e.item_id, i.url AS item_url, i.title AS item_title, i.published_at,
+               e.program, e.confidence, e.item_id, i.url AS item_url, i.title AS item_title, i.published_at,
                COALESCE(src.name, i.url) AS source_name
         FROM events e
         JOIN items i ON i.id = e.item_id
@@ -937,7 +954,10 @@ def build_monthly(
                 "rows": [
                     [
                         fmt_date(e.get("date")),
-                        e.get("kind") or "—",
+                        # CR round 14: Hebrew kind label (was the raw enum slug) and an explicit
+                        # 'not final' marker for low-confidence rows (e.g. a funding round still
+                        # in progress) so the top-10-by-value table never reads as settled fact.
+                        _top_event_kind_he(e),
                         ", ".join(e.get("parties") or []) or "—",
                         fmt_amount(e),
                         f"[{id_to_n[e['item_id']]}]" if id_to_n.get(e.get("item_id")) else "—",

@@ -40,6 +40,8 @@ BODY_SIZE_PT = 11
 TITLE_TEXT = "דוח יומי — אלקטרואופטיקה ובינה חזותית ביטחונית"
 
 _EVENT_KIND_LABELS_HE = {
+    "financial_results": "דיווח פיננסי",
+    "appointment": "מינוי",
     "contract_award": "זכייה בחוזה",
     "m_and_a": "מיזוג/רכישה",
     "partnership": "שותפות",

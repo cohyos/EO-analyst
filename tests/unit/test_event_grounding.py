@@ -469,3 +469,18 @@ def test_collect_platform_events_grounded_customer_becomes_buyer(monkeypatch):
     out = bdt.collect_platform_events("GR", dt.date(2026, 1, 1), dt.date(2026, 12, 31))
     assert out[0]["buyer"] == "Greece"
     assert out[0]["vendor"] == "Rafael"
+
+
+def test_valuation_cue_right_after_the_figure_is_a_valuation_but_a_later_cue_is_not():
+    """Lead follow-up (round 14): live event 19's item title "XTEND starts trading on NYSE this week
+    at $1.5b valuation" carries the cue AFTER the figure; live event 23's "$10 billion, based on a
+    company valuation of about $100 billion" carries a cue ~30 chars later that belongs to the
+    NEXT figure and must not poison the real round size."""
+    from eoa.pipeline.event_grounding import _amount_grounded
+
+    grounded, is_val, _ = _amount_grounded(1.5e9, "XTEND starts trading on NYSE this week at $1.5b valuation")
+    assert grounded and is_val
+    grounded, is_val, _ = _amount_grounded(
+        1e10, "the size of the round has reached about $10 billion, based on a company valuation of about $100 billion"
+    )
+    assert grounded and not is_val

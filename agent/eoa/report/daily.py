@@ -1151,6 +1151,8 @@ _FALLBACK_TEXT_TRUNC_CHARS = 220
 #: report-building module keeping its own copy of a rendering label map rather than importing a
 #: private name across a module boundary).
 _EVENT_KIND_LABELS_HE_FALLBACK = {
+    "financial_results": "דיווח פיננסי",
+    "appointment": "מינוי",
     "contract_award": "זכייה בחוזה",
     "m_and_a": "מיזוג/רכישה",
     "partnership": "שותפות",

@@ -195,6 +195,7 @@ _AMOUNT_MAGNITUDE_WORDS: dict[str, float] = {
 }  # fmt: skip
 _MAGNITUDE_ALT = "|".join(sorted(_AMOUNT_MAGNITUDE_WORDS, key=len, reverse=True))
 _VALUATION_WINDOW_CHARS = 60
+_VALUATION_AFTER_WINDOW_CHARS = 14
 
 
 def _fmt_reduced(value: float) -> list[str]:
@@ -244,8 +245,16 @@ def _amount_grounded(amount: float | None, text: str) -> tuple[bool, bool, str]:
             match = re.search(pat, text)
     if match is None:
         return False, False, ""
-    window = text[max(0, match.start() - _VALUATION_WINDOW_CHARS) : match.start()]
-    return True, bool(_VALUATION_CONTEXT_RE.search(window)), _snippet(match, text, radius=40)
+    # Valuation cue before the figure ("a valuation of about $100 billion") or immediately after
+    # it ("trading at $1.5b valuation" -- live event 19's item title). The after-window is tight
+    # (14 chars) on purpose: event 23's "$10 billion, based on a company valuation of about
+    # $100 billion" must keep its real round size, so a cue ~30 chars later must NOT count.
+    window_before = text[max(0, match.start() - _VALUATION_WINDOW_CHARS) : match.start()]
+    window_after = text[match.end() : match.end() + _VALUATION_AFTER_WINDOW_CHARS]
+    is_valuation = bool(_VALUATION_CONTEXT_RE.search(window_before)) or bool(
+        _VALUATION_CONTEXT_RE.search(window_after)
+    )
+    return True, is_valuation, _snippet(match, text, radius=40)
 
 
 # ---------------------------------------------------------------------------------------------
