@@ -22,13 +22,20 @@ Matching rules (see ``config/product_lines.yaml``'s own field docs for the per-l
    holds (in which case (4) alone would already tag the line -- this rule exists so a caller can
    reason about "why" a competitor-heavy but subdomain-confirmed row was tagged, not because it
    changes the final decision on its own).
+6. **Conditional keyword match** (R8-tagging, 2026-09-07) -- a line's ``conditional_keywords_en``
+   entries (see ``config/product_lines.yaml``'s own field docs) are terms that are genuinely
+   ambiguous standalone (e.g. "DIRCM" names a jam/dazzle emitter, only a ``mws_eo`` signal when the
+   surrounding text is actually about self-protection/missile-warning). A term counts only when it
+   itself is present (word-boundary in ``text_en``) **and** at least one of its own ``context``
+   terms is also present somewhere in the item's text (``text_he`` substring or ``text_en``
+   word-boundary) -- see :func:`_conditional_match`.
 """
 
 from __future__ import annotations
 
 import re
 
-from eoa.product_lines.registry import ProductLineDef, product_line_defs
+from eoa.product_lines.registry import ConditionalKeyword, ProductLineDef, product_line_defs
 
 _WORD_BOUNDARY_CACHE: dict[str, re.Pattern[str]] = {}
 
@@ -53,6 +60,37 @@ def _any_substring_he(text_he: str, terms: tuple[str, ...]) -> bool:
     return any(term and term in text_he for term in terms)
 
 
+def _term_present(term: str, *, text_he: str, hay_en: str) -> bool:
+    """A single term is "present" if it's a Hebrew-scripted term found as a plain substring of
+    ``text_he``, or found as a word-boundary Latin match in either ``hay_en`` or ``text_he`` (a
+    context term may legitimately be written in a Hebrew sentence, e.g. an English acronym embedded
+    in Hebrew prose) -- used by both a conditional keyword's own ``term`` and its ``context``
+    entries, which may mix scripts."""
+    if not term:
+        return False
+    if term in text_he:
+        return True
+    return bool(_word_pattern(term).search(hay_en) or _word_pattern(term).search(text_he))
+
+
+def _conditional_match(
+    conditional_keywords: tuple[ConditionalKeyword, ...], *, text_he: str, hay_en: str
+) -> bool:
+    """Rule 6: each ``ConditionalKeyword`` counts only when its own ``term`` AND at least one of
+    its ``context`` terms are both present somewhere in the item's text (script-agnostic, see
+    :func:`_term_present`). A conditional keyword with no configured ``context`` never matches on
+    its own (fails safe, matching this module's "never invent a signal from bad config" convention
+    elsewhere -- see :func:`tag_product_lines`'s own docstring)."""
+    for ck in conditional_keywords:
+        if not ck.context:
+            continue
+        if _term_present(ck.term, text_he=text_he, hay_en=hay_en) and any(
+            _term_present(c, text_he=text_he, hay_en=hay_en) for c in ck.context
+        ):
+            return True
+    return False
+
+
 def _line_matches(
     pl: ProductLineDef, *, text_he: str, hay_en: str, entity_lower: set[str], subdomain: str | None
 ) -> bool:
@@ -66,6 +104,8 @@ def _line_matches(
         entity_lower & {s.lower() for s in pl.exemplar_systems}
     )
     if keyword_hit or exemplar_hit or subdomain_hit:
+        return True
+    if _conditional_match(pl.conditional_keywords_en, text_he=text_he, hay_en=hay_en):
         return True
     # Rule 5: a competitor name alone is never enough -- only counts alongside a subdomain match,
     # which (per rule 4 above) would already have returned True. Kept as an explicit, independently

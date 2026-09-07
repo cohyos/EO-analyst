@@ -889,6 +889,28 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
             entities=entities_for_tagging,
             subdomain=item.get("subdomain"),
         )
+        tag_method = "deterministic"
+        # R8-tagging (2026-09-07): the deterministic pass above is precise but incomplete -- a
+        # genuinely relevant item that never uses one of the configured keyword strings verbatim
+        # gets no tag at all. When it found nothing, `product_lines.yaml`'s `llm_tagging: true`
+        # switch is on, and this item is in scope (same domain/level gate `entity_persistence_ok`
+        # above already computed), give the LLM-assisted fallback one shot at this single item (a
+        # batch of 1 is still a valid `chat_structured_batch` call -- the ~15-per-batch case is
+        # `scripts/backfill_product_lines.py --llm`'s own bulk sweep, not this per-item hook).
+        # Never breaks the pipeline on failure -- `llm_tag_batch` itself never raises.
+        if not product_lines and entity_persistence_ok:
+            from eoa.product_lines.registry import llm_tagging_enabled
+
+            if llm_tagging_enabled():
+                from eoa.product_lines.llm_tagging import llm_tag_batch
+
+                llm_result = llm_tag_batch(
+                    [{"id": item["id"], "title": item.get("title"), "summary_he": text_he}]
+                )
+                llm_lines = llm_result.get(item["id"])
+                if llm_lines:
+                    product_lines = llm_lines
+                    tag_method = "llm"
         if product_lines:
             update_item_fields(item["id"], product_lines=product_lines)
             if persisted_event_ids:
@@ -897,7 +919,9 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                         "UPDATE events SET product_lines = %(lines)s WHERE id = ANY(%(ids)s)",
                         {"lines": product_lines, "ids": persisted_event_ids},
                     )
-            log.info("product_lines_tagged", item_id=item["id"], product_lines=product_lines)
+            log.info(
+                "product_lines_tagged", item_id=item["id"], product_lines=product_lines, method=tag_method
+            )
     except Exception as exc:
         log.debug("product_lines_tagging_failed", item_id=item["id"], error=str(exc)[:160])
     # --- PL-backend -- END ----------------------------------------------------------------

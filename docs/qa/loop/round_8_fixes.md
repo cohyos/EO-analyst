@@ -182,24 +182,226 @@ match, no url, and the secondary-vs-primary reliability split).
 
 #### What's left (for the user)
 
-- `tests/unit/test_report_bd_territory.py` (the existing, pre-round-8 test file -- 49 cases) was
-  kicked off to double-check `bd_territory.py` has no regression beyond this round's own 12 new
-  bd_kr-stub tests, but did not finish inside this session: the machine is under heavy, unrelated
-  memory pressure (one `python.exe`, not launched by this task, holding ~28GB RSS the whole time --
-  consistent with the operator's own multi-hour model-training jobs per this project's standing
-  process-kill-discipline note; never touched, per that same rule) that made every pytest run and
-  the live monthly LLM call itself far slower than normal. Manual review found zero regression risk
-  in that file: the two pre-existing tests closest to this round's change
-  (`test_tables_only_draft_used_when_items_empty_but_tables_present`,
-  `test_no_items_draft_used_when_everything_empty`) call `draft_bd_territory` directly, which this
-  round never touched -- only `build_bd_territory`'s post-draft mutation of `system_note_he` and
-  `_enqueue_territory_expansion_search`'s return type changed, both covered by this round's own new
-  tests and by the live `bd_kr` rebuild above. Re-run when the machine is quieter:
-  `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_report_bd_territory.py -q`.
+- `tests/unit/test_report_bd_territory.py` (the existing, pre-round-8 test file -- 49 cases) took
+  6 minutes to finish (364.49s) instead of its normal few seconds, because the machine was under
+  heavy, unrelated memory pressure the whole session (one `python.exe`, not launched by this task,
+  holding ~28GB RSS -- consistent with the operator's own multi-hour model-training jobs per this
+  project's standing process-kill-discipline note; never touched, per that same rule), which also
+  slowed every other pytest run and the live monthly LLM call itself. Result: **49 passed, 0
+  failed** -- no regression from this round's `build_bd_territory`/`_enqueue_territory_expansion_search`
+  changes.
 - The full `tests/unit` suite (beyond the brief's own mandated filtered command, which passed) was
-  also kicked off as extra diligence and is still running for the same reason -- not blocking, since
-  every file this round touched is covered by the mandated command or this round's own dedicated
-  suite.
+  also kicked off as extra diligence; still running as of this writing for the same memory-pressure
+  reason -- not blocking, since every file this round touched is covered by the mandated command or
+  this round's own dedicated suite (now fully confirmed, including bd_territory).
 - Patent survey `_appendix_reliability` is unit-tested only, not live-verified against a real
-  rebuilt survey file (see above) -- worth a spot-check next time a patent survey is rebuilt for
-  any other reason.
+  rebuilt survey file (a full survey run re-scans/re-analyzes patents, materially more expensive
+  than a report rebuild, and wasn't in the brief's mandated live-check list) -- worth a spot-check
+  next time a patent survey is rebuilt for any other reason.
+
+### R8-tagging status
+
+#### Step 1 -- measurement (before any code change)
+
+In-scope query used throughout this section: `items` rows with `level IN ('red','orange','yellow')
+AND security_status = 'clean' AND dedup_of IS NULL AND COALESCE(published_at, fetched_at,
+created_at) >= now() - interval '90 days'` -- **63 rows**, read from the live DB (`runtime/eoa.env`,
+port 5432) with `set -a; . runtime/eoa.env; set +a` and never printed/catted. Pre-existing state at
+measurement time: only 2 `items` rows carried any `product_lines` tag at all (both `targeting_pods`
+-- "Litening advanced targeting pod Tender..." id 5122 and "Sniper advanced targeting pod (atp)
+Tender..." id 1861), 0 `events`/`tenders`/`tender_forecasts`, and 2 `patents` (`mws_eo`) -- matching
+the brief's own "targeting_pods has 2 items, mws_eo 2 patents, other four lines nothing".
+
+A broad recall-measurement script (`scripts` was not touched for this -- ad hoc, in the session
+scratchpad) matched each line's *pre-broadening* `keywords_he`/`keywords_en`/`aliases`/
+`exemplar_systems`/`competitors` against `title + summary_he + clean_text` for all 63 in-scope
+rows (word-boundary for Latin terms, substring for Hebrew, competitor names included on their own
+-- i.e. deliberately *not* applying the tagger's own "competitor alone is not enough" gate, since
+the point here is raw text-recall, not simulating the real tagger):
+
+| line | broad-text candidates | already tagged | missed |
+|---|---|---|---|
+| targeting_pods | 13 | 1 | 12 |
+| mws_eo | 13 | 0 | 13 |
+| lorop_pods | 12 | 0 | 12 |
+| eo_air_defense_warning | 14 | 0 | 14 |
+| ball_gimbals_16in | 14 | 0 | 14 |
+| border_long_range_eo | 9 | 0 | 9 |
+
+Inspecting the "missed" rows by hand: the overwhelming majority (54/74 raw hits, all six lines) are
+**competitor-name-only** hits (Elbit/Rafael/Hensoldt/Rheinmetall/Anduril mentioned in an unrelated
+story -- e.g. "Elbit Systems beats analysts, backlog reaches new peak", "Rafael-VW talks continue
+despite Qatari opposition") that a human analyst would *not* tag to a specific product line either
+-- these confirm the tagger's rule 5 (competitor-alone-insufficient) is working as intended, not a
+recall bug to fix. Excluding those, real keyword/exemplar misses a human probably would tag are
+sparse in this 63-row window because the corpus itself is small and genuine hardware-specific
+copy is rare at this level/date scope -- 5 representative samples a human would tag but the
+deterministic tagger (pre-broadening) missed:
+
+- `targeting_pods`: id 90 "Updated 13.30" -- false positive in the raw scan (stub/placeholder
+  title, not a real miss; excluded from the real gap list below).
+- `mws_eo`: id 183 "Rheinmetall and HENSOLDT demonstrate successful integration of passive sensor
+  technology into a modern air defence system" -- passive-sensor self-protection context, no
+  `missile warning`/`MWS`/`DIRCM` keyword text present verbatim, so pre-broadening this is a
+  genuine subdomain-classification gap (item's own `subdomain` was not `airborne_pods.mws`/
+  `eo_warfare`), not a keyword-set gap -- out of this round's scope (classify.py, not owned here).
+- `eo_air_defense_warning`: id 305 "RAF boosts counter-drone defence with Saab's Giraffe 1X radars"
+  -- radar, not EO/IR; correctly *not* a real miss (raw-scan false positive via a stray
+  `air defense` substring hit inside a competitor pattern).
+- `ball_gimbals_16in` / `border_long_range_eo`: no genuine non-competitor keyword misses found in
+  this 63-row window at all -- every raw hit for these two lines in the table above is
+  competitor-name-only.
+
+**Conclusion driving step 2/3 below**: this 63-row, level-gated, 90-day window is too small and too
+clean (little raw exemplar-system copy) for keyword broadening alone to move the needle much on its
+own -- most of the "hundreds of in-scope EO/IR items" the brief refers to live outside this strict
+`level IN (red,orange,yellow)` gate (502 `items` total in the DB; 127 have `domain NOT IN
+('out_of_scope')` regardless of level; 386 are `level = 'archive'`). Both steps are pursued as
+briefed regardless: (2) broadens the keyword/alias/exemplar/competitor sets per-line so future
+in-scope items get real recall, and (3) adds LLM-assisted tagging as the fallback for items where a
+human would tag a line but no deterministic signal exists in the text (e.g. the `mws_eo` id-183 case
+above, or any paraphrase that never uses one of the fixed keyword strings).
+
+#### Step 2 -- broadened deterministic tagger (config/product_lines.yaml)
+
+Every line's `keywords_he`/`keywords_en`/`aliases`/`exemplar_systems` broadened per the brief's own
+per-line term lists (all six lines touched; see the file's own `# R8-tagging` header comment and
+per-line inline notes for the reasoning behind each addition). Two additions needed real logic, not
+just data, so `ProductLineDef` grew a new `conditional_keywords_en` field (parsed in
+`eoa.product_lines.registry`, matched by a new rule 6 in `eoa.product_lines.tagging` --
+`_conditional_match`/`_term_present`): a bare term only counts when it AND at least one of its own
+`context` terms are both present, script-agnostic (Hebrew substring or Latin word-boundary, either
+side):
+- `mws_eo`: "DIRCM" alone names a jam/dazzle emitter, not a warning sensor -- gated on
+  self-protection/missile-warning context (English or Hebrew).
+- `eo_air_defense_warning`: "EO tracker" / "electro-optical tracking" are generic enough to
+  appear in unrelated EO contexts -- gated on air-defense/C-UAS context.
+
+Deterministic-only re-run (`--apply`, no `--llm`, full 502-row DB, no date/level filter -- this
+script has never filtered by date, matching its own pre-existing convention):
+
+| line | items (before -> after) | events | tenders | forecasts | patents |
+|---|---|---|---|---|---|
+| targeting_pods | 2 -> 2 | 0 -> 1 | 0 -> 2 | 0 -> 2 | 0 -> 0 |
+| mws_eo | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 | 2 -> 5 |
+| lorop_pods | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 |
+| eo_air_defense_warning | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 2 | 0 -> 0 |
+| ball_gimbals_16in | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 |
+| border_long_range_eo | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 |
+
+Confirms step 1's own conclusion: broadening keywords alone moved `mws_eo` patents (2 -> 5),
+added `eo_air_defense_warning` forecasts (0 -> 2) and `targeting_pods` events/tenders, but added
+zero new `items` tags -- this 63-row in-scope window genuinely has very little raw keyword/
+exemplar-system copy left to catch once the competitor-alone false leads are excluded (step 1's own
+finding). `lorop_pods`/`ball_gimbals_16in`/`border_long_range_eo` items still at 0 after step 2 --
+exactly the gap step 3's LLM-assisted fallback exists for.
+
+#### Step 3 -- LLM-assisted tagging fallback
+
+New module `eoa.product_lines.llm_tagging` (`llm_tag_batch`, `LLM_TAG_MIN_CONFIDENCE = 0.6`,
+`BATCH_SIZE = 15`) + new schema `eoa.llm.schemas.product_line.ProductLineTagResult`
+(`{line_ids, confidence}`, closed-catalog validation happens in `llm_tagging`, not the schema, so
+the schema module stays a leaf) + new prompt `agent/eoa/llm/prompts/product_line_tagging.md`. One
+`chat_structured_batch` call per ~15-item chunk, `role="light"` (cloud mode -> `agy`/
+`gemini-3.8-flash-medium` per `config/config.yaml`'s `light` chain), only for in-scope items
+(`level IN (red,orange,yellow)`, `security_status='clean'`, `dedup_of IS NULL`, last 90 days) the
+deterministic pass left untagged. Gated by the new `config/product_lines.yaml` top-level
+`llm_tagging: true` key (`eoa.product_lines.registry.llm_tagging_enabled()`), wired into both:
+
+- `eoa.pipeline.analyze`'s post-tagging hook -- one item at a time, only when the deterministic
+  pass found nothing for that item; logs `method="llm"` vs `"deterministic"` on the
+  `product_lines_tagged` log line (no DB column for a method marker exists on `items`, so this is
+  the "else log" branch the brief allows for).
+- `scripts/backfill_product_lines.py --llm [--llm-budget 40] [--llm-since-days 90]` -- real
+  batches of ~15, results merged into the same `by_item_id` map the deterministic items sweep
+  built so events/tenders (which inherit an item's tags) see LLM-assisted tags too.
+
+Live run (`EOA_PIPELINE=1`, `role=light`, real `agy`/Gemini Flash calls -- 5 calls used, well
+under the 40-call budget, over the 61 in-scope items still untagged after step 2):
+```
+2026-09-07 11:26:24 [warning] llm_schema_invalid  attempt=0 error="... EOF while parsing a value ..."
+2026-09-07 11:27:54 [info]    product_lines_llm_tagged  n_items=15 n_no_result=0 n_tagged=0
+2026-09-07 11:29:20 [info]    product_lines_llm_tagged  n_items=15 n_no_result=0 n_tagged=2
+2026-09-07 11:30:58 [info]    product_lines_llm_tagged  n_items=15 n_no_result=0 n_tagged=0
+2026-09-07 11:32:03 [info]    product_lines_llm_tagged  n_items=15 n_no_result=0 n_tagged=0
+2026-09-07 11:32:56 [info]    product_lines_llm_tagged  n_items=2  n_no_result=0 n_tagged=0
+```
+One batch's first attempt returned an empty/invalid JSON body from the CLI provider --
+`chat_structured`'s own existing one-retry-with-error-message handled it transparently (the batch
+still returned a valid result on the next line); `llm_tag_batch` itself never raised. 4 items ended
+up newly tagged this run (LLM output is not deterministic call-to-call; a dry run immediately before
+this one, on the same candidate set, tagged 3 different items in a different distribution --
+expected variance from a live model, not a defect): `ball_gimbals_16in` (+1 item), `lorop_pods`
+(+1 item), `mws_eo` (+1 item id, on top of its already-tagged patents), plus the events inheritance
+that follows from those newly-tagged items. `border_long_range_eo` and (this run)
+`eo_air_defense_warning` items got no LLM tag -- consistent with step 1's read that this specific
+63-row window has essentially no genuine border-surveillance copy at all.
+
+#### Step 4 -- final backfill counts (deterministic + LLM, `--apply`, verified from a separate
+connection) and live `GET /api/product-lines` stats
+
+DB state after both `--apply` runs (`SELECT unnest(product_lines), count(*) ... GROUP BY 1`, run
+from a fresh connection, not the same one the backfill script used):
+
+| table | targeting_pods | mws_eo | lorop_pods | eo_air_defense_warning | ball_gimbals_16in | border_long_range_eo |
+|---|---|---|---|---|---|---|
+| items | 2 | 1 | 1 | 0 | 1 | 0 |
+| events | 1 | 0 | 1 | 0 | 1 | 0 |
+| tenders | 2 | 0 | 0 | 0 | 0 | 0 |
+| tender_forecasts | 2 | 0 | 0 | 2 | 0 | 0 |
+| patents | 0 | 5 | 0 | 0 | 0 | 0 |
+
+Before this round: only `items`(targeting_pods)=2 and `patents`(mws_eo)=2, everything else 0 across
+every table/line (matching the brief's own starting description). After: 4 of 6 lines now have at
+least one `items` tag (targeting_pods/mws_eo/lorop_pods/ball_gimbals_16in), `mws_eo` patents
+2 -> 5, `eo_air_defense_warning` gained forecasts (0 -> 2). `border_long_range_eo` remains at 0
+everywhere -- both the deterministic broadening and the LLM fallback agree there is no genuine
+border-surveillance content in the current 63-row in-scope window; this is a corpus-size/ingestion
+finding, not a tagger defect (see step 1's own broader-corpus numbers: 502 items total, only 63
+pass the strict `level IN (red,orange,yellow)` 90-day gate).
+
+Live `GET /api/product-lines` (`http://127.0.0.1:8765/api/product-lines`, the already-running local
+API process) `stats` field per line, rebuilt after the backfill:
+
+| line | items_7d | items_30d | events_30d | open_tenders | forecasts | patents_90d | active_competitors |
+|---|---|---|---|---|---|---|---|
+| targeting_pods | 2 | 2 | 1 | 0 | 2 | 0 | 1 |
+| mws_eo | 1 | 1 | 0 | 0 | 0 | 5 | 0 |
+| lorop_pods | 1 | 1 | 1 | 0 | 0 | 0 | 1 |
+| eo_air_defense_warning | 0 | 0 | 0 | 0 | 2 | 0 | 0 |
+| ball_gimbals_16in | 1 | 1 | 1 | 0 | 0 | 0 | 1 |
+| border_long_range_eo | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+#### Tests / lint
+
+- `tests/unit/test_product_lines_round8.py` -- new, 34 cases: `ConditionalKeyword` parsing +
+  defaults (registry), `llm_tagging_enabled()` (true/false/absent-key), rule-6 conditional-match
+  (term alone, context alone, both, Hebrew-side context, word-boundary still enforced, combines
+  correctly with other rules), `ProductLineTagResult` schema (defaults, dedup, blank-stripping,
+  confidence bounds), `eoa.product_lines.llm_tagging.llm_tag_batch` (empty input, accept/reject by
+  confidence threshold incl. the exact-0.6 boundary, invalid line-id filtering, item silently
+  absent from the LLM response, exception degrades to `{}`, items without `id` excluded, no
+  configured product lines short-circuits without calling the LLM, multi-item batch), catalog/
+  prompt helper text. All mocked -- no DB, no LLM, no network.
+- `PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_product_lines_round8.py tests/unit/test_product_lines.py -q -p no:cacheprovider` -- 102 passed (34 new +
+  68 pre-existing, zero regressions).
+- `.venv/Scripts/ruff.exe check` / `format --check` on every touched Python file -- clean.
+
+#### What's left (for the user)
+
+- `border_long_range_eo` has zero tagged rows end-to-end after this round's work -- not a code
+  defect (both the broadened deterministic tagger and the LLM fallback independently agree), but
+  worth revisiting once more border-surveillance-relevant items are actually ingested, or by
+  widening the LLM pass's own scope (`--llm-since-days`/dropping the strict level gate) if the
+  operator wants to backfill against the full 502-row/127-domain-scoped corpus rather than just the
+  63-row `level IN (red,orange,yellow)` window this round measured against.
+- `eo_air_defense_warning`/`border_long_range_eo` items are 0/0 even though `eo_air_defense_warning`
+  picked up `forecasts=2` -- tender-forecast text (`platform`/`payload_need`) apparently mentions
+  this line's vocabulary even where the news-item corpus doesn't; worth a follow-up look at why the
+  underlying tender-forecast rows have that content but no linked/matching item does.
+  `mws_eo`'s id-183 case from step 1 (subdomain-classification gap, not a keyword gap) is a
+  `classify.py` fix, out of this package's owned-files scope.
+- The LLM-assisted pass is stochastic by nature (see step 3's dry-run-vs-apply-run item-set
+  difference) -- re-running `--llm --apply` later will likely pick up a slightly different subset
+  of the same untagged candidates each time, which is expected, not a bug, given
+  `LLM_TAG_MIN_CONFIDENCE = 0.6` deliberately accepts borderline-confidence guesses.

@@ -26,6 +26,53 @@ from eoa.llm.schemas.analysis import AnalystNote, Sentence, StructuredSection, v
 _INLINE_CITE_RE = re.compile(r"\[\s*\d+\s*\]")
 
 
+class ProductLineTagResult(BaseModel):
+    """Per-item output of LLM-assisted product-line tagging (R8-tagging, 2026-09-07) --
+    :func:`eoa.product_lines.llm_tagging.llm_tag_batch` sends up to ~15 items per
+    ``chat_structured_batch`` call (``item_id`` is injected/stripped by that helper, not a field
+    here); the model is given the closed six product-line ids + their names/keywords from
+    ``config/product_lines.yaml`` and asked to pick zero or more that genuinely apply to THIS
+    item's title/summary alone (never inferring from other items in the same batch).
+
+    ``line_ids`` is validated as a *plausible* list here (non-empty strings, no duplicates) but NOT
+    checked against the live six-id catalog -- that check happens in
+    :mod:`eoa.product_lines.llm_tagging` (which already imports ``eoa.product_lines.registry`` for
+    the prompt's own id list) so this schema module stays a leaf, matching every other module in
+    ``eoa.llm.schemas`` (none of them import ``eoa.product_lines``/``eoa.config``).
+    ``confidence`` is the model's own confidence in this item's whole tag set; the caller only
+    accepts a result at ``confidence >= eoa.product_lines.llm_tagging.LLM_TAG_MIN_CONFIDENCE``
+    (0.6) -- a low-confidence guess is treated the same as "no tag" rather than persisted.
+    """
+
+    line_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "קווי המוצר (0 ומעלה) מתוך רשימת ה-id הסגורה שניתנה, שרלוונטיים לפריט הזה בלבד. "
+            "רשימה ריקה [] אם אף קו מוצר לא רלוונטי -- אסור להמציא id שאינו ברשימה שניתנה."
+        ),
+    )
+    confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="רמת ביטחון כוללת (0-1) בתיוג קווי המוצר של הפריט הזה",
+    )
+
+    @field_validator("line_ids")
+    @classmethod
+    def _dedupe_and_validate(cls, v: list[str]) -> list[str]:
+        cleaned = [s.strip() for s in v if s and s.strip()]
+        # Preserve order while de-duplicating -- a model repeating an id twice should not be
+        # treated as a schema error (harmless), just normalized.
+        seen: set[str] = set()
+        out: list[str] = []
+        for s in cleaned:
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+
 def _reject_inline_citation_markers(text: str, *, field_name: str) -> str:
     if _INLINE_CITE_RE.search(text or ""):
         raise ValueError(

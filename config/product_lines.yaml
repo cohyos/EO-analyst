@@ -21,6 +21,34 @@
 #                     also holds, since a bare company name recurs across many unrelated stories
 #   our_products      empty unless config.yaml's bd_report.our_company names a real product line
 #                     (left empty here; the operator can populate this alongside our_company)
+#   conditional_keywords_en  optional list of {term, context} pairs (R8-tagging, 2026-09-07) -- a
+#                     term here only counts as a signal when it AND at least one of its own
+#                     `context` terms both appear (word-boundary for Latin, substring for Hebrew,
+#                     checked across both text_he and text_en) -- see
+#                     eoa.product_lines.tagging._conditional_match. Used for terms that are
+#                     genuinely ambiguous on their own (e.g. "DIRCM" names a jam/dazzle emitter,
+#                     which only overlaps mws_eo's self-protection domain when the surrounding text
+#                     is actually about self-protection/missile-warning, not e.g. a bare mention in
+#                     a program-list article) -- keeps such terms out of the unconditional
+#                     keywords_en/aliases/exemplar_systems lists (which are strong signals on their
+#                     own) without dropping them from the tagger's recall entirely.
+#
+# R8-tagging (2026-09-07, product-line tagging coverage round): every line's keywords_he/
+# keywords_en/aliases/exemplar_systems broadened per the measured recall gap in
+# docs/qa/loop/round_8_fixes.md's "R8-tagging status" section -- short Latin tokens (e.g. "MWS",
+# 'MX-15', '16"') rely on eoa.product_lines.tagging's word-boundary matching to avoid false
+# positives inside longer unrelated words/model numbers.
+
+# llm_tagging (R8-tagging, 2026-09-07): when true, an in-scope item/patent that still has no
+# deterministic product-line tag after eoa.product_lines.tagging.tag_product_lines gets one more
+# shot at LLM-assisted tagging -- eoa.product_lines.llm_tagging.llm_tag_batch, called from the
+# eoa.pipeline.analyze post-analysis hook (one item at a time there) and from
+# scripts/backfill_product_lines.py --llm (batches of ~15 items per structured light-role call).
+# Only accepts a per-item result at confidence >= LLM_TAG_MIN_CONFIDENCE (0.6); line ids outside
+# the closed six-id catalog above are dropped. Read via
+# eoa.product_lines.registry.llm_tagging_enabled(); defaults to False (opt-in) when this key is
+# absent, so an older/unedited copy of this file never silently starts spending LLM calls.
+llm_tagging: true
 
 product_lines:
   - id: targeting_pods
@@ -28,6 +56,7 @@ product_lines:
     name_en: "Targeting Pods"
     keywords_he:
       - "פוד ציון מטרות"
+      - "פוד ציון"
       - "פוד תקיפה"
       - "פוד כיוון"
       - "כיוון תקיפה"
@@ -35,16 +64,21 @@ product_lines:
       - "targeting pod"
       - "advanced targeting pod"
       - "laser designator pod"
-    aliases: ["ATP", "NGTP"]
+      - "laser designation pod"
+      - "electro-optical targeting system"
+    aliases: ["ATP", "NGTP", "EOTS"]
     subdomains: ["airborne_pods.targeting_pods"]
     exemplar_systems:
       - Litening
       - "Sniper ATP"
+      - "Sniper pod"
       - ATFLIR
       - "ATP-SE"
       - Damocles
       - Talios
       - LANTIRN
+      - "Rafael Litening"
+      - PANTERA
     competitors:
       - Rafael
       - "Lockheed Martin"
@@ -57,13 +91,17 @@ product_lines:
     name_en: "EO-based Missile Warning Systems (MWS)"
     keywords_he:
       - "מערכת התראת טילים"
+      - "התראת טילים"
       - "התראה להגנה עצמית"
       - "מערכת הגנה עצמית אלקטרו-אופטית"
+      - "מערכת התרעה מפני טילים"
     keywords_en:
       - "missile warning system"
       - "missile warning sensor"
+      - "missile warning"
       - "self-protection system"
-    aliases: ["MWS", "CMWS", "EOSS"]
+      - "aircraft survivability equipment"
+    aliases: ["MWS", "CMWS", "EOSS", "MAWS", "PAWS"]
     subdomains: ["airborne_pods.eo_warfare", "airborne_pods.mws"]
     exemplar_systems:
       - PAWS
@@ -72,12 +110,27 @@ product_lines:
       - "AN/AAR-47"
       - MILDS
       - EOSS
+      - "AN/AAQ-24"
     competitors:
       - Elbit
       - "BAE Systems"
       - "Northrop Grumman"
       - Hensoldt
     our_products: []
+    # R8-tagging: "DIRCM" alone names a jam/dazzle emitter, not a warning sensor -- only a mws_eo
+    # signal when it co-occurs with self-protection/missile-warning context (see the field docs
+    # header above and eoa.product_lines.tagging._conditional_match).
+    conditional_keywords_en:
+      - term: "DIRCM"
+        context:
+          - "self-protection"
+          - "self protection"
+          - "missile warning"
+          - "aircraft survivability"
+          - "countermeasure"
+          - "IRCM"
+          - "להגנה עצמית"
+          - "התראת טילים"
 
   - id: lorop_pods
     name_he: "פודי LOROP (צילום אלכסוני ארוך-טווח)"
@@ -86,10 +139,13 @@ product_lines:
       - "פוד LOROP"
       - "צילום אלכסוני ארוך טווח"
       - "פוד סיור ארוך טווח"
+      - "פוד סיור"
     keywords_en:
       - "long-range oblique photography"
+      - "long-range oblique"
       - "LOROP pod"
       - "reconnaissance pod"
+      - "oblique photography pod"
     aliases: ["LOROP"]
     subdomains: ["airborne_pods.isr_pods", "airborne_pods.lorop"]
     exemplar_systems:
@@ -109,12 +165,15 @@ product_lines:
     name_en: "EO Detection & Warning for Air Defense"
     keywords_he:
       - "גילוי והתראה אלקטרו-אופטיים"
+      - "גילוי אלקטרו-אופטי"
       - "התראה אווירית אלקטרו-אופטית"
       - "עוקב אלקטרואופטי"
     keywords_en:
       - "EO air defense warning"
       - "electro-optical air surveillance"
       - "IRST ground system"
+      - "EO/IR air surveillance"
+      - "infrared search and track"
     aliases: ["IRST"]
     subdomains:
       - "air_defense.eo_trackers"
@@ -128,19 +187,31 @@ product_lines:
       - Rheinmetall
       - Hensoldt
     our_products: []
+    # R8-tagging: "EO tracker" / "electro-optical tracking" are generic enough to appear inside
+    # other domains (e.g. air_defense.eo_trackers seeker/fire-control text, which belongs to a
+    # different concern than a standalone air-surveillance sensor) -- only a signal here when
+    # paired with air-defense/C-UAS context.
+    conditional_keywords_en:
+      - term: "EO tracker"
+        context: ["air defense", "air-defense", "c-uas", "counter-uas", "counter uas", "anti-aircraft", "הגנה אווירית"]
+      - term: "electro-optical tracking"
+        context: ["air defense", "air-defense", "c-uas", "counter-uas", "counter uas", "anti-aircraft", "הגנה אווירית"]
 
   - id: ball_gimbals_16in
     name_he: "מטע\"דים כדוריים 16 אינץ'"
     name_en: "16-inch Ball Gimbals"
     keywords_he:
       - "מטע\"ד כדורי 16 אינץ'"
+      - "מטע\"ד כדורי"
       - "גימבל כדורי 16 אינץ'"
       - "מטען כדורי גדול"
     keywords_en:
       - "16-inch ball gimbal"
       - "16in gimbal"
       - "large gimbal"
-    aliases: ["MX-15", "MX-20"]
+      - "16-inch"
+      - '16"'
+    aliases: ["MX-15", "MX-20", "WESCAM"]
     subdomains: ["airborne_pods.uav_gimbals", "airborne_pods.large_gimbals_16in"]
     exemplar_systems:
       - "MX-15"
@@ -167,6 +238,7 @@ product_lines:
       - "מגדל תצפית גבולות"
     keywords_en:
       - "long-range border surveillance"
+      - "border surveillance"
       - "border security EO"
       - "long-range surveillance system"
     aliases: ["LORROS"]

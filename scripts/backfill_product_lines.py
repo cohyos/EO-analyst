@@ -21,9 +21,23 @@ Default is a dry run (report only, no writes) -- pass ``--apply`` to actually wr
 per-product-line counts either way, so a dry run's report is directly comparable to the applied
 run's own counts.
 
+**Optional sixth sweep (R8-tagging, 2026-09-07): ``--llm``**. Runs *after* the items sweep, over
+in-scope items (``level IN ('red','orange','yellow')``, ``security_status = 'clean'``,
+``dedup_of IS NULL``, published/fetched/created within ``--llm-since-days`` days, default 90) that
+the deterministic pass above still left untagged -- one
+``eoa.product_lines.llm_tagging.llm_tag_batch`` call per ``BATCH_SIZE``-sized chunk (~15 items),
+capped at ``--llm-budget`` calls total (default 40) so a large untagged backlog can't blow the
+pipeline's LLM budget. Its results are merged into the same ``by_item_id`` map the deterministic
+items sweep built, so the events/tenders sweeps below (which inherit an item's tags) see the
+LLM-assisted tags too, not just the deterministic ones. No-op (0 calls) unless ``--llm`` is passed,
+regardless of ``config/product_lines.yaml``'s own ``llm_tagging`` switch (that switch gates the
+*live pipeline hook* in ``eoa.pipeline.analyze``, not this one-off script -- an operator running
+this script explicitly opted in via the flag).
+
 Usage:
     DATABASE_URL=postgresql://eoa@127.0.0.1:5432/eoanalyst \
-    PYTHONPATH=agent python scripts/backfill_product_lines.py [--apply] [--limit N]
+    PYTHONPATH=agent python scripts/backfill_product_lines.py [--apply] [--limit N] \
+        [--llm] [--llm-budget 40] [--llm-since-days 90]
 """
 
 from __future__ import annotations
@@ -68,6 +82,62 @@ def _items_pass(*, limit: int | None = None, apply: bool = False) -> tuple[Count
         if apply and lines:
             update_item_fields(row["id"], product_lines=lines)
     return counts, by_item_id
+
+
+def _llm_pass(
+    by_item_id: dict[int, list[str]],
+    *,
+    apply: bool = False,
+    since_days: int = 90,
+    budget: int = 40,
+) -> tuple[Counter, int]:
+    """R8-tagging (2026-09-07): LLM-assisted fallback over in-scope items the deterministic
+    ``_items_pass`` above left untagged (``by_item_id[id] == []``). Mutates ``by_item_id`` in place
+    (merges any LLM-assisted tags in) so the events/tenders sweeps that run after this one inherit
+    them too. Returns ``(per-line counts, calls used)`` -- ``calls used`` is always
+    ``<= budget`` regardless of how many candidate items there were."""
+    from eoa.db import connection
+    from eoa.memory.relational import update_item_fields
+    from eoa.product_lines.llm_tagging import BATCH_SIZE, llm_tag_batch
+
+    candidate_ids = sorted(iid for iid, lines in by_item_id.items() if not lines)
+    counts: Counter = Counter()
+    calls = 0
+    if not candidate_ids:
+        return counts, calls
+
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, title, summary_he FROM items
+            WHERE id = ANY(%(ids)s)
+              AND level IN ('red', 'orange', 'yellow')
+              AND security_status = 'clean' AND dedup_of IS NULL
+              AND COALESCE(published_at, fetched_at, created_at) >= now() - (%(since_days)s || ' days')::interval
+            ORDER BY id
+            """,
+            {"ids": candidate_ids, "since_days": since_days},
+        )
+        rows = cur.fetchall()
+
+    for i in range(0, len(rows), BATCH_SIZE):
+        if calls >= budget:
+            print(
+                f"LLM budget ({budget} calls) reached -- {len(rows) - i} in-scope untagged item(s) "
+                "left unprocessed this run"
+            )
+            break
+        chunk = rows[i : i + BATCH_SIZE]
+        result = llm_tag_batch(chunk)
+        calls += 1
+        for item_id, lines in result.items():
+            merged = sorted(set(by_item_id.get(item_id) or []) | set(lines))
+            by_item_id[item_id] = merged
+            for line_id in lines:
+                counts[line_id] += 1
+            if apply:
+                update_item_fields(item_id, product_lines=merged)
+    return counts, calls
 
 
 def _events_pass(by_item_id: dict[int, list[str]], *, apply: bool = False) -> Counter:
@@ -169,10 +239,32 @@ def main() -> int:
         "--apply", action="store_true", help="write the computed tags (default: dry run, report only)"
     )
     parser.add_argument("--limit", type=int, default=None, help="cap the items pass (debug only)")
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help=(
+            "after the deterministic items pass, run eoa.product_lines.llm_tagging over in-scope "
+            "still-untagged items (see this script's own docstring) -- costs real LLM calls"
+        ),
+    )
+    parser.add_argument(
+        "--llm-budget", type=int, default=40, help="max LLM batch calls for --llm (default: 40)"
+    )
+    parser.add_argument(
+        "--llm-since-days", type=int, default=90, help="--llm candidate window in days (default: 90)"
+    )
     args = parser.parse_args()
     apply = args.apply
 
     items_counts, by_item_id = _items_pass(limit=args.limit, apply=apply)
+    llm_counts: Counter = Counter()
+    llm_calls = 0
+    if args.llm:
+        llm_counts, llm_calls = _llm_pass(
+            by_item_id, apply=apply, since_days=args.llm_since_days, budget=args.llm_budget
+        )
+        for line_id, n in llm_counts.items():
+            items_counts[line_id] += n
     events_counts = _events_pass(by_item_id, apply=apply)
     tenders_counts = _tenders_pass(by_item_id, apply=apply)
     forecasts_counts = _forecasts_pass(apply=apply)
@@ -195,6 +287,10 @@ def main() -> int:
         )
     print("=" * 70)
     print(f"items scanned: {len(by_item_id)}, items tagged: {sum(1 for v in by_item_id.values() if v)}")
+    if args.llm:
+        print(
+            f"LLM pass: {llm_calls} call(s) used (budget {args.llm_budget}), {sum(llm_counts.values())} tag(s) added"
+        )
     return 0
 
 
