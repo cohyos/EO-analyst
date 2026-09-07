@@ -1,0 +1,535 @@
+{
+  "round": 7,
+  "golden_item_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    22,
+    24,
+    27,
+    32,
+    33,
+    35,
+    36,
+    37,
+    39,
+    43,
+    44,
+    47,
+    50,
+    52,
+    56,
+    57,
+    58,
+    61,
+    62,
+    71,
+    80,
+    81
+  ],
+  "rotating_item_ids": [
+    6276,
+    4655,
+    6734,
+    5123,
+    6710,
+    6847,
+    6161,
+    6600,
+    8412,
+    6198,
+    8330,
+    5858,
+    5850,
+    5849,
+    8183,
+    5845,
+    8114,
+    6180,
+    8247,
+    5844
+  ],
+  "investigation_job_ids": [
+    91,
+    86,
+    70,
+    48,
+    47,
+    46
+  ],
+  "domains": {
+    "D1": {
+      "domain": "D1",
+      "score_0_100": 88.9,
+      "n": 60,
+      "note": "",
+      "checks": [
+        {
+          "name": "subdomain_valid_vs_taxonomy",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "60/60 valid; bad ids: []"
+        },
+        {
+          "name": "no_eoir_gate_agreement",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "60/60 agree; disagreeing ids: []"
+        },
+        {
+          "name": "reason_score_level_consistency",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "60/60 consistent; bad ids: []"
+        },
+        {
+          "name": "hebrew_truncation_zero_hits",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "0 hits: []"
+        },
+        {
+          "name": "gershayim_no_ascii_quote",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "0 hits: []"
+        },
+        {
+          "name": "key_facts_no_duplicates",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "60/60 clean; bad ids: []"
+        },
+        {
+          "name": "entities_mentioned_nonempty_in_scope",
+          "passed": false,
+          "weight": 1.5,
+          "evidence": "28/30 in-scope items have entities or key_facts; empty ids: [5858, 5845]"
+        },
+        {
+          "name": "corroboration_populated_for_recent_in_scope",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "63/63 (100%) non-unknown status"
+        }
+      ]
+    },
+    "D2": {
+      "domain": "D2",
+      "score_0_100": 100.0,
+      "n": 30,
+      "note": "",
+      "checks": [
+        {
+          "name": "summary_length_bounds",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "30/30 within [40,900] chars; bad: []"
+        },
+        {
+          "name": "hebrew_dominant",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "30/30 Hebrew-dominant; bad ids: []"
+        },
+        {
+          "name": "no_model_chatter",
+          "passed": true,
+          "weight": 2.5,
+          "evidence": "30/30 clean; bad ids: []"
+        },
+        {
+          "name": "terminology_in_parens_when_relevant",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "20/30 carry a parenthesised term; missing ids (informational, high false-positive rate): [8, 11, 27, 32, 33, 37, 44, 61, 62, 71]"
+        }
+      ]
+    },
+    "D3": {
+      "domain": "D3",
+      "score_0_100": 100.0,
+      "n": 370,
+      "note": "",
+      "checks": [
+        {
+          "name": "events_duplicate_groups_zero",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "36 events, 0 duplicate (item_id,kind,title) groups: []"
+        },
+        {
+          "name": "no_narrative_events",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "36/36 concrete; narrative event ids: []"
+        },
+        {
+          "name": "entity_junk_gate",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "334/334 clean; junk entity ids: []"
+        },
+        {
+          "name": "entity_kind_valid",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "invalid-kind entity ids: []"
+        },
+        {
+          "name": "entity_country_resolves",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "unresolvable-country entity ids: []"
+        }
+      ]
+    },
+    "D4": {
+      "domain": "D4",
+      "score_0_100": 100.0,
+      "n": 8,
+      "note": "",
+      "checks": [
+        {
+          "name": "sources_nonempty_for_found",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "job ids with empty sources on outcome=found: []"
+        },
+        {
+          "name": "confidence_capped_by_outcome",
+          "passed": true,
+          "weight": 2.5,
+          "evidence": "job ids violating confidence caps: []"
+        },
+        {
+          "name": "relevance_check_present_consistent",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "job ids with inconsistent/missing relevance signal: []"
+        },
+        {
+          "name": "queries_anchored_to_question",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "job ids with at least one unanchored logged query: []"
+        },
+        {
+          "name": "blocked_distinct_from_not_found",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "0 entr(y/ies) rendered 'לא נמצא' despite a security-block marker: []"
+        },
+        {
+          "name": "no_contradictory_reruns_in_report",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "0 question(s) logged more than once in the report: []"
+        }
+      ]
+    },
+    "D5": {
+      "domain": "D5",
+      "score_0_100": null,
+      "n": 0,
+      "note": "manual only -- judge the 8 golden_questions.json answers by hand each round",
+      "checks": [
+        {
+          "name": "chat_log_table_exists",
+          "passed": false,
+          "weight": 1.0,
+          "evidence": "no chat-log persistence table found; D5 deterministic scoring is manual-only for now"
+        }
+      ]
+    },
+    "D6": {
+      "domain": "D6",
+      "score_0_100": 87.8,
+      "n": 47,
+      "note": "C:\\Users\\cohyo\\Documents\\EO-analyst\\output\\reports\\daily_2026-09-07.md",
+      "checks": [
+        {
+          "name": "every_factual_exec_summary_sentence_cited",
+          "passed": false,
+          "weight": 2.5,
+          "evidence": "1 uncited factual sentences: ['בנוסף לפריט שנותח, נרשמו בתקופה 2 אירועים עסקיים/מבצעיים, 7 תחזיות מכרזים חדשות ']"
+        },
+        {
+          "name": "every_inline_citation_in_appendix",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "appendix has 21 entries; orphan [n] refs: []"
+        },
+        {
+          "name": "no_raw_slug_headings",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "raw-slug headings: []"
+        },
+        {
+          "name": "no_duplicate_sentences",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "0 duplicate sentences: []"
+        },
+        {
+          "name": "israel_tech_tenders_sections_present",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "present: ['israel', 'tenders']; missing: ['tech']"
+        },
+        {
+          "name": "bluf_present_and_short",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "1 sentence(s), 14 words, cited=True, before_exec_summary=True"
+        },
+        {
+          "name": "what_changed_section_present",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "headings matching 'השתנה': ['מה השתנה מאז הדוח הקודם']"
+        },
+        {
+          "name": "indicator_watchlist_table_present",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "status words found: ['חדש', 'פתוח']"
+        },
+        {
+          "name": "israel_single_table_with_type_column",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "single israel heading found; header cells: ['כותרת', 'סוג', 'ישויות', 'מה זה אומר', 'מקור']"
+        },
+        {
+          "name": "outlook_likelihood_and_confidence_separated",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "0/1 indicator(s) missing a separated marker or mixing them: []"
+        },
+        {
+          "name": "exec_summary_no_filler_phrases",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "filler phrases found in exec summary: []"
+        },
+        {
+          "name": "no_row_repeated_across_tables",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "0 cross-table duplicate row(s) sharing a citation set: []"
+        },
+        {
+          "name": "heading_count_within_budget",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "13 H2 headings (budget: 15, kind: daily)"
+        },
+        {
+          "name": "monthly_is_structured",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "0 bare (non-link) [n] citation(s) found: []"
+        }
+      ]
+    },
+    "D7": {
+      "domain": "D7",
+      "score_0_100": 44.4,
+      "n": 10,
+      "note": "",
+      "checks": [
+        {
+          "name": "conference_dates_match_db",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "6/6 conference dates matched the DB"
+        },
+        {
+          "name": "no_empty_headings",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "empty headings: []"
+        },
+        {
+          "name": "no_competitor_promotion_language",
+          "passed": false,
+          "weight": 2.5,
+          "evidence": "promotion-verb hits on watchlist competitors: ['bd_de_2026-09-07.md:Hensoldt: | בינונית | לתכנן נוכחות בכנס DSEI 2027 בלונדון לפגישות עם גורמי רכש גרמנים ולמעקב אחר נוכחות המתחרה', 'bd_de_2026-09-07.md:Hensoldt: | נמוכה | להשתתף בכנס SPIE Defense + Commercial Sensing 2027 באורלנדו לצורך בנצ׳מרק מול טכנולוגיית ה']"
+        },
+        {
+          "name": "actions_table_nonempty",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "reports with no populated actions/recommendations section: []"
+        },
+        {
+          "name": "bluf_present_and_short",
+          "passed": false,
+          "weight": 1.5,
+          "evidence": "bd_de_2026-09-07.md: 1 sentence(s), 33 words, cited=True, before_exec_summary=True; bd_eu_2026-09-07.md: 1 sentence(s), 28 words, cited=True, before_exec_summary=True; bd_gb_2026-09-07.md: 1 sentence(s), 39 words, cited=True, before_exec_summary=True; bd_gr_2026-09-07.md: 1 sentence(s), 31 words, cited=True, before_exec_summary=True; bd_il_2026-09-07.md: 1 sentence(s), 28 words, cited=True, before_exec_summary=True; bd_in_2026-09-07.md: 1 sentence(s), 38 words, cited=True, before_exec_summary=Tr"
+        },
+        {
+          "name": "buyer_pipeline_table_present",
+          "passed": false,
+          "weight": 2.0,
+          "evidence": "bd_de_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_eu_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_gb_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_gr_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_il_2026-09-07.md: heading 'מפת קונים / צינור הזדמנויות' found; has populated table: True; bd_in_2026-09-07.md: heading 'מפת ק"
+        },
+        {
+          "name": "assumptions_falsifiers_list_present",
+          "passed": false,
+          "weight": 1.5,
+          "evidence": "bd_de_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_eu_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_gb_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_gr_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_il_2026-09-07.md: heading 'הנחות והפרכות': falsifier_language=True, list_items=True; bd_in_2026-09-07.md: heading 'הנחות והפרכות': falsifier_lang"
+        },
+        {
+          "name": "acquisition_watch_scoped_to_territory",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "out-of-territory rows without a 'גלובלי' disclosure: []"
+        }
+      ]
+    },
+    "D8": {
+      "domain": "D8",
+      "score_0_100": 100.0,
+      "n": 41,
+      "note": "C:\\Users\\cohyo\\Documents\\EO-analyst\\output\\reports\\patent_survey_FPA_עם_פיקסל_דיגיטלי_DROIC_2026-09-07.md",
+      "checks": [
+        {
+          "name": "timeline_present",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "4 heading(s) matched 'ציר זמן'; data row or disclosure present: True"
+        },
+        {
+          "name": "cpc_present",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "3 heading(s) matched 'CPC'; data row or disclosure present: True"
+        },
+        {
+          "name": "every_cited_patent_has_appendix_row",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "no [Pn]-style inline citations in this survey (table-only format)"
+        },
+        {
+          "name": "methodology_box_before_summary",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "positioned_before_summary=True, coverage_tag_in_box=True"
+        },
+        {
+          "name": "coverage_tag_present",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "coverage tag found: כיסוי נתוני מקצה: 100%"
+        },
+        {
+          "name": "implications_have_priority_confidence",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "heading 'השלכות עסקיות והמלצות': priority=True, confidence=True"
+        },
+        {
+          "name": "no_bogus_assignee",
+          "passed": true,
+          "weight": 1.5,
+          "evidence": "bogus assignee name(s) found: []"
+        },
+        {
+          "name": "no_unclassified_cluster_when_patents_exist",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "unclassified cluster heading(s): []"
+        },
+        {
+          "name": "cpc_assignee_matrix_present",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "heading 'מטריצת CPC x מקצה (White Space)' found; has populated matrix table: True"
+        },
+        {
+          "name": "patent_numbers_ltr_isolated",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "10/10 distinct patent-number tokens wrapped in <bdi>"
+        }
+      ]
+    },
+    "D9": {
+      "domain": "D9",
+      "score_0_100": 100.0,
+      "n": 89,
+      "note": "",
+      "checks": [
+        {
+          "name": "tenders_open_rows_have_dates",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "9 tenders; open-with-no-dates ids: []"
+        },
+        {
+          "name": "conferences_status_and_dates_real",
+          "passed": true,
+          "weight": 2.0,
+          "evidence": "28 conferences; bad status ids: []; missing start_date ids: []; synthetic day sequence: False"
+        },
+        {
+          "name": "sources_enabled_fetched_recently",
+          "passed": true,
+          "weight": 1.0,
+          "evidence": "52/52 fetched within 7d; stale ids: []"
+        },
+        {
+          "name": "source_reliability_column_in_appendix",
+          "passed": true,
+          "weight": 0.5,
+          "evidence": "appendix header cells: ['#', 'כותרת', 'מקור', 'אמינות', 'תאריך', 'קישור']"
+        }
+      ]
+    },
+    "D10": {
+      "domain": "D10",
+      "score_0_100": 93.8,
+      "n": 625,
+      "note": "",
+      "checks": [
+        {
+          "name": "e2e_pass_ratio",
+          "passed": false,
+          "weight": 1.0,
+          "evidence": "586/625 passed (93.8%)"
+        }
+      ]
+    }
+  },
+  "judge_scores": {
+    "D1": 91.0,
+    "D2": 87.0,
+    "D3": 87.0,
+    "D4": 30.0,
+    "D5": 40.0,
+    "D6": 74.0,
+    "D7": 86.0,
+    "D8": 94.0,
+    "D9": 91.0
+  },
+  "weighted_total": 80.4
+}

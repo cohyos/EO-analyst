@@ -1,0 +1,133 @@
+{
+  "round": 7,
+  "judge": "independent read-only agent (no pipeline runs, no fixes, no OMC skills/agents/tools, no DB writes, no git commands of any kind, no process kills, no stack start/stop). DATABASE_URL loaded exactly once per shell via `set -a; . runtime/eoa.env; set +a` and passed straight into short-lived python/psycopg scripts (os.environ['DATABASE_URL']) -- the value itself was never cat/grep/type/echoed at any point; every query confirmed port 5432 (`inet_server_port()`) and db `eoanalyst`, alembic_version='0027'. Live chat tested against POST http://127.0.0.1:8765/api/ask (JSON-lines-over-SSE with a literal `data: ` prefix per line, not named SSE `event:` fields) -- two full sequential passes across all 8 golden questions were run (first pass had a harness parsing bug that masked `gate_busy` detection, discovered and corrected; both passes, and every one of the resulting 14-22 attempts across ~28 minutes of wall clock, returned only `gate_busy` with zero `answer_final` events -- the local chat model was persistently occupied by concurrent traffic (the brief's own disclosed concurrent Playwright e2e run, plus at least one concurrent deep_search/product_line_report job observed mid-session) for the full testing window; see D5 for detail and remaining budget). Every artifact claim in docs/qa/loop/round_7_fixes.md was cross-checked against a live SELECT and/or the actual bytes of the freshest rendered report files, never against the fixes doc's own prose -- this surfaced the round's single most severe finding (D4).",
+  "domains": {
+    "D1": {
+      "score": 91,
+      "n": 44,
+      "notes": [
+        "VERIFIED, durable: all 40 golden items (docs/qa/loop/golden_items.json) checked for score<->level consistency against config/config.yaml thresholds (red:8/orange:6/yellow:4) -- zero mismatches, identical clean result to round 6 (items 52/56/57's dedup_of-driven null domain/level/score remains the correct convention).",
+        "VERIFIED, real fix: round 6's #4 worst-list item (item 22's entities_mentioned still literally containing 'F-16s'/'Western Partners') is now clean -- a DB-wide scan (items.entities_mentioned && ARRAY['F-16s','Western Partners']) returns zero rows; a broader regex/length scan of the standalone entities table for junk-shaped names (short tokens, 'partners' substrings, 'unknown') returns only legitimate short designators (AV, F-47, J-36), no junk survives.",
+        "MAJOR VERIFIED FIX, closes round 6's #5 worst-list item at scale: entity orphan count (no item mention AND no graph_edges row) is down from 245/365 (67%) to 16/334 (4.8%) -- both the entity count itself shrank (365->334, -31) and the orphan rate collapsed by 94%. The retroactive-cleanup recommendation round 6 made appears to have been substantively acted on, not just the two entities the brief named.",
+        "VERIFIED, new feature, exceeds bar: replicated the live D1 QA check `corroboration_populated_for_recent_in_scope` (agent/eoa/qa/d1_classify.py) directly against the DB -- 63/63 (100%) of recent (7d) in-scope (red/orange/yellow, clean, non-dedup) items have a non-unknown item_corroboration.status, comfortably clearing the >=90% bar the brief names. item_corroboration itself: 63 rows total, 58 single_source + 5 corroborated (0 official_primary) -- the 5 corroborated pairs include a real, verifiable match (item 10/AeroVironment $465M laser <-> items 52/96 duplicate coverage)."
+      ]
+    },
+    "D2": {
+      "score": 87,
+      "n": 43,
+      "notes": [
+        "VERIFIED, durable: re-scanned items.so_what_he against the exact current SO_WHAT_TEMPLATE_PHRASES_HE list read from agent/eoa/report/qa_citations.py (11 phrases) -- zero matching item ids DB-wide, same clean result as round 6 (a first, broader approximate phrase list I used before reading the source code incorrectly flagged 5 items -- re-run against the real list cleared all 5; noted here as a self-correction, not a live finding).",
+        "Spot-checked so_what_he on 3 additional golden items (9, 33, 58) beyond the 40-item consistency scan: all three are substantive, specific analytical judgments (competitive-advantage reasoning tied to named entities/programs) with no template-phrase or generic-filler structure -- consistent with round 6's positive characterization, no new defect found in this round's sample.",
+        "Not independently re-verified this round: full clean_text-vs-so_what_he fabrication cross-checks beyond the items already spot-read for D1/D4 purposes -- time-boxed in favor of the D4 finding below; score held near round 6's 88 rather than raised, since this domain's judgmental half was sampled less exhaustively than round 6's own pass."
+      ]
+    },
+    "D3": {
+      "score": 87,
+      "n": 50,
+      "notes": [
+        "VERIFIED, durable: 0 events belong to an out_of_scope-domain or archive-level item DB-wide (same clean result as round 6's post-fix state); 0 events with kind='ניסוי' DB-wide (StrikeMaster/Atlantic City events remain properly enum'd); 0 exact-duplicate (item_id, kind, title) event groups; all 9 distinct event kinds in use are valid enum values (contract_award/deployment/investment/launch/m_and_a/other/partnership/regulation/test).",
+        "UNCHANGED, not fixed: round 6's one disclosed minor finding -- the weekly report's business-events table still lists 3 rows for 'Operation Atlantic City' (שותפות/פעילות מבצעית/פריסה, all citing the same single source [8]) -- identical pattern to round 6, not addressed this round (not part of round 7's claimed scope, so not a regression, just a carried-over gap)."
+      ]
+    },
+    "D4": {
+      "score": 30,
+      "n": 15,
+      "notes": [
+        "CRITICAL, HIGHEST-SEVERITY FINDING THIS ROUND: round_7_fixes.md's own re-run results table (jobs 137/138/139/140, claimed found/0.9, partial/0.78, partial/0.7, found/0.85 with rich sourced summaries) does NOT match live DB state. All four jobs are `state='failed'` in the `jobs` table with `result=NULL` and identical error `\"cannot import name 'FallbackSynthesisOut' from 'eoa.llm.schemas.analysis'\"` -- a live ImportError, even though `FallbackSynthesisOut` is in fact defined at analysis.py:328 (file mtimes 04:38/05:02, hours before the 05:08-07:23 failures, ruling out a since-fixed-then-broken-again race). Nothing about this table's claimed confidence scores or 'new job id' framing survives contact with the live jobs table.",
+        "NUANCED, not pure fabrication: investigation_log DOES carry exactly one row per job (137/138/139/140) with engine='cloud_batch' and an outcome (found/partial/partial/found) matching the fixes doc's claims, and the logged `notes` text is genuinely substantive, accurate, and well-sourced (verified by reading all 4 in full -- e.g. job 137's note correctly states the AeroVironment $464.8M E-HEL OTA, matching the doc). So the underlying content-generation step (the `claude` CLI batch call) really did run and produce good answers -- but a downstream persistence/finalize step crashes on the same ImportError before writing anything retrievable to `jobs.result`, so no consumer of the system (API, reports) can ever see this content.",
+        "DIRECT CONFIRMATION the fix is not reader-visible anywhere: the freshest weekly (weekly_2026-09-07.md line ~219) and monthly (monthly_2026-09-30.md line ~177) reports' own 'חקירות עומק' sections still render the exact stale not_found text for the AARGM-ER question (job 48) and the Reaper/MMA question (job 91) -- 'לא נמצא: לא נמצאו נתונים המאשרים...' / 'לא נמצא מידע מספק במסגרת התקציב' -- identical to rounds 3-6, not the new partial/0.78 or found/0.85 outcomes the fixes doc describes.",
+        "Compounding finding: the FIRST rerun attempt this round (jobs 131/133/135/136, via `investigate()` directly -- the CLI's own documented `eo investigate` path) also failed outright, all four with the identical ImportError, confirming the fixes doc's own disclosed 'tool-calling gap' (cloud-chain dispatch never wires tool_calls) makes the standard investigation path completely non-functional today, independent of the batch-cloud pivot's separate persistence bug.",
+        "One genuine, narrow, verified fix: job 46's re-run (new job id 130) correctly returns insufficient_context/confidence 0.0 with an honest degenerate-question message in ~0.1s (via the new `_is_degenerate_question` short-circuit) -- this one specific mechanism works exactly as designed and is visible in the jobs table (state='done', real result).",
+        "Historical golden jobs 47/48/70/86/91 themselves are unchanged from round 3-6 (not_found/off_topic, confidence 0.0-0.3) -- this round's brief explicitly asked whether the newest jobs read pages instead of timing out, and the honest answer is: the newest attempts that used the tool-calling path read zero pages and failed outright; the newest attempts that used the batch-cloud path did read real content (via the CLI's own web tools, not `investigation_log.pages_read`, which stayed 0 for jobs 137-140) but the result never persisted."
+      ]
+    },
+    "D5": {
+      "score": 40,
+      "n": 8,
+      "notes": [
+        "COULD NOT OBTAIN A SINGLE REAL ANSWER this round despite two full sequential passes over all 8 golden questions (POST http://127.0.0.1:8765/api/ask), spanning roughly 28 minutes of the 45-minute chat budget: every one of 14 completed attempts (6 in a first pass invalidated by a harness bug that masked gate_busy detection, corrected and re-run; 8 in the corrected second pass, itself cut short by its own conservative sub-budget once the pattern was clear) returned only a `gate_busy` event (\"המודל המקומי תפוס כרגע (ריצת לילה/דוח); נסה שוב בעוד דקה\") -- zero `answer_final` events observed anywhere, on any question, in either pass.",
+        "This is consistent with, and directly attributable to, the brief's own disclosed condition: a concurrent Playwright e2e run was hitting the same API for an overlapping window, and at least one concurrent job (a queued product_line_report at 10:00:27, observed live) was competing for the same local model resource; no jobs were in state='running' at the moment of the last DB check, so the contention is most plausibly the e2e suite rather than the pipeline queue.",
+        "Cannot verify or refute any of round 6's specific D5 findings this round (the XM30/MWIR fabrication, the missing/duplicated answer_final protocol bug, the Skyranger weak-citation pattern) -- no content was ever returned to check them against. Scoring this domain at a moderate-low 40 reflects: (a) genuine inability to confirm any content-quality improvement claimed for D5 this round, (b) the sustained, total unavailability of the feature during this entire testing window is itself a real, user-facing degradation worth flagging on its own terms (not a crash, and the gate_busy message is honest and well-formed, which is why this is not scored lower), and (c) no evidence either confirms or newly reproduces round 6's specific content defects, so this is not scored as low as a confirmed-fabrication case.",
+        "One structural relevant fact confirmed independently, outside the chat endpoint itself: item 257 (the item behind round 6's XM30/MWIR fabrication) exists unchanged in the DB; a full re-verification of whether the same fabrication recurs was not possible this round due to the above.",
+        "A third, shorter chat attempt (Q1 only, after the two full passes above) was made with longer per-attempt retry budget: after 3 more consecutive gate_busy responses, the 4th attempt hit a raw connection reset (WinError 10054, 'An existing connection was forcibly closed by the remote host') rather than another gate_busy -- one more data point consistent with sustained server-side load during this window, not a contradiction of the above."
+      ]
+    },
+    "D6": {
+      "score": 74,
+      "n": 100,
+      "notes": [
+        "VERIFIED: heading budgets met across the board under this round's stated thresholds -- daily_2026-09-07.md 13 H2 (<=15), weekly_2026-09-07.md 15 H2 (<=16), monthly_2026-09-30.md 11 H2 (<=16). No malformed `[n]]` citation markers found in any of the three. No banned analyst-filler phrases ('יש לציין'/'חשוב להדגיש'/'בהקשר זה'/'ראוי לציין') found in any exec summary. Single 'תעשייה ישראלית' heading with a populated 'סוג' (type) column present in both daily and weekly.",
+        "NEW, real, partial gap: cross-source corroboration markers ('(מקור יחיד)'/'(מאומת ב-N מקורות)'), though the underlying DB layer is 100% populated (see D1), render wildly inconsistently across report types when counted against each report's own source-appendix row count -- weekly: 40/59 rows marked (~68%); daily: 1/21 rows marked (~5%, and the one marked row is not even the most relevant one -- item 10's row, which the DB shows as corroborated with 2 real sources, carries NO marker in daily's appendix even though the identical story is correctly marked in weekly's own appendix the same day); monthly: 0/59 rows marked (0% -- confirmed via source read that agent/eoa/report/monthly.py never imports or calls `_append_item_corroboration_markers`/`_append_event_corroboration_markers` at all, unlike weekly.py which does).",
+        "UNCHANGED, carried over from round 6 (not this round's claimed scope): weekly's business-events table still triple-lists 'Operation Atlantic City' as three separate rows sharing one citation (see D3).",
+        "PARTIALLY IMPROVED, not cleanly fixed: round 6's #7 worst-list finding (daily's indicator-watchlist table: 10 rows covering only 3 distinct indicators, near-verbatim repeats) -- this round's daily table (11 rows) no longer repeats near-verbatim sentences, but is still heavily topically clustered (4 of 11 rows on the Volkswagen/Rafael story, 6 of 11 on the Estonia/David's Sling decision, each row stating a genuinely distinct angle/fact rather than a repeat) -- a real improvement in wording diversity, but the same underlying 'too many rows on too few underlying stories' pattern a reader would still notice.",
+        "NEW finding: weekly's own indicator-watchlist 'ראיה' (evidence) column is blank ('—') on all 13 rows -- a fully populated-looking table structurally, with zero actual evidence content in that column."
+      ]
+    },
+    "D7": {
+      "score": 86,
+      "n": 8,
+      "notes": [
+        "VERIFIED, real fix: bd_il was rebuilt this round (bd_il_2026-09-07.md exists, unlike round 6 where it was the one territory not rebuilt) and its round-5/6 internal acquisition-watch duplicate row ('Elbit | שותפות | — | — | [dated]' appearing twice) is gone -- exactly one 'Elbit | שותפות' row remains in the current table (plus 3 other, non-duplicate Elbit rows of different event kinds: השקעה x2, מיזוג/רכישה).",
+        "VERIFIED across all 7 populated territories (US/IL/DE/GR/EU/GB/IN): BLUF ('שורה תחתונה') word counts are 28-39 words (including inline citation markers in the count, so real prose is even shorter), comfortably within the brief's <=40-word budget. Buyer-pipeline/acquisition-watch tables and 'הנחות והפרכות' (assumptions/falsifiers, carrying genuine falsification language) sections present and populated in all 7.",
+        "PRE-EXISTING, not a round-7 regression: bd_kr_2026-09-07.md is an essentially content-free stub ('אין תקציר לתקופה זו... הדוח ייבנה מחדש כשיושלם', zero competitor activity, zero patents) -- consistent with round 5/6's own characterization of KR as a thin territory, not newly broken this round."
+      ]
+    },
+    "D8": {
+      "score": 94,
+      "n": 16,
+      "notes": [
+        "MAJOR VERIFIED FIX, cleanly closes round 6's #10 worst-list item: the Anduril survey's one non-CPC-mapped patent, whose fallback cluster label round 6 flagged as the low-quality assignee-fragment string 'אשכול נושאי: anduril / inc / industries', now reads 'אשכול נושאי: lattice / mesh' -- a genuine product/technology term (matching the patent's own title, 'Lattice mesh'), not an assignee-name fragment. All other clusters in both fresh surveys (DROIC: H04N5/H03M1/G01S7/H04N25; Anduril: H04W4/F41H3/G05D1/F41H11) are real CPC-code-based technology labels with substantive, grounded prose.",
+        "VERIFIED, durable: assignee-data coverage 100% (10/10 DROIC, 6/6 Anduril); zero 'לא מסווג'/'ללא סיווג' strings anywhere in either fresh survey; both CPC×assignee matrices render with real, populated data; methodology box ('שיטה והיקף') present before the exec summary in both, carrying the coverage-% tag.",
+        "MINOR, unchanged: the patent survey's own source-appendix 'אמינות' (reliability) column is blank ('—') for every patent row in both surveys -- unlike the daily/weekly news-item appendices, which now populate this column (see D9) -- a real, narrower-scope carryover of round 6's general 'reliability column blank' finding, not closed for this specific report type."
+      ]
+    },
+    "D9": {
+      "score": 91,
+      "n": 19,
+      "notes": [
+        "MAJOR VERIFIED FIX, live and structural: tender id 42 ('Finland – Security cameras – Computer Vision Technology for Airport Operations', TED notice 593909-2026, source ted_eu_cpv) is status='open' in the live tenders table -- confirmed the first-ever TED-sourced row with status='open' in the table's history (every prior TED row, id 13, is archived with a 2016 deadline). This required and is consistent with the claimed date-filter/sort/pagination TED query fix (PD>=date + SORT BY PD DESC inside the query string) and the new deadline-passed exclusion in `_within_window`.",
+        "VERIFIED: candidates id 34 (Rotterdam Dutch HR contract, the word-boundary-ATR-false-positive finding's own named target) and id 35 (Northrop Grumman product page, a bonus catch) are both status='archived', intake left at 'candidate' -- matching the repair script's claimed scoped, insert/archive-only discipline; all 5 pre-existing accepted rows unchanged.",
+        "VERIFIED in code: config/tenders.yaml carries real `cpv_allow_prefixes`/`cpv_deny_prefixes` config (not just claimed in prose); the word-boundary short-keyword matching logic exists in agent/eoa/tenders/scan.py.",
+        "VERIFIED, durable: tender_forecasts (10 rows) remains free of near-duplicate (platform, buyer_country, payload_need) groups, identical clean result to round 6.",
+        "Not scored down, but noted: tender id 38 carries status='unknown' -- a non-standard status value visible in a live SELECT; low-severity data-quality nit, not investigated further."
+      ]
+    }
+  },
+  "worst": [
+    "D4: round_7_fixes.md's own claimed re-run results for the golden investigations (jobs 137-140: found/0.9, partial/0.78, partial/0.7, found/0.85 with rich sourced summaries) do not match live DB state -- all four jobs are state='failed' with a live ImportError ('cannot import name FallbackSynthesisOut') and result=NULL; the freshest weekly and monthly reports' own 'חקירות עומק' sections still render the identical stale not_found text for these same questions that rounds 3-6 showed.",
+    "D4: the standard `eo investigate` / investigate() path (jobs 131/133/135/136, this round's first rerun attempt) also failed outright with the same ImportError, on top of the separately-disclosed tool-calling-gap bug -- the golden-investigation rerun mechanism is non-functional end-to-end via every path except the one-off batch-cloud CLI call, whose own results never persist either.",
+    "D5: could not obtain a single real answer to any of the 8 golden questions across two full passes (14 completed attempts, ~28 minutes) -- every attempt returned only gate_busy; round 6's specific content findings (XM30/MWIR fabrication, missing/duplicated answer_final events) could neither be confirmed fixed nor reproduced.",
+    "D6: monthly report renders zero cross-source corroboration markers (0/59 appendix rows) despite the underlying DB being 100% populated -- monthly.py never wires in the marker-append functions weekly.py already uses.",
+    "D6: daily report renders corroboration markers on only 1/21 appendix rows (~5%) -- including missing the marker on item 10's own row, which the same day's weekly report correctly marks as 'מאומת ב-2 מקורות'.",
+    "D3/D6: 'Operation Atlantic City' still appears as 3 separate near-duplicate rows in the weekly business-events table, sharing one citation -- unchanged from round 6, not addressed this round.",
+    "D6: weekly's indicator-watchlist 'ראיה' (evidence) column is blank on all 13 rows -- a structurally complete table with no actual evidence content in that column.",
+    "D6: daily's indicator-watchlist table remains heavily topically clustered (10 of 11 rows on just 2 underlying stories) -- wording diversity improved over round 6's near-verbatim repeats, but the same over-representation pattern persists.",
+    "D8: the patent survey's own source-appendix reliability column remains blank for every row in both fresh surveys, unlike the daily/weekly news appendices which now populate it -- round 6's reliability-column finding is closed for D6/D9 report types but not for D8.",
+    "D7: bd_kr_2026-09-07.md remains an essentially content-free stub report -- pre-existing, not a new regression, but still a real gap among the 8 territory files judged this round."
+  ],
+  "deltas": {
+    "fixed": [
+      "D1: item 22's junk-shaped entities_mentioned ('F-16s'/'Western Partners') purged -- 0 items now match DB-wide.",
+      "D1: entity orphan rate cut from 67% (245/365) to 4.8% (16/334) -- both the fixed entities and a much broader retroactive cleanup landed.",
+      "D1: new corroboration_populated_for_recent_in_scope check passes at 100% (63/63), well above the 90% bar.",
+      "D7: bd_il rebuilt this round; its round-5/6 internal acquisition-watch duplicate row is fixed.",
+      "D8: the Anduril survey's assignee-fragment fallback cluster label ('anduril / inc / industries') replaced with a genuine technology term ('lattice / mesh') -- closes round 6's worst-list #10.",
+      "D9: TED tender id 42 is now status='open', live and verified -- the first-ever open TED-sourced notice in the table's history, closing the multi-round 'TED archive, no recent notices' gap.",
+      "D9: candidates id 34/35 archived per the disclosed repair script, scoped correctly (accepted rows and tender_feedback untouched).",
+      "D4: job 46's degenerate-question short-circuit works exactly as designed and is visible live in the jobs table."
+    ],
+    "unchanged": [
+      "D3/D6: 'Operation Atlantic City' 3-row near-duplicate in the weekly business-events table.",
+      "D7: bd_kr remains an essentially empty stub report (pre-existing characteristic).",
+      "D8: patent survey appendix reliability column remains blank.",
+      "D2: so_what template-phrase family remains at zero (durable clean, re-verified against the exact current phrase list)."
+    ],
+    "new": [
+      "D4 (severe): round-7's own claimed golden-investigation rerun successes (jobs 137-140) do not match live DB state -- jobs failed with an ImportError, no result ever persisted, reports still show stale answers.",
+      "D4: the standard investigate() path is now confirmed completely broken (0 successful reruns via that path this round, all 4 attempts failed on the same ImportError).",
+      "D5: total, sustained chat unavailability (gate_busy on 100% of 14 completed attempts across ~28 minutes) -- could not test content quality at all this round.",
+      "D6: cross-source corroboration markers -- a genuinely well-built, 100%-covered DB feature -- render inconsistently to the point of near-absence in daily (5%) and total absence in monthly (0%), while working reasonably well in weekly (68%).",
+      "D6: weekly's indicator-watchlist evidence column found to be uniformly blank (not previously checked/flagged)."
+    ]
+  }
+}
