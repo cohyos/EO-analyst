@@ -229,9 +229,17 @@ def clear_settings_cache():
 
 
 @pytest.fixture(autouse=True)
-def _reports_to_tmp(tmp_path, monkeypatch):
-    """Never let a test write report files into output/reports (see ReportCfg.model_post_init)."""
+def _reports_to_tmp(tmp_path, monkeypatch, clear_settings_cache):
+    """Never let a test write report files into output/reports (see ReportCfg.model_post_init).
+
+    ``ReportCfg.model_post_init`` reads ``EOA_REPORT_OUTPUT_DIR`` once, when ``settings()`` builds
+    the model, so the env var must be in place *before* anything fills the ``lru_cache``. Any
+    autouse fixture that calls ``settings()`` (``_ask_entailment_off``) therefore has to depend on
+    this fixture -- pytest does not order same-scope autouse fixtures by definition order -- and the
+    cache is cleared here again in case something earlier in the setup chain already populated it.
+    """
     monkeypatch.setenv("EOA_REPORT_OUTPUT_DIR", str(tmp_path / "reports"))
+    settings.cache_clear()
     yield
 
 
@@ -293,9 +301,12 @@ def _source_reliability_isolation(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _ask_entailment_off(monkeypatch, clear_settings_cache):
+def _ask_entailment_off(monkeypatch, clear_settings_cache, _reports_to_tmp):
     """R7-chat: `ask.entailment_check` is ON in production (user decision 2026-09-07) but the pass
-    calls the light LLM role; unit tests must never make that call -- force it off here."""
+    calls the light LLM role; unit tests must never make that call -- force it off here.
+
+    Depends on ``_reports_to_tmp`` because the ``settings()`` call below is what populates the
+    cache for the test: the report output-dir override must already be in the environment."""
     try:
         from eoa.config import settings
 
