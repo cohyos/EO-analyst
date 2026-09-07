@@ -168,6 +168,9 @@ class ResourceGate:
                             f"after {waited_ms // 1000}s"
                         )
                     delay = backoffs[min(attempt, len(backoffs) - 1)]
+                    # round 8 (live chat, 2026-09-07): an interactive caller must never sleep past its
+                    # deadline -- the 5/10/30 s backoff turned a 20 s budget into a 45 s wait
+                    delay = max(1, min(delay, int(deadline - time.monotonic())))
                     self._record(
                         self._decision(
                             "queued",
