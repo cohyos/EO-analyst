@@ -640,14 +640,58 @@ def _unclassified_label_he(label_terms: list[str]) -> str:
     return f"{_TERM_CLUSTER_LABEL_PREFIX_HE}: " + " / ".join(hebrew_first + rest)
 
 
+#: J11 (round 11, D8 74): 8 of 9 cluster headings were bare CPC codes ('H04N5', 'F41H11'). Class-level
+#: Hebrew titles for the EO/IR-relevant CPC classes, used when the exact subgroup is not in
+#: _CPC_CODE_TITLES; the code stays in parentheses for traceability.
+_CPC_CLASS_TITLES_HE: dict[str, str] = {
+    "H04N": "הדמיה, מצלמות ווידאו",
+    "H04W": "תקשורת אלחוטית ורשתות",
+    "H04B": "תקשורת ושידור",
+    "H04L": "תקשורת דיגיטלית",
+    "H03M": "המרה אנלוגית-דיגיטלית וקידוד",
+    "H01L": "התקני מוליכים למחצה וגלאים",
+    "G01S": 'מכ"ם, לידאר וגילוי אקוסטי',
+    "G01J": "רדיומטריה ומדידת קרינה",
+    "G01C": "ניווט ומדידה גיאודטית",
+    "G01N": "ניתוח חומרים וספקטרוסקופיה",
+    "G02B": "אופטיקה, עדשות ומערכות אופטיות",
+    "G02F": "בקרת אור ואופטיקה אלקטרונית",
+    "G05D": "בקרת כלי רכב ומערכות אוטונומיות",
+    "G05B": "מערכות בקרה",
+    "G06T": "עיבוד תמונה",
+    "G06V": "זיהוי תמונה וראייה ממוחשבת",
+    "G06N": "למידת מכונה ובינה מלאכותית",
+    "G06F": "מחשוב ועיבוד נתונים",
+    "G08B": "מערכות התראה ואיתות",
+    "F41G": "כוונות, ציון מטרות ובקרת אש",
+    "F41H": "מיגון והגנה אקטיבית",
+    "F41A": "נשק קל ומנגנוני ירי",
+    "F42B": "תחמושת וראשי קרב",
+    "B64C": "כלי טיס",
+    "B64D": "ציוד וחימוש למטוסים",
+    "B64U": "כלי טיס בלתי מאוישים",
+    "B60R": "ציוד לכלי רכב",
+    "F16M": "תושבות וג'ימבלים",
+    "G03B": "צילום והקרנה",
+    "H01S": "לייזרים",
+    "H01Q": "אנטנות",
+    "H04M": "טלפוניה",
+}
+
+
 def _cpc_label(code: str, topics: list[_TopicLike]) -> str:
     for topic in topics:
         if code in (topic.cpc or []):
             return topic.name_he
     known = _CPC_CODE_TITLES.get(code)
     if known:
-        return f"אשכול טכנולוגי: {known[1]} ({code})"
-    return f"אשכול טכנולוגי {code}"
+        # the survey prefixes the heading with 'אשכול טכנולוגי: ' itself (J11 D8: it was doubled)
+        return f"{known[1]} ({code})"
+    for prefix_len in (4, 3):
+        cls = _CPC_CLASS_TITLES_HE.get(code[:prefix_len].upper())
+        if cls:
+            return f"{cls} ({code})"
+    return f"קוד CPC {code}"
 
 
 def _keyword_cluster(
