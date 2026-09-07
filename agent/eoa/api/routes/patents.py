@@ -51,7 +51,7 @@ def patents_status() -> dict[str, Any]:
         "banner_he": (
             None
             if configured
-            else "מקורות פטנטים: מצב חיפוש בלבד — הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY ב-.env לכיסוי מלא."
+            else "מקורות פטנטים: מצב חיפוש בלבד — הזן EPO_OPS_KEY/USPTO_ODP_API_KEY ב-.env לכיסוי מלא."
         ),
     }
 

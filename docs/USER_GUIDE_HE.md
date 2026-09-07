@@ -531,7 +531,7 @@ Federal Register, Congress.gov), Janes (אם יש לך מנוי), ופטנטים
 
 **כברירת מחדל הכלים כבויים** — צריך להפעיל אותם ב-`config/mcp.yaml` (`enabled: true` למעלה),
 ולהוסיף ל-`.env` את המפתחות הרלוונטיים (`SAM_GOV_API_KEY`, `CONGRESS_GOV_API_KEY`,
-`JANES_API_KEY`, `EPO_OPS_KEY`+`EPO_OPS_SECRET`, `PATENTSVIEW_API_KEY`) — שרת שאין לו מפתח פשוט
+`JANES_API_KEY`, `EPO_OPS_KEY`+`EPO_OPS_SECRET`, `USPTO_ODP_API_KEY`) — שרת שאין לו מפתח פשוט
 מחזיר "לא מוגדר" במקום לקרוס, כך שאפשר להפעיל את השכבה גם עם רק חלק מהמפתחות.
 
 בכרטיס "MCP" בהגדרות (`⚙️ הגדרות`, מתחת לכרטיס "מודלים") רואים את רשימת השרתים, האם הם פעילים,
@@ -633,7 +633,7 @@ Aerosystems, IWI, Tomer, RADA) וגופי ממשל/ביטחון (משרד הבי
 ו-LiDAR") ושל בעלי הפטנטים המרכזיים ברשימת המעקב (Elbit, IAI, Rafael, RTX, Lockheed Martin ועוד).
 
 **מקורות:** כאשר מוגדרים `EPO_OPS_KEY`+`EPO_OPS_SECRET` (חינם, ops.epo.org) ו/או
-`PATENTSVIEW_API_KEY` (חינם, patentsview.org) ב-`.env`, המערכת שולפת נתונים מובנים ישירות מ-EPO
+`USPTO_ODP_API_KEY` (חינם, data.uspto.gov — חשבון USPTO.gov מקושר ל-ID.me) ב-`.env`, המערכת שולפת נתונים מובנים ישירות מ-EPO
 ו-USPTO. **ללא מפתחות** (ברירת המחדל) המערכת פועלת ב"מצב חיפוש בלבד" — חיפוש רגיל ב-Google
 Patents דרך מנוע החיפוש הקיים, ללא צורך במפתח כלשהו; מסך הפטנטים מציג באנר המסביר זאת בבירור.
 

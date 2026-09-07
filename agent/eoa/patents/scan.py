@@ -1,7 +1,7 @@
 """Stage: patent discovery (A14, docs/PLAN_WINDOWS_NATIVE.md row A14).
 
 For each configured watch topic (``config/patents.yaml``'s ``watch_topics``) and each configured
-assignee (``assignees``): query EPO OPS / PatentsView **in-process** (importing the tool functions
+assignee (``assignees``): query EPO OPS / USPTO ODP **in-process** (importing the tool functions
 straight out of ``eoa.mcp_servers.patents`` rather than spawning the stdio server -- both keys are
 unconfigured on this machine, so those calls degrade to ``not_configured`` and this always falls
 through to the second path) via the module's own SSRF-guarded ``_common`` HTTP helpers, else the
@@ -81,7 +81,7 @@ def first_run_since_days(path: str | Path | None = None) -> int:
 
 
 # --------------------------------------------------------------------------
-# EPO OPS / PatentsView (in-process, only when configured)
+# EPO OPS / USPTO ODP (in-process, only when configured)
 # --------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ def _structured_sources_available() -> bool:
 
     return bool(
         (os.environ.get("EPO_OPS_KEY") and os.environ.get("EPO_OPS_SECRET"))
-        or os.environ.get("PATENTSVIEW_API_KEY")
+        or os.environ.get("USPTO_ODP_API_KEY")
     )
 
 
@@ -140,29 +140,38 @@ def _epo_records(query: str, limit: int) -> list[PatentRecord]:
     return out
 
 
-def _patentsview_records(query: str, assignee: str, limit: int) -> list[PatentRecord]:
-    from eoa.mcp_servers.patents import patentsview_search
+def _uspto_odp_records(query: str, assignee: str, limit: int) -> list[PatentRecord]:
+    """USPTO Open Data Portal search (``eoa.mcp_servers.patents.uspto_odp_search``, replaced
+    PatentsView 2026-09-07), parsed into :class:`PatentRecord` rows. Unlike the EPO biblio search
+    the ODP rows already carry title/assignees/CPC/dates, so nothing needs a second fetch."""
+    from eoa.mcp_servers.patents import uspto_odp_search
 
     try:
-        raw = json.loads(patentsview_search(query, assignee=assignee, limit=limit))
+        raw = json.loads(uspto_odp_search(query, assignee=assignee, limit=limit))
     except Exception as exc:
-        log.debug("patents_patentsview_search_failed", query=query[:80], error=str(exc)[:200])
+        log.debug("patents_uspto_odp_search_failed", query=query[:80], error=str(exc)[:200])
         return []
     if raw.get("error"):
         return []
     out: list[PatentRecord] = []
-    for p in raw.get("patents") or []:
-        patent_id = p.get("patent_id")
-        if not patent_id:
+    for p in raw.get("results") or []:
+        pub_number = p.get("pub_number")
+        if not pub_number:
             continue
         out.append(
             PatentRecord(
-                pub_number=f"US{patent_id}",
-                title=p.get("patent_title") or "",
-                publication_date=_parse_date(p.get("patent_date")),
-                assignees=[assignee] if assignee else [],
-                jurisdictions=["US"],
-                source="patentsview",
+                pub_number=pub_number,
+                kind=p.get("kind"),
+                title=p.get("title") or "",
+                assignees=list(p.get("assignees") or []),
+                inventors=list(p.get("inventors") or []),
+                cpc=list(p.get("cpc") or []),
+                filing_date=_parse_date(p.get("filing_date")),
+                publication_date=_parse_date(p.get("publication_date")),
+                grant_date=_parse_date(p.get("grant_date")),
+                jurisdictions=[p.get("country") or "US"],
+                url=p.get("url"),
+                source="uspto_odp",
                 raw=p,
             )
         )
@@ -539,7 +548,7 @@ def _records_for_query(query: str, *, assignee: str | None, structured_ok: bool)
     if structured_ok:
         records: list[PatentRecord] = []
         records += _epo_records(query, limit=20)
-        records += _patentsview_records(query, assignee or "", limit=20)
+        records += _uspto_odp_records(query, assignee or "", limit=20)
         if records:
             return records
     return _google_patents_records(query)
@@ -547,7 +556,7 @@ def _records_for_query(query: str, *, assignee: str | None, structured_ok: bool)
 
 def search_records(query: str, limit: int = 100) -> list[PatentRecord]:
     """Public, DB-free gather: every record the configured sources return for ``query`` (EPO
-    OPS/PatentsView when configured, else the Google Patents search fallback), deduped by
+    OPS/USPTO ODP when configured, else the Google Patents search fallback), deduped by
     ``pub_number`` and capped at ``limit``. Used by ``eoa.patents.survey`` to gather a deeper,
     on-demand sample for one free-text topic without going through the whole watch-topic/assignee
     scan loop (or its DB side effects) in :func:`scan_patents`."""

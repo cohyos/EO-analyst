@@ -1,7 +1,7 @@
 """Stage: on-demand patent landscape survey ("סקר פטנטים", A14).
 
 ``build_patent_survey(topic)``: gather up to ``deep_limit`` patent records for a free-text topic
-(reusing ``eoa.patents.scan.search_records`` -- the same EPO OPS/PatentsView/Google-Patents-search
+(reusing ``eoa.patents.scan.search_records`` -- the same EPO OPS/USPTO-ODP/Google-Patents-search
 sources as the routine scan, just deeper and scoped to one on-demand query), upsert them into
 ``patents`` (dedup by ``pub_number``), analyze/value the freshest of them so the report tables have
 something to show, compute deterministic aggregates (CPC/assignee clustering, a yearly timeline,
@@ -36,7 +36,7 @@ renders with a short, honest "ניתוח שפה טבעית לא זמין" placeh
 deterministic table (clustering/timeline/top assignees/white space/patents appendix) always renders
 regardless. Likewise, when the gathered sample carries no real (non-empty, non-generic) company
 assignee at all -- an inherent limitation of the keyless Google-Patents-search fallback used
-without EPO_OPS_KEY/PATENTSVIEW_API_KEY, see ``eoa.patents.scan``'s own docstring -- this module
+without EPO_OPS_KEY/USPTO_ODP_API_KEY, see ``eoa.patents.scan``'s own docstring -- this module
 never asks the LLM to fabricate an assignee profile from nothing; it skips synthesis and surfaces
 an explicit, honest open point instead (docs/CONVENTIONS.md rule 5: never invent).
 """
@@ -157,7 +157,7 @@ _TIMELINE_DISCLOSURE_HE = (
 )
 _CPC_DISCLOSURE_HE = (
     "אין נתוני קודי CPC זמינים לפטנטים במדגם זה (מקור החיפוש חסר-המפתחות אינו מספק סיווג CPC -- "
-    "ראו eoa.patents.scan; הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY ב-.env לכיסוי מלא)."
+    "ראו eoa.patents.scan; הזן EPO_OPS_KEY/USPTO_ODP_API_KEY ב-.env לכיסוי מלא)."
 )
 
 # Round 3 D8 finding 4 (2026-09-06): a survey whose LLM synthesis stage never reached Ollama (or
@@ -414,7 +414,7 @@ def _territory_filter(rows: list[dict[str, Any]], territory: str | None) -> list
     """Best-effort territory filter (2026-09-06 request) by the publication number's leading WIPO
     ST.16 country/office code (e.g. "US9197834B2" -> "US") -- there is no structured jurisdiction
     field reliably filled by the keyless Google-Patents-search fallback (``eoa.patents.scan``), so
-    the number itself is the only signal available without EPO_OPS_KEY/PATENTSVIEW_API_KEY.
+    the number itself is the only signal available without EPO_OPS_KEY/USPTO_ODP_API_KEY.
     ``territory=None`` (the default) returns ``rows`` unchanged."""
     if not territory:
         return rows
@@ -609,7 +609,7 @@ def _date_range_he(rows: list[dict[str, Any]]) -> tuple[dt.date, dt.date] | None
 def _sources_scanned_he() -> str:
     """Which patent data source(s) this gather actually used (:func:`eoa.patents.scan.
     structured_sources_configured`) -- an honest label for the methodology box rather than always
-    implying the full EPO OPS/PatentsView structured search that most dev/CI environments never
+    implying the full EPO OPS/USPTO ODP structured search that most dev/CI environments never
     have credentials for."""
     if scan_mod.structured_sources_configured():
         return "EPO OPS / PatentsView (מבני, עם השלמת Google Patents במקרה של תוצאה ריקה)"
@@ -1159,7 +1159,7 @@ _NO_LLM_TEXT_HE = "ניתוח שפה טבעית לא זמין כרגע (המוד
 _NO_ADVANCE_FALLBACK_HE = "תיאור התקדמות לא זמין."
 _NO_ASSIGNEE_DATA_HE = (
     "לא זוהה בעל-פטנטים (assignee) אחד לפחות הניתן לזיהוי במדגם שנאסף -- מגבלה של מקור החיפוש "
-    "חסר-המפתחות (ראו eoa.patents.scan); הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY ב-.env לכיסוי בעלים "
+    "חסר-המפתחות (ראו eoa.patents.scan); הזן EPO_OPS_KEY/USPTO_ODP_API_KEY ב-.env לכיסוי בעלים "
     "מלא. לא ניתן היה לבנות פרופילי מקצה מבוססי-מאגר עבור נושא זה, כדי לא להמציא נתונים."
 )
 
@@ -1800,7 +1800,7 @@ def build_patent_survey(
         open_points_extra = (
             []
             if scan_mod.structured_sources_configured()
-            else ["מקורות פטנטים: מצב חיפוש בלבד -- הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY ב-.env לכיסוי מלא."]
+            else ["מקורות פטנטים: מצב חיפוש בלבד -- הזן EPO_OPS_KEY/USPTO_ODP_API_KEY ב-.env לכיסוי מלא."]
         )
 
         profile_names = _select_profile_assignees(top_assignees)

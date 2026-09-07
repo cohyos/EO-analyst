@@ -105,7 +105,7 @@ re-verified. Next: re-run the 7 layers as round r2 once the in-flight fix packag
   degrades gracefully to "not configured" rather than failing: `ANTHROPIC_API_KEY`,
   `GEMINI_API_KEY`, `OPENAI_API_KEY` (cloud LLM providers); `SAM_GOV_API_KEY`,
   `CONGRESS_GOV_API_KEY` (procurement MCP; USAspending/Federal Register/DSCA need no key);
-  `EPO_OPS_KEY`/`EPO_OPS_SECRET`, `PATENTSVIEW_API_KEY` (patents MCP).
+  `EPO_OPS_KEY`/`EPO_OPS_SECRET`, `USPTO_ODP_API_KEY` (patents MCP; PatentsView is retired).
 - **Janes API key** (`JANES_API_KEY`, `JANES_API_BASE`) — the user has a Janes Data Services
   subscription (confirmed 2026-09-05); without the key the Janes MCP server has no automation
   against the portal at all.

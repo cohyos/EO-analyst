@@ -100,7 +100,7 @@ describe("PatentsPage", () => {
 
   it("shows the search-only-mode banner when structured sources are not configured", async () => {
     getPatentsStatus.mockResolvedValue(
-      statusResponse({ banner_he: "מקורות פטנטים: מצב חיפוש בלבד — הזן EPO_OPS_KEY/PATENTSVIEW_API_KEY ב-.env לכיסוי מלא." }),
+      statusResponse({ banner_he: "מקורות פטנטים: מצב חיפוש בלבד — הזן EPO_OPS_KEY/USPTO_ODP_API_KEY ב-.env לכיסוי מלא." }),
     );
     renderPage();
     expect(

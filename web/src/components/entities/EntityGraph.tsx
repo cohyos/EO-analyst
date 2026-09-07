@@ -202,7 +202,13 @@ export function EntityGraph({
         <button
           type="button"
           onClick={onExpand}
-          className="absolute bottom-2 start-2 flex items-center gap-1 rounded-md border border-border-strong bg-bg-raised px-2 py-1 text-xs text-fg-muted shadow-panel hover:bg-bg-sunken"
+          // `end-2` (not `start-2`): the persistent chat FAB (ChatPanel.tsx) is fixed at the
+          // viewport's *start* edge (`start-20`, or `start-4` at `xl`) to clear the nav rail.
+          // On the stacked/2-column tablet and mobile layouts this compact GraphPanel can end up
+          // scrolled so its own bottom-start corner lands under that fixed FAB, silently making
+          // this button unclickable to a real pointer (not just Playwright) -- pin this one to
+          // the opposite corner so the two floating controls can never overlap.
+          className="absolute bottom-2 end-2 flex items-center gap-1 rounded-md border border-border-strong bg-bg-raised px-2 py-1 text-xs text-fg-muted shadow-panel hover:bg-bg-sunken"
         >
           <Maximize2 size={12} aria-hidden="true" />
           פתח גרף מלא

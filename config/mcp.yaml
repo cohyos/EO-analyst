@@ -44,12 +44,15 @@ servers:
     max_output_chars: 8000
 
   - id: patents
-    label: "פטנטים (EPO OPS / USPTO PatentsView)"
+    label: "פטנטים (EPO OPS / USPTO ODP)"
     transport: stdio
     enabled: true
     command: "{python}"
     args: ["-m", "eoa.mcp_servers.patents"]
-    env: ["EPO_OPS_KEY", "EPO_OPS_SECRET", "PATENTSVIEW_API_KEY"]
+    # USPTO_ODP_API_KEY replaced PATENTSVIEW_API_KEY (PatentsView retired, 2026-09-07). The old
+    # PATENTSVIEW_* names are deliberately NOT listed: `key_configured` requires every listed
+    # name to be set, and the in-process callers (eoa.patents.scan) see the full env anyway.
+    env: ["EPO_OPS_KEY", "EPO_OPS_SECRET", "USPTO_ODP_API_KEY"]
     allow_tools: []
     deny_tools: []
     timeout_s: 30

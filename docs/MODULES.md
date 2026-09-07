@@ -4733,11 +4733,28 @@ the project's SSRF guard -- even though every host here is a fixed, well-known p
   `EPO_OPS_KEY`/`EPO_OPS_SECRET` -- **the token endpoint's shape confirmed live 2026-09-06**: an
   unauthenticated POST to `https://ops.epo.org/3.2/auth/accesstoken` returns `401 "Client
   identifier is required"`, proving the endpoint and auth flow are real; a token is cached
-  in-process and refreshed on expiry), `patentsview_search` (USPTO PatentsView's 2023+ Search API
-  at `https://search.patentsview.org/api/v1`, `PATENTSVIEW_API_KEY` via `X-Api-Key` --
-  **`search.patentsview.org` did not resolve (DNS failure) from this project's dev/CI network**,
-  while the legacy `api.patentsview.org` resolved but serves a docs front-end at the paths tried;
-  `PATENTSVIEW_API_BASE` is overridable if your network resolves a different host).
+  in-process and refreshed on expiry), `uspto_odp_search(query, assignee, cpc, date_from, limit)`
+  (**2026-09-07, replaces PatentsView**: USPTO Open Data Portal Patent File Wrapper API, `POST
+  https://api.uspto.gov/api/v1/patent/applications/search` with `USPTO_ODP_API_KEY` as the
+  `X-API-KEY` header; body = ODP's `PatentSearchRequest` (`q` in OpenSearch query-string syntax +
+  `fields`/`pagination`/`sort`), response = `PatentDataResponse` (`count`,
+  `patentFileWrapperDataBag[].applicationMetaData{inventionTitle, filingDate, grantDate,
+  patentNumber, earliestPublicationNumber, cpcClassificationBag, applicantBag}` +
+  `assignmentBag[].assigneeBag`), normalised by `normalize_odp_record` into the provider-neutral
+  row `{pub_number, kind, title, assignees, inventors, cpc, filing_date, publication_date,
+  grant_date, url}` that `epo_ops_search`'s rows now also carry (`pub_number`/`url` added) and
+  `eoa.patents.scan._uspto_odp_records` maps 1:1 onto `PatentRecord`. Rate limits honoured
+  per https://data.uspto.gov/apis/api-rate-limits: one in-flight call per key (module lock),
+  0.25 s spacing, a single retry 5 s after a 429; ODP's 404 "no matching records" is an empty
+  result, 401/403 a "key rejected" error. **Verified live 2026-09-07 without a key: the search
+  URL answers `401 {"message":"Unauthorized"}`, so host/path/auth gate are real; the
+  authenticated round-trip and the searchability of the nested field names in `q` are
+  unverified until the user registers an ODP key** (USPTO.gov account + ID.me). PatentsView
+  itself is retired (patentsview.org redirects to the ODP transition guide,
+  `search.patentsview.org` no longer resolves, PatentsView keys are invalid for ODP):
+  `patentsview_search` stays importable but is no longer an MCP tool and always answers
+  `not_configured` naming `USPTO_ODP_API_KEY`; a stale `PATENTSVIEW_API_KEY`/`_BASE` logs one
+  `patentsview_deprecated` warning per process and is otherwise ignored).
 
 **Deep search wiring (`agent/eoa/search/deep_search.py`)**: `_mcp_tool_specs()` returns
 `eoa.mcp.registry.tool_specs_for_react()` when `settings().mcp.enabled`, else `[]` -- swallows any

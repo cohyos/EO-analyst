@@ -1,7 +1,7 @@
 # Patent / IP landscape tracking (A14, docs/PLAN_WINDOWS_NATIVE.md).
 #
 # `cpc` codes and `watch_topics` drive eoa.patents.scan: each topic is queried against EPO OPS /
-# PatentsView when EPO_OPS_KEY+EPO_OPS_SECRET / PATENTSVIEW_API_KEY are configured (see
+# USPTO ODP when EPO_OPS_KEY+EPO_OPS_SECRET / USPTO_ODP_API_KEY are configured (see
 # agent/eoa/mcp_servers/patents.py -- not configured on this dev machine, so live calls degrade to
 # `not_configured`), and always additionally via the keyless Google Patents search fallback
 # (`eoa.search.provider`, `site:patents.google.com <query>`) so the module still produces real

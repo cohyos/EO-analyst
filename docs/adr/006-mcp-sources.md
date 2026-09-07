@@ -9,7 +9,8 @@ row) has exactly two research tools: `search` (a metasearch engine) and `read` (
 are general-purpose and both are guessing games against structured domains that actually have
 purpose-built APIs -- US government procurement (SAM.gov, USAspending, DSCA, Federal Register,
 Congress.gov), the user's own Janes Data Services subscription (approved 2026-09-05), and patent
-databases (EPO OPS, USPTO PatentsView). A `search` query for "night vision goggles contract 2026"
+databases (EPO OPS, USPTO PatentsView -- since 2026-09-07 the USPTO Open Data Portal, see the
+revision note at the end). A `search` query for "night vision goggles contract 2026"
 returns news coverage of a contract; `sam_gov_search(psc="5855")` returns the actual solicitation
 record. The gap is real and the task (A8) asks for exactly this: give the analyst MCP tools,
 read-only, allow-listed, with every tool output DATA-framed and guard-screened exactly like a
@@ -196,3 +197,28 @@ was off, unlike `list_mcp_servers`. None of this changes this ADR's architecture
 Consequences section above -- it hardens the transport/error-handling layer every tool family
 here already depends on. Full writeup: `docs/MODULES.md`'s "Security QA r2 fixes:
 Q2-14/Q2-15/Q2-16" section.
+
+## Revision 2026-09-07: USPTO PatentsView replaced by the Open Data Portal (ODP)
+
+PatentsView, the US half of the patents server, no longer exists: patentsview.org redirects to
+USPTO's ODP transition guide, `search.patentsview.org` does not resolve, and PatentsView keys are
+explicitly not valid for ODP (the March-2026 migration). The `patentsview_search` tool was
+therefore replaced by `uspto_odp_search` against the ODP Patent File Wrapper API (`POST
+https://api.uspto.gov/api/v1/patent/applications/search`, `X-API-KEY` header, new
+`USPTO_ODP_API_KEY` env var in `config/mcp.yaml` + `.env.example`). The request/response contract
+was taken from the OpenAPI spec the ODP Swagger UI loads (`PatentSearchRequest`,
+`PatentDataResponse`, `ApplicationMetaData`, `Assignment`) and the published syntax examples, not
+from memory; both providers now emit one provider-neutral row (`pub_number`, `kind`, `title`,
+`assignees`, `cpc`, dates, `url`) so `eoa.patents.scan` -> survey/cluster and the product-line
+report's patent rows consume either source unchanged. ODP's rate-limit contract (burst 1 per key,
+4-15 req/s, 5 s minimum before retrying a 429, 5 M metadata calls/week) is enforced in the client
+with a process-wide lock, 0.25 s spacing and exactly one delayed retry. `PATENTSVIEW_API_KEY`/
+`PATENTSVIEW_API_BASE` are still accepted (one deprecation warning per process) but treated as
+not configured. Live verification so far is limited to the unauthenticated gate (`401
+Unauthorized` from the real host): an ODP key requires a USPTO.gov account linked to an ID.me
+identity, which the user will register when ready -- the authenticated round-trip and the
+searchability of the nested field names used in `q` (`applicationMetaData.applicantBag.
+applicantNameText`, `assignmentBag.assigneeBag.assigneeNameText`, `cpcClassificationBag` with a
+trailing wildcard) remain to be confirmed then. Nothing in this ADR's decision changes: it is a
+provider swap inside one FastMCP server, behind the same registry and the same `not_configured`
+contract.

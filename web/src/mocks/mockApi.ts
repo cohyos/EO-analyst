@@ -1669,7 +1669,7 @@ export const mockApi: ApiClient = {
           enabled: true,
           inherit_cli_only: false,
           key_configured: false,
-          key_env: ["EPO_OPS_KEY", "EPO_OPS_SECRET", "PATENTSVIEW_API_KEY"],
+          key_env: ["EPO_OPS_KEY", "EPO_OPS_SECRET", "USPTO_ODP_API_KEY"],
           tool_count: null,
           ok: null,
           error: null,

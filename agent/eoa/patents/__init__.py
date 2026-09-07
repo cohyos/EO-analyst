@@ -4,7 +4,7 @@ Sub-modules:
 
 - ``models``: :class:`PatentRecord` -- the scan-time shape, before DB insertion.
 - ``scan``: ``scan_patents`` -- per-watch-topic + per-assignee patent discovery (EPO OPS /
-  PatentsView when configured, else a keyless Google Patents search fallback).
+  USPTO ODP when configured, else a keyless Google Patents search fallback).
 - ``analyze``: ``analyze_patents`` -- LLM claims summary / subdomain / so-what, plus the
   deterministic Israel-relevance signal.
 - ``valuation``: ``score_patent`` -- a deterministic, documented value-score proxy (never a

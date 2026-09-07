@@ -1,7 +1,7 @@
 """``PatentRecord``: the scan-time shape of one patent, before DB insertion (A14).
 
 Mirrors ``eoa.tenders.scan.NoticeRaw``'s role -- a plain dataclass every scan source (EPO OPS,
-PatentsView, the Google Patents search fallback) normalizes into, so the rest of the pipeline
+USPTO ODP, the Google Patents search fallback) normalizes into, so the rest of the pipeline
 (dedupe, analyze, valuation, insert) never needs to know which source produced a given record.
 """
 

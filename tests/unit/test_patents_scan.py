@@ -7,6 +7,8 @@ is monkeypatched at the module level.
 from __future__ import annotations
 
 import datetime as dt
+import json
+from typing import ClassVar
 from unittest.mock import patch
 
 from eoa.patents.models import PatentRecord
@@ -151,14 +153,68 @@ class TestStructuredSourcesConfigured:
     def test_false_when_no_keys_set(self, monkeypatch):
         monkeypatch.delenv("EPO_OPS_KEY", raising=False)
         monkeypatch.delenv("EPO_OPS_SECRET", raising=False)
-        monkeypatch.delenv("PATENTSVIEW_API_KEY", raising=False)
+        monkeypatch.delenv("USPTO_ODP_API_KEY", raising=False)
+        monkeypatch.setenv("PATENTSVIEW_API_KEY", "stale")  # retired provider: must not count
         assert structured_sources_configured() is False
 
     def test_true_when_epo_keys_set(self, monkeypatch):
         monkeypatch.setenv("EPO_OPS_KEY", "k")
         monkeypatch.setenv("EPO_OPS_SECRET", "s")
-        monkeypatch.delenv("PATENTSVIEW_API_KEY", raising=False)
+        monkeypatch.delenv("USPTO_ODP_API_KEY", raising=False)
         assert structured_sources_configured() is True
+
+    def test_true_when_odp_key_set(self, monkeypatch):
+        monkeypatch.delenv("EPO_OPS_KEY", raising=False)
+        monkeypatch.delenv("EPO_OPS_SECRET", raising=False)
+        monkeypatch.setenv("USPTO_ODP_API_KEY", "k")
+        assert structured_sources_configured() is True
+
+
+class TestUsptoOdpRecords:
+    """``_uspto_odp_records`` maps the provider-neutral rows ``uspto_odp_search`` emits straight
+    onto ``PatentRecord`` -- no second fetch, every structured field carried over."""
+
+    ROW: ClassVar[dict[str, object]] = {
+        "pub_number": "US9362380",
+        "kind": None,
+        "country": "US",
+        "title": "HETEROJUNCTION BIPOLAR TRANSISTOR",
+        "assignees": ["STMicroelectronics S.A."],
+        "inventors": ["Pascal Chevalier"],
+        "cpc": ["H01L29/66325"],
+        "filing_date": "2012-12-19",
+        "publication_date": "2014-06-19",
+        "grant_date": "2016-06-07",
+        "url": "https://patents.google.com/patent/US9362380/en",
+    }
+
+    def test_maps_rows_to_patent_records(self):
+        from eoa.patents.scan import _uspto_odp_records
+
+        payload = json.dumps({"total_count": 1, "results": [self.ROW, {"title": "no pub_number -> skipped"}]})
+        with patch("eoa.mcp_servers.patents.uspto_odp_search", return_value=payload):
+            records = _uspto_odp_records("transistor", "STMicroelectronics", limit=20)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.pub_number == "US9362380"
+        assert rec.source == "uspto_odp"
+        assert rec.assignees == ["STMicroelectronics S.A."]
+        assert rec.cpc == ["H01L29/66325"]
+        assert rec.publication_date == dt.date(2014, 6, 19)
+        assert rec.grant_date == dt.date(2016, 6, 7)
+        assert rec.filing_date == dt.date(2012, 12, 19)
+        assert rec.jurisdictions == ["US"]
+        assert rec.url == "https://patents.google.com/patent/US9362380/en"
+
+    def test_error_and_exception_paths_yield_no_records(self):
+        from eoa.patents.scan import _uspto_odp_records
+
+        with patch(
+            "eoa.mcp_servers.patents.uspto_odp_search", return_value=json.dumps({"error": "not_configured"})
+        ):
+            assert _uspto_odp_records("q", "", limit=5) == []
+        with patch("eoa.mcp_servers.patents.uspto_odp_search", side_effect=RuntimeError("boom")):
+            assert _uspto_odp_records("q", "", limit=5) == []
 
 
 class TestSearchRecords:
