@@ -275,3 +275,181 @@ tests/unit -q -p no:cacheprovider -k "patent or survey"` -> **349 passed, 1 fail
   survey) still never enriches, by design (this round scoped the fix to the on-demand survey per
   the brief); the same `enrich_stored_patents_missing_assignee` function could be wired into the
   routine scan too in a future round if that gap turns out to matter.
+
+### R6-entities status
+
+Follow-up to R6-data (task 2's `entities_mentioned` backfill and D9's "owl leak" events cleanup
+above) -- the round-5 judge D1/D3 finding + the live `monthly_2026-09-30.md` "ישויות חדשות החודש"
+symptom: entities mentioned *only* by out-of-scope/archived items pollute both the `entities`
+table and the monthly's new-entities list (e.g. entity 1208 "Western Burrowing Owl", kind=company;
+'Rees Training Center'; 'Global Owl Project'; 'F-16s'; 'Western Partners'). Files touched:
+`scripts/repair_round6.py` (new `entities_cleanup` subcommand), `agent/eoa/pipeline/analyze.py`
+(entity persistence only: `persist_analysis`'s entities_mentioned/entities/graph_edges writes,
+plus its new junk-name-shape helper), `agent/eoa/memory/relational.py` (`upsert_entity`'s junk
+gate only), `tests/unit/test_round6_entities.py` (new, 33 cases, no DB). Ran against
+`127.0.0.1:5432/eoanalyst` (alembic head `0025`). `entities_cleanup` is pure SQL (no LLM calls).
+Lint/format clean (`ruff check`/`ruff format --check`) on every touched file.
+
+#### 1. `entities_cleanup` subcommand (D1/D3)
+
+**Query** (`find_out_of_scope_only_entities`): confirmed `items.entities_mentioned` is `TEXT[]`
+live, then re-ran the brief's query DB-wide (not capped at the original 151): **160** entities
+currently mentioned by at least one item but never by any item outside
+`domain='out_of_scope'`/`level='archive'` (the count moved from the brief's 151 because items have
+kept flowing through the pipeline since that finding was written, and R6-data's own item-22
+entities backfill in the prior round added 6 more names -- AIM-120 AMRAAM/NASAMS/Ukraine/Russia/
+F-16s/Western Partners -- that immediately qualified, since item 22 is `level='archive'` even
+though its `domain='air_defense'`).
+
+**Protection rules** (never deleted, per the brief's three exemptions), implemented in
+`_protection_reason`:
+- (a) `_watchlist_protected_names()`: normalized name/alias set from `config/watchlist.yaml`
+  (`companies` name+aliases+strict_aliases, `programs` name+aliases, `agencies` name+aliases,
+  `acquisition_watch` name+`peers_of`) and `config/payloads_seed.yaml`'s
+  `payloads[].vendor_entity_name`.
+- (b) `kind in (company, org, system, program)` with `country` set AND at least one in-scope
+  mention -- implemented and unit-tested (`test_protection_reason_never_fires_for_country_rule_
+  without_in_scope_mention`), but verified live/by construction that it can **never** actually
+  protect a row `find_out_of_scope_only_entities` returns: that query's own `WHERE` clause already
+  requires zero in-scope mentions, so `has_in_scope_mention` is `False` for every candidate row.
+  Kept exactly as specified, as a documented safety net against a future loosening of that
+  population query.
+- (c) `referenced_by_report_state`: every non-null `reports.report_state` cast to text and
+  substring/word-boundary-matched against each candidate name -- `report_state`'s own
+  `item_ids`/`item_levels`/`indicator_ids` fields are never entity names, only
+  `trend_titles[].title_he` free text can name one (e.g. "מגמה: פעילות מוגברת סביב Hezbollah
+  בתחום out_of_scope").
+
+**Dry run** (first 40 rows in `candidates_preview`, full counts): **160** candidates, **8**
+protected, **152** to delete.
+
+| id | name | reason |
+|---|---|---|
+| 13 | Safran | watchlist (companies) |
+| 20 | Aselsan | watchlist (companies) |
+| 28 | Hanwha | watchlist (companies) |
+| 31 | HAL | watchlist (companies) |
+| 138 | Marine Corps | referenced by report_state (trend_titles "US Marine Corps") |
+| 893 | Iran | referenced by report_state |
+| 1232 | Hezbollah | referenced by report_state |
+| 1296 | Mossad | referenced by report_state |
+
+**Applied 2026-09-07**: `entities_cleanup --apply` deleted **152** entities. Dependent rows,
+discovered live via `information_schema` (`_entity_fk_columns`) rather than hardcoded -- confirmed
+the only FK-to-`entities.id` columns in the live schema are `graph_edges.src_entity_id`/
+`dst_entity_id` (both already `ON DELETE CASCADE` per migration `0006_drop_extensions.py`; deleted
+explicitly anyway for an accurate touched-row count): **23** `graph_edges` rows via `dst_entity_id`
++ **25** via `src_entity_id` = 48 total. `patents.entity_ids` (`BIGINT[]`, a soft reference found
+by inspecting every migration for a column naming entities by id, not a declared FK) had **0**
+rows needing an update this run (no patent currently references any of the 152 deleted ids). All
+three steps ran inside one transaction.
+
+**Verified from a separate connection:** `entities` table: 518 -> 366 rows. Re-running the same
+population query finds exactly **8** remaining out-of-scope-only entities -- the 8 protected ones
+above, untouched and still present. Every one of the "known junk" names from the original finding
+and R6-data's item-22 backfill is now gone: `F-16s`, `Western Partners`, `AIM-120 AMRAAM`,
+`NASAMS`, `Ukraine`, `Russia` (all mentioned only by archived item 22) plus e.g. `Airbus`/
+`Honeywell` all confirmed absent. `graph_edges`: 347 -> 299 rows.
+
+**Follow-up finding (not fixed here, out of this round's specific query):** entity 1208 "Western
+Burrowing Owl" -- the finding's own headline example -- is no longer in the 160-row population at
+all, because the item that named it (2463, the "owl leak") no longer mentions it in
+`entities_mentioned` (0 items currently do; the row is a true orphan, mentioned by *zero* items,
+not just zero in-scope ones). `find_out_of_scope_only_entities`'s `EXISTS (...)` clause requires at
+least one mentioning item, so a fully-orphaned entity falls outside this round's query by
+construction. Confirmed via `find_junk_shaped_entities` (task 3 below), which flags it DB-wide with
+`in_out_of_scope_population: false` -- per the brief's "do not delete them unless they are in the
+151 set" instruction, it was correctly left untouched. A future round should add a fourth
+subcommand (or extend this one) for "entity mentioned by zero items at all" as its own, distinct
+population.
+
+#### 2. Pipeline fix: entity persistence skipped for out-of-scope/archived items (D3/D9)
+
+**`_entity_persistence_allowed(item)`** (`analyze.py`): `False` when `item.domain ==
+'out_of_scope'` or `item.level == 'archive'` -- mirrors `relational._ANALYZE_STAGE_SCOPE_FILTER`'s
+own `IS DISTINCT FROM`-safe condition (a missing/unset domain or level, i.e. not yet classified/
+triaged, is never blocked). `get_items_for_stage`'s analyze-stage filter (R6-data) already keeps
+such items out of the normal `run_analyze` sweep, but a *direct* `analyze_item`/`persist_analysis`
+call bypasses that filter entirely -- which is exactly how item 22 (domain='air_defense' but
+level='archive') got AIM-120 AMRAAM/NASAMS/F-16s/Western Partners/Ukraine/Russia written into
+`entities_mentioned` by R6-data's own targeted repair. `persist_analysis` now checks this guard and
+skips only entity persistence -- `items.entities_mentioned` (both the watchlist backfill and the
+new events-fallback below) and the `entities`/`graph_edges` upserts in the edges block -- while
+`summary_he`/`so_what_he`/`key_facts`/`uncertainty_he`/`tech_*`/events are written exactly as
+before (unit-tested: `test_persist_analysis_skips_entities_mentioned_write_for_archived_item`).
+Deliberately narrow scope (per this round's "entity persistence only" file ownership): the
+pre-existing A13 israel-relevance re-scoring block (`score_and_persist_entity_israeli`, which also
+writes to `entities`) was left untouched -- it re-scores entities already on record rather than
+extracting new ones, a different concern from the pollution this task targets.
+
+**Events/graph_edges fallback moved into the pipeline** (`_entities_from_persisted_events`): when
+neither the LLM's own extraction nor `_backfill_entities_from_watchlist` populates
+`entities_mentioned` for an in-scope item, `persist_analysis` now falls back to the party names
+from its own just-inserted `events` and the endpoint names from its own just-written `graph_edges`
+-- the exact mechanism R6-data's `scripts/repair_round6.py._entities_from_events` implemented as a
+one-off, script-only fallback (discovered live on items 153/290), now generalized into the
+pipeline itself for every future analyze pass, in-memory (no extra DB round trip) rather than
+re-querying. Every candidate name is passed through the new junk-shape filter (task 3) before
+being written, so a bare "F-16s"/"Western Partners" surfacing in an event's own `parties` list
+never backfills the field (unit-tested:
+`test_persist_analysis_backfills_entities_from_events_when_still_empty`,
+`test_persist_analysis_events_fallback_filters_junk_names`,
+`test_persist_analysis_events_fallback_skipped_when_entities_already_present`,
+`test_persist_analysis_events_fallback_skipped_for_out_of_scope_item`).
+
+#### 3. Junk-entity guard (D9)
+
+**`is_junk_candidate_entity_name(name, kind=None)`** (`analyze.py`), mirrored as a small local
+duplicate `_is_junk_shaped_entity_name` in `relational.py` (not imported -- this codebase's own
+convention for a cross-module-boundary helper, e.g. `analyze._event_dedup_key` mirroring
+`report.daily._normalize_event_key`; `entity_normalize.py`, home of the broader
+`is_junk_entity`, is not owned by this round's file list). Three conservative, deterministic
+checks: (1) a bare pluralised platform/weapon designation, `^[A-Z]{1,3}-?\d{1,3}[A-Za-z]?s$` (e.g.
+"F-16s", "M1s", "AK47s" -- "F-16" itself, no trailing "s", is untouched); (2) an exact
+case-insensitive match against a 5-entry stoplist of generic "who talked" phrases (Western
+Partners, Local Partners, Industry Partners, Defense Officials, Government Officials); (3) a
+wildlife/nature word (owl, eagle, habitat, wildlife, conservation) present in a name typed
+`kind == 'company'` only (the same word under `program`/`org`/no kind is left alone -- a real
+conservation program is not junk). Wired in at two persistence points: `relational.upsert_entity`
+(rejects before any DB call, alongside the existing `is_junk_entity` gate -- returns `None`,
+matching that function's existing "junk -> no id" contract) and `analyze.persist_analysis`'s new
+events-fallback (task 2).
+
+**Dry-run visibility** (`find_junk_shaped_entities`, task 1's `entities_cleanup` output): scanned
+every entity DB-wide (not just the out-of-scope-only population) for a match -- **3** existing
+rows flagged: `F-16s` (id 1196) and `Western Partners` (id 1198), both also in the 160-row
+out-of-scope-only population and therefore deleted by task 1's apply above; `Western Burrowing Owl`
+(id 1208) flagged but `in_out_of_scope_population: false` (see task 1's follow-up finding above) --
+correctly **not** deleted, per the brief's "do not delete them unless they are in the 151 set"
+instruction. The filter is informational-only inside `entities_cleanup`; it never triggers a
+deletion on its own.
+
+#### Tests / lint
+
+`PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/unit/test_round6_entities.py
+tests/unit/test_round6_data.py -q -p no:cacheprovider` -> **64 passed** (33 new, no DB; fake
+cursor/connection per `test_round6_data.py`'s and `test_upsert_entity_normalization.py`'s
+patterns). Also re-ran the full existing suite touching these modules for regressions
+(`test_persist_analysis.py`, `test_upsert_entity_normalization.py`, `test_relational_stage_filter.py`,
+`test_entity_normalize.py`, `test_entity_canonical_write_regression.py`,
+`test_persist_classification_entities.py`, `test_analyze_key_facts_entities.py`,
+`test_events_dedup.py`, `test_graph_edges.py`, plus the two round-6 files above): **273 passed, 0
+failed**. `ruff check`/`ruff format --check` clean on `scripts/repair_round6.py`,
+`agent/eoa/pipeline/analyze.py`, `agent/eoa/memory/relational.py`,
+`tests/unit/test_round6_entities.py`.
+
+#### What's left
+
+- The fully-orphaned "Western Burrowing Owl" (entity 1208, mentioned by zero items at all, not
+  just zero in-scope ones) needs a follow-up subcommand/query -- see task 1's follow-up finding.
+- Task 1(b)'s "kind+country+in-scope-mention" protection rule is implemented and tested but
+  structurally never fires against `find_out_of_scope_only_entities`'s current population (see
+  above) -- worth revisiting only if that population query is ever widened.
+- The A13 israel-relevance re-scoring block in `persist_analysis` still runs
+  `score_and_persist_entity_israeli` against an out-of-scope/archived item's *pre-existing*
+  `entities_mentioned` (a deliberate scoping decision, not a bug -- see task 2 above); if that
+  turns out to matter it belongs in a future round scoped to `israel_focus.py`/that block
+  specifically, not this round's "entity persistence only" ownership.
+- `entities_cleanup` is not yet wired into any scheduled/routine job -- it is a manual, on-demand
+  repair subcommand like `events`/`tenders`, run the same way (`--apply` after reviewing the dry
+  run).

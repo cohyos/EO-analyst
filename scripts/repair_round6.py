@@ -2,7 +2,12 @@
 """Round-6 data repair (docs/qa/loop/round_5_judge.md D1/D2/D3/D9) -- the recurring data defects
 the judge has flagged for 3-4 rounds running, plus the pipeline gaps that produced them.
 
-Five independent, individually-runnable subcommands:
+R6-entities (docs/qa/loop/round_6_fixes.md's "R6-entities status", follow-up to R6-data) adds the
+`entities_cleanup` subcommand below for the D1/D3 follow-up finding: entities mentioned only by
+out-of-scope/archived items (e.g. entity 1208 "Western Burrowing Owl", kind=company) pollute both
+the `entities` table and the monthly's "ישויות חדשות החודש" list.
+
+Six independent, individually-runnable subcommands:
 
     so_what   -- items.so_what_he matching a banned generic-formula phrase
                  (eoa.report.qa_citations.SO_WHAT_TEMPLATE_PHRASES_HE), queried DB-wide (not just
@@ -23,6 +28,17 @@ Five independent, individually-runnable subcommands:
                  different per-country search sources) -- merged (delete all but the oldest id per
                  duplicate group). Pure SQL, no LLM calls. Never touches 'accepted'/'archived' rows
                  or tender_feedback.
+    entities_cleanup -- entities mentioned ONLY by items with domain='out_of_scope' or
+                 level='archive' (never by any in-scope item) -- deleted, along with every
+                 dependent row (graph_edges, discovered live via information_schema; patents'
+                 soft-reference entity_ids array). Never deletes a name on config/watchlist.yaml
+                 (companies/aliases/strict_aliases, programs, agencies, acquisition_watch +
+                 peers_of) or config/payloads_seed.yaml's vendor_entity_name, a company/org/
+                 system/program with a country AND at least one in-scope mention, or a name
+                 referenced in an existing reports.report_state. Also reports (informational only,
+                 never a deletion trigger on its own) which existing entities DB-wide the new
+                 junk-name-shape filter (eoa.pipeline.analyze.is_junk_candidate_entity_name) would
+                 now block. Pure SQL, no LLM calls.
 
 Every subcommand (and "all") defaults to a dry run (report only); pass --apply to write. so_what/
 entities/triage additionally cost real LLM calls on the cloud chain (EOA_PIPELINE=1, forced by this
@@ -30,7 +46,8 @@ script) -- a shared --llm-budget (default 25, per the round-6 brief's "keep tota
 ~25") caps how many of those this single invocation will spend, processed in the fixed priority
 order triage -> entities -> so_what (ascending id) so the two single-item, explicitly-named
 defects (item 5604, item 22) are never starved by the larger so_what batch; anything left over is
-reported under "skipped_budget" for a follow-up run.
+reported under "skipped_budget" for a follow-up run. events/tenders/entities_cleanup are pure SQL
+and never touch the LLM budget.
 
 Prints the DB target (host:port/db, never the password) and refuses port 5433, per
 docs/qa/loop/round_1_fixes.md's lesson. Every --apply run re-verifies its own writes from a
@@ -51,6 +68,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import yaml
+from psycopg import sql
 from psycopg.rows import dict_row
 
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
@@ -60,14 +79,17 @@ if str(_AGENT_DIR) not in sys.path:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+from eoa.config import CONFIG_DIR, settings  # noqa: E402
 from eoa.db import connection  # noqa: E402
 from eoa.memory.relational import update_item_fields  # noqa: E402
 from eoa.pipeline.analyze import (  # noqa: E402
     _backfill_entities_from_watchlist,
     analyze_item,
+    is_junk_candidate_entity_name,
     persist_analysis,
     repair_so_what_text,
 )
+from eoa.pipeline.entity_normalize import normalize_name_key  # noqa: E402
 from eoa.pipeline.triage import (  # noqa: E402
     _reason_conflicting_level,
     level_for,
@@ -455,6 +477,232 @@ def repair_tenders(apply: bool) -> dict:
 
 
 # --------------------------------------------------------------------------
+# task 6 -- entities_cleanup: entities mentioned ONLY by out-of-scope/archived items (R6-entities)
+# --------------------------------------------------------------------------
+
+#: kind values eligible for the "has its own country and an in-scope mention" protection rule
+#: (docs brief task 1(b)). Verified live 2026-09-07: given how ``find_out_of_scope_only_entities``
+#: is constructed (its own WHERE clause already requires zero in-scope mentions), this rule can
+#: never actually protect a row returned by that query -- kept anyway, exactly as the brief
+#: specifies, as an explicit documented safety net against a future loosening of that population
+#: query (e.g. if it is ever widened to include a *partial*-in-scope entity).
+_PROTECTED_KINDS_WITH_COUNTRY = frozenset({"company", "org", "system", "program"})
+
+
+def _watchlist_protected_names() -> set[str]:
+    """Every name/alias this repair must never delete (docs brief task 1): normalized via
+    ``eoa.pipeline.entity_normalize.normalize_name_key`` --
+
+    - ``config/watchlist.yaml``: ``companies`` (name + aliases + strict_aliases), ``programs``
+      (name + aliases), ``agencies`` (name + aliases), ``acquisition_watch`` (name + peers_of).
+    - ``config/payloads_seed.yaml``: every ``payloads[].vendor_entity_name``.
+
+    Pure config/yaml reads -- no DB call, safe to call from a dry run."""
+    wl = settings().watchlist
+    names: set[str] = set()
+    for rec in wl.get("companies", []) or []:
+        names.add(rec.get("name", ""))
+        names.update(rec.get("aliases") or [])
+        names.update(rec.get("strict_aliases") or [])
+    for rec in wl.get("programs", []) or []:
+        names.add(rec.get("name", ""))
+        names.update(rec.get("aliases") or [])
+    for rec in wl.get("agencies", []) or []:
+        names.add(rec.get("name", ""))
+        names.update(rec.get("aliases") or [])
+    for rec in wl.get("acquisition_watch", []) or []:
+        names.add(rec.get("name", ""))
+        names.update(rec.get("peers_of") or [])
+    payloads_path = CONFIG_DIR / "payloads_seed.yaml"
+    if payloads_path.exists():
+        data = yaml.safe_load(payloads_path.read_text(encoding="utf-8")) or {}
+        for rec in data.get("payloads", []) or []:
+            vendor = rec.get("vendor_entity_name")
+            if vendor:
+                names.add(vendor)
+    return {normalize_name_key(n) for n in names if n}
+
+
+def find_out_of_scope_only_entities() -> list[dict]:
+    """Entities mentioned by at least one item, but NEVER by any item outside
+    ``domain='out_of_scope'``/``level='archive'`` -- the docs-brief finding query, confirmed live
+    against ``items.entities_mentioned`` (``TEXT[]``). ``has_in_scope_mention`` is always ``False``
+    for every row this returns (see :data:`_PROTECTED_KINDS_WITH_COUNTRY`'s note) -- included for
+    transparency/documentation rather than because it can vary here."""
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT e.id, e.name, e.kind, e.country, e.created_at,
+              (SELECT count(*) FROM items i WHERE e.name = ANY(i.entities_mentioned)
+                 AND (COALESCE(i.domain, '') = 'out_of_scope' OR COALESCE(i.level, '') = 'archive')
+              ) AS n_items_out_of_scope,
+              EXISTS (
+                SELECT 1 FROM items i WHERE e.name = ANY(i.entities_mentioned)
+                  AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
+              ) AS has_in_scope_mention
+            FROM entities e
+            WHERE NOT EXISTS (
+                SELECT 1 FROM items i WHERE e.name = ANY(i.entities_mentioned)
+                  AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
+              )
+              AND EXISTS (SELECT 1 FROM items i WHERE e.name = ANY(i.entities_mentioned))
+            ORDER BY e.id
+            """
+        )
+        return cur.fetchall()
+
+
+def _reports_report_state_text() -> str:
+    """The concatenated text of every non-null ``reports.report_state`` (cast to text in SQL) --
+    used to check whether a candidate entity name is visibly referenced in an already-published
+    report's ``trend_titles`` (docs brief task 1(c): "referenced by a report_state/reports row").
+    ``item_ids``/``item_levels``/``indicator_ids`` in that JSON are item/indicator ids, never
+    entity names or ids -- only ``trend_titles[].title_he`` free text can name an entity."""
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT report_state::text AS txt FROM reports WHERE report_state IS NOT NULL")
+        rows = cur.fetchall()
+    return "\n".join(r["txt"] for r in rows if r.get("txt"))
+
+
+def _protection_reason(row: dict, protected_names: set[str], reports_blob: str) -> str | None:
+    """``None`` when `row` (a :func:`find_out_of_scope_only_entities` row) is safe to delete;
+    otherwise the reason it must be kept -- docs brief task 1's three exemptions."""
+    name = row.get("name") or ""
+    if normalize_name_key(name) in protected_names:
+        return "watchlist_or_payloads_vendor"
+    if (
+        row.get("kind") in _PROTECTED_KINDS_WITH_COUNTRY
+        and row.get("country")
+        and row.get("has_in_scope_mention")
+    ):
+        return "kind_with_country_and_in_scope_mention"
+    if name and re.search(r"\b" + re.escape(name) + r"\b", reports_blob, re.IGNORECASE):
+        return "referenced_by_report_state"
+    return None
+
+
+def find_junk_shaped_entities() -> list[dict]:
+    """Every *existing* entity DB-wide (not just the out-of-scope-only population) that the new
+    persistence-time junk-name-shape filter (``eoa.pipeline.analyze.is_junk_candidate_entity_name``,
+    docs brief task 3) would now reject -- reported purely for visibility. Cross-referenced against
+    the out-of-scope-only population by the caller; never itself a deletion trigger."""
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT id, name, kind FROM entities ORDER BY id")
+        rows = cur.fetchall()
+    return [r for r in rows if is_junk_candidate_entity_name(r["name"], r.get("kind"))]
+
+
+def _entity_fk_columns() -> list[tuple[str, str]]:
+    """``(table_name, column_name)`` for every FK column in the live schema that references
+    ``entities.id`` -- discovered via ``information_schema`` (docs brief task 1: "inspect
+    information_schema for every table with a FK to entities.id") so a future migration adding a
+    new FK-to-entities table is covered automatically, without a code change here. Verified live
+    2026-09-07: only ``graph_edges.src_entity_id``/``graph_edges.dst_entity_id`` (both
+    ``ON DELETE CASCADE`` already, per ``db/migrations/versions/0006_drop_extensions.py`` -- this
+    repair still deletes them explicitly, for an accurate "what did this touch" count rather than
+    relying on an implicit cascade)."""
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT tc.table_name, kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND ccu.table_name = 'entities' AND ccu.column_name = 'id'
+            ORDER BY tc.table_name, kcu.column_name
+            """
+        )
+        return [(r["table_name"], r["column_name"]) for r in cur.fetchall()]
+
+
+def _table_has_column(cur, table: str, column: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = %(t)s AND column_name = %(c)s",
+        {"t": table, "c": column},
+    )
+    return cur.fetchone() is not None
+
+
+def repair_entities_cleanup(apply: bool) -> dict:
+    candidates = find_out_of_scope_only_entities()
+    protected_names = _watchlist_protected_names()
+    reports_blob = _reports_report_state_text()
+
+    annotated = []
+    to_delete_ids: list[int] = []
+    for row in candidates:
+        reason = _protection_reason(row, protected_names, reports_blob)
+        annotated.append({**row, "protected_reason": reason})
+        if reason is None:
+            to_delete_ids.append(row["id"])
+
+    candidate_id_set = {r["id"] for r in candidates}
+    junk_flagged = [
+        {**r, "in_out_of_scope_population": r["id"] in candidate_id_set} for r in find_junk_shaped_entities()
+    ]
+
+    report: dict = {
+        "candidate_count": len(annotated),
+        "candidates_preview": annotated[:40],
+        "protected_count": len(annotated) - len(to_delete_ids),
+        "to_delete_ids": to_delete_ids,
+        "to_delete_count": len(to_delete_ids),
+        "junk_filter_flagged": junk_flagged,
+        "junk_filter_flagged_count": len(junk_flagged),
+    }
+    if not apply or not to_delete_ids:
+        report["deleted_count"] = 0
+        return report
+
+    # Metadata discovery (read-only, no need to share the write transaction below) --
+    # _entity_fk_columns() opens its own connection, so it must run BEFORE the single write
+    # transaction opens, not inside it (that would silently split the delete across two
+    # connections/transactions instead of one).
+    fk_columns = _entity_fk_columns()
+
+    # One transaction: dependent-row cleanup, then the entities themselves.
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        fk_deleted: dict[str, int] = {}
+        for table, column in fk_columns:
+            cur.execute(
+                sql.SQL("DELETE FROM {table} WHERE {column} = ANY(%(ids)s::bigint[])").format(
+                    table=sql.Identifier(table), column=sql.Identifier(column)
+                ),
+                {"ids": to_delete_ids},
+            )
+            fk_deleted[f"{table}.{column}"] = cur.rowcount
+
+        patents_updated = 0
+        # patents.entity_ids (BIGINT[]) is a soft reference to entities.id -- not a declared FK
+        # (an array column can't carry one), found by inspecting every migration for a column
+        # naming entities by id (db/migrations/versions/0018_patents.py). Strips the deleted ids
+        # out of the array; never deletes the patents row itself.
+        if _table_has_column(cur, "patents", "entity_ids"):
+            cur.execute(
+                """
+                UPDATE patents SET entity_ids = (
+                    SELECT COALESCE(array_agg(x), '{}') FROM unnest(entity_ids) AS x
+                    WHERE x <> ALL(%(ids)s::bigint[])
+                )
+                WHERE entity_ids && %(ids)s::bigint[]
+                """,
+                {"ids": to_delete_ids},
+            )
+            patents_updated = cur.rowcount
+
+        cur.execute("DELETE FROM entities WHERE id = ANY(%(ids)s::bigint[])", {"ids": to_delete_ids})
+        deleted_count = cur.rowcount
+
+    report["fk_dependents_deleted"] = fk_deleted
+    report["patents_rows_updated"] = patents_updated
+    report["deleted_count"] = deleted_count
+    return report
+
+
+# --------------------------------------------------------------------------
 # verification (separate connection, per standing rule)
 # --------------------------------------------------------------------------
 
@@ -467,6 +715,7 @@ def verify_all() -> dict:
     item5604 = _fetch_item(TRIAGE_REPAIR_ITEM_ID)
     remaining_events = len(find_out_of_scope_events())
     remaining_tender_dupes = len(find_duplicate_tenders())
+    remaining_out_of_scope_entities = len(find_out_of_scope_only_entities())
 
     return {
         "so_what_remaining_matches": remaining_so_what,
@@ -474,6 +723,7 @@ def verify_all() -> dict:
         "item_5604_consistency": _consistency_snapshot(item5604) if item5604 else None,
         "events_remaining_out_of_scope": remaining_events,
         "tenders_remaining_duplicates": remaining_tender_dupes,
+        "entities_remaining_out_of_scope_only": remaining_out_of_scope_entities,
     }
 
 
@@ -486,7 +736,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument(
         "subcommand",
-        choices=["so_what", "entities", "triage", "events", "tenders", "all"],
+        choices=["so_what", "entities", "triage", "events", "tenders", "entities_cleanup", "all"],
         help="which repair to run",
     )
     ap.add_argument("--apply", action="store_true", help="write the repairs (default: dry run)")
@@ -517,6 +767,8 @@ def main() -> None:
         report["events"] = repair_events(args.apply)
     if args.subcommand in ("tenders", "all"):
         report["tenders"] = repair_tenders(args.apply)
+    if args.subcommand in ("entities_cleanup", "all"):
+        report["entities_cleanup"] = repair_entities_cleanup(args.apply)
 
     report["llm_calls_used"] = budget.used
 

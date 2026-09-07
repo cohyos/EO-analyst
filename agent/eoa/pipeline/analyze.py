@@ -633,13 +633,99 @@ def _with_partial_content_note(item: dict, uncertainty_he: str | None) -> str | 
     )
 
 
+#: Round-6 D3/D9 continuation (docs/qa/loop/round_6_fixes.md, "R6-entities" task 2): entities
+#: extracted from an out-of-scope/archived item pollute both `items.entities_mentioned` and the
+#: `entities` table itself (the live finding: item 22, domain='air_defense' but level='archive',
+#: had AIM-120 AMRAAM/NASAMS/F-16s/Western Partners/Ukraine/Russia written into
+#: entities_mentioned by a *direct* analyze_item/persist_analysis call in the R6-data round --
+#: get_items_for_stage's own analyze-stage scope filter (_ANALYZE_STAGE_SCOPE_FILTER,
+#: eoa.memory.relational) only protects the normal run_analyze sweep, not a targeted per-item
+#: call like scripts/repair_round6.py's). This is that defense-in-depth guard.
+def _entity_persistence_allowed(item: dict) -> bool:
+    """False when `item`'s domain == 'out_of_scope' or level == 'archive' -- persist_analysis
+    must then skip `items.entities_mentioned` and the `entities`/`graph_edges` upserts entirely
+    (every other field it writes is unaffected). A missing/unset domain or level (not yet
+    classified/triaged) is never blocked -- only an explicit 'out_of_scope'/'archive' value is."""
+    return item.get("domain") != "out_of_scope" and item.get("level") != "archive"
+
+
+# --------------------------------------------------------------------------
+# Round-6 D9 continuation ("R6-entities" task 3): a small, conservative, deterministic net for
+# junk entity-name *shapes* observed live in the out-of-scope-entity population
+# (scripts/repair_round6.py's entities_cleanup subcommand), applied at persistence time. Narrower
+# and more conservative than eoa.pipeline.entity_normalize.is_junk_entity (not owned by this
+# round's file list) -- this exists to catch specific shapes that module's technique/generic-
+# concept checks miss: a bare plural of a platform/weapon designation ("F-16s", "M1s"), a generic
+# "who talked" two-word phrase ("Western Partners"), or a wildlife/nature word in a name typed
+# kind='company' ("Western Burrowing Owl", entity 1208). Mirrored as a small local duplicate in
+# eoa.memory.relational (`_is_junk_shaped_entity_name`) rather than imported, per this codebase's
+# convention for a cross-module-boundary helper (e.g. this module's own `_event_dedup_key`
+# mirroring `eoa.report.daily._normalize_event_key`).
+# --------------------------------------------------------------------------
+_PLATFORM_DESIGNATION_PLURAL_RE = re.compile(r"^[A-Z]{1,3}-?\d{1,3}[A-Za-z]?s$")
+_GENERIC_TWO_WORD_STOPLIST = frozenset(
+    {
+        "western partners",
+        "local partners",
+        "industry partners",
+        "defense officials",
+        "government officials",
+    }
+)
+_WILDLIFE_NATURE_WORDS = ("owl", "eagle", "habitat", "wildlife", "conservation")
+
+
+def is_junk_candidate_entity_name(name: str | None, kind: str | None = None) -> bool:
+    """True when `name` should never be persisted as an entity, or into
+    `items.entities_mentioned`, regardless of what upstream extraction produced it -- see the
+    module note above. Deliberately narrow: callers only ever use this to *drop* a fresh candidate
+    before writing, never to reject something already on record."""
+    if not name or not name.strip():
+        return False
+    n = name.strip()
+    if _PLATFORM_DESIGNATION_PLURAL_RE.match(n):
+        return True
+    if n.casefold() in _GENERIC_TWO_WORD_STOPLIST:
+        return True
+    return kind == "company" and any(w in n.casefold() for w in _WILDLIFE_NATURE_WORDS)
+
+
+def _entities_from_persisted_events(event_party_names: list[str], edge_entity_names: list[str]) -> list[str]:
+    """Round-6 D3 continuation ("R6-entities" task 2): order-preserving, deduped union of every
+    event-party name and edge-endpoint name captured during *this* `persist_analysis` call --
+    moved in from `scripts/repair_round6.py`'s original `_entities_from_events` (R6-data round),
+    which discovered live (items 153/290) that `events`/`graph_edges` could already carry real
+    named parties that were never unioned back into `items.entities_mentioned` at all. Unlike the
+    original script-only version, this reads the in-memory events/edges just processed in this
+    same call rather than re-querying the DB. Junk-shaped names (see
+    :func:`is_junk_candidate_entity_name`) are the caller's responsibility to filter."""
+    names: list[str] = []
+    for name in [*event_party_names, *edge_entity_names]:
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
-    """Write summary/so-what/events/edges. Returns (events_written, edges_written)."""
-    entities_backfill = _backfill_entities_from_watchlist(item)
+    """Write summary/so-what/events/edges. Returns (events_written, edges_written).
+
+    Round-6 D3/D9: entity persistence -- `items.entities_mentioned` and the `entities`/
+    `graph_edges` upserts below -- is skipped entirely when `item` is out of scope or archived
+    (see :func:`_entity_persistence_allowed`); every other field this function writes is
+    unaffected."""
+    entity_persistence_ok = _entity_persistence_allowed(item)
+    entities_backfill = _backfill_entities_from_watchlist(item) if entity_persistence_ok else None
     extra_fields: dict[str, Any] = {}
     if entities_backfill:
         log.info("analyze_entities_backfilled", item_id=item["id"], entities=entities_backfill)
         extra_fields["entities_mentioned"] = entities_backfill
+    elif not entity_persistence_ok and item.get("entities_mentioned"):
+        log.info(
+            "analyze_entity_persistence_skipped_out_of_scope",
+            item_id=item["id"],
+            domain=item.get("domain"),
+            level=item.get("level"),
+        )
 
     # --- A13 (מיקוד תעשייה ישראלית, 2026-09-06) -- BEGIN ------------------------------------
     # Refresh eoa.pipeline.israel_focus.israel_relevance() now that entities_mentioned may have
@@ -678,6 +764,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
         **extra_fields,
     )
     n_events = 0
+    persisted_event_party_names: list[str] = []
     for ev in _dedup_events(out.events):
         ev = _reclassify_exercise_kind(ev)
         if _is_narrative_event_title(ev.title, ev):
@@ -709,10 +796,22 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 confidence=ev.confidence,
             )
             n_events += 1
+            persisted_event_party_names.extend(p for p in (event_parties or []) if p)
         except Exception as exc:
             log.warning("event_insert_failed", item_id=item["id"], error=str(exc)[:160])
     n_edges = 0
-    if out.edges:
+    persisted_edge_entity_names: list[str] = []
+    if out.edges and not entity_persistence_ok:
+        # Round-6 D3/D9: the analyzer's own entity/graph-edge upserts are entity persistence --
+        # skipped for an out-of-scope/archived item exactly like items.entities_mentioned above.
+        log.info(
+            "analyze_edges_skipped_out_of_scope",
+            item_id=item["id"],
+            n_edges_candidate=len(out.edges),
+            domain=item.get("domain"),
+            level=item.get("level"),
+        )
+    elif out.edges:
         try:
             from eoa.memory.graph import add_edge, merge_entity
             from eoa.pipeline.entity_normalize import canonical_name_and_kind
@@ -742,8 +841,33 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 merge_entity(dst_id, dst_name, dst_kind, None)
                 add_edge(src_id, dst_id, e.label, item["id"], {"evidence": e.evidence_he[:300]})
                 n_edges += 1
+                persisted_edge_entity_names.extend([src_name, dst_name])
         except Exception as exc:
             log.warning("edge_write_failed", item_id=item["id"], error=str(exc)[:160])
+
+    # Round-6 D3 continuation ("R6-entities" task 2): when neither the LLM's own extraction nor
+    # the watchlist backfill above populated entities_mentioned for an in-scope item, fall back to
+    # the party/edge-endpoint names captured in THIS SAME analyze pass (see
+    # _entities_from_persisted_events) -- moved in from scripts/repair_round6.py's original
+    # _entities_from_events (R6-data). Never runs when entity persistence is blocked (out-of-scope/
+    # archived item), and drops any junk-shaped candidate (_is_junk_candidate_entity_name) so a
+    # bare "F-16s"/"Western Partners" in an event's own parties list never backfills the field.
+    if entity_persistence_ok:
+        existing_entities = extra_fields.get("entities_mentioned") or item.get("entities_mentioned") or []
+        if not existing_entities:
+            fallback_names = [
+                n
+                for n in _entities_from_persisted_events(
+                    persisted_event_party_names, persisted_edge_entity_names
+                )
+                if not is_junk_candidate_entity_name(n)
+            ]
+            if fallback_names:
+                update_item_fields(item["id"], entities_mentioned=fallback_names)
+                log.info(
+                    "analyze_entities_backfilled_from_events", item_id=item["id"], entities=fallback_names
+                )
+
     return n_events, n_edges
 
 

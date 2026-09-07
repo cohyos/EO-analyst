@@ -854,6 +854,43 @@ def _find_case_insensitive_existing_name(name: str) -> str | None:
     return row["name"] if row else None
 
 
+# --------------------------------------------------------------------------
+# Round-6 D9 continuation (docs/qa/loop/round_6_fixes.md, "R6-entities" task 3): a small,
+# conservative, deterministic junk-name-*shape* filter applied at persistence time, kept as a
+# local duplicate of `eoa.pipeline.analyze.is_junk_candidate_entity_name` (not imported -- this
+# module's convention for a cross-module-boundary helper, e.g. `analyze._event_dedup_key`
+# mirroring `report.daily._normalize_event_key`) rather than this round also owning
+# `entity_normalize.py`. Catches junk shapes observed live in the out-of-scope-entity population
+# that `eoa.pipeline.entity_normalize.is_junk_entity`'s broader technique/generic-concept checks
+# miss: a bare plural of a platform/weapon designation ("F-16s"), a generic "who talked" two-word
+# phrase ("Western Partners"), or a wildlife/nature word in a name typed kind='company'
+# ("Western Burrowing Owl", entity 1208).
+# --------------------------------------------------------------------------
+_PLATFORM_DESIGNATION_PLURAL_RE = re.compile(r"^[A-Z]{1,3}-?\d{1,3}[A-Za-z]?s$")
+_GENERIC_TWO_WORD_STOPLIST = frozenset(
+    {
+        "western partners",
+        "local partners",
+        "industry partners",
+        "defense officials",
+        "government officials",
+    }
+)
+_WILDLIFE_NATURE_WORDS = ("owl", "eagle", "habitat", "wildlife", "conservation")
+
+
+def _is_junk_shaped_entity_name(name: str | None, kind: str | None = None) -> bool:
+    """See the module note above. Mirrors `eoa.pipeline.analyze.is_junk_candidate_entity_name`."""
+    if not name or not name.strip():
+        return False
+    n = name.strip()
+    if _PLATFORM_DESIGNATION_PLURAL_RE.match(n):
+        return True
+    if n.casefold() in _GENERIC_TWO_WORD_STOPLIST:
+        return True
+    return kind == "company" and any(w in n.casefold() for w in _WILDLIFE_NATURE_WORDS)
+
+
 def upsert_entity(
     *,
     name: str,
@@ -891,6 +928,9 @@ def upsert_entity(
 
     if is_junk_entity(name):
         log.info("entity.rejected_junk", name=name)
+        return None
+    if _is_junk_shaped_entity_name(name, kind):
+        log.info("entity.rejected_junk_shape", name=name, kind=kind)
         return None
 
     canonical = resolve_canonical(name)
