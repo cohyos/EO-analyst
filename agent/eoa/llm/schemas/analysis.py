@@ -325,6 +325,29 @@ class RelevanceVerdict(BaseModel):
     reason: str = Field(default="", max_length=300, description="one short sentence, Hebrew or English")
 
 
+class FallbackSynthesisOut(BaseModel):
+    """R7-investigations (docs/qa/loop/round_7_fixes.md): job 91's investigation read 10 pages
+    across 4 rounds -- including at least one squarely on-topic page -- but the ReAct loop's
+    per-round step budget (`_act`'s `max_steps`) was consumed by search/read overhead (several
+    security-quarantined and robots.txt-disallowed fetches along the way) before the model ever
+    reached a `finish()` call. `_finalize_outcome`'s "no result" branch then discarded every page
+    summary already gathered and reported a blank, 0-confidence `not_found` -- exactly the
+    "content quality remains not_found ... confidence 0.0" symptom the round-7 judge flagged.
+
+    `_synthesize_from_reads` (`eoa.search.deep_search`) asks the model, tools-less and DATA-framed
+    exactly like `_summarise_page`, to write a `finish`-shaped answer strictly from the page
+    summaries already on hand -- never inventing beyond them. This is intentionally a strict
+    subset of `InvestigationOut`'s own fields (no `outcome` -- the caller always treats a
+    synthesis as `partial` and still runs it through the same `_relevance_gate` as a normal
+    `finish` call, so an off-topic pile of reads, job 86's original failure mode, cannot slip
+    through this fallback path either)."""
+
+    answer_he: str
+    confidence: float = Field(ge=0, le=1, default=0.0)
+    key_facts: list[str] = Field(default_factory=list)
+    contradictions_he: str = ""
+
+
 class ReportSection(BaseModel):
     title_he: str
     domain: str

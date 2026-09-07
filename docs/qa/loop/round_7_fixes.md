@@ -84,9 +84,48 @@ reading each job's `payload`/`result` and every `investigation_log` row, plus th
 
 #### Re-run results (new investigations, cloud chain: claude-sonnet-5 -> gemini-3.1-pro-high -> local)
 
-_See the table appended below once the live re-runs complete -- `EOA_PIPELINE=1`,
-`PYTHONPATH=agent PYTHONUTF8=1 .venv/Scripts/eo.exe investigate "<question>" --item-id <id>`,
-budget: up to 8 full investigations, job 46's is free (short-circuits before touching the cloud)._
+**Critical cross-cutting finding (blocks the local ReAct path, not this round's file ownership):**
+the first re-run attempt used `investigate()` directly (`eo investigate "<question>" --item-id <id>`,
+`EOA_PIPELINE=1` -- exactly this round's brief and the CLI's own `investigate` command). Jobs
+47/48/70/86-91 all produced correctly anchored, well-targeted searches (real confirmation the
+anchor/context fixes above work) but **zero page reads** in every case, each burning the full
+25-38 minute round budget before `stopped_timeout`. Root cause traced to
+`eoa.llm.ollama_client._dispatch_chain` (used whenever `chat()` runs inside the pipeline process
+with a real cloud chain configured for the role -- exactly "investigator" under `EOA_PIPELINE=1`):
+it has no `tools` parameter at all and unconditionally returns `tool_calls=[]`, so
+`_act`'s ReAct loop can never receive a `search`/`read`/`finish` tool call while routed through the
+claude/agy CLI legs of that chain -- only the seeded, non-tool-calling searches built directly in
+Python (`plan_queries`/`_tool_search`, called from `investigate()` itself) ever ran. This is out of
+this round's file ownership (`agent/eoa/llm/ollama_client.py`); flagged as a follow-up task
+(`task_97febb55`). Historical job 91 (which DID read 10 pages via `_act`) most likely ran before
+"investigator" was configured with this cloud chain, or with `EOA_PIPELINE` unset, landing on the
+tool-calling-capable local Ollama leg instead.
+
+**Second attempt, pivoted to `investigate_batch_cloud`** (already in this round's owned file,
+purpose-built for exactly this situation -- hands the question to the CLI's own native
+`--allowedTools WebSearch,WebFetch` instead of the custom tool-calling contract the dispatch path
+cannot carry): re-ran the same 4 real questions (item title/entities/summary passed as `context_he`/
+`entities`, matching what `_fallback_item_context` would supply) in ONE combined `claude` CLI call,
+~4 minutes total. Every one succeeded, with accurate, well-sourced, honest answers:
+
+| Question (item) | Old outcome / confidence | New job id | New outcome / confidence | Sources | 2-line summary |
+|---|---|---|---|---|---|
+| job 47 -- item 10, AeroVironment $465M laser contract | not_found / 0.1 | 137 | **found** / **0.9** | 8 | Confirmed: Sep 2, 2026 US Army OTA with AeroVironment, $464.8M, for the Enduring-High Energy Laser (E-HEL) production line -- the Army's first-ever HEL production contract. Fielded system is AV's LOCUST X3 (from the 2025 BlueHalo acquisition), 20-35+ kW, platform-agnostic. |
+| job 48 -- item 44, AARGM-ER unit price / losing bidders | not_found / 0.1 | 138 | **partial** / **0.78** | 10 | Honestly confirms the unit price was never published (Japan's FY2027 request is an "unpriced item request" for the AGM-88G AARGM-ER, ~$55.6B total budget); reports what IS public (JASDF chief Gen. Morita's remarks, F-35A/B integration) without inventing a number or bidders. |
+| job 70 -- item 81, Norkin/Anduril appointment | not_found / 0.0 | 139 | **partial** / **0.7** | 6 | Correctly identifies the appointee (Amikam Norkin, former IAF commander -- and flags the item title's own "Amiram" as likely garbled) and names an actual other candidate, Amir Abulafia (former IDF Planning Directorate head), per Globes reporting. |
+| job 86/91 -- item 1352, Reaper successor (MMA) | found/0.9 off-topic (86) then not_found/0.0 (91) | 140 | **found** / **0.85** | 9 | Confirmed on-topic: DIU's Massed Modular Aircraft Commercial Solutions Opening (PROJ00626, opened 2026-07-07, closed 2026-07-23), USAF as operational customer, target ~$10M/unit vs. Reaper's $30-50M, via Prototype OTA. |
+
+Bonus: the batch call's `cross_insights_he` correctly connected jobs 47 and 86/91 as two sides of
+the same 2026 acquisition-speed trend (cheap mass offense via MMA vs. cheap-per-kill-cost defense
+via E-HEL, both moving through OTA/DIU CSO fast-acquisition tracks instead of traditional FAR).
+
+Job 46 (new job id 130) re-ran via `investigate()` directly (free, no cloud call needed): confirmed
+`insufficient_context`/confidence 0.0 with the honest degenerate-question message in 0.1s, exactly
+as designed -- see the diagnosis table above.
+
+Cloud-call budget used: 1 batch call (job46 needed none) + the 4 earlier `investigate()` attempts
+that hit the tool-calling gap (their searches still ran, at real cloud-call cost, before timing
+out) = well within the round's "at most 8 full investigations" budget.
 
 ### R7-tenders status
 
