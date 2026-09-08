@@ -62,11 +62,18 @@ def http_get_json(
     params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    include_headers: bool = False,
 ) -> dict[str, Any]:
-    """GET `url`, return `{"status": int, "json": <parsed body or None>, "text": <raw body>}`."""
+    """GET `url`, return `{"status": int, "json": <parsed body or None>, "text": <raw body>}`.
+
+    ``include_headers`` (additive, default ``False`` so every existing caller/test keeps its exact
+    prior output shape unchanged): when set, the result also carries ``"headers"`` -- a plain
+    ``dict`` of the response's own headers (lower-cased keys, per ``httpx``'s own normalization).
+    Added for EPO OPS's ``X-Throttling-Control``/quota headers (``eoa.mcp_servers.patents``); any
+    other caller is free to opt in the same way."""
     hdrs = {"Accept": "application/json", "User-Agent": USER_AGENT, **(headers or {})}
     resp = _request("GET", url, params=params, headers=hdrs, timeout_s=timeout_s)
-    return _parse_response(resp)
+    return _parse_response(resp, include_headers=include_headers)
 
 
 def http_post_json(
@@ -159,14 +166,17 @@ def _request(
         raise FetchError(redact_secrets(str(exc))[:2000]) from exc
 
 
-def _parse_response(resp: httpx.Response) -> dict[str, Any]:
+def _parse_response(resp: httpx.Response, *, include_headers: bool = False) -> dict[str, Any]:
     body: Any = None
     try:
         body = resp.json()
     except (json.JSONDecodeError, ValueError):
         body = None
     text = None if body is not None else redact_secrets(resp.text[:4000])
-    return {"status": resp.status_code, "json": body, "text": text}
+    out: dict[str, Any] = {"status": resp.status_code, "json": body, "text": text}
+    if include_headers:
+        out["headers"] = dict(resp.headers)
+    return out
 
 
 def truncate_list(items: list[Any], limit: int) -> list[Any]:

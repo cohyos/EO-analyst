@@ -13,11 +13,13 @@ from unittest.mock import patch
 
 from eoa.patents.models import PatentRecord
 from eoa.patents.scan import (
+    PatentScanStats,
     WatchTopic,
     _assignee_candidates_in_text,
     _clean_search_title,
     _extract_pub_number,
     _google_patents_records,
+    _ingest_records,
     _within_window,
     first_run_since_days,
     load_assignees,
@@ -104,6 +106,63 @@ class TestWithinWindow:
     def test_old_record_outside_window(self):
         rec = PatentRecord(pub_number="US1", publication_date=dt.date(2020, 1, 1))
         assert _within_window(rec, since_days=30, today=dt.date(2026, 9, 6)) is False
+
+
+class TestIngestRecordsApplyWindow:
+    """2026-09-08 regression found live: EPO OPS biblio enrichment gives a hit a real (often
+    years-old) ``publication_date`` for the first time -- before enrichment existed, every EPO
+    record here carried no date at all, so ``_within_window``'s own "no date -> never filtered"
+    rule silently exempted every EPO hit from age filtering. Once enrichment started setting a real
+    date, the *enriched*, highest-quality hits started being the ones age-filtered out, while the
+    un-enriched, title-less hits for the very same patents sailed through unfiltered -- exactly
+    backwards. ``apply_window=False`` (used by the assignee-scan loop, which builds a company's
+    portfolio rather than tracking novelty) is the fix; these tests pin both directions."""
+
+    def test_apply_window_true_drops_old_dated_record(self):
+        stats = PatentScanStats()
+        old = PatentRecord(pub_number="US1", title="old", publication_date=dt.date(2015, 1, 1))
+        with patch("eoa.patents.scan._patent_exists", return_value=False), patch(
+            "eoa.patents.scan._insert_patent", return_value=1
+        ):
+            _ingest_records([old], [], 30, dt.date(2026, 9, 8), set(), stats, apply_window=True)
+        assert stats.inserted == 0
+        assert stats.records_fetched == 0
+
+    def test_apply_window_false_keeps_old_dated_record(self):
+        stats = PatentScanStats()
+        old = PatentRecord(pub_number="US1", title="old", publication_date=dt.date(2015, 1, 1))
+        with patch("eoa.patents.scan._patent_exists", return_value=False), patch(
+            "eoa.patents.scan._insert_patent", return_value=1
+        ):
+            _ingest_records([old], [], 30, dt.date(2026, 9, 8), set(), stats, apply_window=False)
+        assert stats.inserted == 1
+        assert stats.records_fetched == 1
+
+    def test_apply_window_defaults_to_true(self):
+        """Default unchanged from before this parameter existed -- the topic-scan loop's own call
+        site does not pass ``apply_window`` at all."""
+        stats = PatentScanStats()
+        old = PatentRecord(pub_number="US1", title="old", publication_date=dt.date(2015, 1, 1))
+        with patch("eoa.patents.scan._patent_exists", return_value=False), patch(
+            "eoa.patents.scan._insert_patent", return_value=1
+        ):
+            _ingest_records([old], [], 30, dt.date(2026, 9, 8), set(), stats)
+        assert stats.inserted == 0
+
+    def test_assignee_loop_ingests_with_apply_window_false(self):
+        """Integration-level pin on scan_patents itself: an old-dated record surfacing from the
+        *assignee* loop is inserted; the identical record surfacing from the *topic* loop is not."""
+        old = PatentRecord(pub_number="US_OLD_1", title="old", publication_date=dt.date(2015, 1, 1))
+
+        with (
+            patch("eoa.patents.scan._structured_sources_available", return_value=False),
+            patch("eoa.patents.scan._any_patents_exist", return_value=True),
+            patch("eoa.patents.scan._patent_exists", return_value=False),
+            patch("eoa.patents.scan._insert_patent", return_value=1),
+            patch("eoa.patents.scan._records_for_query", return_value=[old]),
+        ):
+            stats = scan_patents(topics=[], assignees=["Elbit"], since_days=30)
+        assert stats.inserted == 1
 
 
 class TestGooglePatentsRecords:
@@ -374,7 +433,7 @@ class TestScanPatentsOrchestration:
         topic_rec = PatentRecord(pub_number="US1", title="t")
         assignee_rec = PatentRecord(pub_number="US2", title="t2")
 
-        def side_effect(query, *, assignee, structured_ok):
+        def side_effect(query, *, assignee, structured_ok, epo_keywords=None):
             return [assignee_rec] if assignee else [topic_rec]
 
         with (
@@ -421,3 +480,51 @@ class TestScanPatentsOrchestration:
                 )
         assert stats.queries_failed == 1
         assert stats.topics_scanned == 1
+
+    def test_max_inserted_stops_further_queries_once_reached(self):
+        """One record per topic query, three topics, ``max_inserted=2`` -- the scan stops issuing
+        further queries once the cap is reached, so only the first two topics are ever scanned (the
+        third query is never even attempted)."""
+        calls: list[str] = []
+
+        def side_effect(query, **kwargs):
+            calls.append(query)
+            return [PatentRecord(pub_number=f"US{query}", title="t")]
+
+        with (
+            patch("eoa.patents.scan._structured_sources_available", return_value=False),
+            patch("eoa.patents.scan._any_patents_exist", return_value=True),
+            patch("eoa.patents.scan._patent_exists", return_value=False),
+            patch("eoa.patents.scan._insert_patent", return_value=1),
+            patch("eoa.patents.scan._records_for_query", side_effect=side_effect),
+        ):
+            stats = scan_patents(
+                topics=[
+                    WatchTopic(name_he="a", query="a"),
+                    WatchTopic(name_he="b", query="b"),
+                    WatchTopic(name_he="c", query="c"),
+                ],
+                assignees=[],
+                since_days=30,
+                max_inserted=2,
+            )
+        assert stats.inserted == 2
+        assert calls == ["a", "b"]
+
+    def test_max_inserted_none_is_unbounded_default(self):
+        with (
+            patch("eoa.patents.scan._structured_sources_available", return_value=False),
+            patch("eoa.patents.scan._any_patents_exist", return_value=True),
+            patch("eoa.patents.scan._patent_exists", return_value=False),
+            patch("eoa.patents.scan._insert_patent", return_value=1),
+            patch(
+                "eoa.patents.scan._records_for_query",
+                side_effect=lambda query, **kw: [PatentRecord(pub_number=f"US{query}", title="t")],
+            ),
+        ):
+            stats = scan_patents(
+                topics=[WatchTopic(name_he="a", query="a"), WatchTopic(name_he="b", query="b")],
+                assignees=[],
+                since_days=30,
+            )
+        assert stats.inserted == 2

@@ -155,19 +155,82 @@ def _epo_token_value() -> str | None:
     return _epo_token
 
 
+# --------------------------------------------------------------------------
+# EPO OPS throttling (X-Throttling-Control) -- verified live 2026-09-08: a real response header
+# looks like ``"busy (images=green:100, inpadoc=green:45, other=green:1000, retrieval=green:100,
+# search=green:15)"`` -- one ``service=color:value`` triple per OPS-internal service. OPS's own
+# fair-use escalation ladder is green (no restriction) -> yellow/amber (approaching the per-minute
+# cap) -> red (very close) -> black (blocked for a period OPS does not itself disclose in the
+# header). This module tracks the most-recently-seen color per service and adds a short courtesy
+# delay before the *next* call to that service when it was not green -- a best-effort avoidance of
+# predictably tripping the real limit, not a substitute for it: the authoritative enforcement is
+# still whatever HTTP status/quota headers OPS itself returns, and this module never loops or
+# retries on its own account.
+# --------------------------------------------------------------------------
+
+_THROTTLE_SERVICE_RE = re.compile(r"(\w+)=(\w+):(\d+)")
+_THROTTLE_BACKOFF_S = {"green": 0.0, "yellow": 2.0, "amber": 2.0, "red": 8.0, "black": 60.0}
+
+_epo_throttle_lock = threading.Lock()
+_epo_throttle_state: dict[str, str] = {}  # service name -> last-seen color
+
+
+def _parse_throttling_control(header_value: str) -> dict[str, str]:
+    """``"busy (search=green:15, retrieval=green:100, ...)"`` -> ``{"search": "green", ...}``.
+    Tolerant of a missing/malformed header -- returns ``{}`` rather than raising."""
+    return {m.group(1): m.group(2) for m in _THROTTLE_SERVICE_RE.finditer(header_value or "")}
+
+
+def _record_throttle_state(headers: dict[str, str] | None) -> None:
+    """Update the module's last-seen-color-per-service from one response's headers (case-insensitive
+    key lookup -- ``httpx`` normalizes to lower-case, but a test-supplied fixture may not)."""
+    if not headers:
+        return
+    raw = headers.get("x-throttling-control") or headers.get("X-Throttling-Control")
+    if not raw:
+        return
+    with _epo_throttle_lock:
+        _epo_throttle_state.update(_parse_throttling_control(raw))
+
+
+def _epo_throttle_wait(service: str) -> None:
+    with _epo_throttle_lock:
+        color = _epo_throttle_state.get(service, "green")
+    delay = _THROTTLE_BACKOFF_S.get(color, 0.0)
+    if delay:
+        log.debug("epo_ops_throttled", service=service, color=color, delay_s=delay)
+        _sleep(delay)
+
+
 @mcp.tool()
 def epo_ops_search(query: str, limit: int = 20) -> str:
-    """EPO Open Patent Services published-data search (CQL query syntax, e.g.
-    ``'ti=\"night vision\" AND pd within \"2023-2026\"'``). Requires ``EPO_OPS_KEY``/
-    ``EPO_OPS_SECRET`` (OAuth2 client-credentials app, free registration at ops.epo.org)."""
+    """EPO Open Patent Services published-data search (CQL query syntax). Requires
+    ``EPO_OPS_KEY``/``EPO_OPS_SECRET`` (OAuth2 client-credentials app, free registration at
+    ops.epo.org). Prefer :func:`build_epo_query` over hand-writing ``query`` -- CQL has a few
+    live-verified quoting quirks (see that function's docstring): a quoted phrase whose value
+    contains a hyphen (``ti=\"electro-optical\"``) 404s as "no results" even when the identical
+    *unquoted* term (``ti=electro-optical``) matches real documents, while an *unquoted* multi-word
+    value (``pa=elbit systems``) silently drops every word after the first rather than erroring.
+    Known-good field prefixes: ``pa=`` (applicant), ``ti=``/``ab=``/``ta=`` (title / abstract /
+    title+abstract combined), ``cpc=``/``ipc=`` (classification prefix, case-insensitive),
+    ``and``/``or``/parenthesised groups. A syntactically valid query with zero matches and a
+    malformed-query 404 are indistinguishable in OPS's own response (both
+    ``SERVER.EntityNotFound``/"No results found") -- this function reports either as
+    ``{"total_result_count": 0, "results": []}``, never as an error, since a real caller cannot
+    tell them apart from the response alone either."""
     token = _epo_token_value()
     if token is None:
         return not_configured("EPO_OPS_KEY", "EPO_OPS_SECRET")
+    _epo_throttle_wait("search")
     resp = http_get_json(
         EPO_OPS_SEARCH_URL,
         params={"q": query, "Range": f"1-{max(1, min(limit, 100))}"},
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        include_headers=True,
     )
+    _record_throttle_state(resp.get("headers"))
+    if resp["status"] == 404:
+        return json_out({"total_result_count": 0, "results": []})
     if resp["status"] != 200:
         return json_out({"error": f"EPO OPS returned HTTP {resp['status']}", "body": resp.get("text")})
     return json_out(_extract_epo_results(resp["json"] or {}))
@@ -206,6 +269,356 @@ def _extract_epo_results(data: dict[str, Any]) -> dict[str, Any]:
         return {"total_result_count": total, "results": docs}
     except (KeyError, TypeError):
         return {"total_result_count": None, "results": [], "raw": data}
+
+
+# --------------------------------------------------------------------------
+# EPO OPS CQL query construction -- live-verified 2026-09-08 against applicant "Elbit Systems" x
+# keywords (electro-optical, payload, gimbal, infrared); see docs/qa/content_review/PATENTS-OPS.md
+# for the full verification session. Findings that drive :func:`_cql_term`/:func:`build_epo_query`:
+#
+#   pa="Elbit Systems" and ti=optical    -> 200, 42 hits  (multi-word applicant phrase, quoted)
+#   pa=elbit and ta=infrared             -> 200, 9 hits   (single word, unquoted)
+#   pa=elbit and ta=electro-optical      -> 200, 2 hits   (hyphenated compound, left UNQUOTED)
+#   pa=elbit and ti="electro-optical"    -> 404 "No results found" -- quoting a hyphenated value is
+#                                            a real OPS CQL parser quirk, not a genuine zero-match:
+#                                            the identical term unquoted (previous row) matches.
+#                                            This is the task brief's "naive query returned No
+#                                            results" bug, isolated to its precise trigger.
+#   pa=elbit systems and ta=infrared     -> 200, 9 hits   -- the SAME total as `pa=elbit` alone: an
+#                                            unquoted multi-word value silently drops every word
+#                                            after the first instead of erroring, so this form
+#                                            looks like it "works" while quietly ignoring "systems".
+#   pa=elbit and ta=(electro-optical or gimbal or payload)  -> 200, 6 hits (parenthesised OR group)
+#   pa=elbit and cpc=G02B27              -> 200, 97 hits  (bare class/subclass/main-group prefix,
+#                                            case-insensitive; ipc= behaves the same way)
+#
+# Net rule: quote a value if and only if it is multi-word AND contains no hyphen; a hyphenated
+# value is always left bare, regardless of word count.
+# --------------------------------------------------------------------------
+
+
+def _cql_term(value: str) -> str:
+    """One CQL field value, quoted/unquoted per the live-verified rule above. A value containing a
+    hyphen is always left unquoted (quoting it 404s as a spurious "No results"); a non-hyphenated
+    multi-word value is always quoted as an exact phrase (left unquoted, OPS silently drops every
+    word after the first); a single word needs no quoting either way."""
+    value = value.strip()
+    if not value or "-" in value:
+        return value
+    if " " in value:
+        return f'"{value}"'
+    return value
+
+
+def build_epo_query(*, applicant: str = "", keywords: list[str] | None = None, cpc: str = "", field: str = "ta") -> str:
+    """Build one CQL query string for :func:`epo_ops_search` from structured parts, applying
+    :func:`_cql_term`'s quoting rule to every value so a caller never has to hand-write CQL (or
+    rediscover its quoting quirks). ``applicant`` -> ``pa=``; ``keywords`` -> ``field=`` (default
+    ``ta``, title+abstract combined) -- OR-ed together in one parenthesised group when there is more
+    than one; ``cpc`` -> ``cpc=`` (a class/subclass/main-group prefix, non-alphanumeric characters
+    stripped, upper-cased). Every part is optional and simply omitted when empty; present parts are
+    AND-ed. Returns ``""`` if nothing was supplied (never a bare ``"and and"``)."""
+    clauses: list[str] = []
+    if applicant.strip():
+        clauses.append(f"pa={_cql_term(applicant)}")
+    kw_terms = [_cql_term(k) for k in (keywords or []) if k and k.strip()]
+    if len(kw_terms) == 1:
+        clauses.append(f"{field}={kw_terms[0]}")
+    elif kw_terms:
+        clauses.append(f"{field}=({' or '.join(kw_terms)})")
+    if cpc.strip():
+        code = re.sub(r"[^A-Za-z0-9/]", "", cpc).upper()
+        clauses.append(f"cpc={code}")
+    return " and ".join(clauses)
+
+
+# --------------------------------------------------------------------------
+# EPO OPS biblio (per-publication title/abstract/applicants/CPC/IPC/dates/family) -- verified live
+# 2026-09-08 against US2024220012A1 (docs/qa/content_review/PATENTS-OPS.md carries the full
+# response). The task brief's ask ("fetch biblio for the top hits") needs a second call per
+# publication beyond the search endpoint, which only returns bare country/doc-number/kind refs.
+# --------------------------------------------------------------------------
+
+EPO_OPS_BIBLIO_URL_TMPL = (
+    "https://ops.epo.org/3.2/rest-services/published-data/publication/docdb/{cc}.{num}.{kind}/biblio"
+)
+
+#: A compact pub_number like "US2024220012A1" -> ("US", "2024220012", "A1"). Verified live
+#: 2026-09-08: the *docdb* number form (dot-separated country.doc-number.kind) reliably resolves on
+#: this endpoint; the same number in bare ``epodoc`` form with its kind letter glued on
+#: (``US20250199318A1``) 404s even though the docdb form of the identical publication
+#: (``US.20250199318.A1``) returns 200 -- so this module always builds the docdb form.
+_PUB_NUMBER_RE = re.compile(r"^([A-Za-z]{2})(\d+)([A-Za-z]\d*)?$")
+
+
+def _pub_number_to_docdb(pub_number: str) -> tuple[str, str, str] | None:
+    m = _PUB_NUMBER_RE.match((pub_number or "").strip().replace(" ", ""))
+    if not m:
+        return None
+    country, num, kind = m.group(1).upper(), m.group(2), (m.group(3) or "").upper()
+    return country, num, kind or "A"  # OPS's docdb path segment always needs *some* kind; "A" is
+    # the common default for a number that was stored/typed without one.
+
+
+def _as_list(value: Any) -> list[Any]:
+    """OPS's XML->JSON conversion collapses a single child to a bare object and multiple children
+    to a list -- this normalizes either shape (and ``None``) to a list, so every reader below can
+    iterate uniformly."""
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _ops_text(node: Any) -> str | None:
+    """OPS's ``{"$": "value", ...attrs}`` leaf shape -> the plain string (``None`` if absent/blank).
+    Also accepts a bare string, for callers that already unwrapped one level."""
+    if isinstance(node, dict):
+        v = node.get("$")
+        return str(v).strip() if v not in (None, "") else None
+    if isinstance(node, str):
+        return node.strip() or None
+    return None
+
+
+def _ops_date(node: Any) -> dt.date | None:
+    raw = _ops_text(node)
+    if not raw or len(raw) != 8 or not raw.isdigit():
+        return None
+    try:
+        return dt.date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+    except ValueError:
+        return None
+
+
+def _extract_party_names(party_block: dict[str, Any] | None, role_key: str, name_key: str) -> list[str]:
+    """``parties.applicants.applicant`` (or ``.inventors.inventor``) -> deduped display names
+    (case-insensitively), preferring the ``@data-format == "epodoc"`` entries -- OPS's own
+    normalized form (e.g. ``"ELBIT SYSTEMS LTD [IL]"``) -- and falling back to whatever is present
+    when no epodoc-format entry exists."""
+    if not party_block:
+        return []
+    entries = [e for e in _as_list(party_block.get(role_key)) if isinstance(e, dict)]
+    epodoc = [e for e in entries if e.get("@data-format") == "epodoc"]
+    chosen = epodoc or entries
+    out: list[str] = []
+    seen: set[str] = set()
+    for e in chosen:
+        name = _ops_text((e.get(name_key) or {}).get("name"))
+        if name and name.casefold() not in seen:
+            seen.add(name.casefold())
+            out.append(name)
+    return out
+
+
+def _extract_cpc_codes(bib: dict[str, Any]) -> list[str]:
+    """``patent-classifications.patent-classification`` -> compact ``"G02B27/0093"``-style codes
+    (section+class+subclass+main-group, ``/``subgroup), deduped, order preserved."""
+    entries = _as_list((bib.get("patent-classifications") or {}).get("patent-classification"))
+    out: list[str] = []
+    seen: set[str] = set()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        section = _ops_text(e.get("section")) or ""
+        cls = _ops_text(e.get("class")) or ""
+        subclass = _ops_text(e.get("subclass")) or ""
+        main = _ops_text(e.get("main-group")) or ""
+        sub = _ops_text(e.get("subgroup")) or ""
+        if not (section and cls and subclass and main):
+            continue
+        code = f"{section}{cls}{subclass}{main}" + (f"/{sub}" if sub else "")
+        if code not in seen:
+            seen.add(code)
+            out.append(code)
+    return out
+
+
+_IPC_COMPACT_RE = re.compile(r"^([A-Z]\d{2}[A-Z]\d+/\d+)")
+
+
+def _extract_ipc_codes(bib: dict[str, Any]) -> list[str]:
+    """``classifications-ipcr.classification-ipcr`` -- OPS gives raw fixed-width IPC text (e.g.
+    ``"G02B  27/    01            A I"``); collapsed to the compact ``"G02B27/01"`` form."""
+    entries = _as_list((bib.get("classifications-ipcr") or {}).get("classification-ipcr"))
+    out: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        raw = _ops_text(e.get("text"))
+        if not raw:
+            continue
+        compact = re.sub(r"\s+", "", raw)
+        m = _IPC_COMPACT_RE.match(compact)
+        if m and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
+def _extract_title(bib: dict[str, Any]) -> str:
+    """``invention-title`` -- a bare object for one language, a list for several. Prefers English,
+    falls back to the first language present."""
+    entries = [t for t in _as_list(bib.get("invention-title")) if isinstance(t, dict)]
+    for t in entries:
+        if t.get("@lang") == "en":
+            return _ops_text(t) or ""
+    for t in entries:
+        val = _ops_text(t)
+        if val:
+            return val
+    return ""
+
+
+def _extract_abstract(doc: dict[str, Any]) -> str:
+    """``abstract`` -- a bare object for one language, a list for several; each carries one or more
+    ``p`` paragraphs. Prefers English, falls back to the first language present, joins multiple
+    paragraphs with a single space."""
+
+    def _paragraphs(a: dict[str, Any]) -> str:
+        parts = [_ops_text(p) for p in _as_list(a.get("p"))]
+        return " ".join(p for p in parts if p)
+
+    entries = [a for a in _as_list(doc.get("abstract")) if isinstance(a, dict)]
+    for a in entries:
+        if a.get("@lang") == "en":
+            text = _paragraphs(a)
+            if text:
+                return text
+    for a in entries:
+        text = _paragraphs(a)
+        if text:
+            return text
+    return ""
+
+
+def _extract_epo_biblio(data: dict[str, Any], *, fallback_pub_number: str = "") -> dict[str, Any]:
+    """One EPO OPS biblio response (:func:`epo_ops_biblio`) -> the provider-neutral row shape
+    ``eoa.patents.scan`` turns into a :class:`PatentRecord` -- deliberately the same key set
+    :func:`normalize_odp_record` emits, plus EPO-native ``applicants``/``family_id``/``ipc``, so a
+    caller can treat an EPO- and an ODP-sourced biblio record almost interchangeably. Tolerant of a
+    missing/renamed branch (returns an all-empty shape rather than raising) -- the exact shape is
+    deeply nested and only verified against the handful of live documents this project has actually
+    fetched (docs/qa/content_review/PATENTS-OPS.md)."""
+    empty = {
+        "pub_number": fallback_pub_number or None,
+        "kind": None,
+        "country": None,
+        "title": "",
+        "abstract": "",
+        "applicants": [],
+        "assignees": [],
+        "inventors": [],
+        "cpc": [],
+        "ipc": [],
+        "family_id": None,
+        "application_number": None,
+        "priority_date": None,
+        "filing_date": None,
+        "publication_date": None,
+        "url": None,
+    }
+    try:
+        raw_doc = data["ops:world-patent-data"]["exchange-documents"]["exchange-document"]
+    except (KeyError, TypeError):
+        return empty
+    docs = [d for d in _as_list(raw_doc) if isinstance(d, dict)]
+    if not docs:
+        return empty
+    doc = docs[0]
+
+    country = doc.get("@country")
+    doc_number = doc.get("@doc-number")
+    kind = doc.get("@kind")
+    family_id = doc.get("@family-id")
+    pub_number = (f"{country or ''}{doc_number or ''}{kind or ''}" or "").strip() or fallback_pub_number or None
+
+    bib = doc.get("bibliographic-data") or {}
+    if not isinstance(bib, dict):
+        bib = {}
+    parties = bib.get("parties") or {}
+    applicants = _extract_party_names(parties.get("applicants"), "applicant", "applicant-name")
+    inventors = _extract_party_names(parties.get("inventors"), "inventor", "inventor-name")
+
+    publication_date = None
+    for d in _as_list((bib.get("publication-reference") or {}).get("document-id")):
+        if isinstance(d, dict) and d.get("@document-id-type") == "docdb":
+            publication_date = _ops_date(d.get("date"))
+            break
+
+    application_number = None
+    filing_date = None
+    app_doc_ids = [d for d in _as_list((bib.get("application-reference") or {}).get("document-id")) if isinstance(d, dict)]
+    for d in app_doc_ids:
+        if d.get("@document-id-type") == "epodoc":
+            application_number = _ops_text(d.get("doc-number"))
+            filing_date = _ops_date(d.get("date"))
+            break
+    if application_number is None and app_doc_ids:
+        application_number = _ops_text(app_doc_ids[0].get("doc-number"))
+        filing_date = filing_date or _ops_date(app_doc_ids[0].get("date"))
+
+    priority_date = None
+    for claim in _as_list((bib.get("priority-claims") or {}).get("priority-claim")):
+        if not isinstance(claim, dict):
+            continue
+        for d in _as_list(claim.get("document-id")):
+            if not isinstance(d, dict):
+                continue
+            candidate = _ops_date(d.get("date"))
+            if candidate and (priority_date is None or candidate < priority_date):
+                priority_date = candidate
+
+    return {
+        "pub_number": pub_number,
+        "kind": kind,
+        "country": country,
+        "title": _extract_title(bib),
+        "abstract": _extract_abstract(doc),
+        "applicants": applicants,
+        # EPO OPS's "parties" model has no separate assignee concept -- the applicant is the
+        # closest OPS equivalent -- so it is also exposed under "assignees" (matching
+        # normalize_odp_record's key) for a caller that reads either provider's rows uniformly.
+        "assignees": applicants,
+        "inventors": inventors,
+        "cpc": _extract_cpc_codes(bib),
+        "ipc": _extract_ipc_codes(bib),
+        "family_id": family_id,
+        "application_number": application_number,
+        "priority_date": priority_date,
+        "filing_date": filing_date,
+        "publication_date": publication_date,
+        "url": _google_patents_url(pub_number) if pub_number else None,
+    }
+
+
+@mcp.tool()
+def epo_ops_biblio(pub_number: str) -> str:
+    """EPO OPS bibliographic detail for one publication (``pub_number`` in compact form, e.g.
+    ``"US2024220012A1"`` -- the same shape :func:`epo_ops_search`'s own results and
+    :func:`uspto_odp_search`'s ``pub_number`` use). Returns ``{"pub_number", "kind", "country",
+    "title", "abstract", "applicants", "assignees", "inventors", "cpc", "ipc", "family_id",
+    "application_number", "priority_date", "filing_date", "publication_date", "url"}`` -- any field
+    the response did not carry is ``None``/``[]``/``""``, never guessed. Requires
+    ``EPO_OPS_KEY``/``EPO_OPS_SECRET``."""
+    token = _epo_token_value()
+    if token is None:
+        return not_configured("EPO_OPS_KEY", "EPO_OPS_SECRET")
+    parsed = _pub_number_to_docdb(pub_number)
+    if parsed is None:
+        return json_out({"error": f"unrecognized pub_number format: {pub_number!r}"})
+    country, num, kind = parsed
+    url = EPO_OPS_BIBLIO_URL_TMPL.format(cc=country, num=num, kind=kind)
+    _epo_throttle_wait("retrieval")
+    resp = http_get_json(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        include_headers=True,
+    )
+    _record_throttle_state(resp.get("headers"))
+    if resp["status"] == 404:
+        return json_out({"error": "not_found", "pub_number": pub_number})
+    if resp["status"] != 200:
+        return json_out({"error": f"EPO OPS returned HTTP {resp['status']}", "body": resp.get("text")})
+    return json_out(_extract_epo_biblio(resp["json"] or {}, fallback_pub_number=pub_number))
 
 
 # --------------------------------------------------------------------------

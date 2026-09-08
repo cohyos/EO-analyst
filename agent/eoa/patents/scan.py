@@ -2,12 +2,17 @@
 
 For each configured watch topic (``config/patents.yaml``'s ``watch_topics``) and each configured
 assignee (``assignees``): query EPO OPS / USPTO ODP **in-process** (importing the tool functions
-straight out of ``eoa.mcp_servers.patents`` rather than spawning the stdio server -- both keys are
-unconfigured on this machine, so those calls degrade to ``not_configured`` and this always falls
-through to the second path) via the module's own SSRF-guarded ``_common`` HTTP helpers, else the
+straight out of ``eoa.mcp_servers.patents`` rather than spawning the stdio server) via the
+module's own SSRF-guarded ``_common`` HTTP helpers. ``EPO_OPS_KEY``/``EPO_OPS_SECRET`` are
+configured and verified live as of 2026-09-08 (docs/qa/content_review/PATENTS-OPS.md) -- EPO OPS
+is therefore the primary structured source; a topic/assignee query only ever falls through to the
 keyless Google Patents search fallback (``eoa.search.provider``, ``site:patents.google.com
-<query>``), parsing each hit's URL for a publication number and its title/snippet for an assignee
-(via ``eoa.pipeline.entity_normalize``'s watchlist alias matching -- "assignee if present").
+<query>``) when neither EPO OPS nor USPTO ODP is configured, or when a configured provider's own
+call for that specific query returned nothing. The fallback parses each hit's URL for a
+publication number and its title/snippet for an assignee (via
+``eoa.pipeline.entity_normalize``'s watchlist alias matching -- "assignee if present"); EPO OPS's
+own top hits are additionally enriched with a per-hit biblio fetch (see :func:`_epo_records`) for
+real title/abstract/applicants/CPC/dates/family_id, not just a bare publication reference.
 
 Records are deduped by ``pub_number`` (``ON CONFLICT ... DO NOTHING`` -- a repeat scan hit never
 duplicates a row) and, best-effort, by ``family_id`` when both sides carry one. Window: the first
@@ -49,6 +54,13 @@ DEFAULT_FIRST_RUN_SINCE_DAYS = 90
 _SUBSEQUENT_SCAN_SINCE_DAYS = 21
 
 _GOOGLE_PATENTS_URL_RE = re.compile(r"patents\.google\.com/patent/([A-Za-z]{2}[A-Za-z0-9]+)")
+
+#: Per-assignee scan's keyword set (2026-09-08, replacing the old bare free-text string
+#: ``f"{assignee} electro-optical infrared imaging patent"`` -- which was never restricted to the
+#: assignee as an actual applicant on any provider, and the trailing "patent" was pure noise).
+#: These are also the exact keywords the task's own live-verification round used against applicant
+#: "Elbit Systems" -- docs/qa/content_review/PATENTS-OPS.md.
+_ASSIGNEE_SCAN_KEYWORDS = ["electro-optical", "infrared", "gimbal", "payload"]
 
 
 class WatchTopic(BaseModel):
@@ -104,16 +116,28 @@ def _structured_sources_available() -> bool:
     )
 
 
-def _epo_records(query: str, limit: int) -> list[PatentRecord]:
-    """EPO OPS published-data search, parsed into minimal :class:`PatentRecord` rows.
+#: EPO OPS's "retrieval" fair-use quota is separate from -- and, per its own throttling headers,
+#: tighter than -- the "search" quota (eoa.mcp_servers.patents's own X-Throttling-Control note); a
+#: biblio fetch is one retrieval call each, so only the top N hits per query get one, keeping a
+#: routine scan's total extra-call volume small and predictable rather than one-per-hit.
+_EPO_BIBLIO_ENRICH_CAP = 5
 
-    The biblio-search endpoint (``eoa.mcp_servers.patents.epo_ops_search``) only returns
-    publication references (country/doc-number/kind) -- no title/abstract/assignee without a
-    further per-document biblio fetch, which this module deliberately does not add (EPO_OPS is
-    unconfigured on this dev machine and unverified live, per that module's own docstring); a
-    title-less record here is still useful as a real, deduped ``pub_number`` that
-    ``eoa.patents.analyze`` can later enrich once biblio detail is worth adding."""
-    from eoa.mcp_servers.patents import epo_ops_search
+
+def _epo_records(query: str, limit: int, *, biblio_cap: int = _EPO_BIBLIO_ENRICH_CAP) -> list[PatentRecord]:
+    """EPO OPS published-data search, parsed into :class:`PatentRecord` rows.
+
+    The search endpoint alone (``eoa.mcp_servers.patents.epo_ops_search``) only returns bare
+    publication references (country/doc-number/kind) -- no title/abstract/assignee/CPC without a
+    further per-document biblio fetch. Live-verified 2026-09-08 (``EPO_OPS_KEY``/``EPO_OPS_SECRET``
+    now configured, see docs/qa/content_review/PATENTS-OPS.md): the top ``biblio_cap`` hits are each
+    enriched with ``eoa.mcp_servers.patents.epo_ops_biblio`` (title/abstract/applicants/CPC/IPC/
+    dates/family_id) right here, so a scan's own EPO OPS records carry real content rather than
+    only a deduped identifier for the first time. A hit beyond the cap, or a biblio fetch/parse
+    failure for one hit (never aborts the batch, docs/CONVENTIONS.md rule 9), still yields the same
+    title-less record the pre-biblio version of this function always produced -- still a real,
+    deduped ``pub_number`` the existing Google-Patents-detail-page enrichment pass
+    (:func:`enrich_stored_patents_missing_assignee`) can pick up later."""
+    from eoa.mcp_servers.patents import epo_ops_biblio, epo_ops_search
 
     try:
         raw = json.loads(epo_ops_search(query, limit=limit))
@@ -123,20 +147,50 @@ def _epo_records(query: str, limit: int) -> list[PatentRecord]:
     if raw.get("error"):
         return []
     out: list[PatentRecord] = []
-    for r in raw.get("results") or []:
+    for i, r in enumerate(raw.get("results") or []):
         country, doc_number, kind = r.get("country"), r.get("doc_number"), r.get("kind")
         if not doc_number:
             continue
         pub_number = f"{country or ''}{doc_number}{kind or ''}"
-        out.append(
-            PatentRecord(
-                pub_number=pub_number,
-                kind=kind,
-                jurisdictions=[country] if country else [],
-                source="epo_ops",
-                raw=r,
+        biblio: dict[str, Any] | None = None
+        if i < biblio_cap:
+            try:
+                parsed = json.loads(epo_ops_biblio(pub_number))
+            except Exception as exc:
+                log.debug("patents_epo_biblio_failed", pub_number=pub_number, error=str(exc)[:200])
+                parsed = None
+            if parsed and not parsed.get("error"):
+                biblio = parsed
+        if biblio:
+            out.append(
+                PatentRecord(
+                    pub_number=biblio.get("pub_number") or pub_number,
+                    kind=biblio.get("kind") or kind,
+                    title=biblio.get("title") or "",
+                    abstract=biblio.get("abstract") or "",
+                    assignees=list(biblio.get("assignees") or []),
+                    inventors=list(biblio.get("inventors") or []),
+                    cpc=list(biblio.get("cpc") or []),
+                    priority_date=_parse_date(biblio.get("priority_date")),
+                    filing_date=_parse_date(biblio.get("filing_date")),
+                    publication_date=_parse_date(biblio.get("publication_date")),
+                    family_id=biblio.get("family_id"),
+                    jurisdictions=[country] if country else [],
+                    url=biblio.get("url"),
+                    source="epo_ops",
+                    raw=biblio,
+                )
             )
-        )
+        else:
+            out.append(
+                PatentRecord(
+                    pub_number=pub_number,
+                    kind=kind,
+                    jurisdictions=[country] if country else [],
+                    source="epo_ops",
+                    raw=r,
+                )
+            )
     return out
 
 
@@ -676,14 +730,29 @@ def _within_window(rec: PatentRecord, since_days: int, today: dt.date) -> bool:
     return (today - rec.publication_date).days <= since_days
 
 
-def _records_for_query(query: str, *, assignee: str | None, structured_ok: bool) -> list[PatentRecord]:
+def _records_for_query(
+    query: str, *, assignee: str | None, structured_ok: bool, epo_keywords: list[str] | None = None
+) -> list[PatentRecord]:
+    """``query`` is the free-text portion passed to USPTO ODP's ``q`` and (when no structured
+    source has anything, or none is configured) the keyless Google Patents fallback -- both accept
+    a plain natural-language string. EPO OPS's CQL does not (its own quoting rules are stricter, see
+    ``eoa.mcp_servers.patents.build_epo_query``'s docstring): when ``assignee`` is set, the EPO call
+    is built from structured parts (``pa=<assignee>`` AND'd with ``epo_keywords`` OR'd together,
+    default: ``[query]`` treated as one term) instead of passing ``query`` through as-is."""
     if structured_ok:
+        from eoa.mcp_servers.patents import build_epo_query
+
         records: list[PatentRecord] = []
-        records += _epo_records(query, limit=20)
+        if assignee:
+            epo_query = build_epo_query(applicant=assignee, keywords=epo_keywords or [query])
+            records += _epo_records(epo_query, limit=20)
+        else:
+            records += _epo_records(query, limit=20)
         records += _uspto_odp_records(query, assignee or "", limit=20)
         if records:
             return records
-    return _google_patents_records(query)
+    fallback_query = f"{assignee} {query}".strip() if assignee else query
+    return _google_patents_records(fallback_query)
 
 
 def search_records(query: str, limit: int = 100) -> list[PatentRecord]:
@@ -710,15 +779,50 @@ def search_records(query: str, limit: int = 100) -> list[PatentRecord]:
     return out
 
 
+def search_records_for_applicant(
+    applicant: str, keywords: list[str], *, limit: int = 20
+) -> list[PatentRecord]:
+    """Public, DB-free gather scoped to one applicant (a product's vendor/alias) + a set of
+    free-text keywords (product name + product-line terms) -- EPO OPS ``pa=``/USPTO ODP
+    ``assignee=`` when configured, else the keyless Google Patents fallback (``"<applicant>
+    <keywords>"``). Added 2026-09-08 for ``eoa.dossier.corpus``: an on-demand dossier product that
+    predates/falls outside the periodic watch-topic scan (e.g. SPECTRO XR) otherwise has an empty
+    ``data->'patents'`` section, since :func:`search_records` above has no applicant-restriction
+    parameter of its own. Deduped by ``pub_number``, capped at ``limit``."""
+    structured_ok = _structured_sources_available()
+    free_text = " ".join(k for k in keywords if k and k.strip())
+    records = _records_for_query(
+        free_text, assignee=applicant, structured_ok=structured_ok, epo_keywords=keywords
+    )
+    if not structured_ok:
+        records = _google_patents_records(f"{applicant} {free_text}".strip(), max_results=min(limit, 100))
+    seen: set[str] = set()
+    out: list[PatentRecord] = []
+    for rec in records:
+        if rec.pub_number in seen:
+            continue
+        seen.add(rec.pub_number)
+        out.append(rec)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def scan_patents(
     since_days: int | None = None,
     *,
     topics: list[WatchTopic] | None = None,
     assignees: list[str] | None = None,
+    max_inserted: int | None = None,
 ) -> PatentScanStats:
     """A14 entry point: scan every configured watch topic + assignee, dedupe by ``pub_number``,
     insert new ``patents`` rows. ``since_days`` overrides the first-run/subsequent-run default
-    window (mainly useful for tests and the CLI's ``--topic`` one-off mode)."""
+    window (mainly useful for tests and the CLI's ``--topic`` one-off mode). ``max_inserted``
+    (2026-09-08, added for a bounded one-off verification/rescan run): once ``stats.inserted``
+    reaches this cap, the scan stops issuing further topic/assignee queries -- a query already in
+    flight still finishes and its own records are still fully ingested (a single query's hits are
+    never partially inserted), so the final ``stats.inserted`` can land slightly above the cap, not
+    below it. ``None`` (the default) means unbounded, same as before this parameter existed."""
     stats = PatentScanStats()
     today = dt.date.today()
     structured_ok = _structured_sources_available()
@@ -730,6 +834,8 @@ def scan_patents(
     seen_pub_numbers: set[str] = set()
 
     for topic in topics if topics is not None else load_watch_topics():
+        if max_inserted is not None and stats.inserted >= max_inserted:
+            break
         try:
             records = _records_for_query(topic.query, assignee=None, structured_ok=structured_ok)
         except Exception as exc:
@@ -740,15 +846,32 @@ def scan_patents(
         _ingest_records(records, topic.cpc, since_days, today, seen_pub_numbers, stats)
 
     for assignee in assignees if assignees is not None else load_assignees():
-        query = f"{assignee} electro-optical infrared imaging patent"
+        if max_inserted is not None and stats.inserted >= max_inserted:
+            break
+        query = " ".join(_ASSIGNEE_SCAN_KEYWORDS)
         try:
-            records = _records_for_query(query, assignee=assignee, structured_ok=structured_ok)
+            records = _records_for_query(
+                query, assignee=assignee, structured_ok=structured_ok, epo_keywords=_ASSIGNEE_SCAN_KEYWORDS
+            )
         except Exception as exc:
             log.warning("patents_assignee_scan_failed", assignee=assignee, error=str(exc)[:200])
             stats.queries_failed += 1
             continue
         stats.assignees_scanned += 1
-        _ingest_records(records, [], since_days, today, seen_pub_numbers, stats)
+        # apply_window=False (2026-09-08): an assignee query builds that company's patent
+        # *portfolio*, not a novelty signal -- unlike the topic loop above. Before EPO OPS biblio
+        # enrichment existed, every EPO record here carried no publication_date at all, so
+        # _within_window's own "no date -> never filtered" rule silently exempted the whole
+        # assignee loop from age filtering anyway; now that a biblio-enriched hit carries its real
+        # (often years-old) publication_date, applying the window here would have the *enriched*,
+        # highest-quality hits -- the ones biblio enrichment exists to add -- systematically
+        # dropped while the un-enriched, title-less hits for the very same patents sailed through
+        # unfiltered (verified live 2026-09-08: every one of a query's first 5 biblio-enriched
+        # results was silently excluded this way before this fix). Correctness still comes from
+        # pub_number dedup (ON CONFLICT DO NOTHING / seen_pub_numbers), exactly as this module's
+        # own docstring already argues for the window being a traffic bound, not a correctness
+        # mechanism.
+        _ingest_records(records, [], since_days, today, seen_pub_numbers, stats, apply_window=False)
 
     log.info("patents_scan_done", **vars(stats))
     return stats
@@ -761,12 +884,14 @@ def _ingest_records(
     today: dt.date,
     seen_pub_numbers: set[str],
     stats: PatentScanStats,
+    *,
+    apply_window: bool = True,
 ) -> None:
     for rec in records:
         if rec.pub_number in seen_pub_numbers:
             continue
         seen_pub_numbers.add(rec.pub_number)
-        if not _within_window(rec, since_days, today):
+        if apply_window and not _within_window(rec, since_days, today):
             continue
         stats.records_fetched += 1
         if not rec.cpc and default_cpc:
