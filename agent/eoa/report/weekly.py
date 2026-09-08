@@ -56,6 +56,11 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
+from eoa.report.redundancy import (
+    apply_redundancy_pass,
+    filter_facts_against_narrative,
+    narrative_citation_numbers,
+)
 from eoa.report.style import apply_style_guard, dedupe_exact_sentences_across_sections
 from eoa.report.textnorm import normalize_draft
 
@@ -1091,6 +1096,31 @@ def build_weekly(
             dropped=_claims_gate_report.dropped,
         )
 
+    # docs/qa/content_review/REPORT-REDUNDANCY.md (2026-09-08 user feedback: "the report repeats
+    # the information overview needlessly"): a deterministic cross-section near-duplicate pass,
+    # AFTER drafting and AFTER the claims gate above (softened/dropped text must be final before
+    # comparing sentences) -- see `eoa.report.redundancy.apply_redundancy_pass`'s own docstring
+    # for the BLUF > exec summary > trends > domain review > analyst note priority order.
+    draft, _redundancy_result = apply_redundancy_pass(draft, report_kind="weekly")
+    _redundancy_result.log_all(report_kind="weekly")
+    if _redundancy_result.dropped:
+        log.info(
+            "weekly_report_redundancy_pass_applied",
+            n_dropped=_redundancy_result.n_dropped,
+            n_pointer_sections=len(_redundancy_result.pointer_sections),
+        )
+    for _entry in deep_search:
+        if _entry.get("key_facts"):
+            _entry["key_facts"], _n_facts_dropped = filter_facts_against_narrative(
+                _entry["key_facts"], _redundancy_result.kept_sentence_texts
+            )
+            if _n_facts_dropped:
+                log.info(
+                    "weekly_report_deep_search_facts_redundant_dropped",
+                    job_id=_entry.get("job_id"),
+                    n=_n_facts_dropped,
+                )
+
     trend_sections = [
         {
             "title_he": tp.title_he,
@@ -1127,7 +1157,9 @@ def build_weekly(
         delta_result = deltas.compute_deltas(
             "weekly", items, before_period_end=end, current_trends=trend_list, id_to_n=id_to_n
         )
-        extra_sections.append(deltas.delta_extra_section(delta_result))
+        extra_sections.append(
+            deltas.delta_extra_section(delta_result, narrative_cites=narrative_citation_numbers(draft))
+        )
     except Exception as exc:
         log.warning("weekly_report_deltas_section_failed", error=str(exc)[:160])
     extra_sections.extend(trend_sections)

@@ -75,6 +75,7 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
+from eoa.report.redundancy import apply_redundancy_pass, filter_facts_against_narrative
 from eoa.report.style import apply_style_guard, dedupe_exact_sentences_across_sections
 from eoa.report.textnorm import normalize_draft
 from eoa.report.weekly import (
@@ -944,6 +945,35 @@ def build_monthly(
     gone = _gone_trend_sections(current_titles, previous_trends)
     if gone:
         draft = draft.model_copy(update={"trends": [*draft.trends, *gone]})
+
+    # docs/qa/content_review/REPORT-REDUNDANCY.md (2026-09-08 user feedback: "the report repeats
+    # the information overview needlessly"): a deterministic cross-section near-duplicate pass,
+    # AFTER drafting and AFTER the claims gate above -- see
+    # `eoa.report.redundancy.apply_redundancy_pass`'s own docstring for the BLUF > exec summary >
+    # trends > domain review > analyst note priority order. Run after the "gone" trend append
+    # above so those (already ``sentences=[]``, untouched by this pass) are included when trend
+    # sections are rendered below; a "gone" trend is passed straight through (never pointered --
+    # ``apply_redundancy_pass`` only pointers a trend that HAD sentences and lost every one of
+    # them to a redundancy drop, never one that already had none).
+    draft, _redundancy_result = apply_redundancy_pass(draft, report_kind="monthly")
+    _redundancy_result.log_all(report_kind="monthly")
+    if _redundancy_result.dropped:
+        log.info(
+            "monthly_report_redundancy_pass_applied",
+            n_dropped=_redundancy_result.n_dropped,
+            n_pointer_sections=len(_redundancy_result.pointer_sections),
+        )
+    for _entry in deep_search:
+        if _entry.get("key_facts"):
+            _entry["key_facts"], _n_facts_dropped = filter_facts_against_narrative(
+                _entry["key_facts"], _redundancy_result.kept_sentence_texts
+            )
+            if _n_facts_dropped:
+                log.info(
+                    "monthly_report_deep_search_facts_redundant_dropped",
+                    job_id=_entry.get("job_id"),
+                    n=_n_facts_dropped,
+                )
 
     # deterministic, non-LLM data (rule 4: never ask the model to narrate ungrounded numbers)
     players = players_map()

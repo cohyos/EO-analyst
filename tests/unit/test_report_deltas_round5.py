@@ -289,6 +289,43 @@ class TestRenderDeltaSection:
         assert "פריט שעלה: צהוב ← אדום [3]" in body
         assert "מגמת X: מגמה חדשה (עוצמה 3) [4]" in body
 
+    def test_new_item_already_cited_in_narrative_is_excluded_and_counted(self) -> None:
+        """docs/qa/content_review/REPORT-REDUNDANCY.md item 1: a new item whose registry number is
+        already used by BLUF/exec summary (eoa.report.redundancy.narrative_citation_numbers) is
+        dropped from the bullet list and folded into a trailing 'covered' count instead of being
+        repeated a second time."""
+        item_delta = deltas.ItemDelta(
+            new_count=2,
+            new_top_items=[
+                {"id": 2, "n": 2, "title": "פריט שכבר בתקציר"},
+                {"id": 5, "n": 5, "title": "פריט חדש שלא הוזכר"},
+            ],
+        )
+        result = deltas.DeltaResult(
+            has_previous=True,
+            previous_report_id=1,
+            item_delta=item_delta,
+            trend_deltas=[],
+            summary_he="לעומת הדוח הקודם: 2 פריטים חדשים.",
+        )
+        body = deltas.render_delta_section_he(result, narrative_cites={2})
+        assert "- פריט שכבר בתקציר [2]" not in body
+        assert "- פריט חדש שלא הוזכר [5]" in body
+        assert "עוד 1 פריטים חדשים כבר מוזכרים בתקציר המנהלים/שורה תחתונה" in body
+
+    def test_no_narrative_cites_behaves_exactly_as_before(self) -> None:
+        item_delta = deltas.ItemDelta(new_count=1, new_top_items=[{"id": 2, "n": 2, "title": "פריט חדש"}])
+        result = deltas.DeltaResult(
+            has_previous=True,
+            previous_report_id=1,
+            item_delta=item_delta,
+            trend_deltas=[],
+            summary_he="לעומת הדוח הקודם: 1 פריטים חדשים.",
+        )
+        body = deltas.render_delta_section_he(result)
+        assert "- פריט חדש [2]" in body
+        assert "כבר מוזכרים" not in body
+
 
 def test_delta_extra_section_shape() -> None:
     result = deltas.DeltaResult(
@@ -302,6 +339,20 @@ def test_delta_extra_section_shape() -> None:
     assert section["title_he"] == deltas.SECTION_TITLE_HE == "מה השתנה מאז הדוח הקודם"
     assert section["position"] == "after_summary"
     assert section["body_he"] == "קו אחד כן."
+
+
+def test_delta_extra_section_forwards_narrative_cites() -> None:
+    item_delta = deltas.ItemDelta(new_count=1, new_top_items=[{"id": 7, "n": 7, "title": "פריט"}])
+    result = deltas.DeltaResult(
+        has_previous=True,
+        previous_report_id=1,
+        item_delta=item_delta,
+        trend_deltas=[],
+        summary_he="לעומת הדוח הקודם: 1 פריטים חדשים.",
+    )
+    section = deltas.delta_extra_section(result, narrative_cites={7})
+    assert "- פריט [7]" not in section["body_he"]
+    assert "כבר מוזכרים" in section["body_he"]
 
 
 # --------------------------------------------------------------------------

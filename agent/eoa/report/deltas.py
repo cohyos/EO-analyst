@@ -398,11 +398,19 @@ def _label_raw_subdomain_keys(title: str) -> str:
     return title
 
 
-def render_delta_section_he(result: DeltaResult) -> str:
+def render_delta_section_he(result: DeltaResult, *, narrative_cites: set[int] | None = None) -> str:
     """Deterministic Hebrew body for the "מה השתנה מאז הדוח הקודם" section — plain paragraphs plus
     "- " bullet runs (``eoa.report.docx_builder._md_blocks`` renders each as its own block in all
     three output formats). ``[n]`` markers here are real registry numbers taken straight from the
-    already-numbered item dicts in ``result`` — never invented, per docs/CONVENTIONS.md rule 4."""
+    already-numbered item dicts in ``result`` — never invented, per docs/CONVENTIONS.md rule 4.
+
+    ``narrative_cites`` (docs/qa/content_review/REPORT-REDUNDANCY.md, 2026-09-08 user feedback:
+    "the report repeats the information overview needlessly") is the set of citation numbers
+    already used by BLUF/exec summary (``eoa.report.redundancy.narrative_citation_numbers``,
+    called by the caller AFTER the redundancy pass so it reflects the final draft). A new item
+    whose own registry number ``n`` is already in that set was already told to the reader up top
+    — it is skipped from the bullet list here and folded into a trailing "already covered" count
+    instead, rather than repeated verbatim a second time."""
     if not result.has_previous:
         return result.summary_he
 
@@ -411,10 +419,16 @@ def render_delta_section_he(result: DeltaResult) -> str:
     item_delta = result.item_delta
     if item_delta.new_count:
         lines.append(f"פריטים חדשים מאז הדוח הקודם: {item_delta.new_count}.")
+        covered = 0
         for it in item_delta.new_top_items:
             n = it.get("n")
+            if narrative_cites and n is not None and n in narrative_cites:
+                covered += 1
+                continue
             marker = f" [{n}]" if n is not None else ""
             lines.append(f"- {it.get('title') or '—'}{marker}")
+        if covered:
+            lines.append(f"(עוד {covered} פריטים חדשים כבר מוזכרים בתקציר המנהלים/שורה תחתונה.)")
     else:
         lines.append("לא זוהו פריטים חדשים מאז הדוח הקודם.")
 
@@ -499,13 +513,15 @@ def _legacy_trend_title_he(title: str) -> str:
     return t
 
 
-def delta_extra_section(result: DeltaResult) -> dict[str, Any]:
+def delta_extra_section(result: DeltaResult, *, narrative_cites: set[int] | None = None) -> dict[str, Any]:
     """The ready ``extra_sections`` entry (``position="after_summary"``) — always returned (never
     ``None``): even the no-previous-report case renders one honest line under the same heading,
-    per the D4/W3 spec, rather than silently omitting the section on a report's first issue."""
+    per the D4/W3 spec, rather than silently omitting the section on a report's first issue.
+    ``narrative_cites`` is forwarded to :func:`render_delta_section_he` unchanged — see its own
+    docstring."""
     return {
         "title_he": SECTION_TITLE_HE,
-        "body_he": render_delta_section_he(result),
+        "body_he": render_delta_section_he(result, narrative_cites=narrative_cites),
         "position": "after_summary",
     }
 

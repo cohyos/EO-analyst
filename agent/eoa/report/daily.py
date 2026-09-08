@@ -36,6 +36,11 @@ from eoa.report.docx_builder import (
     validate_docx,
 )
 from eoa.report.qa_citations import QAResult, check, strip_so_what_phrases_from_draft
+from eoa.report.redundancy import (
+    apply_redundancy_pass,
+    filter_facts_against_narrative,
+    narrative_citation_numbers,
+)
 from eoa.report.style import apply_style_guard, dedupe_exact_sentences_across_sections
 from eoa.report.textnorm import normalize_draft, normalize_hebrew_punctuation, trim_at_word_boundary
 
@@ -1694,6 +1699,36 @@ def build_daily(
     if _n_dupes_dropped:
         log.info("daily_report_exact_duplicate_sentences_dropped", n=_n_dupes_dropped)
 
+    # docs/qa/content_review/REPORT-REDUNDANCY.md (2026-09-08 user feedback on the daily report:
+    # "the report repeats the information overview needlessly"): unlike
+    # `dedupe_exact_sentences_across_sections` above (byte-identical text only), this pass also
+    # catches a NEAR-duplicate restatement (token-set Jaccard >= 0.6, or same distinctive number +
+    # same organisation) across BLUF -> exec summary -> domain-review sections -> analyst note,
+    # merging the dropped sentence's citations into the one it restated. Runs last among the
+    # draft-cleanup passes (after style/dedupe; there is no claims gate for the daily report) so
+    # every section it inspects is already final.
+    draft, _redundancy_result = apply_redundancy_pass(draft, report_kind="daily")
+    _redundancy_result.log_all(report_kind="daily")
+    if _redundancy_result.dropped:
+        log.info(
+            "daily_report_redundancy_pass_applied",
+            n_dropped=_redundancy_result.n_dropped,
+            n_pointer_sections=len(_redundancy_result.pointer_sections),
+        )
+    # deep-search key facts add nothing when they only restate a sentence the narrative already
+    # kept (spec: "deep-search entries render only facts absent from the narrative").
+    for _entry in deep_search:
+        if _entry.get("key_facts"):
+            _entry["key_facts"], _n_facts_dropped = filter_facts_against_narrative(
+                _entry["key_facts"], _redundancy_result.kept_sentence_texts
+            )
+            if _n_facts_dropped:
+                log.info(
+                    "daily_report_deep_search_facts_redundant_dropped",
+                    job_id=_entry.get("job_id"),
+                    n=_n_facts_dropped,
+                )
+
     # Round 5 P2 (docs/PLAN_ROUND5_REPORTS.md P2, D4/D5): "מה השתנה מאז הדוח הקודם" (deterministic
     # delta vs. the previous daily report) and the "מעקב אינדיקטורים" (I&W) watchlist table -- both
     # additive `extra_sections` entries, computed here (after the draft/fallback is final) so the
@@ -1709,7 +1744,9 @@ def build_daily(
         from eoa.report import deltas
 
         delta_result = deltas.compute_deltas("daily", items, before_period_end=label)
-        extra_sections.append(deltas.delta_extra_section(delta_result))
+        extra_sections.append(
+            deltas.delta_extra_section(delta_result, narrative_cites=narrative_citation_numbers(draft))
+        )
     except Exception as exc:
         log.warning("daily_report_deltas_section_failed", error=str(exc)[:160])
     try:
