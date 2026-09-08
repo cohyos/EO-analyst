@@ -57,19 +57,28 @@ def _today_jerusalem() -> dt.date:
 
 
 def _write_job_progress(job_id: int | None, progress: list[dict[str, Any]]) -> None:
-    """PD-fix (2026-09-08, item 5): best-effort, persists ``progress`` (one entry per research
-    topic -- ``eoa.dossier.plan``'s ``ProgressEntry``) into ``jobs.result->'progress'`` WHILE the
+    """PD-fix-3 (2026-09-08, item 2): best-effort, persists ``progress`` (one entry per research
+    topic -- ``eoa.dossier.plan``'s ``ProgressEntry``) into ``jobs.payload->'progress'`` WHILE the
     job is still ``running`` -- so ``GET /api/dossiers/{key}``'s ``pending_job.progress``
     (``eoa.api.services``) can render a live per-topic banner instead of the ~2h run showing no
-    progress at all. Only ever touches a row still ``running`` (never clobbers a result
-    ``eoa.orchestrator.jobs``'s own ``finish_job`` already wrote for a job that raced ahead) and
-    never raises -- a progress-write failure must not break the dossier build itself."""
+    progress at all.
+
+    ``jobs.payload.progress`` (not ``result``) is the ONE documented location for this -- the
+    original PD-fix (item 5) wrote into ``result``, which ``eoa.orchestrator.jobs``'s own
+    ``finish_job`` REPLACES wholesale (never merges) the moment the job reaches a terminal state,
+    and which a live DB read of job 194 confirmed: ``result`` held only the final
+    ``{"product_dossier": {...}}`` payload, no trace of the mid-run progress list. ``payload`` is
+    merged (jsonb ``||``, additive over the existing ``product_key``/``vendor``/... keys set at
+    enqueue time), never replaced by ``finish_job``, so it is the one column a poller can read
+    consistently for the life of the job. Only ever touches a row still ``running`` (a progress
+    write racing a job that already finished must not resurrect/clobber a finished row) and never
+    raises -- a progress-write failure must not break the dossier build itself."""
     if job_id is None:
         return
     try:
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE jobs SET result = COALESCE(result, '{}'::jsonb) || %(patch)s::jsonb "
+                "UPDATE jobs SET payload = COALESCE(payload, '{}'::jsonb) || %(patch)s::jsonb "
                 "WHERE id = %(id)s AND state = 'running'",
                 {"id": job_id, "patch": Json({"progress": progress}, dumps=_json_dumps)},
             )

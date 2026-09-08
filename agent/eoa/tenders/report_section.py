@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from eoa.db import connection
+from eoa.report.claims_gate import soften_text
 from eoa.report.link_check import LinkCheckResult
 from eoa.tenders.forecast import normalize_hebrew_punctuation
 
@@ -157,6 +158,31 @@ def dedupe_forecasts_by_topic(
 
 
 # --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 3): forecast rationale claims-gate softening -- the weekly/monthly
+# reports were still shipping an unsupported intensifier straight from the forecast-drafting LLM
+# stage (``eoa.tenders.forecast``) in a rendered forecast-table cell (e.g. "ייתכן שהמימוש המסחרי
+# ... יאפשר להוזיל משמעותית עלויות אימון"), because ``rationale_he`` never went through
+# ``eoa.report.claims_gate.soften_text`` the way every other free-text report cell already does
+# (``eoa.report.israel_section``/``eoa.report.tech_watch``, both softening their own ``so_what_he``
+# cell before rendering). Applied once here, at the shared collection point every forecast-table
+# renderer (this module's own ``tenders_extra_section`` and ``eoa.report.daily``'s
+# ``_tenders_forecast_table``, both fed straight from ``collect_tenders``'s ``new_forecasts``) reads
+# from, rather than duplicated per-renderer.
+# --------------------------------------------------------------------------
+
+
+def _soften_forecast_rationales(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Soften each forecast's ``rationale_he`` in place (mirrors
+    ``eoa.report.claims_gate.gate_item_texts``'s own "soften if present, else leave alone"
+    convention) -- an unsupported claims-gate phrase drops out of the sentence entirely rather than
+    being rewritten, exactly like every other softened report field."""
+    for row in rows:
+        if row.get("rationale_he"):
+            row["rationale_he"] = soften_text(row["rationale_he"]) or row["rationale_he"]
+    return rows
+
+
+# --------------------------------------------------------------------------
 # W6: forecast -> report citation-registry extension (same convention as
 # eoa.report.tech_watch._extend_registry / eoa.report.israel_section)
 # --------------------------------------------------------------------------
@@ -262,6 +288,10 @@ def collect_tenders(
     # W1 (round 4): the same platform+payload topic can appear as more than one row (typically one
     # per resolved buyer_country) -- collapse before this ever reaches a report table.
     new_forecasts = dedupe_forecasts_by_topic(new_forecasts)
+    # PD-fix-3 item 3: soften every forecast's rationale_he here, once, before it reaches ANY
+    # report renderer (this module's tenders_extra_section and eoa.report.daily's
+    # _tenders_forecast_table both read new_forecasts straight from this function's return value).
+    new_forecasts = _soften_forecast_rationales(new_forecasts)
     unknown_rows = _fetchall(
         "SELECT count(*) AS c FROM tenders WHERE status = 'unknown' AND intake = 'accepted'"
     )

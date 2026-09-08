@@ -175,6 +175,7 @@ def test_price_row_fully_grounded_is_kept() -> None:
     )
     result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
     assert len(result.dossier.pricing) == 1
+    assert result.dossier.pricing[0].basis_he == dossier_extract.BASIS_UNIT_HE
 
 
 def test_price_row_number_not_grounded_is_dropped() -> None:
@@ -186,6 +187,74 @@ def test_price_row_number_not_grounded_is_dropped() -> None:
     )
     result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
     assert result.dossier.pricing == []
+
+
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 1): basis_he consistency -- a price row is kept only when its basis_he
+# classifies deterministically into one of the three canonical forms; the SPECTRO XR case is the
+# real live-dossier row that motivated this ("לחוזה כולל (לא צוין מחיר ליחידה)", not the prompt's
+# own "לתוכנית כולה").
+# --------------------------------------------------------------------------
+
+
+def test_classify_price_basis_contract_total_spectro_xr_live_case() -> None:
+    assert (
+        dossier_extract._classify_price_basis("לחוזה כולל (לא צוין מחיר ליחידה)")
+        == dossier_extract.BASIS_TOTAL_HE
+    )
+
+
+def test_classify_price_basis_per_unit() -> None:
+    assert dossier_extract._classify_price_basis("ליחידה") == dossier_extract.BASIS_UNIT_HE
+    assert dossier_extract._classify_price_basis("מחיר ליחידה") == dossier_extract.BASIS_UNIT_HE
+
+
+def test_classify_price_basis_lot() -> None:
+    assert dossier_extract._classify_price_basis("למנה של 5 יחידות") == "למנה של 5 יחידות"
+    assert dossier_extract._classify_price_basis("lot of 12 units") == "למנה של 12 יחידות"
+
+
+def test_classify_price_basis_unparseable_returns_none() -> None:
+    assert dossier_extract._classify_price_basis("מחיר משוער") is None
+
+
+def test_price_row_spectro_xr_contract_total_is_normalized_and_kept() -> None:
+    items = [
+        {
+            "id": 1,
+            "title": "contract award",
+            "summary_he": "כ-80 מיליון דולר לחוזה כולל (לא צוין מחיר ליחידה).",
+            "so_what_he": "",
+        }
+    ]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        pricing=[
+            PriceRow(
+                figure="כ-80 מיליון דולר",
+                source_kind="contract",
+                basis_he="לחוזה כולל (לא צוין מחיר ליחידה)",
+                cites=[1],
+            )
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert len(result.dossier.pricing) == 1
+    assert result.dossier.pricing[0].basis_he == dossier_extract.BASIS_TOTAL_HE
+    assert result.dossier.pricing[0].figure == "כ-80 מיליון דולר"
+
+
+def test_price_row_unparseable_basis_is_dropped() -> None:
+    items = [{"id": 1, "title": "contract award", "summary_he": "$2 million contract.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        pricing=[PriceRow(figure="$2 million", source_kind="contract", basis_he="מחיר משוער", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.pricing == []
+    assert any(d.field == "pricing" and "unparseable" in d.reason for d in result.dropped)
 
 
 # --------------------------------------------------------------------------

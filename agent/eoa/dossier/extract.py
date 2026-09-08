@@ -437,11 +437,60 @@ def _ground_deal_row(
     )
 
 
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 1): basis_he consistency. The prompt already asks the model for one of
+# three literal Hebrew phrasings, but (same "a model that slips past the prompt's own rules is
+# caught here" discipline as everywhere else in this module) it doesn't always comply -- the live
+# SPECTRO XR dossier's own price row carried "לחוזה כולל (לא צוין מחיר ליחידה)" verbatim, not the
+# prompt's "לתוכנית כולה". Rather than reject every variant, this classifies whatever free-text
+# basis_he the model wrote into exactly one of three canonical forms (contract/programme total,
+# per-unit, or a lot of N units, with N read off the model's own text -- never invented); a
+# basis_he that fits none of them is unparseable and the whole row is dropped, per the module's own
+# "nothing else worth keeping" rule for a row whose grounding can't be verified.
+# --------------------------------------------------------------------------
+
+BASIS_TOTAL_HE = "היקף חוזה (לא מחיר ליחידה)"
+BASIS_UNIT_HE = "מחיר ליחידה"
+
+#: A lot of N units -- checked first because it's the most specific pattern (and because its own
+#: text often also contains "יחידות", which would otherwise false-match the per-unit keywords).
+_LOT_BASIS_RE = re.compile(r"(?:למנה|מנה)\s+של\s+(\d+)|lot\s+of\s+(\d+)", re.IGNORECASE)
+
+#: An explicit "no per-unit price stated" negation -- checked before the bare per-unit keywords
+#: below, since a phrase like "לא צוין מחיר ליחידה" contains the word "ליחידה" itself.
+_BASIS_UNIT_NEGATION_RE = re.compile(
+    r"לא\s+(?:צוין\s+)?מחיר\s+ליחיד|not\s+(?:a\s+)?per[- ]unit|no\s+per[- ]unit", re.IGNORECASE
+)
+
+_BASIS_TOTAL_KEYWORDS = ("חוזה", "תוכנית", "כולל", "כוללת", "היקף", "contract", "programme", "program", "total")
+_BASIS_UNIT_KEYWORDS = ("ליחידה", "יחידה", "per-unit", "per unit", "unit price")
+
+
+def _classify_price_basis(basis_he: str) -> str | None:
+    """Returns one of the three canonical forms, or ``None`` when ``basis_he`` is unparseable."""
+    text = basis_he.strip()
+    if not text:
+        return None
+    lot = _LOT_BASIS_RE.search(text)
+    if lot:
+        n = lot.group(1) or lot.group(2)
+        return f"למנה של {n} יחידות"
+    if _BASIS_UNIT_NEGATION_RE.search(text):
+        return BASIS_TOTAL_HE
+    low = text.lower()
+    if any(kw in text or kw in low for kw in _BASIS_TOTAL_KEYWORDS):
+        return BASIS_TOTAL_HE
+    if any(kw in text or kw in low for kw in _BASIS_UNIT_KEYWORDS):
+        return BASIS_UNIT_HE
+    return None
+
+
 def _ground_price_row(
     row: PriceRow, valid_ns: set[int], registry_text: dict[int, str], dropped: list[DroppedField]
 ) -> PriceRow | None:
     """Section 1/6.3's strictest rule: a price row survives only when it names a qualifying source
-    kind, carries a stated basis, resolves to at least one valid citation, and its own figure's
+    kind, carries a stated basis that resolves to one of the three canonical ``basis_he`` forms
+    (:func:`_classify_price_basis`), resolves to at least one valid citation, and its own figure's
     digits are grounded in that citation's text -- any failure drops the WHOLE row (never a
     half-grounded price)."""
     good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
@@ -458,11 +507,15 @@ def _ground_price_row(
     if not row.basis_he.strip():
         _drop(dropped, "pricing", "missing basis_he", row.figure)
         return None
+    canonical_basis = _classify_price_basis(row.basis_he)
+    if canonical_basis is None:
+        _drop(dropped, "pricing", f"unparseable basis_he: {row.basis_he!r}", row.figure)
+        return None
     text = _text_for_cites(good_cites, registry_text)
     if row.figure and not _numbers_grounded(row.figure, text):
         _drop(dropped, "pricing", "figure number not in cited source", row.figure)
         return None
-    return row.model_copy(update={"cites": good_cites})
+    return row.model_copy(update={"cites": good_cites, "basis_he": canonical_basis})
 
 
 def _ground_competitor_row(

@@ -110,7 +110,7 @@ def test_dossier_detail_includes_pending_job(monkeypatch: pytest.MonkeyPatch) ->
 
     def fake_fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
         assert "jobs" in query
-        return {"id": 99, "state": "running", "result": None}
+        return {"id": 99, "state": "running", "payload": None}
 
     monkeypatch.setattr(services, "_fetchall", fake_fetchall)
     monkeypatch.setattr(services, "_fetchone", fake_fetchone)
@@ -121,7 +121,7 @@ def test_dossier_detail_includes_pending_job(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_dossier_detail_pending_job_surfaces_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PD-fix item 5: `eoa.dossier.plan.run_plan`'s `on_progress` writes into `jobs.result->
+    """PD-fix-3 item 2: `eoa.dossier.plan.run_plan`'s `on_progress` writes into `jobs.payload->
     'progress'` while the job is still running -- `_pending_dossier_job` must surface it verbatim."""
     progress = [{"topic": "specifications", "title_he": "מפרט ודף נתונים", "status": "done", "seconds": 12.3, "sources_found": 2}]
 
@@ -130,7 +130,7 @@ def test_dossier_detail_pending_job_surfaces_progress(monkeypatch: pytest.Monkey
 
     def fake_fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
         assert "jobs" in query
-        return {"id": 99, "state": "running", "result": {"progress": progress}}
+        return {"id": 99, "state": "running", "payload": {"progress": progress}}
 
     monkeypatch.setattr(services, "_fetchall", fake_fetchall)
     monkeypatch.setattr(services, "_fetchone", fake_fetchone)

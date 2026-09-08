@@ -66,6 +66,29 @@ class TestCollectTenders:
         assert data["new_forecasts"] == []
         assert data["unknown_count"] == 0
 
+    def test_collect_softens_unsupported_intensifier_in_forecast_rationale(self):
+        """PD-fix-3 item 3: the live monthly/weekly-report finding -- a forecast rationale carrying
+        an unsupported ``eoa.report.claims_gate`` trigger word ("משמעותית", no digit anywhere in
+        the sentence to back it up) must come back softened, matching every other free-text report
+        cell (``eoa.report.israel_section``/``eoa.report.tech_watch``)."""
+        raw = "ייתכן שהמימוש המסחרי של הפלטפורמה יאפשר להוזיל משמעותית עלויות אימון."
+        with patch(
+            "eoa.tenders.report_section._fetchall",
+            side_effect=[[_tender_row()], [_forecast_row(rationale_he=raw)], [{"c": 0}]],
+        ):
+            data = collect_tenders()
+        softened = data["new_forecasts"][0]["rationale_he"]
+        assert "משמעותית" not in softened
+        assert "ייתכן שהמימוש המסחרי" in softened  # softened, not dropped -- content remains
+
+    def test_collect_leaves_unflagged_rationale_untouched(self):
+        with patch(
+            "eoa.tenders.report_section._fetchall",
+            side_effect=[[_tender_row()], [_forecast_row()], [{"c": 0}]],
+        ):
+            data = collect_tenders()
+        assert data["new_forecasts"][0]["rationale_he"] == "נימוק לדוגמה [item 10]"
+
 
 class TestTendersExtraSection:
     def test_title_and_position(self):

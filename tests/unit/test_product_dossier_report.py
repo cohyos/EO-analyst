@@ -7,6 +7,11 @@ Run with: ``PYTHONPATH=agent PYTHONUTF8=1 python -m pytest tests/unit/test_produ
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
+from eoa.api import services
 from eoa.dossier import plan as dossier_plan
 from eoa.dossier import report as dossier_report
 from eoa.llm.schemas.product_dossier import (
@@ -274,3 +279,95 @@ def test_deals_table_renders_hebrew_kind_label_not_raw_kind() -> None:
     tbl = dossier_report._deals_table(dossier)
     assert tbl["rows"][0][3] == dossier_report._deal_kind_label("contract_award")
     assert tbl["rows"][0][3] != "contract_award"
+
+
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 2): progress persists to jobs.payload (not jobs.result, which
+# eoa.orchestrator.jobs's finish_job replaces wholesale on completion -- confirmed empty on the
+# live job 194 row). Round-trip: two simulated on_progress topic callbacks through
+# dossier_report._write_job_progress, read back through eoa.api.services (the same path
+# GET /api/dossiers/{key} uses for pending_job.progress).
+# --------------------------------------------------------------------------
+
+
+class _FakeJobsCursor:
+    """Applies the same jsonb ``||`` merge semantics Postgres would for
+    ``UPDATE jobs SET payload = COALESCE(payload, '{}'::jsonb) || %(patch)s::jsonb WHERE id = ...
+    AND state = 'running'`` against an in-memory ``{job_id: row}`` table -- no live Postgres
+    needed, same "fake DB" convention as ``tests/unit/test_backfill_analysis_gaps.py``."""
+
+    def __init__(self, table: dict[int, dict[str, Any]]) -> None:
+        self._table = table
+
+    def execute(self, query: str, params: dict[str, Any] | None = None) -> None:
+        params = params or {}
+        assert "UPDATE jobs SET payload" in query
+        assert "state = 'running'" in query
+        row = self._table.get(params["id"])
+        if row is None or row.get("state") != "running":
+            return
+        patch = params["patch"]
+        patch_dict = patch.obj if hasattr(patch, "obj") else patch
+        row["payload"] = {**(row.get("payload") or {}), **patch_dict}
+
+    def __enter__(self) -> _FakeJobsCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeJobsConnection:
+    def __init__(self, table: dict[int, dict[str, Any]]) -> None:
+        self._table = table
+
+    def cursor(self, row_factory: Any = None) -> _FakeJobsCursor:
+        return _FakeJobsCursor(self._table)
+
+    def __enter__(self) -> _FakeJobsConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+def test_write_job_progress_round_trips_through_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs_table: dict[int, dict[str, Any]] = {
+        99: {"id": 99, "state": "running", "payload": {"product_key": "elbit-spectro-xr"}}
+    }
+    monkeypatch.setattr(dossier_report, "connection", lambda: _FakeJobsConnection(jobs_table))
+
+    # Two topic callbacks, as eoa.dossier.plan.run_plan's on_progress would emit while working
+    # through TOPICS in order: first "specifications" starts running, then it finishes and
+    # "performance" starts.
+    dossier_report._write_job_progress(
+        99,
+        [
+            {"topic": "specifications", "title_he": "מפרט", "status": "running", "seconds": None, "sources_found": None},
+            {"topic": "performance", "title_he": "ביצועים", "status": "pending", "seconds": None, "sources_found": None},
+        ],
+    )
+    dossier_report._write_job_progress(
+        99,
+        [
+            {"topic": "specifications", "title_he": "מפרט", "status": "done", "seconds": 8.5, "sources_found": 3},
+            {"topic": "performance", "title_he": "ביצועים", "status": "running", "seconds": None, "sources_found": None},
+        ],
+    )
+
+    # The enqueue-time payload keys (product_key) must survive the merge, not just progress.
+    assert jobs_table[99]["payload"]["product_key"] == "elbit-spectro-xr"
+
+    def fake_fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
+        assert "jobs" in query
+        row = jobs_table[99]
+        return {"id": row["id"], "state": row["state"], "payload": row["payload"]}
+
+    monkeypatch.setattr(services, "_fetchone", fake_fetchone)
+    pending = services._pending_dossier_job("elbit-spectro-xr")
+    assert pending is not None
+    assert pending["job_id"] == 99
+    assert pending["progress"] == [
+        {"topic": "specifications", "title_he": "מפרט", "status": "done", "seconds": 8.5, "sources_found": 3},
+        {"topic": "performance", "title_he": "ביצועים", "status": "running", "seconds": None, "sources_found": None},
+    ]

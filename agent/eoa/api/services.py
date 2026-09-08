@@ -3697,7 +3697,7 @@ def _dossier_sources_view(sources: list[dict[str, Any]] | None) -> list[dict[str
 def _pending_dossier_job(product_key: str) -> dict[str, Any] | None:
     row = _fetchone(
         """
-        SELECT id, state, result FROM jobs
+        SELECT id, state, payload FROM jobs
         WHERE kind = 'product_dossier' AND state IN ('queued', 'running')
           AND payload->>'product_key' = %(key)s
         ORDER BY created_at DESC LIMIT 1
@@ -3706,12 +3706,19 @@ def _pending_dossier_job(product_key: str) -> dict[str, Any] | None:
     )
     if row is None:
         return None
-    # PD-fix item 5: `eoa.dossier.plan.run_plan`'s `on_progress` (wired in `eoa.dossier.report.
-    # build_product_dossier`) writes the same shape into `jobs.result->'progress'` while the job is
-    # still running -- surfaced here so the detail page's pending banner can list per-topic status
-    # instead of a single opaque "running" line for a ~2h job.
-    result = row.get("result") or {}
-    return {"job_id": row["id"], "state": row["state"], "progress": result.get("progress") or []}
+    # PD-fix-3 (2026-09-08, item 2): `eoa.dossier.plan.run_plan`'s `on_progress` (wired in
+    # `eoa.dossier.report.build_product_dossier`/`_write_job_progress`) writes the same shape into
+    # `jobs.payload->'progress'` while the job is still running -- surfaced here so the detail
+    # page's pending banner can list per-topic status instead of a single opaque "running" line for
+    # a ~2h job. `payload` (not `result`) is the one documented location: `result` is REPLACED
+    # wholesale by `eoa.orchestrator.jobs`'s `finish_job` the moment the job reaches a terminal
+    # state, so a progress list written there never survives past the job's own run -- confirmed by
+    # reading job 194's row live (`result` held only its final `{"product_dossier": {...}}`, no
+    # trace of the mid-run progress that should have been polled while it was still `running`).
+    # `payload` is merged (jsonb `||`), so it is the one column safe to poll for the job's whole
+    # `queued`/`running` lifetime.
+    payload = row.get("payload") or {}
+    return {"job_id": row["id"], "state": row["state"], "progress": payload.get("progress") or []}
 
 
 def list_dossiers() -> list[dict[str, Any]]:
