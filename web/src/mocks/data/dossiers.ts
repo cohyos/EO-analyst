@@ -122,13 +122,41 @@ const SPECTRO_DATA: ProductDossierOut = {
       cites: [4],
     },
   ],
+  // PD-vocab-ui (2026-09-09): mixes keyed rows (matched against config/spec_vocabulary.yaml via
+  // web/src/lib/specVocabulary.ts) with two deliberately unkeyed rows -- the pre-vocabulary/
+  // legacy-free-named shape DossierSpecTable must still render (flat, ungrouped) alongside the
+  // new grouped rows, per this lane's brief ("normaliser tolerant of both shapes").
   specifications: [
     { parameter_he: "טווח גילוי (אדם)", value: "26", unit: 'ק"מ', variant: null, source_kind: "datasheet", cites: [2] },
     { parameter_he: "טווח זיהוי (רכב)", value: "36", unit: 'ק"מ', variant: null, source_kind: "datasheet", cites: [2] },
-    { parameter_he: "משקל", value: "95", unit: 'ק"ג', variant: null, source_kind: "datasheet", cites: [2] },
-    { parameter_he: "ערוצי חיישנים", value: "EO צבע, IR קירור, LRF", unit: null, variant: null, source_kind: "datasheet", cites: [2] },
-    { parameter_he: "ייצוב", value: "פעיל, שני צירים", unit: null, variant: "XR2", source_kind: "brochure", cites: [1] },
-    { parameter_he: "ממשקים", value: "Ethernet, RS-422", unit: null, variant: null, source_kind: "datasheet", cites: [2] },
+    { parameter_he: "משקל", value: "95", unit: 'ק"ג', variant: null, source_kind: "datasheet", cites: [2], key: "weight" },
+    {
+      parameter_he: "סוג/י גלאי",
+      value: "EO צבע, IR קירור, LRF",
+      unit: null,
+      variant: null,
+      source_kind: "datasheet",
+      cites: [2],
+      key: "detector_type",
+    },
+    {
+      parameter_he: "ייצוב קו ראייה",
+      value: "פעיל, שני צירים",
+      unit: null,
+      variant: "XR2",
+      source_kind: "brochure",
+      cites: [1],
+      key: "line_of_sight_stabilization",
+    },
+    {
+      parameter_he: "ממשקי תקשורת/נתונים",
+      value: "Ethernet, RS-422",
+      unit: null,
+      variant: null,
+      source_kind: "datasheet",
+      cites: [2],
+      key: "interfaces",
+    },
   ],
   variants_and_versions: [
     {
@@ -148,11 +176,12 @@ const SPECTRO_DATA: ProductDossierOut = {
   ],
   performance: [
     {
-      metric_he: "טווח גילוי אדם",
+      metric_he: "DRI בטווח ארוך",
       claimed_value: '26 ק"מ',
       tested_value: '22 ק"מ (הודגם בתנאי שדה, IDF)',
       conditions_he: "ראות טובה, יעד עומד",
       cites: [2, 3],
+      key: "dri_at_long_range",
     },
     {
       metric_he: "זמן תגובה לתראה",
@@ -266,6 +295,19 @@ const SPECTRO_DATA: ProductDossierOut = {
       cites: [],
     },
   ],
+  // PD-vocab-ui (2026-09-09): the §3.3-item-3 overflow bucket -- a real fact ("שילוב עם רשת חיישני
+  // גבול ארצית") that matches no vocabulary key, demonstrating the "אחר" appendix table stays
+  // separate from the grouped vocabulary table.
+  other_specifications: [
+    {
+      parameter_he: "שילוב עם רשת חיישני גבול ארצית",
+      value: "תומך",
+      unit: null,
+      variant: null,
+      source_kind: "article",
+      cites: [4],
+    },
+  ],
 };
 
 const STRATOS_SOURCES: DossierSource[] = [
@@ -320,6 +362,7 @@ const STRATOS_DATA: ProductDossierOut = {
   bd_implications: [
     { text_he: "מוקדם מדי לגזור המלצת פעולה עסקית — נדרש מידע נוסף על מפרט ולוחות זמנים.", cites: [] },
   ],
+  other_specifications: [],
 };
 
 interface MockDossierProduct {
@@ -329,6 +372,13 @@ interface MockDossierProduct {
   aliases: string[];
   runs: DossierRunDetail[];
   pending_job: { job_id: string; state: string; progress: DossierProgressTopic[] } | null;
+  /** PD-vocab-ui (2026-09-09): both mock products are deliberately on the SAME product line
+   * ("border_long_range_eo" -- matches both fixtures' own category_he) so
+   * `/dossiers/compare?keys=elbit-systems-spectro-xr,safran-electronics-defense-stratos` has a
+   * real same-line pair to render against under VITE_USE_MOCKS, without inventing a third
+   * product. See `web/src/types/api.ts`'s `DossierRunDetail.product_line` doc comment for why
+   * this is surfaced through `get_dossier()`'s shape rather than the list/detail endpoints. */
+  product_line: string | null;
 }
 
 //: PD-fix (2026-09-08, item 5): a representative snapshot of `eoa.dossier.plan.run_plan`'s own
@@ -354,6 +404,7 @@ function makeRun(
   reportId: number | null,
   data: ProductDossierOut,
   sources: DossierSource[],
+  llmLeg: string = "local",
 ): DossierRunDetail {
   return {
     id,
@@ -361,6 +412,7 @@ function makeRun(
     outcome,
     confidence,
     report_id: reportId,
+    llm_leg: llmLeg,
     data,
     sources,
     path_docx: reportId ? `/reports/dossier_${id}.docx` : null,
@@ -377,6 +429,7 @@ export const mockDossierProducts: Record<string, MockDossierProduct> = {
     aliases: ["Spectro", "SPECTRO XR", "ספקטרו"],
     runs: [makeRun(501, "2026-09-06T21:10:00+03:00", "found", 0.82, 940, SPECTRO_DATA, SPECTRO_SOURCES)],
     pending_job: null,
+    product_line: "border_long_range_eo",
   },
   "safran-electronics-defense-stratos": {
     product_key: "safran-electronics-defense-stratos",
@@ -385,6 +438,7 @@ export const mockDossierProducts: Record<string, MockDossierProduct> = {
     aliases: ["STRATOS"],
     runs: [makeRun(502, "2026-09-05T09:40:00+03:00", "partial", 0.28, null, STRATOS_DATA, STRATOS_SOURCES)],
     pending_job: null,
+    product_line: "border_long_range_eo",
   },
 };
 
@@ -440,11 +494,13 @@ export function buildMockDossierSummaries(): DossierSummary[] {
             outcome: latestRun.outcome,
             confidence: latestRun.confidence,
             report_id: latestRun.report_id,
+            llm_leg: latestRun.llm_leg,
           }
         : null,
       // `count` = deal count on the latest run (see DossierSummary's own doc comment in
       // web/src/types/api.ts for why) -- not the number of past runs.
       count: latestRun?.data.deals.length ?? 0,
+      product_line: p.product_line,
     };
   });
 }
@@ -464,16 +520,24 @@ export function buildMockDossierDetail(key: string): DossierDetail | null {
       outcome: r.outcome,
       confidence: r.confidence,
       report_id: r.report_id,
+      llm_leg: r.llm_leg,
     })),
     latest: latestRun ? { ...latestRun.data, sources: latestRun.sources } : null,
     pending_job: p.pending_job,
+    product_line: p.product_line,
   };
 }
 
 export function buildMockDossierRunDetail(key: string, id: number): DossierRunDetail | null {
   const p = mockDossierProducts[key];
   if (!p) return null;
-  return p.runs.find((r) => r.id === id) ?? null;
+  const run = p.runs.find((r) => r.id === id);
+  if (!run) return null;
+  // PD-vocab-ui (2026-09-09): product_key/product_name/vendor/product_line live on the PRODUCT,
+  // not the individual run, mirroring how get_dossier() (agent/eoa/api/services.py) joins them
+  // from the same product_dossiers row -- attached here rather than threaded through every
+  // makeRun()/buildFollowUpRun() call site.
+  return { ...run, product_key: p.product_key, product_name: p.product_name, vendor: p.vendor, product_line: p.product_line };
 }
 
 /** Registers a brand-new product (or reuses an existing one for the same key) with a
@@ -484,12 +548,14 @@ export function createOrRerunMockDossier(
   productName: string,
   vendor: string | null | undefined,
   aliases: string[] | undefined,
+  productLine?: string | null,
 ): { job_id: string; product_key: string } {
   const key = productKeyFor(productName, vendor);
   const jobId = `mock-dossier-job-${nextMockDossierRunId}`;
   const existing = mockDossierProducts[key];
   if (existing) {
     existing.pending_job = { job_id: jobId, state: "queued", progress: MOCK_DOSSIER_PROGRESS };
+    if (productLine) existing.product_line = productLine;
   } else {
     mockDossierProducts[key] = {
       product_key: key,
@@ -498,6 +564,7 @@ export function createOrRerunMockDossier(
       aliases: aliases && aliases.length > 0 ? aliases : [productName],
       runs: [],
       pending_job: { job_id: jobId, state: "queued", progress: MOCK_DOSSIER_PROGRESS },
+      product_line: productLine ?? null,
     };
   }
   scheduleMockDossierCompletion(key);

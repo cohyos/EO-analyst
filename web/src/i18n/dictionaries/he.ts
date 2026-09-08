@@ -457,6 +457,14 @@ export const he = {
     dealsCount: "{n} עסקאות",
     lastRunLabel: "הרצה אחרונה",
     confidenceLabel: "ביטחון: {pct}%",
+    // PD-vocab-ui (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md §5.2): comparison entry points --
+    // the DossiersPage multi-select ("השווה נבחרים") and the DossierDetailPage competitors-table
+    // per-row action ("השווה" when a matching dossier exists, "הרץ סקירה למוצר זה" otherwise).
+    compareLink: "השווה",
+    runForCompetitor: "הרץ סקירה למוצר זה",
+    selectForCompareAria: "בחר את {name} להשוואה",
+    compareSelectedButton: "השווה נבחרים ({n})",
+    compareMaxWarning: "ניתן לבחור עד 3 מוצרים להשוואה",
     outcome: {
       found: "נמצא",
       partial: "חלקי",
@@ -488,6 +496,11 @@ export const he = {
       budgetLabel: "תקציב מחקר",
       budget1x: "רגיל (1x)",
       budget2x: "כפול (2x)",
+      modelLabel: "מודל",
+      modelDefault: "ברירת מחדל (שרשרת מוגדרת)",
+      modelCodex: "Codex",
+      modelClaude: "Claude Sonnet",
+      modelAgy: "Gemini (agy)",
       submit: "צור סקירה",
       cancel: "ביטול",
     },
@@ -555,6 +568,10 @@ export const he = {
       colAccessed: "תאריך גישה",
       colOpen: "פתח",
       colSources: "מקורות",
+      colAction: "פעולה",
+      // PD-vocab-ui (2026-09-09): title of the un-grouped appendix table DossierSpecTable renders
+      // for other_specifications + any legacy/stray-keyed row -- docs/PLAN_SPEC_VOCABULARY.md §5.1.
+      otherSpecifications: "פרמטרים נוספים",
     },
     maturity: {
       trlLabel: "TRL",
@@ -588,6 +605,18 @@ export const he = {
       bdImplications: "אין משמעות עסקית מתועדת",
       whatChanged: "אין שינויים לעומת ההרצה הקודמת",
       sources: "אין מקורות מתועדים",
+    },
+    // PD-vocab-ui (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md §5.2): DossierComparePage
+    // (/dossiers/compare?keys=...).
+    compare: {
+      title: "השוואת מוצרים",
+      invalidCountError: "יש לבחור בין 2 ל-3 מוצרים להשוואה",
+      someNotFoundError: "אחד או יותר מהמוצרים שנבחרו לא נמצא",
+      differentLinesWarning: "המוצרים שנבחרו אינם מאותו קו מוצר",
+      differentLinesDetail: "השוואה משמעותית רק בתוך אותו קו מוצר. קווי המוצר שנמצאו: {lines}.",
+      noLine: "ללא קו מוצר",
+      sharedLineLabel: "קו מוצר",
+      differsIndicator: "ערך שונה בין המוצרים",
     },
   },
   accessGate: {

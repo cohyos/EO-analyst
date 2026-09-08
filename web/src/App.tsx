@@ -21,6 +21,7 @@ import { ProductLinesPage } from "@/pages/ProductLinesPage";
 import { ProductLineDetailPage } from "@/pages/ProductLineDetailPage";
 import { DossiersPage } from "@/pages/DossiersPage";
 import { DossierDetailPage } from "@/pages/DossierDetailPage";
+import { DossierComparePage } from "@/pages/DossierComparePage";
 import { TechRadarPage } from "@/pages/TechRadarPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -65,6 +66,7 @@ export default function App() {
                 <Route path="product-lines" element={<ProductLinesPage />} />
                 <Route path="product-lines/:id" element={<ProductLineDetailPage />} />
                 <Route path="dossiers" element={<DossiersPage />} />
+                <Route path="dossiers/compare" element={<DossierComparePage />} />
                 <Route path="dossiers/:key" element={<DossierDetailPage />} />
                 <Route path="tech-radar" element={<TechRadarPage />} />
                 <Route path="settings" element={<SettingsPage />} />

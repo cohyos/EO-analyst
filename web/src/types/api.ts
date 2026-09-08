@@ -1505,6 +1505,12 @@ export interface DossierSpecRow {
   /** datasheet / brochure / article / official */
   source_kind: string | null;
   cites: number[];
+  /** PD-vocab-ui (2026-09-09): stable key into `config/spec_vocabulary.yaml`/`specVocabulary.ts`
+   * (docs/PLAN_SPEC_VOCABULARY.md) -- set once the extraction lane (PD-vocab-extract) lands;
+   * `""`/absent for a legacy free-named row (pre-vocabulary) or a genuine `other_specifications`
+   * overflow row. `DossierSpecTable` groups/orders by this when present and falls back to a flat
+   * render of `parameter_he` when it isn't -- both shapes must render, never just one. */
+  key?: string;
 }
 
 export interface DossierVersionRow {
@@ -1523,6 +1529,8 @@ export interface DossierPerformanceRow {
   tested_value: string | null;
   conditions_he: string | null;
   cites: number[];
+  /** See `DossierSpecRow.key` -- same vocabulary, same fallback discipline. */
+  key?: string;
 }
 
 export interface DossierMaturity {
@@ -1628,6 +1636,12 @@ export interface ProductDossierOut {
   what_changed: DossierSentence[];
   /** For the user's BD role, hedged, quantity first. */
   bd_implications: DossierSentence[];
+  /** PD-vocab-ui (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md §3.3 item 3): a genuine spec fact that
+   * matched no vocabulary key -- the deliberate overflow valve so an unanticipated spec is never
+   * silently dropped. Rows here always carry `key: ""`. Renders as its own small un-grouped "אחר"
+   * table at the end of the spec section (§5.1), never diffed by key (§4), never merged into the
+   * grouped table. Absent/`[]` for data from before this field existed. */
+  other_specifications?: DossierSpecRow[];
 }
 
 /** One row of the dossier's own citation registry (section 2's `sources JSONB`). */
@@ -1650,6 +1664,10 @@ export interface DossierRunRef {
   outcome: DossierOutcome;
   confidence: number | null;
   report_id: number | null;
+  /** PD-cloud-tools (2026-09-09): the LLM leg this run's research + extraction actually used --
+   * "codex:<model>" / "claude:<model>" / "agy:<model>", or "local" for the configured chain (the
+   * default, and every run made before this field existed). */
+  llm_leg: string;
 }
 
 /** `GET /api/dossiers` list row. The frozen contract (section 5) declares only a bare `count` on
@@ -1665,6 +1683,14 @@ export interface DossierSummary {
   vendor: string | null;
   latest: DossierRunRef | null;
   count: number;
+  /** PD-vocab-ui (2026-09-09): NOT currently returned by `list_dossiers()`
+   * (`agent/eoa/api/services.py`) even though `product_dossiers.product_line` exists in the DB --
+   * declared here, optional, for forward compatibility once the backend adds it (a straightforward
+   * additive change, flagged to the backend lane rather than assumed). Comparison entry points
+   * (`DossiersPage`'s "השווה" picker) work without it today (the gate itself runs on
+   * `DossierComparePage`, which resolves each product's line from `GET /api/dossiers/{key}/{id}`,
+   * the one endpoint that already returns it -- see `DossierRunDetail.product_line` below). */
+  product_line?: string | null;
 }
 
 /** PD-fix (2026-09-08, item 5): one research topic's live status, written by
@@ -1698,6 +1724,10 @@ export interface DossierDetail {
   dossiers: DossierRunRef[];
   latest: (ProductDossierOut & { sources: DossierSource[] }) | null;
   pending_job: DossierPendingJob | null;
+  /** See `DossierSummary.product_line`'s doc comment -- same backend gap, same forward-compat
+   * field. Not returned by `dossier_detail()` today either; `DossierComparePage` falls back to
+   * `getDossierRun` for the authoritative value. */
+  product_line?: string | null;
 }
 
 /** `GET /api/dossiers/{product_key}/{id}` -- one specific run, in full. */
@@ -1707,6 +1737,17 @@ export interface DossierRunDetail extends DossierRunRef {
   path_docx: string | null;
   path_md: string | null;
   path_html: string | null;
+  /** PD-vocab-ui (2026-09-09): `get_dossier()` (`agent/eoa/api/services.py`) already returns
+   * `product_key`/`product_name`/`vendor`/`product_line` alongside `data`/`sources` -- this is the
+   * one dossier endpoint the live backend DOES carry `product_line` on today (unlike the list/
+   * detail endpoints, see `DossierSummary`/`DossierDetail`'s own notes), so `DossierComparePage`
+   * uses this endpoint as the authoritative source for gating "same product line" comparisons.
+   * All optional here since the frozen contract (docs/PLAN_PRODUCT_DOSSIER.md §5) never declared
+   * them on this type and older/mock data may omit them. */
+  product_key?: string;
+  product_name?: string;
+  vendor?: string | null;
+  product_line?: string | null;
 }
 
 /** `POST /api/dossiers` request body. */
@@ -1717,6 +1758,9 @@ export interface DossierCreateBody {
   product_line?: string | null;
   /** 1 (regular) or 2 (double) research budget -- section 4's `budget_multiplier`. */
   budget_multiplier?: number | null;
+  /** PD-cloud-tools (2026-09-09): optional per-run model override -- "codex:<model>" |
+   * "claude:<model>" | "agy:<model>" | "local"/null (the configured chain, the default). */
+  llm_leg?: string | null;
 }
 
 export interface DossierCreateResponse {

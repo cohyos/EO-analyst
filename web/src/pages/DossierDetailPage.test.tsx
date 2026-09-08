@@ -8,12 +8,20 @@ import type { DossierDetail, DossierRunDetail, ProductDossierOut } from "@/types
 const getDossier = vi.fn();
 const getDossierRun = vi.fn();
 const postDossierRerun = vi.fn();
+// PD-vocab-ui (2026-09-09): DossierDetailPage now also fetches the full dossier list (for the
+// competitors table's "השווה" / "הרץ סקירה למוצר זה" match, docs/PLAN_SPEC_VOCABULARY.md §5.2
+// entry point 2) and can POST a new dossier for an unmatched competitor -- both mocked here so
+// every pre-existing test in this file keeps working unchanged.
+const getDossiers = vi.fn();
+const postDossier = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
     getDossier: (...args: unknown[]) => getDossier(...args),
     getDossierRun: (...args: unknown[]) => getDossierRun(...args),
     postDossierRerun: (...args: unknown[]) => postDossierRerun(...args),
+    getDossiers: (...args: unknown[]) => getDossiers(...args),
+    postDossier: (...args: unknown[]) => postDossier(...args),
   },
 }));
 
@@ -62,7 +70,7 @@ function detail(over: Partial<DossierDetail> = {}): DossierDetail {
     vendor: "Elbit Systems",
     aliases: ["Spectro"],
     dossiers: [
-      { id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940 },
+      { id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940, llm_leg: "local" },
     ],
     latest: {
       ...emptyDossierOut(),
@@ -92,6 +100,9 @@ beforeEach(() => {
   getDossier.mockReset();
   getDossierRun.mockReset();
   postDossierRerun.mockReset();
+  getDossiers.mockReset();
+  postDossier.mockReset();
+  getDossiers.mockResolvedValue([]);
 });
 
 describe("DossierDetailPage (PD-ui)", () => {
@@ -133,10 +144,74 @@ describe("DossierDetailPage (PD-ui)", () => {
     }
   });
 
-  it("shows the empty-table placeholder for a section with no rows", async () => {
+  it("shows the empty-table placeholder for a still-flat section with no rows", async () => {
+    // PD-vocab-ui (2026-09-09): specifications/performance now render through DossierSpecTable,
+    // whose own required-vocabulary-key placeholders mean those two sections are no longer
+    // "empty" even with zero rows (see the dedicated grouped-table test below) -- versions stays
+    // a plain DossierTable, so it's the one still exercising the flat empty-label path.
     getDossier.mockResolvedValue(detail());
     renderPage();
-    expect(await screen.findByText("אין נתוני מפרט")).toBeInTheDocument();
+    expect(await screen.findByText("אין גרסאות מתועדות")).toBeInTheDocument();
+  });
+
+  it("PD-vocab-ui: specifications table renders required-vocabulary placeholders when no data was found", async () => {
+    getDossier.mockResolvedValue(detail());
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    // "משקל" (weight) is a required common.weight vocabulary key -- with no product_line and no
+    // matching row it must still render as a distinct "not found, required" placeholder, not be
+    // silently omitted the way a non-required missing param would be.
+    expect(await screen.findByText("משקל")).toBeInTheDocument();
+  });
+
+  it("PD-vocab-ui: keyed specification/performance rows render under their vocabulary group with the canonical label", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          specifications: [
+            { parameter_he: "משקל", value: "95", unit: "ק\"ג", variant: null, source_kind: "datasheet", cites: [1], key: "weight" },
+          ],
+          performance: [
+            {
+              metric_he: "DRI בטווח ארוך",
+              claimed_value: "26 ק\"מ",
+              tested_value: null,
+              conditions_he: null,
+              cites: [1],
+              key: "dri_at_long_range",
+            },
+          ],
+          sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null }],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    // Group headers per docs/PLAN_SPEC_VOCABULARY.md §2's fixed group_he order.
+    expect(await screen.findByText("מכניקה וסביבה")).toBeInTheDocument();
+    expect(screen.getByText("ביצועי מערכת")).toBeInTheDocument();
+    expect(screen.getByText("95")).toBeInTheDocument();
+    // renderBidiRuns can split "26 ק"מ" across sibling spans -- assert on aggregate text.
+    await waitFor(() => expect(document.body.textContent ?? "").toContain('26 ק"מ'));
+  });
+
+  it("PD-vocab-ui: an unkeyed (legacy) specification row still renders, in the appendix table", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          specifications: [
+            { parameter_he: "טווח גילוי (אדם)", value: "26", unit: 'ק"מ', variant: null, source_kind: "datasheet", cites: [1] },
+          ],
+          sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null }],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    expect(await screen.findByText("פרמטרים נוספים")).toBeInTheDocument();
+    expect(screen.getByText("טווח גילוי (אדם)")).toBeInTheDocument();
   });
 
   it("shows the pending-run banner while a job is in flight", async () => {
@@ -234,6 +309,50 @@ describe("DossierDetailPage (PD-ui)", () => {
     await waitFor(() => expect(postDossierRerun).toHaveBeenCalledWith("elbit-systems-spectro-xr"));
   });
 
+  it("PD-vocab-ui §5.2 entry point 2: competitor row offers 'הרץ סקירה למוצר זה' when unmatched, launches a dossier on click", async () => {
+    const user = userEvent.setup();
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          competitors: [{ product: "WESCAM MX-25", vendor: "L3Harris", comparison_he: "מוצר מתחרה.", cites: [] }],
+          sources: [],
+        },
+      }),
+    );
+    getDossiers.mockResolvedValue([]);
+    postDossier.mockResolvedValue({ job_id: "job-9", product_key: "l3harris-wescam-mx-25" });
+    renderPage();
+
+    const runButton = await screen.findByText("הרץ סקירה למוצר זה");
+    await user.click(runButton);
+    await waitFor(() =>
+      expect(postDossier).toHaveBeenCalledWith({ product_name: "WESCAM MX-25", vendor: "L3Harris" }),
+    );
+  });
+
+  it("PD-vocab-ui §5.2 entry point 2: competitor row offers a 'השווה' link when a matching dossier already exists", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          competitors: [{ product: "WESCAM MX-25", vendor: "L3Harris", comparison_he: "מוצר מתחרה.", cites: [] }],
+          sources: [],
+        },
+      }),
+    );
+    getDossiers.mockResolvedValue([
+      { product_key: "l3harris-wescam-mx-25", product_name: "WESCAM MX-25", vendor: "L3Harris", latest: null, count: 0 },
+    ]);
+    renderPage();
+
+    const link = await screen.findByRole("link", { name: "השווה" });
+    expect(link).toHaveAttribute(
+      "href",
+      "/dossiers/compare?keys=elbit-systems-spectro-xr,l3harris-wescam-mx-25",
+    );
+  });
+
   it("expands a run-history row's 'השווה' to show its what_changed sentences", async () => {
     const user = userEvent.setup();
     getDossier.mockResolvedValue(detail());
@@ -243,6 +362,7 @@ describe("DossierDetailPage (PD-ui)", () => {
       outcome: "found",
       confidence: 0.82,
       report_id: 940,
+      llm_leg: "local",
       data: { ...emptyDossierOut(), what_changed: [{ text_he: "התווספה עסקה חדשה.", cites: [1] }] },
       sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: null, reliability: null, accessed_at: null }],
       path_docx: null,

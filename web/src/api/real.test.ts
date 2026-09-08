@@ -166,8 +166,12 @@ describe("real.ts dossier normalizers (PD-ui)", () => {
         product_key: "elbit-systems-spectro-xr",
         product_name: "SPECTRO XR",
         vendor: "Elbit Systems",
-        latest: { id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940 },
+        // llm_leg (PD-cloud-tools, 2026-09-09) and product_line (PD-vocab-ui, 2026-09-09) are
+        // both always present on the normalized shape -- "local"/null defaults when the raw
+        // response (as stubbed above) doesn't carry them.
+        latest: { id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940, llm_leg: "local" },
         count: 3,
+        product_line: null,
       },
     ]);
   });

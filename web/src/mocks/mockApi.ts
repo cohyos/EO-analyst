@@ -1542,7 +1542,7 @@ export const mockApi: ApiClient = {
   // PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירות מוצר" -- see web/src/mocks/data/dossiers.ts.
   getDossiers: async (): Promise<DossierSummary[]> => delay(buildMockDossierSummaries()),
   postDossier: async (body: DossierCreateBody): Promise<DossierCreateResponse> => {
-    const res = createOrRerunMockDossier(body.product_name, body.vendor, body.aliases);
+    const res = createOrRerunMockDossier(body.product_name, body.vendor, body.aliases, body.product_line);
     return delay(res, 300);
   },
   getDossier: async (productKey: string): Promise<DossierDetail> => {

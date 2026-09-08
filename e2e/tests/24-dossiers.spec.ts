@@ -89,3 +89,68 @@ test.describe("Product dossiers screen (/dossiers) -- PD-ui", () => {
     await assertNoBadText(page, testInfo, "Product dossiers (/dossiers)");
   });
 });
+
+// PD-vocab-ui (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md §5.1/§5.2): the grouped spec vocabulary
+// table and the /dossiers/compare comparison page. Same live-backend-optional discipline as the
+// suite above -- the route-level/validation tests need no backend and always run; anything that
+// reads real dossier content skips when the backend doesn't have enough data yet (the vocabulary
+// extraction lane, PD-vocab-extract, may not have shipped `key`-tagged rows on this backend yet --
+// the grouped table still renders correctly against legacy free-named rows, see
+// DossierSpecTable's own "tolerant of both shapes" design).
+test.describe("Spec vocabulary grouping + comparison (/dossiers/compare) -- PD-vocab-ui", () => {
+  test("/dossiers/compare rejects a keys list outside the 2-3 range, no backend required", async ({ page }) => {
+    await page.goto("/dossiers/compare?keys=only-one-key");
+    await expect(page.getByText("יש לבחור בין 2 ל-3 מוצרים להשוואה")).toBeVisible();
+    await expect(page.getByRole("link", { name: /חזרה לרשימת הסקירות/ })).toBeVisible();
+  });
+
+  test("dossier detail page's specifications section renders as a grouped table with group headings", async ({
+    page,
+    request,
+  }) => {
+    const res = await request.get(`${API_BASE}/api/dossiers`);
+    test.skip(res.status() === 404, "GET /api/dossiers not implemented on this backend yet");
+    const body = await res.json();
+    test.skip(!Array.isArray(body) || body.length === 0, "No dossiers returned by this backend");
+
+    const first = body[0];
+    await page.goto(`/dossiers/${first.product_key}`);
+    await expect(page.getByRole("heading", { name: "מפרט", level: 3 })).toBeVisible({ timeout: 15_000 });
+    // The common vocabulary always carries required rows (e.g. weight/detector type), so the
+    // specifications section renders at least one of the 8 fixed group_he headings even for a
+    // dossier with a null product_line and zero grounded specification rows.
+    const groupHeadings = page.locator("h4").filter({
+      hasText: /^(אופטיקה|חיישנים|לייזר|ייצוב ובקרה|מכניקה וסביבה|ממשקים|ביצועי מערכת|בשלות ולוגיסטיקה|פרמטרים נוספים)$/,
+    });
+    await expect(groupHeadings.first()).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("selecting 2 dossiers from the list and comparing opens the comparison page", async ({ page, request }) => {
+    const res = await request.get(`${API_BASE}/api/dossiers`);
+    test.skip(res.status() === 404, "GET /api/dossiers not implemented on this backend yet");
+    const body = await res.json();
+    test.skip(!Array.isArray(body) || body.length < 2, "Need at least 2 dossiers to exercise comparison");
+
+    await page.goto("/dossiers");
+    const checkboxes = page.locator('[data-testid^="dossier-compare-checkbox-"]');
+    await expect(checkboxes.first()).toBeVisible({ timeout: 15_000 });
+    await checkboxes.nth(0).check();
+    await checkboxes.nth(1).check();
+    await page.getByTestId("dossier-compare-selected-button").click();
+
+    await expect(page).toHaveURL(/\/dossiers\/compare\?keys=/);
+    await expect(page.getByRole("heading", { name: "השוואת מוצרים" })).toBeVisible({ timeout: 15_000 });
+    // Either the grouped comparison renders, or (real dossiers rarely share a product_line yet,
+    // since PD-vocab-extract's product_line plumbing may not be live) the honest mismatch warning
+    // does -- either is a correct, non-crashing outcome for arbitrary live data.
+    const comparisonRendered = page.getByText("קו מוצר:");
+    const mismatchWarning = page.getByText("המוצרים שנבחרו אינם מאותו קו מוצר");
+    await expect(comparisonRendered.or(mismatchWarning)).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("no bad literal text on the comparison page's invalid-selection state", async ({ page }, testInfo) => {
+    await page.goto("/dossiers/compare?keys=a,b,c,d,e");
+    await expect(page.getByText("יש לבחור בין 2 ל-3 מוצרים להשוואה")).toBeVisible();
+    await assertNoBadText(page, testInfo, "Dossier comparison (/dossiers/compare)");
+  });
+});

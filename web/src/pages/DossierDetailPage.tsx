@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { DossierSectionNav, type DossierSectionNavItem } from "@/components/dossiers/DossierSectionNav";
 import { DossierTable, type DossierTableColumn } from "@/components/dossiers/DossierTable";
+import { DossierSpecTable } from "@/components/dossiers/DossierSpecTable";
 import {
   DossierCiteChips,
   DossierFactText,
@@ -23,9 +24,7 @@ import type {
   DossierDealRow,
   DossierPartnerRow,
   DossierPatentRef,
-  DossierPerformanceRow,
   DossierPriceRow,
-  DossierSpecRow,
   DossierTenderRef,
   DossierVersionRow,
 } from "@/types/api";
@@ -72,6 +71,7 @@ export function DossierDetailPage() {
   const t = useT();
   const { locale } = useI18n();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const detailQuery = useQuery({
     queryKey: ["dossier", key],
@@ -84,6 +84,28 @@ export function DossierDetailPage() {
     mutationFn: () => api.postDossierRerun(key),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dossier", key] }),
   });
+
+  // PD-vocab-ui (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md §5.2 entry point 2): the competitors
+  // table's own "השווה"/"הרץ סקירה למוצר זה" action needs the full dossier list to best-effort
+  // match a competitor's `product`/`vendor` names against an existing dossier -- same list
+  // `DossiersPage` itself already fetches under the same query key (react-query dedupes the
+  // request rather than firing it twice).
+  const dossierListQuery = useQuery({ queryKey: ["dossiers"], queryFn: () => api.getDossiers() });
+  const launchCompetitorMutation = useMutation({
+    mutationFn: (body: { product_name: string; vendor?: string | null }) => api.postDossier(body),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["dossiers"] });
+      navigate(`/dossiers/${res.product_key}`);
+    },
+  });
+
+  function findMatchingDossier(competitor: DossierCompetitorRow) {
+    const target = competitor.product.trim().toLowerCase();
+    if (!target) return null;
+    return (
+      (dossierListQuery.data ?? []).find((s) => s.product_name.trim().toLowerCase() === target) ?? null
+    );
+  }
 
   if (detailQuery.isLoading) return <LoadingState label={t("common.loading")} />;
   if (detailQuery.isError)
@@ -118,28 +140,11 @@ export function DossierDetailPage() {
     { id: "dossier-sources", label: t("dossiers.sections.sources") },
   ];
 
-  const specColumns: DossierTableColumn<DossierSpecRow>[] = [
-    { key: "parameter", label: t("dossiers.table.colParameter"), render: (r) => <DossierPlainText text={r.parameter_he} /> },
-    { key: "value", label: t("dossiers.table.colValue"), render: (r) => <DossierPlainText text={r.value} /> },
-    { key: "unit", label: t("dossiers.table.colUnit"), render: (r) => <DossierPlainText text={r.unit} /> },
-    { key: "variant", label: t("dossiers.table.colVariant"), render: (r) => <DossierPlainText text={r.variant} /> },
-    { key: "source_kind", label: t("dossiers.table.colSourceKind"), render: (r) => <DossierPlainText text={r.source_kind} /> },
-    { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
-  ];
-
   const versionColumns: DossierTableColumn<DossierVersionRow>[] = [
     { key: "name", label: t("dossiers.table.colName"), render: (r) => <DossierPlainText text={r.name} /> },
     { key: "year", label: t("dossiers.table.colYear"), render: (r) => <DossierPlainText text={r.year != null ? String(r.year) : null} /> },
     { key: "changes", label: t("dossiers.table.colChanges"), render: (r) => <DossierPlainText text={r.changes_he} /> },
     { key: "platforms", label: t("dossiers.table.colPlatforms"), render: (r) => <DossierPlainText text={r.platforms.join(", ") || null} /> },
-    { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
-  ];
-
-  const performanceColumns: DossierTableColumn<DossierPerformanceRow>[] = [
-    { key: "metric", label: t("dossiers.table.colMetric"), render: (r) => <DossierPlainText text={r.metric_he} /> },
-    { key: "claimed", label: t("dossiers.table.colClaimed"), render: (r) => <DossierPlainText text={r.claimed_value} /> },
-    { key: "demonstrated", label: t("dossiers.table.colDemonstrated"), render: (r) => <DossierPlainText text={r.tested_value} /> },
-    { key: "conditions", label: t("dossiers.table.colConditions"), render: (r) => <DossierPlainText text={r.conditions_he} /> },
     { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
   ];
 
@@ -204,6 +209,35 @@ export function DossierDetailPage() {
     { key: "vendor", label: t("dossiers.table.colVendor"), render: (r) => <DossierPlainText text={r.vendor} /> },
     { key: "comparison", label: t("dossiers.table.colComparison"), render: (r) => <DossierPlainText text={r.comparison_he} /> },
     { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
+    {
+      key: "action",
+      label: t("dossiers.table.colAction"),
+      render: (r) => {
+        const match = findMatchingDossier(r);
+        if (match) {
+          return (
+            <Link
+              to={`/dossiers/compare?keys=${d.product_key},${match.product_key}`}
+              className="whitespace-nowrap text-accent hover:underline"
+            >
+              {t("dossiers.compareLink")}
+            </Link>
+          );
+        }
+        const pending =
+          launchCompetitorMutation.isPending && launchCompetitorMutation.variables?.product_name === r.product;
+        return (
+          <button
+            type="button"
+            onClick={() => launchCompetitorMutation.mutate({ product_name: r.product, vendor: r.vendor })}
+            disabled={pending}
+            className="whitespace-nowrap text-xs text-accent hover:underline disabled:opacity-60"
+          >
+            {pending ? t("common.loading") : t("dossiers.runForCompetitor")}
+          </button>
+        );
+      },
+    },
   ];
 
   const patentColumns: DossierTableColumn<DossierPatentRef>[] = [
@@ -335,7 +369,15 @@ export function DossierDetailPage() {
 
           <section id="dossier-specifications" className="scroll-mt-16">
             <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.specifications")}</h3>
-            <DossierTable columns={specColumns} rows={data.specifications} rowKey={(r, i) => `${r.parameter_he}-${i}`} emptyLabel={t("dossiers.emptySections.specifications")} caption={t("dossiers.sections.specifications")} />
+            <DossierSpecTable
+              table="specifications"
+              rows={data.specifications}
+              otherRows={data.other_specifications ?? []}
+              productLine={d.product_line ?? null}
+              citations={citations}
+              emptyLabel={t("dossiers.emptySections.specifications")}
+              caption={t("dossiers.sections.specifications")}
+            />
           </section>
 
           <section id="dossier-versions" className="scroll-mt-16">
@@ -345,7 +387,14 @@ export function DossierDetailPage() {
 
           <section id="dossier-performance" className="scroll-mt-16">
             <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.performance")}</h3>
-            <DossierTable columns={performanceColumns} rows={data.performance} rowKey={(r, i) => `${r.metric_he}-${i}`} emptyLabel={t("dossiers.emptySections.performance")} caption={t("dossiers.sections.performance")} />
+            <DossierSpecTable
+              table="performance"
+              rows={data.performance}
+              productLine={d.product_line ?? null}
+              citations={citations}
+              emptyLabel={t("dossiers.emptySections.performance")}
+              caption={t("dossiers.sections.performance")}
+            />
           </section>
 
           <section id="dossier-maturity" className="scroll-mt-16">

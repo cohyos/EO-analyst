@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Plus } from "lucide-react";
+import { Plus, Scale } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { DossierCard, type DossierPendingState } from "@/components/dossiers/DossierCard";
@@ -23,6 +23,21 @@ export function DossiersPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [rerunPendingByKey, setRerunPendingByKey] = useState<Record<string, DossierPendingState | null>>({});
   const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  // PD-vocab-ui (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md §5.2 entry point 1): "השווה" multi-select
+  // -- an ordered list (not a Set) so "השווה נבחרים" can build `?keys=` in the order the user
+  // actually checked the cards, which matters for column order on the comparison page.
+  const [compareSelection, setCompareSelection] = useState<string[]>([]);
+  const MAX_COMPARE = 3;
+
+  function toggleCompare(productKey: string) {
+    setCompareSelection((cur) =>
+      cur.includes(productKey)
+        ? cur.filter((k) => k !== productKey)
+        : cur.length < MAX_COMPARE
+          ? [...cur, productKey]
+          : cur,
+    );
+  }
 
   const listQuery = useQuery({
     queryKey: ["dossiers"],
@@ -68,16 +83,32 @@ export function DossiersPage() {
     <div className="space-y-4 p-4 md:p-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="sr-only">{t("nav.dossiers")}</h2>
-        {!formOpen && (
-          <button
-            type="button"
-            onClick={() => setFormOpen(true)}
-            data-testid="dossier-new-button"
-            className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90"
-          >
-            <Plus size={14} aria-hidden="true" />
-            {t("dossiers.createNew")}
-          </button>
+        <div className="flex items-center gap-2">
+          {!formOpen && (
+            <button
+              type="button"
+              onClick={() => setFormOpen(true)}
+              data-testid="dossier-new-button"
+              className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90"
+            >
+              <Plus size={14} aria-hidden="true" />
+              {t("dossiers.createNew")}
+            </button>
+          )}
+          {compareSelection.length >= 2 && (
+            <button
+              type="button"
+              onClick={() => navigate(`/dossiers/compare?keys=${compareSelection.join(",")}`)}
+              data-testid="dossier-compare-selected-button"
+              className="flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-sm font-medium text-fg hover:bg-bg-sunken"
+            >
+              <Scale size={14} aria-hidden="true" />
+              {t("dossiers.compareSelectedButton", { n: compareSelection.length })}
+            </button>
+          )}
+        </div>
+        {compareSelection.length === MAX_COMPARE && (
+          <p className="text-xs text-fg-dim">{t("dossiers.compareMaxWarning")}</p>
         )}
       </div>
 
@@ -108,6 +139,9 @@ export function DossiersPage() {
               pending={rerunPendingByKey[d.product_key]}
               rerunning={rerunMutation.isPending && rerunMutation.variables === d.product_key}
               onRerun={() => rerunMutation.mutate(d.product_key)}
+              compareSelected={compareSelection.includes(d.product_key)}
+              compareDisabled={compareSelection.length >= MAX_COMPARE}
+              onToggleCompare={() => toggleCompare(d.product_key)}
             />
           ))}
         </div>

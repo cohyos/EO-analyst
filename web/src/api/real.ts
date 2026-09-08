@@ -740,6 +740,9 @@ function normalizeDossierSpecRow(raw: Partial<DossierSpecRow> | null | undefined
     variant: r.variant ?? null,
     source_kind: r.source_kind ?? null,
     cites: normalizeDossierCites(r.cites),
+    // PD-vocab-ui (2026-09-09): "" for a legacy free-named row / a genuine other_specifications
+    // overflow row -- never throws/omits on a backend build that predates the vocabulary key.
+    key: typeof r.key === "string" ? r.key : "",
   };
 }
 
@@ -764,6 +767,7 @@ function normalizeDossierPerformanceRow(
     tested_value: r.tested_value ?? null,
     conditions_he: r.conditions_he ?? null,
     cites: normalizeDossierCites(r.cites),
+    key: typeof r.key === "string" ? r.key : "",
   };
 }
 
@@ -899,6 +903,8 @@ function normalizeProductDossierOut(
     bd_implications: arr(
       ((r as Record<string, unknown>).bd_implications_he ?? r.bd_implications) as Partial<DossierSentence>[] | null | undefined,
     ).map(normalizeDossierSentence),
+    // PD-vocab-ui (2026-09-09): [] on a backend build that predates the vocabulary rollout.
+    other_specifications: arr(r.other_specifications).map(normalizeDossierSpecRow),
   };
 }
 
@@ -930,6 +936,7 @@ function normalizeDossierRunRef(raw: Partial<DossierRunRef> | null | undefined):
     outcome: normalizeDossierOutcome(r.outcome),
     confidence: typeof r.confidence === "number" ? r.confidence : null,
     report_id: typeof r.report_id === "number" ? r.report_id : null,
+    llm_leg: typeof r.llm_leg === "string" && r.llm_leg ? r.llm_leg : "local",
   };
 }
 
@@ -941,6 +948,10 @@ function normalizeDossierSummary(raw: Partial<DossierSummary> | null | undefined
     vendor: r.vendor ?? null,
     latest: r.latest ? normalizeDossierRunRef(r.latest) : null,
     count: num(r.count),
+    // PD-vocab-ui (2026-09-09): not returned by list_dossiers() today -- see this field's own doc
+    // comment in web/src/types/api.ts. Passed through when present so a future backend addition
+    // is picked up with no further UI change.
+    product_line: typeof r.product_line === "string" ? r.product_line : null,
   };
 }
 
@@ -985,6 +996,7 @@ function normalizeDossierDetail(raw: Partial<DossierDetail> | null | undefined):
       ? { ...normalizeProductDossierOut(r.latest), sources: arr(r.latest.sources).map(normalizeDossierSource) }
       : null,
     pending_job: normalizeDossierPendingJob(r.pending_job),
+    product_line: typeof r.product_line === "string" ? r.product_line : null,
   };
 }
 
@@ -999,6 +1011,13 @@ function normalizeDossierRunDetail(
     path_docx: r.path_docx ?? null,
     path_md: r.path_md ?? null,
     path_html: r.path_html ?? null,
+    // PD-vocab-ui (2026-09-09): get_dossier() already returns these (agent/eoa/api/services.py) --
+    // DossierComparePage's product-line gate reads product_line from here (the one dossier
+    // endpoint that reliably carries it, see this type's own doc comment).
+    product_key: typeof r.product_key === "string" ? r.product_key : undefined,
+    product_name: typeof r.product_name === "string" ? r.product_name : undefined,
+    vendor: r.vendor ?? null,
+    product_line: typeof r.product_line === "string" ? r.product_line : null,
   };
 }
 

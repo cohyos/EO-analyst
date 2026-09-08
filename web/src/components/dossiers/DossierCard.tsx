@@ -28,11 +28,22 @@ export function DossierCard({
   pending,
   rerunning,
   onRerun,
+  compareSelected,
+  compareDisabled,
+  onToggleCompare,
 }: {
   dossier: DossierSummary;
   pending?: DossierPendingState | null;
   rerunning?: boolean;
   onRerun: () => void;
+  /** PD-vocab-ui (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md §5.2 entry point 1): the "השווה" multi-
+   * select checkbox on `DossiersPage`'s own card list -- all three optional/omitted entirely
+   * outside a comparison-selection context (e.g. this component's own vitest), matching this
+   * file's existing optional-prop convention for `pending`/`rerunning`. */
+  compareSelected?: boolean;
+  /** Disables (but still shows, unchecked) the checkbox once 3 other cards are already selected. */
+  compareDisabled?: boolean;
+  onToggleCompare?: () => void;
 }) {
   const t = useT();
   const outcomeLabel = dossier.latest
@@ -45,6 +56,19 @@ export function DossierCard({
       className="flex flex-col gap-3 rounded-lg border border-border bg-bg-raised p-4 shadow-panel"
     >
       <div className="flex items-start justify-between gap-2">
+        {onToggleCompare && (
+          <label className="flex shrink-0 items-center pt-0.5">
+            <span className="sr-only">{t("dossiers.selectForCompareAria", { name: dossier.product_name })}</span>
+            <input
+              type="checkbox"
+              checked={!!compareSelected}
+              disabled={!compareSelected && compareDisabled}
+              onChange={onToggleCompare}
+              data-testid={`dossier-compare-checkbox-${dossier.product_key}`}
+              className="h-4 w-4 rounded border-border-strong"
+            />
+          </label>
+        )}
         <div className="min-w-0 flex-1">
           <Link
             to={`/dossiers/${dossier.product_key}`}

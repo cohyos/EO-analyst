@@ -36,6 +36,7 @@ function dossier(over: Partial<DossierSummary> = {}): DossierSummary {
       outcome: "found",
       confidence: 0.82,
       report_id: 940,
+      llm_leg: "local",
     },
     count: 3,
     ...over,
@@ -64,7 +65,7 @@ beforeEach(() => {
 
 describe("DossiersPage (PD-ui)", () => {
   it("renders one card per product with outcome badge and deal count", async () => {
-    getDossiers.mockResolvedValue([dossier(), dossier({ product_key: "safran-stratos", product_name: "STRATOS", latest: { id: 502, created_at: "2026-09-05T09:40:00+03:00", outcome: "partial", confidence: 0.28, report_id: null }, count: 0 })]);
+    getDossiers.mockResolvedValue([dossier(), dossier({ product_key: "safran-stratos", product_name: "STRATOS", latest: { id: 502, created_at: "2026-09-05T09:40:00+03:00", outcome: "partial", confidence: 0.28, report_id: null, llm_leg: "local" }, count: 0 })]);
     renderPage();
 
     expect(await screen.findByTestId("dossier-card-elbit-systems-spectro-xr")).toBeInTheDocument();
@@ -131,6 +132,46 @@ describe("DossiersPage (PD-ui)", () => {
 
     await user.click(screen.getByRole("button", { name: "הסר כינוי Spectro" }));
     expect(screen.queryByText("Spectro")).not.toBeInTheDocument();
+  });
+
+  it("PD-vocab-ui §5.2 entry point 1: selecting 2+ cards shows 'השווה נבחרים' and navigates to the compare route", async () => {
+    const user = userEvent.setup();
+    getDossiers.mockResolvedValue([
+      dossier(),
+      dossier({ product_key: "safran-stratos", product_name: "STRATOS" }),
+    ]);
+    renderPage();
+
+    await screen.findByTestId("dossier-card-elbit-systems-spectro-xr");
+    expect(screen.queryByTestId("dossier-compare-selected-button")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("dossier-compare-checkbox-elbit-systems-spectro-xr"));
+    expect(screen.queryByTestId("dossier-compare-selected-button")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("dossier-compare-checkbox-safran-stratos"));
+
+    const compareButton = await screen.findByTestId("dossier-compare-selected-button");
+    expect(compareButton).toHaveTextContent("השווה נבחרים (2)");
+    await user.click(compareButton);
+    expect(navigateSpy).toHaveBeenCalledWith("/dossiers/compare?keys=elbit-systems-spectro-xr,safran-stratos");
+  });
+
+  it("PD-vocab-ui §5.2: caps selection at 3 and disables further checkboxes", async () => {
+    const user = userEvent.setup();
+    getDossiers.mockResolvedValue([
+      dossier({ product_key: "a", product_name: "A" }),
+      dossier({ product_key: "b", product_name: "B" }),
+      dossier({ product_key: "c", product_name: "C" }),
+      dossier({ product_key: "d", product_name: "D" }),
+    ]);
+    renderPage();
+
+    await screen.findByTestId("dossier-card-a");
+    await user.click(screen.getByTestId("dossier-compare-checkbox-a"));
+    await user.click(screen.getByTestId("dossier-compare-checkbox-b"));
+    await user.click(screen.getByTestId("dossier-compare-checkbox-c"));
+
+    expect(await screen.findByText("ניתן לבחור עד 3 מוצרים להשוואה")).toBeInTheDocument();
+    expect(screen.getByTestId("dossier-compare-checkbox-d")).toBeDisabled();
   });
 
   it("queues a rerun and shows the queued status", async () => {
