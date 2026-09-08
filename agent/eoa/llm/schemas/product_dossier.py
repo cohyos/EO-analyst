@@ -108,7 +108,11 @@ class DealRow(BaseModel):
     #: post-check backfills ``date`` from the cited source's own publish date and marks it
     #: ``"published"`` (never silently indistinguishable from an actual deal-closing date).
     date_kind: DealDateKind = "deal"
-    customer: str = Field(default="", description="הלקוח/הרוכש")
+    #: PD-fix-3 (2026-09-08, item 4): ``None`` (never a placeholder string like ``"—"``/"לא ידוע")
+    #: when the customer is unknown -- ``eoa.dossier.extract``'s post-check normalizes whatever
+    #: placeholder text the model wrote to ``None`` here, so the persisted/API value is a real null
+    #: the UI/renderer can each show their own placeholder for, rather than baking one in.
+    customer: str | None = Field(default=None, description="הלקוח/הרוכש; null אם לא ידוע")
     country: str = Field(
         default="",
         description="מדינת הלקוח הספציפית בלבד; אם המקור מציין רק אזור (למשל 'מדינה באסיה-פסיפיק') ולא "

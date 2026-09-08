@@ -2061,11 +2061,28 @@ def _act(
     ``tools`` defaults to the original fixed ``TOOLS`` list (search/read/finish); callers pass the
     A8-extended list (``TOOLS + _mcp_tool_specs()``) to add MCP tools without changing this
     function's own defaults or any existing call site that doesn't care about MCP.
-    """
+
+    PD-fix-3 (2026-09-08, item 5): ``budget.exhausted`` (which folds in ``deadline_s``, see
+    ``investigate()``) was being *checked* every step here, but never actually stopped the loop --
+    once exhausted, this function kept nudging the model with the "budget מוצה" message and calling
+    ``chat()`` again for up to ``max_steps`` (12) more full round-trips (each its own LLM call, plus
+    whatever ``search``/``read`` tool calls the model chose to make anyway), rather than stopping.
+    That is exactly how a single ``maturity`` topic blew a 600s (``dossier.topic_time_cap_s``) cap
+    to 17 minutes: the cap was a polite request the model could keep ignoring, not an enforced
+    stop. Fixed here to a hard one-step grace period: the FIRST time budget is found exhausted, the
+    model gets exactly one more turn (with the nudge message) to call ``finish``; if that turn
+    doesn't finish, the loop stops for real on the very next check -- the caller (``investigate()``)
+    then finalizes with whatever ``inv.result`` already holds (or ``stopped_timeout`` if none)."""
     tools = tools if tools is not None else TOOLS
+    exhaustion_notice_given = False
     for _ in range(max_steps):
         _check_stop(inv)
         if budget.exhausted:
+            if exhaustion_notice_given:
+                # Already spent the one grace turn below without the model calling `finish` --
+                # stop cycling through more (potentially slow) steps past the deadline.
+                break
+            exhaustion_notice_given = True
             transcript.append(
                 {
                     "role": "user",

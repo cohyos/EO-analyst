@@ -96,6 +96,22 @@ def _cell(value: Any) -> Any:
     return value
 
 
+#: PD-fix-3 (2026-09-08, item 4): the deals table's own customer placeholder -- deliberately
+#: distinct from the generic `PLACEHOLDER_HE` ("לא נמצא במקורות", which reads as "the research
+#: never covered this at all"): a deal row itself IS grounded/cited, it is specifically the
+#: customer's identity that is unknown, which "לא צוין" (not specified) says honestly without
+#: implying the whole row is unsourced.
+CUSTOMER_PLACEHOLDER_HE = "לא צוין"
+
+
+def _deal_customer_cell(r: DealRow) -> str:
+    """Never the raw `"—"`/`None` value -- `eoa.dossier.extract._normalize_customer` already turns
+    a model-written placeholder string into a real `None`, so the only remaining case to handle
+    here is that `None` itself (or, defensively, an already-blank string on old persisted data)."""
+    customer = (r.customer or "").strip()
+    return customer or CUSTOMER_PLACEHOLDER_HE
+
+
 # --------------------------------------------------------------------------
 # render-side duck-typed dataclasses -- see eoa.patents.survey's own identical-purpose note for
 # why this is a small local shape rather than a docx_builder.py change.
@@ -349,7 +365,7 @@ def _deals_table(dossier: ProductDossierOut) -> dict[str, Any]:
     rows = [
         [
             _deal_date_cell(r),
-            _cell(r.customer),
+            _deal_customer_cell(r),
             # PD-fix item 3: a region-only source ("Asia-Pacific country") never fabricates a
             # specific country here -- `country` is empty and `region_he` carries the region text.
             _cell(r.country or r.region_he),

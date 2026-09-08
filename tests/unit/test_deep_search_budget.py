@@ -250,3 +250,41 @@ class TestActBudgetExhaustion:
         _act(inv, budget, transcript, round_no=1, max_steps=5)
         # Should have added a user message about budget exhaustion
         assert any("תקציב" in str(msg.get("content", "")) for msg in transcript)
+
+    def test_act_stops_after_one_grace_step_past_deadline_instead_of_cycling_to_max_steps(
+        self, monkeypatch
+    ):
+        """PD-fix-3 (2026-09-08, item 5): reproduces why a 600s (dossier.topic_time_cap_s) topic cap
+        blew out to 17 minutes live -- before this fix, `_act` KEPT calling `chat()` (and processing
+        whatever tool calls the model made) for every remaining step up to `max_steps` once the
+        budget/deadline was exhausted, merely re-appending the "budget exhausted" nudge each time
+        rather than actually stopping. The model here never calls `finish` no matter how many turns
+        it gets -- with the fix, `chat()` (each call standing in for a real, possibly slow LLM/tool
+        round-trip) is invoked at most twice total (the step already in flight when exhaustion was
+        first detected, plus exactly one grace turn), never cycling through all of `max_steps`."""
+        inv = Investigation(job_id=None, item_id=None, question="test")
+        budget = Budget(
+            max_queries=10,
+            max_pages=20,
+            deadline=time.monotonic() - 1,  # already past deadline before _act even starts
+            confidence_stop=0.8,
+        )
+
+        call_count = {"n": 0}
+        mock_result = MagicMock()
+        mock_result.tool_calls = []  # never finishes
+        mock_result.content = "still working"
+
+        def fake_chat(*a, **kw):
+            call_count["n"] += 1
+            return mock_result
+
+        monkeypatch.setattr("eoa.search.deep_search.chat", fake_chat)
+        monkeypatch.setattr("eoa.search.deep_search._check_stop", lambda *a: None)
+
+        max_steps = 12  # the real _DEFAULT_ACT_MAX_STEPS
+        result = _act(inv, budget, [], round_no=1, max_steps=max_steps)
+
+        assert result is False  # never finished
+        assert call_count["n"] <= 2  # bounded by the one-grace-turn fix, not max_steps
+        assert call_count["n"] < max_steps

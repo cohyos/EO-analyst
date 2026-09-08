@@ -23,7 +23,7 @@ from typing import Any
 
 import structlog
 
-from eoa.dossier.corpus import CorpusResult
+from eoa.dossier.corpus import CorpusResult, patent_relevance_he
 from eoa.dossier.plan import PlanResult
 from eoa.errors import LLMOutputError
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
@@ -31,6 +31,7 @@ from eoa.llm.prompts import render
 from eoa.llm.schemas.product_dossier import (
     CompetitorRow,
     DealRow,
+    DossierPatentRow,
     PartnerRow,
     PerformanceRow,
     PriceRow,
@@ -381,6 +382,29 @@ def _ground_performance_row(
     )
 
 
+#: PD-fix-3 (2026-09-08, item 4): a "customer" value the model wrote as a literal placeholder
+#: ("—", "-", "לא ידוע", "unknown", ...) is never kept as-is -- see :func:`_normalize_customer`.
+_CUSTOMER_PLACEHOLDER_RE = re.compile(
+    r"^[\s\-—–_.]*$|^(?:n/?a|unknown|לא\s*ידוע|לא\s*צוין|אין\s*מידע|לא\s*מזוהה)[\s.]*$", re.IGNORECASE
+)
+
+
+def _normalize_customer(customer: str | None) -> str | None:
+    """``None`` (never a placeholder string) when ``customer`` is empty or literal placeholder
+    text -- the live SPECTRO XR deals table rendered the raw "—" a model wrote into ``customer``
+    verbatim, because the general ``_cell()`` placeholder check in ``eoa.dossier.report`` only ever
+    catches ``None``/``""``, not a truthy-but-meaningless string. Normalizing here means the
+    persisted/API ``customer`` value is a real null: ``eoa.dossier.report`` renders its own "לא
+    צוין" for it, and ``eoa.dossier.diff`` independently falls back to (amount, kind) identity
+    whenever a customer is missing on either side of a comparison."""
+    if not customer:
+        return None
+    text = customer.strip()
+    if not text or _CUSTOMER_PLACEHOLDER_RE.match(text):
+        return None
+    return text
+
+
 def _ground_deal_row(
     row: DealRow,
     valid_ns: set[int],
@@ -392,6 +416,7 @@ def _ground_deal_row(
     good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
     if bad_cites:
         _drop(dropped, "deals.cites", f"out of range: {bad_cites}", row.customer)
+    customer = _normalize_customer(row.customer)
     text = _text_for_cites(good_cites, registry_text)
     amount = row.amount
     if amount and not _numbers_grounded(amount, text):
@@ -426,6 +451,7 @@ def _ground_deal_row(
     return row.model_copy(
         update={
             "cites": good_cites,
+            "customer": customer,
             "amount": amount,
             "amount_value": amount_value,
             "currency": currency,
@@ -547,6 +573,50 @@ def _ground_generic_row(row: Any, valid_ns: set[int], dropped: list[DroppedField
     return row.model_copy(update={"cites": good_cites})
 
 
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 1): a patent row's own `relevance_he` is never trusted as the model
+# wrote it -- the live SPECTRO XR dossier had rows whose `relevance_he` already admitted "אין אישור
+# במקורות לקשר" (no confirmed link in the sources) yet were kept anyway. `relevance_he` here is
+# entirely code-derived (`eoa.dossier.corpus.patent_relevance_he` -- the same deterministic rule
+# `build_corpus` already applies upstream to keep an ungrounded patent out of the registry in the
+# first place): it states only the one concrete, checkable link -- the row's own `assignee` field
+# matching the vendor/an alias, or the product name literally appearing in the row's own cited
+# source text -- and OVERWRITES whatever text the model wrote. A row with neither link is dropped
+# outright, same "nothing else worth keeping" rule `_ground_competitor_row`/`_ground_partner_row`
+# already apply to an ungrounded name -- a second, independent line of defense in case a model ever
+# cites a patent registry row (already relevance-filtered upstream) but still invents its own
+# `assignee`/`title` text that doesn't actually match.
+# --------------------------------------------------------------------------
+
+
+def _ground_patent_row(
+    row: DossierPatentRow,
+    valid_ns: set[int],
+    registry_text: dict[int, str],
+    dropped: list[DroppedField],
+    *,
+    product_name: str,
+    vendor: str | None,
+    aliases: list[str],
+) -> DossierPatentRow | None:
+    good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
+    if bad_cites:
+        _drop(dropped, "patents.cites", f"out of range: {bad_cites}", row.pub_number)
+    text = _text_for_cites(good_cites, registry_text)
+    relevance = patent_relevance_he(
+        assignees=[row.assignee] if row.assignee else [],
+        title=row.title,
+        source_text=text,
+        product_name=product_name,
+        vendor=vendor,
+        aliases=aliases,
+    )
+    if relevance is None:
+        _drop(dropped, "patents", "no grounded applicant/product-name link", row.pub_number)
+        return None
+    return row.model_copy(update={"cites": good_cites, "relevance_he": relevance})
+
+
 def ground_dossier(
     draft: ProductDossierOut, corpus: CorpusResult, plan_result: PlanResult
 ) -> GroundingResult:
@@ -597,7 +667,22 @@ def ground_dossier(
         _ground_generic_row(r, valid_ns, dropped, label="variants_and_versions")
         for r in draft.variants_and_versions
     ]
-    patents = [_ground_generic_row(r, valid_ns, dropped, label="patents") for r in draft.patents]
+    patents = [
+        r
+        for r in (
+            _ground_patent_row(
+                r,
+                valid_ns,
+                registry_text,
+                dropped,
+                product_name=corpus.product_name,
+                vendor=corpus.vendor,
+                aliases=corpus.aliases,
+            )
+            for r in draft.patents
+        )
+        if r
+    ]
     tenders = [
         _ground_generic_row(r, valid_ns, dropped, label="tenders_and_forecasts")
         for r in draft.tenders_and_forecasts

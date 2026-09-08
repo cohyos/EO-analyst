@@ -49,7 +49,41 @@ def _rows(data: dict[str, Any] | None, key: str) -> list[dict[str, Any]]:
 # PD-fix-2 item 1: deal identity -- (customer, amount, kind) only; date/date_kind/region never
 # participate in "is this the same deal" -- they are the exact fields a rerun most often refines
 # for an already-known deal.
+#
+# PD-fix-3 (2026-09-08, item 2): customer identity falls back to (amount, kind) alone whenever the
+# customer is missing/a placeholder on EITHER side. The live SPECTRO XR regression (id=2 -> id=3):
+# run 2's deal carried a real (if unidentified) customer description, "מדינה באזור אסיה-פסיפיק (לא
+# מזוהה)"; run 3's re-extraction of the very same deal lost that text and left customer empty/None
+# -- two genuinely different normalized-name keys for the same deal, so it read as a brand-new
+# "עסקה חדשה" (with the fabricated-looking "לקוח לא צוין: כ-80 מיליון דולר" line to go with it).
+# :func:`_is_placeholder_customer` recognizes both an actually-empty/``None`` customer AND the
+# common placeholder TEXT a model (or a hand-built previous-run dict) sometimes writes literally
+# ("—", "-", "לא ידוע", "לא צוין", "unknown", "n/a", ...) -- a placeholder customer on either side
+# collapses the customer half of the key to the same empty string, so identity then rests on
+# amount+kind alone, exactly matching a *real* customer's own empty-string key (which is exactly
+# what should happen: "no customer known" is one identity, not a new one every run).
 # --------------------------------------------------------------------------
+
+_PLACEHOLDER_CUSTOMER_RE = re.compile(
+    r"^[\s\-—–_.]*$|^(?:n/?a|unknown|לא\s*ידוע|לא\s*צוין|אין\s*מידע|לא\s*מזוהה)[\s.]*$", re.IGNORECASE
+)
+
+
+def _is_placeholder_customer(customer: str | None) -> bool:
+    """``True`` for ``None``/empty AND for common literal placeholder text (never for a real,
+    if partial, customer description like "מדינה באזור אסיה-פסיפיק (לא מזוהה)" -- that string
+    names an actual region/qualifier, it just isn't a specific company/country name)."""
+    if not customer:
+        return True
+    return bool(_PLACEHOLDER_CUSTOMER_RE.match(customer.strip()))
+
+
+def _customer_display_he(customer: str | None) -> str:
+    """Never renders the raw ``"—"``/``None`` placeholder into change text -- an honest Hebrew
+    label instead (PD-fix-3 item 2's own "never print '—' as a customer" rule)."""
+    if customer and not _is_placeholder_customer(customer):
+        return customer.strip()
+    return "לקוח לא צוין"
 
 
 def _deal_amount_key(amount_value: float | None, amount_text: str) -> str:
@@ -65,9 +99,12 @@ def _deal_amount_key(amount_value: float | None, amount_text: str) -> str:
     return f"{parsed:.2f}" if parsed is not None else ""
 
 
-def _deal_key(customer: str, amount_value: float | None, amount_text: str, kind: str) -> tuple[str, str, str]:
+def _deal_key(
+    customer: str | None, amount_value: float | None, amount_text: str, kind: str
+) -> tuple[str, str, str]:
+    customer_key = "" if _is_placeholder_customer(customer) else entity_normalize.normalize_name_key(customer)
     return (
-        entity_normalize.normalize_name_key(customer),
+        customer_key,
         _deal_amount_key(amount_value, amount_text),
         str(kind or ""),
     )
@@ -75,11 +112,17 @@ def _deal_key(customer: str, amount_value: float | None, amount_text: str, kind:
 
 def _diff_deals(previous: dict[str, Any] | None, current: ProductDossierOut) -> list[Sentence]:
     prev_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    #: PD-fix-3 item 2: the (amount, kind)-only fallback -- populated from EVERY previous deal
+    #: regardless of its own customer, so a current row whose customer is a placeholder can still
+    #: find its previous match (and vice versa: a previous row whose OWN customer was a placeholder
+    #: is still findable from a current row that has since identified a real customer).
+    prev_by_amount_kind: dict[tuple[str, str], dict[str, Any]] = {}
     for r in _rows(previous, "deals"):
-        key = _deal_key(r.get("customer") or "", r.get("amount_value"), r.get("amount") or "", r.get("kind") or "")
+        key = _deal_key(r.get("customer"), r.get("amount_value"), r.get("amount") or "", r.get("kind") or "")
         # First-seen wins; a duplicate identity already present in the previous run's own data is
         # not this stage's problem to resolve.
         prev_by_key.setdefault(key, r)
+        prev_by_amount_kind.setdefault((key[1], key[2]), r)
 
     out: list[Sentence] = []
     for d in current.deals:
@@ -88,10 +131,25 @@ def _diff_deals(previous: dict[str, Any] | None, current: ProductDossierOut) -> 
         key = _deal_key(d.customer, d.amount_value, d.amount, d.kind)
         prev_row = prev_by_key.get(key)
         if prev_row is None:
+            # PD-fix-3 item 2: an exact-key miss doesn't necessarily mean "new deal" -- when the
+            # customer is a placeholder on EITHER side (this run's or the matched-by-amount+kind
+            # previous row's), customer text is never a reliable identity signal for that pair, so
+            # identity falls back to (amount, kind) alone. Two rows that both name REAL, different
+            # customers at the same amount+kind are deliberately left unmatched here (still "new") --
+            # the fallback is never applied just because two customer strings differ.
+            candidate = prev_by_amount_kind.get((key[1], key[2]))
+            if candidate is not None and (
+                _is_placeholder_customer(d.customer) or _is_placeholder_customer(candidate.get("customer"))
+            ):
+                prev_row = candidate
+        if prev_row is None:
             amount_part = f" בהיקף {d.amount}" if d.amount else ""
             out.append(
                 Sentence(
-                    text_he=f"עסקה חדשה מאז הסקירה הקודמת: {d.customer or '—'}{amount_part} ({d.kind}).",
+                    text_he=(
+                        f"עסקה חדשה מאז הסקירה הקודמת: {_customer_display_he(d.customer)}"
+                        f"{amount_part} ({d.kind})."
+                    ),
                     cites=d.cites,
                 )
             )
@@ -100,7 +158,10 @@ def _diff_deals(previous: dict[str, Any] | None, current: ProductDossierOut) -> 
         # date genuinely discovered where none existed before earns its own honest note.
         if d.date and not prev_row.get("date"):
             out.append(
-                Sentence(text_he=f"נוסף תאריך לעסקה עם {d.customer or '—'}: {d.date}.", cites=d.cites)
+                Sentence(
+                    text_he=f"נוסף תאריך לעסקה עם {_customer_display_he(d.customer)}: {d.date}.",
+                    cites=d.cites,
+                )
             )
     return out
 
@@ -116,6 +177,13 @@ def _tokens(text: str) -> set[str]:
     return set(_TOKEN_RE.findall((text or "").casefold()))
 
 
+def _token_jaccard(a: str, b: str) -> float:
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
 def _values_effectively_same(previous_value: str, current_value: str) -> bool:
     """An exact (case-insensitive) match is always "same". Otherwise, compared by token (Jaccard)
     overlap -- ``|intersection| / |union| >= 0.6`` counts as the same value (mere rewording of the
@@ -123,22 +191,61 @@ def _values_effectively_same(previous_value: str, current_value: str) -> bool:
     a, b = (previous_value or "").strip(), (current_value or "").strip()
     if a.casefold() == b.casefold():
         return True
-    ta, tb = _tokens(a), _tokens(b)
-    if not ta or not tb:
+    if not a or not b:
         return False
-    return len(ta & tb) / len(ta | tb) >= 0.6
+    return _token_jaccard(a, b) >= 0.6
 
 
-def _spec_key(row: dict[str, Any]) -> str:
-    return str(row.get("parameter_he") or "").strip().casefold()
+#: PD-fix-3 (2026-09-08, item 3): a parameter/metric NAME match this loose ("ביצועי אופטיקה" vs.
+#: "ביצועי עומס אופטי במארז קומפקטי" -- the live SPECTRO XR case, 5 false "new parameter" entries
+#: from the extraction model simply re-wording its own parameter names between runs, not a genuine
+#: new spec). Deliberately lower than the 0.6 VALUE-sameness threshold above: a name is a short,
+#: low-entropy label where even a real rewording often shares under 60% of its tokens, while two
+#: genuinely different parameters sharing half their words is rare enough that 0.5 stays safe.
+_PARAM_NAME_JACCARD_MIN = 0.5
+
+
+def _find_matching_prev_row(
+    prev_rows: list[dict[str, Any]],
+    *,
+    name_key: str,
+    value_key: str,
+    current_name: str,
+    current_value: str,
+) -> dict[str, Any] | None:
+    """The previous row this current spec/performance row is "the same parameter" as -- by a fuzzy
+    (token-Jaccard >= :data:`_PARAM_NAME_JACCARD_MIN`) match on the NAME field, OR (independently)
+    by the VALUE already being effectively the same (:func:`_values_effectively_same`, >= 0.6) --
+    either signal alone is enough, covering both "renamed parameter, same value" and "same-ish name,
+    refined/changed value". Name match is tried first (cheaper, and the more semantically direct
+    signal); returns the first row satisfying either, or ``None`` when nothing matches at all (a
+    genuinely new parameter)."""
+    current_name = (current_name or "").strip()
+    for row in prev_rows:
+        prev_name = str(row.get(name_key) or "").strip()
+        if prev_name and _token_jaccard(current_name, prev_name) >= _PARAM_NAME_JACCARD_MIN:
+            return row
+    current_value = (current_value or "").strip()
+    if current_value:
+        for row in prev_rows:
+            prev_value = str(row.get(value_key) or "").strip()
+            if prev_value and _values_effectively_same(prev_value, current_value):
+                return row
+    return None
 
 
 def _diff_specifications(previous: dict[str, Any] | None, current: ProductDossierOut) -> list[Sentence]:
-    prev_by_param = {_spec_key(r): (r.get("value") or "") for r in _rows(previous, "specifications")}
+    prev_specs = _rows(previous, "specifications")
     out = []
     for spec in current.specifications:
-        key = spec.parameter_he.strip().casefold()
-        if key not in prev_by_param:
+        prev_row = _find_matching_prev_row(
+            prev_specs,
+            name_key="parameter_he",
+            value_key="value",
+            current_name=spec.parameter_he,
+            current_value=spec.value,
+        )
+        if prev_row is None:
             if spec.value and spec.cites:
                 out.append(
                     Sentence(
@@ -147,7 +254,7 @@ def _diff_specifications(previous: dict[str, Any] | None, current: ProductDossie
                     )
                 )
             continue
-        prev_value = prev_by_param[key]
+        prev_value = prev_row.get("value") or ""
         if spec.value and spec.cites and not _values_effectively_same(prev_value, spec.value):
             out.append(
                 Sentence(
@@ -158,19 +265,23 @@ def _diff_specifications(previous: dict[str, Any] | None, current: ProductDossie
     return out
 
 
-def _perf_key(row: dict[str, Any]) -> str:
-    return str(row.get("metric_he") or "").strip().casefold()
-
-
 def _diff_performance(previous: dict[str, Any] | None, current: ProductDossierOut) -> list[Sentence]:
     """PD-fix-2 item 2's "same rule for performance rows" -- claimed and demonstrated/operational
     values compared the same token-overlap way as specifications, kept as two independent checks
-    per metric (a rewording of one must not mask a genuine change in the other)."""
-    prev_by_metric = {_perf_key(r): r for r in _rows(previous, "performance")}
+    per metric (a rewording of one must not mask a genuine change in the other). PD-fix-3 item 3:
+    matched against the previous run's rows the same fuzzy name-or-value way specifications are,
+    not by an exact ``metric_he`` string -- the same LLM re-wording drift applies to metric names
+    as much as spec parameter names."""
+    prev_perf = _rows(previous, "performance")
     out: list[Sentence] = []
     for perf in current.performance:
-        key = perf.metric_he.strip().casefold()
-        prev_row = prev_by_metric.get(key)
+        prev_row = _find_matching_prev_row(
+            prev_perf,
+            name_key="metric_he",
+            value_key="claimed_value",
+            current_name=perf.metric_he,
+            current_value=perf.claimed_value,
+        )
         if prev_row is None:
             if perf.claimed_value and perf.cites:
                 out.append(

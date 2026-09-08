@@ -20,6 +20,7 @@ from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.product_dossier import (
     CompetitorRow,
     DealRow,
+    DossierPatentRow,
     IdentityBlock,
     PriceRow,
     ProductDossierOut,
@@ -329,3 +330,109 @@ def test_deal_row_with_own_date_keeps_date_kind_deal() -> None:
     deal = result.dossier.deals[0]
     assert deal.date == "2026-03-01"
     assert deal.date_kind == "deal"
+
+
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 4): a placeholder "customer" string the model wrote literally (e.g.
+# the live SPECTRO XR "—") is normalized to None -- never persisted/rendered as-is.
+# --------------------------------------------------------------------------
+
+
+def test_deal_customer_placeholder_dash_normalized_to_none() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="—", kind="contract_award", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].customer is None
+
+
+def test_deal_customer_placeholder_hebrew_text_normalized_to_none() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="לא ידוע", kind="contract_award", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].customer is None
+
+
+def test_deal_real_customer_name_is_kept_verbatim() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה עם US Air Force.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="US Air Force", kind="contract_award", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].customer == "US Air Force"
+
+
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 1): patents -- relevance_he is entirely code-derived (never trusted as
+# the model wrote it) and a row with no grounded applicant/product-name link is dropped outright.
+# --------------------------------------------------------------------------
+
+
+def test_patent_row_with_matching_assignee_gets_deterministic_relevance_he() -> None:
+    corpus = _corpus_with_registry([_reg(1, kind="patent")])
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        patents=[
+            DossierPatentRow(
+                pub_number="US1234567B2",
+                title="EO/IR payload apparatus",
+                assignee="Elbit Systems",
+                relevance_he="Some model-written text that may or may not be true.",
+                cites=[1],
+            )
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert len(result.dossier.patents) == 1
+    relevance = result.dossier.patents[0].relevance_he
+    assert "Elbit Systems" in relevance
+    assert "Some model-written text" not in relevance
+
+
+def test_patent_row_admitting_no_confirmed_link_is_dropped() -> None:
+    """Reproduces the live defect verbatim: the model's own relevance_he already says there is no
+    confirmed link in the sources, and the row must not survive grounding regardless."""
+    corpus = _corpus_with_registry([_reg(1, kind="patent")])
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        patents=[
+            DossierPatentRow(
+                pub_number="CN113804187A",
+                title="target positioning pod apparatus",
+                assignee="",
+                relevance_he="אין אישור במקורות לקשר",
+                cites=[1],
+            )
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.patents == []
+    assert any(d.field == "patents" for d in result.dropped)
+
+
+def test_patent_row_product_name_in_title_is_kept_without_assignee_match() -> None:
+    corpus = _corpus_with_registry([_reg(1, kind="patent")])
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        patents=[
+            DossierPatentRow(
+                pub_number="US9999999A1",
+                title="SPECTRO XR compact payload housing",
+                assignee="Unrelated Assignee Inc",
+                relevance_he="",
+                cites=[1],
+            )
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert len(result.dossier.patents) == 1
+    assert "SPECTRO XR" in result.dossier.patents[0].relevance_he

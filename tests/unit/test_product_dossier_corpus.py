@@ -510,3 +510,134 @@ class TestBuildCorpusPatentsOpsMerge:
         )
         assert called == []
         assert len(result.patents) == 1  # only the DB-table match from the fixture
+
+
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 1): patent relevance gate -- reproduces the live SPECTRO XR patents
+# defect (8 generic "pod"/"target" hits, all with an empty assignee, kept anyway) and the fix's own
+# rule: an empty-assignee row is always dropped; a row WITH an assignee is kept only when that
+# assignee matches the vendor/an alias, or the product name itself appears in title/abstract.
+# --------------------------------------------------------------------------
+
+
+class TestPatentRelevanceGate:
+    def test_empty_assignee_row_is_dropped_even_with_product_name_in_title(self) -> None:
+        assert (
+            dossier_corpus.patent_relevance_he(
+                assignees=[],
+                title="SPECTRO XR targeting pod mount",
+                source_text="",
+                product_name="SPECTRO XR",
+                vendor="Elbit Systems",
+                aliases=["Spectro"],
+            )
+            is None
+        )
+
+    def test_unrelated_assignee_and_no_product_name_is_dropped(self) -> None:
+        assert (
+            dossier_corpus.patent_relevance_he(
+                assignees=["Some Other Company Ltd"],
+                title="target positioning pod apparatus",
+                source_text="a generic pod for target positioning",
+                product_name="SPECTRO XR",
+                vendor="Elbit Systems",
+                aliases=["Spectro"],
+            )
+            is None
+        )
+
+    def test_matching_assignee_is_kept_and_states_the_grounded_link(self) -> None:
+        relevance = dossier_corpus.patent_relevance_he(
+            assignees=["Elbit Systems Ltd"],
+            title="EO/IR payload apparatus",
+            source_text="",
+            product_name="SPECTRO XR",
+            vendor="Elbit Systems",
+            aliases=["Spectro"],
+        )
+        assert relevance is not None
+        assert "Elbit Systems Ltd" in relevance
+
+    def test_unrelated_assignee_but_product_name_in_title_is_kept(self) -> None:
+        relevance = dossier_corpus.patent_relevance_he(
+            assignees=["Unrelated Assignee Inc"],
+            title="SPECTRO XR compact payload housing",
+            source_text="",
+            product_name="SPECTRO XR",
+            vendor="Elbit Systems",
+            aliases=["Spectro"],
+        )
+        assert relevance is not None
+        assert "SPECTRO XR" in relevance
+
+    def test_build_corpus_drops_empty_assignee_generic_keyword_patents(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reproduces the live defect end-to-end: the DB-table match returns generic "pod"/"target"
+        hits with empty assignees alongside the one genuinely relevant, assignee-matched row -- only
+        the relevant row survives build_corpus."""
+
+        def fake_fetchall(query: str, params: Any = None) -> list[dict[str, Any]]:
+            q = query.upper()
+            if "FROM PATENTS" in q:
+                return [
+                    dict(_FIXTURE_PATENTS[0]),  # assignee="Elbit Systems" -- relevant, kept
+                    {
+                        "id": 21,
+                        "pub_number": "CN113804187A",
+                        "title": "target positioning pod apparatus",
+                        "abstract": "a generic pod for target positioning",
+                        "assignees": [],
+                        "cpc": [],
+                        "publication_date": dt.date(2025, 1, 1),
+                        "filing_date": None,
+                        "url": None,
+                        "value_score": None,
+                    },
+                ]
+            return _fake_fetchall(query, params)
+
+        monkeypatch.setattr(dossier_corpus, "_fetchall", fake_fetchall)
+        result = dossier_corpus.build_corpus("SPECTRO XR", "Elbit Systems", ["Spectro"])
+        pub_numbers = {p["pub_number"] for p in result.patents}
+        assert pub_numbers == {"US1234567B2"}
+
+    def test_cap_is_15_and_assignee_matches_ranked_first(self) -> None:
+        """Unit-level: exercises ``_filter_and_cap_patents`` directly (the merge-time gate
+        ``build_corpus`` applies) rather than the full DB pipeline -- ``collect_patents``'s own SQL
+        query already requires the product name/alias to appear somewhere in the combined title/
+        abstract/assignees text (its ``_search_terms`` clause), so a row whose ONLY grounding is an
+        assignee match (with no product-name mention at all in its title) would never even be
+        fetched from a real Postgres in the first place; testing the shared gate function in
+        isolation avoids conflating that separate, pre-existing SQL-side filter with this one."""
+        rank1_rows = [
+            {
+                "pub_number": f"US{i}NAME",
+                "title": "SPECTRO XR variant",  # product-name-only match, rank 1
+                "abstract": "",
+                "assignees": ["Some Other Company"],
+                "publication_date": None,
+            }
+            for i in range(10)
+        ]
+        rank0_rows = [
+            {
+                "pub_number": f"US{i}ASSIGNEE",
+                "title": "SPECTRO XR family member",
+                "abstract": "",
+                "assignees": ["Elbit Systems"],  # assignee-matched, rank 0
+                "publication_date": None,
+            }
+            for i in range(10)
+        ]
+        kept = dossier_corpus._filter_and_cap_patents(
+            [*rank1_rows, *rank0_rows],
+            product_name="SPECTRO XR",
+            vendor="Elbit Systems",
+            aliases=["Spectro"],
+        )
+        assert len(kept) == 15
+        # All 10 assignee-matched rows must be present (ranked ahead of the product-name-only ones).
+        kept_pub_numbers = {p["pub_number"] for p in kept}
+        assert all(f"US{i}ASSIGNEE" in kept_pub_numbers for i in range(10))

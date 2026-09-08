@@ -228,6 +228,33 @@ def test_deals_table_uses_region_when_country_empty() -> None:
 
 
 # --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 4): the deals table's customer cell renders "לא צוין", never the raw
+# "—"/None placeholder -- and never the generic "לא נמצא במקורות" placeholder either (the deal row
+# itself IS grounded; only the customer's identity is unknown).
+# --------------------------------------------------------------------------
+
+
+def test_deal_customer_cell_placeholder_for_none() -> None:
+    deal = DealRow(customer=None)
+    assert dossier_report._deal_customer_cell(deal) == dossier_report.CUSTOMER_PLACEHOLDER_HE
+
+
+def test_deal_customer_cell_real_name_kept_verbatim() -> None:
+    deal = DealRow(customer="US Air Force")
+    assert dossier_report._deal_customer_cell(deal) == "US Air Force"
+
+
+def test_deals_table_customer_column_never_shows_raw_dash() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="X"), deals=[DealRow(customer=None, cites=[1])]
+    )
+    tbl = dossier_report._deals_table(dossier)
+    customer_cell = tbl["rows"][0][1]
+    assert customer_cell == "לא צוין"
+    assert customer_cell != "—"
+
+
+# --------------------------------------------------------------------------
 # PD-fix-2 item 3: date-only rendering + Hebrew deal-kind labels
 # --------------------------------------------------------------------------
 

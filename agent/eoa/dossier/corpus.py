@@ -210,6 +210,110 @@ def _patent_text(row: dict[str, Any]) -> str:
     )
 
 
+# --------------------------------------------------------------------------
+# PD-fix-3 (2026-09-08, item 1): a patent row must actually be about THIS product/vendor, not just
+# a generic-keyword ILIKE hit. The live SPECTRO XR dossier's patents section had 8 rows -- every one
+# a generic "pod"/"target" hit with an EMPTY assignee, and the extraction model's own `relevance_he`
+# already admitted "אין אישור במקורות לקשר" (no confirmed link in the sources) for them, yet nothing
+# upstream ever dropped them. Rule (applies to both the DB-table match, :func:`collect_patents`, and
+# the live OPS/keyless-fallback query, :func:`collect_patents_ops` -- one shared gate, so neither
+# path can reintroduce the same defect): a row with NO assignee at all is dropped outright; among
+# rows that DO carry an assignee, it is kept only when that assignee matches the vendor/an alias
+# (substring either way, on the same normalized key ``eoa.pipeline.entity_normalize`` uses
+# everywhere else) OR the product name itself (whole word) appears in the patent's own title/
+# abstract. :func:`build_corpus` applies this once, after merging both patent sources, and caps the
+# survivors at :data:`_PATENT_RELEVANCE_CAP`, assignee-matched rows ranked ahead of product-name-only
+# matches (a stable sort, so each group keeps its own publication_date-DESC order).
+# --------------------------------------------------------------------------
+
+_PATENT_RELEVANCE_CAP = 15
+
+
+def patent_assignee_matches_vendor(
+    assignees: list[str] | None, vendor: str | None, aliases: list[str]
+) -> str | None:
+    """The first assignee that matches the vendor or an alias (substring either way on the
+    normalized-name key), or ``None`` when none do. ``assignees`` empty/``None`` always -> ``None``
+    (an empty assignee is never treated as a match by omission)."""
+    if not assignees:
+        return None
+    candidates = [c for c in ([vendor, *aliases]) if c and c.strip()]
+    if not candidates:
+        return None
+    candidate_keys = [(c, entity_normalize.normalize_name_key(c)) for c in candidates]
+    for a in assignees:
+        a_key = entity_normalize.normalize_name_key(a)
+        if not a_key:
+            continue
+        for _c, c_key in candidate_keys:
+            if c_key and (c_key in a_key or a_key in c_key):
+                return a
+    return None
+
+
+def patent_relevance_he(
+    *,
+    assignees: list[str] | None,
+    title: str | None,
+    source_text: str,
+    product_name: str,
+    vendor: str | None,
+    aliases: list[str],
+) -> str | None:
+    """The one concrete, checkable reason to keep this patent row -- or ``None`` when neither check
+    succeeds (caller drops the row). Deliberately states only the grounded link found, never a
+    paraphrase/summary of the patent itself -- exactly what item 1 asks the replacement
+    ``relevance_he`` to do.
+
+    ``assignees`` empty/``None`` is an absolute gate -- ``None`` unconditionally, never falling
+    through to the product-name-in-title check below -- per the rule's own explicit "rows with
+    empty assignee are dropped" clause (the live SPECTRO XR defect: 8 generic keyword hits, every
+    one with an empty assignee; a title/abstract match alone is not trusted as a substitute for
+    SOME structured attribution existing on the row at all)."""
+    if not assignees:
+        return None
+    matched_assignee = patent_assignee_matches_vendor(assignees, vendor, aliases)
+    if matched_assignee:
+        vendor_label = vendor or (aliases[0] if aliases else matched_assignee)
+        return f"מבקש/בעל הפטנט ({matched_assignee}) תואם ליצרן {vendor_label}."
+    text = f"{title or ''} {source_text or ''}"
+    if product_name and _word_present(text, product_name):
+        return f"שם המוצר '{product_name}' מופיע בכותרת/בתקציר הפטנט."
+    return None
+
+
+def _patent_is_relevant(
+    row: dict[str, Any], *, product_name: str, vendor: str | None, aliases: list[str]
+) -> bool:
+    return (
+        patent_relevance_he(
+            assignees=row.get("assignees"),
+            title=row.get("title"),
+            source_text=row.get("abstract") or "",
+            product_name=product_name,
+            vendor=vendor,
+            aliases=aliases,
+        )
+        is not None
+    )
+
+
+def _filter_and_cap_patents(
+    patents: list[dict[str, Any]], *, product_name: str, vendor: str | None, aliases: list[str]
+) -> list[dict[str, Any]]:
+    relevant = [
+        p for p in patents if _patent_is_relevant(p, product_name=product_name, vendor=vendor, aliases=aliases)
+    ]
+    # Stable sort: assignee-matched rows (rank 0) ahead of product-name-only matches (rank 1); each
+    # rank group keeps whatever order it already had (both collect_patents/collect_patents_ops emit
+    # publication_date DESC).
+    ranked = sorted(
+        relevant,
+        key=lambda p: 0 if patent_assignee_matches_vendor(p.get("assignees"), vendor, aliases) else 1,
+    )
+    return ranked[:_PATENT_RELEVANCE_CAP]
+
+
 def _tender_text(row: dict[str, Any]) -> str:
     return " ".join(str(v) for v in (row.get("title"), row.get("summary_he")) if v)
 
@@ -594,6 +698,11 @@ def build_corpus(
             if pub_number and pub_number not in seen_pub_numbers:
                 seen_pub_numbers.add(pub_number)
                 patents.append(p)
+    # PD-fix-3 item 1: one shared relevance gate over the merged DB-table + live-OPS patent list --
+    # drops any row with no assignee at all, and any row whose assignee doesn't match the vendor/an
+    # alias AND whose title/abstract doesn't literally name the product -- then caps the survivors,
+    # assignee-matched rows ranked first. See `_filter_and_cap_patents`'s own docstring.
+    patents = _filter_and_cap_patents(patents, product_name=product_name, vendor=vendor, aliases=aliases)
     tenders = collect_tenders(terms, product_name=product_name, vendor=vendor, aliases=aliases)
     forecasts = collect_forecasts(terms, product_name=product_name, vendor=vendor, aliases=aliases)
     entities, edges = collect_entities_and_edges(vendor)
