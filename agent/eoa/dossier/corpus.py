@@ -5,9 +5,16 @@ registry's DB half from it (numbered ``n``, same flat-registry convention as
 ``eoa.patents.survey``/``eoa.report.product_line``: every existing DB record gets a number first;
 ``eoa.dossier.plan`` continues that same numbering sequence for the web sources it reads).
 
-No LLM/network calls here -- this stage is pure SQL + deterministic Python, which is also why the
-task brief allows a live dry run of just this stage (plus ``plan``) without running the full
-multi-topic investigation.
+No LLM calls here. Every collector except one is pure SQL + deterministic Python -- the one
+exception is :func:`collect_patents_ops` (2026-09-08): a live EPO OPS/USPTO ODP (else keyless
+Google Patents fallback) query per product, added because :func:`collect_patents` alone only reads
+whatever the periodic watch-topic/assignee scan (``eoa.patents.scan``, ``config/patents.yaml``)
+already happened to put in the ``patents`` table -- a product that scan never surfaced (e.g. Elbit
+Systems' SPECTRO XR) otherwise gets an empty patents section. :func:`build_corpus` calls it by
+default; pass ``include_live_patents_ops=False`` for the old, fully offline/dry-run behavior (a
+network-touching HTTP call happening during "prove the queries work" is exactly what that flag is
+for) -- keeping the task brief's live-dry-run promise available, just no longer the unconditional
+default.
 """
 
 from __future__ import annotations
@@ -320,6 +327,79 @@ def collect_patents(
     )
 
 
+#: Cap on how many OPS/ODP (or keyless-fallback) records one dossier's live patent query gathers
+#: before upserting -- kept small since this runs once per dossier build, on the product's live
+#: request path, not a batch job.
+_PATENTS_OPS_LIMIT = 10
+
+
+def collect_patents_ops(
+    product_name: str,
+    *,
+    vendor: str | None = None,
+    aliases: list[str] | None = None,
+    product_line: str | None = None,
+    limit: int = _PATENTS_OPS_LIMIT,
+) -> list[dict[str, Any]]:
+    """Live EPO OPS/USPTO ODP (else the keyless Google Patents fallback) query for this product's
+    own patents -- ``pa=<applicant>`` (vendor, falling back to the first alias when no vendor is
+    given) AND'd with the product name + ``product_line`` as keywords
+    (``eoa.patents.scan.search_records_for_applicant``) -- upserted into the ``patents`` table
+    (real ``id``s, the same gather -> upsert -> id flow ``eoa.patents.survey.build_patent_survey``
+    already uses) and returned in the exact row shape :func:`collect_patents` emits, so
+    ``build_corpus`` can merge the two lists (pre-scanned DB match + this live query) into one
+    ``patents`` section.
+
+    Added 2026-09-08 (user finding): a product whose own patents were never sitting in the
+    periodically-scanned ``patents`` table -- e.g. Elbit Systems' SPECTRO XR, whose
+    ``product_dossiers`` row had ``data->'patents'`` completely empty because
+    ``config/patents.yaml``'s watch topics/assignee list never happened to surface it -- otherwise
+    gets an empty patents section from :func:`collect_patents` alone, since that function only ever
+    reads what a *different*, earlier scan already put in the DB. This function is the dossier's
+    own, product-scoped patent search, run at dossier-build time.
+
+    Grounded by construction: every returned row's ``pub_number``/``title``/``assignees``/``cpc``
+    is exactly what the live OPS/ODP record (or Google Patents search hit) carried -- nothing here
+    is generated or inferred beyond the existing, already-reviewed assignee-safe matching
+    (``eoa.pipeline.entity_normalize.find_watchlist_company_names_in_text``, CR-patents/CR-patents-2
+    text-grounding rules) the shared ``eoa.patents.scan`` gather path already applies to a
+    keyless-fallback hit. A network/DB failure at any step is caught and logged -- returns ``[]``
+    rather than ever failing the dossier build (docs/CONVENTIONS.md rule 9), same discipline as
+    every other DB-touching helper in this module."""
+    applicant = (vendor or "").strip() or next((a for a in (aliases or []) if a and a.strip()), "")
+    if not applicant or not product_name.strip():
+        return []
+    keywords = [k for k in (product_name, product_line) if k and k.strip()]
+    if not keywords:
+        return []
+    from eoa.patents.scan import search_records_for_applicant, upsert_records
+
+    try:
+        records = search_records_for_applicant(applicant, keywords, limit=limit)
+    except Exception as exc:
+        log.warning("dossier_patents_ops_query_failed", product_name=product_name, error=str(exc)[:200])
+        return []
+    if not records:
+        return []
+    try:
+        ids_by_pub = upsert_records(records)
+    except Exception as exc:
+        log.warning("dossier_patents_ops_upsert_failed", product_name=product_name, error=str(exc)[:200])
+        return []
+    ids = list(ids_by_pub.values())
+    if not ids:
+        return []
+    return _fetchall(
+        """
+        SELECT id, pub_number, title, abstract, assignees, cpc, publication_date, filing_date, url, value_score
+        FROM patents
+        WHERE id = ANY(%(ids)s)
+        ORDER BY publication_date DESC NULLS LAST, id DESC
+        """,
+        {"ids": ids},
+    )
+
+
 def collect_tenders(
     terms: list[str],
     *,
@@ -328,6 +408,15 @@ def collect_tenders(
     aliases: list[str] | None = None,
     limit: int = _TENDERS_LIMIT,
 ) -> list[dict[str, Any]]:
+    """TENDERS-SAM (2026-09-08, docs/qa/content_review/TENDERS-SAM.md item 3): restricted to
+    ``intake = 'accepted'`` -- the same relevance-gate philosophy already applied to the daily/
+    weekly report's own tender table (``eoa.tenders.report_section.collect_tenders``'s
+    ``"status = 'open' AND intake = 'accepted'"`` clause). A dossier's corpus is a citation source
+    for the reader, exactly like a report -- a ``'candidate'`` row (below the self-tuning relevance
+    threshold, or demoted by ``eoa.tenders.scan``'s negative-keyword/defence-context check) is an
+    unconfirmed lead, not something to cite as fact in a product dossier either. The whole-word
+    alias precision filter below (``_filter_precise``, PD-fix 2026-09-08) is unaffected -- this is
+    an independent, additive restriction on top of it."""
     if not terms:
         return []
     clause = _ilike_any_clause(
@@ -336,9 +425,9 @@ def collect_tenders(
     params: dict[str, Any] = {**_term_params(terms, prefix="t"), "limit": limit}
     rows = _fetchall(
         f"""
-        SELECT id, title, agency, country, deadline, status, url, summary_he
+        SELECT id, title, agency, country, deadline, status, url, summary_he, relevance_score, intake
         FROM tenders
-        WHERE {clause}
+        WHERE intake = 'accepted' AND ({clause})
         ORDER BY deadline ASC NULLS LAST
         LIMIT %(limit)s
         """,
@@ -475,11 +564,18 @@ def build_corpus(
     *,
     product_line: str | None = None,
     max_sources: int | None = None,
+    include_live_patents_ops: bool = True,
 ) -> CorpusResult:
     """Gather the DB's own knowledge of ``product_name``/``vendor``/``aliases`` and seed the
     citation registry from it (items -> events -> patents -> tenders -> forecasts, in that order,
-    matching every other report module's flat-numbering convention). ``product_line`` is currently
-    only carried through for persistence (``eoa.dossier.report``); it is not itself a search term."""
+    matching every other report module's flat-numbering convention). ``product_line`` feeds
+    :func:`collect_patents_ops`'s keyword set (in addition to being carried through for persistence,
+    ``eoa.dossier.report``) -- otherwise not itself a search term. ``include_live_patents_ops``
+    (default ``True``): whether to also run :func:`collect_patents_ops`'s live EPO OPS/USPTO
+    ODP/Google-Patents-fallback query for this product, merged into ``patents`` (deduped by
+    ``pub_number``, the DB-table match from :func:`collect_patents` always wins on a collision)
+    before the citation registry is built. Pass ``False`` to keep this stage fully offline (the old
+    behavior, still exercised by the task brief's "prove the queries work" dry run)."""
     aliases = aliases or []
     cap = max_sources or settings().dossier.max_sources
     product_key = slugify_product_key(vendor, product_name)
@@ -488,6 +584,16 @@ def build_corpus(
     items = collect_items(terms, product_name=product_name, vendor=vendor, aliases=aliases)
     events = collect_events(terms, product_name=product_name, vendor=vendor, aliases=aliases)
     patents = collect_patents(terms, product_name=product_name, vendor=vendor, aliases=aliases)
+    if include_live_patents_ops:
+        seen_pub_numbers = {p.get("pub_number") for p in patents}
+        ops_patents = collect_patents_ops(
+            product_name, vendor=vendor, aliases=aliases, product_line=product_line
+        )
+        for p in ops_patents:
+            pub_number = p.get("pub_number")
+            if pub_number and pub_number not in seen_pub_numbers:
+                seen_pub_numbers.add(pub_number)
+                patents.append(p)
     tenders = collect_tenders(terms, product_name=product_name, vendor=vendor, aliases=aliases)
     forecasts = collect_forecasts(terms, product_name=product_name, vendor=vendor, aliases=aliases)
     entities, edges = collect_entities_and_edges(vendor)
@@ -591,6 +697,7 @@ __all__ = [
     "collect_forecasts",
     "collect_items",
     "collect_patents",
+    "collect_patents_ops",
     "collect_tenders",
     "previous_dossier",
     "slugify_product_key",

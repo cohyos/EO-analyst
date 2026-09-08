@@ -214,6 +214,30 @@ MAX_KEYWORDS_PER_API_SOURCE = 5
 DEFAULT_CPV_ALLOW_PREFIXES = ["35", "38"]
 DEFAULT_CPV_DENY_PREFIXES = ["79", "80", "85", "98"]
 
+# TENDERS-SAM (2026-09-08, docs/qa/content_review/TENDERS-SAM.md): fallback if config/tenders.yaml
+# somehow omits `negative_keywords`/`defence_context_signals` -- see that file's own comment above
+# these two lists for the full rationale. Kept short here (the real, actively-maintained lists live
+# in the YAML); these fallbacks only matter for a test fixture or a stripped-down config.
+DEFAULT_NEGATIVE_KEYWORDS = [
+    "spectroscopy",
+    "laboratory reagent",
+    "veterinary",
+    "office supplies",
+    "janitorial",
+    "food service",
+    "recruitment services",
+]
+DEFAULT_DEFENCE_CONTEXT_SIGNALS = [
+    "military",
+    "defense",
+    "defence",
+    "army",
+    "navy",
+    "air force",
+    "DoD",
+    "NATO",
+]
+
 # R7-tenders: keywords this short are prone to matching as a substring *inside* an unrelated word
 # (candidate id 34's "ATR" matching inside the Dutch "privaatrechtelijke") -- see
 # :func:`_matches_keywords`'s word-boundary handling below. Deliberately conservative (<=4 chars,
@@ -345,6 +369,23 @@ def load_cpv_deny_prefixes(path: str | Path | None = None) -> list[str]:
     community services -- see ``DEFAULT_CPV_DENY_PREFIXES``'s docstring)."""
     raw = _load_yaml(path)
     return list(raw.get("cpv_deny_prefixes") or DEFAULT_CPV_DENY_PREFIXES)
+
+
+def load_negative_keywords(path: str | Path | None = None) -> list[str]:
+    """TENDERS-SAM: top-level ``negative_keywords`` -- off-topic-domain phrases (medical,
+    laboratory, office/facilities services, ...) that demote (never outright reject, per W2b)
+    ``tenders.relevance_score`` when present without a countervailing ``defence_context_signals``
+    term -- see ``_negative_keyword_penalty``."""
+    raw = _load_yaml(path)
+    return list(raw.get("negative_keywords") or DEFAULT_NEGATIVE_KEYWORDS)
+
+
+def load_defence_context_signals(path: str | Path | None = None) -> list[str]:
+    """TENDERS-SAM: top-level ``defence_context_signals`` -- broad military/security-context
+    vocabulary that overrides a ``negative_keywords`` hit (see ``_has_defence_context``): a notice
+    mentioning both an off-topic word AND a defence-context word is not demoted."""
+    raw = _load_yaml(path)
+    return list(raw.get("defence_context_signals") or DEFAULT_DEFENCE_CONTEXT_SIGNALS)
 
 
 # --------------------------------------------------------------------------
@@ -763,6 +804,16 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
         if src.query_lookback_days
         else ""
     )
+    # TENDERS-SAM: same lookback window as `{since_date}` above, just rendered MM/dd/yyyy for an
+    # API (SAM.gov v2) whose own date-range params require that format rather than YYYYMMDD. Empty
+    # string (a harmless no-op substitution) when `query_lookback_days` is 0, same convention as
+    # `{since_date}`.
+    since_date_us = (
+        (dt.date.today() - dt.timedelta(days=src.query_lookback_days)).strftime("%m/%d/%Y")
+        if src.query_lookback_days
+        else ""
+    )
+    today_us = dt.date.today().strftime("%m/%d/%Y")
     out: list[NoticeRaw] = []
     for page in range(1, max(1, src.max_pages) + 1):
         if page > 1 and src.pace_seconds:
@@ -782,11 +833,20 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
                     src.query_template.replace("{keyword}", escaped_keyword)
                     .replace("{api_key}", escaped_api_key)
                     .replace("{since_date}", since_date)
+                    .replace("{since_date_us}", since_date_us)
+                    .replace("{today_us}", today_us)
                     .replace("{page}", str(page))
                 )
                 return fetch_raw_remote(src.url, method=src.method or "POST", json_body=body)
             params = {
-                k: v.format(keyword=keyword, api_key=api_key, since_date=since_date, page=str(page))
+                k: v.format(
+                    keyword=keyword,
+                    api_key=api_key,
+                    since_date=since_date,
+                    since_date_us=since_date_us,
+                    today_us=today_us,
+                    page=str(page),
+                )
                 for k, v in (src.query_params or {}).items()
             }
             return fetch_raw_remote(f"{src.url}?{urlencode(params)}", method=src.method or "GET")
@@ -901,6 +961,49 @@ def _has_procurement_signal(notice: NoticeRaw, src_kind: str, procurement_signal
     return any(_term_present(sig, text) for sig in (procurement_signals or DEFAULT_PROCUREMENT_SIGNALS))
 
 
+def _negative_defence_text(notice: NoticeRaw) -> str:
+    """Shared casefolded text used by :func:`_has_defence_context`/:func:`_negative_keyword_penalty`
+    -- title + summary + agency, so a defence-context signal sitting only in the buyer's own name
+    (e.g. ``agency="DEPARTMENT OF THE NAVY"``) still counts, matching the intuition that a notice
+    from a defence buyer has defence context even if its title text is generic."""
+    return f"{notice.title} {notice.summary} {notice.agency or ''}".casefold()
+
+
+def _has_defence_context(notice: NoticeRaw, defence_context_signals: list[str]) -> bool:
+    """TENDERS-SAM: True if any ``defence_context_signals`` term (military/security vocabulary,
+    deliberately broader/less precise than the EO/IR domain vocabulary itself) is present in
+    title+summary+agency -- see ``_negative_keyword_penalty``'s docstring for how this is used."""
+    text = _negative_defence_text(notice)
+    return any(
+        _term_present(sig, text) for sig in (defence_context_signals or DEFAULT_DEFENCE_CONTEXT_SIGNALS)
+    )
+
+
+# TENDERS-SAM: relevance_score ceiling applied when a negative_keywords term is present with no
+# countervailing defence_context_signals term -- low enough to sit well below
+# eoa.tenders.feedback.DEFAULT_RELEVANCE_THRESHOLD (0.6) and even THRESHOLD_MIN (0.3), so a demoted
+# notice is never accidentally 'accepted' by a self-tuned threshold at its floor.
+_NEGATIVE_KEYWORD_RELEVANCE_CEILING = 0.2
+
+
+def _negative_keyword_penalty(
+    notice: NoticeRaw, negative_keywords: list[str], defence_context_signals: list[str]
+) -> str | None:
+    """TENDERS-SAM: returns the first matched ``negative_keywords`` term when the notice's
+    title+summary+agency contains one AND :func:`_has_defence_context` is False for the same text
+    -- the caller (``_relevance_score_for``) uses a non-``None`` return to cap ``relevance_score``
+    at :data:`_NEGATIVE_KEYWORD_RELEVANCE_CEILING`. Returns ``None`` (no penalty) either when no
+    negative term matched, or when one did but a defence-context term also matched -- per W2b this
+    is a *demotion* signal only, never a rejection reason (``_gate_reject_reason`` is untouched)."""
+    if _has_defence_context(notice, defence_context_signals):
+        return None
+    text = _negative_defence_text(notice)
+    for term in negative_keywords or DEFAULT_NEGATIVE_KEYWORDS:
+        if _term_present(term, text):
+            return term
+    return None
+
+
 def _passes_gate(
     notice: NoticeRaw, src_kind: str, domain_keywords: list[str], procurement_signals: list[str]
 ) -> list[str]:
@@ -989,7 +1092,10 @@ def _candidate_duplicate_exists(normalized_title: str, portal: str) -> bool:
             {"t": normalized_title},
         )
         rows = cur.fetchall()
-    return any(_notice_portal(r[0]) == portal for r in rows if r[0])
+    # the pool's connection() yields dict rows -- r[0] raised KeyError: 0 and crashed the whole
+    # tenders stage of the nightly run (2026-09-08 01:31, run_errors 279)
+    urls = [(r["url"] if isinstance(r, dict) else r[0]) for r in rows]
+    return any(_notice_portal(u) == portal for u in urls if u)
 
 
 # F2 (2026-09-05): "assume open when undated" bug -- a notice with no deadline (the overwhelming
@@ -1239,13 +1345,33 @@ def _as_datetime(d: dt.date | None) -> dt.datetime | None:
 _RELEVANCE_SCORE_WHEN_LLM_UNAVAILABLE = 0.5
 
 
-def _relevance_score_for(extract: TenderExtract | None) -> float:
+def _relevance_score_for(
+    extract: TenderExtract | None,
+    notice: NoticeRaw | None = None,
+    negative_keywords: list[str] | None = None,
+    defence_context_signals: list[str] | None = None,
+) -> float:
     """W2b: the 0-1 normalized signal ``tenders.intake``/the self-tuning threshold act on --
     ``extract.relevance / 10`` when the LLM actually ran, else the neutral default above. Never
-    used to reject a notice outright (see ``_gate_reject_reason``'s docstring)."""
-    if extract is None:
-        return _RELEVANCE_SCORE_WHEN_LLM_UNAVAILABLE
-    return max(0.0, min(1.0, extract.relevance / 10.0))
+    used to reject a notice outright (see ``_gate_reject_reason``'s docstring).
+
+    TENDERS-SAM: when ``notice`` is supplied, the score is additionally capped at
+    :data:`_NEGATIVE_KEYWORD_RELEVANCE_CEILING` if :func:`_negative_keyword_penalty` fires (an
+    off-topic-domain term present with no defence-context term to override it) -- this can only
+    ever lower the score the LLM/default already produced, never raise it. ``notice=None`` (every
+    pre-existing caller/test) skips this check entirely, exactly the old behaviour."""
+    base = (
+        _RELEVANCE_SCORE_WHEN_LLM_UNAVAILABLE
+        if extract is None
+        else max(0.0, min(1.0, extract.relevance / 10.0))
+    )
+    if notice is not None:
+        penalty_term = _negative_keyword_penalty(
+            notice, negative_keywords or DEFAULT_NEGATIVE_KEYWORDS, defence_context_signals or DEFAULT_DEFENCE_CONTEXT_SIGNALS
+        )
+        if penalty_term is not None:
+            base = min(base, _NEGATIVE_KEYWORD_RELEVANCE_CEILING)
+    return base
 
 
 def _intake_for_score(relevance_score: float) -> str:
@@ -1704,6 +1830,106 @@ def repair_relevance_prefilter(*, apply: bool = False) -> list[PrefilterViolatio
 
 
 # --------------------------------------------------------------------------
+# TENDERS-SAM (2026-09-08, docs/qa/content_review/TENDERS-SAM.md item 2): re-scoring existing
+# tenders rows against the negative-keyword/defence-context relevance signal -- same
+# find_*/repair_* dry-run/apply shape as find_prefilter_violations/repair_relevance_prefilter
+# above, deliberately kept as a *separate* pair of functions rather than folded into that one:
+# a prefilter violation (no domain term / no procurement signal / a denied CPV family) means the
+# row shouldn't have cleared the gate AT ALL and gets archived outright, whereas a negative-keyword
+# hit is only ever a relevance *demotion* (per W2b, "never reject outright on a relevance signal")
+# -- the row stays exactly where it is, only relevance_score/intake move.
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class RelevanceRescoreResult:
+    """One existing ``tenders`` row :func:`find_relevance_demotions` found should have its
+    ``relevance_score``/``intake`` lowered under today's negative-keyword/defence-context check."""
+
+    id: int
+    source: str
+    title: str
+    negative_term: str
+    before_score: float
+    after_score: float
+    before_intake: str
+    after_intake: str
+
+
+def find_relevance_demotions() -> list[RelevanceRescoreResult]:
+    """Every existing ``tenders`` row (any ``intake`` except ``'rejected-by-user'`` -- an explicit
+    operator decision this must never override, mirroring :func:`find_prefilter_violations`'s own
+    "never re-litigate an operator's own accept" rule, extended here to never re-litigate a
+    reject either) whose title+summary+agency triggers :func:`_negative_keyword_penalty` under
+    today's ``negative_keywords``/``defence_context_signals`` config -- read-only, always safe to
+    call. Only ever a *demotion*: a row already at/below the penalty ceiling, or whose recomputed
+    intake would (absurdly) come out as ``'accepted'`` from a lower score, is left out/unchanged --
+    this can never raise a row's relevance_score or promote a 'candidate' to 'accepted'."""
+    negative_keywords = load_negative_keywords()
+    defence_context_signals = load_defence_context_signals()
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, source, title, summary_he, agency, relevance_score, intake FROM tenders "
+            "WHERE intake != 'rejected-by-user'"
+        )
+        rows = cur.fetchall()
+    results: list[RelevanceRescoreResult] = []
+    for row in rows:
+        notice = NoticeRaw(
+            source_id=row.get("source") or "",
+            external_ref="",
+            title=row.get("title") or "",
+            summary=row.get("summary_he") or "",
+            agency=row.get("agency"),
+        )
+        term = _negative_keyword_penalty(notice, negative_keywords, defence_context_signals)
+        if term is None:
+            continue
+        before_score_raw = row.get("relevance_score")
+        before_score = float(before_score_raw) if before_score_raw is not None else 0.5
+        after_score = min(before_score, _NEGATIVE_KEYWORD_RELEVANCE_CEILING)
+        if after_score >= before_score:
+            continue  # already at/below the ceiling -- nothing to change
+        before_intake = row.get("intake") or "candidate"
+        after_intake = _intake_for_score(after_score)
+        # Never re-promote: a demotion in score must never come out as a "more accepted" intake
+        # than the row already had.
+        if before_intake == "candidate" and after_intake == "accepted":
+            after_intake = "candidate"
+        results.append(
+            RelevanceRescoreResult(
+                id=row["id"],
+                source=row.get("source") or "",
+                title=row.get("title") or "",
+                negative_term=term,
+                before_score=before_score,
+                after_score=after_score,
+                before_intake=before_intake,
+                after_intake=after_intake,
+            )
+        )
+    return results
+
+
+def repair_relevance_scores(*, apply: bool = False) -> list[RelevanceRescoreResult]:
+    """Finds every current relevance demotion (:func:`find_relevance_demotions`); with
+    ``apply=True`` also writes the demoted ``relevance_score``/``intake`` (``apply=False``, the
+    default: dry run, no writes). The ``UPDATE``'s own ``WHERE ... AND intake != 'rejected-by-
+    user'`` is a second, defence-in-depth guard, same convention as
+    :func:`repair_relevance_prefilter`'s own ``intake = 'candidate'`` guard."""
+    results = find_relevance_demotions()
+    if apply and results:
+        with connection() as conn, conn.cursor() as cur:
+            for r in results:
+                cur.execute(
+                    "UPDATE tenders SET relevance_score = %(score)s, intake = %(intake)s, updated_at = now() "
+                    "WHERE id = %(id)s AND intake != 'rejected-by-user'",
+                    {"score": r.after_score, "intake": r.after_intake, "id": r.id},
+                )
+    return results
+
+
+# --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
 
@@ -1789,6 +2015,8 @@ def scan_tenders(
     deny_domains = load_deny_domains()
     cpv_allow_prefixes = load_cpv_allow_prefixes()
     cpv_deny_prefixes = load_cpv_deny_prefixes()
+    negative_keywords = load_negative_keywords()
+    defence_context_signals = load_defence_context_signals()
 
     ordered_sources = _order_sources_by_priority(sources if sources is not None else load_tender_sources())
     for src in ordered_sources:
@@ -1899,7 +2127,9 @@ def scan_tenders(
             # W2b (open intake): everything past the four hard checks above is stored -- a low or
             # absent LLM verdict only shapes relevance_score/intake (self-tuning, see
             # eoa.tenders.feedback), it is never itself a reason to discard the notice.
-            relevance_score = _relevance_score_for(extract)
+            relevance_score = _relevance_score_for(
+                extract, notice, negative_keywords, defence_context_signals
+            )
             intake = _intake_for_score(relevance_score)
             try:
                 tender_id, _item_id = _insert_tender_and_item(

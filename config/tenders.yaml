@@ -157,6 +157,81 @@ cpv_deny_prefixes: &cpv_deny
   - "85"
   - "98"
 
+# TENDERS-SAM (2026-09-08, docs/qa/content_review/TENDERS-SAM.md): a deterministic text-level
+# relevance signal, sitting alongside (not replacing) the two-signal DOMAIN+PROCUREMENT gate and
+# the CPV-family pre-filter above. The two-signal gate alone lets through a title/summary that
+# merely *mentions* a DOMAIN word in an off-topic civilian sense -- e.g. "infrared spectroscopy"
+# (a laboratory-chemistry technique, not an EO/IR sensor), "night vision goggles repair training
+# curriculum for hospital security guards" (education/medical, not a defence buyer). Per W2b (see
+# eoa.tenders.scan module docstring), this NEVER hard-rejects a notice outright -- it only demotes
+# `tenders.relevance_score` (via eoa.tenders.scan._negative_keyword_penalty), keeping the notice
+# stored and visible to an operator's own 👍/👎 feedback, just below the accepted-intake threshold
+# by default so it never silently appears in a daily/weekly report or a product dossier's citation
+# list until a human confirms it. The penalty only fires when a negative_keywords term is present
+# AND no defence_context_signals term is also present in the same title+summary+agency text (see
+# eoa.tenders.scan._has_defence_context) -- a notice that says e.g. "military infrared
+# spectroscopy sensor for battlefield chemical detection" keeps its LLM/default relevance score
+# unchanged, since "military"/"battlefield" is itself a defence-context signal.
+negative_keywords: &neg_kw
+  - spectroscopy
+  - spectrometer
+  - spectrophotometer
+  - laboratory reagent
+  - clinical laboratory
+  - medical laboratory
+  - veterinary
+  - dental
+  - pharmaceutical
+  - cosmetic
+  - agricultural
+  - horticulture
+  - office supplies
+  - office furniture
+  - janitorial
+  - custodial
+  - food service
+  - catering
+  - hvac
+  - plumbing
+  - landscaping
+  - printing services
+  - translation services
+  - recruitment services
+  - staffing agency
+  - executive coaching
+  - curriculum development
+  - continuing education
+
+# Present alongside a negative_keywords hit, this signal overrides the demotion (see the
+# negative_keywords note above) -- a genuine defence/security-context phrase, deliberately broader
+# and less precise than the EO/IR domain vocabulary itself (this is a *context* check, not another
+# domain-topic check).
+defence_context_signals: &defence_ctx
+  - military
+  - defense
+  - defence
+  - army
+  - navy
+  - air force
+  - marine corps
+  - coast guard
+  - homeland security
+  - national guard
+  - armed forces
+  - battlefield
+  - combat
+  - tactical
+  - weapon system
+  - warfighter
+  - DoD
+  - NATO
+  - MOD
+  - DAPA
+  - security forces
+  - border security
+  - counter-terrorism
+  - special operations
+
 sources:
   # ---------------------------------------------------------------- TED (EU) -- api_json, verified working
   - id: ted_eu
@@ -260,32 +335,159 @@ sources:
       `tender.classification.scheme == "CPV"` (single code string, e.g. "60000000") -- feeds
       eoa.tenders.scan._parse_contracts_finder's cpv_naics / the CPV pre-filter.
 
-  # ---------------------------------------------------------------- SAM.gov (US) -- documented, currently dead
+  # ---------------------------------------------------------------- SAM.gov (US) -- api_json, verified working
+  # TENDERS-SAM (2026-09-08, docs/qa/content_review/TENDERS-SAM.md): this entry was live-broken in
+  # two independent ways found investigating "SAM_GOV_API_KEY has been set since 2026-09-07 evening
+  # but no SAM.gov tenders show up":
+  #   1. `keyword` is NOT a documented v2 query parameter at all (confirmed live 2026-09-08 against
+  #      https://api.sam.gov/opportunities/v2/search with a real key: a request carrying only
+  #      `keyword=` returns HTTP 400 "postedFrom and postedTo are required fields" -- the API
+  #      silently has no `keyword` param, so the old query was never filtering anything even before
+  #      failing on the missing mandatory date range). The real search-by-text parameter is `title`
+  #      (matches against the opportunity title only, confirmed live: `title=infrared` -> HTTP 200,
+  #      23 results, virtually all genuine EO/IR defence notices, e.g. "CH-53K Electrical Optical
+  #      (EO) / Infrared (IR) Sensor System Competition").
+  #   2. `postedFrom`/`postedTo` (both MM/dd/yyyy, both mandatory -- confirmed live: omitting either
+  #      is a hard HTTP 400) were never sent at all.
+  #   3. (independent of the query itself) `parse_hints.format: json` matched neither
+  #      eoa.tenders.scan._API_PARSERS (keyed by source id -- sam_gov_api has no bespoke parser)
+  #      nor _GENERIC_API_PARSERS (keyed by "ocds"/"json_list" only) -- `.get("json")` silently
+  #      returned `None`, so `_fetch_api_json` always parsed zero notices out of every response,
+  #      even a real HTTP 200 with real data. Fixed to `json_list` (the correct generic-parser key
+  #      for a flat `opportunitiesData` array) with the real v2 response field names (confirmed live
+  #      2026-09-08: `noticeId`, `title`, `postedDate` (YYYY-MM-DD), `responseDeadLine`,
+  #      `fullParentPathName` (full agency hierarchy, e.g. "INTERIOR, DEPARTMENT OF THE.US FISH AND
+  #      WILDLIFE SERVICE..."), `uiLink` (the human-facing sam.gov page), `description` (a link to a
+  #      fetchable notice-description endpoint, used here as the summary field -- short but never
+  #      empty), `naicsCode`/`classificationCode` (feeds cpv_naics for the round-6/7 CPV pre-filter,
+  #      even though these are NAICS/PSC codes rather than CPV -- same prefix-family shape, "33"/"38"
+  #      NAICS families and "58"/"12" PSC families both already land inside cpv_allow_prefixes'
+  #      existing "35"/"38" defence/optics allow-list only loosely, so this pre-filter is
+  #      intentionally left permissive for SAM.gov's own code families -- the two-signal domain gate
+  #      plus the negative-keyword/defence-context relevance check below do the real filtering work
+  #      for this source).
+  # `{api_key}` is resolved at request time from the real SAM_GOV_API_KEY environment variable
+  # (eoa.tenders.scan._fetch_api_json), never a literal value here -- eoa.tenders.scan.
+  # _api_json_source_enabled only ever attempts this source when that variable is actually set to
+  # something non-empty. `{since_date_us}`/`{today_us}` are the same lookback-window computation as
+  # every other paged api_json source's `{since_date}`, just re-rendered MM/dd/yyyy for this API's
+  # own required date-range params.
   - id: sam_gov_api
     name: "SAM.gov Opportunities API v2 (US)"
     kind: api_json
     country: US
     url: "https://api.sam.gov/opportunities/v2/search"
     method: GET
-    # R7-tenders (finding 1c): `{api_key}` is resolved at request time from the real
-    # SAM_GOV_API_KEY environment variable (eoa.tenders.scan._fetch_api_json), never a literal
-    # value here -- eoa.tenders.scan._api_json_source_enabled only ever attempts this source when
-    # that variable is actually set to something non-empty, so this source springs to life
-    # automatically the moment a real per-user key is added to the environment, no config edit
-    # (flipping `verified: true` by hand) required.
-    query_params: { api_key: "{api_key}", keyword: "{keyword}", limit: "25" }
+    query_params:
+      {
+        api_key: "{api_key}",
+        title: "{keyword}",
+        postedFrom: "{since_date_us}",
+        postedTo: "{today_us}",
+        limit: "25",
+      }
     keywords: *kw
-    parse_hints: { format: json, notice_path: opportunitiesData }
+    # TENDERS-SAM: `title=` is a phrase/substring match against the opportunity title only --
+    # live-probed 2026-09-08, a hyphenated multi-word compound ("electro-optical", the vocabulary's
+    # own first few entries) matched 0 titles in-window, while a plain single/two-word term did
+    # well ("infrared" -> 23, "thermal imaging" -> 8, "night vision" -> 7, all overwhelmingly
+    # genuine EO/IR defence notices). `eoa.tenders.scan._collect_source_notices` only rotates the
+    # first `MAX_KEYWORDS_PER_API_SOURCE` (5) entries of whichever list it uses, always the *same*
+    # 5 every scan (no rotation offset) -- so, exactly like `ted_eu_cpv`'s CPV-code override, this
+    # source gets its own curated `api_query_keywords` rather than silently always querying the
+    # vocabulary's first 5 (all electro-optical/EO-IR hyphenated-compound variants, confirmed
+    # low/zero-yield for a title search). `keywords` above (the full vocabulary) is untouched --
+    # still what the two-signal DOMAIN gate matches against.
+    api_query_keywords:
+      ["infrared", "thermal imaging", "night vision", "FLIR", "gimbal"]
+    parse_hints:
+      format: json_list
+      notice_path: opportunitiesData
+      id_field: noticeId
+      title_field: title
+      summary_field: description
+      agency_field: fullParentPathName
+      date_field: postedDate
+      deadline_field: responseDeadLine
+      url_field: uiLink
+      cpv_field: naicsCode
+    max_pages: 1
+    # TENDERS-SAM: live-probed 2026-09-08 -- api.sam.gov returned HTTP 429 after ~6 requests fired
+    # with no inter-request delay at all (no rate-limit headers exposed to size the window
+    # precisely), so this is deliberately more conservative than TED/Contracts Finder's 2.0s.
+    # eoa.tenders.scan._call_with_rate_limit_backoff already retries a 429 up to 3x with
+    # exponential backoff (1x/2x/4x this value) on top of this baseline spacing.
+    pace_seconds: 6.0
+    query_lookback_days: 29
     verified: false
-    verified_at: "2026-09-04"
+    verified_at: "2026-09-08"
     needs_key_env_var: SAM_GOV_API_KEY
     notes: >
-      curl GET with api_key=DEMO_KEY (SAM.gov's documented public demo key) -> HTTP 404 for both
-      /opportunities/v2/search and /prod/opportunities/v2/search. The v2 DEMO_KEY path appears to
-      have been retired/moved behind a real per-user key since this doc's endpoint was written.
-      `verified: false` so it is never polled with no key at all (covered instead by
-      `sam_gov_search` below) -- but per finding 1c it is no longer permanently disabled: with a
-      real SAM_GOV_API_KEY in the environment, eoa.tenders.scan attempts it directly.
+      Live-probed 2026-09-08 with a real SAM_GOV_API_KEY (see docs/qa/content_review/TENDERS-SAM.md
+      for the exact requests/responses): `title=infrared&postedFrom=MM/dd/yyyy&postedTo=MM/dd/yyyy`
+      -> HTTP 200, 23 total records, e.g. "Infrared Imagers Justification", "CH-53K Electrical
+      Optical (EO) / Infrared (IR) Sensor System Competition", "Advanced Threat Warning System
+      (ATWS) and Common Infrared Countermeasure (CIRCM) Development and Support". `title=electro-
+      optical` -> 0 (the hyphenated compound doesn't literally appear in any in-window title; the
+      keyword-rotation loop still tries every EO/IR term in config's `keywords`, so single-word
+      terms like "infrared"/"thermal"/"gimbal" carry this source). `verified: false` (unchanged)
+      so this source is still never polled with no key at all -- gated purely by
+      `needs_key_env_var`/`_api_json_source_enabled`, same mechanism as before this fix.
+
+  # TENDERS-SAM: a second SAM.gov query strategy alongside sam_gov_api's title-keyword rotation --
+  # PSC (Product/Service Code, the `ccode` v2 param) classification search. `api_query_keywords`
+  # (same override mechanism as `ted_eu_cpv`'s CPV-code rotation) substitutes a PSC code into
+  # `ccode` via `{keyword}` instead of a human-readable term into `title`; the DOMAIN-gate
+  # `keywords` list stays the full EO/IR vocabulary (unchanged) since a PSC code obviously never
+  # appears in notice text itself. PSC 1240 ("Optical Sighting and Ranging Equipment") and 5855
+  # ("Night Vision Equipment, Emitted and Reflected Radiation") were both live-probed 2026-09-08 and
+  # returned overwhelmingly EO/IR-relevant notices (night vision devices, periscopes, reflex
+  # sights, image intensifiers). PSC 5840 ("Radar Equipment, Except Airborne") -- suggested
+  # alongside 1240/5855 as a plausible EO/IR-adjacent code -- was also probed and found to return
+  # radar/acoustic/ultrasonic notices with no EO/IR content at all (radar is a distinct sensing
+  # modality, not electro-optical); deliberately excluded here rather than included on the strength
+  # of its name alone.
+  - id: sam_gov_api_psc
+    name: "SAM.gov Opportunities API v2 (US) -- PSC classification search"
+    kind: api_json
+    country: US
+    url: "https://api.sam.gov/opportunities/v2/search"
+    method: GET
+    query_params:
+      {
+        api_key: "{api_key}",
+        ccode: "{keyword}",
+        postedFrom: "{since_date_us}",
+        postedTo: "{today_us}",
+        limit: "25",
+      }
+    keywords: *kw
+    api_query_keywords: ["1240", "5855"]
+    parse_hints:
+      format: json_list
+      notice_path: opportunitiesData
+      id_field: noticeId
+      title_field: title
+      summary_field: description
+      agency_field: fullParentPathName
+      date_field: postedDate
+      deadline_field: responseDeadLine
+      url_field: uiLink
+      cpv_field: naicsCode
+    max_pages: 1
+    # TENDERS-SAM: same conservative pacing as sam_gov_api above -- see that entry's note.
+    pace_seconds: 6.0
+    query_lookback_days: 29
+    verified: false
+    verified_at: "2026-09-08"
+    needs_key_env_var: SAM_GOV_API_KEY
+    notes: >
+      Live-probed 2026-09-08: `ccode=1240&postedFrom=...&postedTo=...` -> HTTP 200, 13 total
+      records, e.g. "Night Vision Devices for Foreign Military Sales (FMS)", "M68 Optic Close
+      Combat Sight Reflex", "Periscope, Armored Vehicle". `ccode=5855` -> 19 total records, e.g.
+      "Infrared Imagers Justification", "VIEWER,NIGHT VISION, IN REPAIR/MODIFICATION OF", "Light
+      Interference Filter (LIF) -- Enhanced Night Vision Goggles". See
+      docs/qa/content_review/TENDERS-SAM.md for full evidence.
 
   - id: sam_gov_search
     name: "SAM.gov opportunities -- SearXNG fallback"

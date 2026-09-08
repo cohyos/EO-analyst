@@ -15,6 +15,8 @@ from unittest.mock import patch
 from eoa.errors import LLMOutputError, ResourceUnavailable
 from eoa.llm.schemas.tenders import TenderExtract
 from eoa.tenders.scan import (
+    DEFAULT_DEFENCE_CONTEXT_SIGNALS,
+    DEFAULT_NEGATIVE_KEYWORDS,
     NOTICE_MAX_AGE_DAYS,
     RELEVANCE_MIN_ACCEPT,
     NoticeRaw,
@@ -25,21 +27,27 @@ from eoa.tenders.scan import (
     _archive_stale_closed,
     _collect_source_notices,
     _country_from_domain,
+    _fetch_api_json,
     _fetch_notice_text,
     _gate_reject_reason,
+    _has_defence_context,
     _has_procurement_signal,
     _initial_status,
     _is_denylisted_domain,
     _matches_keywords,
+    _negative_keyword_penalty,
     _parse_contracts_finder,
     _parse_generic_json_list,
     _parse_generic_ocds,
     _parse_search_hits,
     _parse_ted_notices,
     _passes_gate,
+    _relevance_score_for,
     _transition_closed,
     _within_window,
+    load_defence_context_signals,
     load_deny_domains,
+    load_negative_keywords,
     load_procurement_signals,
     load_tender_sources,
     scan_tenders,
@@ -1484,3 +1492,222 @@ class TestGateRejectReason:
         notice = self._notice(status_hint="closed")
         reason = _gate_reject_reason(notice, deny_domains=[])
         assert reason == "status_hint_closed"
+
+
+# --------------------------------------------------------------------------
+# TENDERS-SAM (2026-09-08, docs/qa/content_review/TENDERS-SAM.md): SAM.gov v2 query/parser fix +
+# the negative-keyword/defence-context relevance-demotion signal.
+# --------------------------------------------------------------------------
+
+
+class TestSamGovApiConfig:
+    """config/tenders.yaml's sam_gov_api / sam_gov_api_psc entries, post-fix: the real v2 query
+    parameters (title/ccode + mandatory postedFrom/postedTo, never the non-existent `keyword`
+    param) and a parser format that actually resolves to a real parser function."""
+
+    def test_sam_gov_api_uses_title_not_keyword_param(self):
+        sources = {s.id: s for s in load_tender_sources()}
+        src = sources["sam_gov_api"]
+        params = src.query_params or {}
+        assert "keyword" not in params, "keyword is not a documented SAM.gov v2 parameter"
+        assert params.get("title") == "{keyword}"
+
+    def test_sam_gov_api_sends_mandatory_date_range(self):
+        sources = {s.id: s for s in load_tender_sources()}
+        params = sources["sam_gov_api"].query_params or {}
+        assert params.get("postedFrom") == "{since_date_us}"
+        assert params.get("postedTo") == "{today_us}"
+        assert sources["sam_gov_api"].query_lookback_days > 0, (
+            "postedFrom/postedTo are mandatory on SAM.gov v2 -- {since_date_us} must not render empty"
+        )
+
+    def test_sam_gov_api_parse_hints_resolve_to_a_real_parser(self):
+        """The pre-fix bug: parse_hints.format='json' matched neither the per-id _API_PARSERS
+        dict nor the generic-format _GENERIC_API_PARSERS dict (keyed 'ocds'/'json_list' only), so
+        _fetch_api_json's parser lookup silently returned None and every response parsed to zero
+        notices regardless of content. 'json_list' is the correct, resolvable key."""
+        sources = {s.id: s for s in load_tender_sources()}
+        for source_id in ("sam_gov_api", "sam_gov_api_psc"):
+            hints = sources[source_id].parse_hints or {}
+            assert hints.get("format") == "json_list"
+            assert hints.get("notice_path") == "opportunitiesData"
+            assert hints.get("id_field") == "noticeId"
+            assert hints.get("date_field") == "postedDate"
+            assert hints.get("deadline_field") == "responseDeadLine"
+            assert hints.get("url_field") == "uiLink"
+
+    def test_sam_gov_api_psc_uses_ccode_and_naics_psc_codes(self):
+        sources = {s.id: s for s in load_tender_sources()}
+        src = sources["sam_gov_api_psc"]
+        params = src.query_params or {}
+        assert params.get("ccode") == "{keyword}"
+        assert src.api_query_keywords == ["1240", "5855"]
+        # The DOMAIN-gate keyword list must stay the full EO/IR vocabulary, not the PSC codes
+        # actually rotated into the query -- same rule test_a15_ted_cpv_source_uses_domain_keywords
+        # _for_gate_not_cpv_codes enforces for ted_eu_cpv.
+        assert "electro-optical" in src.keywords
+
+    def test_sam_gov_sources_still_gated_by_needs_key_env_var_not_verified(self):
+        """verified stays False for both -- _api_json_source_enabled gates purely on
+        SAM_GOV_API_KEY being set, unchanged by this fix."""
+        sources = {s.id: s for s in load_tender_sources()}
+        assert sources["sam_gov_api"].verified is False
+        assert sources["sam_gov_api"].verified is False
+        assert sources["sam_gov_api"].needs_key_env_var == "SAM_GOV_API_KEY"
+        assert sources["sam_gov_api_psc"].needs_key_env_var == "SAM_GOV_API_KEY"
+
+
+class TestFetchApiJsonUsDateParamSubstitution:
+    """{since_date_us}/{today_us} placeholder substitution in _fetch_api_json's query_params
+    branch (SAM.gov's own MM/dd/yyyy date-range requirement, alongside the pre-existing
+    {since_date} YYYYMMDD placeholder TED uses)."""
+
+    def test_since_date_us_and_today_us_rendered_mm_dd_yyyy(self, monkeypatch):
+        captured: dict[str, str] = {}
+
+        def fake_fetch_raw_remote(url, method="GET", json_body=None):
+            captured["url"] = url
+            return {"json": {"opportunitiesData": []}}
+
+        monkeypatch.setattr("eoa.tenders.scan.fetch_raw_remote", fake_fetch_raw_remote)
+        monkeypatch.setenv("SAM_GOV_API_KEY", "test-key")
+        src = TenderSource(
+            id="sam_gov_api",
+            name="x",
+            kind="api_json",
+            country="US",
+            url="https://api.sam.gov/opportunities/v2/search",
+            query_params={
+                "api_key": "{api_key}",
+                "title": "{keyword}",
+                "postedFrom": "{since_date_us}",
+                "postedTo": "{today_us}",
+            },
+            keywords=["infrared"],
+            needs_key_env_var="SAM_GOV_API_KEY",
+            query_lookback_days=29,
+        )
+        _fetch_api_json(src, "infrared")
+        url = captured["url"]
+        today_us = dt.date.today().strftime("%m/%d/%Y")
+        since_us = (dt.date.today() - dt.timedelta(days=29)).strftime("%m/%d/%Y")
+        assert f"postedTo={today_us.replace('/', '%2F')}" in url
+        assert f"postedFrom={since_us.replace('/', '%2F')}" in url
+        assert "title=infrared" in url
+
+    def test_since_date_us_empty_when_no_lookback_configured(self, monkeypatch):
+        captured: dict[str, str] = {}
+
+        def fake_fetch_raw_remote(url, method="GET", json_body=None):
+            captured["url"] = url
+            return {"json": {"opportunitiesData": []}}
+
+        monkeypatch.setattr("eoa.tenders.scan.fetch_raw_remote", fake_fetch_raw_remote)
+        src = TenderSource(
+            id="x",
+            name="x",
+            kind="api_json",
+            country="US",
+            url="https://example.gov/search",
+            query_params={"postedFrom": "{since_date_us}"},
+            keywords=["infrared"],
+        )
+        _fetch_api_json(src, "infrared")
+        assert "postedFrom=" in captured["url"]
+        # empty value -- no digits, no slashes
+        assert captured["url"].split("postedFrom=")[1] in ("", "&") or captured["url"].endswith(
+            "postedFrom="
+        )
+
+
+class TestLoadNegativeKeywordsAndDefenceContextSignals:
+    def test_loads_real_negative_keywords(self):
+        terms = load_negative_keywords()
+        assert len(terms) >= 5
+        assert "spectroscopy" in [t.casefold() for t in terms]
+
+    def test_loads_real_defence_context_signals(self):
+        terms = load_defence_context_signals()
+        assert len(terms) >= 5
+        assert "military" in [t.casefold() for t in terms]
+
+
+class TestHasDefenceContext:
+    def _notice(self, **overrides) -> NoticeRaw:
+        base = dict(source_id="x", external_ref="x:1", title="t", url="https://example.gov/n/1")
+        base.update(overrides)
+        return NoticeRaw(**base)
+
+    def test_true_when_title_mentions_military(self):
+        notice = self._notice(title="Military infrared spectroscopy sensor RFP")
+        assert _has_defence_context(notice, DEFAULT_DEFENCE_CONTEXT_SIGNALS) is True
+
+    def test_true_when_only_agency_carries_defence_signal(self):
+        notice = self._notice(title="Infrared detector procurement", agency="Department of the Navy")
+        assert _has_defence_context(notice, DEFAULT_DEFENCE_CONTEXT_SIGNALS) is True
+
+    def test_false_when_no_defence_signal_anywhere(self):
+        notice = self._notice(title="Infrared spectroscopy lab equipment", summary="For a university lab")
+        assert _has_defence_context(notice, DEFAULT_DEFENCE_CONTEXT_SIGNALS) is False
+
+
+class TestNegativeKeywordPenalty:
+    def _notice(self, **overrides) -> NoticeRaw:
+        base = dict(source_id="x", external_ref="x:1", title="t", url="https://example.gov/n/1")
+        base.update(overrides)
+        return NoticeRaw(**base)
+
+    def test_negative_term_without_defence_context_returns_term(self):
+        notice = self._notice(title="Infrared spectroscopy analyzer for university lab RFQ")
+        term = _negative_keyword_penalty(notice, DEFAULT_NEGATIVE_KEYWORDS, DEFAULT_DEFENCE_CONTEXT_SIGNALS)
+        assert term == "spectroscopy"
+
+    def test_negative_term_with_defence_context_is_overridden(self):
+        notice = self._notice(
+            title="Military infrared spectroscopy sensor for battlefield chemical detection RFI"
+        )
+        term = _negative_keyword_penalty(notice, DEFAULT_NEGATIVE_KEYWORDS, DEFAULT_DEFENCE_CONTEXT_SIGNALS)
+        assert term is None
+
+    def test_no_negative_term_returns_none(self):
+        notice = self._notice(title="Infrared targeting pod for fighter aircraft RFP")
+        term = _negative_keyword_penalty(notice, DEFAULT_NEGATIVE_KEYWORDS, DEFAULT_DEFENCE_CONTEXT_SIGNALS)
+        assert term is None
+
+
+class TestRelevanceScoreForNegativeKeywordCap:
+    def _notice(self, **overrides) -> NoticeRaw:
+        base = dict(source_id="x", external_ref="x:1", title="t", url="https://example.gov/n/1")
+        base.update(overrides)
+        return NoticeRaw(**base)
+
+    def test_high_llm_score_capped_when_negative_term_present(self):
+        extract = _extract(relevance=9)
+        notice = self._notice(title="Infrared spectroscopy reagent kit RFQ")
+        score = _relevance_score_for(
+            extract, notice, DEFAULT_NEGATIVE_KEYWORDS, DEFAULT_DEFENCE_CONTEXT_SIGNALS
+        )
+        assert score <= 0.3
+        assert score < 0.9  # never raised, only ever lowered
+
+    def test_score_unaffected_when_defence_context_present(self):
+        extract = _extract(relevance=9)
+        notice = self._notice(title="Military infrared spectroscopy sensor for battlefield use RFI")
+        score = _relevance_score_for(
+            extract, notice, DEFAULT_NEGATIVE_KEYWORDS, DEFAULT_DEFENCE_CONTEXT_SIGNALS
+        )
+        assert score == 0.9
+
+    def test_notice_none_is_backward_compatible(self):
+        """Every pre-existing caller passes only `extract` -- this must be unaffected."""
+        extract = _extract(relevance=9)
+        assert _relevance_score_for(extract) == 0.9
+        assert _relevance_score_for(None) == 0.5
+
+    def test_no_negative_term_leaves_score_unchanged(self):
+        extract = _extract(relevance=7)
+        notice = self._notice(title="Infrared targeting pod tender for fighter jets")
+        score = _relevance_score_for(
+            extract, notice, DEFAULT_NEGATIVE_KEYWORDS, DEFAULT_DEFENCE_CONTEXT_SIGNALS
+        )
+        assert score == 0.7
