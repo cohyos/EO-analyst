@@ -1247,6 +1247,13 @@ export const realApi: ApiClient = {
         job_id: e?.job_id ?? null,
         stage: e?.stage ?? null,
         message: str(e?.message),
+        error_type: e?.error_type ?? null,
+        traceback_tail: arr(e?.traceback_tail).map((f) => str(f)),
+        item_id: e?.item_id ?? null,
+        link: e?.link ?? null,
+        cause_he: str(e?.cause_he),
+        action_he: str(e?.action_he),
+        impact_he: str(e?.impact_he),
         at: e?.at ?? null,
       })),
     };

@@ -19,7 +19,7 @@ import { LoadingState, ErrorState, EmptyState } from "@/components/states";
 import { ReportBody } from "@/components/reports/ReportBody";
 import { NowRunningStrip } from "@/components/morning/NowRunningStrip";
 import { PipelineReplayTimeline } from "@/components/morning/PipelineReplayTimeline";
-import { ErrorsDrawer } from "@/components/morning/ErrorsDrawer";
+import { RunErrorsPanel } from "@/components/morning/RunErrorsPanel";
 import { formatDateTime } from "@/lib/time";
 import { DEADLINE_SOON_DAYS, daysLeft } from "@/lib/tenders";
 import { useI18n } from "@/i18n";
@@ -73,7 +73,7 @@ export function MorningPage() {
     queryFn: () => api.getMorning(),
   });
   const queryClient = useQueryClient();
-  const [errorsDrawerOpen, setErrorsDrawerOpen] = useState(false);
+  const [errorsPanelOpen, setErrorsPanelOpen] = useState(false);
   // Provided by AppShell via <Outlet context={...}> (a single shared
   // WS /ws/status connection) -- undefined when this page renders without
   // that ancestor (e.g. a unit test rendering <MorningPage /> directly), in
@@ -106,8 +106,8 @@ export function MorningPage() {
         </div>
       )}
 
-      {errorsDrawerOpen && (
-        <ErrorsDrawer errors={recent_errors} onClose={() => setErrorsDrawerOpen(false)} />
+      {errorsPanelOpen && (
+        <RunErrorsPanel errors={recent_errors} onClose={() => setErrorsPanelOpen(false)} />
       )}
 
       <section aria-label="מכרזים ו-RFI/RFP" className="grid grid-cols-1 sm:grid-cols-2">
@@ -157,10 +157,10 @@ export function MorningPage() {
         />
         <StatTile
           label={t("morning.errorsLabel")}
-          value={night_summary.errors}
-          tone={night_summary.errors > 0 ? "danger" : "default"}
+          value={t("morning.errorsCount", { count: night_summary.errors })}
+          tone={night_summary.errors > 0 ? "danger" : "ok"}
           icon={<FileWarning size={14} />}
-          onClick={() => setErrorsDrawerOpen(true)}
+          onClick={() => setErrorsPanelOpen(true)}
           ariaLabel={t("morning.errorsAria")}
         />
       </section>

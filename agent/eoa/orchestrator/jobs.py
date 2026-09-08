@@ -12,6 +12,7 @@ import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -142,16 +143,33 @@ def _run_stage(rs: RunState, stage: str, fn: Callable[[], Any], *, mandatory: bo
         return None
     except Exception as exc:
         rs.failures[stage] = rs.failures.get(stage, 0) + 1
-        rs.stats[stage] = {"error": str(exc)[:300], "minutes": round((time.monotonic() - t0) / 60, 1)}
+        error_type = type(exc).__name__
+        # UI-ERRORS (docs/qa/content_review/UI-ERRORS.md): `str(exc)` is worthless for exceptions
+        # raised with a single non-string arg (e.g. `KeyError(0)` -> str is just "0") -- the Morning
+        # errors panel showed a bare "0" with no way to tell what actually broke (error 279,
+        # 2026-09-08 01:31:51, tenders stage). When the raw message is empty or looks like nothing
+        # but a bare number, fall back to `repr(exc)`, which always carries the exception's own
+        # class name (e.g. "KeyError(0)").
+        raw_message = str(exc)
+        message = raw_message if raw_message and not raw_message.strip().isdigit() else f"{error_type}: {exc!r}"
+        message = message[:300]
+        tb_frames = traceback.extract_tb(exc.__traceback__)
+        # Last 5 frames, file:line:function only -- no local variable values (those can carry
+        # sensitive item/source content and this detail blob is read straight back out by the
+        # Morning "שגיאות" panel's "פרטים טכניים" expander).
+        traceback_tail = [f"{Path(fr.filename).name}:{fr.lineno}:{fr.name}" for fr in tb_frames[-5:]]
+        rs.stats[stage] = {"error": message, "minutes": round((time.monotonic() - t0) / 60, 1)}
         _hb(
             rs,
             "error",
             stage=stage,
-            error=str(exc)[:300],
+            error=message,
+            error_type=error_type,
+            traceback_tail=traceback_tail,
             minutes=rs.stats[stage]["minutes"],
             trace=traceback.format_exc()[-1500:],
         )
-        log.error("stage_failed", stage=stage, error=str(exc))
+        log.error("stage_failed", stage=stage, error=message, error_type=error_type)
         if rs.failures[stage] >= 3:
             ntfy.failure(stage, f"{exc}"[:300])
         return None

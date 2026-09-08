@@ -1337,10 +1337,128 @@ def morning() -> dict[str, Any]:
     }
 
 
+# UI-ERRORS (docs/qa/content_review/UI-ERRORS.md): Hebrew stage labels used only in error
+# classification text below. Mirrors web/src/lib/pipelineTimeline.ts's STAGE_LABEL_HE -- a separate
+# copy (Python vs. TS, no shared module between the two), kept in sync by hand.
+_STAGE_LABEL_HE_FOR_ERRORS = {
+    "ingest": "קליטה",
+    "embed_dedup": "הטמעה וזיהוי כפילויות",
+    "classify": "סיווג",
+    "dedup_xlang": "זיהוי כפילויות רב-לשוני",
+    "triage": "מיון (Triage)",
+    "deep_search": "חיפוש עומק",
+    "analyze": "ניתוח",
+    "corroborate": "אימות הצלבה",
+    "tenders": "מכרזים",
+    "post_tenders_catchup": "השלמת מכרזים",
+    "report": "דוח",
+    "export_backup": "ייצוא וגיבוי",
+    "notify": "התראות",
+}
+
+# Stages `_run_stage(..., mandatory=True)` runs regardless of remaining time budget
+# (eoa.orchestrator.jobs.run_daily) -- a failure here is more consequential than a regular stage's.
+_MANDATORY_ERROR_STAGES = {"report", "export_backup", "notify"}
+
+
+def _stage_label_he(stage: str | None) -> str:
+    if not stage:
+        return "שלב לא ידוע"
+    return _STAGE_LABEL_HE_FOR_ERRORS.get(stage, stage.replace("_", " "))
+
+
+_ERROR_TYPE_FROM_TRACE_RE = re.compile(r"^([A-Za-z_][\w.]*)\s*:?\s*(.*)$")
+_FRAME_FROM_TRACE_RE = re.compile(r'File "([^"]+)", line (\d+), in (\S+)')
+
+
+def _error_type_and_message_from_trace(trace: str) -> tuple[str | None, str | None]:
+    """Best-effort recovery of the exception class name (and a usable message) from a raw
+    ``traceback.format_exc()`` string, for `run_log` rows written before `error_type` was captured
+    directly (see jobs.py `_run_stage`) -- e.g. error 279 (2026-09-08 01:31:51, tenders stage:
+    `agent/eoa/tenders/scan.py`'s `_candidate_duplicate_exists` indexes a dict-row with `r[0]`
+    instead of `r["url"]`, see docs/qa/content_review/UI-ERRORS.md), whose stored `detail.error` was
+    the useless bare "0" that `str(KeyError(0))` produces. The last non-empty line of a Python
+    traceback is always "ExceptionClassName: message" (or a bare "ExceptionClassName" for a
+    no-arg exception)."""
+    lines = [ln for ln in trace.strip().splitlines() if ln.strip()]
+    if not lines:
+        return None, None
+    last = lines[-1].strip()
+    m = _ERROR_TYPE_FROM_TRACE_RE.match(last)
+    if not m:
+        return None, None
+    error_type = m.group(1).rsplit(".", 1)[-1]
+    # A real traceback's last line is a short class name -- reject anything implausibly long
+    # (e.g. a non-traceback string passed in by mistake, or a test fixture's opaque filler text),
+    # rather than surfacing garbage as an "error type".
+    if not error_type or len(error_type) > 60:
+        return None, None
+    return error_type, last
+
+
+def _traceback_tail_from_trace(trace: str, n: int = 5) -> list[str]:
+    """Same recovery as `_error_type_and_message_from_trace`, for the frame list: parses
+    ``File "...", line N, in func`` lines out of a raw traceback string -- file/line/function only,
+    no local variable values (those were never captured in `trace` to begin with)."""
+    frames = _FRAME_FROM_TRACE_RE.findall(trace)
+    return [f"{Path(path).name}:{lineno}:{func}" for path, lineno, func in frames[-n:]]
+
+
+def _classify_error(error_type: str | None, message: str, stage: str | None) -> dict[str, str]:
+    """Deterministic cause/action/impact classification for one stage error, computed at read time
+    (never persisted) -- an improvement to this table applies retroactively to every historical
+    row, not only ones written after the change. See docs/qa/content_review/UI-ERRORS.md."""
+    et = (error_type or "").lower()
+    msg = (message or "").lower()
+    stage_label = _stage_label_he(stage)
+    impact_he = (
+        f"שלב קריטי ('{stage_label}') נכשל -- ייתכן שהריצה לא הושלמה כראוי"
+        if stage in _MANDATORY_ERROR_STAGES
+        else f"השלב '{stage_label}' נכשל; ההרצה המשיכה לשלב הבא"
+    )
+
+    def _r(cause: str, action: str) -> dict[str, str]:
+        return {"cause_he": cause, "action_he": action, "impact_he": impact_he}
+
+    if any(t in et for t in ("operationalerror", "interfaceerror", "connectionerror", "poolerror")) or any(
+        t in msg for t in ("connection refused", "could not connect", "connection to server", "connection pool")
+    ):
+        return _r("בסיס הנתונים לא זמין", "בדוק eo native status")
+
+    if "timeout" in et or "timeout" in msg:
+        return _r(
+            "פסק זמן בביצוע הפעולה",
+            "הפעולה תיבדק שוב בריצה הבאה; אם חוזר, בדוק את זמינות המקור/השירות",
+        )
+
+    if any(t in et for t in ("httperror", "httpstatuserror", "requestexception", "fetcherror")) or re.search(
+        r"\b[45]\d{2}\b", msg
+    ):
+        return _r("המקור השיב בשגיאה", "המקור ייבדק שוב בריצה הבאה; אם חוזר, בדוק את הגדרות המקור")
+
+    if et in ("keyerror", "indexerror", "typeerror", "attributeerror", "valueerror", "zerodivisionerror"):
+        return _r(f"שגיאת קוד בשלב '{stage_label}'", "דווח למפתח; ההרצה המשיכה לשלב הבא")
+
+    return _r("שגיאה לא מסווגת", "דווח למפתח; בדוק את הפרטים הטכניים למטה")
+
+
+def _error_link(stage: str | None, job_id: int | None, item_id: int | None) -> str | None:
+    """Best-effort deep link for an error card: to the item it concerns, when known; to the
+    investigation a failing `deep_search` job represents; otherwise to the run's own replay
+    timeline. There is no standalone `/jobs/{id}` page in this app (only `/items/:id` and
+    `/investigations/:jobId` exist -- see web/src/App.tsx), so a bare job id alone links there."""
+    if item_id is not None:
+        return f"/items/{item_id}"
+    if stage == "deep_search" and job_id is not None:
+        return f"/investigations/{job_id}"
+    return "/morning#pipeline-replay"
+
+
 def recent_errors(hours: int = 24, limit: int = 20) -> list[dict[str, Any]]:
-    """U2: backs the Morning "שגיאות אחרונות" drawer -- every `run_log` error event in the last
-    `hours`, newest first, with a short human-readable message extracted from that event's
-    `detail` (never the raw traceback -- see `eoa.orchestrator.jobs._run_stage`'s `error` event)."""
+    """U2/UI-ERRORS: backs the Morning "שגיאות בריצה האחרונה" panel -- every `run_log` error event
+    in the last `hours`, newest first, enriched with a deterministic cause/action/impact
+    classification and a technical detail trail (error_type + traceback tail) so an error is never
+    a dead end (see docs/qa/content_review/UI-ERRORS.md)."""
     window_start, window_end = _kpi_window(hours)
     rows = _fetchall(
         "SELECT id, job_id, stage, event, detail, COALESCE(heartbeat_at, created_at) AS at "
@@ -1351,14 +1469,43 @@ def recent_errors(hours: int = 24, limit: int = 20) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in rows:
         detail = r.get("detail") or {}
-        message = detail.get("error") or detail.get("message") or r.get("event") or "שגיאה"
+        stage = r.get("stage")
+        trace = detail.get("trace") or ""
+
+        error_type = detail.get("error_type")
+        raw_message = detail.get("error") or detail.get("message")
+        # A message that's empty or a bare number (e.g. "0" -- `str(KeyError(0))`) carries no
+        # information; recover a real one from the stored traceback when possible (covers every
+        # `run_log` row written before jobs.py started capturing `error_type` directly, including
+        # error 279).
+        needs_recovery = not raw_message or str(raw_message).strip().isdigit()
+        if (not error_type or needs_recovery) and trace:
+            recovered_type, recovered_message = _error_type_and_message_from_trace(trace)
+            error_type = error_type or recovered_type
+            if needs_recovery and recovered_message:
+                raw_message = recovered_message
+
+        message = str(raw_message or r.get("event") or "שגיאה")[:300]
+
+        traceback_tail = detail.get("traceback_tail")
+        if not traceback_tail and trace:
+            traceback_tail = _traceback_tail_from_trace(trace)
+
+        item_id = detail.get("item_id")
+        classification = _classify_error(error_type, message, stage)
+
         out.append(
             {
                 "id": r["id"],
                 "job_id": r.get("job_id"),
-                "stage": r.get("stage"),
-                "message": str(message)[:300],
+                "stage": stage,
+                "message": message,
+                "error_type": error_type,
+                "traceback_tail": traceback_tail or [],
+                "item_id": item_id,
+                "link": _error_link(stage, r.get("job_id"), item_id),
                 "at": r["at"].isoformat() if r.get("at") else None,
+                **classification,
             }
         )
     return out

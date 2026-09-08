@@ -181,14 +181,27 @@ describe("MorningPage KPI cards (U2)", () => {
     );
   });
 
-  it("the errors card opens a drawer listing recent run_log errors, with a close control", async () => {
+  it("the errors card opens a panel listing recent run_log errors with cause/action/impact, and a close control", async () => {
     getMorning.mockResolvedValue({
       report: null,
       headlines: [],
       open_points: [],
       night_summary: fullNightSummary,
       recent_errors: [
-        { id: 1, job_id: 9, stage: "ingest", message: "FetchError: timeout", at: "2026-09-04T01:12:00+03:00" },
+        {
+          id: 1,
+          job_id: 9,
+          stage: "ingest",
+          message: "FetchError: timeout",
+          error_type: "FetchError",
+          traceback_tail: ["ingest.py:10:fetch"],
+          item_id: null,
+          link: "/morning#pipeline-replay",
+          cause_he: "המקור השיב בשגיאה",
+          action_he: "המקור ייבדק שוב בריצה הבאה",
+          impact_he: "השלב 'קליטה' נכשל; ההרצה המשיכה לשלב הבא",
+          at: "2026-09-04T01:12:00+03:00",
+        },
       ],
     });
     renderMorningPage();
@@ -198,9 +211,30 @@ describe("MorningPage KPI cards (U2)", () => {
     fireEvent.click(screen.getByRole("button", { name: /שגיאות/ }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByText("FetchError: timeout")).toBeInTheDocument();
+    expect(screen.getByText("המקור השיב בשגיאה")).toBeInTheDocument();
+    expect(screen.getByText("המקור ייבדק שוב בריצה הבאה")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "סגור" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows a clean, green '0 שגיאות' state when there are no recent errors", async () => {
+    getMorning.mockResolvedValue({
+      report: null,
+      headlines: [],
+      open_points: [],
+      night_summary: { ...fullNightSummary, errors: 0 },
+      recent_errors: [],
+    });
+    renderMorningPage();
+    await screen.findByText("50");
+
+    const errorsButton = screen.getByRole("button", { name: /שגיאות/ });
+    expect(errorsButton).toHaveTextContent("0 שגיאות");
+
+    fireEvent.click(errorsButton);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("אין שגיאות ב-24 השעות האחרונות")).toBeInTheDocument();
   });
 
   it("shows a dash (not a crash) for run duration when no run has completed yet (F12)", async () => {

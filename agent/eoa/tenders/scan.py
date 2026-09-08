@@ -1092,10 +1092,10 @@ def _candidate_duplicate_exists(normalized_title: str, portal: str) -> bool:
             {"t": normalized_title},
         )
         rows = cur.fetchall()
-    # the pool's connection() yields dict rows -- r[0] raised KeyError: 0 and crashed the whole
-    # tenders stage of the nightly run (2026-09-08 01:31, run_errors 279)
-    urls = [(r["url"] if isinstance(r, dict) else r[0]) for r in rows]
-    return any(_notice_portal(u) == portal for u in urls if u)
+    # `eoa.db.get_pool()` configures the pool with ``row_factory=dict_row``, so every row here is a
+    # dict -- ``r[0]`` raised ``KeyError: 0`` and crashed the whole tenders stage of the nightly run
+    # (2026-09-08 01:31, run_errors 279).
+    return any(_notice_portal(r["url"]) == portal for r in rows if r["url"])
 
 
 # F2 (2026-09-05): "assume open when undated" bug -- a notice with no deadline (the overwhelming
