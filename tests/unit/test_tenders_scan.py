@@ -940,6 +940,7 @@ class TestScanTendersGateAndDedup:
         with (
             patch("eoa.tenders.scan._collect_source_notices") as mock_collect,
             patch("eoa.tenders.scan._tender_exists") as mock_exists,
+            patch("eoa.tenders.scan._candidate_duplicate_exists", return_value=False),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
             patch("eoa.tenders.scan._transition_closed", return_value=0),
             patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
@@ -1062,6 +1063,8 @@ def _common_patches(notice: NoticeRaw) -> ExitStack:
     stack = ExitStack()
     stack.enter_context(patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]))
     stack.enter_context(patch("eoa.tenders.scan._tender_exists", return_value=False))
+    # R6-data title+portal dedupe (2026-09-07) -- also a DB read; unstubbed it hits the real pool
+    stack.enter_context(patch("eoa.tenders.scan._candidate_duplicate_exists", return_value=False))
     stack.enter_context(patch("eoa.tenders.scan._transition_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan._archive_stale_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0))

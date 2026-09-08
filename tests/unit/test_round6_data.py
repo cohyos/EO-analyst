@@ -465,7 +465,11 @@ def test_candidate_duplicate_exists_true_for_same_title_and_portal(monkeypatch):
         "connection",
         _connection_stub(
             _sql_router(
-                {"FROM tenders": [("https://www.northropgrumman.com/what-we-do/mission-solutions/eo-ir",)]}
+                {
+                    "FROM tenders": [
+                        {"url": "https://www.northropgrumman.com/what-we-do/mission-solutions/eo-ir"}
+                    ]
+                }
             ),
             recorder,
         ),
@@ -482,7 +486,8 @@ def test_candidate_duplicate_exists_false_for_different_portal(monkeypatch):
         scan_mod,
         "connection",
         _connection_stub(
-            _sql_router({"FROM tenders": [("https://www.example.com/some-other-page",)]}), recorder
+            _sql_router({"FROM tenders": [{"url": "https://www.example.com/some-other-page"}]}),
+            recorder,
         ),
     )
     exists = scan_mod._candidate_duplicate_exists("same title", "www.northropgrumman.com")
@@ -492,6 +497,34 @@ def test_candidate_duplicate_exists_false_for_different_portal(monkeypatch):
 def test_candidate_duplicate_exists_short_circuits_without_portal():
     assert scan_mod._candidate_duplicate_exists("some title", "") is False
     assert scan_mod._candidate_duplicate_exists("", "www.example.com") is False
+
+
+def test_candidate_duplicate_exists_reads_dict_rows_and_skips_null_urls(monkeypatch):
+    """Regression for run_errors 279 (nightly 2026-09-08 01:31): the pool yields ``dict_row``
+    rows, and the helper used to index them with ``r[0]`` -> ``KeyError: 0``, which crashed the
+    whole tenders stage whenever a candidate title collided with an existing row. Rows are
+    keyed by column name; a NULL url is skipped rather than blowing up in ``_notice_portal``."""
+    recorder: list = []
+    monkeypatch.setattr(
+        scan_mod,
+        "connection",
+        _connection_stub(
+            _sql_router(
+                {
+                    "FROM tenders": [
+                        {"url": None},
+                        {"url": "https://www.example.com/unrelated"},
+                        {"url": "https://WWW.NorthropGrumman.com/another-page"},
+                    ]
+                }
+            ),
+            recorder,
+        ),
+    )
+    assert scan_mod._candidate_duplicate_exists("same title", "www.northropgrumman.com") is True
+    sql, params = recorder[-1]
+    assert "intake = 'candidate'" in sql
+    assert params == {"t": "same title"}
 
 
 # ---------------------------------------------------------------------------
