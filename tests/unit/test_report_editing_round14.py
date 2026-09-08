@@ -364,12 +364,31 @@ def test_table_caption_uses_note_he_when_present():
 
 
 def test_table_caption_synthesizes_row_count_when_missing():
-    tbl = {"rows": [[1], [2], [3]]}
-    assert docx_builder._table_caption_text(tbl) == "(3 שורות)"
+    # Round-15 (PL-REPORT-FIX): >3 rows so the caption actually renders (see the "small table"
+    # test below) -- and with no wrapping parentheses (they mirror in RTL, see docx_builder's own
+    # updated docstring).
+    tbl = {"rows": [[1], [2], [3], [4], [5]]}
+    assert docx_builder._table_caption_text(tbl) == "5 שורות"
 
 
 def test_table_caption_none_for_empty_table():
     assert docx_builder._table_caption_text({"rows": []}) is None
+
+
+def test_table_caption_none_for_three_or_fewer_rows():
+    # Round-15 (PL-REPORT-FIX, user screenshot 2026-09-08 20:30): a synthesized row-count caption
+    # is dropped entirely for a table this small -- confirmed live: pl_targeting_pods_2026-09-08's
+    # "מפת קונים / צינור הזדמנויות" table rendered a mangled "*(3 שורות)*" caption under exactly 3
+    # rows.
+    assert docx_builder._table_caption_text({"rows": [[1], [2], [3]]}) is None
+    assert docx_builder._table_caption_text({"rows": [[1]]}) is None
+
+
+def test_table_caption_note_he_still_renders_for_a_small_table():
+    # An author-provided note_he is real content (not a bare row count), so it still renders even
+    # under the <=3-row synthesis threshold.
+    tbl = {"note_he": "הערה קיימת.", "rows": [[1], [2]]}
+    assert docx_builder._table_caption_text(tbl) == "הערה קיימת."
 
 
 def test_dedupe_rows_across_tables_singular_note_for_one_dropped_row():

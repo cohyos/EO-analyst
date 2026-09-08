@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -64,7 +64,12 @@ from eoa.report.docx_builder import (
     save_docx,
     validate_docx,
 )
-from eoa.report.qa_citations import QAResult, check
+from eoa.report.qa_citations import (
+    QAResult,
+    check,
+    is_tender_aggregator_domain,
+    tender_aggregator_reliability,
+)
 from eoa.report.textnorm import trim_at_word_boundary
 
 log = structlog.get_logger(__name__)
@@ -330,7 +335,8 @@ def collect_tenders_and_forecasts(line_id: str, *, limit: int = 20) -> dict[str,
     today = _today_jerusalem()
     tenders = _fetchall(
         """
-        SELECT id, title, agency, country, deadline, status, url, entities, summary_he
+        SELECT id, title, agency, country, deadline, status, url, entities, summary_he,
+               item_id, source, published_at
         FROM tenders
         WHERE product_lines @> ARRAY[%(line)s]::text[]
           AND status IN ('open', 'unknown') AND (deadline IS NULL OR deadline >= %(today)s)
@@ -358,6 +364,65 @@ def collect_tenders_and_forecasts(line_id: str, *, limit: int = 20) -> dict[str,
         f["n"] = next_n
         next_n += 1
     return {"tenders": tenders, "forecasts": forecasts}
+
+
+def _any_status_tender_date_for_item(item_id: int) -> Any:
+    """Live-verification finding (rebuilding pl_targeting_pods 2026-09-08 after the round-15 fix):
+    the Litening item's own linked ``tenders`` row (``item_id`` match) turned out to be
+    ``status='archived'`` with a long-past ``deadline`` (2015) -- excluded by
+    :func:`collect_tenders_and_forecasts`'s own ``status IN ('open','unknown')`` filter (that query
+    is deliberately scoped to *currently actionable* tenders for the "מכרזים ו-RFI פתוחים" table,
+    unchanged here) so :func:`_attach_tender_aggregator_metadata` never saw it via the ``tenders``
+    argument alone. This is a separate, unrestricted-by-status lookup used ONLY for the appendix
+    date backfill -- "their date comes from the tender row" never said "only an open one" -- a
+    plain read, one row, no write."""
+    row = _fetchone(
+        "SELECT published_at, deadline FROM tenders WHERE item_id = %(id)s "
+        "ORDER BY published_at DESC NULLS LAST, deadline DESC NULLS LAST LIMIT 1",
+        {"id": item_id},
+    )
+    if not row:
+        return None
+    return row.get("published_at") or row.get("deadline")
+
+
+def _attach_tender_aggregator_metadata(items: list[dict[str, Any]], tenders: list[dict[str, Any]]) -> None:
+    """User screenshot 2026-09-08 20:30 defect #2a: pl_targeting_pods_2026-09-08's sole market item
+    (a "Litening advanced targeting pod Tender" listing on usarfp.com, a tender aggregator/reseller
+    site) rendered "אמינות" AND "תאריך" as "—" in the sources appendix --
+    ``eoa.report.docx_builder._reliability_for`` only ever reads an item's own optional
+    ``reliability`` key or the DB ``sources.reliability`` scale, neither of which any collector
+    populates for an aggregator domain, and the item's own ``published_at`` was simply never
+    scraped by the tender ingester (out of scope here -- ``agent/eoa/tenders/**`` is owned by
+    another agent).
+
+    Mutates each ``items`` dict IN PLACE, before the citation registry copies the list (list
+    membership only -- the dict objects themselves are shared), to:
+
+    (a) attach a deterministic ``qa_citations.tender_aggregator_reliability()`` descriptor to any
+        item whose source resolves to a known aggregator domain and that doesn't already carry a
+        ``reliability`` value, so the appendix "אמינות" cell never falls back to "—" for one; and
+    (b) backfill a missing ``published_at`` from the *linked* ``tenders`` row's own
+        ``published_at``/``deadline`` (whichever is available) when this item is that tender's
+        source item (``tenders.item_id``) -- "their date comes from the tender row", per the brief.
+        Checks the already-collected (open/unknown-only) ``tenders`` list first, then falls back to
+        :func:`_any_status_tender_date_for_item` for a linked tender excluded from that list purely
+        by status/deadline (see its own docstring) -- the appendix date is informational, not a
+        claim the tender is still open. Only ever fills a ``None`` -- an item's own real
+        ``published_at`` is never overwritten.
+    """
+    tenders_by_item_id = {t["item_id"]: t for t in tenders if t.get("item_id") is not None}
+    for it in items:
+        if it.get("reliability") is None and is_tender_aggregator_domain(
+            url=it.get("url"), source_name=it.get("source_name")
+        ):
+            it["reliability"] = tender_aggregator_reliability()
+        if it.get("published_at") is None and it.get("id") is not None:
+            tender = tenders_by_item_id.get(it["id"])
+            if tender is not None:
+                it["published_at"] = tender.get("published_at") or tender.get("deadline")
+            else:
+                it["published_at"] = _any_status_tender_date_for_item(it["id"])
 
 
 def format_tenders_block(data: dict[str, Any]) -> str:
@@ -712,6 +777,19 @@ class PipelineRow:
     likelihood: float | None = None
     level: str | None = None
     watchlist_fit: bool = False
+    #: The forecast/tender window's *start* date -- only ever set for a forecast-derived row (see
+    #: :func:`_pipeline_rows_from_forecasts`); used solely by :func:`dedupe_pipeline_rows`'s
+    #: near-duplicate window check (``reference_date`` alone is the window's *end*).
+    window_from: dt.date | None = None
+    #: User screenshot 2026-09-08 20:30 defect #2c: "an opportunity whose only source is an
+    #: aggregator gets grade C at best" -- set by each ``_pipeline_rows_from_*`` builder from the
+    #: row's own citation source(s) (``qa_citations.is_tender_aggregator_domain``); caps
+    #: :meth:`tier` at "C" regardless of the computed score.
+    is_aggregator_only: bool = False
+    #: Extra citation numbers folded into this row by :func:`dedupe_pipeline_rows` when it merges
+    #: near-duplicate rows -- rendered as additional "[n]" markers alongside ``n`` itself (see
+    #: :func:`_pipeline_row_citation_markers`). Empty for every row that was never merged.
+    extra_ns: list[int] = field(default_factory=list)
 
     def tier(self, *, today: dt.date) -> str:
         score = _tier_score(
@@ -722,7 +800,45 @@ class PipelineRow:
             watchlist_fit=self.watchlist_fit,
             today=today,
         )
-        return tier_label(score)
+        label = tier_label(score)
+        if self.is_aggregator_only and label != "C":
+            return "C"
+        return label
+
+
+def _tender_is_aggregator_only(tender: dict[str, Any]) -> bool:
+    """User screenshot 2026-09-08 20:30 defect #2c -- see :data:`PipelineRow.is_aggregator_only`.
+    A tender's own ``url``/``source`` columns are checked directly (a tender is its own
+    citation source, unlike a forecast -- see :func:`_forecast_is_aggregator_only`)."""
+    return is_tender_aggregator_domain(url=tender.get("url"), source_name=tender.get("source"))
+
+
+def _forecast_is_aggregator_only(
+    forecast: dict[str, Any], items_by_id: dict[int, dict[str, Any]]
+) -> bool:
+    """A forecast (``tender_forecasts``) carries no source URL of its own -- its provenance is the
+    market item that triggered it (``trigger_item_id``). Resolves that item's own
+    ``url``/``source_name`` from the already-collected ``items_by_id`` map when possible, falling
+    back to a direct DB lookup for a trigger item outside this report's own lookback window (still
+    a plain read, no write). ``False`` (never capped) when the trigger item can't be resolved at
+    all -- absence of evidence is not evidence of an aggregator source."""
+    trigger_id = forecast.get("trigger_item_id")
+    if trigger_id is None:
+        return False
+    trigger_item = items_by_id.get(trigger_id)
+    if trigger_item is None:
+        trigger_item = _fetchone(
+            "SELECT source_name, url FROM items WHERE id = %(id)s", {"id": trigger_id}
+        )
+    if not trigger_item:
+        return False
+    return is_tender_aggregator_domain(url=trigger_item.get("url"), source_name=trigger_item.get("source_name"))
+
+
+def _event_is_aggregator_only(ev: dict[str, Any]) -> bool:
+    """An event row already carries its triggering item's own ``item_url``/``source_name`` (the
+    ``events``-``items`` join in :func:`collect_events`), so no extra lookup is needed here."""
+    return is_tender_aggregator_domain(url=ev.get("item_url"), source_name=ev.get("source_name"))
 
 
 def _pipeline_rows_from_tenders(
@@ -735,32 +851,44 @@ def _pipeline_rows_from_tenders(
             PipelineRow(
                 opportunity_he=t.get("title") or "—",
                 stage=_tender_stage(t),
-                buyer_he=t.get("agency") or "—",
+                buyer_he=t.get("agency") or "",
                 target_date_he=fmt_date(t.get("deadline")),
                 n=t.get("n"),
                 reference_date=t.get("deadline"),
                 watchlist_fit=bool(entities & watchlist_names),
+                is_aggregator_only=_tender_is_aggregator_only(t),
             )
         )
     return rows
 
 
 def _pipeline_rows_from_forecasts(
-    forecasts: list[dict[str, Any]], watchlist_names: set[str], *, today: dt.date
+    forecasts: list[dict[str, Any]],
+    watchlist_names: set[str],
+    *,
+    today: dt.date,
+    items_by_id: dict[int, dict[str, Any]] | None = None,
 ) -> list[PipelineRow]:
     rows = []
+    items_by_id = items_by_id or {}
     for f in forecasts:
         candidate_vendors = set(f.get("candidate_vendors") or [])
         rows.append(
             PipelineRow(
                 opportunity_he=f"{f.get('platform') or '—'}: {f.get('payload_need') or '—'}",
                 stage=_forecast_stage(f, today=today),
-                buyer_he="—",
+                # R15 (PL-REPORT-FIX defect #4): this row's own "גורם רוכש" was hardcoded to "—"
+                # even though ``tender_forecasts.buyer_country`` (already SELECTed by
+                # collect_tenders_and_forecasts) carries a real buyer when the forecast has one --
+                # a render-side bug, not a data gap.
+                buyer_he=f.get("buyer_country") or "",
                 target_date_he=f"{fmt_date(f.get('window_from'))} - {fmt_date(f.get('window_to'))}",
                 n=f.get("n"),
                 reference_date=f.get("window_to"),
                 likelihood=f.get("likelihood"),
                 watchlist_fit=bool(candidate_vendors & watchlist_names),
+                window_from=f.get("window_from"),
+                is_aggregator_only=_forecast_is_aggregator_only(f, items_by_id),
             )
         )
     return rows
@@ -775,16 +903,124 @@ def _pipeline_rows_from_events(events: list[dict[str, Any]], watchlist_names: se
             PipelineRow(
                 opportunity_he=f"המשך עסקי סביב {ev.get('title') or ev.get('program') or '—'} אצל {ev.get('customer') or '—'}",
                 stage="לאחר-זכייה",
-                buyer_he=ev.get("customer") or "—",
+                buyer_he=ev.get("customer") or "",
                 target_date_he=fmt_date(ev.get("date")),
                 n=ev.get("n"),
                 reference_date=ev.get("date"),
                 amount_usd=ev.get("amount_usd"),
                 watchlist_fit=bool(set(ev.get("parties") or []) & watchlist_names)
                 or (ev.get("customer") in watchlist_names),
+                is_aggregator_only=_event_is_aggregator_only(ev),
             )
         )
     return rows
+
+
+# --------------------------------------------------------------------------
+# 5b. opportunities-table render-side near-duplicate dedupe (user screenshot 2026-09-08 20:30
+# defect #1) -- the data-level fix (the same underlying tender_forecasts row apparently being
+# re-derived/re-inserted a day apart) belongs to eoa.tenders.forecast, out of scope for this
+# report-layer round; documented here as the acknowledged gap.
+# --------------------------------------------------------------------------
+
+#: Two pipeline rows sharing the same platform+payload/buyer/stage identity whose target-date
+#: windows both fall within this many days of each other are treated as the same underlying
+#: forecast reported twice, not two genuinely distinct opportunities.
+_PIPELINE_DEDUPE_WINDOW_DAYS = 14
+_TIER_RANK = {"A": 0, "B": 1, "C": 2}
+
+
+def _pipeline_dedupe_key(row: PipelineRow) -> tuple[str, str, str]:
+    """Platform+payload (``opportunity_he`` already encodes both for a forecast row) + buyer +
+    stage identity for :func:`dedupe_pipeline_rows` -- see its own docstring."""
+    return (row.opportunity_he, row.buyer_he or "", row.stage)
+
+
+def _pipeline_rows_are_near_duplicates(a: PipelineRow, b: PipelineRow) -> bool:
+    """True when both rows carry a target-date window (``window_from``..``reference_date``) and
+    both edges of the two windows fall within :data:`_PIPELINE_DEDUPE_WINDOW_DAYS` days of each
+    other -- e.g. the reproduction case's ``2027-03-05..2028-09-05`` vs ``2027-03-06..2028-09-06``
+    (both edges one day apart). A row with no window on either side (a tender/event row, which
+    never sets ``window_from``) is never treated as a near-duplicate of anything by this check."""
+    if a.window_from is None or b.window_from is None:
+        return False
+    if a.reference_date is None or b.reference_date is None:
+        return False
+    return (
+        abs((a.window_from - b.window_from).days) <= _PIPELINE_DEDUPE_WINDOW_DAYS
+        and abs((a.reference_date - b.reference_date).days) <= _PIPELINE_DEDUPE_WINDOW_DAYS
+    )
+
+
+def dedupe_pipeline_rows(rows: list[PipelineRow], *, today: dt.date) -> list[PipelineRow]:
+    """User screenshot 2026-09-08 20:30 defect #1: pl_targeting_pods_2026-09-08's opportunities
+    table ("מפת קונים / צינור הזדמנויות") carried two near-identical rows for the same
+    platform+payload forecast ("מטוס קרב: פוד כיוון (Targeting Pod)", RFI, grades A/B) whose
+    target-date windows differed by a single day -- almost certainly the same underlying
+    ``tender_forecasts`` row reported twice a day apart (a data-level near-duplicate that belongs
+    to ``eoa.tenders.forecast``, out of scope for this report-layer round -- documented here as the
+    acknowledged gap, not fixed at the source).
+
+    This is a *render-side* dedupe only: rows sharing the same :func:`_pipeline_dedupe_key`
+    (platform+payload text, buyer, stage) whose target-date windows are
+    :func:`near-duplicates <_pipeline_rows_are_near_duplicates>` collapse into ONE row -- keeping
+    the better-graded (A > B > C, via :meth:`PipelineRow.tier`) candidate's own fields, widening
+    the shown date range to cover every merged row's own window, unioning their citation numbers
+    (rendered as multiple "[n]" markers by :func:`_pipeline_row_citation_markers`), and appending a
+    "N תחזיות מאוחדות" note to the date cell so a reader can tell rows were merged rather than one
+    opportunity simply spanning a wide date range."""
+    if len(rows) < 2:
+        return rows
+    clusters: list[list[PipelineRow]] = []
+    for row in rows:
+        placed = False
+        for cluster in clusters:
+            if _pipeline_dedupe_key(cluster[0]) != _pipeline_dedupe_key(row):
+                continue
+            if any(_pipeline_rows_are_near_duplicates(row, member) for member in cluster):
+                cluster.append(row)
+                placed = True
+                break
+        if not placed:
+            clusters.append([row])
+    out: list[PipelineRow] = []
+    for cluster in clusters:
+        if len(cluster) == 1:
+            out.append(cluster[0])
+            continue
+        best = sorted(cluster, key=lambda r: _TIER_RANK[r.tier(today=today)])[0]
+        window_froms = [r.window_from for r in cluster if r.window_from is not None]
+        window_tos = [r.reference_date for r in cluster if r.reference_date is not None]
+        target_date_he = best.target_date_he
+        if window_froms and window_tos:
+            target_date_he = f"{fmt_date(min(window_froms))} - {fmt_date(max(window_tos))}"
+        ns = [r.n for r in cluster if r.n is not None]
+        out.append(
+            PipelineRow(
+                opportunity_he=best.opportunity_he,
+                stage=best.stage,
+                buyer_he=best.buyer_he,
+                target_date_he=f"{target_date_he} ({len(cluster)} תחזיות מאוחדות)",
+                n=ns[0] if ns else None,
+                reference_date=best.reference_date,
+                amount_usd=best.amount_usd,
+                likelihood=best.likelihood,
+                level=best.level,
+                watchlist_fit=any(r.watchlist_fit for r in cluster),
+                window_from=best.window_from,
+                is_aggregator_only=best.is_aggregator_only,
+                extra_ns=ns[1:],
+            )
+        )
+    return out
+
+
+def _pipeline_row_citation_markers(row: PipelineRow) -> str:
+    """Every citation number a rendered pipeline row carries -- its own ``n`` plus any
+    ``extra_ns`` folded in by :func:`dedupe_pipeline_rows` -- as "[n][n2]..." markers, or "—" for a
+    row with none (mirrors every other table's own "no citation" placeholder)."""
+    ns = ([row.n] if row.n is not None else []) + list(row.extra_ns or [])
+    return "".join(f"[{n}]" for n in ns) if ns else "—"
 
 
 def pipeline_table(rows: list[PipelineRow], *, today: dt.date | None = None) -> dict[str, Any] | None:
@@ -799,10 +1035,13 @@ def pipeline_table(rows: list[PipelineRow], *, today: dt.date | None = None) -> 
         [
             r.opportunity_he,
             r.stage,
-            r.buyer_he or "—",
+            # User screenshot 2026-09-08 20:30 defect #4: "never '—' in a Hebrew table" for a
+            # buyer this table simply never learned -- "—" reads as "data missing/error", while
+            # "לא צוין" ("not specified") correctly reads as "the source didn't name one".
+            r.buyer_he or "לא צוין",
             r.target_date_he or "—",
             r.tier(today=today),
-            f"[{r.n}]" if r.n is not None else "—",
+            _pipeline_row_citation_markers(r),
         ]
         for r in ordered
     ]
@@ -1097,6 +1336,64 @@ def _render_sentences(sentences: list[Sentence]) -> str:
     return " ".join(f"{s.text_he} {''.join(f'[{n}]' for n in s.cites)}" for s in sentences)
 
 
+#: User screenshot 2026-09-08 20:30 defect #2b: a recommended action prefixed with this marker was
+#: downgraded by :func:`_downgrade_aggregator_only_actions` because its only supporting source is a
+#: tender aggregator/reseller domain -- "לאימות: ..." ("to verify: ...") reads as a verification
+#: task, not a direct call to action, at the report's own lowest priority.
+_AGGREGATOR_ONLY_ACTION_PREFIX_HE = "לאימות: "
+_AGGREGATOR_ONLY_RATIONALE_TEXT_HE = (
+    "המקור היחיד שתומך בהזדמנות זו הוא אתר מצבור מכרזים/מתווכי מכרזים (אמינות נמוכה); נדרש אימות "
+    "ממקור נוסף ובלתי-תלוי לפני פעולה בפועל."
+)
+
+
+def _downgrade_aggregator_only_actions(
+    actions: list[ProductLineRecommendedAction], citation_items: list[dict[str, Any]]
+) -> list[ProductLineRecommendedAction]:
+    """User screenshot 2026-09-08 20:30 defect #2b: pl_targeting_pods_2026-09-08's every
+    recommended action ("פעולות מומלצות") cited only [1] -- a market item sourced from a tender
+    aggregator/reseller site (usarfp.com) -- with no independent corroboration anywhere in the
+    report, yet was rendered as a direct, high-priority call to action ("להגיש הצעה תחרותית
+    למכרז..."). An action may still cite an aggregator when at least one OTHER cited source is NOT
+    an aggregator (aggregator + independent corroboration is fine, per the brief); only an action
+    whose EVERY resolvable cited source is a confirmed aggregator is downgraded here: its
+    ``action_he`` gains a "לאימות: " prefix, its ``priority`` is forced to "L", and a deterministic
+    (non-LLM, but citing the same aggregator source(s) it always could) rationale sentence is
+    appended explaining why. A citation this function can't resolve to any source at all (dangling
+    ``n``, already an ``eoa.report.qa_citations.check`` finding elsewhere) is simply ignored here --
+    neither counted as an aggregator nor as independent corroboration."""
+    items_by_n = {it["n"]: it for it in citation_items if it.get("n") is not None}
+    out: list[ProductLineRecommendedAction] = []
+    for action in actions:
+        cited_ns = sorted({n for s in action.rationale for n in s.cites})
+        agg_ns: list[int] = []
+        has_non_aggregator_source = False
+        for n in cited_ns:
+            it = items_by_n.get(n)
+            if it is None:
+                continue
+            url, source_name = it.get("url"), it.get("source_name")
+            if not url and not source_name:
+                continue
+            if is_tender_aggregator_domain(url=url, source_name=source_name):
+                agg_ns.append(n)
+            else:
+                has_non_aggregator_source = True
+        if not agg_ns or has_non_aggregator_source:
+            out.append(action)
+            continue
+        new_action_he = action.action_he
+        if not new_action_he.startswith(_AGGREGATOR_ONLY_ACTION_PREFIX_HE):
+            new_action_he = f"{_AGGREGATOR_ONLY_ACTION_PREFIX_HE}{new_action_he}"
+        new_rationale = [*action.rationale, Sentence(text_he=_AGGREGATOR_ONLY_RATIONALE_TEXT_HE, cites=agg_ns)]
+        out.append(
+            action.model_copy(
+                update={"action_he": new_action_he, "priority": "L", "rationale": new_rationale}
+            )
+        )
+    return out
+
+
 def recommended_actions_table(
     draft: ProductLineReportDraft, *, deterministic: bool = False
 ) -> dict[str, Any] | None:
@@ -1301,6 +1598,10 @@ def build_product_line(
     patents = collect_patents(line_id)
     competitors = collect_active_competitors(line_id, [it["id"] for it in items])
 
+    # User screenshot 2026-09-08 20:30 defect #2a: attach aggregator-domain reliability/backfill
+    # the appendix date BEFORE citation_items copies `items` -- see the function's own docstring.
+    _attach_tender_aggregator_metadata(items, tenders_data.get("tenders") or [])
+
     citation_items = list(items)
     _extend_registry_with_events(citation_items, events)
 
@@ -1386,6 +1687,14 @@ def build_product_line(
             duplicate_sentences=original_errors.duplicate_sentences,
         )
 
+    # User screenshot 2026-09-08 20:30 defect #2b: downgrade any recommended action whose only
+    # resolvable source is a tender aggregator/reseller domain -- after the QA gate above resolves
+    # (only ever ADDS a citation reusing an already-valid `n`, so it can't invalidate a passed QA
+    # result), before the recommended_actions_table is built from `draft` below.
+    draft = draft.model_copy(
+        update={"recommended_actions": _downgrade_aggregator_only_actions(draft.recommended_actions, citation_items)}
+    )
+
     extra_sections: list[dict[str, Any]] = []
     # D7 round-3-analog (mirrors eoa.report.bd_territory's own "no activity" marker, see
     # PL_NO_ACTIVITY_MARKER_HE's docstring note): an honest, machine-detectable "nothing to
@@ -1408,12 +1717,18 @@ def build_product_line(
 
     watchlist_names = {c["name"] for c in competitors}
     today = end
+    items_by_id = {it["id"]: it for it in items if it.get("id") is not None}
     pipeline_rows: list[PipelineRow] = []
     pipeline_rows.extend(_pipeline_rows_from_tenders(tenders_data.get("tenders") or [], watchlist_names))
     pipeline_rows.extend(
-        _pipeline_rows_from_forecasts(tenders_data.get("forecasts") or [], watchlist_names, today=today)
+        _pipeline_rows_from_forecasts(
+            tenders_data.get("forecasts") or [], watchlist_names, today=today, items_by_id=items_by_id
+        )
     )
     pipeline_rows.extend(_pipeline_rows_from_events(events, watchlist_names))
+    # User screenshot 2026-09-08 20:30 defect #1: collapse near-identical opportunity rows (same
+    # platform+payload/buyer/stage, target-date windows within 14 days) before the table is built.
+    pipeline_rows = dedupe_pipeline_rows(pipeline_rows, today=today)
 
     try:
         from eoa.report import deltas

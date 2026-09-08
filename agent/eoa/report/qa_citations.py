@@ -39,12 +39,105 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 
 from eoa.llm.schemas.analysis import DailyReportDraft
 
 log = structlog.get_logger(__name__)
+
+# =================================================================================================
+# PL-REPORT-FIX (user screenshot 2026-09-08 20:30, pl_targeting_pods report id 184): defect #2 --
+# a product-line report's every row and every recommended action rested on ONE source
+# (usarfp.com, "Litening advanced targeting pod Tender in USA, ID 3483356"), a tender
+# aggregator/reseller site, rendered with reliability "—" and date "—" in the sources appendix
+# because no collector populates ``sources.reliability``/an item's own ``reliability`` key for an
+# aggregator domain (``eoa.report.docx_builder._reliability_for`` only ever reads those two).
+#
+# This is a small, static domain -> reliability map -- deliberately NOT DB-backed (unlike the
+# primary/secondary ``sources.reliability`` scale above/in docx_builder) so a tender/forecast
+# report-layer caller (``eoa.report.product_line`` today) can grade a known aggregator/reseller
+# domain deterministically, offline, with no DB round-trip or collector-side change (out of scope
+# for this file -- see the callers for what they do with it: attach a reliability descriptor,
+# backfill the appendix date from the linked ``tenders`` row, downgrade an aggregator-only
+# recommended action, and cap an aggregator-only opportunity's tier at "C").
+# =================================================================================================
+
+#: Known tender-aggregator / reseller sites -- third parties that re-list a government/OEM tender
+#: notice (sometimes for a fee, sometimes scraped) rather than being the primary procurement portal
+#: or OEM/government source itself. Not exhaustive; extend as new aggregator domains are confirmed.
+TENDER_AGGREGATOR_DOMAINS: frozenset[str] = frozenset(
+    {
+        "usarfp.com",
+        "tendersinfo.com",
+        "bidnetdirect.com",
+        "bidnet.com",
+        "globaltenders.com",
+        "tenderdetail.com",
+        "tendersontime.com",
+        "biddingo.com",
+        "tenderswala.com",
+        "eibidding.com",
+        "tenderguru.com",
+        "biddetail.com",
+        "tendersgate.com",
+    }
+)
+
+TENDER_AGGREGATOR_RELIABILITY_LABEL_HE = "מצבור מכרזים (אמינות נמוכה)"
+TENDER_AGGREGATOR_RELIABILITY_SCORE = 0.3
+
+
+def _normalize_domain(raw: str) -> str:
+    """``raw`` (a URL, a bare host, or a free-text source name that may or may not be a URL)
+    reduced to a lowercase, ``www.``-stripped registrable-looking host for comparison against
+    :data:`TENDER_AGGREGATOR_DOMAINS`. Not a full public-suffix-list normalisation -- good enough
+    for exact/subdomain matching against a short, manually-curated allowlist."""
+    value = raw.strip().lower()
+    if "://" in value:
+        value = urlparse(value).netloc or value
+    elif "/" in value:
+        # A bare "usarfp.com/tender/..." with no scheme -- urlparse alone would put it all in
+        # `.path`, so split on the first "/" ourselves.
+        value = value.split("/", 1)[0]
+    value = value.split("@")[-1]  # drop a userinfo prefix, if any
+    value = value.split(":")[0]  # drop a port, if any
+    if value.startswith("www."):
+        value = value[4:]
+    return value
+
+
+def is_tender_aggregator_domain(*, url: str | None = None, source_name: str | None = None) -> bool:
+    """True when ``url`` and/or ``source_name`` resolve to a known tender-aggregator/reseller
+    domain (:data:`TENDER_AGGREGATOR_DOMAINS`) -- checks whichever of the two is given, a bare
+    ``source_name`` that already looks like a domain (e.g. ``"usarfp.com"``) included. A domain
+    that cannot be determined from either argument (both empty, or neither looks like a URL/host)
+    returns ``False`` -- never guessed."""
+    for raw in (url, source_name):
+        if not raw:
+            continue
+        domain = _normalize_domain(str(raw))
+        if not domain or "." not in domain:
+            continue
+        if domain in TENDER_AGGREGATOR_DOMAINS or any(
+            domain == d or domain.endswith(f".{d}") for d in TENDER_AGGREGATOR_DOMAINS
+        ):
+            return True
+    return False
+
+
+def tender_aggregator_reliability() -> dict[str, Any]:
+    """The ``reliability`` dict shape ``eoa.report.docx_builder.reliability_label`` already knows
+    how to render (``{"kind", "score", "label"}``, see that function's own docstring) for a
+    confirmed tender-aggregator source -- ``kind`` is left out (``None``) so the appendix cell
+    reads just "<label> · <score>" rather than a redundant "מקור משני · <label> · <score>"."""
+    return {
+        "kind": None,
+        "score": TENDER_AGGREGATOR_RELIABILITY_SCORE,
+        "label": TENDER_AGGREGATOR_RELIABILITY_LABEL_HE,
+    }
+
 
 # -- sentence splitting ------------------------------------------------------
 
