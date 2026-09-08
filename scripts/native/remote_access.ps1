@@ -145,7 +145,10 @@ function Invoke-SetPasscode {
     Write-Host "    eo native stop"
     Write-Host "    eo native start"
 
-    if (Get-RemoteAccessEnabledFromConfig -eq $false) {
+    # `Get-X -eq $false` passes `-eq $false` as ARGUMENTS to the function (PowerShell parses a
+    # bare command call greedily), so the warning fired even with enabled: true -- compare the
+    # call's result instead (lead fix 2026-09-08).
+    if ((Get-RemoteAccessEnabledFromConfig) -eq $false) {
         Write-Warning "config\config.yaml api.remote_access.enabled is still 'false' -- the API will NOT require this passcode until you set it to 'true' and restart."
     }
 }
