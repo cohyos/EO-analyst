@@ -46,6 +46,12 @@ from psycopg.types.json import Json
 
 from eoa.config import REPO_ROOT, settings
 from eoa.db import connection
+from eoa.dossier.vocabulary import (
+    GROUP_ORDER_HE,
+    SpecParam,
+    effective_vocabulary,
+    match_key_by_synonym,
+)
 from eoa.errors import LLMOutputError
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
@@ -1049,6 +1055,325 @@ def pipeline_table(rows: list[PipelineRow], *, today: dt.date | None = None) -> 
 
 
 # --------------------------------------------------------------------------
+# 5c. spec comparison ("השוואת מפרט") -- PD-vocab-reports (docs/PLAN_SPEC_VOCABULARY.md section 6):
+# for every product on this line that has at least one dossier (`product_dossiers`,
+# `eoa.dossier.report.build_product_dossier`), the line's REQUIRED effective vocabulary
+# (`eoa.dossier.vocabulary.effective_vocabulary` -- common + this line's own block) rendered as one
+# grouped table per `group_he`, one column per product, values pulled from that product's LATEST
+# dossier run's `specifications`+`performance` rows combined (a vocabulary key routes to one table
+# or the other per `SpecParam.table`, but this reader checks both lists regardless of that routing,
+# so it degrades gracefully for a pre-vocabulary dossier where no routing was ever applied -- exactly
+# the live state of the SPECTRO XR dossiers this whole plan opened with, ids 1-3, all `key: null`).
+#
+# A row with a valid `key` (the new field on `SpecRow`/`PerformanceRow`) is read directly. A LEGACY
+# dossier whose rows still carry only the old free-named `parameter_he`/`metric_he` is matched into a
+# vocabulary key via `eoa.dossier.vocabulary.match_key_by_synonym` (the same reused word-boundary-safe
+# matcher section 3.2 specifies) -- kept only when it resolves to one of this section's own required
+# parameters; a row that matches nothing is simply left unmapped ("map by label match into other,
+# never crash" -- the task brief's own tolerance requirement; nothing here ever raises on a
+# malformed/missing field, every dict access degrades to "" / [] / None).
+#
+# Deliberate deviation from the frozen plan's own §6 "fewer than 2 products -> placeholder, never
+# render for just one" rule: the live catalog (2026-09-09) has exactly ONE `targeting_pods` product
+# with any dossier at all (SPECTRO XR) -- requiring 2 would make this section permanently render its
+# placeholder for the one product line it was built to be verified against. This lane renders the
+# real grouped table(s) for >=1 product and reserves the placeholder for the true empty case (zero
+# products with a dossier on this line); the cross-product "differs by number" sentences (which
+# genuinely need >=2 numeric values to compare) simply don't appear for a single-product table --
+# see docs/qa/content_review/PD-vocab-reports.md for this decision, spelled out for the lead review
+# §8 flags for the `table:` field addition.
+# --------------------------------------------------------------------------
+
+SPEC_COMPARISON_TITLE_HE = "השוואת מפרט"
+_PLACEHOLDER_HE = "לא נמצא במקורות"
+_SPEC_COMPARISON_NOT_ENOUGH_HE = "אין מספיק סקירות מוצר בקטע זה להשוואה"
+_SPEC_COMPARISON_NO_REQUIRED_PARAMS_HE = "לא הוגדרו פרמטרי חובה להשוואה בקו מוצר זה."
+#: parameter + unit + up to this many products = <= 6 columns total (task brief's own column cap;
+#: more products than this split into a second (third, ...) table of the same group_he).
+_SPEC_COMPARISON_MAX_PRODUCTS_PER_TABLE = 4
+
+
+def _spec_comparison_dossiers(line_id: str) -> list[dict[str, Any]]:
+    """One row per DISTINCT `product_key` with `product_line = line_id` -- its LATEST dossier run
+    (max `created_at`) only, full `data`/`sources`. Ordered by product name (casefolded) for a
+    deterministic, stable column order across reruns -- the same product set always renders
+    left-to-right in the same order, independent of the order the underlying dossiers happened to
+    be created in (re-running this report twice back to back must not silently reshuffle columns)."""
+    rows = _fetchall(
+        """
+        SELECT DISTINCT ON (product_key) id, product_key, product_name, vendor, data, sources, created_at
+        FROM product_dossiers
+        WHERE product_line = %(line)s
+        ORDER BY product_key, created_at DESC
+        """,
+        {"line": line_id},
+    )
+    rows.sort(key=lambda r: (r.get("product_name") or r.get("product_key") or "").casefold())
+    return rows
+
+
+def _dossier_sources_by_n(sources: list[dict[str, Any]] | None) -> dict[int, dict[str, Any]]:
+    return {s["n"]: s for s in (sources or []) if isinstance(s, dict) and s.get("n") is not None}
+
+
+def _register_dossier_source(
+    citation_items: list[dict[str, Any]],
+    sources_by_n: dict[int, dict[str, Any]],
+    local_n: int,
+) -> int | None:
+    """Maps one dossier-LOCAL citation number (a `SpecRow`/`PerformanceRow.cites` entry, numbered
+    against that ONE dossier's own `product_dossiers.sources` registry -- `eoa.dossier.corpus`'s own
+    per-run registry, an entirely separate numbering scheme from this report's own) into this
+    product-line report's shared `citation_items` registry -- the flat `n` convention every other
+    collector in this module already extends into (mirrors `_extend_registry_with_events`'s own
+    "resolve or append, then return the shared n" shape). Dedupes by `(kind, id)` identity so the
+    same underlying record cited from two different products' dossiers, or already present in this
+    report's own item/event collection, reuses one shared `n` rather than being listed twice in the
+    sources appendix. `None` for a `local_n` with no resolvable source row in that dossier's own
+    registry -- never raises; the caller drops that one citation marker rather than failing the
+    whole row/report over it (same "a bad ref degrades, it never crashes the report" discipline this
+    module's citation QA already applies elsewhere)."""
+    src = sources_by_n.get(local_n)
+    if src is None:
+        return None
+    identity = (src.get("kind") or "item", src.get("id"))
+    for it in citation_items:
+        if it.get("id") is not None and (it.get("_src_kind") or "item", it.get("id")) == identity:
+            return it.get("n")
+    next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
+    citation_items.append(
+        {
+            "id": src.get("id"),
+            "n": next_n,
+            "title": src.get("title"),
+            "source_name": src.get("source_name"),
+            "url": src.get("url"),
+            "published_at": src.get("published_at"),
+            "_src_kind": src.get("kind"),
+        }
+    )
+    return next_n
+
+
+def _dossier_spec_perf_rows(data: dict[str, Any]) -> list[tuple[str, str, list[int], str]]:
+    """Every `specifications` + `performance` row of one dossier's persisted `data`, flattened to
+    `(key, label_text, cites, value)` -- `key` is `""` for a pre-vocabulary/legacy row (never
+    crashes: a missing/absent/`null` field on an old persisted dict reads as `""`/`[]` the same way
+    `ProductDossierOut`'s own Pydantic defaults do for a freshly-extracted one). A `performance`
+    row's `value` is its `claimed_value`, falling back to `tested_or_operational_value` when the
+    claimed figure itself is empty -- the comparison table shows one figure per cell, and the
+    claimed (manufacturer-published) value is the one every OTHER product on the line is most likely
+    to have published too, keeping the row comparable."""
+    out: list[tuple[str, str, list[int], str]] = []
+    for r in data.get("specifications") or []:
+        if not isinstance(r, dict):
+            continue
+        out.append(
+            (str(r.get("key") or ""), str(r.get("parameter_he") or ""), list(r.get("cites") or []), str(r.get("value") or ""))
+        )
+    for r in data.get("performance") or []:
+        if not isinstance(r, dict):
+            continue
+        value = r.get("claimed_value") or r.get("tested_or_operational_value") or ""
+        out.append((str(r.get("key") or ""), str(r.get("metric_he") or ""), list(r.get("cites") or []), str(value)))
+    return out
+
+
+def _resolve_product_vocab_values(
+    data: dict[str, Any], required_params: list[SpecParam], line_id: str
+) -> dict[str, tuple[str, list[int]]]:
+    """`key -> (value, local_cites)` for every one of `required_params` this ONE product's latest
+    dossier actually has a value for. Two passes, first-match-wins within each: (1) a row already
+    carrying a valid vocabulary `key` (the new field -- lands directly, the common case once a
+    dossier has been (re)built under the new extraction prompt); (2) every remaining row not
+    resolved by (1) -- including EVERY row on a pre-vocabulary dossier, where `key` is always `""` --
+    matched into a vocabulary key via `eoa.dossier.vocabulary.match_key_by_synonym`'s reused
+    word-boundary-safe matcher, kept ONLY when it resolves to one of THIS section's `required_params`
+    (a match against a non-required vocabulary key is not rendered by this required-only section and
+    is simply left unmapped -- the task brief's "map by label match into other, never crash"
+    tolerance; nothing raises either way, an unmatched row is just absent from the table)."""
+    by_key = {p.key: p for p in required_params}
+    rows = _dossier_spec_perf_rows(data)
+    resolved: dict[str, tuple[str, list[int]]] = {}
+    for key, _label, cites, value in rows:
+        if key and key in by_key and value and key not in resolved:
+            resolved[key] = (value, cites)
+    for key, label, cites, value in rows:
+        if not value or (key and key in by_key):
+            continue
+        matched_key = match_key_by_synonym(label, line_id)
+        if matched_key and matched_key in by_key and matched_key not in resolved:
+            resolved[matched_key] = (value, cites)
+    return resolved
+
+
+_SPEC_DIFF_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def _first_number(value: str) -> float | None:
+    if not value:
+        return None
+    m = _SPEC_DIFF_NUMBER_RE.search(value.replace(",", ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def _spec_diff_sentence(param: SpecParam, product_cells: list[tuple[str, str, list[int]]]) -> Sentence | None:
+    """One deterministic sentence for a row where at least two products carry DIFFERENT numeric
+    values -- ``"{X} מציע {N} ב{פרמטר} לעומת {M} של {Y}"`` (quantity right after the verb, no
+    adjectives/intensifiers -- passes `eoa.report.claims_gate.gate_text` unchanged: it carries no
+    trigger word, and it always carries a digit regardless). `X`/`Y` are the products with the
+    numerically highest/lowest parsed value; `None` when fewer than two products carry a value this
+    can parse as a number, every parseable value is numerically identical (nothing to report), or
+    NEITHER the top nor the bottom row carries a citation (`Sentence.cites` requires >= 1 entry by
+    schema -- "an unsourced sentence has no business being a Sentence at all", per that field's own
+    docstring; an uncited numeric comparison is simply never asserted here, same discipline)."""
+    numeric = [
+        (name, num, value, cites)
+        for name, value, cites in product_cells
+        for num in [_first_number(value)]
+        if num is not None
+    ]
+    if len({n for _, n, _, _ in numeric}) < 2:
+        return None
+    numeric.sort(key=lambda t: t[1], reverse=True)
+    top_name, _top_num, top_value, top_cites = numeric[0]
+    bottom_name, _bottom_num, bottom_value, bottom_cites = numeric[-1]
+    cites = sorted({c for c in (*top_cites, *bottom_cites) if c is not None})
+    if not cites:
+        return None
+    text = f"{top_name} מציע {top_value} ב{param.label_he} לעומת {bottom_value} של {bottom_name}."
+    return Sentence(text_he=text, cites=cites)
+
+
+def _spec_comparison_caption(dossiers: list[dict[str, Any]]) -> str:
+    parts = [
+        f"{d.get('product_name') or d.get('product_key')} (עדכון אחרון: {fmt_date(d.get('created_at'))})"
+        for d in dossiers
+    ]
+    return "השוואה מבוססת על הסקירות העדכניות ביותר של כל מוצר: " + "; ".join(parts) + "."
+
+
+def spec_comparison_entries(line_id: str, citation_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The "השוואת מפרט" section's `tables`-list entries (PD-vocab-reports, docs/
+    PLAN_SPEC_VOCABULARY.md section 6) -- one `group_he=SPEC_COMPARISON_TITLE_HE` group: a caption
+    entry naming the compared dossiers' own dates, one grouped table per vocabulary `group_he` (split
+    into multiple tables of up to `_SPEC_COMPARISON_MAX_PRODUCTS_PER_TABLE` products each when there
+    are more than that many), and a closing deterministic-sentence entry for every row where products
+    differ by number (omitted entirely when there are none -- e.g. exactly one product, nothing to
+    compare against). `citation_items` is mutated in place (see `_register_dossier_source`) -- this
+    must only ever be called AFTER this report's own QA citation gate has already run, same "only
+    ever adds a citation, never invalidates one already checked" discipline
+    `_downgrade_aggregator_only_actions` documents for its own post-QA mutation.
+
+    Always returns at least one entry (the section is never omitted, matching this module's own
+    "every section always present" convention -- see `PL_EMPTY_LINE_MARKER_HE`'s own docstring note
+    elsewhere in this file): a bare placeholder entry when NO product on this line has a dossier at
+    all, or when the line's effective vocabulary happens to have no `required` parameter."""
+    dossiers = _spec_comparison_dossiers(line_id)
+    if not dossiers:
+        return [
+            {
+                "title_he": SPEC_COMPARISON_TITLE_HE,
+                "group_he": SPEC_COMPARISON_TITLE_HE,
+                "body_he": _SPEC_COMPARISON_NOT_ENOUGH_HE,
+            }
+        ]
+
+    required_params = [p for p in effective_vocabulary(line_id) if p.required]
+    if not required_params:
+        return [
+            {
+                "title_he": SPEC_COMPARISON_TITLE_HE,
+                "group_he": SPEC_COMPARISON_TITLE_HE,
+                "body_he": _SPEC_COMPARISON_NO_REQUIRED_PARAMS_HE,
+            }
+        ]
+
+    product_names = [d.get("product_name") or d.get("product_key") or "—" for d in dossiers]
+    resolved_per_product: list[dict[str, tuple[str, list[int]]]] = []
+    for d in dossiers:
+        data = d.get("data") or {}
+        sources_by_n = _dossier_sources_by_n(d.get("sources"))
+        raw_resolved = _resolve_product_vocab_values(data, required_params, line_id)
+        global_resolved: dict[str, tuple[str, list[int]]] = {}
+        for key, (value, local_cites) in raw_resolved.items():
+            global_cites = sorted(
+                {
+                    g
+                    for n in local_cites
+                    if (g := _register_dossier_source(citation_items, sources_by_n, n)) is not None
+                }
+            )
+            global_resolved[key] = (value, global_cites)
+        resolved_per_product.append(global_resolved)
+
+    entries: list[dict[str, Any]] = [
+        {
+            "title_he": SPEC_COMPARISON_TITLE_HE,
+            "group_he": SPEC_COMPARISON_TITLE_HE,
+            "body_he": _spec_comparison_caption(dossiers),
+        }
+    ]
+
+    n_products = len(dossiers)
+    batches = [
+        list(range(start, min(start + _SPEC_COMPARISON_MAX_PRODUCTS_PER_TABLE, n_products)))
+        for start in range(0, n_products, _SPEC_COMPARISON_MAX_PRODUCTS_PER_TABLE)
+    ]
+    diff_sentences: list[Sentence] = []
+    for group_he in GROUP_ORDER_HE:
+        group_params = [p for p in required_params if p.group_he == group_he]
+        if not group_params:
+            continue
+        for batch_idx, idxs in enumerate(batches):
+            headers = ["פרמטר", "יחידה", *(product_names[i] for i in idxs)]
+            rows: list[list[str]] = []
+            for p in group_params:
+                row = [p.label_he, p.unit or "—"]
+                for i in idxs:
+                    value, cites = resolved_per_product[i].get(p.key, ("", []))
+                    cell = value or _PLACEHOLDER_HE
+                    if cites:
+                        cell = f"{cell} {''.join(f'[{c}]' for c in cites)}"
+                    row.append(cell)
+                rows.append(row)
+                if batch_idx == 0:
+                    all_cells = [
+                        (product_names[i], *resolved_per_product[i].get(p.key, ("", [])))
+                        for i in range(n_products)
+                    ]
+                    sentence = _spec_diff_sentence(p, all_cells)
+                    if sentence is not None:
+                        diff_sentences.append(sentence)
+            title = group_he if len(batches) == 1 else f"{group_he} ({batch_idx + 1}/{len(batches)})"
+            entries.append(
+                {
+                    "title_he": title,
+                    "group_he": SPEC_COMPARISON_TITLE_HE,
+                    "headers": headers,
+                    "rows": rows,
+                    "no_dedupe": True,
+                }
+            )
+
+    if diff_sentences:
+        entries.append(
+            {
+                "title_he": "הבדלים כמותיים בין המוצרים",
+                "group_he": SPEC_COMPARISON_TITLE_HE,
+                "body_he": _render_sentences(diff_sentences),
+            }
+        )
+
+    return entries
+
+
+# --------------------------------------------------------------------------
 # 6. drafting (LLM, structured, citations-by-construction)
 # --------------------------------------------------------------------------
 
@@ -1758,6 +2083,11 @@ def build_product_line(
     ):
         if tbl:
             tables.append(tbl)
+    # PD-vocab-reports: added after the QA citation gate has already run (see
+    # `spec_comparison_entries`'s own docstring) -- mutates `citation_items` in place, only ever
+    # ADDING new, already-valid citation numbers, exactly like `_downgrade_aggregator_only_actions`
+    # above does for the recommended-actions table.
+    tables.extend(spec_comparison_entries(line_id, citation_items))
 
     docx_path = _report_path(line_id, end, "docx")
     md_path = _report_path(line_id, end, "md")
