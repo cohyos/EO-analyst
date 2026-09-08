@@ -34,6 +34,13 @@
 # Every parameter entry:
 #   key            snake_case, stable, GLOBALLY unique across common + all six line blocks (never
 #                  reused for a different fact even across lines -- diff/extraction key on this alone)
+#   table          "specifications" | "performance" -- which of ProductDossierOut's two existing row
+#                  lists this key's extracted value lands in (added post-freeze per
+#                  docs/PLAN_SPEC_VOCABULARY.md section 3.4/section 9 item 1: a measured-outcome
+#                  number/range param -- claimed-vs-demonstrated is meaningful for it -- routes to
+#                  "performance"; every mechanical/interface/enum/bool/identity-shaped param routes to
+#                  "specifications". This is DATA, not model judgment -- eoa.dossier.extract's
+#                  post-check relocates a row the model placed in the wrong table by this field alone.
 #   label_he       professional Hebrew label as used by Israeli EO/IR defence engineers
 #   label_en       English label (industry-standard term/acronym where one exists)
 #   unit           unit of measure as a short Hebrew/English string, or null when not a measured
@@ -70,6 +77,7 @@ schema_version: 1
 # ====================================================================================================
 common:
   - key: field_of_view
+    table: "specifications"
     label_he: "שדה ראייה"
     label_en: "Field of View (FOV)"
     unit: "מעלות (°) / מיליראד (mrad)"
@@ -91,6 +99,7 @@ common:
       לא כפרמטר חדש; אין למזג לערך ממוצע.
 
   - key: optical_aperture
+    table: "specifications"
     label_he: "קוטר אפרטורה אופטית"
     label_en: "Optical Aperture Diameter"
     unit: "אינץ׳ / מ״מ"
@@ -108,6 +117,7 @@ common:
     notes_he: "לעיתים מדווח כטווח לפי ערוץ (EO/IR/ספוטר) -- לשמור ערוצים נפרדים כשורות variant נפרדות."
 
   - key: zoom_range
+    table: "specifications"
     label_he: "טווח זום"
     label_en: "Zoom Range"
     unit: "פי (x) / מ״מ (טווח מוקד)"
@@ -124,6 +134,7 @@ common:
     notes_he: "יש להבחין בין זום אופטי לזום דיגיטלי -- אינם אותו ערך."
 
   - key: detector_type
+    table: "specifications"
     label_he: "סוג/י גלאי"
     label_en: "Detector Type(s)"
     unit: null
@@ -145,6 +156,7 @@ common:
     notes_he: "רשימת כל ערוצי הגלאי (למשל MWIR+SWIR+VIS) -- לא לצמצם לערוץ אחד כשהמקור מפרט כמה."
 
   - key: resolution
+    table: "specifications"
     label_he: "רזולוציה (מערך גלאי)"
     label_en: "Detector Resolution"
     unit: "פיקסלים"
@@ -160,6 +172,7 @@ common:
     notes_he: "ערך לפי ערוץ (למשל רזולוציית MWIR שונה מרזולוציית VIS) -- variant נפרד לכל ערוץ."
 
   - key: netd
+    table: "specifications"
     label_he: "רגישות תרמית (NETD)"
     label_en: "Noise Equivalent Temperature Difference (NETD)"
     unit: "mK"
@@ -174,6 +187,7 @@ common:
     notes_he: ""
 
   - key: spectral_channels_count
+    table: "specifications"
     label_he: "מספר ערוצים ספקטרליים"
     label_en: "Spectral Channel Count"
     unit: "ערוצים"
@@ -189,6 +203,7 @@ common:
     notes_he: "גרסאות SPECTRO XR הדגימו טווח -- 'עד 9 חיישנים דיגיטליים' -- לדווח את הערך המדויק כפי שפורסם, לא עיגול."
 
   - key: detection_range_dri
+    table: "performance"
     label_he: "טווח זיהוי/הכרה/זיהוי-ודאי (DRI)"
     label_en: "Detection/Recognition/Identification (DRI) Range"
     unit: "ק״מ"
@@ -213,6 +228,7 @@ common:
       demonstrated (ניסוי/מבצעי) -- שתי שורות נפרדות ב-performance, לא מוזגות.
 
   - key: size_to_performance_ratio
+    table: "performance"
     label_he: "יחס ביצועים-למעטפת"
     label_en: "Aperture-to-Envelope / Size-to-Performance Ratio"
     unit: null
@@ -235,6 +251,7 @@ common:
       הקונקרטי של מחלקת הקוטר) -- שני הפרמטרים משלימים זה את זה, לא כפולים.
 
   - key: adverse_weather_performance
+    table: "performance"
     label_he: "ביצועים בתנאי מזג אוויר קשים"
     label_en: "Adverse-Weather / Obscurant Penetration Performance"
     unit: null
@@ -253,6 +270,7 @@ common:
     notes_he: "לרוב נסמך על ערוץ SWIR -- לציין את הערוץ הספציפי כשהמקור מפרט אותו."
 
   - key: target_tracker_atr
+    table: "specifications"
     label_he: "עוקב מטרות / זיהוי אוטומטי (ATR)"
     label_en: "Target Tracker / Automatic Target Recognition (ATR)"
     unit: null
@@ -274,6 +292,7 @@ common:
       במפורש ליכולת המעקב/הזיהוי, לא כפרמטר חומרה נפרד.
 
   - key: line_of_sight_stabilization
+    table: "specifications"
     label_he: "ייצוב קו ראייה"
     label_en: "Line-of-Sight (LOS) Stabilization"
     unit: "מיקרו-רדיאן (µrad, RMS)"
@@ -291,6 +310,7 @@ common:
     notes_he: "ערך ה-µrad RMS אינו תמיד מפורסם -- כשלא, לשמור את התיאור האיכותני (למשל 'מיוצב-גירו') כ-value."
 
   - key: gimbal_axes_class
+    table: "specifications"
     label_he: "גימבל -- מספר צירים וסוג"
     label_en: "Gimbal Axes Count / Class"
     unit: "צירים"
@@ -309,6 +329,7 @@ common:
     notes_he: ""
 
   - key: inertial_sensors_imu
+    table: "specifications"
     label_he: "חיישני אינרציה (IMU)"
     label_en: "Inertial Measurement Unit (IMU) Sensors"
     unit: null
@@ -324,6 +345,7 @@ common:
     notes_he: ""
 
   - key: laser_rangefinder
+    table: "specifications"
     label_he: "מד-טווח לייזר (LRF)"
     label_en: "Laser Range Finder (LRF)"
     unit: "ק״מ"
@@ -341,6 +363,7 @@ common:
     notes_he: "לציין אם 'בטוח לעין' (eye-safe) מצוין במפורש -- זו דרישה תפעולית נפרדת מטווח המדידה עצמו."
 
   - key: laser_designator_illuminator
+    table: "specifications"
     label_he: "מצביע/מאיר לייזר"
     label_en: "Laser Designator / Illuminator"
     unit: null
@@ -358,6 +381,7 @@ common:
     notes_he: "מצביע (pointer, לצפייה) ומסמן/מאיר (marker/illuminator, לתאורת מטרה) הם שני רכיבים -- variant נפרד לכל אחד כשהמקור מבחין ביניהם."
 
   - key: weight
+    table: "specifications"
     label_he: "משקל"
     label_en: "Weight"
     unit: "ק״ג"
@@ -372,6 +396,7 @@ common:
     notes_he: "משקל כולל (gross) לעומת משקל תשלובת/payload בלבד -- לציין variant כשהמקור מבחין."
 
   - key: envelope_dimensions
+    table: "specifications"
     label_he: "נפח/מעטפת"
     label_en: "Envelope Dimensions / Volume"
     unit: "מ״מ / ליטר"
@@ -390,6 +415,7 @@ common:
     notes_he: ""
 
   - key: environmental_qualification
+    table: "specifications"
     label_he: "תנאי סביבה (הסמכה)"
     label_en: "Environmental Qualification"
     unit: null
@@ -407,6 +433,7 @@ common:
     notes_he: "לשמור תקן/סעיף ספציפי (למשל 'MIL-STD-810H') כשמצוין, לא רק 'עומד בתקן צבאי' כללי."
 
   - key: power_consumption
+    table: "specifications"
     label_he: "הספק / צריכת חשמל"
     label_en: "Power Consumption"
     unit: "ואט (W) / וולט (V)"
@@ -424,6 +451,7 @@ common:
     notes_he: ""
 
   - key: interfaces
+    table: "specifications"
     label_he: "ממשקי תקשורת/נתונים"
     label_en: "Communication/Data Interfaces"
     unit: null
@@ -442,6 +470,7 @@ common:
     notes_he: "רשימת כל הממשקים המדווחים (לא רק הראשון) -- כל ממשק כפריט ברשימה."
 
   - key: gnss_receiver
+    table: "specifications"
     label_he: "מקלט ניווט (GNSS)"
     label_en: "GNSS/Navigation Receiver"
     unit: null
@@ -457,6 +486,7 @@ common:
     notes_he: ""
 
   - key: trl_status
+    table: "specifications"
     label_he: "TRL / סטטוס בשלות"
     label_en: "Technology Readiness Level (TRL) / Status"
     unit: null
@@ -481,6 +511,7 @@ common:
       שקובץ זה בא למנוע).
 
   - key: platforms
+    table: "specifications"
     label_he: "פלטפורמות נשא"
     label_en: "Carrier Platforms"
     unit: null
@@ -500,6 +531,7 @@ common:
 # ====================================================================================================
 targeting_pods:
   - key: laser_designation_accuracy
+    table: "specifications"
     label_he: "דיוק ציון מטרות בלייזר"
     label_en: "Laser Designation Accuracy"
     unit: "מטר / מיליראד"
@@ -514,6 +546,7 @@ targeting_pods:
     notes_he: "להבחין מדיוק ה-LRF הכללי (common.laser_rangefinder) -- זהו דיוק נקודת הציון על המטרה בפועל."
 
   - key: laser_code_compliance
+    table: "specifications"
     label_he: "קודי לייזר נתמכים"
     label_en: "Laser Code Compliance"
     unit: null
@@ -528,6 +561,7 @@ targeting_pods:
     notes_he: ""
 
   - key: boresight_retention
+    table: "specifications"
     label_he: "שימור כיוונון (Boresight Retention)"
     label_en: "Boresight Retention"
     unit: null
@@ -542,6 +576,7 @@ targeting_pods:
     notes_he: ""
 
   - key: weapon_interface_compatibility
+    table: "specifications"
     label_he: "תאימות לתחמושת מונחית-לייזר"
     label_en: "Laser-Guided Weapon Interface Compatibility"
     unit: null
@@ -558,6 +593,7 @@ targeting_pods:
     notes_he: "רשימת סוגי תחמושת שנמצאו כתואמים במפורש במקור -- לא הסקה מסוג הפלטפורמה."
 
   - key: pylon_station_interface
+    table: "specifications"
     label_he: "ממשק תלייה / עמדת נשיאה"
     label_en: "Pylon/Station Interface"
     unit: null
@@ -573,6 +609,7 @@ targeting_pods:
     notes_he: ""
 
   - key: cooling_system
+    table: "specifications"
     label_he: "מערכת קירור"
     label_en: "Cooling System"
     unit: null
@@ -589,6 +626,7 @@ targeting_pods:
     notes_he: ""
 
   - key: common_aperture_telescope
+    table: "specifications"
     label_he: "טלסקופ ספוטר משותף"
     label_en: "Common-Aperture Spotter Telescope"
     unit: "אינץ׳"
@@ -604,6 +642,7 @@ targeting_pods:
     notes_he: "נצפה בפועל ב-SPECTRO XR ('קוטר 7 אינץ׳, ערוצי VIS/MWIR/SWIR') -- מבחין ממטע״ד/עדשה יחידה כשהמקור מציין 'משותף'."
 
   - key: pod_class_diameter
+    table: "specifications"
     label_he: "מחלקת קוטר המטע״ד"
     label_en: "Pod-Class Diameter"
     unit: "אינץ׳"
@@ -624,6 +663,7 @@ targeting_pods:
       "ביצועי X בתוך מעטפת Y"), לא כפול אותו: זהו קוטר המעטפת הפיזית בלבד.
 
   - key: laser_spot_tracker
+    table: "specifications"
     label_he: "גלאי מעקב נקודת לייזר"
     label_en: "Laser Spot Tracker (Quadrant Detector)"
     unit: null
@@ -639,6 +679,7 @@ targeting_pods:
     notes_he: ""
 
   - key: eo_ir_dual_band_simultaneous
+    table: "specifications"
     label_he: "ראייה סימולטנית רב-ספקטרלית"
     label_en: "Simultaneous Multi-Band EO/IR Imaging"
     unit: null
@@ -653,6 +694,7 @@ targeting_pods:
     notes_he: "true רק כשהמקור מציין הצגה/צילום בו-זמניים של כמה ערוצים, לא רק זמינות כמה ערוצים ברצף."
 
   - key: video_tracker_channels
+    table: "specifications"
     label_he: "ערוצי מעקב וידאו"
     label_en: "Video Tracker Channels"
     unit: "ערוצים"
@@ -666,6 +708,7 @@ targeting_pods:
     notes_he: ""
 
   - key: designation_range_effective
+    table: "specifications"
     label_he: "טווח ציון מטרות אפקטיבי"
     label_en: "Effective Designation Range"
     unit: "ק״מ"
@@ -679,6 +722,7 @@ targeting_pods:
     notes_he: "שונה מ-detection_range_dri (זיהוי) -- זהו הטווח שבו הפוד יכול לציין/לסמן מטרה בפועל לתחמושת."
 
   - key: ai_target_recognition
+    table: "specifications"
     label_he: "זיהוי/סיווג מטרות מבוסס AI"
     label_en: "AI-Based Target Recognition/Classification"
     unit: null
@@ -694,6 +738,7 @@ targeting_pods:
     notes_he: "שם השבב/מחשב (למשל NVIDIA Jetson) נשמר כטקסט חופשי בתוך value, לא כפרמטר חומרה נפרד."
 
   - key: nvg_compatible_marking
+    table: "specifications"
     label_he: "סימון תואם משקפי ראיית לילה (NVG)"
     label_en: "NVG-Compatible Marking"
     unit: null
@@ -708,6 +753,7 @@ targeting_pods:
     notes_he: ""
 
   - key: field_of_view_multiplicity
+    table: "specifications"
     label_he: "ריבוי שדות ראייה (WFOV/NFOV/Spot)"
     label_en: "Field-of-View Multiplicity"
     unit: "מספר שדות"
@@ -721,6 +767,7 @@ targeting_pods:
     notes_he: "המספר בלבד (למשל 3) -- הערכים עצמם נשמרים תחת common.field_of_view."
 
   - key: slant_range_performance
+    table: "specifications"
     label_he: "ביצועים בטווח אלכסוני (Slant Range)"
     label_en: "Slant Range Performance"
     unit: "ק״מ / רגל"
@@ -733,6 +780,7 @@ targeting_pods:
     notes_he: ""
 
   - key: store_management_integration
+    table: "specifications"
     label_he: "אינטגרציה עם ניהול תחמושת"
     label_en: "Stores Management System (SMS) Integration"
     unit: null
@@ -746,6 +794,7 @@ targeting_pods:
     notes_he: ""
 
   - key: aircraft_platform_compatibility
+    table: "specifications"
     label_he: "תאימות לפלטפורמות מטוסי קרב"
     label_en: "Fighter Aircraft Platform Compatibility"
     unit: null
@@ -762,6 +811,7 @@ targeting_pods:
     notes_he: "רשימת דגמי מטוס ספציפיים -- מפרט יותר מ-common.platforms הכללי."
 
   - key: mtbf_pod
+    table: "specifications"
     label_he: "אמינות (MTBF)"
     label_en: "Mean Time Between Failures (MTBF)"
     unit: "שעות"
@@ -779,6 +829,7 @@ targeting_pods:
 # ====================================================================================================
 mws_eo:
   - key: threat_coverage_types
+    table: "specifications"
     label_he: "סוגי איומים מכוסים"
     label_en: "Threat Coverage Types"
     unit: null
@@ -796,6 +847,7 @@ mws_eo:
     notes_he: "רשימה מלאה של כל סוגי האיום המדווחים, לא רק המנפאד״ס."
 
   - key: spectral_band_coverage
+    table: "specifications"
     label_he: "כיסוי ספקטרלי (UV/MWIR)"
     label_en: "Spectral Band Coverage"
     unit: null
@@ -811,6 +863,7 @@ mws_eo:
     notes_he: ""
 
   - key: false_alarm_rate
+    table: "performance"
     label_he: "שיעור התרעות שווא"
     label_en: "False Alarm Rate (FAR)"
     unit: "התרעות/שעת טיסה"
@@ -825,6 +878,7 @@ mws_eo:
     notes_he: "claimed (יצרן) לעומת demonstrated (מבצעי/ניסוי) -- שתי שורות נפרדות ב-performance."
 
   - key: declaration_time
+    table: "performance"
     label_he: "זמן הכרזת איום"
     label_en: "Threat Declaration Time"
     unit: "מילישניות (ms) / שניות"
@@ -839,6 +893,7 @@ mws_eo:
     notes_he: ""
 
   - key: coverage_sectors
+    table: "specifications"
     label_he: "מספר סקטורי/ראשי כיסוי"
     label_en: "Coverage Sectors / Sensor Head Count"
     unit: "יחידות"
@@ -854,6 +909,7 @@ mws_eo:
     notes_he: "כיסוי 360° מלא לעומת כיסוי חלקי (סקטור בודד) -- לציין באיזה תצורה הערך מדווח."
 
   - key: dircm_integration
+    table: "specifications"
     label_he: "אינטגרציה עם DIRCM"
     label_en: "DIRCM Integration"
     unit: null
@@ -867,6 +923,7 @@ mws_eo:
     notes_he: "אזכור בלבד של 'DIRCM' אינו מספיק -- נדרש הקשר מפורש של אינטגרציה/הפעלה משותפת (ראו config/product_lines.yaml conditional_keywords_en לאותה הבחנה בשכבת התיוג)."
 
   - key: countermeasure_cueing
+    table: "specifications"
     label_he: "הכוונת אמצעי הגנה"
     label_en: "Countermeasure Cueing"
     unit: null
@@ -881,6 +938,7 @@ mws_eo:
     notes_he: ""
 
   - key: detection_range_missile
+    table: "specifications"
     label_he: "טווח גילוי טיל"
     label_en: "Missile Detection Range"
     unit: "ק״מ"
@@ -893,6 +951,7 @@ mws_eo:
     notes_he: "פרמטר MWS-ספציפי -- שונה מ-common.detection_range_dri (שמניח יעד סטנדרטי, לא טיל)."
 
   - key: probability_of_detection
+    table: "performance"
     label_he: "הסתברות גילוי (Pd)"
     label_en: "Probability of Detection (Pd)"
     unit: "אחוזים (%)"
@@ -906,6 +965,7 @@ mws_eo:
     notes_he: ""
 
   - key: sensor_count_per_platform
+    table: "specifications"
     label_he: "מספר חיישנים לפלטפורמה"
     label_en: "Sensor Count per Platform"
     unit: "יחידות"
@@ -919,6 +979,7 @@ mws_eo:
     notes_he: ""
 
   - key: weight_per_sensor_head
+    table: "specifications"
     label_he: "משקל ליחידת חיישן"
     label_en: "Weight per Sensor Head"
     unit: "ק״ג"
@@ -932,6 +993,7 @@ mws_eo:
     notes_he: "שונה מ-common.weight (המערכת השלמה) -- זהו משקל ראש חיישן בודד."
 
   - key: mtbf_mws
+    table: "specifications"
     label_he: "אמינות (MTBF)"
     label_en: "Mean Time Between Failures (MTBF)"
     unit: "שעות"
@@ -945,6 +1007,7 @@ mws_eo:
     notes_he: ""
 
   - key: uv_solar_blind_capability
+    table: "specifications"
     label_he: "יכולת UV עיוור-שמש"
     label_en: "UV Solar-Blind Capability"
     unit: null
@@ -958,6 +1021,7 @@ mws_eo:
     notes_he: ""
 
   - key: passive_operation
+    table: "specifications"
     label_he: "פעולה פסיבית (ללא פליטה)"
     label_en: "Passive-Only Operation"
     unit: null
@@ -971,6 +1035,7 @@ mws_eo:
     notes_he: ""
 
   - key: software_reprogrammability
+    table: "specifications"
     label_he: "עדכון תוכנה / ספריית איומים"
     label_en: "Software/Threat-Library Reprogrammability"
     unit: null
@@ -984,6 +1049,7 @@ mws_eo:
     notes_he: ""
 
   - key: irst_secondary_capability
+    table: "specifications"
     label_he: "יכולת IRST משנית"
     label_en: "Secondary IRST Capability"
     unit: null
@@ -997,6 +1063,7 @@ mws_eo:
     notes_he: "רלוונטי כשה-MWS משמש גם כחיישן IRST משני, לא רק כמתריע."
 
   - key: integration_test_status
+    table: "specifications"
     label_he: "סטטוס שילוב/הסמכה בפלטפורמה"
     label_en: "Platform Integration/Certification Status"
     unit: null
@@ -1015,6 +1082,7 @@ mws_eo:
 # ====================================================================================================
 lorop_pods:
   - key: standoff_range
+    table: "performance"
     label_he: "טווח עמידה (Standoff Range)"
     label_en: "Standoff Range"
     unit: "ק״מ / נ״מ (nm)"
@@ -1028,6 +1096,7 @@ lorop_pods:
     notes_he: "המרחק בו ניתן לצלם ללא חדירה למרחב אווירי עוין -- שונה מגובה/מהירות טיסה."
 
   - key: gsd
+    table: "performance"
     label_he: "רזולוציית קרקע (GSD)"
     label_en: "Ground Sample Distance (GSD)"
     unit: "ס״מ / מ׳ לפיקסל"
@@ -1041,6 +1110,7 @@ lorop_pods:
     notes_he: "תלוי טווח/גובה צילום -- לשמור את התנאים (מרחק/גובה) שהערך מדווח עבורם ב-conditions."
 
   - key: niirs_rating
+    table: "specifications"
     label_he: "דירוג NIIRS"
     label_en: "National Imagery Interpretability Rating Scale (NIIRS)"
     unit: "דירוג (0-9)"
@@ -1053,6 +1123,7 @@ lorop_pods:
     notes_he: ""
 
   - key: swath_width
+    table: "specifications"
     label_he: "רוחב רצועת סריקה"
     label_en: "Swath Width"
     unit: "ק״מ"
@@ -1066,6 +1137,7 @@ lorop_pods:
     notes_he: ""
 
   - key: sensor_type_film_digital
+    table: "specifications"
     label_he: "סוג חיישן (סרט/דיגיטלי)"
     label_en: "Sensor Type (Film/Digital)"
     unit: null
@@ -1081,6 +1153,7 @@ lorop_pods:
     notes_he: ""
 
   - key: data_link_bandwidth
+    table: "specifications"
     label_he: "קצב שידור קישור נתונים"
     label_en: "Data Link Bandwidth"
     unit: "Mbps/Gbps"
@@ -1095,6 +1168,7 @@ lorop_pods:
     notes_he: ""
 
   - key: image_storage_capacity
+    table: "specifications"
     label_he: "קיבולת אחסון תמונות"
     label_en: "Onboard Image Storage Capacity"
     unit: "TB/GB"
@@ -1108,6 +1182,7 @@ lorop_pods:
     notes_he: ""
 
   - key: altitude_envelope
+    table: "specifications"
     label_he: "מעטפת גובה תפעולי"
     label_en: "Operating Altitude Envelope"
     unit: "רגל / מטר"
@@ -1121,6 +1196,7 @@ lorop_pods:
     notes_he: ""
 
   - key: speed_envelope
+    table: "specifications"
     label_he: "מעטפת מהירות תפעולית"
     label_en: "Operating Speed Envelope"
     unit: "קשר (kt) / מאך"
@@ -1134,6 +1210,7 @@ lorop_pods:
     notes_he: ""
 
   - key: geolocation_accuracy
+    table: "specifications"
     label_he: "דיוק מיקום גיאוגרפי"
     label_en: "Geolocation Accuracy"
     unit: "מטר (CEP)"
@@ -1147,6 +1224,7 @@ lorop_pods:
     notes_he: ""
 
   - key: spectral_bands_count
+    table: "specifications"
     label_he: "מספר פסי ספקטרום"
     label_en: "Number of Spectral Bands"
     unit: "פסים"
@@ -1161,6 +1239,7 @@ lorop_pods:
     notes_he: ""
 
   - key: real_time_downlink
+    table: "specifications"
     label_he: "שידור בזמן אמת"
     label_en: "Real-Time Downlink"
     unit: null
@@ -1174,6 +1253,7 @@ lorop_pods:
     notes_he: ""
 
   - key: focal_length
+    table: "specifications"
     label_he: "אורך מוקד עדשה"
     label_en: "Focal Length"
     unit: "מ״מ / אינץ׳"
@@ -1186,6 +1266,7 @@ lorop_pods:
     notes_he: ""
 
   - key: image_motion_compensation
+    table: "specifications"
     label_he: "פיצוי תזוזת תמונה (IMC/FMC)"
     label_en: "Image/Forward Motion Compensation (IMC/FMC)"
     unit: null
@@ -1200,6 +1281,7 @@ lorop_pods:
     notes_he: ""
 
   - key: mission_duration
+    table: "specifications"
     label_he: "משך משימה"
     label_en: "Mission Duration"
     unit: "שעות"
@@ -1213,6 +1295,7 @@ lorop_pods:
     notes_he: ""
 
   - key: onboard_processing_exploitation
+    table: "specifications"
     label_he: "עיבוד/ניצול תמונה על-סיפון"
     label_en: "Onboard Processing/Exploitation"
     unit: null
@@ -1230,6 +1313,7 @@ lorop_pods:
 # ====================================================================================================
 eo_air_defense_warning:
   - key: search_volume
+    table: "specifications"
     label_he: "נפח חיפוש"
     label_en: "Search Volume"
     unit: "מעלות אזימוט × מעלות רום"
@@ -1244,6 +1328,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: revisit_rate
+    table: "performance"
     label_he: "קצב סריקה חוזרת"
     label_en: "Revisit Rate"
     unit: "שניות / הרץ (Hz)"
@@ -1258,6 +1343,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: track_capacity
+    table: "specifications"
     label_he: "קיבולת מעקב (מספר מטרות)"
     label_en: "Track Capacity"
     unit: "מטרות בו-זמנית"
@@ -1272,6 +1358,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: cueing_interfaces
+    table: "specifications"
     label_he: "ממשקי הכוונה"
     label_en: "Cueing Interfaces"
     unit: null
@@ -1286,6 +1373,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: c_uas_integration
+    table: "specifications"
     label_he: "אינטגרציה עם מערכות C-UAS"
     label_en: "C-UAS System Integration"
     unit: null
@@ -1299,6 +1387,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: air_defense_integration
+    table: "specifications"
     label_he: "אינטגרציה עם הגנה אווירית/פיקוד"
     label_en: "Air Defense/C2 System Integration"
     unit: null
@@ -1312,6 +1401,7 @@ eo_air_defense_warning:
     notes_he: "רשימת מערכות הגנה אווירית/פיקוד ספציפיות שהמקור מציין אינטגרציה איתן."
 
   - key: detection_range_small_uas
+    table: "performance"
     label_he: "טווח גילוי רחפנים קטנים"
     label_en: "Small UAS Detection Range"
     unit: "ק״מ / מ׳"
@@ -1325,6 +1415,7 @@ eo_air_defense_warning:
     notes_he: "שונה מ-common.detection_range_dri -- כאן היעד המוגדר הוא רחפן קטן, לא רכב/אדם סטנדרטי."
 
   - key: classification_capability
+    table: "specifications"
     label_he: "יכולת סיווג מטרות"
     label_en: "Target Classification Capability"
     unit: null
@@ -1338,6 +1429,7 @@ eo_air_defense_warning:
     notes_he: "למשל הבחנה בין ציפור/רחפן/מטוס קל -- לפרט את הקטגוריות שהמקור מציין."
 
   - key: false_alarm_rate_ad
+    table: "performance"
     label_he: "שיעור התרעות שווא"
     label_en: "False Alarm Rate"
     unit: "התרעות/יום"
@@ -1350,6 +1442,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: scan_pattern
+    table: "specifications"
     label_he: "תבנית סריקה"
     label_en: "Scan Pattern"
     unit: null
@@ -1365,6 +1458,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: number_of_sensor_heads
+    table: "specifications"
     label_he: "מספר ראשי חיישן במערך"
     label_en: "Number of Sensor Heads"
     unit: "יחידות"
@@ -1378,6 +1472,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: fusion_with_radar
+    table: "specifications"
     label_he: "מיזוג נתונים עם מכ״ם"
     label_en: "Radar Data Fusion"
     unit: null
@@ -1391,6 +1486,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: passive_detection
+    table: "specifications"
     label_he: "גילוי פסיבי (ללא פליטה)"
     label_en: "Passive Detection"
     unit: null
@@ -1404,6 +1500,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: day_night_all_weather
+    table: "specifications"
     label_he: "פעולה יום/לילה/כל-מזג-אוויר"
     label_en: "Day/Night/All-Weather Operation"
     unit: null
@@ -1418,6 +1515,7 @@ eo_air_defense_warning:
     notes_he: ""
 
   - key: slew_to_cue_time
+    table: "specifications"
     label_he: "זמן תגובה מהכוונה לנעילה"
     label_en: "Slew-to-Cue Time"
     unit: "שניות"
@@ -1435,6 +1533,7 @@ eo_air_defense_warning:
 # ====================================================================================================
 ball_gimbals_16in:
   - key: ball_diameter
+    table: "specifications"
     label_he: "קוטר הכדור"
     label_en: "Ball Diameter"
     unit: "אינץ׳"
@@ -1450,6 +1549,7 @@ ball_gimbals_16in:
     notes_he: "הערך הפיזי הקונקרטי (למשל 15.7 אינץ׳) -- לא לעגל ל-'16 אינץ׳' כשהמקור נותן ערך מדויק אחר."
 
   - key: payload_channel_count
+    table: "specifications"
     label_he: "מספר ערוצי תשלובת"
     label_en: "Payload Channel Count"
     unit: "ערוצים"
@@ -1463,6 +1563,7 @@ ball_gimbals_16in:
     notes_he: "EO/IR/LRF/לייזר כל אחד נספר כערוץ נפרד."
 
   - key: slew_rate
+    table: "performance"
     label_he: "קצב סיבוב/סריקה"
     label_en: "Slew Rate"
     unit: "מעלות/שנייה (°/s)"
@@ -1476,6 +1577,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: stabilization_class_microrad
+    table: "performance"
     label_he: "סיווג ייצוב (מיקרו-רדיאן)"
     label_en: "Stabilization Class (µrad RMS)"
     unit: "מיקרו-רדיאן (µrad, RMS)"
@@ -1490,6 +1592,7 @@ ball_gimbals_16in:
     notes_he: "פירוט מספרי של common.line_of_sight_stabilization -- לא כפול, אלא הערך המדויק כשקיים."
 
   - key: mounting_type
+    table: "specifications"
     label_he: "סוג התקנה"
     label_en: "Mounting Type"
     unit: null
@@ -1506,6 +1609,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: field_of_regard
+    table: "specifications"
     label_he: "שדה כיסוי (Field of Regard)"
     label_en: "Field of Regard (FOR)"
     unit: "מעלות"
@@ -1519,6 +1623,7 @@ ball_gimbals_16in:
     notes_he: "שונה מ-common.field_of_view (שדה הראייה האופטי) -- זהו טווח התנועה המלא של הגימבל."
 
   - key: payload_weight_capacity
+    table: "specifications"
     label_he: "קיבולת משקל תשלובת"
     label_en: "Payload Weight Capacity"
     unit: "ק״ג"
@@ -1532,6 +1637,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: power_supply_voltage
+    table: "specifications"
     label_he: "מתח הספקה"
     label_en: "Power Supply Voltage"
     unit: "וולט (V)"
@@ -1545,6 +1651,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: environmental_sealing
+    table: "specifications"
     label_he: "איטום סביבתי (דירוג IP)"
     label_en: "Environmental Sealing (IP Rating)"
     unit: null
@@ -1560,6 +1667,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: laser_designator_option
+    table: "specifications"
     label_he: "אופציית מצביע לייזר"
     label_en: "Laser Designator Option"
     unit: null
@@ -1572,6 +1680,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: multi_sensor_fusion
+    table: "specifications"
     label_he: "מיזוג חיישנים (EO/IR/LRF)"
     label_en: "Multi-Sensor Fusion"
     unit: null
@@ -1585,6 +1694,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: platform_types_supported
+    table: "specifications"
     label_he: "סוגי פלטפורמות נתמכות"
     label_en: "Supported Platform Types"
     unit: null
@@ -1601,6 +1711,7 @@ ball_gimbals_16in:
     notes_he: "רמת הקטגוריה (מל״ט/מסוק/כלי שיט/רק״ם) -- לא רשימת דגמים ספציפיים (זה תחת common.platforms)."
 
   - key: continuous_zoom
+    table: "specifications"
     label_he: "זום רציף"
     label_en: "Continuous Zoom"
     unit: null
@@ -1613,6 +1724,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: az_el_travel_limits
+    table: "specifications"
     label_he: "טווחי תנועה אזימוט/רום"
     label_en: "Azimuth/Elevation Travel Limits"
     unit: "מעלות"
@@ -1627,6 +1739,7 @@ ball_gimbals_16in:
     notes_he: ""
 
   - key: vibration_shock_rating
+    table: "specifications"
     label_he: "עמידות ברעידות/זעזועים"
     label_en: "Vibration/Shock Rating"
     unit: null
@@ -1644,6 +1757,7 @@ ball_gimbals_16in:
 # ====================================================================================================
 border_long_range_eo:
   - key: mast_tower_mounting
+    table: "specifications"
     label_he: "התקנה על תורן/מגדל"
     label_en: "Mast/Tower Mounting"
     unit: "מטר (גובה התקנה)"
@@ -1658,6 +1772,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: dri_at_long_range
+    table: "performance"
     label_he: "DRI בטווח ארוך"
     label_en: "Long-Range DRI"
     unit: "ק״מ"
@@ -1671,6 +1786,7 @@ border_long_range_eo:
     notes_he: "אותה משמעת הפרדה כמו common.detection_range_dri (D/R/I נפרדים, גודל יעד, claimed/demonstrated) -- כאן בדגש על טווחים ארוכים במיוחד האופייניים לקו הגבול."
 
   - key: duty_cycle_24_7
+    table: "specifications"
     label_he: "מחזור פעולה 24/7"
     label_en: "24/7 Duty Cycle"
     unit: null
@@ -1685,6 +1801,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: c2_integration
+    table: "specifications"
     label_he: "אינטגרציה עם פיקוד ובקרה (C2)"
     label_en: "C2/VMS Integration"
     unit: null
@@ -1699,6 +1816,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: thermal_camera_class
+    table: "specifications"
     label_he: "סיווג מצלמה תרמית"
     label_en: "Thermal Camera Class"
     unit: null
@@ -1714,6 +1832,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: pan_tilt_range
+    table: "specifications"
     label_he: "טווח פאן/טילט"
     label_en: "Pan/Tilt Range"
     unit: "מעלות"
@@ -1727,6 +1846,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: weatherproofing_rating
+    table: "specifications"
     label_he: "דירוג עמידות למזג אוויר"
     label_en: "Weatherproofing Rating"
     unit: null
@@ -1741,6 +1861,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: perimeter_coverage_length
+    table: "specifications"
     label_he: "אורך היקף מכוסה ליחידה"
     label_en: "Perimeter Coverage Length per Unit"
     unit: "ק״מ"
@@ -1754,6 +1875,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: radar_fusion
+    table: "specifications"
     label_he: "מיזוג עם מכ״ם קרקעי"
     label_en: "Ground Radar Fusion"
     unit: null
@@ -1767,6 +1889,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: number_of_units_per_site
+    table: "specifications"
     label_he: "מספר יחידות/עמדות לאתר"
     label_en: "Number of Units per Site"
     unit: "יחידות"
@@ -1780,6 +1903,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: remote_monitoring_capability
+    table: "specifications"
     label_he: "יכולת ניטור/הפעלה מרחוק"
     label_en: "Remote Monitoring/Operation Capability"
     unit: null
@@ -1793,6 +1917,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: vms_software_integration
+    table: "specifications"
     label_he: "אינטגרציה עם תוכנת ניהול תצפית"
     label_en: "Video Management Software (VMS) Integration"
     unit: null
@@ -1806,6 +1931,7 @@ border_long_range_eo:
     notes_he: "כשמצוין שם מוצר VMS ספציפי -- לשמור כטקסט חופשי ב-value."
 
   - key: lighting_illuminator_support
+    table: "specifications"
     label_he: "תמיכה בתאורת IR/לייזר מאיר"
     label_en: "IR Illuminator/Laser Illuminator Support"
     unit: null
@@ -1819,6 +1945,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: anti_vandalism_hardening
+    table: "specifications"
     label_he: "הקשחה נגד חבלה/פגעי טבע"
     label_en: "Anti-Vandalism/Weather Hardening"
     unit: null
@@ -1832,6 +1959,7 @@ border_long_range_eo:
     notes_he: ""
 
   - key: maintenance_interval
+    table: "specifications"
     label_he: "מרווח תחזוקה מתוכנן"
     label_en: "Scheduled Maintenance Interval"
     unit: "חודשים / שעות פעולה"

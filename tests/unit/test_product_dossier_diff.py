@@ -409,3 +409,136 @@ def test_deals_reported_before_specifications() -> None:
     )
     changes = compute_diff(previous, current)
     assert "עסקה" in changes[0].text_he
+
+
+# --------------------------------------------------------------------------
+# PD-vocab-diff (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md section 4): key-based matching -- a
+# direct dict lookup by `key` replaces the fuzzy name/value matcher for any row that HAS a key
+# (real, post-vocabulary-rollout data); the fuzzy matcher stays only as the fallback for a previous
+# dossier whose own rows carry no `key` at all (exercised by the pre-existing fuzzy tests above,
+# unchanged and still passing).
+# --------------------------------------------------------------------------
+
+
+def test_keyed_spec_value_change_uses_canonical_label_not_raw_parameter_he() -> None:
+    previous = {"specifications": [{"key": "weight", "value": "10 ק\"ג"}]}
+    current = _current(
+        specifications=[SpecRow(parameter_he="שם שרירותי", key="weight", value="12 ק\"ג", cites=[1])]
+    )
+    changes = compute_diff(previous, current)
+    assert len(changes) == 1
+    assert "משקל" in changes[0].text_he
+    assert "שם שרירותי" not in changes[0].text_he
+    assert "10" in changes[0].text_he and "12" in changes[0].text_he
+
+
+def test_keyed_spec_same_key_no_fuzzy_name_overlap_still_matched() -> None:
+    """The whole point of a stable key: a completely reworded label (zero token overlap with the
+    previous run's own free-text name) still matches by key alone -- the fuzzy matcher would have
+    missed this and reported it as a fabricated 'new parameter'."""
+    previous = {"specifications": [{"key": "size_to_performance_ratio", "value": "מטע\"ד 20 אינץ'"}]}
+    current = _current(
+        specifications=[
+            SpecRow(
+                parameter_he="יחס ביצועים-למעטפת",
+                key="size_to_performance_ratio",
+                value="ביצועים משופרים",
+                cites=[1],
+            )
+        ]
+    )
+    changes = compute_diff(previous, current)
+    assert len(changes) == 1
+    assert "פרמטר מפרט חדש" not in changes[0].text_he
+
+
+def test_keyed_spec_new_key_not_in_previous_run_reported_as_new() -> None:
+    previous = {"specifications": [{"key": "weight", "value": "10 ק\"ג"}]}
+    current = _current(
+        specifications=[
+            SpecRow(parameter_he="X", key="weight", value="10 ק\"ג", cites=[1]),
+            SpecRow(parameter_he="Y", key="power_consumption", value="50W", cites=[2]),
+        ]
+    )
+    changes = compute_diff(previous, current)
+    assert len(changes) == 1
+    assert "power_consumption" not in changes[0].text_he  # label, not the raw key
+    assert "50W" in changes[0].text_he
+
+
+def test_keyed_spec_required_key_silent_on_both_sides_not_worth_a_sentence() -> None:
+    """section 4's new diff class: a key present neither in the previous run's data nor with a
+    real value in this run (a required-but-unconfirmed placeholder, cites=[]) is not a change."""
+    previous = {"specifications": []}
+    current = _current(
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value="", cites=[])]
+    )
+    assert compute_diff(previous, current) == []
+
+
+def test_keyed_spec_value_retracted_reports_using_current_cites() -> None:
+    """section 4's new diff class: a key that flips from a real previous value to an empty CITED
+    current value (a source apparently retracted/superseded the fact) -- cites come from the
+    current row only, never the previous run's own (stale) registry."""
+    previous = {"specifications": [{"key": "weight", "value": "10 ק\"ג"}]}
+    current = _current(
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value="", cites=[7])]
+    )
+    changes = compute_diff(previous, current)
+    assert len(changes) == 1
+    assert "לא אושר יותר" in changes[0].text_he
+    assert "10" in changes[0].text_he
+    assert changes[0].cites == [7]
+
+
+def test_keyed_spec_value_retracted_without_cites_is_silent() -> None:
+    """The common real-world shape of a retraction: a deterministic required-backfill placeholder
+    (value="", cites=[]) -- with no citation available at all, there is nothing a Sentence (which
+    requires non-empty cites) could honestly point to, so no sentence is emitted."""
+    previous = {"specifications": [{"key": "weight", "value": "10 ק\"ג"}]}
+    current = _current(
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value="", cites=[])]
+    )
+    assert compute_diff(previous, current) == []
+
+
+def test_keyed_performance_claimed_value_change_uses_canonical_label() -> None:
+    previous = {"performance": [{"key": "size_to_performance_ratio", "claimed_value": "20 אינץ'"}]}
+    current = _current(
+        performance=[
+            PerformanceRow(
+                metric_he="שם ישן",
+                key="size_to_performance_ratio",
+                claimed_value="25 אינץ'",
+                cites=[1],
+            )
+        ]
+    )
+    changes = compute_diff(previous, current)
+    assert len(changes) == 1
+    assert "יחס ביצועים-למעטפת" in changes[0].text_he
+    assert "שם ישן" not in changes[0].text_he
+
+
+def test_keyed_performance_claimed_value_retracted() -> None:
+    previous = {"performance": [{"key": "false_alarm_rate", "claimed_value": "2%"}]}
+    current = _current(
+        performance=[PerformanceRow(metric_he="שיעור התרעות שווא", key="false_alarm_rate", claimed_value="", cites=[9])]
+    )
+    changes = compute_diff(previous, current)
+    assert len(changes) == 1
+    assert "לא אושר יותר" in changes[0].text_he
+    assert changes[0].cites == [9]
+
+
+def test_keyless_previous_dossier_falls_back_to_fuzzy_matching_for_keyed_current_rows() -> None:
+    """A previous dossier that predates the vocabulary rollout (its own specifications rows carry
+    no `key` at all) -- the current run's keyed rows still get compared, via the old fuzzy
+    name/value matcher, rather than every one of them reading as 'brand new'."""
+    previous = {"specifications": [{"parameter_he": "משקל", "value": "10 ק\"ג"}]}
+    current = _current(
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value="10.5 ק\"ג", cites=[1])]
+    )
+    # token-Jaccard on "10 ק"ג"/"10.5 ק"ג" clears the >=0.6 "same value" bar (matches the existing
+    # fuzzy-matcher tests' own numeric-rewording tolerance) -- no false "new parameter"/"changed".
+    assert compute_diff(previous, current) == []

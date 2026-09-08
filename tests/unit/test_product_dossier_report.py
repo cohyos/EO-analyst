@@ -134,9 +134,13 @@ def test_build_topics_no_vendor_still_valid() -> None:
 # order, every one present even for a fully empty dossier.
 # --------------------------------------------------------------------------
 
+#: PD-vocab-extract (2026-09-09): "פרמטרים נוספים" (the other_specifications overflow appendix,
+#: docs/PLAN_SPEC_VOCABULARY.md section 3.3 item 3) now always renders right after "מפרט" -- see
+#: eoa.dossier.spec_render/eoa.dossier.report._ordered_report_entries.
 _EXPECTED_ORDER_HE = [
     "זיהוי המוצר",
     "מפרט",
+    "פרמטרים נוספים",
     "גרסאות",
     "ביצועים (מוצהר מול נמדד)",
     "בשלות ופריסה",

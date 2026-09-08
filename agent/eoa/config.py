@@ -394,6 +394,15 @@ class LlmProvidersCfg(BaseModel):
     allow_cloud: bool = True
     interactive_default: str = "ollama"  # "ollama" | "chain" (the role's fallback chain) | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
     timeout_s: int = 120
+    #: 2026-09-09 (cloud tool-calling): when true (default), ``eoa.llm.providers.cli.CliProvider``
+    #: exposes ``supports_tools = True`` and accepts a caller-supplied ``tools`` schema via the
+    #: text-protocol dispatch (render the tool list into the prompt, parse a strict single-JSON-
+    #: object reply back into Ollama's own ``tool_calls`` shape) -- see
+    #: ``eoa.llm.providers.cli``'s module docstring. ``false`` is an escape hatch (no code change
+    #: needed) if a CLI's real-world reliability on the protocol turns out to be poor; every
+    #: tool-calling turn then falls back to the chain's local Ollama entry exactly as before this
+    #: change (``eoa.llm.chain.run_chain`` already skips a leg with ``supports_tools`` falsy).
+    cli_text_tools: bool = True
     cli: dict[str, CliProviderCfg] = Field(
         default_factory=lambda: {
             "agy": CliProviderCfg(
@@ -601,6 +610,11 @@ class Settings(BaseModel):
     # ownership claim in LLM-generated analysis text. Loaded optionally, same rationale as
     # product_lines/mcp above.
     company_facts: dict[str, Any] = {}
+    # PD-vocab-extract (2026-09-09): config/spec_vocabulary.yaml -- the fixed, stable-key
+    # specification/performance parameter vocabulary the product dossier extraction/diff now write
+    # to (eoa.dossier.vocabulary), replacing free-named SpecRow.parameter_he/PerformanceRow.
+    # metric_he. Loaded optionally, same rationale as product_lines/company_facts above.
+    spec_vocabulary: dict[str, Any] = {}
 
     # ---- derived / env-driven -------------------------------------------------
     @property
@@ -670,6 +684,7 @@ def settings() -> Settings:
     watchlist = _load_yaml("watchlist.yaml")
     product_lines = _load_yaml_optional("product_lines.yaml")
     company_facts = _load_yaml_optional("company_facts.yaml")
+    spec_vocabulary = _load_yaml_optional("spec_vocabulary.yaml")
     mcp_data = _load_yaml_optional("mcp.yaml")
     if "mcp" not in base and mcp_data:
         base = {**base, "mcp": mcp_data}
@@ -679,5 +694,6 @@ def settings() -> Settings:
         watchlist=watchlist,
         product_lines=product_lines,
         company_facts=company_facts,
+        spec_vocabulary=spec_vocabulary,
         **base,
     )

@@ -25,6 +25,13 @@ import structlog
 
 from eoa.dossier.corpus import CorpusResult, patent_relevance_he
 from eoa.dossier.plan import PlanResult
+from eoa.dossier.vocabulary import (
+    SpecParam,
+    effective_vocabulary,
+    match_key_by_synonym,
+    param_by_key,
+    vocabulary_prompt_block_he,
+)
 from eoa.errors import LLMOutputError
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
@@ -178,8 +185,20 @@ def extract_dossier(
     *,
     role: str = "resident",
     interactive: bool = False,
+    llm_leg: str | None = None,
 ) -> ProductDossierOut:
+    """``llm_leg`` (PD-cloud-tools, 2026-09-09): ``"<provider>[:<model>][@<power>]"`` or
+    ``"local"``/``None`` -- when given, this one structured-extraction call tries that leg first,
+    ahead of ``role``'s normally-configured chain (``eoa.llm.chain.build_chain_with_leg_override``),
+    which stays the fallback. ``None`` (the default) preserves the exact prior dispatch."""
     data_block = build_data_block(corpus, plan_result)
+    #: PD-vocab-extract (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md section 3.3): the effective
+    #: vocabulary (common + this run's product line, or common alone with no line set) is handed to
+    #: the model as an enumerated list it must fill from verbatim -- never invent/reword a
+    #: parameter name. `corpus.product_line` is threaded through from `eoa.dossier.corpus.
+    #: build_corpus`'s own param (unchanged call signature elsewhere -- see CorpusResult's own
+    #: docstring for why it's read off `corpus` rather than a new function parameter here).
+    vocabulary_block = vocabulary_prompt_block_he(effective_vocabulary(corpus.product_line))
     prompt = render(
         "product_dossier_extract",
         product_name=corpus.product_name,
@@ -187,7 +206,13 @@ def extract_dossier(
         aliases_he=", ".join(corpus.aliases) or "אין",
         n_registry=len(corpus.registry),
         data=wrap_data(data_block, "dossier", corpus.product_key),
+        vocabulary_block=vocabulary_block,
     )
+    chain_override = None
+    if llm_leg:
+        from eoa.llm.chain import build_chain_with_leg_override
+
+        chain_override = build_chain_with_leg_override(role, llm_leg)
     return chat_structured(
         role,
         ProductDossierOut,
@@ -198,6 +223,7 @@ def extract_dossier(
         task="report",
         interactive=interactive,
         options={"temperature": 0.2, "num_predict": _NUM_PREDICT},
+        chain_override=chain_override,
     )
 
 
@@ -617,6 +643,245 @@ def _ground_patent_row(
     return row.model_copy(update={"cites": good_cites, "relevance_he": relevance})
 
 
+# --------------------------------------------------------------------------
+# PD-vocab-extract (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md section 3.5): fixed-vocabulary
+# post-checks -- applied AFTER the existing per-row grounding above, over the already-grounded
+# specifications/performance/other_specifications lists. Every step is independently additive, same
+# "a unit that fails a rule is dropped/trimmed/demoted, the rest kept" discipline as the rest of
+# this module -- a model that slips past the prompt's own vocabulary instructions is caught here,
+# never trusted. Order matters: (1) invalid keys are demoted to other_specifications before anything
+# else can key off them, (2) a valid key placed in the wrong table (config/spec_vocabulary.yaml's
+# own `table` field, section 3.4) is relocated, (3) parameter_he/metric_he is overwritten from the
+# vocabulary's own canonical label for every surviving keyed row, (4) same-key/same-variant
+# duplicates collapse, (5) every `required: true` vocabulary param still missing after all of the
+# above gets a deterministic placeholder row.
+# --------------------------------------------------------------------------
+
+
+def _spec_row_to_performance_row(row: SpecRow, param: SpecParam) -> PerformanceRow:
+    return PerformanceRow(
+        metric_he=param.label_he,
+        key=row.key,
+        claimed_value=row.value,
+        conditions_he=row.variant,
+        cites=row.cites,
+    )
+
+
+def _performance_row_to_spec_row(row: PerformanceRow, param: SpecParam) -> SpecRow:
+    return SpecRow(
+        parameter_he=param.label_he,
+        key=row.key,
+        value=row.claimed_value,
+        unit=param.unit or "",
+        cites=row.cites,
+    )
+
+
+def _demote_spec_to_other(row: SpecRow) -> SpecRow:
+    return row.model_copy(update={"key": ""}) if row.key else row
+
+
+def _demote_performance_to_other(row: PerformanceRow) -> SpecRow:
+    return SpecRow(parameter_he=row.metric_he, key="", value=row.claimed_value, cites=row.cites)
+
+
+def _split_invalid_keys(
+    specifications: list[SpecRow],
+    performance: list[PerformanceRow],
+    params: dict[str, SpecParam],
+    dropped: list[DroppedField],
+) -> tuple[list[SpecRow], list[PerformanceRow], list[SpecRow]]:
+    """Step 1: ``specifications``/``performance`` only ever hold rows with a REAL vocabulary key
+    after this step -- a row whose ``key`` is empty (the model wrote a free-text fact directly into
+    the wrong list instead of ``other_specifications``) or non-empty-but-hallucinated is demoted
+    into ``other_specifications`` either way (never dropped outright -- the fact itself may still be
+    real, only the placement/key assignment was wrong)."""
+    kept_specs: list[SpecRow] = []
+    demoted: list[SpecRow] = []
+    for row in specifications:
+        if not row.key:
+            _drop(dropped, "specifications.key", "missing_key_demoted_to_other", row.parameter_he)
+            demoted.append(_demote_spec_to_other(row))
+        elif row.key not in params:
+            _drop(dropped, "specifications.key", "invalid_vocabulary_key", row.key)
+            demoted.append(_demote_spec_to_other(row))
+        else:
+            kept_specs.append(row)
+    kept_perf: list[PerformanceRow] = []
+    for row in performance:
+        if not row.key:
+            _drop(dropped, "performance.key", "missing_key_demoted_to_other", row.metric_he)
+            demoted.append(_demote_performance_to_other(row))
+        elif row.key not in params:
+            _drop(dropped, "performance.key", "invalid_vocabulary_key", row.key)
+            demoted.append(_demote_performance_to_other(row))
+        else:
+            kept_perf.append(row)
+    return kept_specs, kept_perf, demoted
+
+
+def _relocate_by_table(
+    specifications: list[SpecRow],
+    performance: list[PerformanceRow],
+    params: dict[str, SpecParam],
+    dropped: list[DroppedField],
+) -> tuple[list[SpecRow], list[PerformanceRow]]:
+    """Step 2: a valid-keyed row the model placed in the wrong table (config/spec_vocabulary.yaml's
+    own ``table`` field, section 3.4 -- DATA, not model judgment) is moved to the correct one. This
+    is the deterministic fix for the id=1/2/3 drift the whole vocabulary exists to close: a fact
+    like ``common.size_to_performance_ratio`` always lands in ``performance`` now, never split
+    across both tables run to run."""
+    final_specs: list[SpecRow] = []
+    moved_to_perf: list[PerformanceRow] = []
+    for row in specifications:
+        param = params.get(row.key) if row.key else None
+        if param is not None and param.table == "performance":
+            _drop(dropped, "specifications", "table_relocated_to_performance", row.key)
+            moved_to_perf.append(_spec_row_to_performance_row(row, param))
+        else:
+            final_specs.append(row)
+    final_perf: list[PerformanceRow] = []
+    moved_to_spec: list[SpecRow] = []
+    for row in performance:
+        param = params.get(row.key) if row.key else None
+        if param is not None and param.table == "specifications":
+            _drop(dropped, "performance", "table_relocated_to_specifications", row.key)
+            moved_to_spec.append(_performance_row_to_spec_row(row, param))
+        else:
+            final_perf.append(row)
+    final_specs.extend(moved_to_spec)
+    final_perf.extend(moved_to_perf)
+    return final_specs, final_perf
+
+
+def _normalize_labels(
+    specifications: list[SpecRow], performance: list[PerformanceRow], params: dict[str, SpecParam]
+) -> tuple[list[SpecRow], list[PerformanceRow]]:
+    """Step 3: for every row with a valid key, ``parameter_he``/``metric_he`` is overwritten from
+    the vocabulary's own canonical ``label_he`` unconditionally -- never trust the model's own copy,
+    even when it typed it correctly (one canonical write path, not a "matches" check)."""
+    new_specs = [
+        row.model_copy(update={"parameter_he": params[row.key].label_he}) if row.key in params else row
+        for row in specifications
+    ]
+    new_perf = [
+        row.model_copy(update={"metric_he": params[row.key].label_he}) if row.key in params else row
+        for row in performance
+    ]
+    return new_specs, new_perf
+
+
+def _collapse_duplicate_spec_keys(rows: list[SpecRow], dropped: list[DroppedField]) -> list[SpecRow]:
+    """Step 4 (specifications): two rows sharing a key AND the same/empty ``variant`` collapse to
+    whichever carries a non-empty ``value`` (first one wins on a further tie); different non-empty
+    ``variant`` values are kept as separate, legitimate per-variant rows."""
+    result: list[SpecRow] = []
+    seen: dict[tuple[str, str], int] = {}
+    for row in rows:
+        if not row.key:
+            result.append(row)
+            continue
+        ident = (row.key, row.variant or "")
+        idx = seen.get(ident)
+        if idx is None:
+            seen[ident] = len(result)
+            result.append(row)
+            continue
+        _drop(dropped, "specifications", "duplicate_vocabulary_key", row.key)
+        if not result[idx].value and row.value:
+            result[idx] = row
+    return result
+
+
+def _collapse_duplicate_performance_keys(
+    rows: list[PerformanceRow], dropped: list[DroppedField]
+) -> list[PerformanceRow]:
+    """Step 4 (performance): same rule as :func:`_collapse_duplicate_spec_keys`, using
+    ``conditions_he`` as the per-variant differentiator (``PerformanceRow`` has no ``variant`` field
+    of its own)."""
+    result: list[PerformanceRow] = []
+    seen: dict[tuple[str, str], int] = {}
+    for row in rows:
+        if not row.key:
+            result.append(row)
+            continue
+        ident = (row.key, row.conditions_he or "")
+        idx = seen.get(ident)
+        if idx is None:
+            seen[ident] = len(result)
+            result.append(row)
+            continue
+        _drop(dropped, "performance", "duplicate_vocabulary_key", row.key)
+        if not result[idx].claimed_value and row.claimed_value:
+            result[idx] = row
+    return result
+
+
+def _backfill_required(
+    specifications: list[SpecRow], performance: list[PerformanceRow], product_line: str | None
+) -> tuple[list[SpecRow], list[PerformanceRow]]:
+    """Step 5: every ``required: true`` vocabulary param still missing a keyed row (in its own
+    ``table``) after every step above gets a deterministic placeholder row (``value``/
+    ``claimed_value`` == ``""``, ``cites`` == ``[]``) -- renders as "לא נמצא במקורות" via the
+    existing ``_cell()`` path in ``eoa.dossier.report``, no renderer change needed."""
+    have_spec = {row.key for row in specifications if row.key}
+    have_perf = {row.key for row in performance if row.key}
+    new_specs = list(specifications)
+    new_perf = list(performance)
+    for param in effective_vocabulary(product_line):
+        if not param.required:
+            continue
+        if param.table == "performance":
+            if param.key not in have_perf:
+                new_perf.append(PerformanceRow(metric_he=param.label_he, key=param.key, claimed_value=""))
+        elif param.key not in have_spec:
+            new_specs.append(SpecRow(parameter_he=param.label_he, key=param.key, value="", unit=param.unit or ""))
+    return new_specs, new_perf
+
+
+def _finalize_other_specifications(
+    rows: list[SpecRow], product_line: str | None, dropped: list[DroppedField]
+) -> list[SpecRow]:
+    """Every ``other_specifications`` row always has ``key == ""`` (section 3.4 -- enforced here,
+    not just relied on from the model). Also runs the promoted synonym matcher (section 3.2) as a
+    non-destructive QA signal: a row whose own ``parameter_he`` matches a known vocabulary
+    label/synonym is logged (never auto-reclassified -- the model already had the full vocabulary
+    and chose not to key this row; a non-trivial rate of these hints the vocabulary itself needs a
+    new entry, section 9 item 3, not a silent code-side override)."""
+    final: list[SpecRow] = []
+    for row in rows:
+        row = row.model_copy(update={"key": ""}) if row.key else row
+        hit = match_key_by_synonym(row.parameter_he, product_line)
+        if hit:
+            _drop(dropped, "other_specifications", f"matches_known_vocabulary_key:{hit}", row.parameter_he)
+        final.append(row)
+    return final
+
+
+def apply_vocabulary(
+    specifications: list[SpecRow],
+    performance: list[PerformanceRow],
+    other_specifications: list[SpecRow],
+    *,
+    product_line: str | None,
+    dropped: list[DroppedField],
+) -> tuple[list[SpecRow], list[PerformanceRow], list[SpecRow]]:
+    """The single entry point for the section-3.5 vocabulary post-checks, steps 1-5 in order (see
+    each helper's own docstring). Public (not ``_``-prefixed) so tests can exercise it directly
+    without a full ``ground_dossier`` draft."""
+    params = param_by_key(product_line)
+    specifications, performance, demoted = _split_invalid_keys(specifications, performance, params, dropped)
+    other_specifications = [*other_specifications, *demoted]
+    specifications, performance = _relocate_by_table(specifications, performance, params, dropped)
+    specifications, performance = _normalize_labels(specifications, performance, params)
+    specifications = _collapse_duplicate_spec_keys(specifications, dropped)
+    performance = _collapse_duplicate_performance_keys(performance, dropped)
+    specifications, performance = _backfill_required(specifications, performance, product_line)
+    other_specifications = _finalize_other_specifications(other_specifications, product_line, dropped)
+    return specifications, performance, other_specifications
+
+
 def ground_dossier(
     draft: ProductDossierOut, corpus: CorpusResult, plan_result: PlanResult
 ) -> GroundingResult:
@@ -648,6 +913,16 @@ def ground_dossier(
 
     specifications = [_ground_spec_row(r, valid_ns, registry_text, dropped) for r in draft.specifications]
     performance = [_ground_performance_row(r, valid_ns, registry_text, dropped) for r in draft.performance]
+    other_specifications = [
+        _ground_spec_row(r, valid_ns, registry_text, dropped) for r in draft.other_specifications
+    ]
+    specifications, performance, other_specifications = apply_vocabulary(
+        specifications,
+        performance,
+        other_specifications,
+        product_line=corpus.product_line,
+        dropped=dropped,
+    )
     deals = [
         _ground_deal_row(r, valid_ns, registry_text, dropped, published_by_n=published_by_n)
         for r in draft.deals
@@ -698,6 +973,7 @@ def ground_dossier(
             "bd_implications_he": bd_implications,
             "what_changed_he": what_changed,
             "specifications": specifications,
+            "other_specifications": other_specifications,
             "performance": performance,
             "deals": deals,
             "pricing": pricing,
@@ -712,13 +988,19 @@ def ground_dossier(
 
 
 def build_dossier(
-    corpus: CorpusResult, plan_result: PlanResult, *, role: str = "resident", interactive: bool = False
+    corpus: CorpusResult,
+    plan_result: PlanResult,
+    *,
+    role: str = "resident",
+    interactive: bool = False,
+    llm_leg: str | None = None,
 ) -> GroundingResult:
     """``extract`` + ``ground`` in one call -- the shape ``eoa.dossier.report`` uses. A
     :class:`~eoa.errors.LLMOutputError` propagates (the caller decides the fallback -- an empty,
-    honest "not_found" dossier -- rather than this module inventing one)."""
+    honest "not_found" dossier -- rather than this module inventing one). ``llm_leg`` (PD-cloud-
+    tools, 2026-09-09) is forwarded verbatim to :func:`extract_dossier`."""
     try:
-        draft = extract_dossier(corpus, plan_result, role=role, interactive=interactive)
+        draft = extract_dossier(corpus, plan_result, role=role, interactive=interactive, llm_leg=llm_leg)
     except LLMOutputError:
         raise
     return ground_dossier(draft, corpus, plan_result)
@@ -727,6 +1009,7 @@ def build_dossier(
 __all__ = [
     "DroppedField",
     "GroundingResult",
+    "apply_vocabulary",
     "build_data_block",
     "build_dossier",
     "extract_dossier",

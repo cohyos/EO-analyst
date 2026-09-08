@@ -59,9 +59,18 @@ class IdentityBlock(BaseModel):
 
 class SpecRow(BaseModel):
     """One published specification row -- ``value`` is copied verbatim as published (never
-    normalized/converted), per the report-style rule "numbers only from sources"."""
+    normalized/converted), per the report-style rule "numbers only from sources".
+
+    PD-vocab-extract (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md): ``key`` is the stable join into
+    ``config/spec_vocabulary.yaml`` (``eoa.dossier.vocabulary``) -- set to a vocabulary key VERBATIM
+    when the row fills one of that vocabulary's parameters, left ``""`` for a row in
+    ``ProductDossierOut.other_specifications`` (a genuine fact matching no vocabulary entry). A row
+    with a non-empty ``key`` also has its ``parameter_he`` overwritten to that key's own canonical
+    ``label_he`` by ``eoa.dossier.extract``'s post-check -- the model's own copy of the label is
+    never trusted, one canonical write path only."""
 
     parameter_he: str = Field(description="שם הפרמטר בעברית (למשל: טווח זיהוי, משקל, צריכת הספק)")
+    key: str = Field(default="", description="מפתח יציב מתוך config/spec_vocabulary.yaml, ריק אם 'אחר'")
     value: str = Field(default="", description="הערך כפי שפורסם, כולל יחידות")
     unit: str = Field(default="", description="יחידת מידה, אם רלוונטי בנפרד מ-value")
     variant: str = Field(default="", description="גרסה/וריאנט שאליו הערך מתייחס, אם צוין")
@@ -82,6 +91,9 @@ class PerformanceRow(BaseModel):
     מוצגים כאותו הדבר; ``tested_or_operational_value`` נשאר ``null`` כשלא ידוע."""
 
     metric_he: str = Field(description="שם המדד (למשל: טווח זיהוי MWIR, קצב זיהוי)")
+    #: PD-vocab-extract (2026-09-09): same key/normalization contract as SpecRow.key -- see that
+    #: field's own docstring.
+    key: str = Field(default="", description="מפתח יציב מתוך config/spec_vocabulary.yaml, ריק אם 'אחר'")
     claimed_value: str = Field(default="", description="הערך המוצהר על ידי היצרן")
     tested_or_operational_value: str | None = Field(
         default=None, description="ערך שנמדד/הופעל בפועל (ניסוי/שטח), אם דווח בנפרד; אחרת null"
@@ -201,6 +213,14 @@ class ProductDossierOut(BaseModel):
         description="עד 6 משפטים, כל אחד עם cites: מה המוצר ואיפה הוא עומד",
     )
     specifications: list[SpecRow] = Field(default_factory=list)
+    #: PD-vocab-extract (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md section 3.3 item 3): the overflow
+    #: bucket for a genuine fact that matches NO vocabulary parameter (by key or by any of its
+    #: synonyms) -- a real, unanticipated spec is never silently dropped, it lands here instead with
+    #: a model-chosen ``parameter_he`` (exactly like ``specifications`` used to work for everything).
+    #: Every row here always has ``key == ""`` (enforced by ``eoa.dossier.extract``'s post-check); a
+    #: non-trivial, persistently non-empty list here for a well-covered product line is itself a
+    #: signal the vocabulary is missing something real (section 9 item 3), not a steady state.
+    other_specifications: list[SpecRow] = Field(default_factory=list)
     variants_and_versions: list[VersionRow] = Field(default_factory=list)
     performance: list[PerformanceRow] = Field(default_factory=list)
     maturity: MaturityBlock = Field(default_factory=MaturityBlock)

@@ -33,6 +33,7 @@ import re
 from typing import Any
 
 from eoa.dossier.extract import parse_amount_he
+from eoa.dossier.vocabulary import all_params_by_key
 from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.product_dossier import ProductDossierOut
 from eoa.pipeline import entity_normalize
@@ -234,61 +235,97 @@ def _find_matching_prev_row(
     return None
 
 
+#: PD-vocab-diff (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md section 4): with `key` now stable
+#: (eoa.dossier.vocabulary; every current specifications/performance row is guaranteed a real,
+#: validated key by eoa.dossier.extract's own post-check, see that module's `_split_invalid_keys`),
+#: matching a current row to its previous-run counterpart is a direct dict lookup by key -- no
+#: fuzzy Jaccard matching needed for a keyed row at all. `_find_matching_prev_row` stays as the
+#: fallback ONLY for a previous dossier that predates the vocabulary rollout (its own rows carry no
+#: `key` field at all -- a keyless previous run can't be joined by key no matter how confident the
+#: current run's own keys are).
+def _label_for_key(key: str, fallback: str) -> str:
+    #: `all_params_by_key()` is itself cached (keyed off `id(settings())`, see eoa.dossier.
+    #: vocabulary._raw_vocabulary_cached) -- no separate cache needed at this call site, and calling
+    #: it directly here means a test that swaps Settings via `settings.cache_clear()` is always
+    #: reflected immediately, never stuck behind a second, independent cache layer.
+    param = all_params_by_key().get(key)
+    return param.label_he if param is not None else fallback
+
+
 def _diff_specifications(previous: dict[str, Any] | None, current: ProductDossierOut) -> list[Sentence]:
     prev_specs = _rows(previous, "specifications")
-    out = []
+    prev_by_key = {r["key"]: r for r in prev_specs if r.get("key")}
+    #: A previous dossier with real rows but NONE carrying a `key` at all predates the vocabulary
+    #: rollout -- fall back to the old fuzzy name/value matcher for every current row rather than
+    #: treating every one of them as "brand new" just because the previous run's own data has no
+    #: keys to join against.
+    use_fuzzy_fallback = bool(prev_specs) and not prev_by_key
+    out: list[Sentence] = []
     for spec in current.specifications:
-        prev_row = _find_matching_prev_row(
-            prev_specs,
-            name_key="parameter_he",
-            value_key="value",
-            current_name=spec.parameter_he,
-            current_value=spec.value,
-        )
+        label = _label_for_key(spec.key, spec.parameter_he)
+        if use_fuzzy_fallback:
+            prev_row = _find_matching_prev_row(
+                prev_specs,
+                name_key="parameter_he",
+                value_key="value",
+                current_name=spec.parameter_he,
+                current_value=spec.value,
+            )
+        else:
+            prev_row = prev_by_key.get(spec.key)
         if prev_row is None:
+            # No previous row for this key at all: worth a sentence only when this run actually
+            # found something to report -- a key both runs are silent on (e.g. a required-but-
+            # unconfirmed placeholder, empty on both sides) is not a change, per section 4's own
+            # "not worth a sentence" rule.
             if spec.value and spec.cites:
                 out.append(
-                    Sentence(
-                        text_he=f"פרמטר מפרט חדש שפורסם: {spec.parameter_he} = {spec.value}.",
-                        cites=spec.cites,
-                    )
+                    Sentence(text_he=f"פרמטר מפרט חדש שפורסם: {label} = {spec.value}.", cites=spec.cites)
                 )
             continue
         prev_value = prev_row.get("value") or ""
         if spec.value and spec.cites and not _values_effectively_same(prev_value, spec.value):
             out.append(
                 Sentence(
-                    text_he=f"שינוי בערך המפרט '{spec.parameter_he}': {prev_value or '—'} -> {spec.value}.",
+                    text_he=f"שינוי בערך המפרט '{label}': {prev_value or '—'} -> {spec.value}.",
                     cites=spec.cites,
                 )
+            )
+        elif not spec.value and spec.cites and prev_value:
+            # section 4's new diff class: a key that flips from a real previous value to an
+            # (actively cited, not merely a required-backfill placeholder) empty current value --
+            # a source apparently retracted/superseded the fact.
+            out.append(
+                Sentence(text_he=f"פרמטר '{label}' לא אושר יותר במקורות (היה: {prev_value}).", cites=spec.cites)
             )
     return out
 
 
 def _diff_performance(previous: dict[str, Any] | None, current: ProductDossierOut) -> list[Sentence]:
-    """PD-fix-2 item 2's "same rule for performance rows" -- claimed and demonstrated/operational
-    values compared the same token-overlap way as specifications, kept as two independent checks
-    per metric (a rewording of one must not mask a genuine change in the other). PD-fix-3 item 3:
-    matched against the previous run's rows the same fuzzy name-or-value way specifications are,
-    not by an exact ``metric_he`` string -- the same LLM re-wording drift applies to metric names
-    as much as spec parameter names."""
+    """PD-vocab-diff (2026-09-09): same key-based matching as :func:`_diff_specifications` (direct
+    dict lookup by ``key``, fuzzy fallback only for a keyless pre-vocabulary previous dossier) --
+    claimed and demonstrated/operational values still compared independently (a rewording of one
+    must not mask a genuine change in the other, PD-fix-2 item 2's own rule, unchanged)."""
     prev_perf = _rows(previous, "performance")
+    prev_by_key = {r["key"]: r for r in prev_perf if r.get("key")}
+    use_fuzzy_fallback = bool(prev_perf) and not prev_by_key
     out: list[Sentence] = []
     for perf in current.performance:
-        prev_row = _find_matching_prev_row(
-            prev_perf,
-            name_key="metric_he",
-            value_key="claimed_value",
-            current_name=perf.metric_he,
-            current_value=perf.claimed_value,
-        )
+        label = _label_for_key(perf.key, perf.metric_he)
+        if use_fuzzy_fallback:
+            prev_row = _find_matching_prev_row(
+                prev_perf,
+                name_key="metric_he",
+                value_key="claimed_value",
+                current_name=perf.metric_he,
+                current_value=perf.claimed_value,
+            )
+        else:
+            prev_row = prev_by_key.get(perf.key)
         if prev_row is None:
             if perf.claimed_value and perf.cites:
                 out.append(
-                    Sentence(
-                        text_he=f"מדד ביצועים חדש שפורסם: {perf.metric_he} = {perf.claimed_value}.",
-                        cites=perf.cites,
-                    )
+                    Sentence(text_he=f"מדד ביצועים חדש שפורסם: {label} = {perf.claimed_value}.", cites=perf.cites)
                 )
             continue
         prev_claimed = prev_row.get("claimed_value") or ""
@@ -296,21 +333,22 @@ def _diff_performance(previous: dict[str, Any] | None, current: ProductDossierOu
             out.append(
                 Sentence(
                     text_he=(
-                        f"שינוי בערך הביצועים המוצהר '{perf.metric_he}': "
-                        f"{prev_claimed or '—'} -> {perf.claimed_value}."
+                        f"שינוי בערך הביצועים המוצהר '{label}': {prev_claimed or '—'} -> {perf.claimed_value}."
                     ),
                     cites=perf.cites,
                 )
+            )
+        elif not perf.claimed_value and perf.cites and prev_claimed:
+            # section 4's new diff class, mirrored for the claimed-value half of a performance row.
+            out.append(
+                Sentence(text_he=f"מדד '{label}' לא אושר יותר במקורות (היה: {prev_claimed}).", cites=perf.cites)
             )
         prev_tested = prev_row.get("tested_or_operational_value") or ""
         cur_tested = perf.tested_or_operational_value or ""
         if cur_tested and perf.cites and not _values_effectively_same(prev_tested, cur_tested):
             out.append(
                 Sentence(
-                    text_he=(
-                        f"שינוי בערך הביצועים הנמדד/מבצעי '{perf.metric_he}': "
-                        f"{prev_tested or '—'} -> {cur_tested}."
-                    ),
+                    text_he=f"שינוי בערך הביצועים הנמדד/מבצעי '{label}': {prev_tested or '—'} -> {cur_tested}.",
                     cites=perf.cites,
                 )
             )

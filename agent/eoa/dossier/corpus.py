@@ -28,7 +28,7 @@ import structlog
 
 from eoa.config import settings
 from eoa.db import connection
-from eoa.pipeline import entity_normalize
+from eoa.pipeline import entity_normalize, text_match
 
 log = structlog.get_logger(__name__)
 
@@ -135,12 +135,12 @@ _GENERAL_REFERENCE_DOMAINS = {
 }
 
 
-def _word_present(text: str, term: str) -> bool:
-    term = (term or "").strip()
-    if not term:
-        return False
-    pattern = r"\b" + re.escape(term) + r"\b"
-    return re.search(pattern, text or "", re.IGNORECASE) is not None
+#: PD-vocab-extract (2026-09-09): the real implementation moved to eoa.pipeline.text_match (a
+#: shared, non-private location -- eoa.dossier.vocabulary's synonym matcher reuses it too, see that
+#: module's own docstring for why importing a `_`-prefixed name across packages was never an
+#: option). Re-exported under the original private name so every call site in this file (and this
+#: module's own public surface, unchanged) keeps working verbatim.
+_word_present = text_match.word_present
 
 
 def _matches_product_precisely(
@@ -631,6 +631,12 @@ class CorpusResult:
     edges: list[dict[str, Any]] = field(default_factory=list)
     previous: dict[str, Any] | None = None
     registry: list[dict[str, Any]] = field(default_factory=list)
+    #: PD-vocab-extract (2026-09-09): carried through from build_corpus's own `product_line` param
+    #: (previously used only for OPS-patent keywords + persistence -- eoa.dossier.report) so
+    #: eoa.dossier.extract/vocabulary can resolve this run's effective specification vocabulary
+    #: (eoa.dossier.vocabulary.effective_vocabulary) without report.py needing to thread a new
+    #: parameter through build_dossier's own call signature.
+    product_line: str | None = None
 
     @property
     def next_n(self) -> int:
@@ -795,6 +801,7 @@ def build_corpus(
         edges=edges,
         previous=prev,
         registry=registry,
+        product_line=product_line,
     )
 
 
