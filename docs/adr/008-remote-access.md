@@ -163,3 +163,12 @@ only ever reads it back to warn.
   behaves today and was judged acceptable for a personal, single-operator tool.
 - **Follow-up:** none of this defends against Funnel/port-forward exposure (see Threat model) --
   if that's ever wanted, this ADR needs revisiting first, not just a `tailscale funnel` command.
+
+## Addendum 2026-09-08: persisted sessions, 30-day TTL
+
+The in-memory session store meant every API restart (ten in one night of fixes) logged the phone
+out. Sessions now live in `remote_sessions` (migration 0032): only SHA-256(token) is stored, the
+process-local dict is a read cache and the fallback when the DB is unavailable, expired rows are
+pruned on login, and `destroy_session` deletes the row. TTL is `api.remote_access.session_ttl_days`
+(default 30) -- proportionate for a gate that is only reachable through the user's own tailnet; the
+5-attempts/15-minutes rate limit and the Funnel/port-forward prohibition are unchanged.

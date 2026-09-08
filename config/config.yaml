@@ -175,6 +175,7 @@ api:
   # memory -- never stored here in plaintext) rather than editing passcode_hash by hand.
   remote_access:
     enabled: true
+    session_ttl_days: 30   # 2026-09-08: DB-persisted sessions (migration 0032); restarts no longer log the phone out
     passcode_hash: ""
     token_required_for_writes: true
     trusted_local_only: true

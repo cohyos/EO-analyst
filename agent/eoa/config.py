@@ -280,6 +280,11 @@ class RemoteAccessCfg(BaseModel):
     passcode_hash: str = ""
     token_required_for_writes: bool = True
     trusted_local_only: bool = True
+    #: 2026-09-08: sessions are persisted in ``remote_sessions`` (migration 0032) so an API
+    #: restart no longer logs the phone out; 30 days is proportionate for a tailnet-only gate
+    #: behind Tailscale's own device auth (ADR-008 addendum).
+    session_ttl_days: int = 30
+
 
 
 class ApiCfg(BaseModel):

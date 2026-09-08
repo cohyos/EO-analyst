@@ -46,7 +46,8 @@ log = structlog.get_logger(__name__)
 router = APIRouter(tags=["auth"])
 
 SESSION_COOKIE_NAME = "eoa_session"
-SESSION_TTL_SECONDS = 12 * 60 * 60  # 12h, per ADR-008
+SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days (ADR-008 addendum 2026-09-08); overridable via
+# api.remote_access.session_ttl_days -- see session_ttl_seconds()
 
 RATE_LIMIT_MAX_ATTEMPTS = 5
 RATE_LIMIT_WINDOW_SECONDS = 15 * 60  # 5 attempts / 15 min per IP
@@ -150,33 +151,88 @@ def reset_passcode_cache() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Server-side session store (in-memory, single-process -- matches this project's one-uvicorn-
-# process deployment; ADR-004). 12h expiry, no persistence across a restart by design.
+# Server-side session store. 2026-09-08 (user decision): persisted in the ``remote_sessions``
+# table (migration 0032) so an API restart no longer logs the phone out; the process-local dict
+# is a read cache and the fallback when the DB is unavailable (unit tests without a DB, a
+# transient outage -- a session created during an outage simply does not survive a restart).
+# Only SHA-256(token) is stored server-side; the cookie carries the token itself.
 # ---------------------------------------------------------------------------
 
 _sessions_lock = threading.Lock()
 _sessions: dict[str, datetime] = {}
 
 
+def session_ttl_seconds() -> int:
+    try:
+        days = int(settings().api.remote_access.session_ttl_days)
+        if days > 0:
+            return days * 24 * 60 * 60
+    except Exception:  # pragma: no cover -- settings unavailable in some test harnesses
+        pass
+    return SESSION_TTL_SECONDS
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _db_exec(sql: str, params: tuple[Any, ...], *, fetch: bool = False) -> Any:
+    """Run one statement against the sessions table; ``None`` when the DB is unavailable."""
+    try:
+        from eoa.db import connection
+
+        with connection(timeout=2) as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            if not fetch:
+                return True
+            row = cur.fetchone()
+            # the pool's default row factory yields dicts; normalise to a tuple for callers
+            return tuple(row.values()) if isinstance(row, dict) else row
+    except Exception as exc:  # DB down / not migrated / no DATABASE_URL (tests)
+        log.debug("auth.session_db_unavailable", error=str(exc)[:120])
+        return None
+
+
 def create_session() -> tuple[str, datetime]:
     token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(UTC) + timedelta(seconds=SESSION_TTL_SECONDS)
+    expires_at = datetime.now(UTC) + timedelta(seconds=session_ttl_seconds())
     with _sessions_lock:
         _sessions[token] = expires_at
+    _db_exec(
+        "INSERT INTO remote_sessions (token_hash, expires_at) VALUES (%s, %s) "
+        "ON CONFLICT (token_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at",
+        (_token_hash(token), expires_at),
+    )
+    _db_exec("DELETE FROM remote_sessions WHERE expires_at < now()", ())
     return token, expires_at
 
 
 def is_valid_session(token: str | None) -> bool:
     if not token:
         return False
+    now = datetime.now(UTC)
     with _sessions_lock:
         expires_at = _sessions.get(token)
-        if expires_at is None:
-            return False
-        if expires_at < datetime.now(UTC):
-            del _sessions[token]
-            return False
-        return True
+        if expires_at is not None:
+            if expires_at < now:
+                del _sessions[token]
+                return False
+            return True
+    row = _db_exec(
+        "SELECT expires_at FROM remote_sessions WHERE token_hash = %s", (_token_hash(token),), fetch=True
+    )
+    if not row:
+        return False
+    expires_at = row[0]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < now:
+        _db_exec("DELETE FROM remote_sessions WHERE token_hash = %s", (_token_hash(token),))
+        return False
+    with _sessions_lock:
+        _sessions[token] = expires_at
+    _db_exec("UPDATE remote_sessions SET last_seen_at = now() WHERE token_hash = %s", (_token_hash(token),))
+    return True
 
 
 def destroy_session(token: str | None) -> None:
@@ -184,10 +240,11 @@ def destroy_session(token: str | None) -> None:
         return
     with _sessions_lock:
         _sessions.pop(token, None)
+    _db_exec("DELETE FROM remote_sessions WHERE token_hash = %s", (_token_hash(token),))
 
 
 def clear_all_sessions() -> None:
-    """Test hook."""
+    """Test hook (process-local cache only; tests never reach the DB)."""
     with _sessions_lock:
         _sessions.clear()
 
@@ -429,7 +486,7 @@ def login(request: Request, response: Response, body: LoginRequest) -> dict:
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
-        max_age=SESSION_TTL_SECONDS,
+        max_age=session_ttl_seconds(),
         # `expires` must be a `datetime` (Starlette formats it as an HTTP-date itself) or omitted
         # entirely -- NOT an int: `http.cookies.Morsel` treats an integer `expires` as a *delta in
         # seconds from now* (the same semantics as `max_age`), not as a Unix timestamp. Passing
