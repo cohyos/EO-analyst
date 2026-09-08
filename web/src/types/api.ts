@@ -826,12 +826,25 @@ export interface NightSummary {
   new_forecasts: number;
 }
 
-// U2: backs the Morning "שגיאות אחרונות" drawer (agent/eoa/api/services.py `recent_errors`).
+// U2/UI-ERRORS (docs/qa/content_review/UI-ERRORS.md): backs the Morning "שגיאות בריצה האחרונה"
+// panel (agent/eoa/api/services.py `recent_errors`). Every field beyond id/job_id/stage/message/at
+// is computed server-side at read time from `run_log.detail` (never persisted separately), so a
+// classification-table improvement there applies retroactively to historical rows too.
 export interface RecentErrorLogEntry {
   id: number;
   job_id: number | null;
   stage: string | null;
   message: string;
+  /** Exception class name, e.g. "KeyError" — null when it could not be determined at all. */
+  error_type: string | null;
+  /** Last 5 stack frames as "file:line:function" — no local variable values. */
+  traceback_tail: string[];
+  item_id: number | null;
+  /** Deep link for this error: an item, an investigation, or the run's own replay timeline. */
+  link: string | null;
+  cause_he: string;
+  action_he: string;
+  impact_he: string;
   at: string | null;
 }
 
@@ -1113,6 +1126,11 @@ export interface PipelineStageInfo {
   minutes: number | null;
   last_event: string | null;
   last_at: string | null;
+  // agent/eoa/api/services.py `_stage_timeline_from_log`: the terminal `run_log` row's `detail`
+  // JSON, stripped of `minutes`/`stage`. For a `failed` stage this carries `{"error": "<exc>"[:300]}`
+  // (agent/eoa/orchestrator/jobs.py line ~145) -- the UI QA fix (2026-09-08) surfaces it as the
+  // failed stage's legend tooltip so an analyst can see *why* a stage failed without reading logs.
+  detail?: Record<string, unknown> | null;
 }
 
 export interface PipelineLastRun {

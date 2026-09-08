@@ -60,6 +60,9 @@ export interface StageTimelineEntry {
   label: string;
   status: StageStatus;
   minutes: number | null;
+  // From `PipelineStageInfo.detail.error` -- only ever populated for a `failed` stage (see
+  // agent/eoa/orchestrator/jobs.py's `except` handler that logs the `error` run_log event).
+  error: string | null;
 }
 
 /**
@@ -79,13 +82,25 @@ export function buildStageTimeline(
 
   return orderedKeys.map((key) => {
     const info: PipelineStageInfo = stages[key];
+    const rawError = info.detail?.error;
     return {
       key,
       label: stageLabelHe(key),
       status: info.status,
       minutes: info.minutes,
+      error: typeof rawError === "string" && rawError.length > 0 ? rawError : null,
     };
   });
+}
+
+/**
+ * UI QA fix (2026-09-08, docs/qa/content_review/UI-TIMELINE.md): the legend used to render
+ * "N דק׳" -- the geresh (U+05F3) after a bare Hebrew "דק" renders, in the app's font stack, as a
+ * glyph indistinguishable from a yod, so "14.5 דק׳" read as "14.5 דקי". The spelled-out word has
+ * no such ambiguity, so every duration in this component uses it instead of the abbreviation.
+ */
+export function formatStageMinutes(minutes: number): string {
+  return `${minutes} דקות`;
 }
 
 export const STAGE_STATUS_LABEL_HE: Record<StageStatus, string> = {

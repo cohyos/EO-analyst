@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildStageTimeline, stageLabelHe, STAGE_ORDER } from "./pipelineTimeline";
+import { buildStageTimeline, formatStageMinutes, stageLabelHe, STAGE_ORDER } from "./pipelineTimeline";
 import type { PipelineLastRun, PipelineStageInfo } from "@/types/api";
 
 function stage(overrides: Partial<PipelineStageInfo> = {}): PipelineStageInfo {
@@ -79,6 +79,48 @@ describe("buildStageTimeline", () => {
     expect(entries.find((e) => e.key === "mystery_stage")?.label).toBe("mystery stage");
   });
 
+  it("carries a failed stage's error detail through as `error`, and leaves it null otherwise", () => {
+    // UI QA fix (2026-09-08, docs/qa/content_review/UI-TIMELINE.md): the legend used to give no
+    // hint which stage failed or why. `detail.error` comes from agent/eoa/orchestrator/jobs.py's
+    // `except` handler (`{"error": str(exc)[:300], "minutes": ...}`) via
+    // agent/eoa/api/services.py's `_stage_timeline_from_log`.
+    const lastRun: PipelineLastRun = {
+      started_at: null,
+      finished_at: null,
+      state: "partial",
+      stages: {
+        ingest: stage({ status: "done" }),
+        classify: stage({
+          status: "failed",
+          minutes: 0.4,
+          detail: { error: "requests.exceptions.ConnectionError: ..." },
+        }),
+      },
+    };
+    const entries = buildStageTimeline(lastRun);
+    expect(entries.find((e) => e.key === "ingest")?.error).toBeNull();
+    expect(entries.find((e) => e.key === "classify")?.error).toBe(
+      "requests.exceptions.ConnectionError: ...",
+    );
+  });
+
+  it("treats a missing, empty, or non-string detail.error as no error", () => {
+    const lastRun: PipelineLastRun = {
+      started_at: null,
+      finished_at: null,
+      state: "done",
+      stages: {
+        ingest: stage({ detail: undefined }),
+        classify: stage({ detail: {} }),
+        triage: stage({ detail: { error: "" } }),
+      },
+    };
+    const entries = buildStageTimeline(lastRun);
+    expect(entries.find((e) => e.key === "ingest")?.error).toBeNull();
+    expect(entries.find((e) => e.key === "classify")?.error).toBeNull();
+    expect(entries.find((e) => e.key === "triage")?.error).toBeNull();
+  });
+
   it("has a Hebrew label for every stage in the canonical STAGE_ORDER, including post_tenders_catchup", () => {
     // Q5-5: agent/eoa/orchestrator/jobs.py's STAGE_ORDER runs "post_tenders_catchup" between
     // "tenders" and "report" -- it was missing from STAGE_LABEL_HE, so the morning replay
@@ -96,5 +138,18 @@ describe("stageLabelHe", () => {
 
   it("humanises (replaces underscores with spaces) an unknown stage key instead of returning it raw", () => {
     expect(stageLabelHe("some_new_stage")).toBe("some new stage");
+  });
+});
+
+describe("formatStageMinutes", () => {
+  // UI QA fix (2026-09-08, docs/qa/content_review/UI-TIMELINE.md): "דק׳" (the geresh abbreviation)
+  // rendered in the app's font stack as a glyph indistinguishable from a yod ("14.5 דקי"). Every
+  // duration in the timeline now spells the word out instead.
+  it("spells out the word 'דקות' instead of using the geresh abbreviation", () => {
+    expect(formatStageMinutes(14.5)).toBe("14.5 דקות");
+  });
+
+  it("spells it out for sub-one-minute durations too", () => {
+    expect(formatStageMinutes(0.4)).toBe("0.4 דקות");
   });
 });
