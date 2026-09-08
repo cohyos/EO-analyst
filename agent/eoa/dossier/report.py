@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,14 @@ from eoa.dossier.extract import DroppedField, build_dossier
 from eoa.dossier.plan import PlanResult, run_plan
 from eoa.errors import LLMOutputError
 from eoa.llm.schemas.product_dossier import DealRow, ProductDossierOut
-from eoa.report.docx_builder import build_docx, render_html, render_markdown, save_docx, validate_docx
+from eoa.report.docx_builder import (
+    _EVENT_KIND_LABELS_HE,
+    build_docx,
+    render_html,
+    render_markdown,
+    save_docx,
+    validate_docx,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -272,10 +280,41 @@ def _performance_table(dossier: ProductDossierOut) -> dict[str, Any]:
     return {"title_he": "ביצועים (מוצהר מול נמדד)", "headers": headers, "rows": rows}
 
 
+#: PD-fix-2 item 3: a `date`/`published_at` value can carry a time-of-day and timezone offset
+#: (e.g. ``"2026-09-02 09:04:00+03:00"``, backfilled from a cited item's own `published_at` --
+#: `eoa.dossier.extract._ground_deal_row`, not owned by this round) -- the deals table shows a
+#: date only, never a time/timezone. Rendering-only: the stored value itself is untouched.
+_DATE_ONLY_RE = re.compile(r"^(\d{4}(?:-\d{2}(?:-\d{2})?)?)")
+
+
+def _date_only(value: str | None) -> str | None:
+    if not value:
+        return value
+    m = _DATE_ONLY_RE.match(value.strip())
+    return m.group(1) if m else value
+
+
+#: PD-fix-2 item 3: Hebrew label for a deal's `kind` -- reuses `docx_builder._EVENT_KIND_LABELS_HE`
+#: for the one kind the two enums share (`contract_award`), extended with the deal-only kinds that
+#: enum doesn't cover; an unrecognised kind falls back to the raw value (same convention as every
+#: other `_EVENT_KIND_LABELS_HE(...).get(kind, kind)` call site in this codebase).
+_DEAL_KIND_LABELS_HE_EXTRA = {
+    "FMS": "מכירת ציוד ביטחוני זר (FMS)",
+    "framework": "הסכם מסגרת",
+    "option": "אופציה בחוזה",
+    "export_license": "רישיון ייצוא",
+}
+
+
+def _deal_kind_label(kind: str) -> str:
+    return _EVENT_KIND_LABELS_HE.get(kind) or _DEAL_KIND_LABELS_HE_EXTRA.get(kind) or kind
+
+
 def _deal_date_cell(r: DealRow) -> str:
     """PD-fix item 3: a date backfilled from the cited source's own publish date (never the actual
-    deal-closing date) says so, rather than reading as indistinguishable from one that was."""
-    text = _cell(r.date)
+    deal-closing date) says so, rather than reading as indistinguishable from one that was. PD-fix-2
+    item 3: rendered as a date only -- never a time/timezone."""
+    text = _cell(_date_only(r.date))
     if r.date and r.date_kind == "published":
         return f"{text} (תאריך פרסום)"
     return text
@@ -305,7 +344,7 @@ def _deals_table(dossier: ProductDossierOut) -> dict[str, Any]:
             # PD-fix item 3: a region-only source ("Asia-Pacific country") never fabricates a
             # specific country here -- `country` is empty and `region_he` carries the region text.
             _cell(r.country or r.region_he),
-            r.kind,
+            _deal_kind_label(r.kind),
             _deal_amount_cell(r),
             _cite_cell(r.cites),
         ]

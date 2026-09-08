@@ -14,6 +14,7 @@ import {
 } from "@/components/dossiers/DossierFact";
 import { DossierRunHistoryList } from "@/components/dossiers/DossierRunHistoryList";
 import { DossierProgressList } from "@/components/dossiers/DossierProgressBanner";
+import { eventKindLabel } from "@/components/entities/eventKindLabel";
 import type { CitationLike } from "@/components/CitationText";
 import { formatDateTime } from "@/lib/time";
 import { useI18n, useT } from "@/i18n";
@@ -28,6 +29,36 @@ import type {
   DossierTenderRef,
   DossierVersionRow,
 } from "@/types/api";
+
+/** PD-fix-2 (2026-09-08, item 3): Hebrew label for a deal's `kind` -- reuses the shared
+ * event-kind map (`eventKindLabel`, `@/components/entities/eventKindLabel`) for the one kind the
+ * two enums share (`contract_award`), extended with the deal-only kinds that map doesn't cover;
+ * an unrecognised kind falls back to the raw value, same as `eventKindLabel` itself. Mirrors
+ * `agent/eoa/dossier/report.py`'s `_deal_kind_label` so the docx/md/html renderer and this page
+ * agree on the same Hebrew text. */
+const DEAL_KIND_LABEL_HE_EXTRA: Record<string, string> = {
+  FMS: "מכירת ציוד ביטחוני זר (FMS)",
+  framework: "הסכם מסגרת",
+  option: "אופציה בחוזה",
+  export_license: "רישיון ייצוא",
+};
+
+function dealKindLabel(kind: string | null | undefined): string {
+  if (!kind) return "אחר";
+  return DEAL_KIND_LABEL_HE_EXTRA[kind] ?? eventKindLabel(kind);
+}
+
+/** PD-fix-2 (2026-09-08, item 3): a deal's `date`/backfilled `published_at` can carry a
+ * time-of-day and timezone offset (e.g. `"2026-09-02 09:04:00+03:00"`); the deals table shows a
+ * date only. Deliberately a plain prefix match (not `formatDate`/`Intl`+timezone conversion,
+ * `@/lib/time`) -- a deal date can be partial-precision ("2021-06", year+month only, no day), and
+ * reformatting/TZ-shifting a partial date risks changing what it says; this only strips a
+ * trailing time/offset when one is present, exactly mirroring `report.py`'s `_date_only`. */
+function dealDateOnly(value: string | null | undefined): string | null {
+  if (!value) return value ?? null;
+  const m = /^(\d{4}(?:-\d{2}(?:-\d{2})?)?)/.exec(value.trim());
+  return m ? m[1] : value;
+}
 
 /**
  * PD-ui (docs/PLAN_PRODUCT_DOSSIER.md section 6): `/dossiers/:key` -- header (identity, status,
@@ -113,16 +144,35 @@ export function DossierDetailPage() {
   ];
 
   const dealColumns: DossierTableColumn<DossierDealRow>[] = [
-    { key: "date", label: t("dossiers.table.colDate"), render: (r) => <DossierPlainText text={r.date} /> },
+    {
+      key: "date",
+      label: t("dossiers.table.colDate"),
+      render: (r) => {
+        const text = dealDateOnly(r.date);
+        // PD-fix item 3: a date backfilled from the cited source's own publish date (never the
+        // actual deal-closing date) says so, rather than reading as indistinguishable from one
+        // that was -- mirrors `report.py`'s `_deal_date_cell`.
+        const suffix = r.date && r.date_kind === "published" ? " (תאריך פרסום)" : "";
+        return <DossierPlainText text={text ? `${text}${suffix}` : null} />;
+      },
+    },
     {
       key: "customer",
       label: t("dossiers.table.colCustomer"),
-      render: (r) => <DossierPlainText text={[r.customer, r.country].filter(Boolean).join(" · ") || null} />,
+      render: (r) => {
+        // PD-fix-2 item 3: a region-only source ("Asia-Pacific country") never fabricates a
+        // specific country here -- when `country` is empty, `region_he` carries the region text.
+        const place = r.country || r.region_he;
+        return <DossierPlainText text={[r.customer, place].filter(Boolean).join(" · ") || null} />;
+      },
     },
     {
       key: "kind",
       label: t("dossiers.table.colKind"),
-      render: (r) => <DossierPlainText text={r.platform ? `${r.kind} (${r.platform})` : r.kind} />,
+      render: (r) => {
+        const label = dealKindLabel(r.kind);
+        return <DossierPlainText text={r.platform ? `${label} (${r.platform})` : label} />;
+      },
     },
     {
       key: "amount",

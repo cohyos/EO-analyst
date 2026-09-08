@@ -1521,8 +1521,16 @@ export type DossierDealKind = "contract_award" | "FMS" | "framework" | "option" 
 
 export interface DossierDealRow {
   date: string | null;
+  /** PD-fix (2026-09-08, item 3): "deal" (the deal's own date) vs "published" (backfilled from
+   * the cited source's own publish date -- never indistinguishable from an actual deal-closing
+   * date). Optional: absent on data persisted before this field existed. */
+  date_kind?: "deal" | "published" | string | null;
   customer: string | null;
   country: string | null;
+  /** PD-fix (2026-09-08, item 3): set instead of `country` when a source names only a broader
+   * region ("Asia-Pacific country") rather than a specific country. Optional: absent on data
+   * persisted before this field existed. */
+  region_he?: string | null;
   kind: DossierDealKind;
   amount: string | null;
   currency: string | null;

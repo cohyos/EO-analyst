@@ -108,6 +108,46 @@ def test_run_plan_dedupes_same_url_across_topics(monkeypatch: pytest.MonkeyPatch
     assert result.findings[0].source_ns[0]["n"] == result.findings[1].source_ns[0]["n"]
 
 
+def test_run_plan_reuses_item_derived_registry_row_for_same_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PD-fix-2 item 4: a topic's own web search can re-read a URL the corpus already knows as a
+    DB item (e.g. a press item already in ``items`` that a "deals" investigation finds again) --
+    that source is item-derived and already carries the item's real title/url from
+    ``eoa.dossier.corpus``. The dedup seed must reuse that existing row, not mint a second, weaker
+    "web" entry (whose title would fall back to a bare hostname) for the identical page."""
+    item_url = "https://www.israeldefense.co.il/en/node/70529"
+    corpus = _corpus(
+        registry=[
+            {
+                "n": 1,
+                "kind": "item",
+                "id": 93,
+                "title": "Elbit Systems Lands $270M ISR Deal",
+                "url": item_url,
+                "source_name": "Israel Defense (English)",
+            }
+        ]
+    )
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        return _inv(
+            read_sources=[{"url": item_url, "title": ""}],
+            read_summaries=[{"url": item_url, "title": "", "summary": "עסקה עבור SPECTRO XR."}],
+        )
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    result = dossier_plan.run_plan(corpus, max_topics=1)
+
+    web_rows = [r for r in corpus.registry if r["kind"] == "web"]
+    assert web_rows == []  # no second, weaker entry minted for the same URL
+    assert len(corpus.registry) == 1  # the original item row is untouched, not duplicated
+    assert len(result.findings[0].source_ns) == 1
+    reused = result.findings[0].source_ns[0]
+    assert reused["n"] == 1
+    assert reused["kind"] == "item"
+    assert reused["title"] == "Elbit Systems Lands $270M ISR Deal"
+    assert reused["url"] == item_url
+
+
 def test_run_plan_drops_irrelevant_page(monkeypatch: pytest.MonkeyPatch) -> None:
     """A page whose read summary never mentions the product/vendor/alias at all (e.g. the live
     French WeTransfer forum thread) is dropped -- never appended to the registry, never citable."""

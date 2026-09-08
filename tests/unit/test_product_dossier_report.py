@@ -220,3 +220,57 @@ def test_deals_table_uses_region_when_country_empty() -> None:
     )
     tbl = dossier_report._deals_table(dossier)
     assert "מדינה באסיה-פסיפיק" in tbl["rows"][0]
+
+
+# --------------------------------------------------------------------------
+# PD-fix-2 item 3: date-only rendering + Hebrew deal-kind labels
+# --------------------------------------------------------------------------
+
+
+def test_date_only_strips_time_and_timezone() -> None:
+    assert dossier_report._date_only("2026-09-02 09:04:00+03:00") == "2026-09-02"
+    assert dossier_report._date_only("2026-09-02T09:04:00+03:00") == "2026-09-02"
+
+
+def test_date_only_preserves_partial_precision_dates() -> None:
+    assert dossier_report._date_only("2021-06") == "2021-06"
+    assert dossier_report._date_only("2021") == "2021"
+
+
+def test_date_only_passes_through_none_and_non_date_text() -> None:
+    assert dossier_report._date_only(None) is None
+    assert dossier_report._date_only("לא ידוע") == "לא ידוע"
+
+
+def test_deal_date_cell_strips_time_from_published_fallback() -> None:
+    deal = DealRow(customer="x", date="2026-09-02 09:04:00+03:00", date_kind="published")
+    cell = dossier_report._deal_date_cell(deal)
+    assert "2026-09-02" in cell
+    assert "09:04" not in cell
+    assert "תאריך פרסום" in cell
+
+
+def test_deal_kind_label_reuses_shared_contract_award_label() -> None:
+    from eoa.report.docx_builder import _EVENT_KIND_LABELS_HE
+
+    assert dossier_report._deal_kind_label("contract_award") == _EVENT_KIND_LABELS_HE["contract_award"]
+
+
+def test_deal_kind_label_covers_deal_only_kinds() -> None:
+    for kind in ("FMS", "framework", "option", "export_license"):
+        label = dossier_report._deal_kind_label(kind)
+        assert label and label != kind
+
+
+def test_deal_kind_label_falls_back_to_raw_kind_when_unrecognised() -> None:
+    assert dossier_report._deal_kind_label("mystery_kind") == "mystery_kind"
+
+
+def test_deals_table_renders_hebrew_kind_label_not_raw_kind() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="X"),
+        deals=[DealRow(customer="Some AF", kind="contract_award", cites=[1])],
+    )
+    tbl = dossier_report._deals_table(dossier)
+    assert tbl["rows"][0][3] == dossier_report._deal_kind_label("contract_award")
+    assert tbl["rows"][0][3] != "contract_award"

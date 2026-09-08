@@ -316,6 +316,16 @@ def run_plan(
     own patents-then-db-records convention (here: DB-then-web). A page already cited (same
     normalized URL, any topic) is never re-numbered -- the existing row is reused.
 
+    PD-fix-2 (2026-09-08, item 4): the dedup-by-URL seed now covers **every** ``corpus.registry``
+    row that carries a ``url`` -- not just an earlier ``"web"``-kind one. A DB item/event/patent/
+    tender the corpus already knows about often carries the very same URL a topic's own web search
+    then reads (e.g. a press item already in ``items`` that a "deals" investigation also finds via
+    search) -- that source is *item-derived*: it already has the item's real ``title``/``url`` from
+    ``eoa.dossier.corpus``, strictly better than a fresh web-read stub (whose title falls back to a
+    bare hostname when the read itself returns none, see :func:`_host` below). Reusing the existing
+    DB-kind row's own ``n`` for that URL, instead of minting a second, weaker "web" entry for the
+    exact same page, is what keeps an item-derived source carrying the item's own url/title.
+
     ``on_progress`` (item 5), when given, is called with the full progress list (one entry per
     planned topic, ``TOPICS`` order) once up front and again after every topic's status changes --
     the caller (``eoa.dossier.report.build_product_dossier``) uses it to persist a live per-topic
@@ -327,9 +337,13 @@ def run_plan(
     aliases_he = ", ".join(corpus.aliases) or "אין"
     topics = TOPICS[: max(cap, 0)]
 
+    # PD-fix-2 item 4: seed the dedup set from every registry row that already has a url (item/
+    # event/patent/tender/web -- not just "web"), so a topic re-reading a URL the corpus already
+    # knows as a DB item reuses that item-derived row (its real title/url) instead of minting a
+    # second, weaker "web" entry for the same page.
     seen_by_normalized_url: dict[str, ProgressEntry] = {}
     for row in corpus.registry:
-        if row.get("kind") == "web" and row.get("url"):
+        if row.get("url"):
             seen_by_normalized_url.setdefault(normalize_url(row["url"]), row)
 
     progress = _new_progress(topics)

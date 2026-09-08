@@ -252,4 +252,45 @@ describe("real.ts dossier normalizers (PD-ui)", () => {
       { topic: "performance", title_he: "", status: "pending", seconds: null, sources_found: null },
     ]);
   });
+
+  it("PD-fix-2 item 3: normalizes a deal row's date_kind/region_he through", async () => {
+    stubFetchJson({
+      product_key: "elbit-systems-spectro-xr",
+      product_name: "SPECTRO XR",
+      vendor: "Elbit Systems",
+      aliases: [],
+      dossiers: [],
+      latest: {
+        identity: { product_name: "SPECTRO XR", cites: [] },
+        deals: [
+          {
+            date: "2026-09-02",
+            date_kind: "published",
+            customer: "לקוח בינלאומי (לא מזוהה)",
+            country: "",
+            region_he: "אסיה-פסיפיק",
+            kind: "FMS",
+            amount: "כ-80 מיליון דולר",
+            currency: "USD",
+            quantity: null,
+            platform: null,
+            cites: [1],
+            confidence: 0.7,
+          },
+          // a deal row persisted before date_kind/region_he existed -- must not throw.
+          { date: null, customer: "X", country: "IL", kind: "contract_award", cites: [] },
+        ],
+        sources: [],
+      },
+      pending_job: null,
+    });
+    const { realApi: api } = await import("./real");
+    const detail = await api.getDossier("elbit-systems-spectro-xr");
+    expect(detail.latest?.deals[0]).toMatchObject({
+      date_kind: "published",
+      region_he: "אסיה-פסיפיק",
+      country: "",
+    });
+    expect(detail.latest?.deals[1]).toMatchObject({ date_kind: null, region_he: null });
+  });
 });

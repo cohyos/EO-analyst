@@ -783,8 +783,13 @@ function normalizeDossierDealRow(raw: Partial<DossierDealRow> | null | undefined
   const r = raw ?? {};
   return {
     date: r.date ?? null,
+    // PD-fix-2 (2026-09-08, item 3): pass through date_kind/region_he -- without this the deal
+    // table can never distinguish a backfilled "published" date from a real deal date, or show a
+    // region-only source's region instead of a blank/guessed country.
+    date_kind: r.date_kind ?? null,
     customer: r.customer ?? null,
     country: r.country ?? null,
+    region_he: r.region_he ?? null,
     kind: str(r.kind),
     amount: r.amount ?? null,
     currency: r.currency ?? null,

@@ -174,6 +174,49 @@ describe("DossierDetailPage (PD-ui)", () => {
     expect(screen.getByTestId("dossier-progress-topic-regulatory")).toHaveTextContent("רגולציה וייצוא");
   });
 
+  it("PD-fix-2 item 3: deals table shows date-only, Hebrew kind label, and region fallback", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          deals: [
+            {
+              date: "2026-09-02 09:04:00+03:00",
+              date_kind: "published",
+              customer: "לקוח בינלאומי (לא מזוהה)",
+              country: "",
+              region_he: "אסיה-פסיפיק",
+              kind: "FMS",
+              amount: "כ-80 מיליון דולר",
+              currency: "USD",
+              quantity: null,
+              platform: null,
+              cites: [1],
+              confidence: 0.7,
+            },
+          ],
+          sources: [
+            { n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null },
+          ],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+
+    // The date/kind-label text can be split across bidi-run spans (`renderBidiRuns`), so assert
+    // on the page's own aggregate text rather than a single element's text content.
+    await waitFor(() => expect(document.body.textContent ?? "").toContain("2026-09-02"));
+    const bodyText = document.body.textContent ?? "";
+    // date only -- no time-of-day/timezone -- with the "published" (backfilled) marker.
+    expect(bodyText).toContain("תאריך פרסום");
+    expect(bodyText).not.toContain("09:04");
+    // region_he shown in place of an empty country.
+    expect(bodyText).toContain("אסיה-פסיפיק");
+    // Hebrew label for a deal-only kind (FMS), not the raw enum value alone.
+    expect(bodyText).toContain("מכירת ציוד ביטחוני זר");
+  });
+
   it("shows a not-found state for an unknown product key", async () => {
     getDossier.mockRejectedValue(new Error("not_found"));
     renderPage("unknown");

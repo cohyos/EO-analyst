@@ -10,6 +10,7 @@ from eoa.dossier.diff import compute_diff
 from eoa.llm.schemas.product_dossier import (
     DealRow,
     IdentityBlock,
+    PerformanceRow,
     PriceRow,
     ProductDossierOut,
     SpecRow,
@@ -82,6 +83,170 @@ def test_new_price_point_detected() -> None:
     current = _current(pricing=[PriceRow(figure="$2M", basis_he="ליחידה", source_kind="contract", cites=[4])])
     changes = compute_diff(previous, current)
     assert any("$2M" in c.text_he for c in changes)
+
+
+# --------------------------------------------------------------------------
+# PD-fix-2 item 1: deal identity is (customer, amount, kind) only -- never date/date_kind/region.
+# Reproduces the live SPECTRO XR false positive: product_dossiers.id=1 -> id=2, the $270M and $80M
+# deals gained a date (backfilled from a source's published_at, or genuinely discovered) between
+# runs and were wrongly reported as "new deals" under the old (customer, date, kind) key.
+# --------------------------------------------------------------------------
+
+
+def test_same_deal_with_newly_backfilled_date_not_reported_as_new_deal() -> None:
+    previous = {
+        "deals": [
+            {
+                "date": None,
+                "kind": "contract_award",
+                "amount": "כ-270 מיליון דולר, לביצוע על פני תקופה של עד שש שנים",
+                "customer": "לקוח בינלאומי (לא מזוהה)",
+            }
+        ]
+    }
+    current = _current(
+        deals=[
+            DealRow(
+                date="2026-09-02",
+                date_kind="published",
+                kind="contract_award",
+                amount="כ-270 מיליון דולר, לביצוע על פני תקופה של עד שש שנים",
+                amount_value=270_000_000.0,
+                customer="לקוח בינלאומי (לא מזוהה)",
+                cites=[1],
+            )
+        ]
+    )
+    changes = compute_diff(previous, current)
+    assert not any("עסקה חדשה" in c.text_he for c in changes)
+    assert any("נוסף תאריך" in c.text_he for c in changes)
+
+
+def test_same_deal_with_only_region_change_not_reported_at_all() -> None:
+    previous = {
+        "deals": [
+            {
+                "date": "2021-06",
+                "kind": "contract_award",
+                "amount": "כ-80 מיליון דולר",
+                "customer": "מדינה באזור אסיה-פסיפיק (לא מזוהה)",
+            }
+        ]
+    }
+    current = _current(
+        deals=[
+            DealRow(
+                date="2021-06",
+                date_kind="deal",
+                region_he="אסיה-פסיפיק",
+                kind="contract_award",
+                amount="כ-80 מיליון דולר",
+                amount_value=80_000_000.0,
+                customer="מדינה באזור אסיה-פסיפיק (לא מזוהה)",
+                cites=[1],
+            )
+        ]
+    )
+    assert compute_diff(previous, current) == []
+
+
+def test_deal_customer_key_is_case_and_whitespace_insensitive() -> None:
+    previous = {
+        "deals": [{"date": None, "kind": "contract_award", "amount": "$1M", "customer": "US Air Force"}]
+    }
+    current = _current(
+        deals=[DealRow(customer="  us   air force  ", kind="contract_award", amount="$1M", cites=[1])]
+    )
+    assert compute_diff(previous, current) == []
+
+
+def test_deal_key_ignores_previous_run_missing_amount_value_field() -> None:
+    """A previous dossier persisted before ``amount_value`` existed (a raw dict with no such key)
+    must still key-match the current, already-grounded row for the same published amount text."""
+    previous = {
+        "deals": [
+            {"date": None, "kind": "contract_award", "amount": "מעל 90 מיליון דולר", "customer": "X"}
+        ]
+    }
+    current = _current(
+        deals=[
+            DealRow(
+                customer="X", kind="contract_award", amount="מעל 90 מיליון דולר", amount_value=90_000_000.0,
+                cites=[1],
+            )
+        ]
+    )
+    assert compute_diff(previous, current) == []
+
+
+def test_genuinely_different_amount_is_still_a_new_deal() -> None:
+    previous = {"deals": [{"date": None, "kind": "contract_award", "amount": "$1M", "customer": "X"}]}
+    current = _current(deals=[DealRow(customer="X", kind="contract_award", amount="$5M", cites=[1])])
+    changes = compute_diff(previous, current)
+    assert any("עסקה חדשה" in c.text_he for c in changes)
+
+
+# --------------------------------------------------------------------------
+# PD-fix-2 item 2: token-overlap "same value" -- mere rewording must not read as a change.
+# --------------------------------------------------------------------------
+
+
+def test_spec_reworded_value_not_reported_as_change() -> None:
+    previous = {
+        "specifications": [
+            {"parameter_he": "חיישנים", "value": "חיישני IMU בסיבים אופטיים על הגימבל"}
+        ]
+    }
+    current = _current(
+        specifications=[
+            SpecRow(
+                parameter_he="חיישנים",
+                value="חיישני IMU בסיבים אופטיים המורכבים על הגימבל",
+                cites=[2],
+            )
+        ]
+    )
+    assert compute_diff(previous, current) == []
+
+
+def test_spec_genuinely_different_value_still_reported() -> None:
+    previous = {"specifications": [{"parameter_he": "משקל", "value": '20 ק"ג'}]}
+    current = _current(specifications=[SpecRow(parameter_he="משקל", value='95 ק"ג', cites=[2])])
+    changes = compute_diff(previous, current)
+    assert len(changes) == 1
+    assert "20" in changes[0].text_he and "95" in changes[0].text_he
+
+
+def test_performance_reworded_claimed_value_not_reported() -> None:
+    previous = {
+        "performance": [
+            {"metric_he": "טווח זיהוי", "claimed_value": "עד 20 ק\"מ ביום בהיר"}
+        ]
+    }
+    current = _current(
+        performance=[
+            PerformanceRow(metric_he="טווח זיהוי", claimed_value="עד 20 ק\"מ ביום בהיר וללא ערפל", cites=[3])
+        ]
+    )
+    assert compute_diff(previous, current) == []
+
+
+def test_performance_genuinely_different_claimed_value_reported() -> None:
+    previous = {"performance": [{"metric_he": "טווח זיהוי", "claimed_value": '20 ק"מ'}]}
+    current = _current(
+        performance=[PerformanceRow(metric_he="טווח זיהוי", claimed_value='36 ק"מ', cites=[3])]
+    )
+    changes = compute_diff(previous, current)
+    assert any("טווח זיהוי" in c.text_he and "20" in c.text_he and "36" in c.text_he for c in changes)
+
+
+def test_performance_new_metric_detected() -> None:
+    previous = {"performance": []}
+    current = _current(
+        performance=[PerformanceRow(metric_he="קצב זיהוי", claimed_value="95%", cites=[3])]
+    )
+    changes = compute_diff(previous, current)
+    assert any("קצב זיהוי" in c.text_he for c in changes)
 
 
 def test_deals_reported_before_specifications() -> None:
