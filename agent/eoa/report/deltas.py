@@ -305,7 +305,11 @@ def _build_summary_he(kind: str, item_delta: ItemDelta, trend_deltas: list[Trend
         appeared = sum(1 for t in trend_deltas if t.status == "appeared")
         strengthened = sum(1 for t in trend_deltas if t.status == "strengthened")
         weakened = sum(1 for t in trend_deltas if t.status == "weakened")
-        vanished = sum(1 for t in trend_deltas if t.status == "vanished")
+        # count only what the renderer will actually list (secondary-domain vanished trends
+        # are dropped there), so the summary line never says "54 נעלמו" above 5 rows
+        vanished = sum(
+            1 for t in trend_deltas if t.status == "vanished" and not _is_secondary_domain_title(t.title_he)
+        )
         trend_bits = []
         if appeared:
             trend_bits.append(f"{appeared} מגמות חדשות")
