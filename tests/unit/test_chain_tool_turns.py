@@ -4,10 +4,17 @@
 loop lost every search/read/finish call the moment a cloud chain was configured for its role and
 looped until its budget expired. Contract now: a tool-calling turn runs only on a tool-capable leg
 (the local Ollama leg today), cloud legs are skipped with one warning per role, tool calls flow back,
-and a chain with no tool-capable leg fails loudly."""
+and a chain with no tool-capable leg fails loudly.
+
+``TestRunChainWithTextToolsCliLeg`` (cloud-tools, 2026-09-09) extends that contract now that
+``CliProvider`` itself can be a tool-capable leg (text-protocol dispatch,
+``eoa.llm.providers.cli``) -- these exercise the REAL ``CliProvider`` through ``run_chain`` (only
+``subprocess.run`` is mocked), unlike the fakes above."""
 
 from __future__ import annotations
 
+import json
+import subprocess
 from typing import Any, ClassVar
 
 import pytest
@@ -189,3 +196,93 @@ class TestInteractiveChainDefault:
         res = ollama_client.chat("resident", [{"role": "user", "content": "q"}], task="chat")
         assert res.content == "ok" and called["role"] == "resident"
         assert ollama_client.resolve_provider_info(None) == ("claude", "m")
+
+
+class TestRunChainWithTextToolsCliLeg:
+    """Cloud-tools (2026-09-09): a real ``CliProvider`` leg (only ``subprocess.run`` mocked, not
+    ``_build_provider``) is now tool-capable and gets tried BEFORE the local terminal entry for a
+    tool-calling turn -- the fix this whole module used to document as "no CLI leg ever accepts
+    tools" no longer holds for a CLI leg once ``llm_providers.cli_text_tools`` is on (the default)."""
+
+    def _completed(self, stdout: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(args=["x"], returncode=0, stdout=stdout, stderr="")
+
+    def test_cli_leg_handles_tool_turn_before_reaching_local(
+        self, monkeypatch: pytest.MonkeyPatch, no_record: None
+    ) -> None:
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+
+        def fake_run(args: Any, **kwargs: Any) -> subprocess.CompletedProcess:
+            # codex writes its final message to the `-o <path>` file, not stdout JSON.
+            from pathlib import Path
+
+            out_path = args[args.index("-o") + 1]
+            reply = json.dumps({"tool": "search", "args": {"query": "SPECTRO XR", "lang": "en"}})
+            Path(out_path).write_text(reply, encoding="utf-8")
+            return self._completed(json.dumps({"type": "turn.completed", "usage": {}}))
+
+        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        result, attempts = chain_mod.run_chain(
+            "investigator",
+            _entries("codex", "ollama"),
+            lambda: pytest.fail("local leg must not run -- codex handled the turn"),
+            messages=[{"role": "user", "content": "investigate"}],
+            tools=TOOLS,
+        )
+        assert result.provider == "codex"
+        assert result.tool_calls == [
+            {"function": {"name": "search", "arguments": {"query": "SPECTRO XR", "lang": "en"}}}
+        ]
+        assert attempts[0].provider == "codex" and attempts[0].ok
+
+    def test_cli_leg_malformed_reply_falls_back_to_local(
+        self, monkeypatch: pytest.MonkeyPatch, no_record: None
+    ) -> None:
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.subprocess.run",
+            lambda *a, **k: self._completed(json.dumps({"is_error": False, "result": "no JSON here"})),
+        )
+        local = ProviderResult(content="", model="dictalm", provider="ollama", tool_calls=[TOOL_CALL])
+        result, attempts = chain_mod.run_chain(
+            "investigator",
+            _entries("claude", "ollama"),
+            lambda: local,
+            messages=[{"role": "user", "content": "investigate"}],
+            tools=TOOLS,
+        )
+        assert result.provider == "ollama" and result.tool_calls == [TOOL_CALL]
+        assert attempts[0].provider == "claude" and not attempts[0].ok
+
+    def test_cli_text_tools_config_flag_off_skips_cli_leg(
+        self, monkeypatch: pytest.MonkeyPatch, no_record: None
+    ) -> None:
+        from eoa.config import settings as real_settings
+
+        base = real_settings()
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.settings",
+            lambda: base.model_copy(
+                update={"llm_providers": base.llm_providers.model_copy(update={"cli_text_tools": False})}
+            ),
+        )
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        called_cli = {"n": 0}
+
+        def fake_run(*a: Any, **k: Any) -> subprocess.CompletedProcess:
+            called_cli["n"] += 1
+            return self._completed(json.dumps({"is_error": False, "result": "should not be called"}))
+
+        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        local = ProviderResult(content="", model="dictalm", provider="ollama", tool_calls=[TOOL_CALL])
+        result, attempts = chain_mod.run_chain(
+            "investigator",
+            _entries("claude", "ollama"),
+            lambda: local,
+            messages=[{"role": "user", "content": "investigate"}],
+            tools=TOOLS,
+        )
+        assert called_cli["n"] == 0  # never even attempted -- supports_tools was False
+        assert result.provider == "ollama"
+        assert attempts[0].provider == "claude" and not attempts[0].ok
+        assert "tools-schema" in (attempts[0].error or "") or "tool-calling" in (attempts[0].error or "")

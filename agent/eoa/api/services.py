@@ -3778,6 +3778,12 @@ def product_line_detail(line_id: str) -> dict[str, Any] | None:
     card["recent_items"] = recent_items
     card["open_tenders"] = [_tender_card(r) for r in tender_rows]
     card["reports"] = list_product_line_reports(line_id)
+    # PD-vocab-reports (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md section 6): which products on this
+    # line already have a product dossier (`product_dossiers`, PD-backend) -- the same set the
+    # "השוואת מפרט" section of `eoa.report.product_line.build_product_line` reads. Surfaced here so
+    # the product-line detail page can show/link them without a second round trip to
+    # `GET /api/dossiers` and filtering client-side.
+    card["dossiers"] = _product_line_dossiers(line_id)
     return card
 
 
@@ -3812,7 +3818,40 @@ def _dossier_run_card(row: dict[str, Any]) -> dict[str, Any]:
         "outcome": row.get("outcome"),
         "confidence": row.get("confidence"),
         "report_id": row.get("report_id"),
+        # PD-cloud-tools (2026-09-09): the leg this run's ReAct turns + extraction actually used
+        # (eoa.dossier.report._persist stamps it into data.meta.llm_leg -- "local" for a run made
+        # before this field existed or with no override given, never missing/None here).
+        "llm_leg": ((row.get("data") or {}).get("meta") or {}).get("llm_leg", "local"),
     }
+
+
+def _product_line_dossiers(line_id: str) -> list[dict[str, Any]]:
+    """PD-vocab-reports (2026-09-09): which products on this product line already have at least one
+    `product_dossiers` run -- the LATEST run each (`DISTINCT ON (product_key)`, newest first per
+    product), the same "one card per product" shape `list_dossiers` returns for the global list, so
+    the product-line detail page can reuse its existing dossier-card rendering unchanged. This is a
+    plain read -- it never enqueues/creates anything -- distinct from `enqueue_product_dossier`."""
+    rows = _fetchall(
+        """
+        SELECT DISTINCT ON (product_key) product_key, product_name, vendor, id, created_at,
+               outcome, confidence, report_id, data
+        FROM product_dossiers
+        WHERE product_line = %(line)s
+        ORDER BY product_key, created_at DESC
+        """,
+        {"line": line_id},
+    )
+    out = [
+        {
+            "product_key": r["product_key"],
+            "product_name": r["product_name"],
+            "vendor": r.get("vendor"),
+            "latest": _dossier_run_card(r),
+        }
+        for r in rows
+    ]
+    out.sort(key=lambda c: (c["product_name"] or c["product_key"] or "").casefold())
+    return out
 
 
 def _dossier_source_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -3963,11 +4002,18 @@ def enqueue_product_dossier(
     aliases: list[str] | None = None,
     product_line: str | None = None,
     budget_multiplier: float | None = None,
+    llm_leg: str | None = None,
 ) -> dict[str, Any]:
     """`POST /api/dossiers`: enqueue the `product_dossier` job kind
     (`eoa.orchestrator.jobs.HANDLERS`) -- never waits synchronously (frozen contract: the response
     is `{job_id, product_key}` only), the client polls `GET /api/dossiers/{product_key}` for
-    `dossiers`/`pending_job` to update."""
+    `dossiers`/`pending_job` to update.
+
+    `llm_leg` (PD-cloud-tools, 2026-09-09): optional per-run model override
+    (`"codex:<model>"` / `"claude:<model>"` / `"agy:<model>"` / `"local"`) -- carried through the
+    job payload into `eoa.orchestrator.jobs.run_product_dossier` -> `eoa.dossier.report.
+    build_product_dossier`. `None`/omitted keeps the configured chain, unchanged from before this
+    field existed."""
     from eoa.dossier.corpus import slugify_product_key
 
     product_name = (product_name or "").strip()
@@ -3981,15 +4027,20 @@ def enqueue_product_dossier(
         "aliases": aliases or [],
         "product_line": product_line,
         "budget_multiplier": budget_multiplier,
+        "llm_leg": llm_leg,
     }
     job_id = relational.enqueue_job("product_dossier", payload, priority=4)
     return {"job_id": job_id, "product_key": product_key}
 
 
-def rerun_product_dossier(product_key: str, budget_multiplier: float | None = None) -> dict[str, Any]:
+def rerun_product_dossier(
+    product_key: str, budget_multiplier: float | None = None, llm_leg: str | None = None
+) -> dict[str, Any]:
     """`POST /api/dossiers/{product_key}/rerun`: re-enqueue for an existing product, reusing its
     last run's `product_name`/`vendor`/`aliases`/`product_line` -- `None` when this `product_key`
-    has never been run at all (the route raises 404)."""
+    has never been run at all (the route raises 404). `llm_leg` (PD-cloud-tools, 2026-09-09): same
+    per-run model override as `enqueue_product_dossier` -- never inherited from the previous run,
+    always exactly what this call passes (`None` -> the configured chain)."""
     latest = _fetchone(
         "SELECT product_name, vendor, aliases, product_line FROM product_dossiers "
         "WHERE product_key = %(key)s ORDER BY created_at DESC LIMIT 1",
@@ -4004,9 +4055,50 @@ def rerun_product_dossier(product_key: str, budget_multiplier: float | None = No
         "aliases": latest.get("aliases") or [],
         "product_line": latest.get("product_line"),
         "budget_multiplier": budget_multiplier,
+        "llm_leg": llm_leg,
     }
     job_id = relational.enqueue_job("product_dossier", payload, priority=4)
     return {"job_id": job_id}
+
+
+def dossier_vocabulary(product_line: str) -> dict[str, Any] | None:
+    """`GET /api/dossiers/vocabulary/{product_line}` (PD-vocab-reports, docs/
+    PLAN_SPEC_VOCABULARY.md section 5): the EFFECTIVE spec/performance vocabulary (common + this
+    line's own block, `eoa.dossier.vocabulary.effective_vocabulary`) for the UI's grouped spec
+    table/comparison view -- the same vocabulary `eoa.report.product_line`'s own "השוואת מפרט"
+    section reads server-side. `product_line == "common"` returns the common-only vocabulary (no
+    line block on top, mirrors `effective_vocabulary(None)`'s own documented fallback); any other
+    unrecognized `product_line` returns `None` (the route raises 404) -- never silently falls back to
+    `common` for a typo'd/unknown line id, which would otherwise look like a valid, if short,
+    response."""
+    from eoa.dossier.vocabulary import effective_vocabulary
+    from eoa.product_lines.registry import get_product_line
+
+    line: str | None = None
+    if product_line and product_line != "common":
+        if get_product_line(product_line) is None:
+            return None
+        line = product_line
+    params = effective_vocabulary(line)
+    return {
+        "product_line": line,
+        "parameters": [
+            {
+                "key": p.key,
+                "label_he": p.label_he,
+                "label_en": p.label_en,
+                "unit": p.unit,
+                "value_type": p.value_type,
+                "enum_values": p.enum_values,
+                "synonyms": p.synonyms,
+                "group_he": p.group_he,
+                "required": p.required,
+                "notes_he": p.notes_he,
+                "table": p.table,
+            }
+            for p in params
+        ],
+    }
 
 
 # --------------------------------------------------------------------------

@@ -213,3 +213,166 @@ def test_rerun_product_dossier_reuses_prior_fields(monkeypatch: pytest.MonkeyPat
 def test_rerun_product_dossier_unknown_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(services, "_fetchone", lambda query, params=None: None)
     assert services.rerun_product_dossier("unknown") is None
+
+
+# --------------------------------------------------------------------------
+# llm_leg plumbing (PD-cloud-tools, 2026-09-09)
+# --------------------------------------------------------------------------
+
+
+def test_enqueue_product_dossier_carries_llm_leg_in_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_enqueue_job(kind: str, payload: dict[str, Any], priority: int = 2) -> int:
+        captured["payload"] = payload
+        return 123
+
+    monkeypatch.setattr(services.relational, "enqueue_job", fake_enqueue_job)
+    services.enqueue_product_dossier("SPECTRO XR", "Elbit Systems", llm_leg="codex:gpt-6-astra")
+    assert captured["payload"]["llm_leg"] == "codex:gpt-6-astra"
+
+
+def test_enqueue_product_dossier_llm_leg_none_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_enqueue_job(kind: str, payload: dict[str, Any], priority: int = 2) -> int:
+        captured["payload"] = payload
+        return 123
+
+    monkeypatch.setattr(services.relational, "enqueue_job", fake_enqueue_job)
+    services.enqueue_product_dossier("SPECTRO XR")
+    assert captured["payload"]["llm_leg"] is None
+
+
+def test_rerun_product_dossier_carries_llm_leg_in_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
+        return {
+            "product_name": "SPECTRO XR",
+            "vendor": "Elbit Systems",
+            "aliases": ["Spectro"],
+            "product_line": "targeting_pods",
+        }
+
+    captured: dict[str, Any] = {}
+
+    def fake_enqueue_job(kind: str, payload: dict[str, Any], priority: int = 2) -> int:
+        captured["payload"] = payload
+        return 55
+
+    monkeypatch.setattr(services, "_fetchone", fake_fetchone)
+    monkeypatch.setattr(services.relational, "enqueue_job", fake_enqueue_job)
+    services.rerun_product_dossier("elbit-systems-spectro-xr", llm_leg="claude:claude-sonnet-5")
+    assert captured["payload"]["llm_leg"] == "claude:claude-sonnet-5"
+
+
+def test_dossier_run_card_reads_llm_leg_from_data_meta() -> None:
+    row = {**_ROW, "data": {**_ROW["data"], "meta": {"llm_leg": "codex:gpt-6-astra"}}}
+    card = services._dossier_run_card(row)
+    assert card["llm_leg"] == "codex:gpt-6-astra"
+
+
+def test_dossier_run_card_defaults_llm_leg_to_local_when_absent() -> None:
+    card = services._dossier_run_card(_ROW)
+    assert card["llm_leg"] == "local"
+
+
+# --------------------------------------------------------------------------
+# PD-vocab-reports (2026-09-09, docs/PLAN_SPEC_VOCABULARY.md section 5): the vocabulary endpoint
+# (`GET /api/dossiers/vocabulary/{product_line}`) and product-line-detail's own "which products on
+# this line have a dossier" exposure (`services._product_line_dossiers`,
+# `services.product_line_detail`'s new `dossiers` key).
+# --------------------------------------------------------------------------
+
+
+def test_dossier_vocabulary_targeting_pods_is_common_plus_line_block() -> None:
+    out = services.dossier_vocabulary("targeting_pods")
+    assert out is not None
+    assert out["product_line"] == "targeting_pods"
+    keys = [p["key"] for p in out["parameters"]]
+    assert len(keys) == len(set(keys))  # globally unique, per eoa.dossier.vocabulary's own guarantee
+    assert len(keys) > 24  # common (24) + at least one targeting_pods-only key
+    # every parameter carries the full field contract the UI needs
+    sample = out["parameters"][0]
+    for field in ("key", "label_he", "label_en", "unit", "value_type", "enum_values", "synonyms", "group_he", "required", "notes_he", "table"):
+        assert field in sample
+
+
+def test_dossier_vocabulary_common_alone_has_no_line_block() -> None:
+    common_only = services.dossier_vocabulary("common")
+    assert common_only is not None
+    assert common_only["product_line"] is None
+    full = services.dossier_vocabulary("targeting_pods")
+    assert full is not None
+    assert len(common_only["parameters"]) < len(full["parameters"])
+    common_keys = {p["key"] for p in common_only["parameters"]}
+    full_keys = {p["key"] for p in full["parameters"]}
+    assert common_keys < full_keys  # strict subset
+
+
+def test_dossier_vocabulary_unknown_line_returns_none() -> None:
+    assert services.dossier_vocabulary("not_a_real_product_line") is None
+
+
+def test_product_line_dossiers_returns_latest_run_per_product_sorted_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [
+        {
+            "product_key": "beta-co-widget",
+            "product_name": "Beta Widget",
+            "vendor": "Beta Co",
+            "id": 2,
+            "created_at": dt.datetime(2026, 9, 5, tzinfo=dt.UTC),
+            "outcome": "found",
+            "confidence": 0.7,
+            "report_id": 10,
+            "data": {},
+        },
+        {
+            "product_key": "elbit-systems-spectro-xr",
+            "product_name": "SPECTRO XR",
+            "vendor": "Elbit Systems",
+            "id": 1,
+            "created_at": dt.datetime(2026, 9, 8, tzinfo=dt.UTC),
+            "outcome": "found",
+            "confidence": 0.68,
+            "report_id": 42,
+            "data": {},
+        },
+    ]
+
+    def fake_fetchall(query: str, params: Any = None) -> list[dict[str, Any]]:
+        assert "product_dossiers" in query
+        assert params["line"] == "targeting_pods"
+        return list(rows)
+
+    monkeypatch.setattr(services, "_fetchall", fake_fetchall)
+    out = services._product_line_dossiers("targeting_pods")
+    assert [d["product_name"] for d in out] == ["Beta Widget", "SPECTRO XR"]  # alphabetical
+    assert out[1]["product_key"] == "elbit-systems-spectro-xr"
+    assert out[1]["latest"]["id"] == 1
+    assert out[1]["latest"]["confidence"] == 0.68
+
+
+def test_product_line_dossiers_empty_when_no_products_have_a_dossier(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(services, "_fetchall", lambda query, params=None: [])
+    assert services._product_line_dossiers("targeting_pods") == []
+
+
+def test_product_line_detail_exposes_which_products_have_dossiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from eoa.product_lines import stats as pl_stats
+
+    canned_dossiers = [{"product_key": "elbit-systems-spectro-xr", "product_name": "SPECTRO XR", "vendor": "Elbit Systems", "latest": {"id": 3}}]
+
+    monkeypatch.setattr(pl_stats, "product_line_stats", lambda line_id: {"items_7d": 0})
+    monkeypatch.setattr(services, "_fetchall", lambda query, params=None: [])
+    monkeypatch.setattr(services, "_fetchone", lambda query, params=None: None)
+    monkeypatch.setattr(services, "_attach_corroboration", lambda items: None)
+    monkeypatch.setattr(services, "list_product_line_reports", lambda line_id: [])
+    monkeypatch.setattr(services, "_product_line_dossiers", lambda line_id: canned_dossiers)
+
+    detail = services.product_line_detail("targeting_pods")
+    assert detail is not None
+    assert detail["dossiers"] == canned_dossiers
+
+
+def test_product_line_detail_unknown_line_returns_none() -> None:
+    assert services.product_line_detail("not_a_real_product_line") is None

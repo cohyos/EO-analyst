@@ -221,12 +221,20 @@ def _dispatch_chain(
     interactive: bool,
     keep_alive: str | None,
     tools: list[dict[str, Any]] | None = None,
+    chain: list[ChainEntryCfg] | None = None,
 ) -> ChatResult:
     """U8-א/ה (Revision 2026-09-06): role-based dispatch through the global mode's fallback
     chain, used only for a `provider=None` call made from inside the pipeline/worker process
     (see `chat()`). Delegates the actual try-in-order/fallback/logging logic to
     `eoa.llm.chain.run_chain`; the chain's local terminal entry calls straight back into
     `_ollama_chat` so the resource gate/num_ctx path is defined in exactly one place.
+
+    ``chain`` (cloud-tools, 2026-09-09): normally ``None``, resolving to
+    ``settings().llm_providers.effective_chain(role)`` exactly as before this parameter existed --
+    a caller (``eoa.search.deep_search.investigate``'s ``llm_leg`` override, ``eoa.dossier.extract``
+    likewise) can pass an explicit chain instead, e.g. one leg prepended ahead of the role's own
+    configured chain (``eoa.llm.chain.build_chain_with_leg_override``), without this function
+    needing to know anything about where that chain came from.
     """
     from eoa.llm.chain import run_chain
     from eoa.llm.providers.base import ProviderResult
@@ -253,16 +261,30 @@ def _dispatch_chain(
             tool_calls=list(res.tool_calls or []),
         )
 
-    chain = settings().llm_providers.effective_chain(role)
+    chain = chain if chain is not None else settings().llm_providers.effective_chain(role)
     if tools:
-        skipped = [e.provider for e in chain if e.provider != "ollama"]
+        # Cloud-tools (2026-09-09): a CLI leg (agy/claude/codex) can now serve a tool-calling turn
+        # itself via the text protocol (`eoa.llm.providers.cli.CliProvider.supports_tools`) -- only
+        # a genuinely tool-incapable leg (a direct-API provider, or a CLI leg with
+        # `llm_providers.cli_text_tools: false`) is "skipped" in the sense this warning means.
+        from eoa.llm.chain import _build_provider
+
+        skipped = []
+        for e in chain:
+            if e.provider == "ollama":
+                continue
+            try:
+                if not getattr(_build_provider(e), "supports_tools", False):
+                    skipped.append(e.provider)
+            except Exception:  # an unbuildable entry is also effectively "skipped"
+                skipped.append(e.provider)
         if skipped and role not in _TOOL_TURN_WARNED_ROLES:
             _TOOL_TURN_WARNED_ROLES.add(role)
             log.warning(
                 "llm_chain_tools_local_only",
                 role=role,
                 skipped_legs=skipped,
-                reason="cloud legs do not accept a caller-supplied tools schema; tool-calling turns run locally",
+                reason="these legs do not accept a caller-supplied tools schema; their turn runs on the next leg",
             )
     result, attempts = run_chain(
         role, chain, _call_ollama_leg, messages=messages, json_schema=format_schema, tools=tools
@@ -291,6 +313,7 @@ def chat(
     interactive: bool = False,
     keep_alive: str | None = None,
     provider: str | None = None,
+    chain_override: list[ChainEntryCfg] | None = None,
 ) -> ChatResult:
     """One chat completion. ``role`` is a config role (resident/light/...), used for the local
     Ollama path (default).
@@ -311,10 +334,17 @@ def chat(
     ``llm_providers.interactive_default`` when none was given -- is honored exactly as before this
     revision (the interactive chat's per-question override).
 
+    ``chain_override`` (cloud-tools, 2026-09-09): only consulted inside the pipeline/worker
+    process, in place of ``llm_providers.effective_chain(role)`` -- a caller that already knows
+    exactly which chain to try (e.g. a dossier run's explicit ``llm_leg``, one entry prepended
+    ahead of the role's normal chain via ``eoa.llm.chain.build_chain_with_leg_override``) can hand
+    it over directly. ``None`` (the default) preserves the exact prior behavior for every existing
+    call site.
+
     A cloud/API leg bypasses the resource gate entirely (it does not touch the local GPU).
     """
     if _in_pipeline_process():
-        chain = settings().llm_providers.effective_chain(role)
+        chain = chain_override if chain_override is not None else settings().llm_providers.effective_chain(role)
         if len(chain) > 1 or chain[0].provider != "ollama":
             return _dispatch_chain(
                 role,
@@ -326,6 +356,7 @@ def chat(
                 interactive=interactive,
                 keep_alive=keep_alive,
                 tools=tools,
+                chain=chain,
             )
     else:
         resolved = _resolve_provider(provider)
@@ -445,6 +476,7 @@ def _structured_once(
     interactive: bool,
     options: dict[str, Any] | None,
     provider: str | None,
+    chain_override: list[ChainEntryCfg] | None = None,
 ) -> tuple[T, ChatResult]:
     """One provider's worth of ``chat_structured``: the JSON-schema call plus its own
     one-corrective-retry contract, against a *single* resolved provider (``chat()``'s own
@@ -452,6 +484,16 @@ def _structured_once(
     ``LLMOutputError`` if both attempts fail validation -- the caller (``chat_structured``)
     decides whether that means "give up" (plain/no-chain call) or "try the next chain entry"
     (``_chat_structured_chain``, U8-4: "a schema validation failure after the corrective retry").
+
+    ``chain_override`` (cloud-tools, 2026-09-09 bugfix): inside the pipeline/worker process,
+    ``chat()`` ignores its own ``provider`` argument entirely (ADR-005's defense-in-depth --
+    only the configured/overridden chain ever applies there) -- passing ``provider=provider_str``
+    alone from ``_chat_structured_chain`` therefore silently resolved to ``effective_chain(role)``
+    on EVERY iteration, never actually reaching that iteration's own ``entry`` (confirmed live,
+    2026-09-09: the fourth SPECTRO XR dossier's ``llm_leg="codex:..."`` never actually invoked
+    codex for the extraction call -- claude served it, the first entry of the plain default
+    chain). ``chain_override`` is what actually pins one call to one specific chain/entry inside
+    the pipeline process; ``_chat_structured_chain`` now passes ``[entry]`` per iteration.
     """
     json_schema = schema.model_json_schema()
     last_err: Exception | None = None
@@ -466,6 +508,7 @@ def _structured_once(
             options={"temperature": 0.1, **(options or {})},
             think=False,
             provider=provider,
+            chain_override=chain_override,
         )
         try:
             return schema.model_validate_json(_strip_fences(res.content)), res
@@ -638,13 +681,19 @@ def _guard_hebrew_truncation(
     interactive: bool,
     options: dict[str, Any] | None,
     provider: str | None,
+    chain_override: list[ChainEntryCfg] | None = None,
 ) -> T:
     """``chat_structured``'s Q3-1 post-validation step (see module note above): detect a
     suspected mid-acronym truncation, attempt one corrective retry, then always normalise
     remaining ASCII quotes-between-Hebrew-letters before returning. Never raises -- a failure to
     even get a corrective retry through just falls back to the original (only quote-normalised)
     result, exactly like the plain schema-validation retry falls back to raising only when the
-    *initial* attempt(s) fail, never adding a new failure mode of its own."""
+    *initial* attempt(s) fail, never adding a new failure mode of its own.
+
+    ``chain_override`` (cloud-tools, 2026-09-09): forwarded to :func:`_structured_once` so this
+    corrective retry -- run inside the pipeline process on the same call that just produced
+    ``validated`` -- honors the same chain (e.g. a dossier's ``llm_leg`` override) rather than
+    silently falling back to ``effective_chain(role)``."""
     suspects = _find_truncation_suspects(validated)
     if not suspects:
         return _normalize_model_hebrew_quotes(validated)
@@ -663,6 +712,7 @@ def _guard_hebrew_truncation(
             interactive=interactive,
             options=options,
             provider=provider,
+            chain_override=chain_override,
         )
     except LLMOutputError as exc:
         log.warning("hebrew_truncation_retry_failed", schema=schema.__name__, error=str(exc)[:200])
@@ -682,6 +732,7 @@ def chat_structured(
     interactive: bool = False,
     options: dict[str, Any] | None = None,
     provider: str | None = None,
+    chain_override: list[ChainEntryCfg] | None = None,
 ) -> T:
     """Chat with a JSON schema constraint and validate into ``schema``; one corrective retry.
 
@@ -697,13 +748,18 @@ def chat_structured(
     falls back to the *next* chain entry (a fresh one-corrective-retry attempt there), rather than
     raising immediately -- exactly like a provider/HTTP failure does.
 
+    ``chain_override`` (cloud-tools, 2026-09-09): same meaning as ``chat()``'s own parameter of the
+    same name -- an explicit chain to try instead of ``llm_providers.effective_chain(role)``,
+    consulted only inside the pipeline/worker process. ``eoa.dossier.extract``'s structured
+    extraction call uses this to honor a dossier run's ``llm_leg`` override.
+
     Additive (Q3-1): once a validated result is in hand (from either path below), it passes
     through :func:`_guard_hebrew_truncation` -- a best-effort detector + one corrective retry for
     the "Hebrew acronym truncated right before its closing quote" failure mode, independent of and
     on top of the schema-validation contract above.
     """
     if _in_pipeline_process():
-        chain = settings().llm_providers.effective_chain(role)
+        chain = chain_override if chain_override is not None else settings().llm_providers.effective_chain(role)
         if len(chain) > 1 or chain[0].provider != "ollama":
             validated = _chat_structured_chain(
                 role, chain, schema, messages, task=task, interactive=interactive, options=options
@@ -717,6 +773,7 @@ def chat_structured(
                 interactive=interactive,
                 options=options,
                 provider=None,
+                chain_override=chain,
             )
     validated, _res = _structured_once(
         role, schema, messages, task=task, interactive=interactive, options=options, provider=provider
@@ -747,7 +804,17 @@ def _chat_structured_chain(
     ``_structured_once`` (schema call + one corrective retry); a provider/HTTP failure *or* a
     schema-validation failure that survives that retry moves on to the next entry. Every attempt
     is logged to ``llm_calls`` via ``eoa.llm.chain``'s recorder, same as the plain-chat chain path.
-    """
+
+    Bugfix (cloud-tools, 2026-09-09): each iteration passes ``chain_override=[entry]`` to
+    :func:`_structured_once`, not just ``provider=provider_str`` -- inside the pipeline process
+    (the only context this function ever runs in, see ``chat_structured``), ``chat()`` ignores its
+    own ``provider`` argument entirely (ADR-005), so ``provider=provider_str`` alone silently
+    resolved every iteration to ``effective_chain(role)`` regardless of ``entry`` -- confirmed live
+    2026-09-09: the fourth SPECTRO XR dossier's extraction never actually reached codex despite
+    being the chain's first entry; claude (the *default* chain's first entry) served it instead.
+    A single-entry ``chain_override`` pins each iteration to exactly its own ``entry`` (falling
+    through to ``_ollama_chat`` directly when ``entry.provider == "ollama"``, same as ``chat()``'s
+    own single-entry-ollama shortcut)."""
     from eoa.llm.chain import FALLBACK_EXCEPTIONS, ChainAttempt, _record
 
     fell_back_from: str | None = None
@@ -764,6 +831,7 @@ def _chat_structured_chain(
                 interactive=interactive,
                 options=options,
                 provider=provider_str,
+                chain_override=[entry],
             )
         except FALLBACK_EXCEPTIONS as exc:
             attempt = ChainAttempt(

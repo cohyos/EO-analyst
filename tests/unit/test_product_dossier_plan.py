@@ -259,3 +259,34 @@ def test_run_plan_forwards_topic_time_cap_as_deadline_s(monkeypatch: pytest.Monk
     corpus = _corpus()
     dossier_plan.run_plan(corpus, max_topics=1)
     assert captured["deadline_s"] == dossier_plan.settings().dossier.topic_time_cap_s
+
+
+# --------------------------------------------------------------------------
+# llm_leg plumbing (PD-cloud-tools, 2026-09-09)
+# --------------------------------------------------------------------------
+
+
+def test_run_plan_forwards_llm_leg_to_every_topic_investigate_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[Any] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        captured.append(kwargs.get("llm_leg"))
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=3, llm_leg="codex:gpt-6-astra")
+    assert captured == ["codex:gpt-6-astra"] * 3
+
+
+def test_run_plan_llm_leg_none_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        captured.update(kwargs)
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert captured["llm_leg"] is None

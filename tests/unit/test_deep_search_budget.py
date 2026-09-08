@@ -287,4 +287,78 @@ class TestActBudgetExhaustion:
 
         assert result is False  # never finished
         assert call_count["n"] <= 2  # bounded by the one-grace-turn fix, not max_steps
-        assert call_count["n"] < max_steps
+
+
+class TestActLlmLegOverride:
+    """PD-cloud-tools (2026-09-09): ``_act``'s ``llm_leg`` -> a ``chain_override`` built once
+    (via ``eoa.llm.chain.build_chain_with_leg_override``) and passed to every ``chat()`` call this
+    loop makes, so a dossier run's per-run leg is tried first for the ReAct tool-calling turns."""
+
+    def test_llm_leg_given_builds_and_forwards_chain_override(self, monkeypatch):
+        from eoa.config import ChainEntryCfg
+
+        inv = Investigation(job_id=None, item_id=None, question="test")
+        budget = Budget(max_queries=10, max_pages=20, deadline=time.monotonic() + 3600, confidence_stop=0.8)
+        inv.read_urls = ["https://example.com"]
+        inv.hits_seen = {"https://example.com": MagicMock()}
+
+        override_chain = [ChainEntryCfg(provider="codex", model="gpt-6-astra"), ChainEntryCfg(provider="ollama")]
+        built_for: dict[str, str] = {}
+
+        def fake_build_override(role: str, leg: str) -> list:
+            built_for["role"] = role
+            built_for["leg"] = leg
+            return override_chain
+
+        monkeypatch.setattr("eoa.llm.chain.build_chain_with_leg_override", fake_build_override)
+
+        mock_result = MagicMock()
+        mock_result.tool_calls = [
+            {
+                "function": {
+                    "name": "finish",
+                    "arguments": json.dumps(
+                        {"outcome": "found", "answer_he": "x", "confidence": 0.9, "sources": ["https://example.com"]}
+                    ),
+                }
+            }
+        ]
+        mock_result.content = ""
+        seen_kwargs: dict = {}
+
+        def fake_chat(role, transcript, **kw):
+            seen_kwargs.update(kw)
+            return mock_result
+
+        monkeypatch.setattr("eoa.search.deep_search.chat", fake_chat)
+        _act(inv, budget, [], round_no=1, max_steps=5, llm_leg="codex:gpt-6-astra")
+        assert built_for == {"role": "investigator", "leg": "codex:gpt-6-astra"}
+        assert seen_kwargs["chain_override"] == override_chain
+
+    def test_llm_leg_none_passes_no_chain_override(self, monkeypatch):
+        inv = Investigation(job_id=None, item_id=None, question="test")
+        budget = Budget(max_queries=10, max_pages=20, deadline=time.monotonic() + 3600, confidence_stop=0.8)
+        inv.read_urls = ["https://example.com"]
+        inv.hits_seen = {"https://example.com": MagicMock()}
+
+        mock_result = MagicMock()
+        mock_result.tool_calls = [
+            {
+                "function": {
+                    "name": "finish",
+                    "arguments": json.dumps(
+                        {"outcome": "found", "answer_he": "x", "confidence": 0.9, "sources": ["https://example.com"]}
+                    ),
+                }
+            }
+        ]
+        mock_result.content = ""
+        seen_kwargs: dict = {}
+
+        def fake_chat(role, transcript, **kw):
+            seen_kwargs.update(kw)
+            return mock_result
+
+        monkeypatch.setattr("eoa.search.deep_search.chat", fake_chat)
+        _act(inv, budget, [], round_no=1, max_steps=5)  # no llm_leg
+        assert seen_kwargs["chain_override"] is None

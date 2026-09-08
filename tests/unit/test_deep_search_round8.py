@@ -414,7 +414,7 @@ class TestForceReadTopHits:
             budget.queries += 1
             return "seeded"
 
-        def fake_act(inv, budget, transcript, round_no, max_steps=12, tools=None):
+        def fake_act(inv, budget, transcript, round_no, max_steps=12, tools=None, llm_leg=None):
             # the model calls `search` (already seeded above) but never `read` or `finish`
             budget.queries += 1
             return False  # never finished

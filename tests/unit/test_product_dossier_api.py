@@ -70,8 +70,10 @@ def test_create_dossier(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> 
 
     captured = {}
 
-    def fake_enqueue(product_name, vendor=None, aliases=None, product_line=None, budget_multiplier=None):
-        captured["args"] = (product_name, vendor, aliases, product_line, budget_multiplier)
+    def fake_enqueue(
+        product_name, vendor=None, aliases=None, product_line=None, budget_multiplier=None, llm_leg=None
+    ):
+        captured["args"] = (product_name, vendor, aliases, product_line, budget_multiplier, llm_leg)
         return {"job_id": 42, "product_key": "elbit-spectro-xr"}
 
     monkeypatch.setattr(services, "enqueue_product_dossier", fake_enqueue)
@@ -89,7 +91,9 @@ def test_create_dossier_missing_name_is_bad_request(
 ) -> None:
     from eoa.api import services
 
-    def fake_enqueue(product_name, vendor=None, aliases=None, product_line=None, budget_multiplier=None):
+    def fake_enqueue(
+        product_name, vendor=None, aliases=None, product_line=None, budget_multiplier=None, llm_leg=None
+    ):
         if not product_name:
             raise ValueError("product_name is required")
         return {"job_id": 1, "product_key": "x"}
@@ -152,7 +156,11 @@ def test_dossier_run_not_found(client: TestClient, monkeypatch: pytest.MonkeyPat
 def test_rerun_dossier(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from eoa.api import services
 
-    monkeypatch.setattr(services, "rerun_product_dossier", lambda key, budget_multiplier=None: {"job_id": 99})
+    monkeypatch.setattr(
+        services,
+        "rerun_product_dossier",
+        lambda key, budget_multiplier=None, llm_leg=None: {"job_id": 99},
+    )
     r = client.post("/api/dossiers/elbit-spectro-xr/rerun", json={})
     assert r.status_code == 200
     assert r.json() == {"job_id": 99}
@@ -161,6 +169,45 @@ def test_rerun_dossier(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> N
 def test_rerun_dossier_unknown_product(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from eoa.api import services
 
-    monkeypatch.setattr(services, "rerun_product_dossier", lambda key, budget_multiplier=None: None)
+    monkeypatch.setattr(
+        services, "rerun_product_dossier", lambda key, budget_multiplier=None, llm_leg=None: None
+    )
     r = client.post("/api/dossiers/unknown-product/rerun", json={})
     assert r.status_code == 404
+
+
+def test_create_dossier_forwards_llm_leg(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PD-cloud-tools (2026-09-09): the optional `llm_leg` request field reaches
+    `services.enqueue_product_dossier` verbatim."""
+    from eoa.api import services
+
+    captured = {}
+
+    def fake_enqueue(
+        product_name, vendor=None, aliases=None, product_line=None, budget_multiplier=None, llm_leg=None
+    ):
+        captured["llm_leg"] = llm_leg
+        return {"job_id": 42, "product_key": "elbit-spectro-xr"}
+
+    monkeypatch.setattr(services, "enqueue_product_dossier", fake_enqueue)
+    r = client.post(
+        "/api/dossiers",
+        json={"product_name": "SPECTRO XR", "llm_leg": "codex:gpt-6-astra"},
+    )
+    assert r.status_code == 200
+    assert captured["llm_leg"] == "codex:gpt-6-astra"
+
+
+def test_rerun_dossier_forwards_llm_leg(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from eoa.api import services
+
+    captured = {}
+
+    def fake_rerun(key, budget_multiplier=None, llm_leg=None):
+        captured["llm_leg"] = llm_leg
+        return {"job_id": 99}
+
+    monkeypatch.setattr(services, "rerun_product_dossier", fake_rerun)
+    r = client.post("/api/dossiers/elbit-spectro-xr/rerun", json={"llm_leg": "claude:claude-sonnet-5"})
+    assert r.status_code == 200
+    assert captured["llm_leg"] == "claude:claude-sonnet-5"

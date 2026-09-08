@@ -24,7 +24,7 @@ from typing import Any
 
 import structlog
 
-from eoa.config import ChainEntryCfg
+from eoa.config import ChainEntryCfg, settings
 from eoa.errors import CliProviderError, LLMOutputError, ProviderUnavailable
 from eoa.llm.cost import estimate_cost_usd
 from eoa.llm.providers.base import ProviderResult
@@ -184,6 +184,38 @@ def run_chain(
     # Unreachable when `chain` came from `effective_chain()` (always ollama-terminated) -- kept
     # as a defensive floor for a hand-built chain (e.g. a unit test) that omits one.
     raise ChainExhausted(f"llm chain for role={role!r} exhausted with no local terminal entry")
+
+
+def parse_leg(leg: str | None) -> ChainEntryCfg | None:
+    """One ``"<provider>[:<model>][@<power>]"`` string -> a single :class:`ChainEntryCfg`, or
+    ``None`` for ``"local"``/blank/``None`` (no override -- use the role's normal chain as-is).
+    Mirrors the ``model@power`` split ``eoa.llm.ollama_client._dispatch_explicit_provider`` already
+    uses for the interactive chat's per-question override, so the two "pick one cloud provider by
+    string" entry points in this codebase (chat's picker, a dossier run's ``llm_leg``) parse
+    identically. Used by :func:`build_chain_with_leg_override` (PD-cloud-tools, 2026-09-09)."""
+    if not leg or leg == "local":
+        return None
+    provider, _, rest = leg.partition(":")
+    model, _, power = rest.partition("@") if "@" in rest else (rest, "", "")
+    return ChainEntryCfg(provider=provider, model=model or None, power=power or None)
+
+
+def build_chain_with_leg_override(role: str, leg: str | None) -> list[ChainEntryCfg]:
+    """PD-cloud-tools (2026-09-09): a dossier run's explicit ``llm_leg`` override (``POST
+    /api/dossiers``'s optional field, threaded through ``eoa.dossier.plan``/``eoa.dossier.report``
+    into ``eoa.search.deep_search.investigate()``'s ReAct turns and ``eoa.dossier.extract``'s
+    structured extraction call) prepends ONE chain entry ahead of the role's normally-configured
+    chain -- "try this leg first, then fall back to the configured chain (which itself always ends
+    in local ollama, enforced by ``effective_chain``)" -- rather than replacing the chain outright,
+    so a leg that is temporarily unavailable (CLI not logged in, a typo'd model id) still degrades
+    to the existing chain instead of leaving the run with nothing. ``leg`` of ``None``/``""``/
+    ``"local"`` returns the role's configured chain unchanged (:func:`parse_leg` returns ``None``
+    for all three)."""
+    default_chain = settings().llm_providers.effective_chain(role)
+    entry = parse_leg(leg)
+    if entry is None:
+        return default_chain
+    return [entry, *default_chain]
 
 
 def _record(role: str, attempt: ChainAttempt, batch_size: int) -> None:

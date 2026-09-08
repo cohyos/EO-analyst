@@ -210,3 +210,74 @@ class TestBuildProvider:
         assert isinstance(_build_provider(ChainEntryCfg(provider="anthropic")), AnthropicProvider)
         assert isinstance(_build_provider(ChainEntryCfg(provider="gemini")), GeminiProvider)
         assert isinstance(_build_provider(ChainEntryCfg(provider="openai")), OpenAIProvider)
+
+
+class TestParseLeg:
+    """PD-cloud-tools (2026-09-09): a dossier run's ``llm_leg`` string -> one ``ChainEntryCfg``."""
+
+    def test_provider_and_model(self):
+        from eoa.llm.chain import parse_leg
+
+        assert parse_leg("codex:gpt-6-astra") == ChainEntryCfg(
+            provider="codex", model="gpt-6-astra", power=None
+        )
+
+    def test_provider_model_and_power(self):
+        from eoa.llm.chain import parse_leg
+
+        assert parse_leg("claude:claude-sonnet-5@high") == ChainEntryCfg(
+            provider="claude", model="claude-sonnet-5", power="high"
+        )
+
+    def test_bare_provider_no_model(self):
+        from eoa.llm.chain import parse_leg
+
+        assert parse_leg("codex") == ChainEntryCfg(provider="codex", model=None, power=None)
+
+    def test_local_returns_none(self):
+        from eoa.llm.chain import parse_leg
+
+        assert parse_leg("local") is None
+
+    def test_none_and_empty_return_none(self):
+        from eoa.llm.chain import parse_leg
+
+        assert parse_leg(None) is None
+        assert parse_leg("") is None
+
+
+class TestBuildChainWithLegOverride:
+    """PD-cloud-tools (2026-09-09): the override leg is prepended ahead of the role's normally-
+    configured chain -- never replaces it -- so a temporarily-unavailable leg still degrades to
+    the existing chain instead of leaving the caller with nothing."""
+
+    def test_override_prepended_ahead_of_configured_chain(self, monkeypatch: pytest.MonkeyPatch):
+        from eoa.llm import chain as chain_mod
+
+        class _LP:
+            def effective_chain(self, role: str) -> list[ChainEntryCfg]:
+                return [ChainEntryCfg(provider="claude", model="claude-sonnet-5"), ChainEntryCfg(provider="ollama")]
+
+        class _S:
+            llm_providers = _LP()
+
+        monkeypatch.setattr(chain_mod, "settings", lambda: _S())
+        result = chain_mod.build_chain_with_leg_override("investigator", "codex:gpt-6-astra")
+        assert [e.provider for e in result] == ["codex", "claude", "ollama"]
+        assert result[0].model == "gpt-6-astra"
+
+    def test_local_leg_returns_configured_chain_unchanged(self, monkeypatch: pytest.MonkeyPatch):
+        from eoa.llm import chain as chain_mod
+
+        configured = [ChainEntryCfg(provider="claude"), ChainEntryCfg(provider="ollama")]
+
+        class _LP:
+            def effective_chain(self, role: str) -> list[ChainEntryCfg]:
+                return configured
+
+        class _S:
+            llm_providers = _LP()
+
+        monkeypatch.setattr(chain_mod, "settings", lambda: _S())
+        assert chain_mod.build_chain_with_leg_override("investigator", "local") == configured
+        assert chain_mod.build_chain_with_leg_override("investigator", None) == configured

@@ -224,3 +224,39 @@ displayed directly, or always passed through `textnorm.strip_bidi_isolates` + a 
 first (which would already dodge it via this round's fix). Out of this task's ownership
 (`agent/eoa/search/**`) — flagged as a background task for investigation and, if needed, a mirrored
 fix, rather than touched here.
+
+## 8. Follow-up: the `deep_search.py` mirror is inert (2026-09-09)
+
+Resolution of the section-7 flag. The defect **does** reproduce in isolation — 
+`_split_bidi_runs("AeroVironment בעלות")` returns `[("other", "AeroVironment "), ("he", "בעלות")]`
+and `_bidi_space_and_isolate_line` then emits `LRI + "AeroVironment " + PDI + "בעלות"` with the
+space trapped inside the isolate — but no consumer ever sees that string:
+
+- `_bidi_space_and_isolate` has exactly one call site, inside `format_investigation_answer_he`
+  (`agent/eoa/search/deep_search.py`). That function's very next statement is
+  `normalize_hebrew_punctuation(assembled)`, whose second pass is `strip_bidi_isolates`. The
+  `or assembled` fallback can only fire on falsy input, which the normaliser returns unchanged, so a
+  non-empty answer is always stripped. The function returns plain text: `"AeroVironment בעלות"`
+  with its ordinary space intact, no U+2066/U+2069 anywhere.
+- `format_investigation_answer_he` has two callers — `_finalize_outcome` (local ReAct path) and
+  `investigate_batch_cloud` (cloud path) — both assign the already-stripped result to
+  `InvestigationOut.answer_he`. That is what gets persisted, served by the API, rendered into the
+  daily report (`docx_builder`, which re-splits plain text with this round's fixed `split_runs`) and
+  displayed on the investigation page (`web/src/components/AnswerText.tsx` → `renderBidiRuns`, which
+  builds its own `<bdi dir="ltr">` isolates from plain text).
+- The frontend's isolate stripping in `web/src/lib/answerFormat.ts` exists for *legacy* rows stored
+  before round 14, when `normalize_hebrew_punctuation` did not yet strip isolates. Nothing written
+  since carries marks.
+
+The only thing the pass contributes to the final text is the *space insertion* at a bare
+Hebrew/Latin boundary (`_needs_bidi_space`); the isolate wrapping is dead weight that is immediately
+undone. Whitespace absorbed into an `other` run is therefore never trapped anywhere, because the
+run boundaries themselves never survive into output.
+
+Decision: no code change in `deep_search.py`. A behaviour change there would be unjustified by any
+observable defect. The finding is pinned by `TestIsolateMarksNeverReachStoredAnswer` in
+`tests/unit/test_deep_search_answer_format.py`, which runs the section-2 symptom phrases through
+`format_investigation_answer_he` and asserts (a) no isolate characters in the output and (b) every
+Hebrew/Latin boundary keeps exactly the single space the source had. If someone later drops the
+`normalize_hebrew_punctuation` call or emits the isolate-wrapped text directly, that test fails and
+the mirrored `_rebalance_boundary_whitespace` fix becomes necessary.

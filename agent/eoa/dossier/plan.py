@@ -301,6 +301,7 @@ def run_plan(
     budget_multiplier: float | None = None,
     max_topics: int | None = None,
     on_progress: ProgressCallback | None = None,
+    llm_leg: str | None = None,
 ) -> PlanResult:
     """Runs :data:`TOPICS` (capped at ``max_topics``) sequentially through
     ``eoa.search.deep_search.investigate()``, each with the corpus summary as ``context_he`` and
@@ -329,7 +330,11 @@ def run_plan(
     ``on_progress`` (item 5), when given, is called with the full progress list (one entry per
     planned topic, ``TOPICS`` order) once up front and again after every topic's status changes --
     the caller (``eoa.dossier.report.build_product_dossier``) uses it to persist a live per-topic
-    banner into the running job's own row."""
+    banner into the running job's own row.
+
+    ``llm_leg`` (PD-cloud-tools, 2026-09-09): forwarded verbatim into every topic's own
+    ``investigate()`` call -- see that function's own docstring. ``None`` (the default) preserves
+    the exact prior dispatch for every existing caller."""
     cfg = settings().dossier
     rounds = rounds_per_topic if rounds_per_topic is not None else cfg.rounds_per_topic
     mult = budget_multiplier if budget_multiplier is not None else cfg.budget_multiplier
@@ -374,6 +379,7 @@ def run_plan(
                 max_rounds=rounds,
                 budget_multiplier=mult,
                 deadline_s=cfg.topic_time_cap_s,
+                llm_leg=llm_leg,
             )
         except Exception as exc:  # a single topic must never take the whole dossier down
             elapsed = round(time.monotonic() - started, 1)

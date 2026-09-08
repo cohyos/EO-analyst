@@ -29,6 +29,7 @@ from eoa.dossier.corpus import CorpusResult, build_corpus
 from eoa.dossier.diff import compute_diff
 from eoa.dossier.extract import DroppedField, build_dossier
 from eoa.dossier.plan import PlanResult, run_plan
+from eoa.dossier.spec_render import spec_and_performance_entries
 from eoa.errors import LLMOutputError
 from eoa.llm.schemas.product_dossier import DealRow, ProductDossierOut
 from eoa.report.docx_builder import (
@@ -235,11 +236,17 @@ def _what_changed_entry(dossier: ProductDossierOut) -> dict[str, Any]:
 
 
 def _ordered_report_entries(dossier: ProductDossierOut) -> list[dict[str, Any]]:
+    #: PD-vocab-extract (2026-09-09): the ONE integration call into eoa.dossier.spec_render -- see
+    #: that module's own docstring for the grouped-by-vocabulary rendering it replaces
+    #: (specifications/performance) and adds (other_specifications, spliced in right after
+    #: specifications, both spec-shaped sections read together).
+    spec_entry, performance_entry, other_specifications_entry = spec_and_performance_entries(dossier)
     return [
         _identity_entry(dossier),
-        _specifications_table(dossier),
+        spec_entry,
+        other_specifications_entry,
         _variants_table(dossier),
-        _performance_table(dossier),
+        performance_entry,
         _maturity_entry(dossier),
         _deals_table(dossier),
         _pricing_table(dossier),
@@ -254,21 +261,16 @@ def _ordered_report_entries(dossier: ProductDossierOut) -> list[dict[str, Any]]:
     ]
 
 
+#: PD-vocab-extract (2026-09-09): backward-compatible aliases -- eoa.dossier.spec_render.
+#: specifications_entry/performance_entry now own the real grouped-by-vocabulary implementation;
+#: kept here (pure delegation, no logic of their own) only so an existing direct caller/test of
+#: these two names keeps working unchanged.
 def _specifications_table(dossier: ProductDossierOut) -> dict[str, Any]:
-    if not dossier.specifications:
-        return {"title_he": "מפרט", "body_he": PLACEHOLDER_HE}
-    headers = ["פרמטר", "ערך", "יחידה/וריאנט", "סוג מקור", "מקור"]
-    rows = [
-        [
-            r.parameter_he,
-            _cell(r.value),
-            " / ".join(x for x in (r.unit, r.variant) if x) or "—",
-            r.source_kind,
-            _cite_cell(r.cites),
-        ]
-        for r in dossier.specifications
-    ]
-    return {"title_he": "מפרט", "headers": headers, "rows": rows}
+    return spec_and_performance_entries(dossier)[0]
+
+
+def _performance_table(dossier: ProductDossierOut) -> dict[str, Any]:
+    return spec_and_performance_entries(dossier)[1]
 
 
 def _variants_table(dossier: ProductDossierOut) -> dict[str, Any]:
@@ -286,23 +288,6 @@ def _variants_table(dossier: ProductDossierOut) -> dict[str, Any]:
         for r in dossier.variants_and_versions
     ]
     return {"title_he": "גרסאות", "headers": headers, "rows": rows}
-
-
-def _performance_table(dossier: ProductDossierOut) -> dict[str, Any]:
-    if not dossier.performance:
-        return {"title_he": "ביצועים (מוצהר מול נמדד)", "body_he": PLACEHOLDER_HE}
-    headers = ["מדד", "ערך מוצהר", "ערך נמדד/מבצעי", "תנאים", "מקור"]
-    rows = [
-        [
-            r.metric_he,
-            _cell(r.claimed_value),
-            _cell(r.tested_or_operational_value),
-            _cell(r.conditions_he)[:150],
-            _cite_cell(r.cites),
-        ]
-        for r in dossier.performance
-    ]
-    return {"title_he": "ביצועים (מוצהר מול נמדד)", "headers": headers, "rows": rows}
 
 
 #: PD-fix-2 item 3: a `date`/`published_at` value can carry a time-of-day and timezone offset
@@ -506,6 +491,7 @@ def _persist(
     job_id: int | None,
     product_line: str | None,
     dropped: list[DroppedField],
+    llm_leg: str | None = None,
 ) -> tuple[int, int]:
     today = _today_jerusalem()
     item_ids = [it["id"] for it in corpus.items if it.get("id")]
@@ -514,6 +500,13 @@ def _persist(
         "errors": [],
         "dropped_fields": [{"field": d.field, "reason": d.reason, "value": d.value} for d in dropped],
     }
+    # PD-cloud-tools (2026-09-09): the leg actually used for this run's ReAct turns + extraction
+    # (or "local"/None when no override was given) is stamped into the persisted record itself --
+    # `ProductDossierOut` (the frozen schema, out of this file's ownership) has no `meta` field, so
+    # this is added at the dict level, after `model_dump()`, rather than by touching the schema.
+    data_dict = dossier.model_dump()
+    data_dict["meta"] = {"llm_leg": llm_leg or "local"}
+
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -553,7 +546,7 @@ def _persist(
                 "line": product_line,
                 "job_id": job_id,
                 "report_id": report_id,
-                "data": Json(dossier.model_dump(), dumps=_json_dumps),
+                "data": Json(data_dict, dumps=_json_dumps),
                 "sources": Json(corpus.registry, dumps=_json_dumps),
                 "outcome": outcome,
                 "confidence": confidence,
@@ -597,23 +590,33 @@ def build_product_dossier(
     job_id: int | None = None,
     role: str = "resident",
     interactive: bool = False,
+    llm_leg: str | None = None,
 ) -> DossierPaths:
     """Collect (corpus) -> research (plan) -> extract+ground -> diff -> render -> persist, for one
     product. A failed extraction (LLM unavailable/invalid output after ``chat_structured``'s own
     retries) never blocks the run -- the dossier renders honestly as an empty, ``not_found`` record
     (every table shows the "לא נמצא במקורות" placeholder) rather than failing the job outright,
-    matching every other report module's own two-failure-fallback discipline."""
+    matching every other report module's own two-failure-fallback discipline.
+
+    ``llm_leg`` (PD-cloud-tools, 2026-09-09): ``"<provider>[:<model>][@<power>]"`` (e.g.
+    ``"codex:gpt-6-astra"``) or ``"local"``/``None`` -- a per-run override, forwarded into every
+    research topic's ``investigate()`` ReAct turns (``run_plan``) and the structured extraction
+    call (``build_dossier``); that leg is tried first, ahead of the role's normally-configured
+    cloud chain, which stays the fallback unchanged. Persisted into ``product_dossiers.data.meta.
+    llm_leg`` (see :func:`_persist`) so a run's own provenance survives the round-trip and can be
+    shown in the run history. ``None`` (the default) preserves the exact prior dispatch."""
     corpus = build_corpus(product_name, vendor, aliases, product_line=product_line)
     plan_result = run_plan(
         corpus,
         job_id=job_id,
         budget_multiplier=budget_multiplier,
         on_progress=lambda progress: _write_job_progress(job_id, progress),
+        llm_leg=llm_leg,
     )
 
     dropped: list[DroppedField] = []
     try:
-        grounding = build_dossier(corpus, plan_result, role=role, interactive=interactive)
+        grounding = build_dossier(corpus, plan_result, role=role, interactive=interactive, llm_leg=llm_leg)
         dossier = grounding.dossier
         dropped = grounding.dropped
     except LLMOutputError as exc:
@@ -663,6 +666,7 @@ def build_product_dossier(
         job_id=job_id,
         product_line=product_line,
         dropped=dropped,
+        llm_leg=llm_leg,
     )
 
     return DossierPaths(

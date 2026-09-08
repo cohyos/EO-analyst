@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,7 +39,7 @@ import structlog
 
 from eoa.config import settings
 from eoa.errors import CliProviderError, ProviderUnavailable
-from eoa.llm.providers.base import ProviderResult
+from eoa.llm.providers.base import ProviderResult, strip_code_fences
 
 log = structlog.get_logger(__name__)
 
@@ -57,6 +58,123 @@ _JSON_INSTRUCTION = (
     "Return ONLY valid JSON matching this JSON Schema. No prose, no markdown code fences, "
     "no explanation before or after the JSON:\n{schema}"
 )
+
+# --------------------------------------------------------------------------------------------
+# Cloud tools (2026-09-09): text-protocol tool calling for CLI legs.
+#
+# `eoa.llm.chain.run_chain` skipped every CLI leg for a tool-calling turn (the deep-search ReAct
+# loop's search/read/finish tools) because no CLI provider accepted a caller-supplied tools
+# schema -- every tool-calling turn therefore ran on the local Ollama leg even in `mode: cloud`,
+# defeating the point of the cloud chain for `investigate()`'s own rounds. This section renders
+# the tool list into the prompt with a strict output contract (one JSON object, either
+# `{"tool": "<name>", "args": {...}}` or `{"final": {...}}` for the "finish" tool) and parses the
+# reply back into the same `tool_calls` shape Ollama's native tool-calling API produces
+# (`[{"function": {"name": ..., "arguments": {...}}}]`) -- `eoa.search.deep_search._act` reads
+# only that shape and needs no change at all. A malformed/unparseable reply gets exactly one
+# repair prompt ("reply with only the JSON object"); if that also fails, `CliProviderError` is
+# raised so `eoa.llm.chain.run_chain`'s existing fallback machinery moves on to the next leg --
+# no new fallback mechanism needed, this is the same `FALLBACK_EXCEPTIONS` path a bad HTTP
+# response or a non-zero CLI exit already takes.
+# --------------------------------------------------------------------------------------------
+
+_TOOL_PROTOCOL_INSTRUCTION = (
+    "\n\n--- TOOL CALLING PROTOCOL ---\n"
+    "You have access to the following tools. To use one, reply with EXACTLY ONE JSON object and "
+    "nothing else -- no prose, no markdown code fences, no explanation before or after it -- in "
+    "one of these two forms:\n"
+    '  {{"tool": "<tool_name>", "args": {{...}}}}   -- to call a tool\n'
+    '  {{"final": {{...}}}}                         -- to call the "finish" tool (its args go '
+    'directly under "final", not wrapped in a nested "args")\n'
+    "Available tools:\n{tool_list}\n"
+    "Reply with the JSON object only."
+)
+
+_TOOL_REPAIR_INSTRUCTION = (
+    "\n\nAssistant: {prior_reply}\n\n"
+    "User: התשובה הקודמת אינה תואמת לפרוטוקול הכלים ({reason}). הגב אך ורק עם אובייקט JSON יחיד "
+    'כמפורט לעיל -- {{"tool": "<name>", "args": {{...}}}} או {{"final": {{...}}}} -- בלי שום טקסט '
+    "נוסף, בלי markdown, בלי הסבר."
+)
+
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _render_tool_list(tools: list[dict[str, Any]]) -> str:
+    lines = []
+    for t in tools:
+        fn = t.get("function") or {}
+        name = fn.get("name", "?")
+        desc = fn.get("description", "")
+        params = fn.get("parameters") or {}
+        lines.append(f"- {name}: {desc}\n  args schema: {json.dumps(params, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
+def _find_tool_spec(tools: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    for t in tools:
+        fn = t.get("function") or {}
+        if fn.get("name") == name:
+            return fn
+    return None
+
+
+def _validate_tool_args(spec: dict[str, Any], args: dict[str, Any]) -> str | None:
+    """Lightweight validation: every ``required`` property from the tool's JSON Schema must be
+    present. No deeper type-checking -- this project has no ``jsonschema`` dependency and the
+    downstream tool implementations (``eoa.search.deep_search``'s ``_tool_search``/``_tool_read``/
+    the ``finish`` handling in ``_act``) already validate/coerce values themselves (e.g. via
+    ``InvestigationOut.model_validate``); this check only needs to catch a reply that omits an
+    argument outright, so a repair prompt can ask for it rather than crashing deeper in the loop.
+    """
+    required = (spec.get("parameters") or {}).get("required") or []
+    missing = [r for r in required if r not in args]
+    if missing:
+        return f"missing required args: {missing}"
+    return None
+
+
+def _parse_tool_reply(
+    raw: str, tools: list[dict[str, Any]]
+) -> tuple[tuple[str, dict[str, Any]] | None, str | None]:
+    """``((tool_name, args), None)`` on success, or ``(None, reason)`` on a malformed/invalid
+    reply -- tolerates a fenced ```json block and, failing a direct parse, the first ``{...}``
+    substring in the reply (some CLIs prepend a stray word or two despite the instruction)."""
+    text = strip_code_fences(raw)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        m = _JSON_OBJECT_RE.search(text)
+        if not m:
+            return None, "no JSON object found in reply"
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError as exc:
+            return None, f"invalid JSON: {str(exc)[:120]}"
+    if not isinstance(data, dict):
+        return None, "reply JSON is not an object"
+
+    if "final" in data:
+        name = "finish"
+        args = data["final"] if isinstance(data["final"], dict) else None
+        if args is None:
+            return None, '"final" value is not a JSON object'
+    elif "tool" in data:
+        name = str(data["tool"])
+        args = data.get("args")
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            return None, '"args" is not a JSON object'
+    else:
+        return None, 'reply JSON is missing a "tool" or "final" key'
+
+    spec = _find_tool_spec(tools, name)
+    if spec is None:
+        return None, f"unknown tool {name!r}"
+    err = _validate_tool_args(spec, args)
+    if err:
+        return None, err
+    return (name, args), None
 
 _CREATE_NO_WINDOW = 0x08000000  # subprocess.CREATE_NO_WINDOW, inlined so this imports on non-Windows too
 
@@ -137,6 +255,21 @@ class CliProvider:
     def is_available(self) -> bool:
         return _resolve_binary(self.kind) is not None
 
+    @property
+    def supports_tools(self) -> bool:
+        """2026-09-09 (cloud tool-calling): gated behind ``llm_providers.cli_text_tools``
+        (default ``true``) so the text-protocol dispatch below can be switched off without a code
+        change if a CLI's real-world reliability on the protocol turns out to be poor. Every CLI
+        kind opts in identically -- the protocol is provider-agnostic (plain text in, plain text
+        out), unlike the native web-tools delegation in ``eoa.search.deep_search.
+        investigate_batch_cloud`` (codex excluded there for lacking a search/web flag; that
+        constraint doesn't apply here, this project's own tools are being described in the
+        prompt, not the CLI's own browsing capability)."""
+        try:
+            return bool(settings().llm_providers.cli_text_tools)
+        except Exception:
+            return True
+
     def list_models(self) -> list[str]:
         cli = settings().llm_providers.cli.get(self.kind)
         return list(cli.models) if cli and cli.models else list(_STATIC_MODELS[self.kind])
@@ -149,6 +282,7 @@ class CliProvider:
         json_schema: dict[str, Any] | None = None,
         timeout_s: float | None = None,
         power: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ProviderResult:
         binary = _resolve_binary(self.kind)
         if not binary:
@@ -159,11 +293,39 @@ class CliProvider:
         mdl = model or self.model
         pwr = power or self.power
         prompt = _flatten_messages(messages)
-        if json_schema:
-            prompt += _JSON_INSTRUCTION.format(schema=json.dumps(json_schema, ensure_ascii=False))
         timeout = timeout_s or float(settings().llm_providers.timeout_s)
 
-        args, stdin_data, tmp_out = self._build_args(binary, mdl, prompt, pwr)
+        if tools:
+            return self._chat_with_tools(binary, mdl, prompt, pwr, tools, timeout)
+
+        if json_schema:
+            prompt += _JSON_INSTRUCTION.format(schema=json.dumps(json_schema, ensure_ascii=False))
+
+        content, usage, duration_ms = self._run_once(binary, mdl, prompt, pwr, timeout)
+        log.info(
+            "cli_provider_call",
+            provider=self.kind,
+            model=mdl or "default",
+            prompt_chars=len(prompt),
+            duration_ms=duration_ms,
+        )
+        return ProviderResult(
+            content=content,
+            model=mdl or "default",
+            provider=self.kind,
+            duration_ms=duration_ms,
+            prompt_chars=len(prompt),
+            usage=usage,
+        )
+
+    def _run_once(
+        self, binary: str, model: str | None, prompt: str, power: str | None, timeout: float
+    ) -> tuple[str, dict[str, Any], int]:
+        """One subprocess call for ``prompt`` -> ``(content, usage, duration_ms)``. Factored out
+        of ``chat()`` so the tool-calling path (:meth:`_chat_with_tools`, up to two calls: the
+        turn itself plus one repair attempt) shares exactly the same argv/stdin/parse/cleanup
+        mechanics as the plain-text and structured-output paths."""
+        args, stdin_data, tmp_out = self._build_args(binary, model, prompt, power)
         creationflags = _CREATE_NO_WINDOW if os.name == "nt" else 0
 
         t0 = time.monotonic()
@@ -199,21 +361,52 @@ class CliProvider:
             content, usage = self._parse_output(proc, tmp_out)
         finally:
             self._cleanup(tmp_out)
+        return content, usage, duration_ms
 
-        log.info(
-            "cli_provider_call",
-            provider=self.kind,
-            model=mdl or "default",
-            prompt_chars=len(prompt),
-            duration_ms=duration_ms,
-        )
+    def _chat_with_tools(
+        self,
+        binary: str,
+        model: str | None,
+        prompt: str,
+        power: str | None,
+        tools: list[dict[str, Any]],
+        timeout: float,
+    ) -> ProviderResult:
+        """Text-protocol tool calling (2026-09-09): render ``tools`` into the prompt with a strict
+        output contract, call once, parse; on a malformed/invalid reply give the model exactly one
+        repair prompt, then raise ``CliProviderError`` (picked up by ``eoa.llm.chain.run_chain``'s
+        existing fallback machinery -- see module docstring above) rather than retrying further.
+        Returns a ``ProviderResult`` whose ``tool_calls`` carries the same
+        ``[{"function": {"name": ..., "arguments": {...}}}]`` shape Ollama's native tool-calling
+        API produces, so ``eoa.search.deep_search._act`` needs no change at all."""
+        tool_prompt = prompt + _TOOL_PROTOCOL_INSTRUCTION.format(tool_list=_render_tool_list(tools))
+
+        content, usage, duration_ms = self._run_once(binary, model, tool_prompt, power, timeout)
+        parsed, reason = _parse_tool_reply(content, tools)
+
+        if parsed is None:
+            repair_prompt = tool_prompt + _TOOL_REPAIR_INSTRUCTION.format(
+                prior_reply=content[:2000], reason=reason or "malformed reply"
+            )
+            content2, usage2, duration_ms2 = self._run_once(binary, model, repair_prompt, power, timeout)
+            duration_ms += duration_ms2
+            usage = usage2 or usage
+            parsed, reason = _parse_tool_reply(content2, tools)
+            if parsed is None:
+                raise CliProviderError(
+                    f"{self.kind} CLI text-tools reply still malformed after one repair attempt: {reason}"
+                )
+
+        name, args = parsed
+        log.info("llm_chain_text_tools", provider=self.kind, model=model or "default", tool=name)
         return ProviderResult(
-            content=content,
-            model=mdl or "default",
+            content="",
+            model=model or "default",
             provider=self.kind,
             duration_ms=duration_ms,
             prompt_chars=len(prompt),
             usage=usage,
+            tool_calls=[{"function": {"name": name, "arguments": args}}],
         )
 
     # -- per-kind argv/stdin construction --------------------------------------------------

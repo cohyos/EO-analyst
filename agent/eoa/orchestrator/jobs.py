@@ -618,14 +618,16 @@ def run_product_line_report(job: dict[str, Any]) -> dict[str, Any]:
 def run_product_dossier(job: dict[str, Any]) -> dict[str, Any]:
     """``product_dossier`` job kind (PD-backend, user request 2026-09-08): builds one "סקירת שוק
     עמוקה למוצר" (``eoa.dossier.report.build_product_dossier``) from the payload
-    ``{product_key, product_name, vendor, aliases, product_line, budget_multiplier}``
+    ``{product_key, product_name, vendor, aliases, product_line, budget_multiplier, llm_leg}``
     (API-enqueued, ``eoa.api.services.enqueue_product_dossier``/``rerun_product_dossier``).
     ``product_key`` itself is not passed to the builder (it is re-derived deterministically from
     ``vendor``+``product_name`` -- see ``eoa.dossier.corpus.slugify_product_key`` -- so the two can
-    never drift); it is only used here for the log line. Returns ``{"product_dossier":
-    {"report_id", "dossier_id", "product_key", "outcome", "confidence"}}`` so the enqueue endpoint's
-    poll loop can resolve the finished run; a failure never blocks the orchestrator (docs/
-    CONVENTIONS.md rule 9)."""
+    never drift); it is only used here for the log line. ``llm_leg`` (PD-cloud-tools, 2026-09-09):
+    an optional per-run override, e.g. ``"codex:gpt-6-astra"`` -- forwarded verbatim into
+    ``build_product_dossier``; ``None``/absent preserves the prior dispatch (the role's configured
+    cloud chain, unchanged). Returns ``{"product_dossier": {"report_id", "dossier_id",
+    "product_key", "outcome", "confidence"}}`` so the enqueue endpoint's poll loop can resolve the
+    finished run; a failure never blocks the orchestrator (docs/CONVENTIONS.md rule 9)."""
     from eoa.dossier.report import build_product_dossier
 
     payload = job.get("payload") or {}
@@ -640,6 +642,7 @@ def run_product_dossier(job: dict[str, Any]) -> dict[str, Any]:
             product_line=payload.get("product_line"),
             budget_multiplier=payload.get("budget_multiplier"),
             job_id=job["id"],
+            llm_leg=payload.get("llm_leg"),
         )
         return {
             "product_dossier": {

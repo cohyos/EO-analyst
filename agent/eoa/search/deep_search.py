@@ -1365,7 +1365,19 @@ def _split_bidi_runs(text: str) -> list[tuple[str, str]]:
     closing mark's own position -- without it, "- [1] https://..." would put the opening `[` in the
     preceding Hebrew run but `1]` in the following Latin/digit run, an asymmetric split that (a)
     reads as broken bidi and (b) trips the space-insertion pass into wedging a space inside the
-    bracket (see `docx_builder.split_runs`'s own docstring for the same failure mode on `()`)."""
+    bracket (see `docx_builder.split_runs`'s own docstring for the same failure mode on `()`).
+
+    Known, deliberately unfixed: like the pre-round-16 `docx_builder.split_runs`, a space between a
+    Hebrew word and an adjacent Latin/digit run inherits the run it falls in, so "AeroVironment
+    בעלות" splits as `("other", "AeroVironment ")` + `("he", "בעלות")` -- the joining space ends up
+    *inside* the LRI/PDI isolate `_bidi_space_and_isolate_line` wraps around the 'other' run.
+    Inside an atomic isolate that space is not a separator, so rendered as-is the two words would
+    glue (BIDI-REPORTS.md section 2). It is inert here: the only caller,
+    `format_investigation_answer_he`, immediately runs `normalize_hebrew_punctuation`, whose
+    `strip_bidi_isolates` pass removes the marks before anything is stored or displayed -- the
+    space survives as an ordinary space in plain text, and the renderers re-isolate from scratch.
+    See docs/qa/content_review/BIDI-REPORTS.md section 8; if this function's isolate-wrapped output
+    is ever emitted directly, port `docx_builder._rebalance_boundary_whitespace` first."""
     if not text:
         return []
     runs: list[tuple[str, str]] = []
@@ -1845,6 +1857,7 @@ def investigate(
     budget_multiplier: float = 1.0,
     prior_findings_he: str = "",
     deadline_s: float | None = None,
+    llm_leg: str | None = None,
 ) -> Investigation:
     """Run the persistence protocol; returns an Investigation with ``result`` (never invents).
 
@@ -1858,6 +1871,13 @@ def investigate(
     plan``'s per-topic time cap) can bound a single call without touching the global
     ``deep_search.per_investigation_timeout_min`` config default every other caller still uses
     unchanged. ``None`` (the default) preserves the exact prior behavior.
+
+    ``llm_leg`` (PD-cloud-tools, 2026-09-09): ``"<provider>[:<model>][@<power>]"`` (e.g.
+    ``"codex:gpt-6-astra"``) or ``"local"``/``None`` -- forwarded to every ReAct round's own
+    ``_act()`` call as a chain override (``eoa.llm.chain.build_chain_with_leg_override``): that
+    one leg is tried first for the tool-calling turn, ahead of the role's normally-configured
+    chain, which stays the fallback exactly as before. ``None`` (the default) preserves the exact
+    prior dispatch (``_role()``'s configured chain, unchanged) for every existing call site.
     """
     cfg = settings().deep_search
     inv = Investigation(job_id=job_id, item_id=item_id, question=question)
@@ -1954,7 +1974,7 @@ def investigate(
                     f"≥ {cfg.confidence_stop} או כשמיצית את הסבב. לעולם אל תמציא — אם לא נמצא, finish עם not_found.",
                 }
             )
-            finished = _act(inv, budget, transcript, round_no, tools=react_tools)
+            finished = _act(inv, budget, transcript, round_no, tools=react_tools, llm_leg=llm_leg)
             if finished:
                 break
             if inv.result and inv.result.confidence >= cfg.confidence_stop:
@@ -2055,12 +2075,19 @@ def _act(
     round_no: int,
     max_steps: int = _DEFAULT_ACT_MAX_STEPS,
     tools: list[dict[str, Any]] | None = None,
+    llm_leg: str | None = None,
 ) -> bool:
     """Let the model call tools until it finishes or the step/budget cap; returns True if finished.
 
     ``tools`` defaults to the original fixed ``TOOLS`` list (search/read/finish); callers pass the
     A8-extended list (``TOOLS + _mcp_tool_specs()``) to add MCP tools without changing this
     function's own defaults or any existing call site that doesn't care about MCP.
+
+    ``llm_leg`` (PD-cloud-tools, 2026-09-09): when given, every ``chat()`` call this loop makes
+    passes ``chain_override=eoa.llm.chain.build_chain_with_leg_override(_role(), llm_leg)`` --
+    that one leg tried first, ahead of the role's normally-configured chain (unchanged as the
+    fallback). ``None`` (the default, every pre-existing call site) makes ``chat()`` resolve the
+    chain exactly as before this parameter existed.
 
     PD-fix-3 (2026-09-08, item 5): ``budget.exhausted`` (which folds in ``deadline_s``, see
     ``investigate()``) was being *checked* every step here, but never actually stopped the loop --
@@ -2074,6 +2101,11 @@ def _act(
     doesn't finish, the loop stops for real on the very next check -- the caller (``investigate()``)
     then finalizes with whatever ``inv.result`` already holds (or ``stopped_timeout`` if none)."""
     tools = tools if tools is not None else TOOLS
+    chain_override = None
+    if llm_leg:
+        from eoa.llm.chain import build_chain_with_leg_override
+
+        chain_override = build_chain_with_leg_override(_role(), llm_leg)
     exhaustion_notice_given = False
     for _ in range(max_steps):
         _check_stop(inv)
@@ -2097,6 +2129,7 @@ def _act(
                 tools=tools,
                 think=False,
                 options={"temperature": 0.2, "num_predict": 1200},
+                chain_override=chain_override,
             )
         except Exception as exc:  # timeout / transport error: end this round, keep what we have
             log.warning("react_step_failed", error=str(exc)[:160])

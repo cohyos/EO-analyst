@@ -29,6 +29,7 @@ export function NewDossierForm({
   const [aliases, setAliases] = useState<string[]>([]);
   const [productLine, setProductLine] = useState("");
   const [budgetMultiplier, setBudgetMultiplier] = useState(1);
+  const [llmLeg, setLlmLeg] = useState("");
   const [touched, setTouched] = useState(false);
 
   const trimmedName = productName.trim();
@@ -68,6 +69,7 @@ export function NewDossierForm({
       aliases: finalAliases,
       product_line: productLine || null,
       budget_multiplier: budgetMultiplier,
+      llm_leg: llmLeg || null,
     });
   }
 
@@ -184,6 +186,26 @@ export function NewDossierForm({
           >
             <option value={1}>{t("dossiers.form.budget1x")}</option>
             <option value={2}>{t("dossiers.form.budget2x")}</option>
+          </select>
+        </div>
+        <div>
+          {/* PD-cloud-tools (2026-09-09): optional per-run LLM leg override -- "" means "no
+              override, use the configured chain" (eoa.api.services.enqueue_product_dossier's
+              `llm_leg=None`); the ReAct research turns AND the structured extraction both try
+              this leg first, ahead of the configured chain, which stays the fallback. */}
+          <label htmlFor="dossier-llm-leg" className="mb-1 block text-xs text-fg-muted">
+            {t("dossiers.form.modelLabel")}
+          </label>
+          <select
+            id="dossier-llm-leg"
+            value={llmLeg}
+            onChange={(e) => setLlmLeg(e.target.value)}
+            className="w-full rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm"
+          >
+            <option value="">{t("dossiers.form.modelDefault")}</option>
+            <option value="codex:gpt-6-astra">{t("dossiers.form.modelCodex")}</option>
+            <option value="claude:claude-sonnet-5">{t("dossiers.form.modelClaude")}</option>
+            <option value="agy:gemini-3.1-pro-high">{t("dossiers.form.modelAgy")}</option>
           </select>
         </div>
       </div>

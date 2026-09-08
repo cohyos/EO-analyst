@@ -294,3 +294,52 @@ class TestJob175Fixture:
             a, b = out[i], out[i + 1]
             if (latin_re.match(a) and hebrew_re.match(b)) or (hebrew_re.match(a) and latin_re.match(b)):
                 raise AssertionError(f"unspaced bidi boundary at {i}: ...{out[max(0, i - 10) : i + 10]!r}...")
+
+
+class TestIsolateMarksNeverReachStoredAnswer:
+    """BIDI-REPORTS.md section 8 (docs/qa/content_review/BIDI-REPORTS.md).
+
+    `_split_bidi_runs` shares the pre-round-16 `docx_builder.split_runs` defect: the single space
+    joining a Hebrew word and an adjacent Latin/digit run is absorbed into the 'other' run, so
+    `_bidi_space_and_isolate_line` wraps it *inside* the LRI/PDI isolate. That is harmless only
+    because `format_investigation_answer_he` strips every isolate mark (via
+    `normalize_hebrew_punctuation`) before the text is stored/served/rendered. These tests pin
+    that guarantee with the exact symptom phrases from the 2026-09-08 daily report; if the strip
+    ever goes away, the trapped-space bug becomes live and `_split_bidi_runs` needs the mirrored
+    `docx_builder._rebalance_boundary_whitespace` fix.
+    """
+
+    SYMPTOM_PHRASES: ClassVar[list[str]] = [
+        "נשק לייזר של AeroVironment בעלות 3 דולר לירי צמצם",
+        "צמצם ב-75% את טיסות רחפני הקרטלים",
+        "הולנד מזמינה 6 מערכות ReDrone נוספות מאלביט",
+        "לצד הזמנת C-UAS ישראלית נוספת",
+        "לעומת הדוח היומי הקודם: 5 פריטים חדשים",
+    ]
+
+    @pytest.mark.parametrize("phrase", SYMPTOM_PHRASES)
+    def test_split_reproduces_the_trapped_boundary_space_in_isolation(self, phrase: str) -> None:
+        """Documents (not endorses) the latent defect: at least one 'other' run carries the
+        boundary space at its edge. Kept so a future fix to `_split_bidi_runs` is a conscious
+        change to this expectation, not an accidental one."""
+        runs = _split_bidi_runs(phrase)
+        assert any(cls == "other" and chunk != chunk.strip() for cls, chunk in runs)
+
+    @pytest.mark.parametrize("phrase", SYMPTOM_PHRASES)
+    def test_isolate_marks_are_stripped_and_boundary_spaces_survive(self, phrase: str) -> None:
+        out = format_investigation_answer_he(phrase)
+        assert not re.search(r"[\u2066-\u2069]", out), out
+        # Every Hebrew/Latin-or-digit boundary in the source had a single space (or a prefix
+        # hyphen); the stored text must keep exactly that -- no glue, no doubled space.
+        assert out == phrase
+        assert "  " not in out
+
+    def test_isolate_marks_gone_across_a_full_sectioned_answer(self) -> None:
+        out = format_investigation_answer_he(
+            "נשק לייזר של AeroVironment בעלות 3 דולר לירי.\n\nהולנד מזמינה 6 מערכות ReDrone נוספות.",
+            key_facts=["הזמנת C-UAS ישראלית נוספת [1]"],
+            contradictions_he="לא ידוע מחיר ליחידה.",
+        )
+        assert not re.search(r"[\u2066-\u2069]", out)
+        for expected in ("AeroVironment בעלות", "3 דולר", "6 מערכות", "ReDrone נוספות", "C-UAS ישראלית"):
+            assert expected in out, (expected, out)
