@@ -29,7 +29,7 @@ from eoa.dossier.diff import compute_diff
 from eoa.dossier.extract import DroppedField, build_dossier
 from eoa.dossier.plan import PlanResult, run_plan
 from eoa.errors import LLMOutputError
-from eoa.llm.schemas.product_dossier import ProductDossierOut
+from eoa.llm.schemas.product_dossier import DealRow, ProductDossierOut
 from eoa.report.docx_builder import build_docx, render_html, render_markdown, save_docx, validate_docx
 
 log = structlog.get_logger(__name__)
@@ -46,6 +46,27 @@ _PARTIAL_MIN_SIGNALS = 1
 
 def _today_jerusalem() -> dt.date:
     return dt.datetime.now(JERUSALEM).date()
+
+
+def _write_job_progress(job_id: int | None, progress: list[dict[str, Any]]) -> None:
+    """PD-fix (2026-09-08, item 5): best-effort, persists ``progress`` (one entry per research
+    topic -- ``eoa.dossier.plan``'s ``ProgressEntry``) into ``jobs.result->'progress'`` WHILE the
+    job is still ``running`` -- so ``GET /api/dossiers/{key}``'s ``pending_job.progress``
+    (``eoa.api.services``) can render a live per-topic banner instead of the ~2h run showing no
+    progress at all. Only ever touches a row still ``running`` (never clobbers a result
+    ``eoa.orchestrator.jobs``'s own ``finish_job`` already wrote for a job that raced ahead) and
+    never raises -- a progress-write failure must not break the dossier build itself."""
+    if job_id is None:
+        return
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET result = COALESCE(result, '{}'::jsonb) || %(patch)s::jsonb "
+                "WHERE id = %(id)s AND state = 'running'",
+                {"id": job_id, "patch": Json({"progress": progress}, dumps=_json_dumps)},
+            )
+    except Exception as exc:
+        log.warning("dossier_progress_write_failed", job_id=job_id, error=str(exc)[:200])
 
 
 def _cite_cell(cites: list[int]) -> str:
@@ -93,51 +114,116 @@ def _sentence_or_placeholder(sentences: list[Any]) -> list[_CiteSentence]:
 
 
 def _build_render_draft(dossier: ProductDossierOut) -> _RenderableDossierDraft:
-    exec_summary = _sentence_or_placeholder(dossier.summary_he)
-    sections: list[_RenderSection] = []
+    """PD-fix (2026-09-08, item 4): only ``exec_summary`` (תקציר מנהלים) still goes through
+    ``docx_builder``'s ``draft.sections`` slot -- every other section moved into the ordered
+    ``tables`` list (:func:`_ordered_report_entries`) so the WHOLE document (prose sections + real
+    data tables, interleaved) follows the plan's exact section order instead of "prose sections
+    block, then every table" (``docx_builder.build_docx`` renders ``draft.sections`` as one group
+    before ``tables`` as a second group -- the only way to interleave them without touching that
+    shared, not-owned-by-this-round module is to keep ``draft.sections`` empty and put everything,
+    prose included, into ``tables`` -- a ``tables`` entry with no ``headers``/``rows``, just
+    ``body_he``, already renders as plain prose in every one of ``docx_builder``'s three renderers,
+    see ``_render_table_entry_docx``/``_render_table_entry_md``/``_render_table_entry_html``)."""
+    return _RenderableDossierDraft(exec_summary=_sentence_or_placeholder(dossier.summary_he), sections=[])
 
+
+# --------------------------------------------------------------------------
+# PD-fix item 4: ordered section/table entries -- section order EXACTLY per docs/
+# PLAN_PRODUCT_DOSSIER.md section 6 (as re-affirmed by the fix brief): תקציר (exec_summary, above),
+# זיהוי, מפרט, גרסאות, ביצועים, בשלות, עסקאות, מחירים, שותפויות, מתחרים, פטנטים, מכרזים ותחזיות,
+# רגולציה, פערים, משמעות עסקית, מה השתנה, מקורות (the sources appendix, always rendered last by
+# ``docx_builder`` itself -- not part of this list). Every one of the 15 entries below is ALWAYS
+# present -- an empty section renders its own single placeholder line/body, it is never omitted
+# (a caller checking "did this section render" must see it either way).
+# --------------------------------------------------------------------------
+
+
+def _cite_suffix(cites: list[int]) -> str:
+    return "".join(f"[{n}]" for n in cites)
+
+
+def _prose_entry(title_he: str, text: str, cites: list[int] | None = None) -> dict[str, Any]:
+    text = (text or "").strip()
+    if not text:
+        return {"title_he": title_he, "body_he": PLACEHOLDER_HE}
+    suffix = _cite_suffix(cites or [])
+    body = f"{text} {suffix}".rstrip() if suffix else text
+    return {"title_he": title_he, "body_he": body}
+
+
+def _sentence_list_entry(title_he: str, sentences: list[Any]) -> dict[str, Any]:
+    if not sentences:
+        return {"title_he": title_he, "body_he": PLACEHOLDER_HE}
+    parts = []
+    for s in sentences:
+        suffix = _cite_suffix(s.cites)
+        text = (s.text_he or "").rstrip()
+        parts.append(f"{text} {suffix}".rstrip() if suffix else text)
+    return {"title_he": title_he, "body_he": " ".join(parts)}
+
+
+def _identity_entry(dossier: ProductDossierOut) -> dict[str, Any]:
     identity = dossier.identity
-    identity_line = (
+    line = (
         f"יצרן: {_cell(identity.vendor)} | משפחת מוצרים: {_cell(identity.product_family)} | "
         f"קטגוריה: {_cell(identity.category_he)} | תאריך הכרזה: {_cell(identity.first_announced)} | "
         f"סטטוס: {identity.status_he}"
     )
-    sections.append(
-        _RenderSection("זיהוי המוצר", [_CiteSentence(text_he=identity_line, cites=identity.cites)])
-    )
+    return _prose_entry("זיהוי המוצר", line, identity.cites)
 
+
+def _maturity_entry(dossier: ProductDossierOut) -> dict[str, Any]:
     maturity = dossier.maturity
-    maturity_bits = [
+    bits = [
         f"TRL: {_cell(maturity.trl)}",
         f"מפעילים: {', '.join(maturity.operational_users) or PLACEHOLDER_HE}",
         f"פלטפורמות: {', '.join(maturity.platforms_integrated) or PLACEHOLDER_HE}",
         f"פריסה ראשונה: {_cell(maturity.first_fielding)}",
         _cell(maturity.assessment_he),
     ]
-    sections.append(
-        _RenderSection(
-            "בשלות ופריסה", [_CiteSentence(text_he=" | ".join(maturity_bits), cites=maturity.cites)]
-        )
-    )
+    return _prose_entry("בשלות ופריסה", " | ".join(bits), maturity.cites)
 
+
+def _regulatory_entry(dossier: ProductDossierOut) -> dict[str, Any]:
     regulatory = dossier.regulatory_export
-    if regulatory.export_regime_he or regulatory.restrictions_he:
-        reg_text = f"{_cell(regulatory.export_regime_he)} — {_cell(regulatory.restrictions_he)}"
-        sections.append(
-            _RenderSection("רגולציה וייצוא", [_CiteSentence(text_he=reg_text, cites=regulatory.cites)])
-        )
-
-    sections.append(_RenderSection("פערים ואי-ודאויות", _sentence_or_placeholder(dossier.risks_and_gaps_he)))
-    sections.append(_RenderSection("משמעות עסקית", _sentence_or_placeholder(dossier.bd_implications_he)))
-    if dossier.what_changed_he is not None:
-        sections.append(_RenderSection("מה השתנה", _sentence_or_placeholder(dossier.what_changed_he)))
-
-    return _RenderableDossierDraft(exec_summary=exec_summary, sections=sections)
+    if not (regulatory.export_regime_he or regulatory.restrictions_he):
+        return {"title_he": "רגולציה וייצוא", "body_he": PLACEHOLDER_HE}
+    text = f"{_cell(regulatory.export_regime_he)} — {_cell(regulatory.restrictions_he)}"
+    return _prose_entry("רגולציה וייצוא", text, regulatory.cites)
 
 
-def _specifications_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _what_changed_entry(dossier: ProductDossierOut) -> dict[str, Any]:
+    title = "מה השתנה"
+    if dossier.what_changed_he is None:
+        return {"title_he": title, "body_he": "אין סקירה קודמת להשוואה — זוהי הסקירה הראשונה של מוצר זה."}
+    if not dossier.what_changed_he:
+        return {"title_he": title, "body_he": "לא זוהו שינויים לעומת הסקירה הקודמת."}
+    return _sentence_list_entry(title, dossier.what_changed_he)
+
+
+def _ordered_report_entries(dossier: ProductDossierOut) -> list[dict[str, Any]]:
+    return [
+        _identity_entry(dossier),
+        _specifications_table(dossier),
+        _variants_table(dossier),
+        _performance_table(dossier),
+        _maturity_entry(dossier),
+        _deals_table(dossier),
+        _pricing_table(dossier),
+        _partnerships_table(dossier),
+        _competitors_table(dossier),
+        _patents_table(dossier),
+        _tenders_table(dossier),
+        _regulatory_entry(dossier),
+        _sentence_list_entry("פערים ואי-ודאויות", dossier.risks_and_gaps_he),
+        _sentence_list_entry("משמעות עסקית", dossier.bd_implications_he),
+        _what_changed_entry(dossier),
+    ]
+
+
+def _specifications_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.specifications:
-        return None
+        return {"title_he": "מפרט", "body_he": PLACEHOLDER_HE}
     headers = ["פרמטר", "ערך", "יחידה/וריאנט", "סוג מקור", "מקור"]
     rows = [
         [
@@ -152,9 +238,9 @@ def _specifications_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
     return {"title_he": "מפרט", "headers": headers, "rows": rows}
 
 
-def _variants_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _variants_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.variants_and_versions:
-        return None
+        return {"title_he": "גרסאות", "body_he": PLACEHOLDER_HE}
     headers = ["גרסה/דגם", "שנה", "שינויים", "פלטפורמות", "מקור"]
     rows = [
         [
@@ -169,9 +255,9 @@ def _variants_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
     return {"title_he": "גרסאות", "headers": headers, "rows": rows}
 
 
-def _performance_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _performance_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.performance:
-        return None
+        return {"title_he": "ביצועים (מוצהר מול נמדד)", "body_he": PLACEHOLDER_HE}
     headers = ["מדד", "ערך מוצהר", "ערך נמדד/מבצעי", "תנאים", "מקור"]
     rows = [
         [
@@ -186,17 +272,41 @@ def _performance_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
     return {"title_he": "ביצועים (מוצהר מול נמדד)", "headers": headers, "rows": rows}
 
 
-def _deals_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _deal_date_cell(r: DealRow) -> str:
+    """PD-fix item 3: a date backfilled from the cited source's own publish date (never the actual
+    deal-closing date) says so, rather than reading as indistinguishable from one that was."""
+    text = _cell(r.date)
+    if r.date and r.date_kind == "published":
+        return f"{text} (תאריך פרסום)"
+    return text
+
+
+def _deal_amount_cell(r: DealRow) -> str:
+    """The published figure stays primary (never replaced); the deterministically parsed numeric
+    value, when one was found, is appended in parentheses -- e.g. "כ-80 מיליון דולר (80,000,000
+    USD)" -- never the other way around (no derived/computed value is ever presented as if it were
+    itself the published figure)."""
+    if not r.amount:
+        return PLACEHOLDER_HE
+    if r.amount_value is not None:
+        currency = f" {r.currency}" if r.currency else ""
+        return f"{r.amount} ({r.amount_value:,.0f}{currency})"
+    return r.amount
+
+
+def _deals_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.deals:
-        return None
+        return {"title_he": "עסקאות", "body_he": PLACEHOLDER_HE}
     headers = ["תאריך", "לקוח", "מדינה", "סוג", "היקף", "מקור"]
     rows = [
         [
-            _cell(r.date),
+            _deal_date_cell(r),
             _cell(r.customer),
-            _cell(r.country),
+            # PD-fix item 3: a region-only source ("Asia-Pacific country") never fabricates a
+            # specific country here -- `country` is empty and `region_he` carries the region text.
+            _cell(r.country or r.region_he),
             r.kind,
-            _cell(r.amount),
+            _deal_amount_cell(r),
             _cite_cell(r.cites),
         ]
         for r in dossier.deals
@@ -204,9 +314,9 @@ def _deals_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
     return {"title_he": "עסקאות", "headers": headers, "rows": rows}
 
 
-def _pricing_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _pricing_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.pricing:
-        return None
+        return {"title_he": "מחירים", "body_he": PLACEHOLDER_HE}
     headers = ["סכום", "בסיס", "תאריך", "סוג מקור", "מקור"]
     rows = [
         [_cell(r.figure), _cell(r.basis_he), _cell(r.date), r.source_kind, _cite_cell(r.cites)]
@@ -215,17 +325,17 @@ def _pricing_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
     return {"title_he": "מחירים", "headers": headers, "rows": rows}
 
 
-def _partnerships_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _partnerships_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.partnerships:
-        return None
+        return {"title_he": "שותפויות", "body_he": PLACEHOLDER_HE}
     headers = ["שותף", "תפקיד", "מאז", "מקור"]
     rows = [[r.partner, r.role_he, _cell(r.since), _cite_cell(r.cites)] for r in dossier.partnerships]
     return {"title_he": "שותפויות", "headers": headers, "rows": rows}
 
 
-def _competitors_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _competitors_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.competitors:
-        return None
+        return {"title_he": "מתחרים", "body_he": PLACEHOLDER_HE}
     headers = ["מוצר מתחרה", "יצרן", "השוואה", "מקור"]
     rows = [
         [r.product, _cell(r.vendor), _cell(r.comparison_he)[:200], _cite_cell(r.cites)]
@@ -234,9 +344,9 @@ def _competitors_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
     return {"title_he": "מתחרים", "headers": headers, "rows": rows}
 
 
-def _patents_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _patents_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.patents:
-        return None
+        return {"title_he": "פטנטים", "body_he": PLACEHOLDER_HE}
     headers = ["מספר פרסום", "כותרת", "בעלים", "רלוונטיות", "מקור"]
     rows = [
         [
@@ -251,9 +361,9 @@ def _patents_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
     return {"title_he": "פטנטים", "headers": headers, "rows": rows}
 
 
-def _tenders_table(dossier: ProductDossierOut) -> dict[str, Any] | None:
+def _tenders_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.tenders_and_forecasts:
-        return None
+        return {"title_he": "מכרזים ותחזיות", "body_he": PLACEHOLDER_HE}
     headers = ["מכרז/תחזית", "סטטוס", "רלוונטיות", "מקור"]
     rows = [
         [_cell(r.title), _cell(r.status), _cell(r.relevance_he)[:150], _cite_cell(r.cites)]
@@ -430,7 +540,12 @@ def build_product_dossier(
     (every table shows the "לא נמצא במקורות" placeholder) rather than failing the job outright,
     matching every other report module's own two-failure-fallback discipline."""
     corpus = build_corpus(product_name, vendor, aliases, product_line=product_line)
-    plan_result = run_plan(corpus, job_id=job_id, budget_multiplier=budget_multiplier)
+    plan_result = run_plan(
+        corpus,
+        job_id=job_id,
+        budget_multiplier=budget_multiplier,
+        on_progress=lambda progress: _write_job_progress(job_id, progress),
+    )
 
     dropped: list[DroppedField] = []
     try:
@@ -448,21 +563,10 @@ def build_product_dossier(
     outcome, confidence = _compute_outcome_confidence(dossier, plan_result)
 
     draft = _build_render_draft(dossier)
-    tables = [
-        tbl
-        for tbl in (
-            _specifications_table(dossier),
-            _variants_table(dossier),
-            _performance_table(dossier),
-            _deals_table(dossier),
-            _pricing_table(dossier),
-            _partnerships_table(dossier),
-            _competitors_table(dossier),
-            _patents_table(dossier),
-            _tenders_table(dossier),
-        )
-        if tbl
-    ]
+    # PD-fix item 4: the full section order (identity through "מה השתנה") -- every entry always
+    # present, prose sections included -- lives in this one ordered list now; see
+    # `_build_render_draft`'s own docstring for why prose moved out of `draft.sections`.
+    tables = _ordered_report_entries(dossier)
 
     today = _today_jerusalem()
     docx_path, md_path, html_path = _report_paths(corpus.product_key, today)

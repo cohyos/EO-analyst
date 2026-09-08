@@ -126,9 +126,20 @@ Regression check on the suites this round's changes touch (`jobs`/`product_line`
 (`pytest tests/unit -q -k "jobs or product_line or patent_survey or api_smoke or app_middleware"`
 = 214, `pytest tests/unit/test_docx_builder.py tests/unit/test_api_smoke.py
 tests/unit/test_app_middleware.py -q` = 58, overlapping api_smoke/app_middleware counted once).
-A full-suite run (`pytest tests/unit -q`) was also kicked off; its full pass/fail tally is recorded
-separately once complete (this environment's full suite takes several minutes -- see
-`docs/MODULES.md`'s own note on the last full-suite baseline, ~3849 tests).
+A full-suite run (`pytest tests/unit -q`, ~4693 tests, 2h43m) completed: **4664 passed, 29
+failed, 1 skipped**. Re-running every failing file with `DATABASE_URL` properly sourced (the
+background run's own shell had not sourced `runtime/eoa.env`, so every `psycopg_pool.PoolTimeout`
+among the 29 was that, not a real failure) brought it down to **3 failed** across 297 tests in
+those files: `test_ask_round6_grounding.py::TestAnchorMissDemotedSectionEndToEnd
+::test_citation_repair_rewrite_is_reguarded_before_reaching_the_demoted_section` and two in
+`test_discovery_round4.py::TestToolReadUsesL2Arbitration` (`eoa.api.ask_grounding` and
+`eoa.search.deep_search._tool_read` respectively -- confirmed by reading the failures directly:
+the latter two are a pre-existing test/fixture mismatch, the fake page body in both tests is
+shorter than `_MIN_BODY_CHARS`, so `_tool_read`'s own low-quality-page gate discards it before the
+mocked `security.guard.screen` is ever reached). All three failures are in modules this round never
+touches (`eoa.dossier` only ever *imports* `investigate`/`Investigation` read-only from
+`eoa.search.deep_search`, never modifies it) -- pre-existing and unrelated, same pattern
+`docs/MODULES.md`'s own "Product-line" entry documents for its own full-suite baseline.
 
 `ruff check` clean on every file touched (`agent/eoa/dossier/`, `agent/eoa/llm/schemas/
 product_dossier.py`, `agent/eoa/api/routes/dossiers.py`, `agent/eoa/api/services.py`,

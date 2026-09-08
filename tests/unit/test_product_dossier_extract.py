@@ -19,6 +19,7 @@ from eoa.dossier.plan import PlanResult
 from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.product_dossier import (
     CompetitorRow,
+    DealRow,
     IdentityBlock,
     PriceRow,
     ProductDossierOut,
@@ -185,3 +186,77 @@ def test_price_row_number_not_grounded_is_dropped() -> None:
     )
     result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
     assert result.dossier.pricing == []
+
+
+# --------------------------------------------------------------------------
+# PD-fix (2026-09-08, item 3): deal amount/date/country deterministic post-processing
+# --------------------------------------------------------------------------
+
+
+def test_parse_amount_he_hebrew_scale_and_currency() -> None:
+    assert dossier_extract.parse_amount_he("כ-80 מיליון דולר") == (80_000_000.0, "USD")
+
+
+def test_parse_amount_he_english_scale_and_currency() -> None:
+    assert dossier_extract.parse_amount_he("$2 million") == (2_000_000.0, "USD")
+
+
+def test_parse_amount_he_no_digits_returns_none() -> None:
+    assert dossier_extract.parse_amount_he("") == (None, None)
+    assert dossier_extract.parse_amount_he("no numbers here") == (None, None)
+
+
+def test_split_country_region_region_only() -> None:
+    assert dossier_extract.split_country_region("Asia-Pacific country") == ("", "Asia-Pacific country")
+    assert dossier_extract.split_country_region("מדינה באסיה-פסיפיק") == ("", "מדינה באסיה-פסיפיק")
+
+
+def test_split_country_region_specific_country_is_kept() -> None:
+    assert dossier_extract.split_country_region("India") == ("India", "")
+    assert dossier_extract.split_country_region("") == ("", "")
+
+
+def test_deal_row_amount_parsed_and_country_split_to_region() -> None:
+    items = [
+        {
+            "id": 1,
+            "title": "Elbit wins deal",
+            "summary_he": "עסקה בהיקף כ-80 מיליון דולר, מדינה באסיה-פסיפיק.",
+            "so_what_he": "",
+        }
+    ]
+    corpus = _corpus_with_registry([_reg(1, published_at="2026-03-01")], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[
+            DealRow(
+                customer="Some AF",
+                amount="כ-80 מיליון דולר",
+                country="מדינה באסיה-פסיפיק",
+                date=None,
+                cites=[1],
+            )
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    deal = result.dossier.deals[0]
+    assert deal.amount_value == 80_000_000.0
+    assert deal.currency == "USD"
+    assert deal.country == ""
+    assert deal.region_he == "מדינה באסיה-פסיפיק"
+    # No date on the deal itself -> backfilled from the cited item's own published_at.
+    assert deal.date == "2026-03-01"
+    assert deal.date_kind == "published"
+
+
+def test_deal_row_with_own_date_keeps_date_kind_deal() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "נחתם חוזה ב-1.3.2026.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1, published_at="2026-05-01")], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="Some AF", date="2026-03-01", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    deal = result.dossier.deals[0]
+    assert deal.date == "2026-03-01"
+    assert deal.date_kind == "deal"

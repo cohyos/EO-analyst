@@ -234,6 +234,12 @@ class DossierCfg(BaseModel):
     max_topics: int = 9
     budget_multiplier: float = 1.0
     max_sources: int = 40
+    #: PD-fix (2026-09-08, item 6): a hard wall-clock cap per topic investigation, seconds -- a
+    #: topic that exceeds it stops with whatever ``investigate()`` has already found instead of
+    #: running the full multiplier-scaled ``deep_search.per_investigation_timeout_min`` (9 topics
+    #: x 3 rounds each was the actual first live run's ~2h cost). Forwarded as
+    #: ``eoa.search.deep_search.investigate()``'s own ``deadline_s``.
+    topic_time_cap_s: int = 600
 
 
 class NotifyCfg(BaseModel):

@@ -49,6 +49,105 @@ _QUALIFYING_PRICE_SOURCE_KINDS = {"contract", "tender", "budget", "official"}
 
 
 # --------------------------------------------------------------------------
+# PD-fix (2026-09-08, item 3): deterministic deal-amount/date/country post-processing -- never
+# LLM-authored, always derived from what the model already wrote (``amount``/``country``) or from
+# the cited source's own metadata (``published_at``), same "code, not another model call" discipline
+# ``eoa.dossier.diff`` already documents for "מה השתנה".
+# --------------------------------------------------------------------------
+
+_DEAL_NUM_RE = re.compile(r"(\d[\d,.']*)")
+
+#: Hebrew + English scale words -> multiplier (a published figure is as likely to come from an
+#: English-language source as a Hebrew one). Checked independently, first hit wins -- none of these
+#: are substrings of each other (case-insensitive match on the English words).
+_SCALE_HE: dict[str, float] = {
+    "מיליארד": 1_000_000_000,
+    "מיליארדי": 1_000_000_000,
+    "billion": 1_000_000_000,
+    "מיליון": 1_000_000,
+    "מיליוני": 1_000_000,
+    "million": 1_000_000,
+    "אלפי": 1_000,
+    "אלף": 1_000,
+    "thousand": 1_000,
+}
+
+_CURRENCY_HE: dict[str, str] = {
+    "דולר": "USD",
+    "דולרים": "USD",
+    "usd": "USD",
+    "dollars": "USD",
+    "dollar": "USD",
+    "$": "USD",
+    "שקל": "ILS",
+    "שקלים": "ILS",
+    "nis": "ILS",
+    "ils": "ILS",
+    "₪": "ILS",
+    "יורו": "EUR",
+    "eur": "EUR",
+    "euros": "EUR",
+    "euro": "EUR",
+    "€": "EUR",
+    "לירה שטרלינג": "GBP",
+    "gbp": "GBP",
+    "pounds": "GBP",
+    "£": "GBP",
+}
+
+
+def parse_amount_he(text: str) -> tuple[float | None, str | None]:
+    """``"כ-80 מיליון דולר"`` -> ``(80_000_000.0, "USD")``. Only ever applied to text the model
+    itself already wrote in ``amount`` (never invents a figure) -- the leading digit run is taken
+    as the base number, an Hebrew scale word anywhere after it multiplies it, and a currency
+    word/symbol anywhere in the text sets the currency. Returns ``(None, None)`` when no digit run
+    is found at all (nothing to parse -- not an error)."""
+    if not text:
+        return None, None
+    m = _DEAL_NUM_RE.search(text)
+    if not m:
+        return None, None
+    num_str = m.group(1).replace(",", "").replace("'", "")
+    try:
+        value = float(num_str)
+    except ValueError:
+        return None, None
+    tail = text[m.end() :].casefold()
+    for word, mult in _SCALE_HE.items():
+        if word.casefold() in tail:
+            value *= mult
+            break
+    currency = None
+    haystack = text.casefold()
+    for word, code in _CURRENCY_HE.items():
+        if word.casefold() in haystack:
+            currency = code
+            break
+    return value, currency
+
+
+#: PD-fix item 3: a `country` value that actually names a broader region (not a specific country)
+#: is reclassified into `region_he` instead -- deliberately conservative (English + Hebrew region
+#: nouns only; a real country name never happens to contain one of these as a whole word).
+_REGION_HINT_RE = re.compile(
+    r"\b(region|area|asia.?pacific|middle\s*east|gulf|europe|africa|"
+    r"אזור|אסיה|אפריקה|אירופה|המפרץ|פסיפיק|מזרח\s*תיכון)\b",
+    re.IGNORECASE,
+)
+
+
+def split_country_region(country: str) -> tuple[str, str]:
+    """``("country", "region_he")`` -- ``country`` stays empty (never a guessed country) when the
+    text reads like a region descriptor; that text moves to ``region_he`` instead."""
+    c = (country or "").strip()
+    if not c:
+        return "", ""
+    if _REGION_HINT_RE.search(c):
+        return "", c
+    return c, ""
+
+
+# --------------------------------------------------------------------------
 # data block for the extraction prompt
 # --------------------------------------------------------------------------
 
@@ -175,6 +274,14 @@ def _text_for_cites(cites: list[int], registry_text: dict[int, str]) -> str:
     return "\n".join(registry_text.get(n, "") for n in cites)
 
 
+def _registry_published_at_by_n(corpus: CorpusResult) -> dict[int, Any]:
+    """PD-fix item 3: ``n -> published_at`` for every registry row that has one (every DB-kind row
+    already carries it; web rows currently don't -- ``eoa.dossier.plan`` has no reliable publish
+    date for a fetched page today) -- used only to backfill a deal's missing ``date`` from its own
+    cited source's publish date."""
+    return {r["n"]: r.get("published_at") for r in corpus.registry if r.get("n") is not None and r.get("published_at")}
+
+
 # Narrow local port of eoa.pipeline.analysis_grounding's digit-boundary-safe matching (see that
 # module's own docstring for why this is a duplicate, not a cross-package import: eoa.dossier
 # importing a private ``_``-prefixed name from eoa.pipeline would also be a layering inversion).
@@ -275,7 +382,12 @@ def _ground_performance_row(
 
 
 def _ground_deal_row(
-    row: DealRow, valid_ns: set[int], registry_text: dict[int, str], dropped: list[DroppedField]
+    row: DealRow,
+    valid_ns: set[int],
+    registry_text: dict[int, str],
+    dropped: list[DroppedField],
+    *,
+    published_by_n: dict[int, Any],
 ) -> DealRow:
     good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
     if bad_cites:
@@ -285,7 +397,44 @@ def _ground_deal_row(
     if amount and not _numbers_grounded(amount, text):
         _drop(dropped, "deals.amount", "number not in cited source", amount)
         amount = ""
-    return row.model_copy(update={"cites": good_cites, "amount": amount})
+
+    # PD-fix item 3: amount_value/currency are always deterministically derived from the (already
+    # grounded) `amount` text -- never authored by the model itself.
+    amount_value: float | None = None
+    currency = row.currency
+    if amount:
+        parsed_value, parsed_currency = parse_amount_he(amount)
+        amount_value = parsed_value
+        currency = currency or parsed_currency or ""
+
+    # A `country` value that actually names a region, not a specific country, moves to region_he.
+    country, region_from_country = split_country_region(row.country)
+    region_he = row.region_he or region_from_country
+
+    # A deal with no date of its own inherits its cited source's publish date, marked accordingly
+    # (never indistinguishable from an actual deal-closing date).
+    date = row.date
+    date_kind = row.date_kind or "deal"
+    if not date:
+        for n in good_cites:
+            published = published_by_n.get(n)
+            if published:
+                date = str(published)
+                date_kind = "published"
+                break
+
+    return row.model_copy(
+        update={
+            "cites": good_cites,
+            "amount": amount,
+            "amount_value": amount_value,
+            "currency": currency,
+            "country": country,
+            "region_he": region_he,
+            "date": date,
+            "date_kind": date_kind,
+        }
+    )
 
 
 def _ground_price_row(
@@ -352,6 +501,7 @@ def ground_dossier(
     to ``draft`` and returns the grounded record plus a flat drop log."""
     valid_ns = _valid_ns(corpus)
     registry_text = _registry_text_by_n(corpus, plan_result)
+    published_by_n = _registry_published_at_by_n(corpus)
     dropped: list[DroppedField] = []
 
     identity = draft.identity.model_copy(update={"cites": _clean_cites(draft.identity.cites, valid_ns)[0]})
@@ -375,7 +525,10 @@ def ground_dossier(
 
     specifications = [_ground_spec_row(r, valid_ns, registry_text, dropped) for r in draft.specifications]
     performance = [_ground_performance_row(r, valid_ns, registry_text, dropped) for r in draft.performance]
-    deals = [_ground_deal_row(r, valid_ns, registry_text, dropped) for r in draft.deals]
+    deals = [
+        _ground_deal_row(r, valid_ns, registry_text, dropped, published_by_n=published_by_n)
+        for r in draft.deals
+    ]
     pricing = [
         r for r in (_ground_price_row(r, valid_ns, registry_text, dropped) for r in draft.pricing) if r
     ]
@@ -440,4 +593,6 @@ __all__ = [
     "build_dossier",
     "extract_dossier",
     "ground_dossier",
+    "parse_amount_he",
+    "split_country_region",
 ]

@@ -155,3 +155,78 @@ def test_corpus_summary_he_mentions_product_and_vendor() -> None:
 def test_corpus_next_n_increments() -> None:
     result = dossier_corpus.build_corpus("SPECTRO XR", "Elbit Systems", ["Spectro"])
     assert result.next_n == 4
+
+
+# --------------------------------------------------------------------------
+# PD-fix (2026-09-08, item 1): alias-matching precision -- a short alias ("Spectro") must not
+# substring-match an unrelated word ("spectroscopy"); the live corpus dry run pulled in "Infrared
+# spectroscopy - Wikipedia" this way (docs/qa/content_review/PD-backend.md).
+# --------------------------------------------------------------------------
+
+
+def test_word_present_requires_whole_word() -> None:
+    assert dossier_corpus._word_present("Infrared spectroscopy overview", "Spectro") is False
+    assert dossier_corpus._word_present("Elbit unveils SPECTRO XR payload", "SPECTRO XR") is True
+    assert dossier_corpus._word_present("the Spectro pod is new", "Spectro") is True
+
+
+def test_short_alias_alone_does_not_match_without_vendor() -> None:
+    assert (
+        dossier_corpus._matches_product_precisely(
+            "some Spectro thing", "SPECTRO XR", None, ["Spectro"]
+        )
+        is False
+    )
+
+
+def test_short_alias_matches_together_with_vendor() -> None:
+    assert (
+        dossier_corpus._matches_product_precisely(
+            "Elbit Systems unveils its new Spectro pod", "SPECTRO XR", "Elbit Systems", ["Spectro"]
+        )
+        is True
+    )
+
+
+def test_long_alias_matches_alone() -> None:
+    assert (
+        dossier_corpus._matches_product_precisely(
+            "the SPECTRO XR payload was shown", "SPECTRO XR", None, ["SPECTRO XR"]
+        )
+        is True
+    )
+
+
+def test_general_reference_domain_requires_full_product_name() -> None:
+    assert dossier_corpus._is_general_reference_domain("en.wikipedia.org") is True
+    assert dossier_corpus._is_general_reference_domain("example.com") is False
+
+
+def test_collect_items_filters_out_wikipedia_spectroscopy_false_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduces the exact live false positive: a short alias ("Spectro") substring-matching
+    "Infrared spectroscopy - Wikipedia" via the broad SQL ILIKE candidate query -- the precise
+    Python-side filter must drop it (no whole-word match, and it's a general-reference domain with
+    no full product name present either)."""
+    rows = [
+        {
+            "id": 1,
+            "title": "Elbit unveils SPECTRO XR payload",
+            "summary_he": "",
+            "so_what_he": "",
+            "domain": "airborne_pods",
+        },
+        {
+            "id": 2,
+            "title": "Infrared spectroscopy - Wikipedia",
+            "summary_he": "",
+            "so_what_he": "",
+            "domain": "wikipedia.org",
+        },
+    ]
+    monkeypatch.setattr(dossier_corpus, "_fetchall", lambda query, params=None: list(rows))
+    out = dossier_corpus.collect_items(
+        ["SPECTRO XR", "Spectro"], product_name="SPECTRO XR", vendor="Elbit Systems", aliases=["Spectro"]
+    )
+    assert [r["id"] for r in out] == [1]

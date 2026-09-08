@@ -99,12 +99,32 @@ class MaturityBlock(BaseModel):
     cites: list[int] = Field(default_factory=list)
 
 
+DealDateKind = Literal["deal", "published"]
+
+
 class DealRow(BaseModel):
     date: str | None = Field(default=None, description="תאריך העסקה (ISO אם ידוע)")
+    #: PD-fix (2026-09-08, item 3): when the deal itself carries no date, ``eoa.dossier.extract``'s
+    #: post-check backfills ``date`` from the cited source's own publish date and marks it
+    #: ``"published"`` (never silently indistinguishable from an actual deal-closing date).
+    date_kind: DealDateKind = "deal"
     customer: str = Field(default="", description="הלקוח/הרוכש")
-    country: str = Field(default="", description="מדינת הלקוח")
+    country: str = Field(
+        default="",
+        description="מדינת הלקוח הספציפית בלבד; אם המקור מציין רק אזור (למשל 'מדינה באסיה-פסיפיק') ולא "
+        "מדינה מסוימת, השאר שדה זה ריק ותאר את האזור ב-region_he במקום.",
+    )
+    #: PD-fix item 3: a source that only names a region ("Asia-Pacific country") rather than a
+    #: specific country -- ``country`` stays empty (never a guessed country) and the region text
+    #: goes here instead. ``eoa.dossier.extract``'s post-check also reclassifies a `country` value
+    #: that reads like a region rather than trusting the model unconditionally.
+    region_he: str = Field(default="", description="תיאור אזור, כאשר המקור נוקב אזור ולא מדינה ספציפית")
     kind: DealKind = "contract_award"
     amount: str = Field(default="", description="סכום כפי שפורסם (כולל יחידה/סקאלה), ריק אם לא ידוע")
+    #: PD-fix item 3: deterministically parsed from ``amount`` by ``eoa.dossier.extract`` (Hebrew
+    #: scale words -- אלף/מיליון/מיליארד -- and currency words/symbols); the model never fills this
+    #: itself and never derives it from anything but ``amount``'s own text.
+    amount_value: float | None = Field(default=None, description="הסכום כמספר, נגזר אוטומטית מ-amount")
     currency: str = Field(default="", description="מטבע, אם צוין בנפרד מ-amount")
     quantity: str | None = Field(default=None, description="כמות, אם צוינה")
     platform: str | None = Field(default=None, description="פלטפורמת הנשא הרלוונטית, אם צוינה")

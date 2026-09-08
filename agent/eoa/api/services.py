@@ -3668,10 +3668,36 @@ def _dossier_run_card(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _dossier_source_view(row: dict[str, Any]) -> dict[str, Any]:
+    """PD-fix (2026-09-08, item 2): the persisted registry row's internal ``kind`` field means
+    "record type" (item/event/patent/tender/forecast/web/previous_dossier -- ``eoa.dossier.corpus``/
+    ``plan``'s own dispatch key, exercised by ``eoa.dossier.extract``'s grounding text lookup and
+    locked in by ``tests/unit/test_product_dossier_corpus.py``'s registry-ordering assertions) --
+    NOT the "vendor_official / press / trade_press / forum / reference" classification
+    ``web/src/types/api.ts``'s ``DossierSource.kind`` (and this dossier's own frontend table) expect.
+    A web-kind row now additionally carries that classification under ``source_kind``/
+    ``reliability`` (``eoa.dossier.plan.classify_web_source``) -- this view maps it onto the
+    ``DossierSource`` shape at the API boundary, falling back to the internal ``kind`` for a DB-kind
+    row (an "item"/"patent"/... label, same as before this fix -- still informative, just not the
+    web-only vendor/press/... taxonomy)."""
+    return {
+        "n": row.get("n"),
+        "url": row.get("url"),
+        "title": row.get("title"),
+        "kind": row.get("source_kind") or row.get("kind"),
+        "reliability": row.get("reliability"),
+        "accessed_at": row.get("accessed_at"),
+    }
+
+
+def _dossier_sources_view(sources: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [_dossier_source_view(r) for r in sources or []]
+
+
 def _pending_dossier_job(product_key: str) -> dict[str, Any] | None:
     row = _fetchone(
         """
-        SELECT id, state FROM jobs
+        SELECT id, state, result FROM jobs
         WHERE kind = 'product_dossier' AND state IN ('queued', 'running')
           AND payload->>'product_key' = %(key)s
         ORDER BY created_at DESC LIMIT 1
@@ -3680,7 +3706,12 @@ def _pending_dossier_job(product_key: str) -> dict[str, Any] | None:
     )
     if row is None:
         return None
-    return {"job_id": row["id"], "state": row["state"]}
+    # PD-fix item 5: `eoa.dossier.plan.run_plan`'s `on_progress` (wired in `eoa.dossier.report.
+    # build_product_dossier`) writes the same shape into `jobs.result->'progress'` while the job is
+    # still running -- surfaced here so the detail page's pending banner can list per-topic status
+    # instead of a single opaque "running" line for a ~2h job.
+    result = row.get("result") or {}
+    return {"job_id": row["id"], "state": row["state"], "progress": result.get("progress") or []}
 
 
 def list_dossiers() -> list[dict[str, Any]]:
@@ -3732,7 +3763,7 @@ def dossier_detail(product_key: str) -> dict[str, Any] | None:
         "vendor": latest.get("vendor"),
         "aliases": latest.get("aliases") or [],
         "dossiers": [_dossier_run_card(r) for r in runs],
-        "latest": {**(latest.get("data") or {}), "sources": latest.get("sources") or []},
+        "latest": {**(latest.get("data") or {}), "sources": _dossier_sources_view(latest.get("sources"))},
         "pending_job": _pending_dossier_job(product_key),
     }
 
@@ -3765,7 +3796,7 @@ def get_dossier(product_key: str, dossier_id: int) -> dict[str, Any] | None:
         "aliases": row.get("aliases") or [],
         "product_line": row.get("product_line"),
         "data": row.get("data") or {},
-        "sources": row.get("sources") or [],
+        "sources": _dossier_sources_view(row.get("sources")),
         "path_docx": report.get("path_docx"),
         "path_md": report.get("path_md"),
         "path_html": report.get("path_html"),

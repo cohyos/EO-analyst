@@ -33,10 +33,16 @@ _ALL_TABLE_BUILDERS = [
 ]
 
 
-def test_empty_dossier_every_table_is_none() -> None:
+def test_empty_dossier_every_table_has_placeholder_body() -> None:
+    """PD-fix (2026-09-08, item 4): a table builder never returns ``None`` any more -- an empty
+    section always renders its own single placeholder line (``body_he``, no ``headers``/``rows``)
+    instead of being silently omitted from the report."""
     dossier = ProductDossierOut(identity=IdentityBlock(product_name="X"))
     for builder in _ALL_TABLE_BUILDERS:
-        assert builder(dossier) is None
+        entry = builder(dossier)
+        assert entry is not None
+        assert "headers" not in entry
+        assert entry["body_he"] == dossier_report.PLACEHOLDER_HE
 
 
 def _sample_dossier() -> ProductDossierOut:
@@ -55,7 +61,9 @@ def test_tables_stay_within_six_columns() -> None:
     dossier = _sample_dossier()
     for builder in _ALL_TABLE_BUILDERS:
         tbl = builder(dossier)
-        if tbl is None:
+        if "headers" not in tbl:
+            # An empty section for this dossier fixture (e.g. competitors/patents/tenders) --
+            # placeholder body_he, not a real table; nothing to column-count here.
             continue
         assert len(tbl["headers"]) <= 6, tbl["title_he"]
         for row in tbl["rows"]:
@@ -114,3 +122,101 @@ def test_build_topics_respects_max_topics_cap() -> None:
 def test_build_topics_no_vendor_still_valid() -> None:
     topics = dossier_plan.build_topics("MOSP 5000", None, [])
     assert all(t["question_he"] for t in topics)
+
+
+# --------------------------------------------------------------------------
+# PD-fix (2026-09-08, item 4): the full section order -- always 15 entries, in the plan's exact
+# order, every one present even for a fully empty dossier.
+# --------------------------------------------------------------------------
+
+_EXPECTED_ORDER_HE = [
+    "זיהוי המוצר",
+    "מפרט",
+    "גרסאות",
+    "ביצועים (מוצהר מול נמדד)",
+    "בשלות ופריסה",
+    "עסקאות",
+    "מחירים",
+    "שותפויות",
+    "מתחרים",
+    "פטנטים",
+    "מכרזים ותחזיות",
+    "רגולציה וייצוא",
+    "פערים ואי-ודאויות",
+    "משמעות עסקית",
+    "מה השתנה",
+]
+
+
+def test_ordered_report_entries_follow_plan_order_for_empty_dossier() -> None:
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="X"))
+    entries = dossier_report._ordered_report_entries(dossier)
+    assert [e["title_he"] for e in entries] == _EXPECTED_ORDER_HE
+    # Every section renders SOMETHING -- never omitted.
+    for entry in entries:
+        assert entry.get("body_he") or entry.get("rows") is not None
+
+
+def test_ordered_report_entries_follow_plan_order_for_full_dossier() -> None:
+    dossier = _sample_dossier()
+    entries = dossier_report._ordered_report_entries(dossier)
+    assert [e["title_he"] for e in entries] == _EXPECTED_ORDER_HE
+
+
+def test_what_changed_entry_distinguishes_first_run_from_no_change() -> None:
+    from eoa.llm.schemas.analysis import Sentence
+
+    first_run = ProductDossierOut(identity=IdentityBlock(product_name="X"), what_changed_he=None)
+    entry = dossier_report._what_changed_entry(first_run)
+    assert "ראשונה" in entry["body_he"]
+
+    no_change = ProductDossierOut(identity=IdentityBlock(product_name="X"), what_changed_he=[])
+    entry = dossier_report._what_changed_entry(no_change)
+    assert "לא זוהו שינויים" in entry["body_he"]
+
+    changed = ProductDossierOut(
+        identity=IdentityBlock(product_name="X"),
+        what_changed_he=[Sentence(text_he="עסקה חדשה זוהתה.", cites=[1])],
+    )
+    entry = dossier_report._what_changed_entry(changed)
+    assert "עסקה חדשה זוהתה." in entry["body_he"]
+    assert "[1]" in entry["body_he"]
+
+
+# --------------------------------------------------------------------------
+# PD-fix item 3: deal-cell renderer helpers
+# --------------------------------------------------------------------------
+
+
+def test_deal_amount_cell_appends_parsed_value() -> None:
+    deal = DealRow(customer="x", amount="כ-80 מיליון דולר", amount_value=80_000_000.0, currency="USD")
+    cell = dossier_report._deal_amount_cell(deal)
+    assert "כ-80 מיליון דולר" in cell
+    assert "80,000,000" in cell
+    assert "USD" in cell
+
+
+def test_deal_amount_cell_placeholder_when_empty() -> None:
+    deal = DealRow(customer="x")
+    assert dossier_report._deal_amount_cell(deal) == dossier_report.PLACEHOLDER_HE
+
+
+def test_deal_date_cell_flags_published_fallback() -> None:
+    deal = DealRow(customer="x", date="2026-03-01", date_kind="published")
+    cell = dossier_report._deal_date_cell(deal)
+    assert "2026-03-01" in cell
+    assert "תאריך פרסום" in cell
+
+
+def test_deal_date_cell_plain_for_actual_deal_date() -> None:
+    deal = DealRow(customer="x", date="2026-03-01", date_kind="deal")
+    assert dossier_report._deal_date_cell(deal) == "2026-03-01"
+
+
+def test_deals_table_uses_region_when_country_empty() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="X"),
+        deals=[DealRow(customer="Some AF", country="", region_he="מדינה באסיה-פסיפיק", cites=[1])],
+    )
+    tbl = dossier_report._deals_table(dossier)
+    assert "מדינה באסיה-פסיפיק" in tbl["rows"][0]

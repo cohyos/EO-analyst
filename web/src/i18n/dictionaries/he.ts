@@ -454,6 +454,16 @@ export const he = {
       not_found: "לא נמצא",
     },
     pendingBanner: "הסקירה נבנית ברקע — הדף יתעדכן אוטומטית כשתושלם",
+    progress: {
+      status: {
+        pending: "ממתין",
+        running: "בחקירה…",
+        done: "הושלם",
+        failed: "נעצר",
+      },
+      seconds: "{s} שנ'",
+      sourcesFound: "{n} מקורות",
+    },
     form: {
       title: "סקירת מוצר חדשה",
       productNameLabel: "שם המוצר",

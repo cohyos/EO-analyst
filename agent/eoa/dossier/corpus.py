@@ -104,11 +104,128 @@ def _term_params(terms: list[str], *, prefix: str) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
+# PD-fix (2026-09-08, item 1): alias-matching precision. The broad ``ILIKE %term%`` clauses above
+# stay as the (cheap, recall-favoring) SQL-side candidate filter -- but a short alias like "Spectro"
+# substring-matches unrelated words ("spectroscopy"), which is exactly how the corpus dry run pulled
+# in "Infrared spectroscopy - Wikipedia" (docs/qa/content_review/PD-backend.md's "Open item"). Every
+# candidate row is re-checked in Python against a precise rule before it is kept: the product name OR
+# a >=8-char alias must match as a whole word (``\b``-delimited, case-insensitive); an alias shorter
+# than 8 chars only counts together with the vendor name also appearing (both as whole words) --
+# never the short alias alone. A Wikipedia/general-reference-domain item additionally requires the
+# full product name itself (not just an alias) to appear, per the same item's own false-positive.
+# --------------------------------------------------------------------------
+
+_SHORT_ALIAS_LEN = 8
+
+#: General-reference / encyclopedia domains -- never enough on their own to justify a match on a
+#: short alias; only the literal product name earns them a place in the corpus.
+_GENERAL_REFERENCE_DOMAINS = {
+    "wikipedia.org",
+    "wiktionary.org",
+    "britannica.com",
+    "dictionary.com",
+    "investopedia.com",
+}
+
+
+def _word_present(text: str, term: str) -> bool:
+    term = (term or "").strip()
+    if not term:
+        return False
+    pattern = r"\b" + re.escape(term) + r"\b"
+    return re.search(pattern, text or "", re.IGNORECASE) is not None
+
+
+def _matches_product_precisely(
+    text: str, product_name: str, vendor: str | None, aliases: list[str]
+) -> bool:
+    """The precision gate itself (product name, or a long alias, always qualify on their own; a
+    short alias only together with the vendor name)."""
+    if _word_present(text, product_name):
+        return True
+    for alias in aliases:
+        if len(alias) >= _SHORT_ALIAS_LEN:
+            if _word_present(text, alias):
+                return True
+        elif vendor and _word_present(text, alias) and _word_present(text, vendor):
+            return True
+    return False
+
+
+def _is_general_reference_domain(domain: str | None) -> bool:
+    d = (domain or "").strip().lower()
+    if d.startswith("www."):
+        d = d[4:]
+    if not d:
+        return False
+    return any(d == ref or d.endswith("." + ref) for ref in _GENERAL_REFERENCE_DOMAINS)
+
+
+def _filter_precise(
+    rows: list[dict[str, Any]],
+    *,
+    product_name: str,
+    vendor: str | None,
+    aliases: list[str],
+    text_fn: Any,
+    domain_fn: Any = None,
+) -> list[dict[str, Any]]:
+    out = []
+    for row in rows:
+        text = text_fn(row) or ""
+        if not _matches_product_precisely(text, product_name, vendor, aliases):
+            continue
+        if domain_fn is not None:
+            domain = domain_fn(row)
+            if _is_general_reference_domain(domain) and not _word_present(text, product_name):
+                continue
+        out.append(row)
+    return out
+
+
+def _item_text(row: dict[str, Any]) -> str:
+    return " ".join(
+        str(v) for v in (row.get("title"), row.get("summary_he"), row.get("so_what_he")) if v
+    )
+
+
+def _event_text(row: dict[str, Any]) -> str:
+    return " ".join(
+        str(v) for v in (row.get("title"), row.get("program"), row.get("summary_he")) if v
+    )
+
+
+def _patent_text(row: dict[str, Any]) -> str:
+    return " ".join(
+        str(v)
+        for v in (row.get("title"), row.get("abstract"), " ".join(row.get("assignees") or []))
+        if v
+    )
+
+
+def _tender_text(row: dict[str, Any]) -> str:
+    return " ".join(str(v) for v in (row.get("title"), row.get("summary_he")) if v)
+
+
+def _forecast_text(row: dict[str, Any]) -> str:
+    return " ".join(
+        str(v) for v in (row.get("platform"), row.get("payload_need"), row.get("rationale_he")) if v
+    )
+
+
+# --------------------------------------------------------------------------
 # collectors
 # --------------------------------------------------------------------------
 
 
-def collect_items(terms: list[str], *, limit: int = _ITEMS_LIMIT) -> list[dict[str, Any]]:
+def collect_items(
+    terms: list[str],
+    *,
+    product_name: str = "",
+    vendor: str | None = None,
+    aliases: list[str] | None = None,
+    limit: int = _ITEMS_LIMIT,
+) -> list[dict[str, Any]]:
     if not terms:
         return []
     clause = _ilike_any_clause(
@@ -128,10 +245,24 @@ def collect_items(terms: list[str], *, limit: int = _ITEMS_LIMIT) -> list[dict[s
         """,
         params,
     )
-    return rows
+    return _filter_precise(
+        rows,
+        product_name=product_name,
+        vendor=vendor,
+        aliases=aliases or [],
+        text_fn=_item_text,
+        domain_fn=lambda r: r.get("domain") or r.get("subdomain"),
+    )
 
 
-def collect_events(terms: list[str], *, limit: int = _EVENTS_LIMIT) -> list[dict[str, Any]]:
+def collect_events(
+    terms: list[str],
+    *,
+    product_name: str = "",
+    vendor: str | None = None,
+    aliases: list[str] | None = None,
+    limit: int = _EVENTS_LIMIT,
+) -> list[dict[str, Any]]:
     if not terms:
         return []
     clause = _ilike_any_clause(
@@ -153,10 +284,19 @@ def collect_events(terms: list[str], *, limit: int = _EVENTS_LIMIT) -> list[dict
         """,
         params,
     )
-    return rows
+    return _filter_precise(
+        rows, product_name=product_name, vendor=vendor, aliases=aliases or [], text_fn=_event_text
+    )
 
 
-def collect_patents(terms: list[str], *, limit: int = _PATENTS_LIMIT) -> list[dict[str, Any]]:
+def collect_patents(
+    terms: list[str],
+    *,
+    product_name: str = "",
+    vendor: str | None = None,
+    aliases: list[str] | None = None,
+    limit: int = _PATENTS_LIMIT,
+) -> list[dict[str, Any]]:
     if not terms:
         return []
     clause = _ilike_any_clause(
@@ -175,10 +315,19 @@ def collect_patents(terms: list[str], *, limit: int = _PATENTS_LIMIT) -> list[di
         """,
         params,
     )
-    return rows
+    return _filter_precise(
+        rows, product_name=product_name, vendor=vendor, aliases=aliases or [], text_fn=_patent_text
+    )
 
 
-def collect_tenders(terms: list[str], *, limit: int = _TENDERS_LIMIT) -> list[dict[str, Any]]:
+def collect_tenders(
+    terms: list[str],
+    *,
+    product_name: str = "",
+    vendor: str | None = None,
+    aliases: list[str] | None = None,
+    limit: int = _TENDERS_LIMIT,
+) -> list[dict[str, Any]]:
     if not terms:
         return []
     clause = _ilike_any_clause(
@@ -195,10 +344,19 @@ def collect_tenders(terms: list[str], *, limit: int = _TENDERS_LIMIT) -> list[di
         """,
         params,
     )
-    return rows
+    return _filter_precise(
+        rows, product_name=product_name, vendor=vendor, aliases=aliases or [], text_fn=_tender_text
+    )
 
 
-def collect_forecasts(terms: list[str], *, limit: int = _FORECASTS_LIMIT) -> list[dict[str, Any]]:
+def collect_forecasts(
+    terms: list[str],
+    *,
+    product_name: str = "",
+    vendor: str | None = None,
+    aliases: list[str] | None = None,
+    limit: int = _FORECASTS_LIMIT,
+) -> list[dict[str, Any]]:
     if not terms:
         return []
     clause = _ilike_any_clause(
@@ -218,7 +376,9 @@ def collect_forecasts(terms: list[str], *, limit: int = _FORECASTS_LIMIT) -> lis
         """,
         params,
     )
-    return rows
+    return _filter_precise(
+        rows, product_name=product_name, vendor=vendor, aliases=aliases or [], text_fn=_forecast_text
+    )
 
 
 def collect_entities_and_edges(vendor: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -325,11 +485,11 @@ def build_corpus(
     product_key = slugify_product_key(vendor, product_name)
     terms = _search_terms(product_name, vendor, aliases)
 
-    items = collect_items(terms)
-    events = collect_events(terms)
-    patents = collect_patents(terms)
-    tenders = collect_tenders(terms)
-    forecasts = collect_forecasts(terms)
+    items = collect_items(terms, product_name=product_name, vendor=vendor, aliases=aliases)
+    events = collect_events(terms, product_name=product_name, vendor=vendor, aliases=aliases)
+    patents = collect_patents(terms, product_name=product_name, vendor=vendor, aliases=aliases)
+    tenders = collect_tenders(terms, product_name=product_name, vendor=vendor, aliases=aliases)
+    forecasts = collect_forecasts(terms, product_name=product_name, vendor=vendor, aliases=aliases)
     entities, edges = collect_entities_and_edges(vendor)
     prev = previous_dossier(product_key)
 

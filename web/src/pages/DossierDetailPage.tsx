@@ -13,6 +13,7 @@ import {
   NotFoundInSources,
 } from "@/components/dossiers/DossierFact";
 import { DossierRunHistoryList } from "@/components/dossiers/DossierRunHistoryList";
+import { DossierProgressList } from "@/components/dossiers/DossierProgressBanner";
 import type { CitationLike } from "@/components/CitationText";
 import { formatDateTime } from "@/lib/time";
 import { useI18n, useT } from "@/i18n";
@@ -253,9 +254,10 @@ export function DossierDetailPage() {
       </div>
 
       {d.pending_job && (
-        <p role="status" className="rounded-md border border-border-strong bg-bg-sunken px-3 py-2 text-sm text-fg-dim">
-          {t("dossiers.pendingBanner")}
-        </p>
+        <div role="status" className="rounded-md border border-border-strong bg-bg-sunken px-3 py-2 text-sm text-fg-dim">
+          <p>{t("dossiers.pendingBanner")}</p>
+          <DossierProgressList progress={d.pending_job.progress} />
+        </div>
       )}
 
       {!data ? (

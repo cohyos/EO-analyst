@@ -140,12 +140,38 @@ describe("DossierDetailPage (PD-ui)", () => {
   });
 
   it("shows the pending-run banner while a job is in flight", async () => {
-    getDossier.mockResolvedValue(detail({ pending_job: { job_id: "77", state: "running" } }));
+    getDossier.mockResolvedValue(detail({ pending_job: { job_id: "77", state: "running", progress: [] } }));
     renderPage();
     await screen.findByRole("heading", { name: "SPECTRO XR" });
     expect(
       await screen.findByText("הסקירה נבנית ברקע — הדף יתעדכן אוטומטית כשתושלם"),
     ).toBeInTheDocument();
+  });
+
+  it("PD-fix item 5: lists per-topic progress with status and elapsed time", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        pending_job: {
+          job_id: "77",
+          state: "running",
+          progress: [
+            { topic: "specifications", title_he: "מפרט ודף נתונים", status: "done", seconds: 12, sources_found: 3 },
+            { topic: "versions", title_he: "גרסאות וציר זמן", status: "running", seconds: null, sources_found: null },
+            { topic: "regulatory", title_he: "רגולציה וייצוא", status: "pending", seconds: null, sources_found: null },
+          ],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+
+    const list = await screen.findByTestId("dossier-progress-list");
+    expect(list).toBeInTheDocument();
+    expect(await screen.findByTestId("dossier-progress-topic-specifications")).toHaveTextContent("מפרט");
+    expect(screen.getByTestId("dossier-progress-topic-specifications")).toHaveTextContent("הושלם");
+    // "regulatory" has no dedicated top-level nav section -- falls back to the backend's own
+    // title_he rather than a raw i18n key.
+    expect(screen.getByTestId("dossier-progress-topic-regulatory")).toHaveTextContent("רגולציה וייצוא");
   });
 
   it("shows a not-found state for an unknown product key", async () => {

@@ -1844,12 +1844,20 @@ def investigate(
     max_rounds: int = 4,
     budget_multiplier: float = 1.0,
     prior_findings_he: str = "",
+    deadline_s: float | None = None,
 ) -> Investigation:
     """Run the persistence protocol; returns an Investigation with ``result`` (never invents).
 
     ``budget_multiplier``/``prior_findings_he`` back U12's "הרחב חקירה" (expand investigation):
     a re-run of a `not_found`/`stopped_budget` investigation with a larger budget and the prior
     attempt's findings folded into the context, instead of a plain re-run of the same question.
+
+    ``deadline_s`` (PD-fix, 2026-09-08): an optional hard cap, in seconds, on this single
+    investigation's wall-clock budget -- when given, it is combined with (never *extends*) the
+    multiplier-scaled per-investigation timeout below via ``min()``, so a caller (``eoa.dossier.
+    plan``'s per-topic time cap) can bound a single call without touching the global
+    ``deep_search.per_investigation_timeout_min`` config default every other caller still uses
+    unchanged. ``None`` (the default) preserves the exact prior behavior.
     """
     cfg = settings().deep_search
     inv = Investigation(job_id=job_id, item_id=item_id, question=question)
@@ -1898,10 +1906,13 @@ def investigate(
     timeout_min = max(
         cfg.per_investigation_timeout_min, round(cfg.per_investigation_timeout_min * budget_multiplier)
     )
+    timeout_s = float(timeout_min * 60)
+    if deadline_s is not None:
+        timeout_s = min(timeout_s, float(deadline_s))
     budget = Budget(
         max_queries,
         max_pages,
-        time.monotonic() + timeout_min * 60,
+        time.monotonic() + timeout_s,
         cfg.confidence_stop,
     )
     primary = langs or cfg.langs_primary

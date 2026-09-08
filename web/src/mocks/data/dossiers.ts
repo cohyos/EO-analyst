@@ -1,5 +1,6 @@
 import type {
   DossierDetail,
+  DossierProgressTopic,
   DossierRunDetail,
   DossierRunRef,
   DossierSource,
@@ -327,8 +328,23 @@ interface MockDossierProduct {
   vendor: string | null;
   aliases: string[];
   runs: DossierRunDetail[];
-  pending_job: { job_id: string; state: string } | null;
+  pending_job: { job_id: string; state: string; progress: DossierProgressTopic[] } | null;
 }
+
+//: PD-fix (2026-09-08, item 5): a representative snapshot of `eoa.dossier.plan.run_plan`'s own
+//: `ProgressEntry` shape -- some topics done, one running, the rest still pending -- so the mock
+//: demonstrates the pending-run banner's per-topic list without a real ~2h backend run.
+const MOCK_DOSSIER_PROGRESS: DossierProgressTopic[] = [
+  { topic: "specifications", title_he: "מפרט ודף נתונים", status: "done", seconds: 41.2, sources_found: 3 },
+  { topic: "versions", title_he: "גרסאות וציר זמן", status: "done", seconds: 28.7, sources_found: 1 },
+  { topic: "performance", title_he: "ביצועים (מוצהר מול נמדד)", status: "running", seconds: null, sources_found: null },
+  { topic: "maturity", title_he: "בשלות ופריסה", status: "pending", seconds: null, sources_found: null },
+  { topic: "deals", title_he: "עסקאות ולקוחות", status: "pending", seconds: null, sources_found: null },
+  { topic: "pricing", title_he: "מחירים", status: "pending", seconds: null, sources_found: null },
+  { topic: "partnerships", title_he: "שותפויות ואינטגרציות", status: "pending", seconds: null, sources_found: null },
+  { topic: "competitors", title_he: "מתחרים", status: "pending", seconds: null, sources_found: null },
+  { topic: "regulatory", title_he: "רגולציה וייצוא", status: "pending", seconds: null, sources_found: null },
+];
 
 function makeRun(
   id: number,
@@ -473,7 +489,7 @@ export function createOrRerunMockDossier(
   const jobId = `mock-dossier-job-${nextMockDossierRunId}`;
   const existing = mockDossierProducts[key];
   if (existing) {
-    existing.pending_job = { job_id: jobId, state: "queued" };
+    existing.pending_job = { job_id: jobId, state: "queued", progress: MOCK_DOSSIER_PROGRESS };
   } else {
     mockDossierProducts[key] = {
       product_key: key,
@@ -481,7 +497,7 @@ export function createOrRerunMockDossier(
       vendor: vendor ?? null,
       aliases: aliases && aliases.length > 0 ? aliases : [productName],
       runs: [],
-      pending_job: { job_id: jobId, state: "queued" },
+      pending_job: { job_id: jobId, state: "queued", progress: MOCK_DOSSIER_PROGRESS },
     };
   }
   scheduleMockDossierCompletion(key);
@@ -492,7 +508,7 @@ export function rerunMockDossier(key: string): { job_id: string } | null {
   const p = mockDossierProducts[key];
   if (!p) return null;
   const jobId = `mock-dossier-job-${nextMockDossierRunId}`;
-  p.pending_job = { job_id: jobId, state: "queued" };
+  p.pending_job = { job_id: jobId, state: "queued", progress: MOCK_DOSSIER_PROGRESS };
   scheduleMockDossierCompletion(key);
   return { job_id: jobId };
 }

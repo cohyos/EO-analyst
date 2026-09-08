@@ -146,6 +146,7 @@ dossier:   # PD-backend: "סקירת שוק עמוקה למוצר" (eoa.dossier)
   max_topics: 9            # research-plan topic cap (spec/versions/performance/maturity/deals/pricing/partnerships/competitors/regulatory)
   budget_multiplier: 1.0   # forwarded to investigate()'s own budget_multiplier for every topic call
   max_sources: 40          # citation-registry cap (existing DB records + deep-search sources combined)
+  topic_time_cap_s: 600    # PD-fix item 6: hard per-topic wall-clock cap (seconds); investigate() stops with what it has
 
 notify:
   url: http://127.0.0.1:8091      # native ntfy (ADR-004); NTFY_URL env overrides

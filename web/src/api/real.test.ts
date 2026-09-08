@@ -199,7 +199,7 @@ describe("real.ts dossier normalizers (PD-ui)", () => {
     const { realApi: api } = await import("./real");
     const detail = await api.getDossier("elbit-systems-spectro-xr");
     expect(detail.aliases).toEqual(["Spectro"]);
-    expect(detail.pending_job).toEqual({ job_id: "77", state: "running" });
+    expect(detail.pending_job).toEqual({ job_id: "77", state: "running", progress: [] });
     expect(detail.latest?.identity.product_name).toBe("SPECTRO XR");
     expect(detail.latest?.summary).toEqual([{ text_he: "תקציר.", cites: [1] }]);
     // Every array field the backend omitted normalizes to [], not undefined/throw.
@@ -224,5 +224,32 @@ describe("real.ts dossier normalizers (PD-ui)", () => {
     const { realApi: api } = await import("./real");
     const detail = await api.getDossier("unknown-product");
     expect(detail).toMatchObject({ product_key: "", product_name: "", aliases: [], dossiers: [], latest: null, pending_job: null });
+  });
+
+  it("PD-fix item 5: normalizes pending_job.progress, one entry per topic", async () => {
+    stubFetchJson({
+      product_key: "elbit-systems-spectro-xr",
+      product_name: "SPECTRO XR",
+      vendor: "Elbit Systems",
+      aliases: [],
+      dossiers: [],
+      latest: null,
+      pending_job: {
+        job_id: 77,
+        state: "running",
+        progress: [
+          { topic: "specifications", title_he: "מפרט ודף נתונים", status: "done", seconds: 12.3, sources_found: 2 },
+          { topic: "versions", title_he: "גרסאות וציר זמן", status: "running", seconds: null, sources_found: null },
+          { topic: "performance", status: "not-a-real-status" }, // malformed -- falls back to "pending"
+        ],
+      },
+    });
+    const { realApi: api } = await import("./real");
+    const detail = await api.getDossier("elbit-systems-spectro-xr");
+    expect(detail.pending_job?.progress).toEqual([
+      { topic: "specifications", title_he: "מפרט ודף נתונים", status: "done", seconds: 12.3, sources_found: 2 },
+      { topic: "versions", title_he: "גרסאות וציר זמן", status: "running", seconds: null, sources_found: null },
+      { topic: "performance", title_he: "", status: "pending", seconds: null, sources_found: null },
+    ]);
   });
 });

@@ -428,6 +428,16 @@ export const en: Dictionary = {
       not_found: "Not found",
     },
     pendingBanner: "The dossier is building in the background — this page will update automatically once it finishes",
+    progress: {
+      status: {
+        pending: "Waiting",
+        running: "Researching…",
+        done: "Done",
+        failed: "Stopped",
+      },
+      seconds: "{s}s",
+      sourcesFound: "{n} sources",
+    },
     form: {
       title: "New product dossier",
       productNameLabel: "Product name",

@@ -34,8 +34,15 @@ _ROW = {
     "report_id": 42,
     "job_id": 7,
     "data": {"identity": {"product_name": "SPECTRO XR"}, "deals": [{"customer": "A"}, {"customer": "B"}]},
-    "sources": [{"n": 1, "url": "https://x", "title": "t"}],
+    "sources": [{"n": 1, "url": "https://x", "title": "t", "kind": "item"}],
 }
+
+#: PD-fix (2026-09-08, item 2): what `_dossier_source_view` maps `_ROW["sources"]` into --
+#: `reliability`/`accessed_at` default null (this fixture row carries neither), `kind` falls back to
+#: the internal record-type `kind` ("item") since there is no `source_kind` override on it.
+_ROW_SOURCES_VIEW = [
+    {"n": 1, "url": "https://x", "title": "t", "kind": "item", "reliability": None, "accessed_at": None}
+]
 
 
 def test_list_dossiers_count_is_latest_deal_count(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,7 +83,7 @@ def test_get_dossier_flattens_report_paths(monkeypatch: pytest.MonkeyPatch) -> N
     assert out["path_html"] == "/x.html"
     assert "report_paths" not in out
     assert out["data"]["identity"]["product_name"] == "SPECTRO XR"
-    assert out["sources"] == _ROW["sources"]
+    assert out["sources"] == _ROW_SOURCES_VIEW
 
 
 def test_get_dossier_missing_report_row_defaults_to_none_paths(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,15 +110,56 @@ def test_dossier_detail_includes_pending_job(monkeypatch: pytest.MonkeyPatch) ->
 
     def fake_fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
         assert "jobs" in query
-        return {"id": 99, "state": "running"}
+        return {"id": 99, "state": "running", "result": None}
 
     monkeypatch.setattr(services, "_fetchall", fake_fetchall)
     monkeypatch.setattr(services, "_fetchone", fake_fetchone)
     detail = services.dossier_detail("elbit-systems-spectro-xr")
     assert detail is not None
-    assert detail["pending_job"] == {"job_id": 99, "state": "running"}
-    assert detail["latest"]["sources"] == _ROW["sources"]
-    assert detail["latest"]["identity"]["product_name"] == "SPECTRO XR"
+    assert detail["pending_job"] == {"job_id": 99, "state": "running", "progress": []}
+    assert detail["latest"]["sources"] == _ROW_SOURCES_VIEW
+
+
+def test_dossier_detail_pending_job_surfaces_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PD-fix item 5: `eoa.dossier.plan.run_plan`'s `on_progress` writes into `jobs.result->
+    'progress'` while the job is still running -- `_pending_dossier_job` must surface it verbatim."""
+    progress = [{"topic": "specifications", "title_he": "מפרט ודף נתונים", "status": "done", "seconds": 12.3, "sources_found": 2}]
+
+    def fake_fetchall(query: str, params: Any = None) -> list[dict[str, Any]]:
+        return [dict(_ROW)]
+
+    def fake_fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
+        assert "jobs" in query
+        return {"id": 99, "state": "running", "result": {"progress": progress}}
+
+    monkeypatch.setattr(services, "_fetchall", fake_fetchall)
+    monkeypatch.setattr(services, "_fetchone", fake_fetchone)
+    detail = services.dossier_detail("elbit-systems-spectro-xr")
+    assert detail is not None
+    assert detail["pending_job"]["progress"] == progress
+
+
+def test_dossier_source_view_prefers_source_kind_over_internal_kind() -> None:
+    row = {
+        "n": 9,
+        "url": "https://elbitsystems.com/press",
+        "title": "Elbit press release",
+        "kind": "web",
+        "source_kind": "vendor_official",
+        "reliability": "primary",
+        "accessed_at": "2026-09-08T10:00:00+00:00",
+    }
+    view = services._dossier_source_view(row)
+    assert view["kind"] == "vendor_official"
+    assert view["reliability"] == "primary"
+    assert view["accessed_at"] == "2026-09-08T10:00:00+00:00"
+
+
+def test_dossier_source_view_falls_back_to_internal_kind_for_db_rows() -> None:
+    row = {"n": 1, "url": None, "title": "item title", "kind": "item"}
+    view = services._dossier_source_view(row)
+    assert view["kind"] == "item"
+    assert view["reliability"] is None
 
 
 def test_dossier_detail_no_runs_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1641,9 +1641,25 @@ export interface DossierSummary {
   count: number;
 }
 
+/** PD-fix (2026-09-08, item 5): one research topic's live status, written by
+ * `eoa.dossier.plan.run_plan`'s `on_progress` into the running job's own row and surfaced through
+ * `pending_job.progress` below -- what the detail page's pending-run banner polls (every 10s, same
+ * as the rest of `pending_job`) to show a per-topic check/spinner instead of one opaque "running"
+ * line for a run that can take ~2h. */
+export interface DossierProgressTopic {
+  topic: string;
+  title_he: string;
+  status: "pending" | "running" | "done" | "failed";
+  seconds: number | null;
+  sources_found: number | null;
+}
+
 export interface DossierPendingJob {
   job_id: string;
   state: string;
+  /** One entry per planned research topic, in question order; `[]` before the backend has written
+   * its first progress snapshot (or for a job enqueued before this fix shipped). */
+  progress: DossierProgressTopic[];
 }
 
 /** `GET /api/dossiers/{product_key}` -- the product's identity/aliases, its full run history, the

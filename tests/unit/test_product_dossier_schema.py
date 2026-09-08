@@ -72,6 +72,33 @@ def test_deal_row_defaults() -> None:
     assert deal.amount == ""
 
 
+def test_deal_row_pd_fix_fields_default() -> None:
+    """PD-fix (2026-09-08, item 3): `amount_value`/`date_kind`/`region_he` are new, deterministically
+    derived-post-extraction fields (never model-authored) -- default to null/"deal"/empty."""
+    deal = DealRow(customer="US Air Force")
+    assert deal.amount_value is None
+    assert deal.date_kind == "deal"
+    assert deal.region_he == ""
+
+
+def test_deal_row_accepts_pd_fix_fields() -> None:
+    deal = DealRow(
+        customer="Some AF",
+        amount="כ-80 מיליון דולר",
+        amount_value=80_000_000.0,
+        currency="USD",
+        country="",
+        region_he="מדינה באסיה-פסיפיק",
+        date="2026-03-01",
+        date_kind="published",
+    )
+    assert deal.amount_value == 80_000_000.0
+    assert deal.region_he == "מדינה באסיה-פסיפיק"
+    assert deal.date_kind == "published"
+    with pytest.raises(ValidationError):
+        DealRow(customer="x", date_kind="rumor")  # type: ignore[arg-type]
+
+
 def test_price_row_requires_valid_source_kind_literal() -> None:
     row = PriceRow(figure="$1M", source_kind="contract", basis_he="לתוכנית כולה")
     assert row.source_kind == "contract"
