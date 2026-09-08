@@ -17,6 +17,7 @@ import type {
   DossierPartnerRow,
   DossierPendingJob,
   DossierPerformanceRow,
+  DossierProgressTopic,
   DossierPriceRow,
   DossierRegulatoryExport,
   DossierRerunResponse,
@@ -867,7 +868,12 @@ function normalizeProductDossierOut(
   const r = raw ?? {};
   return {
     identity: normalizeDossierIdentity(r.identity),
-    summary: arr(r.summary).map(normalizeDossierSentence),
+    // The backend uses the plan's `_he` names for the four sentence lists (summary_he,
+    // risks_and_gaps_he, what_changed_he, bd_implications_he); accept both spellings so the
+    // detail page never shows a placeholder for content that is actually there (first live run).
+    summary: arr(
+      ((r as Record<string, unknown>).summary_he ?? r.summary) as Partial<DossierSentence>[] | null | undefined,
+    ).map(normalizeDossierSentence),
     specifications: arr(r.specifications).map(normalizeDossierSpecRow),
     variants_and_versions: arr(r.variants_and_versions).map(normalizeDossierVersionRow),
     performance: arr(r.performance).map(normalizeDossierPerformanceRow),
@@ -879,9 +885,15 @@ function normalizeProductDossierOut(
     regulatory_export: normalizeDossierRegulatoryExport(r.regulatory_export),
     patents: arr(r.patents).map(normalizeDossierPatentRef),
     tenders_and_forecasts: arr(r.tenders_and_forecasts).map(normalizeDossierTenderRef),
-    risks_and_gaps: arr(r.risks_and_gaps).map(normalizeDossierSentence),
-    what_changed: arr(r.what_changed).map(normalizeDossierSentence),
-    bd_implications: arr(r.bd_implications).map(normalizeDossierSentence),
+    risks_and_gaps: arr(
+      ((r as Record<string, unknown>).risks_and_gaps_he ?? r.risks_and_gaps) as Partial<DossierSentence>[] | null | undefined,
+    ).map(normalizeDossierSentence),
+    what_changed: arr(
+      ((r as Record<string, unknown>).what_changed_he ?? r.what_changed) as Partial<DossierSentence>[] | null | undefined,
+    ).map(normalizeDossierSentence),
+    bd_implications: arr(
+      ((r as Record<string, unknown>).bd_implications_he ?? r.bd_implications) as Partial<DossierSentence>[] | null | undefined,
+    ).map(normalizeDossierSentence),
   };
 }
 
@@ -927,11 +939,33 @@ function normalizeDossierSummary(raw: Partial<DossierSummary> | null | undefined
   };
 }
 
+const DOSSIER_PROGRESS_STATUSES = new Set(["pending", "running", "done", "failed"]);
+
+function normalizeDossierProgressTopic(
+  raw: Partial<DossierProgressTopic> | null | undefined,
+): DossierProgressTopic {
+  const r = raw ?? {};
+  const status = DOSSIER_PROGRESS_STATUSES.has(String(r.status)) ? (r.status as DossierProgressTopic["status"]) : "pending";
+  return {
+    topic: str(r.topic),
+    title_he: str(r.title_he),
+    status,
+    seconds: typeof r.seconds === "number" ? r.seconds : null,
+    sources_found: typeof r.sources_found === "number" ? r.sources_found : null,
+  };
+}
+
 function normalizeDossierPendingJob(
   raw: Partial<DossierPendingJob> | null | undefined,
 ): DossierPendingJob | null {
   if (!raw) return null;
-  return { job_id: idStr(raw.job_id), state: str(raw.state) };
+  return {
+    job_id: idStr(raw.job_id),
+    state: str(raw.state),
+    // PD-fix (2026-09-08, item 5): eoa.dossier.plan.run_plan's on_progress writes this into the
+    // running job's own row; eoa.api.services._pending_dossier_job surfaces it verbatim.
+    progress: arr(raw.progress).map(normalizeDossierProgressTopic),
+  };
 }
 
 function normalizeDossierDetail(raw: Partial<DossierDetail> | null | undefined): DossierDetail {
