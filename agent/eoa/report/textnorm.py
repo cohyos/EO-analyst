@@ -8,8 +8,9 @@ punctuation mark. This module is a small, pure, idempotent set of string-normali
 report renderer can apply to *display* text right before it reaches the page.
 
 Applied only to rendered/display text -- never to raw DB fields at rest, citation markers
-(``[n]``), URLs, or file paths. Six passes, always run in this order (Round-14, CR-editing.md,
-added the first, second and last of the six -- see each function's own docstring):
+(``[n]``), URLs, or file paths. Eight passes, always run in this order (Round-14, CR-editing.md,
+added the first, second and sixth; Round-16, BIDI-REPORTS.md, added the last two -- see each
+function's own docstring):
 
 1. :func:`unescape_stray_backslash_quotes` -- a literal ``\"``/``\'`` (an unescaped JSON/string
    escape that leaked into display text, most often inside a Hebrew acronym like כטב\"ם) drops its
@@ -27,8 +28,13 @@ added the first, second and last of the six -- see each function's own docstring
 6. :func:`collapse_space_before_closing_punctuation` -- a stray space between a closing
    bracket/paren/quote and the sentence punctuation right after it (often left behind by passes
    1-2 above) collapses away, so ``"[1, 5, 6] ."`` reads ``"[1, 5, 6]."``.
+7. :func:`fix_percent_sign_order` -- a percent sign that landed before its number (with or without
+   a stray space) swaps back to ``NUMBER%``, e.g. ``"% 75"`` -> ``"75%"``.
+8. :func:`collapse_space_after_hebrew_prefix_hyphen` -- a stray space between a Hebrew
+   single-letter prefix's maqaf hyphen and the digit/Latin token it binds to collapses away, e.g.
+   ``"ב- 75%"`` -> ``"ב-75%"``.
 
-:func:`normalize_hebrew_punctuation` runs all six in order and is the one function report
+:func:`normalize_hebrew_punctuation` runs all eight in order and is the one function report
 renderers should actually call.
 
 Hebrew-script detection uses raw Unicode codepoint ranges (the Hebrew block and the Hebrew
@@ -78,6 +84,41 @@ _STRAY_BACKSLASH_QUOTE_RE = re.compile(r"\\([\"'])")
 # hugs the bracket the way normal punctuation does. Scoped to *right after* `)`/`]`/`"` specifically
 # (never touches a mid-sentence space) so it can never merge two otherwise-unrelated words.
 _SPACE_BEFORE_CLOSING_PUNCT_RE = re.compile(r'([\]\)"])\s+([.,;:!?])')
+
+# Round 16 (docs/qa/content_review/BIDI-REPORTS.md, "ב- %75" finding): a percent sign that landed
+# *before* its number -- with or without a stray space in between -- is always wrong reading order
+# in both Hebrew and English prose (the sign always follows the number: "75%", never "%75"). This
+# only ever shows up as a genuine text-level defect (a stray artifact from upstream extraction, or
+# an LLM draft quirk); it is never legitimate content, so unconditionally safe to normalize. Scoped
+# to *immediately* before a digit run so it can never misfire on an unrelated ``%`` elsewhere in a
+# sentence.
+_PERCENT_BEFORE_NUMBER_RE = re.compile(r"%\s*(\d+(?:\.\d+)?)")
+
+# Round 16: a Hebrew single-letter grammatical prefix's maqaf hyphen (ב-, כ-, ל-, מ-, ש-, ו-, ה-,
+# e.g. "ב-75%" = "at 75%") binds directly to the token that follows it with *no* space -- a stray
+# space there (e.g. "ב- 75%") is always a defect, never legitimate Hebrew (the maqaf construction is
+# specifically the zero-space form; a genuine word-initial "-" with a following space would just be
+# a dash, not this prefix). Scoped to the single-letter-prefix set specifically (not every Hebrew
+# letter) so it never touches an unrelated hyphenated compound.
+_HEBREW_PREFIX_HYPHEN_SPACE_RE = re.compile(r"([בכלמשוה]-)\s+(?=[0-9A-Za-z])")
+
+
+def fix_percent_sign_order(text: str) -> str:
+    """Swap a percent sign that landed before its number back to the correct ``NUMBER%`` order,
+    dropping any stray space between them -- see :data:`_PERCENT_BEFORE_NUMBER_RE`. E.g. ``"%75"``
+    -> ``"75%"``, ``"% 75"`` -> ``"75%"``."""
+    if not text:
+        return text
+    return _PERCENT_BEFORE_NUMBER_RE.sub(r"\1%", text)
+
+
+def collapse_space_after_hebrew_prefix_hyphen(text: str) -> str:
+    """Collapse a stray space between a Hebrew single-letter prefix's maqaf hyphen and the
+    digit/Latin token it binds to -- see :data:`_HEBREW_PREFIX_HYPHEN_SPACE_RE`. E.g. ``"ב- 75%"``
+    -> ``"ב-75%"``."""
+    if not text:
+        return text
+    return _HEBREW_PREFIX_HYPHEN_SPACE_RE.sub(r"\1", text)
 
 
 def _is_hebrew_char(ch: str) -> bool:
@@ -169,6 +210,20 @@ def normalize_hebrew_punctuation(text: str | None) -> str | None:
     that order) since the quote/gershayim passes below reason about *adjacent* characters, which
     only makes sense once the backslash/isolate noise between them is gone.
 
+    Round-16 (BIDI-REPORTS.md): also repairs a percent sign that landed before its number and a
+    stray space after a Hebrew prefix's maqaf hyphen (``fix_percent_sign_order``,
+    ``collapse_space_after_hebrew_prefix_hyphen``) -- narrowly scoped source-text defenses, run
+    last since they reason about digits/Latin letters the earlier passes don't touch. Deliberately
+    *not* included: a blanket "insert a space at every bare Hebrew/Latin boundary" pass -- checked
+    against the actual report corpus (docs/qa/content_review/BIDI-REPORTS.md) and rejected, because
+    a single-letter Hebrew conjunction/prefix (most commonly ו-, "and") *correctly* glues directly
+    to a following Latin/digit token with zero space per ordinary Hebrew grammar (e.g. "וH04N5" =
+    "and H04N5", a real patent-code citation already in the corpus) -- a blanket rule would corrupt
+    that. The actual "3דולר"-style glued-word bug this round investigated turned out to live in the
+    HTML/DOCX *rendering* layer (an isolate boundary swallowing a real space that was already
+    correctly present in the source -- see ``docx_builder.split_runs``), not in the source text
+    itself, so no general source-level spacing pass was needed to fix it.
+
     ``None``/empty input is returned unchanged (falsy short-circuit), so this is always safe to
     call on an optional field without a separate ``is None`` check at the call site.
     """
@@ -180,6 +235,8 @@ def normalize_hebrew_punctuation(text: str | None) -> str | None:
     text = ascii_quote_to_gershayim(text)
     text = ascii_apostrophe_to_geresh(text)
     text = collapse_space_before_closing_punctuation(text)
+    text = fix_percent_sign_order(text)
+    text = collapse_space_after_hebrew_prefix_hyphen(text)
     return text
 
 

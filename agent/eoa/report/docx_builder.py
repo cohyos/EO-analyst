@@ -238,18 +238,32 @@ def _trim_row_cells(cells: list[Any]) -> list[Any]:
     return [_trim_cell_text(v) for v in cells]
 
 
+#: Round-15 (PL-REPORT-FIX, user screenshot 2026-09-08 20:30): a table of this many rows or fewer
+#: renders no synthesized row-count caption at all -- see :func:`_table_caption_text`.
+_CAPTION_MIN_ROWS_FOR_SYNTHESIS = 3
+
+
 def _table_caption_text(tbl: dict[str, Any]) -> str | None:
     """A short caption line for a rendered table (defect: "missing table captions",
     CR-editing.md) -- the author-provided ``note_he`` when the table already carries one,
     otherwise a synthesized row-count line so a reader always knows a table's size before reading
-    it. ``None`` (render nothing) only for a table with zero rows, which has nothing to caption."""
+    it. ``None`` (render nothing) for a table with zero rows (nothing to caption) or with
+    :data:`_CAPTION_MIN_ROWS_FOR_SYNTHESIS` rows or fewer (a bare "3 שורות" under a table the
+    reader can already see is 3 rows long is noise, not information).
+
+    Round-15 (PL-REPORT-FIX, user screenshot 2026-09-08 20:30): the synthesized caption used to
+    wrap the count in literal ASCII parentheses (``"(3 שורות)"``). Inside an RTL Hebrew paragraph,
+    ASCII ``(``/``)`` are *mirrored* characters under the Unicode bidi algorithm, so that caption
+    rendered flipped in the UI (``")שורות 3("``) -- confirmed live in the pl_targeting_pods
+    2026-09-08 report. The synthesized form now emits plain "N שורות" with no bracketing at all; an
+    author-provided ``note_he`` (free text, not this synthesized shape) is returned unchanged."""
     note = tbl.get("note_he")
     if note:
         return note
     n = len(tbl.get("rows") or [])
-    if not n:
+    if n <= _CAPTION_MIN_ROWS_FOR_SYNTHESIS:
         return None
-    return f"({n} שורות)"
+    return f"{n} שורות"
 
 
 def _row_identity(row: Any) -> str:
@@ -794,6 +808,24 @@ def split_runs(text: str) -> list[tuple[str, str]]:
     follows Hebrew text, per the plain inherit-from-``cur`` rule) but the closing ')' in the Latin
     run (it follows "Payloads") -- an asymmetric split that renders as broken bidi (Q5-4,
     docs/qa/findings_Q5_r1.md).
+
+    Round 16 (BIDI-REPORTS.md): the single joining space between a Hebrew run and an adjacent
+    Latin/digit run is never left trapped as leading/trailing whitespace *inside* the Latin/digit
+    run (see :func:`_rebalance_boundary_whitespace`, applied to this function's result below). An
+    HTML ``<bdi dir="ltr">``/OOXML-run isolate is atomic: a boundary space left inside it does not
+    act as a normal separator, and the two words either side render glued together with no visible
+    gap at all -- e.g. "3 " (trailing space) inside an isolate immediately followed by "דולר"
+    renders "3דולר", not "3 דולר". Confirmed empirically in a live browser (character-level
+    ``getBoundingClientRect`` measurement, not just visual inspection): moving the same space to
+    sit *after* the isolate instead of inside it eliminates the glue in every case checked,
+    including the harder "opening bracket immediately before an isolate" case ("(Axon Vision, "
+    followed by Hebrew) -- there the *bracket itself* ends up pixel-adjacent to the isolate's
+    *trailing* character rather than its leading one (an isolate's own internal layout is fixed
+    left-to-right regardless of which neighbour is logically nearer), but since a bracket sitting
+    directly against a letter with no gap is normal, unremarkable typography (unlike two *letters*
+    from different scripts touching with no gap at all), only the whitespace side of this actually
+    needs correcting -- rebalancing it alone was verified to produce zero letter-to-letter glues
+    across every reported symptom phrase, so no separate bracket-specific handling was added here.
     """
     if not text:
         return []
@@ -842,7 +874,43 @@ def split_runs(text: str) -> list[tuple[str, str]]:
                 quote_open_class = None if quote_open_class is not None else cur
     if buf:
         runs.append((cur, "".join(buf)))
-    return runs
+    return _rebalance_boundary_whitespace(runs)
+
+
+def _rebalance_boundary_whitespace(runs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Move whitespace sitting at the edge of an 'other' (Latin/digit) run into the adjacent 'he'
+    run instead, so the joining space between a Hebrew word and an LTR run is never left *inside*
+    the isolate/run :func:`split_runs` emits for the LTR side -- see that function's docstring for
+    why a boundary space trapped inside the isolate renders glued rather than separated (round 16,
+    BIDI-REPORTS.md, confirmed empirically in a live browser: "3 " (trailing space) inside a
+    ``dir="ltr"`` isolate immediately followed by "דולר" renders as "3דולר", no visible gap; moving
+    the same space to sit *after* the isolate instead of inside it renders correctly).
+
+    Whitespace *inside* an LTR run that is not at a Hebrew boundary (e.g. the space between "Axon"
+    and "Vision") is untouched -- :func:`split_runs`'s runs already strictly alternate 'he'/'other'
+    (a class only changes on a real script transition), so this only ever touches a run's own
+    leading/trailing edge, never text in its interior.
+    """
+    if len(runs) < 2:
+        return runs
+    runs = list(runs)
+    for i, (cls, chunk) in enumerate(runs):
+        if cls != "other" or not chunk:
+            continue
+        if i > 0 and runs[i - 1][0] == "he":
+            stripped = chunk.lstrip()
+            lead = chunk[: len(chunk) - len(stripped)]
+            if lead:
+                runs[i - 1] = ("he", runs[i - 1][1] + lead)
+                chunk = stripped
+        if i + 1 < len(runs) and runs[i + 1][0] == "he":
+            stripped = chunk.rstrip()
+            trail = chunk[len(stripped) :]
+            if trail:
+                runs[i + 1] = ("he", trail + runs[i + 1][1])
+                chunk = stripped
+        runs[i] = (cls, chunk)
+    return [(cls, chunk) for cls, chunk in runs if chunk]
 
 
 def split_runs_with_citations(text: str) -> list[tuple[str, str]]:
