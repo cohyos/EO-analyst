@@ -299,6 +299,16 @@ class TestScanTendersEndToEndRescue:
 
 import eoa.search.deep_search as ds  # noqa: E402
 
+#: R8-investigations-b added `_low_quality_page_reason`'s interstitial/short-body gate
+#: (`_MIN_BODY_CHARS = 400`), which runs in `_tool_read` *before* the security `screen()` call
+#: these round-4 tests exercise. A short fixture body (e.g. "hello world") is now discarded by
+#: that gate before `screen()` is ever reached, which made these tests fail for a reason
+#: unrelated to L2 arbitration (`use_l2=True` at deep_search.py:1005 is unchanged and correct --
+#: verified against the round-4 commit that introduced it). Fixture bodies below are padded past
+#: the 400-char minimum, with no `_LOW_QUALITY_PAGE_SIGNATURES` phrase, so they clear the
+#: low-quality gate and reach `screen()` as these tests intend.
+_REAL_BODY_TEXT = "Real article body text describing the fetched page in detail. " * 8
+
 
 class TestScreenTextPartial:
     def test_clean_text_untouched(self, monkeypatch):
@@ -399,7 +409,7 @@ class TestToolReadUsesL2Arbitration:
 
         monkeypatch.setattr(
             "eoa.fetch.remote.fetch_remote",
-            lambda url: {"text": "hello world", "title": "T", "lang": "en", "published_at": None},
+            lambda url: {"text": _REAL_BODY_TEXT, "title": "T", "lang": "en", "published_at": None},
         )
         monkeypatch.setattr("eoa.security.guard.screen", fake_screen)
         monkeypatch.setattr(ds, "_summarise_page", lambda inv, text, url: "summary")
@@ -417,7 +427,7 @@ class TestToolReadUsesL2Arbitration:
 
         monkeypatch.setattr(
             "eoa.fetch.remote.fetch_remote",
-            lambda url: {"text": "bad content", "title": "T", "lang": "en", "published_at": None},
+            lambda url: {"text": _REAL_BODY_TEXT, "title": "T", "lang": "en", "published_at": None},
         )
         monkeypatch.setattr(
             "eoa.security.guard.screen",

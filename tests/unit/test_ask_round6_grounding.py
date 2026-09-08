@@ -375,7 +375,24 @@ class TestAnchorMissDemotedSectionEndToEnd:
         rewrite attaches `[1]` to the same fabricated sentence, citing the Elbit-only source. Before
         round 6, `_run_citation_repair`'s rewrite was adopted as the new `answer_text` completely
         unguarded, so the fabricated "AMPSNG" jargon (grounded nowhere) survived, unexamined, all
-        the way into the demoted "### הקשר קרוב (לא התשובה)" section. It must not survive now."""
+        the way into the demoted "### הקשר קרוב (לא התשובה)" section. It must not survive now.
+
+        Contract update (content-review LEFT-2, 2026-09-08): round 6 expected the demoted section
+        itself to always survive, fabricated content stripped but the heading still shown. Rounds
+        7-13 (`filter_claim_grounding`'s tightened per-citation scoping, `enforce_answer_coherence`
+        R10's dangling-leading-fragment drop, `_drop_empty_headings`) now compose so that when the
+        *entire* rewritten sentence is fabricated (as here -- nothing about "AMPSNG"/"מגן אור" in
+        this scenario grounds against the Elbit-only source), the guards strip it down to a bare
+        " [1]." citation-marker residue, which `enforce_answer_coherence` correctly recognises as a
+        dangling fragment and drops -- taking the now-empty "### הקשר קרוב" heading with it. Traced
+        live (`ask_route._run_removal_guards` + `ask_grounding.enforce_answer_coherence` called
+        directly on this test's own fixture text) to confirm this isn't a regression in L2/anchor
+        wiring: `extract_anchors`/`_primary_anchors` splitting "(Iron Beam)" into two independent
+        anchors ("Iron", "Beam") is itself deliberate, documented, live-verified behaviour
+        (`_primary_anchors`'s own docstring names this exact "מגן אור (Iron Beam)" shape), not the
+        cause. The net effect -- a wholly-fabricated demoted section disappears entirely, leaving
+        only the honest off-topic caveat -- is more honest than round 6's original contract, so the
+        assertion below is updated rather than the product code."""
         rows = [
             _row(
                 93,
@@ -399,7 +416,12 @@ class TestAnchorMissDemotedSectionEndToEnd:
         final_text = finals[-1]["text"]
         assert final_text.startswith(ask_route._OFF_TOPIC_PREFIX)
         assert "AMPSNG" not in final_text
-        assert "### הקשר קרוב" in final_text  # the anchor-miss guard did demote it
+        # Updated contract (see docstring above): a wholly-fabricated demoted section is now
+        # stripped down to nothing (dangling-fragment + empty-heading guards) rather than shown
+        # empty, so the "### הקשר קרוב" heading itself no longer survives here -- only the honest
+        # anchor-miss caveat does.
+        assert "### הקשר קרוב" not in final_text
+        assert "Iron" in final_text and "Beam" in final_text  # the missed anchors are still named
         assert events[-1]["type"] == "done"
 
     def test_demoted_section_conflation_is_scrubbed_even_when_the_original_answer_already_cited(
