@@ -308,7 +308,11 @@ def _build_summary_he(kind: str, item_delta: ItemDelta, trend_deltas: list[Trend
         # count only what the renderer will actually list (secondary-domain vanished trends
         # are dropped there), so the summary line never says "54 נעלמו" above 5 rows
         vanished = sum(
-            1 for t in trend_deltas if t.status == "vanished" and not _is_secondary_domain_title(t.title_he)
+            1
+            for t in trend_deltas
+            if t.status == "vanished"
+            and not _is_secondary_domain_title(t.title_he)
+            and not _is_legacy_trend_title(t.title_he)
         )
         trend_bits = []
         if appeared:
@@ -448,12 +452,19 @@ def render_delta_section_he(result: DeltaResult) -> str:
     # secondary/other domains, relabel the legacy "זינוק" prefix, cap at 5 by prior strength
     # and summarise the rest in one line.
     vanished = [td for td in result.trend_deltas if td.status == "vanished"]
-    vanished = [td for td in vanished if not _is_secondary_domain_title(td.title_he)]
+    legacy = [td for td in vanished if _is_legacy_trend_title(td.title_he)]
+    vanished = [
+        td for td in vanished if not _is_secondary_domain_title(td.title_he) and not _is_legacy_trend_title(td.title_he)
+    ]
     vanished.sort(key=lambda td: (-(td.previous_strength or 0), td.title_he or ""))
     for td in vanished[:_MAX_VANISHED_ROWS]:
         lines.append(
             f"- {_legacy_trend_title_he(_label_raw_subdomain_keys(td.title_he))}: "
             f"{_STATUS_LABELS_HE['vanished']} (הייתה בעוצמה {td.previous_strength})"
+        )
+    if legacy:
+        lines.append(
+            f"- {len(legacy)} מגמות מהדוח הקודם נוסחו במנוע המגמות הישן ואינן ברות השוואה (לא נספרו)."
         )
     if len(vanished) > _MAX_VANISHED_ROWS:
         lines.append(f"- ועוד {len(vanished) - _MAX_VANISHED_ROWS} מגמות מהדוח הקודם לא חזרו בתקופה זו.")
@@ -463,6 +474,16 @@ def render_delta_section_he(result: DeltaResult) -> str:
 
 _MAX_VANISHED_ROWS = 5
 _SECONDARY_DOMAIN_MARKERS_HE = ("תחומים נוספים", "תחומים משיקים", "(Secondary)")
+
+
+_LEGACY_TITLE_PREFIXES_HE = ("מגמה: פעילות מוגברת סביב", "זינוק בכמות הפריטים בתחום", "מגמה: זינוק")
+
+
+def _is_legacy_trend_title(title: str | None) -> bool:
+    """A previous-issue title written by the pre-round-14 trend engine (looser thresholds,
+    superlative wording). Such a trend "vanishing" says nothing about this period, so it is
+    neither listed nor counted -- one note line reports how many were skipped."""
+    return (title or "").startswith(_LEGACY_TITLE_PREFIXES_HE)
 
 
 def _is_secondary_domain_title(title: str | None) -> bool:
