@@ -1,0 +1,216 @@
+"""Pydantic schema for the product dossier ("סקירת שוק עמוקה למוצר", PD-backend, user request
+2026-09-08 -- ``docs/PLAN_PRODUCT_DOSSIER.md`` section 3, the frozen contract).
+
+``ProductDossierOut`` is the single structured-extraction output of ``eoa.dossier.extract``: one
+LLM call, cloud chain, JSON schema = this class, over the corpus + every deep-search topic finding
+(``eoa.dossier.corpus``/``plan``). Every field that carries a factual claim (a number, a date, a
+name, a price) also carries ``cites: list[int]`` into the dossier's own citation registry -- the
+same numbered-registry convention every other report in this codebase already uses
+(``eoa.llm.schemas.analysis.Sentence`` / ``eoa.report.qa_citations``); a field the research could
+not establish is left ``null``/empty rather than guessed (``eoa.report.docx_builder``-style
+placeholders render it as "לא נמצא במקורות" -- see ``eoa.dossier.report``).
+
+Unlike ``Sentence`` (which requires a *non-empty* ``cites`` -- an unsourced sentence has no
+business existing at all, per that class's own docstring), every row model below allows an EMPTY
+``cites`` list: the deterministic post-checks in ``eoa.dossier.extract`` (grounding -- every cite
+must be a real registry number, every number in a value must appear in the cited source text) drop
+an ungrounded field to ``cites=[]`` + a null/placeholder value rather than raising, exactly per the
+plan's "deterministic post-checks ... drop the offending field to null" instruction. A *non-empty*
+``cites`` list is still required to still validate as non-null after those checks run -- enforced in
+``eoa.dossier.extract``, not in this schema (the schema must first accept whatever the model wrote
+so the post-check pass can inspect and trim it).
+
+Pricing (``PriceRow``) is the one row kind the plan singles out for extra discipline (section 1 and
+6.3): only a figure that appears in a contract award, tender, budget line, FMS notice or a quoted
+official is ever extracted at all -- enforced by the extraction prompt
+(``agent/eoa/llm/prompts/product_dossier_extract.md``) and, deterministically, by
+``eoa.dossier.extract``'s post-checks (a price row with no ``basis_he``/``source_kind`` naming one
+of those four source types, or whose ``cites`` don't resolve to a registry entry, is dropped).
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from eoa.llm.schemas.analysis import Sentence
+
+ProductStatusHe = Literal["בפיתוח", "בייצור", "מופעל בשטח", "הוצא משימוש", "לא ידוע"]
+
+DealKind = Literal["contract_award", "FMS", "framework", "option", "export_license"]
+SourceKind = Literal["datasheet", "brochure", "article", "official", "contract", "tender", "budget", "other"]
+PartnerRole = Literal["integrator", "subcontractor", "co-development", "reseller", "other"]
+
+
+class IdentityBlock(BaseModel):
+    """Section 3's ``identity`` block -- the product's own basic identity facts."""
+
+    product_name: str = Field(description="שם המוצר כפי שמופיע במקורות")
+    vendor: str = Field(default="", description="היצרן/הספק; מחרוזת ריקה אם לא ידוע")
+    product_family: str = Field(default="", description="משפחת מוצרים/פלטפורמה; מחרוזת ריקה אם לא ידוע")
+    category_he: str = Field(default="", description="קטגוריה טכנולוגית קצרה בעברית")
+    first_announced: str | None = Field(
+        default=None, description="תאריך הכרזה ראשונה (ISO אם ידוע), אחרת null"
+    )
+    status_he: ProductStatusHe = "לא ידוע"
+    cites: list[int] = Field(default_factory=list)
+
+
+class SpecRow(BaseModel):
+    """One published specification row -- ``value`` is copied verbatim as published (never
+    normalized/converted), per the report-style rule "numbers only from sources"."""
+
+    parameter_he: str = Field(description="שם הפרמטר בעברית (למשל: טווח זיהוי, משקל, צריכת הספק)")
+    value: str = Field(default="", description="הערך כפי שפורסם, כולל יחידות")
+    unit: str = Field(default="", description="יחידת מידה, אם רלוונטי בנפרד מ-value")
+    variant: str = Field(default="", description="גרסה/וריאנט שאליו הערך מתייחס, אם צוין")
+    source_kind: SourceKind = "other"
+    cites: list[int] = Field(default_factory=list)
+
+
+class VersionRow(BaseModel):
+    name: str = Field(description="שם הגרסה/הדגם")
+    year: str | None = Field(default=None, description="שנת השקה/עדכון (ISO אם ידוע), אחרת null")
+    changes_he: str = Field(default="", description="מה השתנה בגרסה זו לעומת קודמתה, אם ידוע")
+    platforms: list[str] = Field(default_factory=list, description="פלטפורמות נשא ידועות לגרסה זו")
+    cites: list[int] = Field(default_factory=list)
+
+
+class PerformanceRow(BaseModel):
+    """ "claimed" (יצרן/פרסום) לעומת "demonstrated"/"operational" (ניסוי/הפעלה בפועל) -- לעולם לא
+    מוצגים כאותו הדבר; ``tested_or_operational_value`` נשאר ``null`` כשלא ידוע."""
+
+    metric_he: str = Field(description="שם המדד (למשל: טווח זיהוי MWIR, קצב זיהוי)")
+    claimed_value: str = Field(default="", description="הערך המוצהר על ידי היצרן")
+    tested_or_operational_value: str | None = Field(
+        default=None, description="ערך שנמדד/הופעל בפועל (ניסוי/שטח), אם דווח בנפרד; אחרת null"
+    )
+    conditions_he: str = Field(default="", description="תנאי המדידה/ההפעלה, אם צוינו")
+    cites: list[int] = Field(default_factory=list)
+
+
+class MaturityBlock(BaseModel):
+    trl: int | None = Field(default=None, ge=1, le=9, description="TRL 1-9 אם ניתן להסיק, אחרת null")
+    operational_users: list[str] = Field(default_factory=list, description="מפעילים ידועים")
+    platforms_integrated: list[str] = Field(default_factory=list, description="פלטפורמות שבהן שולב")
+    first_fielding: str | None = Field(default=None, description="תאריך פריסה מבצעית ראשונה, אם ידוע")
+    assessment_he: str = Field(default="", description="הערכת בשלות קצרה בעברית")
+    cites: list[int] = Field(default_factory=list)
+
+
+class DealRow(BaseModel):
+    date: str | None = Field(default=None, description="תאריך העסקה (ISO אם ידוע)")
+    customer: str = Field(default="", description="הלקוח/הרוכש")
+    country: str = Field(default="", description="מדינת הלקוח")
+    kind: DealKind = "contract_award"
+    amount: str = Field(default="", description="סכום כפי שפורסם (כולל יחידה/סקאלה), ריק אם לא ידוע")
+    currency: str = Field(default="", description="מטבע, אם צוין בנפרד מ-amount")
+    quantity: str | None = Field(default=None, description="כמות, אם צוינה")
+    platform: str | None = Field(default=None, description="פלטפורמת הנשא הרלוונטית, אם צוינה")
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    cites: list[int] = Field(default_factory=list)
+
+
+class PriceRow(BaseModel):
+    """Section 1/6.3: ONLY a figure grounded in a contract award/tender/budget line/FMS notice/
+    quoted official -- ``basis_he``/``source_kind`` are what the post-check gate in
+    ``eoa.dossier.extract`` inspects to enforce that; no derived per-unit price is ever computed
+    here (a "per unit" ``basis_he`` is allowed only when the source itself states it that way)."""
+
+    figure: str = Field(description="הסכום כפי שפורסם, כולל יחידה/סקאלה")
+    currency: str = Field(default="", description="מטבע")
+    basis_he: str = Field(default="", description="בסיס הסכום כפי שפורסם: ליחידה / למנה של N / לתוכנית כולה")
+    date: str | None = Field(default=None, description="תאריך הפרסום/החוזה (ISO אם ידוע)")
+    source_kind: SourceKind = "other"
+    cites: list[int] = Field(default_factory=list)
+
+
+class PartnerRow(BaseModel):
+    partner: str = Field(description="שם השותף")
+    role_he: PartnerRole = "other"
+    since: str | None = Field(default=None, description="תאריך תחילת השותפות, אם ידוע")
+    cites: list[int] = Field(default_factory=list)
+
+
+class CompetitorRow(BaseModel):
+    """Only a competitor actually named in a cited source or on the configured watchlist -- an
+    invented/inferred competitor is dropped by ``eoa.dossier.extract``'s post-checks."""
+
+    product: str = Field(description="שם המוצר המתחרה")
+    vendor: str = Field(default="", description="יצרן המוצר המתחרה")
+    comparison_he: str = Field(default="", description="השוואה קצרה, מבוססת מקור")
+    cites: list[int] = Field(default_factory=list)
+
+
+class RegulatoryExportBlock(BaseModel):
+    export_regime_he: str = Field(default="", description="משטר הייצוא הרלוונטי (ITAR/EAR/DECA וכו')")
+    restrictions_he: str = Field(default="", description="הגבלות ידועות")
+    cites: list[int] = Field(default_factory=list)
+
+
+class DossierPatentRow(BaseModel):
+    pub_number: str = Field(default="", description="מספר פרסום הפטנט")
+    title: str = Field(default="")
+    assignee: str = Field(default="")
+    relevance_he: str = Field(default="", description="למה הפטנט רלוונטי למוצר זה")
+    cites: list[int] = Field(default_factory=list)
+
+
+class DossierTenderRow(BaseModel):
+    tender_id: str | None = Field(default=None)
+    title: str = Field(default="")
+    status: str = Field(default="")
+    relevance_he: str = Field(default="")
+    cites: list[int] = Field(default_factory=list)
+
+
+class ProductDossierOut(BaseModel):
+    """Section 3's full record. Every list defaults empty (a topic the research could not establish
+    anything about renders as an honest empty table, never a fabricated row) -- see
+    ``eoa.dossier.report`` for the "לא נמצא במקורות" placeholder rendering of an empty/null field."""
+
+    identity: IdentityBlock
+    summary_he: list[Sentence] = Field(
+        default_factory=list,
+        max_length=6,
+        description="עד 6 משפטים, כל אחד עם cites: מה המוצר ואיפה הוא עומד",
+    )
+    specifications: list[SpecRow] = Field(default_factory=list)
+    variants_and_versions: list[VersionRow] = Field(default_factory=list)
+    performance: list[PerformanceRow] = Field(default_factory=list)
+    maturity: MaturityBlock = Field(default_factory=MaturityBlock)
+    deals: list[DealRow] = Field(default_factory=list)
+    pricing: list[PriceRow] = Field(default_factory=list)
+    partnerships: list[PartnerRow] = Field(default_factory=list)
+    competitors: list[CompetitorRow] = Field(default_factory=list)
+    regulatory_export: RegulatoryExportBlock = Field(default_factory=RegulatoryExportBlock)
+    patents: list[DossierPatentRow] = Field(default_factory=list)
+    tenders_and_forecasts: list[DossierTenderRow] = Field(default_factory=list)
+    risks_and_gaps_he: list[Sentence] = Field(
+        default_factory=list, description="מה לא ידוע / סתירות בין מקורות, כל משפט עם cites"
+    )
+    what_changed_he: list[Sentence] | None = Field(
+        default=None,
+        description="מה השתנה לעומת הסקירה הקודמת של אותו product_key; null אם זו הסקירה הראשונה",
+    )
+    bd_implications_he: list[Sentence] = Field(
+        default_factory=list, description="משמעויות לתפקיד BD, מסויגות, כמות לפני משמעות, כל משפט עם cites"
+    )
+
+
+__all__ = [
+    "CompetitorRow",
+    "DealRow",
+    "DossierPatentRow",
+    "DossierTenderRow",
+    "IdentityBlock",
+    "MaturityBlock",
+    "PartnerRow",
+    "PerformanceRow",
+    "PriceRow",
+    "ProductDossierOut",
+    "RegulatoryExportBlock",
+    "SpecRow",
+    "VersionRow",
+]

@@ -11902,3 +11902,164 @@ the suite); `test_report_round3_d6.py`'s weekly-report backup-contamination test
 too, in `eoa.report.weekly` (a module this round never touches) under a live GPU/polite-mode gate
 this environment happened to trip during that run -- not a regression from this work. `ruff check`/
 `ruff format --check` clean on every file touched.
+
+## Product dossier -- "סקירת שוק עמוקה למוצר" (PD-backend, user request 2026-09-08, migration 0031)
+
+**User requirement, verbatim intent (2026-09-08):** a deep, on-demand market survey of ONE named
+product (name + vendor + aliases -- e.g. Elbit **SPECTRO XR**): specification, maturity,
+performance (claimed vs. demonstrated), versions/variants, deals, prices, partnerships and
+competitors, combining what the system already holds (items/events/patents/tenders/forecasts/
+entities/graph edges/a previous dossier of the same product) with fresh web research through the
+existing deep-search machinery. Every fact cell carries citations; an unestablished field renders
+"לא נמצא במקורות" -- never estimated. See `docs/PLAN_PRODUCT_DOSSIER.md` for the frozen contract
+both implementation lanes (PD-backend/PD-ui) built against.
+
+### Schema (`db/migrations/versions/0031_product_dossiers.py`)
+
+`product_dossiers`: one row per run, keyed by `product_key` (slug of vendor+name, e.g.
+`elbit-systems-spectro-xr`, `UNIQUE (product_key, created_at)` so `ORDER BY created_at DESC LIMIT 1`
+is the cheap "latest" lookup). Carries the full structured record inline: `data JSONB` (the whole
+`ProductDossierOut`, every fact with its own `cites`) and `sources JSONB` (the numbered citation
+registry -- DB records + web sources), plus `outcome`/`confidence`/`job_id`/`report_id`. Mirrors
+`patent_surveys`' own "side-table linking to the `reports` row that carries the rendered docx/md/
+html" shape, but additionally stores the structured record inline since the dossier detail API
+(`GET /api/dossiers/{key}`) serves it back to the UI verbatim rather than only a report card. Also
+widens `reports.kind`'s CHECK (0014/0018/0028 -> 'bd_territory'/'patent_survey'/'product_line') to
+add `'product_dossier'`.
+
+### Config (`config/config.yaml` `dossier:` block, `eoa.config.DossierCfg`)
+
+`rounds_per_topic` (3, forwarded as `investigate()`'s own `max_rounds` per research topic),
+`max_topics` (9 -- the full fixed topic list below), `budget_multiplier` (1.0, forwarded to every
+topic's `investigate()` call), `max_sources` (40, citation-registry cap).
+
+### Schema + prompt (`agent/eoa/llm/schemas/product_dossier.py`, `agent/eoa/llm/prompts/
+product_dossier_extract.md`)
+
+`ProductDossierOut`: `identity`, `summary_he` (<= 6 `Sentence`s), `specifications`/
+`variants_and_versions`/`performance` (claimed vs. demonstrated kept in two separate fields, never
+merged)/`maturity`/`deals`/`pricing`/`partnerships`/`competitors`/`regulatory_export`/`patents`/
+`tenders_and_forecasts` (row lists), `risks_and_gaps_he`/`bd_implications_he`/`what_changed_he`
+(`Sentence` lists). Every row model carries its own `cites: list[int]`; unlike
+`eoa.llm.schemas.analysis.Sentence` (non-empty `cites` enforced at the schema level), a fact row
+here is allowed an *empty* `cites` at the schema level -- the deterministic post-checks in
+`eoa.dossier.extract` are what enforce non-empty `cites` on a *kept* fact (the schema must first
+accept whatever the model wrote so the post-check pass can inspect and trim it). The prompt carries
+the report's stricter-than-usual "never invent" rules verbatim, in particular section 6 (pricing:
+only a contract/tender/budget/FMS/official-quote source, with a stated basis, no derived per-unit
+price ever computed by the model) and rule 8 (claimed vs. demonstrated performance kept apart).
+
+### Pipeline (`agent/eoa/dossier/`, new package)
+
+1. **`corpus.py`** -- `build_corpus(product_name, vendor, aliases, product_line=None)`: gathers
+   items/events/patents/tenders/tender_forecasts matching the product's name+aliases (`ILIKE`
+   against title/summary/abstract, same "bounded set, small alias list" shape as
+   `eoa.patents.survey`'s own keyword matching), the vendor's canonical `entities`/`graph_edges` row
+   (best-effort context, not itself a citable fact source), and the previous `product_dossiers` row
+   of the same `product_key`. Seeds the citation registry (items -> events -> patents -> tenders ->
+   forecasts -> previous-dossier-marker, flat numbering, same convention as
+   `eoa.patents.survey`/`eoa.report.product_line`). `slugify_product_key(vendor, product_name)` is
+   the one place `product_key` is computed (an all-non-ASCII name with no vendor falls back to a
+   short deterministic hash suffix rather than an empty key) -- both `eoa.api.services` and
+   `eoa.orchestrator.jobs.run_product_dossier` call it independently so the key can never drift.
+   Pure SQL + deterministic Python, no LLM/network -- this is also why a dry run of just this stage
+   (+ `plan`, below) needs no live investigation budget.
+2. **`plan.py`** -- a *fixed* 9-topic research plan (`TOPICS`: specifications, versions, performance,
+   maturity, deals, pricing, partnerships, competitors, regulatory), each topic's question naming
+   the product/vendor/aliases explicitly (required by `eoa.search.deep_search.extract_anchors`'s own
+   anchoring guard -- an anchor-less question would have every `search` call rejected). `run_plan`
+   calls `eoa.search.deep_search.investigate()` once per topic, sequentially, with the corpus's own
+   summary as `context_he`; every source a topic's investigation actually read is appended to
+   `corpus.registry` in place, continuing the DB half's numbering (DB-then-web, mirrors
+   `eoa.patents.survey`'s own patents-then-db convention in the opposite direction). `build_topics`
+   is the pure, no-network half (question construction only) -- what a dry run exercises to "prove
+   the queries work" without spending a real multi-round investigation's budget.
+3. **`extract.py`** -- one structured-extraction `chat_structured` call (`ProductDossierOut`) over
+   the corpus + every topic's finding, then `ground_dossier`: deterministic, code-only post-checks
+   mirroring `eoa.pipeline.analysis_grounding`'s "a unit that fails any rule is dropped or trimmed,
+   the rest is kept" discipline (narrow local ports of that module's digit-boundary-safe number
+   matching, per this codebase's established "small local copy, not a cross-package import of a
+   private name" convention -- `eoa.dossier` importing from `eoa.pipeline` would also be a layering
+   inversion). Independently additive checks: an out-of-range `cites` entry is stripped (the
+   sentence/row survives if any cite remains valid); an ungrounded number in `SpecRow.value`/
+   `PerformanceRow.claimed_value`/`tested_or_operational_value`/`DealRow.amount` blanks just that
+   field; an ungrounded competitor/partner NAME drops the whole row; a `PriceRow` missing a
+   qualifying `source_kind` (contract/tender/budget/official) or a `basis_he`, or whose own `cites`
+   don't resolve, is dropped outright (section 1/6.3's strictest rule -- no half-grounded price ever
+   survives). Every drop is logged (`dossier.field_dropped`) and returned for persistence into the
+   report's `qa_report`. `build_dossier` is `extract` + `ground` in one call; an `LLMOutputError`
+   propagates to the caller (`eoa.dossier.report`), which falls back to an honest, empty,
+   `not_found` dossier rather than failing the job.
+4. **`diff.py`** -- `compute_diff(previous_data, current)`: a deterministic (not LLM-drafted) "מה
+   השתנה" comparison against the previous dossier's raw JSONB `data` -- new/changed deals, new price
+   points, changed specification values, new variants, in that priority order. `None` when there is
+   no previous dossier at all (first run); an empty list is a real, honest answer (a previous dossier
+   exists but nothing detectably changed). `eoa.dossier.report` overwrites whatever the extraction
+   model itself wrote into `what_changed_he` with this deterministic result.
+5. **`report.py`** -- `build_product_dossier(...)`: corpus -> plan -> extract+ground -> diff ->
+   render -> persist. Rendering reuses `eoa.report.docx_builder`'s existing structured-draft path
+   unmodified, via small local duck-typed dataclasses (`_CiteSentence`/`_RenderSection`/
+   `_RenderableDossierDraft`) -- the same convention `eoa.patents.survey` already established for
+   the identical reason (docx_builder stays untouched; only the dossier module needs to shape data
+   to its existing contract). `corpus.registry` is passed straight as `items` to
+   `build_docx`/`render_markdown`/`render_html`, so the builder's own "נספח מקורות" appendix +
+   citation-jump bookmarks (`add_citation_run`/`_add_bookmark`) work unchanged -- no separate sources
+   table needed. Every fact-row list becomes its own <= 6-column table (`_specifications_table` etc.,
+   headers listed in `docs/PLAN_PRODUCT_DOSSIER.md` section 6's UI order); an empty/blanked value
+   cell renders `PLACEHOLDER_HE = "לא נמצא במקורות"`. `outcome`/`confidence` are computed
+   deterministically from a grounded-fact "signal count" (>= 5 -> found, >= 1 -> partial, else
+   not_found, confidence capped at 0.3) plus the mean of the plan's own per-topic investigation
+   confidences -- never asserted by the model. Persists a `reports` row (`kind='product_dossier'`,
+   `product_key` in the existing `territory` column -- same reuse `eoa.report.product_line` already
+   documents for that column) and the `product_dossiers` row in one connection block; JSONB payloads
+   use `json.dumps(..., default=str)` so a `date`/`datetime` value in the registry serializes without
+   a separate recursive sanitizer.
+
+### Job kind (`agent/eoa/orchestrator/jobs.py`)
+
+`run_product_dossier` (`HANDLERS["product_dossier"]`): payload
+`{product_key, product_name, vendor, aliases, product_line, budget_multiplier}` -- `product_key`
+itself is carried in the payload only for the API's own pending-job lookup (`eoa.api.services
+._pending_dossier_job`, a `jobs.payload->>'product_key' = ...` query); the handler re-derives it
+deterministically from `vendor`+`product_name` via `eoa.dossier.corpus.slugify_product_key` rather
+than trusting the payload's copy, so the two can never drift. Returns `{"product_dossier":
+{"report_id", "dossier_id", "product_key", "outcome", "confidence"}}`; a failure never blocks the
+orchestrator (docs/CONVENTIONS.md rule 9).
+
+### API (frozen contract, `agent/eoa/api/routes/dossiers.py` + `agent/eoa/api/services.py`)
+
+```
+GET  /api/dossiers                      -> [{product_key, product_name, vendor, latest, count}]
+POST /api/dossiers                      body {product_name, vendor?, aliases?, product_line?, budget_multiplier?} -> {job_id, product_key}
+GET  /api/dossiers/{product_key}        -> {product_key, product_name, vendor, aliases, dossiers, latest, pending_job}
+GET  /api/dossiers/{product_key}/{id}   -> one run's full data/sources + report_paths
+POST /api/dossiers/{product_key}/rerun  -> {job_id}
+```
+
+`POST` bodies use a `pydantic.BaseModel` request shape (`DossierCreateRequest`/
+`DossierRerunRequest`), matching `eoa.api.routes.bd`'s own convention rather than a bare
+`dict = Body(...)` default (ruff B008). A generated dossier is also a normal `reports` row, so its
+docx/md/html download continues to be served by the existing generic `GET /api/reports/{id}` etc.
+(`agent/eoa/api/routes/reports.py`) -- this router only adds the product-scoped endpoints. Job
+progress is visible through the existing `/api/jobs`/`/ws/status` endpoints, same as every other
+job kind.
+
+### Tests (`tests/unit/test_product_dossier_*.py`, new, 57 test cases)
+
+`test_product_dossier_schema.py` (schema validation: nulls for unknowns, `cites` empty-allowed at
+the row level but `Sentence` still requires non-empty, `summary_he`'s 6-sentence cap, round-trip
+through `model_dump`/`model_validate`), `test_product_dossier_corpus.py` (`slugify_product_key`
+incl. the all-Hebrew hash-fallback case, registry numbering order/cap against fixture DB rows,
+`monkeypatch`ed `_fetchall`/`_fetchone` -- no real Postgres, mirrors `test_product_lines.py`'s own
+convention), `test_product_dossier_extract.py` (the three worked post-check cases from the task
+brief: a number not in source -> field null; an invented competitor -> dropped; a price without
+basis -> dropped; plus out-of-range-cites stripping and the grounded/kept counterpart of each),
+`test_product_dossier_diff.py` (no-previous -> `None`, empty-previous -> `[]`, new/unchanged deal,
+spec-value change, new version, new price point, ordering), `test_product_dossier_report.py`
+(every table builder <= 6 columns and `None` on an empty dossier, the "לא נמצא במקורות" placeholder,
+`build_topics`'s deterministic question construction), `test_product_dossier_api.py`
+(`TestClient` against every endpoint with `eoa.api.services` functions mocked, mirrors
+`test_api_smoke.py`'s own convention). `pytest tests/unit/test_product_dossier_*.py -q`: **57
+passed**. `pytest tests/unit -q -k "jobs or product_line or patent_survey or api_smoke or
+app_middleware"` (the suites this round's changes touch): **214 passed, 0 failed** -- no
+regression. `ruff check` clean on every file touched.

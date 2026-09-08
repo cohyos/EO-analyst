@@ -1,0 +1,192 @@
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import type { DossierDetail, DossierRunDetail, ProductDossierOut } from "@/types/api";
+
+const getDossier = vi.fn();
+const getDossierRun = vi.fn();
+const postDossierRerun = vi.fn();
+
+vi.mock("@/api", () => ({
+  api: {
+    getDossier: (...args: unknown[]) => getDossier(...args),
+    getDossierRun: (...args: unknown[]) => getDossierRun(...args),
+    postDossierRerun: (...args: unknown[]) => postDossierRerun(...args),
+  },
+}));
+
+import { DossierDetailPage } from "./DossierDetailPage";
+
+function emptyDossierOut(): ProductDossierOut {
+  return {
+    identity: {
+      product_name: "SPECTRO XR",
+      vendor: "Elbit Systems",
+      product_family: null,
+      category_he: null,
+      first_announced: null,
+      status_he: "בייצור",
+      cites: [],
+    },
+    summary: [{ text_he: "תקציר בדיקה.", cites: [1] }],
+    specifications: [],
+    variants_and_versions: [],
+    performance: [],
+    maturity: {
+      trl: 9,
+      operational_users: [],
+      platforms_integrated: [],
+      first_fielding: null,
+      assessment_he: null,
+      cites: [],
+    },
+    deals: [],
+    pricing: [],
+    partnerships: [],
+    competitors: [],
+    regulatory_export: { export_regime_he: null, restrictions_he: null, cites: [] },
+    patents: [],
+    tenders_and_forecasts: [],
+    risks_and_gaps: [],
+    what_changed: [],
+    bd_implications: [],
+  };
+}
+
+function detail(over: Partial<DossierDetail> = {}): DossierDetail {
+  return {
+    product_key: "elbit-systems-spectro-xr",
+    product_name: "SPECTRO XR",
+    vendor: "Elbit Systems",
+    aliases: ["Spectro"],
+    dossiers: [
+      { id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940 },
+    ],
+    latest: {
+      ...emptyDossierOut(),
+      sources: [
+        { n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: "2026-09-07T06:00:00+03:00" },
+      ],
+    },
+    pending_job: null,
+    ...over,
+  };
+}
+
+function renderPage(key = "elbit-systems-spectro-xr") {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[`/dossiers/${key}`]}>
+        <Routes>
+          <Route path="/dossiers/:key" element={<DossierDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+beforeEach(() => {
+  getDossier.mockReset();
+  getDossierRun.mockReset();
+  postDossierRerun.mockReset();
+});
+
+describe("DossierDetailPage (PD-ui)", () => {
+  it("renders the header identity, status, TRL and confidence", async () => {
+    getDossier.mockResolvedValue(detail());
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "SPECTRO XR" })).toBeInTheDocument();
+    expect(screen.getByText("Elbit Systems")).toBeInTheDocument();
+    expect(screen.getByText("בייצור")).toBeInTheDocument();
+    expect(screen.getAllByText(/TRL/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/82%/).length).toBeGreaterThan(0);
+  });
+
+  it("renders every fixed section heading in order", async () => {
+    getDossier.mockResolvedValue(detail());
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+
+    const order = [
+      "תקציר",
+      "מפרט",
+      "גרסאות",
+      "ביצועים",
+      "בשלות",
+      "עסקאות",
+      "מחירים",
+      "שותפויות",
+      "מתחרים",
+      "פטנטים",
+      "מכרזים ותחזיות",
+      "פערים",
+      "משמעות עסקית",
+      "מה השתנה",
+      "מקורות",
+    ];
+    for (const label of order) {
+      expect(screen.getByRole("heading", { name: label, level: 3 })).toBeInTheDocument();
+    }
+  });
+
+  it("shows the empty-table placeholder for a section with no rows", async () => {
+    getDossier.mockResolvedValue(detail());
+    renderPage();
+    expect(await screen.findByText("אין נתוני מפרט")).toBeInTheDocument();
+  });
+
+  it("shows the pending-run banner while a job is in flight", async () => {
+    getDossier.mockResolvedValue(detail({ pending_job: { job_id: "77", state: "running" } }));
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    expect(
+      await screen.findByText("הסקירה נבנית ברקע — הדף יתעדכן אוטומטית כשתושלם"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a not-found state for an unknown product key", async () => {
+    getDossier.mockRejectedValue(new Error("not_found"));
+    renderPage("unknown");
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+  });
+
+  it("triggers a rerun from the detail page's 'הרץ שוב' button", async () => {
+    const user = userEvent.setup();
+    getDossier.mockResolvedValue(detail());
+    postDossierRerun.mockResolvedValue({ job_id: "job-3" });
+    renderPage();
+
+    const button = await screen.findByTestId("dossier-detail-rerun");
+    await user.click(button);
+    await waitFor(() => expect(postDossierRerun).toHaveBeenCalledWith("elbit-systems-spectro-xr"));
+  });
+
+  it("expands a run-history row's 'השווה' to show its what_changed sentences", async () => {
+    const user = userEvent.setup();
+    getDossier.mockResolvedValue(detail());
+    const runDetail: DossierRunDetail = {
+      id: 501,
+      created_at: "2026-09-06T21:10:00+03:00",
+      outcome: "found",
+      confidence: 0.82,
+      report_id: 940,
+      data: { ...emptyDossierOut(), what_changed: [{ text_he: "התווספה עסקה חדשה.", cites: [1] }] },
+      sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: null, reliability: null, accessed_at: null }],
+      path_docx: null,
+      path_md: null,
+      path_html: null,
+    };
+    getDossierRun.mockResolvedValue(runDetail);
+    renderPage();
+
+    await screen.findByTestId("dossier-run-history");
+    await user.click(screen.getByTestId("dossier-run-compare-501"));
+
+    await waitFor(() => expect(getDossierRun).toHaveBeenCalledWith("elbit-systems-spectro-xr", 501));
+    expect(await screen.findByText("התווספה עסקה חדשה.")).toBeInTheDocument();
+  });
+});

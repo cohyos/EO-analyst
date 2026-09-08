@@ -141,6 +141,12 @@ acquisition_watch:   # A16: מעקב רכישות ושותפויות (eoa.pipeli
   enabled: true       # gates the deterministic triage alert AND the weekly/BD "מעקב רכישות" section
   alert_level: red    # triage.levels key the deterministic acquisition-watch boost raises a matching item's score to
 
+dossier:   # PD-backend: "סקירת שוק עמוקה למוצר" (eoa.dossier) -- on-demand, multi-round product deep dive
+  rounds_per_topic: 3     # max_rounds per eoa.search.deep_search.investigate() call, one per research topic
+  max_topics: 9            # research-plan topic cap (spec/versions/performance/maturity/deals/pricing/partnerships/competitors/regulatory)
+  budget_multiplier: 1.0   # forwarded to investigate()'s own budget_multiplier for every topic call
+  max_sources: 40          # citation-registry cap (existing DB records + deep-search sources combined)
+
 notify:
   url: http://127.0.0.1:8091      # native ntfy (ADR-004); NTFY_URL env overrides
   topic: eo-analyst

@@ -127,3 +127,102 @@ describe("real.ts getInvestigation keeps security-review, blocked-reason and con
     expect(detail.answer?.blocked_reason_he).toBeUndefined();
   });
 });
+
+// PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): the dossier normalizers must never throw on a
+// backend build that predates this feature, omits a field, or sends a malformed/partial value --
+// every consumer (DossiersPage/DossierDetailPage) reads the result unconditionally, exactly like
+// every other PL-ui-style normalizer in this file.
+describe("real.ts dossier normalizers (PD-ui)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  function stubFetchJson(body: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } }),
+        ),
+      ),
+    );
+  }
+
+  it("normalizes a well-formed getDossiers list", async () => {
+    stubFetchJson([
+      {
+        product_key: "elbit-systems-spectro-xr",
+        product_name: "SPECTRO XR",
+        vendor: "Elbit Systems",
+        latest: { id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940 },
+        count: 3,
+      },
+    ]);
+    const { realApi: api } = await import("./real");
+    const list = await api.getDossiers();
+    expect(list).toEqual([
+      {
+        product_key: "elbit-systems-spectro-xr",
+        product_name: "SPECTRO XR",
+        vendor: "Elbit Systems",
+        latest: { id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940 },
+        count: 3,
+      },
+    ]);
+  });
+
+  it("degrades a malformed/partial getDossiers list to safe defaults instead of throwing", async () => {
+    stubFetchJson([{ product_key: "x" }, null, {}]);
+    const { realApi: api } = await import("./real");
+    const list = await api.getDossiers();
+    expect(list).toHaveLength(3);
+    expect(list[0]).toMatchObject({ product_key: "x", product_name: "", vendor: null, latest: null, count: 0 });
+    expect(list[1]).toMatchObject({ product_key: "", latest: null });
+  });
+
+  it("normalizes getDossier's nested ProductDossierOut, defaulting missing arrays/objects", async () => {
+    stubFetchJson({
+      product_key: "elbit-systems-spectro-xr",
+      product_name: "SPECTRO XR",
+      vendor: "Elbit Systems",
+      aliases: ["Spectro"],
+      dossiers: [{ id: 501, created_at: "2026-09-06T21:10:00+03:00", outcome: "found", confidence: 0.82, report_id: 940 }],
+      latest: {
+        identity: { product_name: "SPECTRO XR", vendor: "Elbit Systems", cites: [1] },
+        summary: [{ text_he: "תקציר.", cites: [1] }],
+        // every other array-shaped field omitted on purpose
+        sources: [{ n: 1, url: "https://example.test", title: "Source 1" }],
+      },
+      pending_job: { job_id: 77, state: "running" },
+    });
+    const { realApi: api } = await import("./real");
+    const detail = await api.getDossier("elbit-systems-spectro-xr");
+    expect(detail.aliases).toEqual(["Spectro"]);
+    expect(detail.pending_job).toEqual({ job_id: "77", state: "running" });
+    expect(detail.latest?.identity.product_name).toBe("SPECTRO XR");
+    expect(detail.latest?.summary).toEqual([{ text_he: "תקציר.", cites: [1] }]);
+    // Every array field the backend omitted normalizes to [], not undefined/throw.
+    expect(detail.latest?.specifications).toEqual([]);
+    expect(detail.latest?.deals).toEqual([]);
+    expect(detail.latest?.what_changed).toEqual([]);
+    expect(detail.latest?.maturity).toEqual({
+      trl: null,
+      operational_users: [],
+      platforms_integrated: [],
+      first_fielding: null,
+      assessment_he: null,
+      cites: [],
+    });
+    expect(detail.latest?.sources).toEqual([
+      { n: 1, url: "https://example.test", title: "Source 1", kind: null, reliability: null, accessed_at: null },
+    ]);
+  });
+
+  it("normalizes a missing/null getDossier response to the zero shape rather than throwing", async () => {
+    stubFetchJson(null);
+    const { realApi: api } = await import("./real");
+    const detail = await api.getDossier("unknown-product");
+    expect(detail).toMatchObject({ product_key: "", product_name: "", aliases: [], dossiers: [], latest: null, pending_job: null });
+  });
+});

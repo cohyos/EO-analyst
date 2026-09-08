@@ -597,6 +597,51 @@ def run_product_line_report(job: dict[str, Any]) -> dict[str, Any]:
     return {"product_line_reports": results}
 
 
+def run_product_dossier(job: dict[str, Any]) -> dict[str, Any]:
+    """``product_dossier`` job kind (PD-backend, user request 2026-09-08): builds one "סקירת שוק
+    עמוקה למוצר" (``eoa.dossier.report.build_product_dossier``) from the payload
+    ``{product_key, product_name, vendor, aliases, product_line, budget_multiplier}``
+    (API-enqueued, ``eoa.api.services.enqueue_product_dossier``/``rerun_product_dossier``).
+    ``product_key`` itself is not passed to the builder (it is re-derived deterministically from
+    ``vendor``+``product_name`` -- see ``eoa.dossier.corpus.slugify_product_key`` -- so the two can
+    never drift); it is only used here for the log line. Returns ``{"product_dossier":
+    {"report_id", "dossier_id", "product_key", "outcome", "confidence"}}`` so the enqueue endpoint's
+    poll loop can resolve the finished run; a failure never blocks the orchestrator (docs/
+    CONVENTIONS.md rule 9)."""
+    from eoa.dossier.report import build_product_dossier
+
+    payload = job.get("payload") or {}
+    product_name = (payload.get("product_name") or "").strip()
+    if not product_name:
+        return {"product_dossier_error": "missing product_name"}
+    try:
+        paths = build_product_dossier(
+            product_name,
+            payload.get("vendor"),
+            payload.get("aliases") or [],
+            product_line=payload.get("product_line"),
+            budget_multiplier=payload.get("budget_multiplier"),
+            job_id=job["id"],
+        )
+        return {
+            "product_dossier": {
+                "report_id": paths.report_id,
+                "dossier_id": paths.dossier_id,
+                "product_key": paths.product_key,
+                "outcome": paths.outcome,
+                "confidence": paths.confidence,
+            }
+        }
+    except Exception as exc:
+        log.error(
+            "product_dossier_failed",
+            product_key=payload.get("product_key"),
+            product_name=product_name,
+            error=str(exc)[:300],
+        )
+        return {"product_dossier_error": str(exc)[:300]}
+
+
 def _backup() -> dict[str, Any]:
     """Obsidian vault export (if enabled) + pg_dump via docker (best effort) + retention prune."""
     out: dict[str, Any] = {}
@@ -878,6 +923,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "tender_scan": run_tender_scan,
     "bd_report": run_bd_report,
     "product_line_report": run_product_line_report,
+    "product_dossier": run_product_dossier,
     "patent_scan": run_patent_scan,
     "patent_survey": run_patent_survey,
     "payload_extract": run_payload_extract_job,

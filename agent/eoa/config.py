@@ -220,6 +220,22 @@ class AcquisitionWatchCfg(BaseModel):
     alert_level: str = "red"
 
 
+class DossierCfg(BaseModel):
+    """PD-backend (user request 2026-09-08): "סקירת שוק עמוקה למוצר" (``eoa.dossier``) -- the
+    on-demand, multi-round research plan run per product (``docs/PLAN_PRODUCT_DOSSIER.md`` section
+    4). ``rounds_per_topic`` is forwarded as ``max_rounds`` to each research topic's own
+    ``eoa.search.deep_search.investigate()`` call; ``max_topics`` caps the research plan's own
+    topic list (``eoa.dossier.plan``); ``budget_multiplier`` is forwarded to every topic's
+    ``investigate()`` call (its own existing budget-scaling knob, unchanged); ``max_sources`` caps
+    the dossier's citation registry (existing DB records + deep-search sources combined,
+    ``eoa.dossier.corpus``)."""
+
+    rounds_per_topic: int = 3
+    max_topics: int = 9
+    budget_multiplier: float = 1.0
+    max_sources: int = 40
+
+
 class NotifyCfg(BaseModel):
     url: str = "http://ntfy:80"
     topic: str = "eo-analyst"
@@ -551,6 +567,7 @@ class Settings(BaseModel):
     bd_report: BdReportCfg = BdReportCfg()
     payloads: PayloadsCfg = PayloadsCfg()
     acquisition_watch: AcquisitionWatchCfg = AcquisitionWatchCfg()
+    dossier: DossierCfg = DossierCfg()
     notify: NotifyCfg = NotifyCfg()
     retention: RetentionCfg = RetentionCfg()
     api: ApiCfg = ApiCfg()

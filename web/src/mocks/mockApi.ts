@@ -2,6 +2,12 @@ import type {
   AskCitation,
   BdTerritoryOption,
   Conference,
+  DossierCreateBody,
+  DossierCreateResponse,
+  DossierDetail,
+  DossierRerunResponse,
+  DossierRunDetail,
+  DossierSummary,
   EntityDetail,
   EntitySummary,
   EventRow,
@@ -87,6 +93,13 @@ import {
   buildMockProductLines,
   mockProductLineReports,
 } from "./data/productLines";
+import {
+  buildMockDossierDetail,
+  buildMockDossierRunDetail,
+  buildMockDossierSummaries,
+  createOrRerunMockDossier,
+  rerunMockDossier,
+} from "./data/dossiers";
 import { mockForecasts, mockTenders } from "./data/tenders";
 import {
   mockClarifications,
@@ -1517,6 +1530,28 @@ export const mockApi: ApiClient = {
       is_latest: true,
     });
     return delay({ job_id: `mock-pl-job-${newId}` }, 400);
+  },
+
+  // PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירות מוצר" -- see web/src/mocks/data/dossiers.ts.
+  getDossiers: async (): Promise<DossierSummary[]> => delay(buildMockDossierSummaries()),
+  postDossier: async (body: DossierCreateBody): Promise<DossierCreateResponse> => {
+    const res = createOrRerunMockDossier(body.product_name, body.vendor, body.aliases);
+    return delay(res, 300);
+  },
+  getDossier: async (productKey: string): Promise<DossierDetail> => {
+    const detail = buildMockDossierDetail(productKey);
+    if (!detail) throw new Error("not_found");
+    return delay(detail, 250);
+  },
+  getDossierRun: async (productKey: string, id: number): Promise<DossierRunDetail> => {
+    const run = buildMockDossierRunDetail(productKey, id);
+    if (!run) throw new Error("not_found");
+    return delay(run, 250);
+  },
+  postDossierRerun: async (productKey: string): Promise<DossierRerunResponse> => {
+    const res = rerunMockDossier(productKey);
+    if (!res) throw new Error("not_found");
+    return delay(res, 300);
   },
 
   getSettings: async (name: SettingsName): Promise<SettingsGetResponse> =>

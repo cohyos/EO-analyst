@@ -3,6 +3,7 @@ import {
   Briefcase,
   CalendarDays,
   Camera,
+  FileSearch,
   Gavel,
   Inbox,
   LayoutDashboard,
@@ -43,6 +44,7 @@ const NAV_ROUTES: NavItem[] = [
   { to: "/reports", labelKey: "nav.reports", icon: FileText },
   { to: "/bd", labelKey: "nav.bd", icon: Briefcase },
   { to: "/product-lines", labelKey: "nav.productLines", icon: Layers },
+  { to: "/dossiers", labelKey: "nav.dossiers", icon: FileSearch },
   { to: "/tech-radar", labelKey: "nav.techRadar", icon: Radar },
   { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon },
 ];
@@ -70,6 +72,7 @@ export function usePageTitle(pathname: string): string {
   if (pathname.startsWith("/reports")) return t("nav.reports");
   if (pathname.startsWith("/bd")) return t("nav.bd");
   if (pathname.startsWith("/product-lines")) return t("nav.productLines");
+  if (pathname.startsWith("/dossiers")) return t("nav.dossiers");
   if (pathname.startsWith("/tech-radar")) return t("nav.techRadar");
   if (pathname.startsWith("/settings")) return t("nav.settings");
   return t("nav.shellFallback");

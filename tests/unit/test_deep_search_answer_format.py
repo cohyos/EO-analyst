@@ -9,6 +9,7 @@ Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_deep_search_answer
 from __future__ import annotations
 
 import re
+from typing import ClassVar
 
 import pytest
 
@@ -240,7 +241,7 @@ class TestJob175Fixture:
 
     #: Job 175's `key_facts`, verbatim -- every one of these restates a clause already present in
     #: `DIRECT_HE` above except the NUC-shutter and air/land/sea-usage bullets.
-    KEY_FACTS = [
+    KEY_FACTS: ClassVar = [
         "העדשה מיועדת לגלאי MWIR מסוג 10 µm SXGA המיועדים למשימות ISR [1]",
         'העדשה מציעה טווח זום רציף של 15-300 מ\\"מ עם פתיחת עדשה קבועה של f/4 [1,2]',
         'העדשה תומכת בהרחבה (Scalability) עד ל-1200 מ"מ באמצעות מתאמי המערכת של Ophir [1,2]',

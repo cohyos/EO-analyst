@@ -25,6 +25,7 @@ from eoa.api.routes import (
     bd,
     clarifications,
     conferences,
+    dossiers,
     entities,
     feedback,
     investigations,
@@ -253,6 +254,7 @@ def create_app() -> FastAPI:
     app.include_router(patents.router, prefix="/api")
     app.include_router(payloads.router, prefix="/api")
     app.include_router(product_lines.router, prefix="/api")
+    app.include_router(dossiers.router, prefix="/api")
     app.include_router(security_review.router, prefix="/api")
 
     if WEB_DIST.exists():

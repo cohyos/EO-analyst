@@ -1451,3 +1451,237 @@ export interface PayloadTreeResponse {
   family_count: number;
   payload_count: number;
 }
+
+// --- PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירת שוק עמוקה למוצר" -- product_dossier ----------
+// Frozen contract, sections 3/5/6. Every fact-bearing row/object carries its own `cites: number[]`
+// (citation numbers into the dossier's own `sources` registry, section 2) -- a field the research
+// could not establish is `null`/an empty list, never a guess (rendered "לא נמצא במקורות"). This is
+// a UI-side mirror of `agent/eoa/llm/schemas/product_dossier.py::ProductDossierOut`, built against
+// the frozen contract before the backend lane (PD-backend) lands it -- see `normalizeDossier*` in
+// `web/src/api/real.ts` for the defensive, never-throws normalization every field goes through.
+
+/** Mirrors a Pydantic `Sentence`-style object (section 3's "cites per sentence via Sentence
+ * objects like the reports"): one prose sentence/bullet plus the citation numbers backing it. */
+export interface DossierSentence {
+  text_he: string;
+  cites: number[];
+}
+
+export interface DossierIdentity {
+  product_name: string;
+  vendor: string | null;
+  product_family: string | null;
+  category_he: string | null;
+  first_announced: string | null;
+  /** e.g. "בפיתוח" / "בייצור" / "בשירות" / "הוצא משירות" -- free Hebrew text from the model, not
+   * a fixed enum (the plan's "in development / in production / fielded / retired" are examples). */
+  status_he: string | null;
+  cites: number[];
+}
+
+export interface DossierSpecRow {
+  parameter_he: string;
+  value: string;
+  unit: string | null;
+  variant: string | null;
+  /** datasheet / brochure / article / official */
+  source_kind: string | null;
+  cites: number[];
+}
+
+export interface DossierVersionRow {
+  name: string;
+  year: number | null;
+  changes_he: string;
+  platforms: string[];
+  cites: number[];
+}
+
+export interface DossierPerformanceRow {
+  metric_he: string;
+  claimed_value: string | null;
+  /** "tested_or_operational_value" in the plan -- kept visually/semantically distinct from
+   * `claimed_value` everywhere this renders (never merged into one cell). */
+  tested_value: string | null;
+  conditions_he: string | null;
+  cites: number[];
+}
+
+export interface DossierMaturity {
+  trl: number | null;
+  operational_users: string[];
+  platforms_integrated: string[];
+  first_fielding: string | null;
+  assessment_he: string | null;
+  cites: number[];
+}
+
+/** contract_award / FMS / framework / option / export_license */
+export type DossierDealKind = "contract_award" | "FMS" | "framework" | "option" | "export_license" | string;
+
+export interface DossierDealRow {
+  date: string | null;
+  customer: string | null;
+  country: string | null;
+  kind: DossierDealKind;
+  amount: string | null;
+  currency: string | null;
+  quantity: number | null;
+  platform: string | null;
+  cites: number[];
+  /** 0..1, deal-level confidence -- distinct from the whole dossier's own `confidence`. */
+  confidence: number | null;
+}
+
+export interface DossierPriceRow {
+  figure: string;
+  currency: string | null;
+  /** e.g. "ליחידה" / "למגרש של N" / "לתוכנית כולה". */
+  basis_he: string;
+  date: string | null;
+  source_kind: string | null;
+  cites: number[];
+}
+
+export interface DossierPartnerRow {
+  partner: string;
+  /** integrator / subcontractor / co-development / reseller (free Hebrew text). */
+  role_he: string;
+  since: string | null;
+  cites: number[];
+}
+
+export interface DossierCompetitorRow {
+  product: string;
+  vendor: string | null;
+  comparison_he: string;
+  cites: number[];
+}
+
+export interface DossierRegulatoryExport {
+  export_regime_he: string | null;
+  restrictions_he: string | null;
+  cites: number[];
+}
+
+export interface DossierPatentRef {
+  pub_number: string;
+  title: string | null;
+  assignee: string | null;
+  relevance_he: string | null;
+  cites: number[];
+}
+
+export interface DossierTenderRef {
+  tender_id: number | null;
+  title: string;
+  status: string | null;
+  relevance_he: string | null;
+  cites: number[];
+}
+
+/** `ProductDossierOut` (docs/PLAN_PRODUCT_DOSSIER.md section 3). */
+export interface ProductDossierOut {
+  identity: DossierIdentity;
+  /** <= 6 sentences, what the product is and where it stands. */
+  summary: DossierSentence[];
+  specifications: DossierSpecRow[];
+  variants_and_versions: DossierVersionRow[];
+  performance: DossierPerformanceRow[];
+  maturity: DossierMaturity;
+  deals: DossierDealRow[];
+  pricing: DossierPriceRow[];
+  partnerships: DossierPartnerRow[];
+  competitors: DossierCompetitorRow[];
+  regulatory_export: DossierRegulatoryExport;
+  patents: DossierPatentRef[];
+  tenders_and_forecasts: DossierTenderRef[];
+  /** What is NOT known, contradictions between sources. */
+  risks_and_gaps: DossierSentence[];
+  /** vs. the previous dossier of the same product_key -- `null`/empty on a product's first run. */
+  what_changed: DossierSentence[];
+  /** For the user's BD role, hedged, quantity first. */
+  bd_implications: DossierSentence[];
+}
+
+/** One row of the dossier's own citation registry (section 2's `sources JSONB`). */
+export interface DossierSource {
+  n: number;
+  url: string;
+  title: string;
+  kind: string | null;
+  reliability: string | null;
+  accessed_at: string | null;
+}
+
+export type DossierOutcome = "found" | "partial" | "not_found";
+
+/** One `product_dossiers` row, without the heavy `data`/`sources` payload -- the shape both the
+ * list endpoint's `latest` and a product's own `dossiers` run-history array use. */
+export interface DossierRunRef {
+  id: number;
+  created_at: string;
+  outcome: DossierOutcome;
+  confidence: number | null;
+  report_id: number | null;
+}
+
+/** `GET /api/dossiers` list row. The frozen contract (section 5) declares only a bare `count` on
+ * this row, with no further definition -- the run-history array (`dossiers`) lives on the
+ * *detail* endpoint, not here. Since section 6's own card spec calls for a "deal count" (not a
+ * run count) at list granularity, and the list row otherwise carries nothing deal-shaped, this
+ * is read as the product's total number of grounded deals in its latest dossier (not the number
+ * of past runs) -- PD-backend: please confirm/align `_dossier_card`'s `count` field to this
+ * reading, or add a distinct field if a run count is also needed here. */
+export interface DossierSummary {
+  product_key: string;
+  product_name: string;
+  vendor: string | null;
+  latest: DossierRunRef | null;
+  count: number;
+}
+
+export interface DossierPendingJob {
+  job_id: string;
+  state: string;
+}
+
+/** `GET /api/dossiers/{product_key}` -- the product's identity/aliases, its full run history, the
+ * latest run's full structured data + sources, and any in-flight (re)run job. */
+export interface DossierDetail {
+  product_key: string;
+  product_name: string;
+  vendor: string | null;
+  aliases: string[];
+  dossiers: DossierRunRef[];
+  latest: (ProductDossierOut & { sources: DossierSource[] }) | null;
+  pending_job: DossierPendingJob | null;
+}
+
+/** `GET /api/dossiers/{product_key}/{id}` -- one specific run, in full. */
+export interface DossierRunDetail extends DossierRunRef {
+  data: ProductDossierOut;
+  sources: DossierSource[];
+  path_docx: string | null;
+  path_md: string | null;
+  path_html: string | null;
+}
+
+/** `POST /api/dossiers` request body. */
+export interface DossierCreateBody {
+  product_name: string;
+  vendor?: string | null;
+  aliases?: string[];
+  product_line?: string | null;
+  /** 1 (regular) or 2 (double) research budget -- section 4's `budget_multiplier`. */
+  budget_multiplier?: number | null;
+}
+
+export interface DossierCreateResponse {
+  job_id: string;
+  product_key: string;
+}
+
+export interface DossierRerunResponse {
+  job_id: string;
+}

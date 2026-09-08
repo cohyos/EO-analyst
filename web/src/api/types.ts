@@ -6,6 +6,12 @@ import type {
   Clarification,
   Conference,
   Corroboration,
+  DossierCreateBody,
+  DossierCreateResponse,
+  DossierDetail,
+  DossierRerunResponse,
+  DossierRunDetail,
+  DossierSummary,
   EntityDetail,
   EntityDetailFull,
   EntitySummary,
@@ -360,6 +366,23 @@ export interface ApiClient {
   /** Queues a report build; poll `getProductLine(id)` (same pattern as the BD page) to see
    * `reports`/`latest_report` update once it finishes. */
   postProductLineReport(id: string): Promise<ProductLineReportCreateResponse>;
+
+  // PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירות מוצר" -- per-product deep market dossiers. Built
+  // against a frozen contract (section 5) that may not exist on the live API yet -- callers must
+  // degrade gracefully exactly like the product-lines surface above (see
+  // `normalizeDossier*` in `web/src/api/real.ts`).
+  getDossiers(): Promise<DossierSummary[]>;
+  /** Queues a fresh dossier build; the response's `product_key` is the slug the detail route uses. */
+  postDossier(body: DossierCreateBody): Promise<DossierCreateResponse>;
+  getDossier(productKey: string): Promise<DossierDetail>;
+  /** One specific past run, in full (used by the run-history "השווה" expander). */
+  getDossierRun(productKey: string, id: number): Promise<DossierRunDetail>;
+  /** "הרץ שוב" -- re-investigates the same product; poll `getDossier(productKey)` for
+   * `pending_job`/`dossiers`/`latest` to update once it finishes. */
+  postDossierRerun(
+    productKey: string,
+    body?: { budget_multiplier?: number | null },
+  ): Promise<DossierRerunResponse>;
 
   getSettings(name: SettingsName): Promise<SettingsGetResponse>;
   putSettings(name: SettingsName, yaml: string): Promise<SettingsPutResponse>;

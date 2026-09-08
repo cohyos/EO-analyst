@@ -6,6 +6,28 @@ import type {
   Clarification,
   Conference,
   Corroboration,
+  DossierCompetitorRow,
+  DossierCreateBody,
+  DossierCreateResponse,
+  DossierDealRow,
+  DossierDetail,
+  DossierIdentity,
+  DossierMaturity,
+  DossierPatentRef,
+  DossierPartnerRow,
+  DossierPendingJob,
+  DossierPerformanceRow,
+  DossierPriceRow,
+  DossierRegulatoryExport,
+  DossierRerunResponse,
+  DossierRunDetail,
+  DossierRunRef,
+  DossierSentence,
+  DossierSource,
+  DossierSpecRow,
+  DossierSummary,
+  DossierTenderRef,
+  DossierVersionRow,
   EntityDetail,
   EntityDetailFull,
   EntitySummary,
@@ -42,6 +64,7 @@ import type {
   PayloadDiffResponse,
   PayloadRecord,
   PayloadTreeResponse,
+  ProductDossierOut,
   ProductLine,
   ProductLineDetail,
   ProductLineReportCreateResponse,
@@ -678,6 +701,265 @@ function normalizeProductLineDetail(
     recent_items: arr(r.recent_items).map(normalizeItemCard),
     open_tenders: arr(r.open_tenders).map(normalizeTenderCard),
     reports: arr(r.reports).map(normalizeReportSummary),
+  };
+}
+
+// PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירות מוצר" -- mirrors the frozen contract (section 3/5)
+// exactly like the PL-ui normalizers above: a backend build that predates this feature, or omits
+// a field, normalizes to an empty array / null / "not established" shape and never throws, so the
+// page renders its own empty/"לא נמצא במקורות" states instead of an error screen.
+function normalizeDossierCites(raw: unknown): number[] {
+  return Array.isArray(raw) ? raw.filter((n): n is number => typeof n === "number") : [];
+}
+
+function normalizeDossierSentence(raw: Partial<DossierSentence> | null | undefined): DossierSentence {
+  const r = raw ?? {};
+  return { text_he: str(r.text_he), cites: normalizeDossierCites(r.cites) };
+}
+
+function normalizeDossierIdentity(raw: Partial<DossierIdentity> | null | undefined): DossierIdentity {
+  const r = raw ?? {};
+  return {
+    product_name: str(r.product_name),
+    vendor: r.vendor ?? null,
+    product_family: r.product_family ?? null,
+    category_he: r.category_he ?? null,
+    first_announced: r.first_announced ?? null,
+    status_he: r.status_he ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierSpecRow(raw: Partial<DossierSpecRow> | null | undefined): DossierSpecRow {
+  const r = raw ?? {};
+  return {
+    parameter_he: str(r.parameter_he),
+    value: str(r.value),
+    unit: r.unit ?? null,
+    variant: r.variant ?? null,
+    source_kind: r.source_kind ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierVersionRow(raw: Partial<DossierVersionRow> | null | undefined): DossierVersionRow {
+  const r = raw ?? {};
+  return {
+    name: str(r.name),
+    year: typeof r.year === "number" ? r.year : null,
+    changes_he: str(r.changes_he),
+    platforms: arr(r.platforms).map((p) => str(p)),
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierPerformanceRow(
+  raw: Partial<DossierPerformanceRow> | null | undefined,
+): DossierPerformanceRow {
+  const r = raw ?? {};
+  return {
+    metric_he: str(r.metric_he),
+    claimed_value: r.claimed_value ?? null,
+    tested_value: r.tested_value ?? null,
+    conditions_he: r.conditions_he ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierMaturity(raw: Partial<DossierMaturity> | null | undefined): DossierMaturity {
+  const r = raw ?? {};
+  return {
+    trl: typeof r.trl === "number" ? r.trl : null,
+    operational_users: arr(r.operational_users).map((u) => str(u)),
+    platforms_integrated: arr(r.platforms_integrated).map((p) => str(p)),
+    first_fielding: r.first_fielding ?? null,
+    assessment_he: r.assessment_he ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierDealRow(raw: Partial<DossierDealRow> | null | undefined): DossierDealRow {
+  const r = raw ?? {};
+  return {
+    date: r.date ?? null,
+    customer: r.customer ?? null,
+    country: r.country ?? null,
+    kind: str(r.kind),
+    amount: r.amount ?? null,
+    currency: r.currency ?? null,
+    quantity: typeof r.quantity === "number" ? r.quantity : null,
+    platform: r.platform ?? null,
+    cites: normalizeDossierCites(r.cites),
+    confidence: typeof r.confidence === "number" ? r.confidence : null,
+  };
+}
+
+function normalizeDossierPriceRow(raw: Partial<DossierPriceRow> | null | undefined): DossierPriceRow {
+  const r = raw ?? {};
+  return {
+    figure: str(r.figure),
+    currency: r.currency ?? null,
+    basis_he: str(r.basis_he),
+    date: r.date ?? null,
+    source_kind: r.source_kind ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierPartnerRow(raw: Partial<DossierPartnerRow> | null | undefined): DossierPartnerRow {
+  const r = raw ?? {};
+  return {
+    partner: str(r.partner),
+    role_he: str(r.role_he),
+    since: r.since ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierCompetitorRow(
+  raw: Partial<DossierCompetitorRow> | null | undefined,
+): DossierCompetitorRow {
+  const r = raw ?? {};
+  return {
+    product: str(r.product),
+    vendor: r.vendor ?? null,
+    comparison_he: str(r.comparison_he),
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierRegulatoryExport(
+  raw: Partial<DossierRegulatoryExport> | null | undefined,
+): DossierRegulatoryExport {
+  const r = raw ?? {};
+  return {
+    export_regime_he: r.export_regime_he ?? null,
+    restrictions_he: r.restrictions_he ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierPatentRef(raw: Partial<DossierPatentRef> | null | undefined): DossierPatentRef {
+  const r = raw ?? {};
+  return {
+    pub_number: str(r.pub_number),
+    title: r.title ?? null,
+    assignee: r.assignee ?? null,
+    relevance_he: r.relevance_he ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeDossierTenderRef(raw: Partial<DossierTenderRef> | null | undefined): DossierTenderRef {
+  const r = raw ?? {};
+  return {
+    tender_id: typeof r.tender_id === "number" ? r.tender_id : null,
+    title: str(r.title),
+    status: r.status ?? null,
+    relevance_he: r.relevance_he ?? null,
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+function normalizeProductDossierOut(
+  raw: Partial<ProductDossierOut> | null | undefined,
+): ProductDossierOut {
+  const r = raw ?? {};
+  return {
+    identity: normalizeDossierIdentity(r.identity),
+    summary: arr(r.summary).map(normalizeDossierSentence),
+    specifications: arr(r.specifications).map(normalizeDossierSpecRow),
+    variants_and_versions: arr(r.variants_and_versions).map(normalizeDossierVersionRow),
+    performance: arr(r.performance).map(normalizeDossierPerformanceRow),
+    maturity: normalizeDossierMaturity(r.maturity),
+    deals: arr(r.deals).map(normalizeDossierDealRow),
+    pricing: arr(r.pricing).map(normalizeDossierPriceRow),
+    partnerships: arr(r.partnerships).map(normalizeDossierPartnerRow),
+    competitors: arr(r.competitors).map(normalizeDossierCompetitorRow),
+    regulatory_export: normalizeDossierRegulatoryExport(r.regulatory_export),
+    patents: arr(r.patents).map(normalizeDossierPatentRef),
+    tenders_and_forecasts: arr(r.tenders_and_forecasts).map(normalizeDossierTenderRef),
+    risks_and_gaps: arr(r.risks_and_gaps).map(normalizeDossierSentence),
+    what_changed: arr(r.what_changed).map(normalizeDossierSentence),
+    bd_implications: arr(r.bd_implications).map(normalizeDossierSentence),
+  };
+}
+
+function normalizeDossierSource(raw: Partial<DossierSource> | null | undefined): DossierSource {
+  const r = raw ?? {};
+  return {
+    n: num(r.n),
+    url: str(r.url),
+    title: str(r.title),
+    kind: r.kind ?? null,
+    reliability: r.reliability ?? null,
+    accessed_at: r.accessed_at ?? null,
+  };
+}
+
+const VALID_DOSSIER_OUTCOMES = new Set(["found", "partial", "not_found"]);
+
+function normalizeDossierOutcome(value: unknown): DossierRunRef["outcome"] {
+  return typeof value === "string" && VALID_DOSSIER_OUTCOMES.has(value)
+    ? (value as DossierRunRef["outcome"])
+    : "not_found";
+}
+
+function normalizeDossierRunRef(raw: Partial<DossierRunRef> | null | undefined): DossierRunRef {
+  const r = raw ?? {};
+  return {
+    id: num(r.id),
+    created_at: str(r.created_at),
+    outcome: normalizeDossierOutcome(r.outcome),
+    confidence: typeof r.confidence === "number" ? r.confidence : null,
+    report_id: typeof r.report_id === "number" ? r.report_id : null,
+  };
+}
+
+function normalizeDossierSummary(raw: Partial<DossierSummary> | null | undefined): DossierSummary {
+  const r = raw ?? {};
+  return {
+    product_key: str(r.product_key),
+    product_name: str(r.product_name),
+    vendor: r.vendor ?? null,
+    latest: r.latest ? normalizeDossierRunRef(r.latest) : null,
+    count: num(r.count),
+  };
+}
+
+function normalizeDossierPendingJob(
+  raw: Partial<DossierPendingJob> | null | undefined,
+): DossierPendingJob | null {
+  if (!raw) return null;
+  return { job_id: idStr(raw.job_id), state: str(raw.state) };
+}
+
+function normalizeDossierDetail(raw: Partial<DossierDetail> | null | undefined): DossierDetail {
+  const r = raw ?? {};
+  return {
+    product_key: str(r.product_key),
+    product_name: str(r.product_name),
+    vendor: r.vendor ?? null,
+    aliases: arr(r.aliases).map((a) => str(a)),
+    dossiers: arr(r.dossiers).map(normalizeDossierRunRef),
+    latest: r.latest
+      ? { ...normalizeProductDossierOut(r.latest), sources: arr(r.latest.sources).map(normalizeDossierSource) }
+      : null,
+    pending_job: normalizeDossierPendingJob(r.pending_job),
+  };
+}
+
+function normalizeDossierRunDetail(
+  raw: Partial<DossierRunDetail> | null | undefined,
+): DossierRunDetail {
+  const r = raw ?? {};
+  return {
+    ...normalizeDossierRunRef(r),
+    data: normalizeProductDossierOut(r.data),
+    sources: arr(r.sources).map(normalizeDossierSource),
+    path_docx: r.path_docx ?? null,
+    path_md: r.path_md ?? null,
+    path_html: r.path_html ?? null,
   };
 }
 
@@ -1449,6 +1731,32 @@ export const realApi: ApiClient = {
       `/api/product-lines/${id}/report`,
       { method: "POST" },
     );
+    return { job_id: idStr(data?.job_id) };
+  },
+
+  // PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירות מוצר" -- built against a frozen contract
+  // (section 5) that may not exist on the live API yet -- every call here degrades to the
+  // normalizers' empty-shape defaults, same reasoning as the PL-ui block above.
+  getDossiers: async () =>
+    arr(await request<Partial<DossierSummary>[] | null>("/api/dossiers")).map(normalizeDossierSummary),
+  postDossier: async (body: DossierCreateBody) => {
+    const data = await request<Partial<DossierCreateResponse>>("/api/dossiers", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return { job_id: idStr(data?.job_id), product_key: str(data?.product_key) };
+  },
+  getDossier: async (productKey: string) =>
+    normalizeDossierDetail(await request<Partial<DossierDetail>>(`/api/dossiers/${productKey}`)),
+  getDossierRun: async (productKey: string, id: number) =>
+    normalizeDossierRunDetail(
+      await request<Partial<DossierRunDetail>>(`/api/dossiers/${productKey}/${id}`),
+    ),
+  postDossierRerun: async (productKey: string, body?: { budget_multiplier?: number | null }) => {
+    const data = await request<Partial<DossierRerunResponse>>(`/api/dossiers/${productKey}/rerun`, {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    });
     return { job_id: idStr(data?.job_id) };
   },
 

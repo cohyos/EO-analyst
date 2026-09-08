@@ -951,6 +951,7 @@ _REPORT_KIND_LABEL_HE = {
     "adhoc": "דוח אד-הוק",
     "bd_territory": "דוח פיתוח עסקי",
     "patent_survey": "סקר פטנטים",
+    "product_dossier": "סקירת שוק עמוקה למוצר",
 }
 
 # A small local Hebrew country-name table for `bd_territory`'s `subject_he`/`title_he`
@@ -3643,6 +3644,183 @@ def enqueue_product_line_report(line_id: str) -> dict[str, Any]:
     if get_product_line(line_id) is None:
         raise ValueError(f"unrecognized product line: {line_id!r}")
     job_id = relational.enqueue_job("product_line_report", {"line_id": line_id}, priority=4)
+    return {"job_id": job_id}
+
+
+# --------------------------------------------------------------------------
+# product dossiers / סקירות מוצר (PD-backend, user request 2026-09-08 -- docs/PLAN_PRODUCT_DOSSIER.md
+# section 5, the frozen contract). A generated dossier is BOTH a `product_dossiers` row (the full
+# structured `data`/`sources`) AND a normal `reports` row (`kind='product_dossier'`, the
+# `product_key` in the existing `territory` column -- same reuse `eoa.report.product_line` already
+# documents for that column) so its docx/md/html continue to be served by the generic
+# `GET /api/reports/{id}` etc. (agent/eoa/api/routes/reports.py) exactly like every other report
+# kind; these functions only add the product-scoped list/detail/create/rerun endpoints.
+# --------------------------------------------------------------------------
+
+
+def _dossier_run_card(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "created_at": row.get("created_at"),
+        "outcome": row.get("outcome"),
+        "confidence": row.get("confidence"),
+        "report_id": row.get("report_id"),
+    }
+
+
+def _pending_dossier_job(product_key: str) -> dict[str, Any] | None:
+    row = _fetchone(
+        """
+        SELECT id, state FROM jobs
+        WHERE kind = 'product_dossier' AND state IN ('queued', 'running')
+          AND payload->>'product_key' = %(key)s
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        {"key": product_key},
+    )
+    if row is None:
+        return None
+    return {"job_id": row["id"], "state": row["state"]}
+
+
+def list_dossiers() -> list[dict[str, Any]]:
+    """`GET /api/dossiers`: one card per distinct `product_key` that has at least one dossier run,
+    with its latest run's summary. `count` is the LATEST run's grounded deal count (not a run
+    count) -- see `web/src/types/api.ts`'s `DossierSummary` doc comment (PD-ui, 2026-09-08): the
+    frozen contract's list row declares only a bare `count` with no further definition, while
+    section 6's own card spec calls for a "deal count" at this same list granularity (run history
+    only exists on the detail endpoint) -- the already-shipped UI reads it that way, so this aligns
+    to match rather than leave the two lanes disagreeing on the field's meaning."""
+    rows = _fetchall(
+        """
+        SELECT DISTINCT ON (product_key) product_key, product_name, vendor, id, created_at,
+               outcome, confidence, report_id, data
+        FROM product_dossiers
+        ORDER BY product_key, created_at DESC
+        """
+    )
+    out = []
+    for r in rows:
+        deals = ((r.get("data") or {}).get("deals")) or []
+        out.append(
+            {
+                "product_key": r["product_key"],
+                "product_name": r["product_name"],
+                "vendor": r.get("vendor"),
+                "latest": _dossier_run_card(r),
+                "count": len(deals),
+            }
+        )
+    out.sort(key=lambda c: c["latest"]["created_at"] or dt.datetime.min, reverse=True)
+    return out
+
+
+def dossier_detail(product_key: str) -> dict[str, Any] | None:
+    """`GET /api/dossiers/{product_key}`: every run of this product (newest first), the latest
+    run's full structured record + sources, and a pending job if one is queued/running. `None`
+    when this `product_key` has never been run at all (the route raises 404)."""
+    runs = _fetchall(
+        "SELECT * FROM product_dossiers WHERE product_key = %(key)s ORDER BY created_at DESC",
+        {"key": product_key},
+    )
+    if not runs:
+        return None
+    latest = runs[0]
+    return {
+        "product_key": product_key,
+        "product_name": latest.get("product_name"),
+        "vendor": latest.get("vendor"),
+        "aliases": latest.get("aliases") or [],
+        "dossiers": [_dossier_run_card(r) for r in runs],
+        "latest": {**(latest.get("data") or {}), "sources": latest.get("sources") or []},
+        "pending_job": _pending_dossier_job(product_key),
+    }
+
+
+def get_dossier(product_key: str, dossier_id: int) -> dict[str, Any] | None:
+    """`GET /api/dossiers/{product_key}/{id}`: one specific run -- `DossierRunRef` fields
+    (id/created_at/outcome/confidence/report_id) flattened together with `data`/`sources` and the
+    linked report's rendered file paths (`path_docx`/`path_md`/`path_html`, top-level -- matches
+    `web/src/types/api.ts`'s `DossierRunDetail extends DossierRunRef`, PD-ui, 2026-09-08). `None`
+    when the id doesn't exist or belongs to a different `product_key` (the route raises 404 either
+    way -- never leaks another product's row by id)."""
+    row = _fetchone(
+        "SELECT * FROM product_dossiers WHERE id = %(id)s AND product_key = %(key)s",
+        {"id": dossier_id, "key": product_key},
+    )
+    if row is None:
+        return None
+    report = _fetchone(
+        "SELECT path_docx, path_md, path_html FROM reports WHERE id = %(id)s", {"id": row.get("report_id")}
+    ) or {}
+    return {
+        "id": row["id"],
+        "created_at": row.get("created_at"),
+        "outcome": row.get("outcome"),
+        "confidence": row.get("confidence"),
+        "report_id": row.get("report_id"),
+        "product_key": row["product_key"],
+        "product_name": row["product_name"],
+        "vendor": row.get("vendor"),
+        "aliases": row.get("aliases") or [],
+        "product_line": row.get("product_line"),
+        "data": row.get("data") or {},
+        "sources": row.get("sources") or [],
+        "path_docx": report.get("path_docx"),
+        "path_md": report.get("path_md"),
+        "path_html": report.get("path_html"),
+    }
+
+
+def enqueue_product_dossier(
+    product_name: str,
+    vendor: str | None = None,
+    aliases: list[str] | None = None,
+    product_line: str | None = None,
+    budget_multiplier: float | None = None,
+) -> dict[str, Any]:
+    """`POST /api/dossiers`: enqueue the `product_dossier` job kind
+    (`eoa.orchestrator.jobs.HANDLERS`) -- never waits synchronously (frozen contract: the response
+    is `{job_id, product_key}` only), the client polls `GET /api/dossiers/{product_key}` for
+    `dossiers`/`pending_job` to update."""
+    from eoa.dossier.corpus import slugify_product_key
+
+    product_name = (product_name or "").strip()
+    if not product_name:
+        raise ValueError("product_name is required")
+    product_key = slugify_product_key(vendor, product_name)
+    payload = {
+        "product_key": product_key,
+        "product_name": product_name,
+        "vendor": vendor,
+        "aliases": aliases or [],
+        "product_line": product_line,
+        "budget_multiplier": budget_multiplier,
+    }
+    job_id = relational.enqueue_job("product_dossier", payload, priority=4)
+    return {"job_id": job_id, "product_key": product_key}
+
+
+def rerun_product_dossier(product_key: str, budget_multiplier: float | None = None) -> dict[str, Any]:
+    """`POST /api/dossiers/{product_key}/rerun`: re-enqueue for an existing product, reusing its
+    last run's `product_name`/`vendor`/`aliases`/`product_line` -- `None` when this `product_key`
+    has never been run at all (the route raises 404)."""
+    latest = _fetchone(
+        "SELECT product_name, vendor, aliases, product_line FROM product_dossiers "
+        "WHERE product_key = %(key)s ORDER BY created_at DESC LIMIT 1",
+        {"key": product_key},
+    )
+    if latest is None:
+        return None
+    payload = {
+        "product_key": product_key,
+        "product_name": latest["product_name"],
+        "vendor": latest.get("vendor"),
+        "aliases": latest.get("aliases") or [],
+        "product_line": latest.get("product_line"),
+        "budget_multiplier": budget_multiplier,
+    }
+    job_id = relational.enqueue_job("product_dossier", payload, priority=4)
     return {"job_id": job_id}
 
 
