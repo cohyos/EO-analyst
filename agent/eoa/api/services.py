@@ -3917,8 +3917,8 @@ def list_dossiers() -> list[dict[str, Any]]:
     to match rather than leave the two lanes disagreeing on the field's meaning."""
     rows = _fetchall(
         """
-        SELECT DISTINCT ON (product_key) product_key, product_name, vendor, id, created_at,
-               outcome, confidence, report_id, data
+        SELECT DISTINCT ON (product_key) product_key, product_name, vendor, product_line, id,
+               created_at, outcome, confidence, report_id, data
         FROM product_dossiers
         ORDER BY product_key, created_at DESC
         """
@@ -3931,6 +3931,7 @@ def list_dossiers() -> list[dict[str, Any]]:
                 "product_key": r["product_key"],
                 "product_name": r["product_name"],
                 "vendor": r.get("vendor"),
+                "product_line": r.get("product_line"),  # PD-vocab-ui: same-line comparison filter
                 "latest": _dossier_run_card(r),
                 "count": len(deals),
             }
@@ -3954,6 +3955,7 @@ def dossier_detail(product_key: str) -> dict[str, Any] | None:
         "product_key": product_key,
         "product_name": latest.get("product_name"),
         "vendor": latest.get("vendor"),
+        "product_line": latest.get("product_line"),
         "aliases": latest.get("aliases") or [],
         "dossiers": [_dossier_run_card(r) for r in runs],
         "latest": {**(latest.get("data") or {}), "sources": _dossier_sources_view(latest.get("sources"))},
