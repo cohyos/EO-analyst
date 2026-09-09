@@ -413,6 +413,63 @@ def test_gather_must_read_urls_empty_when_no_vendor_domain_known() -> None:
     assert dossier_plan.gather_must_read_urls(corpus) == []
 
 
+# --------------------------------------------------------------------------
+# PD-fix-5 (2026-09-09, item 2): a previous dossier can carry more `vendor_official` URLs than
+# `_MUST_READ_URL_CAP` allows re-reading -- the live SPECTRO XR previous run (product_dossiers id=8)
+# had 8, and n-order put six deal-announcement press releases ahead of the two pages that actually
+# carry the full spec table, so the cap silently dropped exactly those two. A URL already known to
+# have carried a real spec/performance/overflow VALUE last run must be prioritized ahead of a
+# same-domain URL that was never actually the source of a fact.
+# --------------------------------------------------------------------------
+
+
+def test_previous_vendor_official_urls_prioritizes_spec_bearing_page_over_press_release() -> None:
+    previous = {
+        "sources": [
+            {"n": 3, "kind": "web", "source_kind": "vendor_official", "url": "https://elbitsystems.com/news/deal"},
+            {"n": 24, "kind": "web", "source_kind": "vendor_official", "url": "https://elbitsystems.com/spec-page"},
+        ],
+        "data": {
+            "specifications": [{"key": "weight", "value": '51 ק"ג', "cites": [24]}],
+        },
+    }
+    urls = dossier_plan._previous_vendor_official_urls(previous)
+    assert urls == ["https://elbitsystems.com/spec-page", "https://elbitsystems.com/news/deal"]
+
+
+def test_previous_vendor_official_urls_spec_bearing_page_survives_the_cap() -> None:
+    """The exact live-bug shape: 8 vendor_official URLs, only the LAST one (n=8) actually carried a
+    real spec value -- with the fix, it still lands inside the (raised) cap because it sorts first."""
+    sources = [
+        {"n": i, "kind": "web", "source_kind": "vendor_official", "url": f"https://elbitsystems.com/news/{i}"}
+        for i in range(1, 8)
+    ]
+    sources.append(
+        {"n": 8, "kind": "web", "source_kind": "vendor_official", "url": "https://elbitsystems.com/spec-page"}
+    )
+    previous = {
+        "sources": sources,
+        "data": {"other_specifications": [{"parameter_he": "משקל", "value": '51 ק"ג', "cites": [8]}]},
+    }
+    corpus = _corpus(previous=previous)
+    urls = dossier_plan.gather_must_read_urls(corpus)
+    assert "https://elbitsystems.com/spec-page" in urls[: dossier_plan._MUST_READ_URL_CAP]
+
+
+def test_previous_vendor_official_urls_stable_order_when_none_are_spec_bearing() -> None:
+    """No previous specifications/performance/other_specifications value cited any of these URLs --
+    original n-order is preserved (never reshuffled without reason)."""
+    previous = {
+        "sources": [
+            {"n": 3, "kind": "web", "source_kind": "vendor_official", "url": "https://elbitsystems.com/a"},
+            {"n": 4, "kind": "web", "source_kind": "vendor_official", "url": "https://elbitsystems.com/b"},
+        ],
+        "data": {},
+    }
+    urls = dossier_plan._previous_vendor_official_urls(previous)
+    assert urls == ["https://elbitsystems.com/a", "https://elbitsystems.com/b"]
+
+
 def test_run_must_read_fetches_and_registers_new_page(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_fetch_remote(url: str) -> dict[str, Any]:
         return {

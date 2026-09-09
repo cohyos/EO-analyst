@@ -77,13 +77,104 @@ _QUALIFYING_PRICE_SOURCE_KINDS = {"contract", "tender", "budget", "official"}
 #: SpecRow/PriceRow's own SourceKind literal reused verbatim (never re-derived independently).
 _HIGH_CONFIDENCE_SOURCE_KINDS = {"datasheet", "official", "contract", "tender", "budget"}
 
+# --------------------------------------------------------------------------
+# PD-fix-5 (2026-09-09, item 5): confidence-formula rebalance, row-confidence half. A live SPECTRO
+# XR rerun (product_dossiers id=11) reported dossier-level confidence 0.36 with 12 keyed rows filled
+# -- many of them citing the vendor's OWN product page or the hunted datasheet -- yet still scored
+# "medium", not "high". Root cause: the "vendor/datasheet" branch above only ever looked at the
+# row's own model-authored ``source_kind`` field (``SpecRow.source_kind``/``PriceRow.source_kind``,
+# almost always left at its schema default ``"other"`` -- the extraction prompt never asks the model
+# to classify ITS OWN citation, only what kind of fact it found), never at what the CITED SOURCE
+# itself actually is: ``eoa.dossier.plan.classify_web_source`` already tags every registry row with
+# its own ``source_kind`` (``"vendor_official"``/``"datasheet"``/``"press"``/``"trade_press"``, a
+# distinct, corpus-level classification of the URL itself, not to be confused with the row-level
+# schema field of the same name) -- that signal was computed and persisted every run, just never
+# consulted here. A row kind with no ``source_kind`` field at all (``PerformanceRow``, ``DealRow``,
+# ``CompetitorRow``, ``PartnerRow``, ``VersionRow``) could never reach "high" via a single citation
+# at all, regardless of how authoritative that citation was.
+#
+# Fix: an optional ``kind_by_n`` (this run's own ``corpus.registry``, ``n -> source_kind`` --
+# :func:`_registry_kind_by_n`) lets every call site pass in the registry's own classification of
+# each of a row's ``cites``; a row is "high" when EITHER its own ``source_kind`` field says so
+# (unchanged) OR any surviving citation resolves to a registry row whose OWN ``source_kind`` is
+# ``"vendor_official"``/``"datasheet"`` (:data:`_HIGH_CONFIDENCE_REGISTRY_KINDS`) -- OR (unchanged)
+# it carries >=2 independent citations. ``kind_by_n=None`` (the default) preserves the exact prior
+# behavior for any caller that doesn't pass it.
+# --------------------------------------------------------------------------
 
-def _row_confidence_he(cites: list[int], source_kind: str | None = None) -> RowConfidenceHe:
+#: Registry-level ``source_kind`` (``eoa.dossier.plan.classify_web_source``/``eoa.dossier.datasheet``
+#: -- what the CITED PAGE itself is) that alone means "high confidence", regardless of the row's own
+#: (often un-set) schema-level ``source_kind`` field.
+_HIGH_CONFIDENCE_REGISTRY_KINDS = {"vendor_official", "datasheet"}
+
+
+def _registry_kind_by_n(rows: list[dict[str, Any]] | None) -> dict[int, str | None]:
+    """``n -> source_kind`` (falling back to the row's own ``kind`` when ``source_kind`` is unset)
+    for every registry row that carries a citation number -- works identically for THIS run's own
+    in-memory ``corpus.registry`` and for a previous run's persisted ``product_dossiers.sources``
+    (both are plain ``list[dict]`` with the same ``n``/``source_kind``/``kind`` field names)."""
+    out: dict[int, str | None] = {}
+    for r in rows or []:
+        n = r.get("n")
+        if n is not None:
+            out[n] = r.get("source_kind") or r.get("kind")
+    return out
+
+
+#: PD-fix-5 item 1: a coarse "how strong is this source" ranking -- used only to decide whether a
+#: PREVIOUS run's own value should WIN over a weaker-sourced value THIS run happened to extract for
+#: the same key (never used for the row-confidence label itself, see
+#: :data:`_HIGH_CONFIDENCE_REGISTRY_KINDS` for that). A registry-level ``source_kind`` (vendor page/
+#: hunted datasheet) ranks above a schema-level ``SourceKind`` value that isn't itself a registry
+#: kind (``official``/``contract``/``tender``/``budget``/``brochure`` never appear as a REGISTRY
+#: ``source_kind`` -- ``eoa.dossier.plan.classify_web_source`` only ever emits ``vendor_official``/
+#: ``reference``/``forum``/``trade_press``/``press``, plus ``eoa.dossier.datasheet``'s own
+#: ``"datasheet"`` -- but are included here too so the same ranking works uniformly whichever kind
+#: vocabulary a given ``n`` happens to carry).
+_SOURCE_KIND_STRENGTH: dict[str, int] = {
+    "datasheet": 3,
+    "vendor_official": 2,
+    "official": 2,
+    "brochure": 2,
+    "contract": 2,
+    "tender": 2,
+    "budget": 2,
+    "trade_press": 1,
+    "press": 1,
+    "article": 1,
+    "item": 1,
+    "reference": 0,
+    "forum": 0,
+    "other": 0,
+}
+
+
+def _source_kind_strength(kind: str | None) -> int:
+    return _SOURCE_KIND_STRENGTH.get(kind or "other", 0)
+
+
+def _strongest_kind_for_cites(cites: list[int] | None, kind_by_n: dict[int, str | None]) -> int:
+    """The strongest :data:`_SOURCE_KIND_STRENGTH` rank among ``cites``' own registry kinds -- ``0``
+    (weakest) when ``cites`` is empty or none of them resolve to a known kind."""
+    if not cites:
+        return 0
+    return max((_source_kind_strength(kind_by_n.get(n)) for n in cites), default=0)
+
+
+def _row_confidence_he(
+    cites: list[int],
+    source_kind: str | None = None,
+    kind_by_n: dict[int, str | None] | None = None,
+) -> RowConfidenceHe:
     """The shared definition every row-confidence call site below applies -- see this section's own
-    docstring for the exact three-way rule."""
+    docstring for the exact three-way rule. ``kind_by_n`` (PD-fix-5 item 5) additionally checks the
+    REGISTRY's own classification of each citation -- a vendor-official page or a hunted datasheet
+    cited even once is "high", independent of what the row's own ``source_kind`` field says."""
     if not cites:
         return "low"
-    if (source_kind in _HIGH_CONFIDENCE_SOURCE_KINDS) or len(cites) >= 2:
+    if source_kind in _HIGH_CONFIDENCE_SOURCE_KINDS or len(cites) >= 2:
+        return "high"
+    if kind_by_n and any(kind_by_n.get(n) in _HIGH_CONFIDENCE_REGISTRY_KINDS for n in cites):
         return "high"
     return "medium"
 
@@ -505,7 +596,12 @@ def _ground_sentences(
 
 
 def _ground_spec_row(
-    row: SpecRow, valid_ns: set[int], registry_text: dict[int, str], dropped: list[DroppedField]
+    row: SpecRow,
+    valid_ns: set[int],
+    registry_text: dict[int, str],
+    dropped: list[DroppedField],
+    *,
+    kind_by_n: dict[int, str | None] | None = None,
 ) -> SpecRow:
     good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
     if bad_cites:
@@ -516,12 +612,17 @@ def _ground_spec_row(
         _drop(dropped, "specifications.value", "number not in cited source", value)
         value = ""
         good_cites = []
-    confidence = _row_confidence_he(good_cites, row.source_kind)
+    confidence = _row_confidence_he(good_cites, row.source_kind, kind_by_n)
     return row.model_copy(update={"cites": good_cites, "value": value, "confidence": confidence})
 
 
 def _ground_performance_row(
-    row: PerformanceRow, valid_ns: set[int], registry_text: dict[int, str], dropped: list[DroppedField]
+    row: PerformanceRow,
+    valid_ns: set[int],
+    registry_text: dict[int, str],
+    dropped: list[DroppedField],
+    *,
+    kind_by_n: dict[int, str | None] | None = None,
 ) -> PerformanceRow:
     good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
     if bad_cites:
@@ -535,7 +636,7 @@ def _ground_performance_row(
     if tested and not _numbers_grounded(tested, text):
         _drop(dropped, "performance.tested_or_operational_value", "number not in cited source", tested)
         tested = None
-    confidence = _row_confidence_he(good_cites)
+    confidence = _row_confidence_he(good_cites, kind_by_n=kind_by_n)
     return row.model_copy(
         update={
             "cites": good_cites,
@@ -641,6 +742,7 @@ def _ground_deal_row(
     dropped: list[DroppedField],
     *,
     published_by_n: dict[int, Any],
+    kind_by_n: dict[int, str | None] | None = None,
 ) -> DealRow:
     good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
     if bad_cites:
@@ -661,12 +763,24 @@ def _ground_deal_row(
         amount_value = parsed_value
         currency = currency or parsed_currency or ""
 
-    # A `country` value that actually names a region, not a specific country, moves to region_he.
+    # A `country` value that actually names a region, not a specific country, moves to region_he --
+    # independent of `customer`: a deal whose customer is unknown still keeps whatever country/
+    # region the source names (PD-fix-5 item 3 -- `customer=None` never blanks these two fields,
+    # they are grounded from `row.country`/`row.region_he` alone, never gated on `customer`).
     country, region_from_country = split_country_region(row.country)
     region_he = row.region_he or region_from_country
 
     # A deal with no date of its own inherits its cited source's publish date, marked accordingly
-    # (never indistinguishable from an actual deal-closing date).
+    # (never indistinguishable from an actual deal-closing date). PD-fix-5 item 3: a press-release
+    # page fetched as a plain "web" source (not a DB "item"/"event" row) never carries a
+    # `published_at` in the registry at all (`_registry_published_at_by_n` only ever sees it for a
+    # DB-native row) -- a live SPECTRO XR rerun (id=11) kept every one of its 5 deals `date: null`
+    # for exactly this reason, even though every cited press release names its own publish date in
+    # its own text ("...בספטמבר 2016...", "ב-2 ביוני 2021"). Second fallback, only when the registry
+    # itself has no `published_at`: the SAME textual date-hint scan `build_timeline` already uses
+    # (`_finding_date_hint`) over the deal's own already-grounded cited text -- a raw sighting lifted
+    # verbatim from the source's own words, never a fabricated/normalized date, marked
+    # `date_kind="published"` exactly like the registry-metadata path.
     date = row.date
     date_kind = row.date_kind or "deal"
     if not date:
@@ -676,8 +790,13 @@ def _ground_deal_row(
                 date = str(published)
                 date_kind = "published"
                 break
+    if not date and text:
+        hint = _finding_date_hint(text)
+        if hint:
+            date = hint
+            date_kind = "published"
 
-    confidence_level = _row_confidence_he(good_cites)
+    confidence_level = _row_confidence_he(good_cites, kind_by_n=kind_by_n)
     return row.model_copy(
         update={
             "cites": good_cites,
@@ -776,25 +895,39 @@ def _ground_price_row(
 
 
 def _ground_competitor_row(
-    row: CompetitorRow, valid_ns: set[int], registry_text: dict[int, str], dropped: list[DroppedField]
+    row: CompetitorRow,
+    valid_ns: set[int],
+    registry_text: dict[int, str],
+    dropped: list[DroppedField],
+    *,
+    kind_by_n: dict[int, str | None] | None = None,
 ) -> CompetitorRow | None:
     good_cites, _bad = _clean_cites(row.cites, valid_ns)
     text = _text_for_cites(good_cites, registry_text)
     if not _name_grounded(row.product, text):
         _drop(dropped, "competitors", "invented/ungrounded competitor product", row.product)
         return None
-    return row.model_copy(update={"cites": good_cites, "confidence": _row_confidence_he(good_cites)})
+    return row.model_copy(
+        update={"cites": good_cites, "confidence": _row_confidence_he(good_cites, kind_by_n=kind_by_n)}
+    )
 
 
 def _ground_partner_row(
-    row: PartnerRow, valid_ns: set[int], registry_text: dict[int, str], dropped: list[DroppedField]
+    row: PartnerRow,
+    valid_ns: set[int],
+    registry_text: dict[int, str],
+    dropped: list[DroppedField],
+    *,
+    kind_by_n: dict[int, str | None] | None = None,
 ) -> PartnerRow | None:
     good_cites, _bad = _clean_cites(row.cites, valid_ns)
     text = _text_for_cites(good_cites, registry_text)
     if not _name_grounded(row.partner, text):
         _drop(dropped, "partnerships", "invented/ungrounded partner", row.partner)
         return None
-    return row.model_copy(update={"cites": good_cites, "confidence": _row_confidence_he(good_cites)})
+    return row.model_copy(
+        update={"cites": good_cites, "confidence": _row_confidence_he(good_cites, kind_by_n=kind_by_n)}
+    )
 
 
 # --------------------------------------------------------------------------
@@ -961,38 +1094,90 @@ def _timeline_rows_from_findings(dossier: ProductDossierOut) -> list[TimelineRow
 
 _VARIANT_SUFFIX_RE = r"([A-Z][A-Z0-9]{1,5}(?:[- ][A-Z0-9]{1,5}){0,2})\b"
 
+# PD-fix-5 (2026-09-09, item 4): two more variant shapes the narrow ALL-CAPS-suffix rule above never
+# caught, both present in the SPECTRO XR corpus's own hand-made reference (``docs/qa/content_review/
+# LESSONS-fable-dossier.md``): (a) a lowercase deployment-domain word right after the product name
+# ("SPECTRO XR maritime") -- a short, curated list (never a bare lower-case word in general, which
+# would false-match ordinary prose); (b) a variant named off just the product's own FIRST word/
+# "family" ("SPECTRO CU") when the dossier's own `product_name` carries a longer form ("SPECTRO XR")
+# -- a full-name-only anchor never matches this at all, since "SPECTRO CU" doesn't contain "SPECTRO
+# XR" as a substring anywhere.
+
+_VARIANT_CONFIG_WORDS_HE = ("ימי", "ימית", "אווירי", "אווירית", "יבשתי", "יבשתית")
+_VARIANT_CONFIG_WORDS_EN = ("maritime", "airborne", "land", "naval", "shipborne", "ground")
+_VARIANT_CONFIG_SUFFIX_RE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in (*_VARIANT_CONFIG_WORDS_HE, *_VARIANT_CONFIG_WORDS_EN)) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _variant_anchor_names(product_name: str) -> list[str]:
+    """The full product name, plus (item 4b above) its own first "family" word alone when that word
+    is at least 4 characters and differs from the full name."""
+    names = [product_name]
+    words = product_name.split()
+    first = words[0] if words else ""
+    if len(first) >= 4 and first.casefold() != product_name.casefold():
+        names.append(first)
+    return names
+
 
 def _variant_mentions_from_text(
     product_name: str, text: str, cites: list[int], seen: set[str]
 ) -> list[VersionRow]:
     if not cites or not text or not text.strip():
         return []
-    pattern = re.compile(re.escape(product_name) + r"\s+" + _VARIANT_SUFFIX_RE)
     rows: list[VersionRow] = []
-    for m in pattern.finditer(text):
-        suffix = m.group(1).strip()
-        name = f"{product_name} {suffix}"
-        key = name.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        rows.append(
-            VersionRow(
-                name=name,
-                evidence_he=text.strip()[:500],
-                cites=list(cites),
-                confidence=_row_confidence_he(cites),
+    #: A code-suffix match is only a genuine NEW variant when its own FIRST token isn't itself one of
+    #: the full product name's own words -- otherwise the shorter "family" anchor (item 4b) would
+    #: re-match the product's own remaining name as a fake "variant" (e.g. anchor "SPECTRO" against
+    #: the text "SPECTRO XR CU" would otherwise capture the multi-token suffix "XR CU" whole, minting
+    #: the nonsense name "SPECTRO XR XR CU" -- checking only the suffix's OWN first token catches
+    #: this even though the suffix as a whole string is not itself a bare product-name word).
+    product_words = {w.casefold() for w in product_name.split()}
+    for anchor in _variant_anchor_names(product_name):
+        escaped = re.escape(anchor)
+        code_pattern = re.compile(escaped + r"\s+" + _VARIANT_SUFFIX_RE)
+        config_pattern = re.compile(escaped + r"\s+", re.IGNORECASE)
+        matches: list[str] = []
+        for m in code_pattern.finditer(text):
+            suffix = m.group(1).strip()
+            first_token = suffix.split()[0] if suffix.split() else suffix
+            if first_token.casefold() in product_words:
+                continue
+            matches.append(suffix)
+        for m in config_pattern.finditer(text):
+            tail = text[m.end() : m.end() + 20]
+            hit = _VARIANT_CONFIG_SUFFIX_RE.match(tail)
+            if hit:
+                matches.append(hit.group(1).strip())
+        for suffix in matches:
+            name = f"{product_name} {suffix}"
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                VersionRow(
+                    name=name,
+                    evidence_he=text.strip()[:500],
+                    cites=list(cites),
+                    confidence=_row_confidence_he(cites),
+                )
             )
-        )
     return rows
 
 
-def build_variant_mentions(dossier: ProductDossierOut) -> list[VersionRow]:
+def build_variant_mentions(
+    dossier: ProductDossierOut, corpus: CorpusResult | None = None
+) -> list[VersionRow]:
     """Every variant/model-suffix sighting of ``dossier.identity.product_name`` across
     ``risks_and_gaps_he``/``gaps_tracking``/``bd_implications_he`` (see this section's own
-    docstring) -- deduped against variant names the model's own "versions" topic already produced
-    (never a re-added duplicate) and against each other. ``[]`` when ``product_name`` is empty (an
-    identity-less draft has no anchor to search for)."""
+    docstring), PLUS (PD-fix-5 item 4, when ``corpus`` is given) every registered datasheet's own
+    text (``corpus.datasheets`` -- a configuration named in the vendor's own brochure/spec page,
+    cited under that datasheet's own registry ``n``) -- deduped against variant names the model's
+    own "versions" topic already produced (never a re-added duplicate) and against each other. ``[]``
+    when ``product_name`` is empty (an identity-less draft has no anchor to search for)."""
     product_name = (dossier.identity.product_name or "").strip()
     if not product_name:
         return []
@@ -1007,6 +1192,12 @@ def build_variant_mentions(dossier: ProductDossierOut) -> list[VersionRow]:
         rows.extend(_variant_mentions_from_text(product_name, g.gap_he, g.cites, seen))
     for s in dossier.bd_implications_he:
         rows.extend(_variant_mentions_from_text(product_name, s.text_he, s.cites, seen))
+    for ds in (corpus.datasheets if corpus is not None else []) or []:
+        n = ds.get("n")
+        text = ds.get("text") or ""
+        if n is None or not text:
+            continue
+        rows.extend(_variant_mentions_from_text(product_name, text, [n], seen))
     return rows
 
 
@@ -1171,7 +1362,11 @@ def _ground_generic_row(row: Any, valid_ns: set[int], dropped: list[DroppedField
 
 
 def _ground_version_row(
-    row: VersionRow, valid_ns: set[int], dropped: list[DroppedField]
+    row: VersionRow,
+    valid_ns: set[int],
+    dropped: list[DroppedField],
+    *,
+    kind_by_n: dict[int, str | None] | None = None,
 ) -> VersionRow:
     """LESSONS-2 item 7: same cites-cleaning as :func:`_ground_generic_row`, plus the deterministic
     row-confidence :func:`_row_confidence_he` computes for every other confidence-bearing row --
@@ -1180,7 +1375,9 @@ def _ground_version_row(
     good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
     if bad_cites:
         _drop(dropped, "variants_and_versions", f"cites out of range: {bad_cites}", row.name)
-    return row.model_copy(update={"cites": good_cites, "confidence": _row_confidence_he(good_cites)})
+    return row.model_copy(
+        update={"cites": good_cites, "confidence": _row_confidence_he(good_cites, kind_by_n=kind_by_n)}
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1603,6 +1800,11 @@ def ground_dossier(
     valid_ns = _valid_ns(corpus)
     registry_text = _registry_text_by_n(corpus, plan_result)
     published_by_n = _registry_published_at_by_n(corpus)
+    #: PD-fix-5 item 5: this run's own registry classification of every citation (vendor_official/
+    #: datasheet/press/...) -- fed into every row-confidence call below so a row citing the vendor's
+    #: own page or a hunted datasheet reaches "high" regardless of what the row's own (usually unset)
+    #: schema-level `source_kind` field says.
+    kind_by_n = _registry_kind_by_n(corpus.registry)
     dropped: list[DroppedField] = []
 
     identity = draft.identity.model_copy(update={"cites": _clean_cites(draft.identity.cites, valid_ns)[0]})
@@ -1624,10 +1826,17 @@ def ground_dossier(
         else None
     )
 
-    specifications = [_ground_spec_row(r, valid_ns, registry_text, dropped) for r in draft.specifications]
-    performance = [_ground_performance_row(r, valid_ns, registry_text, dropped) for r in draft.performance]
+    specifications = [
+        _ground_spec_row(r, valid_ns, registry_text, dropped, kind_by_n=kind_by_n)
+        for r in draft.specifications
+    ]
+    performance = [
+        _ground_performance_row(r, valid_ns, registry_text, dropped, kind_by_n=kind_by_n)
+        for r in draft.performance
+    ]
     other_specifications = [
-        _ground_spec_row(r, valid_ns, registry_text, dropped) for r in draft.other_specifications
+        _ground_spec_row(r, valid_ns, registry_text, dropped, kind_by_n=kind_by_n)
+        for r in draft.other_specifications
     ]
     specifications, performance, other_specifications = _null_vague_values(
         specifications, performance, other_specifications, dropped
@@ -1645,7 +1854,9 @@ def ground_dossier(
     deal_candidates = _deal_candidates_from_registry(corpus, registry_text, published_by_n)
     deal_rows = _merge_deal_candidates(draft.deals, deal_candidates)
     deals = [
-        _ground_deal_row(r, valid_ns, registry_text, dropped, published_by_n=published_by_n)
+        _ground_deal_row(
+            r, valid_ns, registry_text, dropped, published_by_n=published_by_n, kind_by_n=kind_by_n
+        )
         for r in deal_rows
     ]
     pricing = [
@@ -1653,13 +1864,23 @@ def ground_dossier(
     ]
     competitors = [
         r
-        for r in (_ground_competitor_row(r, valid_ns, registry_text, dropped) for r in draft.competitors)
+        for r in (
+            _ground_competitor_row(r, valid_ns, registry_text, dropped, kind_by_n=kind_by_n)
+            for r in draft.competitors
+        )
         if r
     ]
     partnerships = [
-        r for r in (_ground_partner_row(r, valid_ns, registry_text, dropped) for r in draft.partnerships) if r
+        r
+        for r in (
+            _ground_partner_row(r, valid_ns, registry_text, dropped, kind_by_n=kind_by_n)
+            for r in draft.partnerships
+        )
+        if r
     ]
-    variants = [_ground_version_row(r, valid_ns, dropped) for r in draft.variants_and_versions]
+    variants = [
+        _ground_version_row(r, valid_ns, dropped, kind_by_n=kind_by_n) for r in draft.variants_and_versions
+    ]
     claims_review = _ground_claims_review(draft.claims_review, valid_ns, dropped)
     timeline = _ground_timeline(draft.timeline, valid_ns, dropped)
     patents = [
@@ -1709,7 +1930,7 @@ def ground_dossier(
     # PD-fix-4 item 5: a variant/model-suffix named in any already-grounded free-text section (not
     # only the dedicated "versions" topic) -- folded into `grounded` BEFORE `build_timeline` runs so
     # a newly-found variant's own `.year` (when it has one) is already visible to that pass too.
-    variant_mentions = build_variant_mentions(grounded)
+    variant_mentions = build_variant_mentions(grounded, corpus)
     if variant_mentions:
         grounded = grounded.model_copy(
             update={"variants_and_versions": [*grounded.variants_and_versions, *variant_mentions]}
@@ -1913,6 +2134,189 @@ def apply_fact_retention(
 
 
 # --------------------------------------------------------------------------
+# PD-fix-5 (2026-09-09, item 2): datasheet-priority key retention. A live SPECTRO XR rerun (id=11)
+# had the full-spec vendor page (weight/power/laser lines/spectral band -- the exact page a PREVIOUS
+# run had already read and extracted from) sitting in ITS OWN registry, hunted-datasheet text
+# already fetched, yet still left the matching REQUIRED vocabulary keys null: the page's content
+# reached the "specifications"/"performance" research topics (folded into every topic's own
+# ``context_he``, see ``eoa.dossier.plan.run_plan``), but the single structured-extraction call
+# simply didn't extract every fact from it. Unlike :func:`apply_fact_retention` (which scans EVERY
+# cited source's text for ANY ungrounded number, keyed or not), this pass is narrowly targeted: only
+# a still-null REQUIRED key, only against text already registered as a datasheet/brochure
+# (``corpus.datasheets`` -- ``eoa.dossier.datasheet.hunt_datasheets``' own output, each entry
+# carrying the registry ``n`` it was folded in under), and only for that key's own vocabulary
+# synonyms/label -- never a new web/network call, purely a second look at text this run already has
+# in memory.
+# --------------------------------------------------------------------------
+
+_DATASHEET_RETENTION_MAX_KEYS = 8
+
+
+def _null_required_params(dossier: ProductDossierOut, product_line: str | None) -> list[SpecParam]:
+    """Every REQUIRED vocabulary key (spec or performance table) still null on ``dossier``, in
+    vocabulary order."""
+    params = param_by_key(product_line)
+    have_spec = {r.key: r.value for r in dossier.specifications if r.key}
+    have_perf = {r.key: r.claimed_value for r in dossier.performance if r.key}
+    missing: list[SpecParam] = []
+    for key, param in params.items():
+        if not param.required:
+            continue
+        value = have_perf.get(key) if param.table == "performance" else have_spec.get(key)
+        if not value:
+            missing.append(param)
+    return missing
+
+
+def _datasheet_snippet_for_param(param: SpecParam, corpus: CorpusResult) -> tuple[int, str] | None:
+    """The first ``(n, snippet)`` hit for any of ``param``'s own label/synonyms inside a registered
+    datasheet's own text -- ``None`` when no registered datasheet mentions it at all."""
+    needles = [param.label_he, param.label_en, *param.synonyms]
+    needles = [n.strip() for n in needles if n and len(n.strip()) >= 2]
+    for ds in corpus.datasheets or []:
+        n = ds.get("n")
+        text = ds.get("text") or ""
+        if n is None or not text:
+            continue
+        low = text.casefold()
+        for needle in needles:
+            idx = low.find(needle.casefold())
+            if idx == -1:
+                continue
+            start = max(0, idx - 80)
+            end = min(len(text), idx + len(needle) + 160)
+            return n, text[start:end]
+    return None
+
+
+def find_missing_datasheet_keys(dossier: ProductDossierOut, corpus: CorpusResult) -> list[dict[str, Any]]:
+    """Every still-null REQUIRED vocabulary key whose own synonyms/label show up in a registered
+    datasheet's own text -- ``{"key", "n", "snippet"}`` entries, capped at
+    :data:`_DATASHEET_RETENTION_MAX_KEYS`."""
+    out: list[dict[str, Any]] = []
+    for param in _null_required_params(dossier, corpus.product_line):
+        hit = _datasheet_snippet_for_param(param, corpus)
+        if hit is None:
+            continue
+        n, snippet = hit
+        out.append({"key": param.key, "n": n, "snippet": snippet[:220]})
+        if len(out) >= _DATASHEET_RETENTION_MAX_KEYS:
+            break
+    return out
+
+
+class _DatasheetKeyRetentionOut(BaseModel):
+    """The datasheet-key-retention re-ask's own tiny schema -- one row per requested key, nothing
+    else in the dossier is touched by this second call."""
+
+    specifications: list[SpecRow] = Field(default_factory=list)
+    performance: list[PerformanceRow] = Field(default_factory=list)
+
+
+def reask_datasheet_keys(
+    missing: list[dict[str, Any]],
+    corpus: CorpusResult,
+    *,
+    role: str = "resident",
+    interactive: bool = False,
+    llm_leg: str | None = None,
+) -> _DatasheetKeyRetentionOut:
+    """Exactly one follow-up structured-extraction call, scoped ONLY to ``missing``'s own snippets --
+    asks the model to fill each requested key's row from its own snippet alone (``key`` set VERBATIM
+    to the one requested, ``cites=[n]`` from that same snippet's own registry number). Returns an
+    empty result (never raises) on any failure."""
+    empty = _DatasheetKeyRetentionOut()
+    if not missing:
+        return empty
+    lines = [f"[{m['n']}] מפתח: {m['key']} | קטע מהעלון: {m['snippet']}" for m in missing]
+    prompt = (
+        "להלן קטעים מעלון/דף נתונים של היצרן שכבר נרשם בסקירה (מספר המקור בסוגריים מרובעים, ומפתח "
+        "הפרמטר המבוקש לצדו):\n\n"
+        + wrap_data("\n".join(lines), "dossier_datasheet_keys", corpus.product_key)
+        + f"\n\nעבור כל קטע שמכיל ערך אמיתי עבור {corpus.product_name}"
+        + (f" ({corpus.vendor})" if corpus.vendor else "")
+        + ": כתוב שורת specifications (או performance, לפי מהות הפרמטר) אחת, עם key זהה בדיוק למפתח "
+        "המבוקש, value/claimed_value כפי שפורסם בקטע כולל יחידות, cites=[מספר המקור מהסוגריים "
+        "המרובעים של אותו קטע]. קטע שאינו מכיל ערך אמיתי עבור מפתח זה -- פשוט השמט אותו, אל תמציא. "
+        "החזר JSON בלבד לפי הסכמה."
+    )
+    chain_override = None
+    if llm_leg:
+        from eoa.llm.chain import build_chain_with_leg_override
+
+        chain_override = build_chain_with_leg_override(role, llm_leg)
+    try:
+        return chat_structured(
+            role,
+            _DatasheetKeyRetentionOut,
+            [
+                {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
+                {"role": "user", "content": prompt},
+            ],
+            task="report",
+            interactive=interactive,
+            options={"temperature": 0.1, "num_predict": 1500},
+            chain_override=chain_override,
+        )
+    except Exception as exc:
+        log.warning("dossier.datasheet_key_reask_failed", error=str(exc)[:200])
+        return empty
+
+
+def apply_datasheet_key_retention(
+    grounding: GroundingResult,
+    corpus: CorpusResult,
+    plan_result: PlanResult,
+    *,
+    role: str = "resident",
+    interactive: bool = False,
+    llm_leg: str | None = None,
+) -> GroundingResult:
+    """The single entry point ``build_dossier`` calls for PD-fix-5 item 2: scans, logs every miss
+    (``dossier.datasheet_key_missing``), re-asks once, grounds whatever comes back through the SAME
+    :func:`_ground_spec_row`/:func:`_ground_performance_row` post-checks every other row goes
+    through, and fills only a key that is STILL null after grounding (never overwrites a value this
+    run already found by other means)."""
+    missing = find_missing_datasheet_keys(grounding.dossier, corpus)
+    if not missing:
+        return grounding
+    for m in missing:
+        log.info("dossier.datasheet_key_missing", key=m["key"], n=m["n"], snippet=m["snippet"])
+    supplemental = reask_datasheet_keys(missing, corpus, role=role, interactive=interactive, llm_leg=llm_leg)
+    if not supplemental.specifications and not supplemental.performance:
+        return grounding
+    valid_ns = _valid_ns(corpus)
+    registry_text = _registry_text_by_n(corpus, plan_result)
+    kind_by_n = _registry_kind_by_n(corpus.registry)
+    params = param_by_key(corpus.product_line)
+
+    new_specs = list(grounding.dossier.specifications)
+    have_spec_keys = {r.key for r in new_specs if r.key and r.value}
+    for row in supplemental.specifications:
+        if not row.key or row.key not in params or row.key in have_spec_keys:
+            continue
+        grounded = _ground_spec_row(row, valid_ns, registry_text, grounding.dropped, kind_by_n=kind_by_n)
+        if not grounded.value:
+            continue
+        new_specs = [grounded if r.key == row.key else r for r in new_specs]
+        have_spec_keys.add(row.key)
+
+    new_perf = list(grounding.dossier.performance)
+    have_perf_keys = {r.key for r in new_perf if r.key and r.claimed_value}
+    for row in supplemental.performance:
+        if not row.key or row.key not in params or row.key in have_perf_keys:
+            continue
+        grounded = _ground_performance_row(row, valid_ns, registry_text, grounding.dropped, kind_by_n=kind_by_n)
+        if not grounded.claimed_value:
+            continue
+        new_perf = [grounded if r.key == row.key else r for r in new_perf]
+        have_perf_keys.add(row.key)
+
+    updated = grounding.dossier.model_copy(update={"specifications": new_specs, "performance": new_perf})
+    return GroundingResult(dossier=updated, dropped=grounding.dropped)
+
+
+# --------------------------------------------------------------------------
 # PD-fix-4 (2026-09-09, item B.3): fact retention across runs. A rerun must never know LESS than the
 # previous run of the same ``product_key`` -- when this run's own keyed row is null but a previous
 # run already had a grounded value for that same key, and that value's own cited source is still
@@ -1969,22 +2373,144 @@ def _append_carried_tag(existing: str) -> str:
     return f"{existing}; {tag}"
 
 
+def _overflow_row_from_dict(row: dict[str, Any]) -> SpecRow:
+    """Reconstruct a ``SpecRow`` from a previous run's persisted ``other_specifications`` dict --
+    only the fields :func:`_match_overflow_key` and this module's own grounding logic ever read;
+    extra/legacy dict keys from an older schema version are simply ignored (never a validation
+    error)."""
+    return SpecRow(
+        parameter_he=row.get("parameter_he") or "",
+        value=row.get("value") or "",
+        unit=row.get("unit") or "",
+        variant=row.get("variant") or "",
+        source_kind=row.get("source_kind") or "other",
+        cites=row.get("cites") or [],
+    )
+
+
+def _prev_overflow_candidates(
+    previous_data: dict[str, Any], product_line: str | None
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """PD-fix-5 item 1: a real, cited fact that lived in the PREVIOUS run's own
+    ``other_specifications`` -- never promoted to a keyed row that run (e.g. a run predating
+    PD-fix-4's overflow-promotion fix, :func:`_promote_overflow_rows`) -- is still worth carrying
+    forward when THIS run's own keyed row for the matching vocabulary key is null. Live case: a
+    SPECTRO XR run (``product_dossiers.id=8``) kept weight/power/laser-wavelength/spectral-band/FOV
+    facts stuck in ``other_specifications`` with no ``key`` at all; the very next run's own
+    :func:`carry_forward_missing_specs` (pre-fix) never saw them because it only ever read the
+    previous run's KEYED ``specifications``/``performance``, which were null for those same facts.
+    Re-matches each overflow row from scratch with the SAME matcher :func:`_promote_overflow_rows`
+    already applies to THIS run's own overflow rows (label, then value, then the units/number
+    heuristic) -- returns ``(spec_candidates_by_key, performance_candidates_by_key)``, each entry
+    shaped like a keyed-row dict (``value``/``claimed_value``/``cites``/``unit``/``source_kind``) so
+    the caller can treat it identically to a genuine previous keyed row. The FIRST overflow row that
+    resolves to a given key wins (mirrors the keyed dict's own "one row per key" shape) -- a real,
+    already-keyed previous row (checked first by the caller) always takes priority over an overflow
+    candidate for the same key."""
+    params = param_by_key(product_line)
+    spec_by_key: dict[str, dict[str, Any]] = {}
+    perf_by_key: dict[str, dict[str, Any]] = {}
+    for raw in previous_data.get("other_specifications") or []:
+        row = _overflow_row_from_dict(raw)
+        if not row.value:
+            continue
+        key = _match_overflow_key(row, params, product_line)
+        if not key or key not in params:
+            continue
+        param = params[key]
+        target = perf_by_key if param.table == "performance" else spec_by_key
+        if key in target:
+            continue
+        target[key] = {
+            "value": row.value,
+            "claimed_value": row.value,
+            "cites": row.cites,
+            "unit": row.unit,
+            "source_kind": row.source_kind,
+        }
+    return spec_by_key, perf_by_key
+
+
+@dataclass
+class _CarryDecision:
+    value: str
+    cites: list[int]
+    unit: str | None = None
+    source_kind: str | None = None
+
+
+def _carry_forward_decision(
+    *,
+    key: str,
+    current_value: str,
+    current_cites: list[int],
+    prev_row: dict[str, Any] | None,
+    value_field: str,
+    prev_url_by_n: dict[int, str],
+    current_n_by_norm: dict[str, int],
+    prev_kind_by_n: dict[int, str | None],
+    current_kind_by_n: dict[int, str | None],
+) -> _CarryDecision | None:
+    """The one carry-forward decision every keyed row (spec or performance) goes through: fills a
+    null current value, OR (PD-fix-5 item 1) REPLACES an already-filled current value when the
+    previous run's own value is grounded in a strictly stronger-sourced citation
+    (:data:`_SOURCE_KIND_STRENGTH` -- a datasheet/vendor-page value must win over a weaker
+    news-sourced value THIS run happened to extract instead for the same key). Returns ``None`` when
+    there is nothing to carry: no previous row, a vague previous value (:func:`_is_vague_value_he`,
+    never resurrected through the back door), no citation that still resolves in this run's own
+    registry, or (when ``current_value`` is already filled) the current value's own source is at
+    least as strong as the previous one's."""
+    if not prev_row:
+        return None
+    prev_value = prev_row.get(value_field)
+    if not prev_value or _is_vague_value_he(prev_value):
+        return None
+    new_cites = _remap_prev_cites(prev_row.get("cites"), prev_url_by_n, current_n_by_norm)
+    if not new_cites:
+        return None
+    if not current_value:
+        return _CarryDecision(
+            value=prev_value, cites=new_cites, unit=prev_row.get("unit"), source_kind=prev_row.get("source_kind")
+        )
+    prev_strength = _strongest_kind_for_cites(prev_row.get("cites") or [], prev_kind_by_n)
+    current_strength = _strongest_kind_for_cites(current_cites, current_kind_by_n)
+    if prev_strength <= current_strength:
+        return None
+    log.info(
+        "dossier.value_kept_from_datasheet",
+        key=key,
+        previous_value=str(prev_value)[:120],
+        current_value=str(current_value)[:120],
+        previous_source_strength=prev_strength,
+        current_source_strength=current_strength,
+    )
+    return _CarryDecision(
+        value=prev_value, cites=new_cites, unit=prev_row.get("unit"), source_kind=prev_row.get("source_kind")
+    )
+
+
 def carry_forward_missing_specs(
     dossier: ProductDossierOut, corpus: CorpusResult
 ) -> tuple[ProductDossierOut, int]:
-    """Fills a null-value keyed specifications/performance row from the previous dossier of the same
-    ``product_key`` (``corpus.previous``, the raw ``product_dossiers`` row) whenever that previous
-    run had a real, non-vague (:func:`_is_vague_value_he` -- a previous run predating item B.2 can
-    itself carry a hand-wavy "לא צוין"/"מתקדם"-with-no-digit value; never resurrect that through the
-    back door) value for the same ``key`` AND at least one of its own citations still resolves into
-    this run's own registry (:func:`_remap_prev_cites`). The carried value's ``variant``/
-    ``conditions_he`` gets a ``"(מהסקירה הקודמת)"`` tag -- ``eoa.dossier.spec_render`` already joins
-    that field into the rendered cell, so no renderer change is needed; ``eoa.dossier.diff`` compares
-    only ``value``/``claimed_value``/``tested_or_operational_value`` (never ``variant``/
-    ``conditions_he``), and the carried value is verbatim-identical to the previous run's own value,
-    so a carried row is never reported as a change either -- both "for free", by construction.
-    Returns ``(dossier, 0)`` unchanged when there is no previous dossier, or it carries no `sources`
-    at all to re-resolve citations against."""
+    """Fills (or, PD-fix-5 item 1, upgrades) a keyed specifications/performance row from the
+    previous dossier of the same ``product_key`` (``corpus.previous``, the raw ``product_dossiers``
+    row) whenever that previous run had a real, non-vague (:func:`_is_vague_value_he`) value for the
+    same ``key`` AND at least one of its own citations still resolves into this run's own registry
+    (:func:`_remap_prev_cites`) -- see :func:`_carry_forward_decision` for the exact fill-vs-replace
+    rule. The previous value can come from either the previous run's own KEYED row, or (PD-fix-5
+    item 1, :func:`_prev_overflow_candidates`) its ``other_specifications`` overflow, re-matched to
+    today's vocabulary -- a fact that lived unkeyed in the previous run is no less real than one that
+    was already keyed, and losing it on every subsequent rerun (because a keyed-only lookup never
+    even looked at ``other_specifications``) is exactly the bug this item fixes. The carried value's
+    ``variant``/``conditions_he`` gets a ``"(מהסקירה הקודמת)"`` tag -- ``eoa.dossier.spec_render``
+    already joins that field into the rendered cell, so no renderer change is needed;
+    ``eoa.dossier.diff`` compares only ``value``/``claimed_value``/``tested_or_operational_value``
+    (never ``variant``/``conditions_he``), and a FILLED (not upgraded) carried value is
+    verbatim-identical to the previous run's own value, so it is never reported as a change either --
+    both "for free", by construction; an UPGRADED row (a stronger source replacing a weaker one) is
+    still a genuine value change and is reported as such, correctly. Returns ``(dossier, 0)``
+    unchanged when there is no previous dossier, or it carries no `sources` at all to re-resolve
+    citations against."""
     previous_row = corpus.previous
     if not previous_row:
         return dossier, 0
@@ -1993,32 +2519,44 @@ def carry_forward_missing_specs(
         return dossier, 0
     previous_data = previous_row.get("data") or {}
     current_n_by_norm = _current_n_by_normalized_url(corpus)
-    prev_specs_by_key = {r.get("key"): r for r in (previous_data.get("specifications") or []) if r.get("key")}
-    prev_perf_by_key = {r.get("key"): r for r in (previous_data.get("performance") or []) if r.get("key")}
+    prev_kind_by_n = _registry_kind_by_n(previous_row.get("sources"))
+    current_kind_by_n = _registry_kind_by_n(corpus.registry)
+    prev_specs_by_key = {
+        r.get("key"): r for r in (previous_data.get("specifications") or []) if r.get("key") and r.get("value")
+    }
+    prev_perf_by_key = {
+        r.get("key"): r
+        for r in (previous_data.get("performance") or [])
+        if r.get("key") and r.get("claimed_value")
+    }
+    overflow_spec_by_key, overflow_perf_by_key = _prev_overflow_candidates(previous_data, corpus.product_line)
 
     carried = 0
     new_specs: list[SpecRow] = []
     for row in dossier.specifications:
-        prev_row = prev_specs_by_key.get(row.key) if row.key and not row.value else None
-        prev_value = prev_row.get("value") if prev_row else None
-        # A previous run that predates item B.2 (vague-value nulling) can itself carry a vague
-        # value ("לא צוין"/"מתקדם" with no digit) -- never resurrect that through the back door;
-        # the point of carrying forward is real facts, not stale hand-waving.
-        if not prev_value or _is_vague_value_he(prev_value):
-            new_specs.append(row)
-            continue
-        new_cites = _remap_prev_cites(prev_row.get("cites"), prev_url_by_n, current_n_by_norm)
-        if not new_cites:
+        prev_row = (prev_specs_by_key.get(row.key) or overflow_spec_by_key.get(row.key)) if row.key else None
+        decision = _carry_forward_decision(
+            key=row.key,
+            current_value=row.value,
+            current_cites=row.cites,
+            prev_row=prev_row,
+            value_field="value",
+            prev_url_by_n=prev_url_by_n,
+            current_n_by_norm=current_n_by_norm,
+            prev_kind_by_n=prev_kind_by_n,
+            current_kind_by_n=current_kind_by_n,
+        )
+        if decision is None:
             new_specs.append(row)
             continue
         carried += 1
         new_specs.append(
             row.model_copy(
                 update={
-                    "value": prev_value,
-                    "unit": prev_row.get("unit") or row.unit,
-                    "source_kind": prev_row.get("source_kind") or row.source_kind,
-                    "cites": new_cites,
+                    "value": decision.value,
+                    "unit": decision.unit or row.unit,
+                    "source_kind": decision.source_kind or row.source_kind,
+                    "cites": decision.cites,
                     "variant": _append_carried_tag(row.variant),
                 }
             )
@@ -2026,23 +2564,29 @@ def carry_forward_missing_specs(
 
     new_perf: list[PerformanceRow] = []
     for row in dossier.performance:
-        prev_row = prev_perf_by_key.get(row.key) if row.key and not row.claimed_value else None
-        prev_value = prev_row.get("claimed_value") if prev_row else None
-        if not prev_value or _is_vague_value_he(prev_value):
-            new_perf.append(row)
-            continue
-        new_cites = _remap_prev_cites(prev_row.get("cites"), prev_url_by_n, current_n_by_norm)
-        if not new_cites:
+        prev_row = (prev_perf_by_key.get(row.key) or overflow_perf_by_key.get(row.key)) if row.key else None
+        decision = _carry_forward_decision(
+            key=row.key,
+            current_value=row.claimed_value,
+            current_cites=row.cites,
+            prev_row=prev_row,
+            value_field="claimed_value",
+            prev_url_by_n=prev_url_by_n,
+            current_n_by_norm=current_n_by_norm,
+            prev_kind_by_n=prev_kind_by_n,
+            current_kind_by_n=current_kind_by_n,
+        )
+        if decision is None:
             new_perf.append(row)
             continue
         carried += 1
         new_perf.append(
             row.model_copy(
                 update={
-                    "claimed_value": prev_value,
+                    "claimed_value": decision.value,
                     "tested_or_operational_value": row.tested_or_operational_value
                     or prev_row.get("tested_or_operational_value"),
-                    "cites": new_cites,
+                    "cites": decision.cites,
                     "conditions_he": _append_carried_tag(row.conditions_he),
                 }
             )
@@ -2051,6 +2595,68 @@ def carry_forward_missing_specs(
     if carried == 0:
         return dossier, 0
     return dossier.model_copy(update={"specifications": new_specs, "performance": new_perf}), carried
+
+
+# --------------------------------------------------------------------------
+# PD-fix-5 (2026-09-09, item 4, cross-run half): variant retention across runs -- the same "a rerun
+# must never know LESS than the previous run" principle :func:`carry_forward_missing_specs` already
+# applies to keyed specs/performance, extended to ``variants_and_versions``. A live SPECTRO XR rerun
+# (id=11) kept 0 variants even though the PREVIOUS run's own gap-tracking sentence already named
+# "SPECTRO XR CU" with real citations -- variants were never carried across runs at all, only
+# re-derived (or not) from THIS run's own findings.
+# --------------------------------------------------------------------------
+
+
+def carry_forward_missing_variants(
+    dossier: ProductDossierOut, corpus: CorpusResult
+) -> tuple[ProductDossierOut, int]:
+    """Every variant from the previous dossier of the same ``product_key`` whose ``name`` isn't
+    already present in THIS run's own ``variants_and_versions`` (case-insensitive) and whose own
+    citations still resolve into this run's registry (:func:`_remap_prev_cites`) is carried forward
+    verbatim (``evidence_he``/``year``/``platforms`` copied as-is, ``cites`` re-numbered). Returns
+    ``(dossier, 0)`` unchanged when there is no previous dossier, it carries no ``sources`` to
+    re-resolve citations against, or it named no variants at all."""
+    previous_row = corpus.previous
+    if not previous_row:
+        return dossier, 0
+    prev_url_by_n = _previous_source_url_by_n(previous_row)
+    if not prev_url_by_n:
+        return dossier, 0
+    previous_data = previous_row.get("data") or {}
+    prev_variants = previous_data.get("variants_and_versions") or []
+    if not prev_variants:
+        return dossier, 0
+    current_n_by_norm = _current_n_by_normalized_url(corpus)
+    have_names = {v.name.casefold() for v in dossier.variants_and_versions if v.name}
+
+    carried_rows: list[VersionRow] = []
+    for raw in prev_variants:
+        name = (raw.get("name") or "").strip()
+        if not name or name.casefold() in have_names:
+            continue
+        new_cites = _remap_prev_cites(raw.get("cites"), prev_url_by_n, current_n_by_norm)
+        if not new_cites:
+            continue
+        have_names.add(name.casefold())
+        carried_rows.append(
+            VersionRow(
+                name=name,
+                year=raw.get("year"),
+                changes_he=raw.get("changes_he") or "",
+                platforms=list(raw.get("platforms") or []),
+                evidence_he=_append_carried_tag(raw.get("evidence_he") or ""),
+                cites=new_cites,
+                confidence=_row_confidence_he(new_cites),
+            )
+        )
+    if not carried_rows:
+        return dossier, 0
+    return (
+        dossier.model_copy(
+            update={"variants_and_versions": [*dossier.variants_and_versions, *carried_rows]}
+        ),
+        len(carried_rows),
+    )
 
 
 def build_dossier(
@@ -2068,12 +2674,15 @@ def build_dossier(
 
     PD-fix-4 (2026-09-09, items B.1/B.3): after the deterministic grounding pass, the fact-retention
     scan + one bounded re-ask (:func:`apply_fact_retention`) recovers a real cited fact the model
-    silently dropped instead of routing to ``other_specifications``; then :func:`carry_forward_
-    missing_specs` fills any keyed row still null from the previous dossier of the same
-    ``product_key``, when that previous value's own citation still resolves in this run's registry.
-    Both run unconditionally (a no-op, zero extra calls, when there is nothing to do) -- every
-    existing caller's behavior is unchanged for a first-run dossier with no previous data and no
-    missing facts."""
+    silently dropped instead of routing to ``other_specifications``; then (PD-fix-5 item 2)
+    :func:`apply_datasheet_key_retention` re-asks once more, scoped only to still-null REQUIRED keys
+    a registered datasheet's own text already mentions; then :func:`carry_forward_missing_specs`
+    upgrades/fills any keyed row from the previous dossier of the same ``product_key`` (keyed OR
+    overflow, weaker-sourced current value included -- PD-fix-5 item 1), and
+    :func:`carry_forward_missing_variants` (PD-fix-5 item 4) does the same for
+    ``variants_and_versions``. Every one of these runs unconditionally (a no-op, zero extra calls,
+    when there is nothing to do) -- every existing caller's behavior is unchanged for a first-run
+    dossier with no previous data and no missing facts."""
     try:
         draft = extract_dossier(corpus, plan_result, role=role, interactive=interactive, llm_leg=llm_leg)
     except LLMOutputError:
@@ -2082,7 +2691,13 @@ def build_dossier(
     grounding = apply_fact_retention(
         grounding, corpus, plan_result, role=role, interactive=interactive, llm_leg=llm_leg
     )
+    grounding = apply_datasheet_key_retention(
+        grounding, corpus, plan_result, role=role, interactive=interactive, llm_leg=llm_leg
+    )
     carried_dossier, _carried_count = carry_forward_missing_specs(grounding.dossier, corpus)
+    if carried_dossier is not grounding.dossier:
+        grounding = GroundingResult(dossier=carried_dossier, dropped=grounding.dropped)
+    carried_dossier, _carried_variant_count = carry_forward_missing_variants(grounding.dossier, corpus)
     if carried_dossier is not grounding.dossier:
         grounding = GroundingResult(dossier=carried_dossier, dropped=grounding.dropped)
     return grounding
@@ -2092,6 +2707,7 @@ __all__ = [
     "CARRIED_FROM_RUN_TAG_HE",
     "DroppedField",
     "GroundingResult",
+    "apply_datasheet_key_retention",
     "apply_fact_retention",
     "apply_vocabulary",
     "build_data_block",
@@ -2100,10 +2716,13 @@ __all__ = [
     "build_timeline",
     "build_variant_mentions",
     "carry_forward_missing_specs",
+    "carry_forward_missing_variants",
     "extract_dossier",
+    "find_missing_datasheet_keys",
     "find_missing_spec_facts",
     "ground_dossier",
     "parse_amount_he",
+    "reask_datasheet_keys",
     "reask_missing_facts",
     "split_country_region",
 ]

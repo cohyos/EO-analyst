@@ -184,8 +184,11 @@ _VENDOR_DOMAIN_HINTS: dict[str, str] = {
 SITE_RESTRICTED_TOPIC_KEYS: frozenset[str] = frozenset({"specifications", "versions", "performance"})
 
 #: Bound on how many vendor pages one dossier build fetches up front -- a deliberate, small cap
-#: (network + wall-clock cost, paid once per dossier build, not per topic).
-_MUST_READ_URL_CAP = 6
+#: (network + wall-clock cost, paid once per dossier build, not per topic). PD-fix-5 item 2: raised
+#: 6 -> 8 -- a live SPECTRO XR previous run alone had 8 distinct `vendor_official` URLs; even with
+#: :func:`_previous_vendor_official_urls`'s new spec-bearing-first ordering, 6 was tight enough that
+#: a product with slightly more vendor pages than SPECTRO XR could still truncate a real one.
+_MUST_READ_URL_CAP = 8
 
 _EXCERPT_MAX_CHARS = 1200
 
@@ -209,20 +212,50 @@ def resolve_vendor_domain(vendor: str | None, registry: list[dict[str, Any]] | N
     return None
 
 
+#: PD-fix-5 (2026-09-09, item 2): a previous dossier can carry more `vendor_official` URLs than
+#: :data:`_MUST_READ_URL_CAP` allows re-reading -- a live SPECTRO XR rerun's previous run (id=8) had
+#: 8, and n-order (the order sources were first registered in) put SIX deal-announcement press
+#: releases ahead of the two pages that actually carry the full spec table (weight/power/laser
+#: lines/spectral band), which the cap then silently dropped. `_previous_spec_bearing_urls` finds
+#: which of the previous run's own vendor_official URLs are cited by a REAL (non-empty) value in its
+#: specifications/performance/other_specifications -- these are known, concretely, to carry
+#: extractable spec content, not just news copy -- so :func:`_previous_vendor_official_urls` can put
+#: them first, ahead of a same-domain URL that was never actually the SOURCE of a fact.
+def _previous_spec_bearing_ns(previous_data: dict[str, Any]) -> set[int]:
+    ns: set[int] = set()
+    for row in previous_data.get("specifications") or []:
+        if row.get("value"):
+            ns.update(row.get("cites") or [])
+    for row in previous_data.get("performance") or []:
+        if row.get("claimed_value"):
+            ns.update(row.get("cites") or [])
+    for row in previous_data.get("other_specifications") or []:
+        if row.get("value"):
+            ns.update(row.get("cites") or [])
+    return ns
+
+
 def _previous_vendor_official_urls(previous: dict[str, Any] | None) -> list[str]:
     """``vendor_official`` URLs from the previous dossier of the same ``product_key`` (its own
     persisted ``sources`` column, ``CorpusResult.previous`` is the raw ``product_dossiers`` row) --
     still worth re-reading even though they were already read once, since ``run_must_read`` folds
     their content back into *this* run's own topic context, independent of whichever registry row
-    number they carried last time."""
+    number they carried last time. PD-fix-5 item 2: ordered with every URL already known to have
+    carried a real spec/performance/overflow value last run FIRST (:func:`_previous_spec_bearing_ns`)
+    -- :data:`_MUST_READ_URL_CAP` truncates the tail of this list, so a spec-bearing page must never
+    lose its slot to a plain deal-announcement press release that happens to sit earlier in n-order."""
     if not previous:
         return []
     sources = previous.get("sources") or []
-    return [
-        s.get("url")
+    spec_bearing_ns = _previous_spec_bearing_ns(previous.get("data") or {})
+    vendor_urls = [
+        s
         for s in sources
         if s.get("url") and (s.get("source_kind") == "vendor_official" or s.get("kind") == "vendor_official")
     ]
+    prioritized = [s for s in vendor_urls if s.get("n") in spec_bearing_ns]
+    rest = [s for s in vendor_urls if s.get("n") not in spec_bearing_ns]
+    return [s["url"] for s in (*prioritized, *rest)]
 
 
 def gather_must_read_urls(corpus: CorpusResult) -> list[str]:

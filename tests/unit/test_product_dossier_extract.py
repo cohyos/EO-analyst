@@ -1266,3 +1266,399 @@ def test_variant_mention_requires_citation() -> None:
         gaps_tracking=[GapTrackingRow(gap_he="SPECTRO XR CU מוזכר כאן ללא ציטוט.", cites=[])],
     )
     assert dossier_extract.build_variant_mentions(dossier) == []
+
+
+# ==========================================================================
+# PD-fix-5 (2026-09-09, docs/qa/content_review/PD-fix-5.md): comparison of product_dossiers rows
+# 8/11 (elbit-systems-spectro-xr) against the hand-made reference dossier found five further live
+# bugs. Each item below is its own section.
+# ==========================================================================
+
+
+# --------------------------------------------------------------------------
+# item 5: registry-kind-aware row confidence -- a citation to a vendor_official/datasheet REGISTRY
+# source now yields "high" even when the row's own (model-authored) schema-level source_kind is left
+# at its default "other" and it carries only one citation.
+# --------------------------------------------------------------------------
+
+
+def test_spec_row_confidence_high_for_single_vendor_official_citation() -> None:
+    corpus = _corpus_with_registry(
+        [
+            _reg(
+                1,
+                kind="web",
+                url="https://elbitsystems.com/x",
+                source_kind="vendor_official",
+                title='משקל 51 ק"ג.',
+            )
+        ]
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value='51 ק"ג', cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    row = next(r for r in result.dossier.specifications if r.key == "weight")
+    assert row.confidence == "high"
+
+
+def test_spec_row_confidence_stays_medium_for_single_press_citation() -> None:
+    """Regression guard: item 5 only ADDS a new "high" path (registry vendor_official/datasheet) --
+    a plain press citation with a single cite and no qualifying schema-level source_kind still stays
+    "medium", exactly as before."""
+    corpus = _corpus_with_registry(
+        [
+            _reg(
+                1, kind="web", url="https://news.example.com/x", source_kind="press", title='משקל 51 ק"ג.'
+            )
+        ]
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value='51 ק"ג', cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    row = next(r for r in result.dossier.specifications if r.key == "weight")
+    assert row.confidence == "medium"
+
+
+def test_performance_row_confidence_high_for_single_datasheet_citation() -> None:
+    corpus = _corpus_with_registry(
+        [
+            _reg(
+                1,
+                kind="web",
+                url="https://x.com/ds.pdf",
+                source_kind="datasheet",
+                title='טווח זיהוי 20 ק"מ.',
+            )
+        ]
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        performance=[
+            PerformanceRow(
+                metric_he="טווח זיהוי", key="detection_range_dri", claimed_value='20 ק"מ', cites=[1]
+            )
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    row = next(r for r in result.dossier.performance if r.key == "detection_range_dri")
+    assert row.confidence == "high"
+
+
+def test_deal_row_confidence_high_for_single_vendor_official_citation() -> None:
+    corpus = _corpus_with_registry(
+        [
+            _reg(
+                1,
+                kind="web",
+                url="https://elbitsystems.com/news/x",
+                source_kind="vendor_official",
+                title="חוזה בכ-80 מיליון דולר.",
+            )
+        ]
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="Some AF", amount="כ-80 מיליון דולר", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].confidence_level == "high"
+
+
+def test_variant_row_confidence_high_for_single_vendor_official_citation() -> None:
+    corpus = _corpus_with_registry(
+        [
+            _reg(
+                1,
+                kind="web",
+                url="https://elbitsystems.com/x",
+                source_kind="vendor_official",
+                title="SPECTRO XR CU.",
+            )
+        ]
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        variants_and_versions=[VersionRow(name="SPECTRO XR CU", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.variants_and_versions[0].confidence == "high"
+
+
+# --------------------------------------------------------------------------
+# item 1: carry-forward covers a previous run's UNKEYED overflow fact too, and a stronger previous
+# (datasheet/vendor) value wins over a weaker current (press) value for the same key.
+# --------------------------------------------------------------------------
+
+
+def test_carry_forward_covers_previous_overflow_row_matched_by_label() -> None:
+    """A fact that lived in the PREVIOUS run's own ``other_specifications`` (key="") -- e.g. a run
+    predating PD-fix-4's overflow-promotion fix -- is still carried into today's matching keyed row,
+    not only a previous run's own already-keyed rows."""
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://elbitsystems.com/x")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 24, "url": "https://elbitsystems.com/x", "source_kind": "vendor_official"}],
+        data={"other_specifications": [{"parameter_he": "משקל המערכת.", "value": '51 ק"ג', "cites": [24]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value="")],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 1
+    row = next(r for r in new_dossier.specifications if r.key == "weight")
+    assert row.value == '51 ק"ג'
+    assert row.cites == [5]
+    assert dossier_extract.CARRIED_FROM_RUN_TAG_HE in row.variant
+
+
+def test_carry_forward_replaces_weaker_current_value_with_stronger_previous_datasheet_value() -> None:
+    """A previous run's value cited to a vendor page must WIN over a weaker current-run value cited
+    only to a plain press source -- even though the current row is already filled (not null)."""
+    corpus = _corpus_with_registry(
+        [
+            _reg(5, kind="web", url="https://elbitsystems.com/vendor", source_kind="vendor_official"),
+            _reg(6, kind="web", url="https://news.example.com/press", source_kind="press"),
+        ]
+    )
+    corpus.previous = _previous_row(
+        sources=[{"n": 24, "url": "https://elbitsystems.com/vendor", "source_kind": "vendor_official"}],
+        data={"specifications": [{"key": "weight", "value": '51 ק"ג', "cites": [24]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value='52 ק"ג בתצורה מרבית', cites=[6])],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 1
+    row = next(r for r in new_dossier.specifications if r.key == "weight")
+    assert row.value == '51 ק"ג'
+    assert row.cites == [5]
+
+
+def test_carry_forward_does_not_downgrade_when_current_source_is_at_least_as_strong() -> None:
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://x.com/page", source_kind="vendor_official")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 24, "url": "https://x.com/page", "source_kind": "press"}],
+        data={"specifications": [{"key": "weight", "value": '52 ק"ג', "cites": [24]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value='51 ק"ג', cites=[5])],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 0
+    assert new_dossier.specifications[0].value == '51 ק"ג'
+
+
+# --------------------------------------------------------------------------
+# item 4 (cross-run half): variants are carried forward across runs exactly like keyed specs.
+# --------------------------------------------------------------------------
+
+
+def test_carry_forward_missing_variants_fills_from_previous_run() -> None:
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://elbitsystems.com/x")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 24, "url": "https://elbitsystems.com/x"}],
+        data={
+            "variants_and_versions": [
+                {"name": "SPECTRO XR CU", "cites": [24], "evidence_he": "מוזכר בעמוד היצרן."}
+            ]
+        },
+    )
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    new_dossier, carried = dossier_extract.carry_forward_missing_variants(dossier, corpus)
+    assert carried == 1
+    row = new_dossier.variants_and_versions[0]
+    assert row.name == "SPECTRO XR CU"
+    assert row.cites == [5]
+    assert dossier_extract.CARRIED_FROM_RUN_TAG_HE in row.evidence_he
+
+
+def test_carry_forward_missing_variants_skips_name_already_present() -> None:
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://elbitsystems.com/x")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 24, "url": "https://elbitsystems.com/x"}],
+        data={"variants_and_versions": [{"name": "SPECTRO XR CU", "cites": [24]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        variants_and_versions=[VersionRow(name="SPECTRO XR CU", cites=[1])],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_variants(dossier, corpus)
+    assert carried == 0
+    assert new_dossier is dossier
+
+
+def test_carry_forward_missing_variants_no_op_with_no_previous_dossier() -> None:
+    corpus = _corpus_with_registry([])
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    new_dossier, carried = dossier_extract.carry_forward_missing_variants(dossier, corpus)
+    assert carried == 0
+    assert new_dossier is dossier
+
+
+# --------------------------------------------------------------------------
+# item 3: deals -- a date is recovered from the cited page's own text when the registry carries no
+# published_at at all (a plain "web"-fetched press release, not a DB item/event row); customer=None
+# never blanks country/region_he.
+# --------------------------------------------------------------------------
+
+
+def test_deal_date_backfilled_from_cited_text_when_no_registry_published_at() -> None:
+    corpus = _corpus_with_registry(
+        [
+            _reg(
+                1,
+                kind="web",
+                url="https://elbitsystems.com/news/x",
+                title="הודעת חברה מ-2 ביוני 2021 על חוזה בכ-80 מיליון דולר.",
+            )
+        ]
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="Some AF", amount="כ-80 מיליון דולר", date=None, cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    deal = result.dossier.deals[0]
+    assert deal.date == "יוני 2021"
+    assert deal.date_kind == "published"
+
+
+def test_deal_country_and_region_kept_when_customer_unknown() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה עם מדינה באסיה-פסיפיק.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="—", country="מדינה באסיה-פסיפיק", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    deal = result.dossier.deals[0]
+    assert deal.customer is None
+    assert deal.region_he == "מדינה באסיה-פסיפיק"
+
+
+# --------------------------------------------------------------------------
+# item 4 (scan half): the variant scan accepts a lowercase deployment-domain word ("maritime") and a
+# variant named off just the product's own "family" word, and (when a corpus is given) also scans
+# registered datasheet text, not only already-extracted risk/gap sentences.
+# --------------------------------------------------------------------------
+
+
+def test_variant_config_word_maritime_captured_as_version_row() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        risks_and_gaps_he=[
+            Sentence(text_he="עמוד היצרן מתאר תצורה בשם SPECTRO XR maritime לשימוש ימי.", cites=[7]),
+        ],
+    )
+    names = {m.name for m in dossier_extract.build_variant_mentions(dossier)}
+    assert "SPECTRO XR maritime" in names
+
+
+def test_variant_base_name_anchor_captures_family_suffix_variant() -> None:
+    """"SPECTRO CU" doesn't contain the full product_name ("SPECTRO XR") as a substring at all --
+    only reachable via the shorter "SPECTRO" family-word anchor (item 4b)."""
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        gaps_tracking=[GapTrackingRow(gap_he="הכינוי SPECTRO CU מוזכר ללא פירוט.", cites=[9])],
+    )
+    names = {m.name for m in dossier_extract.build_variant_mentions(dossier)}
+    assert "SPECTRO XR CU" in names
+
+
+def test_variant_family_anchor_does_not_re_match_full_product_name_as_fake_variant() -> None:
+    """Regression guard for the family-anchor extension: scanning "...SPECTRO XR CU..." must never
+    also mint a bogus "SPECTRO XR XR CU"/"SPECTRO XR XR" row from the "SPECTRO" anchor re-consuming
+    the product's own "XR" word."""
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        gaps_tracking=[GapTrackingRow(gap_he="הכינוי SPECTRO XR CU מוזכר ללא פירוט.", cites=[9])],
+    )
+    names = {m.name for m in dossier_extract.build_variant_mentions(dossier)}
+    assert names == {"SPECTRO XR CU"}
+
+
+def test_variant_scan_covers_registered_datasheet_text_when_corpus_given() -> None:
+    corpus = _corpus_with_registry([])
+    corpus.datasheets = [{"n": 12, "text": "SPECTRO XR maritime configuration described here."}]
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    mentions = dossier_extract.build_variant_mentions(dossier, corpus)
+    assert len(mentions) == 1
+    assert mentions[0].name == "SPECTRO XR maritime"
+    assert mentions[0].cites == [12]
+
+
+def test_variant_scan_without_corpus_ignores_datasheets() -> None:
+    """Backward compatibility: every pre-existing caller that passes only ``dossier`` (no corpus)
+    keeps behaving exactly as before -- datasheet text is only scanned when explicitly given."""
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    assert dossier_extract.build_variant_mentions(dossier) == []
+
+
+# --------------------------------------------------------------------------
+# item 2: datasheet-priority key retention -- a still-null REQUIRED vocabulary key whose synonyms
+# show up in a registered datasheet's own text is found and (via one bounded re-ask) filled, without
+# any new web/network call.
+# --------------------------------------------------------------------------
+
+
+def test_find_missing_datasheet_keys_finds_required_null_key_in_registered_datasheet_text() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value="")],
+    )
+    corpus = _corpus_with_registry([])
+    corpus.datasheets = [{"n": 7, "text": 'לפי העלון, משקל המערכת הוא 51 ק"ג בתצורה הבסיסית.'}]
+    missing = dossier_extract.find_missing_datasheet_keys(dossier, corpus)
+    assert any(m["key"] == "weight" and m["n"] == 7 for m in missing)
+
+
+def test_find_missing_datasheet_keys_skips_a_key_already_filled() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="משקל", key="weight", value='51 ק"ג', cites=[1])],
+    )
+    corpus = _corpus_with_registry([])
+    corpus.datasheets = [{"n": 7, "text": 'משקל המערכת הוא 51 ק"ג.'}]
+    assert dossier_extract.find_missing_datasheet_keys(dossier, corpus) == []
+
+
+def test_apply_datasheet_key_retention_fills_null_required_key(monkeypatch: Any) -> None:
+    corpus = _corpus_with_registry([_reg(7, kind="web", url="https://x.com/ds", title='משקל 51 ק"ג.')])
+    corpus.datasheets = [{"n": 7, "text": 'לפי העלון, משקל המערכת הוא 51 ק"ג בתצורה הבסיסית.'}]
+    grounding = dossier_extract.GroundingResult(
+        dossier=ProductDossierOut(
+            identity=IdentityBlock(product_name="SPECTRO XR"),
+            specifications=[SpecRow(parameter_he="משקל", key="weight", value="")],
+        ),
+        dropped=[],
+    )
+
+    def fake_reask(missing, corpus_arg, **kwargs):
+        assert missing and missing[0]["key"] == "weight"  # no new web call -- built purely offline
+        return dossier_extract._DatasheetKeyRetentionOut(
+            specifications=[SpecRow(parameter_he="משקל", key="weight", value='51 ק"ג', cites=[7])]
+        )
+
+    monkeypatch.setattr(dossier_extract, "reask_datasheet_keys", fake_reask)
+    result = dossier_extract.apply_datasheet_key_retention(grounding, corpus, _EMPTY_PLAN)
+    row = next(r for r in result.dossier.specifications if r.key == "weight")
+    assert row.value == '51 ק"ג'
+
+
+def test_apply_datasheet_key_retention_no_op_when_no_datasheets_registered() -> None:
+    corpus = _corpus_with_registry([])
+    grounding = dossier_extract.GroundingResult(
+        dossier=ProductDossierOut(
+            identity=IdentityBlock(product_name="SPECTRO XR"),
+            specifications=[SpecRow(parameter_he="משקל", key="weight", value="")],
+        ),
+        dropped=[],
+    )
+    result = dossier_extract.apply_datasheet_key_retention(grounding, corpus, _EMPTY_PLAN)
+    assert result is grounding
