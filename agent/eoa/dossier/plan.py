@@ -24,6 +24,16 @@ import structlog
 
 from eoa.config import settings
 from eoa.dossier.corpus import CorpusResult
+from eoa.dossier.datasheet import hunt_datasheets
+from eoa.dossier.gaps import build_gap_followup_topics, extract_gaps_from_previous, gap_status
+from eoa.dossier.programs import (
+    MAX_PROGRAMME_PLATFORMS,
+    detect_customer_countries,
+    extra_langs_for_countries,
+    identify_platforms,
+    parse_programme_deals,
+    platform_deal_question_he,
+)
 from eoa.fetch.remote import fetch_remote
 from eoa.search.deep_search import Investigation, investigate
 
@@ -347,12 +357,20 @@ _NOT_RELEVANT_MARKERS_HE = (
 )
 
 
-def _mentions_product(text: str, product_name: str, aliases: list[str]) -> bool:
+def _mentions_product(
+    text: str, product_name: str, aliases: list[str], *, extra_terms: list[str] | None = None
+) -> bool:
     """A page's own read summary must actually mention the product (name or an alias, plain
     case-insensitive substring -- this is a page-relevance check, not the stricter whole-word
     corpus-item gate in ``eoa.dossier.corpus``) or it is dropped outright rather than being handed
     to the extraction model as if it were on-topic (the live French WeTransfer forum thread that
-    never mentioned SPECTRO XR at all)."""
+    never mentioned SPECTRO XR at all).
+
+    ``extra_terms`` (LESSONS-1 item 2): additional terms that ALSO count as relevance on their own
+    -- used for a programme-deal-topic's own reads, where a page about the carrier PLATFORM (e.g.
+    "Watchkeeper X"), not the product by name, is exactly the evidence being searched for (see
+    ``docs/qa/content_review/LESSONS-fable-dossier.md`` finding 2 -- the old relevance filter threw
+    away a Romania Watchkeeper X purchase page for never naming SPECTRO XR)."""
     hay = (text or "").casefold()
     if not hay.strip():
         # No summary at all to judge by -- err on the side of keeping it (a read page whose
@@ -362,7 +380,9 @@ def _mentions_product(text: str, product_name: str, aliases: list[str]) -> bool:
         return False
     if product_name and product_name.casefold() in hay:
         return True
-    return any(a and a.casefold() in hay for a in aliases)
+    if any(a and a.casefold() in hay for a in aliases):
+        return True
+    return any(t and t.casefold() in hay for t in (extra_terms or []))
 
 
 @dataclass(frozen=True)
@@ -405,6 +425,19 @@ TOPICS: tuple[Topic, ...] = (
         "בשלות ופריסה",
         "מה מצב הבשלות (TRL) של {product_name} ({vendor}), מי המפעילים הידועים, על אילו פלטפורמות "
         "הוא שולב, ומתי הייתה הפריסה המבצעית הראשונה שלו? כינויים נוספים: {aliases_he}.",
+    ),
+    Topic(
+        # LESSONS-1 item 2 (PD-datasheet, 2026-09-09): identifies the carrier platforms
+        # (eoa.dossier.programs.identify_platforms scans this topic's own finding text) that
+        # run_plan then runs a dedicated deal search for, per-platform -- see run_plan's own
+        # "programme deals" block below. Placed right after "maturity" (which already asks about
+        # platform integration in passing) and before "deals" (a general deal search benefits from
+        # already knowing the platform names, even though the programme-deal search itself is
+        # independent of this ordering).
+        "platforms_and_programmes",
+        "פלטפורמות ותוכניות",
+        "על אילו פלטפורמות/כלי טיס/כלי שיט משולב {product_name} ({vendor})? ציין שמות פלטפורמה "
+        "מדויקים (למשל דגם/גרסה, כגון Hermes 900 או Watchkeeper X). כינויים נוספים: {aliases_he}.",
     ),
     Topic(
         "deals",
@@ -545,10 +578,19 @@ def _process_topic_reads(
     topic: Topic,
     corpus: CorpusResult,
     seen_by_normalized_url: dict[str, ProgressEntry],
+    extra_relevance_terms: list[str] | None = None,
+    component_of_package: bool = False,
 ) -> list[dict[str, Any]]:
     """One investigation's ``read_sources`` -> deduped, relevance-checked, classified registry rows
     (item 2's own logic, factored out so :func:`run_plan`'s read-budget retry loop -- item C -- can
-    run it again over a follow-up ``investigate()`` call's own reads without duplicating the body)."""
+    run it again over a follow-up ``investigate()`` call's own reads without duplicating the body).
+
+    ``extra_relevance_terms``/``component_of_package`` (LESSONS-1 item 2): a programme-deal-topic's
+    own reads pass the identified platform names here -- a page about the carrier platform (e.g. a
+    Watchkeeper X purchase) is relevant evidence for the PRODUCT even when it never names the
+    product itself, and is marked ``component_of_package: True`` on its own registry row so a
+    downstream reader can tell "this source is about the deal for a platform this product rides
+    on" apart from a source that is about the product directly."""
     summaries_by_url = {s.get("url"): s for s in inv.read_summaries if s.get("url")}
     added: list[dict[str, Any]] = []
     for src in inv.read_sources:
@@ -557,12 +599,16 @@ def _process_topic_reads(
             continue
         summary_entry = summaries_by_url.get(url)
         summary_text = _read_summary_text(summary_entry)
-        if not _mentions_product(summary_text, corpus.product_name, corpus.aliases):
+        if not _mentions_product(
+            summary_text, corpus.product_name, corpus.aliases, extra_terms=extra_relevance_terms
+        ):
             log.info("dossier.source_dropped_irrelevant", topic=topic.key, url=url[:300])
             continue
         norm = normalize_url(url)
         existing = seen_by_normalized_url.get(norm)
         if existing is not None:
+            if component_of_package:
+                existing["component_of_package"] = True
             added.append(existing)
             continue
         title = (src.get("title") or "").strip() or (summary_entry or {}).get("title") or _host(url)
@@ -580,10 +626,45 @@ def _process_topic_reads(
             "reliability": reliability,
             "accessed_at": dt.datetime.now(dt.UTC).isoformat(),
         }
+        if component_of_package:
+            row["component_of_package"] = True
         corpus.registry.append(row)
         seen_by_normalized_url[norm] = row
         added.append(row)
     return added
+
+
+def _resolve_competitor_seeds(product_line: str | None) -> list[dict[str, Any]]:
+    """LESSONS-1 item 3: ``config/product_lines.yaml``'s ``competitor_products`` for this run's own
+    ``product_line`` -- ``[{"name", "vendor"}, ...]``, ``[]`` when ``product_line`` is unset or
+    unknown. Reads ``settings().product_lines`` directly (the raw parsed YAML dict every other
+    consumer of this file also reads through, ``eoa.product_lines.registry`` included) rather than
+    going through that module's own ``ProductLineDef`` (which has no ``competitor_products`` field
+    of its own -- adding one would be a change to a file this lane doesn't own)."""
+    if not product_line:
+        return []
+    rows = settings().product_lines.get("product_lines") or []
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") == product_line:
+            seeds = row.get("competitor_products") or []
+            return [
+                {"name": s.get("name"), "vendor": s.get("vendor")}
+                for s in seeds
+                if isinstance(s, dict) and s.get("name")
+            ]
+    return []
+
+
+_BRACE_RE = re.compile(r"[{}]")
+
+
+def _escape_braces(text: str) -> str:
+    """``Topic.question_he`` always runs ``question_template_he.format(...)`` -- a gap-follow-up
+    question's own text (LESSONS-1 item 4) is already the final, fully-resolved question (no
+    ``{product_name}``-style placeholders left to fill), so any literal ``{``/``}`` it happens to
+    contain (e.g. a quoted spec value) must be doubled first or ``.format()`` would raise/mangle
+    it."""
+    return _BRACE_RE.sub(lambda m: m.group(0) * 2, text)
 
 
 def run_plan(
@@ -627,13 +708,37 @@ def run_plan(
 
     ``llm_leg`` (PD-cloud-tools, 2026-09-09): forwarded verbatim into every topic's own
     ``investigate()`` call -- see that function's own docstring. ``None`` (the default) preserves
-    the exact prior dispatch for every existing caller."""
+    the exact prior dispatch for every existing caller.
+
+    LESSONS-1 (PD-datasheet, 2026-09-09) adds four more stages, all best-effort (a failure in any
+    of them is logged and never breaks the build, same discipline as every existing stage here):
+    item 1, a datasheet/brochure hunt (``eoa.dossier.datasheet.hunt_datasheets``) folded into
+    ``context_he`` before the topic loop, same placement as the must-read block above; item 2, a
+    per-identified-platform programme-deal search run right after the new ``"platforms_and_
+    programmes"`` topic (one of :data:`TOPICS`) completes, populating ``corpus.programme_deals``
+    and extending this run's own search languages (item 5) once a customer country is known; item
+    3, the "competitors" topic's own question is pointed at this run's ``product_line``'s named
+    ``competitor_products`` (``config/product_lines.yaml``); item 4, extra "gap follow-up" topics
+    (``eoa.dossier.gaps``) for every open gap the previous dossier of this product left behind,
+    appended to the topic list and run exactly like any other topic, with
+    ``corpus.gap_status`` populated once they've all run."""
     cfg = settings().dossier
     rounds = rounds_per_topic if rounds_per_topic is not None else cfg.rounds_per_topic
     mult = budget_multiplier if budget_multiplier is not None else cfg.budget_multiplier
     cap = max_topics if max_topics is not None else cfg.max_topics
     aliases_he = ", ".join(corpus.aliases) or "אין"
-    topics = TOPICS[: max(cap, 0)]
+    fixed_topics = TOPICS[: max(cap, 0)]
+
+    # LESSONS-1 item 4: gap follow-up topics, deterministic from the previous dossier of this same
+    # product_key alone (no network needed to know WHAT to ask, only to answer it) -- appended to
+    # the fixed topic list and run through the exact same loop as every other topic below.
+    gap_texts = extract_gaps_from_previous(corpus.previous)
+    gap_followups = build_gap_followup_topics(gap_texts, product_name=corpus.product_name, vendor=corpus.vendor)
+    gap_topics = tuple(
+        Topic(key=g.key, title_he=g.title_he, question_template_he=_escape_braces(g.question_he))
+        for g in gap_followups
+    )
+    topics = fixed_topics + gap_topics
 
     # PD-fix-2 item 4: seed the dedup set from every registry row that already has a url (item/
     # event/patent/tender/web -- not just "web"), so a topic re-reading a URL the corpus already
@@ -682,6 +787,79 @@ def run_plan(
     # falling back to the small hint map only when none is.
     vendor_domain = resolve_vendor_domain(corpus.vendor, corpus.registry)
 
+    # LESSONS-1 item 1: datasheet/brochure hunt -- fold the found text into the SAME context_he
+    # every topic receives, same placement discipline as the must-read block above (before the
+    # topic loop starts, so specifications/versions/performance never start "cold" of it).
+    try:
+        datasheet_results = hunt_datasheets(
+            corpus.product_name, corpus.vendor, corpus.aliases, vendor_domain=vendor_domain
+        )
+    except Exception as exc:
+        log.warning("dossier_datasheet_hunt_failed", error=str(exc)[:200])
+        datasheet_results = []
+    datasheet_blocks: list[str] = []
+    for ds in datasheet_results:
+        url = ds.get("url") or ""
+        if not url:
+            continue
+        norm = normalize_url(url)
+        existing = seen_by_normalized_url.get(norm)
+        if existing is not None:
+            n = existing["n"]
+            existing["source_kind"] = "datasheet"
+            existing["reliability"] = "primary"
+        else:
+            n = corpus.next_n
+            title = (ds.get("title") or "").strip() or _host(url)
+            row = {
+                "n": n,
+                "kind": "web",
+                "id": None,
+                "title": title,
+                "url": url,
+                "source_name": title,
+                "published_at": None,
+                "topic": "datasheet_hunt",
+                "source_kind": "datasheet",
+                "reliability": "primary",
+                "accessed_at": dt.datetime.now(dt.UTC).isoformat(),
+            }
+            corpus.registry.append(row)
+            seen_by_normalized_url[norm] = row
+        corpus.datasheets.append({**ds, "n": n})
+        excerpt = _deterministic_excerpt(ds.get("text") or "")
+        if excerpt:
+            datasheet_blocks.append(f"[{n}] (עלון/דף נתונים יצרן, נקרא מראש) {ds.get('title') or ''}\n{excerpt}")
+    if datasheet_blocks:
+        context_he = context_he + "\n\nעלוני/דפי נתונים שנמצאו (נקראו מראש):\n" + "\n".join(datasheet_blocks)
+        log.info("dossier.datasheets_found", count=len(datasheet_results))
+
+    # LESSONS-1 item 3: this run's own product_line's named competitor products -- the
+    # "competitors" topic's own question is pointed at them explicitly below.
+    competitor_seeds = _resolve_competitor_seeds(corpus.product_line)
+    corpus.competitor_seeds = competitor_seeds
+
+    # LESSONS-1 item 5: extended once a customer country is identified (from the programme-deal
+    # search below) -- every investigate() call from that point on requests these languages too, in
+    # addition to deep_search's own configured primary languages (Hebrew always included there).
+    langs_extra: list[str] = []
+
+    def _investigate(question_text: str, *, deadline_s: float) -> Investigation:
+        langs = None
+        if langs_extra:
+            base = list(settings().deep_search.langs_primary)
+            langs = base + [lg for lg in langs_extra if lg not in base]
+        return investigate(
+            question_text,
+            job_id=job_id,
+            context_he=context_he,
+            max_rounds=rounds,
+            budget_multiplier=mult,
+            deadline_s=deadline_s,
+            llm_leg=llm_leg,
+            langs=langs,
+        )
+
     for idx, topic in enumerate(topics):
         question = topic.question_he(
             product_name=corpus.product_name, vendor=corpus.vendor or "", aliases_he=aliases_he
@@ -691,19 +869,16 @@ def run_plan(
                 f"חפש תחילה באתר היצרן בלבד (site:{vendor_domain} {corpus.product_name}) לפני כל "
                 f"חיפוש כללי אחר. {question}"
             )
+        if topic.key == "competitors" and competitor_seeds:
+            names = "; ".join(
+                f"{c['name']} ({c['vendor']})" if c.get("vendor") else c["name"] for c in competitor_seeds
+            )
+            question = f"{question} בדוק במפורש מול המתחרים הידועים הבאים בשוק: {names}."
         progress[idx]["status"] = "running"
         _emit()
         started = time.monotonic()
         try:
-            inv = investigate(
-                question,
-                job_id=job_id,
-                context_he=context_he,
-                max_rounds=rounds,
-                budget_multiplier=mult,
-                deadline_s=cfg.topic_time_cap_s,
-                llm_leg=llm_leg,
-            )
+            inv = _investigate(question, deadline_s=cfg.topic_time_cap_s)
         except Exception as exc:  # a single topic must never take the whole dossier down
             elapsed = round(time.monotonic() - started, 1)
             log.warning("dossier_topic_failed", topic=topic.key, error=str(exc)[:200], seconds=elapsed)
@@ -734,15 +909,7 @@ def run_plan(
                 "ואמינים בנושא זה, כולל מקורות שטרם נקראו."
             )
             try:
-                inv = investigate(
-                    followup_question,
-                    job_id=job_id,
-                    context_he=context_he,
-                    max_rounds=rounds,
-                    budget_multiplier=mult,
-                    deadline_s=remaining,
-                    llm_leg=llm_leg,
-                )
+                inv = _investigate(followup_question, deadline_s=remaining)
             except Exception as exc:
                 log.warning(
                     "dossier_topic_followup_failed", topic=topic.key, error=str(exc)[:200], attempt=attempts
@@ -776,6 +943,92 @@ def run_plan(
             sources_found=len(source_ns),
             attempts=attempts,
         )
+
+        # LESSONS-1 item 2: right after "platforms_and_programmes" finishes, run one dedicated deal
+        # search per identified platform -- treating a page about the carrier platform as evidence
+        # about the product too (component_of_package=True, extra_relevance_terms=[platform] so it
+        # survives the relevance filter without ever naming the product itself). Also extends this
+        # run's own search languages (item 5) for every remaining topic once a customer country is
+        # known from these deals.
+        if topic.key == "platforms_and_programmes" and inv.result is not None:
+            finding_texts = [inv.result.answer_he, *inv.result.key_facts]
+            finding_texts += [it.get("title") or "" for it in corpus.items]
+            finding_texts += [ev.get("title") or ev.get("program") or "" for ev in corpus.events]
+            platforms = identify_platforms(finding_texts, limit=MAX_PROGRAMME_PLATFORMS)
+            deal_texts: list[str] = []
+            for platform in platforms:
+                platform_question = platform_deal_question_he(corpus.product_name, corpus.vendor, platform)
+                platform_topic = Topic(
+                    key=f"programme_deal::{platform}",
+                    title_he=f"עסקת תוכנית: {platform}",
+                    question_template_he=_escape_braces(platform_question),
+                )
+                try:
+                    p_inv = _investigate(platform_question, deadline_s=cfg.topic_time_cap_s)
+                except Exception as exc:
+                    log.warning(
+                        "dossier_programme_deal_search_failed", platform=platform, error=str(exc)[:200]
+                    )
+                    continue
+                p_sources = _process_topic_reads(
+                    p_inv,
+                    topic=platform_topic,
+                    corpus=corpus,
+                    seen_by_normalized_url=seen_by_normalized_url,
+                    extra_relevance_terms=[platform],
+                    component_of_package=True,
+                )
+                p_cites = [r["n"] for r in p_sources]
+                if p_inv.result is not None:
+                    deals = parse_programme_deals(
+                        platform, answer_he=p_inv.result.answer_he, key_facts=p_inv.result.key_facts, cites=p_cites
+                    )
+                    corpus.programme_deals.extend(deals)
+                    deal_texts.append(p_inv.result.answer_he)
+                    deal_texts.extend(p_inv.result.key_facts)
+                result.findings.append(
+                    TopicFinding(
+                        key=platform_topic.key,
+                        title_he=platform_topic.title_he,
+                        question_he=platform_question,
+                        investigation=p_inv,
+                        source_ns=p_sources,
+                    )
+                )
+                progress.append(
+                    {
+                        "topic": platform_topic.key,
+                        "title_he": platform_topic.title_he,
+                        "status": "done",
+                        "seconds": None,
+                        "sources_found": len(p_sources),
+                        "pages_read": [
+                            {"n": r["n"], "url": r.get("url"), "kind": r.get("source_kind")} for r in p_sources
+                        ],
+                    }
+                )
+                _emit()
+                log.info(
+                    "dossier.programme_deal_topic_done", platform=platform, sources_found=len(p_sources)
+                )
+            countries = detect_customer_countries([corpus.product_name, *deal_texts])
+            for lang in extra_langs_for_countries(countries):
+                if lang not in langs_extra:
+                    langs_extra.append(lang)
+
+    # LESSONS-1 item 4: gap status for every gap-follow-up topic that ran this round -- see
+    # eoa.dossier.gaps's own module docstring for why this only ever reports closed/open, never new.
+    if gap_followups:
+        outcomes: dict[str, tuple[str, float, list[int]]] = {}
+        for f in result.findings:
+            if f.investigation.result is not None:
+                outcomes[f.key] = (
+                    f.investigation.result.outcome,
+                    f.investigation.result.confidence,
+                    [s.get("n") for s in f.source_ns],
+                )
+        corpus.gap_status = gap_status(gap_followups, outcomes)
+
     return result
 
 

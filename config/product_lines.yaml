@@ -32,6 +32,24 @@
 #                     a program-list article) -- keeps such terms out of the unconditional
 #                     keywords_en/aliases/exemplar_systems lists (which are strong signals on their
 #                     own) without dropping them from the tagger's recall entirely.
+#   competitor_products  PD-datasheet (2026-09-09, LESSONS-1 item 3): named competitor PRODUCTS (not
+#                     just company names -- see `competitors` above, an unrelated, older field a
+#                     different consumer -- eoa.product_lines.tagging -- already depends on with a
+#                     company-name-only shape; this is deliberately a separate key rather than a
+#                     shape change to that one). Each entry is `{name, vendor}`. Consumed by
+#                     eoa.dossier.plan.run_plan: the product dossier's own "competitors" research
+#                     topic is pointed at these names explicitly (rather than hoping a general web
+#                     search surfaces them), and the resolved list for this run's own `product_line`
+#                     is exposed as `CorpusResult.competitor_seeds` for the extraction lane
+#                     (LESSONS-2) to compare the dossier's own found competitors against. 4-8 named
+#                     products per line, a real (if necessarily best-effort/not independently
+#                     re-verified) market survey -- refine as better-sourced per line.
+#
+# vendor_domains (top-level, not per-line): vendor display name -> official web domain, used by
+# eoa.dossier.datasheet/plan to resolve a competitor product's own vendor site for a
+# `site:<domain>` datasheet search, the same role eoa.dossier.plan._VENDOR_DOMAIN_HINTS already
+# plays for the dossier's OWN product's vendor -- this is that same idea, extended to competitor
+# vendors introduced only via `competitor_products` above (not already covered by that map).
 #
 # R8-tagging (2026-09-07, product-line tagging coverage round): every line's keywords_he/
 # keywords_en/aliases/exemplar_systems broadened per the measured recall gap in
@@ -84,6 +102,17 @@ product_lines:
       - "Lockheed Martin"
       - Thales
       - "L3Harris"
+    competitor_products:
+      - name: "Litening 5"
+        vendor: Rafael
+      - name: "Sniper ATP"
+        vendor: "Lockheed Martin"
+      - name: Talios
+        vendor: Thales
+      - name: ASELPOD
+        vendor: Aselsan
+      - name: ATLIS
+        vendor: "L3Harris"
     our_products: []
 
   - id: mws_eo
@@ -116,6 +145,19 @@ product_lines:
       - "BAE Systems"
       - "Northrop Grumman"
       - Hensoldt
+    competitor_products:
+      - name: "AN/AAR-57 CMWS"
+        vendor: "BAE Systems"
+      - name: "AN/AAR-47"
+        vendor: "BAE Systems"
+      - name: "MILDS F/G"
+        vendor: Hensoldt
+      - name: "PAWS-2"
+        vendor: "Elbit Systems"
+      - name: "AN/AAQ-24 Nemesis"
+        vendor: "Northrop Grumman"
+      - name: "Praetorian MWS"
+        vendor: Leonardo
     our_products: []
     # R8-tagging: "DIRCM" alone names a jam/dazzle emitter, not a warning sensor -- only a mws_eo
     # signal when it co-occurs with self-protection/missile-warning context (see the field docs
@@ -158,6 +200,17 @@ product_lines:
       - "Collins Aerospace"
       - Elbit
       - Rafael
+    competitor_products:
+      - name: "DB-110"
+        vendor: "Collins Aerospace"
+      - name: "MS-110"
+        vendor: "Collins Aerospace"
+      - name: "RecceLite NG"
+        vendor: Rafael
+      - name: "Condor 2"
+        vendor: "Airbus Defence and Space"
+      - name: "Vinten LOROP"
+        vendor: Thales
     our_products: []
 
   - id: eo_air_defense_warning
@@ -186,6 +239,17 @@ product_lines:
       - Elbit
       - Rheinmetall
       - Hensoldt
+    competitor_products:
+      - name: Skyranger
+        vendor: Rheinmetall
+      - name: MEOS
+        vendor: Hensoldt
+      - name: "Sentinel EO"
+        vendor: "Chess Dynamics"
+      - name: ARGUS
+        vendor: "Elbit Systems"
+      - name: "EOS-580"
+        vendor: Leonardo
     our_products: []
     # R8-tagging: "EO tracker" / "electro-optical tracking" are generic enough to appear inside
     # other domains (e.g. air_defense.eo_trackers seeker/fire-control text, which belongs to a
@@ -227,6 +291,21 @@ product_lines:
       - Rafael
       - "Teledyne FLIR"
       - Hensoldt
+    competitor_products:
+      - name: "WESCAM MX-15"
+        vendor: "L3Harris"
+      - name: "WESCAM MX-20"
+        vendor: "L3Harris"
+      - name: "Star SAFIRE 380X"
+        vendor: "Teledyne FLIR"
+      - name: "Euroflir 410"
+        vendor: Safran
+      - name: "Toplite EOS"
+        vendor: "Elbit Systems"
+      - name: "ARGOS-II"
+        vendor: Thales
+      - name: "MOSP 3000"
+        vendor: "Israel Aerospace Industries"
     our_products: []
 
   - id: border_long_range_eo
@@ -256,4 +335,44 @@ product_lines:
       - "Chess Dynamics"
       - Controp
       - "Teledyne FLIR"
+    # SPECTRO XR is deliberately NOT in this line's own competitor_products (below) -- it is one
+    # of THIS line's own products (see exemplar_systems above), not a competitor of itself; a
+    # SPECTRO XR dossier's own "competitors" topic must never be pointed at its own name.
+    competitor_products:
+      - name: LORROS
+        vendor: "Elbit Systems"
+      - name: "Long-View"
+        vendor: "Teledyne FLIR"
+      - name: Cerberus
+        vendor: "Chess Dynamics"
+      - name: "Ranger HDC"
+        vendor: "Teledyne FLIR"
+      - name: iSea
+        vendor: Controp
     our_products: []
+
+# vendor_domains (PD-datasheet, 2026-09-09, LESSONS-1 item 3): official web domain for every vendor
+# named above (both `competitors` and the `competitor_products` entries) -- read via
+# eoa.dossier.plan.resolve_vendor_domain-style lookup (a plain dict key/substring match, same
+# discipline as that function's own static hint map) wherever a competitor product's own vendor
+# site needs a `site:<domain>` datasheet search. Keyed by the exact `vendor` string used above.
+vendor_domains:
+  Rafael: rafael.co.il
+  "Lockheed Martin": lockheedmartin.com
+  Thales: thalesgroup.com
+  Aselsan: aselsan.com.tr
+  "L3Harris": l3harris.com
+  "BAE Systems": baesystems.com
+  Hensoldt: hensoldt.net
+  "Elbit Systems": elbitsystems.com
+  Elbit: elbitsystems.com
+  "Northrop Grumman": northropgrumman.com
+  Leonardo: leonardo.com
+  "Teledyne FLIR": flir.com
+  "Chess Dynamics": chess-dynamics.com
+  Controp: controp.com
+  "Collins Aerospace": collinsaerospace.com
+  "Airbus Defence and Space": airbus.com
+  Safran: safran-group.com
+  "Israel Aerospace Industries": iai.co.il
+  Rheinmetall: rheinmetall.com

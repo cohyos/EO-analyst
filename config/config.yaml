@@ -143,7 +143,7 @@ acquisition_watch:   # A16: מעקב רכישות ושותפויות (eoa.pipeli
 
 dossier:   # PD-backend: "סקירת שוק עמוקה למוצר" (eoa.dossier) -- on-demand, multi-round product deep dive
   rounds_per_topic: 3     # max_rounds per eoa.search.deep_search.investigate() call, one per research topic
-  max_topics: 9            # research-plan topic cap (spec/versions/performance/maturity/deals/pricing/partnerships/competitors/regulatory)
+  max_topics: 10           # research-plan topic cap (spec/versions/performance/maturity/platforms_and_programmes/deals/pricing/partnerships/competitors/regulatory)
   budget_multiplier: 1.0   # forwarded to investigate()'s own budget_multiplier for every topic call
   max_sources: 40          # citation-registry cap (existing DB records + deep-search sources combined)
   topic_time_cap_s: 600    # PD-fix item 6: hard per-topic wall-clock cap (seconds); investigate() stops with what it has

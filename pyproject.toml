@@ -31,6 +31,9 @@ dependencies = [
     "charset-normalizer>=3.3",
     "ddgs>=9.0",
     "mcp>=1.6,<2.0",
+    # PD-datasheet (2026-09-09): eoa.dossier.datasheet / eoa.search.pdf_reader -- extract text from
+    # vendor brochure/datasheet PDFs found during the dossier datasheet hunt.
+    "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]

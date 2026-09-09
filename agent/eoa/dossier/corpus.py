@@ -637,6 +637,27 @@ class CorpusResult:
     #: (eoa.dossier.vocabulary.effective_vocabulary) without report.py needing to thread a new
     #: parameter through build_dossier's own call signature.
     product_line: str | None = None
+    # -- LESSONS-1 (PD-datasheet, 2026-09-09): populated by eoa.dossier.plan.run_plan (the network-
+    # touching stage), not by build_corpus itself -- see docs/qa/content_review/LESSONS-1.md for the
+    # full interface this hands off to the LESSONS-2 (extract/report) lane.
+    #: eoa.dossier.datasheet.hunt_datasheets's own results, one per PDF/product-page actually read:
+    #: {"url", "title", "text", "pages", "kind", "n"} -- "n" is the citation registry number
+    #: run_plan assigned it (same row also lives in `registry`, kind="web", source_kind="datasheet").
+    datasheets: list[dict[str, Any]] = field(default_factory=list)
+    #: eoa.dossier.programs.parse_programme_deals's own results, one row per platform+monetary
+    #: sentence found: {"platform", "customer", "date", "amount_text", "amount_value", "currency",
+    #: "cites", "note_he", "component_of_package": True}.
+    programme_deals: list[dict[str, Any]] = field(default_factory=list)
+    #: The named competitor products (config/product_lines.yaml's `competitor_products`, resolved
+    #: for this run's own `product_line`) the "competitors" topic was explicitly pointed at:
+    #: [{"name", "vendor"}, ...] -- see eoa.dossier.plan._resolve_competitor_seeds.
+    competitor_seeds: list[dict[str, Any]] = field(default_factory=list)
+    #: eoa.dossier.gaps.gap_status's own output for every gap that got a follow-up topic this run:
+    #: [{"gap", "status": "closed"|"open", "cites"}, ...]. Never carries a "new"-status row (see
+    #: eoa.dossier.gaps's own module docstring for why that classification is out of this lane's
+    #: reach) -- the LESSONS-2 lane merges eoa.dossier.gaps.diff_new_gaps's own output in alongside
+    #: this before persisting `data.meta.gaps` for the next run.
+    gap_status: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def next_n(self) -> int:

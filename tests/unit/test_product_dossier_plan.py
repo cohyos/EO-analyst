@@ -3,6 +3,13 @@ hygiene (item 2 -- dedupe by normalized URL, title capture, kind/reliability cla
 irrelevant-page drop), per-topic progress reporting (item 5), and the per-topic time-cap wiring
 (item 6) -- ``investigate()`` itself is monkeypatched throughout (no network/LLM).
 
+PD-datasheet (2026-09-09, LESSONS-1): ``run_plan`` now also runs a datasheet hunt
+(``eoa.dossier.datasheet.hunt_datasheets``, real search + PDF download) unconditionally before the
+topic loop, same "network-touching stage defaults ON, the test FILE stubs it" convention
+``test_product_dossier_corpus.py``'s own ``_no_live_patents_ops`` autouse fixture already
+established for ``collect_patents_ops`` -- see :func:`_no_live_datasheet_hunt` below. The dedicated
+datasheet/programs/gaps tests further down override it per-test with recorded-shape fixtures.
+
 Run with: ``PYTHONPATH=agent PYTHONUTF8=1 python -m pytest tests/unit/test_product_dossier_plan.py -q``
 """
 
@@ -17,6 +24,15 @@ from eoa.dossier.corpus import CorpusResult
 from eoa.llm.schemas.analysis import InvestigationOut
 from eoa.search.deep_search import Investigation
 from eoa.search.provider import SearchHit
+
+
+@pytest.fixture(autouse=True)
+def _no_live_datasheet_hunt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PD-datasheet (2026-09-09): ``run_plan`` calls ``hunt_datasheets`` (real search + PDF
+    download) unconditionally, before the topic loop -- stubbed to a no-op here for every test in
+    this file that doesn't explicitly exercise that path, preserving this file's own "no real
+    network calls" convention. The dedicated datasheet-wiring tests below override this per-test."""
+    monkeypatch.setattr(dossier_plan, "hunt_datasheets", lambda *a, **kw: [])
 
 
 def _corpus(**kwargs: Any) -> CorpusResult:
@@ -575,3 +591,237 @@ def test_run_plan_progress_records_pages_read_with_kind(monkeypatch: pytest.Monk
     assert len(pages_read) == 1
     assert pages_read[0]["kind"] == "vendor_official"
     assert pages_read[0]["url"] == "https://www.elbitsystems.com/x"
+
+
+# --------------------------------------------------------------------------
+# LESSONS-1 item 1: datasheet hunt wiring
+# --------------------------------------------------------------------------
+
+
+def test_run_plan_folds_datasheet_hunt_into_context_and_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        captured.append(kwargs.get("context_he", ""))
+        return _inv(read_sources=[], read_summaries=[])
+
+    def fake_hunt_datasheets(product_name: str, vendor: str | None, aliases: list[str], **kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "url": "https://elbitsystems.com/brochure.pdf",
+                "title": "SPECTRO XR Brochure",
+                "text": "InSb detector 1280x1024 sensor",
+                "pages": 4,
+                "kind": "pdf",
+            }
+        ]
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    monkeypatch.setattr(dossier_plan, "hunt_datasheets", fake_hunt_datasheets)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert "InSb" in captured[0]
+    datasheet_rows = [r for r in corpus.registry if r.get("source_kind") == "datasheet"]
+    assert len(datasheet_rows) == 1
+    assert datasheet_rows[0]["reliability"] == "primary"
+    assert len(corpus.datasheets) == 1
+    assert corpus.datasheets[0]["n"] == datasheet_rows[0]["n"]
+    assert "InSb" in corpus.datasheets[0]["text"]
+
+
+def test_run_plan_datasheet_hunt_failure_does_not_break_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        return _inv(read_sources=[], read_summaries=[])
+
+    def failing_hunt(*a: Any, **kw: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    monkeypatch.setattr(dossier_plan, "hunt_datasheets", failing_hunt)
+    corpus = _corpus()
+    result = dossier_plan.run_plan(corpus, max_topics=1)
+    assert len(result.findings) == 1
+    assert corpus.datasheets == []
+
+
+def test_run_plan_datasheet_reuses_existing_registry_row_for_same_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        return _inv(read_sources=[], read_summaries=[])
+
+    def fake_hunt_datasheets(*a: Any, **kw: Any) -> list[dict[str, Any]]:
+        return [{"url": "https://elbitsystems.com/x", "title": "X", "text": "InSb 1280", "pages": 1, "kind": "page"}]
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    monkeypatch.setattr(dossier_plan, "hunt_datasheets", fake_hunt_datasheets)
+    corpus = _corpus(registry=[{"n": 1, "kind": "item", "url": "https://elbitsystems.com/x"}])
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert len(corpus.registry) == 1
+    assert corpus.registry[0]["source_kind"] == "datasheet"
+    assert corpus.datasheets[0]["n"] == 1
+
+
+# --------------------------------------------------------------------------
+# LESSONS-1 item 3: competitor seeds wiring
+# --------------------------------------------------------------------------
+
+
+def test_run_plan_points_competitors_topic_at_named_products(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        captured.append(question)
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus(product_line="targeting_pods")
+    dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    competitors_idx = [t.key for t in dossier_plan.TOPICS].index("competitors")
+    assert "Sniper ATP" in captured[competitors_idx]
+    assert any(c["name"] == "Litening 5" for c in corpus.competitor_seeds)
+
+
+def test_run_plan_no_competitor_seeds_when_product_line_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert corpus.competitor_seeds == []
+
+
+# --------------------------------------------------------------------------
+# LESSONS-1 item 2: programme-deal search wiring (+ item 5: multilingual)
+# --------------------------------------------------------------------------
+
+
+def test_run_plan_runs_programme_deal_search_for_identified_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    deal_url = "https://overtdefense.com/romania-watchkeeper-x"
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        if "פלטפורמות/כלי טיס" in question:
+            inv = Investigation(job_id=None, item_id=None, question=question)
+            inv.result = InvestigationOut(
+                outcome="found", answer_he="המוצר משולב על גבי Watchkeeper X.", confidence=0.7, sources=[]
+            )
+            return inv
+        if "עבור הפלטפורמה Watchkeeper X" in question:
+            inv = Investigation(job_id=None, item_id=None, question=question)
+            inv.read_sources = [{"url": deal_url, "title": "Romania buys Watchkeeper X"}]
+            inv.read_summaries = [
+                {
+                    "url": deal_url,
+                    "title": "Romania buys Watchkeeper X",
+                    # deliberately never names the product itself -- proves the platform's own
+                    # name (extra_relevance_terms) is what keeps this page from being dropped.
+                    "summary": "רומניה רכשה מערכות Watchkeeper X בעסקה בהיקף משמעותי.",
+                }
+            ]
+            inv.result = InvestigationOut(
+                outcome="found",
+                answer_he="רומניה חתמה על עסקה בהיקף כ-180 מיליון דולר עבור Watchkeeper X.",
+                confidence=0.7,
+                sources=[],
+            )
+            return inv
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    assert corpus.programme_deals
+    deal = corpus.programme_deals[0]
+    assert deal["platform"] == "Watchkeeper X"
+    assert deal["amount_value"] == 180_000_000
+    assert deal["component_of_package"] is True
+    matching_rows = [r for r in corpus.registry if r.get("url") == deal_url]
+    assert len(matching_rows) == 1
+    assert matching_rows[0].get("component_of_package") is True
+
+
+def test_run_plan_no_platforms_identified_means_no_programme_deals(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    assert corpus.programme_deals == []
+
+
+def test_run_plan_extends_search_languages_after_customer_country_identified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_langs: list[Any] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        seen_langs.append(kwargs.get("langs"))
+        if "פלטפורמות/כלי טיס" in question:
+            inv = Investigation(job_id=None, item_id=None, question=question)
+            inv.result = InvestigationOut(outcome="found", answer_he="Hermes 900 בשימוש.", confidence=0.7, sources=[])
+            return inv
+        if "עבור הפלטפורמה Hermes 900" in question:
+            inv = Investigation(job_id=None, item_id=None, question=question)
+            inv.result = InvestigationOut(
+                outcome="found", answer_he="רומניה רכשה Hermes 900 ב-72 מיליון דולר.", confidence=0.6, sources=[]
+            )
+            return inv
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    platforms_idx = [t.key for t in dossier_plan.TOPICS].index("platforms_and_programmes")
+    assert seen_langs[platforms_idx] is None
+    assert seen_langs[-1] is not None
+    assert "ro" in seen_langs[-1]
+
+
+# --------------------------------------------------------------------------
+# LESSONS-1 item 4: gap follow-up topics wiring
+# --------------------------------------------------------------------------
+
+
+def test_run_plan_adds_gap_followup_topics_from_previous_dossier(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        calls.append(question)
+        inv = Investigation(job_id=None, item_id=None, question=question)
+        inv.result = InvestigationOut(outcome="found", answer_he="נמצא מחיר: 2 מיליון דולר.", confidence=0.8, sources=[])
+        return inv
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    previous = {"id": 1, "data": {"risks_and_gaps_he": ["לא נמצא מחיר רשמי"]}}
+    corpus = _corpus(previous=previous)
+    result = dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    assert any("לא נמצא מחיר רשמי" in q for q in calls)
+    assert corpus.gap_status == [{"gap": "לא נמצא מחיר רשמי", "status": "closed", "cites": []}]
+    assert any(f.key == "gap_followup_1" for f in result.findings)
+
+
+def test_run_plan_gap_followup_stays_open_when_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        inv = Investigation(job_id=None, item_id=None, question=question)
+        inv.result = InvestigationOut(outcome="not_found", answer_he="לא נמצא מידע.", confidence=0.0, sources=[])
+        return inv
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    previous = {"id": 1, "data": {"risks_and_gaps_he": ["לא נמצא TRL"]}}
+    corpus = _corpus(previous=previous)
+    dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    assert corpus.gap_status == [{"gap": "לא נמצא TRL", "status": "open", "cites": []}]
+
+
+def test_run_plan_no_previous_dossier_means_no_gap_followup_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        calls.append(question)
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    assert corpus.gap_status == []
+    assert not any("gap_followup" in q for q in calls)

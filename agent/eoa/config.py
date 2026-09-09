@@ -231,7 +231,11 @@ class DossierCfg(BaseModel):
     ``eoa.dossier.corpus``)."""
 
     rounds_per_topic: int = 3
-    max_topics: int = 9
+    #: PD-datasheet (2026-09-09): bumped 9 -> 10 -- eoa.dossier.plan.TOPICS gained a 10th entry
+    #: ("platforms_and_programmes", LESSONS-1 item 2) alongside the original 9; this keeps every
+    #: existing topic still running by default instead of the new one silently being the one
+    #: TOPICS[:max_topics] truncates away.
+    max_topics: int = 10
     budget_multiplier: float = 1.0
     max_sources: int = 40
     #: PD-fix (2026-09-08, item 6): a hard wall-clock cap per topic investigation, seconds -- a
