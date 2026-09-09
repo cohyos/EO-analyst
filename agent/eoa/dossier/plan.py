@@ -24,6 +24,7 @@ import structlog
 
 from eoa.config import settings
 from eoa.dossier.corpus import CorpusResult
+from eoa.fetch.remote import fetch_remote
 from eoa.search.deep_search import Investigation, investigate
 
 log = structlog.get_logger(__name__)
@@ -120,10 +121,230 @@ def classify_web_source(url: str, vendor: str | None) -> tuple[str, str]:
     return "press", "secondary"
 
 
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item A.1/A.2): vendor-domain resolution + MUST-READ vendor pages. Run 4's
+# ``specifications`` topic read only ``instro.com`` (a reseller catalog page) and never reached
+# ``elbitsystems.com/unmanned/maritime/usv-payloads/spectro`` or ``elbitsystems.com/product/
+# spectro-maritime/`` -- the two pages that actually carry SPECTRO XR's concrete specs (7-inch
+# common spotter, up to 9 digital sensors, eye-safe LRF, quadrant detector, Jetson Xavier) --
+# because the ReAct search loop is free to wander off to whatever a general web search surfaces
+# first. Two independent, deterministic (code-only, no LLM judgment call) mitigations:
+#
+# 1. :func:`gather_must_read_urls` / :func:`run_must_read` -- every ``vendor_official`` URL already
+#    known (this run's own registry, or the previous dossier of the same ``product_key``) is fetched
+#    unconditionally, once, before the topic loop starts, and folded into every topic's own
+#    ``context_he`` -- a topic can no longer simply never encounter the vendor's own page.
+# 2. :func:`resolve_vendor_domain` + the site-restricted search preamble below -- a spec-ish topic's
+#    own question is prefixed with an explicit "search the vendor's own site first" instruction.
+# --------------------------------------------------------------------------
+
+#: Small, deliberately conservative vendor-name -> official-domain map -- used only as a fallback
+#: when no ``vendor_official`` URL is already known anywhere in the corpus (a fresh product with no
+#: prior dossier and no vendor-domain DB item yet). Keyed by the same bare (non-alnum-stripped,
+#: lower-cased) form :func:`_bare_domain` produces, so lookup is a plain substring check, same
+#: discipline as :func:`classify_web_source`'s own vendor-slug match.
+_VENDOR_DOMAIN_HINTS: dict[str, str] = {
+    "elbitsystems": "elbitsystems.com",
+    "elbit": "elbitsystems.com",
+    "rafael": "rafael.co.il",
+    "rafaeladvanceddefensesystems": "rafael.co.il",
+    "iai": "iai.co.il",
+    "israelaerospaceindustries": "iai.co.il",
+    "lockheedmartin": "lockheedmartin.com",
+    "rtx": "rtx.com",
+    "raytheon": "rtx.com",
+    "northropgrumman": "northropgrumman.com",
+    "l3harris": "l3harris.com",
+    "teledyneflir": "flir.com",
+    "flir": "flir.com",
+    "thales": "thalesgroup.com",
+    "thalesgroup": "thalesgroup.com",
+    "safran": "safran-group.com",
+    "leonardo": "leonardo.com",
+    "hensoldt": "hensoldt.net",
+    "aselsan": "aselsan.com.tr",
+    "controp": "controp.com",
+    "saab": "saab.com",
+}
+
+#: The three topics MUST-READ vendor pages exist for (section A.1) -- deliberately the first three
+#: entries of :data:`TOPICS`, so folding the must-read summaries into the shared ``context_he``
+#: before the topic loop starts already satisfies "before the specifications/versions/performance
+#: topics start" for every one of them (and is harmless context for every later topic too).
+SITE_RESTRICTED_TOPIC_KEYS: frozenset[str] = frozenset({"specifications", "versions", "performance"})
+
+#: Bound on how many vendor pages one dossier build fetches up front -- a deliberate, small cap
+#: (network + wall-clock cost, paid once per dossier build, not per topic).
+_MUST_READ_URL_CAP = 6
+
+_EXCERPT_MAX_CHARS = 1200
+
+
+def resolve_vendor_domain(vendor: str | None, registry: list[dict[str, Any]] | None = None) -> str | None:
+    """The vendor's own official web domain (bare host, e.g. ``"elbitsystems.com"``) -- preferring
+    an actual ``vendor_official``-classified URL already sitting in ``registry`` (real evidence from
+    this run or a merged-in previous dossier) over the small static hint map, which is only a
+    fallback for a product with no such URL known yet."""
+    for row in registry or []:
+        if row.get("source_kind") == "vendor_official" and row.get("url"):
+            domain = _host(row["url"])
+            if domain:
+                return domain
+    vendor_key = _bare_domain(vendor or "")
+    if not vendor_key:
+        return None
+    for name_key, domain in _VENDOR_DOMAIN_HINTS.items():
+        if name_key in vendor_key or vendor_key in name_key:
+            return domain
+    return None
+
+
+def _previous_vendor_official_urls(previous: dict[str, Any] | None) -> list[str]:
+    """``vendor_official`` URLs from the previous dossier of the same ``product_key`` (its own
+    persisted ``sources`` column, ``CorpusResult.previous`` is the raw ``product_dossiers`` row) --
+    still worth re-reading even though they were already read once, since ``run_must_read`` folds
+    their content back into *this* run's own topic context, independent of whichever registry row
+    number they carried last time."""
+    if not previous:
+        return []
+    sources = previous.get("sources") or []
+    return [
+        s.get("url")
+        for s in sources
+        if s.get("url") and (s.get("source_kind") == "vendor_official" or s.get("kind") == "vendor_official")
+    ]
+
+
+def gather_must_read_urls(corpus: CorpusResult) -> list[str]:
+    """Deterministic (no network, no LLM) -- every URL section A.1 requires reading unconditionally:
+    a ``vendor_official`` URL from the previous dossier of the same product, plus every URL already
+    in ``corpus.registry`` whose host sits on the resolved vendor domain. Deduped by normalized URL,
+    capped at :data:`_MUST_READ_URL_CAP`. Returns ``[]`` (a no-op for :func:`run_must_read`) when no
+    vendor domain can be resolved at all -- a product with neither a previous dossier nor any
+    vendor-domain DB item yet, and no hint-map entry for its vendor."""
+    domain = resolve_vendor_domain(corpus.vendor, corpus.registry)
+    urls: list[str] = []
+    seen_norm: set[str] = set()
+
+    def _add(url: str | None) -> None:
+        if not url:
+            return
+        norm = normalize_url(url)
+        if norm in seen_norm:
+            return
+        seen_norm.add(norm)
+        urls.append(url)
+
+    for url in _previous_vendor_official_urls(corpus.previous):
+        _add(url)
+    if domain:
+        for row in corpus.registry:
+            url = row.get("url")
+            if not url:
+                continue
+            host = _host(url)
+            if host == domain or host.endswith("." + domain):
+                _add(url)
+    return urls[:_MUST_READ_URL_CAP]
+
+
+def _deterministic_excerpt(text: str, *, max_chars: int = _EXCERPT_MAX_CHARS) -> str:
+    """No LLM call -- just whitespace-normalized truncation of the fetched page's own extracted
+    text. This is what makes the MUST-READ step "no LLM decision": the page is always read and its
+    own words are what land in the topic context, never a model's paraphrase of whether it bothered
+    to look."""
+    collapsed = " ".join((text or "").split())
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return collapsed[:max_chars].rstrip() + "…"
+
+
+def run_must_read(corpus: CorpusResult, urls: list[str]) -> list[str]:
+    """Fetches every ``urls`` entry (deterministic ``eoa.fetch.remote.fetch_remote`` page reader,
+    the same primitive ``eoa.search.deep_search._tool_read`` itself wraps -- no LLM in the loop
+    deciding whether to bother) and returns one formatted Hebrew context block per successfully
+    fetched page -- ready to prepend into every topic's own ``context_he``.
+
+    A URL that is already a registry row -- typically a DB item whose own ``url`` happens to sit on
+    the vendor's domain, e.g. a press item that IS the vendor's own announcement page -- is never
+    re-numbered: its fetched excerpt is folded into a context block under that row's OWN ``n``
+    instead of minting a second, duplicate registry entry for the identical page (same "reuse the
+    existing row" discipline :func:`run_plan`'s own topic-read dedup already applies). Only a URL
+    genuinely new to the registry gets a fresh row. A fetch failure is logged and skipped (never
+    fails the whole dossier build, same discipline as every other network-touching helper here)."""
+    blocks: list[str] = []
+    existing_by_norm = {normalize_url(r["url"]): r for r in corpus.registry if r.get("url")}
+    already_fetched: set[str] = set()
+    for url in urls:
+        norm = normalize_url(url)
+        if norm in already_fetched:
+            continue
+        try:
+            page = fetch_remote(url)
+        except Exception as exc:  # a must-read fetch failure must never break the dossier build
+            log.warning("dossier.must_read_fetch_failed", url=url[:300], error=str(exc)[:200])
+            continue
+        text = page.get("text") or ""
+        excerpt = _deterministic_excerpt(text)
+        if not excerpt:
+            log.info("dossier.must_read_empty_page", url=url[:300])
+            continue
+        already_fetched.add(norm)
+        existing = existing_by_norm.get(norm)
+        if existing is not None:
+            n = existing["n"]
+            title = existing.get("title") or (page.get("title") or "").strip() or _host(url)
+        else:
+            title = (page.get("title") or "").strip() or _host(url)
+            kind, reliability = classify_web_source(url, corpus.vendor)
+            row = {
+                "n": corpus.next_n,
+                "kind": "web",
+                "id": None,
+                "title": title,
+                "url": url,
+                "source_name": title,
+                "published_at": page.get("published_at"),
+                "topic": "must_read",
+                "source_kind": kind,
+                "reliability": reliability,
+                "accessed_at": dt.datetime.now(dt.UTC).isoformat(),
+            }
+            corpus.registry.append(row)
+            existing_by_norm[norm] = row
+            n = row["n"]
+        blocks.append(f"[{n}] (עמוד יצרן, נקרא מראש) {title}\n{excerpt}")
+        log.info("dossier.must_read_page", url=url[:300], n=n)
+    return blocks
+
+
 def _read_summary_text(entry: dict[str, Any] | None) -> str:
     if not entry:
         return ""
     return f"{entry.get('title') or ''}\n{entry.get('summary') or ''}"
+
+
+#: PD-fix-4 (2026-09-09, item A.3): run 4's ``partnerships``/``competitors`` topics kept two pages
+#: that were never about SPECTRO XR at all (a Romania Watchkeeper-X purchase, a generic "four
+#: aircraft technology contracts" piece) despite this very function already existing --
+#: ``_summarise_page``'s own prompt (``eoa.search.deep_search``) asks the model to write literally
+#: "לא רלוונטי" for an off-topic page, but a model that instead explains *why* a page is off-topic
+#: ("הדף עוסק בעסקת Watchkeeper X... אינו קשור ל-SPECTRO XR") ends up name-dropping the very product
+#: it is disclaiming -- the old naive substring check then reads that negated mention as a positive
+#: hit. An explicit negation/not-relevant marker anywhere in the summary now short-circuits to
+#: "does not mention the product" regardless of any other substring match in the same text.
+_NOT_RELEVANT_MARKERS_HE = (
+    "לא רלוונטי",
+    "אינו רלוונטי",
+    "אינה רלוונטית",
+    "לא קשור",
+    "אינו קשור",
+    "אינה קשורה",
+    "not relevant",
+    "no mention",
+    "not related",
+    "unrelated to",
+)
 
 
 def _mentions_product(text: str, product_name: str, aliases: list[str]) -> bool:
@@ -137,6 +358,8 @@ def _mentions_product(text: str, product_name: str, aliases: list[str]) -> bool:
         # No summary at all to judge by -- err on the side of keeping it (a read page whose
         # summariser produced nothing is a summariser gap, not evidence of irrelevance).
         return True
+    if any(marker in hay for marker in _NOT_RELEVANT_MARKERS_HE):
+        return False
     if product_name and product_name.casefold() in hay:
         return True
     return any(a and a.casefold() in hay for a in aliases)
@@ -288,9 +511,79 @@ ProgressCallback = Callable[[list[ProgressEntry]], None]
 
 def _new_progress(topics: tuple[Topic, ...]) -> list[ProgressEntry]:
     return [
-        {"topic": t.key, "title_he": t.title_he, "status": "pending", "seconds": None, "sources_found": None}
+        {
+            "topic": t.key,
+            "title_he": t.title_he,
+            "status": "pending",
+            "seconds": None,
+            "sources_found": None,
+            #: PD-fix-4 item C: pages actually read for this topic (own read + any read-budget
+            #: retry rounds), ``[{"n", "url", "kind"} ...]`` in read order -- what an operator/QA
+            #: pass inspects to confirm a topic didn't stop after one shallow read.
+            "pages_read": [],
+        }
         for t in topics
     ]
+
+
+#: PD-fix-4 item C: run 4's topics mostly stopped after 1-2 successful reads even when their own
+#: search turned up plenty of candidate hits -- the ReAct loop's own round budget (rounds_per_topic)
+#: happily "finishes" once it has *an* answer, not once it has read enough independent sources. This
+#: is the floor a topic's own reads are topped up to (read-budget, not round-budget) when the
+#: initial investigate() call under-delivers but its own search did surface candidates worth reading
+#: (``inv.hits_seen`` non-empty -- an investigation whose search genuinely found nothing has no
+#: candidates to top up with, and is left alone).
+_MIN_SUCCESSFUL_READS_PER_TOPIC = 3
+#: 1 initial call + up to this many follow-up "read more" calls, each with its own fresh search --
+#: bounded so a topic that just keeps finding low-quality/irrelevant pages doesn't loop forever.
+_MAX_TOPIC_READ_ATTEMPTS = 3
+
+
+def _process_topic_reads(
+    inv: Investigation,
+    *,
+    topic: Topic,
+    corpus: CorpusResult,
+    seen_by_normalized_url: dict[str, ProgressEntry],
+) -> list[dict[str, Any]]:
+    """One investigation's ``read_sources`` -> deduped, relevance-checked, classified registry rows
+    (item 2's own logic, factored out so :func:`run_plan`'s read-budget retry loop -- item C -- can
+    run it again over a follow-up ``investigate()`` call's own reads without duplicating the body)."""
+    summaries_by_url = {s.get("url"): s for s in inv.read_summaries if s.get("url")}
+    added: list[dict[str, Any]] = []
+    for src in inv.read_sources:
+        url = (src.get("url") or "").strip()
+        if not url:
+            continue
+        summary_entry = summaries_by_url.get(url)
+        summary_text = _read_summary_text(summary_entry)
+        if not _mentions_product(summary_text, corpus.product_name, corpus.aliases):
+            log.info("dossier.source_dropped_irrelevant", topic=topic.key, url=url[:300])
+            continue
+        norm = normalize_url(url)
+        existing = seen_by_normalized_url.get(norm)
+        if existing is not None:
+            added.append(existing)
+            continue
+        title = (src.get("title") or "").strip() or (summary_entry or {}).get("title") or _host(url)
+        kind, reliability = classify_web_source(url, corpus.vendor)
+        row = {
+            "n": corpus.next_n,
+            "kind": "web",
+            "id": None,
+            "title": title,
+            "url": url,
+            "source_name": title,
+            "published_at": None,
+            "topic": topic.key,
+            "source_kind": kind,
+            "reliability": reliability,
+            "accessed_at": dt.datetime.now(dt.UTC).isoformat(),
+        }
+        corpus.registry.append(row)
+        seen_by_normalized_url[norm] = row
+        added.append(row)
+    return added
 
 
 def run_plan(
@@ -364,10 +657,40 @@ def run_plan(
 
     result = PlanResult()
     context_he = corpus.summary_he()
+
+    # PD-fix-4 item A.1: every MUST-READ vendor page (previous-dossier vendor_official URLs + any
+    # vendor-domain URL already in the corpus) is read deterministically, once, before the topic
+    # loop starts -- its content is folded into the SAME context_he every topic receives, so
+    # specifications/versions/performance (TOPICS' own first three entries) cannot start "cold"
+    # of the vendor's own page the way run 4 did.
+    must_read_urls = gather_must_read_urls(corpus)
+    if must_read_urls:
+        must_read_blocks = run_must_read(corpus, must_read_urls)
+        # a fetch can fail (network, robots.txt, quarantine) -- only successfully read pages are
+        # already registered by run_must_read, so re-seed the dedup map from whatever it added.
+        for row in corpus.registry:
+            if row.get("url"):
+                seen_by_normalized_url.setdefault(normalize_url(row["url"]), row)
+        if must_read_blocks:
+            context_he = context_he + "\n\nעמודי יצרן שחובה להביא בחשבון (נקראו מראש):\n" + "\n".join(
+                must_read_blocks
+            )
+
+    # PD-fix-4 item A.2: a spec-ish topic's own question is prefixed with an explicit "search the
+    # vendor's own site first" instruction -- best-effort (the ReAct loop's own query planner still
+    # decides the actual search string), derived from a real vendor_official URL when one is known,
+    # falling back to the small hint map only when none is.
+    vendor_domain = resolve_vendor_domain(corpus.vendor, corpus.registry)
+
     for idx, topic in enumerate(topics):
         question = topic.question_he(
             product_name=corpus.product_name, vendor=corpus.vendor or "", aliases_he=aliases_he
         )
+        if vendor_domain and topic.key in SITE_RESTRICTED_TOPIC_KEYS:
+            question = (
+                f"חפש תחילה באתר היצרן בלבד (site:{vendor_domain} {corpus.product_name}) לפני כל "
+                f"חיפוש כללי אחר. {question}"
+            )
         progress[idx]["status"] = "running"
         _emit()
         started = time.monotonic()
@@ -388,40 +711,49 @@ def run_plan(
             _emit()
             continue
 
-        summaries_by_url = {s.get("url"): s for s in inv.read_summaries if s.get("url")}
-        source_ns: list[dict[str, Any]] = []
-        for src in inv.read_sources:
-            url = (src.get("url") or "").strip()
-            if not url:
-                continue
-            summary_entry = summaries_by_url.get(url)
-            summary_text = _read_summary_text(summary_entry)
-            if not _mentions_product(summary_text, corpus.product_name, corpus.aliases):
-                log.info("dossier.source_dropped_irrelevant", topic=topic.key, url=url[:300])
-                continue
-            norm = normalize_url(url)
-            existing = seen_by_normalized_url.get(norm)
-            if existing is not None:
-                source_ns.append(existing)
-                continue
-            title = (src.get("title") or "").strip() or (summary_entry or {}).get("title") or _host(url)
-            kind, reliability = classify_web_source(url, corpus.vendor)
-            row = {
-                "n": corpus.next_n,
-                "kind": "web",
-                "id": None,
-                "title": title,
-                "url": url,
-                "source_name": title,
-                "published_at": None,
-                "topic": topic.key,
-                "source_kind": kind,
-                "reliability": reliability,
-                "accessed_at": dt.datetime.now(dt.UTC).isoformat(),
-            }
-            corpus.registry.append(row)
-            seen_by_normalized_url[norm] = row
-            source_ns.append(row)
+        source_ns: list[dict[str, Any]] = _process_topic_reads(
+            inv, topic=topic, corpus=corpus, seen_by_normalized_url=seen_by_normalized_url
+        )
+        source_ns_by_n = {r["n"] for r in source_ns}
+
+        # PD-fix-4 item C: read budget, not round budget -- when the topic's own search surfaced
+        # candidates (`inv.hits_seen`) but under-delivered actual reads, ask again for more, each
+        # follow-up call getting whatever wall-clock remains under the topic's own time cap.
+        attempts = 1
+        while (
+            len(source_ns) < _MIN_SUCCESSFUL_READS_PER_TOPIC
+            and inv.hits_seen
+            and attempts < _MAX_TOPIC_READ_ATTEMPTS
+        ):
+            remaining = cfg.topic_time_cap_s - (time.monotonic() - started)
+            if remaining <= 5:
+                break
+            attempts += 1
+            followup_question = (
+                f"{question}\nהמשך לחפש ולקרוא לפחות {_MIN_SUCCESSFUL_READS_PER_TOPIC} מקורות שונים "
+                "ואמינים בנושא זה, כולל מקורות שטרם נקראו."
+            )
+            try:
+                inv = investigate(
+                    followup_question,
+                    job_id=job_id,
+                    context_he=context_he,
+                    max_rounds=rounds,
+                    budget_multiplier=mult,
+                    deadline_s=remaining,
+                    llm_leg=llm_leg,
+                )
+            except Exception as exc:
+                log.warning(
+                    "dossier_topic_followup_failed", topic=topic.key, error=str(exc)[:200], attempt=attempts
+                )
+                break
+            for row in _process_topic_reads(
+                inv, topic=topic, corpus=corpus, seen_by_normalized_url=seen_by_normalized_url
+            ):
+                if row["n"] not in source_ns_by_n:
+                    source_ns_by_n.add(row["n"])
+                    source_ns.append(row)
 
         elapsed = round(time.monotonic() - started, 1)
         finding = TopicFinding(
@@ -432,13 +764,23 @@ def run_plan(
             source_ns=source_ns,
         )
         result.findings.append(finding)
-        progress[idx].update(status="done", seconds=elapsed, sources_found=len(source_ns))
+        pages_read = [{"n": r["n"], "url": r.get("url"), "kind": r.get("source_kind")} for r in source_ns]
+        progress[idx].update(
+            status="done", seconds=elapsed, sources_found=len(source_ns), pages_read=pages_read
+        )
         _emit()
-        log.info("dossier.topic_done", topic=topic.key, seconds=elapsed, sources_found=len(source_ns))
+        log.info(
+            "dossier.topic_done",
+            topic=topic.key,
+            seconds=elapsed,
+            sources_found=len(source_ns),
+            attempts=attempts,
+        )
     return result
 
 
 __all__ = [
+    "SITE_RESTRICTED_TOPIC_KEYS",
     "TOPICS",
     "PlanResult",
     "ProgressCallback",
@@ -447,6 +789,9 @@ __all__ = [
     "TopicFinding",
     "build_topics",
     "classify_web_source",
+    "gather_must_read_urls",
     "normalize_url",
+    "resolve_vendor_domain",
+    "run_must_read",
     "run_plan",
 ]

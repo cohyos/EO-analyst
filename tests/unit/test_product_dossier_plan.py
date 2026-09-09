@@ -16,6 +16,7 @@ from eoa.dossier import plan as dossier_plan
 from eoa.dossier.corpus import CorpusResult
 from eoa.llm.schemas.analysis import InvestigationOut
 from eoa.search.deep_search import Investigation
+from eoa.search.provider import SearchHit
 
 
 def _corpus(**kwargs: Any) -> CorpusResult:
@@ -290,3 +291,287 @@ def test_run_plan_llm_leg_none_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     corpus = _corpus()
     dossier_plan.run_plan(corpus, max_topics=1)
     assert captured["llm_leg"] is None
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09): item A.3 -- negation-aware _mentions_product
+# --------------------------------------------------------------------------
+
+
+def test_mentions_product_true_for_plain_mention() -> None:
+    assert dossier_plan._mentions_product("מאמר על SPECTRO XR ומפרטו.", "SPECTRO XR", ["Spectro"])
+
+
+def test_mentions_product_false_for_explicit_not_relevant_marker() -> None:
+    """The exact live-bug pattern (item A.3): a summariser that explains WHY a page is off-topic
+    ends up name-dropping the very product it is disclaiming -- an explicit negation/not-relevant
+    marker anywhere in the summary must win over any incidental substring match."""
+    text = "הדף עוסק בעסקת Watchkeeper X ברומניה; אינו קשור ל-SPECTRO XR."
+    assert not dossier_plan._mentions_product(text, "SPECTRO XR", ["Spectro"])
+
+
+def test_mentions_product_false_for_literal_not_relevant() -> None:
+    assert not dossier_plan._mentions_product("לא רלוונטי", "SPECTRO XR", ["Spectro"])
+
+
+def test_mentions_product_true_when_summary_empty() -> None:
+    # No summary at all to judge by -- err on the side of keeping it (summariser gap, not evidence
+    # of irrelevance).
+    assert dossier_plan._mentions_product("", "SPECTRO XR", ["Spectro"])
+
+
+def test_run_plan_drops_page_whose_summary_only_mentions_product_via_negation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        return _inv(
+            read_sources=[{"url": "https://www.overtdefense.com/x", "title": "Watchkeeper X"}],
+            read_summaries=[
+                {
+                    "url": "https://www.overtdefense.com/x",
+                    "title": "Watchkeeper X",
+                    "summary": "עסקת Watchkeeper X ברומניה; אינו קשור ל-SPECTRO XR.",
+                }
+            ],
+        )
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert [r for r in corpus.registry if r["kind"] == "web"] == []
+
+
+# --------------------------------------------------------------------------
+# item A.1/A.2: vendor-domain resolution + MUST-READ vendor pages
+# --------------------------------------------------------------------------
+
+
+def test_resolve_vendor_domain_prefers_known_vendor_official_url() -> None:
+    registry = [
+        {"n": 1, "kind": "web", "source_kind": "vendor_official", "url": "https://www.elbitsystems.com/x"}
+    ]
+    assert dossier_plan.resolve_vendor_domain("Elbit Systems", registry) == "elbitsystems.com"
+
+
+def test_resolve_vendor_domain_falls_back_to_hint_map() -> None:
+    assert dossier_plan.resolve_vendor_domain("Elbit Systems", []) == "elbitsystems.com"
+
+
+def test_resolve_vendor_domain_none_for_unknown_vendor() -> None:
+    assert dossier_plan.resolve_vendor_domain("Some Unknown Vendor Ltd", []) is None
+
+
+def test_gather_must_read_urls_from_previous_dossier_vendor_official_source() -> None:
+    corpus = _corpus(
+        previous={
+            "sources": [
+                {"n": 1, "kind": "web", "source_kind": "vendor_official", "url": "https://elbitsystems.com/a"},
+                {"n": 2, "kind": "web", "source_kind": "press", "url": "https://defensenews.com/b"},
+            ]
+        }
+    )
+    urls = dossier_plan.gather_must_read_urls(corpus)
+    assert urls == ["https://elbitsystems.com/a"]
+
+
+def test_gather_must_read_urls_from_registry_vendor_domain_row() -> None:
+    corpus = _corpus(
+        registry=[
+            {"n": 1, "kind": "item", "url": "https://www.elbitsystems.com/press/spectro"},
+            {"n": 2, "kind": "item", "url": "https://www.israeldefense.co.il/x"},
+        ]
+    )
+    urls = dossier_plan.gather_must_read_urls(corpus)
+    assert urls == ["https://www.elbitsystems.com/press/spectro"]
+
+
+def test_gather_must_read_urls_dedupes_and_caps() -> None:
+    many = [{"n": i, "kind": "item", "url": f"https://elbitsystems.com/p{i}"} for i in range(1, 10)]
+    corpus = _corpus(registry=many)
+    urls = dossier_plan.gather_must_read_urls(corpus)
+    assert len(urls) == dossier_plan._MUST_READ_URL_CAP
+
+
+def test_gather_must_read_urls_empty_when_no_vendor_domain_known() -> None:
+    corpus = _corpus(vendor="Some Unknown Vendor Ltd", registry=[])
+    assert dossier_plan.gather_must_read_urls(corpus) == []
+
+
+def test_run_must_read_fetches_and_registers_new_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fetch_remote(url: str) -> dict[str, Any]:
+        return {
+            "text": "SPECTRO XR carries a 7-inch common spotter.",
+            "title": "SPECTRO XR",
+            "published_at": None,
+        }
+
+    monkeypatch.setattr(dossier_plan, "fetch_remote", fake_fetch_remote)
+    corpus = _corpus()
+    blocks = dossier_plan.run_must_read(corpus, ["https://elbitsystems.com/product/spectro"])
+    web_rows = [r for r in corpus.registry if r["kind"] == "web"]
+    assert len(web_rows) == 1
+    assert web_rows[0]["source_kind"] == "vendor_official"
+    assert web_rows[0]["topic"] == "must_read"
+    assert len(blocks) == 1
+    assert "7-inch common spotter" in blocks[0]
+
+
+def test_run_must_read_reuses_existing_row_n_instead_of_duplicating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A URL that is already a DB item's own url (e.g. a press item that IS the vendor's own
+    announcement page) still gets fetched -- its content wasn't sitting in the registry, just its
+    url/title were -- but folds into a context block under that item's OWN ``n``, never a second,
+    duplicate registry row for the identical page."""
+
+    def fake_fetch_remote(url: str) -> dict[str, Any]:
+        return {"text": "SPECTRO XR carries a Jetson Xavier compute module.", "title": "", "published_at": None}
+
+    monkeypatch.setattr(dossier_plan, "fetch_remote", fake_fetch_remote)
+    corpus = _corpus(
+        registry=[{"n": 1, "kind": "item", "title": "Elbit unveils SPECTRO XR", "url": "https://elbitsystems.com/x"}]
+    )
+    blocks = dossier_plan.run_must_read(corpus, ["https://elbitsystems.com/x"])
+    assert len(corpus.registry) == 1  # no second row minted
+    assert len(blocks) == 1
+    assert blocks[0].startswith("[1] ")
+    assert "Jetson Xavier" in blocks[0]
+
+
+def test_run_must_read_swallows_fetch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fetch_remote(url: str) -> dict[str, Any]:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(dossier_plan, "fetch_remote", fake_fetch_remote)
+    corpus = _corpus()
+    blocks = dossier_plan.run_must_read(corpus, ["https://elbitsystems.com/x"])
+    assert blocks == []
+    assert [r for r in corpus.registry if r["kind"] == "web"] == []
+
+
+def test_run_plan_folds_must_read_blocks_into_context_he(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        captured.append(kwargs["context_he"])
+        return _inv(read_sources=[], read_summaries=[])
+
+    def fake_fetch_remote(url: str) -> dict[str, Any]:
+        return {"text": "עמוד יצרן רשמי עם מפרט.", "title": "Spectro page", "published_at": None}
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    monkeypatch.setattr(dossier_plan, "fetch_remote", fake_fetch_remote)
+    corpus = _corpus(registry=[{"n": 1, "kind": "item", "url": "https://elbitsystems.com/x"}])
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert "עמודי יצרן שחובה להביא בחשבון" in captured[0]
+    assert "Spectro page" in captured[0]
+
+
+def test_run_plan_prefixes_site_restricted_question_for_spec_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        captured.append(question)
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()  # vendor "Elbit Systems" resolves via the hint map even with no registry
+    dossier_plan.run_plan(corpus, max_topics=1)  # topic[0] == "specifications"
+    assert captured[0].startswith("חפש תחילה באתר היצרן בלבד (site:elbitsystems.com")
+
+
+def test_run_plan_does_not_site_restrict_non_spec_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        captured.append(question)
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
+    deals_idx = [t.key for t in dossier_plan.TOPICS].index("deals")
+    assert not captured[deals_idx].startswith("חפש תחילה באתר היצרן")
+
+
+# --------------------------------------------------------------------------
+# item C: read budget (not round budget) per topic
+# --------------------------------------------------------------------------
+
+
+def test_run_plan_retries_topic_when_candidates_found_but_reads_below_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        calls["n"] += 1
+        url = f"https://instro.com/page{calls['n']}"
+        inv = _inv(
+            read_sources=[{"url": url, "title": "Instro"}],
+            read_summaries=[{"url": url, "title": "Instro", "summary": "מפרט SPECTRO XR."}],
+        )
+        # A non-empty hits_seen signals "search found candidates" -- the read-budget retry only
+        # fires when this is populated (an investigation whose search found nothing has no
+        # candidates to top up with, and must not be retried -- see the "no retry" test below).
+        inv.hits_seen = {url: SearchHit(url=url, title="Instro", snippet="", engine="test")}
+        return inv
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    result = dossier_plan.run_plan(corpus, max_topics=1)
+    # 1 successful (deduped-relevant) read per call, floor is 3 -> up to 3 attempts total.
+    assert calls["n"] == dossier_plan._MAX_TOPIC_READ_ATTEMPTS
+    assert len(result.findings[0].source_ns) == dossier_plan._MAX_TOPIC_READ_ATTEMPTS
+
+
+def test_run_plan_does_not_retry_when_search_found_no_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        calls["n"] += 1
+        # hits_seen stays empty (the dataclass default) -- search genuinely found nothing.
+        return _inv(read_sources=[], read_summaries=[])
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert calls["n"] == 1
+
+
+def test_run_plan_stops_retrying_once_floor_reached(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        calls["n"] += 1
+        # Every call returns 2 fresh reads -- floor of 3 is reached after the 2nd call (4 total),
+        # so a 3rd call must never happen.
+        urls = [f"https://instro.com/{calls['n']}-{i}" for i in range(2)]
+        inv = _inv(
+            read_sources=[{"url": u, "title": "Instro"} for u in urls],
+            read_summaries=[{"url": u, "title": "Instro", "summary": "מפרט SPECTRO XR."} for u in urls],
+        )
+        inv.hits_seen = {u: SearchHit(url=u, title="Instro", snippet="", engine="test") for u in urls}
+        return inv
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    dossier_plan.run_plan(corpus, max_topics=1)
+    assert calls["n"] == 2
+
+
+def test_run_plan_progress_records_pages_read_with_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_investigate(question: str, **kwargs: Any) -> Investigation:
+        return _inv(
+            read_sources=[{"url": "https://www.elbitsystems.com/x", "title": ""}],
+            read_summaries=[
+                {"url": "https://www.elbitsystems.com/x", "title": "X", "summary": "מפרט SPECTRO XR."}
+            ],
+        )
+
+    monkeypatch.setattr(dossier_plan, "investigate", fake_investigate)
+    corpus = _corpus()
+    snapshots: list[list[dict[str, Any]]] = []
+    dossier_plan.run_plan(corpus, max_topics=1, on_progress=lambda p: snapshots.append(p))
+    pages_read = snapshots[-1][0]["pages_read"]
+    assert len(pages_read) == 1
+    assert pages_read[0]["kind"] == "vendor_official"
+    assert pages_read[0]["url"] == "https://www.elbitsystems.com/x"

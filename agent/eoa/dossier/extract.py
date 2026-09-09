@@ -22,9 +22,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from pydantic import BaseModel, Field
 
 from eoa.dossier.corpus import CorpusResult, patent_relevance_he
-from eoa.dossier.plan import PlanResult
+from eoa.dossier.plan import PlanResult, normalize_url
 from eoa.dossier.vocabulary import (
     SpecParam,
     effective_vocabulary,
@@ -406,6 +407,71 @@ def _ground_performance_row(
     return row.model_copy(
         update={"cites": good_cites, "claimed_value": claimed, "tested_or_operational_value": tested}
     )
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item B.2): vague-value nulling. The live run-4 SPECTRO XR dossier kept rows
+# like "לייזרים מתקדמים (סוג לא צוין)" / "ייצוב ברמה גבוהה (ערך מספרי לא צוין)" -- these are the
+# model admitting it found nothing concrete, dressed up as if they were values. A value carrying one
+# of these hand-wavy markers AND no digit anywhere in it is not a fact; nulling it lets the row
+# render its own honest "לא נמצא במקורות" placeholder (``eoa.dossier.report``'s existing ``_cell()``
+# path) instead of a value that only looks informative.
+# --------------------------------------------------------------------------
+
+_VAGUE_VALUE_MARKERS_HE = ("לא צוין", "ערך מספרי לא צוין", "מתקדם", "ברמה גבוהה")
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+
+def _is_vague_value_he(value: str) -> bool:
+    """A value is "vague" -- never worth keeping -- when it carries one of
+    :data:`_VAGUE_VALUE_MARKERS_HE` and no digit at all; a real number anywhere in the same text
+    (e.g. "15 מטר, לייזר מתקדם") means the value is still concrete enough to keep as-is."""
+    if not value or not value.strip():
+        return False
+    if _HAS_DIGIT_RE.search(value):
+        return False
+    return any(marker in value for marker in _VAGUE_VALUE_MARKERS_HE)
+
+
+def _null_vague_values(
+    specifications: list[SpecRow],
+    performance: list[PerformanceRow],
+    other_specifications: list[SpecRow],
+    dropped: list[DroppedField],
+) -> tuple[list[SpecRow], list[PerformanceRow], list[SpecRow]]:
+    """Applies :func:`_is_vague_value_he` to every specifications/other_specifications ``value`` and
+    every performance ``claimed_value``/``tested_or_operational_value`` -- a hit nulls just that
+    field (and, for a specifications/other_specifications row -- which carry only one value each --
+    its now-unsupported ``cites`` too); a performance row's two values are independent (one can be
+    vague while the other stays a real, grounded number), so its own ``cites`` is left untouched."""
+    new_specs: list[SpecRow] = []
+    for row in specifications:
+        if _is_vague_value_he(row.value):
+            _drop(dropped, "specifications.value", "vague_value_no_number", row.value)
+            row = row.model_copy(update={"value": "", "cites": []})
+        new_specs.append(row)
+    new_other: list[SpecRow] = []
+    for row in other_specifications:
+        if _is_vague_value_he(row.value):
+            _drop(dropped, "other_specifications.value", "vague_value_no_number", row.value)
+            row = row.model_copy(update={"value": "", "cites": []})
+        new_other.append(row)
+    new_perf: list[PerformanceRow] = []
+    for row in performance:
+        update: dict[str, Any] = {}
+        if _is_vague_value_he(row.claimed_value):
+            _drop(dropped, "performance.claimed_value", "vague_value_no_number", row.claimed_value)
+            update["claimed_value"] = ""
+        if row.tested_or_operational_value and _is_vague_value_he(row.tested_or_operational_value):
+            _drop(
+                dropped,
+                "performance.tested_or_operational_value",
+                "vague_value_no_number",
+                row.tested_or_operational_value,
+            )
+            update["tested_or_operational_value"] = None
+        new_perf.append(row.model_copy(update=update) if update else row)
+    return new_specs, new_perf, new_other
 
 
 #: PD-fix-3 (2026-09-08, item 4): a "customer" value the model wrote as a literal placeholder
@@ -916,6 +982,9 @@ def ground_dossier(
     other_specifications = [
         _ground_spec_row(r, valid_ns, registry_text, dropped) for r in draft.other_specifications
     ]
+    specifications, performance, other_specifications = _null_vague_values(
+        specifications, performance, other_specifications, dropped
+    )
     specifications, performance, other_specifications = apply_vocabulary(
         specifications,
         performance,
@@ -987,6 +1056,333 @@ def ground_dossier(
     return GroundingResult(dossier=grounded, dropped=dropped)
 
 
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item B.1): fact-retention scan + one bounded re-ask. Run 4's cited sources
+# genuinely carried concrete specs (7-inch spotter, up to 9 digital sensors, Jetson Xavier...) that
+# never made it into ``other_specifications`` at all -- the prompt's own rule 2 ("a real fact
+# matching no vocabulary key goes to other_specifications") was simply not followed. Rather than
+# trust the model harder, this scans every CITED source's own text for a number+unit pattern and
+# checks whether that same number is already represented somewhere in the extraction's own kept
+# values; a snippet that isn't gets logged (``dossier.fact_missing``, operator-visible even if the
+# re-ask below can't recover it) and offered back to the model exactly once, scoped to only those
+# snippets -- never a second full extraction pass.
+# --------------------------------------------------------------------------
+
+#: Deliberately narrow unit/count vocabulary (Hebrew + English) -- a false negative here just means
+#: one fewer re-ask candidate (the source text itself is never discarded), a false positive just
+#: means one wasted re-ask line, so precision is not critical either way.
+_SPEC_FACT_RE = re.compile(
+    r"\d[\d.,]*[\s-]*"
+    r"(?:mm|מ\"מ|מ״מ|inch(?:es)?|אינץ['\"׳]|kg|ק\"ג|ק״ג|קג\b|°|km|ק\"מ|ק״מ|hz|הרץ|µm|מיקרומטר|"
+    r"w\b|וואט|חיישנ(?:ים|י)?|sensors?)",
+    re.IGNORECASE,
+)
+
+_FACT_SNIPPET_CONTEXT_CHARS = 40
+_FACT_RETENTION_MAX_SNIPPETS = 20
+
+
+def _spec_like_snippets(text: str) -> list[tuple[str, str]]:
+    """Every :data:`_SPEC_FACT_RE` match in ``text`` as ``(matched_fact, context_snippet)`` --
+    ``matched_fact`` is just the number+unit itself (what groundedness is checked against: a wider
+    window would mix in unrelated nearby digits, e.g. a date, into one nonsensical combined number);
+    ``context_snippet`` is a short window around it (what a human/re-ask prompt actually reads).
+    Deduped (whitespace-insensitive, case-insensitive) by ``matched_fact``."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for m in _SPEC_FACT_RE.finditer(text or ""):
+        fact = m.group(0)
+        key = re.sub(r"\s+", "", fact).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        start = max(0, m.start() - _FACT_SNIPPET_CONTEXT_CHARS)
+        end = min(len(text), m.end() + _FACT_SNIPPET_CONTEXT_CHARS)
+        snippet = text[start:end].strip()
+        if snippet:
+            out.append((fact, snippet))
+    return out
+
+
+def _all_kept_value_texts(dossier: ProductDossierOut) -> str:
+    """Every ``value``/``claimed_value``/``tested_or_operational_value`` the extraction actually
+    kept, joined into one text -- what :func:`find_missing_spec_facts` checks a source's own
+    spec-like snippet against before deciding it was never captured anywhere."""
+    parts: list[str] = [row.value for row in dossier.specifications]
+    parts.extend(row.value for row in dossier.other_specifications)
+    for row in dossier.performance:
+        parts.append(row.claimed_value)
+        if row.tested_or_operational_value:
+            parts.append(row.tested_or_operational_value)
+    return " \n ".join(p for p in parts if p)
+
+
+def find_missing_spec_facts(
+    corpus: CorpusResult, plan_result: PlanResult, dossier: ProductDossierOut
+) -> list[dict[str, Any]]:
+    """Every spec-like snippet sitting in a CITED (real registry number) source's own text whose
+    number is not grounded (:func:`_digits_grounded`, the same digit-boundary-safe check the row
+    post-checks already use) anywhere in the dossier's own kept values -- one entry per missing
+    snippet, ``{"n", "topic", "snippet"}``, in registry order, capped at
+    :data:`_FACT_RETENTION_MAX_SNIPPETS` (a re-ask prompt scoped to everything would just be a second
+    full extraction pass, exactly what this is meant not to be)."""
+    registry_text = _registry_text_by_n(corpus, plan_result)
+    represented = _all_kept_value_texts(dossier)
+    topic_by_n: dict[int, str] = {}
+    for finding in plan_result.findings:
+        for s in finding.source_ns:
+            if s.get("n") is not None:
+                topic_by_n[s["n"]] = finding.key
+    missing: list[dict[str, Any]] = []
+    for n in sorted(registry_text):
+        text = registry_text[n]
+        for fact, snippet in _spec_like_snippets(text):
+            if _digits_grounded(fact, represented):
+                continue
+            missing.append({"n": n, "topic": topic_by_n.get(n, ""), "snippet": snippet[:200]})
+            if len(missing) >= _FACT_RETENTION_MAX_SNIPPETS:
+                return missing
+    return missing
+
+
+class _SupplementalSpecsOut(BaseModel):
+    """The re-ask call's own tiny schema -- ``other_specifications`` rows only, nothing else in the
+    dossier is ever touched by this second call."""
+
+    other_specifications: list[SpecRow] = Field(default_factory=list)
+
+
+def reask_missing_facts(
+    missing: list[dict[str, Any]],
+    corpus: CorpusResult,
+    *,
+    role: str = "resident",
+    interactive: bool = False,
+    llm_leg: str | None = None,
+) -> list[SpecRow]:
+    """Exactly one follow-up structured-extraction call, scoped ONLY to ``missing``'s own snippets --
+    asks the model to route each real fact into a proper ``other_specifications`` row (a snippet
+    that turns out to be a false-positive unit match is simply omitted from the reply). Returns
+    ``[]`` (never raises) on any failure -- a failed re-ask still leaves every entry logged as
+    ``dossier.fact_missing`` by the caller, it just doesn't recover this run's own data for it."""
+    if not missing:
+        return []
+    lines = [f"[{m['n']}] {m['snippet']}" for m in missing]
+    prompt = (
+        "להלן קטעי טקסט ממקורות שכבר צוטטו בסקירה (מספר המקור בסוגריים מרובעים בתחילת כל שורה), "
+        "שכל אחד מהם מכיל מספר/יחידה שלא נכלל בשום שורת מפרט/ביצועים קיימת בסקירה:\n\n"
+        + wrap_data("\n".join(lines), "dossier_missing_facts", corpus.product_key)
+        + f"\n\nעבור כל קטע שמכיל עובדה טכנית אמיתית עבור {corpus.product_name}"
+        + (f" ({corpus.vendor})" if corpus.vendor else "")
+        + ": כתוב שורת other_specifications אחת (parameter_he מתאים לעובדה, value כפי שפורסם "
+        "במקור כולל יחידות, cites=[מספר המקור מהסוגריים המרובעים בתחילת אותה שורה]). קטע שאינו "
+        "עובדה טכנית אמיתית עבור מוצר זה (למשל התאמה מקרית של מספר לא קשור) -- פשוט השמט אותו, "
+        "אל תמציא. החזר JSON בלבד לפי הסכמה."
+    )
+    chain_override = None
+    if llm_leg:
+        from eoa.llm.chain import build_chain_with_leg_override
+
+        chain_override = build_chain_with_leg_override(role, llm_leg)
+    try:
+        out = chat_structured(
+            role,
+            _SupplementalSpecsOut,
+            [
+                {"role": "system", "content": render("system_analyst", data_guard=DATA_GUARD_SYSTEM)},
+                {"role": "user", "content": prompt},
+            ],
+            task="report",
+            interactive=interactive,
+            options={"temperature": 0.1, "num_predict": 2000},
+            chain_override=chain_override,
+        )
+    except Exception as exc:
+        log.warning("dossier.fact_missing_reask_failed", error=str(exc)[:200])
+        return []
+    return out.other_specifications
+
+
+def apply_fact_retention(
+    grounding: GroundingResult,
+    corpus: CorpusResult,
+    plan_result: PlanResult,
+    *,
+    role: str = "resident",
+    interactive: bool = False,
+    llm_leg: str | None = None,
+) -> GroundingResult:
+    """The single entry point ``build_dossier`` calls for item B.1: scans, logs every miss, re-asks
+    once, grounds whatever comes back (same :func:`_ground_spec_row` post-check every other
+    ``other_specifications`` row goes through -- a re-ask reply is not trusted any harder than the
+    original extraction), and appends only the rows that survive grounding."""
+    missing = find_missing_spec_facts(corpus, plan_result, grounding.dossier)
+    if not missing:
+        return grounding
+    for m in missing:
+        log.info("dossier.fact_missing", n=m["n"], topic=m["topic"], snippet=m["snippet"])
+    supplemental = reask_missing_facts(missing, corpus, role=role, interactive=interactive, llm_leg=llm_leg)
+    if not supplemental:
+        return grounding
+    valid_ns = _valid_ns(corpus)
+    registry_text = _registry_text_by_n(corpus, plan_result)
+    grounded_supplemental = [
+        r
+        for r in (
+            _ground_spec_row(row.model_copy(update={"key": ""}), valid_ns, registry_text, grounding.dropped)
+            for row in supplemental
+        )
+        if r.value
+    ]
+    if not grounded_supplemental:
+        return grounding
+    updated = grounding.dossier.model_copy(
+        update={"other_specifications": [*grounding.dossier.other_specifications, *grounded_supplemental]}
+    )
+    return GroundingResult(dossier=updated, dropped=grounding.dropped)
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item B.3): fact retention across runs. A rerun must never know LESS than the
+# previous run of the same ``product_key`` -- when this run's own keyed row is null but a previous
+# run already had a grounded value for that same key, and that value's own cited source is still
+# registered (reachable) in THIS run's own registry, carry it forward rather than silently losing
+# it. The previous row's citation numbers are never reused verbatim (they numbered a DIFFERENT
+# run's registry) -- each is resolved back to its own URL and re-numbered against THIS run's
+# registry; a citation whose URL isn't registered this run at all is simply not carried (never
+# "reachable/registered" per the rule), and a value with no citation left after that isn't carried
+# either (an unsourced carried fact would be worse than an honest null).
+# --------------------------------------------------------------------------
+
+CARRIED_FROM_RUN_TAG_HE = "מהסקירה הקודמת"
+
+
+def _previous_source_url_by_n(previous_row: dict[str, Any] | None) -> dict[int, str]:
+    if not previous_row:
+        return {}
+    sources = previous_row.get("sources") or []
+    return {s.get("n"): s.get("url") for s in sources if s.get("n") is not None and s.get("url")}
+
+
+def _current_n_by_normalized_url(corpus: CorpusResult) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for r in corpus.registry:
+        url, n = r.get("url"), r.get("n")
+        if url and n is not None:
+            out.setdefault(normalize_url(url), n)
+    return out
+
+
+def _remap_prev_cites(
+    prev_cites: list[int] | None, prev_url_by_n: dict[int, str], current_n_by_norm: dict[str, int]
+) -> list[int]:
+    """Every previous-run citation number that still resolves to a URL registered in THIS run's own
+    registry, re-numbered to this run's own ``n`` -- ``[]`` when none do (nothing "reachable/
+    registered" to carry the value under)."""
+    out: list[int] = []
+    for n in prev_cites or []:
+        url = prev_url_by_n.get(n)
+        if not url:
+            continue
+        cur_n = current_n_by_norm.get(normalize_url(url))
+        if cur_n is not None and cur_n not in out:
+            out.append(cur_n)
+    return out
+
+
+def _append_carried_tag(existing: str) -> str:
+    tag = f"({CARRIED_FROM_RUN_TAG_HE})"
+    if not existing:
+        return tag
+    if CARRIED_FROM_RUN_TAG_HE in existing:
+        return existing
+    return f"{existing}; {tag}"
+
+
+def carry_forward_missing_specs(
+    dossier: ProductDossierOut, corpus: CorpusResult
+) -> tuple[ProductDossierOut, int]:
+    """Fills a null-value keyed specifications/performance row from the previous dossier of the same
+    ``product_key`` (``corpus.previous``, the raw ``product_dossiers`` row) whenever that previous
+    run had a real, non-vague (:func:`_is_vague_value_he` -- a previous run predating item B.2 can
+    itself carry a hand-wavy "לא צוין"/"מתקדם"-with-no-digit value; never resurrect that through the
+    back door) value for the same ``key`` AND at least one of its own citations still resolves into
+    this run's own registry (:func:`_remap_prev_cites`). The carried value's ``variant``/
+    ``conditions_he`` gets a ``"(מהסקירה הקודמת)"`` tag -- ``eoa.dossier.spec_render`` already joins
+    that field into the rendered cell, so no renderer change is needed; ``eoa.dossier.diff`` compares
+    only ``value``/``claimed_value``/``tested_or_operational_value`` (never ``variant``/
+    ``conditions_he``), and the carried value is verbatim-identical to the previous run's own value,
+    so a carried row is never reported as a change either -- both "for free", by construction.
+    Returns ``(dossier, 0)`` unchanged when there is no previous dossier, or it carries no `sources`
+    at all to re-resolve citations against."""
+    previous_row = corpus.previous
+    if not previous_row:
+        return dossier, 0
+    prev_url_by_n = _previous_source_url_by_n(previous_row)
+    if not prev_url_by_n:
+        return dossier, 0
+    previous_data = previous_row.get("data") or {}
+    current_n_by_norm = _current_n_by_normalized_url(corpus)
+    prev_specs_by_key = {r.get("key"): r for r in (previous_data.get("specifications") or []) if r.get("key")}
+    prev_perf_by_key = {r.get("key"): r for r in (previous_data.get("performance") or []) if r.get("key")}
+
+    carried = 0
+    new_specs: list[SpecRow] = []
+    for row in dossier.specifications:
+        prev_row = prev_specs_by_key.get(row.key) if row.key and not row.value else None
+        prev_value = prev_row.get("value") if prev_row else None
+        # A previous run that predates item B.2 (vague-value nulling) can itself carry a vague
+        # value ("לא צוין"/"מתקדם" with no digit) -- never resurrect that through the back door;
+        # the point of carrying forward is real facts, not stale hand-waving.
+        if not prev_value or _is_vague_value_he(prev_value):
+            new_specs.append(row)
+            continue
+        new_cites = _remap_prev_cites(prev_row.get("cites"), prev_url_by_n, current_n_by_norm)
+        if not new_cites:
+            new_specs.append(row)
+            continue
+        carried += 1
+        new_specs.append(
+            row.model_copy(
+                update={
+                    "value": prev_value,
+                    "unit": prev_row.get("unit") or row.unit,
+                    "source_kind": prev_row.get("source_kind") or row.source_kind,
+                    "cites": new_cites,
+                    "variant": _append_carried_tag(row.variant),
+                }
+            )
+        )
+
+    new_perf: list[PerformanceRow] = []
+    for row in dossier.performance:
+        prev_row = prev_perf_by_key.get(row.key) if row.key and not row.claimed_value else None
+        prev_value = prev_row.get("claimed_value") if prev_row else None
+        if not prev_value or _is_vague_value_he(prev_value):
+            new_perf.append(row)
+            continue
+        new_cites = _remap_prev_cites(prev_row.get("cites"), prev_url_by_n, current_n_by_norm)
+        if not new_cites:
+            new_perf.append(row)
+            continue
+        carried += 1
+        new_perf.append(
+            row.model_copy(
+                update={
+                    "claimed_value": prev_value,
+                    "tested_or_operational_value": row.tested_or_operational_value
+                    or prev_row.get("tested_or_operational_value"),
+                    "cites": new_cites,
+                    "conditions_he": _append_carried_tag(row.conditions_he),
+                }
+            )
+        )
+
+    if carried == 0:
+        return dossier, 0
+    return dossier.model_copy(update={"specifications": new_specs, "performance": new_perf}), carried
+
+
 def build_dossier(
     corpus: CorpusResult,
     plan_result: PlanResult,
@@ -998,22 +1394,43 @@ def build_dossier(
     """``extract`` + ``ground`` in one call -- the shape ``eoa.dossier.report`` uses. A
     :class:`~eoa.errors.LLMOutputError` propagates (the caller decides the fallback -- an empty,
     honest "not_found" dossier -- rather than this module inventing one). ``llm_leg`` (PD-cloud-
-    tools, 2026-09-09) is forwarded verbatim to :func:`extract_dossier`."""
+    tools, 2026-09-09) is forwarded verbatim to :func:`extract_dossier`.
+
+    PD-fix-4 (2026-09-09, items B.1/B.3): after the deterministic grounding pass, the fact-retention
+    scan + one bounded re-ask (:func:`apply_fact_retention`) recovers a real cited fact the model
+    silently dropped instead of routing to ``other_specifications``; then :func:`carry_forward_
+    missing_specs` fills any keyed row still null from the previous dossier of the same
+    ``product_key``, when that previous value's own citation still resolves in this run's registry.
+    Both run unconditionally (a no-op, zero extra calls, when there is nothing to do) -- every
+    existing caller's behavior is unchanged for a first-run dossier with no previous data and no
+    missing facts."""
     try:
         draft = extract_dossier(corpus, plan_result, role=role, interactive=interactive, llm_leg=llm_leg)
     except LLMOutputError:
         raise
-    return ground_dossier(draft, corpus, plan_result)
+    grounding = ground_dossier(draft, corpus, plan_result)
+    grounding = apply_fact_retention(
+        grounding, corpus, plan_result, role=role, interactive=interactive, llm_leg=llm_leg
+    )
+    carried_dossier, _carried_count = carry_forward_missing_specs(grounding.dossier, corpus)
+    if carried_dossier is not grounding.dossier:
+        grounding = GroundingResult(dossier=carried_dossier, dropped=grounding.dropped)
+    return grounding
 
 
 __all__ = [
+    "CARRIED_FROM_RUN_TAG_HE",
     "DroppedField",
     "GroundingResult",
+    "apply_fact_retention",
     "apply_vocabulary",
     "build_data_block",
     "build_dossier",
+    "carry_forward_missing_specs",
     "extract_dossier",
+    "find_missing_spec_facts",
     "ground_dossier",
     "parse_amount_he",
+    "reask_missing_facts",
     "split_country_region",
 ]

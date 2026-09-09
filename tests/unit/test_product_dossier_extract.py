@@ -625,3 +625,344 @@ def test_end_to_end_id1_id2_id3_drift_reproduced_and_fixed() -> None:
         matches = [r for r in result.dossier.performance if r.key == "size_to_performance_ratio"]
         assert len(matches) == 1
         assert matches[0].metric_he == "יחס ביצועים-למעטפת"
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item B.2): vague-value nulling
+# --------------------------------------------------------------------------
+
+
+def test_is_vague_value_true_for_marker_with_no_digit() -> None:
+    assert dossier_extract._is_vague_value_he("לייזרים מתקדמים (סוג לא צוין)")
+    assert dossier_extract._is_vague_value_he("ייצוב ברמה גבוהה (ערך מספרי לא צוין)")
+
+
+def test_is_vague_value_false_when_a_real_number_is_present() -> None:
+    # A marker word can co-occur with a real number -- that's still a concrete value.
+    assert not dossier_extract._is_vague_value_he("ייצוב מתקדם, דיוק 0.1 מיליראד")
+
+
+def test_is_vague_value_false_for_ordinary_concrete_text() -> None:
+    assert not dossier_extract._is_vague_value_he("קוטר 7 אינץ'")
+    assert not dossier_extract._is_vague_value_he("")
+
+
+def test_null_vague_values_clears_spec_value_and_cites() -> None:
+    rows = [SpecRow(parameter_he="לייזר", value="לייזרים מתקדמים (סוג לא צוין)", cites=[1])]
+    new_specs, _perf, _other = dossier_extract._null_vague_values(rows, [], [], [])
+    assert new_specs[0].value == ""
+    assert new_specs[0].cites == []
+
+
+def test_null_vague_values_leaves_concrete_spec_untouched() -> None:
+    rows = [SpecRow(parameter_he="קוטר", value="7 אינץ'", cites=[1])]
+    new_specs, _perf, _other = dossier_extract._null_vague_values(rows, [], [], [])
+    assert new_specs[0].value == "7 אינץ'"
+    assert new_specs[0].cites == [1]
+
+
+def test_null_vague_values_handles_performance_independently() -> None:
+    rows = [
+        PerformanceRow(
+            metric_he="ייצוב",
+            claimed_value="ברמה גבוהה",
+            tested_or_operational_value="0.2 מיליראד",
+            cites=[1],
+        )
+    ]
+    _specs, new_perf, _other = dossier_extract._null_vague_values([], rows, [], [])
+    row = new_perf[0]
+    assert row.claimed_value == ""
+    assert row.tested_or_operational_value == "0.2 מיליראד"  # the concrete half survives
+    assert row.cites == [1]  # cites untouched -- still supports the surviving tested value
+
+
+def test_ground_dossier_nulls_vague_spec_value_end_to_end() -> None:
+    corpus = _corpus_with_registry([_reg(1, kind="web", title="ייצוב ברמה גבוהה, ללא ערך מספרי.")])
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="ייצוב", value="ייצוב ברמה גבוהה (ערך מספרי לא צוין)", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.specifications[0].value == ""
+
+
+# --------------------------------------------------------------------------
+# item B.1: fact-retention scan + one bounded re-ask
+# --------------------------------------------------------------------------
+
+
+def test_find_missing_spec_facts_flags_uncaptured_numeric_fact() -> None:
+    corpus = _corpus_with_registry(
+        [_reg(1, kind="web", url="https://elbitsystems.com/x", title='מד טווח לייזר: 15 ק"מ. משקל: 45 ק"ג.')]
+    )
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    missing = dossier_extract.find_missing_spec_facts(corpus, _EMPTY_PLAN, draft)
+    assert any('15 ק"מ' in m["snippet"] for m in missing)
+    assert any('45 ק"ג' in m["snippet"] for m in missing)
+    assert all(m["n"] == 1 for m in missing)
+
+
+def test_find_missing_spec_facts_skips_already_represented_fact() -> None:
+    corpus = _corpus_with_registry(
+        [_reg(1, kind="web", url="https://elbitsystems.com/x", title='משקל: 45 ק"ג.')]
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        other_specifications=[SpecRow(parameter_he="משקל", value='45 ק"ג', cites=[1])],
+    )
+    missing = dossier_extract.find_missing_spec_facts(corpus, _EMPTY_PLAN, draft)
+    assert missing == []
+
+
+def test_find_missing_spec_facts_empty_when_no_spec_like_text() -> None:
+    corpus = _corpus_with_registry([_reg(1, kind="web", url="https://x.com/a", title="מאמר כללי ללא מספרים.")])
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    assert dossier_extract.find_missing_spec_facts(corpus, _EMPTY_PLAN, draft) == []
+
+
+def test_reask_missing_facts_returns_empty_for_no_missing() -> None:
+    corpus = _corpus_with_registry([])
+    assert dossier_extract.reask_missing_facts([], corpus) == []
+
+
+def test_reask_missing_facts_calls_chat_structured_and_returns_rows(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_chat_structured(role, schema, messages, **kwargs):
+        captured["role"] = role
+        captured["schema"] = schema
+        return schema(other_specifications=[SpecRow(parameter_he='משקל', value='45 ק"ג', cites=[1])])
+
+    monkeypatch.setattr(dossier_extract, "chat_structured", fake_chat_structured)
+    corpus = _corpus_with_registry([_reg(1, kind="web", url="https://elbitsystems.com/x")])
+    missing = [{"n": 1, "topic": "specifications", "snippet": 'משקל: 45 ק"ג'}]
+    rows = dossier_extract.reask_missing_facts(missing, corpus)
+    assert len(rows) == 1
+    assert rows[0].value == '45 ק"ג'
+    assert captured["role"] == "resident"
+
+
+def test_reask_missing_facts_swallows_failure(monkeypatch: Any) -> None:
+    def failing_chat_structured(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(dossier_extract, "chat_structured", failing_chat_structured)
+    corpus = _corpus_with_registry([_reg(1, kind="web", url="https://elbitsystems.com/x")])
+    missing = [{"n": 1, "topic": "specifications", "snippet": "x"}]
+    assert dossier_extract.reask_missing_facts(missing, corpus) == []
+
+
+def test_apply_fact_retention_appends_grounded_supplemental_row(monkeypatch: Any) -> None:
+    corpus = _corpus_with_registry(
+        [_reg(1, kind="web", url="https://elbitsystems.com/x", title='משקל המערכת: 45 ק"ג.')]
+    )
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    grounding = dossier_extract.GroundingResult(dossier=draft, dropped=[])
+
+    def fake_reask(missing, corpus_arg, **kwargs):
+        return [SpecRow(parameter_he="משקל", value='45 ק"ג', cites=[1])]
+
+    monkeypatch.setattr(dossier_extract, "reask_missing_facts", fake_reask)
+    result = dossier_extract.apply_fact_retention(grounding, corpus, _EMPTY_PLAN)
+    assert len(result.dossier.other_specifications) == 1
+    assert result.dossier.other_specifications[0].value == '45 ק"ג'
+
+
+def test_apply_fact_retention_no_op_when_nothing_missing() -> None:
+    corpus = _corpus_with_registry([_reg(1, kind="web", url="https://x.com/a", title="אין מספרים כאן.")])
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    grounding = dossier_extract.GroundingResult(dossier=draft, dropped=[])
+    result = dossier_extract.apply_fact_retention(grounding, corpus, _EMPTY_PLAN)
+    assert result is grounding
+
+
+# --------------------------------------------------------------------------
+# item B.3: fact retention across runs (carry-forward)
+# --------------------------------------------------------------------------
+
+
+def _previous_row(*, sources: list[dict[str, Any]], data: dict[str, Any]) -> dict[str, Any]:
+    return {"id": 3, "sources": sources, "data": data}
+
+
+def test_carry_forward_fills_null_spec_when_source_still_registered() -> None:
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://elbitsystems.com/x")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 3, "url": "https://elbitsystems.com/x"}],
+        data={"specifications": [{"key": "detector_type", "value": "HD", "cites": [3]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="סוג גלאי", key="detector_type", value="")],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 1
+    row = new_dossier.specifications[0]
+    assert row.value == "HD"
+    assert row.cites == [5]  # remapped to THIS run's own registry number for the same url
+    assert dossier_extract.CARRIED_FROM_RUN_TAG_HE in row.variant
+
+
+def test_carry_forward_skips_when_source_not_registered_this_run() -> None:
+    corpus = _corpus_with_registry([])  # the previous source's url is nowhere in this run's registry
+    corpus.previous = _previous_row(
+        sources=[{"n": 3, "url": "https://elbitsystems.com/gone"}],
+        data={"specifications": [{"key": "detector_type", "value": "HD", "cites": [3]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="סוג גלאי", key="detector_type", value="")],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 0
+    assert new_dossier.specifications[0].value == ""
+
+
+def test_carry_forward_does_not_overwrite_existing_value() -> None:
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://elbitsystems.com/x")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 3, "url": "https://elbitsystems.com/x"}],
+        data={"specifications": [{"key": "detector_type", "value": "OLD-VALUE", "cites": [3]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="סוג גלאי", key="detector_type", value="NEW-VALUE", cites=[5])],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 0
+    assert new_dossier.specifications[0].value == "NEW-VALUE"
+
+
+def test_carry_forward_no_op_with_no_previous_dossier() -> None:
+    corpus = _corpus_with_registry([])
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="סוג גלאי", key="detector_type", value="")],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 0
+    assert new_dossier is dossier
+
+
+def test_carry_forward_performance_tags_conditions_he() -> None:
+    corpus = _corpus_with_registry([_reg(2, kind="web", url="https://elbitsystems.com/perf")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 9, "url": "https://elbitsystems.com/perf"}],
+        data={"performance": [{"key": "detection_range", "claimed_value": "20 ק\"מ", "cites": [9]}]},
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        performance=[PerformanceRow(metric_he="טווח זיהוי", key="detection_range", claimed_value="")],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 1
+    row = new_dossier.performance[0]
+    assert row.claimed_value == '20 ק"מ'
+    assert row.cites == [2]
+    assert dossier_extract.CARRIED_FROM_RUN_TAG_HE in row.conditions_he
+
+
+def test_carry_forward_never_resurrects_a_vague_previous_value() -> None:
+    """Live finding (dossier run 5, 2026-09-09): a previous run predating item B.2 (vague-value
+    nulling) can itself carry a hand-wavy "לא צוין"-with-no-digit value -- carry-forward must never
+    resurrect that through the back door just because the current run's own value was (correctly)
+    nulled by B.2."""
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://elbitsystems.com/x")])
+    corpus.previous = _previous_row(
+        sources=[{"n": 3, "url": "https://elbitsystems.com/x"}],
+        data={
+            "specifications": [
+                {"key": "laser_designator_illuminator", "value": "לייזרים מתקדמים (סוג לא צוין)", "cites": [3]}
+            ],
+            "performance": [
+                {"key": "line_of_sight_stabilization", "claimed_value": "ברמה גבוהה (ערך מספרי לא צוין)", "cites": [3]}
+            ],
+        },
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="מצביע לייזר", key="laser_designator_illuminator", value="")],
+        performance=[
+            PerformanceRow(metric_he="ייצוב", key="line_of_sight_stabilization", claimed_value="")
+        ],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 0
+    assert new_dossier.specifications[0].value == ""
+    assert new_dossier.performance[0].claimed_value == ""
+
+
+def test_carry_forward_does_not_break_diff_no_change_reported() -> None:
+    """The carried value is verbatim-identical to the previous run's own value -- eoa.dossier.diff
+    must not report it as a change (compares only value/claimed_value, never variant/conditions_he,
+    so this is true "for free" -- this test is the regression guard for that claim)."""
+    from eoa.dossier import diff as dossier_diff
+
+    corpus = _corpus_with_registry([_reg(5, kind="web", url="https://elbitsystems.com/x")])
+    previous_data = {"specifications": [{"key": "detector_type", "value": "HD", "cites": [3]}]}
+    corpus.previous = _previous_row(
+        sources=[{"n": 3, "url": "https://elbitsystems.com/x"}], data=previous_data
+    )
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="סוג גלאי", key="detector_type", value="")],
+    )
+    new_dossier, carried = dossier_extract.carry_forward_missing_specs(dossier, corpus)
+    assert carried == 1
+    sentences = dossier_diff.compute_diff(previous_data, new_dossier)
+    assert sentences == []
+
+
+# --------------------------------------------------------------------------
+# build_dossier wiring: both new steps (B.1 fact retention, B.3 carry-forward) run in order after
+# ground_dossier, end to end -- extract_dossier itself is the only mocked call (no network/LLM).
+# --------------------------------------------------------------------------
+
+
+def test_build_dossier_wires_fact_retention_and_carry_forward(monkeypatch: Any) -> None:
+    corpus = _corpus_with_registry(
+        [
+            _reg(1, kind="web", url="https://elbitsystems.com/spec", title='טווח זיהוי: 12 ק"מ.'),
+            _reg(2, kind="web", url="https://elbitsystems.com/carried"),
+        ]
+    )
+    corpus.previous = _previous_row(
+        sources=[{"n": 9, "url": "https://elbitsystems.com/carried"}],
+        data={"specifications": [{"key": "detector_type", "value": "HD sensor", "cites": [9]}]},
+    )
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        specifications=[SpecRow(parameter_he="סוג גלאי", key="detector_type", value="")],
+    )
+
+    monkeypatch.setattr(dossier_extract, "extract_dossier", lambda *a, **k: draft)
+
+    def fake_reask(missing, corpus_arg, **kwargs):
+        assert missing  # the 12 ק"מ fact from registry row 1 must have been detected
+        return [SpecRow(parameter_he="טווח זיהוי", value='12 ק"מ', cites=[1])]
+
+    monkeypatch.setattr(dossier_extract, "reask_missing_facts", fake_reask)
+
+    result = dossier_extract.build_dossier(corpus, _EMPTY_PLAN, llm_leg="codex:gpt-6-astra")
+
+    # B.1: the re-asked fact landed in other_specifications.
+    assert any(r.value == '12 ק"מ' for r in result.dossier.other_specifications)
+    # B.3: the previous run's detector_type value was carried forward, remapped to n=2, tagged.
+    carried_row = next(r for r in result.dossier.specifications if r.key == "detector_type")
+    assert carried_row.value == "HD sensor"
+    assert carried_row.cites == [2]
+    assert dossier_extract.CARRIED_FROM_RUN_TAG_HE in carried_row.variant
+
+
+def test_build_dossier_no_op_for_first_run_with_no_previous_and_no_missing(monkeypatch: Any) -> None:
+    """Every existing caller's behavior is unchanged for a plain first-run dossier -- both new steps
+    are zero-cost no-ops when there is nothing to retain or carry forward."""
+    corpus = _corpus_with_registry([_reg(1, kind="web", url="https://x.com/a", title="אין מספרים.")])
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    monkeypatch.setattr(dossier_extract, "extract_dossier", lambda *a, **k: draft)
+    result = dossier_extract.build_dossier(corpus, _EMPTY_PLAN)
+    assert result.dossier.other_specifications == []
+    # apply_vocabulary's own required-param backfill (pre-existing, unrelated behavior) may still
+    # add empty placeholder rows -- what matters here is that neither new step invented a value.
+    assert all(r.value == "" and r.cites == [] for r in result.dossier.specifications)
