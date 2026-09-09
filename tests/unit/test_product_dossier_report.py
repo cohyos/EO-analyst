@@ -137,23 +137,34 @@ def test_build_topics_no_vendor_still_valid() -> None:
 #: PD-vocab-extract (2026-09-09): "פרמטרים נוספים" (the other_specifications overflow appendix,
 #: docs/PLAN_SPEC_VOCABULARY.md section 3.3 item 3) now always renders right after "מפרט" -- see
 #: eoa.dossier.spec_render/eoa.dossier.report._ordered_report_entries.
+#: LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md): "פלטפורמות" (item 7),
+#: "ציר זמן" (item 1), the two-entry "אומדן תמחור אנליטי" (item 2), "ניתוח ביקורתי של טענות
+#: היצרן" (item 3), "מעקב פערים" (item 5), "מקורות מקובצים"/"מתודולוגיה" (item 6) all added.
 _EXPECTED_ORDER_HE = [
     "זיהוי המוצר",
     "מפרט",
     "פרמטרים נוספים",
     "גרסאות",
+    "פלטפורמות",
     "ביצועים (מוצהר מול נמדד)",
     "בשלות ופריסה",
+    "ציר זמן",
     "עסקאות",
     "מחירים",
+    "אומדן תמחור אנליטי (ביטחון נמוך)",
+    "עוגני שוק לאומדן",
     "שותפויות",
     "מתחרים",
+    "ניתוח ביקורתי של טענות היצרן",
     "פטנטים",
     "מכרזים ותחזיות",
     "רגולציה וייצוא",
     "פערים ואי-ודאויות",
+    "מעקב פערים",
     "משמעות עסקית",
     "מה השתנה",
+    "מקורות מקובצים",
+    "מתודולוגיה",
 ]
 
 

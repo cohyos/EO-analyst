@@ -29,9 +29,9 @@ from eoa.dossier.corpus import CorpusResult, build_corpus
 from eoa.dossier.diff import compute_diff
 from eoa.dossier.extract import DroppedField, build_dossier
 from eoa.dossier.plan import PlanResult, run_plan
-from eoa.dossier.spec_render import spec_and_performance_entries
+from eoa.dossier.spec_render import CONFIDENCE_LABEL_HE, spec_and_performance_entries
 from eoa.errors import LLMOutputError
-from eoa.llm.schemas.product_dossier import DealRow, ProductDossierOut
+from eoa.llm.schemas.product_dossier import DealRow, GapTrackingRow, ProductDossierOut
 from eoa.report.docx_builder import (
     _EVENT_KIND_LABELS_HE,
     build_docx,
@@ -235,30 +235,48 @@ def _what_changed_entry(dossier: ProductDossierOut) -> dict[str, Any]:
     return _sentence_list_entry(title, dossier.what_changed_he)
 
 
-def _ordered_report_entries(dossier: ProductDossierOut) -> list[dict[str, Any]]:
+def _ordered_report_entries(
+    dossier: ProductDossierOut,
+    corpus: CorpusResult | None = None,
+    *,
+    progress: list[dict[str, Any]] | None = None,
+    llm_leg: str | None = None,
+) -> list[dict[str, Any]]:
+    """``corpus``/``progress``/``llm_leg`` (LESSONS-2, 2026-09-09) are optional -- every existing
+    caller passing only ``dossier`` keeps working: the grouped-sources and methodology appendices
+    render their own honest placeholder without a ``corpus`` to draw on (see
+    :func:`_grouped_sources_table`/:func:`_methodology_entry`)."""
     #: PD-vocab-extract (2026-09-09): the ONE integration call into eoa.dossier.spec_render -- see
     #: that module's own docstring for the grouped-by-vocabulary rendering it replaces
     #: (specifications/performance) and adds (other_specifications, spliced in right after
     #: specifications, both spec-shaped sections read together).
     spec_entry, performance_entry, other_specifications_entry = spec_and_performance_entries(dossier)
-    return [
+    entries = [
         _identity_entry(dossier),
         spec_entry,
         other_specifications_entry,
         _variants_table(dossier),
+        _platforms_table(dossier),
         performance_entry,
         _maturity_entry(dossier),
+        _timeline_table(dossier),
         _deals_table(dossier),
         _pricing_table(dossier),
+        *_pricing_estimate_entries(dossier),
         _partnerships_table(dossier),
         _competitors_table(dossier),
+        _claims_review_table(dossier),
         _patents_table(dossier),
         _tenders_table(dossier),
         _regulatory_entry(dossier),
         _sentence_list_entry("פערים ואי-ודאויות", dossier.risks_and_gaps_he),
+        _gaps_tracking_table(dossier),
         _sentence_list_entry("משמעות עסקית", dossier.bd_implications_he),
         _what_changed_entry(dossier),
+        _grouped_sources_table(corpus),
+        _methodology_entry(corpus, progress, llm_leg),
     ]
+    return entries
 
 
 #: PD-vocab-extract (2026-09-09): backward-compatible aliases -- eoa.dossier.spec_render.
@@ -273,21 +291,36 @@ def _performance_table(dossier: ProductDossierOut) -> dict[str, Any]:
     return spec_and_performance_entries(dossier)[1]
 
 
+#: LESSONS-2 item 7: "פלטפורמות" moved out of the variants table into its own dedicated table
+#: (:func:`_platforms_table`) -- freeing a column slot within the report's <= 6-column limit for
+#: the item's own "evidence + confidence columns" requirement.
 def _variants_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.variants_and_versions:
         return {"title_he": "גרסאות", "body_he": PLACEHOLDER_HE}
-    headers = ["גרסה/דגם", "שנה", "שינויים", "פלטפורמות", "מקור"]
+    headers = ["גרסה/דגם", "שנה", "שינויים", "עדות", "ביטחון", "מקור"]
     rows = [
         [
             r.name,
             _cell(r.year),
-            _cell(r.changes_he)[:200],
-            ", ".join(r.platforms) or "—",
+            _cell(r.changes_he)[:150],
+            _cell(r.evidence_he)[:150],
+            CONFIDENCE_LABEL_HE.get(r.confidence, r.confidence),
             _cite_cell(r.cites),
         ]
         for r in dossier.variants_and_versions
     ]
     return {"title_he": "גרסאות", "headers": headers, "rows": rows}
+
+
+def _platforms_table(dossier: ProductDossierOut) -> dict[str, Any]:
+    if not dossier.platforms:
+        return {"title_he": "פלטפורמות", "body_he": PLACEHOLDER_HE}
+    headers = ["פלטפורמה", "תחום", "עדות לשילוב", "מקור"]
+    rows = [
+        [p.platform, _cell(p.domain), _cell(p.integration_evidence_he)[:200], _cite_cell(p.cites)]
+        for p in dossier.platforms
+    ]
+    return {"title_he": "פלטפורמות", "headers": headers, "rows": rows}
 
 
 #: PD-fix-2 item 3: a `date`/`published_at` value can carry a time-of-day and timezone offset
@@ -343,6 +376,13 @@ def _deal_amount_cell(r: DealRow) -> str:
     return r.amount
 
 
+#: LESSONS-2 item 4: the deals table is already at the 6-column cap, so confidence is merged into
+#: the trailing citations cell rather than added as a 7th column.
+def _deal_cite_cell_with_confidence(r: DealRow) -> str:
+    base = _cite_cell(r.cites)
+    return f"{base} | ביטחון: {CONFIDENCE_LABEL_HE.get(r.confidence_level, r.confidence_level)}"
+
+
 def _deals_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.deals:
         return {"title_he": "עסקאות", "body_he": PLACEHOLDER_HE}
@@ -356,7 +396,7 @@ def _deals_table(dossier: ProductDossierOut) -> dict[str, Any]:
             _cell(r.country or r.region_he),
             _deal_kind_label(r.kind),
             _deal_amount_cell(r),
-            _cite_cell(r.cites),
+            _deal_cite_cell_with_confidence(r),
         ]
         for r in dossier.deals
     ]
@@ -377,17 +417,26 @@ def _pricing_table(dossier: ProductDossierOut) -> dict[str, Any]:
 def _partnerships_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.partnerships:
         return {"title_he": "שותפויות", "body_he": PLACEHOLDER_HE}
-    headers = ["שותף", "תפקיד", "מאז", "מקור"]
-    rows = [[r.partner, r.role_he, _cell(r.since), _cite_cell(r.cites)] for r in dossier.partnerships]
+    headers = ["שותף", "תפקיד", "מאז", "ביטחון", "מקור"]
+    rows = [
+        [r.partner, r.role_he, _cell(r.since), CONFIDENCE_LABEL_HE.get(r.confidence, r.confidence), _cite_cell(r.cites)]
+        for r in dossier.partnerships
+    ]
     return {"title_he": "שותפויות", "headers": headers, "rows": rows}
 
 
 def _competitors_table(dossier: ProductDossierOut) -> dict[str, Any]:
     if not dossier.competitors:
         return {"title_he": "מתחרים", "body_he": PLACEHOLDER_HE}
-    headers = ["מוצר מתחרה", "יצרן", "השוואה", "מקור"]
+    headers = ["מוצר מתחרה", "יצרן", "השוואה", "ביטחון", "מקור"]
     rows = [
-        [r.product, _cell(r.vendor), _cell(r.comparison_he)[:200], _cite_cell(r.cites)]
+        [
+            r.product,
+            _cell(r.vendor),
+            _cell(r.comparison_he)[:200],
+            CONFIDENCE_LABEL_HE.get(r.confidence, r.confidence),
+            _cite_cell(r.cites),
+        ]
         for r in dossier.competitors
     ]
     return {"title_he": "מתחרים", "headers": headers, "rows": rows}
@@ -422,6 +471,290 @@ def _tenders_table(dossier: ProductDossierOut) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md): items 1/2/3/5 -- the new
+# sections' table/prose builders. Every one follows the exact same "always render, placeholder when
+# empty" convention as every table above.
+# --------------------------------------------------------------------------
+
+_TIMELINE_KIND_LABEL_HE = {
+    "launch": "השקה",
+    "contract": "עסקה",
+    "integration": "שילוב",
+    "exhibition": "תערוכה",
+    "variant": "גרסה",
+    "milestone": "אבן דרך",
+}
+
+
+def _timeline_table(dossier: ProductDossierOut) -> dict[str, Any]:
+    if not dossier.timeline:
+        return {"title_he": "ציר זמן", "body_he": PLACEHOLDER_HE}
+    headers = ["תאריך", "אירוע", "סוג", "מקור"]
+    rows = [
+        [
+            _cell(r.date),
+            r.event_he,
+            _TIMELINE_KIND_LABEL_HE.get(r.kind, r.kind),
+            _cite_cell(r.cites),
+        ]
+        for r in dossier.timeline
+    ]
+    return {"title_he": "ציר זמן", "headers": headers, "rows": rows}
+
+
+#: LESSONS-2 item 2: the mandatory disclaimer -- rendered verbatim, every time the estimate block
+#: is present, never paraphrased/omitted.
+PRICING_ESTIMATE_DISCLAIMER_HE = "אומדן אנליטי, לא נתון ממקור"
+
+
+def _pricing_estimate_entries(dossier: ProductDossierOut) -> list[dict[str, Any]]:
+    """ALWAYS exactly two entries -- a prose block (method/assumptions/range/disclaimer) and a
+    market-anchors table -- so the report's own section order/count never varies with whether the
+    gate in ``eoa.dossier.extract`` let ``pricing_estimate`` through (both entries fall back to the
+    same placeholder ``eoa.dossier.report.PLACEHOLDER_HE`` renders everywhere else when it didn't)."""
+    est = dossier.pricing_estimate
+    if est is None:
+        return [
+            {"title_he": "אומדן תמחור אנליטי (ביטחון נמוך)", "body_he": PLACEHOLDER_HE},
+            {"title_he": "עוגני שוק לאומדן", "body_he": PLACEHOLDER_HE},
+        ]
+    lines = [f"שיטה: {_cell(est.method_he)}"]
+    if est.assumptions:
+        for a in est.assumptions:
+            suffix = _cite_suffix(a.cites)
+            lines.append(f"הנחה: {a.text_he} {suffix}".rstrip())
+    if est.range_low is not None or est.range_high is not None:
+        low = f"{est.range_low:,.0f}" if est.range_low is not None else "—"
+        high = f"{est.range_high:,.0f}" if est.range_high is not None else "—"
+        currency = f" {est.currency}" if est.currency else ""
+        basis = f" ({est.basis_he})" if est.basis_he else ""
+        lines.append(f"טווח אומדן: {low}–{high}{currency}{basis}.")
+    lines.append(f"ביטחון: נמוך. {PRICING_ESTIMATE_DISCLAIMER_HE}.")
+    prose_entry = {"title_he": "אומדן תמחור אנליטי (ביטחון נמוך)", "body_he": "\n".join(lines)}
+    if not est.market_anchors:
+        anchors_entry = {"title_he": "עוגני שוק לאומדן", "body_he": PLACEHOLDER_HE}
+    else:
+        headers = ["מוצר להשוואה", "טווח מחיר", "מקור"]
+        rows = [[a.product_he, a.price_range_he, _cite_cell(a.cites)] for a in est.market_anchors]
+        anchors_entry = {"title_he": "עוגני שוק לאומדן", "headers": headers, "rows": rows}
+    return [prose_entry, anchors_entry]
+
+
+_CLAIM_VERDICT_LABEL_HE = {"plausible": "סביר", "unverified": "לא מאומת", "contradicted": "סותר מקורות"}
+
+
+def _claims_review_table(dossier: ProductDossierOut) -> dict[str, Any]:
+    if not dossier.claims_review:
+        return {"title_he": "ניתוח ביקורתי של טענות היצרן", "body_he": PLACEHOLDER_HE}
+    headers = ["טענה", "בסיס", "מה יאמת", "השוואתיות", "מסקנה", "מקור"]
+    rows = [
+        [
+            r.claim_he,
+            _cell(r.basis_he)[:150],
+            _cell(r.verifiability_he)[:150],
+            _cell(r.comparability_he)[:150],
+            _CLAIM_VERDICT_LABEL_HE.get(r.verdict, r.verdict),
+            _cite_cell(r.cites),
+        ]
+        for r in dossier.claims_review
+    ]
+    return {"title_he": "ניתוח ביקורתי של טענות היצרן", "headers": headers, "rows": rows}
+
+
+_GAP_STATUS_LABEL_HE = {"closed": "נסגר", "open": "פתוח", "new": "חדש"}
+
+
+def _previous_gap_texts(corpus: CorpusResult) -> list[str]:
+    """The previous dossier's own open-gap texts -- ``data.meta.gaps`` (once this module has
+    persisted it, see :func:`_persist`) union ``data.risks_and_gaps_he``, the same two sources
+    ``eoa.dossier.gaps.extract_gaps_from_previous`` itself reads (kept independent here rather than
+    imported, since that function also reads a THIRD source -- unfilled required specs -- which is
+    a "what to research next" concern, not a "what counts as a previously-known gap" one)."""
+    previous = corpus.previous
+    if not previous:
+        return []
+    data = previous.get("data") or {}
+    texts: list[str] = []
+    meta = data.get("meta") or {}
+    for entry in meta.get("gaps") or []:
+        if isinstance(entry, dict) and entry.get("gap"):
+            texts.append(str(entry["gap"]))
+    for s in data.get("risks_and_gaps_he") or []:
+        if isinstance(s, dict) and s.get("text_he"):
+            texts.append(str(s["text_he"]))
+    return texts
+
+
+def _build_gaps_tracking_raw(corpus: CorpusResult, dossier: ProductDossierOut) -> list[dict[str, Any]]:
+    """LESSONS-2 item 5: the merged, persistence-shaped gap list -- ``CorpusResult.gap_status``'s
+    own closed/open rows (this run's gap-followup topics, ``eoa.dossier.gaps.gap_status``, landed by
+    the LESSONS-1 lane and read here via ``getattr`` so this stays a no-op, not a crash, against an
+    older corpus build) UNION ``eoa.dossier.gaps.diff_new_gaps`` (a gap in this run's OWN
+    ``risks_and_gaps_he`` that wasn't already known from the previous run) -- exactly the merge that
+    module's own docstring asks the LESSONS-2 lane to perform. Every row is ``{"gap", "status",
+    "cites"}`` -- the same shape :func:`_persist` writes verbatim into ``data.meta.gaps`` for the
+    NEXT run's own ``eoa.dossier.gaps.extract_gaps_from_previous`` to read."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for g in getattr(corpus, "gap_status", None) or []:
+        gap = str(g.get("gap") or "").strip() if isinstance(g, dict) else str(getattr(g, "gap", "") or "").strip()
+        if not gap or gap in seen:
+            continue
+        status = (g.get("status") if isinstance(g, dict) else getattr(g, "status", "open")) or "open"
+        cites = (g.get("cites") if isinstance(g, dict) else getattr(g, "cites", None)) or []
+        rows.append({"gap": gap, "status": status if status in ("closed", "open") else "open", "cites": list(cites)})
+        seen.add(gap)
+    try:
+        from eoa.dossier.gaps import diff_new_gaps
+
+        previous_texts = _previous_gap_texts(corpus)
+        current_texts = [s.text_he for s in dossier.risks_and_gaps_he if s.text_he]
+        for entry in diff_new_gaps(previous_texts, current_texts):
+            gap = str(entry.get("gap") or "").strip()
+            if not gap or gap in seen:
+                continue
+            rows.append({"gap": gap, "status": "new", "cites": list(entry.get("cites") or [])})
+            seen.add(gap)
+    except ImportError:  # eoa.dossier.gaps not present yet on an older checkout -- no-op, not fatal
+        pass
+    return rows
+
+
+def _build_gaps_tracking(corpus: CorpusResult, dossier: ProductDossierOut) -> list[GapTrackingRow]:
+    rows = []
+    for g in _build_gaps_tracking_raw(corpus, dossier):
+        status = g["status"] if g["status"] in ("closed", "open", "new") else "open"
+        rows.append(GapTrackingRow(gap_he=g["gap"], status=status, cites=g["cites"]))
+    return rows
+
+
+def _gaps_tracking_table(dossier: ProductDossierOut) -> dict[str, Any]:
+    if not dossier.gaps_tracking:
+        return {"title_he": "מעקב פערים", "body_he": PLACEHOLDER_HE}
+    headers = ["פער", "סטטוס", "מקור"]
+    rows = [
+        [r.gap_he, _GAP_STATUS_LABEL_HE.get(r.status, r.status), _cite_cell(r.cites)]
+        for r in dossier.gaps_tracking
+    ]
+    return {"title_he": "מעקב פערים", "headers": headers, "rows": rows}
+
+
+# --------------------------------------------------------------------------
+# LESSONS-2 item 6: sources grouped by kind + an automatic "מתודולוגיה" appendix. ``docx_builder``
+# (reused, not modified -- see this module's own docstring) already renders its OWN flat, ungrouped
+# sources appendix at the very end of every report -- these two entries are additive sections of
+# their own, not a replacement for it.
+# --------------------------------------------------------------------------
+
+#: Six named groups per the lessons doc's own wording, plus a fallback -- declaration order is the
+#: render order.
+_SOURCE_GROUP_ORDER_HE: tuple[str, ...] = (
+    "יצרן ועלונים",
+    "עיתונות ביטחונית וכלכלית",
+    "מתחרים",
+    "מחקר ודוחות שוק",
+    "פטנטים",
+    "מכרזים",
+    "אחר",
+)
+
+
+def _source_group_he(row: dict[str, Any]) -> str:
+    """Best-effort classification from the registry row's own fields -- ``kind`` (item/event/
+    patent/tender/forecast/web), ``source_kind`` (a web row's ``eoa.dossier.plan.classify_web_source``
+    output), and ``topic`` (the research topic a web row was read under, when known). A row that
+    fits none of the specific rules below falls into "אחר" rather than a guessed group."""
+    kind = row.get("kind")
+    source_kind = row.get("source_kind")
+    topic = row.get("topic")
+    if kind == "patent":
+        return "פטנטים"
+    if kind == "tender":
+        return "מכרזים"
+    if kind == "forecast":
+        return "מחקר ודוחות שוק"
+    if topic == "competitors":
+        return "מתחרים"
+    if source_kind in ("vendor_official", "datasheet", "brochure"):
+        return "יצרן ועלונים"
+    if source_kind in ("trade_press", "press"):
+        return "עיתונות ביטחונית וכלכלית"
+    if source_kind == "reference":
+        return "מחקר ודוחות שוק"
+    return "אחר"
+
+
+def _grouped_sources_table(corpus: CorpusResult | None) -> dict[str, Any]:
+    title = "מקורות מקובצים"
+    if corpus is None or not corpus.registry:
+        return {"title_he": title, "body_he": PLACEHOLDER_HE}
+    order_index = {g: i for i, g in enumerate(_SOURCE_GROUP_ORDER_HE)}
+    rows_sorted = sorted(
+        corpus.registry,
+        key=lambda r: (order_index.get(_source_group_he(r), len(_SOURCE_GROUP_ORDER_HE)), r.get("n") or 0),
+    )
+    headers = ["קבוצה", "#", "כותרת", "סוג/קישור"]
+    rows = [
+        [
+            _source_group_he(r),
+            r.get("n"),
+            r.get("title") or r.get("url") or PLACEHOLDER_HE,
+            r.get("source_kind") or r.get("kind") or PLACEHOLDER_HE,
+        ]
+        for r in rows_sorted
+    ]
+    return {"title_he": title, "headers": headers, "rows": rows}
+
+
+def _methodology_entry(
+    corpus: CorpusResult | None, progress: list[dict[str, Any]] | None, llm_leg: str | None
+) -> dict[str, Any]:
+    """LESSONS-2 item 6's "נספח מתודולוגיה" -- what topics were run, how many pages each read, the
+    MUST-READ vendor pages fetched up front (``eoa.dossier.plan``'s own ``topic == "must_read"``
+    marker), the datasheets/vendor pages the registry actually holds, which topics hit their own
+    per-topic time cap, and which LLM leg drove this run -- built entirely from ``progress`` (the
+    live per-topic status this module's own :func:`build_product_dossier` already captures via
+    ``on_progress``, see that function) and ``corpus.registry``, never from a fresh LLM call of its
+    own."""
+    title = "מתודולוגיה"
+    if corpus is None:
+        return {"title_he": title, "body_he": PLACEHOLDER_HE}
+    lines: list[str] = []
+    topic_cap_s = settings().dossier.topic_time_cap_s
+    if progress:
+        lines.append(f"נושאי מחקר שהורצו: {len(progress)}.")
+        time_caps_hit: list[str] = []
+        for p in progress:
+            seconds = p.get("seconds")
+            pages = p.get("pages_read") or []
+            seconds_txt = f"{seconds:.0f} שנ׳" if isinstance(seconds, int | float) else "לא זמין"
+            lines.append(
+                f"- {p.get('title_he') or p.get('topic')}: סטטוס {p.get('status')}, "
+                f"{len(pages)} מקורות נקראו, {seconds_txt}."
+            )
+            if isinstance(seconds, int | float) and seconds >= topic_cap_s:
+                time_caps_hit.append(str(p.get("title_he") or p.get("topic")))
+        if time_caps_hit:
+            lines.append("נושאים שהגיעו למגבלת הזמן לנושא (" + f"{topic_cap_s} שנ׳" + "): " + ", ".join(time_caps_hit) + ".")
+    else:
+        lines.append("נושאי מחקר: אין נתוני התקדמות זמינים לריצה זו.")
+    vendor_pages = [r for r in corpus.registry if r.get("source_kind") in ("vendor_official", "datasheet")]
+    must_read_pages = [r for r in corpus.registry if r.get("topic") == "must_read"]
+    lines.append(
+        f"עמודי יצרן/עלונים במאגר המקורות: {len(vendor_pages)} "
+        f"(מתוכם {len(must_read_pages)} נקראו מראש כ-MUST-READ לפני תחילת המחקר)."
+    )
+    #: LESSONS-1's own PDF/brochure hunt (`eoa.dossier.datasheet.hunt_datasheets`) -- read via
+    #: `getattr` so a corpus build from before that lane landed renders honestly as "0" rather than
+    #: crashing.
+    datasheets = getattr(corpus, "datasheets", None) or []
+    lines.append(f"עלונים/דפי נתונים שאותרו ונקראו: {len(datasheets)}.")
+    lines.append("שפות חיפוש: עברית (מאגר פנימי) ואנגלית (חיפוש רשת).")
+    lines.append(f"רגל מודל (LLM leg): {llm_leg or 'תצורת ברירת המחדל (local)'}.")
+    return {"title_he": title, "body_he": "\n".join(lines)}
+
+
+# --------------------------------------------------------------------------
 # outcome / confidence
 # --------------------------------------------------------------------------
 
@@ -442,18 +775,42 @@ def _signal_count(dossier: ProductDossierOut) -> int:
     )
 
 
+#: LESSONS-2 item 4: "the dossier-level confidence becomes the weighted share of high rows" --
+#: every row kind that carries a per-row confidence (deals use their own ``confidence_level``, the
+#: rest use ``confidence``), pooled into one flat list.
+def _row_confidence_values(dossier: ProductDossierOut) -> list[str]:
+    values: list[str] = []
+    values.extend(r.confidence for r in dossier.specifications)
+    values.extend(r.confidence for r in dossier.performance)
+    values.extend(r.confidence_level for r in dossier.deals)
+    values.extend(r.confidence for r in dossier.variants_and_versions)
+    values.extend(r.confidence for r in dossier.partnerships)
+    values.extend(r.confidence for r in dossier.competitors)
+    return values
+
+
 def _compute_outcome_confidence(dossier: ProductDossierOut, plan_result: PlanResult) -> tuple[str, float]:
     signals = _signal_count(dossier)
-    confidences = [f.investigation.result.confidence for f in plan_result.findings if f.investigation.result]
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    row_confidences = _row_confidence_values(dossier)
+    if row_confidences:
+        # LESSONS-2 item 4: the weighted share of high-confidence rows across every
+        # confidence-bearing row kind -- replaces the pre-LESSONS-2 investigation-average, which
+        # stays only as the fallback for a dossier with no confidence-bearing rows at all (e.g. the
+        # fully empty "not_found" case, where there is nothing to compute a row share from).
+        conf = sum(1 for c in row_confidences if c == "high") / len(row_confidences)
+    else:
+        confidences = [
+            f.investigation.result.confidence for f in plan_result.findings if f.investigation.result
+        ]
+        conf = sum(confidences) / len(confidences) if confidences else 0.0
     if signals >= _FOUND_MIN_SIGNALS:
         outcome = "found"
     elif signals >= _PARTIAL_MIN_SIGNALS:
         outcome = "partial"
     else:
         outcome = "not_found"
-        avg_conf = min(avg_conf, 0.3)
-    return outcome, round(min(max(avg_conf, 0.0), 1.0), 2)
+        conf = min(conf, 0.3)
+    return outcome, round(min(max(conf, 0.0), 1.0), 2)
 
 
 def _empty_dossier(product_name: str, vendor: str | None) -> ProductDossierOut:
@@ -492,6 +849,7 @@ def _persist(
     product_line: str | None,
     dropped: list[DroppedField],
     llm_leg: str | None = None,
+    gaps_tracking_raw: list[dict[str, Any]] | None = None,
 ) -> tuple[int, int]:
     today = _today_jerusalem()
     item_ids = [it["id"] for it in corpus.items if it.get("id")]
@@ -505,7 +863,10 @@ def _persist(
     # `ProductDossierOut` (the frozen schema, out of this file's ownership) has no `meta` field, so
     # this is added at the dict level, after `model_dump()`, rather than by touching the schema.
     data_dict = dossier.model_dump()
-    data_dict["meta"] = {"llm_leg": llm_leg or "local"}
+    #: LESSONS-2 item 5: `meta.gaps` is the ONE documented location `eoa.dossier.gaps.
+    #: extract_gaps_from_previous` reads for the NEXT run's own gap-followup topics (that module's
+    #: own docstring, priority 1) -- `{"gap", "status", "cites"}` rows, verbatim.
+    data_dict["meta"] = {"llm_leg": llm_leg or "local", "gaps": gaps_tracking_raw or []}
 
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -606,11 +967,24 @@ def build_product_dossier(
     llm_leg`` (see :func:`_persist`) so a run's own provenance survives the round-trip and can be
     shown in the run history. ``None`` (the default) preserves the exact prior dispatch."""
     corpus = build_corpus(product_name, vendor, aliases, product_line=product_line)
+
+    #: LESSONS-2 item 6: the methodology appendix needs the FINAL per-topic progress snapshot
+    #: (seconds/sources_found/pages_read) -- `run_plan`'s own `on_progress` already calls back on
+    #: every status change; this captures the latest one in a plain local variable alongside the
+    #: existing `_write_job_progress` side effect (never replacing it -- the live pending-job banner
+    #: still needs that write).
+    last_progress: list[dict[str, Any]] = []
+
+    def _on_progress(progress: list[dict[str, Any]]) -> None:
+        nonlocal last_progress
+        last_progress = progress
+        _write_job_progress(job_id, progress)
+
     plan_result = run_plan(
         corpus,
         job_id=job_id,
         budget_multiplier=budget_multiplier,
-        on_progress=lambda progress: _write_job_progress(job_id, progress),
+        on_progress=_on_progress,
         llm_leg=llm_leg,
     )
 
@@ -625,7 +999,15 @@ def build_product_dossier(
 
     previous_data = corpus.previous.get("data") if corpus.previous else None
     what_changed = compute_diff(previous_data, dossier)
-    dossier = dossier.model_copy(update={"what_changed_he": what_changed})
+    #: LESSONS-2 item 5: gaps_tracking is deterministic, code-only (never LLM-authored), same
+    #: discipline as `what_changed_he` right above -- see `_build_gaps_tracking`'s own docstring.
+    #: `gaps_tracking_raw` is what `_persist` writes into `data.meta.gaps` for the NEXT run.
+    gaps_tracking_raw = _build_gaps_tracking_raw(corpus, dossier)
+    gaps_tracking = [
+        GapTrackingRow(gap_he=g["gap"], status=g["status"] if g["status"] in ("closed", "open", "new") else "open", cites=g["cites"])
+        for g in gaps_tracking_raw
+    ]
+    dossier = dossier.model_copy(update={"what_changed_he": what_changed, "gaps_tracking": gaps_tracking})
 
     outcome, confidence = _compute_outcome_confidence(dossier, plan_result)
 
@@ -633,7 +1015,7 @@ def build_product_dossier(
     # PD-fix item 4: the full section order (identity through "מה השתנה") -- every entry always
     # present, prose sections included -- lives in this one ordered list now; see
     # `_build_render_draft`'s own docstring for why prose moved out of `draft.sections`.
-    tables = _ordered_report_entries(dossier)
+    tables = _ordered_report_entries(dossier, corpus, progress=last_progress, llm_leg=llm_leg)
 
     today = _today_jerusalem()
     docx_path, md_path, html_path = _report_paths(corpus.product_key, today)
@@ -667,6 +1049,7 @@ def build_product_dossier(
         product_line=product_line,
         dropped=dropped,
         llm_leg=llm_leg,
+        gaps_tracking_raw=gaps_tracking_raw,
     )
 
     return DossierPaths(

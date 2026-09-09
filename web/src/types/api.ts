@@ -1497,6 +1497,11 @@ export interface DossierIdentity {
   cites: number[];
 }
 
+/** LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md item 7): high/medium/low,
+ * computed deterministically by the backend (`eoa.dossier.extract`) after grounding -- never
+ * authored by the model. Optional/absent on data from before this field existed. */
+export type DossierRowConfidence = "high" | "medium" | "low";
+
 export interface DossierSpecRow {
   parameter_he: string;
   value: string;
@@ -1511,6 +1516,7 @@ export interface DossierSpecRow {
    * overflow row. `DossierSpecTable` groups/orders by this when present and falls back to a flat
    * render of `parameter_he` when it isn't -- both shapes must render, never just one. */
   key?: string;
+  confidence?: DossierRowConfidence | null;
 }
 
 export interface DossierVersionRow {
@@ -1519,6 +1525,10 @@ export interface DossierVersionRow {
   changes_he: string;
   platforms: string[];
   cites: number[];
+  /** LESSONS-2 item 7: what evidence (from a cited source) supports this variant actually
+   * existing -- distinct from `changes_he` (what changed). */
+  evidence_he?: string | null;
+  confidence?: DossierRowConfidence | null;
 }
 
 export interface DossierPerformanceRow {
@@ -1531,6 +1541,7 @@ export interface DossierPerformanceRow {
   cites: number[];
   /** See `DossierSpecRow.key` -- same vocabulary, same fallback discipline. */
   key?: string;
+  confidence?: DossierRowConfidence | null;
 }
 
 export interface DossierMaturity {
@@ -1565,6 +1576,10 @@ export interface DossierDealRow {
   cites: number[];
   /** 0..1, deal-level confidence -- distinct from the whole dossier's own `confidence`. */
   confidence: number | null;
+  /** LESSONS-2 item 4: the high/medium/low row-confidence column -- distinct from the pre-existing
+   * continuous `confidence` float above (that one is the model's own subjective estimate for the
+   * deal itself; this one is the deterministic, definition-based classification). */
+  confidence_level?: DossierRowConfidence | null;
 }
 
 export interface DossierPriceRow {
@@ -1583,12 +1598,80 @@ export interface DossierPartnerRow {
   role_he: string;
   since: string | null;
   cites: number[];
+  confidence?: DossierRowConfidence | null;
 }
 
 export interface DossierCompetitorRow {
   product: string;
   vendor: string | null;
   comparison_he: string;
+  cites: number[];
+  confidence?: DossierRowConfidence | null;
+}
+
+/** LESSONS-2 item 1: "ציר זמן כרונולוגי" -- built from deals/programme-deals/variants/
+ * identity.first_announced (deterministic) plus LLM-extracted milestones with a real cited date. */
+export type DossierTimelineKind = "launch" | "contract" | "integration" | "exhibition" | "variant" | "milestone" | string;
+
+export interface DossierTimelineRow {
+  date: string | null;
+  event_he: string;
+  kind: DossierTimelineKind;
+  cites: number[];
+}
+
+/** LESSONS-2 item 2: the labelled analyst pricing estimate -- wholly separate from `pricing`
+ * (published figures only). `null` unless the backend's gate (a cited contract total with
+ * duration/scope AND a cited market anchor) passed. */
+export interface DossierAssumptionRow {
+  text_he: string;
+  cites: number[];
+}
+
+export interface DossierMarketAnchorRow {
+  product_he: string;
+  price_range_he: string;
+  cites: number[];
+}
+
+export interface DossierPricingEstimate {
+  method_he: string;
+  assumptions: DossierAssumptionRow[];
+  market_anchors: DossierMarketAnchorRow[];
+  range_low: number | null;
+  range_high: number | null;
+  currency: string | null;
+  basis_he: string | null;
+  /** Always "low" -- an estimate is a labelled inference, never presented at higher confidence. */
+  confidence: "low";
+}
+
+/** LESSONS-2 item 3: up to 5 critically-reviewed vendor claims. */
+export type DossierClaimVerdict = "plausible" | "unverified" | "contradicted" | string;
+
+export interface DossierClaimReviewRow {
+  claim_he: string;
+  basis_he: string | null;
+  verifiability_he: string | null;
+  comparability_he: string | null;
+  verdict: DossierClaimVerdict;
+  cites: number[];
+}
+
+/** LESSONS-2 item 5: renders the backend's cross-run gap tracking (closed/open/new) when present. */
+export type DossierGapStatus = "closed" | "open" | "new" | string;
+
+export interface DossierGapTrackingRow {
+  gap_he: string;
+  status: DossierGapStatus;
+  cites: number[];
+}
+
+/** LESSONS-2 item 7: platforms as their own table (platform, domain, integration evidence, cites). */
+export interface DossierPlatformRow {
+  platform: string;
+  domain: string | null;
+  integration_evidence_he: string | null;
   cites: number[];
 }
 
@@ -1642,6 +1725,17 @@ export interface ProductDossierOut {
    * table at the end of the spec section (§5.1), never diffed by key (§4), never merged into the
    * grouped table. Absent/`[]` for data from before this field existed. */
   other_specifications?: DossierSpecRow[];
+  /** LESSONS-2 item 1. Absent/`[]` for data from before this field existed. */
+  timeline?: DossierTimelineRow[];
+  /** LESSONS-2 item 2. Absent/`null` for data from before this field existed, or when the gate
+   * didn't pass this run. */
+  pricing_estimate?: DossierPricingEstimate | null;
+  /** LESSONS-2 item 3. Absent/`[]` for data from before this field existed. */
+  claims_review?: DossierClaimReviewRow[];
+  /** LESSONS-2 item 5. Absent/`[]` for data from before this field existed. */
+  gaps_tracking?: DossierGapTrackingRow[];
+  /** LESSONS-2 item 7. Absent/`[]` for data from before this field existed. */
+  platforms?: DossierPlatformRow[];
 }
 
 /** One row of the dossier's own citation registry (section 2's `sources JSONB`). */

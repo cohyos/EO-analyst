@@ -6,21 +6,28 @@ import type {
   Clarification,
   Conference,
   Corroboration,
+  DossierAssumptionRow,
+  DossierClaimReviewRow,
   DossierCompetitorRow,
   DossierCreateBody,
   DossierCreateResponse,
   DossierDealRow,
   DossierDetail,
+  DossierGapTrackingRow,
   DossierIdentity,
+  DossierMarketAnchorRow,
   DossierMaturity,
   DossierPatentRef,
   DossierPartnerRow,
   DossierPendingJob,
   DossierPerformanceRow,
+  DossierPlatformRow,
+  DossierPricingEstimate,
   DossierProgressTopic,
   DossierPriceRow,
   DossierRegulatoryExport,
   DossierRerunResponse,
+  DossierRowConfidence,
   DossierRunDetail,
   DossierRunRef,
   DossierSentence,
@@ -28,6 +35,7 @@ import type {
   DossierSpecRow,
   DossierSummary,
   DossierTenderRef,
+  DossierTimelineRow,
   DossierVersionRow,
   EntityDetail,
   EntityDetailFull,
@@ -713,6 +721,13 @@ function normalizeDossierCites(raw: unknown): number[] {
   return Array.isArray(raw) ? raw.filter((n): n is number => typeof n === "number") : [];
 }
 
+// LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md item 7): high/medium/low
+// -- anything else (absent field, an older backend build) normalizes to `null`, never a guessed
+// value.
+function normalizeDossierRowConfidence(raw: unknown): DossierRowConfidence | null {
+  return raw === "high" || raw === "medium" || raw === "low" ? raw : null;
+}
+
 function normalizeDossierSentence(raw: Partial<DossierSentence> | null | undefined): DossierSentence {
   const r = raw ?? {};
   return { text_he: str(r.text_he), cites: normalizeDossierCites(r.cites) };
@@ -743,6 +758,7 @@ function normalizeDossierSpecRow(raw: Partial<DossierSpecRow> | null | undefined
     // PD-vocab-ui (2026-09-09): "" for a legacy free-named row / a genuine other_specifications
     // overflow row -- never throws/omits on a backend build that predates the vocabulary key.
     key: typeof r.key === "string" ? r.key : "",
+    confidence: normalizeDossierRowConfidence(r.confidence),
   };
 }
 
@@ -754,6 +770,8 @@ function normalizeDossierVersionRow(raw: Partial<DossierVersionRow> | null | und
     changes_he: str(r.changes_he),
     platforms: arr(r.platforms).map((p) => str(p)),
     cites: normalizeDossierCites(r.cites),
+    evidence_he: r.evidence_he ?? null,
+    confidence: normalizeDossierRowConfidence(r.confidence),
   };
 }
 
@@ -768,6 +786,7 @@ function normalizeDossierPerformanceRow(
     conditions_he: r.conditions_he ?? null,
     cites: normalizeDossierCites(r.cites),
     key: typeof r.key === "string" ? r.key : "",
+    confidence: normalizeDossierRowConfidence(r.confidence),
   };
 }
 
@@ -801,6 +820,7 @@ function normalizeDossierDealRow(raw: Partial<DossierDealRow> | null | undefined
     platform: r.platform ?? null,
     cites: normalizeDossierCites(r.cites),
     confidence: typeof r.confidence === "number" ? r.confidence : null,
+    confidence_level: normalizeDossierRowConfidence(r.confidence_level),
   };
 }
 
@@ -823,6 +843,7 @@ function normalizeDossierPartnerRow(raw: Partial<DossierPartnerRow> | null | und
     role_he: str(r.role_he),
     since: r.since ?? null,
     cites: normalizeDossierCites(r.cites),
+    confidence: normalizeDossierRowConfidence(r.confidence),
   };
 }
 
@@ -834,6 +855,76 @@ function normalizeDossierCompetitorRow(
     product: str(r.product),
     vendor: r.vendor ?? null,
     comparison_he: str(r.comparison_he),
+    cites: normalizeDossierCites(r.cites),
+    confidence: normalizeDossierRowConfidence(r.confidence),
+  };
+}
+
+// LESSONS-2 item 1: timeline.
+function normalizeDossierTimelineRow(raw: Partial<DossierTimelineRow> | null | undefined): DossierTimelineRow {
+  const r = raw ?? {};
+  return { date: r.date ?? null, event_he: str(r.event_he), kind: str(r.kind) || "milestone", cites: normalizeDossierCites(r.cites) };
+}
+
+// LESSONS-2 item 2: pricing_estimate.
+function normalizeDossierAssumptionRow(raw: Partial<DossierAssumptionRow> | null | undefined): DossierAssumptionRow {
+  const r = raw ?? {};
+  return { text_he: str(r.text_he), cites: normalizeDossierCites(r.cites) };
+}
+
+function normalizeDossierMarketAnchorRow(
+  raw: Partial<DossierMarketAnchorRow> | null | undefined,
+): DossierMarketAnchorRow {
+  const r = raw ?? {};
+  return { product_he: str(r.product_he), price_range_he: str(r.price_range_he), cites: normalizeDossierCites(r.cites) };
+}
+
+function normalizeDossierPricingEstimate(
+  raw: Partial<DossierPricingEstimate> | null | undefined,
+): DossierPricingEstimate | null {
+  if (!raw) return null;
+  return {
+    method_he: str(raw.method_he),
+    assumptions: arr(raw.assumptions).map(normalizeDossierAssumptionRow),
+    market_anchors: arr(raw.market_anchors).map(normalizeDossierMarketAnchorRow),
+    range_low: typeof raw.range_low === "number" ? raw.range_low : null,
+    range_high: typeof raw.range_high === "number" ? raw.range_high : null,
+    currency: raw.currency ?? null,
+    basis_he: raw.basis_he ?? null,
+    confidence: "low",
+  };
+}
+
+// LESSONS-2 item 3: claims_review.
+function normalizeDossierClaimReviewRow(
+  raw: Partial<DossierClaimReviewRow> | null | undefined,
+): DossierClaimReviewRow {
+  const r = raw ?? {};
+  return {
+    claim_he: str(r.claim_he),
+    basis_he: r.basis_he ?? null,
+    verifiability_he: r.verifiability_he ?? null,
+    comparability_he: r.comparability_he ?? null,
+    verdict: str(r.verdict) || "unverified",
+    cites: normalizeDossierCites(r.cites),
+  };
+}
+
+// LESSONS-2 item 5: gaps_tracking.
+function normalizeDossierGapTrackingRow(
+  raw: Partial<DossierGapTrackingRow> | null | undefined,
+): DossierGapTrackingRow {
+  const r = raw ?? {};
+  return { gap_he: str(r.gap_he), status: str(r.status) || "open", cites: normalizeDossierCites(r.cites) };
+}
+
+// LESSONS-2 item 7: platforms.
+function normalizeDossierPlatformRow(raw: Partial<DossierPlatformRow> | null | undefined): DossierPlatformRow {
+  const r = raw ?? {};
+  return {
+    platform: str(r.platform),
+    domain: r.domain ?? null,
+    integration_evidence_he: r.integration_evidence_he ?? null,
     cites: normalizeDossierCites(r.cites),
   };
 }
@@ -905,6 +996,12 @@ function normalizeProductDossierOut(
     ).map(normalizeDossierSentence),
     // PD-vocab-ui (2026-09-09): [] on a backend build that predates the vocabulary rollout.
     other_specifications: arr(r.other_specifications).map(normalizeDossierSpecRow),
+    // LESSONS-2 (2026-09-09): [] / null on a backend build that predates these fields.
+    timeline: arr(r.timeline).map(normalizeDossierTimelineRow),
+    pricing_estimate: normalizeDossierPricingEstimate(r.pricing_estimate),
+    claims_review: arr(r.claims_review).map(normalizeDossierClaimReviewRow),
+    gaps_tracking: arr(r.gaps_tracking).map(normalizeDossierGapTrackingRow),
+    platforms: arr(r.platforms).map(normalizeDossierPlatformRow),
   };
 }
 

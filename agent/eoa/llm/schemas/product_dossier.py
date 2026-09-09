@@ -42,6 +42,15 @@ DealKind = Literal["contract_award", "FMS", "framework", "option", "export_licen
 SourceKind = Literal["datasheet", "brochure", "article", "official", "contract", "tender", "budget", "other"]
 PartnerRole = Literal["integrator", "subcontractor", "co-development", "reseller", "other"]
 
+#: LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md items 3/5/7/10/11):
+#: high = vendor/datasheet/exchange filing OR two independent sources; medium = a single source or
+#: an unverifiable vendor claim; low = inference (no citation surviving grounding). Computed
+#: deterministically by ``eoa.dossier.extract`` from a row's own ``source_kind``/``cites`` AFTER
+#: grounding -- the model never fills this itself (same "code, not another model call" discipline
+#: as ``DealRow.amount_value``). Declared once, near the top of the module, so every row model below
+#: can reference it directly.
+RowConfidenceHe = Literal["high", "medium", "low"]
+
 
 class IdentityBlock(BaseModel):
     """Section 3's ``identity`` block -- the product's own basic identity facts."""
@@ -76,6 +85,9 @@ class SpecRow(BaseModel):
     variant: str = Field(default="", description="גרסה/וריאנט שאליו הערך מתייחס, אם צוין")
     source_kind: SourceKind = "other"
     cites: list[int] = Field(default_factory=list)
+    #: LESSONS-2 item 4: computed deterministically by ``eoa.dossier.extract`` AFTER grounding --
+    #: never filled by the model itself. See ``RowConfidenceHe``'s own docstring for the definition.
+    confidence: RowConfidenceHe = "low"
 
 
 class VersionRow(BaseModel):
@@ -83,7 +95,11 @@ class VersionRow(BaseModel):
     year: str | None = Field(default=None, description="שנת השקה/עדכון (ISO אם ידוע), אחרת null")
     changes_he: str = Field(default="", description="מה השתנה בגרסה זו לעומת קודמתה, אם ידוע")
     platforms: list[str] = Field(default_factory=list, description="פלטפורמות נשא ידועות לגרסה זו")
+    #: LESSONS-2 item 7: what evidence (from a cited source) supports this variant actually existing
+    #: -- distinct from ``changes_he`` (what changed), this is "why we believe this variant is real".
+    evidence_he: str = Field(default="", description="עדות לקיום הגרסה, מגובה במקור")
     cites: list[int] = Field(default_factory=list)
+    confidence: RowConfidenceHe = "low"
 
 
 class PerformanceRow(BaseModel):
@@ -100,6 +116,7 @@ class PerformanceRow(BaseModel):
     )
     conditions_he: str = Field(default="", description="תנאי המדידה/ההפעלה, אם צוינו")
     cites: list[int] = Field(default_factory=list)
+    confidence: RowConfidenceHe = "low"
 
 
 class MaturityBlock(BaseModel):
@@ -145,6 +162,11 @@ class DealRow(BaseModel):
     quantity: str | None = Field(default=None, description="כמות, אם צוינה")
     platform: str | None = Field(default=None, description="פלטפורמת הנשא הרלוונטית, אם צוינה")
     confidence: float = Field(default=0.5, ge=0, le=1)
+    #: LESSONS-2 item 4: the high/medium/low row-confidence rendered as its own column -- distinct
+    #: from the pre-existing continuous ``confidence`` float above (that one is the model's own
+    #: subjective 0..1 estimate for the deal itself; this one is the deterministic, definition-based
+    #: classification ``eoa.dossier.extract`` computes post-grounding, same as every other row).
+    confidence_level: RowConfidenceHe = "low"
     cites: list[int] = Field(default_factory=list)
 
 
@@ -167,6 +189,7 @@ class PartnerRow(BaseModel):
     role_he: PartnerRole = "other"
     since: str | None = Field(default=None, description="תאריך תחילת השותפות, אם ידוע")
     cites: list[int] = Field(default_factory=list)
+    confidence: RowConfidenceHe = "low"
 
 
 class CompetitorRow(BaseModel):
@@ -177,6 +200,7 @@ class CompetitorRow(BaseModel):
     vendor: str = Field(default="", description="יצרן המוצר המתחרה")
     comparison_he: str = Field(default="", description="השוואה קצרה, מבוססת מקור")
     cites: list[int] = Field(default_factory=list)
+    confidence: RowConfidenceHe = "low"
 
 
 class RegulatoryExportBlock(BaseModel):
@@ -198,6 +222,91 @@ class DossierTenderRow(BaseModel):
     title: str = Field(default="")
     status: str = Field(default="")
     relevance_he: str = Field(default="")
+    cites: list[int] = Field(default_factory=list)
+
+
+#: LESSONS-2 item 3: "ציר זמן כרונולוגי" -- a chronological table built deterministically from
+#: deals/variants/identity.first_announced PLUS LLM-extracted milestones that carry a real date in
+#: a cited source (``eoa.dossier.extract.build_timeline`` merges both halves; see that function's
+#: own docstring). ``launch``/``contract``/``variant`` rows are always the deterministic half;
+#: ``integration``/``exhibition``/``milestone`` are the kinds the model itself may extract.
+TimelineKind = Literal["launch", "contract", "integration", "exhibition", "variant", "milestone"]
+
+
+class TimelineRow(BaseModel):
+    date: str | None = Field(default=None, description="תאריך האירוע (ISO אם ידוע), אחרת null")
+    event_he: str = Field(description="תיאור קצר של האירוע בעברית")
+    kind: TimelineKind = "milestone"
+    cites: list[int] = Field(default_factory=list)
+
+
+#: LESSONS-2 item 2: "אומדן תמחור מסומן" -- a labelled ANALYST ESTIMATE, wholly separate from
+#: ``pricing`` (published figures only). Gated deterministically by ``eoa.dossier.extract``: kept
+#: only when at least one contract total with a duration/scope AND at least one market anchor are
+#: themselves cited -- otherwise the whole block is dropped to ``None``, never a half-formed
+#: estimate. ``confidence`` is always ``"low"`` (an estimate is never presented as more certain than
+#: that, regardless of how well-cited its inputs are).
+class AssumptionRow(BaseModel):
+    text_he: str = Field(description="הנחת עבודה אחת של האומדן")
+    cites: list[int] = Field(default_factory=list)
+
+
+class MarketAnchorRow(BaseModel):
+    """A cited price range of a COMPARABLE product -- what the estimate is anchored against."""
+
+    product_he: str = Field(description="שם המוצר המשווה (עוגן השוק)")
+    price_range_he: str = Field(description="טווח המחיר כפי שפורסם עבור המוצר המשווה")
+    cites: list[int] = Field(default_factory=list)
+
+
+class PricingEstimateBlock(BaseModel):
+    method_he: str = Field(default="", description="שיטת האומדן בעברית")
+    assumptions: list[AssumptionRow] = Field(default_factory=list)
+    market_anchors: list[MarketAnchorRow] = Field(default_factory=list)
+    range_low: float | None = Field(default=None, description="קצה תחתון של טווח האומדן")
+    range_high: float | None = Field(default=None, description="קצה עליון של טווח האומדן")
+    currency: str = Field(default="", description="מטבע האומדן")
+    basis_he: str = Field(default="", description="בסיס האומדן (ליחידה / לתוכנית וכו')")
+    #: Always "low" -- an estimate is a labelled inference, never presented at higher confidence.
+    confidence: Literal["low"] = "low"
+
+
+#: LESSONS-2 item 3: "ניתוח ביקורתי של טענות" -- up to 5 vendor claims (from specifications/
+#: performance rows marked as vendor-claimed), each reviewed critically: what supports it, what
+#: would verify it, and against which competitor figures it is/isn't comparable and why.
+ClaimVerdict = Literal["plausible", "unverified", "contradicted"]
+
+
+class ClaimReviewRow(BaseModel):
+    claim_he: str = Field(description="הטענה של היצרן, כפי שפורסמה")
+    basis_he: str = Field(default="", description="על מה הטענה נשענת (מגובה במקור)")
+    verifiability_he: str = Field(default="", description="מה היה נדרש כדי לאמת את הטענה")
+    comparability_he: str = Field(
+        default="", description="מול אילו נתוני מתחרים הטענה בת-השוואה, ומול אילו לא, ולמה"
+    )
+    verdict: ClaimVerdict = "unverified"
+    cites: list[int] = Field(default_factory=list)
+
+
+#: LESSONS-2 item 5: "מעקב פערים" -- renders ``eoa.dossier.corpus.CorpusResult.gap_status`` (a
+#: parallel lane's addition, section-3-owned; not landed as of this schema -- see
+#: ``eoa.dossier.report._build_gaps_tracking`` for the defensive ``getattr`` read) when present.
+GapStatusHe = Literal["closed", "open", "new"]
+
+
+class GapTrackingRow(BaseModel):
+    gap_he: str = Field(description="תיאור הפער")
+    status: GapStatusHe = "open"
+    cites: list[int] = Field(default_factory=list)
+
+
+#: LESSONS-2 item 7: platforms become their own table (platform, domain, integration evidence,
+#: cites) -- previously only a flat ``list[str]`` on ``maturity.platforms_integrated`` (kept,
+#: unchanged) and a free-text ``platform`` field on ``DealRow`` (also kept).
+class PlatformRow(BaseModel):
+    platform: str = Field(description="שם הפלטפורמה")
+    domain: str = Field(default="", description="תחום הפלטפורמה (אווירי/ימי/יבשתי/USV וכו')")
+    integration_evidence_he: str = Field(default="", description="עדות לשילוב, מגובה במקור")
     cites: list[int] = Field(default_factory=list)
 
 
@@ -241,20 +350,50 @@ class ProductDossierOut(BaseModel):
     bd_implications_he: list[Sentence] = Field(
         default_factory=list, description="משמעויות לתפקיד BD, מסויגות, כמות לפני משמעות, כל משפט עם cites"
     )
+    #: LESSONS-2 item 1: chronological timeline -- the model's own milestone extraction (kinds
+    #: integration/exhibition/milestone, a real date required); ``eoa.dossier.extract.build_dossier``
+    #: merges this with deterministically-built launch/contract/variant rows AFTER grounding, so the
+    #: PERSISTED value here already carries both halves, sorted chronologically.
+    timeline: list[TimelineRow] = Field(default_factory=list)
+    #: LESSONS-2 item 2: the labelled analyst pricing estimate -- ``None`` unless the model actually
+    #: filled it AND ``eoa.dossier.extract``'s gate (a cited contract total with duration/scope AND
+    #: a cited market anchor) passed; see ``PricingEstimateBlock``'s own docstring.
+    pricing_estimate: PricingEstimateBlock | None = Field(default=None)
+    #: LESSONS-2 item 3: up to 5 critically-reviewed vendor claims (post-check truncates to 5 rather
+    #: than a schema ``max_length``, which would fail the whole extraction call outright).
+    claims_review: list[ClaimReviewRow] = Field(default_factory=list)
+    #: LESSONS-2 item 5: rendered from ``CorpusResult.gap_status`` when present (see
+    #: ``GapTrackingRow``'s own docstring) -- always ``[]`` until that parallel lane lands.
+    gaps_tracking: list[GapTrackingRow] = Field(default_factory=list)
+    #: LESSONS-2 item 7: platforms as their own table -- built deterministically by
+    #: ``eoa.dossier.report`` from ``maturity.platforms_integrated`` + every ``DealRow.platform``
+    #: after grounding (never filled by the model itself, to avoid a second, drifting platform list).
+    platforms: list[PlatformRow] = Field(default_factory=list)
 
 
 __all__ = [
+    "AssumptionRow",
+    "ClaimReviewRow",
+    "ClaimVerdict",
     "CompetitorRow",
     "DealRow",
     "DossierPatentRow",
     "DossierTenderRow",
+    "GapStatusHe",
+    "GapTrackingRow",
     "IdentityBlock",
+    "MarketAnchorRow",
     "MaturityBlock",
     "PartnerRow",
     "PerformanceRow",
+    "PlatformRow",
     "PriceRow",
+    "PricingEstimateBlock",
     "ProductDossierOut",
     "RegulatoryExportBlock",
+    "RowConfidenceHe",
     "SpecRow",
+    "TimelineKind",
+    "TimelineRow",
     "VersionRow",
 ]

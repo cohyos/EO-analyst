@@ -3,7 +3,13 @@ import { DossierTable, type DossierTableColumn } from "@/components/dossiers/Dos
 import { DossierCiteChips, DossierPlainText } from "@/components/dossiers/DossierFact";
 import { groupVocabulary, vocabularyForTable, type SpecTableKind, type SpecVocabParam } from "@/lib/specVocabulary";
 import { useT } from "@/i18n";
-import type { DossierPerformanceRow, DossierSpecRow } from "@/types/api";
+import type { DossierPerformanceRow, DossierRowConfidence, DossierSpecRow } from "@/types/api";
+
+// LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md item 4): high/medium/low,
+// rendered as its own column on both the specifications and performance tables.
+function confidenceLabelKey(level: DossierRowConfidence | null | undefined): string {
+  return level ? `dossiers.confidenceLevel.${level}` : "";
+}
 
 type AnyVocabRow = DossierSpecRow | DossierPerformanceRow;
 
@@ -76,6 +82,14 @@ function buildColumns(table: SpecTableKind, t: ReturnType<typeof useT>, citation
         render: (d) => <DossierPlainText text={(d.row as DossierPerformanceRow | null)?.conditions_he ?? null} />,
       },
       {
+        key: "confidence",
+        label: t("dossiers.table.colConfidence"),
+        render: (d) => {
+          const level = (d.row as DossierPerformanceRow | null)?.confidence ?? null;
+          return <DossierPlainText text={level ? t(confidenceLabelKey(level) as never) : null} />;
+        },
+      },
+      {
         key: "cites",
         label: t("dossiers.table.colSources"),
         render: (d) => <DossierCiteChips cites={d.row?.cites ?? []} citations={citations} />,
@@ -106,9 +120,17 @@ function buildColumns(table: SpecTableKind, t: ReturnType<typeof useT>, citation
       render: (d) => <DossierPlainText text={(d.row as DossierSpecRow | null)?.variant ?? null} />,
     },
     {
+      // LESSONS-2 item 4: confidence is merged into the "source kind" cell (rather than a 7th
+      // column) to stay within the shared <= 6-column table limit -- same merge-not-add discipline
+      // as the backend's own eoa.dossier.spec_render.specifications_entry.
       key: "source_kind",
       label: t("dossiers.table.colSourceKind"),
-      render: (d) => <DossierPlainText text={(d.row as DossierSpecRow | null)?.source_kind ?? null} />,
+      render: (d) => {
+        const row = d.row as DossierSpecRow | null;
+        const level = row?.confidence ?? null;
+        const suffix = level ? ` · ${t(confidenceLabelKey(level) as never)}` : "";
+        return <DossierPlainText text={row?.source_kind ? `${row.source_kind}${suffix}` : null} />;
+      },
     },
     {
       key: "cites",

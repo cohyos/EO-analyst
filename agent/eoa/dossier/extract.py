@@ -37,14 +37,20 @@ from eoa.errors import LLMOutputError
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.product_dossier import (
+    ClaimReviewRow,
     CompetitorRow,
     DealRow,
     DossierPatentRow,
     PartnerRow,
     PerformanceRow,
+    PlatformRow,
     PriceRow,
+    PricingEstimateBlock,
     ProductDossierOut,
+    RowConfidenceHe,
     SpecRow,
+    TimelineRow,
+    VersionRow,
 )
 from eoa.pipeline import entity_normalize
 from eoa.report.claims_gate import gate_sentences
@@ -55,6 +61,31 @@ _NUM_PREDICT = 16000
 
 #: Section 1/6.3: a price figure is only ever extracted from one of these source kinds.
 _QUALIFYING_PRICE_SOURCE_KINDS = {"contract", "tender", "budget", "official"}
+
+
+# --------------------------------------------------------------------------
+# LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md item 7): per-row
+# confidence, computed deterministically AFTER a row's own ``cites``/``source_kind`` are already
+# grounded -- never authored by the model. Definition (the lessons doc's own table):
+#   high   = vendor/datasheet/exchange filing OR two independent (>=2) surviving citations
+#   medium = a single surviving citation, or an unverifiable vendor claim (no qualifying
+#            source_kind, exactly one citation)
+#   low    = inference -- no citation survived grounding at all
+# --------------------------------------------------------------------------
+
+#: source_kind values that on their own already mean "vendor/datasheet/exchange filing" --
+#: SpecRow/PriceRow's own SourceKind literal reused verbatim (never re-derived independently).
+_HIGH_CONFIDENCE_SOURCE_KINDS = {"datasheet", "official", "contract", "tender", "budget"}
+
+
+def _row_confidence_he(cites: list[int], source_kind: str | None = None) -> RowConfidenceHe:
+    """The shared definition every row-confidence call site below applies -- see this section's own
+    docstring for the exact three-way rule."""
+    if not cites:
+        return "low"
+    if (source_kind in _HIGH_CONFIDENCE_SOURCE_KINDS) or len(cites) >= 2:
+        return "high"
+    return "medium"
 
 
 # --------------------------------------------------------------------------
@@ -386,7 +417,8 @@ def _ground_spec_row(
         _drop(dropped, "specifications.value", "number not in cited source", value)
         value = ""
         good_cites = []
-    return row.model_copy(update={"cites": good_cites, "value": value})
+    confidence = _row_confidence_he(good_cites, row.source_kind)
+    return row.model_copy(update={"cites": good_cites, "value": value, "confidence": confidence})
 
 
 def _ground_performance_row(
@@ -404,8 +436,14 @@ def _ground_performance_row(
     if tested and not _numbers_grounded(tested, text):
         _drop(dropped, "performance.tested_or_operational_value", "number not in cited source", tested)
         tested = None
+    confidence = _row_confidence_he(good_cites)
     return row.model_copy(
-        update={"cites": good_cites, "claimed_value": claimed, "tested_or_operational_value": tested}
+        update={
+            "cites": good_cites,
+            "claimed_value": claimed,
+            "tested_or_operational_value": tested,
+            "confidence": confidence,
+        }
     )
 
 
@@ -540,6 +578,7 @@ def _ground_deal_row(
                 date_kind = "published"
                 break
 
+    confidence_level = _row_confidence_he(good_cites)
     return row.model_copy(
         update={
             "cites": good_cites,
@@ -551,6 +590,7 @@ def _ground_deal_row(
             "region_he": region_he,
             "date": date,
             "date_kind": date_kind,
+            "confidence_level": confidence_level,
         }
     )
 
@@ -644,7 +684,7 @@ def _ground_competitor_row(
     if not _name_grounded(row.product, text):
         _drop(dropped, "competitors", "invented/ungrounded competitor product", row.product)
         return None
-    return row.model_copy(update={"cites": good_cites})
+    return row.model_copy(update={"cites": good_cites, "confidence": _row_confidence_he(good_cites)})
 
 
 def _ground_partner_row(
@@ -655,7 +695,231 @@ def _ground_partner_row(
     if not _name_grounded(row.partner, text):
         _drop(dropped, "partnerships", "invented/ungrounded partner", row.partner)
         return None
+    return row.model_copy(update={"cites": good_cites, "confidence": _row_confidence_he(good_cites)})
+
+
+# --------------------------------------------------------------------------
+# LESSONS-2 item 3 (claims_review): cites-cleaning + drop-if-unsourced (same "nothing else worth
+# keeping" rule competitors/partners already apply to an ungrounded name), capped at 5 rows --
+# a schema-level ``max_length`` would fail the WHOLE extraction call if the model overshot, so the
+# cap is enforced here, deterministically, after the fact instead.
+# --------------------------------------------------------------------------
+
+_MAX_CLAIMS_REVIEW_ROWS = 5
+
+
+def _ground_claim_review_row(
+    row: ClaimReviewRow, valid_ns: set[int], dropped: list[DroppedField]
+) -> ClaimReviewRow | None:
+    good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
+    if bad_cites:
+        _drop(dropped, "claims_review.cites", f"out of range: {bad_cites}", row.claim_he)
+    if not good_cites:
+        _drop(dropped, "claims_review", "no valid citation", row.claim_he)
+        return None
     return row.model_copy(update={"cites": good_cites})
+
+
+def _ground_claims_review(
+    rows: list[ClaimReviewRow], valid_ns: set[int], dropped: list[DroppedField]
+) -> list[ClaimReviewRow]:
+    kept = [r for r in (_ground_claim_review_row(row, valid_ns, dropped) for row in rows) if r]
+    if len(kept) > _MAX_CLAIMS_REVIEW_ROWS:
+        for extra in kept[_MAX_CLAIMS_REVIEW_ROWS:]:
+            _drop(dropped, "claims_review", "exceeds 5-row cap", extra.claim_he)
+        kept = kept[:_MAX_CLAIMS_REVIEW_ROWS]
+    return kept
+
+
+# --------------------------------------------------------------------------
+# LESSONS-2 item 1 (timeline): the model's own LLM-extracted half -- cites-cleaned, drop-if-
+# unsourced (same rule as claims_review above), AND drop-if-no-real-date (an undated row has no
+# place in a CHRONOLOGICAL table -- section 3's own instruction to the model already asks it to
+# omit these, this is the deterministic backstop). The deterministic launch/contract/variant half
+# is built separately by :func:`build_timeline` and merged in by ``build_dossier`` after grounding.
+# --------------------------------------------------------------------------
+
+
+def _ground_timeline_row(
+    row: TimelineRow, valid_ns: set[int], dropped: list[DroppedField]
+) -> TimelineRow | None:
+    good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
+    if bad_cites:
+        _drop(dropped, "timeline.cites", f"out of range: {bad_cites}", row.event_he)
+    if not good_cites:
+        _drop(dropped, "timeline", "no valid citation", row.event_he)
+        return None
+    if not (row.date or "").strip():
+        _drop(dropped, "timeline", "no date -- not chronological", row.event_he)
+        return None
+    return row.model_copy(update={"cites": good_cites})
+
+
+def _ground_timeline(rows: list[TimelineRow], valid_ns: set[int], dropped: list[DroppedField]) -> list[TimelineRow]:
+    return [r for r in (_ground_timeline_row(row, valid_ns, dropped) for row in rows) if r]
+
+
+# --------------------------------------------------------------------------
+# LESSONS-2 item 1 (timeline, deterministic half): launch (identity.first_announced), contract
+# (every dated deal), variant (every variant with a year) -- merged with the model's own
+# LLM-extracted rows (integration/exhibition/milestone) by :func:`build_dossier`, AFTER grounding,
+# sorted chronologically (undated rows -- there should be none, both halves are already filtered
+# to real dates only -- sort last, defensively).
+# --------------------------------------------------------------------------
+
+
+def _timeline_sort_key(row: TimelineRow) -> tuple[int, str]:
+    date = (row.date or "").strip()
+    return (0, date) if date else (1, "")
+
+
+def build_timeline(dossier: ProductDossierOut, corpus: CorpusResult | None = None) -> list[TimelineRow]:
+    """The deterministic half, PLUS whatever the model already contributed to
+    ``dossier.timeline`` (grounded by :func:`_ground_timeline` upstream) -- merged and sorted
+    chronologically. Reads only the already-grounded ``dossier`` itself, plus (optionally)
+    ``corpus.programme_deals`` (LESSONS-1's per-platform programme-deal search, landed on
+    ``CorpusResult`` -- read via ``getattr`` so this stays a no-op against an older corpus build,
+    never a crash)."""
+    rows: list[TimelineRow] = list(dossier.timeline)
+
+    identity = dossier.identity
+    if identity.first_announced:
+        rows.append(
+            TimelineRow(
+                date=identity.first_announced,
+                event_he=f"הכרזה ראשונה על {identity.product_name}.",
+                kind="launch",
+                cites=identity.cites,
+            )
+        )
+
+    for deal in dossier.deals:
+        if not deal.date or not deal.cites:
+            continue
+        customer = (deal.customer or "").strip() or "לקוח לא צוין"
+        amount_part = f" בהיקף {deal.amount}" if deal.amount else ""
+        rows.append(
+            TimelineRow(
+                date=deal.date,
+                event_he=f"עסקה: {customer}{amount_part}.",
+                kind="contract",
+                cites=deal.cites,
+            )
+        )
+
+    for version in dossier.variants_and_versions:
+        if not version.year or not version.cites:
+            continue
+        rows.append(
+            TimelineRow(date=version.year, event_he=f"גרסה/דגם: {version.name}.", kind="variant", cites=version.cites)
+        )
+
+    #: LESSONS-fable-dossier item 3 explicitly names "programme deals" as one of the timeline's
+    #: deterministic inputs, alongside deals/variants/identity above.
+    for pdeal in getattr(corpus, "programme_deals", None) or []:
+        date = pdeal.get("date") if isinstance(pdeal, dict) else getattr(pdeal, "date", None)
+        cites = (pdeal.get("cites") if isinstance(pdeal, dict) else getattr(pdeal, "cites", None)) or []
+        if not date or not cites:
+            continue
+        platform = (pdeal.get("platform") if isinstance(pdeal, dict) else getattr(pdeal, "platform", "")) or ""
+        customer = (pdeal.get("customer") if isinstance(pdeal, dict) else getattr(pdeal, "customer", "")) or ""
+        amount_text = (
+            pdeal.get("amount_text") if isinstance(pdeal, dict) else getattr(pdeal, "amount_text", "")
+        ) or ""
+        parts = [p for p in (customer, platform) if p]
+        who = " · ".join(parts) or "לקוח לא צוין"
+        amount_part = f" בהיקף {amount_text}" if amount_text else ""
+        rows.append(
+            TimelineRow(
+                date=str(date),
+                event_he=f"עסקת תוכנית (רכיב בפלטפורמה): {who}{amount_part}.",
+                kind="contract",
+                cites=list(cites),
+            )
+        )
+
+    rows.sort(key=_timeline_sort_key)
+    return rows
+
+
+# --------------------------------------------------------------------------
+# LESSONS-2 item 7 (platforms table): built deterministically, never by the model -- from
+# ``maturity.platforms_integrated`` (a flat name list, kept as-is) merged with every distinct
+# ``DealRow.platform`` (a platform a deal actually names, cited by that deal's own citations). A
+# platform named in BOTH sources merges into one row (the deal-derived evidence/cites win, since
+# they are more specific than the bare maturity name list).
+# --------------------------------------------------------------------------
+
+
+def build_platforms(dossier: ProductDossierOut) -> list[PlatformRow]:
+    by_name: dict[str, PlatformRow] = {}
+    for name in dossier.maturity.platforms_integrated:
+        name = (name or "").strip()
+        if not name or name.casefold() in by_name:
+            continue
+        by_name[name.casefold()] = PlatformRow(platform=name, cites=dossier.maturity.cites)
+    for deal in dossier.deals:
+        name = (deal.platform or "").strip()
+        if not name or not deal.cites:
+            continue
+        key = name.casefold()
+        existing = by_name.get(key)
+        evidence = "מוזכר בעסקה" + (f" עם {deal.customer}" if deal.customer else "") + "."
+        if existing is None:
+            by_name[key] = PlatformRow(platform=name, integration_evidence_he=evidence, cites=deal.cites)
+        else:
+            merged_cites = list(dict.fromkeys([*existing.cites, *deal.cites]))
+            by_name[key] = existing.model_copy(
+                update={"integration_evidence_he": existing.integration_evidence_he or evidence, "cites": merged_cites}
+            )
+    return list(by_name.values())
+
+
+# --------------------------------------------------------------------------
+# LESSONS-2 item 2 (pricing_estimate): the gate -- kept only when at least one CITED contract total
+# with a duration/scope AND at least one CITED market anchor are both present. "duration/scope" is
+# read, deliberately conservatively, off a real deal (amount + quantity or platform named) or a
+# totalled ``pricing`` row (``basis_he == BASIS_TOTAL_HE``, section 6.3's own canonical "program
+# total, not per-unit" form) -- never invented from the estimate block itself.
+# --------------------------------------------------------------------------
+
+
+def _has_cited_contract_total_with_scope(dossier: ProductDossierOut) -> bool:
+    for deal in dossier.deals:
+        if deal.amount and deal.cites and (deal.quantity or deal.platform):
+            return True
+    return any(price.basis_he == BASIS_TOTAL_HE and price.cites for price in dossier.pricing)
+
+
+def _ground_pricing_estimate(
+    block: PricingEstimateBlock | None, valid_ns: set[int], dossier_for_gate: ProductDossierOut, dropped: list[DroppedField]
+) -> PricingEstimateBlock | None:
+    if block is None:
+        return None
+    assumptions = []
+    for a in block.assumptions:
+        good, _bad = _clean_cites(a.cites, valid_ns)
+        if good:
+            assumptions.append(a.model_copy(update={"cites": good}))
+        else:
+            _drop(dropped, "pricing_estimate.assumptions", "no valid citation", a.text_he)
+    anchors = []
+    for m in block.market_anchors:
+        good, _bad = _clean_cites(m.cites, valid_ns)
+        if good:
+            anchors.append(m.model_copy(update={"cites": good}))
+        else:
+            _drop(dropped, "pricing_estimate.market_anchors", "no valid citation", m.product_he)
+    grounded_block = block.model_copy(
+        update={"assumptions": assumptions, "market_anchors": anchors, "confidence": "low"}
+    )
+    if not grounded_block.market_anchors:
+        _drop(dropped, "pricing_estimate", "no cited market anchor", block.method_he)
+        return None
+    if not _has_cited_contract_total_with_scope(dossier_for_gate):
+        _drop(dropped, "pricing_estimate", "no cited contract total with duration/scope", block.method_he)
+        return None
+    return grounded_block
 
 
 def _ground_generic_row(row: Any, valid_ns: set[int], dropped: list[DroppedField], *, label: str) -> Any:
@@ -663,6 +927,19 @@ def _ground_generic_row(row: Any, valid_ns: set[int], dropped: list[DroppedField
     if bad_cites:
         _drop(dropped, label, f"cites out of range: {bad_cites}")
     return row.model_copy(update={"cites": good_cites})
+
+
+def _ground_version_row(
+    row: VersionRow, valid_ns: set[int], dropped: list[DroppedField]
+) -> VersionRow:
+    """LESSONS-2 item 7: same cites-cleaning as :func:`_ground_generic_row`, plus the deterministic
+    row-confidence :func:`_row_confidence_he` computes for every other confidence-bearing row --
+    ``VersionRow`` needs its own function (not a bigger generic) purely because it's the one caller
+    of :func:`_ground_generic_row` that also needs a confidence field set afterward."""
+    good_cites, bad_cites = _clean_cites(row.cites, valid_ns)
+    if bad_cites:
+        _drop(dropped, "variants_and_versions", f"cites out of range: {bad_cites}", row.name)
+    return row.model_copy(update={"cites": good_cites, "confidence": _row_confidence_he(good_cites)})
 
 
 # --------------------------------------------------------------------------
@@ -1007,10 +1284,9 @@ def ground_dossier(
     partnerships = [
         r for r in (_ground_partner_row(r, valid_ns, registry_text, dropped) for r in draft.partnerships) if r
     ]
-    variants = [
-        _ground_generic_row(r, valid_ns, dropped, label="variants_and_versions")
-        for r in draft.variants_and_versions
-    ]
+    variants = [_ground_version_row(r, valid_ns, dropped) for r in draft.variants_and_versions]
+    claims_review = _ground_claims_review(draft.claims_review, valid_ns, dropped)
+    timeline = _ground_timeline(draft.timeline, valid_ns, dropped)
     patents = [
         r
         for r in (
@@ -1051,7 +1327,18 @@ def ground_dossier(
             "variants_and_versions": variants,
             "patents": patents,
             "tenders_and_forecasts": tenders,
+            "claims_review": claims_review,
+            "timeline": timeline,
         }
+    )
+    # LESSONS-2 items 1/2/7: the deterministic timeline half, the pricing_estimate gate, and the
+    # platforms table all need the ALREADY-grounded dossier (deals/variants/identity/maturity) as
+    # their input -- computed as one more pass over ``grounded`` itself, not the original ``draft``.
+    full_timeline = build_timeline(grounded, corpus)
+    pricing_estimate = _ground_pricing_estimate(draft.pricing_estimate, valid_ns, grounded, dropped)
+    platforms = build_platforms(grounded)
+    grounded = grounded.model_copy(
+        update={"timeline": full_timeline, "pricing_estimate": pricing_estimate, "platforms": platforms}
     )
     return GroundingResult(dossier=grounded, dropped=dropped)
 
@@ -1426,6 +1713,8 @@ __all__ = [
     "apply_vocabulary",
     "build_data_block",
     "build_dossier",
+    "build_platforms",
+    "build_timeline",
     "carry_forward_missing_specs",
     "extract_dossier",
     "find_missing_spec_facts",

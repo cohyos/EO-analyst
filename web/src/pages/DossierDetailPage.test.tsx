@@ -126,15 +126,20 @@ describe("DossierDetailPage (PD-ui)", () => {
       "תקציר",
       "מפרט",
       "גרסאות",
+      "פלטפורמות",
       "ביצועים",
       "בשלות",
+      "ציר זמן",
       "עסקאות",
       "מחירים",
+      "אומדן תמחור אנליטי (ביטחון נמוך)",
       "שותפויות",
       "מתחרים",
+      "ניתוח ביקורתי של טענות היצרן",
       "פטנטים",
       "מכרזים ותחזיות",
       "פערים",
+      "מעקב פערים",
       "משמעות עסקית",
       "מה השתנה",
       "מקורות",
@@ -377,5 +382,155 @@ describe("DossierDetailPage (PD-ui)", () => {
 
     await waitFor(() => expect(getDossierRun).toHaveBeenCalledWith("elbit-systems-spectro-xr", 501));
     expect(await screen.findByText("התווספה עסקה חדשה.")).toBeInTheDocument();
+  });
+
+  // --------------------------------------------------------------------------
+  // LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md).
+  // --------------------------------------------------------------------------
+
+  it("LESSONS-2 item 1: renders a timeline row with its Hebrew kind label", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          timeline: [{ date: "2020-05-01", event_he: "עסקה: US Air Force.", kind: "contract", cites: [1] }],
+          sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null }],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    // mixed Hebrew/Latin text is split across bidi-run spans (renderBidiRuns) -- assert on the
+    // page's own aggregate text rather than a single element's text content.
+    await waitFor(() => expect(document.body.textContent ?? "").toContain("US Air Force"));
+    expect(document.body.textContent ?? "").toContain("עסקה");
+  });
+
+  it("LESSONS-2 item 2: shows the pricing-estimate placeholder when null, and the disclaimer when present", async () => {
+    getDossier.mockResolvedValue(detail());
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    expect(
+      await screen.findByText("אין מספיק נתונים מגובים (חוזה עם היקף ועוגן שוק) להפקת אומדן"),
+    ).toBeInTheDocument();
+  });
+
+  it("LESSONS-2 item 2: renders the mandatory disclaimer and market anchors when a pricing_estimate is present", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          pricing_estimate: {
+            method_he: "נגזר מהיקפי חוזים לפי כמות משוערת.",
+            assumptions: [{ text_he: "כמות משוערת 10 יחידות.", cites: [1] }],
+            market_anchors: [{ product_he: "MX-15", price_range_he: "1-2M$", cites: [1] }],
+            range_low: 1_000_000,
+            range_high: 2_000_000,
+            currency: "USD",
+            basis_he: "ליחידה",
+            confidence: "low",
+          },
+          sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null }],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    expect(await screen.findByText("אומדן אנליטי, לא נתון ממקור")).toBeInTheDocument();
+    expect(screen.getByText("MX-15")).toBeInTheDocument();
+  });
+
+  it("LESSONS-2 item 3: renders a claims_review row with its verdict label", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          claims_review: [
+            {
+              claim_he: "20 אינץ' בגוף 15.",
+              basis_he: "מבוסס פיזיקלית.",
+              verifiability_he: "מדידה עצמאית.",
+              comparability_he: "לא בר השוואה ל-Toplite.",
+              verdict: "unverified",
+              cites: [1],
+            },
+          ],
+          sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null }],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    await waitFor(() => expect(document.body.textContent ?? "").toContain("20 אינץ'"));
+    expect(screen.getByText("לא מאומת")).toBeInTheDocument();
+  });
+
+  it("LESSONS-2 item 5: renders a gaps_tracking row with its status label", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          gaps_tracking: [{ gap_he: "מחיר יחידה לא ידוע.", status: "closed", cites: [1] }],
+          sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null }],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    expect(await screen.findByText("מחיר יחידה לא ידוע.")).toBeInTheDocument();
+    expect(screen.getByText("נסגר")).toBeInTheDocument();
+  });
+
+  it("LESSONS-2 item 7: renders a platforms row and the variants table's evidence/confidence columns", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          variants_and_versions: [
+            { name: "Block II", year: null, changes_he: "", platforms: [], cites: [1], evidence_he: "מוזכר בעלון 2023.", confidence: "high" },
+          ],
+          platforms: [{ platform: "Hermes 900", domain: "אווירי", integration_evidence_he: "מוזכר בעסקה עם US Air Force.", cites: [1] }],
+          sources: [{ n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null }],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    expect(await screen.findByText("Hermes 900")).toBeInTheDocument();
+    await waitFor(() => expect(document.body.textContent ?? "").toContain("מוזכר בעלון 2023"));
+    expect(document.body.textContent ?? "").toContain("גבוה");
+  });
+
+  it("LESSONS-2 item 4: deals table shows the row confidence alongside its citations", async () => {
+    getDossier.mockResolvedValue(
+      detail({
+        latest: {
+          ...emptyDossierOut(),
+          deals: [
+            {
+              date: "2020-05-01",
+              date_kind: "deal",
+              customer: "US Air Force",
+              country: "US",
+              kind: "contract_award",
+              amount: "$1M",
+              currency: "USD",
+              quantity: null,
+              platform: null,
+              cites: [1, 2],
+              confidence: 0.7,
+              confidence_level: "high",
+            },
+          ],
+          sources: [
+            { n: 1, url: "https://example.test/1", title: "Source 1", kind: "official", reliability: "high", accessed_at: null },
+            { n: 2, url: "https://example.test/2", title: "Source 2", kind: "press", reliability: "secondary", accessed_at: null },
+          ],
+        },
+      }),
+    );
+    renderPage();
+    await screen.findByRole("heading", { name: "SPECTRO XR" });
+    await waitFor(() => expect(document.body.textContent ?? "").toContain("גבוה"));
   });
 });

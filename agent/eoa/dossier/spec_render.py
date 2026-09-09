@@ -43,6 +43,15 @@ def _cite_cell(cites: list[int]) -> str:
     return ", ".join(f"[{n}]" for n in cites) if cites else "—"
 
 
+#: LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md item 7): high/medium/low
+#: -> the Hebrew label rendered in every table's confidence-bearing column.
+CONFIDENCE_LABEL_HE = {"high": "גבוה", "medium": "בינוני", "low": "נמוך"}
+
+
+def _confidence_label(value: str) -> str:
+    return CONFIDENCE_LABEL_HE.get(value, value)
+
+
 def _sort_index(params_by_key: dict[str, SpecParam]) -> dict[str, tuple[int, int]]:
     """``key -> (group_order_index, declaration_order_index)`` -- built from the global vocabulary
     map (itself ``lru_cache``'d, see ``eoa.dossier.vocabulary``, so this is cheap per call)."""
@@ -65,14 +74,17 @@ def specifications_entry(dossier: ProductDossierOut) -> dict[str, Any]:
     rows_sorted = sorted(
         dossier.specifications, key=lambda r: sort_index.get(r.key, _UNKNOWN_SORT_KEY)
     )
-    headers = ["קבוצה", "פרמטר", "ערך", "יחידה/וריאנט", "סוג מקור", "מקור"]
+    #: LESSONS-2 item 4: the "ביטחון" (confidence) column is merged into "סוג מקור" (rather than
+    #: added as its own 7th column) to stay within the report's <= 6-column table limit --
+    #: "datasheet · גבוה".
+    headers = ["קבוצה", "פרמטר", "ערך", "יחידה/וריאנט", "סוג מקור / ביטחון", "מקור"]
     rows = [
         [
             _group_label(r.key, params_by_key),
             r.parameter_he,
             _cell(r.value),
             " / ".join(x for x in (r.unit, r.variant) if x) or "—",
-            r.source_kind,
+            f"{r.source_kind} · {_confidence_label(r.confidence)}",
             _cite_cell(r.cites),
         ]
         for r in rows_sorted
@@ -86,6 +98,8 @@ def performance_entry(dossier: ProductDossierOut) -> dict[str, Any]:
     params_by_key = all_params_by_key()
     sort_index = _sort_index(params_by_key)
     rows_sorted = sorted(dossier.performance, key=lambda r: sort_index.get(r.key, _UNKNOWN_SORT_KEY))
+    #: LESSONS-2 item 4: same merge-not-add discipline as specifications_entry above -- "תנאים" cell
+    #: carries a trailing "(ביטחון: X)" suffix rather than a 7th column.
     headers = ["קבוצה", "מדד", "ערך מוצהר", "ערך נמדד/מבצעי", "תנאים", "מקור"]
     rows = [
         [
@@ -93,7 +107,7 @@ def performance_entry(dossier: ProductDossierOut) -> dict[str, Any]:
             r.metric_he,
             _cell(r.claimed_value),
             _cell(r.tested_or_operational_value),
-            _cell(r.conditions_he)[:150],
+            (f"{_cell(r.conditions_he)[:150]} (ביטחון: {_confidence_label(r.confidence)})"),
             _cite_cell(r.cites),
         ]
         for r in rows_sorted
@@ -107,13 +121,14 @@ def other_specifications_entry(dossier: ProductDossierOut) -> dict[str, Any]:
     used before this vocabulary rollout."""
     if not dossier.other_specifications:
         return {"title_he": "פרמטרים נוספים", "body_he": PLACEHOLDER_HE}
-    headers = ["פרמטר", "ערך", "יחידה/וריאנט", "סוג מקור", "מקור"]
+    headers = ["פרמטר", "ערך", "יחידה/וריאנט", "סוג מקור", "ביטחון", "מקור"]
     rows = [
         [
             r.parameter_he,
             _cell(r.value),
             " / ".join(x for x in (r.unit, r.variant) if x) or "—",
             r.source_kind,
+            _confidence_label(r.confidence),
             _cite_cell(r.cites),
         ]
         for r in dossier.other_specifications
@@ -132,6 +147,7 @@ def spec_and_performance_entries(
 
 
 __all__ = [
+    "CONFIDENCE_LABEL_HE",
     "other_specifications_entry",
     "performance_entry",
     "spec_and_performance_entries",

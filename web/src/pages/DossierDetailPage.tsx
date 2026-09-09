@@ -20,14 +20,25 @@ import type { CitationLike } from "@/components/CitationText";
 import { formatDateTime } from "@/lib/time";
 import { useI18n, useT } from "@/i18n";
 import type {
+  DossierClaimReviewRow,
   DossierCompetitorRow,
   DossierDealRow,
+  DossierGapTrackingRow,
   DossierPartnerRow,
   DossierPatentRef,
+  DossierPlatformRow,
   DossierPriceRow,
+  DossierRowConfidence,
   DossierTenderRef,
+  DossierTimelineRow,
   DossierVersionRow,
 } from "@/types/api";
+
+// LESSONS-2 (2026-09-09, docs/qa/content_review/LESSONS-fable-dossier.md item 4): the shared
+// high/medium/low -> localized label helper, used by every confidence-bearing column below.
+function confidenceLabel(t: ReturnType<typeof useT>, level: DossierRowConfidence | null | undefined): string | null {
+  return level ? t(`dossiers.confidenceLevel.${level}` as never) : null;
+}
 
 /** PD-fix-2 (2026-09-08, item 3): Hebrew label for a deal's `kind` -- reuses the shared
  * event-kind map (`eventKindLabel`, `@/components/entities/eventKindLabel`) for the one kind the
@@ -126,15 +137,20 @@ export function DossierDetailPage() {
     { id: "dossier-summary", label: t("dossiers.sections.summary") },
     { id: "dossier-specifications", label: t("dossiers.sections.specifications") },
     { id: "dossier-versions", label: t("dossiers.sections.versions") },
+    { id: "dossier-platforms", label: t("dossiers.sections.platforms") },
     { id: "dossier-performance", label: t("dossiers.sections.performance") },
     { id: "dossier-maturity", label: t("dossiers.sections.maturity") },
+    { id: "dossier-timeline", label: t("dossiers.sections.timeline") },
     { id: "dossier-deals", label: t("dossiers.sections.deals") },
     { id: "dossier-pricing", label: t("dossiers.sections.pricing") },
+    { id: "dossier-pricing-estimate", label: t("dossiers.sections.pricingEstimate") },
     { id: "dossier-partnerships", label: t("dossiers.sections.partnerships") },
     { id: "dossier-competitors", label: t("dossiers.sections.competitors") },
+    { id: "dossier-claims-review", label: t("dossiers.sections.claimsReview") },
     { id: "dossier-patents", label: t("dossiers.sections.patents") },
     { id: "dossier-tenders", label: t("dossiers.sections.tendersAndForecasts") },
     { id: "dossier-gaps", label: t("dossiers.sections.risksAndGaps") },
+    { id: "dossier-gaps-tracking", label: t("dossiers.sections.gapsTracking") },
     { id: "dossier-bd", label: t("dossiers.sections.bdImplications") },
     { id: "dossier-changed", label: t("dossiers.sections.whatChanged") },
     { id: "dossier-sources", label: t("dossiers.sections.sources") },
@@ -144,7 +160,41 @@ export function DossierDetailPage() {
     { key: "name", label: t("dossiers.table.colName"), render: (r) => <DossierPlainText text={r.name} /> },
     { key: "year", label: t("dossiers.table.colYear"), render: (r) => <DossierPlainText text={r.year != null ? String(r.year) : null} /> },
     { key: "changes", label: t("dossiers.table.colChanges"), render: (r) => <DossierPlainText text={r.changes_he} /> },
-    { key: "platforms", label: t("dossiers.table.colPlatforms"), render: (r) => <DossierPlainText text={r.platforms.join(", ") || null} /> },
+    // LESSONS-2 item 7: "platforms" moved to its own dedicated table (below) -- the freed column
+    // slot carries evidence + confidence instead, matching eoa.dossier.report._variants_table.
+    { key: "evidence", label: t("dossiers.table.colEvidence"), render: (r) => <DossierPlainText text={r.evidence_he ?? null} /> },
+    { key: "confidence", label: t("dossiers.table.colConfidence"), render: (r) => <DossierPlainText text={confidenceLabel(t, r.confidence)} /> },
+    { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
+  ];
+
+  const platformColumns: DossierTableColumn<DossierPlatformRow>[] = [
+    { key: "platform", label: t("dossiers.table.colPlatform"), render: (r) => <DossierPlainText text={r.platform} /> },
+    { key: "domain", label: t("dossiers.table.colDomain"), render: (r) => <DossierPlainText text={r.domain} /> },
+    { key: "evidence", label: t("dossiers.table.colIntegrationEvidence"), render: (r) => <DossierPlainText text={r.integration_evidence_he} /> },
+    { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
+  ];
+
+  const timelineKindLabel = (kind: string): string => t(`dossiers.timelineKind.${kind}` as never) ?? kind;
+
+  const timelineColumns: DossierTableColumn<DossierTimelineRow>[] = [
+    { key: "date", label: t("dossiers.table.colDate"), render: (r) => <DossierPlainText text={r.date} /> },
+    { key: "event", label: t("dossiers.table.colEvent"), render: (r) => <DossierPlainText text={r.event_he} /> },
+    { key: "kind", label: t("dossiers.table.colKind"), render: (r) => <DossierPlainText text={timelineKindLabel(r.kind)} /> },
+    { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
+  ];
+
+  const claimsReviewColumns: DossierTableColumn<DossierClaimReviewRow>[] = [
+    { key: "claim", label: t("dossiers.table.colClaim"), render: (r) => <DossierPlainText text={r.claim_he} /> },
+    { key: "basis", label: t("dossiers.table.colBasis"), render: (r) => <DossierPlainText text={r.basis_he} /> },
+    { key: "verifiability", label: t("dossiers.table.colVerifiability"), render: (r) => <DossierPlainText text={r.verifiability_he} /> },
+    { key: "comparability", label: t("dossiers.table.colComparability"), render: (r) => <DossierPlainText text={r.comparability_he} /> },
+    { key: "verdict", label: t("dossiers.table.colVerdict"), render: (r) => <DossierPlainText text={t(`dossiers.claimVerdict.${r.verdict}` as never) ?? r.verdict} /> },
+    { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
+  ];
+
+  const gapsTrackingColumns: DossierTableColumn<DossierGapTrackingRow>[] = [
+    { key: "gap", label: t("dossiers.table.colGap"), render: (r) => <DossierPlainText text={r.gap_he} /> },
+    { key: "status", label: t("dossiers.table.colStatus"), render: (r) => <DossierPlainText text={t(`dossiers.gapStatus.${r.status}` as never) ?? r.status} /> },
     { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
   ];
 
@@ -185,7 +235,21 @@ export function DossierDetailPage() {
       render: (r) => <DossierPlainText text={r.amount && r.currency ? `${r.amount} ${r.currency}` : r.amount} />,
     },
     { key: "quantity", label: t("dossiers.table.colQuantity"), render: (r) => <DossierPlainText text={r.quantity != null ? String(r.quantity) : null} /> },
-    { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
+    // LESSONS-2 item 4: the deals table is already at the 6-column cap (date/customer/kind/amount/
+    // quantity/sources) -- confidence is merged into the citations cell rather than a 7th column,
+    // matching eoa.dossier.report._deal_cite_cell_with_confidence.
+    {
+      key: "cites",
+      label: t("dossiers.table.colSources"),
+      render: (r) => (
+        <span className="inline-flex flex-wrap items-center gap-1">
+          <DossierCiteChips cites={r.cites} citations={citations} />
+          {r.confidence_level && (
+            <span className="whitespace-nowrap text-fg-dim">({confidenceLabel(t, r.confidence_level)})</span>
+          )}
+        </span>
+      ),
+    },
   ];
 
   const priceColumns: DossierTableColumn<DossierPriceRow>[] = [
@@ -201,6 +265,7 @@ export function DossierDetailPage() {
     { key: "partner", label: t("dossiers.table.colPartner"), render: (r) => <DossierPlainText text={r.partner} /> },
     { key: "role", label: t("dossiers.table.colRole"), render: (r) => <DossierPlainText text={r.role_he} /> },
     { key: "since", label: t("dossiers.table.colSince"), render: (r) => <DossierPlainText text={r.since} /> },
+    { key: "confidence", label: t("dossiers.table.colConfidence"), render: (r) => <DossierPlainText text={confidenceLabel(t, r.confidence)} /> },
     { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
   ];
 
@@ -208,6 +273,7 @@ export function DossierDetailPage() {
     { key: "product", label: t("dossiers.table.colProduct"), render: (r) => <DossierPlainText text={r.product} /> },
     { key: "vendor", label: t("dossiers.table.colVendor"), render: (r) => <DossierPlainText text={r.vendor} /> },
     { key: "comparison", label: t("dossiers.table.colComparison"), render: (r) => <DossierPlainText text={r.comparison_he} /> },
+    { key: "confidence", label: t("dossiers.table.colConfidence"), render: (r) => <DossierPlainText text={confidenceLabel(t, r.confidence)} /> },
     { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
     {
       key: "action",
@@ -385,6 +451,13 @@ export function DossierDetailPage() {
             <DossierTable columns={versionColumns} rows={data.variants_and_versions} rowKey={(r, i) => `${r.name}-${i}`} emptyLabel={t("dossiers.emptySections.versions")} caption={t("dossiers.sections.versions")} />
           </section>
 
+          {/* LESSONS-2 item 7: platforms as their own table -- built deterministically by the
+              backend from maturity.platforms_integrated + every deal's own platform. */}
+          <section id="dossier-platforms" className="scroll-mt-16">
+            <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.platforms")}</h3>
+            <DossierTable columns={platformColumns} rows={data.platforms ?? []} rowKey={(r, i) => `${r.platform}-${i}`} emptyLabel={t("dossiers.emptySections.platforms")} caption={t("dossiers.sections.platforms")} />
+          </section>
+
           <section id="dossier-performance" className="scroll-mt-16">
             <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.performance")}</h3>
             <DossierSpecTable
@@ -422,6 +495,14 @@ export function DossierDetailPage() {
             </p>
           </section>
 
+          {/* LESSONS-2 item 1: chronological timeline built from deals/programme-deals/variants/
+              identity.first_announced (deterministic) plus LLM-extracted milestones with a real
+              cited date. */}
+          <section id="dossier-timeline" className="scroll-mt-16">
+            <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.timeline")}</h3>
+            <DossierTable columns={timelineColumns} rows={data.timeline ?? []} rowKey={(r, i) => `${r.date}-${i}`} emptyLabel={t("dossiers.emptySections.timeline")} caption={t("dossiers.sections.timeline")} />
+          </section>
+
           <section id="dossier-deals" className="scroll-mt-16">
             <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.deals")}</h3>
             <DossierTable columns={dealColumns} rows={data.deals} rowKey={(r, i) => `${r.date}-${i}`} emptyLabel={t("dossiers.emptySections.deals")} caption={t("dossiers.sections.deals")} />
@@ -447,6 +528,60 @@ export function DossierDetailPage() {
             <DossierTable columns={priceColumns} rows={data.pricing} rowKey={(r, i) => `${r.figure}-${i}`} emptyLabel={t("dossiers.emptySections.pricing")} caption={t("dossiers.sections.pricing")} />
           </section>
 
+          {/* LESSONS-2 item 2: a labelled analyst pricing ESTIMATE, wholly separate from the
+              published-figures "pricing" section above -- only ever present when the backend's
+              gate (a cited contract total with duration/scope AND a cited market anchor) passed;
+              the disclaimer is rendered unconditionally whenever the block is present. */}
+          <section id="dossier-pricing-estimate" className="scroll-mt-16">
+            <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.pricingEstimate")}</h3>
+            {!data.pricing_estimate ? (
+              <p className="text-sm text-fg-dim">{t("dossiers.emptySections.pricingEstimate")}</p>
+            ) : (
+              <div className="space-y-3 rounded-md border border-border bg-bg-sunken p-3 text-sm">
+                <p className="text-xs font-semibold text-level-orange">{t("dossiers.pricingEstimate.disclaimer")}</p>
+                <p>
+                  <span className="text-fg-dim">{t("dossiers.pricingEstimate.methodLabel")}: </span>
+                  <DossierPlainText text={data.pricing_estimate.method_he} />
+                </p>
+                {data.pricing_estimate.assumptions.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-semibold text-fg-dim">{t("dossiers.pricingEstimate.assumptionsLabel")}</p>
+                    <ul className="list-disc space-y-1 ps-5">
+                      {data.pricing_estimate.assumptions.map((a, i) => (
+                        <li key={i}><DossierFactText text={a.text_he} cites={a.cites} citations={citations} /></li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {(data.pricing_estimate.range_low != null || data.pricing_estimate.range_high != null) && (
+                  <p>
+                    <span className="text-fg-dim">{t("dossiers.pricingEstimate.rangeLabel")}: </span>
+                    {[data.pricing_estimate.range_low, data.pricing_estimate.range_high]
+                      .map((v) => (v != null ? v.toLocaleString() : "—"))
+                      .join("–")}
+                    {data.pricing_estimate.currency ? ` ${data.pricing_estimate.currency}` : ""}
+                  </p>
+                )}
+                {data.pricing_estimate.market_anchors.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-semibold text-fg-dim">{t("dossiers.pricingEstimate.marketAnchorsLabel")}</p>
+                    <DossierTable
+                      columns={[
+                        { key: "product", label: t("dossiers.table.colComparableProduct"), render: (r: { product_he: string }) => <DossierPlainText text={r.product_he} /> },
+                        { key: "range", label: t("dossiers.table.colPriceRange"), render: (r: { price_range_he: string }) => <DossierPlainText text={r.price_range_he} /> },
+                        { key: "cites", label: t("dossiers.table.colSources"), render: (r: { cites: number[] }) => <DossierCiteChips cites={r.cites} citations={citations} /> },
+                      ]}
+                      rows={data.pricing_estimate.market_anchors}
+                      rowKey={(r, i) => `${r.product_he}-${i}`}
+                      emptyLabel={t("dossiers.emptySections.pricingEstimate")}
+                      caption={t("dossiers.pricingEstimate.marketAnchorsLabel")}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
           <section id="dossier-partnerships" className="scroll-mt-16">
             <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.partnerships")}</h3>
             <DossierTable columns={partnerColumns} rows={data.partnerships} rowKey={(r, i) => `${r.partner}-${i}`} emptyLabel={t("dossiers.emptySections.partnerships")} caption={t("dossiers.sections.partnerships")} />
@@ -455,6 +590,12 @@ export function DossierDetailPage() {
           <section id="dossier-competitors" className="scroll-mt-16">
             <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.competitors")}</h3>
             <DossierTable columns={competitorColumns} rows={data.competitors} rowKey={(r, i) => `${r.product}-${i}`} emptyLabel={t("dossiers.emptySections.competitors")} caption={t("dossiers.sections.competitors")} />
+          </section>
+
+          {/* LESSONS-2 item 3: up to 5 critically-reviewed vendor claims. */}
+          <section id="dossier-claims-review" className="scroll-mt-16">
+            <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.claimsReview")}</h3>
+            <DossierTable columns={claimsReviewColumns} rows={data.claims_review ?? []} rowKey={(r, i) => `${r.claim_he}-${i}`} emptyLabel={t("dossiers.emptySections.claimsReview")} caption={t("dossiers.sections.claimsReview")} />
           </section>
 
           <section id="dossier-patents" className="scroll-mt-16">
@@ -470,6 +611,13 @@ export function DossierDetailPage() {
           <section id="dossier-gaps" className="scroll-mt-16">
             <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.risksAndGaps")}</h3>
             <DossierSentenceList sentences={data.risks_and_gaps} citations={citations} emptyLabel={t("dossiers.emptySections.risksAndGaps")} />
+          </section>
+
+          {/* LESSONS-2 item 5: cross-run gap tracking (closed/open/new), when the backend's
+              gap-status lane has produced data for this product. */}
+          <section id="dossier-gaps-tracking" className="scroll-mt-16">
+            <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.sections.gapsTracking")}</h3>
+            <DossierTable columns={gapsTrackingColumns} rows={data.gaps_tracking ?? []} rowKey={(r, i) => `${r.gap_he}-${i}`} emptyLabel={t("dossiers.emptySections.gapsTracking")} caption={t("dossiers.sections.gapsTracking")} />
           </section>
 
           <section id="dossier-bd" className="scroll-mt-16">
