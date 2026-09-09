@@ -825,3 +825,36 @@ def test_run_plan_no_previous_dossier_means_no_gap_followup_topics(monkeypatch: 
     dossier_plan.run_plan(corpus, max_topics=len(dossier_plan.TOPICS))
     assert corpus.gap_status == []
     assert not any("gap_followup" in q for q in calls)
+
+
+# --------------------------------------------------------------------------
+# TEST-ISO (2026-09-09, docs/qa/content_review/TEST-ISO.md): a run of this file went live (86
+# minutes, 4 failures, DuckDuckGo blocked) because nothing stopped an unmocked code path from
+# reaching the real network primitives ``eoa.search.provider``/``eoa.search.pdf_reader``/
+# ``eoa.fetch.remote``/``eoa.patents.scan`` all eventually funnel through. ``tests/conftest.py``'s
+# ``_dossier_network_guard`` autouse fixture now patches those two primitives -- ``httpx.Client.get``
+# /``.post`` and ``ddgs.DDGS.text`` -- to raise for every test in this file (and the other three
+# owned dossier test files). This is not a test of ``eoa.dossier.plan`` itself: it is a regression
+# test for the guard fixture, proving it is actually wired up and active for this module.
+# --------------------------------------------------------------------------
+
+
+def test_network_guard_blocks_httpx_client_get() -> None:
+    import httpx
+
+    with httpx.Client() as client, pytest.raises(RuntimeError, match="live network call attempted"):
+        client.get("https://example.com")
+
+
+def test_network_guard_blocks_httpx_client_post() -> None:
+    import httpx
+
+    with httpx.Client() as client, pytest.raises(RuntimeError, match="live network call attempted"):
+        client.post("https://example.com")
+
+
+def test_network_guard_blocks_ddgs_text() -> None:
+    from ddgs import DDGS
+
+    with DDGS() as ddgs, pytest.raises(RuntimeError, match="live network call attempted"):
+        ddgs.text("SPECTRO XR datasheet")

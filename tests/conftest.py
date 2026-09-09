@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -335,4 +336,63 @@ def _ask_entailment_off(monkeypatch, clear_settings_cache, _reports_to_tmp):
             monkeypatch.setattr(ask, "entailment_check", False, raising=False)
     except Exception:
         pass
+    yield
+
+
+#: TEST-ISO (2026-09-09, docs/qa/content_review/TEST-ISO.md): the four product-dossier unit-test
+#: files exercise ``eoa.dossier.plan``/``datasheet``/``programs``/``corpus``, which together can
+#: reach live network through ``eoa.search.provider.search`` (DuckDuckGo via ``ddgs.DDGS.text``),
+#: ``eoa.search.pdf_reader``/``eoa.fetch.remote.fetch_remote`` (page/PDF downloads via
+#: ``httpx.Client.get``), and ``eoa.patents.scan.search_records_for_applicant`` (EPO OPS/USPTO ODP,
+#: also via ``httpx.Client``). Every test in these four files already monkeypatches the specific
+#: entry point it exercises (``investigate``/``search``/``fetch_pdf``/``fetch_remote``/
+#: ``search_records_for_applicant``) -- a run went live anyway (86 minutes, 4 failures, DuckDuckGo
+#: blocked) because nothing stopped an *unmocked* path from reaching the two actual network
+#: primitives every one of those higher-level functions eventually calls.
+_DOSSIER_NETWORK_ISOLATED_FILES = frozenset(
+    {
+        "test_product_dossier_plan.py",
+        "test_dossier_datasheet.py",
+        "test_dossier_programs.py",
+        "test_product_dossier_corpus.py",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _dossier_network_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Scoped (by test-file basename) to :data:`_DOSSIER_NETWORK_ISOLATED_FILES` alone -- every
+    other test file's own ``httpx``/``ddgs`` use, if any, is untouched. Within those four files,
+    ``httpx.Client.get``/``.post`` and ``ddgs.DDGS.text`` -- the two low-level primitives every
+    dossier network entry point funnels through -- raise immediately instead of making a real
+    request: a loud, fast (not 86-minutes-hanging-when-blocked) test failure the moment ANY code
+    path in ``eoa.dossier.*`` reaches the network unmocked, pointing at exactly which primitive and
+    which test. See ``docs/qa/content_review/TEST-ISO.md``."""
+    if request.node.fspath.basename not in _DOSSIER_NETWORK_ISOLATED_FILES:
+        yield
+        return
+
+    def _blocked(name: str):
+        def _raise(*args: object, **kwargs: object) -> Any:
+            raise RuntimeError(
+                f"live network call attempted via {name} during dossier unit test "
+                f"{request.node.nodeid!r} -- mock the higher-level entry point "
+                "(search/fetch_pdf/fetch_remote/investigate/search_records_for_applicant) instead "
+                "of letting it reach the network. See docs/qa/content_review/TEST-ISO.md."
+            )
+
+        return _raise
+
+    import httpx
+
+    monkeypatch.setattr(httpx.Client, "get", _blocked("httpx.Client.get"))
+    monkeypatch.setattr(httpx.Client, "post", _blocked("httpx.Client.post"))
+
+    try:
+        from ddgs import DDGS
+
+        monkeypatch.setattr(DDGS, "text", _blocked("ddgs.DDGS.text"))
+    except Exception:
+        pass
+
     yield
