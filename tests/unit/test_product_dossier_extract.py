@@ -347,6 +347,34 @@ def test_deal_row_with_own_date_keeps_date_kind_deal() -> None:
 
 
 def test_deal_customer_placeholder_dash_normalized_to_none() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי ב-2026-01-01.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    # PD-fix-6 item 4: a deal row with no amount/customer/date/country is dropped entirely -- this
+    # row keeps its own explicit `date` so it survives that check, isolating the assertion below to
+    # customer-placeholder normalization alone (see test_deal_row_with_no_content_at_all_is_dropped
+    # for the item-4 drop itself).
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="—", kind="contract_award", date="2026-01-01", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].customer is None
+
+
+def test_deal_customer_placeholder_hebrew_text_normalized_to_none() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי ב-2026-01-01.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="לא ידוע", kind="contract_award", date="2026-01-01", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].customer is None
+
+
+def test_deal_row_with_no_content_at_all_is_dropped() -> None:
+    """PD-fix-6 item 4: a candidate carrying neither an amount, a customer, a date, a country/
+    region, a platform nor a quantity is dropped entirely -- there is nothing left worth keeping."""
     items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי.", "so_what_he": ""}]
     corpus = _corpus_with_registry([_reg(1)], items=items)
     draft = ProductDossierOut(
@@ -354,18 +382,7 @@ def test_deal_customer_placeholder_dash_normalized_to_none() -> None:
         deals=[DealRow(customer="—", kind="contract_award", cites=[1])],
     )
     result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
-    assert result.dossier.deals[0].customer is None
-
-
-def test_deal_customer_placeholder_hebrew_text_normalized_to_none() -> None:
-    items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי.", "so_what_he": ""}]
-    corpus = _corpus_with_registry([_reg(1)], items=items)
-    draft = ProductDossierOut(
-        identity=IdentityBlock(product_name="SPECTRO XR"),
-        deals=[DealRow(customer="לא ידוע", kind="contract_award", cites=[1])],
-    )
-    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
-    assert result.dossier.deals[0].customer is None
+    assert result.dossier.deals == []
 
 
 def test_deal_real_customer_name_is_kept_verbatim() -> None:
@@ -1191,6 +1208,207 @@ def test_deal_candidate_multiple_press_releases_each_yield_own_deal() -> None:
     assert amounts == [80_000_000.0, 270_000_000.0]
 
 
+def test_deal_candidate_spurious_digit_in_list_marker_yields_no_candidate() -> None:
+    """PD-fix-6 item 1/4 root cause: a source whose ONLY digit runs are markdown list markers
+    ("(1)", "1.") inside unrelated investigation prose, not a real monetary figure, must yield no
+    deal candidate at all -- even though the text also carries an award/contract keyword elsewhere.
+    Reproduces the live SPECTRO XR rerun (product_dossiers id=12) text that previously produced
+    ``amount="**(1) עובדות רלוונטיות:** ב-1 בספט"`` / ``amount_value=1.0``."""
+    items = [
+        {
+            "id": 1,
+            "title": "ניתוח הדף",
+            "summary_he": (
+                "חברת אלביט מערכות זכתה בחוזה. הביא 3 מקורות נוספים. להלן ניתוח הדף: "
+                "**(1) עובדות רלוונטיות:** ב-1 בספטמבר 2026 פורסמה הודעה."
+            ),
+            "so_what_he": "",
+        }
+    ]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals == []
+
+
+# --------------------------------------------------------------------------
+# PD-fix-6 (2026-09-09): deal-row hygiene fixed against the live SPECTRO XR rerun's own garbage
+# (product_dossiers id=12) -- customer values that are torn fragments of investigation prose,
+# non-ISO/timestamped dates, and duplicate deal rows in different textual shapes.
+# --------------------------------------------------------------------------
+
+#: The exact garbage `customer` strings named in the PD-fix-6 task brief, verbatim.
+_PD_FIX_6_GARBAGE_CUSTOMERS: tuple[str, ...] = (
+    "- **(1) עובדות רלוונטיות:** ב-1 בספט",
+    "- ews, 03/2023) **(1) עובדות רלוונטיות",
+    "- nds $270M ISR Deal חברת אלביט מערכות ז",
+    "- הביא 3 מקורות נוספים. להלן ניתוח הדף",
+)
+
+
+def test_looks_like_customer_name_rejects_every_pd_fix_6_garbage_string() -> None:
+    for garbage in _PD_FIX_6_GARBAGE_CUSTOMERS:
+        assert dossier_extract._looks_like_customer_name(garbage) is False, garbage
+
+
+def test_normalize_customer_nulls_every_pd_fix_6_garbage_string() -> None:
+    for garbage in _PD_FIX_6_GARBAGE_CUSTOMERS:
+        assert dossier_extract._normalize_customer(garbage) is None, garbage
+
+
+def test_deal_row_with_garbage_customer_is_grounded_to_null_customer_but_keeps_amount() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה בהיקף כ-80 מיליון דולר.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[
+            DealRow(
+                customer=_PD_FIX_6_GARBAGE_CUSTOMERS[2],
+                amount="כ-80 מיליון דולר",
+                cites=[1],
+            )
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    deal = result.dossier.deals[0]
+    assert deal.customer is None
+    assert deal.amount_value == 80_000_000.0
+
+
+def test_looks_like_customer_name_accepts_real_organisation_and_country_names() -> None:
+    for good in ("US Air Force", "משרד ההגנה הלאומי של רומניה", "Romania", "הצי הרומני", "NATO"):
+        assert dossier_extract._looks_like_customer_name(good) is True, good
+
+
+def test_normalize_deal_date_hebrew_month_year_becomes_iso_year_month() -> None:
+    assert dossier_extract._normalize_deal_date("ספטמבר 2026") == "2026-09"
+    assert dossier_extract._normalize_deal_date("מרץ 2023") == "2023-03"
+
+
+def test_normalize_deal_date_english_month_year_becomes_iso_year_month() -> None:
+    assert dossier_extract._normalize_deal_date("September 2026") == "2026-09"
+    assert dossier_extract._normalize_deal_date("Mar 2023") == "2023-03"
+
+
+def test_normalize_deal_date_strips_time_component_from_timestamp() -> None:
+    assert dossier_extract._normalize_deal_date("2026-09-02 09:04:00+03:00") == "2026-09-02"
+
+
+def test_normalize_deal_date_dmy_slash_becomes_iso() -> None:
+    assert dossier_extract._normalize_deal_date("20/3/2023") == "2023-03-20"
+
+
+def test_normalize_deal_date_passes_through_already_iso() -> None:
+    assert dossier_extract._normalize_deal_date("2023-06-21") == "2023-06-21"
+    assert dossier_extract._normalize_deal_date("2022-12") == "2022-12"
+
+
+def test_normalize_deal_date_unparseable_text_becomes_none() -> None:
+    assert dossier_extract._normalize_deal_date("הביא 3 מקורות נוספים") is None
+    assert dossier_extract._normalize_deal_date(None) is None
+    assert dossier_extract._normalize_deal_date("") is None
+
+
+def test_deal_row_hebrew_month_date_grounded_to_iso_year_month() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="Some AF", date="ספטמבר 2026", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].date == "2026-09"
+
+
+def test_deal_row_timestamp_date_grounded_to_date_only() -> None:
+    items = [{"id": 1, "title": "contract", "summary_he": "עסקה כלשהי.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="Some AF", date="2026-09-02 09:04:00+03:00", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals[0].date == "2026-09-02"
+
+
+def test_deal_rows_deduped_by_amount_value_kind_and_customer() -> None:
+    """PD-fix-6 item 3: the same $270M Romanian contract, cited from two different sources in the
+    registry (two different press-release URLs the model each turned into its own deal row --
+    matching product_dossiers id=12's repeated Romanian framework/order and $270M contract), same
+    amount/kind/customer -- collapses to one row, first occurrence kept."""
+    items = [
+        {"id": 1, "title": "contract-a", "summary_he": "עסקה עם רומניה בהיקף כ-270 מיליון דולר.", "so_what_he": ""},
+        {"id": 2, "title": "contract-b", "summary_he": "עסקה נוספת עם רומניה בהיקף כ-270 מיליון דולר.", "so_what_he": ""},
+    ]
+    corpus = _corpus_with_registry([_reg(1), _reg(2)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[
+            DealRow(customer="Romania", amount="כ-270 מיליון דולר", kind="contract_award", cites=[1]),
+            DealRow(customer="Romania", amount="270 מיליון דולר", kind="contract_award", cites=[2]),
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    deals_270 = [d for d in result.dossier.deals if d.amount_value == 270_000_000.0]
+    assert len(deals_270) == 1
+    assert deals_270[0].customer == "Romania"
+    assert deals_270[0].cites == [1]
+
+
+def test_deal_candidate_over_same_amount_and_customer_year_dedupes_against_model_row() -> None:
+    """A registry-derived candidate (no customer of its own) over the same amount/kind whose
+    source's OWN publish date falls in the same year as the model row's `date` collapses into the
+    model row -- `customer or date year` as the dedup identity's third component means an
+    undated-but-same-year candidate is still recognized as the same underlying deal."""
+    items = [
+        {"id": 1, "title": "contract-a", "summary_he": "עסקה עם רומניה בהיקף כ-270 מיליון דולר.", "so_what_he": ""},
+        {
+            "id": 2,
+            "title": "elbitsystems.com",
+            "summary_he": "אלביט זכתה בחוזה עם רומניה בהיקף של כ-270 מיליון דולר.",
+            "so_what_he": "",
+        },
+    ]
+    corpus = _corpus_with_registry([_reg(1), _reg(2, published_at="2023-06-21")], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[
+            DealRow(
+                customer=None,
+                amount="כ-270 מיליון דולר",
+                kind="contract_award",
+                date="2023-06-21",
+                cites=[1],
+            ),
+        ],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    deals_270 = [d for d in result.dossier.deals if d.amount_value == 270_000_000.0]
+    assert len(deals_270) == 1
+    assert deals_270[0].cites == [1]
+
+
+def test_deal_rows_same_amount_different_kind_both_kept() -> None:
+    """A framework agreement and its follow-on contract award over the same nominal figure/customer
+    are two distinct rows -- ``kind`` is part of the dedup identity, so they are never collapsed."""
+    dropped: list = []
+    deals = [
+        DealRow(customer="Romania", amount="180 מיליון דולר", amount_value=180_000_000.0, kind="framework", cites=[1]),
+        DealRow(
+            customer="Romania", amount="180 מיליון דולר", amount_value=180_000_000.0, kind="contract_award", cites=[1]
+        ),
+    ]
+    kept = dossier_extract._finalize_deals(deals, dropped)
+    assert len(kept) == 2
+
+
+def test_deal_row_no_content_dropped_by_finalize_deals_directly() -> None:
+    dropped: list = []
+    deals = [DealRow(kind="contract_award", cites=[1])]
+    assert dossier_extract._finalize_deals(deals, dropped) == []
+    assert dropped[0].reason == "empty_after_grounding"
+
+
 # --------------------------------------------------------------------------
 # PD-fix-4 (2026-09-09, item 5): timeline rows from dated gap/risk findings, and variants named
 # outside the dedicated "versions" topic.
@@ -1525,7 +1743,9 @@ def test_deal_date_backfilled_from_cited_text_when_no_registry_published_at() ->
     )
     result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
     deal = result.dossier.deals[0]
-    assert deal.date == "יוני 2021"
+    # PD-fix-6 item 2: a DealRow.date is always ISO (or null), never the raw Hebrew month-year
+    # phrase the textual date-hint fallback originally lifted verbatim ("יוני 2021").
+    assert deal.date == "2021-06"
     assert deal.date_kind == "published"
 
 

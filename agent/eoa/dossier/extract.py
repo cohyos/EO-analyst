@@ -18,7 +18,9 @@ strictest rule). Every drop is logged as ``dossier.field_dropped`` and returned 
 from __future__ import annotations
 
 import re
+import string
 from dataclasses import dataclass, field
+from datetime import date as _date
 from typing import Any
 
 import structlog
@@ -278,6 +280,97 @@ def split_country_region(country: str) -> tuple[str, str]:
     return c, ""
 
 
+#: PD-fix-6 (2026-09-09, item 1): punctuation characters a real customer/organisation name never
+#: legitimately opens with -- catches a markdown bullet ("- Ministry of..."), a stray heading/bold
+#: marker, or a torn list-item dash left over from investigation prose. ASCII punctuation covers
+#: every character actually observed in the SPECTRO XR (product_dossiers id=12) garbage rows; Hebrew
+#: has no separate punctuation block worth adding here.
+_PUNCTUATION_CHARS = frozenset(string.punctuation)
+
+
+# --------------------------------------------------------------------------
+# PD-fix-6 (2026-09-09, item 2): deterministic deal-date normalization -- a `DealRow.date` is
+# either a real ISO date ("YYYY-MM-DD"), a year-month ("YYYY-MM") when only a month/year is known,
+# or ``None``; never a raw Hebrew/English month-year phrase ("ספטמבר 2026", "March 2023") and never
+# a timestamp with a time component ("2026-09-02 09:04:00+03:00" -- a registry `published_at`
+# datetime backfilled verbatim by :func:`_ground_deal_row` before this existed). Applied to every
+# `DealRow.date` AFTER it is set (model-authored, registry-published-at backfill, or the
+# `_finding_date_hint` textual fallback) -- a date that can't be confidently parsed into one of the
+# two ISO shapes above is dropped to ``None`` rather than persisted as free text, same "grounded or
+# null, never a guess" discipline as every other deterministic post-check in this module.
+# --------------------------------------------------------------------------
+
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+_ISO_YEAR_MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
+_DMY_SLASH_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+
+#: Ordered 1..12 -- same words/order :data:`_TIMELINE_MONTHS_HE`/:data:`_TIMELINE_MONTHS_EN` below
+#: already use for the (deliberately un-normalized) timeline text hint; duplicated here as an
+#: explicit name->number map rather than imported forward (those tuples are defined later in the
+#: module, after this section).
+_HEBREW_MONTHS_HE: dict[str, int] = {
+    "ינואר": 1, "פברואר": 2, "מרץ": 3, "אפריל": 4, "מאי": 5, "יוני": 6,
+    "יולי": 7, "אוגוסט": 8, "ספטמבר": 9, "אוקטובר": 10, "נובמבר": 11, "דצמבר": 12,
+}
+_ENGLISH_MONTHS: dict[str, int] = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+_HEBREW_MONTH_YEAR_RE = re.compile(r"([א-ת]+)\s+(\d{4})")
+_ENGLISH_MONTH_YEAR_RE = re.compile(r"([A-Za-z]+)\.?\s+(\d{4})")
+
+
+def _normalize_deal_date(date: str | None) -> str | None:
+    """See this section's own docstring for the exact contract. ``date`` is coerced to ``str``
+    first so a registry `published_at` (often a real ``datetime``/``date`` object, not a string) is
+    handled the same way as a model-authored string."""
+    if not date:
+        return None
+    text = str(date).strip()
+    if not text:
+        return None
+
+    m = _ISO_DATE_RE.match(text)
+    if m:
+        y, mo, d = m.groups()
+        try:
+            _date(int(y), int(mo), int(d))
+        except ValueError:
+            return None
+        return f"{y}-{mo}-{d}"
+
+    m = _ISO_YEAR_MONTH_RE.match(text)
+    if m:
+        y, mo = m.groups()
+        return f"{y}-{mo}" if 1 <= int(mo) <= 12 else None
+
+    m = _DMY_SLASH_RE.match(text)
+    if m:
+        d, mo, y = m.groups()
+        try:
+            return _date(int(y), int(mo), int(d)).isoformat()
+        except ValueError:
+            return None
+
+    m = _HEBREW_MONTH_YEAR_RE.search(text)
+    if m:
+        word, year = m.groups()
+        month = _HEBREW_MONTHS_HE.get(word)
+        if month:
+            return f"{year}-{month:02d}"
+
+    m = _ENGLISH_MONTH_YEAR_RE.search(text)
+    if m:
+        word, year = m.groups()
+        month = _ENGLISH_MONTHS.get(word.casefold())
+        if month:
+            return f"{year}-{month:02d}"
+
+    return None
+
+
 # --------------------------------------------------------------------------
 # PD-fix-4 (2026-09-09, item 2): deterministic deal candidates from the registry's own press-release
 # pages. A live SPECTRO XR run (product_dossiers id=8) kept exactly ONE deal (amount only, no
@@ -325,7 +418,19 @@ def _deal_candidates_from_registry(
     number, and ``date`` is backfilled from the source's own ``published_at`` when it has one (same
     rule :func:`_ground_deal_row` already applies for a model row with no date). A source that names
     a figure but never an award/contract word (e.g. a spec sheet whose numbers happen to include an
-    unrelated dollar figure) yields no candidate at all."""
+    unrelated dollar figure) yields no candidate at all.
+
+    PD-fix-6 (2026-09-09, item 1/4): ``_DEAL_NUM_RE`` matches ANY digit run -- including the bare
+    "1"/"3" inside a markdown list marker like "**(1)" or "1." in an unrelated investigation-prose
+    writeup that happens to also contain an award/contract keyword elsewhere in the same source
+    text. A live SPECTRO XR rerun (product_dossiers id=12) turned exactly that into deal candidates
+    like ``amount="**(1) עובדות רלוונטיות:** ב-1 בספט"`` (``amount_value=1.0`` -- not a real
+    monetary figure at all). A digit run is now only ever promoted to a candidate when
+    :func:`parse_amount_he` itself found a currency (symbol or word) OR the snippet names a scale
+    word (מיליון/million/...) -- exactly the same evidence :func:`parse_amount_he` already looks
+    for, just required rather than optional here. A digit run with neither is skipped outright
+    (never even reaches :func:`_ground_deal_row`), and per PD-fix-6 item 4 a source whose EVERY
+    digit run fails this check simply yields no candidate for that source at all."""
     candidates: list[DealRow] = []
     for r in corpus.registry:
         n = r.get("n")
@@ -344,6 +449,9 @@ def _deal_candidates_from_registry(
             snippet = _deal_amount_snippet(text, m)
             value, currency = parse_amount_he(snippet)
             if value is None or value in seen_values:
+                continue
+            has_scale = any(word.casefold() in snippet.casefold() for word in _SCALE_HE)
+            if not currency and not has_scale:
                 continue
             seen_values.add(value)
             count += 1
@@ -375,6 +483,60 @@ def _merge_deal_candidates(model_deals: list[DealRow], candidates: list[DealRow]
         merged.append(c)
         already_cited.update(c.cites)
     return merged
+
+
+# --------------------------------------------------------------------------
+# PD-fix-6 (2026-09-09, items 3/4): post-grounding deal-row hygiene, applied to the FULLY grounded
+# `deals` list (model rows + PD-fix-4 candidates alike, after every check above has already run) --
+# never earlier, since dedup/drop both need each row's final ``amount``/``customer``/``date``, not
+# the pre-grounding draft values.
+# --------------------------------------------------------------------------
+
+
+def _deal_dedup_key(deal: DealRow) -> tuple[Any, str, str | None]:
+    """Item 3's own identity: ``(amount_value or normalised amount text, kind, customer or date
+    year)``. ``amount_value`` wins when present (it is already a deterministically parsed number,
+    so "180000000" and "180 מיליון" collapse to the same key); otherwise the row's own ``amount``
+    text, case-folded, stands in. The third component is the row's ``customer`` when known, else
+    just the 4-digit year prefix of its (already ISO-normalized) ``date`` -- two rows for the same
+    amount+kind naming the same customer, OR naming no customer but landing in the same year, are
+    the same underlying deal reported twice (the live SPECTRO XR rerun's repeated Romania
+    Watchkeeper X framework/order and $270M contract, in slightly different textual shapes)."""
+    amount_key: Any = deal.amount_value if deal.amount_value is not None else (deal.amount or "").strip().casefold()
+    if deal.customer:
+        identity = deal.customer.strip().casefold()
+    elif deal.date:
+        identity = deal.date[:4]
+    else:
+        identity = None
+    return (amount_key, deal.kind, identity)
+
+
+def _finalize_deals(deals: list[DealRow], dropped: list[DroppedField]) -> list[DealRow]:
+    """Item 4: a row with no ``amount``, no ``customer`` and no ``date`` carries nothing worth
+    keeping -- dropped outright. Also checks ``country``/``region_he``/``platform``/``quantity``
+    (not named by item 4, but the same "nothing worth keeping" rule applies): PD-fix-5 item 3
+    deliberately keeps a deal whose customer is unknown but whose country/region IS grounded (see
+    :func:`test_deal_country_and_region_kept_when_customer_unknown`) -- that row still carries real
+    information and must survive this check exactly like one with a bare ``date``. Item 3: among
+    the rows that survive, the second and later row sharing a :func:`_deal_dedup_key` is a
+    duplicate of the first -- dropped, first occurrence kept (rows arrive model-authored-first, per
+    :func:`_merge_deal_candidates`, so a model's own richer row -- real customer/platform/quantity
+    -- always wins over a same-deal PD-fix-4 candidate, not the other way around)."""
+    kept: list[DealRow] = []
+    seen: set[tuple[Any, str, str | None]] = set()
+    for d in deals:
+        has_content = d.amount or d.customer or d.date or d.country or d.region_he or d.platform or d.quantity
+        if not has_content:
+            _drop(dropped, "deals.row", "empty_after_grounding", d.kind)
+            continue
+        key = _deal_dedup_key(d)
+        if key in seen:
+            _drop(dropped, "deals.row", "duplicate_deal", d.customer or d.amount or d.date)
+            continue
+        seen.add(key)
+        kept.append(d)
+    return kept
 
 
 # --------------------------------------------------------------------------
@@ -718,19 +880,59 @@ _CUSTOMER_PLACEHOLDER_RE = re.compile(
     r"^[\s\-—–_.]*$|^(?:n/?a|unknown|לא\s*ידוע|לא\s*צוין|אין\s*מידע|לא\s*מזוהה)[\s.]*$", re.IGNORECASE
 )
 
+#: PD-fix-6 (2026-09-09, item 1): a "customer" value that is actually a fragment of the PD-fix-4
+#: candidate builder's own investigation-prose snippet (a markdown bullet/heading torn out of an
+#: LLM-authored "deep investigation findings" writeup, not an organisation/country name at all) --
+#: a live SPECTRO XR rerun (product_dossiers id=12) carried customers like "- **(1) עובדות
+#: רלוונטיות:** ב-1 בספט" and "- הביא 3 מקורות נוספים. להלן ניתוח הדף" verbatim. These substrings
+#: only ever show up in that kind of torn-prose fragment -- never in a real organisation/country
+#: name -- so their presence alone disqualifies the whole value, independent of the other checks
+#: below.
+_CUSTOMER_PROSE_FRAGMENT_SUBSTRINGS: tuple[str, ...] = ("עובדות רלוונטיות", "ניתוח הדף", "מקורות")
+
+#: A real customer name is never all-digits/punctuation (a bare amount or citation number
+#: mistakenly copied into `customer`) and never opens with a punctuation character (a markdown
+#: bullet "- ", a stray "*", a leading dash from a torn list item, ...). ``\w`` with UNICODE also
+#: matches Hebrew letters, so this correctly flags "123", "12/03/2023" or "**" as "no real letter
+#: anywhere" without needing a separate Hebrew-specific alphabet check.
+_CUSTOMER_HAS_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+_CUSTOMER_MAX_LEN = 60
+
+
+def _looks_like_customer_name(text: str) -> bool:
+    """PD-fix-6 item 1's proper-noun-looking-organisation/country gate: ``<= 60`` chars, no
+    markdown ("**"), not all-digits, doesn't open with a punctuation character, and doesn't contain
+    one of :data:`_CUSTOMER_PROSE_FRAGMENT_SUBSTRINGS`. Deliberately conservative -- a real
+    organisation/country name never happens to trip any of these, but a torn investigation-prose
+    fragment almost always trips at least one (usually several at once)."""
+    if not text or len(text) > _CUSTOMER_MAX_LEN:
+        return False
+    if "**" in text:
+        return False
+    if text[0] in _PUNCTUATION_CHARS:
+        return False
+    if not _CUSTOMER_HAS_LETTER_RE.search(text):
+        return False
+    return not any(bad in text for bad in _CUSTOMER_PROSE_FRAGMENT_SUBSTRINGS)
+
 
 def _normalize_customer(customer: str | None) -> str | None:
-    """``None`` (never a placeholder string) when ``customer`` is empty or literal placeholder
-    text -- the live SPECTRO XR deals table rendered the raw "—" a model wrote into ``customer``
-    verbatim, because the general ``_cell()`` placeholder check in ``eoa.dossier.report`` only ever
-    catches ``None``/``""``, not a truthy-but-meaningless string. Normalizing here means the
-    persisted/API ``customer`` value is a real null: ``eoa.dossier.report`` renders its own "לא
-    צוין" for it, and ``eoa.dossier.diff`` independently falls back to (amount, kind) identity
-    whenever a customer is missing on either side of a comparison."""
+    """``None`` (never a placeholder string, and never a garbage value) when ``customer`` is empty,
+    literal placeholder text, or fails :func:`_looks_like_customer_name` -- the live SPECTRO XR
+    deals table rendered the raw "—" a model wrote into ``customer`` verbatim, because the general
+    ``_cell()`` placeholder check in ``eoa.dossier.report`` only ever catches ``None``/``""``, not a
+    truthy-but-meaningless string. PD-fix-6 item 1 extends the same discipline to a value that is
+    truthy and non-placeholder but still not a real customer -- a torn fragment of investigation
+    prose the PD-fix-4 candidate builder (or the model itself) mistakenly carried into ``customer``.
+    Normalizing here means the persisted/API ``customer`` value is a real null: ``eoa.dossier.report``
+    renders its own "לא צוין" for it, and ``eoa.dossier.diff`` independently falls back to (amount,
+    kind) identity whenever a customer is missing on either side of a comparison."""
     if not customer:
         return None
     text = customer.strip()
     if not text or _CUSTOMER_PLACEHOLDER_RE.match(text):
+        return None
+    if not _looks_like_customer_name(text):
         return None
     return text
 
@@ -795,6 +997,16 @@ def _ground_deal_row(
         if hint:
             date = hint
             date_kind = "published"
+
+    # PD-fix-6 (2026-09-09, item 2): whatever `date` ended up as above -- model-authored, a
+    # registry `published_at` backfill (often a real datetime, not a string -- e.g.
+    # "2026-09-02 09:04:00+03:00"), or the `_finding_date_hint` textual fallback (a raw Hebrew/
+    # English month-year phrase like "ספטמבר 2026") -- is normalized to ISO ("YYYY-MM-DD" or
+    # "YYYY-MM") or dropped to `None`; a `DealRow.date` is never persisted as free text.
+    normalized_date = _normalize_deal_date(date)
+    if date and not normalized_date:
+        _drop(dropped, "deals.date", "unparseable_date_not_iso", date)
+    date = normalized_date
 
     confidence_level = _row_confidence_he(good_cites, kind_by_n=kind_by_n)
     return row.model_copy(
@@ -1244,22 +1456,34 @@ def build_timeline(dossier: ProductDossierOut, corpus: CorpusResult | None = Non
 
     #: LESSONS-fable-dossier item 3 explicitly names "programme deals" as one of the timeline's
     #: deterministic inputs, alongside deals/variants/identity above.
+    #:
+    #: PD-fix-6 (2026-09-09, item 5): same hygiene as a `DealRow` gets in `_ground_deal_row` --
+    #: `date` is ISO-normalized (never a raw Hebrew/English month-year phrase or a timestamp with a
+    #: time component) and dropped if unparseable, and `customer` is only ever used when it passes
+    #: :func:`_looks_like_customer_name` (never a torn investigation-prose fragment).
+    seen_pdeal_keys: set[tuple[str, str, str]] = set()
     for pdeal in getattr(corpus, "programme_deals", None) or []:
-        date = pdeal.get("date") if isinstance(pdeal, dict) else getattr(pdeal, "date", None)
+        raw_date = pdeal.get("date") if isinstance(pdeal, dict) else getattr(pdeal, "date", None)
+        date = _normalize_deal_date(str(raw_date) if raw_date is not None else None)
         cites = (pdeal.get("cites") if isinstance(pdeal, dict) else getattr(pdeal, "cites", None)) or []
         if not date or not cites:
             continue
         platform = (pdeal.get("platform") if isinstance(pdeal, dict) else getattr(pdeal, "platform", "")) or ""
-        customer = (pdeal.get("customer") if isinstance(pdeal, dict) else getattr(pdeal, "customer", "")) or ""
+        raw_customer = (pdeal.get("customer") if isinstance(pdeal, dict) else getattr(pdeal, "customer", "")) or ""
+        customer = raw_customer.strip() if _looks_like_customer_name(raw_customer.strip()) else ""
         amount_text = (
             pdeal.get("amount_text") if isinstance(pdeal, dict) else getattr(pdeal, "amount_text", "")
         ) or ""
         parts = [p for p in (customer, platform) if p]
         who = " · ".join(parts) or "לקוח לא צוין"
         amount_part = f" בהיקף {amount_text}" if amount_text else ""
+        dedup_key = (date, who, amount_text.strip().casefold())
+        if dedup_key in seen_pdeal_keys:
+            continue
+        seen_pdeal_keys.add(dedup_key)
         rows.append(
             TimelineRow(
-                date=str(date),
+                date=date,
                 event_he=f"עסקת תוכנית (רכיב בפלטפורמה): {who}{amount_part}.",
                 kind="contract",
                 cites=list(cites),
@@ -1859,6 +2083,8 @@ def ground_dossier(
         )
         for r in deal_rows
     ]
+    # PD-fix-6 items 3/4: drop rows with nothing left after grounding, dedupe the rest.
+    deals = _finalize_deals(deals, dropped)
     pricing = [
         r for r in (_ground_price_row(r, valid_ns, registry_text, dropped) for r in draft.pricing) if r
     ]

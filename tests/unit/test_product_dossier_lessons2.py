@@ -134,6 +134,59 @@ def test_build_timeline_folds_in_programme_deals_when_corpus_has_them() -> None:
     assert len(timeline) == 1
     assert timeline[0].kind == "contract"
     assert "Watchkeeper X" in timeline[0].event_he
+
+
+def test_build_timeline_normalizes_hebrew_month_year_programme_deal_date_to_iso() -> None:
+    """PD-fix-6 item 5: same date hygiene as a structured DealRow -- a raw Hebrew month-year
+    programme-deal date ("מאי 2022", the live SPECTRO XR rerun's own Watchkeeper X/Romania row) is
+    ISO-normalized ("2022-05"), never rendered verbatim into the timeline."""
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="X"))
+    corpus = _corpus(
+        programme_deals=[
+            {
+                "platform": "Watchkeeper X",
+                "customer": "Romania",
+                "date": "מאי 2022",
+                "amount_text": "כ-410 מיליון דולר",
+                "cites": [5],
+            }
+        ]
+    )
+    timeline = dossier_extract.build_timeline(dossier, corpus)
+    assert len(timeline) == 1
+    assert timeline[0].date == "2022-05"
+
+
+def test_build_timeline_drops_programme_deal_with_unparseable_date() -> None:
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="X"))
+    corpus = _corpus(
+        programme_deals=[
+            {"platform": "Watchkeeper X", "customer": "Romania", "date": "not a date", "cites": [5]}
+        ]
+    )
+    assert dossier_extract.build_timeline(dossier, corpus) == []
+
+
+def test_build_timeline_drops_garbage_programme_deal_customer_falls_back_to_platform() -> None:
+    """PD-fix-6 item 5: a programme-deal ``customer`` that fails the same
+    :func:`dossier_extract._looks_like_customer_name` gate a structured DealRow's customer is held
+    to is never rendered into the timeline text -- the row falls back to naming just the platform."""
+    dossier = ProductDossierOut(identity=IdentityBlock(product_name="X"))
+    corpus = _corpus(
+        programme_deals=[
+            {
+                "platform": "Watchkeeper X",
+                "customer": "- **(1) עובדות רלוונטיות:** ב-1 בספט",
+                "date": "2026-02-01",
+                "amount_text": "כ-410 מיליון דולר",
+                "cites": [5],
+            }
+        ]
+    )
+    timeline = dossier_extract.build_timeline(dossier, corpus)
+    assert len(timeline) == 1
+    assert "עובדות רלוונטיות" not in timeline[0].event_he
+    assert "Watchkeeper X" in timeline[0].event_he
     assert timeline[0].cites == [5]
 
 
