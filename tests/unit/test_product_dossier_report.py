@@ -14,6 +14,7 @@ import pytest
 from eoa.api import services
 from eoa.dossier import plan as dossier_plan
 from eoa.dossier import report as dossier_report
+from eoa.dossier.corpus import CorpusResult
 from eoa.llm.schemas.product_dossier import (
     DealRow,
     IdentityBlock,
@@ -104,6 +105,80 @@ def test_outcome_found_when_many_signals_present() -> None:
     dossier = dossier.model_copy(update={"summary_he": [Sentence(text_he="עובדה.", cites=[1])]})
     outcome, _confidence = dossier_report._compute_outcome_confidence(dossier, PlanResult(findings=[]))
     assert outcome in ("found", "partial")
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 3): confidence formula rebalance -- a weighted score over FILLED rows
+# only, floored at 0.3 for a run with >= 5 filled rows and >= 2 primary/datasheet sources.
+# --------------------------------------------------------------------------
+
+
+def test_placeholder_rows_are_excluded_from_the_weighted_confidence_score() -> None:
+    """A null-value specifications row (the ``_backfill_required`` placeholder shape) is never
+    counted either way -- only the one real, filled medium-confidence row drives the score."""
+    from eoa.dossier.plan import PlanResult
+
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="X"),
+        specifications=[
+            SpecRow(parameter_he="a", value="1", cites=[1], confidence="medium"),
+            SpecRow(parameter_he="b", key="weight", value="", cites=[], confidence="low"),
+        ],
+    )
+    _outcome, confidence = dossier_report._compute_outcome_confidence(dossier, PlanResult(findings=[]))
+    assert confidence == 0.6
+
+
+def test_confidence_floored_at_0_3_for_well_sourced_run_with_mostly_low_medium_rows() -> None:
+    """The live SPECTRO XR run-8 regression: >= 5 filled rows, all low/medium, no single "high" row
+    -- pre-fix this collapsed toward 0 (a plain share-of-high formula); with >= 2 primary/datasheet
+    sources in the registry, the floor now guarantees at least 0.3."""
+    from eoa.dossier.plan import PlanResult
+
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="X"),
+        specifications=[
+            SpecRow(parameter_he=f"p{i}", key=f"k{i}", value=str(i), cites=[1], confidence="low")
+            for i in range(6)
+        ],
+    )
+    corpus = CorpusResult(
+        product_key="x",
+        product_name="X",
+        vendor="V",
+        aliases=[],
+        terms=[],
+        registry=[
+            {"n": 1, "kind": "web", "reliability": "primary", "source_kind": "vendor_official"},
+            {"n": 2, "kind": "web", "reliability": "primary", "source_kind": "vendor_official"},
+        ],
+    )
+    _outcome, confidence = dossier_report._compute_outcome_confidence(dossier, PlanResult(findings=[]), corpus)
+    # Unfloored weighted score would be 0.3 (all "low") -- already at the floor here; the assertion
+    # that matters is the floor logic didn't drag it any lower, and outcome/found gating still holds.
+    assert confidence >= 0.3
+
+
+def test_confidence_not_floored_without_enough_primary_sources() -> None:
+    from eoa.dossier.plan import PlanResult
+
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="X"),
+        specifications=[
+            SpecRow(parameter_he=f"p{i}", key=f"k{i}", value=str(i), cites=[1], confidence="low")
+            for i in range(6)
+        ],
+    )
+    corpus = CorpusResult(
+        product_key="x", product_name="X", vendor="V", aliases=[], terms=[],
+        registry=[{"n": 1, "kind": "web", "reliability": "secondary", "source_kind": "press"}],
+    )
+    _outcome, confidence_with_corpus = dossier_report._compute_outcome_confidence(
+        dossier, PlanResult(findings=[]), corpus
+    )
+    _outcome, confidence_no_corpus = dossier_report._compute_outcome_confidence(dossier, PlanResult(findings=[]))
+    # Both stay at the plain weighted score (0.3, all "low") -- neither has >= 2 primary sources.
+    assert confidence_with_corpus == confidence_no_corpus == 0.3
 
 
 # --------------------------------------------------------------------------

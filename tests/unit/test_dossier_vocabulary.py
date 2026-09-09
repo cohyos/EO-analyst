@@ -176,3 +176,35 @@ def test_vocabulary_prompt_block_he_includes_key_label_and_unit() -> None:
     assert "weight" in block
     assert "משקל" in block
     assert "ק״ג" in block
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 1): additive synonyms added for real, previously-unmatched SPECTRO XR
+# run-8 overflow facts (envelope diameter/height, laser designator/rangefinder English glosses,
+# per-channel FOV counts).
+# --------------------------------------------------------------------------
+
+
+def test_envelope_dimensions_matches_diameter_and_height_hebrew_synonyms() -> None:
+    assert vocabulary.match_key_by_synonym("קוטר המערכת.", None) == "envelope_dimensions"
+    assert vocabulary.match_key_by_synonym("גובה המערכת.", None) == "envelope_dimensions"
+
+
+def test_laser_designator_illuminator_matches_designator_gloss() -> None:
+    assert (
+        vocabulary.match_key_by_synonym("סוג הלייזר של מציין הלייזר (Designator).", None)
+        == "laser_designator_illuminator"
+    )
+
+
+def test_laser_rangefinder_matches_rangefinder_gloss() -> None:
+    assert (
+        vocabulary.match_key_by_synonym("סוג הלייזר של מד הטווח (Rangefinder).", None)
+        == "laser_rangefinder"
+    )
+
+
+def test_field_of_view_matches_definite_article_fov_count_phrasing() -> None:
+    assert (
+        vocabulary.match_key_by_synonym("מספר שדות הראייה בערוץ SWIR.", None) == "field_of_view"
+    )

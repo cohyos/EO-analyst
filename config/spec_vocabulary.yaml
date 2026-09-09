@@ -87,6 +87,12 @@ common:
       - "שדה-ראייה"
       - "FOV"
       - "field of view"
+      #: PD-fix-4 (2026-09-09, item 1): the live SPECTRO XR run-8 corpus carried a per-channel
+      #: "מספר שדות הראייה" (number-of-FOVs) overflow row for each of its three imaging channels --
+      #: only the one row that also literally spelled out "(FOV)" already matched via the synonym
+      #: above; the other two used the definite-article form "שדות הראייה" (no exact substring match
+      #: against the existing "שדה ראייה"/"שדה-ראייה" entries, which lack the ה prefix).
+      - "שדות הראייה"
       - "WFOV"
       - "NFOV"
       - "wide field of view"
@@ -358,6 +364,12 @@ common:
       - "laser range finder"
       - "eye-safe LRF"
       - "eye safe laser"
+      #: PD-fix-4 (2026-09-09, item 1): the live SPECTRO XR run-8 corpus's own overflow row read
+      #: "...של מד הטווח (Rangefinder)." -- without a "לייזר" suffix, so none of the "לייזר"-suffixed
+      #: synonyms above matched it; "rangefinder" alone (the parenthetical English gloss the source
+      #: itself used) didn't match "laser range finder" either (a 3-word phrase, not a substring).
+      - "מד הטווח"
+      - "rangefinder"
     group_he: "לייזר"
     required: true
     notes_he: "לציין אם 'בטוח לעין' (eye-safe) מצוין במפורש -- זו דרישה תפעולית נפרדת מטווח המדידה עצמו."
@@ -376,6 +388,12 @@ common:
       - "laser illuminator"
       - "laser target marker"
       - "laser pointer"
+      #: PD-fix-4 (2026-09-09, item 1): the live SPECTRO XR run-8 corpus's own overflow row read
+      #: "...של מציין הלייזר (Designator)." -- "מציין לייזר" is the standard Hebrew defense-industry
+      #: term for a laser designator, and "designator" alone is the parenthetical English gloss the
+      #: source itself used; neither matched the existing "מצביע/מאיר/מסמן לייזר" synonyms above.
+      - "מציין לייזר"
+      - "designator"
     group_he: "לייזר"
     required: false
     notes_he: "מצביע (pointer, לצפייה) ומסמן/מאיר (marker/illuminator, לתאורת מטרה) הם שני רכיבים -- variant נפרד לכל אחד כשהמקור מבחין ביניהם."
@@ -410,6 +428,13 @@ common:
       - "volume"
       - "diameter"
       - "length"
+      #: PD-fix-4 (2026-09-09, item 1): the live SPECTRO XR run-8 corpus's own overflow rows read
+      #: "קוטר המערכת."/"גובה המערכת." (diameter/height) -- the Hebrew "קוטר"/"גובה" terms, distinct
+      #: from the existing Latin "diameter"/"length" synonyms (which never match a Hebrew-only
+      #: source sentence, per this file's own Hebrew-substring/Latin-word-boundary dispatch).
+      - "קוטר"
+      - "גובה"
+      - "height"
     group_he: "מכניקה וסביבה"
     required: true
     notes_he: ""

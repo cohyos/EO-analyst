@@ -69,6 +69,11 @@ def test_ground_deal_row_sets_confidence_level() -> None:
 
 
 def test_dossier_level_confidence_is_weighted_share_of_high_rows() -> None:
+    """PD-fix-4 item 3: the dossier-level confidence is a WEIGHTED score (high=1.0, medium=0.6,
+    low=0.3) over filled rows, not the pre-fix "share of high rows" -- one high (1.0) + one medium
+    (0.6) row averages to 0.8, not 0.5. See ``dossier_report._compute_outcome_confidence``'s own
+    docstring/comments for the full formula, including the >=5-filled-rows/>=2-primary-sources
+    floor (not exercised here -- only 2 rows, no corpus passed)."""
     from eoa.dossier.plan import PlanResult
 
     dossier = ProductDossierOut(
@@ -79,7 +84,7 @@ def test_dossier_level_confidence_is_weighted_share_of_high_rows() -> None:
         ],
     )
     _outcome, confidence = dossier_report._compute_outcome_confidence(dossier, PlanResult(findings=[]))
-    assert confidence == 0.5
+    assert confidence == 0.8
 
 
 # --------------------------------------------------------------------------

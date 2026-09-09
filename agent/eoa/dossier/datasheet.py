@@ -145,6 +145,35 @@ def _rank_key(url: str, title: str, *, vendor_domain: str | None) -> tuple[int, 
     return (rank, on_vendor, on_catalog)
 
 
+def _pdf_is_relevant(
+    text: str,
+    url: str,
+    *,
+    product_name: str,
+    aliases: list[str],
+    vendor_domain: str | None,
+    catalog_domains: tuple[str, ...] = KNOWN_CATALOG_DOMAINS,
+) -> bool:
+    """PD-fix-4 (2026-09-09, item 4): a live SPECTRO XR run (product_dossiers id=8) downloaded and
+    registered an unrelated German hospital incident-reporting PDF ("CIRS-Handlungsempfehlung", from
+    ukw.de) as a ``source_kind="datasheet"`` source -- the hunt found it via a generic search hit
+    that merely LOOKED datasheet-ish (:func:`_looks_datasheet_ish`) and downloaded it without ever
+    checking the PDF's own content against the product it was supposedly a datasheet for. A PDF is
+    relevant only when its own extracted text names the product (its exact name, or one of its known
+    aliases -- a plain, case-insensitive substring check: a real datasheet virtually always spells
+    the product name out somewhere) OR its URL's own host is the vendor's own domain or one of the
+    known EO/IR catalogue domains (a vendor/catalogue page is trusted on domain alone, exactly the
+    same trust :func:`_rank_key` already gives those hosts when ranking candidates)."""
+    haystack = (text or "").casefold()
+    names = [product_name, *aliases]
+    if any(name and name.strip() and name.casefold() in haystack for name in names):
+        return True
+    host = _host(url)
+    if vendor_domain and (host == vendor_domain or host.endswith("." + vendor_domain)):
+        return True
+    return any(host == d or host.endswith("." + d) for d in catalog_domains)
+
+
 def gather_candidates(
     product_name: str,
     vendor: str | None,
@@ -215,11 +244,29 @@ def hunt_datasheets(
 
     results: list[dict[str, Any]] = []
     pdf_candidates = [c for c in candidates if looks_like_pdf_url(c["url"])]
+    aliases_list = list(aliases or [])
     for cand in pdf_candidates[:max_downloads]:
         try:
             pdf = fetch_pdf(cand["url"])
         except Exception as exc:
             log.info("datasheet_pdf_fetch_failed", url=cand["url"][:300], error=str(exc)[:200])
+            continue
+        # PD-fix-4 item 4: never register a PDF whose own text names neither the product nor a
+        # known alias, unless its host is itself the vendor's own domain or a known catalogue --
+        # see `_pdf_is_relevant`'s own docstring for why (the CIRS-Handlungsempfehlung regression).
+        if not _pdf_is_relevant(
+            pdf["text"],
+            pdf["url"],
+            product_name=product_name,
+            aliases=aliases_list,
+            vendor_domain=vendor_domain,
+            catalog_domains=catalog_domains,
+        ):
+            log.info(
+                "dossier.pdf_rejected",
+                url=pdf["url"][:300],
+                reason="no_product_name_or_alias_match_and_not_vendor_or_catalog_domain",
+            )
             continue
         results.append(
             {

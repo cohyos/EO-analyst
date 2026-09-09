@@ -21,11 +21,13 @@ from eoa.llm.schemas.product_dossier import (
     CompetitorRow,
     DealRow,
     DossierPatentRow,
+    GapTrackingRow,
     IdentityBlock,
     PerformanceRow,
     PriceRow,
     ProductDossierOut,
     SpecRow,
+    VersionRow,
 )
 
 
@@ -558,19 +560,25 @@ def test_required_key_missing_after_extraction_gets_placeholder_row() -> None:
     assert weight_rows[0].cites == []
 
 
-def test_other_specification_matching_known_synonym_is_flagged_but_not_reclassified() -> None:
-    """The promoted matcher (section 3.2) used as a non-destructive QA signal only -- the row stays
-    in other_specifications (the model's own placement decision is never silently overridden), but
-    the match is logged for the field-dropped audit trail."""
+def test_other_specification_matching_known_synonym_is_promoted_out_of_overflow() -> None:
+    """PD-fix-4 (2026-09-09, item 1): an other_specifications row whose own ``parameter_he``
+    matches a known vocabulary label/synonym is now actually promoted out of overflow (not just
+    logged as a non-destructive QA hint, the pre-fix behavior) -- appended to the correct table
+    (``performance``, per ``size_to_performance_ratio``'s own ``table`` field) with that key set,
+    its own ``value``/``cites`` carried over untouched."""
     other = [SpecRow(parameter_he="עומס אופטי במארז קומפקטי", value="v", cites=[1])]
     dropped: list[dossier_extract.DroppedField] = []
-    _new_specs, _new_perf, new_other = dossier_extract.apply_vocabulary(
+    _new_specs, new_perf, new_other = dossier_extract.apply_vocabulary(
         [], [], other, product_line="targeting_pods", dropped=dropped
     )
-    assert len(new_other) == 1
-    assert new_other[0].parameter_he == "עומס אופטי במארז קומפקטי"
+    assert new_other == []
+    promoted = [r for r in new_perf if r.key == "size_to_performance_ratio"]
+    assert len(promoted) == 1
+    assert promoted[0].claimed_value == "v"
+    assert promoted[0].cites == [1]
     assert any(
-        d.field == "other_specifications" and "size_to_performance_ratio" in d.reason for d in dropped
+        d.field == "other_specifications" and "promoted_to_vocabulary_key:size_to_performance_ratio" in d.reason
+        for d in dropped
     )
 
 
@@ -966,3 +974,295 @@ def test_build_dossier_no_op_for_first_run_with_no_previous_and_no_missing(monke
     # apply_vocabulary's own required-param backfill (pre-existing, unrelated behavior) may still
     # add empty placeholder rows -- what matters here is that neither new step invented a value.
     assert all(r.value == "" and r.cites == [] for r in result.dossier.specifications)
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 1): overflow-row promotion -- the live SPECTRO XR run-8 facts
+# (weight/diameter/height/average power/MWIR band/FOV counts/laser lines) that stayed stuck in
+# other_specifications with key="" even though a real vocabulary key existed for each of them.
+# --------------------------------------------------------------------------
+
+
+def test_overflow_weight_row_promoted_via_existing_label_synonym() -> None:
+    """"משקל המערכת." already contains the "משקל" synonym on the ``weight`` key -- promoted via
+    plain label matching, no heuristic needed."""
+    other = [SpecRow(parameter_he="משקל המערכת.", value='51 ק"ג', cites=[24], confidence="medium")]
+    new_specs, _new_perf, new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    assert new_other == []
+    weight_rows = [r for r in new_specs if r.key == "weight"]
+    assert len(weight_rows) == 1
+    assert weight_rows[0].value == '51 ק"ג'
+    assert weight_rows[0].cites == [24]
+    assert weight_rows[0].confidence == "medium"
+
+
+def test_overflow_diameter_and_height_promoted_as_distinct_envelope_variants() -> None:
+    """Two genuinely different overflow facts ("קוטר המערכת" / "גובה המערכת") both key to
+    ``envelope_dimensions`` -- promoted with distinct variant tags so neither is silently collapsed
+    away by the same-key/same-variant dedup step."""
+    other = [
+        SpecRow(parameter_he="קוטר המערכת.", value='415 מ"מ', cites=[24]),
+        SpecRow(parameter_he="גובה המערכת.", value='500 מ"מ', cites=[24]),
+    ]
+    new_specs, _new_perf, new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    assert new_other == []
+    envelope_rows = [r for r in new_specs if r.key == "envelope_dimensions"]
+    assert len(envelope_rows) == 2
+    by_variant = {r.variant: r.value for r in envelope_rows}
+    assert by_variant["קוטר"] == '415 מ"מ'
+    assert by_variant["גובה"] == '500 מ"מ'
+
+
+def test_overflow_average_power_promoted_via_label_synonym() -> None:
+    other = [SpecRow(parameter_he="הספק ממוצע.", value="500W", cites=[24])]
+    new_specs, _new_perf, _new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    power_rows = [r for r in new_specs if r.key == "power_consumption"]
+    assert len(power_rows) == 1
+    assert power_rows[0].value == "500W"
+
+
+def test_overflow_mwir_band_promoted_via_existing_mwir_synonym() -> None:
+    """``common.detector_type`` already carries "MWIR" as one of its own synonyms (declared before
+    ``mws_eo.spectral_band_coverage``'s own, later-declared "MWIR" synonym, so it wins the match --
+    an existing, pre-fix vocabulary ambiguity this fix doesn't change, only actually promotes on)."""
+    other = [
+        SpecRow(parameter_he="התחום הספקטרלי של הערוץ התרמי (MWIR).", value="3-5µm", cites=[22])
+    ]
+    new_specs, _new_perf, new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    assert new_other == []
+    detector_rows = [r for r in new_specs if r.key == "detector_type"]
+    assert len(detector_rows) == 1
+    assert detector_rows[0].value == "3-5µm"
+
+
+def test_overflow_fov_counts_promoted_and_kept_distinct_per_channel() -> None:
+    """All three imaging-channel FOV-count facts key to ``field_of_view`` (one via the literal
+    "(FOV)" label match, the other two via the new "שדות הראייה" synonym) -- distinct per-channel
+    variants keep all three, none silently collapsed."""
+    other = [
+        SpecRow(parameter_he="מספר שדות הראייה (FOV) בערוץ התרמי.", value="2 FOV", cites=[22]),
+        SpecRow(
+            parameter_he="מספר שדות הראייה בערוץ הנראה והתת־אדום הקרוב (Visible/NIR).",
+            value="3 FOV",
+            cites=[22],
+        ),
+        SpecRow(parameter_he="מספר שדות הראייה בערוץ SWIR.", value="2 FOV", cites=[22]),
+    ]
+    new_specs, _new_perf, new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    assert new_other == []
+    fov_rows = [r for r in new_specs if r.key == "field_of_view"]
+    assert len(fov_rows) == 3
+
+
+def test_overflow_laser_lines_promoted_to_designator_and_rangefinder_respectively() -> None:
+    other = [
+        SpecRow(
+            parameter_he="סוג הלייזר, אורך הגל ותדר הפעולה של מציין הלייזר (Designator).",
+            value="Nd:YAG, 1064nm, עד 22Hz",
+            cites=[22],
+        ),
+        SpecRow(
+            parameter_he="סוג הלייזר, אורך הגל ותדר הפעולה של מד הטווח (Rangefinder).",
+            value="Nd:YAG/OPO 1570nm עד 3Hz",
+            cites=[22],
+        ),
+    ]
+    new_specs, _new_perf, new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    assert new_other == []
+    designator = [r for r in new_specs if r.key == "laser_designator_illuminator"]
+    rangefinder = [r for r in new_specs if r.key == "laser_rangefinder"]
+    assert len(designator) == 1 and designator[0].value == "Nd:YAG, 1064nm, עד 22Hz"
+    assert len(rangefinder) == 1 and rangefinder[0].value == "Nd:YAG/OPO 1570nm עד 3Hz"
+
+
+def test_overflow_prf_and_wavelength_facts_for_same_laser_key_both_survive() -> None:
+    """Live SPECTRO XR run-8 regression found during verification: a PRF/repetition-rate overflow
+    row and a separate wavelength/type-description overflow row both key to ``laser_rangefinder`` --
+    without a distinguishing variant tag, the same-key/same-variant dedup step would silently
+    collapse the second one away, losing a real fact."""
+    other = [
+        SpecRow(parameter_he="תדר חזרת הפולסים (PRF) של LTDRF.", value="עד 22Hz", cites=[20]),
+        SpecRow(
+            parameter_he="סוג הלייזר, אורך הגל ותדר הפעולה של מד הטווח (Rangefinder).",
+            value="Nd:YAG/OPO 1570nm עד 3Hz",
+            cites=[22],
+        ),
+    ]
+    new_specs, _new_perf, new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    assert new_other == []
+    rangefinder_rows = [r for r in new_specs if r.key == "laser_rangefinder"]
+    assert len(rangefinder_rows) == 2
+    values = {r.value for r in rangefinder_rows}
+    assert values == {"עד 22Hz", "Nd:YAG/OPO 1570nm עד 3Hz"}
+
+
+def test_overflow_row_with_no_match_at_all_stays_in_other_specifications() -> None:
+    other = [SpecRow(parameter_he="מספר ערוצי הספוטר (Spotter).", value="שלושה", cites=[24])]
+    new_specs, new_perf, new_other = dossier_extract.apply_vocabulary(
+        [], [], other, product_line=None, dropped=[]
+    )
+    assert len(new_other) == 1
+    assert new_other[0].parameter_he == "מספר ערוצי הספוטר (Spotter)."
+    # Nothing invented for this row -- it never lands in specifications/performance under any key.
+    assert not any(r.value == "שלושה" for r in new_specs)
+    assert not any(r.claimed_value == "שלושה" for r in new_perf)
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 2): deterministic deal candidates from registry press-release sources.
+# --------------------------------------------------------------------------
+
+
+def test_deal_candidate_built_from_registry_press_release_with_award_keyword_and_amount() -> None:
+    items = [
+        {
+            "id": 1,
+            "title": "Elbit Systems Awarded Contract Over $90 Million",
+            "summary_he": "אלביט מערכות זכתה בחוזה בהיקף העולה על 90 מיליון דולר.",
+            "so_what_he": "",
+        }
+    ]
+    corpus = _corpus_with_registry([_reg(1, published_at="2026-06-01")], items=items)
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert len(result.dossier.deals) == 1
+    deal = result.dossier.deals[0]
+    assert deal.cites == [1]
+    assert deal.amount_value == 90_000_000.0
+    assert deal.date == "2026-06-01"
+    assert deal.date_kind == "published"
+
+
+def test_deal_candidate_not_duplicated_when_model_already_cited_same_source() -> None:
+    items = [
+        {
+            "id": 1,
+            "title": "Elbit Systems Awarded Contract Over $90 Million",
+            "summary_he": "אלביט מערכות זכתה בחוזה בהיקף העולה על 90 מיליון דולר.",
+            "so_what_he": "",
+        }
+    ]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        deals=[DealRow(customer="Asia-Pacific customer", amount="90 מיליון דולר", cites=[1])],
+    )
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert len(result.dossier.deals) == 1
+    assert result.dossier.deals[0].customer == "Asia-Pacific customer"
+
+
+def test_deal_candidate_not_built_without_award_keyword() -> None:
+    items = [{"id": 1, "title": "SPECTRO XR spec sheet", "summary_he": "משקל 51 ק\"ג.", "so_what_he": ""}]
+    corpus = _corpus_with_registry([_reg(1)], items=items)
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    assert result.dossier.deals == []
+
+
+def test_deal_candidate_multiple_press_releases_each_yield_own_deal() -> None:
+    items = [
+        {"id": 1, "title": "elbitsystems.com", "summary_he": "אלביט זכתה בחוזה בהיקף של כ-80 מיליון דולר.", "so_what_he": ""},
+        {
+            "id": 2,
+            "title": "elbitsystems.com",
+            "summary_he": "אלביט מערכות זכתה בחוזים בהיקף של כ-270 מיליון דולר.",
+            "so_what_he": "",
+        },
+    ]
+    corpus = _corpus_with_registry([_reg(1), _reg(2)], items=items)
+    draft = ProductDossierOut(identity=IdentityBlock(product_name="SPECTRO XR"))
+    result = dossier_extract.ground_dossier(draft, corpus, _EMPTY_PLAN)
+    amounts = sorted(d.amount_value for d in result.dossier.deals if d.amount_value)
+    assert amounts == [80_000_000.0, 270_000_000.0]
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 5): timeline rows from dated gap/risk findings, and variants named
+# outside the dedicated "versions" topic.
+# --------------------------------------------------------------------------
+
+
+def test_timeline_includes_dated_risk_sentence_even_without_a_structured_deal_row() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        risks_and_gaps_he=[
+            Sentence(
+                text_he="הסיכומים מתארים גם הודעת חברה מ־2 ביוני 2021 על חוזה בכ-80 מיליון דולר, "
+                "אולם ללא כתובת מלאה אין בסיס להפניה פרטנית.",
+                cites=[15, 16, 17],
+            )
+        ],
+    )
+    timeline = dossier_extract.build_timeline(dossier)
+    assert len(timeline) == 1
+    assert timeline[0].kind == "milestone"
+    assert "יוני 2021" in timeline[0].date
+    assert timeline[0].cites == [15, 16, 17]
+
+
+def test_timeline_ignores_uncited_or_undated_findings() -> None:
+    """A ``Sentence`` (``risks_and_gaps_he``) always carries >=1 cite by schema construction -- the
+    "no cites" case is only reachable via ``gaps_tracking`` (``GapTrackingRow.cites`` has no such
+    minimum)."""
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        risks_and_gaps_he=[Sentence(text_he="פער כלשהו ללא תאריך.", cites=[1])],
+        gaps_tracking=[
+            GapTrackingRow(gap_he="פער נוסף בלי תאריך.", cites=[2]),
+            GapTrackingRow(gap_he="פער עם תאריך 2021 אך ללא ציטוט.", cites=[]),
+        ],
+    )
+    assert dossier_extract.build_timeline(dossier) == []
+
+
+def test_variant_named_in_risk_sentence_is_captured_as_version_row() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        risks_and_gaps_he=[
+            Sentence(
+                text_he="חקירת הגרסאות לא ביססה גרסאות נפרדות, אך חקירת המפרט מזכירה את הכינוי "
+                "SPECTRO XR CU ללא פירוט, ולכן אין בסיס לרצף דורות.",
+                cites=[18, 20, 25],
+            )
+        ],
+    )
+    mentions = dossier_extract.build_variant_mentions(dossier)
+    assert len(mentions) == 1
+    assert mentions[0].name == "SPECTRO XR CU"
+    assert mentions[0].cites == [18, 20, 25]
+
+
+def test_variant_mention_not_duplicated_when_already_in_versions_table() -> None:
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        variants_and_versions=[VersionRow(name="SPECTRO XR CU", cites=[1])],
+        risks_and_gaps_he=[
+            Sentence(text_he="הכינוי SPECTRO XR CU מוזכר שוב כאן.", cites=[18]),
+        ],
+    )
+    assert dossier_extract.build_variant_mentions(dossier) == []
+
+
+def test_variant_mention_requires_citation() -> None:
+    """A ``Sentence`` always carries >=1 cite by schema construction -- the "no cites" case is only
+    reachable via ``gaps_tracking``."""
+    dossier = ProductDossierOut(
+        identity=IdentityBlock(product_name="SPECTRO XR"),
+        gaps_tracking=[GapTrackingRow(gap_he="SPECTRO XR CU מוזכר כאן ללא ציטוט.", cites=[])],
+    )
+    assert dossier_extract.build_variant_mentions(dossier) == []

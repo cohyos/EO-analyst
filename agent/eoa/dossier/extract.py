@@ -188,6 +188,105 @@ def split_country_region(country: str) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 2): deterministic deal candidates from the registry's own press-release
+# pages. A live SPECTRO XR run (product_dossiers id=8) kept exactly ONE deal (amount only, no
+# date/customer) even though the registry itself carried three separate press-release sources naming
+# the ~80M/~90M/~270M dollar contract awards -- the model's own "deals" topic simply under-extracted
+# them. Rather than trust the model harder, every registry source whose own text (title+summary,
+# the SAME ``registry_text`` the row-level grounding checks already use) names both a monetary
+# figure AND an award/contract keyword always yields at least one deal candidate, merged with the
+# model's own ``draft.deals`` BEFORE grounding -- so every existing grounding rule in
+# :func:`_ground_deal_row` (customer normalization, amount-digit-grounding, region/country split,
+# published-date backfill, confidence) still applies to a candidate exactly like a model row; this
+# only ever guarantees the candidate SET is complete, never bypasses a single grounding check.
+# --------------------------------------------------------------------------
+
+_DEAL_AWARD_KEYWORD_RE = re.compile(
+    r"awarded|award\b|\bcontract\b|חוזה|זכתה|זכה|נחתם|supply agreement|purchase order",
+    re.IGNORECASE,
+)
+
+#: How much trailing context (chars) after a matched digit run is kept as the candidate's own
+#: ``amount`` text -- enough room for a scale word ("million"/"מיליון") and a currency
+#: word/symbol to both land inside the same snippet, without pulling in unrelated later text.
+_DEAL_AMOUNT_CONTEXT_CHARS = 30
+#: How many distinct monetary figures on the SAME source are each turned into their own candidate --
+#: a real press release naming both a framework value and a follow-on order (LESSONS-fable-dossier's
+#: own Romania Watchkeeper X example) is not unusual, but this stays small: a source's own text is
+#: mined for real deal amounts, not treated as an open-ended list.
+_MAX_DEAL_CANDIDATES_PER_SOURCE = 3
+
+
+def _deal_amount_snippet(text: str, match: re.Match[str]) -> str:
+    start = max(0, match.start() - 5)
+    end = min(len(text), match.end() + _DEAL_AMOUNT_CONTEXT_CHARS)
+    return " ".join(text[start:end].split())
+
+
+def _deal_candidates_from_registry(
+    corpus: CorpusResult, registry_text: dict[int, str], published_by_n: dict[int, Any]
+) -> list[DealRow]:
+    """One :class:`DealRow` candidate per real monetary figure found in a registry source's own
+    text that ALSO carries an award/contract keyword (:data:`_DEAL_AWARD_KEYWORD_RE`) -- deterministic
+    and never invented: ``amount`` is the source's own text snippet (re-parsed for
+    ``amount_value``/``currency`` by :func:`_ground_deal_row`'s existing :func:`parse_amount_he`
+    call, exactly like a model-authored row), ``cites`` is just that one source's own registry
+    number, and ``date`` is backfilled from the source's own ``published_at`` when it has one (same
+    rule :func:`_ground_deal_row` already applies for a model row with no date). A source that names
+    a figure but never an award/contract word (e.g. a spec sheet whose numbers happen to include an
+    unrelated dollar figure) yields no candidate at all."""
+    candidates: list[DealRow] = []
+    for r in corpus.registry:
+        n = r.get("n")
+        if n is None:
+            continue
+        text = registry_text.get(n) or ""
+        if not text.strip() or not _DEAL_AWARD_KEYWORD_RE.search(text):
+            continue
+        published = published_by_n.get(n)
+        date = str(published) if published else None
+        seen_values: set[float] = set()
+        count = 0
+        for m in _DEAL_NUM_RE.finditer(text):
+            if count >= _MAX_DEAL_CANDIDATES_PER_SOURCE:
+                break
+            snippet = _deal_amount_snippet(text, m)
+            value, currency = parse_amount_he(snippet)
+            if value is None or value in seen_values:
+                continue
+            seen_values.add(value)
+            count += 1
+            candidates.append(
+                DealRow(
+                    cites=[n],
+                    amount=snippet,
+                    currency=currency or "",
+                    date=date,
+                    date_kind="published" if date else "deal",
+                    confidence_level="low",
+                )
+            )
+    return candidates
+
+
+def _merge_deal_candidates(model_deals: list[DealRow], candidates: list[DealRow]) -> list[DealRow]:
+    """Appends a registry-derived candidate only when NONE of its own ``cites`` is already cited by
+    an existing model-authored deal row -- a press release the model already turned into a proper
+    deal row (with a real customer/platform/quantity the deterministic candidate can never recover
+    on its own) is never duplicated; one the model missed entirely always gets its own row."""
+    already_cited: set[int] = set()
+    for d in model_deals:
+        already_cited.update(d.cites or [])
+    merged = list(model_deals)
+    for c in candidates:
+        if any(n in already_cited for n in c.cites):
+            continue
+        merged.append(c)
+        already_cited.update(c.cites)
+    return merged
+
+
+# --------------------------------------------------------------------------
 # data block for the extraction prompt
 # --------------------------------------------------------------------------
 
@@ -773,6 +872,144 @@ def _timeline_sort_key(row: TimelineRow) -> tuple[int, str]:
     return (0, date) if date else (1, "")
 
 
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 5): timeline rows from gap/risk findings that carry a date. A live
+# SPECTRO XR run (product_dossiers id=8) kept only ONE timeline row (a programme deal) even though
+# its own ``risks_and_gaps_he``/``gaps_tracking`` sentences -- already grounded, already carrying
+# real ``cites`` -- explicitly named dates the structured deals/pricing/timeline extraction never
+# turned into a row of its own (e.g. "הסיכומים מתארים גם הודעת חברה מ־2 ביוני 2021 על חוזה בכ־80
+# מיליון דולר, אולם ללא כתובת מלאה... אין בסיס להפניה פרטנית", cites=[15,16,17] -- a real, cited
+# 2021 press-release sighting the model explicitly declined to promote to a full deal row). Every
+# such sentence becomes its own ``kind="milestone"`` timeline row -- the date is lifted verbatim
+# from the sentence's own text (never invented), and the sentence's own ``cites`` (already grounded)
+# is reused as-is; a sentence with real cites but no recognizable date contributes nothing.
+# --------------------------------------------------------------------------
+
+_TIMELINE_DMY_RE = re.compile(r"\b\d{1,2}[./]\d{1,2}[./](19|20)\d{2}\b")
+_TIMELINE_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+_TIMELINE_MONTHS_HE: tuple[str, ...] = (
+    "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר",
+)
+_TIMELINE_MONTHS_EN: tuple[str, ...] = (
+    "january", "february", "march", "april", "may", "june", "july", "august", "september",
+    "october", "november", "december",
+)
+
+
+def _finding_date_hint(text: str) -> str | None:
+    """A best-effort ``"<day> ב<month> <year>"``/``"<dd>/<mm>/<yyyy>"``/``"<year>"`` textual date
+    hint lifted verbatim from ``text`` -- never a fabricated/normalized ISO date (same "raw sighting,
+    not a validated date" discipline ``eoa.dossier.programs._parse_date_hint`` already documents for
+    the identical purpose; duplicated here, not imported, per this module's own "no cross-module
+    private import" convention -- see the ``_DIGIT_RUN_RE`` section's docstring above)."""
+    dmy = _TIMELINE_DMY_RE.search(text)
+    if dmy:
+        return dmy.group(0)
+    year_match = _TIMELINE_YEAR_RE.search(text)
+    if not year_match:
+        return None
+    year = year_match.group(0)
+    lower = text.casefold()
+    for month in (*_TIMELINE_MONTHS_HE, *_TIMELINE_MONTHS_EN):
+        if month in text or month in lower:
+            return f"{month} {year}"
+    return year
+
+
+def _timeline_rows_from_findings(dossier: ProductDossierOut) -> list[TimelineRow]:
+    """Every already-grounded free-text finding sentence (``risks_and_gaps_he`` -- real cites
+    guaranteed by :func:`_ground_sentences`; ``gaps_tracking`` -- the run's own deterministic
+    gap-tracking rows, ``eoa.dossier.report._build_gaps_tracking_raw``) that both carries a real
+    citation and names a recognizable date (:func:`_finding_date_hint`) becomes its own
+    ``kind="milestone"`` row. A sentence with no date, or real cites already consumed, contributes
+    nothing -- this never invents a date or a citation, only reads what the sentence already has."""
+    rows: list[TimelineRow] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(text: str, cites: list[int]) -> None:
+        if not cites or not text or not text.strip():
+            return
+        date = _finding_date_hint(text)
+        if not date:
+            return
+        key = (date, text.strip()[:80])
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append(TimelineRow(date=date, event_he=text.strip(), kind="milestone", cites=list(cites)))
+
+    for s in dossier.risks_and_gaps_he:
+        _add(s.text_he, s.cites)
+    for g in dossier.gaps_tracking:
+        _add(g.gap_he, g.cites)
+    return rows
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 5): variants named in ANY source, not only the dedicated "versions"
+# research topic. The same live SPECTRO XR run kept 0 variants even though its own
+# ``risks_and_gaps_he`` explicitly named one: "חקירת הגרסאות לא ביססה גרסאות נפרדות, אך חקירת המפרט
+# מזכירה את הכינוי SPECTRO XR CU ללא פירוט, ולכן אין בסיס לרצף דורות או להשוואת תצורות" (cites=
+# [18, 20, 25]) -- a real, cited product-name+suffix sighting the model's own "versions" topic never
+# produced a row for, because that topic itself found nothing. :func:`build_variant_mentions` scans
+# every already-grounded free-text section for the product's own name immediately followed by a
+# short, distinctly-capitalized suffix token (a real model/variant code such as "CU"/"NG"/"II" --
+# deliberately narrow: an ordinary lower-case word following the product name is never mistaken for
+# a variant) and turns each sighting into its own ``VersionRow`` (``name``, ``evidence_he`` = the
+# sentence itself, ``cites`` copied verbatim from that already-grounded sentence).
+# --------------------------------------------------------------------------
+
+_VARIANT_SUFFIX_RE = r"([A-Z][A-Z0-9]{1,5}(?:[- ][A-Z0-9]{1,5}){0,2})\b"
+
+
+def _variant_mentions_from_text(
+    product_name: str, text: str, cites: list[int], seen: set[str]
+) -> list[VersionRow]:
+    if not cites or not text or not text.strip():
+        return []
+    pattern = re.compile(re.escape(product_name) + r"\s+" + _VARIANT_SUFFIX_RE)
+    rows: list[VersionRow] = []
+    for m in pattern.finditer(text):
+        suffix = m.group(1).strip()
+        name = f"{product_name} {suffix}"
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            VersionRow(
+                name=name,
+                evidence_he=text.strip()[:500],
+                cites=list(cites),
+                confidence=_row_confidence_he(cites),
+            )
+        )
+    return rows
+
+
+def build_variant_mentions(dossier: ProductDossierOut) -> list[VersionRow]:
+    """Every variant/model-suffix sighting of ``dossier.identity.product_name`` across
+    ``risks_and_gaps_he``/``gaps_tracking``/``bd_implications_he`` (see this section's own
+    docstring) -- deduped against variant names the model's own "versions" topic already produced
+    (never a re-added duplicate) and against each other. ``[]`` when ``product_name`` is empty (an
+    identity-less draft has no anchor to search for)."""
+    product_name = (dossier.identity.product_name or "").strip()
+    if not product_name:
+        return []
+    seen: set[str] = {product_name.casefold()}
+    for v in dossier.variants_and_versions:
+        if v.name:
+            seen.add(v.name.casefold())
+    rows: list[VersionRow] = []
+    for s in dossier.risks_and_gaps_he:
+        rows.extend(_variant_mentions_from_text(product_name, s.text_he, s.cites, seen))
+    for g in dossier.gaps_tracking:
+        rows.extend(_variant_mentions_from_text(product_name, g.gap_he, g.cites, seen))
+    for s in dossier.bd_implications_he:
+        rows.extend(_variant_mentions_from_text(product_name, s.text_he, s.cites, seen))
+    return rows
+
+
 def build_timeline(dossier: ProductDossierOut, corpus: CorpusResult | None = None) -> list[TimelineRow]:
     """The deterministic half, PLUS whatever the model already contributed to
     ``dossier.timeline`` (grounded by :func:`_ground_timeline` upstream) -- merged and sorted
@@ -837,6 +1074,10 @@ def build_timeline(dossier: ProductDossierOut, corpus: CorpusResult | None = Non
                 cites=list(cites),
             )
         )
+
+    #: PD-fix-4 item 5: every gap/risk finding sentence that carries a real date -- see
+    #: `_timeline_rows_from_findings`'s own docstring.
+    rows.extend(_timeline_rows_from_findings(dossier))
 
     rows.sort(key=_timeline_sort_key)
     return rows
@@ -1183,23 +1424,147 @@ def _backfill_required(
     return new_specs, new_perf
 
 
-def _finalize_other_specifications(
-    rows: list[SpecRow], product_line: str | None, dropped: list[DroppedField]
-) -> list[SpecRow]:
+def _finalize_other_specifications(rows: list[SpecRow]) -> list[SpecRow]:
     """Every ``other_specifications`` row always has ``key == ""`` (section 3.4 -- enforced here,
-    not just relied on from the model). Also runs the promoted synonym matcher (section 3.2) as a
-    non-destructive QA signal: a row whose own ``parameter_he`` matches a known vocabulary
-    label/synonym is logged (never auto-reclassified -- the model already had the full vocabulary
-    and chose not to key this row; a non-trivial rate of these hints the vocabulary itself needs a
-    new entry, section 9 item 3, not a silent code-side override)."""
-    final: list[SpecRow] = []
+    not just relied on from the model). By the time this runs, :func:`_promote_overflow_rows` has
+    already tried every possible vocabulary match on each of ``rows`` (label, value, AND the
+    units/number heuristic -- see that function's own docstring) and promoted every hit out of this
+    list, so a row that reaches here is genuinely unmatched, not merely unpromoted."""
+    return [row.model_copy(update={"key": ""}) if row.key else row for row in rows]
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 1): overflow-row promotion. A live SPECTRO XR run (product_dossiers
+# id=8) kept 15 real, cited facts stuck in ``other_specifications`` with ``key: ""`` -- weight,
+# envelope diameter/height, average power, an MWIR spectral band, per-channel FOV counts, and two
+# laser lines -- while ``specifications`` carried a null row for the exact same vocabulary key right
+# next to it. The root cause: the vocabulary post-check only ever ran ``match_key_by_synonym``
+# against an overflow row's own ``parameter_he`` as a non-destructive QA hint (see
+# ``_finalize_other_specifications``'s pre-fix docstring, kept above in git history) -- it never
+# also checked the row's own ``value`` text, never used a units/number heuristic for a row whose
+# ``parameter_he`` is free-text with no vocabulary-label overlap, and never actually promoted a hit
+# out of ``other_specifications`` even when it found one.
+#
+# :func:`_promote_overflow_rows` fixes all three: parameter_he AND value both go through
+# :func:`match_key_by_synonym`; a units/number heuristic (:func:`_overflow_unit_heuristic_key`)
+# catches the rest; and every match is actually promoted -- appended to specifications/performance
+# with its real key set, its own value/cites/confidence carried over untouched. The promoted row
+# then flows through this module's EXISTING steps 2-5 (table relocation, canonical-label overwrite,
+# same-key/variant dedup-by-merge -- which is exactly how it "merges with an existing null row" for
+# the same key, keeping the promoted row's own cites/confidence since the null placeholder has
+# none -- and required-key backfill) with no special-casing needed there. Only a row that still
+# matches nothing at all (label, value, AND the heuristic) stays in other_specifications.
+# --------------------------------------------------------------------------
+
+#: Hebrew geresh/gershayim render as either the double-quote-like ״ or a plain ASCII ``"`` depending
+#: on the source's own typography -- every regex below that needs to recognize a Hebrew abbreviation
+#: mark (ק"ג/ק״ג, מ"מ/מ״מ) matches both.
+_OVERFLOW_WEIGHT_RE = re.compile(r"ק[\"״]?ג|\bkg\b", re.IGNORECASE)
+_OVERFLOW_MM_RE = re.compile(r"מ[\"״]?מ|\bmm\b", re.IGNORECASE)
+_OVERFLOW_DIAMETER_HINT_RE = re.compile(r"קוטר|diameter", re.IGNORECASE)
+_OVERFLOW_HEIGHT_HINT_RE = re.compile(r"גובה|\bheight\b", re.IGNORECASE)
+#: A bare "W" (watts) -- word-boundary only, never matching inside an unrelated longer token.
+_OVERFLOW_POWER_RE = re.compile(r"\bW\b|וואט|ואט", re.IGNORECASE)
+_OVERFLOW_LASER_WAVELEN_RE = re.compile(r"µm|מיקרומטר|ננומטר|\bnm\b", re.IGNORECASE)
+_OVERFLOW_LASER_HINT_RE = re.compile(r"לייזר|laser", re.IGNORECASE)
+_OVERFLOW_DESIGNATOR_HINT_RE = re.compile(r"מציין|מסמן|מאיר|מצביע|designator|illuminator", re.IGNORECASE)
+_OVERFLOW_RANGEFINDER_HINT_RE = re.compile(r"מד.?טווח|range.?finder", re.IGNORECASE)
+_OVERFLOW_FOV_HINT_RE = re.compile(r"\bFOV\b|שדה ראייה|שדות ראייה|שדות הראייה", re.IGNORECASE)
+
+
+def _overflow_unit_heuristic_key(text: str, params: dict[str, SpecParam]) -> str | None:
+    """Deliberately narrow number/unit heuristic -- checked only after :func:`match_key_by_synonym`
+    found nothing on either the row's own ``parameter_he`` or ``value``. Every branch only fires
+    when its own target key actually exists in ``params`` (an older/smaller vocabulary snapshot, or
+    a product line that doesn't carry that key, never gets a key this function invents on its own)."""
+    if _OVERFLOW_WEIGHT_RE.search(text) and "weight" in params:
+        return "weight"
+    if (
+        _OVERFLOW_MM_RE.search(text)
+        and (_OVERFLOW_DIAMETER_HINT_RE.search(text) or _OVERFLOW_HEIGHT_HINT_RE.search(text))
+        and "envelope_dimensions" in params
+    ):
+        return "envelope_dimensions"
+    if _OVERFLOW_POWER_RE.search(text) and "power_consumption" in params:
+        return "power_consumption"
+    if _OVERFLOW_LASER_WAVELEN_RE.search(text) and _OVERFLOW_LASER_HINT_RE.search(text):
+        if _OVERFLOW_DESIGNATOR_HINT_RE.search(text) and "laser_designator_illuminator" in params:
+            return "laser_designator_illuminator"
+        if _OVERFLOW_RANGEFINDER_HINT_RE.search(text) and "laser_rangefinder" in params:
+            return "laser_rangefinder"
+    if _OVERFLOW_FOV_HINT_RE.search(text) and "field_of_view" in params:
+        return "field_of_view"
+    return None
+
+
+def _overflow_variant_hint(text: str) -> str:
+    """A short distinguishing tag for a promoted row that shares its matched key with another,
+    genuinely different overflow fact (e.g. the diameter vs. height envelope facts, or one FOV count
+    per imaging channel) -- without it, :func:`_collapse_duplicate_spec_keys`/
+    :func:`_collapse_duplicate_performance_keys` would silently collapse the two into one, losing a
+    real fact. ``""`` (no hint) is the common/expected case -- a single unambiguous fact like weight
+    is then free to merge straight into an already-existing null placeholder row for its key."""
+    if _OVERFLOW_DIAMETER_HINT_RE.search(text):
+        return "קוטר"
+    if _OVERFLOW_HEIGHT_HINT_RE.search(text):
+        return "גובה"
+    #: A laser PRF/repetition-rate fact vs. the laser's own type/wavelength description -- both can
+    #: key to the SAME laser_designator_illuminator/laser_rangefinder entry (the live SPECTRO XR
+    #: run-8 corpus carried exactly this: a "תדר חזרת הפולסים (PRF)...LTDRF" row alongside a separate
+    #: "...אורך הגל...מד הטווח (Rangefinder)" row) -- without a distinguishing tag, the second one
+    #: would silently collapse away as a same-key/same-variant duplicate.
+    if re.search(r"תדר חזרת הפולסים|\bPRF\b", text, re.IGNORECASE):
+        return "PRF"
+    if re.search(r"אורך הגל|wavelength", text, re.IGNORECASE):
+        return "סוג ואורך גל"
+    if re.search(r"תרמי|mwir", text, re.IGNORECASE):
+        return "ערוץ תרמי (MWIR)"
+    if re.search(r"נראה|visible|nir", text, re.IGNORECASE):
+        return "ערוץ נראה/NIR"
+    if re.search(r"swir", text, re.IGNORECASE):
+        return "ערוץ SWIR"
+    return ""
+
+
+def _match_overflow_key(row: SpecRow, params: dict[str, SpecParam], product_line: str | None) -> str | None:
+    """The one key-resolution path :func:`_promote_overflow_rows` uses: label, then value, then the
+    units/number heuristic over both combined -- the first hit wins."""
+    key = match_key_by_synonym(row.parameter_he, product_line)
+    if key:
+        return key
+    key = match_key_by_synonym(row.value, product_line)
+    if key:
+        return key
+    return _overflow_unit_heuristic_key(f"{row.parameter_he}\n{row.value}", params)
+
+
+def _promote_overflow_rows(
+    rows: list[SpecRow], params: dict[str, SpecParam], product_line: str | None, dropped: list[DroppedField]
+) -> tuple[list[SpecRow], list[SpecRow], list[PerformanceRow]]:
+    """Step 0 of :func:`apply_vocabulary`, run BEFORE steps 1-5: every overflow row whose own
+    parameter_he/value now resolves to a real vocabulary key (:func:`_match_overflow_key`) is
+    promoted out of ``other_specifications`` -- appended to specifications/performance with that key
+    set, its own value/cites/confidence untouched (steps 2-5 already do the table-routing,
+    canonical-label overwrite, and same-key/variant dedup-by-merge this needs, exactly as they
+    already do for a model-authored keyed row). Only a row with no match at all stays in
+    ``other_specifications``, returned as ``still_other``."""
+    still_other: list[SpecRow] = []
+    promoted_specs: list[SpecRow] = []
+    promoted_perf: list[PerformanceRow] = []
     for row in rows:
-        row = row.model_copy(update={"key": ""}) if row.key else row
-        hit = match_key_by_synonym(row.parameter_he, product_line)
-        if hit:
-            _drop(dropped, "other_specifications", f"matches_known_vocabulary_key:{hit}", row.parameter_he)
-        final.append(row)
-    return final
+        key = _match_overflow_key(row, params, product_line)
+        if not key:
+            still_other.append(row)
+            continue
+        param = params[key]
+        variant = row.variant or _overflow_variant_hint(f"{row.parameter_he}\n{row.value}")
+        promoted = row.model_copy(update={"key": key, "variant": variant})
+        _drop(dropped, "other_specifications", f"promoted_to_vocabulary_key:{key}", row.parameter_he)
+        if param.table == "performance":
+            promoted_perf.append(_spec_row_to_performance_row(promoted, param))
+        else:
+            promoted_specs.append(promoted)
+    return still_other, promoted_specs, promoted_perf
 
 
 def apply_vocabulary(
@@ -1210,10 +1575,15 @@ def apply_vocabulary(
     product_line: str | None,
     dropped: list[DroppedField],
 ) -> tuple[list[SpecRow], list[PerformanceRow], list[SpecRow]]:
-    """The single entry point for the section-3.5 vocabulary post-checks, steps 1-5 in order (see
-    each helper's own docstring). Public (not ``_``-prefixed) so tests can exercise it directly
-    without a full ``ground_dossier`` draft."""
+    """The single entry point for the section-3.5 vocabulary post-checks: overflow-row promotion
+    (step 0, item 1 above) followed by steps 1-5 in order (see each helper's own docstring). Public
+    (not ``_``-prefixed) so tests can exercise it directly without a full ``ground_dossier`` draft."""
     params = param_by_key(product_line)
+    other_specifications, promoted_specs, promoted_perf = _promote_overflow_rows(
+        other_specifications, params, product_line, dropped
+    )
+    specifications = [*specifications, *promoted_specs]
+    performance = [*performance, *promoted_perf]
     specifications, performance, demoted = _split_invalid_keys(specifications, performance, params, dropped)
     other_specifications = [*other_specifications, *demoted]
     specifications, performance = _relocate_by_table(specifications, performance, params, dropped)
@@ -1221,7 +1591,7 @@ def apply_vocabulary(
     specifications = _collapse_duplicate_spec_keys(specifications, dropped)
     performance = _collapse_duplicate_performance_keys(performance, dropped)
     specifications, performance = _backfill_required(specifications, performance, product_line)
-    other_specifications = _finalize_other_specifications(other_specifications, product_line, dropped)
+    other_specifications = _finalize_other_specifications(other_specifications)
     return specifications, performance, other_specifications
 
 
@@ -1269,9 +1639,14 @@ def ground_dossier(
         product_line=corpus.product_line,
         dropped=dropped,
     )
+    # PD-fix-4 item 2: every registry press-release source naming an amount + award/contract
+    # keyword always yields at least one deal candidate, merged in ahead of grounding -- see
+    # `_deal_candidates_from_registry`'s own docstring.
+    deal_candidates = _deal_candidates_from_registry(corpus, registry_text, published_by_n)
+    deal_rows = _merge_deal_candidates(draft.deals, deal_candidates)
     deals = [
         _ground_deal_row(r, valid_ns, registry_text, dropped, published_by_n=published_by_n)
-        for r in draft.deals
+        for r in deal_rows
     ]
     pricing = [
         r for r in (_ground_price_row(r, valid_ns, registry_text, dropped) for r in draft.pricing) if r
@@ -1331,6 +1706,14 @@ def ground_dossier(
             "timeline": timeline,
         }
     )
+    # PD-fix-4 item 5: a variant/model-suffix named in any already-grounded free-text section (not
+    # only the dedicated "versions" topic) -- folded into `grounded` BEFORE `build_timeline` runs so
+    # a newly-found variant's own `.year` (when it has one) is already visible to that pass too.
+    variant_mentions = build_variant_mentions(grounded)
+    if variant_mentions:
+        grounded = grounded.model_copy(
+            update={"variants_and_versions": [*grounded.variants_and_versions, *variant_mentions]}
+        )
     # LESSONS-2 items 1/2/7: the deterministic timeline half, the pricing_estimate gate, and the
     # platforms table all need the ALREADY-grounded dossier (deals/variants/identity/maturity) as
     # their input -- computed as one more pass over ``grounded`` itself, not the original ``draft``.
@@ -1715,6 +2098,7 @@ __all__ = [
     "build_dossier",
     "build_platforms",
     "build_timeline",
+    "build_variant_mentions",
     "carry_forward_missing_specs",
     "extract_dossier",
     "find_missing_spec_facts",

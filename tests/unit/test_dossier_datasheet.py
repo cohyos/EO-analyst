@@ -196,3 +196,103 @@ def test_hunt_datasheets_swallows_gather_candidates_failure(monkeypatch: pytest.
 
     monkeypatch.setattr(datasheet, "gather_candidates", failing_gather)
     assert datasheet.hunt_datasheets("SPECTRO XR", "Elbit Systems", vendor_domain="elbitsystems.com") == []
+
+
+# --------------------------------------------------------------------------
+# PD-fix-4 (2026-09-09, item 4): PDF relevance check -- the live SPECTRO XR run-8 regression where
+# an unrelated German hospital incident-reporting PDF (ukw.de/.../CIRS-Handlungsempfehlung.pdf) was
+# downloaded and registered as a source_kind="datasheet" source.
+# --------------------------------------------------------------------------
+
+
+def test_pdf_is_relevant_true_when_text_names_the_product() -> None:
+    assert datasheet._pdf_is_relevant(
+        "The SPECTRO XR payload offers long-range detection.",
+        "https://random-blog.example/post",
+        product_name="SPECTRO XR",
+        aliases=["Spectro"],
+        vendor_domain="elbitsystems.com",
+    )
+
+
+def test_pdf_is_relevant_true_when_text_names_an_alias() -> None:
+    assert datasheet._pdf_is_relevant(
+        "Spectro brochure -- specifications inside.",
+        "https://random-blog.example/post",
+        product_name="SPECTRO XR",
+        aliases=["Spectro"],
+        vendor_domain="elbitsystems.com",
+    )
+
+
+def test_pdf_is_relevant_true_for_vendor_domain_even_without_product_name_in_text() -> None:
+    assert datasheet._pdf_is_relevant(
+        "Generic corporate brochure text with no product name.",
+        "https://elbitsystems.com/files/x.pdf",
+        product_name="SPECTRO XR",
+        aliases=[],
+        vendor_domain="elbitsystems.com",
+    )
+
+
+def test_pdf_is_relevant_true_for_known_catalog_domain() -> None:
+    assert datasheet._pdf_is_relevant(
+        "Generic text.",
+        "https://instro.com/files/x.pdf",
+        product_name="SPECTRO XR",
+        aliases=[],
+        vendor_domain=None,
+    )
+
+
+def test_pdf_is_relevant_false_for_cirs_handlungsempfehlung_regression() -> None:
+    """The exact live regression: a German hospital patient-safety PDF, on a domain that is neither
+    the vendor's own nor a known EO/IR catalogue, whose own text never names the product."""
+    assert not datasheet._pdf_is_relevant(
+        "CIRS-Handlungsempfehlung: Meldung von kritischen Ereignissen im Krankenhaus.",
+        "https://www.ukw.de/fileadmin/uk/qm/07-07-25-CIRS-Handlungsempfehlung.pdf",
+        product_name="SPECTRO XR",
+        aliases=["Spectro"],
+        vendor_domain="elbitsystems.com",
+    )
+
+
+def test_hunt_datasheets_rejects_irrelevant_pdf_and_logs_pdf_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_search(query: str, lang: str, **kwargs: Any) -> SearchResponse:
+        return SearchResponse(query, lang, hits=[_hit("https://www.ukw.de/x/CIRS.pdf", "CIRS")])
+
+    def fake_fetch_pdf(url: str, **kwargs: Any) -> dict[str, Any]:
+        return {"url": url, "title": "CIRS", "text": "Meldung von kritischen Ereignissen im Krankenhaus.", "pages": 1}
+
+    monkeypatch.setattr(datasheet, "search", fake_search)
+    monkeypatch.setattr(datasheet, "fetch_pdf", fake_fetch_pdf)
+    logged: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        datasheet.log, "info", lambda event, **kw: logged.append({"event": event, **kw})
+    )
+    results = datasheet.hunt_datasheets("SPECTRO XR", "Elbit Systems", aliases=["Spectro"], vendor_domain="elbitsystems.com")
+    assert results == []
+    assert any(entry["event"] == "dossier.pdf_rejected" for entry in logged)
+
+
+def test_hunt_datasheets_keeps_relevant_pdf_after_rejecting_an_irrelevant_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_search(query: str, lang: str, **kwargs: Any) -> SearchResponse:
+        return SearchResponse(
+            query,
+            lang,
+            hits=[
+                _hit("https://www.ukw.de/x/CIRS.pdf", "CIRS"),
+                _hit("https://elbitsystems.com/brochure.pdf", "Brochure"),
+            ],
+        )
+
+    def fake_fetch_pdf(url: str, **kwargs: Any) -> dict[str, Any]:
+        if "ukw.de" in url:
+            return {"url": url, "title": "CIRS", "text": "Krankenhaus patient safety document.", "pages": 1}
+        return {"url": url, "title": "SPECTRO XR Brochure", "text": "SPECTRO XR long-range EO/IR payload.", "pages": 4}
+
+    monkeypatch.setattr(datasheet, "search", fake_search)
+    monkeypatch.setattr(datasheet, "fetch_pdf", fake_fetch_pdf)
+    results = datasheet.hunt_datasheets("SPECTRO XR", "Elbit Systems", vendor_domain="elbitsystems.com")
+    assert len(results) == 1
+    assert "brochure" in results[0]["url"]

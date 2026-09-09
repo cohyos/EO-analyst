@@ -751,6 +751,13 @@ def _methodology_entry(
     lines.append(f"עלונים/דפי נתונים שאותרו ונקראו: {len(datasheets)}.")
     lines.append("שפות חיפוש: עברית (מאגר פנימי) ואנגלית (חיפוש רשת).")
     lines.append(f"רגל מודל (LLM leg): {llm_leg or 'תצורת ברירת המחדל (local)'}.")
+    #: PD-fix-4 item 3: the confidence formula, documented where a reader of the report itself can
+    #: find it -- see `_compute_outcome_confidence`'s own docstring for the code-level definition.
+    lines.append(
+        "נוסחת רמת הביטחון: ממוצע משוקלל (גבוה=1.0, בינוני=0.6, נמוך=0.3) על פני שורות עם ערך "
+        "בפועל בלבד (שורות ריקות/placeholder אינן נספרות); הציון מוגבה ל-0.3 לפחות כאשר יש 5 "
+        "שורות מלאות ומעלה וכן 2 מקורות ראשוניים/עלון מוצר ומעלה במאגר המקורות של הריצה."
+    )
     return {"title_he": title, "body_he": "\n".join(lines)}
 
 
@@ -775,29 +782,67 @@ def _signal_count(dossier: ProductDossierOut) -> int:
     )
 
 
-#: LESSONS-2 item 4: "the dossier-level confidence becomes the weighted share of high rows" --
-#: every row kind that carries a per-row confidence (deals use their own ``confidence_level``, the
-#: rest use ``confidence``), pooled into one flat list.
+#: PD-fix-4 (2026-09-09, item 3): "the weighted share of high rows" collapsed to 0.11 on a live
+#: SPECTRO XR run (product_dossiers id=8) whose own rows were overwhelmingly medium/low -- not
+#: because the run itself was thin (it had 25 sources, 8 of them primary/datasheet, and dozens of
+#: filled rows), but because the pre-fix formula only ever counted "high" rows and only ever looked
+#: at ALL rows, placeholder/null ones included. Fixed formula (documented in the methodology
+#: appendix, ``_methodology_entry``, for a reader of the report itself): a WEIGHTED score
+#: (high=1.0, medium=0.6, low=0.3) over FILLED rows only (a `_backfill_required`/no-value placeholder
+#: row is never counted either way -- it isn't a fact the run found, weighting it would misstate
+#: confidence in either direction), floored at 0.3 whenever the run has >= 5 filled rows AND >= 2
+#: primary/datasheet sources in its own registry (a run that clearly did real, well-sourced work
+#: should never report a near-zero confidence just because most of its individual rows only reached
+#: "medium"/"low").
+_CONFIDENCE_WEIGHT_BY_LEVEL: dict[str, float] = {"high": 1.0, "medium": 0.6, "low": 0.3}
+_CONFIDENCE_FLOOR_MIN_FILLED_ROWS = 5
+_CONFIDENCE_FLOOR_MIN_PRIMARY_SOURCES = 2
+_CONFIDENCE_FLOOR_VALUE = 0.3
+
+
 def _row_confidence_values(dossier: ProductDossierOut) -> list[str]:
+    """Every row kind that carries a per-row confidence (deals use their own ``confidence_level``,
+    the rest use ``confidence``), pooled into one flat list -- ONLY for a row that actually carries a
+    real value (a null/placeholder row backfilled by ``eoa.dossier.extract._backfill_required`` is
+    never counted: it isn't a fact this run found, so it should never pull confidence in either
+    direction)."""
     values: list[str] = []
-    values.extend(r.confidence for r in dossier.specifications)
-    values.extend(r.confidence for r in dossier.performance)
-    values.extend(r.confidence_level for r in dossier.deals)
-    values.extend(r.confidence for r in dossier.variants_and_versions)
-    values.extend(r.confidence for r in dossier.partnerships)
-    values.extend(r.confidence for r in dossier.competitors)
+    values.extend(r.confidence for r in dossier.specifications if r.value)
+    values.extend(r.confidence for r in dossier.performance if r.claimed_value)
+    values.extend(r.confidence_level for r in dossier.deals if r.amount or r.customer)
+    values.extend(r.confidence for r in dossier.variants_and_versions if r.name)
+    values.extend(r.confidence for r in dossier.partnerships if r.partner)
+    values.extend(r.confidence for r in dossier.competitors if r.product)
     return values
 
 
-def _compute_outcome_confidence(dossier: ProductDossierOut, plan_result: PlanResult) -> tuple[str, float]:
+def _primary_source_count(corpus: CorpusResult | None) -> int:
+    """How many of ``corpus.registry``'s own sources are "primary/datasheet" -- a vendor-official
+    page (``reliability == "primary"``, ``eoa.dossier.plan.classify_web_source``) or a hunted
+    datasheet/brochure (``source_kind == "datasheet"``, ``eoa.dossier.datasheet``) -- the confidence
+    floor's own "well-sourced run" signal. ``0`` when there is no corpus at all (never floors a run
+    this function can't actually verify sourcing for)."""
+    if corpus is None:
+        return 0
+    return sum(
+        1
+        for r in corpus.registry
+        if r.get("reliability") == "primary" or r.get("source_kind") == "datasheet"
+    )
+
+
+def _compute_outcome_confidence(
+    dossier: ProductDossierOut, plan_result: PlanResult, corpus: CorpusResult | None = None
+) -> tuple[str, float]:
     signals = _signal_count(dossier)
     row_confidences = _row_confidence_values(dossier)
     if row_confidences:
-        # LESSONS-2 item 4: the weighted share of high-confidence rows across every
-        # confidence-bearing row kind -- replaces the pre-LESSONS-2 investigation-average, which
-        # stays only as the fallback for a dossier with no confidence-bearing rows at all (e.g. the
-        # fully empty "not_found" case, where there is nothing to compute a row share from).
-        conf = sum(1 for c in row_confidences if c == "high") / len(row_confidences)
+        # PD-fix-4 item 3: the weighted share (see this section's own docstring) across every
+        # FILLED confidence-bearing row -- replaces the pre-fix "share of high rows over every row,
+        # placeholders included". The investigation-average fallback below is unchanged, and still
+        # applies only when there isn't a single filled, confidence-bearing row at all (e.g. the
+        # fully empty "not_found" case).
+        conf = sum(_CONFIDENCE_WEIGHT_BY_LEVEL.get(c, 0.0) for c in row_confidences) / len(row_confidences)
     else:
         confidences = [
             f.investigation.result.confidence for f in plan_result.findings if f.investigation.result
@@ -810,6 +855,12 @@ def _compute_outcome_confidence(dossier: ProductDossierOut, plan_result: PlanRes
     else:
         outcome = "not_found"
         conf = min(conf, 0.3)
+    if (
+        outcome != "not_found"
+        and len(row_confidences) >= _CONFIDENCE_FLOOR_MIN_FILLED_ROWS
+        and _primary_source_count(corpus) >= _CONFIDENCE_FLOOR_MIN_PRIMARY_SOURCES
+    ):
+        conf = max(conf, _CONFIDENCE_FLOOR_VALUE)
     return outcome, round(min(max(conf, 0.0), 1.0), 2)
 
 
@@ -1009,7 +1060,7 @@ def build_product_dossier(
     ]
     dossier = dossier.model_copy(update={"what_changed_he": what_changed, "gaps_tracking": gaps_tracking})
 
-    outcome, confidence = _compute_outcome_confidence(dossier, plan_result)
+    outcome, confidence = _compute_outcome_confidence(dossier, plan_result, corpus)
 
     draft = _build_render_draft(dossier)
     # PD-fix item 4: the full section order (identity through "מה השתנה") -- every entry always
