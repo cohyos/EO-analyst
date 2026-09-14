@@ -1,3 +1,4 @@
+import { sourceKindLabel } from "@/lib/displayLabels";
 import type { CitationLike } from "@/components/CitationText";
 import { DossierTable, type DossierTableColumn } from "@/components/dossiers/DossierTable";
 import { DossierCiteChips, DossierPlainText } from "@/components/dossiers/DossierFact";
@@ -79,14 +80,14 @@ function buildColumns(table: SpecTableKind, t: ReturnType<typeof useT>, citation
       {
         key: "conditions",
         label: t("dossiers.table.colConditions"),
-        render: (d) => <DossierPlainText text={(d.row as DossierPerformanceRow | null)?.conditions_he ?? null} />,
+        render: (d) => <DossierPlainText compactMissing text={(d.row as DossierPerformanceRow | null)?.conditions_he ?? null} />,
       },
       {
         key: "confidence",
         label: t("dossiers.table.colConfidence"),
         render: (d) => {
           const level = (d.row as DossierPerformanceRow | null)?.confidence ?? null;
-          return <DossierPlainText text={level ? t(confidenceLabelKey(level) as never) : null} />;
+          return <DossierPlainText compactMissing text={level ? t(confidenceLabelKey(level) as never) : null} />;
         },
       },
       {
@@ -112,12 +113,12 @@ function buildColumns(table: SpecTableKind, t: ReturnType<typeof useT>, citation
     {
       key: "unit",
       label: t("dossiers.table.colUnit"),
-      render: (d) => <DossierPlainText text={(d.row as DossierSpecRow | null)?.unit ?? d.unit} />,
+      render: (d) => <DossierPlainText compactMissing text={(d.row as DossierSpecRow | null)?.unit ?? d.unit} />,
     },
     {
       key: "variant",
       label: t("dossiers.table.colVariant"),
-      render: (d) => <DossierPlainText text={(d.row as DossierSpecRow | null)?.variant ?? null} />,
+      render: (d) => <DossierPlainText compactMissing text={(d.row as DossierSpecRow | null)?.variant ?? null} />,
     },
     {
       // LESSONS-2 item 4: confidence is merged into the "source kind" cell (rather than a 7th
@@ -129,7 +130,7 @@ function buildColumns(table: SpecTableKind, t: ReturnType<typeof useT>, citation
         const row = d.row as DossierSpecRow | null;
         const level = row?.confidence ?? null;
         const suffix = level ? ` · ${t(confidenceLabelKey(level) as never)}` : "";
-        return <DossierPlainText text={row?.source_kind ? `${row.source_kind}${suffix}` : null} />;
+        return <DossierPlainText compactMissing text={row?.source_kind ? `${sourceKindLabel(row.source_kind)}${suffix}` : null} />;
       },
     },
     {

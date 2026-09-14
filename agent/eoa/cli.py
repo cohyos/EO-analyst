@@ -23,6 +23,33 @@ native_app = typer.Typer(
 app.add_typer(native_app, name="native")
 
 
+@models_app.command("pause-local")
+def models_pause_local(allow_embed: bool = typer.Option(False, help="Allow embeddings only, subject to resource checks.")) -> None:
+    """Block new local Ollama calls in all EO processes; leave cloud and UI available."""
+    from eoa.resources.gate import LOCAL_INFERENCE_PAUSE_FILE
+
+    LOCAL_INFERENCE_PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LOCAL_INFERENCE_PAUSE_FILE.write_text("allow-embed" if allow_embed else "", encoding="utf-8")
+    rprint("Local generation paused; embeddings allowed subject to resource checks." if allow_embed else "Local inference paused. Cloud and UI remain available; in-flight calls are not cancelled.")
+
+
+@models_app.command("resume-local")
+def models_resume_local() -> None:
+    """Allow local Ollama calls again after other applications finish training."""
+    from eoa.resources.gate import LOCAL_INFERENCE_PAUSE_FILE
+
+    LOCAL_INFERENCE_PAUSE_FILE.unlink(missing_ok=True)
+    rprint("Local inference resumed; the resource gate still applies.")
+
+
+@models_app.command("local-status")
+def models_local_status() -> None:
+    """Show the shared local-inference pause state without loading any model."""
+    from eoa.resources.gate import local_inference_paused
+
+    rprint("Local inference: paused" if local_inference_paused() else "Local inference: enabled")
+
+
 @app.command()
 def run(
     scope: str = typer.Argument("daily", help="daily|ingest|report|dedup|classify|triage|analyze|bd|patents"),

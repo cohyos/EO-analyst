@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
@@ -74,7 +75,7 @@ export function DossierComparePage() {
 
   if (keys.length < MIN_COMPARE || keys.length > MAX_COMPARE) {
     return (
-      <div className="space-y-4 p-4 md:p-6">
+      <div data-share-content className="space-y-4 p-4 md:p-6">
         <EmptyState title={t("dossiers.compare.invalidCountError")} />
         <Link to="/dossiers" className="inline-block text-xs text-accent hover:underline">
           {t("dossiers.backToList")}
@@ -136,6 +137,7 @@ export function DossierComparePage() {
 
   return (
     <div className="space-y-4 p-4 md:p-6">
+      <ContentShareActions title={t("dossiers.compare.title")} />
       <div>
         <h2 className="text-lg font-semibold text-fg">{t("dossiers.compare.title")}</h2>
         <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-fg-dim">

@@ -239,6 +239,8 @@ def _l1_score(text: str) -> float | None:
 
 def _l2_judge(text: str, item_id: int | str, hits: list[str]) -> dict[str, Any] | None:
     """Isolated LLM judgment (no tools). Returns dict or None if the LLM is unavailable."""
+    from eoa.errors import DeadlineExceeded, LeaseLost, ResourceUnavailable
+
     try:
         from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
         from eoa.llm.prompts import render
@@ -258,6 +260,11 @@ def _l2_judge(text: str, item_id: int | str, hits: list[str]) -> dict[str, Any] 
             task="classify",
         )
         return verdict.model_dump()
+    except (DeadlineExceeded, LeaseLost):
+        raise
+    except ResourceUnavailable as exc:
+        log.info("guard_l2_deferred", item_id=item_id, reason=str(exc)[:200])
+        return None
     except Exception as exc:
         log.warning("guard_l2_failed", error=str(exc)[:200])
         return None

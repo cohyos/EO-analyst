@@ -25,7 +25,15 @@ from typing import Any
 import structlog
 
 from eoa.config import ChainEntryCfg, settings
-from eoa.errors import CliProviderError, LLMOutputError, ProviderUnavailable
+from eoa.errors import (
+    CliProviderError,
+    DeadlineExceeded,
+    LeaseLost,
+    LLMOutputError,
+    ProviderUnavailable,
+    ResourceUnavailable,
+)
+from eoa.execution import checkpoint
 from eoa.llm.cost import estimate_cost_usd
 from eoa.llm.providers.base import ProviderResult
 
@@ -102,10 +110,24 @@ def run_chain(
         )
 
     for i, entry in enumerate(chain):
+        checkpoint()
         attempt_no = i + 1
         if entry.provider == "ollama":
             try:
                 result = call_ollama()
+            except (DeadlineExceeded, LeaseLost):
+                raise
+            except ResourceUnavailable as exc:
+                if not any(e.provider != "ollama" for e in chain[i + 1 :]):
+                    raise
+                attempt = ChainAttempt(provider="ollama", model="", power=None, ok=False,
+                                       error=str(exc)[:300], attempt_no=attempt_no,
+                                       fell_back_from=fell_back_from)
+                attempts.append(attempt)
+                _record(role, attempt, batch_size)
+                fell_back_from = "ollama"
+                log.info("local_unavailable_using_cloud", role=role, reason=str(exc)[:200])
+                continue
             except Exception as exc:  # the local leg failing is a hard failure -- nothing left
                 attempt = ChainAttempt(
                     provider="ollama",
@@ -118,6 +140,9 @@ def run_chain(
                 )
                 attempts.append(attempt)
                 _record(role, attempt, batch_size)
+                if any(e.provider != "ollama" for e in chain[i + 1 :]):
+                    fell_back_from = "ollama"
+                    continue
                 raise ChainExhausted(
                     f"llm chain for role={role!r}: local terminal entry failed: {exc}"
                 ) from exc
@@ -150,6 +175,7 @@ def run_chain(
                 result = provider.chat(messages, model=entry.model, json_schema=json_schema, tools=tools)
             else:
                 result = provider.chat(messages, model=entry.model, json_schema=json_schema)
+            checkpoint()
         except FALLBACK_EXCEPTIONS as exc:
             attempt = ChainAttempt(
                 provider=entry.provider,
@@ -181,9 +207,7 @@ def run_chain(
         _record(role, attempt, batch_size)
         return result, attempts
 
-    # Unreachable when `chain` came from `effective_chain()` (always ollama-terminated) -- kept
-    # as a defensive floor for a hand-built chain (e.g. a unit test) that omits one.
-    raise ChainExhausted(f"llm chain for role={role!r} exhausted with no local terminal entry")
+    raise ChainExhausted(f"llm chain for role={role!r} exhausted: all configured providers failed")
 
 
 def parse_leg(leg: str | None) -> ChainEntryCfg | None:

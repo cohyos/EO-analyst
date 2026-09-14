@@ -4,6 +4,20 @@ import type { Dictionary } from "../types";
 // in `../types.ts` enforces this at compile time (`typeof he` is the
 // canonical shape).
 export const en: Dictionary = {
+  share: {
+    "actions": "Copy and share",
+    "copy": "Copy content and links",
+    "email": "Share by email",
+    "whatsapp": "Share on WhatsApp",
+    "copied": "Content and links copied. Paste into email or WhatsApp.",
+    "composeOpened": "Message composer opened. You choose when to send.",
+    "longContent": "The full long content was copied. Open email or WhatsApp below and paste it.",
+    "manualCopy": "Automatic copying is unavailable. Select and copy the full text below.",
+    "fullContent": "Full content to copy",
+    "openEmail": "Open email to paste",
+    "openWhatsapp": "Open WhatsApp to paste",
+    "close": "Close"
+},
   nav: {
     ariaLabel: "Main navigation",
     morning: "Morning",
@@ -67,6 +81,8 @@ export const en: Dictionary = {
     runNowStagePending: "Pending",
     runNowStageFailed: "Failed",
     runNowStageSkipped: "Skipped",
+    runNowStagePartial: "Partial",
+    runNowStageDeferred: "Deferred",
     runNowToastDone: "Run finished · a new report is available",
     runNowToastPartial: "Run finished partially — check the log",
     runNowToastFailed: "Run failed — check the log",
@@ -337,6 +353,7 @@ export const en: Dictionary = {
     commandPaletteNoResults: "No results",
     commandPalettePlaceholder: "Search items, entities…",
     resourceHistoryDialogAria: "Resource history",
+    localInferencePaused: "Local models paused to reserve resources — UI and cloud providers remain available",
     resourceHistoryTitle: "Resource history — last 30 minutes",
     resourceHistoryCollectingData: "Collecting data…",
     resourceHistoryVram: "VRAM in use (MB)",

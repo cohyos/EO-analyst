@@ -20,7 +20,9 @@ from pydantic import BaseModel, ValidationError, create_model
 
 from eoa.config import ChainEntryCfg, ModelSpec, settings
 from eoa.errors import LLMOutputError, ProviderUnavailable
+from eoa.execution import checkpoint, timeout_seconds
 from eoa.resources.gate import gate
+from eoa.resources.inference import local_inference_lock
 
 log = structlog.get_logger(__name__)
 
@@ -62,7 +64,7 @@ class ChatResult:
 
 def _client() -> httpx.Client:
     return httpx.Client(
-        base_url=settings().ollama_url.rstrip("/"), timeout=httpx.Timeout(600.0, connect=10.0)
+        base_url=settings().ollama_url.rstrip("/"), timeout=httpx.Timeout(timeout_seconds(600.0), connect=timeout_seconds(10.0))
     )
 
 
@@ -379,6 +381,17 @@ def chat(
         if resolved != "ollama":
             return _dispatch_explicit_provider(resolved, messages, format_schema=format_schema)
 
+    cfg = settings().llm_providers
+    if not _in_pipeline_process() and provider != "ollama" and cfg.auto_cloud_fallback and cfg.allow_cloud:
+        cloud = [entry for entry in cfg.chains.get(role, []) if entry.provider != "ollama"]
+        if cloud:
+            return _dispatch_chain(
+                role, messages, task=task, format_schema=format_schema,
+                options=options, think=think, interactive=interactive,
+                keep_alive=keep_alive, tools=tools,
+                chain=[ChainEntryCfg(provider="ollama"), *cloud],
+            )
+
     return _ollama_chat(
         role,
         messages,
@@ -407,55 +420,56 @@ def _ollama_chat(
     """The actual local-Ollama call path (resource gate -> HTTP -> ``ChatResult``), factored out
     of ``chat()`` so both the plain local path and the fallback chain's local terminal entry
     (``_dispatch_chain``) share exactly one implementation."""
-    spec = gate().acquire(role, interactive=interactive)
-    assert spec.ollama, f"{spec.key} is not an Ollama model"
-    s = settings()
-    payload: dict[str, Any] = {
-        "model": spec.ollama,
-        "messages": messages,
-        "stream": False,
-        "keep_alive": keep_alive or s.ollama.keep_alive,
-        "options": {
-            **s.ollama.options,
-            "num_ctx": _num_ctx(task, spec),
-            "num_predict": s.ollama.num_predict.get(task, 2000),
-            **(options or {}),
-        },
-    }
-    if tools:
-        payload["tools"] = tools
-    if format_schema:
-        payload["format"] = format_schema
-    if think is not None:
-        payload["think"] = think
+    with local_inference_lock(interactive=interactive):
+        spec = gate().acquire(role, interactive=interactive)
+        assert spec.ollama, f"{spec.key} is not an Ollama model"
+        s = settings()
+        payload: dict[str, Any] = {
+            "model": spec.ollama,
+            "messages": messages,
+            "stream": False,
+            "keep_alive": keep_alive or s.ollama.keep_alive,
+            "options": {
+                **s.ollama.options,
+                "num_ctx": _num_ctx(task, spec),
+                "num_predict": s.ollama.num_predict.get(task, 2000),
+                **(options or {}),
+            },
+        }
+        if tools:
+            payload["tools"] = tools
+        if format_schema:
+            payload["format"] = format_schema
+        if think is not None:
+            payload["think"] = think
 
-    t0 = time.monotonic()
-    with _client() as c:
-        r = c.post("/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-    msg = data.get("message", {})
-    res = ChatResult(
-        content=msg.get("content", "") or "",
-        tool_calls=msg.get("tool_calls", []) or [],
-        thinking=msg.get("thinking"),
-        prompt_tokens=data.get("prompt_eval_count", 0),
-        eval_tokens=data.get("eval_count", 0),
-        duration_ms=int((time.monotonic() - t0) * 1000),
-        model=spec.ollama,
-        raw=data,
-    )
-    log.info(
-        "llm_chat",
-        role=role,
-        model=spec.ollama,
-        task=task,
-        tokens=res.eval_tokens,
-        tok_s=res.tokens_per_s,
-        ms=res.duration_ms,
-        tool_calls=len(res.tool_calls),
-    )
-    return res
+        t0 = time.monotonic()
+        with _client() as c:
+            r = c.post("/api/chat", json=payload)
+            r.raise_for_status()
+            data = r.json()
+        msg = data.get("message", {})
+        res = ChatResult(
+            content=msg.get("content", "") or "",
+            tool_calls=msg.get("tool_calls", []) or [],
+            thinking=msg.get("thinking"),
+            prompt_tokens=data.get("prompt_eval_count", 0),
+            eval_tokens=data.get("eval_count", 0),
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            model=spec.ollama,
+            raw=data,
+        )
+        log.info(
+            "llm_chat",
+            role=role,
+            model=spec.ollama,
+            task=task,
+            tokens=res.eval_tokens,
+            tok_s=res.tokens_per_s,
+            ms=res.duration_ms,
+            tool_calls=len(res.tool_calls),
+        )
+        return res
 
 
 def _provider_string(entry: ChainEntryCfg) -> str:
@@ -921,6 +935,16 @@ def chat_structured_batch(
     caller's own per-item loop treats that the same as any other per-item failure (log + count as
     failed), never inventing a result for a missing item.
     """
+    cap = settings().llm_providers.cloud_batch_size
+    if len(items) > cap:
+        combined: dict[int, T] = {}
+        for start in range(0, len(items), cap):
+            checkpoint()
+            combined.update(chat_structured_batch(
+                role, item_schema, items[start : start + cap], system=system,
+                task=task, intro_he=intro_he, options=options,
+            ))
+        return combined
     wrapper = _batch_wrapper_schema(item_schema)
     body = "\n\n".join(f"### item_id={item_id}\n{prompt}" for item_id, prompt in items)
     intro = intro_he or (
@@ -942,27 +966,27 @@ def chat_structured_batch(
 
 def embed(texts: Iterable[str], *, role: str = "embed", interactive: bool = False) -> list[list[float]]:
     """Embed a batch of texts with the configured embedding model."""
-    spec = gate().acquire(role, interactive=interactive)
-    assert spec.ollama
-    s = settings()
-    batch = [t if t.strip() else " " for t in texts]
-    if not batch:
-        return []
-    with _client() as c:
-        r = c.post(
-            "/api/embed",
-            json={
-                "model": spec.ollama,
-                "input": batch,
-                "keep_alive": s.ollama.keep_alive,
-                "options": {"num_ctx": _num_ctx("embed", spec)},
-            },
-        )
-        r.raise_for_status()
-        vecs = r.json().get("embeddings", [])
-    if len(vecs) != len(batch):
-        raise LLMOutputError(f"embed returned {len(vecs)} vectors for {len(batch)} inputs")
-    return vecs
+    with local_inference_lock(interactive=interactive, role=role):
+        spec = gate().acquire(role, interactive=interactive)
+        assert spec.ollama
+        batch = [t if t.strip() else " " for t in texts]
+        if not batch:
+            return []
+        with _client() as c:
+            r = c.post(
+                "/api/embed",
+                json={
+                    "model": spec.ollama,
+                    "input": batch,
+                    "keep_alive": 0,
+                    "options": {"num_ctx": _num_ctx("embed", spec)},
+                },
+            )
+            r.raise_for_status()
+            vecs = r.json().get("embeddings", [])
+        if len(vecs) != len(batch):
+            raise LLMOutputError(f"embed returned {len(vecs)} vectors for {len(batch)} inputs")
+        return vecs
 
 
 def unload_model(ollama_name: str) -> None:
@@ -973,10 +997,11 @@ def unload_model(ollama_name: str) -> None:
 
 def warm_up(role: str) -> None:
     """Load a model so the first real call is fast (used in pre-flight)."""
-    spec = gate().acquire(role)
-    assert spec.ollama
-    with _client() as c:
-        c.post("/api/generate", json={"model": spec.ollama, "keep_alive": settings().ollama.keep_alive})
+    with local_inference_lock(interactive=False):
+        spec = gate().acquire(role)
+        assert spec.ollama
+        with _client() as c:
+            c.post("/api/generate", json={"model": spec.ollama, "keep_alive": settings().ollama.keep_alive})
 
 
 def list_models() -> list[dict[str, Any]]:
@@ -1043,44 +1068,46 @@ def chat_stream(
             yield res.content[i : i + chunk_size]
         return
 
-    spec = gate().acquire(role, interactive=interactive)
-    assert spec.ollama, f"{spec.key} is not an Ollama model"
-    s = settings()
-    payload: dict[str, Any] = {
-        "model": spec.ollama,
-        "messages": messages,
-        "stream": True,
-        "keep_alive": keep_alive or s.ollama.keep_alive,
-        "options": {
-            **s.ollama.options,
-            "num_ctx": _num_ctx(task, spec),
-            "num_predict": s.ollama.num_predict.get(task, 2000),
-            **(options or {}),
-        },
-    }
-    if think is not None:
-        payload["think"] = think
+    with local_inference_lock(interactive=interactive):
+        spec = gate().acquire(role, interactive=interactive)
+        assert spec.ollama, f"{spec.key} is not an Ollama model"
+        s = settings()
+        payload: dict[str, Any] = {
+            "model": spec.ollama,
+            "messages": messages,
+            "stream": True,
+            "keep_alive": keep_alive or s.ollama.keep_alive,
+            "options": {
+                **s.ollama.options,
+                "num_ctx": _num_ctx(task, spec),
+                "num_predict": s.ollama.num_predict.get(task, 2000),
+                **(options or {}),
+            },
+        }
+        if think is not None:
+            payload["think"] = think
 
-    t0 = time.monotonic()
-    eval_tokens = 0
-    with _client() as c, c.stream("POST", "/api/chat", json=payload) as r:
-        r.raise_for_status()
-        for line in r.iter_lines():
-            if not line:
-                continue
-            data = json.loads(line)
-            msg = data.get("message", {})
-            content = msg.get("content", "")
-            if content:
-                yield content
-            if data.get("done"):
-                eval_tokens = data.get("eval_count", eval_tokens)
-                break
-    log.info(
-        "llm_chat_stream",
-        role=role,
-        model=spec.ollama,
-        task=task,
-        tokens=eval_tokens,
-        ms=int((time.monotonic() - t0) * 1000),
-    )
+        t0 = time.monotonic()
+        eval_tokens = 0
+        with _client() as c, c.stream("POST", "/api/chat", json=payload) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                checkpoint()
+                if not line:
+                    continue
+                data = json.loads(line)
+                msg = data.get("message", {})
+                content = msg.get("content", "")
+                if content:
+                    yield content
+                if data.get("done"):
+                    eval_tokens = data.get("eval_count", eval_tokens)
+                    break
+        log.info(
+            "llm_chat_stream",
+            role=role,
+            model=spec.ollama,
+            task=task,
+            tokens=eval_tokens,
+            ms=int((time.monotonic() - t0) * 1000),
+        )

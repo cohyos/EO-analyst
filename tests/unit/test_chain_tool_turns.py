@@ -221,7 +221,7 @@ class TestRunChainWithTextToolsCliLeg:
             Path(out_path).write_text(reply, encoding="utf-8")
             return self._completed(json.dumps({"type": "turn.completed", "usage": {}}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result, attempts = chain_mod.run_chain(
             "investigator",
             _entries("codex", "ollama"),
@@ -273,7 +273,7 @@ class TestRunChainWithTextToolsCliLeg:
             called_cli["n"] += 1
             return self._completed(json.dumps({"is_error": False, "result": "should not be called"}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         local = ProviderResult(content="", model="dictalm", provider="ollama", tool_calls=[TOOL_CALL])
         result, attempts = chain_mod.run_chain(
             "investigator",

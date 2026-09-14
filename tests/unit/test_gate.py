@@ -65,8 +65,9 @@ GUARD_L1_SPEC = ModelSpec(
 
 
 @pytest.fixture
-def resource_gate():
+def resource_gate(monkeypatch):
     """Fresh ResourceGate instance for each test."""
+    monkeypatch.setattr("eoa.memory.relational.record_resource_decision", lambda **kwargs: None)
     return ResourceGate()
 
 
@@ -139,7 +140,7 @@ class TestResourceGateBasics:
 
         # Both models are old enough, but keep model_a
         reclaim = resource_gate._reclaimable_vram(host, keep="model_a")
-        assert reclaim == 5000  # Only model_b
+        assert reclaim == 0  # Loaded age does not establish exclusive ownership
 
 
 class TestGateDecision:
@@ -347,11 +348,11 @@ class TestEligibleForUnload:
             loaded_models=list(loaded.values()),
         )
 
-    def test_unseen_model_is_eligible(self, resource_gate):
-        """A model the gate never tracked loading (loaded by someone else) counts as eligible."""
+    def test_unseen_model_is_not_eligible(self, resource_gate):
+        """A model loaded by someone else must not be evicted."""
         host = self._host(a=LoadedModel(name="model_a", size_mb=5000, size_vram_mb=5000))
         eligible = resource_gate._eligible_for_unload(host, keep="keep_me")
-        assert [m.name for m in eligible] == ["model_a"]
+        assert eligible == []
 
     def test_freshly_loaded_model_is_not_eligible(self, resource_gate):
         """A model loaded moments ago (by this gate) must not be unloaded yet."""
@@ -360,13 +361,13 @@ class TestEligibleForUnload:
         eligible = resource_gate._eligible_for_unload(host, keep="keep_me")
         assert eligible == []
 
-    def test_aged_model_is_eligible(self, resource_gate):
-        """A model loaded well past min_loaded_seconds is eligible."""
+    def test_aged_shared_model_is_not_eligible(self, resource_gate):
+        """Age alone does not prove a shared model is unused."""
         host = self._host(a=LoadedModel(name="model_a", size_mb=5000, size_vram_mb=5000))
         min_loaded = 300  # matches config/config.yaml resources.min_loaded_seconds
         resource_gate._loaded_since["model_a"] = time.monotonic() - min_loaded - 100
         eligible = resource_gate._eligible_for_unload(host, keep="unrelated")
-        assert [m.name for m in eligible] == ["model_a"]
+        assert eligible == []
 
     def test_keep_model_is_always_excluded(self, resource_gate):
         host = self._host(a=LoadedModel(name="keep_me", size_mb=5000, size_vram_mb=5000))

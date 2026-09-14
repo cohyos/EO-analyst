@@ -10,7 +10,9 @@ from typing import Any
 
 import structlog
 
-from eoa.errors import LLMOutputError, ResourceUnavailable
+from eoa.config import settings
+from eoa.errors import DeadlineExceeded, LeaseLost, LLMOutputError, ResourceUnavailable
+from eoa.execution import checkpoint
 from eoa.llm.ollama_client import (
     DATA_GUARD_SYSTEM,
     chat_structured,
@@ -173,6 +175,8 @@ def _context_for(item: dict) -> str:
         if not rows:
             return "אין."
         return "\n".join(f"- [item {r['id']}] {r['title']}: {r['summary_he']}" for r in rows)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("context_unavailable", error=str(exc)[:120])
         return "אין."
@@ -416,6 +420,8 @@ def _resolve_edge_kinds(names: list[str]) -> dict[str, str]:
         with connection() as conn:
             rows = conn.execute("SELECT name, kind FROM entities WHERE name = ANY(%s)", (names,)).fetchall()
         existing = {r["name"]: r["kind"] for r in rows if r.get("kind")}
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("edge_kind_lookup_failed", error=str(exc)[:120])
     return {name: existing.get(name) or _heuristic_kind(name) for name in names}
@@ -756,6 +762,8 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
             extra_fields["israel_reasons"] = refreshed["reasons"]
         for name in entities_for_scoring:
             score_and_persist_entity_israeli(name)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("israel_relevance_refresh_failed", item_id=item["id"], error=str(exc)[:120])
     # --- A13 -- END --------------------------------------------------------------------------
@@ -869,6 +877,8 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
             n_events += 1
             persisted_event_ids.append(event_id)
             persisted_event_party_names.extend(p for p in (grounded.parties or []) if p)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.warning("event_insert_failed", item_id=item["id"], error=str(exc)[:160])
     n_edges = 0
@@ -914,6 +924,8 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 add_edge(src_id, dst_id, e.label, item["id"], {"evidence": e.evidence_he[:300]})
                 n_edges += 1
                 persisted_edge_entity_names.extend([src_name, dst_name])
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.warning("edge_write_failed", item_id=item["id"], error=str(exc)[:160])
 
@@ -992,6 +1004,8 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
             log.info(
                 "product_lines_tagged", item_id=item["id"], product_lines=product_lines, method=tag_method
             )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("product_lines_tagging_failed", item_id=item["id"], error=str(exc)[:160])
     # --- PL-backend -- END ----------------------------------------------------------------
@@ -1018,6 +1032,8 @@ def _persist_analysis_and_score(it: dict, out: AnalyzeOut, stats: AnalyzeStats) 
 
         for name in it.get("entities_mentioned") or []:
             score_and_persist_entity(name)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("entity_relevance_scoring_skipped", item_id=it["id"], error=str(exc)[:120])
     # --- end entity relevance scoring ----------------------------------------
@@ -1038,6 +1054,8 @@ def _content_status_precheck(it: dict) -> str:
     if it.get("content_status") != status:
         try:
             update_item_fields(it["id"], content_status=status)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.debug("content_status_update_failed", item_id=it["id"], error=str(exc)[:120])
     it["content_status"] = status
@@ -1046,6 +1064,7 @@ def _content_status_precheck(it: dict) -> str:
 
 def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yellow") -> AnalyzeStats:
     """Analyze triaged items at or above ``min_level`` (red > orange > yellow)."""
+    checkpoint()
     order = {"red": 0, "orange": 1, "yellow": 2, "archive": 3}
     stats = AnalyzeStats()
     items = [
@@ -1056,6 +1075,7 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
     items.sort(key=lambda it: order.get(it.get("level") or "archive", 3))
     eligible: list[dict] = []
     for it in items:
+        checkpoint()
         if it.get("level") is None:
             continue  # not triaged yet — leave for the next pass, do not mark
         if order.get(it.get("level") or "archive", 3) > order[min_level]:
@@ -1074,18 +1094,21 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
     # call. Persistence/side-effects are identical to the per-item path via
     # _persist_analysis_and_score. Local mode (default) never enters this branch. -------------
     if is_cloud_batch_mode():
-        for i in range(0, len(eligible), BATCH_SIZE):
-            chunk = eligible[i : i + BATCH_SIZE]
+        batch_size = min(BATCH_SIZE, settings().llm_providers.cloud_batch_size)
+        for i in range(0, len(eligible), batch_size):
+            checkpoint()
+            chunk = eligible[i : i + batch_size]
             try:
                 results = analyze_batch(chunk, role=role)
             except ResourceUnavailable:
                 log.warning("analyze_batch_deferred_resources", n=len(chunk))
-                break
+                raise
             except LLMOutputError as exc:
                 log.error("analyze_batch_bad_output", n=len(chunk), error=str(exc)[:200])
                 stats.failed += len(chunk)
                 continue
             for it in chunk:
+                checkpoint()
                 out = results.get(it["id"])
                 if out is None:
                     log.error("analyze_batch_missing_item", item_id=it["id"])
@@ -1093,6 +1116,8 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
                     continue
                 try:
                     _persist_analysis_and_score(it, out, stats)
+                except (DeadlineExceeded, LeaseLost):
+                    raise
                 except Exception as exc:
                     log.error("analyze_persist_failed", item_id=it["id"], error=str(exc)[:200])
                     stats.failed += 1
@@ -1101,15 +1126,18 @@ def run_analyze(limit: int = 120, role: str = "resident", min_level: str = "yell
     # --- end U8-6 batch mode -------------------------------------------------------------------
 
     for it in eligible:
+        checkpoint()
         try:
             out = analyze_item(it, role=role)
             _persist_analysis_and_score(it, out, stats)
         except ResourceUnavailable:
             log.warning("analyze_deferred_resources", item_id=it["id"])
-            break
+            raise
         except LLMOutputError as exc:
             log.error("analyze_bad_output", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.error("analyze_failed", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1

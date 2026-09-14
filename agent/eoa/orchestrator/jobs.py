@@ -19,7 +19,8 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from eoa.config import settings
-from eoa.errors import DeadlineExceeded, ResourceUnavailable
+from eoa.errors import DeadlineExceeded, LeaseLost, ResourceUnavailable
+from eoa.execution import checkpoint, deadline_scope, has_incomplete_work
 from eoa.memory.relational import claim_next_job, enqueue_job, finish_job, heartbeat, reap_stale_jobs
 from eoa.notify import ntfy
 from eoa.pipeline.investigation_context import ensure_context_he
@@ -54,6 +55,7 @@ STAGE_ORDER = [
     "ingest",
     "embed_dedup",
     "classify",
+    "dedup_xlang",
     "triage",
     "deep_search",
     "analyze",
@@ -128,10 +130,13 @@ def _run_stage(rs: RunState, stage: str, fn: Callable[[], Any], *, mandatory: bo
     _hb(rs, "start", stage=stage, budget_min=budget)
     t0 = time.monotonic()
     try:
-        out = fn()
+        with deadline_scope(max(budget or 0, 0.001) * 60):
+            out = fn()
         rs.stats[stage] = _as_dict(out) | {"minutes": round((time.monotonic() - t0) / 60, 1)}
-        _hb(rs, "done", stage=stage, **rs.stats[stage])
+        _hb(rs, "partial" if has_incomplete_work(rs.stats[stage]) else "done", stage=stage, **rs.stats[stage])
         return out
+    except LeaseLost:
+        raise
     except ResourceUnavailable as exc:
         rs.stats[stage] = {"deferred": str(exc)[:200], "minutes": round((time.monotonic() - t0) / 60, 1)}
         _hb(rs, "deferred", stage=stage, error=str(exc)[:200], minutes=rs.stats[stage]["minutes"])
@@ -250,12 +255,8 @@ def _compute_run_status(stats: dict[str, Any]) -> str:
     `error`/`deferred`/`skipped` marker on it) *and* no other stage recorded a problem
     (`error`/`deferred`/`skipped`/`partial`). If the report itself is missing or failed, the whole
     run is `failed` regardless of anything else; otherwise a problem elsewhere is `partial`."""
-    report_ok = isinstance(stats.get("report"), dict) and not {"error", "deferred", "skipped"} & set(
-        stats["report"]
-    )
-    any_problem = any(
-        isinstance(v, dict) and ({"error", "deferred", "skipped", "partial"} & set(v)) for v in stats.values()
-    )
+    report_ok = isinstance(stats.get("report"), dict) and not has_incomplete_work(stats["report"])
+    any_problem = has_incomplete_work(stats)
     return "done" if report_ok and not any_problem else ("partial" if report_ok else "failed")
 
 
@@ -331,6 +332,9 @@ def _run_deep_search_job_local(job: dict[str, Any]) -> str:
             not_before=datetime.now(tz=UTC) + timedelta(minutes=30),
         )
         raise
+    except (DeadlineExceeded, LeaseLost):
+        finish_job(job["id"], "deferred", error="stage interrupted", not_before=datetime.now(tz=UTC) + timedelta(minutes=30))
+        raise
     except Exception as exc:
         finish_job(job["id"], "failed", error=str(exc)[:400])
         return "failed"
@@ -375,6 +379,10 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
         ]
         try:
             results, cross_insights_he = investigate_batch_cloud(pending)
+        except (DeadlineExceeded, LeaseLost):
+            for pending_job in claimed:
+                finish_job(pending_job["id"], "deferred", error="stage interrupted", not_before=datetime.now(tz=UTC) + timedelta(minutes=30))
+            raise
         except Exception as exc:
             log.warning(
                 "deep_search_cloud_batch_failed_falling_back_local", n=len(claimed), error=str(exc)[:300]
@@ -843,6 +851,10 @@ def _post_tenders_catchup(*, role: str = "resident") -> dict[str, Any]:
         from eoa.pipeline.dedup import run_dedup
 
         out["embed_dedup"] = _as_dict(run_dedup(item_ids=item_ids))
+    except (DeadlineExceeded, LeaseLost):
+        raise
+    except ResourceUnavailable as exc:
+        out["embed_dedup"] = {"deferred": str(exc)[:200]}
     except Exception as exc:
         log.warning("post_tenders_catchup_embed_dedup_failed", error=str(exc)[:200])
         out["embed_dedup_error"] = str(exc)[:200]
@@ -851,6 +863,10 @@ def _post_tenders_catchup(*, role: str = "resident") -> dict[str, Any]:
         from eoa.pipeline.classify import run_classify
 
         out["classify"] = _as_dict(run_classify(role=role, item_ids=item_ids))
+    except (DeadlineExceeded, LeaseLost):
+        raise
+    except ResourceUnavailable as exc:
+        out["classify"] = {"deferred": str(exc)[:200]}
     except Exception as exc:
         log.warning("post_tenders_catchup_classify_failed", error=str(exc)[:200])
         out["classify_error"] = str(exc)[:200]
@@ -859,6 +875,10 @@ def _post_tenders_catchup(*, role: str = "resident") -> dict[str, Any]:
         from eoa.pipeline.triage import run_triage
 
         out["triage"] = _as_dict(run_triage(role=role, item_ids=item_ids))
+    except (DeadlineExceeded, LeaseLost):
+        raise
+    except ResourceUnavailable as exc:
+        out["triage"] = {"deferred": str(exc)[:200]}
     except Exception as exc:
         log.warning("post_tenders_catchup_triage_failed", error=str(exc)[:200])
         out["triage_error"] = str(exc)[:200]
@@ -1016,9 +1036,18 @@ class Worker(threading.Thread):
                         job["id"], "failed", error=f"no handler for {job['kind']}", worker_id=self.worker_id
                     )
                     continue
-                result = handler(job)
-                res = result if isinstance(result, dict) else _as_dict(result)
-                finish_job(job["id"], _terminal_state(res), result=res, worker_id=self.worker_id)
+                from eoa.orchestrator.lease import keep_job_lease
+
+                with keep_job_lease(job["id"], self.worker_id):
+                    result = handler(job)
+                    checkpoint()
+                    res = result if isinstance(result, dict) else _as_dict(result)
+                    finish_job(job["id"], _terminal_state(res), result=res, worker_id=self.worker_id)
+            except LeaseLost:
+                log.warning("job_lease_lost", job_id=job["id"])
+            except ResourceUnavailable as exc:
+                finish_job(job["id"], "deferred", error=str(exc)[:400],
+                           not_before=datetime.now(tz=UTC) + timedelta(minutes=30), worker_id=self.worker_id)
             except Exception as exc:
                 log.error("job_failed", job_id=job["id"], kind=job["kind"], error=str(exc)[:300])
                 finish_job(job["id"], "failed", error=f"{exc}"[:400], worker_id=self.worker_id)

@@ -120,6 +120,7 @@ export function MorningPage() {
           the analyst lands on matches the KPI card's own last-24h window (both now read
           `COALESCE(fetched_at, created_at)` — see `list_items` in eoa/api/services.py). */}
       <section aria-label="תקציר הלילה" className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <p className="col-span-full text-xs text-fg-dim">פריטים, חקירות ושגיאות: 24 השעות האחרונות. משך הריצה מתייחס לריצה האחרונה המוצגת לעיל.</p>
         <StatTile
           label={t("morning.itemsIngestedLabel")}
           value={night_summary.items_ingested}
@@ -167,6 +168,11 @@ export function MorningPage() {
 
       {report ? (
         <section className="rounded-lg border border-border bg-bg-raised p-4 shadow-panel">
+          {Date.now() - Date.parse(report.created_at) > 24 * 60 * 60 * 1000 && (
+            <p role="status" className="mb-3 rounded border border-warn/40 p-2 text-sm text-warn">
+              הדוח האחרון בן יותר מ־24 שעות. מועד הפקתו: {formatDateTime(report.created_at)}.
+            </p>
+          )}
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-fg-dim">תקציר מנהלים — {formatDateTime(report.created_at)}</h2>
             <div className="flex items-center gap-2">

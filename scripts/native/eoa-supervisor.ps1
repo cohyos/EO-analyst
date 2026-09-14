@@ -28,13 +28,13 @@ handling both write/react to a sentinel file, runtime\supervisor.stop, checked e
 NOT SIGTERM. On Windows, `os.kill(pid, SIGTERM)`/`Stop-Process` on a Python process does not
 invoke that process's own SIGTERM handler; it terminates it via TerminateProcess(). So the
 graceful path here is: write the sentinel -> supervisor notices it -> supervisor stops each
-child itself (Stop-Process -Id, or `pg_ctl stop -m fast` for postgres) rather than relying on
+child tree itself (Process.Kill(true), or `pg_ctl stop -m fast` for postgres) rather than relying on
 a child's own signal handling. See agent\eoa\orchestrator\main.py's Windows note for why its
 own SIGINT/SIGTERM handlers are still registered (interactive `eo orchestrate` / Ctrl+C use)
 without contradicting this.
 
-Every 60s, GET http://127.0.0.1:8765/api/status is probed and logged (agent\eoa\api\routes\status.py
--- there is no separate /api/health route in this codebase).
+Every 60s, GET http://127.0.0.1:8765/api/health is probed and logged without database,
+search or GPU work (agent\eoa\api\routes\status.py).
 
 .EXAMPLE
 pwsh -NoProfile -File scripts\native\eoa-supervisor.ps1
@@ -110,6 +110,8 @@ function Import-DotEnv {
 }
 
 Import-DotEnv -Path $envFilePath
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8:backslashreplace"
 
 [System.Diagnostics.Process]::GetCurrentProcess().Id | Set-Content -Path $supervisorPidPath -Encoding ascii
 Write-Log "Supervisor started (pid $((Get-Content $supervisorPidPath)))"
@@ -197,8 +199,31 @@ function Stop-ManagedChild {
     $entry = $children[$Name]
     if ($entry -and $entry.Process -and -not $entry.Process.HasExited) {
         Write-Log "Stopping '$Name' (pid $($entry.Process.Id))"
-        try { Stop-Process -Id $entry.Process.Id -Force -ErrorAction Stop } catch { Write-Log "  (already gone: $_)" }
-        try { $entry.Process.WaitForExit(10000) | Out-Null } catch {}
+        # Python's venv launcher has a separate interpreter child. Capture handles before
+        # killing so PID reuse cannot target an unrelated process, then verify descendants too.
+        $treeIds = [System.Collections.Generic.HashSet[int]]::new()
+        [void]$treeIds.Add($entry.Process.Id)
+        $snapshot = @(Get-CimInstance Win32_Process)
+        do {
+            $added = $false
+            foreach ($child in $snapshot) {
+                if ($treeIds.Contains([int]$child.ParentProcessId) -and $treeIds.Add([int]$child.ProcessId)) {
+                    $added = $true
+                }
+            }
+        } while ($added)
+        $handles = @($treeIds | ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        $entry.Process.Kill($true)
+        # Some Windows launchers exit before .NET finishes traversing their descendants.
+        # The handles captured above still identify the exact owned processes.
+        foreach ($handle in $handles) {
+            if (-not $handle.HasExited) { $handle.Kill($true) }
+        }
+        foreach ($handle in $handles) {
+            if (-not $handle.WaitForExit(10000)) {
+                throw "Managed descendant $($handle.Id) of '$Name' did not stop"
+            }
+        }
     }
     Remove-Item (Join-Path $pidDir "$Name.pid") -Force -ErrorAction SilentlyContinue
 }
@@ -315,10 +340,10 @@ try {
         if (((Get-Date) - $lastHealthCheck).TotalSeconds -ge $HealthIntervalSeconds) {
             $lastHealthCheck = Get-Date
             try {
-                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5 -UseBasicParsing
-                Write-Log "health: api/status -> HTTP $($resp.StatusCode)"
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 5 -UseBasicParsing
+                Write-Log "health: api/health -> HTTP $($resp.StatusCode)"
             } catch {
-                Write-Log "health: api/status -> FAILED ($($_.Exception.Message))"
+                Write-Log "health: api/health -> FAILED ($($_.Exception.Message))"
             }
         }
 

@@ -27,6 +27,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from eoa.config import settings
 from eoa.errors import CliProviderError, ProviderUnavailable
+from eoa.execution import checkpoint, timeout_seconds
 from eoa.llm.providers.base import ProviderResult, strip_code_fences
 
 # Q2-15 (2026-09-06): moved to `eoa.security.redact` so `eoa.mcp_servers.*` / `eoa.mcp.client` /
@@ -164,7 +165,7 @@ class AnthropicProvider:
 
         @_retrying()
         def _call() -> httpx.Response:
-            with httpx.Client(timeout=timeout_s or _TIMEOUT_S) as c:
+            with httpx.Client(timeout=timeout_seconds(timeout_s or _TIMEOUT_S)) as c:
                 r = c.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={
@@ -174,6 +175,7 @@ class AnthropicProvider:
                     },
                     json=body,
                 )
+                checkpoint()
                 r.raise_for_status()
                 return r
 
@@ -247,6 +249,7 @@ class GeminiProvider:
                     "https://generativelanguage.googleapis.com/v1beta/models",
                     headers={"x-goog-api-key": key},
                 )
+                checkpoint()
                 r.raise_for_status()
                 names = [
                     m["name"].removeprefix("models/")
@@ -300,7 +303,7 @@ class GeminiProvider:
 
         @_retrying()
         def _call() -> httpx.Response:
-            with httpx.Client(timeout=timeout_s or _TIMEOUT_S) as c:
+            with httpx.Client(timeout=timeout_seconds(timeout_s or _TIMEOUT_S)) as c:
                 # Q2-3: `x-goog-api-key` header, not a `?key=` query param -- see
                 # `list_models` above for why.
                 r = c.post(
@@ -308,6 +311,7 @@ class GeminiProvider:
                     headers={"x-goog-api-key": key},
                     json=body,
                 )
+                checkpoint()
                 r.raise_for_status()
                 return r
 
@@ -392,12 +396,13 @@ class OpenAIProvider:
 
         @_retrying()
         def _call() -> httpx.Response:
-            with httpx.Client(timeout=timeout_s or _TIMEOUT_S) as c:
+            with httpx.Client(timeout=timeout_seconds(timeout_s or _TIMEOUT_S)) as c:
                 r = c.post(
                     "https://api.openai.com/v1/chat/completions",
                     headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
                     json=body,
                 )
+                checkpoint()
                 r.raise_for_status()
                 return r
 

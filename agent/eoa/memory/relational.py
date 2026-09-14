@@ -1283,16 +1283,17 @@ def finish_job(
     """Mark a job finished with a terminal `state` (`done`/`failed`/`partial`) or requeue it
     (`deferred`/`queued`, optionally with `not_before` for a delayed retry).
 
-    Only updates a row currently `running`, `deferred`, or `queued` — a job already reaped as
-    `failed(error='stale lease')` by `reap_stale_jobs`, or otherwise finished by someone else,
-    is left alone so a late-arriving result from a stale worker cannot clobber it. If `worker_id`
-    is given and differs from the lease holder recorded by `claim_next_job`, this is logged as a
-    warning (the write still proceeds — this is a best-effort ownership check, not a hard lock)."""
+    A worker may only finish its own running job. Calls outside a worker retain the existing
+    administrative queued/deferred transition behavior. Stale owners cannot overwrite results."""
+    from eoa.execution import worker_owner
+
+    worker_id = worker_id or worker_owner.get()
     query = """
         UPDATE jobs
         SET state = %(state)s, finished_at = now(), result = %(result)s, error = %(error)s,
             not_before = COALESCE(%(not_before)s, not_before)
         WHERE id = %(job_id)s AND state IN ('running', 'deferred', 'queued')
+          AND (%(worker_id)s::text IS NULL OR (worker_id = %(worker_id)s AND state = 'running' AND lease_expires_at > now()))
         RETURNING worker_id AS prior_worker_id
     """
     params = {
@@ -1301,20 +1302,26 @@ def finish_job(
         "error": error,
         "not_before": not_before,
         "job_id": job_id,
+        "worker_id": worker_id,
     }
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
         row = cur.fetchone()
     if row is None:
         log.warning("job.finish_no_matching_row", job_id=job_id, state=state)
-    elif worker_id is not None and row["prior_worker_id"] not in (None, worker_id):
-        log.warning(
-            "job.finish_worker_mismatch",
-            job_id=job_id,
-            lease_worker_id=row["prior_worker_id"],
-            finishing_worker_id=worker_id,
+    else:
+        log.info("job.finished", job_id=job_id, state=state, error=error)
+
+
+def renew_worker_leases(worker_id: str, *, lease_seconds: int = 900) -> set[int]:
+    """Renew only live leases still owned by this process, without creating progress noise."""
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "UPDATE jobs SET lease_expires_at = now() + (%s * interval '1 second') "
+            "WHERE worker_id = %s AND state = 'running' AND lease_expires_at > now() RETURNING id",
+            (lease_seconds, worker_id),
         )
-    log.info("job.finished", job_id=job_id, state=state, error=error)
+        return {row["id"] for row in cur.fetchall()}
 
 
 def heartbeat(
@@ -1322,24 +1329,31 @@ def heartbeat(
 ) -> None:
     """Record a heartbeat/progress row in run_log for `job_id`, and extend that job's lease so a
     long-running stage is not mistaken for a crashed worker by `reap_stale_jobs`."""
+    from eoa.execution import worker_owner
+
+    owner = worker_owner.get()
     query = """
         INSERT INTO run_log (job_id, stage, event, detail, heartbeat_at)
-        VALUES (%(job_id)s, %(stage)s, %(event)s, %(detail)s, now())
+        SELECT %(job_id)s, %(stage)s, %(event)s, %(detail)s, now()
+        WHERE EXISTS (SELECT 1 FROM jobs WHERE id = %(job_id)s AND state = 'running'
+          AND (%(worker_id)s::text IS NULL OR (worker_id = %(worker_id)s AND lease_expires_at > now())))
     """
     params = {
         "job_id": job_id,
         "stage": stage,
         "event": event,
         "detail": Json(detail) if detail is not None else None,
+        "worker_id": owner,
     }
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
         cur.execute(
             "UPDATE jobs SET lease_expires_at = now() + (%(lease_seconds)s || ' seconds')::interval "
-            "WHERE id = %(job_id)s AND state = 'running'",
-            {"job_id": job_id, "lease_seconds": lease_seconds},
+            "WHERE id = %(job_id)s AND state = 'running' "
+            "AND (%(worker_id)s::text IS NULL OR (worker_id = %(worker_id)s AND lease_expires_at > now()))",
+            {"job_id": job_id, "lease_seconds": lease_seconds, "worker_id": owner},
         )
-    log.debug("job.heartbeat", job_id=job_id, stage=stage, event=event)
+    log.debug("job.heartbeat", job_id=job_id, stage=stage, heartbeat_event=event)
 
 
 def reap_stale_jobs(max_age_hours: int = 6) -> int:

@@ -177,7 +177,7 @@ class TestCliProviderChatWithTools:
             reply = json.dumps({"tool": "search", "args": {"query": "SPECTRO XR", "lang": "en"}})
             return _completed(stdout=json.dumps({"is_error": False, "result": reply}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result = CliProvider("claude", "claude-sonnet-5").chat(
             [{"role": "user", "content": "investigate SPECTRO XR"}], tools=TOOLS
         )
@@ -198,7 +198,7 @@ class TestCliProviderChatWithTools:
             )
             return _completed(stdout=json.dumps({"status": "SUCCESS", "response": reply}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result = CliProvider("agy").chat([{"role": "user", "content": "q"}], tools=TOOLS)
         assert result.tool_calls[0]["function"]["name"] == "finish"
         assert result.tool_calls[0]["function"]["arguments"]["outcome"] == "found"
@@ -216,7 +216,7 @@ class TestCliProviderChatWithTools:
             reply = json.dumps({"tool": "search", "args": {"query": "q", "lang": "en"}})
             return _completed(stdout=json.dumps({"is_error": False, "result": reply}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result = CliProvider("claude").chat([{"role": "user", "content": "q"}], tools=TOOLS)
         assert len(calls) == 2  # exactly one repair attempt
         assert "אינה תואמת לפרוטוקול" in calls[1]
@@ -230,7 +230,7 @@ class TestCliProviderChatWithTools:
             calls.append(kwargs.get("input") or "")
             return _completed(stdout=json.dumps({"is_error": False, "result": "still no JSON here."}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         with pytest.raises(CliProviderError, match="malformed"):
             CliProvider("claude").chat([{"role": "user", "content": "q"}], tools=TOOLS)
         assert len(calls) == 2  # the original attempt + exactly one repair, then it gives up
@@ -262,7 +262,7 @@ class TestCliProviderChatWithTools:
                 },
             }
         ]
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result = CliProvider("codex").chat([{"role": "user", "content": "q"}], tools=read_tools)
         assert result.tool_calls == [{"function": {"name": "read", "arguments": {"url": "https://x.test"}}}]
 
@@ -278,7 +278,7 @@ class TestCliProviderChatWithTools:
             reply = json.dumps({"tool": "search", "args": {"query": "q", "lang": "en"}})
             return _completed(stdout=json.dumps({"is_error": False, "result": reply}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         CliProvider("claude").chat(
             [{"role": "user", "content": "q"}],
             json_schema={"type": "object"},

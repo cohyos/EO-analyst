@@ -61,6 +61,7 @@ from eoa.llm.schemas.product_line import (
     ProductLineReportDraft,
 )
 from eoa.product_lines.registry import get_product_line, product_line_ids
+from eoa.report.artifacts import versioned_paths
 from eoa.report.docx_builder import (
     build_docx,
     fmt_date,
@@ -2092,6 +2093,7 @@ def build_product_line(
     docx_path = _report_path(line_id, end, "docx")
     md_path = _report_path(line_id, end, "md")
     html_path = _report_path(line_id, end, "html")
+    docx_path, md_path, html_path = versioned_paths(docx_path, md_path, html_path)
     title_text = TITLE_TEMPLATE_HE.format(line=line_label(line_id))
 
     doc = build_docx(

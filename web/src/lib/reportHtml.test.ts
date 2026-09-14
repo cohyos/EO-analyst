@@ -4,9 +4,20 @@ import {
   enhanceSourceAppendixLinks,
   fixBdiSpacing,
   linkifyReportCitations,
+  normalizeReportProse,
   wrapReportTables,
 } from "./reportHtml";
 import type { ReportCitation } from "@/types/api";
+
+describe("historical report prose", () => {
+  it("removes raw headings without changing citation links or interpreting escaped markup", () => {
+    const out = normalizeReportProse('<ul><li>ממצא ### הקשר <a href="#src-1">[1]</a> &lt;script&gt;</li></ul>');
+    expect(out).not.toContain("###");
+    expect(out).toContain("<br>");
+    expect(out).toContain('<a href="#src-1">[1]</a>');
+    expect(out).toContain("&lt;script&gt;");
+  });
+});
 
 describe("linkifyReportCitations", () => {
   it("augments a server-rendered .cite anchor in place instead of nesting a new <a> (F23)", () => {

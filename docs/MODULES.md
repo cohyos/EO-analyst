@@ -3,6 +3,9 @@
 Per-module reference, one section per unit of the system. See
 `docs/CONVENTIONS.md` for the overall layout and hard rules.
 
+Current deployment: [CURRENT_STATE_HE.md](CURRENT_STATE_HE.md). Native Windows services, ddgs,
+SQL graph/array vectors and cloud providers supersede the older Docker-only topology below.
+
 ## Docker infrastructure
 
 Files: `docker-compose.yml` (repo root), `docker/postgres-age/`,

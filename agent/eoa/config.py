@@ -396,6 +396,8 @@ class LlmProvidersCfg(BaseModel):
 
     mode: str = "local"  # "local" | "cloud" -- global switch, applies pipeline-wide (U8-א)
     allow_cloud: bool = True
+    auto_cloud_fallback: bool = False
+    cloud_batch_size: int = Field(default=25, ge=1, le=25)
     interactive_default: str = "ollama"  # "ollama" | "chain" (the role's fallback chain) | "agy[:<model>]" | "claude[:<model>]" | "codex[:<model>]"
     timeout_s: int = 120
     #: 2026-09-09 (cloud tool-calling): when true (default), ``eoa.llm.providers.cli.CliProvider``
@@ -459,16 +461,17 @@ class LlmProvidersCfg(BaseModel):
     )
 
     def effective_chain(self, role: str) -> list[ChainEntryCfg]:
-        """The chain a role-based call (no explicit ``provider`` override) should try, in order.
+        """Resolve local-first routing with optional automatic cloud recovery.
 
-        ``mode == "local"`` (default): always just ``[ollama]``, regardless of ``chains`` -- the
-        global switch (U8-א) means a "cloud" chain configured for a role has zero effect until the
-        user flips ``mode`` to "cloud". ``mode == "cloud"``: the role's configured chain, with a
-        local Ollama entry enforced at the end even if the user's own list omits one (U8-א: "the
-        chain always ends with the local Ollama model (enforced)").
+        Cloud mode keeps the configured cloud-first order and its guarded local
+        terminal entry. Local mode appends configured cloud providers only when
+        auto_cloud_fallback is enabled. allow_cloud=False always remains local-only.
         """
-        if self.mode != "cloud":
+        if not self.allow_cloud:
             return [ChainEntryCfg(provider="ollama")]
+        if self.mode != "cloud":
+            cloud = [entry for entry in self.chains.get(role, []) if entry.provider != "ollama"]
+            return [ChainEntryCfg(provider="ollama"), *(cloud if self.auto_cloud_fallback else [])]
         chain = list(self.chains.get(role) or [])
         if not chain:
             return [ChainEntryCfg(provider="ollama")]

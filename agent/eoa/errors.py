@@ -27,6 +27,10 @@ class DeadlineExceeded(EOAError):
     """The night-window deadline was reached; the stage must wrap up."""
 
 
+class LeaseLost(EOAError):
+    """The worker no longer owns the job and must stop processing it."""
+
+
 class ConfigError(EOAError):
     """Configuration is missing or invalid."""
 

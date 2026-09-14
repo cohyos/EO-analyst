@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { Fragment } from "react";
 import type { PatentRecord } from "@/types/api";
 import { ValueScorePopover } from "./ValueScorePopover";
@@ -76,7 +77,8 @@ export function PatentTable({
                 </tr>
                 {isExpanded && (
                   <tr className="border-b border-border bg-bg-sunken last:border-0">
-                    <td colSpan={7} className="p-3 text-sm">
+                    <td data-share-content colSpan={7} className="p-3 text-sm">
+                      <ContentShareActions title={p.title || p.pub_number} links={[{ url: p.url, title: p.pub_number }]} />
                       <p className="mb-1 font-semibold text-fg">סיכום תביעות</p>
                       <p className="mb-2 leading-relaxed text-fg-muted" dir="auto">
                         {p.claims_summary_he || "טרם נותח."}

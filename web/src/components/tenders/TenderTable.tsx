@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ExternalLink, ThumbsDown, ThumbsUp } from "lucide-react";
@@ -112,7 +113,8 @@ function TenderDetailRow({
   const whyRelevant = [t.matched_terms.join(", "), t.summary_he].filter(Boolean).join(" — ");
   return (
     <tr className="border-t border-border bg-bg-sunken/60">
-      <td colSpan={9} className="p-3 text-xs">
+      <td data-share-content colSpan={9} className="p-3 text-xs">
+        <ContentShareActions title={t.title ?? undefined} links={[{ url: t.url, title: t.title }]} />
         {whyRelevant && (
           <p className="mb-2">
             <span className="text-fg-dim">{translate("tenders.whyRelevantPrefix")}</span>

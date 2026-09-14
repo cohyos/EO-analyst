@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useMemo, type MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import type { AskCitation } from "@/types/api";
@@ -33,11 +34,14 @@ export function AskAnswer({ text, citations }: { text: string; citations: AskCit
   }
 
   return (
+    <div data-share-content>
+    <ContentShareActions links={citations} />
     <div
       className="eo-ask-answer text-sm"
       dir="auto"
       onClick={handleClick}
       dangerouslySetInnerHTML={{ __html: html }}
     />
+    </div>
   );
 }

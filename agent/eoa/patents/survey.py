@@ -93,6 +93,7 @@ from eoa.pipeline.entity_normalize import (
     resolve_canonical,
     resolve_country_name,
 )
+from eoa.report.artifacts import versioned_paths
 from eoa.report.docx_builder import (
     _domain_from_url,
     build_docx,
@@ -248,7 +249,7 @@ def _report_paths(topic: str, today: dt.date) -> tuple[Path, Path, Path]:
     if not out_dir.is_absolute():
         out_dir = REPO_ROOT / out_dir
     base = out_dir / f"patent_survey_{_slug(topic)}_{today.isoformat()}"
-    return base.with_suffix(".docx"), base.with_suffix(".md"), base.with_suffix(".html")
+    return versioned_paths(base.with_suffix(".docx"), base.with_suffix(".md"), base.with_suffix(".html"))
 
 
 _TOPIC_STOPWORDS = frozenset(

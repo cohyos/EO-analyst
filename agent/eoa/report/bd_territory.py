@@ -58,6 +58,7 @@ from eoa.llm.schemas.bd_territory import (
     BdRecommendedAction,
     BdTerritoryReportDraft,
 )
+from eoa.report.artifacts import versioned_paths
 from eoa.report.deltas import build_report_state, compute_deltas, delta_extra_section
 from eoa.report.docx_builder import (
     build_docx,
@@ -3170,6 +3171,7 @@ def build_bd_territory(
     docx_path = _report_path(code, end, "docx")
     md_path = _report_path(code, end, "md")
     html_path = _report_path(code, end, "html")
+    docx_path, md_path, html_path = versioned_paths(docx_path, md_path, html_path)
 
     doc = build_docx(
         draft,

@@ -200,7 +200,7 @@ class TestDdgsErrorHandling:
         )
 
     def test_ddgs_exception_returns_empty_response_with_error(self):
-        FakeDDGS.text_raises = DDGSException("No results found.")
+        FakeDDGS.text_raises = DDGSException("All engines failed")
         resp = provider.search("nonexistent query xyz", "en")
         assert resp.hits == []
         assert resp.error is not None
@@ -262,6 +262,18 @@ class TestProviderSwitch:
 
 
 class TestPing:
+    def test_empty_query_results_do_not_disable_search_for_other_queries(self, monkeypatch, force_provider):
+        force_provider("ddgs")
+        monkeypatch.setattr(provider, "_call_searxng", lambda *a, **k: pytest.fail("unexpected fallback"))
+        FakeDDGS.text_raises = DDGSException("No results found.")
+        for i in range(4):
+            result = provider.search(f"rare-query-{i}", engines=["google"])
+            assert result.hits == []
+            assert result.error is None
+        FakeDDGS.text_raises = None
+        FakeDDGS.text_results = [{"title": "Found", "href": "https://example.com/news"}]
+        assert provider.search("next-query", engines=["google"]).hits
+
     def test_ping_ddgs_success(self):
         FakeDDGS.text_results = [{"title": "t", "href": "https://x.com", "body": "b"}]
         assert provider.ping() is True

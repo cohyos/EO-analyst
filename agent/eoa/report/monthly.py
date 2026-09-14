@@ -56,6 +56,7 @@ from eoa.llm.schemas.analysis import Sentence
 from eoa.llm.schemas.reports import MonthlyReportDraft, MonthlyTrendSection
 from eoa.memory import graph as graph_mod
 from eoa.report import trends as trends_mod
+from eoa.report.artifacts import versioned_paths
 from eoa.report.claims_gate import apply_claims_gate, gate_deep_search_entries, gate_item_texts
 from eoa.report.daily import (
     _append_event_corroboration_markers,
@@ -1144,6 +1145,7 @@ def build_monthly(
     docx_path = _report_path(end, "docx")
     md_path = _report_path(end, "md")
     html_path = _report_path(end, "html")
+    docx_path, md_path, html_path = versioned_paths(docx_path, md_path, html_path)
 
     doc = build_docx(
         draft,

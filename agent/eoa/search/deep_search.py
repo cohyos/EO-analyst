@@ -29,7 +29,15 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from eoa.config import settings
-from eoa.errors import CliProviderError, LLMOutputError, ProviderUnavailable, ResourceUnavailable
+from eoa.errors import (
+    CliProviderError,
+    DeadlineExceeded,
+    LeaseLost,
+    LLMOutputError,
+    ProviderUnavailable,
+    ResourceUnavailable,
+)
+from eoa.execution import checkpoint
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import (
@@ -587,6 +595,7 @@ def _tool_search(
     round_no: int,
     anchor_used: str | None = None,
 ) -> str:
+    checkpoint()
     ok, _matched = _query_anchor_ok(inv, query, anchor_used)
     if not ok and _is_israel_focused_query(query) and inv.read_urls:
         # A13 exemption: the Israeli-angle sub-question may steer off-anchor, but only once the
@@ -638,6 +647,7 @@ def _tool_search(
 
     kept = []
     for h in resp.hits:
+        checkpoint()
         if not h.url.lower().startswith(("http://", "https://")):
             continue
         if scan_heuristics(f"{h.title}\n{h.snippet}").score >= 0.5:
@@ -658,6 +668,7 @@ def _tool_search(
         kept.append(h)
     resp.hits = kept
     for h in resp.hits:
+        checkpoint()
         inv.hits_seen.setdefault(h.url, h)
     _log(
         inv,
@@ -691,6 +702,8 @@ def _mcp_tool_specs() -> list[dict[str, Any]]:
         from eoa.mcp.registry import tool_specs_for_react
 
         return tool_specs_for_react()
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:  # a broken MCP server must never take deep search down with it
         log.warning("mcp_tool_specs_failed", error=str(exc)[:200])
         return []
@@ -762,6 +775,8 @@ def _fetch_with_retry(url: str) -> dict[str, Any]:
 
     try:
         return fetch_remote(url)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         if not _is_transient_fetch_error(exc):
             raise
@@ -948,6 +963,7 @@ def _downgrade_unhedged_decision_claims(inv: Investigation) -> None:
 
 
 def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> str:
+    checkpoint()
     if budget.pages >= budget.max_pages:
         return json.dumps({"error": "page budget exhausted"})
     if url in inv.attempted_urls:
@@ -1062,6 +1078,8 @@ def _tool_read(inv: Investigation, budget: Budget, url: str, round_no: int) -> s
             ),
             f"read:{url[:80]}",
         )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         _log(
             inv,
@@ -1126,6 +1144,8 @@ def _log(
         )
         if url:
             _log_read_url(log_id, url, title)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("investigation_log_failed", error=str(exc)[:120])
 
@@ -1161,6 +1181,8 @@ def _check_stop(inv: Investigation) -> None:
                 inv.stop_requested = True
                 raise StopRequested
     except StopRequested:
+        raise
+    except (DeadlineExceeded, LeaseLost):
         raise
     except Exception:
         pass
@@ -1829,6 +1851,8 @@ def _fallback_item_context(item_id: int) -> str:
             row = conn.execute(
                 "SELECT title, entities_mentioned, summary_he FROM items WHERE id = %s", (item_id,)
             ).fetchone()
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("fallback_item_context_failed", item_id=item_id, error=str(exc)[:160])
         return ""
@@ -1879,6 +1903,7 @@ def investigate(
     chain, which stays the fallback exactly as before. ``None`` (the default) preserves the exact
     prior dispatch (``_role()``'s configured chain, unchanged) for every existing call site.
     """
+    checkpoint()
     cfg = settings().deep_search
     inv = Investigation(job_id=job_id, item_id=item_id, question=question)
     if not (context_he or "").strip() and item_id is not None:
@@ -1948,6 +1973,7 @@ def investigate(
     ]
     try:
         for round_no in range(1, max_rounds + 1):
+            checkpoint()
             _check_stop(inv)
             inv.rounds_done = round_no
             if budget.exhausted:
@@ -1957,6 +1983,7 @@ def investigate(
             # seed the round: run planned queries directly (parallel across languages), then let the model act
             seeded = []
             for q in queries:
+                checkpoint()
                 if budget.queries >= budget.max_queries:
                     break
                 seeded.append(
@@ -2008,6 +2035,8 @@ def investigate(
         # hits exist -- see `_force_read_top_hits`.
         try:
             _force_read_top_hits(inv, budget)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:  # a forced-read failure must never crash the investigation itself
             log.warning("forced_read_crashed", job_id=job_id, error=str(exc)[:160])
 
@@ -2017,6 +2046,8 @@ def investigate(
         # `_finalize_outcome`'s blank, 0-confidence default (see `_synthesize_from_reads`).
         try:
             inv.result = _synthesize_from_reads(inv)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:  # a synthesis failure must never crash the investigation itself
             log.warning("fallback_synthesis_crashed", job_id=job_id, error=str(exc)[:160])
 
@@ -2027,6 +2058,8 @@ def investigate(
         # `_synthesize_from_reads` fallback above.
         try:
             _downgrade_unhedged_decision_claims(inv)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:  # must never crash the investigation itself
             log.warning("hedge_downgrade_crashed", job_id=job_id, error=str(exc)[:160])
 
@@ -2131,6 +2164,8 @@ def _act(
                 options={"temperature": 0.2, "num_predict": 1200},
                 chain_override=chain_override,
             )
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:  # timeout / transport error: end this round, keep what we have
             log.warning("react_step_failed", error=str(exc)[:160])
             return inv.result is not None
@@ -2247,6 +2282,8 @@ def _act(
                     # overwrites it with `inv.read_urls` (the ground truth of what was actually
                     # fetched) once the loop ends, regardless of what the model claims below.
                     inv.result = InvestigationOut.model_validate(args)
+                except (DeadlineExceeded, LeaseLost):
+                    raise
                 except Exception as exc:
                     out = json.dumps({"error": f"invalid finish payload: {str(exc)[:200]}"})
                     transcript.append({"role": "tool", "content": out, "tool_name": "finish"})
@@ -2281,6 +2318,8 @@ def _learn(inv: Investigation) -> None:
                     "ON CONFLICT DO NOTHING",
                     (inv.question[:200], f"engine={hit.engine}; title={hit.title[:120]}", None),
                 )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("playbook_write_failed", error=str(exc)[:120])
 
@@ -2506,6 +2545,8 @@ def _screen_text_partial(text: str, *, item_id: str) -> tuple[str, Any]:
         return text, None
     try:
         verdict = screen(text, title="", item_id=item_id, use_l2=True)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:  # guard failing must never crash the investigation
         log.warning("cloud_investigation_screen_failed", item_id=item_id, error=str(exc)[:160])
         return text, None
@@ -2518,6 +2559,8 @@ def _screen_text_partial(text: str, *, item_id: str) -> tuple[str, Any]:
     for sentence in sentences:
         try:
             sent_verdict = screen(sentence, title="", item_id=item_id, use_l2=False)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception:
             sent_verdict = None
         if sent_verdict is not None and not sent_verdict.is_clean:
@@ -2602,6 +2645,7 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
     existing local ReAct loop", which this project extends to "no tool-capable CLI available
     either").
     """
+    checkpoint()
     if not pending:
         return {}, ""
 
@@ -2610,11 +2654,14 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
     last_exc: Exception | None = None
     raw_text: str | None = None
     for kind, runner in (("claude", _run_claude_with_tools), ("agy", _run_agy_with_tools)):
+        checkpoint()
         cli_cfg = cfg.cli.get(kind)
         model = (cli_cfg.models[0] if cli_cfg and cli_cfg.models else None) if kind == "agy" else None
         try:
             raw_text = runner(file_path, model)
             break
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:  # ProviderUnavailable / CliProviderError / timeout
             last_exc = exc
             log.warning("cloud_batch_investigation_provider_failed", provider=kind, error=str(exc)[:200])
@@ -2631,6 +2678,7 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
 
     out: dict[int, Investigation] = {}
     for q in pending:
+        checkpoint()
         qid_int = q.get("job_id") if q.get("job_id") is not None else q.get("item_id")
         qid_str = str(qid_int)
         answer = parsed.results.get(qid_str)

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from eoa.memory.relational import claim_next_job, finish_job, reap_stale_jobs
+from eoa.memory.relational import claim_next_job, finish_job, heartbeat, reap_stale_jobs
 
 
 class FakeCursor:
@@ -75,6 +75,12 @@ class FakeLog:
 
 
 class TestClaimNextJob:
+    def test_heartbeat_uses_real_logger_without_event_argument_collision(self, monkeypatch):
+        cur = FakeCursor()
+        monkeypatch.setattr("eoa.memory.relational.connection", lambda: FakeConnection(cur))
+        heartbeat(5, "tenders", "progress")
+        assert len(cur.executed) == 2
+
     def test_query_selects_queued_and_deferred_and_stamps_lease(self, monkeypatch) -> None:
         cur = FakeCursor(fetchone_result={"id": 5, "kind": "deep_search"})
         conn = FakeConnection(cur)
@@ -138,8 +144,8 @@ class TestFinishJobNotBefore:
 
 
 class TestFinishJobLeaseOwnership:
-    def test_warns_when_worker_id_differs_from_lease_holder(self, monkeypatch) -> None:
-        cur = FakeCursor(fetchone_result={"prior_worker_id": "host-A:111"})
+    def test_rejects_mismatched_owner_in_update(self, monkeypatch) -> None:
+        cur = FakeCursor(fetchone_result=None)
         conn = FakeConnection(cur)
         fake_log = FakeLog()
         monkeypatch.setattr("eoa.memory.relational.connection", lambda: conn)
@@ -147,7 +153,11 @@ class TestFinishJobLeaseOwnership:
 
         finish_job(7, "done", worker_id="host-B:222")
 
-        assert any(evt == "job.finish_worker_mismatch" for evt, _ in fake_log.warnings)
+        query, params = cur.executed[0]
+        assert "worker_id = %(worker_id)s" in query
+        assert params["worker_id"] == "host-B:222"
+        assert any(evt == "job.finish_no_matching_row" for evt, _ in fake_log.warnings)
+        assert not any(evt == "job.finished" for evt, _ in fake_log.infos)
 
     def test_no_warning_when_worker_id_matches_lease_holder(self, monkeypatch) -> None:
         cur = FakeCursor(fetchone_result={"prior_worker_id": "host-A:111"})

@@ -869,6 +869,18 @@ def render_watchlist_table(
     re-discover per report kind)."""
     if not rows:
         return None
+    # Historical rows may predate insert-time deduplication. Collapse only equivalent claims
+    # with the same status at render time; keep the underlying history intact.
+    distinct: list[dict[str, Any]] = []
+    for row in rows:
+        if not any(
+            row.get("_row_status") == prior.get("_row_status")
+            and _normalize_text(row.get("text_he") or "") == _normalize_text(prior.get("text_he") or "")
+            and row.get("matured_evidence_item_id") == prior.get("matured_evidence_item_id")
+            for prior in distinct
+        ):
+            distinct.append(row)
+    rows = distinct
     rows = _cap_watchlist_rows(rows)
     by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
     items = items or []

@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useMemo } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -111,7 +112,7 @@ export function ItemDetailPage() {
   const displayTitle = item.title || "(ללא כותרת)";
 
   return (
-    <div className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
+    <div data-share-content className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
       <header className="space-y-2">
         <div className="flex flex-wrap items-start gap-2">
           <LevelBadge level={item.level} />
@@ -192,6 +193,7 @@ export function ItemDetailPage() {
           </button>
         </div>
       </header>
+      <ContentShareActions title={displayTitle} links={[{ url: item.url, title: displayTitle }]} />
 
       <section aria-label="תקציר">
         <h3 className="mb-1 text-xs font-semibold text-fg-dim">תקציר</h3>

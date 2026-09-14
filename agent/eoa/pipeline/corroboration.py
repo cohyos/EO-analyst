@@ -56,6 +56,8 @@ from urllib.parse import urlparse
 
 import structlog
 
+from eoa.errors import DeadlineExceeded, LeaseLost
+from eoa.execution import checkpoint
 from eoa.memory.relational import (
     get_corroboration_candidates,
     get_dedup_linked_item_ids,
@@ -333,9 +335,11 @@ def run_corroboration(limit: int = 200, *, item_ids: list[int] | None = None) ->
     ``processed_stages``) is what actually re-covers items over time regardless of this stage's
     marks.
     """
+    checkpoint()
     stats = CorroborationStats()
     to_recompute: set[int] = set()
     for item in get_items_for_stage(STAGE, limit, item_ids=item_ids):
+        checkpoint()
         if item.get("level") is None:
             continue  # not triaged yet -- leave for the next pass, do not mark
         if not _eligible_level(item):
@@ -343,6 +347,8 @@ def run_corroboration(limit: int = 200, *, item_ids: list[int] | None = None) ->
             continue
         try:
             record = compute_for_item(item["id"])
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:  # a single bad item must never abort the whole batch
             log.warning("corroboration_item_failed", item_id=item["id"], error=str(exc)[:200])
             stats.failed += 1
@@ -356,8 +362,11 @@ def run_corroboration(limit: int = 200, *, item_ids: list[int] | None = None) ->
     # design doc point 3: "run corroboration for it and for the items it links to, so both sides
     # update" -- one hop, not a recursive expansion (avoids an unbounded chain reaction).
     for linked_id in to_recompute:
+        checkpoint()
         try:
             compute_for_item(linked_id)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.warning("corroboration_linked_item_failed", item_id=linked_id, error=str(exc)[:200])
 
@@ -369,11 +378,15 @@ def recheck_recent(days: int = WINDOW_DAYS, limit: int = 500) -> CorroborationSt
     :func:`compute_for_item` for every in-scope item from the last ``days`` days, regardless of
     whether the ``corroborate`` stage already marked it done, since a corroborating second article
     can be ingested well after the original."""
+    checkpoint()
     stats = CorroborationStats()
     ids = get_recent_in_scope_item_ids(days)[:limit]
     for item_id in ids:
+        checkpoint()
         try:
             record = compute_for_item(item_id)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.warning("corroboration_recheck_failed", item_id=item_id, error=str(exc)[:200])
             stats.failed += 1

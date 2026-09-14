@@ -8,7 +8,8 @@ from dataclasses import dataclass
 import structlog
 
 from eoa.config import settings
-from eoa.errors import LLMOutputError, ResourceUnavailable
+from eoa.errors import DeadlineExceeded, LeaseLost, LLMOutputError, ResourceUnavailable
+from eoa.execution import checkpoint
 from eoa.llm.ollama_client import (
     DATA_GUARD_SYSTEM,
     chat_structured,
@@ -251,6 +252,8 @@ def _lessons_text() -> str:
                 parts.append("- המשתמש הוריד לאחרונה דירוגים רבים: היה שמרני יותר עם red/orange.")
             elif up > down + 2:
                 parts.append("- המשתמש העלה לאחרונה דירוגים רבים: אל תחמיץ אירועים עסקיים בינוניים.")
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("lessons_unavailable", error=str(exc)[:120])
     return "\n".join(parts) or "אין לקחים קודמים."
@@ -379,6 +382,8 @@ def _apply_israel_focus_boost(item: dict, out: TriageOut) -> TriageOut:
                 new_score=new_score,
             )
             out.score = new_score
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("israel_focus_triage_boost_failed", item_id=item.get("id"), error=str(exc)[:120])
     return out
@@ -431,6 +436,8 @@ def _apply_acquisition_watch_boost(item: dict, out: TriageOut) -> TriageOut:
         prefix = f"מעקב רכישות: {company}"
         if not out.reason_he.startswith(prefix):
             out.reason_he = f"{prefix}. {out.reason_he}"[:400]
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("acquisition_watch_triage_boost_failed", item_id=item.get("id"), error=str(exc)[:120])
     return out
@@ -483,9 +490,11 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
 
     F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
     ``eoa.memory.relational.get_items_for_stage``."""
+    checkpoint()
     stats = TriageStats()
     eligible: list[dict] = []
     for it in get_items_for_stage(STAGE, limit, item_ids=item_ids):
+        checkpoint()
         if it.get("domain") is None:
             continue  # not classified yet — leave for the next pass, do not mark
         if (
@@ -501,18 +510,21 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
     # Persistence/side-effects below are identical to the per-item path; only how TriageOut is
     # obtained differs. Local mode (default) never enters this branch. -----------------------
     if is_cloud_batch_mode():
-        for i in range(0, len(eligible), BATCH_SIZE):
-            chunk = eligible[i : i + BATCH_SIZE]
+        batch_size = min(BATCH_SIZE, settings().llm_providers.cloud_batch_size)
+        for i in range(0, len(eligible), batch_size):
+            checkpoint()
+            chunk = eligible[i : i + batch_size]
             try:
                 results = triage_batch(chunk, role=role)
             except ResourceUnavailable:
                 log.warning("triage_batch_deferred_resources", n=len(chunk))
-                break
+                raise
             except LLMOutputError as exc:
                 log.error("triage_batch_bad_output", n=len(chunk), error=str(exc)[:200])
                 stats.failed += len(chunk)
                 continue
             for it in chunk:
+                checkpoint()
                 out = results.get(it["id"])
                 if out is None:
                     log.error("triage_batch_missing_item", item_id=it["id"])
@@ -529,6 +541,8 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
                     stats.done += 1
                     stats.red += out.level == "red"
                     stats.orange += out.level == "orange"
+                except (DeadlineExceeded, LeaseLost):
+                    raise
                 except Exception as exc:
                     log.error("triage_persist_failed", item_id=it["id"], error=str(exc)[:200])
                     stats.failed += 1
@@ -537,6 +551,7 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
     # --- end U8-6 batch mode -------------------------------------------------------------------
 
     for it in eligible:
+        checkpoint()
         try:
             out = triage_item(it, role=role)
             validate_triage_consistency(it["id"], level=out.level, score=out.score)
@@ -549,10 +564,12 @@ def run_triage(limit: int = 300, role: str = "resident", *, item_ids: list[int] 
             stats.orange += out.level == "orange"
         except ResourceUnavailable:
             log.warning("triage_deferred_resources", item_id=it["id"])
-            break
+            raise
         except LLMOutputError as exc:
             log.error("triage_bad_output", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.error("triage_failed", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1

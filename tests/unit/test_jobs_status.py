@@ -71,10 +71,7 @@ class TestComputeRunStatus:
 
     def test_export_backup_error_makes_it_partial_not_done(self) -> None:
         stats = {"report": {"docx": "x.docx"}, "export_backup": {"backup_error": "disk full"}}
-        # export_backup's own key isn't "error"/"deferred"/"skipped"/"partial" (it's
-        # "backup_error"), so this documents current behavior: only the four recognized keys
-        # trip "partial" — a differently-named problem marker is not detected as one.
-        assert _compute_run_status(stats) == "done"
+        assert _compute_run_status(stats) == "partial"
 
 
 class TestRunWeekly:

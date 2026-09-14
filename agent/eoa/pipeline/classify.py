@@ -9,7 +9,8 @@ import structlog
 import yaml
 
 from eoa.config import settings
-from eoa.errors import LLMOutputError, ResourceUnavailable
+from eoa.errors import DeadlineExceeded, LeaseLost, LLMOutputError, ResourceUnavailable
+from eoa.execution import checkpoint
 from eoa.llm.ollama_client import (
     DATA_GUARD_SYSTEM,
     chat_structured,
@@ -310,6 +311,8 @@ def persist_classification(item: dict, out: ClassifyOut) -> None:
 
                 canonical_name, _ = canonical_name_and_kind(ent.name, ent.kind)
                 names.append(canonical_name)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.debug("entity_upsert_failed", name=ent.name, error=str(exc)[:120])
 
@@ -327,6 +330,8 @@ def persist_classification(item: dict, out: ClassifyOut) -> None:
         israel_score = israel_relevance(text, names, lang=item.get("lang"), geography=out.geography)
         for name in names:
             score_and_persist_entity_israeli(name)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("israel_relevance_scoring_failed", item_id=item_id, error=str(exc)[:120])
     # --- A13 -- END --------------------------------------------------------------------------
@@ -354,6 +359,7 @@ def run_classify(
 
     F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
     ``eoa.memory.relational.get_items_for_stage``."""
+    checkpoint()
     stats = ClassifyStats()
     items = get_items_for_stage(STAGE, limit, item_ids=item_ids)
     if item_ids is None:
@@ -363,6 +369,8 @@ def run_classify(
         seen = {it["id"] for it in items}
         try:
             stuck = [it for it in get_items_stuck_unclassified(limit) if it["id"] not in seen]
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:  # a maintenance tail must never abort the main batch
             log.warning("classify_stuck_lookup_failed", error=str(exc)[:160])
             stuck = []
@@ -371,6 +379,7 @@ def run_classify(
             items = [*items, *stuck][:limit]
     eligible: list[dict] = []
     for it in items:
+        checkpoint()
         if it.get("security_status") in ("quarantined", "blocked") or it.get("dedup_of"):
             mark_stage(it["id"], STAGE)
             continue
@@ -380,18 +389,21 @@ def run_classify(
     # Persistence/side-effects below are identical to the per-item path; only how ClassifyOut is
     # obtained differs. Local mode (default) never enters this branch. -----------------------
     if is_cloud_batch_mode():
-        for i in range(0, len(eligible), BATCH_SIZE):
-            chunk = eligible[i : i + BATCH_SIZE]
+        batch_size = min(BATCH_SIZE, settings().llm_providers.cloud_batch_size)
+        for i in range(0, len(eligible), batch_size):
+            checkpoint()
+            chunk = eligible[i : i + batch_size]
             try:
                 results = classify_batch(chunk, role=role)
             except ResourceUnavailable:
                 log.warning("classify_batch_deferred_resources", n=len(chunk))
-                break
+                raise
             except LLMOutputError as exc:
                 log.error("classify_batch_bad_output", n=len(chunk), error=str(exc)[:200])
                 stats.failed += len(chunk)
                 continue
             for it in chunk:
+                checkpoint()
                 out = results.get(it["id"])
                 if out is None:
                     log.error("classify_batch_missing_item", item_id=it["id"])
@@ -408,6 +420,8 @@ def run_classify(
                         stats.out_of_scope += 1
                     mark_stage(it["id"], STAGE)
                     stats.done += 1
+                except (DeadlineExceeded, LeaseLost):
+                    raise
                 except Exception as exc:
                     log.error("classify_persist_failed", item_id=it["id"], error=str(exc)[:200])
                     stats.failed += 1
@@ -416,6 +430,7 @@ def run_classify(
     # --- end U8-6 batch mode -------------------------------------------------------------------
 
     for it in eligible:
+        checkpoint()
         try:
             out = classify_item(it, role=role)
             out = apply_no_eoir_gate(it, out)
@@ -428,10 +443,12 @@ def run_classify(
             stats.done += 1
         except ResourceUnavailable:
             log.warning("classify_deferred_resources", item_id=it["id"])
-            break
+            raise
         except LLMOutputError as exc:
             log.error("classify_bad_output", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.error("classify_failed", item_id=it["id"], error=str(exc)[:200])
             stats.failed += 1

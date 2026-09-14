@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { Link, useNavigate } from "react-router-dom";
 import { ExternalLink, Search } from "lucide-react";
 import { useMutation, useQueries } from "@tanstack/react-query";
@@ -202,7 +203,8 @@ function ForecastSources({ sources }: { sources: string[] }) {
 
 function ForecastCardView({ f }: { f: ForecastCard }) {
   return (
-    <div className="space-y-2.5 rounded-lg border border-border bg-bg-raised p-4 shadow-panel">
+    <div data-share-content className="space-y-2.5 rounded-lg border border-border bg-bg-raised p-4 shadow-panel">
+      <ContentShareActions title={`${f.platform} — ${f.payload_need}`} />
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <bdi className="block text-xs text-fg-dim" dir="auto">

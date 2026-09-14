@@ -4,6 +4,20 @@
 // existing hardcoded strings where a screen is migrated, so switching a
 // component over to `t()` never changes rendered output for `he`.
 export const he = {
+  share: {
+    "actions": "העתקה ושיתוף",
+    "copy": "העתק תוכן וקישורים",
+    "email": "שתף במייל",
+    "whatsapp": "שתף בוואטסאפ",
+    "copied": "התוכן והקישורים הועתקו. אפשר להדביק במייל או בוואטסאפ.",
+    "composeOpened": "חלון כתיבת ההודעה נפתח. השליחה מתבצעת על ידך.",
+    "longContent": "התוכן ארוך ולכן הועתק במלואו. פתח מייל או וואטסאפ בקישור למטה והדבק אותו.",
+    "manualCopy": "לא ניתן להעתיק אוטומטית. בחר את הטקסט המלא למטה והעתק אותו.",
+    "fullContent": "התוכן המלא להעתקה",
+    "openEmail": "פתח מייל להדבקה",
+    "openWhatsapp": "פתח וואטסאפ להדבקה",
+    "close": "סגור"
+},
   nav: {
     ariaLabel: "ניווט ראשי",
     morning: "הבוקר",
@@ -68,6 +82,8 @@ export const he = {
     runNowStagePending: "ממתין",
     runNowStageFailed: "נכשל",
     runNowStageSkipped: "דולג",
+    runNowStagePartial: "חלקי",
+    runNowStageDeferred: "מושהה",
     runNowToastDone: "הריצה הסתיימה · דוח חדש זמין",
     runNowToastPartial: "הריצה הסתיימה חלקית — יש לבדוק את היומן",
     runNowToastFailed: "הריצה נכשלה — יש לבדוק את היומן",
@@ -366,6 +382,7 @@ export const he = {
     commandPaletteNoResults: "אין תוצאות",
     commandPalettePlaceholder: "חפש פריטים, ישויות…",
     resourceHistoryDialogAria: "היסטוריית משאבים",
+    localInferencePaused: "מודלים מקומיים מושהים לשמירת משאבים — הממשק וספקי הענן זמינים",
     resourceHistoryTitle: "היסטוריית משאבים — 30 דקות אחרונות",
     resourceHistoryCollectingData: "אוסף נתונים…",
     resourceHistoryVram: "VRAM בשימוש (MB)",

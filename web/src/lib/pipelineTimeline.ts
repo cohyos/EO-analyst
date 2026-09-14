@@ -19,7 +19,9 @@ export const STAGE_ORDER = [
   "triage",
   "deep_search",
   "analyze",
+  "corroborate",
   "tenders",
+  "post_tenders_catchup",
   "report",
   "export_backup",
   "notify",
@@ -33,6 +35,7 @@ export const STAGE_LABEL_HE: Record<string, string> = {
   triage: "מיון (Triage)",
   deep_search: "חיפוש עומק",
   analyze: "ניתוח",
+  corroborate: "אישוש מקורות",
   tenders: "מכרזים",
   // Q5-5 (docs/qa/findings_Q5_r1.md): agent/eoa/orchestrator/jobs.py's STAGE_ORDER runs this stage
   // between "tenders" and "report" -- it was missing here entirely, so the replay timeline fell
@@ -88,7 +91,9 @@ export function buildStageTimeline(
       label: stageLabelHe(key),
       status: info.status,
       minutes: info.minutes,
-      error: typeof rawError === "string" && rawError.length > 0 ? rawError : null,
+      error: typeof rawError === "string" && rawError.length > 0
+        ? rawError
+        : info.last_event === "deadline" ? "תקציב הזמן הסתיים; העבודה שבוצעה נשמרה" : null,
     };
   });
 }
@@ -109,6 +114,8 @@ export const STAGE_STATUS_LABEL_HE: Record<StageStatus, string> = {
   done: "הושלם",
   failed: "נכשל",
   skipped: "דולג",
+  partial: "חלקי",
+  deferred: "מושהה",
 };
 
 export const STAGE_COLOR_BAR_CLASS: Record<StageStatus, string> = {
@@ -117,6 +124,8 @@ export const STAGE_COLOR_BAR_CLASS: Record<StageStatus, string> = {
   failed: "bg-danger",
   running: "bg-accent",
   pending: "bg-border-strong",
+  partial: "bg-warn",
+  deferred: "bg-warn",
 };
 
 export const STAGE_COLOR_DOT_CLASS = STAGE_COLOR_BAR_CLASS;

@@ -1108,6 +1108,7 @@ export interface GateDecision {
 // Mirrors ResourceGate.status() (agent/eoa/resources/gate.py) exactly —
 // nested gpu/ram, plural loaded_models, recent_decisions history.
 export interface ResourceGateStatus {
+  local_inference_paused?: boolean;
   gpu: ResourceGateGpu;
   ram: ResourceGateRam;
   disk_free_gb: number;
@@ -1119,7 +1120,7 @@ export interface ResourceGateStatus {
 // F12: a stage's `status` is derived from its own terminal `run_log` event (not a raw heartbeat
 // row count, which is why the old timeline showed "2" for nearly every stage regardless of what
 // it actually did) -- "pending" means the stage was never reached this run.
-export type StageStatus = "pending" | "running" | "done" | "failed" | "skipped";
+export type StageStatus = "pending" | "running" | "done" | "failed" | "skipped" | "partial" | "deferred";
 
 export interface PipelineStageInfo {
   status: StageStatus;

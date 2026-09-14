@@ -32,6 +32,7 @@ from eoa.dossier.plan import PlanResult, run_plan
 from eoa.dossier.spec_render import CONFIDENCE_LABEL_HE, spec_and_performance_entries
 from eoa.errors import LLMOutputError
 from eoa.llm.schemas.product_dossier import DealRow, GapTrackingRow, ProductDossierOut
+from eoa.report.artifacts import versioned_paths
 from eoa.report.docx_builder import (
     _EVENT_KIND_LABELS_HE,
     build_docx,
@@ -76,12 +77,16 @@ def _write_job_progress(job_id: int | None, progress: list[dict[str, Any]]) -> N
     raises -- a progress-write failure must not break the dossier build itself."""
     if job_id is None:
         return
+    from eoa.execution import checkpoint, worker_owner
+
+    checkpoint()
     try:
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE jobs SET payload = COALESCE(payload, '{}'::jsonb) || %(patch)s::jsonb "
-                "WHERE id = %(id)s AND state = 'running'",
-                {"id": job_id, "patch": Json({"progress": progress}, dumps=_json_dumps)},
+                "WHERE id = %(id)s AND state = 'running' "
+                "AND (%(owner)s::text IS NULL OR (worker_id = %(owner)s AND lease_expires_at > now()))",
+                {"id": job_id, "patch": Json({"progress": progress}, dumps=_json_dumps), "owner": worker_owner.get()},
             )
     except Exception as exc:
         log.warning("dossier_progress_write_failed", job_id=job_id, error=str(exc)[:200])
@@ -884,7 +889,7 @@ def _report_paths(product_key: str, today: dt.date) -> tuple[Path, Path, Path]:
     if not out_dir.is_absolute():
         out_dir = REPO_ROOT / out_dir
     base = out_dir / f"dossier_{product_key}_{today.isoformat()}"
-    return base.with_suffix(".docx"), base.with_suffix(".md"), base.with_suffix(".html")
+    return versioned_paths(base.with_suffix(".docx"), base.with_suffix(".md"), base.with_suffix(".html"))
 
 
 def _persist(

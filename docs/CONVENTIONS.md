@@ -1,9 +1,10 @@
 # EO-Analyst — Engineering Conventions (read before writing any code)
 
 ## Purpose
-Local, offline-first OSINT analyst agent for defense electro-optics (EO/IR) and computer vision.
-Runs on Windows 11 + Docker Desktop (WSL2), NVIDIA RTX 5070 Ti Laptop **12 GB VRAM**, 64 GB RAM.
-All inference is local (Ollama). Zero paid APIs. Only Western-origin open-weight models.
+Locally hosted OSINT analyst for defense electro-optics (EO/IR) and computer vision.
+The active installation uses Windows native services, cloud providers and optional Ollama inference.
+See [CURRENT_STATE_HE.md](CURRENT_STATE_HE.md) for the current deployment and resource policy.
+Docker references below describe the older deployment option.
 
 ## Layout
 ```

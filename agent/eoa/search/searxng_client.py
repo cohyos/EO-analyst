@@ -10,6 +10,8 @@ import httpx
 import structlog
 
 from eoa.config import settings
+from eoa.errors import DeadlineExceeded, LeaseLost
+from eoa.execution import checkpoint, sleep, timeout_seconds
 
 log = structlog.get_logger(__name__)
 
@@ -57,7 +59,7 @@ class _RateLimiter:
             if len(self._stamps) >= self.per_minute:
                 sleep_for = 60 - (now - self._stamps[0]) + 0.1
                 log.debug("searxng_rate_limit_sleep", seconds=round(sleep_for, 1))
-                time.sleep(max(sleep_for, 0))
+                sleep(max(sleep_for, 0))
             self._stamps.append(time.monotonic())
 
 
@@ -81,6 +83,7 @@ def search(
     engines: list[str] | None = None,
 ) -> SearchResponse:
     """Run one query. Never raises; returns ``error`` on failure so the ReAct loop can continue."""
+    checkpoint()
     s = settings().searxng
     _limiter_instance().wait()
     params: dict[str, str] = {
@@ -99,11 +102,13 @@ def search(
         r = httpx.get(
             f"{settings().searxng_url.rstrip('/')}/search",
             params=params,
-            timeout=25,
+            timeout=timeout_seconds(25),
             headers={"Accept": "application/json", "User-Agent": settings().fetch.user_agent},
         )
         r.raise_for_status()
         data = r.json()
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.warning("searxng_failed", query=query[:80], lang=lang, error=str(exc)[:160])
         return SearchResponse(query, lang, error=str(exc)[:200])

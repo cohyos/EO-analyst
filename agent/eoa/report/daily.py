@@ -25,6 +25,7 @@ from eoa.db import connection
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import DailyReportDraft, Sentence
+from eoa.report.artifacts import versioned_paths
 from eoa.report.docx_builder import (
     build_docx,
     fmt_amount,
@@ -1827,6 +1828,7 @@ def build_daily(
     docx_path = _report_path(label, "docx")
     md_path = _report_path(label, "md")
     html_path = _report_path(label, "html")
+    docx_path, md_path, html_path = versioned_paths(docx_path, md_path, html_path)
 
     # U8-4 (docs/adr/005-cloud-llm-cli.md, Revision 2026-09-06): a one-line cloud-usage footer --
     # "מודלים: X קריאות ענן, Y נפלו למקומי, עלות משוערת $Z" -- appended to every rendering of the

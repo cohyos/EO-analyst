@@ -595,6 +595,8 @@ class TestBdTerritoryEmptyStub:
 
     @staticmethod
     def _mock_empty_collectors(monkeypatch, tmp_path, *, dormant: list[str]):
+        monkeypatch.setattr("eoa.patents.report_section.collect_patents_bd",
+                            lambda territory: {"territory": territory, "competitor_patents": []})
         monkeypatch.setattr(bdt, "collect_market_items", lambda t, s, e, max_items=250: [])
         monkeypatch.setattr(bdt, "collect_platform_events", lambda t, s, e, limit=25: [])
         monkeypatch.setattr(

@@ -5,6 +5,7 @@ Everything here is read-only and cheap; the gate polls it before every inference
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import subprocess
@@ -101,20 +102,7 @@ def read_ram() -> tuple[int, int]:
         pass
     if os.name == "nt":
         try:
-            out = subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize | "
-                    'ForEach-Object { "$($_.FreePhysicalMemory) $($_.TotalVisibleMemorySize)" })',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=True,
-            ).stdout.split()
-            return int(out[0]) // 1024, int(out[1]) // 1024
+            return _windows_ram()
         except Exception:
             return 0, 0
     try:
@@ -123,6 +111,23 @@ def read_ram() -> tuple[int, int]:
         return vals.get("MemAvailable", 0) // 1024, vals.get("MemTotal", 0) // 1024
     except Exception:
         return 0, 0
+
+
+def _windows_ram() -> tuple[int, int]:
+    """Read MEMORYSTATUSEX directly; no PowerShell process per status update."""
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32)] + [
+            (name, ctypes.c_uint64) for name in (
+                "total_phys", "avail_phys", "total_page", "avail_page",
+                "total_virtual", "avail_virtual", "avail_extended",
+            )
+        ]
+
+    status = MemoryStatus()
+    status.length = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise OSError("GlobalMemoryStatusEx failed")
+    return status.avail_phys // 2**20, status.total_phys // 2**20
 
 
 def read_disk(path: str | Path = ".") -> float:

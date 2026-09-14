@@ -8,6 +8,19 @@ function stage(overrides: Partial<PipelineStageInfo> = {}): PipelineStageInfo {
 }
 
 describe("PipelineReplayTimeline", () => {
+  it("distinguishes exhausted time and paused resources from skipped work", () => {
+    render(<PipelineReplayTimeline lastRun={{
+      started_at: null, finished_at: null, state: "partial",
+      stages: {
+        tenders: stage({ status: "partial", last_event: "deadline", minutes: 15 }),
+        embed_dedup: stage({ status: "deferred", last_event: "deferred", minutes: 0 }),
+      },
+    }} />);
+    expect(screen.getByText("חלקי")).toBeInTheDocument();
+    expect(screen.getByText("מושהה")).toBeInTheDocument();
+    expect(screen.queryByText("דולג")).not.toBeInTheDocument();
+    expect(screen.getAllByTitle(/תקציב הזמן הסתיים/).length).toBeGreaterThan(0);
+  });
   it("renders nothing when there is no last run", () => {
     const { container } = render(<PipelineReplayTimeline lastRun={null} />);
     expect(container).toBeEmptyDOMElement();

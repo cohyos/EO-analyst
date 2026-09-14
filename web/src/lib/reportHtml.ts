@@ -1,5 +1,26 @@
 import type { ReportCitation } from "@/types/api";
 
+/** Display old report prose without raw Markdown heading markers; never interpret new HTML. */
+export function normalizeReportProse(html: string): string {
+  if (!/(^|\s)#{2,6}\s/.test(html)) return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  for (const node of nodes) {
+    if (!node.parentElement?.closest("li, p") || node.parentElement.closest("a, code, pre")) continue;
+    const parts = (node.textContent ?? "").split(/(?:^|\s)#{2,6}\s+/);
+    if (parts.length < 2) continue;
+    const fragment = doc.createDocumentFragment();
+    parts.forEach((part, i) => {
+      if (i) fragment.append(doc.createElement("br"));
+      fragment.append(doc.createTextNode(part));
+    });
+    node.replaceWith(fragment);
+  }
+  return doc.body.innerHTML;
+}
+
 /**
  * Turns `[n]` citation markers inside server-rendered report HTML into clickable chips.
  *

@@ -1,3 +1,5 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
+import { sourceKindLabel } from "@/lib/displayLabels";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
@@ -257,7 +259,7 @@ export function DossierDetailPage() {
     { key: "currency", label: t("dossiers.table.colUnit"), render: (r) => <DossierPlainText text={r.currency} /> },
     { key: "basis", label: t("dossiers.table.colBasis"), render: (r) => <DossierPlainText text={r.basis_he} /> },
     { key: "date", label: t("dossiers.table.colDate"), render: (r) => <DossierPlainText text={r.date} /> },
-    { key: "source_kind", label: t("dossiers.table.colSourceKind"), render: (r) => <DossierPlainText text={r.source_kind} /> },
+    { key: "source_kind", label: t("dossiers.table.colSourceKind"), render: (r) => <DossierPlainText text={sourceKindLabel(r.source_kind, locale)} /> },
     { key: "cites", label: t("dossiers.table.colSources"), render: (r) => <DossierCiteChips cites={r.cites} citations={citations} /> },
   ];
 
@@ -332,14 +334,15 @@ export function DossierDetailPage() {
         </a>
       ),
     },
-    { key: "kind", label: t("dossiers.table.colSourceKind"), render: (r) => <DossierPlainText text={r.kind} /> },
+    { key: "kind", label: t("dossiers.table.colSourceKind"), render: (r) => <DossierPlainText text={sourceKindLabel(r.kind, locale)} /> },
     { key: "reliability", label: t("dossiers.table.colReliability"), render: (r) => <DossierPlainText text={r.reliability} /> },
     { key: "accessed", label: t("dossiers.table.colAccessed"), render: (r) => <DossierPlainText text={r.accessed_at ? formatDateTime(r.accessed_at, locale) : null} /> },
   ];
 
   return (
-    <div className="space-y-4 p-4 md:p-6">
+    <div data-share-content className="space-y-4 p-4 md:p-6">
       <DossierSectionNav items={NAV_ITEMS} />
+      <ContentShareActions title={d.product_name} links={data?.sources ?? []} />
 
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -640,7 +643,7 @@ export function DossierDetailPage() {
           </section>
 
           {d.dossiers.length > 0 && (
-            <section aria-label={t("dossiers.runHistory.title")}>
+            <section data-share-exclude aria-label={t("dossiers.runHistory.title")}>
               <h3 className="mb-2 text-sm font-semibold text-fg">{t("dossiers.runHistory.title")}</h3>
               <DossierRunHistoryList productKey={d.product_key} runs={d.dossiers} />
             </section>

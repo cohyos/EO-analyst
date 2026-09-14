@@ -1,5 +1,8 @@
 # STATUS — EO-Analyst (native Windows stack)
 
+> Current operating state: [CURRENT_STATE_HE.md](docs/CURRENT_STATE_HE.md), updated 2026-09-11.
+> The sections below retain the earlier implementation history.
+
 > **Rewritten 2026-09-06 (Q7-3)** — the previous version of this file described the retired
 > Docker Compose topology (containers, port 8091→ntfy inside compose, `eo status`-only). This
 > rewrite reflects the native stack since ADR-004. If a session is resumed, read this file first.

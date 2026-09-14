@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -70,7 +71,8 @@ export function FeedDetailPanel({
   });
 
   return (
-    <div className="flex h-full flex-col" data-testid="feed-detail-panel">
+    <div data-share-content className="flex h-full flex-col" data-testid="feed-detail-panel">
+      <ContentShareActions title={displayTitle} links={[{ url: item.url, title: displayTitle }]} />
       <div className="flex flex-wrap items-start gap-2 border-b border-border p-3">
         <LevelBadge level={item.level} />
         <CorroborationBadge corroboration={item.corroboration} showUnknown />

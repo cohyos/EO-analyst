@@ -22,6 +22,7 @@ import html as html_lib
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -38,6 +39,7 @@ from eoa.feedback import surveys as feedback_surveys
 from eoa.llm import ollama_client
 from eoa.memory import graph, relational, vector
 from eoa.report import geography
+from eoa.report.artifacts import VISIBLE_REPORT_SQL
 from eoa.resources.gate import gate
 
 log = structlog.get_logger(__name__)
@@ -108,13 +110,29 @@ def _http_reachable(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
+_services_cache: tuple[float, dict[str, bool]] = (0, {})
+_services_lock = threading.Lock()
+
+
 def services_status() -> dict[str, bool]:
+    """Share service probes across status subscribers for 15 seconds."""
+    global _services_cache
+    with _services_lock:
+        expires, cached = _services_cache
+        if time.monotonic() < expires:
+            return dict(cached)
+        result = _probe_services()
+        _services_cache = (time.monotonic() + 15, result)
+        return dict(result)
+
+
+def _probe_services() -> dict[str, bool]:
     """Health of the four backing services shown on the status panel.
 
     The "searxng" key is kept for web UI compatibility even though, since migration step 1b
     (docs/PLAN_WINDOWS_NATIVE.md, docs/MODULES.md search/ note 2026-09-05), it now reflects
     whichever backend `settings().search.provider` selects (ddgs by default has no container
-    to reach; `eoa.search.provider.ping()` runs a lightweight query instead).
+    to reach; its readiness check verifies the package without an external search query).
     """
     from eoa.search.provider import ping as search_ping
 
@@ -122,7 +140,7 @@ def services_status() -> dict[str, bool]:
     return {
         "postgres": db.ping(),
         "ollama": ollama_client.ping(),
-        "searxng": search_ping(),
+        "searxng": search_ping(probe=False),
         "ntfy": _http_reachable(os.environ.get("NTFY_URL", s.notify.url)),  # env override like notify/ntfy.py
     }
 
@@ -178,9 +196,10 @@ _DAILY_RUN_STAGE_ORDER = (
 # `start` is still `running` (see `_stage_status_from_events`).
 _STAGE_TERMINAL_STATUS = {
     "done": "done",
+    "partial": "partial",
     "error": "failed",
-    "deferred": "skipped",
-    "deadline": "skipped",
+    "deferred": "deferred",
+    "deadline": "partial",
     "skipped_no_time": "skipped",
     "skipped_circuit_open": "skipped",
 }
@@ -191,6 +210,8 @@ def _stage_timeline_from_log(job_id: int, job_state: str) -> dict[str, dict[str,
     stage's own terminal event -- not a raw count of heartbeat rows, which is why the old
     timeline showed the same "2" (one `start` + one `done` heartbeat) for nearly every stage
     regardless of how much work it actually did."""
+    from eoa.execution import has_incomplete_work
+
     rows = _fetchall(
         "SELECT stage, event, detail, heartbeat_at FROM run_log WHERE job_id = %s ORDER BY id ASC",
         (job_id,),
@@ -208,18 +229,19 @@ def _stage_timeline_from_log(job_id: int, job_state: str) -> dict[str, dict[str,
         entry["last_at"] = r["heartbeat_at"].isoformat() if r.get("heartbeat_at") else entry["last_at"]
         terminal = _STAGE_TERMINAL_STATUS.get(r.get("event") or "")
         if terminal:
-            entry["status"] = terminal
+            entry["status"] = "partial" if terminal == "done" and has_incomplete_work(detail) else terminal
             entry["minutes"] = detail.get("minutes", entry["minutes"])
             entry["detail"] = {k: v for k, v in detail.items() if k not in {"minutes", "stage"}}
         elif r.get("event") == "start":
             entry["status"] = "running"
     if job_state != "running":
-        # A job that's no longer running can't have a stage stuck "running" or a stage that
-        # never even started -- either it finished (terminal event just wasn't logged for some
-        # reason) or the job ended before reaching it.
+        # A missing completion event is not evidence of success, even for a completed job.
         for entry in stages.values():
             if entry["status"] == "running":
-                entry["status"] = "done"
+                entry["status"] = "failed" if job_state == "failed" else "skipped"
+                entry["detail"] = {"reason": "interrupted", "job_state": job_state}
+                if job_state == "failed":
+                    entry["detail"]["error"] = "הריצה נכשלה לפני שנרשמה השלמת השלב"
     return stages
 
 
@@ -952,6 +974,7 @@ _REPORT_KIND_LABEL_HE = {
     "bd_territory": "דוח פיתוח עסקי",
     "patent_survey": "סקר פטנטים",
     "product_dossier": "סקירת שוק עמוקה למוצר",
+    "product_line": "דוח קו מוצר",
 }
 
 # A small local Hebrew country-name table for `bd_territory`'s `subject_he`/`title_he`
@@ -985,6 +1008,13 @@ def _territory_label_he(territory: str | None) -> str | None:
 
 
 def _report_subject_he(kind: str | None, territory: str | None, qa_report: dict[str, Any]) -> str | None:
+    if kind == "product_line":
+        from eoa.product_lines.registry import get_product_line
+
+        line = get_product_line(territory or "")
+        return line.name_he if line else territory
+    if kind == "product_dossier":
+        return territory
     if kind == "patent_survey":
         topic = qa_report.get("topic")
         return topic.strip() if isinstance(topic, str) and topic.strip() else None
@@ -1018,7 +1048,7 @@ def _report_title_he(
         anchor = period_end if hasattr(period_end, "strftime") else period_start
         month_str = anchor.strftime("%m.%Y") if hasattr(anchor, "strftime") else None
         return f"{label} — {month_str}" if month_str else label
-    if kind == "bd_territory":
+    if kind in {"bd_territory", "product_line", "product_dossier"}:
         subject = subject_he or _territory_label_he(territory) or "—"
         return f"{label} — {subject} — {built}" if built else f"{label} — {subject}"
     if kind == "patent_survey":
@@ -1032,8 +1062,8 @@ def _report_group_key(row: dict[str, Any], subject_he: str | None) -> str:
     kind = row.get("kind") or ""
     if kind == "patent_survey":
         return f"patent_survey:{(subject_he or '').strip().lower()}"
-    if kind == "bd_territory":
-        return f"bd_territory:{(row.get('territory') or '').strip().upper()}"
+    if kind in {"bd_territory", "product_line", "product_dossier"}:
+        return f"{kind}:{(row.get('territory') or '').strip().upper()}"
     start, end = row.get("period_start"), row.get("period_end")
     start_s = start.isoformat() if hasattr(start, "isoformat") else str(start)
     end_s = end.isoformat() if hasattr(end, "isoformat") else str(end)
@@ -1122,17 +1152,20 @@ def _report_card(row: dict[str, Any]) -> dict[str, Any]:
     qa_report = row.get("qa_report") or {}
     subject_he = _report_subject_he(kind, territory, qa_report)
     created_at = row.get("created_at")
-    stats = _report_file_stats(row["id"], created_at, row.get("path_md"))
+    archived = bool(qa_report.get("archive"))
+    stats = {"preview_he": None, "source_count": 0} if archived else _report_file_stats(
+        row["id"], created_at, row.get("path_md")
+    )
     errors = qa_report.get("errors") or []
     return {
         "id": row["id"],
         "kind": kind,
         "period_start": row.get("period_start"),
         "period_end": row.get("period_end"),
-        "path_docx": row.get("path_docx"),
-        "path_md": row.get("path_md"),
-        "path_html": row.get("path_html"),
-        "qa_passed": row.get("qa_passed"),
+        "path_docx": None if archived else row.get("path_docx"),
+        "path_md": None if archived else row.get("path_md"),
+        "path_html": None if archived else row.get("path_html"),
+        "qa_passed": False if qa_report.get("archive") else row.get("qa_passed"),
         "created_at": created_at,
         "headline_count": len(included),
         # A11: only populated for kind='bd_territory' -- None for every other report kind.
@@ -1151,7 +1184,7 @@ def _report_card(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_reports(*, kind: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
-    where = "kind = %(kind)s" if kind else "1 = 1"
+    where = VISIBLE_REPORT_SQL + (" AND kind = %(kind)s" if kind else "")
     params: dict[str, Any] = {"limit": min(max(limit, 1), 200)}
     if kind:
         params["kind"] = kind
@@ -1175,8 +1208,9 @@ def _report_group_where(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if kind == "patent_survey":
         topic = (row.get("qa_report") or {}).get("topic") or ""
         return "kind = 'patent_survey' AND COALESCE(qa_report->>'topic', '') = %(topic)s", {"topic": topic}
-    if kind == "bd_territory":
-        return "kind = 'bd_territory' AND COALESCE(territory, '') = %(territory)s", {
+    if kind in {"bd_territory", "product_line", "product_dossier"}:
+        return "kind = %(kind)s AND COALESCE(territory, '') = %(territory)s", {
+            "kind": kind,
             "territory": row.get("territory") or ""
         }
     return (
@@ -1187,10 +1221,12 @@ def _report_group_where(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 
 def _is_latest_report(row: dict[str, Any]) -> bool:
+    if (row.get("qa_report") or {}).get("archive"):
+        return False
     where_sql, params = _report_group_where(row)
     params["created_at"] = row["created_at"]
     newer = _fetchone(
-        f"SELECT 1 AS x FROM reports WHERE {where_sql} AND created_at > %(created_at)s LIMIT 1", params
+        f"SELECT 1 AS x FROM reports WHERE {VISIBLE_REPORT_SQL} AND {where_sql} AND created_at > %(created_at)s LIMIT 1", params
     )
     return newer is None
 
@@ -1201,7 +1237,7 @@ def get_report(report_id: int) -> dict[str, Any] | None:
         return None
     card = _report_card(row)
     html: str | None = None
-    path_html = row.get("path_html")
+    path_html = card.get("path_html")
     if path_html:
         p = _resolve_repo_path(path_html)
         if p.exists():
@@ -1209,6 +1245,8 @@ def get_report(report_id: int) -> dict[str, Any] | None:
                 html = p.read_text(encoding="utf-8")
             except OSError as exc:
                 log.warning("report.html_read_failed", report_id=report_id, error=str(exc))
+    if (row.get("qa_report") or {}).get("archive"):
+        html = "<p>דוח זה הועבר להסגר בבדיקת תקינות. הקובץ המקורי אינו מוצג כדי למנוע הצגת מידע שגוי.</p>"
     card["html"] = html
     card["open_points"] = _fetchall(
         "SELECT * FROM clarifications WHERE kind = 'report_open_point' AND answer IS NULL ORDER BY asked_at DESC"
@@ -1222,7 +1260,7 @@ def report_file_path(report_id: int, fmt: str) -> Path | None:
     col = {"docx": "path_docx", "md": "path_md", "html": "path_html"}.get(fmt)
     if col is None:
         return None
-    row = _fetchone(f"SELECT {col} AS path FROM reports WHERE id = %s", (report_id,))
+    row = _fetchone(f"SELECT {col} AS path FROM reports WHERE id = %s AND {VISIBLE_REPORT_SQL}", (report_id,))
     if row is None or not row.get("path"):
         return None
     p = _resolve_repo_path(row["path"])
@@ -1256,7 +1294,9 @@ def report_citations(report_id: int) -> dict[str, Any] | None:
     """U3 (docs/REVIEW_2026-09-05.md): `n -> {item_id, url, title}` for every `[n]` citation marker
     a report's html/exec-summary can contain, so the UI can resolve a click to `/items/{id}` (or,
     failing that, the raw source URL) instead of the tooltip-only behaviour it had before."""
-    row = _fetchone("SELECT items_included, path_html FROM reports WHERE id = %s", (report_id,))
+    row = _fetchone(
+        f"SELECT items_included, path_html FROM reports WHERE id = %s AND {VISIBLE_REPORT_SQL}", (report_id,)
+    )
     if row is None:
         return None
 
@@ -3596,7 +3636,7 @@ _BD_POLL_INTERVAL_SECONDS = 1.0
 
 
 def list_bd_reports(*, territory: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
-    where = ["kind = 'bd_territory'"]
+    where = ["kind = 'bd_territory'", VISIBLE_REPORT_SQL]
     params: dict[str, Any] = {"limit": min(max(limit, 1), 200)}
     if territory:
         where.append("territory = %(territory)s")
@@ -3705,7 +3745,7 @@ def build_or_enqueue_bd_report(territory: str, lookback_days: int = 90) -> dict[
 def _product_line_card(pl: Any, stats: dict[str, Any]) -> dict[str, Any]:
     latest = _fetchone(
         "SELECT id, created_at, qa_passed, path_html FROM reports "
-        "WHERE kind = 'product_line' AND territory = %(line)s ORDER BY created_at DESC LIMIT 1",
+        f"WHERE {VISIBLE_REPORT_SQL} AND kind = 'product_line' AND territory = %(line)s ORDER BY created_at DESC LIMIT 1",
         {"line": pl.id},
     )
     latest_report = None
@@ -3739,7 +3779,7 @@ def list_product_lines() -> list[dict[str, Any]]:
 
 def list_product_line_reports(line_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
     rows = _fetchall(
-        "SELECT * FROM reports WHERE kind = 'product_line' AND territory = %(line)s "
+        f"SELECT * FROM reports WHERE {VISIBLE_REPORT_SQL} AND kind = 'product_line' AND territory = %(line)s "
         "ORDER BY created_at DESC LIMIT %(limit)s",
         {"line": line_id, "limit": min(max(limit, 1), 200)},
     )

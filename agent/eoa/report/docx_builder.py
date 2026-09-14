@@ -2346,7 +2346,12 @@ def render_html(
                 if is_blocked
                 else html.escape(outcome_label)
             )
-            li = f"<li><strong>{_bidi_html(heading)}</strong> — {outcome_html}: {_bidi_html(body)}"
+            # Model headings/bullets are prose structure, not literal Markdown in the report.
+            body = re.sub(r"(?:^|\s)#{1,6}\s+", "\n", body)
+            body = re.sub(r"\*\*(.+?)\*\*", r"\1", body)
+            body_parts: list[str] = []
+            _render_prose_body_html(body_parts, body)
+            li = f"<li><strong>{_bidi_html(heading)}</strong> — {outcome_html}: {''.join(body_parts)}"
             # R10-links: a real link to the investigation's own detail page, plus the trigger
             # item's own `[n]` citation (via the same `cite_links` closure every other citation in
             # this document goes through) when it has one.

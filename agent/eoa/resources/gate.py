@@ -2,14 +2,17 @@
 
 Decision flow for ``acquire(role)``:
 
+0. A shared runtime pause file blocks new Ollama calls, including night, interactive and fallback
+   calls, with an explicit allow-embed exception that still passes the resource gate.
+   CPU security screening and cloud providers remain available. Existing calls are not cancelled.
 1. Read host telemetry (GPU VRAM/util/temp, RAM, disk, Ollama loaded models).
 2. Hard stops: disk below minimum, GPU above stop temperature -> ``ResourceUnavailable``.
 3. Thermal pause: above pause temperature -> wait (bounded) and re-check.
-4. Polite mode (outside the night window, or forced): if external GPU utilisation is above the
-   threshold -> batch calls are deferred (``ResourceUnavailable``); interactive calls proceed.
-5. VRAM: if the requested model is already loaded -> proceed. Otherwise the free VRAM (plus what
-   would be freed by unloading other Ollama models that satisfied the minimum-loaded time) must
+4. Polite mode: busy GPU -> defer, including at night and in interactive calls. Loaded Ollama
+   models do not establish ownership of GPU activity; other applications may be training.
+5. VRAM: if the requested model is already loaded -> proceed. Otherwise the free VRAM must
    cover the model's estimate + safety margin. If not -> queue with backoff until timeout.
+   Models on a shared Ollama server are never evicted automatically.
 
 Every decision is written to ``resource_log`` (best-effort) and kept in memory for the status panel.
 """
@@ -25,11 +28,43 @@ from typing import Literal
 
 import structlog
 
-from eoa.config import ModelSpec, settings
+from eoa.config import REPO_ROOT, ModelSpec, settings
 from eoa.errors import ResourceUnavailable
+from eoa.execution import checkpoint, sleep
 from eoa.resources import gpu as telemetry
 
 log = structlog.get_logger(__name__)
+
+LOCAL_INFERENCE_PAUSE_FILE = REPO_ROOT / "runtime" / "local-inference.pause"
+
+
+def local_inference_paused() -> bool:
+    """Read the shared pause switch on every call, including across running processes."""
+    try:
+        LOCAL_INFERENCE_PAUSE_FILE.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # If the switch cannot be checked, do not risk competing with training.
+        return True
+    return True
+
+
+def _check_local_inference_pause(role: str | None = None) -> None:
+    checkpoint()
+    if local_inference_paused():
+        # This opt-in changes only embedding admission; all telemetry checks still apply.
+        if role == "embed":
+            try:
+                if LOCAL_INFERENCE_PAUSE_FILE.read_text(encoding="utf-8").strip() == "allow-embed":
+                    return
+            except OSError:
+                pass
+        raise ResourceUnavailable(
+            "Local inference is paused to reserve resources for other applications; "
+            "cloud providers remain available. Resume with 'eo models resume-local'."
+        )
+
 
 Decision = Literal["proceed", "queued", "deferred", "swap", "throttled", "thermal_pause"]
 
@@ -55,7 +90,7 @@ class ResourceGate:
         self._loaded_since: dict[str, float] = {}
         self.history: deque[GateDecision] = deque(maxlen=200)
         self.force_night_mode: bool = False
-        self._sleep = time.sleep  # patched in tests
+        self._sleep = sleep  # patched in tests
 
     # ------------------------------------------------------------------ helpers
     def _record(self, d: GateDecision) -> None:
@@ -102,20 +137,8 @@ class ResourceGate:
         return self.force_night_mode or self._in_night_window()
 
     def _eligible_for_unload(self, host: telemetry.HostStatus, keep: str) -> list[telemetry.LoadedModel]:
-        """Other Ollama models that have exceeded the minimum loaded time. A model the gate has never
-        seen (loaded by someone else, e.g. before this process started, or by another gate instance)
-        counts as eligible too — we have no evidence it was just loaded, so waiting for it would be
-        an unbounded (and wrong) assumption."""
-        min_loaded = settings().resources.min_loaded_seconds
-        now = time.monotonic()
-        out = []
-        for m in host.loaded_models:
-            if m.name == keep:
-                continue
-            since = self._loaded_since.get(m.name)
-            if since is None or now - since >= min_loaded:
-                out.append(m)
-        return out
+        """A shared Ollama server provides no exclusive ownership proof. Never auto-evict."""
+        return []
 
     def _reclaimable_vram(self, host: telemetry.HostStatus, keep: str) -> int:
         """VRAM held by other Ollama models that may be unloaded now."""
@@ -133,6 +156,8 @@ class ResourceGate:
     def _acquire_locked(self, role: str, *, interactive: bool, est_vram_mb: int | None) -> ModelSpec:
         s = settings()
         spec = s.model(role)
+        if spec.runtime == "ollama":
+            _check_local_inference_pause(role)
         need = est_vram_mb or spec.est_vram_mb
         rc = s.resources
         backoffs = list(rc.queue_backoff_seconds) or [5]
@@ -150,6 +175,8 @@ class ResourceGate:
             # CPU-side models (guard classifiers, embeddings on CPU) only need RAM/disk sanity, but
             # transient RAM pressure still queues with backoff instead of failing outright.
             while True:
+                if spec.runtime == "ollama":
+                    _check_local_inference_pause(role)
                 host = telemetry.snapshot(s.ollama_url)
                 self._check_hard_stops(host, model_name)
                 if host.ram_total_mb and host.ram_free_mb < rc.min_free_ram_mb:
@@ -188,6 +215,7 @@ class ResourceGate:
                 return spec
 
         while True:
+            _check_local_inference_pause(role)
             host = telemetry.snapshot(s.ollama_url)
             self._check_hard_stops(host, model_name)
 
@@ -211,14 +239,11 @@ class ResourceGate:
                 waited_ms += pause * 1000
                 continue
 
-            # polite mode: someone else is using the GPU during the day
+            # A loaded model does not prove that GPU utilization belongs to EO.
             if (
-                not interactive
-                and rc.polite_mode.enabled_outside_night_window
-                and not self.is_batch_window()
+                rc.polite_mode.enabled_outside_night_window
                 and host.gpu.available
                 and host.gpu.util_pct > rc.polite_mode.external_gpu_util_threshold
-                and host.ollama_vram_mb == 0  # if only we are loaded, the util is probably ours
             ):
                 self._record(
                     self._decision(
@@ -230,7 +255,7 @@ class ResourceGate:
                     )
                 )
                 raise ResourceUnavailable(
-                    "polite mode: GPU busy with external work; deferred to night window"
+                    "polite mode: GPU busy; retry after other work finishes"
                 )
 
             # transient RAM pressure (the user's own jobs by day): queue with backoff instead of failing
@@ -272,10 +297,10 @@ class ResourceGate:
             if not host.gpu.available:
                 self._record(
                     self._decision(
-                        "proceed", model_name, host, waited_ms, "no gpu telemetry; trusting ollama"
+                        "deferred", model_name, host, waited_ms, "no GPU telemetry"
                     )
                 )
-                return spec
+                raise ResourceUnavailable("GPU telemetry unavailable; cannot safely admit local inference")
 
             free = host.gpu.vram_free_mb
             reclaim = self._reclaimable_vram(host, keep=model_name)
@@ -378,6 +403,7 @@ class ResourceGate:
         host = telemetry.snapshot(s.ollama_url)
         return {
             "at": host.at.isoformat(),
+            "local_inference_paused": local_inference_paused(),
             "gpu": {
                 "available": host.gpu.available,
                 "vram_total_mb": host.gpu.vram_total_mb,

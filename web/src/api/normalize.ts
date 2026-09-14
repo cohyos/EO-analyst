@@ -101,6 +101,7 @@ export function normalizeNightSummary(
 }
 
 export const DEFAULT_GATE: ResourceGateStatus = {
+  local_inference_paused: false,
   gpu: {
     available: false,
     vram_total_mb: 0,
@@ -166,6 +167,7 @@ export function normalizeGate(
     },
     disk_free_gb: num(r.disk_free_gb),
     loaded_models: arr(r.loaded_models).map(normalizeLoadedModel),
+    local_inference_paused: bool(r.local_inference_paused),
     batch_window: bool(r.batch_window),
     recent_decisions: arr(r.recent_decisions).map(normalizeGateDecision),
   };
@@ -177,6 +179,8 @@ const VALID_STAGE_STATUSES: readonly StageStatus[] = [
   "done",
   "failed",
   "skipped",
+  "partial",
+  "deferred",
 ];
 
 function normalizeStageStatus(value: unknown): StageStatus {

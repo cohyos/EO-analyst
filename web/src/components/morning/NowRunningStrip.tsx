@@ -1,5 +1,7 @@
 import type { PipelineStatus } from "@/types/api";
 import { timeAgo } from "@/lib/time";
+import { jobLabel } from "@/lib/displayLabels";
+import { stageLabelHe } from "@/lib/pipelineTimeline";
 
 /** Live "מה קורה עכשיו" strip, shown only while a pipeline job is running. */
 export function NowRunningStrip({ pipeline }: { pipeline: PipelineStatus | null }) {
@@ -15,7 +17,7 @@ export function NowRunningStrip({ pipeline }: { pipeline: PipelineStatus | null 
         <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
       </span>
       <span className="font-medium text-fg">מה קורה עכשיו:</span>
-      <span className="text-fg-muted">{pipeline.stage ?? job.kind}</span>
+      <span className="text-fg-muted">{pipeline.stage ? stageLabelHe(pipeline.stage) : jobLabel(job.kind)}</span>
       <span className="text-fg-dim">· עדכון אחרון {timeAgo(job.updated_at)}</span>
     </div>
   );

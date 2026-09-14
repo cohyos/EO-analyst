@@ -6,6 +6,7 @@ import {
   STAGE_STATUS_LABEL_HE,
 } from "@/lib/pipelineTimeline";
 import { cn } from "@/lib/cn";
+import { formatDateTime } from "@/lib/time";
 
 /**
  * Night-run replay from `pipeline.last_run.stages` (F12: each stage's own outcome/duration, not a
@@ -23,6 +24,10 @@ export function PipelineReplayTimeline({ lastRun }: { lastRun: PipelineLastRun |
 
   return (
     <section aria-label="שחזור ריצה לילית" className="space-y-2">
+      <p role="status" className={cn("text-sm", lastRun?.state === "failed" ? "text-danger" : "text-fg-muted")}>
+        הריצה האחרונה: {lastRun?.state === "failed" ? "נכשלה" : lastRun?.state === "partial" ? "הסתיימה חלקית" : "הושלמה"}
+        {" · "}{formatDateTime(lastRun?.started_at)}
+      </p>
       <div className="flex items-baseline justify-between">
         <h2 className="text-sm font-semibold text-fg-dim">ציר זמן — שחזור ריצה לילית</h2>
         <span className="text-xs text-fg-dim">רוחב כל שלב יחסי למשך הריצה שלו</span>
@@ -72,6 +77,9 @@ export function PipelineReplayTimeline({ lastRun }: { lastRun: PipelineLastRun |
                     failure marker off the end, since it's the only in-legend hint of which
                     stage broke the run. */}
                 {failed && <span className="shrink-0 text-xs font-semibold text-danger">נכשל</span>}
+                {(e.status === "partial" || e.status === "deferred") && (
+                  <span className="shrink-0 text-xs font-semibold text-warn">{STAGE_STATUS_LABEL_HE[e.status]}</span>
+                )}
               </span>
               <span className="ms-auto w-16 shrink-0 text-end font-mono text-fg-muted">{durationText}</span>
             </li>

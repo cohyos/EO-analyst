@@ -39,7 +39,9 @@ import structlog
 
 from eoa.config import settings
 from eoa.errors import CliProviderError, ProviderUnavailable
+from eoa.execution import checkpoint, timeout_seconds
 from eoa.llm.providers.base import ProviderResult, strip_code_fences
+from eoa.processes import run_process
 
 log = structlog.get_logger(__name__)
 
@@ -338,7 +340,7 @@ class CliProvider:
             # spawned from inside a `nohup`'d uvicorn, while the identical call succeeds from a
             # normal foreground shell. Explicitly closing stdin for that case (nothing needs it)
             # avoids inheriting a handle that may not be valid in that context.
-            proc = subprocess.run(
+            proc = run_process(
                 args,
                 input=stdin_data,
                 stdin=subprocess.DEVNULL if stdin_data is None else None,
@@ -346,11 +348,12 @@ class CliProvider:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
+                timeout=timeout_seconds(timeout),
                 creationflags=creationflags,
             )
         except subprocess.TimeoutExpired as exc:
             self._cleanup(tmp_out)
+            checkpoint()
             raise CliProviderError(f"{self.kind} CLI timed out after {timeout:.0f}s") from exc
         except OSError as exc:
             self._cleanup(tmp_out)
@@ -358,6 +361,7 @@ class CliProvider:
 
         duration_ms = int((time.monotonic() - t0) * 1000)
         try:
+            checkpoint()
             content, usage = self._parse_output(proc, tmp_out)
         finally:
             self._cleanup(tmp_out)
@@ -527,7 +531,7 @@ def _fail(kind: str, proc: subprocess.CompletedProcess[str], reason: str) -> Cli
     if not stderr:
         try:
             data = json.loads(proc.stdout)
-            stderr = str(data.get("error") or data.get("message") or "")[:500]
+            stderr = str(data.get("error") or data.get("message") or data.get("result") or "")[:500]
         except (json.JSONDecodeError, AttributeError):
             pass
     # 2026-09-07: agy's stderr on a mid-run failure is the generic "Agent execution terminated due
@@ -549,6 +553,8 @@ def _parse_agy(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str, A
     if data.get("status") and data["status"] != "SUCCESS":
         raise CliProviderError(f"agy CLI status={data.get('status')}: {str(data)[:300]}")
     content = str(data.get("response", "")).strip()
+    if not content or data.get("response") is None:
+        raise CliProviderError("agy CLI returned an empty response")
     usage = data.get("usage") or {}
     return content, usage
 
@@ -563,6 +569,8 @@ def _parse_claude(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str
     if data.get("is_error"):
         raise CliProviderError(f"claude CLI reported an error: {str(data.get('result'))[:300]}")
     content = str(data.get("result", "")).strip()
+    if not content or data.get("result") is None:
+        raise CliProviderError("claude CLI returned an empty response")
     usage = data.get("usage") or {}
     return content, usage
 
@@ -573,6 +581,8 @@ def _parse_codex(proc: subprocess.CompletedProcess[str], tmp_out: Path | None) -
     if tmp_out is None or not tmp_out.exists():
         raise CliProviderError("codex CLI did not write an output file")
     content = tmp_out.read_text(encoding="utf-8", errors="replace").strip()
+    if not content:
+        raise CliProviderError("codex CLI returned an empty response")
     usage: dict[str, Any] = {}
     for line in proc.stdout.splitlines():
         line = line.strip()

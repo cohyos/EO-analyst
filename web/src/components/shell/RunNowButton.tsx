@@ -5,6 +5,8 @@ import {
   CheckCircle2,
   CircleDashed,
   CircleSlash,
+  CircleAlert,
+  PauseCircle,
   Loader2,
   Play,
   X,
@@ -29,6 +31,8 @@ const STAGE_ICON: Record<StageStatus, typeof CheckCircle2> = {
   skipped: CircleSlash,
   running: Loader2,
   pending: CircleDashed,
+  partial: CircleAlert,
+  deferred: PauseCircle,
 };
 
 const STAGE_ICON_CLASS: Record<StageStatus, string> = {
@@ -37,6 +41,8 @@ const STAGE_ICON_CLASS: Record<StageStatus, string> = {
   skipped: "text-fg-dim",
   running: "text-accent animate-spin",
   pending: "text-fg-dim",
+  partial: "text-warn",
+  deferred: "text-warn",
 };
 
 function StageRow({ entry }: { entry: RunStageEntry }) {
@@ -50,6 +56,8 @@ function StageRow({ entry }: { entry: RunStageEntry }) {
         skipped: "topBar.runNowStageSkipped",
         running: "topBar.runNowStageRunning",
         pending: "topBar.runNowStagePending",
+        partial: "topBar.runNowStagePartial",
+        deferred: "topBar.runNowStageDeferred",
       } as const
     )[entry.status],
   );
@@ -58,7 +66,7 @@ function StageRow({ entry }: { entry: RunStageEntry }) {
       <Icon size={13} aria-hidden="true" className={cn("shrink-0", STAGE_ICON_CLASS[entry.status])} />
       <span className="flex-1 truncate">{stageLabelHe(entry.stage)}</span>
       <span className="shrink-0 text-fg-dim">
-        {entry.minutes != null ? `${entry.minutes} דק׳` : statusLabel}
+        {statusLabel}{entry.minutes != null ? ` · ${entry.minutes} דקות` : ""}
       </span>
     </li>
   );

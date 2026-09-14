@@ -26,6 +26,11 @@ log = structlog.get_logger(__name__)
 
 def configure_logging(level: str = "INFO") -> None:
     """JSON logs to stdout (containers) — human-readable when a TTY is attached."""
+    # Redirected Windows streams may default to cp1252, which cannot encode Hebrew.
+    # Configure both before binding loggers; diagnostic output must not abort a stage.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     logging.basicConfig(level=level, stream=sys.stdout, format="%(message)s")
     renderer = structlog.dev.ConsoleRenderer() if sys.stdout.isatty() else structlog.processors.JSONRenderer()
     structlog.configure(
@@ -67,6 +72,12 @@ def pre_flight() -> dict:
     if checks["disk_free_gb"] < settings().resources.warn_free_disk_gb:
         problems.append(f"disk {checks['disk_free_gb']} GB")
     try:
+        if st.get("local_inference_paused"):
+            checks["warm_up"] = "paused"
+            log.info("pre_flight", **checks)
+            if problems:
+                ntfy.status("pre-flight: בעיות — " + "; ".join(problems), priority="high")
+            return checks
         ollama_client.warm_up("resident")
         checks["warm_up"] = True
     except Exception as exc:

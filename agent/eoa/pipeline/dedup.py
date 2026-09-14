@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import structlog
 
 from eoa.config import settings
+from eoa.errors import DeadlineExceeded, LeaseLost, ResourceUnavailable
+from eoa.execution import checkpoint
 from eoa.llm.ollama_client import embed
 from eoa.memory.relational import get_items_for_stage, mark_stage, update_item_fields
 from eoa.memory.vector import find_duplicate, upsert_embedding
@@ -34,6 +36,7 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
 
     F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
     ``eoa.memory.relational.get_items_for_stage``."""
+    checkpoint()
     cfg = settings().dedup
     stats = DedupStats()
     items = [
@@ -42,14 +45,18 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
         if it.get("security_status") not in ("quarantined", "blocked")
     ]
     for i in range(0, len(items), batch_size):
+        checkpoint()
         batch = items[i : i + batch_size]
         try:
             vecs = embed([_embed_text(it) for it in batch])
+        except (DeadlineExceeded, LeaseLost, ResourceUnavailable):
+            raise
         except Exception as exc:
             log.error("embed_batch_failed", n=len(batch), error=str(exc)[:200])
             stats.failed += len(batch)
             continue
         for it, vec in zip(batch, vecs, strict=True):
+            checkpoint()
             try:
                 dup = find_duplicate(vec, cfg.cosine_threshold, cfg.lookback_days)
                 upsert_embedding(it["id"], vec)
@@ -59,6 +66,8 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
                     log.info("dedup_linked", item_id=it["id"], dup_of=dup[0], sim=round(dup[1], 3))
                 mark_stage(it["id"], STAGE)
                 stats.embedded += 1
+            except (DeadlineExceeded, LeaseLost):
+                raise
             except Exception as exc:
                 log.error("dedup_item_failed", item_id=it["id"], error=str(exc)[:200])
                 stats.failed += 1
@@ -70,6 +79,7 @@ def link_cross_language(lookback_days: int | None = None) -> int:
     """Second-pass dedup after classification: the same story in different languages rarely clears the cosine
     threshold, so link items that share ≥ 2 entities, the same domain and a publication date within ±1 day but
     have different languages. The earlier item becomes the canonical one. Returns the number of links made."""
+    checkpoint()
     from eoa.db import connection
 
     days = lookback_days or settings().dedup.lookback_days
@@ -95,6 +105,7 @@ def link_cross_language(lookback_days: int | None = None) -> int:
         ).fetchall()
         seen: set[int] = set()
         for r in rows:
+            checkpoint()
             if r["b_id"] in seen:
                 continue
             conn.execute(

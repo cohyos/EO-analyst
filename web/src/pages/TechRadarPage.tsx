@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api";
@@ -57,7 +58,8 @@ export function TechRadarPage() {
   const hasAnySubdomainActivity = (radarQuery.data?.subdomains ?? []).some((s) => s.total > 0);
 
   return (
-    <div className="space-y-4 p-4 md:p-6">
+    <div data-share-content className="space-y-4 p-4 md:p-6">
+      <ContentShareActions title="EO-Analyst" />
       <div className="flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-2 text-sm text-fg-muted">
           תקופה:

@@ -62,6 +62,12 @@ async def get_status() -> dict:
     return await _status_payload()
 
 
+@router.get("/health")
+async def health() -> dict[str, str]:
+    """Process liveness, without database, search or GPU probes."""
+    return {"status": "ok"}
+
+
 @ws_router.websocket("/ws/status")
 async def ws_status(ws: WebSocket) -> None:
     """Push the status payload every `api.status_push_seconds`, plus new `run_log` lines as they arrive."""

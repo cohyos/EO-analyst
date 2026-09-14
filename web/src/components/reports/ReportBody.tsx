@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useEffect, useMemo, useRef, useState, type FocusEvent, type MouseEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api";
@@ -5,6 +6,7 @@ import {
   enhanceSourceAppendixLinks,
   fixBdiSpacing,
   linkifyReportCitations,
+  normalizeReportProse,
   wrapReportTables,
 } from "@/lib/reportHtml";
 import { SourcePreviewCard } from "@/components/SourcePreviewCard";
@@ -92,7 +94,7 @@ export function ReportBody({
   const linked = useMemo(
     () =>
       wrapReportTables(
-        fixBdiSpacing(enhanceSourceAppendixLinks(linkifyReportCitations(html, citationsData?.citations))),
+        fixBdiSpacing(enhanceSourceAppendixLinks(linkifyReportCitations(normalizeReportProse(html), citationsData?.citations))),
       ),
     [html, citationsData?.citations],
   );
@@ -192,6 +194,7 @@ export function ReportBody({
 
   return (
     <div
+      data-share-content
       ref={containerRef}
       className="relative"
       onMouseOver={handleMouseOver}
@@ -200,6 +203,7 @@ export function ReportBody({
       onBlur={handleBlur}
       onClick={handleClick}
     >
+      <ContentShareActions />
       <div className={className} dangerouslySetInnerHTML={dangerousHtml} />
       {hover && <CitationHoverCard {...hover} />}
     </div>

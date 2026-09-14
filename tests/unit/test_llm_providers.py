@@ -80,7 +80,7 @@ class TestCliProviderChatAgy:
                 stdout=json.dumps({"status": "SUCCESS", "response": "PONG\n", "usage": {"output_tokens": 3}})
             )
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result = CliProvider("agy").chat([{"role": "user", "content": "ping"}])
         assert isinstance(result, ProviderResult)
         assert result.content == "PONG"
@@ -93,7 +93,7 @@ class TestCliProviderChatAgy:
     def test_status_failure_raises(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
         monkeypatch.setattr(
-            "eoa.llm.providers.cli.subprocess.run",
+            "eoa.llm.providers.cli.run_process",
             lambda *a, **k: _completed(stdout=json.dumps({"status": "ERROR", "response": ""})),
         )
         with pytest.raises(CliProviderError):
@@ -102,7 +102,7 @@ class TestCliProviderChatAgy:
     def test_nonzero_exit_raises(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
         monkeypatch.setattr(
-            "eoa.llm.providers.cli.subprocess.run",
+            "eoa.llm.providers.cli.run_process",
             lambda *a, **k: _completed(stderr="boom", returncode=1),
         )
         with pytest.raises(CliProviderError, match="boom"):
@@ -111,7 +111,7 @@ class TestCliProviderChatAgy:
     def test_non_json_output_raises(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
         monkeypatch.setattr(
-            "eoa.llm.providers.cli.subprocess.run", lambda *a, **k: _completed(stdout="not json")
+            "eoa.llm.providers.cli.run_process", lambda *a, **k: _completed(stdout="not json")
         )
         with pytest.raises(CliProviderError):
             CliProvider("agy").chat([{"role": "user", "content": "ping"}])
@@ -129,7 +129,7 @@ class TestCliProviderChatClaude:
                 stdout=json.dumps({"is_error": False, "result": "PONG", "usage": {"output_tokens": 5}})
             )
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result = CliProvider("claude", "claude-haiku-4-5-20251001").chat(
             [{"role": "system", "content": "be terse"}, {"role": "user", "content": "ping"}]
         )
@@ -141,7 +141,7 @@ class TestCliProviderChatClaude:
     def test_is_error_raises(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
         monkeypatch.setattr(
-            "eoa.llm.providers.cli.subprocess.run",
+            "eoa.llm.providers.cli.run_process",
             lambda *a, **k: _completed(stdout=json.dumps({"is_error": True, "result": "boom"})),
         )
         with pytest.raises(CliProviderError):
@@ -167,7 +167,7 @@ class TestCliProviderChatCodex:
             )
             return _completed(stdout=stdout)
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         result = CliProvider("codex").chat([{"role": "user", "content": "ping"}])
         assert result.content == "PONG"
         assert result.usage == {"output_tokens": 2}
@@ -175,7 +175,7 @@ class TestCliProviderChatCodex:
     def test_missing_output_file_raises(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
         # Never writes to -o's path -- the CliProvider still cleans it up and must raise.
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", lambda *a, **k: _completed(stdout=""))
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", lambda *a, **k: _completed(stdout=""))
 
         def fake_parse_codex(proc, tmp_out):
             from eoa.llm.providers.cli import _parse_codex as real
@@ -197,7 +197,7 @@ class TestCliProviderTimeout:
         def fake_run(*a, **k):
             raise subprocess.TimeoutExpired(cmd="agy", timeout=1)
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         with pytest.raises(CliProviderError, match="timed out"):
             CliProvider("agy").chat([{"role": "user", "content": "ping"}], timeout_s=1)
 
@@ -215,7 +215,7 @@ class TestPowerEffortFlag:
             captured["args"] = args
             return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         CliProvider("agy", power="high").chat([{"role": "user", "content": "ping"}])
         assert "--effort" in captured["args"]
         assert captured["args"][captured["args"].index("--effort") + 1] == "high"
@@ -228,7 +228,7 @@ class TestPowerEffortFlag:
             captured["args"] = args
             return _completed(stdout=json.dumps({"is_error": False, "result": "ok"}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         CliProvider("claude", power="low").chat([{"role": "user", "content": "ping"}])
         assert "--effort" in captured["args"]
         assert captured["args"][captured["args"].index("--effort") + 1] == "low"
@@ -245,7 +245,7 @@ class TestPowerEffortFlag:
             Path(out_path).write_text("ok", encoding="utf-8")
             return _completed(stdout="")
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         CliProvider("codex", power="medium").chat([{"role": "user", "content": "ping"}])
         assert "--effort" not in captured["args"]
         assert "-c" in captured["args"]
@@ -259,7 +259,7 @@ class TestPowerEffortFlag:
             captured["args"] = args
             return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         CliProvider("agy").chat([{"role": "user", "content": "ping"}])
         assert "--effort" not in captured["args"]
 
@@ -271,7 +271,7 @@ class TestPowerEffortFlag:
             captured["args"] = args
             return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "ok"}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         CliProvider("agy", power="low").chat([{"role": "user", "content": "ping"}], power="high")
         assert captured["args"][captured["args"].index("--effort") + 1] == "high"
 
@@ -285,7 +285,7 @@ class TestJsonSchemaInstruction:
             captured["args"] = args
             return _completed(stdout=json.dumps({"status": "SUCCESS", "response": "{}"}))
 
-        monkeypatch.setattr("eoa.llm.providers.cli.subprocess.run", fake_run)
+        monkeypatch.setattr("eoa.llm.providers.cli.run_process", fake_run)
         schema = {"type": "object", "properties": {"x": {"type": "string"}}}
         CliProvider("agy").chat([{"role": "user", "content": "ping"}], json_schema=schema)
         prompt_arg = captured["args"][captured["args"].index("-p") + 1]

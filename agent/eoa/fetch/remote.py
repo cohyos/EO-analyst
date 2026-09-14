@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 import structlog
 
 from eoa.errors import FetchError
+from eoa.execution import checkpoint, sleep, timeout_seconds
 
 log = structlog.get_logger(__name__)
 
@@ -37,7 +38,7 @@ def _wait_job(job_id: int, timeout_s: float, poll_s: float = 1.0) -> dict[str, A
             if row["state"] == "failed":
                 raise FetchError(f"fetcher job {job_id} failed: {row['error']}")
             return row["result"] or {}
-        time.sleep(poll_s)
+        sleep(poll_s)
     raise FetchError(f"fetcher job {job_id} timed out after {int(timeout_s)}s")
 
 
@@ -46,7 +47,7 @@ def run_ingest_remote(since_days: int = 3, timeout_s: float = 25 * 60) -> dict[s
     if role() != "agent":
         from eoa.fetch.service import run_ingest
 
-        stats = asyncio.run(run_ingest(since_days=since_days))
+        stats = asyncio.run(_bounded_async(run_ingest(since_days=since_days), timeout_s))
         return {k: v for k, v in vars(stats).items() if isinstance(v, int | float | str | bool)}
     from eoa.memory.relational import enqueue_job
 
@@ -135,7 +136,7 @@ def _fetch_local(url: str) -> dict[str, Any]:
     from eoa.fetch.sanitize import extract_clean_text
 
     initial_ips = assert_public_http_url(url)
-    page = asyncio.run(fetch_page(url, validate_redirect=assert_public_http_url, pin_ips=initial_ips))
+    page = asyncio.run(_bounded_async(fetch_page(url, validate_redirect=assert_public_http_url, pin_ips=initial_ips), 90))
     clean = extract_clean_text(page.html, url)
     return {
         "url": url,
@@ -190,7 +191,7 @@ def _fetch_raw_local(
 
     assert_public_http_url(url)
     headers = {"Accept": "application/json", "User-Agent": settings().fetch.user_agent}
-    with httpx.Client(timeout=timeout_s) as client:
+    with httpx.Client(timeout=timeout_seconds(timeout_s)) as client:
         if (method or "GET").upper() == "POST":
             r = client.post(url, json=json_body, headers=headers)
         else:
@@ -217,7 +218,7 @@ def serve_fetch_jobs(poll_s: float = 2.0, stop_after: float | None = None) -> No
             time.sleep(poll_s * 3)
             continue
         if not job:
-            time.sleep(poll_s)
+            sleep(poll_s)
             continue
         p = job.get("payload") or {}
         try:
@@ -245,3 +246,18 @@ def serve_fetch_jobs(poll_s: float = 2.0, stop_after: float | None = None) -> No
         except Exception as exc:
             log.warning("fetch_job_failed", job_id=job["id"], kind=job["kind"], error=str(exc)[:200])
             finish_job(job["id"], "failed", error=str(exc)[:400])
+
+
+async def _bounded_async(awaitable, default_timeout: float):
+    try:
+        timeout = timeout_seconds(default_timeout)
+    except BaseException:
+        awaitable.close()
+        raise
+    try:
+        result = await asyncio.wait_for(awaitable, timeout=timeout)
+        checkpoint()
+        return result
+    except TimeoutError:
+        checkpoint()
+        raise

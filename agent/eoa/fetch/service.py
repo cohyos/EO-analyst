@@ -24,6 +24,9 @@ from urllib.parse import urljoin, urlsplit
 
 import structlog
 
+from eoa.errors import DeadlineExceeded, LeaseLost
+from eoa.execution import checkpoint
+
 log = structlog.get_logger(__name__)
 
 
@@ -87,6 +90,8 @@ def _bump_fail_count(source_name: str) -> None:
                 "UPDATE sources SET fail_count = fail_count + 1 WHERE name = %(name)s",
                 {"name": source_name},
             )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("fetch.fail_count_bump_skipped", source=source_name, error=repr(exc))
 
@@ -106,6 +111,8 @@ def _touch_source_fetched(source_db_id: int | None, source_name: str, *, ok: boo
         from eoa.memory.relational import touch_source_fetched
 
         touch_source_fetched(source_db_id, ok)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("fetch.source_touch_failed", source_id=source_db_id, error=repr(exc))
 
@@ -117,6 +124,8 @@ def _strip_tags_fast(html_text: str) -> str:
     try:
         tree = lxml_html.fromstring(html_text)
         return tree.text_content()
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception:
         return html_text
 
@@ -132,12 +141,16 @@ def _extract_links(
 
     try:
         tree = lxml_html.fromstring(html_text)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.warning("fetch.html_source_parse_failed", url=base_url, error=repr(exc))
         return []
 
     try:
         nodes = tree.cssselect(list_selector)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.warning("fetch.bad_list_selector", url=base_url, selector=list_selector, error=repr(exc))
         return []
@@ -207,6 +220,8 @@ def _url_already_seen(url: str) -> bool:
         with connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT 1 FROM items WHERE url = %(url)s", {"url": url})
             return cur.fetchone() is not None
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("fetch.url_seen_check_failed", url=url, error=repr(exc))
         return False
@@ -269,6 +284,8 @@ def _store_item(
             clean_text=stored_clean_text,
             text_hash=text_hash(clean.text),
         )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.warning("fetch.item_store_failed", url=url, error=repr(exc))
         stats.items_skipped += 1
@@ -281,6 +298,8 @@ def _store_item(
     if is_blocked and not already_seen:
         try:
             relational.update_item_fields(item_id, security_status="blocked")
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.warning("fetch.blocked_status_update_failed", url=url, item_id=item_id, error=repr(exc))
         log.info("fetch.block_page_detected", url=url, item_id=item_id, status=http_status)
@@ -303,6 +322,8 @@ async def _fetch_and_store(
     await throttle.wait(url)
     try:
         page = await _guarded_fetch_page(url)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.warning("fetch.article_fetch_failed", url=url, error=repr(exc))
         return
@@ -331,6 +352,7 @@ def _matches_keywords(entry, keywords_any: list[str]) -> bool:
 async def _ingest_rss_source(
     source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
 ) -> None:
+    checkpoint()
     from eoa.fetch.rss import parse_feed
 
     await throttle.wait(source.url)
@@ -343,6 +365,7 @@ async def _ingest_rss_source(
         entries = [e for e in entries if _matches_keywords(e, keywords_any)]
 
     for entry in entries:
+        checkpoint()
         await _fetch_and_store(
             entry.url,
             throttle=throttle,
@@ -356,18 +379,21 @@ async def _ingest_rss_source(
 async def _ingest_html_source(
     source, *, source_db_id: int | None, throttle: _DomainThrottle, stats: IngestStats
 ) -> None:
+    checkpoint()
     await throttle.wait(source.url)
     listing_page = await _guarded_fetch_page(source.url)
     links = _extract_links(listing_page.html, source.url, source.list_selector, source.link_selector)
     stats.entries_seen += len(links)
 
     for link in links:
+        checkpoint()
         await _fetch_and_store(link, throttle=throttle, source_db_id=source_db_id, stats=stats)
 
 
 async def _ingest_one_source(
     source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
 ) -> None:
+    checkpoint()
     from eoa.errors import FetchError
 
     stats.sources_attempted += 1
@@ -384,6 +410,8 @@ async def _ingest_one_source(
         log.warning("fetch.source_failed", source_id=source.id, error=str(exc))
         _touch_source_fetched(source_db_id, source.name, ok=False)
         return
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         stats.sources_failed += 1
         stats.errors.append(f"{source.id}: {exc!r}")
@@ -401,6 +429,7 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
     first (to resolve slug -> DB id), then filtered down to the requested
     set.
     """
+    checkpoint()
     from eoa.fetch.sources_loader import load_sources, upsert_sources_to_db
 
     # Round-3 (D9 finding 5, docs/qa/loop/round_1_judge.md): upsert *every* configured source,
@@ -453,6 +482,8 @@ def _run_forever() -> None:
         from eoa.notify.relay import start_relay_thread
 
         start_relay_thread()  # public-topic mirror (only this container has egress)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.warning("fetch.relay_start_failed", error=str(exc)[:120])
     interval_s = settings().schedule.daytime_rss_poll_minutes * 60
@@ -461,6 +492,8 @@ def _run_forever() -> None:
         log.info("fetch.service_poll_tick")
         try:
             asyncio.run(run_ingest())
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.error("fetch.poll_failed", error=str(exc)[:200])
 

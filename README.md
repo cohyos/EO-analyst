@@ -2,9 +2,11 @@
 
 **English** | [עברית](#עברית)
 
+Current installation and operating policy: [מצב ההתקנה](docs/CURRENT_STATE_HE.md) (2026-09-11).
+
 ## What is EO-Analyst?
 
-A local, offline-first OSINT analyst agent for defense electro-optics (EO/IR) and computer vision. It ingests technical news, company announcements, conference schedules, and patent filings from 40+ Western sources; embeds and deduplicates content; classifies by confidence level; performs deep-search investigations on high-priority items; and generates daily briefing reports in docx format with full citation trails. Zero paid APIs. All inference runs locally on NVIDIA GPU (Ollama). Designed for a defense analyst or researcher who needs continuous, autonomous technical tracking.
+A locally hosted OSINT analyst for defense electro-optics (EO/IR) and computer vision. It ingests technical sources, deduplicates and classifies content, investigates high-priority items, and generates cited reports. The active installation uses Windows native services and cloud model providers; Ollama inference is paused to reserve resources for other applications. Provider availability and costs depend on configuration.
 
 ## Architecture
 

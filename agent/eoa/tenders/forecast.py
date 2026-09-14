@@ -32,7 +32,8 @@ from dateutil.relativedelta import relativedelta
 
 from eoa.config import settings
 from eoa.db import connection
-from eoa.errors import LLMOutputError, ResourceUnavailable
+from eoa.errors import DeadlineExceeded, LeaseLost, LLMOutputError, ResourceUnavailable
+from eoa.execution import checkpoint
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.tenders import TenderForecastOut
@@ -245,6 +246,8 @@ def _country_from_entities(item_ids: list[int]) -> str | None:
             """,
             {"ids": item_ids, "unknown": UNKNOWN_COUNTRY},
         )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("forecast_country_from_entities_failed", error=str(exc)[:120])
         return None
@@ -610,12 +613,15 @@ def _regenerate_flagged_forecasts(role: str) -> int:
     twice) is left exactly as it was, flag included, to retry again next run. Returns the count of
     rows actually regenerated.
     """
+    checkpoint()
     try:
         rows = _fetchall(
             "SELECT id, platform, buyer_country, trigger_event_id, trigger_item_id, payload_need, "
             "candidate_vendors, likelihood, window_from, window_to, sources FROM tender_forecasts "
             "WHERE needs_regen = true"
         )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.warning("forecast_regen_fetch_failed", error=str(exc)[:160])
         return 0
@@ -631,6 +637,7 @@ def _regenerate_flagged_forecasts(role: str) -> int:
 
     regenerated = 0
     for row in rows:
+        checkpoint()
         trigger_item_ids = _item_ids_from_sources(row.get("sources"))
         if not trigger_item_ids:
             continue
@@ -653,6 +660,8 @@ def _regenerate_flagged_forecasts(role: str) -> int:
         except (ResourceUnavailable, LLMOutputError) as exc:
             log.debug("forecast_regen_still_unavailable", forecast_id=row["id"], error=str(exc)[:160])
             continue
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.warning("forecast_regen_unexpected_error", forecast_id=row["id"], error=str(exc)[:160])
             continue
@@ -804,6 +813,7 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
     LLM was unavailable gets replaced with a real one as soon as it's available again, rather than
     staying generic forever.
     """
+    checkpoint()
     stats = ForecastStats()
     stats.regenerated = _regenerate_flagged_forecasts(role)
 
@@ -824,6 +834,7 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
 
     today = dt.date.today()
     for cand in candidates:
+        checkpoint()
         likelihood = compute_likelihood(cand)
 
         # Q3-11: platform-type sanity check -- the trigger text contradicting the candidate's own
@@ -860,6 +871,8 @@ def forecast_tenders(*, role: str = "resident", lookback_days: int = _LOOKBACK_D
             rationale_he = _fallback_rationale(cand)
             stats.llm_failed += 1
             used_fallback = True
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             # Never let one candidate's LLM call (schema retry, logging, transport, ...) take down
             # the whole forecast run -- docs/CONVENTIONS.md rule 9 ("a failing item never stops the

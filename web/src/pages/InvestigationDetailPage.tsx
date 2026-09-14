@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -298,9 +299,11 @@ export function InvestigationDetailPage() {
 
       {data.answer && (
         <section
+          data-share-content
           aria-label="תשובה סופית"
           className="rounded-lg border border-border bg-bg-raised p-4"
         >
+          <ContentShareActions title={data.question} links={data.answer.sources ?? []} />
           <h3 className="mb-2 text-sm font-semibold text-fg-dim">תשובה</h3>
           <AnswerText text={data.answer.answer_he} citations={data.answer.sources ?? []} />
           {data.answer.what_was_tried_he && (

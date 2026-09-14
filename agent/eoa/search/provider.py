@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 import structlog
 
 from eoa.config import settings
+from eoa.errors import DeadlineExceeded, LeaseLost
+from eoa.execution import checkpoint, sleep, timeout_seconds
 from eoa.search import cache as _cache
 from eoa.search import circuit as _circuit
 
@@ -113,7 +115,7 @@ class _RateLimiter:
             if len(self._stamps) >= self.per_minute:
                 sleep_for = 60 - (now - self._stamps[0]) + 0.1
                 log.debug("ddgs_rate_limit_sleep", seconds=round(sleep_for, 1))
-                time.sleep(max(sleep_for, 0))
+                sleep(max(sleep_for, 0))
             self._stamps.append(time.monotonic())
 
 
@@ -191,7 +193,7 @@ def _ddgs_search(
     seen: set[str] = set()
     saw_error: str | None = None
     try:
-        with DDGS(timeout=cfg.timeout_s) as ddgs:
+        with DDGS(timeout=timeout_seconds(cfg.timeout_s)) as ddgs:
             if text_backends:
                 try:
                     raw = ddgs.text(
@@ -203,7 +205,10 @@ def _ddgs_search(
                         backend=",".join(text_backends),
                     )
                 except DDGSException as exc:
-                    saw_error = str(exc)[:200]
+                    # DDGS uses its base exception for a successful search with zero hits.
+                    # Such a query must not trip the provider-wide circuit breaker.
+                    if type(exc) is not DDGSException or str(exc).strip() != "No results found.":
+                        saw_error = str(exc)[:200]
                     raw = []
                 for r in raw:
                     url = r.get("href") or r.get("url") or ""
@@ -229,7 +234,8 @@ def _ddgs_search(
                         backend=",".join(sorted(news_backends)),
                     )
                 except DDGSException as exc:
-                    saw_error = saw_error or str(exc)[:200]
+                    if type(exc) is not DDGSException or str(exc).strip() != "No results found.":
+                        saw_error = saw_error or str(exc)[:200]
                     raw_news = []
                 for r in raw_news:
                     url = r.get("url") or ""
@@ -245,6 +251,8 @@ def _ddgs_search(
                             published=r.get("date"),
                         )
                     )
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         # ddgs raises on rate limits and even on a plain "no results" (DDGSException("No results
         # found.")) — match searxng_client's contract: never raise into the ReAct loop, return an
@@ -298,6 +306,7 @@ def search(
     Round 4: a fresh cache hit short-circuits straight back here (see module docstring); a miss
     falls through to the provider(s), each guarded by its own circuit breaker.
     """
+    checkpoint()
     provider = settings().search.provider
     key = _cache.cache_key(
         provider, query, lang, categories=categories, time_range=time_range, engines=engines
@@ -336,6 +345,7 @@ def search(
     else:
         log.debug("search_circuit_skip", provider="ddgs", query=query[:80])
 
+    checkpoint()
     searxng_circuit = _circuit.get_circuit("searxng")
     if searxng_circuit.allow():
         attempted.append("searxng")
@@ -360,11 +370,12 @@ def search(
     return SearchResponse(query, lang, error=f"search unavailable: {reason}")
 
 
-def ping() -> bool:
+def ping(*, probe: bool = True) -> bool:
     """True if the configured search backend is reachable/usable.
 
-    ddgs has no persistent service to health-check; a lightweight query stands in for it.
+    A full probe runs a query; UI readiness only checks that the backend is installed.
     """
+    checkpoint()
     provider = settings().search.provider
     if provider == "searxng":
         from eoa.search.searxng_client import ping as searxng_ping
@@ -373,8 +384,12 @@ def ping() -> bool:
     try:
         from ddgs import DDGS
 
+        if not probe:
+            return True
         with DDGS(timeout=5) as ddgs:
             return bool(ddgs.text("test", max_results=1))
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("ddgs_ping_failed", error=str(exc)[:160])
         return False

@@ -34,7 +34,9 @@ export function DossierFactText({
 /** Plain, non-cited display value (e.g. a bare number/date already normalized for display) that
  * still needs the empty-value placeholder + bidi-safe Latin/digit isolation, but has no citation
  * markers of its own to render (nothing to append `[n]` to). */
-export function DossierPlainText({ text, className }: { text: string | null | undefined; className?: string }) {
+export function DossierPlainText({ text, className, compactMissing = false }: { text: string | null | undefined; className?: string; compactMissing?: boolean }) {
+  const t = useT();
+  if ((!text || !text.trim()) && compactMissing) return <span className="text-fg-dim" title={t("dossiers.notFoundInSources")} aria-label={t("dossiers.notFoundInSources")}>—</span>;
   if (!text || !text.trim()) return <NotFoundInSources className={className} />;
   return <span className={className}>{renderBidiRuns(text)}</span>;
 }

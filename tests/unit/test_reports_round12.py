@@ -287,6 +287,7 @@ def patch_monthly_collectors(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(monthly, "collect_open_clarifications", lambda: [])
     monkeypatch.setattr(monthly.trends_mod, "detect_trends", lambda period: [])
     monkeypatch.setattr(monthly, "collect_previous_monthly_trends", lambda period_start: [])
+    monkeypatch.setattr(monthly, "_has_previous_monthly_report", lambda period_start: False)
     monkeypatch.setattr(monthly, "draft_monthly", lambda *a, **k: _monthly_draft_fixture())
     monkeypatch.setattr(monthly, "players_map", lambda: {})
     monkeypatch.setattr(monthly, "top_events_by_amount", lambda s, e, limit=10: [])

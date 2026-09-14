@@ -80,7 +80,8 @@ from pydantic import BaseModel, Field
 
 from eoa.config import CONFIG_DIR
 from eoa.db import connection
-from eoa.errors import LLMOutputError, ResourceUnavailable
+from eoa.errors import DeadlineExceeded, LeaseLost, LLMOutputError, ResourceUnavailable
+from eoa.execution import checkpoint, sleep
 from eoa.fetch.remote import fetch_raw_remote, fetch_remote
 from eoa.fetch.rss import parse_feed
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
@@ -754,10 +755,14 @@ def _call_with_rate_limit_backoff(
     ``_RATE_LIMIT_DEFAULT_BASE_SLEEP_S`` when a source has no pacing configured at all, i.e.
     ``pace_seconds`` left at its ``0.0`` default) before each retry -- 1x, 2x, 4x. Any other error,
     or the final attempt, re-raises immediately."""
+    checkpoint()
     base_sleep = src.pace_seconds if src.pace_seconds > 0 else _RATE_LIMIT_DEFAULT_BASE_SLEEP_S
     for attempt in range(_RATE_LIMIT_MAX_ATTEMPTS):
+        checkpoint()
         try:
             return do_request()
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             if attempt == _RATE_LIMIT_MAX_ATTEMPTS - 1 or not _is_rate_limited_error(exc):
                 raise
@@ -769,7 +774,7 @@ def _call_with_rate_limit_backoff(
                 sleep_s=sleep_s,
                 error=str(exc)[:200],
             )
-            time.sleep(sleep_s)
+            sleep(sleep_s)
     raise AssertionError("unreachable -- loop above always returns or raises")
 
 
@@ -796,6 +801,7 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
     signature (``src``, ``keyword``, nothing else) is unchanged from before this round on purpose:
     it is monkeypatched by name with a bare ``(src_arg, keyword)`` stub in
     ``tests/unit/test_tenders_scan.py``'s ``TestCollectSourceNoticesApiQueryKeywordsOverride``."""
+    checkpoint()
     if not src.url:
         return []
     api_key = os.environ.get(src.needs_key_env_var, "") if src.needs_key_env_var else ""
@@ -816,8 +822,9 @@ def _fetch_api_json(src: TenderSource, keyword: str) -> list[NoticeRaw]:
     today_us = dt.date.today().strftime("%m/%d/%Y")
     out: list[NoticeRaw] = []
     for page in range(1, max(1, src.max_pages) + 1):
+        checkpoint()
         if page > 1 and src.pace_seconds:
-            time.sleep(src.pace_seconds)
+            sleep(src.pace_seconds)
 
         def _do_request(page: int = page) -> dict[str, Any]:
             if src.query_template:
@@ -893,6 +900,7 @@ def _fetch_rss(src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
 
 
 def _collect_source_notices(src: TenderSource, deny_domains: list[str]) -> list[NoticeRaw]:
+    checkpoint()
     if src.kind == "api_json":
         seen: set[str] = set()
         out: list[NoticeRaw] = []
@@ -901,14 +909,16 @@ def _collect_source_notices(src: TenderSource, deny_domains: list[str]) -> list[
         # untouched either way -- see the field's docstring on TenderSource.
         query_terms = src.api_query_keywords if src.api_query_keywords else src.keywords
         for i, kw in enumerate((query_terms or DEFAULT_KEYWORDS)[:MAX_KEYWORDS_PER_API_SOURCE]):
+            checkpoint()
             if i > 0 and src.pace_seconds:
                 # R7-tenders-b (finding 2): UK Contracts Finder/Find a Tender 429'd live
                 # 2026-09-07 under exactly this per-keyword rotation loop -- it had no
                 # inter-request pacing at all. Configurable per source (`pace_seconds`); a real
                 # no-op (`time.sleep(0.0)`) for the many sources that were never rate-limited,
                 # since that field's Pydantic default is 0.0.
-                time.sleep(src.pace_seconds)
+                sleep(src.pace_seconds)
             for n in _fetch_api_json(src, kw):
+                checkpoint()
                 if n.external_ref not in seen:
                     seen.add(n.external_ref)
                     out.append(n)
@@ -1381,6 +1391,8 @@ def _intake_for_score(relevance_score: float) -> str:
     (0.6) on a threshold-read failure -- a DB hiccup here must never block insertion."""
     try:
         threshold = get_relevance_threshold()
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("tender_relevance_threshold_unavailable", error=str(exc)[:120])
         threshold = 0.6
@@ -1515,6 +1527,8 @@ def _fetch_notice_text(notice: NoticeRaw, src_kind: str) -> tuple[str, bool]:
         return base, False
     try:
         page = fetch_remote(notice.url)
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("tender_notice_fetch_failed", url=(notice.url or "")[:200], error=str(exc)[:200])
         return base, False
@@ -1539,6 +1553,8 @@ def _llm_classify(
     text_for_llm, page_verified = _fetch_notice_text(notice, src_kind)
     try:
         lessons = tender_lessons_text()
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("tender_lessons_unavailable", error=str(exc)[:120])
         lessons = "אין עדיין משוב רלוונטיות קודם מהמשתמש."
@@ -1985,6 +2001,8 @@ def _order_sources_by_priority(sources: list[TenderSource]) -> list[TenderSource
     the original config order, same as before this feature existed."""
     try:
         priorities = get_source_priorities()
+    except (DeadlineExceeded, LeaseLost):
+        raise
     except Exception as exc:
         log.debug("tender_source_priority_read_failed", error=str(exc)[:200])
         return sources
@@ -2007,6 +2025,7 @@ def scan_tenders(
     ``tenders``+``items`` rows for everything that isn't a hard rejection (open intake), and
     transition passed-deadline tenders to ``status='closed'``. A single source failing (network,
     parse error, ...) never stops the others (docs/CONVENTIONS.md rule 9)."""
+    checkpoint()
     stats = TenderStats()
     today = dt.date.today()
     llm_deadline = time.monotonic() + llm_budget_s
@@ -2020,12 +2039,15 @@ def scan_tenders(
 
     ordered_sources = _order_sources_by_priority(sources if sources is not None else load_tender_sources())
     for src in ordered_sources:
+        checkpoint()
         if src.kind == "html":
             continue
         if src.kind == "api_json" and not _api_json_source_enabled(src):
             continue
         try:
             notices = _collect_source_notices(src, deny_domains)
+        except (DeadlineExceeded, LeaseLost):
+            raise
         except Exception as exc:
             log.warning("tender_source_failed", source=src.id, error=str(exc)[:200])
             stats.sources_failed += 1
@@ -2034,6 +2056,7 @@ def scan_tenders(
         stats.notices_fetched += len(notices)
 
         for notice in notices:
+            checkpoint()
             if notice.external_ref in seen_refs:
                 continue
             if src.kind == "api_json" and not _within_window(notice, since_days, today):
@@ -2075,6 +2098,8 @@ def scan_tenders(
                         "tender_llm_classify_failed", external_ref=notice.external_ref, error=str(exc)[:200]
                     )
                     stats.llm_failed += 1
+                except (DeadlineExceeded, LeaseLost):
+                    raise
                 except Exception as exc:
                     # Never let one notice's LLM call take down the whole scan (docs/
                     # CONVENTIONS.md rule 9) -- extract just stays None, which _relevance_score_for
@@ -2144,6 +2169,8 @@ def scan_tenders(
                     entities=(extract.entities if extract is not None else None),
                     notice_type=(extract.notice_type if extract is not None else None),
                 )
+            except (DeadlineExceeded, LeaseLost):
+                raise
             except Exception as exc:
                 log.warning("tender_insert_failed", external_ref=notice.external_ref, error=str(exc)[:200])
                 continue

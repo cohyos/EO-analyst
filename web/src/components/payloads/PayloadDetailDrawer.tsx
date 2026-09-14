@@ -1,3 +1,4 @@
+import { ContentShareActions } from "@/components/ContentShareActions";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
@@ -131,7 +132,8 @@ export function PayloadDetailDrawer({ payloadId, onClose }: { payloadId: number;
         {detailQuery.isError && <ErrorState onRetry={() => detailQuery.refetch()} />}
 
         {detailQuery.data && (
-          <div className="space-y-6">
+          <div data-share-content className="space-y-6">
+            <ContentShareActions title={detailQuery.data.payload.canonical_name} />
             <section>
               {detailQuery.data.payload.image_url && (
                 <img

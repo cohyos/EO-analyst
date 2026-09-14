@@ -5,6 +5,8 @@ import { useResourceHistory } from "@/hooks/useResourceHistory";
 import { ResourceHistoryDrawer } from "./ResourceHistoryDrawer";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/i18n";
+import { jobLabel } from "@/lib/displayLabels";
+import { stageLabelHe } from "@/lib/pipelineTimeline";
 
 function mbToGb(mb: number): string {
   return (mb / 1024).toFixed(1);
@@ -41,7 +43,7 @@ function Meter({
 const SERVICE_LABELS: Record<string, string> = {
   postgres: "PG",
   ollama: "Ollama",
-  searxng: "SearXNG",
+  searxng: "Search",
   ntfy: "ntfy",
 };
 
@@ -49,7 +51,7 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
   const { status, connected } = state;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const history = useResourceHistory(status);
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   // Q5-9 (docs/qa/findings_Q5_r1.md): these are two distinct situations that used to render the
   // identical "מנותק מהשרת" banner -- (a) the WS socket itself is closed/erroring (`!connected`,
@@ -89,6 +91,11 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
 
   return (
     <div className="relative shrink-0">
+      {gate.local_inference_paused && (
+        <div role="status" className="border-t border-border bg-bg-raised px-4 py-1 text-xs text-warn">
+          {t("shell.localInferencePaused")}
+        </div>
+      )}
       {drawerOpen && (
         <ResourceHistoryDrawer gate={gate} history={history} onClose={() => setDrawerOpen(false)} />
       )}
@@ -149,7 +156,7 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
         <span className="text-fg-dim">תור: {pipeline.queue_depth}</span>
         {pipeline.stage && (
           <span className="rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg">
-            {pipeline.stage}
+            {locale === "he" ? stageLabelHe(pipeline.stage) : pipeline.stage}
           </span>
         )}
         {pipeline.current_job && (
@@ -159,13 +166,13 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
           <span
             role="status"
             className="flex shrink-0 items-center gap-1 rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg"
-            title={t("topBar.backgroundRunIndicator", { kind: pipeline.current_job.kind })}
+            title={t("topBar.backgroundRunIndicator", { kind: jobLabel(pipeline.current_job.kind, locale) })}
           >
             <span className="relative flex h-1.5 w-1.5" aria-hidden="true">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent-fg opacity-75" />
               <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent-fg" />
             </span>
-            {pipeline.current_job.kind}
+            {jobLabel(pipeline.current_job.kind, locale)}
           </span>
         )}
 

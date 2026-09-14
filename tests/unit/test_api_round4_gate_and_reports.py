@@ -258,7 +258,7 @@ def _starved_host() -> HostStatus:
     to unload -- the gate can never admit the model, only queue-and-eventually-timeout."""
     return HostStatus(
         at=datetime.now(tz=UTC),
-        gpu=GpuStatus(vram_total_mb=12227, vram_used_mb=12000, util_pct=90, temp_c=60, available=True),
+        gpu=GpuStatus(vram_total_mb=12227, vram_used_mb=12000, util_pct=0, temp_c=60, available=True),
         ram_free_mb=32000,
         ram_total_mb=64000,
         disk_free_gb=100,
@@ -267,6 +267,11 @@ def _starved_host() -> HostStatus:
 
 
 class TestInteractiveGateBudget:
+    @pytest.fixture(autouse=True)
+    def no_resource_database_logging(self, monkeypatch):
+        # A frozen monotonic clock must never reach a real connection-pool timeout.
+        monkeypatch.setattr("eoa.memory.relational.record_resource_decision", lambda **kwargs: None)
+
     def test_interactive_call_times_out_after_interactive_wait_s_not_queue_timeout_min(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

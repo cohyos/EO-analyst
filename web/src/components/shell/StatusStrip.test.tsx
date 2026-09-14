@@ -37,6 +37,14 @@ const baseStatus: StatusResponse = {
 };
 
 describe("StatusStrip", () => {
+  it("shows the local pause while cloud services and telemetry remain visible", () => {
+    const status = { ...baseStatus, gate: { ...baseStatus.gate, local_inference_paused: true } };
+    render(<StatusStrip state={{ status, connected: true, logs: [] }} />);
+    expect(screen.getByText(/מודלים מקומיים מושהים/)).toBeInTheDocument();
+    expect(screen.getByText("GPU 55%")).toBeInTheDocument();
+    expect(screen.getByText("PG")).toBeInTheDocument();
+  });
+
   it("parses the status payload into VRAM/GPU/RAM/disk readouts", () => {
     const state: StatusSocketState = { status: baseStatus, connected: true, logs: [] };
     render(<StatusStrip state={state} />);
@@ -49,7 +57,7 @@ describe("StatusStrip", () => {
     expect(screen.getByText(/דיסק 200 GB פנוי/)).toBeInTheDocument();
     expect(screen.getByText("qwen2.5:14b-instruct")).toBeInTheDocument();
     expect(screen.getByText(/תור: 2/)).toBeInTheDocument();
-    expect(screen.getByText("triage")).toBeInTheDocument();
+    expect(screen.getByText("מיון (Triage)")).toBeInTheDocument();
   });
 
   it("shows a disconnected state instead of stale readouts when the socket drops", () => {
@@ -81,7 +89,7 @@ describe("StatusStrip", () => {
     render(<StatusStrip state={state} />);
     expect(screen.getByText("PG")).toBeInTheDocument();
     expect(screen.getByText("Ollama")).toBeInTheDocument();
-    expect(screen.getByText("SearXNG")).toBeInTheDocument();
+    expect(screen.getByText("Search")).toBeInTheDocument();
     expect(screen.getByText("ntfy")).toBeInTheDocument();
   });
 
@@ -123,7 +131,7 @@ describe("StatusStrip", () => {
     };
     const state: StatusSocketState = { status: withRunningJob, connected: true, logs: [] };
     render(<StatusStrip state={state} />);
-    expect(screen.getByText("deep_search")).toBeInTheDocument();
+    expect(screen.getByText("חקירת עומק")).toBeInTheDocument();
   });
 
   it("shows no background-run indicator when nothing is running", () => {
