@@ -5,6 +5,7 @@ import { api } from "@/api";
 import {
   enhanceSourceAppendixLinks,
   fixBdiSpacing,
+  groupAdjacentCitations,
   linkifyReportCitations,
   normalizeReportProse,
   wrapReportTables,
@@ -94,7 +95,13 @@ export function ReportBody({
   const linked = useMemo(
     () =>
       wrapReportTables(
-        fixBdiSpacing(enhanceSourceAppendixLinks(linkifyReportCitations(normalizeReportProse(html), citationsData?.citations))),
+        fixBdiSpacing(
+          enhanceSourceAppendixLinks(
+            groupAdjacentCitations(
+              linkifyReportCitations(normalizeReportProse(html), citationsData?.citations),
+            ),
+          ),
+        ),
       ),
     [html, citationsData?.citations],
   );

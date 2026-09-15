@@ -2,6 +2,7 @@ import { ContentShareActions } from "@/components/ContentShareActions";
 import { Fragment } from "react";
 import type { PatentRecord } from "@/types/api";
 import { ValueScorePopover } from "./ValueScorePopover";
+import { TableScrollHint } from "@/components/TableScrollHint";
 import { subdomainLabel } from "@/lib/taxonomy";
 import { formatDate } from "@/lib/time";
 import { cn } from "@/lib/cn";
@@ -130,7 +131,8 @@ export function PatentTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
+    <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
+      <TableScrollHint />
       <table className="w-full min-w-[900px] border-collapse text-sm">
         <thead>
           <tr className="sticky top-0 z-10 border-b border-border bg-bg-raised text-fg-dim">

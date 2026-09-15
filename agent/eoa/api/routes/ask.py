@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -334,6 +335,58 @@ class AskRequest(BaseModel):
 
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+
+
+# iPhone/WebKit "Load failed" investigation (2026-09-15, NEEDS API RESTART to take effect): live
+# WebKit repro (Playwright `devices["iPhone 14"]`) against this same endpoint showed the response
+# headers land fine (200, `text/event-stream`, chunked), tokens stream, then the connection dies
+# with WebKit's network stack reporting `errorText: "Timeout was reached"` ~66s after the response
+# started -- Safari surfaces the same failure to `fetch()` as a bare `TypeError: Load failed`. A
+# same-question Chromium run over the identical backend took ~67s end-to-end with zero errors,
+# confirming this is not a slow/broken answer, just WebKit's own idle-network timeout (its
+# NSURLSession-backed stack defaults to ~60s of no bytes on a request before giving up -- unrelated
+# to the client's own `AbortController`, which only ever fires on the user's "עצור" button; see
+# `web/src/api/real.ts`'s `askStream`). The gap comes from below: after the last `token` event, the
+# citation-repair pass and (when `ask.entailment_check` is on, `config/config.yaml`) the
+# entailment-filter pass are each a single blocking LLM call -- `entailment_filter`'s own
+# `fast_chain_timeout_s=60.0` alone can silently eat the entire WebKit idle budget -- with no SSE
+# bytes emitted in between. This helper keeps bytes flowing during that gap: it runs `task` (a
+# threadpool-wrapped blocking call, started by the caller) to completion while yielding a `: `
+# SSE comment frame -- valid-but-ignorable per the SSE spec -- every `_HEARTBEAT_INTERVAL_S`
+# seconds it is still pending; the client's own `askStream` parser already ignores any frame whose
+# line does not start with `data:` (see `api/real.ts`), so this is a no-op there. The caller reads
+# `task.result()` once this generator is exhausted.
+_HEARTBEAT_INTERVAL_S = 15.0
+
+
+async def _stream_heartbeats_while(task: asyncio.Task[Any]) -> AsyncIterator[str]:
+    while not task.done():
+        done, _pending = await asyncio.wait({task}, timeout=_HEARTBEAT_INTERVAL_S)
+        if not done:
+            yield ": heartbeat\n\n"
+
+
+async def _keep_alive(source: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Wrap the whole SSE generator so NO silent gap exceeds ``_HEARTBEAT_INTERVAL_S``.
+
+    The two per-pass helpers above cover the guard passes, but the first-token wait (retrieval +
+    a contended cloud/local chain) and any future silent step would still trip WebKit's ~60 s
+    idle timeout. This generic wrapper waits on the next item of ``source``; whenever nothing
+    arrives within the interval it emits an SSE comment frame (ignored by the client parser),
+    then keeps waiting for that same item.
+    """
+    it = source.__aiter__()
+    while True:
+        nxt: asyncio.Task[str] = asyncio.ensure_future(it.__anext__())
+        while True:
+            done, _pending = await asyncio.wait({nxt}, timeout=_HEARTBEAT_INTERVAL_S)
+            if done:
+                break
+            yield ": heartbeat\n\n"
+        try:
+            yield nxt.result()
+        except StopAsyncIteration:
+            return
 
 
 def _run_removal_guards(
@@ -705,27 +758,37 @@ async def ask(body: AskRequest) -> StreamingResponse:
                 # graceful-skip-on-error contract. Never wired into the pipeline/report paths.
                 ask_cfg = settings().ask
                 if ask_cfg.entailment_check:
-                    answer_text, _entailment_removed = await run_in_threadpool(
-                        ask_grounding.entailment_filter,
-                        answer_text,
-                        retrieved,
-                        # Round 8 item 3: capped to `_ENTAILMENT_MAX_CLAIMS_CAP` regardless of the
-                        # raw config value -- see that constant's own docstring for why the cap
-                        # lives here instead of in `config/config.yaml` itself.
-                        max_claims=min(ask_cfg.entailment_max_claims, _ENTAILMENT_MAX_CLAIMS_CAP),
-                        # Round 10 (docs/qa/loop/round_9_judge.md finding 2): the only real call
-                        # site opts into the cloud-chain fallback (`ask_grounding.entailment_filter`'s
-                        # own docstring) -- a local RAM shortage that starves the primary `ollama`
-                        # attempt now gets a second, cloud-routed chance instead of silently skipping
-                        # every single time.
-                        chain_fallback=True,
-                        # Round 11 (docs/qa/loop/round_10_judge.md worst #4): the same wall clock
-                        # `_MAX_ANSWER_SECONDS` above already uses -- lets `entailment_filter` grant
-                        # its own chain attempt extra headroom (60s vs. 40s) only when the main
-                        # answer itself came back quickly and this optional pass still has real
-                        # budget left, per that function's own docstring.
-                        answer_elapsed_s=time.monotonic() - t_answer_start,
+                    # 2026-09-15 WebKit "Load failed" fix (needs API restart, see
+                    # `_stream_heartbeats_while`'s own docstring): this single call can alone run up
+                    # to `fast_chain_timeout_s=60.0` with zero bytes emitted -- past WebKit's own
+                    # ~60s idle-network timeout. Run it as a background task and keep the SSE
+                    # connection alive with heartbeat comment frames while it's pending.
+                    _entailment_task = asyncio.ensure_future(
+                        run_in_threadpool(
+                            ask_grounding.entailment_filter,
+                            answer_text,
+                            retrieved,
+                            # Round 8 item 3: capped to `_ENTAILMENT_MAX_CLAIMS_CAP` regardless of the
+                            # raw config value -- see that constant's own docstring for why the cap
+                            # lives here instead of in `config/config.yaml` itself.
+                            max_claims=min(ask_cfg.entailment_max_claims, _ENTAILMENT_MAX_CLAIMS_CAP),
+                            # Round 10 (docs/qa/loop/round_9_judge.md finding 2): the only real call
+                            # site opts into the cloud-chain fallback (`ask_grounding.entailment_filter`'s
+                            # own docstring) -- a local RAM shortage that starves the primary `ollama`
+                            # attempt now gets a second, cloud-routed chance instead of silently skipping
+                            # every single time.
+                            chain_fallback=True,
+                            # Round 11 (docs/qa/loop/round_10_judge.md worst #4): the same wall clock
+                            # `_MAX_ANSWER_SECONDS` above already uses -- lets `entailment_filter` grant
+                            # its own chain attempt extra headroom (60s vs. 40s) only when the main
+                            # answer itself came back quickly and this optional pass still has real
+                            # budget left, per that function's own docstring.
+                            answer_elapsed_s=time.monotonic() - t_answer_start,
+                        )
                     )
+                    async for _hb in _stream_heartbeats_while(_entailment_task):
+                        yield _hb
+                    answer_text, _entailment_removed = _entailment_task.result()
                     ungrounded_removed += _entailment_removed
                     if _entailment_removed:
                         _removed_by_guard["entailment_check"] = _entailment_removed
@@ -743,9 +806,15 @@ async def ask(body: AskRequest) -> StreamingResponse:
             # Round 2 P2 (docs/qa/loop/round_2_chat_fixes.md): live-verified 2026-09-06 that 3/5
             # cleanly-completed answers had zero inline [n] despite a populated sources array.
             if citations and not re.search(r"\[\d+\]", answer_text):
-                corrected = await run_in_threadpool(
-                    _run_citation_repair, messages, answer_text, body.provider
+                # 2026-09-15 WebKit "Load failed" fix (needs API restart, see
+                # `_stream_heartbeats_while`'s own docstring): a full non-streamed LLM call with no
+                # bytes emitted meanwhile -- same heartbeat treatment as the entailment pass above.
+                _repair_task = asyncio.ensure_future(
+                    run_in_threadpool(_run_citation_repair, messages, answer_text, body.provider)
                 )
+                async for _hb in _stream_heartbeats_while(_repair_task):
+                    yield _hb
+                corrected = _repair_task.result()
                 if corrected:
                     # Round 8 finding #2: `_run_citation_repair` reuses the same system+sources
                     # messages `services.ask_build_messages` built the original answer from --
@@ -898,4 +967,4 @@ async def ask(body: AskRequest) -> StreamingResponse:
         finally:
             yield _sse({"type": "done"})
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(_keep_alive(gen()), media_type="text/event-stream")

@@ -51,6 +51,10 @@ export const he = {
     noData: "אין נתונים להצגה",
     error: "אירעה שגיאה בטעינת הנתונים",
     urgencyLevelPrefix: "רמת דחיפות: ",
+    // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #7): the one-line "scrolls sideways" hint above a
+    // wide, horizontally-scrolling table on a phone (TableScrollHint.tsx) -- same text/contract as
+    // reportHtml.ts's own SCROLL_HINT_HTML for server-rendered report tables.
+    tableScrollHint: "→ גלול לרוחב לצפייה בכל העמודות",
   },
   topBar: {
     nightWindowActive: "חלון לילה פעיל",
@@ -176,6 +180,11 @@ export const he = {
     investigateToastViewLink: "צפה בחקירה",
     investigatingIndicator: "🔎 בחקירה",
     investigatingIndicatorAria: "חקירת עומק בתהליך עבור פריט זה",
+    // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): a confirm step in front of "חקור לעומק" --
+    // a cloud-model deep-search that can run for several minutes -- so a stray phone tap doesn't
+    // kick one off unintentionally.
+    investigateConfirmTitle: "פתיחת חקירת עומק",
+    investigateConfirmBody: "לפתוח חקירת עומק על הפריט? (הריצה אורכת מספר דקות ומשתמשת במודל ענן)",
   },
   // CORR (cross-source corroboration, 2026-09-07): `CorroborationBadge` (feed row / item drawer /
   // item detail header / chat sources list) + the item drawer's "בדוק אימות מחדש" re-check action
@@ -362,6 +371,29 @@ export const he = {
       recordedIrrelevant: "סומן כלא רלוונטי",
       failed: "שמירת המשוב נכשלה",
     },
+    // Share-as-HTML (2026-09-15): the tenders board's "שתף HTML" menu (TendersShareMenu.tsx),
+    // building on tendersExport.ts. Menu-item labels + status messages only -- the exported
+    // document's own content is hardcoded Hebrew (see tendersExport.ts), matching the rest of
+    // this page's untranslated table/column labels.
+    share: {
+      trigger: "שתף HTML",
+      triggerWithForecasts: "שתף HTML (כולל תחזיות)",
+      disabledTitle: "אין מכרזים להצגה",
+      docTitle: "מכרזים והזדמנויות — EO-Analyst",
+      docTitleWithForecasts: "מכרזים והזדמנויות ותחזיות — EO-Analyst",
+      shareFile: "שתף קובץ HTML",
+      download: "הורד קובץ HTML",
+      openTab: "פתח בלשונית חדשה",
+      copyHtml: "העתק HTML",
+      copyLinks: "העתק קישורים",
+      email: "שלח במייל",
+      whatsapp: "וואטסאפ",
+      downloaded: "קובץ ה-HTML הורד",
+      copiedHtml: "ה-HTML הועתק ללוח",
+      copiedLinks: "הקישורים הועתקו ללוח",
+      copyFailed: "ההעתקה נכשלה",
+      shareFailed: "השיתוף נכשל",
+    },
   },
   // A13 (מיקוד תעשייה ישראלית): the "ישראליות" facet chip + flag badge on EntitiesPage — the page
   // itself is not otherwise migrated to t() yet (its other strings stay hardcoded Hebrew), so this
@@ -472,6 +504,11 @@ export const he = {
     notFound: "הסקירה לא נמצאה",
     createNew: "סקירה חדשה",
     rerun: "הרץ שוב",
+    // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): a confirm step in front of "הרץ שוב" -- a
+    // full product-dossier re-investigation that takes 30-60 minutes -- on both the detail page
+    // and the list card.
+    rerunConfirmTitle: "הרצה מחדש של הסקירה",
+    rerunConfirmBody: "הרצה מחדש אורכת כ-30–60 דקות",
     detailsLink: "פרטים",
     openDetailAria: "פתח את סקירת המוצר {name}",
     backToList: "← חזרה לרשימת הסקירות",

@@ -303,7 +303,7 @@ describe("DossierDetailPage (PD-ui)", () => {
     expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
 
-  it("triggers a rerun from the detail page's 'הרץ שוב' button", async () => {
+  it("triggers a rerun from the detail page's 'הרץ שוב' button only after confirming", async () => {
     const user = userEvent.setup();
     getDossier.mockResolvedValue(detail());
     postDossierRerun.mockResolvedValue({ job_id: "job-3" });
@@ -311,7 +311,27 @@ describe("DossierDetailPage (PD-ui)", () => {
 
     const button = await screen.findByTestId("dossier-detail-rerun");
     await user.click(button);
+
+    // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): the button now opens a confirm dialog
+    // ("הרצה מחדש אורכת כ-30–60 דקות") instead of firing the mutation directly.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(postDossierRerun).not.toHaveBeenCalled();
+
+    await user.click(screen.getByText("אישור"));
     await waitFor(() => expect(postDossierRerun).toHaveBeenCalledWith("elbit-systems-spectro-xr"));
+  });
+
+  it("does not trigger a rerun when the confirm dialog is cancelled", async () => {
+    const user = userEvent.setup();
+    getDossier.mockResolvedValue(detail());
+    renderPage();
+
+    const button = await screen.findByTestId("dossier-detail-rerun");
+    await user.click(button);
+    await user.click(await screen.findByText("ביטול"));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(postDossierRerun).not.toHaveBeenCalled();
   });
 
   it("PD-vocab-ui §5.2 entry point 2: competitor row offers 'הרץ סקירה למוצר זה' when unmatched, launches a dossier on click", async () => {

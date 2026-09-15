@@ -33,6 +33,33 @@ function loadStoredProvider(): string | null {
   }
 }
 
+// iPhone/WebKit chat "Load failed" investigation (2026-09-15): `/api/ask` streams tokens, then
+// runs several silent server-side guard passes (citation repair, entailment check up to ~60s,
+// anchor/coherence checks) before the final `answer_final`/`sources`/`done` SSE events -- a gap
+// that can exceed WebKit's ~60s per-request idle-network timeout even though the request never
+// had an AbortController deadline on the client (`api/real.ts`'s `askStream` only aborts on the
+// user's own "עצור" button). Safari then throws a bare `TypeError: Load failed`/"cancelled" with
+// no detail, which used to reach the user verbatim (see `ChatThread.tsx`'s `{error}` render). This
+// maps the small, stable set of generic browser network-failure messages (WebKit's "Load failed"/
+// "cancelled", Chromium's "Failed to fetch", Firefox's "NetworkError...") to a clear Hebrew
+// explanation instead -- the partial answer already streamed via `onToken` is left untouched (see
+// `send`'s `onError` below), only the error line changes. The real fix is server-side (a heartbeat
+// during the silent guard-pass gap, see `agent/eoa/api/routes/ask.py`) and needs an API restart;
+// this is the client-side mitigation that ships without one.
+const _GENERIC_NETWORK_FAILURE_RE =
+  /^(load failed|cancelled|failed to fetch|networkerror when attempting to fetch resource\.?|the network connection was lost\.?|network request failed)$/i;
+
+export function friendlyAskErrorMessage(err: Pick<Error, "message">): string {
+  const msg = (err.message ?? "").trim();
+  if (_GENERIC_NETWORK_FAILURE_RE.test(msg)) {
+    return (
+      "החיבור לשרת נקטע באמצע קבלת התשובה (ייתכן עקב זמן עיבוד ארוך ברשת הנייד). " +
+      "התשובה החלקית שכבר התקבלה מוצגת למעלה — אפשר לנסות לשלוח את השאלה שוב."
+    );
+  }
+  return msg || "שגיאה בתקשורת עם השרת";
+}
+
 export function useAskChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -136,7 +163,7 @@ export function useAskChat() {
           },
           onError: (err) => {
             setIsStreaming(false);
-            setError(err.message || "שגיאה בתקשורת עם השרת");
+            setError(friendlyAskErrorMessage(err));
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
             );

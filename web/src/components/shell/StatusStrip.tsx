@@ -121,7 +121,13 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
           type="button"
           onClick={() => setDrawerOpen((v) => !v)}
           aria-expanded={drawerOpen}
-          className="flex shrink-0 items-center gap-2 rounded px-1 py-0.5 hover:bg-bg-sunken"
+          // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #4): the strip itself must keep its compact
+          // visual height (a taller footer eats into content on a phone), but the toggle's actual
+          // tap target was only the ~20px-tall row. Padding grows the button's own hit area
+          // (padding box) to >=40px tall; an equal-and-opposite negative vertical margin cancels
+          // that growth back out of the flex row's cross-axis sizing (outer/margin-box size), so
+          // the footer's height and the neighboring meters/readouts in this same row don't shift.
+          className="flex shrink-0 items-center gap-2 rounded px-1 py-2.5 -my-2 hover:bg-bg-sunken"
           title="הצג/הסתר היסטוריית משאבים"
         >
           <ChevronUp

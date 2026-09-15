@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { MessageSquareText, PanelRightClose, X } from "lucide-react";
 import { useAskChat } from "@/hooks/useAskChat";
+import { useMainScrollDirection } from "@/hooks/useMainScrollDirection";
 import { ChatThread } from "@/components/ask/ChatThread";
 import { useUiStore, type ChatContextItem } from "@/store/uiStore";
 import { cn } from "@/lib/cn";
@@ -27,6 +28,19 @@ export function ChatPanel() {
   const addToChatContext = useUiStore((s) => s.addToChatContext);
   const chat = useAskChat();
   const [dragOver, setDragOver] = useState(false);
+  // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #1): the phone-only compact trigger hides itself
+  // while the analyst is actively scrolling `<main>` down (it otherwise sits fixed over content),
+  // and reappears on scroll-up or after a short idle pause.
+  const scrollHiddenOnPhone = useMainScrollDirection();
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(true);
+  }
+
+  function handleDragLeave() {
+    setDragOver(false);
+  }
 
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
@@ -40,49 +54,73 @@ export function ChatPanel() {
 
   if (!chatOpen) {
     return (
-      <button
-        type="button"
-        onClick={() => setChatOpen(true)}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={handleDrop}
-        data-testid="chat-panel-fab-dropzone"
-        className={cn(
-          // Between `md` and `xl` the nav rail (NavRail.tsx) is a `w-16`
-          // (64px) icon column docked at the *start* edge (right in
-          // RTL/Hebrew, left in LTR) — `start-4` alone sat inside that
-          // column, overlapping its icons on short/narrow viewports.
-          // `md:start-20` (80px = 64px rail + 16px clearance) keeps the FAB
-          // clear of it. Moving to the opposite (`end`) edge instead isn't
-          // an option: the full /ask page's own composer send button
-          // (ChatThread.tsx) lives right there, at the bottom of the *end*
-          // edge, which this FAB would then cover on every screen. `xl:start-4`
-          // reverts to the original tighter inset once the rail widens to
-          // `xl:w-48` but desktop viewports are tall enough that the rail's
-          // icons no longer reach this corner. Below `md:` there is no rail
-          // at all (MobileNav's bottom tab bar replaces it), so `start-4`.
-          //
-          // Bottom offset at `md:` and up is untouched (`3.5rem`, exactly as
-          // before — desktop must stay pixel-identical). Below `md:` it uses
-          // `--eoa-statusbar-clear-h` instead of the bare `3.5rem`: that
-          // constant alone under-cleared StatusStrip once its
-          // "local inference paused" banner is showing (the FAB's bottom
-          // edge landed inside the banner's text), and also adds
-          // `--eoa-tabbar-h` to clear MobileNav's fixed bottom tab bar,
-          // which only exists below `md:` (both vars set on AppShell's root).
-          "fixed z-30 flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90",
-          "bottom-[calc(var(--eoa-statusbar-clear-h)+env(safe-area-inset-bottom)+var(--eoa-tabbar-h))] start-4",
-          "md:bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:start-20 xl:start-4",
-          dragOver && "ring-2 ring-accent-fg ring-offset-2 ring-offset-bg",
-        )}
-        aria-label={t("shell.chatFabAria")}
-      >
-        <MessageSquareText size={16} aria-hidden="true" />
-        {t("shell.chatFabLabel")}
-      </button>
+      <>
+        {/* Below `md:`: a compact icon-only round button (56x56) instead of the full labelled
+            pill -- the pill's visible text plus its fixed positioning was wide enough to sit over
+            feed/report content on a 390px screen. Icon + aria-label only, same drag-to-add-context
+            affordance as the desktop pill. */}
+        <button
+          type="button"
+          onClick={() => setChatOpen(true)}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          data-testid="chat-panel-fab-compact"
+          className={cn(
+            "fixed z-30 flex h-14 w-14 items-center justify-center rounded-full bg-accent text-accent-fg shadow-panel hover:opacity-90 md:hidden",
+            "bottom-[calc(var(--eoa-statusbar-clear-h)+env(safe-area-inset-bottom)+var(--eoa-tabbar-h))] start-4",
+            "transition-transform duration-200 ease-out",
+            // Translating by just the button's own height wasn't enough to actually clear the
+            // viewport: this button's resting `bottom` offset is itself
+            // `--eoa-statusbar-clear-h + --eoa-tabbar-h` (well over 100px, to sit above
+            // StatusStrip/MobileNav) — a `translate-y-[calc(100%+1rem)]` verified via Playwright
+            // against the real app left it still fully on-screen, just shifted down slightly.
+            // Cancelling that same bottom-offset expression here on top of `100%` is what actually
+            // pushes the button's top edge below the viewport's bottom edge.
+            scrollHiddenOnPhone
+              ? "translate-y-[calc(100%+var(--eoa-statusbar-clear-h)+env(safe-area-inset-bottom)+var(--eoa-tabbar-h)+1rem)]"
+              : "translate-y-0",
+            dragOver && "ring-2 ring-accent-fg ring-offset-2 ring-offset-bg",
+          )}
+          aria-label={t("shell.chatFabLabel")}
+        >
+          <MessageSquareText size={20} aria-hidden="true" />
+        </button>
+
+        {/* `md:`+: the original labelled pill, pixel-identical to before this round. */}
+        <button
+          type="button"
+          onClick={() => setChatOpen(true)}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          data-testid="chat-panel-fab-dropzone"
+          className={cn(
+            // Between `md` and `xl` the nav rail (NavRail.tsx) is a `w-16`
+            // (64px) icon column docked at the *start* edge (right in
+            // RTL/Hebrew, left in LTR) — `start-4` alone sat inside that
+            // column, overlapping its icons on short/narrow viewports.
+            // `md:start-20` (80px = 64px rail + 16px clearance) keeps the FAB
+            // clear of it. Moving to the opposite (`end`) edge instead isn't
+            // an option: the full /ask page's own composer send button
+            // (ChatThread.tsx) lives right there, at the bottom of the *end*
+            // edge, which this FAB would then cover on every screen. `xl:start-4`
+            // reverts to the original tighter inset once the rail widens to
+            // `xl:w-48` but desktop viewports are tall enough that the rail's
+            // icons no longer reach this corner.
+            //
+            // Bottom offset at `md:` and up is untouched (`3.5rem`, exactly as
+            // before — desktop must stay pixel-identical).
+            "fixed z-30 hidden items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg shadow-panel hover:opacity-90 md:flex",
+            "md:bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:start-20 xl:start-4",
+            dragOver && "ring-2 ring-accent-fg ring-offset-2 ring-offset-bg",
+          )}
+          aria-label={t("shell.chatFabAria")}
+        >
+          <MessageSquareText size={16} aria-hidden="true" />
+          {t("shell.chatFabLabel")}
+        </button>
+      </>
     );
   }
 

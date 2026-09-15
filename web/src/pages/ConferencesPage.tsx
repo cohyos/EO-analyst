@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { CalendarClock, CalendarPlus, ChevronDown, Download, ExternalLink } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { TableScrollHint } from "@/components/TableScrollHint";
 import { formatDate } from "@/lib/time";
 import { downloadConferenceIcs } from "@/lib/ics";
 import { cn } from "@/lib/cn";
@@ -123,7 +124,8 @@ export function ConferencesPage() {
           ייצוא iCal (כל הכנסים)
         </a>
       </div>
-      <div className="overflow-x-auto rounded-lg border border-border">
+      <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
+        <TableScrollHint />
         <table className="w-full min-w-[720px] text-sm">
           <thead className="bg-bg-raised text-xs text-fg-dim">
             <tr>

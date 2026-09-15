@@ -86,7 +86,7 @@ function RunProgressPopover({
     <div
       role="dialog"
       aria-label={t("topBar.runNowPopoverTitle")}
-      className="absolute end-0 top-full z-30 mt-2 w-72 rounded-lg border border-border-strong bg-bg-raised p-3 text-sm shadow-panel"
+      className="absolute end-0 top-full z-30 mt-2 w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-lg border border-border-strong bg-bg-raised p-3 text-sm shadow-panel"
     >
       <div className="mb-2 flex items-center justify-between">
         <h3 className="font-semibold text-fg">{t("topBar.runNowPopoverTitle")}</h3>

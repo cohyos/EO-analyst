@@ -236,6 +236,21 @@ bdi {
 .eo-citation:hover {
   background: var(--accent);
 }
+/* Round-3 mobile fix (UI-MOBILE-iphone-r3.md #6): wraps 2+ adjacent `.eo-citation` markers
+   (`groupAdjacentCitations`, reportHtml.ts) as one bidi-isolated `dir="ltr"` unit so their
+   ascending order (1, 2, 3) survives inside RTL prose -- `unicode-bidi: isolate` backs up the
+   `dir` attribute so the browser treats this exactly as its own embedded run regardless of what
+   sits around it. `inline-flex` + `flex-wrap: nowrap` keeps the whole group one atomic line-
+   breaking unit, same "orphan-proof" contract `.eo-citation` itself already has (CitationChip's
+   own round-2 fix, CitationText.tsx) -- it moves to the next line as a whole rather than letting
+   the browser split individual chips out of order across a wrap point.
+*/
+.eo-citation-group {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  unicode-bidi: isolate;
+}
 
 /* W4: the sources-appendix row a `[n]` marker jumps/scrolls to (ReportBody.tsx), briefly
    highlighted so the analyst can actually see which row just came into view -- a plain

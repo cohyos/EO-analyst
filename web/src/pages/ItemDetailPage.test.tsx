@@ -190,12 +190,32 @@ describe("ItemDetailPage", () => {
     expect(await screen.findByText("לא ברור מי הספק הסופי")).toBeInTheDocument();
   });
 
-  it("fires the investigate mutation from the 'חקור לעומק' button", async () => {
+  it("fires the investigate mutation from the 'חקור לעומק' button only after confirming", async () => {
     getItem.mockResolvedValue(baseItem());
     renderPage();
     const btn = await screen.findByText("חקור לעומק");
     btn.click();
+
+    // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): the button now opens a confirm dialog
+    // instead of firing the mutation directly.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(postItemInvestigate).not.toHaveBeenCalled();
+
+    const confirmBtn = await screen.findByText("אישור");
+    confirmBtn.click();
     await waitFor(() => expect(postItemInvestigate).toHaveBeenCalledWith(3, { question: null }));
+  });
+
+  it("does not fire the investigate mutation when the confirm dialog is cancelled", async () => {
+    getItem.mockResolvedValue(baseItem());
+    renderPage();
+    const btn = await screen.findByText("חקור לעומק");
+    btn.click();
+
+    const cancelBtn = await screen.findByText("ביטול");
+    cancelBtn.click();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(postItemInvestigate).not.toHaveBeenCalled();
   });
 });
 

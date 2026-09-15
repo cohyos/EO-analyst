@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import type { DossierSummary } from "@/types/api";
@@ -5,6 +6,7 @@ import { formatDateTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
 import type { TranslationKey } from "@/i18n/types";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export interface DossierPendingState {
   status: "queued" | "failed";
@@ -46,6 +48,9 @@ export function DossierCard({
   onToggleCompare?: () => void;
 }) {
   const t = useT();
+  // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): "הרץ שוב" is a full 30-60 minute
+  // re-investigation -- confirm before firing, same as the detail page's own rerun button.
+  const [confirmRerunOpen, setConfirmRerunOpen] = useState(false);
   const outcomeLabel = dossier.latest
     ? t(`dossiers.outcome.${dossier.latest.outcome}` as TranslationKey)
     : null;
@@ -119,7 +124,7 @@ export function DossierCard({
 
         <button
           type="button"
-          onClick={onRerun}
+          onClick={() => setConfirmRerunOpen(true)}
           disabled={rerunning}
           data-testid={`dossier-rerun-${dossier.product_key}`}
           className="flex items-center gap-1.5 rounded-md border border-border-strong px-2.5 py-1.5 text-xs font-medium text-fg hover:bg-bg-sunken disabled:opacity-60"
@@ -127,6 +132,18 @@ export function DossierCard({
           {rerunning && <Loader2 size={12} className="animate-spin" aria-hidden="true" />}
           {t("dossiers.rerun")}
         </button>
+        {confirmRerunOpen && (
+          <ConfirmDialog
+            title={t("dossiers.rerunConfirmTitle")}
+            message={t("dossiers.rerunConfirmBody")}
+            confirming={rerunning}
+            onConfirm={() => {
+              onRerun();
+              setConfirmRerunOpen(false);
+            }}
+            onCancel={() => setConfirmRerunOpen(false)}
+          />
+        )}
       </div>
 
       {pending?.status === "queued" && (

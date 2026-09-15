@@ -4,6 +4,7 @@ import type { PayloadTreeFamily, PayloadTreeResponse, PayloadTreeVariant, Payloa
 import { familyNodeKey, variantNodeKey, vendorNodeKey } from "@/lib/payloadFamilies";
 import { PayloadThumbnail } from "./PayloadTable";
 import { useCategoryLabels } from "./PayloadFilters";
+import { TableScrollHint } from "@/components/TableScrollHint";
 import { useT } from "@/i18n";
 
 /** One visible row of the flattened tree -- built fresh every render from `tree` + the current
@@ -182,7 +183,8 @@ export function PayloadTree({
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
+    <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
+      <TableScrollHint />
       <table
         role="treegrid"
         aria-label={t("payloads.treeAriaLabel")}

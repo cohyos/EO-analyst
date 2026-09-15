@@ -1,6 +1,7 @@
 import type { TechMaturity, TechRadarSubdomain } from "@/types/api";
 import { cn } from "@/lib/cn";
 import { Sparkline } from "./Sparkline";
+import { TableScrollHint } from "@/components/TableScrollHint";
 
 const MATURITY_LABEL_HE: Record<TechMaturity, string> = {
   lab: "מעבדה",
@@ -27,7 +28,8 @@ export function RadarMatrix({
   onCellClick,
 }: RadarMatrixProps) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
+    <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
+      <TableScrollHint />
       <table className="w-full min-w-[720px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-border bg-bg-raised text-fg-dim">

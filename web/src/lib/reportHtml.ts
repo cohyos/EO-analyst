@@ -104,6 +104,39 @@ export function linkifyReportCitations(
   );
 }
 
+// Round-3 mobile fix (UI-MOBILE-iphone-r3.md #6): 2+ `.eo-citation` anchors separated only by
+// whitespace (the common "…fact [1] [3] [2]." shape `linkifyReportCitations` above produces for a
+// sentence with multiple sources) -- captures the run so it can be wrapped as one bidi-isolated
+// unit below.
+const CITATION_ANCHOR_RE = /<a\b[^>]*\bclass="[^"]*\beo-citation\b[^"]*"[^>]*>\[\d+\]<\/a>/;
+const CITATION_GROUP_RE = new RegExp(
+  `([ \\t]*)((?:${CITATION_ANCHOR_RE.source}[ \\t]+){1,}${CITATION_ANCHOR_RE.source})`,
+  "g",
+);
+
+/**
+ * Groups 2+ adjacent citation markers into a single `dir="ltr"` span.
+ *
+ * Content review (docs/qa/content_review/UI-MOBILE-iphone-r3.md #6): three separate anchor
+ * elements sitting in RTL prose with nothing but whitespace between them are exactly the shape the
+ * Unicode bidi algorithm reorders as a run of embedded LTR objects -- "[1] [2] [3]" as authored
+ * rendered as "[1] [3] [2]" on screen, since each `<a>` is its own atomic embedding and the
+ * *sequence* of embeddings (not their internal content) gets right-to-left-ordered by the
+ * surrounding paragraph direction. Wrapping the whole run in one `dir="ltr"` container makes it a
+ * single embedding instead of three, so its own internal left-to-right order (1, 2, 3) is
+ * preserved; the *group* as a whole still gets correctly placed within the RTL paragraph. The
+ * leading run of whitespace immediately before the group is replaced with `&nbsp;` (rather than
+ * dropped) so the group stays glued to the word it follows instead of ever orphaning onto its own
+ * line as a bare leading run when the paragraph wraps.
+ */
+export function groupAdjacentCitations(html: string | null | undefined): string {
+  const safeHtml = html ?? "";
+  return safeHtml.replace(CITATION_GROUP_RE, (_match, leadingSpace: string, group: string) => {
+    const glue = leadingSpace ? "&nbsp;" : "";
+    return `${glue}<span dir="ltr" class="eo-citation-group">${group}</span>`;
+  });
+}
+
 function escapeAttr(s: string): string {
   return s
     .replace(/&/g, "&amp;")

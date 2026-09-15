@@ -84,13 +84,18 @@ export function GraphFilterBar({
         ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-1">
-          <span className="text-fg-dim">מדינה:</span>
+      {/* Round-3 mobile fix (UI-MOBILE-iphone-r3.md #5): below `sm:` each label+select pair is a
+          `flex-wrap` row of its own -- a `whitespace-nowrap` label so it can never be squeezed
+          down to 1-2 characters, and a `flex-1` select so it wraps onto its own full-width line
+          underneath the label instead of both fighting for the same cramped line. `sm:`+ reverts
+          every added class back to the original always-inline, content-width layout. */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+        <label className="flex flex-wrap items-center gap-1">
+          <span className="whitespace-nowrap text-fg-dim">מדינה:</span>
           <select
             value={filters.country}
             onChange={(e) => onChange({ ...filters, country: e.target.value })}
-            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="min-w-0 max-w-full flex-1 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg sm:flex-none"
           >
             <option value="">הכל</option>
             {availableCountries.map((c) => (
@@ -101,12 +106,12 @@ export function GraphFilterBar({
           </select>
         </label>
 
-        <label className="flex items-center gap-1">
-          <span className="text-fg-dim">קו מוצר:</span>
+        <label className="flex flex-wrap items-center gap-1">
+          <span className="whitespace-nowrap text-fg-dim">קו מוצר:</span>
           <select
             value={filters.productLine}
             onChange={(e) => onChange({ ...filters, productLine: e.target.value })}
-            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="min-w-0 max-w-full flex-1 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg sm:flex-none"
           >
             <option value="">הכל</option>
             {PRODUCT_LINE_CATALOG.map((p) => (
@@ -117,8 +122,8 @@ export function GraphFilterBar({
           </select>
         </label>
 
-        <label className="flex items-center gap-1">
-          <span className="text-fg-dim">חלון זמן:</span>
+        <label className="flex flex-wrap items-center gap-1">
+          <span className="whitespace-nowrap text-fg-dim">חלון זמן:</span>
           <select
             value={filters.sinceDays ?? ""}
             onChange={(e) =>
@@ -127,7 +132,7 @@ export function GraphFilterBar({
                 sinceDays: e.target.value === "" ? null : Number(e.target.value),
               })
             }
-            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="min-w-0 max-w-full flex-1 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg sm:flex-none"
           >
             {SINCE_OPTIONS.map((s) => (
               <option key={s.label} value={s.value ?? ""}>
@@ -137,14 +142,14 @@ export function GraphFilterBar({
           </select>
         </label>
 
-        <label className="flex items-center gap-1">
-          <span className="text-fg-dim">עומק:</span>
+        <label className="flex flex-wrap items-center gap-1">
+          <span className="whitespace-nowrap text-fg-dim">עומק:</span>
           <select
             value={filters.depth}
             onChange={(e) =>
               onChange({ ...filters, depth: Number(e.target.value) as 1 | 2 })
             }
-            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="min-w-0 max-w-full flex-1 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg sm:flex-none"
           >
             <option value={1}>1</option>
             <option value={2}>2</option>

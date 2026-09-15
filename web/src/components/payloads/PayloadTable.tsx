@@ -1,5 +1,6 @@
 import type { PayloadRecord } from "@/types/api";
 import { useCategoryLabels } from "./PayloadFilters";
+import { TableScrollHint } from "@/components/TableScrollHint";
 import { useT } from "@/i18n";
 
 /** W19 (docs/REVIEW_2026-09-06_evening.md): small lazy-loaded thumbnail -- `image_url` is
@@ -41,7 +42,8 @@ export function PayloadTable({
   const t = useT();
   const categoryLabels = useCategoryLabels();
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
+    <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
+      <TableScrollHint />
       <table className="w-full min-w-[900px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-border bg-bg-raised text-fg-dim">

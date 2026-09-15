@@ -6,6 +6,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { TenderFilters, type TenderFiltersState } from "@/components/tenders/TenderFilters";
 import { TenderTable } from "@/components/tenders/TenderTable";
 import { ForecastList } from "@/components/tenders/ForecastList";
+import { TendersShareMenu } from "@/components/tenders/TendersShareMenu";
 import { SourceCoveragePanel } from "@/components/tenders/SourceCoveragePanel";
 import { cn } from "@/lib/cn";
 import { useT } from "@/i18n";
@@ -157,33 +158,45 @@ export function TendersPage() {
 
   return (
     <div className="space-y-4 p-4 md:p-6">
-      <div role="tablist" aria-label="מכרזים והזדמנויות" className="flex gap-1 border-b border-border">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "open"}
-          onClick={() => setTab("open")}
-          className={cn(
-            "border-b-2 px-3 py-2 text-sm font-medium",
-            tab === "open" ? "border-accent text-fg" : "border-transparent text-fg-dim hover:text-fg",
-          )}
-        >
-          מכרזים פתוחים
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "forecast"}
-          onClick={() => setTab("forecast")}
-          className={cn(
-            "border-b-2 px-3 py-2 text-sm font-medium",
-            tab === "forecast"
-              ? "border-accent text-fg"
-              : "border-transparent text-fg-dim hover:text-fg",
-          )}
-        >
-          תחזית מכרזים
-        </button>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border">
+        <div role="tablist" aria-label="מכרזים והזדמנויות" className="flex gap-1">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "open"}
+            onClick={() => setTab("open")}
+            className={cn(
+              "border-b-2 px-3 py-2 text-sm font-medium",
+              tab === "open" ? "border-accent text-fg" : "border-transparent text-fg-dim hover:text-fg",
+            )}
+          >
+            מכרזים פתוחים
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "forecast"}
+            onClick={() => setTab("forecast")}
+            className={cn(
+              "border-b-2 px-3 py-2 text-sm font-medium",
+              tab === "forecast"
+                ? "border-accent text-fg"
+                : "border-transparent text-fg-dim hover:text-fg",
+            )}
+          >
+            תחזית מכרזים
+          </button>
+        </div>
+        {/* Share-as-HTML (2026-09-15): always the same filtered/sorted `filteredTenders` the
+            "open" tab's table shows -- forecasts only bundle in when the forecasts tab is
+            active (the menu's own trigger label says so), per tendersExport.ts's doc comment. */}
+        <TendersShareMenu
+          tenders={filteredTenders}
+          forecasts={sortedForecasts}
+          filters={filters}
+          showClosedArchived={showClosedArchived}
+          includeForecasts={tab === "forecast"}
+        />
       </div>
 
       <SourceCoveragePanel />

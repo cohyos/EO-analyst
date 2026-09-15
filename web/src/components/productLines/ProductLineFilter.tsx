@@ -3,6 +3,7 @@ import { ChevronDown, Layers } from "lucide-react";
 import { PRODUCT_LINE_CATALOG, productLineLabel } from "@/lib/productLines";
 import { cn } from "@/lib/cn";
 import { useI18n, useT } from "@/i18n";
+import { usePopoverEdgeClamp } from "@/hooks/usePopoverEdgeClamp";
 
 /**
  * PL-ui (2026-09-07): "קו מוצר" multi-select filter, shared by the Feed and Tenders pages.
@@ -23,6 +24,7 @@ export function ProductLineFilter({
   const t = useT();
   const { locale } = useI18n();
   const [open, setOpen] = useState(false);
+  const { triggerRef, popoverStyle } = usePopoverEdgeClamp<HTMLButtonElement>(open);
 
   function toggle(id: string) {
     onChange(value.includes(id) ? value.filter((v) => v !== id) : [...value, id]);
@@ -31,6 +33,7 @@ export function ProductLineFilter({
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
@@ -56,8 +59,8 @@ export function ProductLineFilter({
           role="group"
           aria-label={t("productLines.filterLabel")}
           data-testid="product-line-filter-menu"
-          className="absolute top-full z-20 mt-1 max-h-72 w-72 overflow-y-auto rounded-md border border-border-strong bg-bg-raised p-1.5 shadow-panel"
-          style={{ insetInlineStart: 0 }}
+          className="absolute top-full z-20 mt-1 max-h-72 w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-md border border-border-strong bg-bg-raised p-1.5 shadow-panel"
+          style={popoverStyle}
         >
           {value.length > 0 && (
             <button

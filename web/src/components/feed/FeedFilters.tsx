@@ -7,6 +7,7 @@ import { COUNTRY_CATALOG, OTHER_COUNTRY, countryLabel } from "@/lib/countries";
 import { ProductLineFilter } from "@/components/productLines/ProductLineFilter";
 import { cn } from "@/lib/cn";
 import { useI18n, useT } from "@/i18n";
+import { usePopoverEdgeClamp } from "@/hooks/usePopoverEdgeClamp";
 
 const ALL_LEVELS: TriageLevel[] = ["red", "orange", "yellow", "archive"];
 
@@ -43,6 +44,8 @@ export function FeedFilters({
   const t = useT();
   const { locale } = useI18n();
   const [countryMenuOpen, setCountryMenuOpen] = useState(false);
+  const { triggerRef: countryTriggerRef, popoverStyle: countryPopoverStyle } =
+    usePopoverEdgeClamp<HTMLButtonElement>(countryMenuOpen);
 
   function toggleLevel(level: TriageLevel) {
     const has = value.levels.includes(level);
@@ -138,6 +141,7 @@ export function FeedFilters({
           crowd the level/domain filters when nothing is selected. */}
       <div className="relative">
         <button
+          ref={countryTriggerRef}
           type="button"
           onClick={() => setCountryMenuOpen((v) => !v)}
           aria-expanded={countryMenuOpen}
@@ -163,8 +167,8 @@ export function FeedFilters({
             role="group"
             aria-label={t("feed.countryFilterLabel")}
             data-testid="country-filter-menu"
-            className="absolute top-full z-20 mt-1 max-h-72 w-64 overflow-y-auto rounded-md border border-border-strong bg-bg-raised p-1.5 shadow-panel"
-            style={{ insetInlineStart: 0 }}
+            className="absolute top-full z-20 mt-1 max-h-72 w-[min(16rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-md border border-border-strong bg-bg-raised p-1.5 shadow-panel"
+            style={countryPopoverStyle}
           >
             {value.countries.length > 0 && (
               <button

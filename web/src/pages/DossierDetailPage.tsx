@@ -1,10 +1,12 @@
 import { ContentShareActions } from "@/components/ContentShareActions";
 import { sourceKindLabel } from "@/lib/displayLabels";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DossierSectionNav, type DossierSectionNavItem } from "@/components/dossiers/DossierSectionNav";
 import { DossierTable, type DossierTableColumn } from "@/components/dossiers/DossierTable";
 import { DossierSpecTable } from "@/components/dossiers/DossierSpecTable";
@@ -85,6 +87,9 @@ export function DossierDetailPage() {
   const { locale } = useI18n();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): "הרץ שוב" is a full 30-60 minute dossier
+  // re-investigation -- confirm before firing.
+  const [confirmRerunOpen, setConfirmRerunOpen] = useState(false);
 
   const detailQuery = useQuery({
     queryKey: ["dossier", key],
@@ -406,7 +411,7 @@ export function DossierDetailPage() {
         <div className="flex shrink-0 flex-col items-end gap-1">
           <button
             type="button"
-            onClick={() => rerunMutation.mutate()}
+            onClick={() => setConfirmRerunOpen(true)}
             disabled={rerunMutation.isPending}
             data-testid="dossier-detail-rerun"
             className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-60"
@@ -414,6 +419,18 @@ export function DossierDetailPage() {
             {rerunMutation.isPending && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
             {t("dossiers.rerun")}
           </button>
+          {confirmRerunOpen && (
+            <ConfirmDialog
+              title={t("dossiers.rerunConfirmTitle")}
+              message={t("dossiers.rerunConfirmBody")}
+              confirming={rerunMutation.isPending}
+              onConfirm={() => {
+                rerunMutation.mutate();
+                setConfirmRerunOpen(false);
+              }}
+              onCancel={() => setConfirmRerunOpen(false)}
+            />
+          )}
           {latestRun?.report_id && (
             <Link to={`/reports?id=${latestRun.report_id}`} className="text-xs text-accent hover:underline">
               {t("dossiers.openReport")}

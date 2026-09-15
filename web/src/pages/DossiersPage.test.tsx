@@ -174,7 +174,7 @@ describe("DossiersPage (PD-ui)", () => {
     expect(screen.getByTestId("dossier-compare-checkbox-d")).toBeDisabled();
   });
 
-  it("queues a rerun and shows the queued status", async () => {
+  it("queues a rerun and shows the queued status, after confirming", async () => {
     const user = userEvent.setup();
     getDossiers.mockResolvedValue([dossier()]);
     postDossierRerun.mockResolvedValue({ job_id: "job-2" });
@@ -183,7 +183,26 @@ describe("DossiersPage (PD-ui)", () => {
     const button = await screen.findByTestId("dossier-rerun-elbit-systems-spectro-xr");
     await user.click(button);
 
+    // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): the card's "הרץ שוב" button now opens a
+    // confirm dialog instead of firing the mutation directly.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(postDossierRerun).not.toHaveBeenCalled();
+    await user.click(screen.getByText("אישור"));
+
     await waitFor(() => expect(postDossierRerun).toHaveBeenCalledWith("elbit-systems-spectro-xr"));
     expect(await screen.findByRole("status")).toHaveTextContent("הדוח בבנייה ברקע — יופיע ברשימה כשיושלם");
+  });
+
+  it("does not queue a rerun when the card's confirm dialog is cancelled", async () => {
+    const user = userEvent.setup();
+    getDossiers.mockResolvedValue([dossier()]);
+    renderPage();
+
+    const button = await screen.findByTestId("dossier-rerun-elbit-systems-spectro-xr");
+    await user.click(button);
+    await user.click(await screen.findByText("ביטול"));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(postDossierRerun).not.toHaveBeenCalled();
   });
 });

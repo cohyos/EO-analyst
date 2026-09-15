@@ -1,5 +1,5 @@
 import { ContentShareActions } from "@/components/ContentShareActions";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
@@ -7,6 +7,7 @@ import type { ItemDetail } from "@/types/api";
 import { api } from "@/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { AddToContextButton } from "@/components/AddToContextButton";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ExplainScorePopover } from "@/components/feed/ExplainScorePopover";
 import { SecurityStatusIcon } from "@/components/feed/SecurityStatusIcon";
 import { CorroborationBadge } from "@/components/feed/CorroborationBadge";
@@ -34,6 +35,9 @@ export function ItemDetailPage() {
   const queryClient = useQueryClient();
   const t = useT();
   const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
+  // Round-3 mobile fix (UI-MOBILE-iphone-r3.md #3): "חקור לעומק" kicks off a several-minute
+  // cloud-model deep search -- confirm before firing, so a stray phone tap doesn't start one.
+  const [confirmInvestigateOpen, setConfirmInvestigateOpen] = useState(false);
 
   const itemQuery = useQuery({
     queryKey: ["item", itemId],
@@ -170,13 +174,25 @@ export function ItemDetailPage() {
           <AddToContextButton kind="item" id={item.id} label={displayTitle} size="sm" />
           <button
             type="button"
-            onClick={() => investigate.mutate()}
+            onClick={() => setConfirmInvestigateOpen(true)}
             disabled={investigate.isPending}
             className="flex items-center gap-1 rounded-md border border-hot px-2 py-1 text-xs text-hot hover:bg-hot/10 disabled:opacity-50"
           >
             <Search size={12} aria-hidden="true" />
             {investigate.isPending ? "פותח חקירה…" : "חקור לעומק"}
           </button>
+          {confirmInvestigateOpen && (
+            <ConfirmDialog
+              title={t("feed.investigateConfirmTitle")}
+              message={t("feed.investigateConfirmBody")}
+              confirming={investigate.isPending}
+              onConfirm={() => {
+                investigate.mutate();
+                setConfirmInvestigateOpen(false);
+              }}
+              onCancel={() => setConfirmInvestigateOpen(false)}
+            />
+          )}
           <button
             type="button"
             onClick={() => recheckCorroboration.mutate()}

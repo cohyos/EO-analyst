@@ -4,6 +4,7 @@ import { Ban, Cloud, Cpu, Save } from "lucide-react";
 import { api } from "@/api";
 import { SETTINGS_NAMES, type LlmChainEntry, type SettingsName } from "@/types/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { TableScrollHint } from "@/components/TableScrollHint";
 import { ChainsEditor } from "@/components/settings/ChainsEditor";
 import { MCPCard } from "@/components/settings/MCPCard";
 import { formatDateTime, formatDuration } from "@/lib/time";
@@ -391,7 +392,8 @@ export function SettingsPage() {
         {jobsQuery.isLoading && <LoadingState label={t("settingsJobs.loading")} />}
         {jobsQuery.data && jobsQuery.data.length === 0 && <EmptyState title={t("settingsJobs.empty")} />}
         {jobsQuery.data && jobsQuery.data.length > 0 && (
-          <div className="overflow-x-auto rounded-lg border border-border">
+          <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
+            <TableScrollHint />
             <table className="w-full min-w-[760px] text-sm">
               <thead className="bg-bg-raised text-xs text-fg-dim">
                 <tr>

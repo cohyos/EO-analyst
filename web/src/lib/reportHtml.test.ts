@@ -3,6 +3,7 @@ import {
   decodeHtmlEntities,
   enhanceSourceAppendixLinks,
   fixBdiSpacing,
+  groupAdjacentCitations,
   linkifyReportCitations,
   normalizeReportProse,
   wrapReportTables,
@@ -201,5 +202,44 @@ describe("wrapReportTables", () => {
     expect(wrapReportTables("<p>no tables</p>")).toBe("<p>no tables</p>");
     expect(wrapReportTables(null)).toBe("");
     expect(wrapReportTables(undefined)).toBe("");
+  });
+});
+
+// Round-3 mobile fix (UI-MOBILE-iphem-r3.md #6): 2+ adjacent .eo-citation markers get reordered by
+// the browser's bidi algorithm inside RTL prose ("[1] [2] [3]" renders as "[1] [3] [2]") because
+// each <a> is its own atomic LTR embedding -- wrapping the whole run in one dir="ltr" span makes
+// it a single embedding instead, preserving authored (ascending) order.
+describe("groupAdjacentCitations", () => {
+  const a = (n: number) => `<a class="eo-citation" data-n="${n}">[${n}]</a>`;
+
+  it("wraps 3 adjacent citation markers in one dir=ltr span, gluing to the preceding word with &nbsp;", () => {
+    const html = `עובדה חשובה ${a(1)} ${a(3)} ${a(2)} וסיפא.`;
+    const out = groupAdjacentCitations(html);
+    expect(out).toBe(
+      `עובדה חשובה&nbsp;<span dir="ltr" class="eo-citation-group">${a(1)} ${a(3)} ${a(2)}</span> וסיפא.`,
+    );
+  });
+
+  it("leaves a single, non-adjacent citation marker untouched (order is irrelevant for one)", () => {
+    const html = `הושלמה מיזוג ${a(2)}.`;
+    expect(groupAdjacentCitations(html)).toBe(html);
+  });
+
+  it("does not group two citations separated by real prose text", () => {
+    const html = `${a(1)} טקסט באמצע ${a(2)}`;
+    expect(groupAdjacentCitations(html)).toBe(html);
+  });
+
+  it("groups a run that starts the string (no leading whitespace to glue)", () => {
+    const html = `${a(1)} ${a(2)} אחרי`;
+    expect(groupAdjacentCitations(html)).toBe(
+      `<span dir="ltr" class="eo-citation-group">${a(1)} ${a(2)}</span> אחרי`,
+    );
+  });
+
+  it("passes through null/undefined and text with no citations", () => {
+    expect(groupAdjacentCitations(null)).toBe("");
+    expect(groupAdjacentCitations(undefined)).toBe("");
+    expect(groupAdjacentCitations("<p>no citations here</p>")).toBe("<p>no citations here</p>");
   });
 });

@@ -4,6 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Plus } from "lucide-react";
 import { api } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { TableScrollHint } from "@/components/TableScrollHint";
 import { NewInvestigationDialog } from "@/components/investigations/NewInvestigationDialog";
 import { ToastStack } from "@/components/ToastStack";
 import { useToastQueue } from "@/hooks/useToastQueue";
@@ -115,7 +116,8 @@ export function InvestigationsListPage() {
         />
       )}
       {!isLoading && !isError && data && data.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
+          <TableScrollHint />
           <table className="w-full min-w-[720px] text-sm">
             <thead className="bg-bg-raised text-xs text-fg-dim">
               <tr>
