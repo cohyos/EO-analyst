@@ -333,7 +333,9 @@ export function SettingsPage() {
 
       <section aria-label="עריכת הגדרות YAML">
         <h2 className="mb-2 text-sm font-semibold text-fg-dim">עריכת קבצי הגדרה</h2>
-        <div className="mb-2 flex gap-1 border-b border-border" role="tablist">
+        {/* Round-5 mobile audit: five monospace tabs overflow a 390px screen and the last one was
+            unreachable -- scroll the row sideways instead of clipping it. */}
+        <div className="mb-2 flex gap-1 overflow-x-auto whitespace-nowrap border-b border-border" role="tablist">
           {SETTINGS_NAMES.map((name) => (
             <button
               key={name}

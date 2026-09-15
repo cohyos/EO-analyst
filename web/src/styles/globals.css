@@ -288,6 +288,11 @@ bdi {
    by the measure cap (a data table benefits from its full container width, not a prose column). */
 .report-body {
   font-size: 0.9375rem;
+  /* Round-5 mobile audit: a long unbroken source URL (citation footers, appendix links) widened
+     <main> to ~800px on a 365px phone column. Break anywhere as a last resort so nothing ever
+     forces a horizontal scroll of the whole page. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .report-body h2 {
   font-size: 1.125rem;
@@ -455,6 +460,7 @@ bdi {
     border-bottom: 1px solid var(--border);
     white-space: normal;
     min-width: 0;
+    overflow-wrap: anywhere;
   }
   .report-table-wrap--stacked td:last-child {
     border-bottom: none;

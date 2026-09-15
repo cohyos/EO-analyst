@@ -577,7 +577,12 @@ test.describe("B — interactive states", () => {
   test("b06-chat-panel-real-question", async ({ page }) => {
     test.setTimeout(150_000);
     await gotoWithTheme(page, "/", "light");
-    const opened = await safeClick(page, page.getByLabel("פתח את פאנל שאל את האנליסט", { exact: false }));
+    // Round-4 mobile fix: below `md:` the chat FAB is the compact icon-only button
+    // (data-testid="chat-panel-fab-compact", aria-label "שאל את האנליסט"), not the labelled
+    // desktop pill ("chat-panel-fab-dropzone", aria-label "פתח את פאנל שאל את האנליסט…") which
+    // this test used to target -- that label belongs to a `md:`-only element hidden on phone
+    // viewports, so the old selector silently never opened the panel. Fixed for r5.
+    const opened = await safeClick(page, page.getByTestId("chat-panel-fab-compact"));
     await page.waitForTimeout(400);
     await shootAndCheck(page, `b06a-chat-panel-open_${opened}`);
 
@@ -660,16 +665,21 @@ test.describe("B — interactive states", () => {
     // Close the chat panel it opens, to not interfere with later steps.
     await safeClick(page, page.getByLabel("סגור", { exact: false }).first());
 
-    // IMPORTANT: `ItemDetailPage`'s "חקור לעומק" button calls `investigate.mutate()` directly on
-    // click (web/src/pages/ItemDetailPage.tsx:173-179) -- there is no confirmation dialog to
-    // screenshot-and-cancel; clicking it immediately queues a REAL investigation job against the
-    // live backend. Per the hard rule against real side effects, screenshot the button in place
-    // only -- never click it. (The absence of a confirm step here is itself worth flagging in the
-    // report, not exercising it.)
+    // Round-4 mobile fix (UI-MOBILE-iphone-r4): "חקור לעומק" now opens a `ConfirmDialog`
+    // (role="dialog") instead of firing `investigate.mutate()` directly -- per the hard rule we
+    // may open it, screenshot, and Cancel (never Confirm, which would queue a real job).
     const investigateBtn = page.getByText("חקור לעומק", { exact: false }).first();
     if (await investigateBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
       await investigateBtn.scrollIntoViewIfNeeded().catch(() => {});
       await shootAndCheck(page, "b08c-investigate-button-in-place-not-clicked");
+      const dialogOpened = await safeClick(page, investigateBtn);
+      await page.waitForTimeout(300);
+      await shootAndCheck(page, `b08c2-investigate-confirm-dialog_${dialogOpened}`);
+      if (dialogOpened) {
+        await safeClick(page, page.getByRole("dialog").getByRole("button", { name: "ביטול" }));
+        await page.waitForTimeout(200);
+        await shootAndCheck(page, "b08c3-investigate-confirm-dismissed");
+      }
     }
 
     const recheckClicked = await safeClick(page, page.getByTestId("corroboration-recheck-button"));
@@ -711,14 +721,21 @@ test.describe("B — interactive states", () => {
       await shootAndCheck(page, "b09d-new-dossier-form-cancelled");
     }
 
-    // Rerun button: screenshot only — no confirmation step exists in the code (direct
-    // mutation on click), so clicking it would queue a real re-investigation. Documented as a
-    // finding, not exercised.
+    // Round-4 mobile fix: "הרץ שוב" now opens a `ConfirmDialog` (role="dialog") instead of
+    // mutating directly -- open it, screenshot, and Cancel (never Confirm).
     const rerunBtn = page.locator('[data-testid^="dossier-rerun-"]').first();
     if (await rerunBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
       await rerunBtn.scrollIntoViewIfNeeded().catch(() => {});
       await page.waitForTimeout(200);
       await shootAndCheck(page, "b09e-rerun-button-in-place");
+      const dialogOpened = await safeClick(page, rerunBtn);
+      await page.waitForTimeout(300);
+      await shootAndCheck(page, `b09f-rerun-confirm-dialog_${dialogOpened}`);
+      if (dialogOpened) {
+        await safeClick(page, page.getByRole("dialog").getByRole("button", { name: "ביטול" }));
+        await page.waitForTimeout(200);
+        await shootAndCheck(page, "b09g-rerun-confirm-dismissed");
+      }
     }
   });
 
@@ -726,11 +743,19 @@ test.describe("B — interactive states", () => {
     await gotoWithTheme(page, "/dossiers/elbit-systems-spectro-xr", "light", 1600);
     await shootAndCheck(page, "b10a-dossier-detail-top");
 
-    // Same no-confirm caveat as b09e — screenshot only, never click.
+    // Round-4 mobile fix: same ConfirmDialog treatment as b09f/g — open, screenshot, Cancel.
     const rerunBtn = page.getByTestId("dossier-detail-rerun");
     if (await rerunBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
       await rerunBtn.scrollIntoViewIfNeeded().catch(() => {});
       await shootAndCheck(page, "b10b-rerun-button-in-place");
+      const dialogOpened = await safeClick(page, rerunBtn);
+      await page.waitForTimeout(300);
+      await shootAndCheck(page, `b10b2-rerun-confirm-dialog_${dialogOpened}`);
+      if (dialogOpened) {
+        await safeClick(page, page.getByRole("dialog").getByRole("button", { name: "ביטול" }));
+        await page.waitForTimeout(200);
+        await shootAndCheck(page, "b10b3-rerun-confirm-dismissed");
+      }
     }
 
     // Section nav chip tap -> verify the section heading lands below the sticky bars.

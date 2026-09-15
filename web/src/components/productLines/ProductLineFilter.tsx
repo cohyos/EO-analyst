@@ -80,11 +80,11 @@ export function ProductLineFilter({
                 onClick={() => toggle(p.id)}
                 aria-pressed={active}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded px-2 py-1 text-start text-sm",
+                  "flex w-full min-w-0 items-center gap-2 rounded px-2 py-1 text-start text-sm",
                   active ? "bg-accent-muted text-accent-fg" : "hover:bg-bg-sunken",
                 )}
               >
-                <bdi className="truncate">{locale === "he" ? p.nameHe : p.nameEn}</bdi>
+                <bdi className="min-w-0 flex-1 truncate">{locale === "he" ? p.nameHe : p.nameEn}</bdi>
               </button>
             );
           })}

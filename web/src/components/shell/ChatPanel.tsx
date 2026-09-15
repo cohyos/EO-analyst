@@ -67,7 +67,9 @@ export function ChatPanel() {
           onDrop={handleDrop}
           data-testid="chat-panel-fab-compact"
           className={cn(
-            "fixed z-30 flex h-14 w-14 items-center justify-center rounded-full bg-accent text-accent-fg shadow-panel hover:opacity-90 md:hidden",
+            // Round-5 audit: at rest the solid disc still covered whatever sat in the corner (a
+            // citation chip, a select label) -- translucent at rest, solid on touch/hover.
+            "fixed z-30 flex h-14 w-14 items-center justify-center rounded-full bg-accent text-accent-fg shadow-panel opacity-75 hover:opacity-100 focus-visible:opacity-100 active:opacity-100 md:hidden",
             "bottom-[calc(var(--eoa-statusbar-clear-h)+env(safe-area-inset-bottom)+var(--eoa-tabbar-h))] start-4",
             "transition-transform duration-200 ease-out",
             // Translating by just the button's own height wasn't enough to actually clear the
