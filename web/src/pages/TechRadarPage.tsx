@@ -66,7 +66,7 @@ export function TechRadarPage() {
           <select
             value={weeks}
             onChange={(e) => setWeeks(Number(e.target.value))}
-            className="rounded-md border border-border bg-bg-raised px-2 py-1 text-sm text-fg"
+            className="max-w-full min-w-0 rounded-md border border-border bg-bg-raised px-2 py-1 text-sm text-fg"
           >
             {WEEK_OPTIONS.map((w) => (
               <option key={w} value={w}>
@@ -80,7 +80,7 @@ export function TechRadarPage() {
           <select
             value={actorKind}
             onChange={(e) => setActorKind(e.target.value as TechActorKind | "")}
-            className="rounded-md border border-border bg-bg-raised px-2 py-1 text-sm text-fg"
+            className="max-w-full min-w-0 rounded-md border border-border bg-bg-raised px-2 py-1 text-sm text-fg"
           >
             {ACTOR_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>

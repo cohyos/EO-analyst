@@ -26,7 +26,7 @@ export function ProductLineStatsGrid({ stats }: { stats: ProductLineStats }) {
           key={e.key}
           className="flex flex-col items-start gap-0.5 rounded-md bg-bg-sunken px-2 py-1.5"
         >
-          <dt className="text-[10px] text-fg-dim">{e.label}</dt>
+          <dt className="text-xs text-fg-dim">{e.label}</dt>
           <dd className="font-mono font-tabular text-sm font-semibold text-fg">{e.value}</dd>
         </div>
       ))}

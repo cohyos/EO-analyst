@@ -1,7 +1,32 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
 import type { PatentRecord } from "@/types/api";
 import { PatentTable } from "./PatentTable";
+
+/** Round-2 mobile fix (UI-MOBILE-iphone.md #6): stubs `window.matchMedia` so
+ * `useIsNarrowViewport(768)` reports "narrow" -- `PatentTable` picks the `<md:` card list over
+ * the `<table>` in that state. Every pre-existing test in this file doesn't call this, so
+ * `matches` stays `false` and they keep exercising the desktop table path. */
+function setNarrowViewport() {
+  window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+    matches: query.includes("max-width"),
+    media: query,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}
+
+// `setNarrowViewport` replaces `window.matchMedia` for the rest of the file (jsdom's `window`
+// persists across tests within one file) unless undone -- restore the original stub (installed by
+// src/test/setup.ts, always "not narrow") after every test so a later test that doesn't call
+// `setNarrowViewport` itself isn't silently left in whatever state the previous test set.
+const originalMatchMedia = window.matchMedia;
+afterEach(() => {
+  window.matchMedia = originalMatchMedia;
+});
 
 function makePatent(overrides: Partial<PatentRecord> = {}): PatentRecord {
   return {
@@ -67,5 +92,38 @@ describe("PatentTable", () => {
   it("formats the publication date through the shared date formatter, not as a bare ISO string", () => {
     render(<PatentTable patents={[makePatent()]} expandedId={null} onToggleExpand={() => {}} />);
     expect(screen.queryByText("2026-09-05")).not.toBeInTheDocument();
+  });
+});
+
+describe("PatentTable phone card mode (round-2 mobile fix #6)", () => {
+  it("renders a card list instead of a <table> on a narrow viewport", () => {
+    setNarrowViewport();
+    render(<PatentTable patents={[makePatent()]} expandedId={null} onToggleExpand={() => {}} />);
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByText("Example patent title")).toBeInTheDocument();
+    expect(screen.getByText("US1234567A1")).toBeInTheDocument();
+    expect(screen.getByText("Acme Corp")).toBeInTheDocument();
+  });
+
+  it("keeps the desktop <table> when the viewport is not narrow", () => {
+    render(<PatentTable patents={[makePatent()]} expandedId={null} onToggleExpand={() => {}} />);
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
+  it("expands the same claims/so-what detail panel on card tap", () => {
+    setNarrowViewport();
+    const patent = makePatent({ claims_summary_he: "תביעה 1: מערכת כיול", so_what_he: "משמעות עסקית" });
+    render(<PatentTable patents={[patent]} expandedId={patent.id} onToggleExpand={() => {}} />);
+    expect(screen.getByText("תביעה 1: מערכת כיול")).toBeInTheDocument();
+    expect(screen.getByText("משמעות עסקית")).toBeInTheDocument();
+  });
+
+  it("toggles expansion via the card's own click handler, same target id as the table row", () => {
+    setNarrowViewport();
+    const onToggleExpand = vi.fn();
+    const patent = makePatent();
+    render(<PatentTable patents={[patent]} expandedId={null} onToggleExpand={onToggleExpand} />);
+    fireEvent.click(screen.getByText("Example patent title"));
+    expect(onToggleExpand).toHaveBeenCalledWith(patent.id);
   });
 });

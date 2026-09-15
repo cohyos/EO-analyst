@@ -38,6 +38,9 @@ export const en: Dictionary = {
     settings: "Settings",
     itemDetail: "Item Details",
     shellFallback: "Situation Room + Copilot",
+    more: "More",
+    moreAriaLabel: "More navigation options",
+    current: "Current page",
   },
   common: {
     search: "Search",
@@ -90,6 +93,7 @@ export const en: Dictionary = {
     runNowToastDismiss: "Dismiss notification",
     runNowConflictToast: "An equivalent run is already active (id {jobId})",
     backgroundRunIndicator: "Background run active: {kind}",
+    overflowMenuAria: "More options",
   },
   levels: {
     red: "Critical",
@@ -352,6 +356,8 @@ export const en: Dictionary = {
     commandPaletteEntitiesGroup: "Entities",
     commandPaletteNoResults: "No results",
     commandPalettePlaceholder: "Search items, entities…",
+    moreSheetTitle: "All navigation pages",
+    moreSheetClose: "Close",
     resourceHistoryDialogAria: "Resource history",
     localInferencePaused: "Local models paused to reserve resources — UI and cloud providers remain available",
     resourceHistoryTitle: "Resource history — last 30 minutes",

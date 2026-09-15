@@ -90,7 +90,7 @@ export function GraphFilterBar({
           <select
             value={filters.country}
             onChange={(e) => onChange({ ...filters, country: e.target.value })}
-            className="rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
           >
             <option value="">הכל</option>
             {availableCountries.map((c) => (
@@ -106,7 +106,7 @@ export function GraphFilterBar({
           <select
             value={filters.productLine}
             onChange={(e) => onChange({ ...filters, productLine: e.target.value })}
-            className="rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
           >
             <option value="">הכל</option>
             {PRODUCT_LINE_CATALOG.map((p) => (
@@ -127,7 +127,7 @@ export function GraphFilterBar({
                 sinceDays: e.target.value === "" ? null : Number(e.target.value),
               })
             }
-            className="rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
           >
             {SINCE_OPTIONS.map((s) => (
               <option key={s.label} value={s.value ?? ""}>
@@ -144,7 +144,7 @@ export function GraphFilterBar({
             onChange={(e) =>
               onChange({ ...filters, depth: Number(e.target.value) as 1 | 2 })
             }
-            className="rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
           >
             <option value={1}>1</option>
             <option value={2}>2</option>

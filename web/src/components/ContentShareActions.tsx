@@ -55,19 +55,27 @@ export function ContentShareActions({
 
   return (
     <div ref={root} data-share-actions className="my-2 space-y-2 text-xs">
+      {/* Below `md:` this collapses to a single compact row of icon-only buttons (defect #2):
+          the label text is hidden (`hidden md:inline`) and the visible icon shrinks to a
+          centered glyph inside a 40x40 tap target, so three stacked full-text rows never push
+          the page's own heading below the fold on a phone. `aria-label` keeps the accessible
+          name identical to the md:+ visible label. At `md:`+ this is byte-for-byte the
+          original row: auto height, icon + visible label, start-aligned. */}
       <div className="flex flex-wrap gap-2" role="group" aria-label={t("share.actions")}>
         {(["copy", "email", "whatsapp"] as const).map((channel) => {
           const Icon =
             channel === "copy" ? Copy : channel === "email" ? Mail : MessageCircle;
+          const label = t(`share.${channel}`);
           return (
             <button
               key={channel}
               type="button"
               onClick={() => void act(channel)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-raised px-2.5 py-1.5 hover:bg-bg-sunken focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+              aria-label={label}
+              className="inline-flex h-10 w-10 items-center justify-center gap-0 rounded-md border border-border bg-bg-raised px-0 py-0 hover:bg-bg-sunken focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent md:h-auto md:w-auto md:justify-start md:gap-1.5 md:px-2.5 md:py-1.5"
             >
-              <Icon size={14} aria-hidden="true" />
-              {t(`share.${channel}`)}
+              <Icon size={14} aria-hidden="true" className="shrink-0" />
+              <span className="hidden md:inline">{label}</span>
             </button>
           );
         })}

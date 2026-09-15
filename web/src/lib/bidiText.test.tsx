@@ -51,14 +51,15 @@ describe("renderBidiText", () => {
 // isolates every such run, not just a quoted one.
 describe("renderBidiRuns", () => {
   it("wraps a bare (unquoted) Latin run adjacent to Hebrew in a dir=ltr bdi", () => {
-    // A trailing space right before the next Hebrew word stays *inside* the isolated run (it
-    // inherits the still-open Latin run's class, same as the backend's own
-    // `eoa.search.deep_search._split_bidi_runs`) -- the visible text is unaffected either way.
+    // Round-2 mobile fix (UI-MOBILE-iphone.md #5): the trailing space right before the next
+    // Hebrew word is rendered as plain text *outside* the isolate, not inside it -- a `<bdi>` is
+    // atomic, so a space swallowed inside it collapses against the run's own edge and never
+    // produces a visible gap before the following word ("Ophir OptronicsנמכרXRהיא"-style gluing).
     const { container } = render(<div>{renderBidiRuns("המוצר Ophir Optronics נמכר")}</div>);
     const bdi = container.querySelector("bdi");
     expect(bdi).not.toBeNull();
     expect(bdi!.getAttribute("dir")).toBe("ltr");
-    expect(bdi!.textContent).toBe("Ophir Optronics ");
+    expect(bdi!.textContent).toBe("Ophir Optronics");
     expect(container.textContent).toBe("המוצר Ophir Optronics נמכר");
   });
 
@@ -66,7 +67,17 @@ describe("renderBidiRuns", () => {
     const { container } = render(<div>{renderBidiRuns("טווח 15-300 מ\"מ")}</div>);
     const bdi = container.querySelector("bdi");
     expect(bdi).not.toBeNull();
-    expect(bdi!.textContent).toBe("15-300 ");
+    expect(bdi!.textContent).toBe("15-300");
+  });
+
+  it("keeps the trailing space of an English run outside the bdi isolate so it stays a real gap before the next Hebrew word (round-2 #5: \"XRהיא\" glued-together regression)", () => {
+    const { container } = render(<div>{renderBidiRuns("מערכת SPECTRO XR היא מכ\"ם")}</div>);
+    const bdis = container.querySelectorAll("bdi");
+    for (const bdi of bdis) {
+      expect(bdi.textContent).not.toMatch(/\s$/);
+      expect(bdi.textContent).not.toMatch(/^\s/);
+    }
+    expect(container.textContent).toBe('מערכת SPECTRO XR היא מכ"ם');
   });
 
   it("keeps a parenthesized English term's brackets in the surrounding Hebrew run", () => {
@@ -83,8 +94,8 @@ describe("renderBidiRuns", () => {
     const { container } = render(<div>{renderBidiRuns("Elbit זכתה מול Rafael בתחרות")}</div>);
     const bdis = container.querySelectorAll("bdi");
     expect(bdis.length).toBe(2);
-    expect(bdis[0].textContent).toBe("Elbit ");
-    expect(bdis[1].textContent).toBe("Rafael ");
+    expect(bdis[0].textContent).toBe("Elbit");
+    expect(bdis[1].textContent).toBe("Rafael");
   });
 
   it("leaves pure Hebrew text completely untouched (returns the original string)", () => {

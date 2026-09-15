@@ -18,10 +18,27 @@ vi.mock("@/api", () => ({
 
 /** Stubs `window.matchMedia("(hover: hover) and (pointer: fine)")` -- same helper as
  * SourcePreviewPopover.test.tsx, needed here to exercise both the desktop and touch branches of
- * the source-link preview wired into the title cell. */
+ * the source-link preview wired into the title cell. Also answers `useIsNarrowViewport`'s
+ * `(max-width: ...)` query as `false` (not narrow) unless a test opts into the mobile card list
+ * via `setNarrowViewport` below -- so every pre-existing test in this file keeps exercising the
+ * desktop `<table>` path unchanged. */
 function setHoverCapable(matches: boolean) {
   window.matchMedia = vi.fn().mockImplementation((query: string) => ({
     matches: query.includes("hover: hover") ? matches : false,
+    media: query,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}
+
+/** Mobile fix (UI-MOBILE-iphone.md #5): stubs `window.matchMedia` so `useIsNarrowViewport(768)`
+ * reports "narrow" -- `TenderTable` picks the `<md:` card list over the `<table>` in that state. */
+function setNarrowViewport() {
+  window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+    matches: query.includes("max-width"),
     media: query,
     addListener: () => {},
     removeListener: () => {},
@@ -72,6 +89,50 @@ function renderTable(hoverCapable: boolean) {
   );
   return { onToggleExpand };
 }
+
+function renderNarrowTable(over: Partial<{ expandedId: number | null }> = {}) {
+  setNarrowViewport();
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const onToggleExpand = vi.fn();
+  render(
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <TenderTable
+          tenders={[tender]}
+          expandedId={over.expandedId ?? null}
+          onToggleExpand={onToggleExpand}
+          onFeedback={() => {}}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>,
+  );
+  return { onToggleExpand };
+}
+
+describe("TenderTable mobile card list (UI-MOBILE-iphone.md #5)", () => {
+  it("renders a card (no <table>) below md, with the full title and no min-width table wrapper", () => {
+    renderNarrowTable();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByText("מכרז לרכש פודי ציון מטרות")).toBeInTheDocument();
+    expect(screen.getByText("US Army")).toBeInTheDocument();
+  });
+
+  it("clicking the card body toggles the expanded detail panel, same as the table row", () => {
+    const { onToggleExpand } = renderNarrowTable();
+    fireEvent.click(screen.getByText("US Army"));
+    expect(onToggleExpand).toHaveBeenCalledWith(9);
+  });
+
+  it("shows the expanded detail content inside the card when expanded", () => {
+    renderNarrowTable({ expandedId: 9 });
+    expect(screen.getByText(/פתח פריט מקושר/)).toBeInTheDocument();
+  });
+
+  it("renders the table (no cards) at desktop width", () => {
+    renderTable(true);
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+});
 
 describe("TenderTable source link preview (R10-preview)", () => {
   it("desktop: clicking the source link still opens it directly and does not toggle the row", () => {

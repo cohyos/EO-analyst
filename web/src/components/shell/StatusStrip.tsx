@@ -27,9 +27,15 @@ function Meter({
 }) {
   const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
   return (
-    <div className="flex min-w-[7.5rem] items-center gap-2" title={`${label}: ${used}/${total} ${unit}`}>
+    <div
+      className="flex shrink-0 items-center gap-1.5 whitespace-nowrap sm:min-w-[7.5rem] sm:gap-2"
+      title={`${label}: ${used}/${total} ${unit}`}
+    >
       <span className="text-fg-dim">{label}</span>
-      <div className="h-1.5 w-16 overflow-hidden rounded-full bg-bg-sunken">
+      {/* Meter track: secondary on a phone (defect — RAM/GPU strip cramped
+          against the "local inference paused" banner on narrow widths) —
+          hidden below `sm:` so only the compact label + percentage remain. */}
+      <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-bg-sunken sm:block">
         <div
           className={cn("h-full rounded-full", danger && pct > 85 ? "bg-hot" : "bg-accent")}
           style={{ width: `${pct}%` }}
@@ -92,7 +98,14 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
   return (
     <div className="relative shrink-0">
       {gate.local_inference_paused && (
-        <div role="status" className="border-t border-border bg-bg-raised px-4 py-1 text-xs text-warn">
+        // Own full-width block row above the (horizontally-scrolling) resource
+        // strip — never the same flex row, so it can never run under/behind it;
+        // `break-words` keeps it wrapping to a second line on a phone instead
+        // of overflowing.
+        <div
+          role="status"
+          className="w-full break-words border-t border-border bg-bg-raised px-4 py-1 text-xs leading-snug text-warn"
+        >
           {t("shell.localInferencePaused")}
         </div>
       )}
@@ -102,7 +115,7 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
       <footer
         role="status"
         aria-label="סטטוס משאבים — לחץ להיסטוריה"
-        className="pb-safe flex min-h-9 items-center gap-4 overflow-x-auto border-t border-border bg-bg-raised px-4 font-mono text-xs no-scrollbar-x"
+        className="pb-safe flex min-h-9 items-center gap-2 overflow-x-auto border-t border-border bg-bg-raised px-4 font-mono text-xs no-scrollbar-x sm:gap-4"
       >
         <button
           type="button"
@@ -123,21 +136,31 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
             unit="MB"
             danger
           />
-          <span className="text-fg-dim">
+          <span className="hidden text-fg-dim sm:inline">
             {mbToGb(gate.gpu.vram_used_mb)}/{mbToGb(gate.gpu.vram_total_mb)} GB
           </span>
-          <span className="text-fg-dim">GPU {gate.gpu.util_pct}%</span>
-          <span className={cn(gate.gpu.temp_c > 80 ? "text-hot" : "text-fg-dim")}>
+          <span className="shrink-0 whitespace-nowrap text-fg-dim">GPU {gate.gpu.util_pct}%</span>
+          {/* Temperature is diagnostic detail, not one of the load-bearing phone readouts —
+              moved off the phone line (`hidden sm:inline`) so it can never be the thing that
+              pushes RAM/queue/services past 390px; still available at `sm:`+ and in the drawer. */}
+          <span
+            className={cn(
+              "hidden shrink-0 whitespace-nowrap sm:inline",
+              gate.gpu.temp_c > 80 ? "text-hot" : "text-fg-dim",
+            )}
+          >
             {gate.gpu.temp_c}°C
           </span>
           <Meter label="RAM" used={ramUsedMb} total={gate.ram.total_mb} unit="MB" />
-          <span className="text-fg-dim">דיסק {gate.disk_free_gb} GB פנוי</span>
+          <span className="hidden text-fg-dim sm:inline">דיסק {gate.disk_free_gb} GB פנוי</span>
 
+          {/* Loaded-model chips and the CPU-offload badge are unbounded in width (model
+              names, counts) — hidden below `sm:` so they can never overflow the phone strip. */}
           {gate.loaded_models.map((m) => (
             <span
               key={m.name}
               className={cn(
-                "rounded px-1.5 py-0.5",
+                "hidden shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 sm:inline-block",
                 m.cpu_offload ? "bg-warn/15 text-warn" : "bg-bg-sunken text-accent",
               )}
               title={m.cpu_offload ? `${m.name} — CPU offload פעיל` : m.name}
@@ -147,25 +170,28 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
             </span>
           ))}
           {cpuOffloadCount > 0 && (
-            <span className="rounded bg-warn/15 px-1.5 py-0.5 text-warn">
+            <span className="hidden shrink-0 whitespace-nowrap rounded bg-warn/15 px-1.5 py-0.5 text-warn sm:inline-block">
               CPU offload ×{cpuOffloadCount}
             </span>
           )}
         </button>
 
-        <span className="text-fg-dim">תור: {pipeline.queue_depth}</span>
+        <span className="shrink-0 whitespace-nowrap text-fg-dim">תור: {pipeline.queue_depth}</span>
         {pipeline.stage && (
-          <span className="rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg">
+          <span className="hidden shrink-0 whitespace-nowrap rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg sm:inline-block">
             {locale === "he" ? stageLabelHe(pipeline.stage) : pipeline.stage}
           </span>
         )}
         {pipeline.current_job && (
           // U4/F17: a persistent indicator that *something* is running in the background even
           // when the analyst isn't on the Morning page watching the run-now popover — F17's
-          // repro was a job nobody could see anywhere in the UI.
+          // repro was a job nobody could see anywhere in the UI. On phones the job's kind label
+          // is unbounded width (Hebrew job names can run long), so it moves into the resource
+          // drawer's reach at `sm:`+ rather than risk pushing the always-visible readouts off
+          // a 390px screen; RAM/GPU/VRAM/queue/services stay the guaranteed-safe phone set.
           <span
             role="status"
-            className="flex shrink-0 items-center gap-1 rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg"
+            className="hidden shrink-0 items-center gap-1 whitespace-nowrap rounded bg-accent-muted px-1.5 py-0.5 text-accent-fg sm:flex"
             title={t("topBar.backgroundRunIndicator", { kind: jobLabel(pipeline.current_job.kind, locale) })}
           >
             <span className="relative flex h-1.5 w-1.5" aria-hidden="true">
@@ -178,16 +204,28 @@ export function StatusStrip({ state }: { state: StatusSocketState }) {
 
         <div className="flex-1" />
 
-        <div className="flex items-center gap-2">
-          {Object.entries(services).map(([key, ok]) => (
-            <span key={key} className="flex items-center gap-1" title={SERVICE_LABELS[key] ?? key}>
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          {/* Below `sm:` this collapses to dots-only (defect #1): the text label is hidden and
+              the status moves onto the dot's own aria-label/title instead, so a screen reader
+              or tooltip still gets "PG — מחובר" even though nothing is rendered as visible text. */}
+          {Object.entries(services).map(([key, ok]) => {
+            const label = SERVICE_LABELS[key] ?? key;
+            const statusHe = ok ? "מחובר" : "מנותק";
+            return (
               <span
-                className={cn("h-2 w-2 rounded-full", ok ? "bg-ok" : "bg-danger")}
-                aria-hidden="true"
-              />
-              <span className="text-fg-dim">{SERVICE_LABELS[key] ?? key}</span>
-            </span>
-          ))}
+                key={key}
+                className="flex items-center gap-1"
+                title={`${label} — ${statusHe}`}
+                aria-label={`${label} — ${statusHe}`}
+              >
+                <span
+                  className={cn("h-2 w-2 shrink-0 rounded-full", ok ? "bg-ok" : "bg-danger")}
+                  aria-hidden="true"
+                />
+                <span className="hidden text-fg-dim sm:inline">{label}</span>
+              </span>
+            );
+          })}
         </div>
       </footer>
     </div>

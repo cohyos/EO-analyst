@@ -65,7 +65,9 @@ export function CorroborationBadge({
   }, [open]);
 
   const status = corroboration?.status ?? "unknown";
-  const sizeClass = size === "sm" ? "h-5 text-[10px]" : "h-6 text-xs";
+  // Mobile fix (UI-MOBILE-iphone.md #9): 10px text is below the readable floor even inside a
+  // compact "sm" chip -- both sizes now render at text-xs (12px).
+  const sizeClass = size === "sm" ? "h-5 text-xs" : "h-6 text-xs";
   const baseChip =
     "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 font-medium";
 

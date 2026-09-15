@@ -97,4 +97,40 @@ describe("PipelineReplayTimeline", () => {
     expect(label.className).toContain("truncate");
     expect(label.closest("li")?.className).toContain("min-w-0");
   });
+
+  // Mobile fix (UI-MOBILE-iphone.md #2): below `sm`, 2 grid columns squeezed each stage's label
+  // to ~170px and `truncate` ate it down to 1-3 characters ("ק…", "מ…"). A single mobile column
+  // gives every stage its own full-width row instead.
+  it("uses a single column below sm (no truncation needed there) and restores 2/4 columns from sm up", () => {
+    const lastRun: PipelineLastRun = {
+      started_at: null,
+      finished_at: null,
+      state: "done",
+      stages: { dedup_xlang: stage({ minutes: 2 }) },
+    };
+    render(<PipelineReplayTimeline lastRun={lastRun} />);
+    const list = screen.getByText("זיהוי כפילויות רב-לשוני").closest("ul");
+    expect(list?.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(["grid-cols-1", "sm:grid-cols-2", "lg:grid-cols-4"]),
+    );
+    // The plain (non-responsive) 2-column class from before this fix must be gone.
+    expect(list?.className.split(/\s+/)).not.toContain("grid-cols-2");
+
+    const label = screen.getByText("זיהוי כפילויות רב-לשוני");
+    expect(label.className).toContain("whitespace-nowrap");
+  });
+
+  it("keeps the stage duration on the same line as the label and never wraps it mid-number", () => {
+    const lastRun: PipelineLastRun = {
+      started_at: null,
+      finished_at: null,
+      state: "done",
+      stages: { ingest: stage({ minutes: 14.5 }) },
+    };
+    render(<PipelineReplayTimeline lastRun={lastRun} />);
+    const duration = screen.getByText("14.5 דקות");
+    expect(duration.className).toContain("whitespace-nowrap");
+    // Same <li> row as the label -- not a second line.
+    expect(duration.closest("li")).not.toBeNull();
+  });
 });

@@ -161,6 +161,10 @@ describe("CorroborationBadge", () => {
 
   it("supports a compact size variant without changing the rendered label", () => {
     render(<CorroborationBadge corroboration={corr({ status: "single_source" })} size="sm" />);
-    expect(screen.getByText("מקור יחיד").closest("[data-testid]")?.className).toMatch(/text-\[10px\]/);
+    // Mobile fix (UI-MOBILE-iphone.md #9): the compact "sm" variant used to render at 10px, below
+    // the readable floor -- it's still visually compact (h-5) but the text itself is now text-xs
+    // (12px) like every other size.
+    expect(screen.getByText("מקור יחיד").closest("[data-testid]")?.className).toMatch(/\btext-xs\b/);
+    expect(screen.getByText("מקור יחיד").closest("[data-testid]")?.className).toMatch(/\bh-5\b/);
   });
 });

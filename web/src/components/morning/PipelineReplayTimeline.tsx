@@ -54,8 +54,13 @@ export function PipelineReplayTimeline({ lastRun }: { lastRun: PipelineLastRun |
           ignores the child's `truncate`), which read as clipped/overlapping text next to the
           duration. `min-w-0` on every cell -- and on the label span itself, since it also sits in
           a flex row -- forces both to respect the track/row width so `truncate` actually applies,
-          and the duration gets its own fixed-width column instead of just trailing the label. */}
-      <ul className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs lg:grid-cols-4">
+          and the duration gets its own fixed-width column instead of just trailing the label.
+          Mobile fix (UI-MOBILE-iphone.md #2): 2 columns were already active below `lg`, so at
+          390px each label+dot+duration cell got only ~170px and `truncate` ate the (Hebrew) stage
+          name down to 1-3 characters -- the actual "what happened overnight" content. `grid-cols-1`
+          below `sm` gives every stage its own full-width row so the label never needs to truncate;
+          `sm:grid-cols-2 lg:grid-cols-4` restores the original layout from `sm` up unchanged. */}
+      <ul className="grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2 lg:grid-cols-4">
         {entries.map((e) => {
           const failed = e.status === "failed";
           const durationText = e.minutes != null ? formatStageMinutes(e.minutes) : STAGE_STATUS_LABEL_HE[e.status];
@@ -72,7 +77,11 @@ export function PipelineReplayTimeline({ lastRun }: { lastRun: PipelineLastRun |
                 className="flex min-w-0 flex-1 items-center gap-1"
                 aria-label={`${e.label} — ${STAGE_STATUS_LABEL_HE[e.status]}${failed && e.error ? ` — ${e.error}` : ""}`}
               >
-                <span className="min-w-0 truncate text-fg-dim">{e.label}</span>
+                {/* Mobile fix (#2): the grid-cols-1 mobile row is full-width, so the label never
+                    needs to truncate there (`whitespace-nowrap`, no ellipsis) -- `sm:truncate`
+                    restores the original clip-if-needed behavior for the narrower sm/lg columns,
+                    unchanged from before this fix. */}
+                <span className="min-w-0 whitespace-nowrap text-fg-dim sm:truncate">{e.label}</span>
                 {/* Never inside the truncating span: a long label must not be able to clip the
                     failure marker off the end, since it's the only in-legend hint of which
                     stage broke the run. */}
@@ -81,7 +90,11 @@ export function PipelineReplayTimeline({ lastRun }: { lastRun: PipelineLastRun |
                   <span className="shrink-0 text-xs font-semibold text-warn">{STAGE_STATUS_LABEL_HE[e.status]}</span>
                 )}
               </span>
-              <span className="ms-auto w-16 shrink-0 text-end font-mono text-fg-muted">{durationText}</span>
+              {/* Mobile fix (#2): duration on the same line as the label (justify-between via the
+                  `ms-auto` push), `whitespace-nowrap` so "N דקות" never wraps mid-number. */}
+              <span className="ms-auto w-16 shrink-0 whitespace-nowrap text-end font-mono text-fg-muted">
+                {durationText}
+              </span>
             </li>
           );
         })}

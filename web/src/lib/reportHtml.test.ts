@@ -168,18 +168,33 @@ describe("decodeHtmlEntities", () => {
 // viewport it either overflows the page or its columns get crushed. wrapReportTables gives it a
 // dedicated horizontal-scroll container (globals.css `.report-table-wrap`).
 describe("wrapReportTables", () => {
-  it("wraps a table in .report-table-wrap", () => {
+  // Round-2 mobile fix (UI-MOBILE-iphone.md #1): a table with <= 4 columns is wrapped
+  // `dir="rtl"` and gets the extra `--narrow` class (globals.css lets it wrap instead of forcing
+  // a horizontal scrollbar) -- a 1-column table like this one qualifies.
+  it("wraps a narrow (<=4 column) table with the --narrow class and dir=rtl, no scroll hint", () => {
     const html = "<p>before</p><table><tr><td>x</td></tr></table><p>after</p>";
     const out = wrapReportTables(html);
     expect(out).toBe(
-      '<p>before</p><div class="report-table-wrap"><table><tr><td>x</td></tr></table></div><p>after</p>',
+      '<p>before</p><div class="report-table-wrap report-table-wrap--narrow" dir="rtl">' +
+        '<table><tr><td>x</td></tr></table></div><p>after</p>',
     );
+  });
+
+  it("wraps a wide (>4 column) table with a scroll hint and no --narrow class", () => {
+    const html =
+      "<table><tr><th>a</th><th>b</th><th>c</th><th>d</th><th>e</th></tr><tr><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr></table>";
+    const out = wrapReportTables(html);
+    expect(out).toContain('<div class="report-table-wrap" dir="rtl">');
+    expect(out).not.toContain("report-table-wrap--narrow");
+    expect(out).toContain("report-table-scroll-hint");
+    // the hint renders before the <table>, inside the wrapper
+    expect(out.indexOf("report-table-scroll-hint")).toBeLessThan(out.indexOf("<table>"));
   });
 
   it("wraps multiple tables independently", () => {
     const html = "<table><tr><td>1</td></tr></table><table><tr><td>2</td></tr></table>";
     const out = wrapReportTables(html);
-    expect((out.match(/report-table-wrap/g) || []).length).toBe(2);
+    expect((out.match(/class="report-table-wrap/g) || []).length).toBe(2);
   });
 
   it("passes through html with no table, and null/undefined", () => {

@@ -291,7 +291,7 @@ export function EntityGraphExplorer({
                       <select
                         value={layoutName}
                         onChange={(e) => setLayoutName(e.target.value as GraphLayoutName)}
-                        className="bg-transparent text-fg"
+                        className="max-w-full min-w-0 bg-transparent text-fg"
                         aria-label="פריסת גרף"
                       >
                         {LAYOUT_OPTIONS.map((l) => (

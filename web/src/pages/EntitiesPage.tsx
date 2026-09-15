@@ -54,7 +54,7 @@ function EntityRow({ entity, active }: { entity: EntitySummary; active: boolean 
           <bdi className="truncate text-sm font-medium text-fg" title={entity.name}>
             {entity.name}
           </bdi>
-          <span className="shrink-0 rounded bg-bg-sunken px-1.5 py-0.5 text-[10px] text-fg-dim">
+          <span className="shrink-0 rounded bg-bg-sunken px-1.5 py-0.5 text-xs text-fg-dim">
             {entityKindLabel(entity.kind)}
           </span>
           {entity.country && (
@@ -76,14 +76,14 @@ function EntityRow({ entity, active }: { entity: EntitySummary; active: boolean 
           )}
           {entity.is_watchlist && (
             <span
-              className="shrink-0 rounded bg-level-orange-bg px-1 py-0.5 text-[10px] text-level-orange"
+              className="shrink-0 rounded bg-level-orange-bg px-1 py-0.5 text-xs text-level-orange"
               title="ברשימת המעקב"
             >
               ★
             </span>
           )}
         </div>
-        <div className="mt-1 flex items-center gap-2 font-mono text-[11px] text-fg-dim">
+        <div className="mt-1 flex items-center gap-2 font-mono text-xs text-fg-dim">
           <span>{entity.mentions_7d} ב-7 ימים</span>
           <span>·</span>
           <span>{entity.mentions_30d} ב-30 יום</span>
@@ -172,7 +172,7 @@ function EntityListPanel({
           value={kind}
           onChange={(e) => setParam("kind", e.target.value || null)}
           aria-label="סינון לפי סוג ישות"
-          className="rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+          className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
         >
           <option value="">כל הסוגים</option>
           {KIND_OPTIONS.map((k) => (
@@ -185,7 +185,7 @@ function EntityListPanel({
           value={country}
           onChange={(e) => setParam("country", e.target.value || null)}
           aria-label="סינון לפי מדינה"
-          className="rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+          className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
         >
           <option value="">כל המדינות</option>
           {countries.map((c) => (
@@ -198,7 +198,7 @@ function EntityListPanel({
           value={sort}
           onChange={(e) => setParam("sort", e.target.value)}
           aria-label="מיון"
-          className="rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
+          className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-1 text-fg"
         >
           {SORT_OPTIONS.map((s) => (
             <option key={s.value} value={s.value}>
@@ -468,7 +468,7 @@ function GraphPanel({
           <select
             value={depth}
             onChange={(e) => setDepth(Number(e.target.value))}
-            className="rounded-md border border-border-strong bg-bg px-1.5 py-0.5 text-sm"
+            className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-1.5 py-0.5 text-sm"
           >
             <option value={1}>1</option>
             <option value={2}>2</option>

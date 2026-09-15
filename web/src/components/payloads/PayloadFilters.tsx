@@ -50,7 +50,7 @@ export function PayloadFilters({
       <select
         value={value.category}
         onChange={(e) => onChange({ ...value, category: e.target.value as PayloadFiltersState["category"] })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
         aria-label={t("payloads.filterByCategoryAria")}
       >
         <option value="">{t("payloads.categoryAll")}</option>
@@ -64,7 +64,7 @@ export function PayloadFilters({
       <select
         value={value.vendor}
         onChange={(e) => onChange({ ...value, vendor: e.target.value })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
         aria-label={t("payloads.filterByVendorAria")}
       >
         <option value="">{t("payloads.vendorAll")}</option>

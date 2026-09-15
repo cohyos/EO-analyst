@@ -30,6 +30,12 @@ export function InvestigationDetailPage() {
   const isRunning = data?.state === "running";
   const { liveLines, connected } = useInvestigationSocket(jobId, isRunning);
 
+  // Round-2 mobile fix (UI-MOBILE-iphone.md #8): the question rendered at heading size with no
+  // cap took up most of a phone screen, pushing the actual answer/status below the fold. Below
+  // `md`, it starts clamped to 4 lines at body size with an explicit expand toggle; `md:`+ keeps
+  // the original uncapped heading-size rendering.
+  const [questionExpanded, setQuestionExpanded] = useState(false);
+
   const stop = useMutation({
     mutationFn: () => api.postInvestigationStop(jobId!),
     onSuccess: () =>
@@ -90,7 +96,12 @@ export function InvestigationDetailPage() {
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold">
+            <h2
+              className={cn(
+                "w-full text-base font-semibold md:w-auto md:text-lg",
+                !questionExpanded && "line-clamp-4 md:line-clamp-none",
+              )}
+            >
               <bdi>{renderBidiText(data.question)}</bdi>
             </h2>
             {isRunning ? (
@@ -114,6 +125,15 @@ export function InvestigationDetailPage() {
               )
             )}
           </div>
+          {data.question && (
+            <button
+              type="button"
+              onClick={() => setQuestionExpanded((v) => !v)}
+              className="mt-0.5 text-xs text-accent hover:underline md:hidden"
+            >
+              {questionExpanded ? "הצג פחות" : "הצג עוד"}
+            </button>
+          )}
           <p className="mt-1 text-xs text-fg-dim">
             {formatDateTime(data.started_at)} · {data.rounds} סבבים · {data.pages_read}{" "}
             עמודים · {connected ? "מחובר" : "מנותק"}

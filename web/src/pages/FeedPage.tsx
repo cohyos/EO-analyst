@@ -18,13 +18,19 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ToastStack } from "@/components/ToastStack";
 import { useToastQueue } from "@/hooks/useToastQueue";
 import { useVirtualList } from "@/hooks/useVirtualList";
+import { useIsNarrowViewport } from "@/hooks/useIsNarrowViewport";
 import { useUiStore } from "@/store/uiStore";
 import { useI18n, useT } from "@/i18n";
 import { countryOption, normalizeCountryCode } from "@/lib/countries";
 import { groupDuplicateItems } from "@/lib/dedupGroups";
 import { cn } from "@/lib/cn";
 
-const ROW_HEIGHT = 64;
+// Mobile fix (UI-MOBILE-iphone.md #1): `FeedRow` is two rows tall (`h-28`) below the `sm`
+// breakpoint instead of the desktop single-row `h-16` -- both this fixed-row-height virtualizer
+// and the (non-windowed) grouped-by-country view below need a matching taller row slot on phones,
+// tracked reactively so resizing/rotating keeps the math in sync with `FeedRow`'s own CSS.
+const ROW_HEIGHT_DESKTOP = 64;
+const ROW_HEIGHT_MOBILE = 112;
 const PAGE_SIZE = 100;
 
 const LEVEL_BY_DIGIT: Record<string, TriageLevel> = {
@@ -374,6 +380,9 @@ export function FeedPage() {
     navigate,
     setOpenItemId,
   ]);
+
+  const isNarrowViewport = useIsNarrowViewport(640);
+  const ROW_HEIGHT = isNarrowViewport ? ROW_HEIGHT_MOBILE : ROW_HEIGHT_DESKTOP;
 
   const { containerRef, totalHeight, visibleItems, scrollToIndex } =
     useVirtualList<ItemCard>({

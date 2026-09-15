@@ -151,13 +151,31 @@ export function renderBidiRuns(text: string | null | undefined): React.ReactNode
   const runs = splitBidiRuns(text);
   if (runs.length === 0) return text;
   if (runs.length === 1 && runs[0][0] === "he") return text;
-  return runs.map(([cls, chunk], i) =>
-    cls === "other" ? (
-      <bdi key={i} dir="ltr">
-        {chunk}
-      </bdi>
-    ) : (
-      <Fragment key={i}>{chunk}</Fragment>
-    ),
-  );
+  return runs.map(([cls, chunk], i) => {
+    if (cls !== "other") return <Fragment key={i}>{chunk}</Fragment>;
+    // Round-2 mobile fix (UI-MOBILE-iphone.md #5): a leading/trailing space that lands *inside*
+    // a `<bdi>` is swallowed by the isolate -- it's atomic, so the space collapses against the
+    // isolated run's own edge instead of visually separating it from the Hebrew word beside it.
+    // That's exactly the "מערכת SPECTRO XRהיא" glued-together bug (no visible gap between the
+    // English run and the following Hebrew word) -- the same class of bug `fixBdiSpacing`
+    // (lib/reportHtml.ts) already fixes for server-rendered report HTML. `splitBidiRuns` itself
+    // still folds a boundary space into whichever run was open (needed for run-splitting to
+    // agree with the backend's own `_split_bidi_runs`), so the fix lives here at render time:
+    // move any leading/trailing whitespace of an "other" chunk back outside the `<bdi>` as plain
+    // text, keeping the same visible characters in the same order.
+    const leadingMatch = /^\s+/.exec(chunk);
+    const leading = leadingMatch ? leadingMatch[0] : "";
+    const rest = chunk.slice(leading.length);
+    const trailingMatch = /\s+$/.exec(rest);
+    const trailing = trailingMatch ? trailingMatch[0] : "";
+    const core = trailing ? rest.slice(0, rest.length - trailing.length) : rest;
+    if (!core) return <Fragment key={i}>{chunk}</Fragment>;
+    return (
+      <Fragment key={i}>
+        {leading}
+        <bdi dir="ltr">{core}</bdi>
+        {trailing}
+      </Fragment>
+    );
+  });
 }

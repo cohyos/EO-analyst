@@ -182,11 +182,15 @@ export function SettingsPage() {
               <label htmlFor="llm-default" className="text-sm text-fg-muted">
                 מודל ברירת מחדל לצ׳אט ולחקירות אינטראקטיביות (עוקף את המצב הגלובלי, לשאלה זו בלבד):
               </label>
+              {/* Mobile fix (UI-MOBILE-iphone.md #3): the model select's longest option
+                  ("...gemini-3.1-pro-high") sized the box past the screen edge on phones with no
+                  way to see or reach the rest of it. `max-w-full min-w-0` caps it to the wrapping
+                  row's actual width. */}
               <select
                 id="llm-default"
                 defaultValue={llmQuery.data.interactive_default}
                 onChange={(e) => saveLlmDefault.mutate(e.target.value)}
-                className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+                className="w-full max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg sm:w-auto"
               >
                 {llmQuery.data.providers
                   .filter((p) => p.kind === "local" || llmQuery.data!.allow_cloud)

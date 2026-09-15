@@ -139,7 +139,7 @@ export function SourcePreviewCard({
               {productLines.map((id) => (
                 <span
                   key={id}
-                  className="rounded-full bg-bg-sunken px-1.5 py-0.5 text-[10px] text-fg-dim"
+                  className="rounded-full bg-bg-sunken px-1.5 py-0.5 text-xs text-fg-dim"
                 >
                   <bdi>{productLineLabel(id, locale)}</bdi>
                 </span>

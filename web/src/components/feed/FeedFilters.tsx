@@ -123,7 +123,7 @@ export function FeedFilters({
       <select
         value={value.domain}
         onChange={(e) => onChange({ ...value, domain: e.target.value })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
         aria-label={t("feed.filterByDomainAria")}
       >
         <option value="">{t("feed.allDomains")}</option>
@@ -217,7 +217,7 @@ export function FeedFilters({
       <select
         value={value.sort}
         onChange={(e) => onChange({ ...value, sort: e.target.value as FeedFiltersState["sort"] })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
         aria-label={t("feed.sortAria")}
       >
         <option value="score">{t("feed.sortByScore")}</option>

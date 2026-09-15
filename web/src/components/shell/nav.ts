@@ -55,6 +55,26 @@ export function useNavItems(): Array<{ to: string; end?: boolean; label: string;
   return NAV_ROUTES.map((item) => ({ to: item.to, end: item.end, label: t(item.labelKey), icon: item.icon }));
 }
 
+// The phone bottom tab bar (NavRail.tsx's `MobileNav`, defect #4 in
+// docs/qa/content_review/UI-MOBILE-iphone.md) only has room for a handful of
+// slots, so it surfaces the routes analysts open most (morning briefing,
+// triage feed, reports, product dossiers) plus a "more" button for the rest —
+// picked from the very `NAV_ROUTES` table above so the two navs never drift.
+const MOBILE_PRIMARY_ROUTE_PATHS = ["/", "/feed", "/reports", "/dossiers"] as const;
+
+/** `{ primary, more }` nav entries for the phone bottom tab bar + its overflow sheet. */
+export function useMobileNavGroups(): {
+  primary: Array<{ to: string; end?: boolean; label: string; icon: typeof LayoutDashboard }>;
+  more: Array<{ to: string; end?: boolean; label: string; icon: typeof LayoutDashboard }>;
+} {
+  const items = useNavItems();
+  const primary = MOBILE_PRIMARY_ROUTE_PATHS.map((to) => items.find((item) => item.to === to)).filter(
+    (item): item is (typeof items)[number] => item != null,
+  );
+  const more = items.filter((item) => !(MOBILE_PRIMARY_ROUTE_PATHS as readonly string[]).includes(item.to));
+  return { primary, more };
+}
+
 /** Localized page heading for the given pathname, used by `TopBar`'s `<h1>`. */
 export function usePageTitle(pathname: string): string {
   const t = useT();

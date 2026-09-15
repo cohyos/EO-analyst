@@ -88,7 +88,7 @@ export function ModelPicker({
             : "מודל מקומי — אינו יוצא מהמחשב"
         }
         className={cn(
-          "rounded-md border border-border-strong bg-bg px-2 py-1.5 text-fg",
+          "max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-fg",
           compact ? "text-xs" : "text-sm",
         )}
       >
@@ -126,7 +126,7 @@ export function ModelPicker({
           value={power ?? ""}
           onChange={(e) => onChange(`${providerId}:${model}${e.target.value ? `@${e.target.value}` : ""}`)}
           className={cn(
-            "rounded-md border border-border-strong bg-bg px-2 py-1.5 text-fg",
+            "max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-fg",
             compact ? "text-xs" : "text-sm",
           )}
         >

@@ -101,7 +101,7 @@ export function BdPage() {
                 id="bd-lookback"
                 value={lookbackDays}
                 onChange={(e) => setLookbackDays(Number(e.target.value))}
-                className="flex-1 rounded-md border border-border-strong bg-bg px-2 py-1 text-sm"
+                className="max-w-full min-w-0 flex-1 rounded-md border border-border-strong bg-bg px-2 py-1 text-sm"
               >
                 {LOOKBACK_OPTIONS.map((days) => (
                   <option key={days} value={days}>

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -285,6 +285,73 @@ describe("ReportsPage 'חקירות בדוח' side list (R10-links)", () => {
     );
     await waitFor(() => expect(getReportInvestigations).toHaveBeenCalledWith(1));
     expect(screen.queryByText(/חקירות בדוח/)).not.toBeInTheDocument();
+  });
+});
+
+// Round-2 mobile fix (UI-MOBILE-iphone.md #1): below `md`, once a report is selected the list
+// hides and a "back to list" control appears -- the single-scroll-container fix for the detail
+// pane collapsing to a sliver on phones.
+function setNarrowViewport() {
+  window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+    matches: query.includes("max-width"),
+    media: query,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}
+
+// `setNarrowViewport` replaces `window.matchMedia` for the rest of the file (jsdom's `window`
+// persists across tests within one file) unless undone -- restore the original stub (installed by
+// src/test/setup.ts, always "not narrow") after every test so a later test that doesn't call
+// `setNarrowViewport` itself isn't silently left in whatever state the previous test set.
+const originalMatchMedia = window.matchMedia;
+afterEach(() => {
+  window.matchMedia = originalMatchMedia;
+});
+
+describe("ReportsPage phone layout (round-2 mobile fix #1)", () => {
+  it("hides the report list and shows a back-to-list control once a report is selected on a narrow viewport", async () => {
+    setNarrowViewport();
+    const summary = report();
+    getReports.mockResolvedValue([summary]);
+    getReport.mockResolvedValue({
+      ...summary,
+      html: "<section><h2>תקציר מנהלים</h2><p>תוכן</p></section>",
+      open_points: [],
+      items_included: [1, 2, 3],
+    });
+    renderPage();
+
+    const row = await screen.findByRole("button", {
+      name: /סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/,
+    });
+    fireEvent.click(row);
+
+    const back = await screen.findByRole("button", { name: /חזרה לרשימה/ });
+    expect(back).toBeInTheDocument();
+    // the list row that was just clicked is no longer rendered -- the list panel is hidden.
+    expect(
+      screen.queryByRole("button", { name: /סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(back);
+    expect(
+      await screen.findByRole("button", { name: /סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the list visible and shows no back control on a narrow viewport before any report is selected", async () => {
+    setNarrowViewport();
+    getReports.mockResolvedValue([report()]);
+    renderPage();
+
+    expect(
+      await screen.findByRole("button", { name: /סקר פטנטים: FPA עם פיקסל דיגיטלי \(DROIC\)/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /חזרה לרשימה/ })).not.toBeInTheDocument();
   });
 });
 

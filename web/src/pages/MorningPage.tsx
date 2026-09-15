@@ -212,7 +212,10 @@ export function MorningPage() {
                 >
                   <LevelBadge level={h.level ?? "yellow"} size="sm" />
                   <div className="min-w-0 flex-1">
-                    <bdi className="block truncate font-medium" title={h.title ?? undefined}>
+                    {/* Mobile fix (UI-MOBILE-iphone.md #2): a single-line `truncate` clipped the
+                        headline itself -- the point of this card -- down to a sliver on phones.
+                        2-line clamp keeps it readable at any width instead of cutting it off. */}
+                    <bdi className="block line-clamp-2 font-medium" title={h.title ?? undefined}>
                       {h.title}
                     </bdi>
                     <bdi className="block truncate text-sm text-fg-muted" title={h.summary_he ?? undefined}>

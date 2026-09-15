@@ -38,6 +38,9 @@ export const he = {
     settings: "הגדרות",
     itemDetail: "פרטי פריט",
     shellFallback: "חדר מצב + עמית",
+    more: "עוד",
+    moreAriaLabel: "עוד אפשרויות ניווט",
+    current: "עמוד נוכחי",
   },
   common: {
     search: "חיפוש",
@@ -91,6 +94,7 @@ export const he = {
     runNowToastDismiss: "סגור התראה",
     runNowConflictToast: "ריצה מקבילה כבר רצה או ממתינה בתור (מזהה {jobId})",
     backgroundRunIndicator: "ריצה פעילה ברקע: {kind}",
+    overflowMenuAria: "אפשרויות נוספות",
   },
   levels: {
     red: "קריטי",
@@ -381,6 +385,8 @@ export const he = {
     commandPaletteEntitiesGroup: "ישויות",
     commandPaletteNoResults: "אין תוצאות",
     commandPalettePlaceholder: "חפש פריטים, ישויות…",
+    moreSheetTitle: "כל דפי הניווט",
+    moreSheetClose: "סגור",
     resourceHistoryDialogAria: "היסטוריית משאבים",
     localInferencePaused: "מודלים מקומיים מושהים לשמירת משאבים — הממשק וספקי הענן זמינים",
     resourceHistoryTitle: "היסטוריית משאבים — 30 דקות אחרונות",

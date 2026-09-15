@@ -25,7 +25,13 @@ export function NavRail() {
       // it. Scrolling keeps every item reachable (Playwright's own
       // auto-scroll-into-view finds it) without needing a separate
       // overflow/"more" menu.
-      className="flex w-16 min-h-0 shrink-0 flex-col items-center gap-1 overflow-y-auto border-l border-border bg-bg-raised py-3 xl:w-48 xl:items-stretch xl:px-2"
+      //
+      // `hidden md:flex` (defect #4, docs/qa/content_review/UI-MOBILE-iphone.md):
+      // below `md:` this rail never collapsed and permanently ate ~64px of a
+      // 390px phone screen. Below `md:` `MobileNav` (in this same directory)
+      // renders a bottom tab bar with the same routes instead; at `md:` and
+      // up this rail renders exactly as before.
+      className="hidden min-h-0 w-16 shrink-0 flex-col items-center gap-1 overflow-y-auto border-l border-border bg-bg-raised py-3 md:flex xl:w-48 xl:items-stretch xl:px-2"
     >
       {navItems.map((item) => {
         const Icon = item.icon;

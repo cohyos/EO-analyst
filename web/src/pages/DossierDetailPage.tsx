@@ -206,11 +206,28 @@ export function DossierDetailPage() {
       label: t("dossiers.table.colDate"),
       render: (r) => {
         const text = dealDateOnly(r.date);
+        if (!text) return <DossierPlainText text={null} />;
         // PD-fix item 3: a date backfilled from the cited source's own publish date (never the
         // actual deal-closing date) says so, rather than reading as indistinguishable from one
         // that was -- mirrors `report.py`'s `_deal_date_cell`.
-        const suffix = r.date && r.date_kind === "published" ? " (תאריך פרסום)" : "";
-        return <DossierPlainText text={text ? `${text}${suffix}` : null} />;
+        //
+        // Round-2 mobile fix (UI-MOBILE-iphone.md #4): plain-text-concatenating the ISO date and
+        // the Hebrew annotation (`` `${text}${suffix}` ``) and letting `DossierPlainText`'s
+        // generic `renderBidiRuns` bidi-isolate it produced "2022-11-14תאריך פרסום(" -- the
+        // annotation's own bracket-symmetry tracking (see bidiText.tsx's `splitBidiRuns`) pulled
+        // the leading "(" into the *date's* LTR run (since it opens right after the digits, with
+        // only a space between) while the closing ")" landed in its own trailing isolate, so the
+        // two brackets ended up in different runs and the whole thing scrambled. Explicit markup
+        // instead: the date is its own `<bdi dir="ltr">`, the annotation is a separate `<span>`
+        // (never concatenated into one string), with a real space between the two -- reads
+        // "2022-11-14 (תאריך פרסום)" regardless of any generic bidi-splitting heuristic.
+        const isPublished = r.date_kind === "published";
+        return (
+          <span>
+            <bdi dir="ltr">{text}</bdi>
+            {isPublished && <span className="text-fg-dim"> (תאריך פרסום)</span>}
+          </span>
+        );
       },
     },
     {
@@ -342,7 +359,6 @@ export function DossierDetailPage() {
   return (
     <div data-share-content className="space-y-4 p-4 md:p-6">
       <DossierSectionNav items={NAV_ITEMS} />
-      <ContentShareActions title={d.product_name} links={data?.sources ?? []} />
 
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -405,6 +421,9 @@ export function DossierDetailPage() {
           )}
         </div>
       </div>
+      {/* Share row sits under the identity header so the product name is the first thing a phone shows
+          (round-2 mobile audit: it used to push "SPECTRO XR" below the fold). */}
+      <ContentShareActions title={d.product_name} links={data?.sources ?? []} />
 
       {d.pending_job && (
         <div role="status" className="rounded-md border border-border-strong bg-bg-sunken px-3 py-2 text-sm text-fg-dim">

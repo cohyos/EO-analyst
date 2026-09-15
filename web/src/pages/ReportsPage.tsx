@@ -9,6 +9,7 @@ import { formatDateTime } from "@/lib/time";
 import { decodeHtmlEntities } from "@/lib/reportHtml";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
 import { cn } from "@/lib/cn";
+import { useIsNarrowViewport } from "@/hooks/useIsNarrowViewport";
 import type { ReportSummary } from "@/types/api";
 
 const KIND_LABEL: Record<string, string> = {
@@ -87,7 +88,7 @@ function ReportRow({
       {report.preview_he && (
         <span className="line-clamp-1 max-w-full text-xs text-fg-dim">{report.preview_he}</span>
       )}
-      <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-fg-dim">
+      <span className="flex flex-wrap items-center gap-1.5 text-xs text-fg-dim">
         <span
           className={cn(
             "rounded bg-bg-sunken px-1.5 py-0.5 font-medium",
@@ -138,7 +139,7 @@ function ReportGroupRow({
             onClick={() => setExpanded((v) => !v)}
             aria-expanded={expanded}
             aria-controls={olderListId}
-            className="flex w-full items-center gap-1 border-b border-border bg-bg-sunken/40 px-3 py-1 text-[11px] text-fg-dim hover:bg-bg-sunken"
+            className="flex w-full items-center gap-1 border-b border-border bg-bg-sunken/40 px-3 py-1 text-xs text-fg-dim hover:bg-bg-sunken"
           >
             {expanded ? <ChevronUp size={12} aria-hidden="true" /> : <ChevronDown size={12} aria-hidden="true" />}
             גרסאות קודמות ({group.older.length})
@@ -212,44 +213,63 @@ export function ReportsPage() {
     [detailQuery.data],
   );
 
+  // Round-2 mobile fix (UI-MOBILE-iphone.md #1): a nested `overflow-y-auto` scroll container for
+  // the detail pane collapsed to near-zero height on phones (a 1-line sliver of the title, then
+  // blank space -- the report body itself never became visible even though it rendered fine into
+  // the DOM). Below `md`, once a report is selected: hide the list entirely (its own scroll
+  // container was part of the same squeeze) and let the detail pane grow to its natural height so
+  // the page's own `<main>` (AppShell, `overflow-y-auto`) is the single scroll container instead
+  // of a second one nested inside it. `md:`+ keeps the original two-pane, independently-scrolling
+  // split unchanged.
+  const isMobile = useIsNarrowViewport(768);
+  const showList = !isMobile || !selectedId;
+
   return (
     <div className="flex h-full flex-col md:flex-row">
-      <div className="w-full shrink-0 border-b border-border md:w-72 md:border-b-0 md:border-l">
-        <div className="border-b border-border p-3">
-          <select
-            value={kind}
-            onChange={(e) => setKind(e.target.value)}
-            className="w-full rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm"
-            aria-label="סינון לפי סוג דוח"
-          >
-            <option value="">כל הסוגים</option>
-            {Object.entries(KIND_LABEL).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
+      {showList && (
+        <div className="w-full shrink-0 border-b border-border md:w-72 md:border-b-0 md:border-l">
+          <div className="border-b border-border p-3">
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+              className="w-full rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm"
+              aria-label="סינון לפי סוג דוח"
+            >
+              <option value="">כל הסוגים</option>
+              {Object.entries(KIND_LABEL).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+          {listQuery.isLoading && <LoadingState label="טוען דוחות…" />}
+          {listQuery.isError && (
+            <ErrorState error={listQuery.error} onRetry={() => listQuery.refetch()} />
+          )}
+          {listQuery.data && listQuery.data.length === 0 && (
+            <EmptyState title="אין דוחות" />
+          )}
+          {/* Mobile fix (UI-MOBILE-iphone.md #6): on phones this list stacks above the detail pane
+              (flex-col, not the desktop side-by-side flex-row) -- capped at 70vh here it could eat
+              almost the entire viewport by itself, squeezing the `flex-1` detail pane below it down
+              to near-zero height once a report was selected (the report body never became visible,
+              "stayed on the list"). A much shorter cap on phones leaves real room for the detail
+              pane; `md:max-h-[70vh]` restores the original desktop sizing unchanged. */}
+          <ul className="max-h-48 overflow-y-auto md:max-h-[70vh]">
+            {groups.map((group) => (
+              <ReportGroupRow
+                key={group.key}
+                group={group}
+                selectedId={selectedId}
+                onSelect={(id) => setSearchParams({ id: String(id) })}
+              />
             ))}
-          </select>
+          </ul>
         </div>
-        {listQuery.isLoading && <LoadingState label="טוען דוחות…" />}
-        {listQuery.isError && (
-          <ErrorState error={listQuery.error} onRetry={() => listQuery.refetch()} />
-        )}
-        {listQuery.data && listQuery.data.length === 0 && (
-          <EmptyState title="אין דוחות" />
-        )}
-        <ul className="max-h-[70vh] overflow-y-auto">
-          {groups.map((group) => (
-            <ReportGroupRow
-              key={group.key}
-              group={group}
-              selectedId={selectedId}
-              onSelect={(id) => setSearchParams({ id: String(id) })}
-            />
-          ))}
-        </ul>
-      </div>
+      )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className={cn("min-w-0 flex-1", !isMobile && "min-h-0 overflow-y-auto")}>
         {!selectedId && <EmptyState title="בחר דוח מהרשימה" />}
         {selectedId && detailQuery.isLoading && <LoadingState label="טוען דוח…" />}
         {selectedId && detailQuery.isError && (
@@ -258,6 +278,15 @@ export function ReportsPage() {
         {detailQuery.data && processed && (
           <div className="mx-auto flex max-w-4xl gap-6 p-4 md:p-6">
             <article className="min-w-0 flex-1">
+              {isMobile && (
+                <button
+                  type="button"
+                  onClick={() => setSearchParams({})}
+                  className="mb-3 flex items-center gap-1 text-sm text-accent hover:underline"
+                >
+                  ← חזרה לרשימה
+                </button>
+              )}
               <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold text-fg-dim">
                   {detailQuery.data.title_he} · {formatDateTime(detailQuery.data.created_at)}
@@ -322,12 +351,12 @@ export function ReportsPage() {
                           </Link>
                           <div className="mt-1 flex flex-wrap items-center gap-1">
                             {inv.outcome && (
-                              <span className={cn("rounded-full px-1.5 py-0.5 text-[10px] font-medium", outcomeTone(inv.outcome))}>
+                              <span className={cn("rounded-full px-1.5 py-0.5 text-xs font-medium", outcomeTone(inv.outcome))}>
                                 {outcomeLabel(inv.outcome)}
                               </span>
                             )}
                             {inv.item_id != null && (
-                              <Link to={`/items/${inv.item_id}`} className="text-[10px] text-fg-dim hover:underline">
+                              <Link to={`/items/${inv.item_id}`} className="text-xs text-fg-dim hover:underline">
                                 פריט מקור
                               </Link>
                             )}

@@ -45,7 +45,7 @@ export function TenderFilters({
       <select
         value={value.status}
         onChange={(e) => onChange({ ...value, status: e.target.value as TenderStatus | "" })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
         aria-label="סינון לפי סטטוס"
       >
         <option value="">כל הסטטוסים</option>
@@ -59,7 +59,7 @@ export function TenderFilters({
       <select
         value={value.country}
         onChange={(e) => onChange({ ...value, country: e.target.value })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
         aria-label="סינון לפי מדינה"
       >
         <option value="">כל המדינות</option>

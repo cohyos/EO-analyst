@@ -12,10 +12,14 @@ import type { ProductLinePendingState } from "@/components/productLines/ProductL
 import { cn } from "@/lib/cn";
 import { domainSubdomainLabel } from "@/lib/taxonomy";
 import { useI18n, useT } from "@/i18n";
+import { useIsNarrowViewport } from "@/hooks/useIsNarrowViewport";
 import type { TenderFeedbackVerdict, TriageLevel } from "@/types/api";
 
 type Tab = "items" | "tenders" | "reports";
-const ROW_HEIGHT = 64;
+// Mobile fix (UI-MOBILE-iphone.md #1): `FeedRow` is two rows tall (`h-28`) below the `sm`
+// breakpoint -- this fixed-height wrapper needs a matching taller slot on phones.
+const ROW_HEIGHT_DESKTOP = 64;
+const ROW_HEIGHT_MOBILE = 112;
 
 /**
  * PL-ui (2026-09-07): `/product-lines/:id` -- header (name + subdomains/exemplar systems/
@@ -33,6 +37,8 @@ export function ProductLineDetailPage() {
   const [tab, setTab] = useState<Tab>("items");
   const [expandedTenderId, setExpandedTenderId] = useState<number | null>(null);
   const [pending, setPending] = useState<ProductLinePendingState | null>(null);
+  const isNarrowViewport = useIsNarrowViewport(640);
+  const ROW_HEIGHT = isNarrowViewport ? ROW_HEIGHT_MOBILE : ROW_HEIGHT_DESKTOP;
 
   const detailQuery = useQuery({
     queryKey: ["product-line", id],

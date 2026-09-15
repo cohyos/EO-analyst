@@ -172,9 +172,40 @@ export function fixBdiSpacing(html: string | null | undefined): string {
 // another, so a plain non-greedy match is safe here.
 const TABLE_RE = /<table\b[^>]*>[\s\S]*?<\/table>/g;
 
+// Round-2 mobile fix (UI-MOBILE-iphone.md #1): a table's first row (header if present, else the
+// first body row) tells us how many columns it has. Regex-counted, not DOM-parsed -- report
+// tables never use colspan/rowspan (they're flat ledgers/appendices, see the module-level notes
+// above on why a plain match is already safe for this content) -- so counting `<th>`/`<td>` opens
+// in the first `<tr>...</tr>` is an accurate, cheap proxy for column count.
+const FIRST_ROW_RE = /<tr\b[^>]*>([\s\S]*?)<\/tr>/;
+const CELL_OPEN_RE = /<t[hd]\b[^>]*>/g;
+
+function countTableColumns(tableHtml: string): number {
+  const rowMatch = FIRST_ROW_RE.exec(tableHtml);
+  if (!rowMatch) return 0;
+  return rowMatch[1].match(CELL_OPEN_RE)?.length ?? 0;
+}
+
+// A wide table (>4 columns) gets a one-line scroll hint above it -- on a phone there's no other
+// affordance telling the analyst the table keeps going sideways. `aria-hidden` since the wrapper
+// itself already scrolls via a real, keyboard/AT-operable mechanism; this is a purely visual nudge.
+const SCROLL_HINT_HTML =
+  '<span class="report-table-scroll-hint" aria-hidden="true">→ גלול לרוחב לצפייה בכל העמודות</span>';
+
 export function wrapReportTables(html: string | null | undefined): string {
   const safeHtml = html ?? "";
-  return safeHtml.replace(TABLE_RE, (match) => `<div class="report-table-wrap">${match}</div>`);
+  return safeHtml.replace(TABLE_RE, (match) => {
+    const colCount = countTableColumns(match);
+    // Round-2 #1: a table with <= 4 columns doesn't need to scroll at all once its cells are
+    // allowed to wrap -- `.report-table-wrap--narrow` (globals.css) overrides the table's own
+    // min-width/nowrap so it reflows like ordinary prose instead of forcing a horizontal
+    // scrollbar. A wider table (or one whose column count couldn't be determined) keeps the
+    // existing scroll-locally behavior, now with an explicit hint that it scrolls.
+    if (colCount > 0 && colCount <= 4) {
+      return `<div class="report-table-wrap report-table-wrap--narrow" dir="rtl">${match}</div>`;
+    }
+    return `<div class="report-table-wrap" dir="rtl">${SCROLL_HINT_HTML}${match}</div>`;
+  });
 }
 
 // Content review: `addHeadingIds` (ReportsPage.tsx) strips tags from a heading's inner HTML to

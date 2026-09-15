@@ -504,3 +504,23 @@ describe("InvestigationDetailPage structured answer rendering (CR-invest.md)", (
     expect(screen.getAllByRole("button", { name: "1" }).length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// Round-2 mobile fix (UI-MOBILE-iphone.md #8): the question rendered at heading size with no cap
+// pushed the answer below the fold on phones. Below `md` it clamps to 4 lines with an explicit
+// expand toggle (`md:` classes aren't evaluated by jsdom, so this exercises the toggle's own
+// state/markup rather than the actual viewport-driven CSS).
+describe("InvestigationDetailPage question clamp toggle (round-2 mobile fix #8)", () => {
+  it("shows a body-size, clamped heading with a הצג עוד toggle that expands it", async () => {
+    getInvestigation.mockResolvedValue(baseDetail());
+    renderPage();
+
+    const heading = await screen.findByRole("heading", { name: "שאלת בדיקה" });
+    expect(heading.className).toContain("text-base");
+    expect(heading.className).toContain("line-clamp-4");
+
+    const toggle = screen.getByRole("button", { name: "הצג עוד" });
+    fireEvent.click(toggle);
+    expect(heading.className).not.toContain("line-clamp-4");
+    expect(screen.getByRole("button", { name: "הצג פחות" })).toBeInTheDocument();
+  });
+});

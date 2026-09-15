@@ -75,12 +75,21 @@ function CitationChip({
   }
 
   return (
-    <span className="relative inline-block">
+    // Round-2 mobile fix (UI-MOBILE-iphone.md #5): `inline-block` made this whole chip an atomic
+    // box for line-breaking -- when it didn't fit, the browser could drop it to its own line
+    // separate from the sentence it belongs to (the dossier summary's citation "15" landing alone
+    // below the paragraph it cites). `inline` + `whitespace-nowrap` keeps it a normal inline run
+    // (still `position: relative` for the tooltip below, which works fine on an inline box) that
+    // only ever breaks as a whole unit at a real space, never as its own orphaned line.
+    <span className="relative inline whitespace-nowrap">
       <button
         type="button"
+        // Mobile fix (UI-MOBILE-iphone.md #9, #10): same treatment as `.eo-citation` in
+        // globals.css -- 10px text in a 16x16px box was both unreadable and under the ~24px
+        // touch-target floor. Grows via padding/min-size, not just the glyph.
         className={cn(
-          "mx-0.5 inline-flex h-4 min-w-[1rem] items-center justify-center rounded",
-          "bg-accent-muted px-1 align-super text-[10px] font-mono font-semibold text-accent-fg",
+          "mx-0.5 inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded px-1.5",
+          "bg-accent-muted align-super text-xs font-mono font-semibold text-accent-fg",
           "hover:bg-accent hover:text-accent-fg",
         )}
         onMouseEnter={() => setOpen(true)}

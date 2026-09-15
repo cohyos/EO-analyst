@@ -140,6 +140,33 @@ describe("StatusStrip", () => {
     expect(screen.queryByText("deep_search")).not.toBeInTheDocument();
   });
 
+  it("keeps the phone strip to a guaranteed-safe, non-wrapping set of readouts (round 2 mobile fix)", () => {
+    const state: StatusSocketState = { status: baseStatus, connected: true, logs: [] };
+    render(<StatusStrip state={state} />);
+
+    // Queue is a single non-wrapping token, not label-over-value.
+    const queue = screen.getByText(/תור: 2/);
+    expect(queue.className).toContain("whitespace-nowrap");
+    expect(queue.className).toContain("shrink-0");
+
+    // Service dots collapse to dots-only below `sm:` — the visible label is hidden there,
+    // but the accessible name survives via aria-label/title on the dot's wrapper.
+    const pgDot = screen.getByLabelText("PG — מחובר");
+    expect(pgDot).toHaveAttribute("title", "PG — מחובר");
+    const pgLabelText = screen.getByText("PG");
+    expect(pgLabelText.className).toContain("hidden");
+    expect(pgLabelText.className).toContain("sm:inline");
+
+    const ollamaDot = screen.getByLabelText("Ollama — מחובר");
+    expect(ollamaDot).toBeInTheDocument();
+    const ntfyDot = screen.getByLabelText("ntfy — מנותק");
+    expect(ntfyDot).toBeInTheDocument();
+
+    // Variable-width extras (model chips, stage badge) are pushed off the phone line.
+    expect(screen.getByText("qwen2.5:14b-instruct").className).toContain("hidden");
+    expect(screen.getByText("מיון (Triage)").className).toContain("hidden");
+  });
+
   it("flags a loaded model that is partially offloaded to CPU", () => {
     const withOffload: StatusResponse = {
       ...baseStatus,

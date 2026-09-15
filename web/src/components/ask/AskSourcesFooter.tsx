@@ -47,7 +47,7 @@ export function AskSourcesFooter({ sources }: { sources: AskCitation[] }) {
           return (
             <li key={`${c.n}-${c.item_id}`} className="rounded-md border border-border bg-bg-sunken/40">
               <div className="flex items-center gap-1.5 px-2 py-1.5">
-                <span className="shrink-0 font-mono text-[10px] text-fg-dim">[{c.n}]</span>
+                <span className="shrink-0 font-mono text-xs text-fg-dim">[{c.n}]</span>
                 {c.level && <LevelBadge level={c.level} size="sm" />}
                 <SourcePreviewPopover
                   itemId={c.item_id}
@@ -64,7 +64,7 @@ export function AskSourcesFooter({ sources }: { sources: AskCitation[] }) {
                   </button>
                 </SourcePreviewPopover>
                 {c.source_name && (
-                  <bdi className="max-w-[8rem] shrink-0 truncate text-[10px] text-fg-dim" title={c.source_name}>
+                  <bdi className="max-w-[8rem] shrink-0 truncate text-xs text-fg-dim" title={c.source_name}>
                     {c.source_name}
                   </bdi>
                 )}

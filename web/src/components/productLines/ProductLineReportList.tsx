@@ -28,7 +28,7 @@ export function ProductLineReportList({ reports }: { reports: ReportSummary[] })
             {r.preview_he && (
               <span className="line-clamp-1 max-w-full text-xs text-fg-dim">{r.preview_he}</span>
             )}
-            <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-fg-dim">
+            <span className="flex flex-wrap items-center gap-1.5 text-xs text-fg-dim">
               <span
                 className={cn(
                   "rounded bg-bg-sunken px-1.5 py-0.5 font-medium",

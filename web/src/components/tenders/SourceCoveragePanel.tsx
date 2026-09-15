@@ -44,7 +44,7 @@ function SourceRow({ source }: { source: TenderSourceCoverageItem }) {
             later in the scan pass -- never disabled, just a visible hint on the panel. */}
         {source.priority_decrement < 0 && (
           <span
-            className="ms-1 rounded-full bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-warn"
+            className="ms-1 rounded-full bg-warn/15 px-1.5 py-0.5 text-xs font-medium text-warn"
             title={t("tenders.coverage.priorityLoweredTitle")}
           >
             {t("tenders.coverage.priorityLowered")}
@@ -55,14 +55,14 @@ function SourceRow({ source }: { source: TenderSourceCoverageItem }) {
       <td className="px-2 py-1.5">
         <span
           className={cn(
-            "inline-block rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+            "inline-block rounded-md px-1.5 py-0.5 text-xs font-medium",
             STATUS_CHIP_CLASS[source.status],
           )}
         >
           {t(STATUS_LABEL_KEY[source.status])}
         </span>
         {source.needs_key_env_var && (
-          <span className="ms-1 font-mono text-[10px] text-fg-dim" dir="ltr">
+          <span className="ms-1 font-mono text-xs text-fg-dim" dir="ltr">
             {source.needs_key_env_var}
           </span>
         )}
@@ -110,7 +110,7 @@ export function SourceCoveragePanel() {
             <span
               key={c.key}
               className={cn(
-                "rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+                "rounded-md px-1.5 py-0.5 text-xs font-medium",
                 STATUS_CHIP_CLASS[c.key as TenderSourceStatus] ?? "bg-bg-sunken text-fg-dim",
               )}
             >
@@ -138,7 +138,7 @@ export function SourceCoveragePanel() {
               </div>
               <table className="w-full min-w-[28rem] border-collapse">
                 <thead>
-                  <tr className="text-start text-[11px] text-fg-dim">
+                  <tr className="text-start text-xs text-fg-dim">
                     <th className="px-2 py-1 text-start font-normal">{t("tenders.coverage.colSource")}</th>
                     <th className="px-2 py-1 text-start font-normal">{t("tenders.coverage.colAccess")}</th>
                     <th className="px-2 py-1 text-start font-normal">{t("tenders.coverage.colStatus")}</th>

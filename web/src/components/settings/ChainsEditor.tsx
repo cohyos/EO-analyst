@@ -273,7 +273,7 @@ export function ChainsEditor({
                     power: undefined,
                   });
                 }}
-                className="rounded-md border border-border-strong bg-bg px-2 py-1 text-xs text-fg"
+                className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1 text-xs text-fg"
               >
                 {optionsFor(entry.provider).map((p) => (
                   <option key={p.id} value={p.id}>
@@ -287,7 +287,7 @@ export function ChainsEditor({
                 aria-label={t("llm.chains.modelLabel")}
                 value={entry.model ?? ""}
                 onChange={(e) => patchStep(activeRole, index, { model: e.target.value })}
-                className="rounded-md border border-border-strong bg-bg px-2 py-1 text-xs text-fg"
+                className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1 text-xs text-fg"
               >
                 {entry.model && !(provider?.models ?? []).includes(entry.model) && (
                   <option value={entry.model}>{entry.model}</option>
@@ -304,7 +304,7 @@ export function ChainsEditor({
                   aria-label={t("llm.powerLabel")}
                   value={entry.power ?? ""}
                   onChange={(e) => patchStep(activeRole, index, { power: e.target.value || undefined })}
-                  className="rounded-md border border-border-strong bg-bg px-2 py-1 text-xs text-fg"
+                  className="max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1 text-xs text-fg"
                 >
                   <option value="">{t("llm.chains.powerDefault")}</option>
                   {powerLevels.map((lvl) => {

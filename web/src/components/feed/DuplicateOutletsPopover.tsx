@@ -72,7 +72,8 @@ export function DuplicateOutletsPopover({
         data-testid="duplicate-outlets-toggle"
         className={cn(
           "flex shrink-0 items-center gap-1 rounded-full border border-border-strong px-1.5 text-fg-dim hover:border-accent hover:text-accent",
-          size === "sm" ? "h-5 text-[10px]" : "h-6 text-xs",
+          // Mobile fix (UI-MOBILE-iphone.md #9): 10px text is below the readable floor.
+          size === "sm" ? "h-5 text-xs" : "h-6 text-xs",
         )}
       >
         <Layers size={size === "sm" ? 10 : 12} aria-hidden="true" />+{duplicates.length}{" "}

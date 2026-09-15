@@ -31,10 +31,14 @@ export function PatentFilters({
         רלוונטי לישראל בלבד
       </label>
 
+      {/* Mobile fix (UI-MOBILE-iphone.md #3): a native <select> sizes itself to its longest
+          <option> with no width cap of its own -- at 390px this box overflowed the screen edge,
+          partly cut off with no way to discover the rest of it. `max-w-full min-w-0` cap it to
+          whatever room this flex-wrap row actually gives it (the parent already wraps). */}
       <select
         value={value.assignee}
         onChange={(e) => onChange({ ...value, assignee: e.target.value })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="w-full max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg sm:w-auto"
         aria-label="סינון לפי בעלים"
       >
         <option value="">כל הבעלים</option>
@@ -48,7 +52,7 @@ export function PatentFilters({
       <select
         value={value.subdomain}
         onChange={(e) => onChange({ ...value, subdomain: e.target.value })}
-        className="rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg"
+        className="w-full max-w-full min-w-0 rounded-md border border-border-strong bg-bg px-2 py-1.5 text-sm text-fg sm:w-auto"
         aria-label="סינון לפי תת-תחום"
       >
         <option value="">כל תתי-התחום</option>

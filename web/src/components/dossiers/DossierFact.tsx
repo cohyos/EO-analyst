@@ -23,7 +23,12 @@ export function DossierFactText({
   className?: string;
 }) {
   if (!text || !text.trim()) return <NotFoundInSources className={className} />;
-  const suffix = cites.length > 0 ? ` ${cites.map((n) => `[${n}]`).join("")}` : "";
+  // Round-2 mobile fix (UI-MOBILE-iphone.md #5): a plain space here is a normal break
+  // opportunity -- at narrow widths the browser could wrap right before the citation chip,
+  // dropping it alone onto the next line separated from the sentence it cites. A non-breaking
+  // space glues it to the last word instead (paired with CitationText's own inline/nowrap fix so
+  // the chip itself can't break internally either).
+  const suffix = cites.length > 0 ? ` ${cites.map((n) => `[${n}]`).join("")}` : "";
   return (
     <span className={className}>
       <CitationText text={`${text}${suffix}`} citations={citations} />

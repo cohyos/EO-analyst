@@ -95,7 +95,7 @@ export function ChatThread({
                 <span className="ms-1 inline-block h-3 w-1 animate-pulse bg-accent align-middle" />
               )}
               {m.role === "assistant" && m.provider && (m.content || !m.streaming) && (
-                <div className="mt-1.5 flex items-center gap-1 text-[10px] text-fg-dim">
+                <div className="mt-1.5 flex items-center gap-1 text-xs text-fg-dim">
                   {m.provider !== "ollama" && <Cloud size={10} aria-hidden="true" />}
                   <span>
                     {m.provider === "ollama" ? "מקומי" : "ענן"}

@@ -15,12 +15,22 @@ export function DossierSectionNav({ items }: { items: DossierSectionNavItem[] })
   return (
     <nav
       aria-label="ניווט בין סעיפי הסקירה"
-      className="sticky top-0 z-10 -mx-4 overflow-x-auto border-b border-border bg-bg/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-bg/80 md:-mx-6 md:px-6"
+      // Mobile fix (UI-MOBILE-iphone.md #4): the sticky nav's translucent `bg-bg/95` +
+      // `backdrop-blur` let the page header (product name, date) bleed through and read as
+      // overlapping garbled text once it scrolled up underneath the nav -- worst on phones, where
+      // the nav sits directly above that header with almost no clearance. An opaque `bg-bg`
+      // removes the bleed-through entirely; chips (below) give each item its own visible
+      // background so the row reads as a horizontally-scrollable tab strip rather than plain text
+      // that could still visually run into whatever sits above it.
+      className="sticky top-0 z-10 -mx-4 overflow-x-auto border-b border-border bg-bg px-4 py-2 md:-mx-6 md:px-6"
     >
-      <ul className="flex list-none gap-3 whitespace-nowrap text-xs">
+      <ul className="flex list-none flex-nowrap gap-2 whitespace-nowrap text-xs">
         {items.map((item) => (
-          <li key={item.id}>
-            <a href={`#${item.id}`} className="text-fg-dim hover:text-accent hover:underline">
+          <li key={item.id} className="shrink-0">
+            <a
+              href={`#${item.id}`}
+              className="block rounded-full bg-bg-sunken px-2.5 py-1 text-fg-dim hover:bg-accent-muted hover:text-accent"
+            >
               {item.label}
             </a>
           </li>
