@@ -31,22 +31,35 @@ export function RadarMatrix({
     <div className="overflow-x-auto rounded-lg border border-border" dir="rtl">
       <TableScrollHint />
       <table className="w-full min-w-[720px] border-collapse text-sm">
+        {/* Round-4 mobile fix (fix #3): the row label ("תת-תחום") pinned via `sticky start-0` so
+            it stays visible while scrolling the maturity columns sideways on a phone -- same
+            sticky-corner-cell contract DossierTable already uses (own opaque bg + higher z-index
+            so it occludes columns scrolling underneath it). The whole header row is `sticky
+            top-0` too (the page's actual scroll container is AppShell's `<main
+            overflow-y-auto>`, not the window, so this pins correctly under the app's own top bar
+            rather than the browser chrome). */}
         <thead>
           <tr className="border-b border-border bg-bg-raised text-fg-dim">
-            <th className="p-2 text-start font-medium">תת-תחום</th>
+            <th className="sticky start-0 top-0 z-20 border-e border-border bg-bg-raised p-2 text-start font-medium">
+              תת-תחום
+            </th>
             {maturities.map((m) => (
-              <th key={m} className="p-2 text-center font-medium">
+              <th key={m} className="sticky top-0 z-10 bg-bg-raised p-2 text-center font-medium">
                 {MATURITY_LABEL_HE[m]}
               </th>
             ))}
-            <th className="p-2 text-center font-medium">סה"כ</th>
-            <th className="p-2 text-center font-medium">מגמה (4 שבועות)</th>
+            <th className="sticky top-0 z-10 bg-bg-raised p-2 text-center font-medium">סה"כ</th>
+            <th className="sticky top-0 z-10 bg-bg-raised p-2 text-center font-medium">
+              מגמה (4 שבועות)
+            </th>
           </tr>
         </thead>
         <tbody>
           {subdomains.map((sub) => (
             <tr key={sub.subdomain} className="border-b border-border last:border-0">
-              <td className="p-2 font-medium text-fg">{sub.label_he}</td>
+              <td className="sticky start-0 z-[1] border-e border-border bg-bg p-2 font-medium text-fg">
+                {sub.label_he}
+              </td>
               {maturities.map((m) => {
                 const count = sub.counts[m] ?? 0;
                 const isSelected = selectedSubdomain === sub.subdomain && selectedMaturity === m;

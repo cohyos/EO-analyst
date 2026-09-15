@@ -130,7 +130,14 @@ export function ConferencesPage() {
           <thead className="bg-bg-raised text-xs text-fg-dim">
             <tr>
               <th className="p-2 text-start"></th>
-              <th className="p-2 text-start">שם</th>
+              {/* Round-4 mobile fix (fix #3): sticky-first-column treatment -- the leading chevron
+                  column is a narrow, icon-only toggle (not the row's identifying label), so the
+                  name column is the one pinned via `sticky start-0` while scrolling the date/
+                  relevance/actions columns sideways on a phone, same contract as RadarMatrix's
+                  row-label column. */}
+              <th className="sticky start-0 z-10 border-e border-border bg-bg-raised p-2 text-start">
+                שם
+              </th>
               <th className="p-2 text-start">מיקום</th>
               <th className="p-2 text-start">מתחיל</th>
               <th className="p-2 text-start">מסתיים</th>
@@ -156,7 +163,7 @@ export function ConferencesPage() {
                         aria-hidden="true"
                       />
                     </td>
-                    <td className="p-2">
+                    <td className="sticky start-0 z-[1] border-e border-border bg-bg p-2">
                       {outUrl ? (
                         // The name itself is plain text (part of the row's click-to-expand
                         // surface, below) with only a small icon-button carrying the outbound

@@ -55,7 +55,7 @@ export function EdgeEvidencePanel({
                   {ev.title ?? `פריט #${ev.item_id}`}
                 </bdi>
                 {ev.published_at && (
-                  <span className="font-mono text-[10px] text-fg-dim">
+                  <span className="font-mono text-xs text-fg-dim">
                     {formatDate(ev.published_at)}
                   </span>
                 )}

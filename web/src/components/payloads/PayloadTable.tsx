@@ -14,7 +14,7 @@ export function PayloadThumbnail({ imageUrl, alt }: { imageUrl: string | null; a
     return (
       <div
         aria-hidden="true"
-        className="flex h-10 w-14 items-center justify-center rounded border border-dashed border-border text-[10px] text-fg-dim"
+        className="flex h-10 w-14 items-center justify-center rounded border border-dashed border-border text-xs text-fg-dim"
       >
         —
       </div>
@@ -48,7 +48,13 @@ export function PayloadTable({
         <thead>
           <tr className="border-b border-border bg-bg-raised text-fg-dim">
             <th className="p-2 text-start font-medium">{t("payloads.colImage")}</th>
-            <th className="p-2 text-start font-medium">{t("payloads.colName")}</th>
+            {/* Round-4 mobile fix (fix #3): sticky-first-column treatment -- the thumbnail column
+                is a narrow image, not the row's identifying label, so the name column is the one
+                pinned via `sticky start-0` while scrolling the rest sideways on a phone, same
+                contract as RadarMatrix's row-label column. */}
+            <th className="sticky start-0 z-10 border-e border-border bg-bg-raised p-2 text-start font-medium">
+              {t("payloads.colName")}
+            </th>
             <th className="p-2 text-start font-medium">{t("payloads.colVendor")}</th>
             <th className="p-2 text-start font-medium">{t("payloads.colCategory")}</th>
             <th className="p-2 text-center font-medium">{t("payloads.colSpecVersions")}</th>
@@ -72,7 +78,14 @@ export function PayloadTable({
               <td className="p-2">
                 <PayloadThumbnail imageUrl={p.image_url} alt={p.canonical_name} />
               </td>
-              <td className="p-2 font-medium text-fg">{p.canonical_name}</td>
+              <td
+                className={
+                  "sticky start-0 z-[1] border-e border-border p-2 font-medium text-fg " +
+                  (selectedId === p.id ? "bg-bg-sunken" : "bg-bg")
+                }
+              >
+                {p.canonical_name}
+              </td>
               <td className="p-2 text-fg-muted">{p.vendor_entity_name ?? "—"}</td>
               <td className="p-2 text-fg-muted">{categoryLabels[p.category]}</td>
               <td className="p-2 text-center text-fg-muted">{p.spec_version_count}</td>

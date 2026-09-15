@@ -393,3 +393,95 @@ bdi {
     display: none;
   }
 }
+
+/* Round-4 mobile fix (fix #1): a >4-column report table (`wrapReportTables`, lib/reportHtml.ts --
+   decides the cutoff and attaches `data-label` to every `<td>` from its header row) stops
+   scrolling sideways below 768px and instead renders as one bordered card per row, each cell a
+   `label: value` line built from `data-label` via `content: attr(...)`. Scoped to `max-width:
+   767px` -- at `md:`+ the table renders exactly as `.report-table-wrap` already does (scrolling,
+   with the hint above), unaffected by any rule below. */
+@media (max-width: 767px) {
+  .report-table-wrap--stacked {
+    overflow-x: visible;
+  }
+  .report-table-wrap--stacked .report-table-scroll-hint {
+    /* Nothing to scroll to once the table is stacked -- the affordance would be misleading. */
+    display: none;
+  }
+  .report-table-wrap--stacked table,
+  .report-table-wrap--stacked tbody,
+  .report-table-wrap--stacked tr,
+  .report-table-wrap--stacked td {
+    display: block;
+    width: 100%;
+  }
+  .report-table-wrap--stacked table {
+    min-width: 0 !important;
+  }
+  /* sr-only: header text is already surfaced per-cell via `data-label` below; the visual header
+     row would otherwise render as an empty stray block once every cell in it is `display:block`. */
+  .report-table-wrap--stacked thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .report-table-wrap--stacked tbody tr {
+    margin-bottom: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--bg-raised);
+  }
+  .report-table-wrap--stacked tbody tr:last-child {
+    margin-bottom: 0;
+  }
+  /* Overrides `.report-body tbody tr:nth-child(even)` zebra striping above -- each row is now its
+     own bordered card, so alternating fills would just make every other card look selected. */
+  .report-table-wrap--stacked tbody tr:nth-child(even) {
+    background: var(--bg-raised);
+  }
+  .report-table-wrap--stacked td {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 0.5rem;
+    padding: 0.3125rem 0;
+    border-bottom: 1px solid var(--border);
+    white-space: normal;
+    min-width: 0;
+  }
+  .report-table-wrap--stacked td:last-child {
+    border-bottom: none;
+  }
+  .report-table-wrap--stacked td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    font-weight: 600;
+    color: var(--fg-dim);
+  }
+  /* A cell the server rendered with no content at all (rare -- most values fall back to a literal
+     "—" server-side) still reads as a value instead of a blank line next to its label. */
+  .report-table-wrap--stacked td:empty::after {
+    content: "—";
+    color: var(--fg-dim);
+  }
+  /* The first column (date/entity -- whatever the report's own column order leads with) is the
+     card's title: bold, no `label:` prefix, set off from the rest with its own divider. */
+  .report-table-wrap--stacked td:first-child {
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.125rem;
+    border-bottom: 1px solid var(--border-strong);
+    font-size: 0.9375rem;
+    font-weight: 700;
+    color: var(--fg);
+  }
+  .report-table-wrap--stacked td:first-child::before {
+    content: none;
+  }
+}

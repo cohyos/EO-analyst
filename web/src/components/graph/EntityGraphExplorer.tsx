@@ -12,6 +12,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { api } from "@/api";
+import { useIsNarrowViewport } from "@/hooks/useIsNarrowViewport";
 import type { GraphEdgeAgg, GraphSearchResult } from "@/types/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { GraphCanvas, type GraphCanvasHandle, type GraphLayoutName } from "./GraphCanvas";
@@ -59,7 +60,13 @@ export function EntityGraphExplorer({
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeAgg | null>(null);
   const [layoutName, setLayoutName] = useState<GraphLayoutName>("cose");
-  const [tableView, setTableView] = useState(false);
+  // Round-4 mobile fix (fix #2): the cytoscape canvas is an opaque, hard-to-operate `<canvas>`-
+  // like surface on a touch screen (pinch-zoom fights the page, node hit targets are tiny) -- below
+  // `md` (768px) default to `GraphTableView`, the same accessible table already built for
+  // keyboard/screen-reader users. Lazy initializer only, so a later resize doesn't yank a user back
+  // out of a table view (or canvas view) they picked on purpose -- the "תצוגת טבלה" toggle stays.
+  const isMobile = useIsNarrowViewport(768);
+  const [tableView, setTableView] = useState(isMobile);
   const [pathFinderOpen, setPathFinderOpen] = useState(false);
   const [pathHighlight, setPathHighlight] = useState<{
     nodeIds: Set<number>;
@@ -286,7 +293,7 @@ export function EntityGraphExplorer({
                     <GraphLegend kinds={kindsPresent} />
                   </div>
                   <div className="absolute top-2 end-2 flex flex-col gap-1">
-                    <label className="flex items-center gap-1 rounded-md bg-bg-raised/90 px-1.5 py-1 text-[10px] text-fg-dim shadow-panel">
+                    <label className="flex items-center gap-1 rounded-md bg-bg-raised/90 px-1.5 py-1 text-xs text-fg-dim shadow-panel">
                       <Waypoints size={12} aria-hidden="true" />
                       <select
                         value={layoutName}

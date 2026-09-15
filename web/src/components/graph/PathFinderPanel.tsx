@@ -131,12 +131,12 @@ export function PathFinderPanel({
             <span key={n.id} className="flex items-center gap-1">
               <li className="rounded-md border border-border-strong bg-bg-sunken px-1.5 py-0.5">
                 <bdi>{n.name}</bdi>
-                <span className="ms-1 text-[10px] text-fg-dim">
+                <span className="ms-1 text-xs text-fg-dim">
                   {entityKindLabel(n.kind)}
                 </span>
               </li>
               {i < q.data!.edges.length && (
-                <span className="text-[10px] text-fg-dim">
+                <span className="text-xs text-fg-dim">
                   ← {edgeLabelHe(q.data!.edges[i].relation)} ←
                 </span>
               )}

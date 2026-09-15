@@ -181,11 +181,11 @@ describe("wrapReportTables", () => {
     );
   });
 
-  it("wraps a wide (>4 column) table with a scroll hint and no --narrow class", () => {
+  it("wraps a wide (>4 column) table with the --stacked class, a scroll hint, and no --narrow class", () => {
     const html =
       "<table><tr><th>a</th><th>b</th><th>c</th><th>d</th><th>e</th></tr><tr><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr></table>";
     const out = wrapReportTables(html);
-    expect(out).toContain('<div class="report-table-wrap" dir="rtl">');
+    expect(out).toContain('<div class="report-table-wrap report-table-wrap--stacked" dir="rtl">');
     expect(out).not.toContain("report-table-wrap--narrow");
     expect(out).toContain("report-table-scroll-hint");
     // the hint renders before the <table>, inside the wrapper
@@ -202,6 +202,55 @@ describe("wrapReportTables", () => {
     expect(wrapReportTables("<p>no tables</p>")).toBe("<p>no tables</p>");
     expect(wrapReportTables(null)).toBe("");
     expect(wrapReportTables(undefined)).toBe("");
+  });
+
+  // Round-4 mobile fix (fix #1): >4-column tables stack into cards below 768px (globals.css
+  // `.report-table-wrap--stacked`) -- each body `<td>` needs `data-label="<header text>"` for the
+  // `label: value` line CSS builds via `content: attr(data-label)`.
+  describe("data-label attachment for the stacked mobile layout", () => {
+    it("labels every body <td> from the matching header <th>, leaving the header row itself untouched", () => {
+      const html =
+        "<table><thead><tr><th>תאריך</th><th>סוג</th><th>צדדים</th><th>לקוח</th><th>סכום</th></tr></thead>" +
+        "<tbody><tr><td>2026-09-01</td><td>עסקה</td><td>א, ב</td><td>לקוח X</td><td>1M$</td></tr></tbody></table>";
+      const out = wrapReportTables(html);
+      expect(out).toContain('<td data-label="תאריך">2026-09-01</td>');
+      expect(out).toContain('<td data-label="סוג">עסקה</td>');
+      expect(out).toContain('<td data-label="צדדים">א, ב</td>');
+      expect(out).toContain('<td data-label="לקוח">לקוח X</td>');
+      expect(out).toContain('<td data-label="סכום">1M$</td>');
+      // the header row's own cells are <th>, never rewritten to carry data-label
+      expect(out).not.toContain("<th data-label");
+    });
+
+    it("labels every row when a table has multiple body rows", () => {
+      const html =
+        "<table><thead><tr><th>a</th><th>b</th><th>c</th><th>d</th><th>e</th></tr></thead>" +
+        "<tbody><tr><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr>" +
+        "<tr><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td></tr></tbody></table>";
+      const out = wrapReportTables(html);
+      // one data-label="a" per body row (2 rows), never on the header row's own <th>
+      expect((out.match(/data-label="a"/g) || []).length).toBe(2);
+      expect(out).toContain('<td data-label="a">1</td>');
+      expect(out).toContain('<td data-label="a">6</td>');
+      expect(out).toContain('<td data-label="e">10</td>');
+    });
+
+    it("HTML-escapes header text carrying an ampersand/quote in the data-label attribute", () => {
+      const html =
+        "<table><thead><tr><th>שם &amp; תפקיד</th><th>b</th><th>c</th><th>d</th><th>e</th></tr></thead>" +
+        "<tbody><tr><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr></tbody></table>";
+      const out = wrapReportTables(html);
+      expect(out).toContain('data-label="שם &amp; תפקיד"');
+      // decoded once, then re-escaped -- never double-escaped to &amp;amp;
+      expect(out).not.toContain("&amp;amp;");
+    });
+
+    it("does not attach data-label on a <=4 column (--narrow) table", () => {
+      const html = "<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>";
+      const out = wrapReportTables(html);
+      expect(out).toContain("report-table-wrap--narrow");
+      expect(out).not.toContain("data-label");
+    });
   });
 });
 

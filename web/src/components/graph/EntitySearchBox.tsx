@@ -106,10 +106,10 @@ export function EntitySearchBox({
                 {r.country && (
                   <span className="shrink-0 text-xs">{countryFlagEmoji(r.country)}</span>
                 )}
-                <span className="shrink-0 rounded bg-bg-sunken px-1 py-0.5 text-[10px] text-fg-dim">
+                <span className="shrink-0 rounded bg-bg-sunken px-1 py-0.5 text-xs text-fg-dim">
                   {entityKindLabel(r.kind)}
                 </span>
-                <span className="shrink-0 font-mono text-[10px] text-fg-dim">
+                <span className="shrink-0 font-mono text-xs text-fg-dim">
                   {r.mention_count}
                 </span>
               </button>

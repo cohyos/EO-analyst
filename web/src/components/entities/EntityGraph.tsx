@@ -175,7 +175,8 @@ export function EntityGraph({
       <div ref={containerRef} className="h-full w-full" role="img" aria-label="גרף ישויות" />
 
       {kindsPresent.length > 0 && (
-        <div className="absolute top-2 start-2 flex flex-wrap gap-2 rounded-md bg-bg-raised/90 p-1.5 text-[10px] text-fg-muted shadow-panel">
+        // Round-4 mobile fix (fix #2): 10px was below the 12px informational-text floor.
+        <div className="absolute top-2 start-2 flex flex-wrap gap-2 rounded-md bg-bg-raised/90 p-1.5 text-xs text-fg-muted shadow-panel">
           {kindsPresent.map((k) => (
             <span key={k} className="flex items-center gap-1">
               <span
@@ -191,7 +192,7 @@ export function EntityGraph({
 
       {hoverEdge && (
         <div
-          className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded bg-bg-raised px-1.5 py-0.5 text-[10px] text-fg shadow-panel"
+          className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded bg-bg-raised px-1.5 py-0.5 text-xs text-fg shadow-panel"
           style={{ left: hoverEdge.x, top: hoverEdge.y }}
         >
           {hoverEdge.label}

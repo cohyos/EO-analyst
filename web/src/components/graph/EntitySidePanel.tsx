@@ -147,7 +147,7 @@ export function EntitySidePanel({
             <h5 className="mb-1 text-xs font-semibold text-fg-dim">
               אימות צולב (בין {node.mention_count} פריטים)
             </h5>
-            <div className="flex flex-wrap gap-1.5 text-[11px]">
+            <div className="flex flex-wrap gap-1.5 text-xs">
               {node.corroboration.corroborated > 0 && (
                 <span className="rounded bg-level-green-bg px-1.5 py-0.5 text-level-green">
                   מאומת: {node.corroboration.corroborated}
@@ -177,7 +177,7 @@ export function EntitySidePanel({
           {node.product_lines.length > 0 && (
             <section aria-label="קווי מוצר">
               <h5 className="mb-1 text-xs font-semibold text-fg-dim">קווי מוצר</h5>
-              <div className="flex flex-wrap gap-1.5 text-[11px]">
+              <div className="flex flex-wrap gap-1.5 text-xs">
                 {node.product_lines.map((pl) => (
                   <span
                     key={pl}
@@ -205,7 +205,7 @@ export function EntitySidePanel({
                       <bdi className="block truncate font-medium" title={t.title ?? undefined}>
                         {t.title}
                       </bdi>
-                      <span className="flex items-center gap-1.5 text-[10px] text-fg-dim">
+                      <span className="flex items-center gap-1.5 text-xs text-fg-dim">
                         <span className="font-mono">{formatDate(t.published_at)}</span>
                         <LevelBadge level={t.level as TriageLevel} size="sm" />
                       </span>
@@ -229,7 +229,7 @@ export function EntitySidePanel({
                   >
                     <div className="flex items-center justify-between">
                       <span>{eventKindLabel(e.kind)}</span>
-                      <span className="font-mono text-[10px] text-fg-dim">
+                      <span className="font-mono text-xs text-fg-dim">
                         {formatDate(e.date)}
                       </span>
                     </div>
@@ -254,7 +254,7 @@ export function EntitySidePanel({
                       <bdi className="min-w-0 flex-1 truncate" title={inv.question ?? "ללא שאלה"}>
                         {inv.question ?? "ללא שאלה"}
                       </bdi>
-                      <span className="shrink-0 rounded bg-bg-raised px-1 py-0.5 text-[10px]">
+                      <span className="shrink-0 rounded bg-bg-raised px-1 py-0.5 text-xs">
                         {INVESTIGATION_STATE_LABEL_HE[inv.state] ?? inv.state}
                       </span>
                     </div>
@@ -276,7 +276,7 @@ export function EntitySidePanel({
                     className="flex items-center justify-between rounded-md bg-bg-sunken p-1.5"
                   >
                     <span>{REPORT_KIND_LABEL_HE[r.kind] ?? r.kind}</span>
-                    <span className="font-mono text-[10px] text-fg-dim">
+                    <span className="font-mono text-xs text-fg-dim">
                       {formatDate(r.created_at)}
                     </span>
                   </li>

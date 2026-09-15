@@ -222,8 +222,59 @@ function countTableColumns(tableHtml: string): number {
 // A wide table (>4 columns) gets a one-line scroll hint above it -- on a phone there's no other
 // affordance telling the analyst the table keeps going sideways. `aria-hidden` since the wrapper
 // itself already scrolls via a real, keyboard/AT-operable mechanism; this is a purely visual nudge.
+// Round-4: below 768px a wide table no longer scrolls at all (see `.report-table-wrap--stacked`,
+// globals.css) -- the hint is only relevant at `md:`+, same as `.report-table-scroll-hint`'s own
+// `@media (min-width: 768px)` rule, so it's still worth rendering (and worth keeping in the markup
+// for a table whose column count couldn't be determined, which keeps the old scroll-only behavior
+// at every width).
 const SCROLL_HINT_HTML =
   '<span class="report-table-scroll-hint" aria-hidden="true">→ גלול לרוחב לצפייה בכל העמודות</span>';
+
+// Round-4 mobile fix (this round's brief, fix #1): a >4-column report table (the events table, the
+// deals table, the sources appendix, the indicator watchlist...) is the analyst's core artefact,
+// so "scroll sideways forever on a phone" isn't good enough -- below 768px it renders as one
+// bordered card per row instead (`.report-table-wrap--stacked`, globals.css), each cell shown as a
+// `label: value` line via a CSS `content: attr(data-label)` on `::before`. This extracts the
+// header row's cell text (regex/DOM-free, same "report tables never use colspan/rowspan" premise
+// `countTableColumns` above already relies on) to use as those labels.
+const HEADER_CELL_RE = /<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]>/g;
+const STRIP_TAGS_RE = /<[^>]*>/g;
+
+function extractHeaderLabels(tableHtml: string): string[] {
+  const rowMatch = FIRST_ROW_RE.exec(tableHtml);
+  if (!rowMatch) return [];
+  const labels: string[] = [];
+  const cellRe = new RegExp(HEADER_CELL_RE.source, "g");
+  let m: RegExpExecArray | null;
+  while ((m = cellRe.exec(rowMatch[1]))) {
+    // Header cells are plain text in practice (`<th>תאריך</th>`), but strip tags defensively and
+    // decode entities (a header can carry `&amp;`, escaped by the server) before re-escaping below
+    // for the attribute context -- decoding first avoids turning `&amp;` into `&amp;amp;`.
+    labels.push(decodeHtmlEntities(m[1].replace(STRIP_TAGS_RE, "")).trim());
+  }
+  return labels;
+}
+
+// Matches each `<tr>...</tr>` (report tables don't nest tables, see the module-level notes above)
+// so `addDataLabels` can skip row 0 (the header, hidden sr-only on mobile via
+// `.report-table-wrap--stacked thead`) and label every `<td>` in the rows after it.
+const ROW_RE = /<tr\b[^>]*>[\s\S]*?<\/tr>/g;
+const TD_OPEN_RE = /<td\b([^>]*)>/g;
+
+function addDataLabels(tableHtml: string, labels: string[]): string {
+  let rowIndex = -1;
+  return tableHtml.replace(ROW_RE, (rowMatch) => {
+    rowIndex++;
+    if (rowIndex === 0) return rowMatch;
+    let cellIndex = -1;
+    return rowMatch.replace(TD_OPEN_RE, (cellMatch, attrs: string) => {
+      cellIndex++;
+      const label = labels[cellIndex];
+      if (label === undefined) return cellMatch;
+      return `<td${attrs} data-label="${escapeAttr(label)}">`;
+    });
+  });
+}
 
 export function wrapReportTables(html: string | null | undefined): string {
   const safeHtml = html ?? "";
@@ -232,11 +283,20 @@ export function wrapReportTables(html: string | null | undefined): string {
     // Round-2 #1: a table with <= 4 columns doesn't need to scroll at all once its cells are
     // allowed to wrap -- `.report-table-wrap--narrow` (globals.css) overrides the table's own
     // min-width/nowrap so it reflows like ordinary prose instead of forcing a horizontal
-    // scrollbar. A wider table (or one whose column count couldn't be determined) keeps the
-    // existing scroll-locally behavior, now with an explicit hint that it scrolls.
+    // scrollbar.
     if (colCount > 0 && colCount <= 4) {
       return `<div class="report-table-wrap report-table-wrap--narrow" dir="rtl">${match}</div>`;
     }
+    // Round-4 #1: a wider table (with a determinable column count) gets the stacked-card mobile
+    // layout instead of an endless horizontal scroll -- the scroll hint markup is kept for `md:`+,
+    // where the table still renders normally and scrolls (globals.css caps `.report-table-wrap--
+    // stacked`'s card rules to `max-width: 767px`).
+    if (colCount > 4) {
+      const labels = extractHeaderLabels(match);
+      const labeled = addDataLabels(match, labels);
+      return `<div class="report-table-wrap report-table-wrap--stacked" dir="rtl">${SCROLL_HINT_HTML}${labeled}</div>`;
+    }
+    // Column count couldn't be determined (no rows) -- keep the old scroll-locally behavior.
     return `<div class="report-table-wrap" dir="rtl">${SCROLL_HINT_HTML}${match}</div>`;
   });
 }
