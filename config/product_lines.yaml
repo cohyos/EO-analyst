@@ -56,6 +56,34 @@
 # docs/qa/loop/round_8_fixes.md's "R8-tagging status" section -- short Latin tokens (e.g. "MWS",
 # 'MX-15', '16"') rely on eoa.product_lines.tagging's word-boundary matching to avoid false
 # positives inside longer unrelated words/model numbers.
+#
+# CR-platform-opportunity (2026-09-16, docs/qa/content_review/CR-platform-opportunity.md): a new
+# platform (aircraft/UAV/CCA/vessel/vehicle) entering production/testing with an open external
+# EO/IR/sensor/pod slot is a business-development opportunity for the matching product line(s)
+# EVEN WHEN the article itself carries no EO/IR technical detail (e.g. a "fit checked with weapons"
+# or "can't start production without FY27 budget" story that only mentions "targeting pods" in
+# passing) -- the classify-stage platform-vs-EO/IR out-of-scope rule above would otherwise archive
+# it before it ever reaches triage/analyze/product-line tagging. Two new per-line fields drive
+# this, read via eoa.product_lines.registry.ProductLineDef.platforms/.opportunity_signals and
+# matched by eoa.pipeline.opportunity_signals.detect_platform_opportunity (simple case-insensitive
+# substring match on title+clean_text, deliberately NOT eoa.product_lines.tagging's stricter
+# word-boundary matcher -- a plural like "targeting pods" must still hit the singular
+# "targeting pod" configured term):
+#   platforms            named real-world platforms (not already carrying our own EO/IR payload)
+#                         this line could plausibly be integrated onto -- a CCA/loyal-wingman UAV,
+#                         a MALE ISR drone, etc.
+#   opportunity_signals   terms that, alongside a `platforms` hit, indicate the story states or
+#                         implies an open external sensor/pod integration slot on that platform
+#                         (a pod-class term, "external stores"/"pylon", or the platform CLASS name
+#                         itself -- "CCA"/"collaborative combat aircraft"/"loyal wingman"/"MUM-T" --
+#                         since any CCA/loyal-wingman airframe is, by class, an open-architecture
+#                         payload carrier). BOTH a `platforms` hit AND an `opportunity_signals` hit
+#                         are required together -- neither list alone is sufficient (see
+#                         eoa.pipeline.opportunity_signals module docstring for why a bare platform
+#                         mention, e.g. a pure naming/budget story with zero pod/sensor content,
+#                         can still legitimately match on the platform's own CCA/loyal-wingman CLASS
+#                         signal -- that is accepted by design, floored to `level: yellow` rather
+#                         than excluded, per the calibration note in that module).
 
 # llm_tagging (R8-tagging, 2026-09-07): when true, an in-scope item/patent that still has no
 # deterministic product-line tag after eoa.product_lines.tagging.tag_product_lines gets one more
@@ -114,6 +142,30 @@ product_lines:
       - name: ATLIS
         vendor: "L3Harris"
     our_products: []
+    # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    platforms:
+      - Fury
+      - "YFQ-44A"
+      - Vengeance
+      - "YFQ-42A"
+      - "Watchkeeper X"
+      - "Hermes 900"
+      - Heron
+      - "Bayraktar TB2"
+      - "Bayraktar Akıncı"
+      - Akıncı
+      - "MQ-9B"
+      - "Gray Eagle"
+    opportunity_signals:
+      - "targeting pod"
+      - "EO/IR pod"
+      - "sensor pod"
+      - "external stores"
+      - "pylon"
+      - "CCA"
+      - "collaborative combat aircraft"
+      - "loyal wingman"
+      - "MUM-T"
 
   - id: mws_eo
     name_he: "מערכות התראה להגנה עצמית מבוססות EO (MWS)"
@@ -173,6 +225,30 @@ product_lines:
           - "IRCM"
           - "להגנה עצמית"
           - "התראת טילים"
+    # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    platforms:
+      - Fury
+      - "YFQ-44A"
+      - Vengeance
+      - "YFQ-42A"
+      - "Watchkeeper X"
+      - "Hermes 900"
+      - Heron
+      - "Bayraktar TB2"
+      - "Bayraktar Akıncı"
+      - Akıncı
+      - "MQ-9B"
+      - "Gray Eagle"
+    opportunity_signals:
+      - "missile warning"
+      - "self-protection pod"
+      - "self-protection system"
+      - "external stores"
+      - "pylon"
+      - "CCA"
+      - "collaborative combat aircraft"
+      - "loyal wingman"
+      - "MUM-T"
 
   - id: lorop_pods
     name_he: "פודי LOROP (צילום אלכסוני ארוך-טווח)"
@@ -212,6 +288,27 @@ product_lines:
       - name: "Vinten LOROP"
         vendor: Thales
     our_products: []
+    # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    platforms:
+      - "Watchkeeper X"
+      - "Hermes 900"
+      - Heron
+      - "Bayraktar TB2"
+      - "Bayraktar Akıncı"
+      - Akıncı
+      - "MQ-9B"
+      - "Gray Eagle"
+    opportunity_signals:
+      - "reconnaissance pod"
+      - "ISR pod"
+      - "EO/IR pod"
+      - "sensor pod"
+      - "external stores"
+      - "pylon"
+      - "CCA"
+      - "collaborative combat aircraft"
+      - "loyal wingman"
+      - "MUM-T"
 
   - id: eo_air_defense_warning
     name_he: "גילוי והתראה אלקטרו-אופטיים להגנה אווירית"
@@ -307,6 +404,26 @@ product_lines:
       - name: "MOSP 3000"
         vendor: "Israel Aerospace Industries"
     our_products: []
+    # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    platforms:
+      - "Watchkeeper X"
+      - "Hermes 900"
+      - Heron
+      - "Bayraktar TB2"
+      - "Bayraktar Akıncı"
+      - Akıncı
+      - "MQ-9B"
+      - "Gray Eagle"
+    opportunity_signals:
+      - "gimbal"
+      - "EO/IR turret"
+      - "sensor ball"
+      - "external stores"
+      - "pylon"
+      - "CCA"
+      - "collaborative combat aircraft"
+      - "loyal wingman"
+      - "MUM-T"
 
   - id: border_long_range_eo
     name_he: "תצפית ארוכת-טווח להגנת גבולות"

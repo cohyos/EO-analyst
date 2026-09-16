@@ -27,6 +27,8 @@ from eoa.memory.relational import (
     update_item_fields,
     upsert_entity,
 )
+from eoa.pipeline.opportunity_signals import TAG as PLATFORM_OPPORTUNITY_TAG
+from eoa.pipeline.opportunity_signals import PlatformOpportunityHint, detect_platform_opportunity
 
 log = structlog.get_logger(__name__)
 
@@ -236,6 +238,76 @@ def apply_generic_ai_market_gate(item: dict, out: ClassifyOut) -> ClassifyOut:
     return out
 
 
+# ---------------------------------------------------------------------------------------------
+# CR-platform-opportunity (2026-09-16, docs/qa/content_review/CR-platform-opportunity.md): the
+# mirror-image gate to the two above -- those two only ever MOVE an item TOWARD out_of_scope; this
+# one is the one deterministic override in this module that can move an item BACK from
+# out_of_scope, when the platform-vs-EO/IR rule in classify.md (the "כלל פלטפורמה מול מטע\"ד" rule)
+# archived a platform-integration story that eoa.pipeline.opportunity_signals.
+# detect_platform_opportunity independently confirms states/implies an open external EO/IR/sensor/
+# pod slot on a named platform -- the live miss this closes: items 22760/23252 (Anduril's YFQ-44A
+# Fury CCA "fit checked" with a targeting-pod integration plan), archived by the model as pure
+# platform-weapons stories with "no substantive EO/IR/CV payload detail", which is a defensible
+# read of the source text's OWN technical content but misses that the story is itself a genuine
+# business-development signal regardless of technical depth.
+#
+# Runs LAST (after both gates above) precisely because it is the one allowed to reverse an
+# out_of_scope verdict -- apply_no_eoir_gate/apply_generic_ai_market_gate may have just set
+# out_of_scope on this same call; detect_platform_opportunity's own two-signal requirement (a named
+# platform AND an opportunity term, see that module's docstring) is what keeps this override
+# narrow, not "runs after the other gates".
+# ---------------------------------------------------------------------------------------------
+def apply_platform_opportunity_gate(item: dict, out: ClassifyOut) -> ClassifyOut:
+    """When :func:`eoa.pipeline.opportunity_signals.detect_platform_opportunity` finds a hit on
+    this item's title+clean_text, tag it ``platform_integration_opportunity`` and ensure
+    ``business`` is one of its ``dimensions`` -- regardless of what domain the model (or the two
+    gates above) landed on. If the model's own domain is ``out_of_scope``, additionally force it
+    in-scope: domain/subdomain set to the matched product line's own primary taxonomy subdomain
+    (``airborne_pods.<sub>`` for every currently-configured line with ``platforms``/
+    ``opportunity_signals``), so the item proceeds to ``triage``/``analyze``/product-line tagging
+    instead of being archived before it ever reaches them (see
+    ``eoa.memory.relational._ANALYZE_STAGE_SCOPE_FILTER``). An item already in scope keeps the
+    model's own domain/subdomain untouched -- only the tag/dimension are added. A no-op (returns
+    ``out`` unchanged) when there is no hint at all."""
+    text = " ".join(filter(None, [item.get("title"), item.get("clean_text")]))
+    hint = detect_platform_opportunity(item.get("title"), text)
+    if hint is None:
+        return out
+    was_out_of_scope = out.domain == "out_of_scope"
+    if was_out_of_scope:
+        from eoa.product_lines.registry import get_product_line
+
+        primary_line = get_product_line(hint.line_ids[0])
+        if primary_line is not None and primary_line.subdomains:
+            domain, _, subdomain = primary_line.subdomains[0].partition(".")
+            out.domain = domain  # type: ignore[assignment]
+            out.subdomain = subdomain
+        else:
+            out.domain = "airborne_pods"  # type: ignore[assignment]
+            out.subdomain = ""
+        note = f"platform_integration_opportunity: {', '.join(hint.platforms)} x {', '.join(hint.signals)}"
+        out.relevance_note = note[:200]
+    if "business" not in out.dimensions:
+        out.dimensions = [*out.dimensions, "business"]
+    if PLATFORM_OPPORTUNITY_TAG not in out.tags:
+        # ClassifyOut.tags is max_length=8 -- truncate the EXISTING tags, not the newly-added one,
+        # so this business-opportunity tag is never itself the casualty of a full tag list.
+        out.tags = [*out.tags[:7], PLATFORM_OPPORTUNITY_TAG]
+    log.info(
+        "classify_gate_platform_opportunity",
+        item_id=item.get("id"),
+        was_out_of_scope=was_out_of_scope,
+        line_ids=hint.line_ids,
+        platforms=hint.platforms,
+        signals=hint.signals,
+    )
+    return out
+
+
+def _opportunity_hint_for_prompt(item: dict) -> PlatformOpportunityHint | None:
+    return detect_platform_opportunity(item.get("title"), item.get("clean_text"))
+
+
 @dataclass
 class ClassifyStats:
     done: int = 0
@@ -257,6 +329,7 @@ def _system() -> str:
 
 
 def _classify_prompt(item: dict) -> str:
+    hint = _opportunity_hint_for_prompt(item)
     return render(
         "classify",
         taxonomy=_taxonomy_text(),
@@ -264,6 +337,7 @@ def _classify_prompt(item: dict) -> str:
         source=item.get("source_name") or item.get("url") or "",
         published_at=item.get("published_at") or "לא ידוע",
         lang=item.get("lang") or "?",
+        opportunity_hint=hint.prompt_text_he() if hint is not None else "אין",
         data=wrap_data((item.get("clean_text") or "")[:MAX_CHARS], item["id"], item.get("url") or ""),
     )
 
@@ -336,6 +410,20 @@ def persist_classification(item: dict, out: ClassifyOut) -> None:
         log.debug("israel_relevance_scoring_failed", item_id=item_id, error=str(exc)[:120])
     # --- A13 -- END --------------------------------------------------------------------------
 
+    extra_fields: dict = {}
+    # CR-platform-opportunity (2026-09-16): the deterministic pre-check's matched product line(s)
+    # are written straight to `items.product_lines` here, at classify time -- not left to wait for
+    # eoa.pipeline.analyze's own tag_product_lines (which only runs at the LATER analyze stage, and
+    # matches against the LLM-authored summary_he/so_what_he text, which may not repeat the exact
+    # configured keyword) -- see apply_platform_opportunity_gate's docstring: "tag the matching
+    # product line(s) even when the LLM is conservative" means this must not depend on the analyze
+    # stage's own text match succeeding. eoa.pipeline.analyze._merge_product_lines (analyze.py)
+    # unions with, rather than overwrites, whatever is written here.
+    if PLATFORM_OPPORTUNITY_TAG in out.tags:
+        hint = detect_platform_opportunity(item.get("title"), item.get("clean_text"))
+        if hint is not None:
+            extra_fields["product_lines"] = list(hint.line_ids)
+
     update_item_fields(
         item_id,
         domain=out.domain,
@@ -349,6 +437,7 @@ def persist_classification(item: dict, out: ClassifyOut) -> None:
         summary_he=out.one_line_he,
         israel_relevance=israel_score["score"],
         israel_reasons=israel_score["reasons"],
+        **extra_fields,
     )
 
 
@@ -412,6 +501,7 @@ def run_classify(
                 try:
                     out = apply_no_eoir_gate(it, out)
                     out = apply_generic_ai_market_gate(it, out)
+                    out = apply_platform_opportunity_gate(it, out)
                     persist_classification(it, out)
                     if out.domain == "out_of_scope":
                         update_item_fields(
@@ -435,6 +525,7 @@ def run_classify(
             out = classify_item(it, role=role)
             out = apply_no_eoir_gate(it, out)
             out = apply_generic_ai_market_gate(it, out)
+            out = apply_platform_opportunity_gate(it, out)
             persist_classification(it, out)
             if out.domain == "out_of_scope":
                 update_item_fields(it["id"], level="archive", score=1, triage_reason=out.relevance_note[:400])

@@ -2066,9 +2066,26 @@ def build_product_line(
     except Exception as exc:
         log.warning("product_line_delta_section_failed", line_id=line_id, error=str(exc)[:160])
 
+    # CR-platform-opportunity (2026-09-16): "הזדמנויות אינטגרציה בפלטפורמות" -- deterministic
+    # table of this line's own items tagged `platform_integration_opportunity` by
+    # eoa.pipeline.classify.apply_platform_opportunity_gate. Already-in-scope items with this
+    # line's own product_lines tag also appear in market_items_table above (collect_market_items
+    # excludes out_of_scope, and the gate moves a matched item out of out_of_scope) -- this table
+    # is additive, giving BD a dedicated, explicitly-framed view of just this signal rather than
+    # requiring the reader to notice it inside the general market-items table. A failure here must
+    # never break the product-line report.
+    platform_opp_tbl = None
+    try:
+        from eoa.report.platform_opportunities import platform_opportunity_table
+
+        platform_opp_tbl = platform_opportunity_table(citation_items, start, end, line_id=line_id)
+    except Exception as exc:
+        log.warning("product_line_platform_opportunity_section_failed", line_id=line_id, error=str(exc)[:160])
+
     tables: list[dict[str, Any]] = []
     for tbl in (
         market_items_table(items),
+        platform_opp_tbl,
         events_table(events),
         competitors_table(competitors),
         israel_positioning_table(line_id, competitors),

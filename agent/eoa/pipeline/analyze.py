@@ -31,6 +31,7 @@ from eoa.memory.relational import (
 )
 from eoa.pipeline.analysis_grounding import ground_analysis_fields, is_too_thin
 from eoa.pipeline.event_grounding import ground_event
+from eoa.pipeline.opportunity_signals import TAG as PLATFORM_OPPORTUNITY_TAG
 
 log = structlog.get_logger(__name__)
 
@@ -194,10 +195,29 @@ _PARTIAL_CONTENT_CONTEXT_NOTE_HE = (
 PARTIAL_CONTENT_UNCERTAINTY_NOTE_HE = "טקסט חלקי (paywall)"
 
 
+#: CR-platform-opportunity (2026-09-16): prepended to `context` (same mechanism as the partial-
+#: content note below) when classify.py's apply_platform_opportunity_gate tagged this item
+#: `platform_integration_opportunity` -- tells the model to phrase `so_what_he` for a BD reader
+#: (which Israeli product line could bid, the platform's own stated timeline, hedged) even though
+#: the item's own domain/subdomain may carry little EO/IR technical depth of its own -- without
+#: this note the model's default ASSESSMENT-mode instructions (analyze.md) have no reason to frame
+#: the so-what around a bid opportunity rather than a generic competitive read.
+_PLATFORM_OPPORTUNITY_CONTEXT_NOTE_HE = (
+    "הערה: פריט זה תויג ב-classify כ'הזדמנות אינטגרציה בפלטפורמה' (platform_integration_opportunity) "
+    "-- הפלטפורמה המתוארת עשויה לפתוח חריץ אינטגרציה חיצוני לפוד/חיישן EO/IR, גם אם אין בפריט עצמו "
+    "תוכן טכני EO/IR ממשי. נסח את so_what_he מנקודת מבט פיתוח עסקי (BD): איזה קו מוצר ישראלי רלוונטי "
+    "(אם ניתן לזהות לפי הפלטפורמה/הצורך המתואר), מה לוח הזמנים המוצהר של הפלטפורמה (אם נמסר במקור), "
+    "בניסוח מסויג (\"עשוי להוות\", \"פוטנציאל ל...\") ולא כעובדה ודאית -- ותמיד לפי הכמות/הפרטים "
+    "שנמסרו במקור קודם לכל ניסוח איכותני."
+)
+
+
 def _analyze_prompt(item: dict) -> str:
     context = _context_for(item)
     if item.get("content_status") == "partial":
         context = f"{_PARTIAL_CONTENT_CONTEXT_NOTE_HE}\n\n{context}"
+    if PLATFORM_OPPORTUNITY_TAG in (item.get("tags") or []):
+        context = f"{_PLATFORM_OPPORTUNITY_CONTEXT_NOTE_HE}\n\n{context}"
     return render(
         "analyze",
         context=context,
@@ -993,6 +1013,16 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
                 if llm_lines:
                     product_lines = llm_lines
                     tag_method = "llm"
+        # CR-platform-opportunity (2026-09-16): UNION with whatever eoa.pipeline.classify's
+        # persist_classification already wrote to items.product_lines (the deterministic platform-
+        # integration-opportunity pre-check, eoa.pipeline.opportunity_signals) rather than
+        # overwrite it -- this stage's own tag_product_lines/llm_tag_batch match against
+        # summary_he/so_what_he/subdomain and may legitimately find nothing (or a different,
+        # non-overlapping set) for an item whose classify-stage tag was set from title/clean_text
+        # alone; overwriting would silently drop a classify-stage tag this function never re-derives.
+        existing_product_lines = item.get("product_lines") or []
+        if existing_product_lines:
+            product_lines = list(dict.fromkeys([*existing_product_lines, *product_lines]))
         if product_lines:
             update_item_fields(item["id"], product_lines=product_lines)
             if persisted_event_ids:

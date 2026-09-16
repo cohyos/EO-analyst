@@ -446,6 +446,43 @@ def _apply_acquisition_watch_boost(item: dict, out: TriageOut) -> TriageOut:
 # --- A16 -- END ------------------------------------------------------------------------------
 
 
+# --- CR-platform-opportunity (2026-09-16) -- BEGIN ------------------------------------------
+# Deterministic level floor, applied last (after the israel-focus/acquisition-watch boosts above,
+# same "never lowers, only ever raises" convention) -- an item classify.py's
+# apply_platform_opportunity_gate tagged `platform_integration_opportunity` must reach at least
+# `level: yellow` (the lowest in-scope tier) regardless of how conservatively the model itself
+# scored novelty/magnitude/core_relevance: the classify-stage gate exists specifically to surface
+# a platform-integration business opportunity that may carry NO technical EO/IR depth of its own
+# (a bare platform/weapons story mentioning an open pod slot in passing) -- exactly the shape of
+# item whose novelty/magnitude the model would otherwise legitimately score low, and which a
+# score-only floor-less path could then quietly leave at `archive` (defeating the whole point of
+# the classify-stage override, see docs/qa/content_review/CR-platform-opportunity.md).
+#
+# Deliberately only floors to `yellow`, never higher: a thin platform-naming story with the tag
+# but no real pod/sensor content of its own (see eoa.pipeline.opportunity_signals module
+# docstring's calibration note, item 20162) should sit at the lowest in-scope tier, while a richer
+# story (e.g. one that itself states the pod integration plan, items 22760/23252) is expected to
+# score higher on the model's own novelty/magnitude judgement, not because of this floor.
+def _apply_platform_opportunity_floor(item: dict, out: TriageOut) -> TriageOut:
+    from eoa.pipeline.opportunity_signals import TAG as _PLATFORM_OPPORTUNITY_TAG
+
+    if _PLATFORM_OPPORTUNITY_TAG not in (item.get("tags") or []):
+        return out
+    yellow_min = settings().triage.levels["yellow"]
+    if out.score < yellow_min:
+        log.info(
+            "platform_opportunity_triage_floor",
+            item_id=item.get("id"),
+            original_score=out.score,
+            floored_score=yellow_min,
+        )
+        out.score = yellow_min
+    return out
+
+
+# --- CR-platform-opportunity -- END -----------------------------------------------------------
+
+
 def triage_item(item: dict, *, role: str = "resident", interactive: bool = False) -> TriageOut:
     """Score one classified item (does not persist). Level is recomputed from config thresholds."""
     out = chat_structured(
@@ -461,6 +498,7 @@ def triage_item(item: dict, *, role: str = "resident", interactive: bool = False
     out = _reconcile_score(item, out, role=role, interactive=interactive)
     out = _apply_israel_focus_boost(item, out)
     out = _apply_acquisition_watch_boost(item, out)
+    out = _apply_platform_opportunity_floor(item, out)
     out.level = level_for(out.score)  # type: ignore[assignment]
     return out
 
@@ -481,6 +519,7 @@ def triage_batch(items: list[dict], *, role: str = "resident") -> dict[int, Tria
             results[item_id] = _reconcile_score(item, out, role=role)
             results[item_id] = _apply_israel_focus_boost(item, results[item_id])
             results[item_id] = _apply_acquisition_watch_boost(item, results[item_id])
+            results[item_id] = _apply_platform_opportunity_floor(item, results[item_id])
         results[item_id].level = level_for(results[item_id].score)  # type: ignore[assignment]
     return results
 

@@ -749,9 +749,28 @@ sources:
     reliability: 2
     tags: [c_uas, air_defense, computer_vision]
     schedule: weekly
-    notes: "Company PR/blog. rss.xml 404s; the news listing page returns 200 but renders its article list client-side (no static href pattern found). Needs a browser-rendering fetch path."
+    # CR-platform-opportunity (2026-09-16) follow-up check: re-probed /sitemap.xml, /sitemap_index.xml,
+    # /news/rss(.xml), /rss.xml, /feed -- only /sitemap.xml (200, robots.txt has no Disallow) exists.
+    # It is a Google-News-extension XML sitemap (<urlset xmlns:news=...>), 311 <loc> entries (241
+    # under /news/), each with news:publication_date/news:title/news:keywords -- fresher entries seen
+    # up to 2026-09-09 at check time (weekly schedule, acceptable lag). This IS a usable, no-JS fetch
+    # path, but NOT a drop-in url swap: (a) it is not RSS/Atom (no <rss>/<feed> root), so `kind: rss`
+    # (feedparser, eoa.fetch.rss) will not parse it; (b) `kind: html`'s eoa.fetch.service._extract_links
+    # only reads a matched node's `href` ATTRIBUTE (built for `<a href=...>` anchors) -- a sitemap's URL
+    # lives in the `<loc>` element's TEXT content, which cssselect("loc") finds (311/311, confirmed
+    # locally against a saved copy of this sitemap) but `_extract_links` currently returns as `href =
+    # None` for every node, so zero links would be extracted even after just changing `url`/
+    # `list_selector` here. Needs a small, additive fetcher change (a `node.text` fallback when `href`
+    # is absent) plus confirming `_guarded_fetch_page` hands `_extract_links` bytes, not a str retaining
+    # the `<?xml ... encoding=...?>` declaration (lxml.html.fromstring raises ValueError on that exact
+    # combination -- confirmed locally; the fetcher's own try/except would silently swallow it as
+    # `fetch.html_source_parse_failed` and yield 0 entries, not an error). Left `verified: false` --
+    # this is a shared code path (agent/eoa/fetch/service.py) used by every `html`-kind source, so the
+    # fetcher change itself belongs in its own dedicated, tested round rather than bundled into a
+    # content-scope fix.
+    notes: "Company PR/blog. rss.xml 404s; the news listing page returns 200 but renders its article list client-side (no static href pattern found). /sitemap.xml IS fetchable (200, news-sitemap XML, 241 /news/ URLs with title+date) but needs a fetcher-side text-content fallback, not just a URL swap -- see the comment above this entry."
     verified: false
-    verified_at: "2026-09-04"
+    verified_at: "2026-09-16"
     list_selector: "a[href^='/news/']"
     link_selector: "self"
 

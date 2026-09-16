@@ -39,6 +39,17 @@ class ProductLineDef:
     competitors: tuple[str, ...] = field(default_factory=tuple)
     our_products: tuple[str, ...] = field(default_factory=tuple)
     conditional_keywords_en: tuple[ConditionalKeyword, ...] = field(default_factory=tuple)
+    #: CR-platform-opportunity (2026-09-16): named platforms (aircraft/UAV/CCA/vessel/vehicle)
+    #: this product line could plausibly be integrated onto -- see
+    #: eoa.pipeline.opportunity_signals.detect_platform_opportunity, which requires a hit here
+    #: AND a hit in `opportunity_signals` below before it forces business-opportunity in-scope
+    #: consideration. Empty by default -- a line with no `platforms` configured never participates
+    #: in the platform-integration-opportunity pre-check.
+    platforms: tuple[str, ...] = field(default_factory=tuple)
+    #: CR-platform-opportunity (2026-09-16): terms that, alongside a `platforms` hit, indicate the
+    #: platform story states or implies an open external EO/IR/sensor/pod integration slot (e.g.
+    #: "targeting pod", "external stores", "CCA") -- see module docstring above.
+    opportunity_signals: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _as_tuple(value: object) -> tuple[str, ...]:
@@ -77,6 +88,8 @@ def _parse(row: dict) -> ProductLineDef | None:
         competitors=_as_tuple(row.get("competitors")),
         our_products=_as_tuple(row.get("our_products")),
         conditional_keywords_en=_parse_conditional_keywords(row.get("conditional_keywords_en")),
+        platforms=_as_tuple(row.get("platforms")),
+        opportunity_signals=_as_tuple(row.get("opportunity_signals")),
     )
 
 

@@ -1819,6 +1819,19 @@ def build_daily(
     except Exception as exc:
         log.warning("daily_report_israel_section_failed", error=str(exc)[:160])
 
+    # CR-platform-opportunity (2026-09-16): "הזדמנויות אינטגרציה בפלטפורמות" -- deterministic
+    # (not LLM-drafted) table of items tagged `platform_integration_opportunity` by
+    # eoa.pipeline.classify.apply_platform_opportunity_gate, same additive mechanism as the
+    # tech-watch/Israel-industry tables above. A failure here must never break the daily report.
+    try:
+        from eoa.report.platform_opportunities import platform_opportunity_table
+
+        platform_opp_table = platform_opportunity_table(citation_items, start_ts, _end_ts)
+        if platform_opp_table:
+            tender_tables.append(platform_opp_table)
+    except Exception as exc:
+        log.warning("daily_report_platform_opportunity_section_failed", error=str(exc)[:160])
+
     # R8-reports #1 (round-7 judge D6 #4/#5): re-mark the *fully extended* citation registry right
     # before rendering -- see the updated docstrings on both marker functions above for why this
     # second pass is needed (and safe) on top of `collect_items`'s own early one.
