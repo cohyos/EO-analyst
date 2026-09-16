@@ -99,3 +99,36 @@ class TestSourceEnabledField:
         )
         enabled_ids = [s.id for s in load_sources(path) if s.enabled]
         assert enabled_ids == ["the_war_zone"]
+
+
+class TestRealConfigTimesOfIsraelFix:
+    """2026-09-16 fix: the real config/sources.yaml's times_of_israel entry pointed at
+    https://www.timesofisrael.com/feed/, which robots.txt genuinely disallows for our UA
+    (`User-agent: *` / `Disallow: /feed/`) -- confirmed live, not a parser false positive -- so
+    every nightly ingest run logged `fetch.source_failed`. It's replaced by three `/topic/<slug>/
+    feed/` sub-feeds, a different path robots.txt allows."""
+
+    def test_real_sources_yaml_loads_without_error(self) -> None:
+        sources = load_sources()
+        assert sources, "config/sources.yaml must load at least one source"
+
+    def test_old_blocked_main_feed_id_is_gone(self) -> None:
+        ids = {s.id for s in load_sources()}
+        assert "times_of_israel" not in ids
+
+    def test_replacement_topic_feeds_are_present_and_not_the_blocked_path(self) -> None:
+        by_id = {s.id: s for s in load_sources()}
+        for source_id in (
+            "times_of_israel_iron_dome",
+            "times_of_israel_hezbollah",
+            "times_of_israel_air_defense",
+        ):
+            assert source_id in by_id, f"{source_id} missing from config/sources.yaml"
+            src = by_id[source_id]
+            assert src.kind == "rss"
+            assert src.enabled is True
+            assert src.verified is True
+            # The robots-blocked path is exactly "/feed/" at the site root; every replacement
+            # must live under "/topic/<slug>/feed/" instead.
+            assert src.url.rstrip("/") != "https://www.timesofisrael.com/feed"
+            assert "/topic/" in src.url

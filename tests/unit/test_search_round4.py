@@ -56,6 +56,11 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(provider, "_ddgs_limiter", None)
     monkeypatch.setattr(cache, "CACHE_DIR", tmp_path / "search_cache")
     monkeypatch.delenv("EOA_SEARCH_NO_CACHE", raising=False)
+    # 2026-09-16 fix: preset the cached searxng reachability preflight to "reachable" so this
+    # file's pre-existing fallback tests (which mock `searxng_client.search` directly) are
+    # unaffected; the probe itself is covered by test_search_provider.py's
+    # TestSearxngReachabilityPreflight.
+    monkeypatch.setattr(provider, "_searxng_reachable", True)
     circuit.reset_all()
     yield
     circuit.reset_all()

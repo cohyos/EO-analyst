@@ -68,6 +68,12 @@ def _reset_fake_ddgs(monkeypatch):
     # keep the rate limiter from accumulating stamps across tests / real config values
     monkeypatch.setattr(provider, "_ddgs_limiter", None)
     monkeypatch.setenv("EOA_SEARCH_NO_CACHE", "1")
+    # Fix (2026-09-16): searxng fallback now checks a cached reachability preflight probe before
+    # ever calling `_call_searxng` (see provider._searxng_reachable_once). Preset it "reachable"
+    # so every pre-existing test here -- which mocks `searxng_client.search` itself, not the
+    # probe -- keeps reaching that mock exactly as before; the probe's own behavior is covered by
+    # TestSearxngReachabilityPreflight below.
+    monkeypatch.setattr(provider, "_searxng_reachable", True)
     from eoa.search import circuit as circuit_mod
 
     circuit_mod.reset_all()
@@ -288,6 +294,79 @@ class TestPing:
 
         monkeypatch.setattr(searxng_client, "ping", lambda: True)
         assert provider.ping() is True
+
+
+class TestSearxngReachabilityPreflight:
+    """searxng fallback is gated by a cached once-per-process reachability probe (2026-09-16 fix
+    for the nightly tenders-scan "searxng_failed [WinError 10061] actively refused" incident:
+    the legacy Docker container doesn't exist on this native-Windows install, so every fallback
+    attempt was a guaranteed, wasted connection-refused error)."""
+
+    def test_unreachable_skips_call_and_logs_once(self, monkeypatch):
+        from eoa.search import searxng_client
+
+        monkeypatch.setattr(provider, "_searxng_reachable", None)  # force a fresh probe
+        ping_calls = []
+        monkeypatch.setattr(searxng_client, "ping", lambda: (ping_calls.append(1), False)[1])
+
+        def boom(*a, **kw):
+            raise AssertionError("searxng_client.search must not be called when unreachable")
+
+        monkeypatch.setattr(searxng_client, "search", boom)
+        FakeDDGS.text_raises = DDGSException("boom")
+
+        for i in range(3):
+            resp = provider.search(f"q{i}", "en", engines=["google"])
+            assert resp.error is not None
+
+        # One probe for the whole process, not one per query.
+        assert ping_calls == [1]
+
+    def test_reachable_probe_result_is_cached_across_calls(self, monkeypatch):
+        from eoa.search import searxng_client
+
+        monkeypatch.setattr(provider, "_searxng_reachable", None)
+        ping_calls = []
+        monkeypatch.setattr(searxng_client, "ping", lambda: (ping_calls.append(1), True)[1])
+        monkeypatch.setattr(
+            searxng_client,
+            "search",
+            lambda q, lang="en", **kw: searxng_client.SearchResponse(q, lang, error="down"),
+        )
+        FakeDDGS.text_raises = DDGSException("boom")
+
+        provider.search("q1", "en", engines=["google"])
+        provider.search("q2", "en", engines=["google"])
+        assert ping_calls == [1]
+
+    def test_unreachable_explicit_searxng_provider_short_circuits(self, monkeypatch, force_provider):
+        force_provider("searxng")
+        from eoa.search import searxng_client
+
+        monkeypatch.setattr(provider, "_searxng_reachable", None)
+        monkeypatch.setattr(searxng_client, "ping", lambda: False)
+
+        def boom(*a, **kw):
+            raise AssertionError("searxng_client.search must not be called when unreachable")
+
+        monkeypatch.setattr(searxng_client, "search", boom)
+
+        resp = provider.search("q", "en")
+        assert resp.error is not None
+
+    def test_reset_helper_forces_a_fresh_probe(self, monkeypatch):
+        from eoa.search import searxng_client
+
+        monkeypatch.setattr(provider, "_searxng_reachable", None)
+        ping_calls = []
+        monkeypatch.setattr(searxng_client, "ping", lambda: (ping_calls.append(1), False)[1])
+        monkeypatch.setattr(searxng_client, "search", lambda *a, **kw: pytest.fail("unreachable"))
+        FakeDDGS.text_raises = DDGSException("boom")
+
+        provider.search("q1", "en", engines=["google"])
+        provider.reset_searxng_reachability()
+        provider.search("q2", "en", engines=["google"])
+        assert ping_calls == [1, 1]
 
 
 class TestRateLimiter:

@@ -1003,6 +1003,55 @@ class TestScanTendersGateAndDedup:
             stats = scan_tenders(sources=[src])
         assert stats.sources_scanned == 0
 
+    def test_unverified_rss_sources_are_skipped(self):
+        """2026-09-16 fix: austender (kind: rss, verified: false, documented in
+        config/tenders.yaml as Akamai-blocked -- 'Not polled directly; covered by
+        austender_search') must be skipped the same way an unverified api_json source is,
+        instead of being fetched every night and logging tender_source_failed on the 403."""
+        src = TenderSource(
+            id="austender",
+            name="AusTender",
+            kind="rss",
+            country="AU",
+            url="https://www.tenders.gov.au/atm/rss?Keyword=electro-optical",
+            keywords=DOMAIN_KEYWORDS,
+            verified=False,
+        )
+        with (
+            patch("eoa.tenders.scan._collect_source_notices") as mock_collect,
+            patch("eoa.tenders.scan._transition_closed", return_value=0),
+            patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
+            patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
+            patch("eoa.tenders.scan.get_source_priorities", return_value={}),
+        ):
+            stats = scan_tenders(sources=[src])
+        mock_collect.assert_not_called()
+        assert stats.sources_scanned == 0
+        assert stats.sources_failed == 0
+
+    def test_verified_rss_sources_are_still_scanned(self):
+        """The rss/verified:false skip must not regress a normal verified rss source (e.g.
+        es_placsp_atom)."""
+        src = TenderSource(
+            id="es_placsp_atom",
+            name="PLACSP",
+            kind="rss",
+            country="ES",
+            url="https://contrataciondelestado.es/x.atom",
+            keywords=DOMAIN_KEYWORDS,
+            verified=True,
+        )
+        with (
+            patch("eoa.tenders.scan._collect_source_notices", return_value=[]) as mock_collect,
+            patch("eoa.tenders.scan._transition_closed", return_value=0),
+            patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
+            patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
+            patch("eoa.tenders.scan.get_source_priorities", return_value={}),
+        ):
+            stats = scan_tenders(sources=[src])
+        mock_collect.assert_called_once()
+        assert stats.sources_scanned == 1
+
     def test_source_failure_does_not_stop_scan(self):
         good = _cf_source()
         bad = TenderSource(

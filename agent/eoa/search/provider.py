@@ -267,6 +267,53 @@ def _ddgs_search(
     return SearchResponse(query, lang, hits[:max_results])
 
 
+_searxng_reachability_lock = threading.Lock()
+_searxng_reachable: bool | None = None  # None = not probed yet this process
+
+
+def _searxng_reachable_once() -> bool:
+    """Probe SearXNG's healthz endpoint at most once per process and cache the result.
+
+    Fix (2026-09-16, nightly-pipeline source failures): the circuit breaker above already skips a
+    provider stuck *failing*, but it still pays a real per-query connection attempt for
+    ``circuit_fail_threshold`` (default 3) queries before it opens -- fine for a genuinely flaky
+    remote service, but wasteful for the common native-Windows case (see config.yaml's
+    ``searxng.url`` comment: the legacy Docker container simply does not exist here), where every
+    one of those attempts is an instant, deterministic connection refusal. A tenders scan with a
+    dozen ``kind: search`` sources each running 2-3 queries hit this repeatedly (incident:
+    ``searxng_failed`` "[WinError 10061] ... actively refused"), burning into the tenders stage's
+    15-minute time budget. One cheap probe (``searxng_client.ping``, a 3s-timeout healthz GET)
+    replaces that: "unreachable" is cached for the rest of the process's life, logged exactly once
+    (not per query, matching the round-4 "one line per state change" spec), and every later query
+    in this process skips the real connection attempt -- and the per-query ``searxng_failed``
+    warning -- entirely, whether reached via an explicit ``search.provider: searxng`` or as ddgs's
+    automatic fallback.
+    """
+    global _searxng_reachable
+    with _searxng_reachability_lock:
+        if _searxng_reachable is not None:
+            return _searxng_reachable
+        from eoa.search.searxng_client import ping as searxng_ping
+
+        reachable = searxng_ping()
+        _searxng_reachable = reachable
+    if not reachable:
+        log.warning("search_searxng_unreachable_skip", url=settings().searxng_url)
+    return reachable
+
+
+def reset_searxng_reachability() -> None:
+    """Test/ops helper: forget the cached preflight-probe result so the next call re-checks.
+
+    Mirrors ``eoa.search.circuit.reset_all()`` -- the probe result is a process-wide, in-memory
+    cache by design (same rationale as the circuit registry), so tests must reset it explicitly
+    between cases.
+    """
+    global _searxng_reachable
+    with _searxng_reachability_lock:
+        _searxng_reachable = None
+
+
 def _call_searxng(
     query: str,
     lang: str,
@@ -318,6 +365,10 @@ def search(
 
     if provider == "searxng":
         # Explicit operator choice: no automatic rotation to ddgs (unchanged pre-round-4 contract).
+        if not _searxng_reachable_once():
+            return SearchResponse(
+                query, lang, error="searxng unreachable (preflight probe failed; see search_searxng_unreachable_skip)"
+            )
         resp = _call_searxng(
             query,
             lang,
@@ -347,7 +398,14 @@ def search(
 
     checkpoint()
     searxng_circuit = _circuit.get_circuit("searxng")
-    if searxng_circuit.allow():
+    if not searxng_circuit.allow():
+        log.debug("search_circuit_skip", provider="searxng", query=query[:80])
+    elif not _searxng_reachable_once():
+        # Cached preflight probe already logged (once) that searxng is unreachable -- skip the
+        # real connection attempt instead of paying another instant connection-refused failure
+        # (and another per-query `searxng_failed` warning) on every remaining query this run.
+        log.debug("search_searxng_unreachable_cached_skip", query=query[:80])
+    else:
         attempted.append("searxng")
         resp = _call_searxng(
             query,
@@ -362,8 +420,6 @@ def search(
             _cache.put(key, resp)
             return resp
         searxng_circuit.record_failure(resp.error or "")
-    else:
-        log.debug("search_circuit_skip", provider="searxng", query=query[:80])
 
     reason = "all attempted providers failed" if attempted else "all providers circuit-open"
     log.warning("search_unavailable", query=query[:80], lang=lang, attempted=attempted, reason=reason)

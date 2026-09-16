@@ -54,9 +54,11 @@ stay open forever), and archives any ``status='closed'`` row whose ``deadline`` 
 days ago (``_archive_stale_closed``, F24 2026-09-06).
 
 ``kind: html`` sources in config/tenders.yaml are documented but intentionally not scraped here
-(see the notes on each entry -- bot-protected or client-hydrated pages); ``kind: api_json`` sources
-marked ``verified: false`` are skipped the same way. Both are covered instead by a sibling
-``kind: search`` source that runs through the already-verified, keyless SearXNG client.
+(see the notes on each entry -- bot-protected or client-hydrated pages); ``kind: api_json`` and
+``kind: rss`` sources marked ``verified: false`` (e.g. ``austender``, Akamai-blocked) are skipped
+the same way. All three are covered instead by a sibling ``kind: search`` source that runs through
+the configured search provider (``eoa.search.provider.search`` -- ``ddgs`` by default, legacy
+SearXNG when explicitly configured).
 """
 
 from __future__ import annotations
@@ -2042,7 +2044,14 @@ def scan_tenders(
         checkpoint()
         if src.kind == "html":
             continue
-        if src.kind == "api_json" and not _api_json_source_enabled(src):
+        # Fix (2026-09-16, nightly-pipeline source failures): the same "skip an unverified
+        # source silently instead of polling it and logging tender_source_failed every run"
+        # rule `_api_json_source_enabled` already applied to `kind: api_json` belongs equally to
+        # `kind: rss` -- e.g. austender (documented in config/tenders.yaml as Akamai-blocked,
+        # `verified: false`, "Not polled directly; covered by austender_search") was still being
+        # fetched here every night and 403'ing. The function itself is kind-agnostic (it only
+        # reads `src.verified`/`src.needs_key_env_var`), so no new helper is needed.
+        if src.kind in ("api_json", "rss") and not _api_json_source_enabled(src):
             continue
         try:
             notices = _collect_source_notices(src, deny_domains)

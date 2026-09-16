@@ -386,9 +386,24 @@ sources:
     verified: true
     verified_at: "2026-09-06"
 
-  - id: times_of_israel
-    name: "Times of Israel (Main Feed)"
-    url: "https://www.timesofisrael.com/feed/"
+  # Fix (2026-09-16, nightly-pipeline source failures): the main site-wide feed
+  # (https://www.timesofisrael.com/feed/) is genuinely, correctly blocked by robots.txt for our
+  # UA -- verified live: `curl -A "eo-analyst/0.1 ..." https://www.timesofisrael.com/robots.txt`
+  # returns `User-agent: *` / `Disallow: /feed/`, and `eoa.fetch.html._get_robot_parser` +
+  # `RobotFileParser.can_fetch` correctly evaluate that as disallowed (not a parser bug -- a
+  # prefix-match `Disallow: /feed/` genuinely covers `/feed/`). `agent/eoa/fetch/html.py` line
+  # ~322-325 then raises `FetchError`, logged nightly as `fetch.source_failed`. Per-topic feeds
+  # under `/topic/<slug>/feed/` are a *different* path (does not start with `/feed/`) and are
+  # therefore robots-allowed -- confirmed live with `RobotFileParser.can_fetch` (True) and `curl`
+  # (200 OK, real RSS). Three topic feeds directly on this source's own tags replace the single
+  # blocked main feed: id/iron-dome (air_defense/c_uas), id/hezbollah (regional threat context),
+  # id/air-defense (air_defense) -- each returned 15 <item> entries live, vs. the single blocked
+  # feed's nominal volume, so this is a volume upgrade, not just a compliance fix. The narrower
+  # id/idf topic feed (previously noted as an alternative) was re-checked and is still too
+  # low-volume (1 <item> live) to carry on its own.
+  - id: times_of_israel_iron_dome
+    name: "Times of Israel (Topic: Iron Dome)"
+    url: "https://www.timesofisrael.com/topic/iron-dome/feed/"
     kind: rss
     lang: en
     category: israel
@@ -396,9 +411,37 @@ sources:
     tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
     schedule: daily
     keywords_any: ["electro-optic", "infrared", "drone", "UAV", "missile", "radar", "air defense", "surveillance", "Iron Dome", "Arrow interceptor", "David's Sling", "IDF", "Hezbollah", "targeting pod", "thermal imaging", "night vision", "loitering munition"]
-    notes: "Site-wide main feed (confirmed 200 OK, real RSS 2.0, 15 <item> entries checked live); keyword-filtered per A12 convention since it is broad, not defense-specific. A narrower https://www.timesofisrael.com/topic/idf/feed/ also exists and is a real feed (200 OK, confirmed real RSS), but had only 1 <item> at check time -- too low-volume to rely on alone, so the main feed is used instead."
+    notes: "Replaces the robots.txt-blocked main /feed/ (see comment above). Topic sub-feed, robots-allowed and verified live: curl -> 200 OK, real RSS 2.0, 15 <item> entries."
     verified: true
-    verified_at: "2026-09-06"
+    verified_at: "2026-09-16"
+
+  - id: times_of_israel_hezbollah
+    name: "Times of Israel (Topic: Hezbollah)"
+    url: "https://www.timesofisrael.com/topic/hezbollah/feed/"
+    kind: rss
+    lang: en
+    category: israel
+    reliability: 4
+    tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
+    schedule: daily
+    keywords_any: ["electro-optic", "infrared", "drone", "UAV", "missile", "radar", "air defense", "surveillance", "Iron Dome", "Arrow interceptor", "David's Sling", "IDF", "Hezbollah", "targeting pod", "thermal imaging", "night vision", "loitering munition"]
+    notes: "Replaces the robots.txt-blocked main /feed/ (see comment above). Topic sub-feed, robots-allowed and verified live: curl -> 200 OK, real RSS 2.0, 15 <item> entries."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: times_of_israel_air_defense
+    name: "Times of Israel (Topic: Air Defense)"
+    url: "https://www.timesofisrael.com/topic/air-defense/feed/"
+    kind: rss
+    lang: en
+    category: israel
+    reliability: 4
+    tags: [land_surveillance, air_defense, naval_surveillance, c_uas]
+    schedule: daily
+    keywords_any: ["electro-optic", "infrared", "drone", "UAV", "missile", "radar", "air defense", "surveillance", "Iron Dome", "Arrow interceptor", "David's Sling", "IDF", "Hezbollah", "targeting pod", "thermal imaging", "night vision", "loitering munition"]
+    notes: "Replaces the robots.txt-blocked main /feed/ (see comment above). Topic sub-feed, robots-allowed and verified live: curl -> 200 OK, real RSS 2.0, 15 <item> entries."
+    verified: true
+    verified_at: "2026-09-16"
 
   - id: dod_contracts
     name: "DoD Contracts (defense.gov)"
