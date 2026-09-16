@@ -143,29 +143,86 @@ product_lines:
         vendor: "L3Harris"
     our_products: []
     # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    # calibration 2026-09-16 (kept CCA/MUM-T standalone, added 6th-gen -- user directive: do NOT
+    # narrow to pod terms only): CCA/loyal-wingman roster broadened to the full public program
+    # list (all are open-architecture, payload-agnostic airframes a targeting pod could plausibly
+    # ride on); MALE/HALE roster broadened to sibling variants of already-listed families; 6th-gen
+    # crewed-fighter programmes added since a targeting pod (internal or external) is a standard
+    # fit-out item on any new fighter program.
     platforms:
       - Fury
       - "YFQ-44A"
       - Vengeance
       - "YFQ-42A"
+      - "Ghost Bat"
+      - "MQ-28"
+      - Valkyrie
+      - "XQ-58"
+      - "Airbus Wingman"
+      - Kızılelma
+      - Kizilelma
       - "Watchkeeper X"
       - "Hermes 900"
+      - "Hermes 650 Spark"
       - Heron
+      - "Heron TP"
+      - "Heron Mk II"
       - "Bayraktar TB2"
+      - "Bayraktar TB3"
       - "Bayraktar Akıncı"
       - Akıncı
+      - Eurodrone
       - "MQ-9B"
+      - SkyGuardian
+      - SeaGuardian
       - "Gray Eagle"
+      - "Gray Eagle 25M"
+      - NGAD
+      - "F-47"
+      - "F/A-XX"
+      - GCAP
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - FCAS
+      - "KF-21"
+      - KAAN
+    # signals: pod-class terms plus the platform's own CLASS/programme name (see module docstring's
+    # calibration note -- a bare programme-name mention is accepted as a floor-level signal, same
+    # precedent as the existing CCA/Fury case). 6th-gen programme names double as both a `platforms`
+    # entry above and a signal here on purpose: a 6th-gen fighter story inherently implies an
+    # open/modular payload architecture even before any pod is named explicitly.
     opportunity_signals:
       - "targeting pod"
       - "EO/IR pod"
       - "sensor pod"
       - "external stores"
       - "pylon"
+      - "hardpoint"
+      - "weapon station"
+      - "payload bay"
+      - "modular payload"
+      - "mission payload"
+      - "open mission systems"
+      - "OMS"
+      - "autonomous collaborative platform"
+      - "ACP"
+      - "attritable"
       - "CCA"
       - "collaborative combat aircraft"
       - "loyal wingman"
       - "MUM-T"
+      - "6th gen"
+      - "sixth-generation"
+      - "sixth generation"
+      - "NGAD"
+      - "F/A-XX"
+      - "F-47"
+      - "GCAP"
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - "FCAS"
+      - "SCAF"
+      - "KF-21"
+      - "TF Kaan"
+      - "KAAN"
 
   - id: mws_eo
     name_he: "מערכות התראה להגנה עצמית מבוססות EO (MWS)"
@@ -226,29 +283,87 @@ product_lines:
           - "להגנה עצמית"
           - "התראת טילים"
     # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    # calibration 2026-09-16: CCA/MALE roster broadened as in targeting_pods above; rotary/manned
+    # platforms added here (missile warning is a standard helicopter self-protection fit, unlike
+    # an external targeting pod) since Apache/Black Hawk/AW159/NH90/T129 family aircraft routinely
+    # integrate an EO-based MWS; 6th-gen crewed-fighter programmes added (a fighter's own MWS is a
+    # baseline self-protection fit on any new fighter program).
     platforms:
       - Fury
       - "YFQ-44A"
       - Vengeance
       - "YFQ-42A"
+      - "Ghost Bat"
+      - "MQ-28"
+      - Valkyrie
+      - "XQ-58"
+      - "Airbus Wingman"
+      - Kızılelma
+      - Kizilelma
       - "Watchkeeper X"
       - "Hermes 900"
+      - "Hermes 650 Spark"
       - Heron
+      - "Heron TP"
+      - "Heron Mk II"
       - "Bayraktar TB2"
+      - "Bayraktar TB3"
       - "Bayraktar Akıncı"
       - Akıncı
+      - Eurodrone
       - "MQ-9B"
+      - SkyGuardian
+      - SeaGuardian
       - "Gray Eagle"
+      - "Gray Eagle 25M"
+      - "AH-64E"
+      - Apache
+      - "Black Hawk"
+      - "AW159"
+      - "NH90"
+      - "T129"
+      - "T929"
+      - NGAD
+      - "F-47"
+      - "F/A-XX"
+      - GCAP
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - FCAS
+      - "KF-21"
+      - KAAN
     opportunity_signals:
       - "missile warning"
       - "self-protection pod"
       - "self-protection system"
       - "external stores"
       - "pylon"
+      - "hardpoint"
+      - "weapon station"
+      - "payload bay"
+      - "modular payload"
+      - "mission payload"
+      - "open mission systems"
+      - "OMS"
+      - "autonomous collaborative platform"
+      - "ACP"
+      - "attritable"
       - "CCA"
       - "collaborative combat aircraft"
       - "loyal wingman"
       - "MUM-T"
+      - "6th gen"
+      - "sixth-generation"
+      - "sixth generation"
+      - "NGAD"
+      - "F/A-XX"
+      - "F-47"
+      - "GCAP"
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - "FCAS"
+      - "SCAF"
+      - "KF-21"
+      - "TF Kaan"
+      - "KAAN"
 
   - id: lorop_pods
     name_he: "פודי LOROP (צילום אלכסוני ארוך-טווח)"
@@ -289,15 +404,46 @@ product_lines:
         vendor: Thales
     our_products: []
     # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    # calibration 2026-09-16: CCA/MALE roster broadened as in targeting_pods above (LOROP recce
+    # pods fit MALE/HALE and CCA-class airframes; rotary platforms omitted -- LOROP is a fixed-wing
+    # high-altitude recon fit, not a helicopter one); 6th-gen crewed-fighter programmes added
+    # (tactical recon/LOROP is a plausible external fit on a new fighter program too).
     platforms:
+      - Fury
+      - "YFQ-44A"
+      - Vengeance
+      - "YFQ-42A"
+      - "Ghost Bat"
+      - "MQ-28"
+      - Valkyrie
+      - "XQ-58"
+      - "Airbus Wingman"
+      - Kızılelma
+      - Kizilelma
       - "Watchkeeper X"
       - "Hermes 900"
+      - "Hermes 650 Spark"
       - Heron
+      - "Heron TP"
+      - "Heron Mk II"
       - "Bayraktar TB2"
+      - "Bayraktar TB3"
       - "Bayraktar Akıncı"
       - Akıncı
+      - Eurodrone
       - "MQ-9B"
+      - SkyGuardian
+      - SeaGuardian
       - "Gray Eagle"
+      - "Gray Eagle 25M"
+      - NGAD
+      - "F-47"
+      - "F/A-XX"
+      - GCAP
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - FCAS
+      - "KF-21"
+      - KAAN
     opportunity_signals:
       - "reconnaissance pod"
       - "ISR pod"
@@ -305,10 +451,33 @@ product_lines:
       - "sensor pod"
       - "external stores"
       - "pylon"
+      - "hardpoint"
+      - "weapon station"
+      - "payload bay"
+      - "modular payload"
+      - "mission payload"
+      - "open mission systems"
+      - "OMS"
+      - "autonomous collaborative platform"
+      - "ACP"
+      - "attritable"
       - "CCA"
       - "collaborative combat aircraft"
       - "loyal wingman"
       - "MUM-T"
+      - "6th gen"
+      - "sixth-generation"
+      - "sixth generation"
+      - "NGAD"
+      - "F/A-XX"
+      - "F-47"
+      - "GCAP"
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - "FCAS"
+      - "SCAF"
+      - "KF-21"
+      - "TF Kaan"
+      - "KAAN"
 
   - id: eo_air_defense_warning
     name_he: "גילוי והתראה אלקטרו-אופטיים להגנה אווירית"
@@ -357,6 +526,29 @@ product_lines:
         context: ["air defense", "air-defense", "c-uas", "counter-uas", "counter uas", "anti-aircraft", "הגנה אווירית"]
       - term: "electro-optical tracking"
         context: ["air defense", "air-defense", "c-uas", "counter-uas", "counter uas", "anti-aircraft", "הגנה אווירית"]
+    # CR-platform-opportunity (2026-09-16, ground platforms): this line's own product is a
+    # standalone EO/IR detection-and-track sensor for air defense (not a fire unit's built-in
+    # seeker), so a plausible integration slot is a mobile SHORAD/gun-based air-defense vehicle
+    # that does not already carry its own organic EO tracker -- Boxer/Lynx KF41/Eitan are named
+    # SHORAD-variant chassis in current programmes; Skyranger is Rheinmetall's own gun+EO system
+    # (already a competitor_products entry above) named here only as the CLASS of vehicle a rival
+    # sensor could be displaced from or co-integrated with, per the operator's directive not to
+    # narrow this to airborne pod terms only. Deliberately excludes Iron Dome/David's Sling: those
+    # are missile-interceptor fire units with their own dedicated radar/EO fire-control chain, not
+    # a general "open EO sensor slot" platform in the sense this module models -- including them
+    # would be a stretch the calibration check (below) would likely flag as a false positive.
+    platforms:
+      - Boxer
+      - "Lynx KF41"
+      - Eitan
+      - Skyranger
+    opportunity_signals:
+      - "EO tracker"
+      - "electro-optical tracking"
+      - "sensor turret"
+      - "mission payload"
+      - "modular payload"
+      - "open architecture"
 
   - id: ball_gimbals_16in
     name_he: "מטע\"דים כדוריים 16 אינץ'"
@@ -405,25 +597,86 @@ product_lines:
         vendor: "Israel Aerospace Industries"
     our_products: []
     # CR-platform-opportunity (2026-09-16): see the field-docs header above.
+    # calibration 2026-09-16: CCA/MALE/rotary roster broadened as in mws_eo above -- a large ball
+    # gimbal is a standard EO/IR turret fit on helicopters (Apache/Black Hawk/AW159/NH90/T129
+    # family) as much as on MALE/HALE and CCA-class airframes; 6th-gen crewed-fighter programmes
+    # added (a chin/wing-mounted EO turret is a plausible fit on a new fighter program).
     platforms:
+      - Fury
+      - "YFQ-44A"
+      - Vengeance
+      - "YFQ-42A"
+      - "Ghost Bat"
+      - "MQ-28"
+      - Valkyrie
+      - "XQ-58"
+      - "Airbus Wingman"
+      - Kızılelma
+      - Kizilelma
       - "Watchkeeper X"
       - "Hermes 900"
+      - "Hermes 650 Spark"
       - Heron
+      - "Heron TP"
+      - "Heron Mk II"
       - "Bayraktar TB2"
+      - "Bayraktar TB3"
       - "Bayraktar Akıncı"
       - Akıncı
+      - Eurodrone
       - "MQ-9B"
+      - SkyGuardian
+      - SeaGuardian
       - "Gray Eagle"
+      - "Gray Eagle 25M"
+      - "AH-64E"
+      - Apache
+      - "Black Hawk"
+      - "AW159"
+      - "NH90"
+      - "T129"
+      - "T929"
+      - NGAD
+      - "F-47"
+      - "F/A-XX"
+      - GCAP
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - FCAS
+      - "KF-21"
+      - KAAN
     opportunity_signals:
       - "gimbal"
       - "EO/IR turret"
       - "sensor ball"
       - "external stores"
       - "pylon"
+      - "hardpoint"
+      - "weapon station"
+      - "payload bay"
+      - "modular payload"
+      - "mission payload"
+      - "open mission systems"
+      - "OMS"
+      - "autonomous collaborative platform"
+      - "ACP"
+      - "attritable"
       - "CCA"
       - "collaborative combat aircraft"
       - "loyal wingman"
       - "MUM-T"
+      - "6th gen"
+      - "sixth-generation"
+      - "sixth generation"
+      - "NGAD"
+      - "F/A-XX"
+      - "F-47"
+      - "GCAP"
+      - "Tempest fighter"  # bare "Tempest" also matched a cyclone-forecasting paper (CR-platform-opportunity §7 FP#1); GCAP covers the programme
+      - "FCAS"
+      - "SCAF"
+      - "KF-21"
+      - "TF Kaan"
+      - "KAAN"
 
   - id: border_long_range_eo
     name_he: "תצפית ארוכת-טווח להגנת גבולות"
@@ -467,6 +720,31 @@ product_lines:
       - name: iSea
         vendor: Controp
     our_products: []
+    # CR-platform-opportunity (2026-09-16, ground/naval platforms): border surveillance is
+    # inherently a vehicle/vessel-mounted long-range EO sensor mission (this line's own exemplar
+    # LORROS/Long-View/Cerberus systems are themselves mast- or vehicle-mounted), so a plausible
+    # external integration slot is an unmanned surface vessel or ground patrol vehicle used on
+    # border/maritime-border missions that does not already carry an equivalent long-range EO
+    # payload -- USVs (Seagull, Protector), OPVs/corvettes on border-patrol duty (Sa'ar 6,
+    # Reshef-class), and armored border-patrol vehicles (Eitan, Boxer, Lynx KF41, Ajax).
+    platforms:
+      - Seagull
+      - Protector
+      - "Sa'ar 6"
+      - "Saar 6"
+      - "Reshef-class"
+      - Eitan
+      - Boxer
+      - "Lynx KF41"
+      - Ajax
+    opportunity_signals:
+      - "sensor mast"
+      - "EO/IR payload"
+      - "electro-optical payload"
+      - "mission payload"
+      - "modular payload"
+      - "open architecture"
+      - "roof-mounted sensor"
 
 # vendor_domains (PD-datasheet, 2026-09-09, LESSONS-1 item 3): official web domain for every vendor
 # named above (both `competitors` and the `competitor_products` entries) -- read via

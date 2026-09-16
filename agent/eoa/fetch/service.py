@@ -390,6 +390,109 @@ async def _ingest_html_source(
         await _fetch_and_store(link, throttle=throttle, source_db_id=source_db_id, stats=stats)
 
 
+async def _ingest_sitemap_source(
+    source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
+) -> None:
+    """`kind: sitemap` (Task B item 1, 2026-09-16): parse the source's sitemap XML
+    (`eoa.fetch.sitemap.parse_sitemap`) and feed the resulting article URLs into the same
+    fetch-and-store path `kind: html` sources use (`_fetch_and_store`) -- see
+    `agent/eoa/fetch/sitemap.py`'s module docstring for why this is a dedicated parser rather than
+    reusing `_extract_links`. `source.path_prefix`, when set, restricts which `<loc>` URLs count
+    (most vendor sitemaps mix press/news URLs with product/careers/legal pages)."""
+    checkpoint()
+    from eoa.fetch.sitemap import parse_sitemap
+
+    await throttle.wait(source.url)
+    sitemap_page = await _guarded_fetch_page(source.url)
+    entries = parse_sitemap(
+        sitemap_page.html, path_prefix=getattr(source, "path_prefix", None), since_days=since_days
+    )
+    stats.entries_seen += len(entries)
+
+    for entry in entries:
+        checkpoint()
+        await _fetch_and_store(
+            entry.url,
+            throttle=throttle,
+            source_db_id=source_db_id,
+            stats=stats,
+            fallback_title=entry.title,
+            fallback_published_at=entry.published_at,
+        )
+
+
+def _store_search_hit(*, source_db_id: int | None, hit, stats: IngestStats) -> None:
+    """Task B item 2 (2026-09-16): store one `eoa.search.provider.SearchHit` directly from its
+    title+snippet -- no full-page fetch (LinkedIn/X company-post pages are not fetchable without
+    login, and there is no API access to another company's own posts either; the search result
+    snippet IS the content).
+
+    Marked `content_status='stub'` -- NOT the task brief's literal `'snippet'`, which does not
+    exist: `items.content_status` has a DB CHECK constraint of exactly `'full'/'partial'/'stub'`
+    (confirmed live 2026-09-16; a `'snippet'` write violates it and is silently dropped by this
+    function's own best-effort except-block, which is how this was actually caught -- every write
+    logged `fetch.search_hit_content_status_failed` and left `content_status` NULL). `'stub'` is
+    the existing value for exactly this shape of content (too short for a full analysis pass --
+    see `eoa.fetch.content_quality.assess`, which `eoa.pipeline.analyze._content_status_precheck`
+    calls on every item at analyze time and would itself compute `'stub'` for a search snippet's
+    length anyway, overwriting whatever this function set here); reusing it avoids both a second
+    schema migration and inventing a status value the rest of the pipeline never checks for."""
+    from eoa.memory import relational
+
+    already_seen = _url_already_seen(hit.url)
+    try:
+        item_id = relational.insert_item(
+            source_id=source_db_id,
+            url=hit.url,
+            title=hit.title or None,
+            clean_text=hit.snippet or None,
+            lang=None,
+        )
+    except (DeadlineExceeded, LeaseLost):
+        raise
+    except Exception as exc:
+        log.warning("fetch.search_hit_store_failed", url=hit.url, error=repr(exc))
+        stats.items_skipped += 1
+        return
+
+    if item_id and not already_seen:
+        try:
+            relational.update_item_fields(item_id, content_status="stub")
+        except (DeadlineExceeded, LeaseLost):
+            raise
+        except Exception as exc:
+            log.debug("fetch.search_hit_content_status_failed", item_id=item_id, error=repr(exc))
+        stats.items_inserted += 1
+    else:
+        stats.items_skipped += 1
+
+
+async def _ingest_search_source(source, *, source_db_id: int | None, stats: IngestStats) -> None:
+    """`kind: search` (Task B item 2, 2026-09-16): run each of `source.queries` through
+    `eoa.search.provider.search` (the ddgs-backed provider, same one `config/tenders.yaml`'s own
+    `kind: search` sources use via `eoa.tenders.scan._fetch_search` -- see that module for the
+    sibling implementation) and store each hit directly from its search-result snippet via
+    `_store_search_hit`. Built for LinkedIn/X company-post monitoring
+    (`site:linkedin.com/posts "<company>"`-style queries, see `config/sources.yaml`'s
+    `*_linkedin_search` entries) but generic over any `kind: search` source's `queries` list.
+    A failed/errored query is logged and skipped -- never aborts the source's remaining queries."""
+    checkpoint()
+    from eoa.search.provider import search as run_search_query
+
+    for query in source.queries:
+        checkpoint()
+        resp = run_search_query(query, source.engine_lang, max_results=source.max_results)
+        if resp.error:
+            log.warning(
+                "fetch.search_source_query_failed", source_id=source.id, query=query[:80], error=resp.error
+            )
+            continue
+        stats.entries_seen += len(resp.hits)
+        for hit in resp.hits:
+            checkpoint()
+            _store_search_hit(source_db_id=source_db_id, hit=hit, stats=stats)
+
+
 async def _ingest_one_source(
     source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
 ) -> None:
@@ -402,6 +505,12 @@ async def _ingest_one_source(
             await _ingest_rss_source(
                 source, source_db_id=source_db_id, since_days=since_days, throttle=throttle, stats=stats
             )
+        elif source.kind == "sitemap":
+            await _ingest_sitemap_source(
+                source, source_db_id=source_db_id, since_days=since_days, throttle=throttle, stats=stats
+            )
+        elif source.kind == "search":
+            await _ingest_search_source(source, source_db_id=source_db_id, stats=stats)
         else:
             await _ingest_html_source(source, source_db_id=source_db_id, throttle=throttle, stats=stats)
     except FetchError as exc:

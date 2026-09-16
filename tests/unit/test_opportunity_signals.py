@@ -134,3 +134,37 @@ class TestDetectPlatformOpportunity:
 
     def test_tag_constant_matches_expected_value(self) -> None:
         assert TAG == "platform_integration_opportunity"
+
+
+class TestShortTermWordBoundary:
+    """Calibration round 2026-09-16 (6th-gen/CCA-class broadening): short (<=4 char) terms like
+    "ACP"/"OMS"/"F-47" must match on word boundaries only, not as a bare substring, since a plain
+    substring match on a short token is prone to false positives inside unrelated longer words."""
+
+    def test_short_signal_inside_unrelated_word_does_not_match(self) -> None:
+        # "OMS" (open mission systems acronym) must not match inside "COMSAT".
+        hint = detect_platform_opportunity(
+            "Fury satcom", "The Fury will use a new COMSAT relay for beyond-line-of-sight control."
+        )
+        assert hint is None
+
+    def test_short_signal_as_standalone_token_does_match(self) -> None:
+        hint = detect_platform_opportunity(
+            "Fury open architecture", "The Fury supports OMS for rapid payload integration."
+        )
+        assert hint is not None
+        assert "OMS" in hint.signals
+
+    def test_short_platform_token_f47_matches_on_word_boundary(self) -> None:
+        hint = detect_platform_opportunity(
+            "Sixth-gen fighter", "The F-47 sixth-generation fighter will carry a modular payload bay."
+        )
+        assert hint is not None
+        assert "F-47" in hint.platforms
+
+    def test_short_platform_token_not_matched_inside_longer_word(self) -> None:
+        # "KAAN" is a real platform name but must not match inside an unrelated longer token.
+        hint = detect_platform_opportunity(
+            "Budget update", "The KAANDAHAR base received a new modular payload shipment."
+        )
+        assert hint is None

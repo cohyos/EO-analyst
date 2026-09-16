@@ -615,25 +615,31 @@ sources:
     reliability: 2
     tags: [airborne_pods, air_defense, c_uas]
     schedule: weekly
-    notes: "Company PR. Site returns an odd HTTP 247 status with a ~500-byte JS-redirect shell to curl for both /feed/ and /news/; needs a browser-rendering fetch path. Kept as placeholder."
+    notes: "Company PR. Site returns an odd HTTP 247 status with a ~500-byte JS-redirect shell to curl for both /feed/ and /news/; needs a browser-rendering fetch path. Kept as placeholder. Task B (2026-09-16): /sitemap.xml, /sitemap_index.xml, /news-sitemap.xml, /sitemap/ all re-probed live -- every path returns the SAME HTTP 247 JS-redirect shell (570 bytes), so the sitemap route does not bypass this site's block either."
     verified: false
-    verified_at: "2026-09-04"
+    verified_at: "2026-09-16"
     list_selector: "div.news-item"
     link_selector: "a"
 
   - id: iai_press
     name: "Israel Aerospace Industries (IAI) - Press Releases"
-    url: "https://www.iai.co.il/media/press-releases"
-    kind: html
+    url: "https://www.iai.co.il/news-sitemap.xml"
+    kind: sitemap
     lang: en
     reliability: 2
     tags: [airborne_pods, naval_surveillance, air_defense, c_uas]
     schedule: weekly
-    notes: "Company PR. Page returns 200 but article list renders client-side (no static href pattern found); needs a browser-rendering fetch path."
-    verified: false
-    verified_at: "2026-09-04"
-    list_selector: "div.press-release-item"
-    link_selector: "a"
+    # Task B item 1 (2026-09-16): the media-hub listing page (/media/press-releases) still renders
+    # client-side (kept the old kind:html note below for history); /news-sitemap.xml is a plain
+    # <urlset> (NOT an index) with 113 entries, live-probed 2026-09-16 -- but it mixes real
+    # /news/<slug>/ article pages with WP media-upload URLs (.webp thumbnails under
+    # /wp-content/uploads/...), hence the mandatory path_prefix below. No news:publication_date/
+    # lastmod on this sitemap -- every /news/ entry is kept (undated-entry fail-open convention,
+    # eoa.fetch.sitemap.parse_sitemap).
+    notes: "Company PR. Media-hub listing page renders client-side (no static href pattern) -- switched to /news-sitemap.xml (kind: sitemap), filtered to /news/ via path_prefix. See the comment above."
+    verified: true
+    verified_at: "2026-09-16"
+    path_prefix: "/news/"
 
   - id: teledyne_flir_press
     name: "Teledyne FLIR - Newsroom"
@@ -687,17 +693,24 @@ sources:
 
   - id: thales_press
     name: "Thales Group - Press Releases"
-    url: "https://www.thalesgroup.com/en/press-release-list"
-    kind: html
+    url: "https://www.thalesgroup.com/sitemap.xml?page=1"
+    kind: sitemap
     lang: en
     reliability: 2
     tags: [airborne_pods, land_surveillance, air_defense, c_uas]
     schedule: weekly
-    notes: "Company PR. Site is behind Incapsula/rss.xml also blocked; the press-release-list page returns 200 but only a ~1KB JS-app shell to a static fetch. Needs a browser-rendering fetch path."
-    verified: false
-    verified_at: "2026-09-04"
-    list_selector: "div.press-release-item"
-    link_selector: "a"
+    # Task B item 1 (2026-09-16): /sitemap.xml itself is a <sitemapindex> (5 pages,
+    # ?page=1..5, ~2000 URLs each, all locales/page-types mixed -- NOT a news-only feed) --
+    # eoa.fetch.sitemap.parse_sitemap deliberately does not follow a sitemapindex (out of scope
+    # for this pre-check, see that module's docstring), so this points directly at page=1 (a real
+    # <urlset>, confirmed live 2026-09-16) rather than the index root. Live-probed: page=1 alone
+    # already contains ~700+ /en/news-centre/press-releases/<slug> URLs (of 3641 found across all
+    # 5 pages combined) -- partial coverage of the full press-release archive, not the complete
+    # set; a follow-up could add page=2..5 as separate source entries if this proves too thin.
+    notes: "Company PR. Incapsula-gated press-release-list page unchanged (still no static fetch path); switched to /sitemap.xml?page=1 (kind: sitemap, path_prefix filtered) -- see the comment above for the pagination/index caveat."
+    verified: true
+    verified_at: "2026-09-16"
+    path_prefix: "/en/news-centre/press-releases"
 
   - id: leonardo_press
     name: "Leonardo - Media Hub Press Releases"
@@ -721,58 +734,47 @@ sources:
     reliability: 2
     tags: [land_surveillance, air_defense, c_uas]
     schedule: weekly
-    notes: "Company PR. /en/rss 404s; the news-watch listing page returns 200 but renders its article list client-side (no static href pattern found). Needs a browser-rendering fetch path."
+    notes: "Company PR. /en/rss 404s; the news-watch listing page returns 200 but renders its article list client-side (no static href pattern found). Needs a browser-rendering fetch path. Task B (2026-09-16): /sitemap.xml IS fetchable (200) but is a <sitemapindex> of 10 site_N.xml children (sitemap.default.xml, sitemap.site_1.xml..site_11.xml) -- eoa.fetch.sitemap.parse_sitemap does not follow an index (out of scope, see that module's docstring); sitemap.default.xml resolved to a single root-page URL and sitemap.site_1.xml errored on fetch (non-XML body despite the .xml extension) -- none of the probed children yielded a usable news-watch URL list in this round. Left undetermined; a follow-up would need to probe each of the 10 children individually."
     verified: false
-    verified_at: "2026-09-04"
+    verified_at: "2026-09-16"
     list_selector: "div.news-watch-item"
     link_selector: "a"
 
   - id: saab_press
     name: "Saab - Newsroom Press Releases"
-    url: "https://www.saab.com/newsroom/press-releases"
-    kind: html
+    url: "https://www.saab.com/sitemap.xml"
+    kind: sitemap
     lang: en
     reliability: 2
     tags: [naval_surveillance, air_defense, land_surveillance]
     schedule: weekly
-    notes: "Company PR. /rss 404s; the newsroom listing page returns 200 but only sub-nav links were found statically, article cards render client-side. Needs a browser-rendering fetch path."
-    verified: false
-    verified_at: "2026-09-04"
-    list_selector: "div.press-release-card"
-    link_selector: "a"
+    # Task B item 1 (2026-09-16): the newsroom listing page still renders client-side (old note
+    # below kept for history); /sitemap.xml is a single flat <urlset> (NOT an index, live-probed
+    # 2026-09-16), 10,788 URLs total across the whole site, 3,161 under /newsroom -- each with a
+    # real <lastmod> (e.g. .../newsroom/stories/2024/january/... | 2024-01-16T05:20:23+00:00), so
+    # `since_days` filtering works properly here (unlike iai_press's undated news-sitemap).
+    notes: "Company PR. Newsroom listing page renders client-side (no static href pattern) -- switched to /sitemap.xml (kind: sitemap), filtered to /newsroom via path_prefix. See the comment above."
+    verified: true
+    verified_at: "2026-09-16"
+    path_prefix: "/newsroom"
 
   - id: anduril_press
     name: "Anduril - News"
-    url: "https://www.anduril.com/news"
-    kind: html
+    url: "https://www.anduril.com/sitemap.xml"
+    kind: sitemap
     lang: en
     reliability: 2
     tags: [c_uas, air_defense, computer_vision]
     schedule: weekly
-    # CR-platform-opportunity (2026-09-16) follow-up check: re-probed /sitemap.xml, /sitemap_index.xml,
-    # /news/rss(.xml), /rss.xml, /feed -- only /sitemap.xml (200, robots.txt has no Disallow) exists.
-    # It is a Google-News-extension XML sitemap (<urlset xmlns:news=...>), 311 <loc> entries (241
-    # under /news/), each with news:publication_date/news:title/news:keywords -- fresher entries seen
-    # up to 2026-09-09 at check time (weekly schedule, acceptable lag). This IS a usable, no-JS fetch
-    # path, but NOT a drop-in url swap: (a) it is not RSS/Atom (no <rss>/<feed> root), so `kind: rss`
-    # (feedparser, eoa.fetch.rss) will not parse it; (b) `kind: html`'s eoa.fetch.service._extract_links
-    # only reads a matched node's `href` ATTRIBUTE (built for `<a href=...>` anchors) -- a sitemap's URL
-    # lives in the `<loc>` element's TEXT content, which cssselect("loc") finds (311/311, confirmed
-    # locally against a saved copy of this sitemap) but `_extract_links` currently returns as `href =
-    # None` for every node, so zero links would be extracted even after just changing `url`/
-    # `list_selector` here. Needs a small, additive fetcher change (a `node.text` fallback when `href`
-    # is absent) plus confirming `_guarded_fetch_page` hands `_extract_links` bytes, not a str retaining
-    # the `<?xml ... encoding=...?>` declaration (lxml.html.fromstring raises ValueError on that exact
-    # combination -- confirmed locally; the fetcher's own try/except would silently swallow it as
-    # `fetch.html_source_parse_failed` and yield 0 entries, not an error). Left `verified: false` --
-    # this is a shared code path (agent/eoa/fetch/service.py) used by every `html`-kind source, so the
-    # fetcher change itself belongs in its own dedicated, tested round rather than bundled into a
-    # content-scope fix.
-    notes: "Company PR/blog. rss.xml 404s; the news listing page returns 200 but renders its article list client-side (no static href pattern found). /sitemap.xml IS fetchable (200, news-sitemap XML, 241 /news/ URLs with title+date) but needs a fetcher-side text-content fallback, not just a URL swap -- see the comment above this entry."
-    verified: false
+    # Task B item 1 (2026-09-16): the dedicated `kind: sitemap` fetcher (agent/eoa/fetch/sitemap.py)
+    # this entry's own prior-round comment called for now exists -- switched from `kind: html`
+    # (client-side news listing page, never usable). /sitemap.xml is a Google-News-extension XML
+    # sitemap (<urlset xmlns:news=...>), 311 <loc> entries (241 under /news/), each with
+    # news:publication_date/news:title -- re-confirmed live 2026-09-16 (still 200, 311 entries).
+    notes: "Company PR/blog. rss.xml 404s; news listing page renders client-side. /sitemap.xml (kind: sitemap, path_prefix filtered) is the working fetch path -- see the comment above."
+    verified: true
     verified_at: "2026-09-16"
-    list_selector: "a[href^='/news/']"
-    link_selector: "self"
+    path_prefix: "/news/"
 
   - id: controp_press
     name: "Controp - News"
@@ -782,11 +784,370 @@ sources:
     reliability: 2
     tags: [airborne_pods, land_surveillance]
     schedule: weekly
-    notes: "Company PR. Site is behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx, including the homepage. Kept as placeholder pending a browser-rendering fetch path."
+    notes: "Company PR. Site is behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx, including the homepage. Kept as placeholder pending a browser-rendering fetch path. Task B (2026-09-16): /sitemap.xml, /sitemap_index.xml, /news-sitemap.xml, /sitemap/ all re-probed live -- all 403 with the identical Cloudflare challenge body (4546 bytes); the WAF gates the sitemap route too, no bypass found."
     verified: false
-    verified_at: "2026-09-04"
+    verified_at: "2026-09-16"
     list_selector: "div.news-item"
     link_selector: "a"
+
+  # ---------------------------------------------------------------- Task B item 2 (2026-09-16):
+  # company LinkedIn posts via the search provider (kind: search, new -- eoa.fetch.service.
+  # _ingest_search_source). LinkedIn pages are not fetchable without login and the API exposes no
+  # other company's posts, so these run a `site:linkedin.com/posts "<company>"` query through
+  # eoa.search.provider.search (ddgs-backed; same provider config/tenders.yaml's own kind: search
+  # sources use) and store each hit directly from its snippet -- content_status='snippet',
+  # reliability: 2 (a search-engine-indexed snippet, not a primary-fetched page), source_name
+  # carries "LinkedIn" + company for report-layer display. Live-probed 2026-09-16 (ddgs, region
+  # us-en); one company (`hensoldt_linkedin_search`, `rheinmetall_linkedin_search`) returned zero
+  # hits across several query phrasings this round and is left `verified: false`/`enabled: false`
+  # pending a re-probe (ddgs coverage is a moving target, not necessarily a permanent gap).
+  - id: elbit_linkedin_search
+    name: "LinkedIn · Elbit Systems (search)"
+    url: "https://www.linkedin.com/company/elbitsystems/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense, c_uas]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Elbit Systems"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 10 hits, e.g. \"Elbit Systems' Post - LinkedIn\", \"Elbit Systems continues to stand alongside our partners with advanced...\", \"Insights from our President and CEO | Elbit Systems - LinkedIn\"."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: rafael_linkedin_search
+    name: "LinkedIn · Rafael Advanced Defense Systems (search)"
+    url: "https://www.linkedin.com/company/rafael-advanced-defense-systems/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, air_defense, c_uas]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Rafael Advanced Defense Systems"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: iai_linkedin_search
+    name: "LinkedIn · Israel Aerospace Industries (search)"
+    url: "https://www.linkedin.com/company/israel-aerospace-industries/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, naval_surveillance, air_defense, c_uas]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Israel Aerospace Industries"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits, e.g. \"IAI - Israel Aerospace Industries on LinkedIn\"."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: teledyne_flir_linkedin_search
+    name: "LinkedIn · Teledyne FLIR (search)"
+    url: "https://www.linkedin.com/company/flir/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, c_uas, secondary]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Teledyne FLIR"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits, e.g. \"Teledyne Acquires FLIR TransponderTech for Maritime Solutions\"."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: hensoldt_linkedin_search
+    name: "LinkedIn · Hensoldt (search)"
+    url: "https://www.linkedin.com/company/hensoldt/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense, c_uas]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Hensoldt"', 'site:linkedin.com/posts "HENSOLDT"']
+    engine_lang: en
+    max_results: 10
+    enabled: false
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 0 hits across both query phrasings this round. Disabled pending re-probe (ddgs coverage is a moving target); the source entry is kept so a later re-enable is a one-line change."
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: safran_linkedin_search
+    name: "LinkedIn · Safran (search)"
+    url: "https://www.linkedin.com/company/safran/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, secondary]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Safran"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: thales_linkedin_search
+    name: "LinkedIn · Thales Group (search)"
+    url: "https://www.linkedin.com/company/thalesgroup/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense, c_uas]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Thales Group"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits, e.g. \"Thales appoints Robert Geckle CEO of Thales USA and North...\"."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: leonardo_linkedin_search
+    name: "LinkedIn · Leonardo (search)"
+    url: "https://www.linkedin.com/company/leonardo_company/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, naval_surveillance, air_defense]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Leonardo"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: rheinmetall_linkedin_search
+    name: "LinkedIn · Rheinmetall (search)"
+    url: "https://www.linkedin.com/company/rheinmetall/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [land_surveillance, air_defense, c_uas]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Rheinmetall"']
+    engine_lang: en
+    max_results: 10
+    enabled: false
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 0 hits this round. Disabled pending re-probe (ddgs coverage is a moving target); kept so a later re-enable is a one-line change."
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: saab_linkedin_search
+    name: "LinkedIn · Saab (search)"
+    url: "https://www.linkedin.com/company/saabgroup/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [naval_surveillance, air_defense, land_surveillance]
+    schedule: weekly
+    # A bare "Saab" query returned 0 hits live (too short/common a token for this backend);
+    # "Saab defence" (still site:-scoped) returned 5+ real hits -- see notes.
+    queries: ['site:linkedin.com/posts "Saab defence"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): bare \"Saab\" query = 0 hits; \"Saab defence\" = 5+ hits, e.g. \"Saab's Annual and Sustainability Report 2024 | Saab - LinkedIn\", \"Saab at Defense & Security Thailand 2025 | Saab - LinkedIn\"."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: anduril_linkedin_search
+    name: "LinkedIn · Anduril Industries (search)"
+    url: "https://www.linkedin.com/company/anduril-industries/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [c_uas, air_defense, computer_vision]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Anduril Industries"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits, e.g. \"Anduril has selected Columbus, Ohio as the location of...\"."
+    verified: true
+    verified_at: "2026-09-16"
+
+  - id: controp_linkedin_search
+    name: "LinkedIn · Controp Precision Technologies (search)"
+    url: "https://www.linkedin.com/company/controp-precision-technologies/posts"
+    kind: search
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance]
+    schedule: weekly
+    queries: ['site:linkedin.com/posts "Controp Precision Technologies"']
+    engine_lang: en
+    max_results: 10
+    notes: "Live-probed 2026-09-16 (ddgs, region us-en): 5+ hits, e.g. \"CONTROP Precision Technologies Ltd.'s Post - LinkedIn\"."
+    verified: true
+    verified_at: "2026-09-16"
+
+  # ---------------------------------------------------------------- Task B item 3 (2026-09-16):
+  # unambiguous top-tier competitors named explicitly by the user, not yet covered by any source
+  # above. Added as `enabled: false` placeholders (no verified fetch URL yet -- kind: html against
+  # each company's own newsroom/press-releases page as a best-guess starting point) so a later
+  # session can verify a real URL and flip `enabled: true`/`verified: true` without re-deciding
+  # scope. See docs/SOURCES_COMPANY_EXPANSION_HE.md for the full data-driven proposal these were
+  # drawn from (only the ones already flagged unambiguous top-tier were added automatically here;
+  # the rest of that doc's Top-25 awaits the lead's approval).
+  - id: l3harris_press
+    name: "L3Harris Technologies - Newsroom"
+    url: "https://www.l3harris.com/newsroom"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, c_uas]
+    schedule: weekly
+    notes: "Placeholder (unverified). Competitor across targeting_pods/ball_gimbals_16in/lorop_pods (WESCAM/ATLIS) -- see config/product_lines.yaml."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: lockheed_martin_mfc_press
+    name: "Lockheed Martin Missiles and Fire Control - News"
+    url: "https://www.lockheedmartin.com/en-us/news.html"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, air_defense]
+    schedule: weekly
+    notes: "Placeholder (unverified). Competitor in targeting_pods (Sniper ATP) -- see config/product_lines.yaml."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: rtx_press
+    name: "RTX (Raytheon) - Newsroom"
+    url: "https://www.rtx.com/news"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, air_defense, c_uas]
+    schedule: weekly
+    notes: "Placeholder (unverified). Top-25 data-driven proposal (7 mentions/90d, docs/SOURCES_COMPANY_EXPANSION_HE.md), not yet in a product-line competitors list."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: northrop_grumman_press
+    name: "Northrop Grumman - Newsroom"
+    url: "https://news.northropgrumman.com/"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, air_defense, c_uas]
+    schedule: weekly
+    notes: "Placeholder (unverified). Competitor in mws_eo (AN/AAQ-24 Nemesis) -- see config/product_lines.yaml. Top-ranked in docs/SOURCES_COMPANY_EXPANSION_HE.md (11 mentions/90d)."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: bae_systems_press
+    name: "BAE Systems - Newsroom"
+    url: "https://www.baesystems.com/en/newsroom"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense]
+    schedule: weekly
+    notes: "Placeholder (unverified). Competitor in mws_eo (AN/AAR-57 CMWS) -- see config/product_lines.yaml."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: general_atomics_press
+    name: "General Atomics Aeronautical Systems - News"
+    url: "https://www.ga-asi.com/news"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods]
+    schedule: weekly
+    notes: "Placeholder (unverified). CCA (YFQ-42A Vengeance) prime -- MALE/HALE and CCA-class platform maker directly relevant to the CR-platform-opportunity gate. Top-25 (5 mentions/90d, 7 graph edges)."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: kratos_press
+    name: "Kratos Defense and Security Solutions - News"
+    url: "https://kratosdefense.com/newsroom"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, c_uas]
+    schedule: weekly
+    notes: "Placeholder (unverified). Attritable/CCA-class (XQ-58 Valkyrie) platform maker -- config/product_lines.yaml platforms lists."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: baykar_press
+    name: "Baykar - News"
+    url: "https://baykartech.com/en/news/"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, c_uas]
+    schedule: weekly
+    notes: "Placeholder (unverified). Bayraktar TB2/TB3/Akıncı/Kızılelma platform maker -- config/product_lines.yaml platforms lists."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: aselsan_press
+    name: "Aselsan - Press Releases"
+    url: "https://www.aselsan.com.tr/en/press-releases"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense]
+    schedule: weekly
+    notes: "Placeholder (unverified). Competitor in targeting_pods (ASELPOD) -- see config/product_lines.yaml. Top-25 (3 mentions/90d)."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: excelitas_press
+    name: "Excelitas Technologies - News"
+    url: "https://www.excelitas.com/news"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods]
+    schedule: weekly
+    notes: "Placeholder (unverified). EO/IR component-level supplier named unambiguous top-tier by the user."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: leonardo_drs_press
+    name: "Leonardo DRS - Newsroom"
+    url: "https://www.leonardodrs.com/news/"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense]
+    schedule: weekly
+    notes: "Placeholder (unverified). US arm of an existing competitor (Leonardo already in ball_gimbals_16in/mws_eo competitor_products) -- distinct newsroom from leonardo_press. Top-25 (2 mentions/90d, 6 graph edges)."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
+
+  - id: elbit_america_press
+    name: "Elbit Systems of America - News"
+    url: "https://www.elbitsystems-us.com/newsroom/"
+    kind: html
+    lang: en
+    reliability: 2
+    tags: [airborne_pods, land_surveillance, air_defense]
+    schedule: weekly
+    notes: "Placeholder (unverified). US arm of our own reference competitor Elbit (elbit_press covers the parent site) -- named unambiguous top-tier by the user for separate US-market coverage."
+    enabled: false
+    verified: false
+    verified_at: "2026-09-16"
 
   # ---------------------------------------------------------------- A12: מעקב טכנולוגי (tech_dev)
   # Academic/professional sources for technology-watch (2026-09-05 user request: FPA with digital

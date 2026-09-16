@@ -52,9 +52,19 @@ higher on its own merits.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from eoa.product_lines.registry import ProductLineDef, product_line_defs
+
+#: Calibration round 2026-09-16 (6th-gen/CCA-class term broadening): short acronym-style terms
+#: (<=4 chars, e.g. "ACP", "OMS", "F-47") are prone to false-positive substring hits inside longer
+#: unrelated words/tokens (e.g. "OMS" inside "COMSAT", "ACP" inside a URL slug). Any configured
+#: `platforms`/`opportunity_signals` term of length <=4 (after stripping non-alnum chars, so
+#: "F-47" counts as 3) is matched on WORD BOUNDARIES only; longer multi-word phrases keep the
+#: plain substring match (see module docstring for why -- plurals like "targeting pods" must still
+#: hit the singular configured "targeting pod").
+_SHORT_TERM_MAX_LEN = 4
 
 #: The tag every gated-in item carries (classify.py) and every downstream consumer (triage's
 #: level floor, the analyze-stage so-what framing, the report-layer sections) keys off of.
@@ -84,11 +94,39 @@ class PlatformOpportunityHint:
         )
 
 
+_WORD_BOUNDARY_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _word_pattern(term: str) -> re.Pattern[str]:
+    """Same convention as ``eoa.product_lines.tagging._word_pattern``: alnum-boundary lookarounds
+    rather than ``\\b`` (which treats ``-``/``/`` as non-word chars and would mis-bound a term like
+    ``F/A-XX``)."""
+    pattern = _WORD_BOUNDARY_CACHE.get(term)
+    if pattern is None:
+        pattern = re.compile(r"(?<![A-Za-z0-9])" + re.escape(term) + r"(?![A-Za-z0-9])", re.IGNORECASE)
+        _WORD_BOUNDARY_CACHE[term] = pattern
+    return pattern
+
+
 def _substring_hits(text: str, terms: tuple[str, ...]) -> tuple[str, ...]:
+    """Plain case-insensitive substring match for most terms (see module docstring -- plurals like
+    "targeting pods" must still hit the configured singular "targeting pod"), EXCEPT a short term
+    (<=``_SHORT_TERM_MAX_LEN`` chars, e.g. "ACP"/"OMS"/"F-47") is matched on alnum word boundaries
+    only, to avoid false-positive hits inside an unrelated longer token (e.g. "OMS" inside
+    "COMSAT", "ACP" inside a URL slug)."""
     if not text or not terms:
         return ()
     lowered = text.lower()
-    return tuple(t for t in terms if t and t.lower() in lowered)
+    hits = []
+    for t in terms:
+        if not t:
+            continue
+        if len(t) <= _SHORT_TERM_MAX_LEN:
+            if _word_pattern(t).search(text):
+                hits.append(t)
+        elif t.lower() in lowered:
+            hits.append(t)
+    return tuple(hits)
 
 
 def _line_hint(pl: ProductLineDef, text: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:

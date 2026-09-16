@@ -133,3 +133,75 @@ Google-News extension, 311 `<loc>`, 241 מתחת ל-`/news/`, עם `news:publica
 תיקון תקין דורש שינוי קטן אך משותף (`agent/eoa/fetch/service.py`, בשימוש ע"י כל מקור מסוג
 `html`) — נשאר `verified: false`, עם `notes` מעודכן במקור עם הממצא המדויק, כדי לא לצרף שינוי
 בקוד פתיחה משותף/חי לתיקון scope תוכן ממוקד.
+
+## 7. כיול 2026-09-16 — הרחבת דור-6 + פלטפורמות קרקע/ים (החלטת המשתמש: לא לצמצם למונחי פוד בלבד)
+
+**הנחיה**: להשאיר CCA/MUM-T כאותות עצמאיים ולהוסיף תוכניות מטוסי-דור-6 (NGAD/F-47, F/A-XX,
+GCAP/Tempest, FCAS/SCAF, KF-21, KAAN) — **לא** לצמצם ל"פוד" בלבד. בנוסף הורחב `platforms` בארבע
+השורות המוטסות (רשימת CCA/loyal-wingman מלאה, MALE/HALE, מסוקים ל-mws_eo/ball_gimbals_16in),
+ונוספו `platforms`/`opportunity_signals` חדשים ל-`eo_air_defense_warning` ו-`border_long_range_eo`
+(כלי רכב/כלי שיט קרקעיים וימיים). המטואצ'ר טוקנים קצרים (≤4 תווים, למשל "ACP"/"OMS"/"F-47")
+שונה כעת ל-word-boundary בלבד (ולא substring חופשי) — ראו `agent/eoa/pipeline/opportunity_signals.py`
+ו-`tests/unit/test_opportunity_signals.py::TestShortTermWordBoundary`.
+
+### הרצה על ה-DB האמיתי (30 יום אחרונים, in_scope + out_of_scope, read-only)
+
+סה"כ פריטים שנסרקו: 1538. התאמות חדשות לפי שורה (סה"כ, מתוכם כרגע `out_of_scope`):
+
+| line_id | matches | out_of_scope |
+|---|---|---|
+| mws_eo | 34 | 21 |
+| ball_gimbals_16in | 33 | 20 |
+| targeting_pods | 32 | 19 |
+| lorop_pods | 32 | 19 |
+| eo_air_defense_warning | 2 | 1 |
+| border_long_range_eo | 1 | 1 |
+
+### Top-25 התאמות חדשות (כותרות מקוצרות, domain נוכחי)
+
+1. `[out_of_scope]` 23260 — New Details On How Space Force Has Waged Electronic Warfare Against Iran — platforms=(Fury,) signals=(missile warning,)
+2. `[out_of_scope]` 10613 — After heavy Reaper drone loses in Iran, Air Force accelerates affordable future replacement
+3. `[airborne_pods]` 59 — Navy Sounds Like It Now Wants The Air Combat Drone It Notoriously Passed Over A Decade Ago
+4. `[out_of_scope]` 120 — הצי האמריקאי מחפש כטב״מים חמושים לנושאות מטוסים
+5. `[out_of_scope]` 11295 — Anduril doubles down on Poland with autonomous aircraft pitch for F-35, Apache
+6. `[out_of_scope]` 11314 — US Navy's next-generation fighter decision to be unveiled soon, sources say
+7. `[out_of_scope]` 51 — US Navy RFI Details Plans for Carrier-Based Collaborative Combat Aircraft (CCA)
+8. `[secondary]` 22294 — A new era of uncrewed airpower: GA-ASI's lineup for high-tech warfare
+9. `[out_of_scope]` 11330 — South Korea supercharges defense budget to record levels — signal=KF-21 בלבד
+10. `[secondary]` 12161 — Pentagon's $1.5B reprogramming would shift money to AI center, MV-75 tiltrotor — signal="mission payload" (חשד: אזכור אגבי)
+11. `[airborne_pods]` 2386 — USAF Wants MQ-9 Reaper Successor At A Fraction Of The Cost At $10M Each
+12. `[out_of_scope]` 11309 — What to know about Europe's next-gen fighter programs
+13. `[out_of_scope]` 20 — UK Government Commits To Boom Refueling For RAF Tankers — signal=GCAP/Tempest אגבי
+14. `[airborne_pods]` 12625 — GCAP Electronics Evolution receives contract...
+15. `[out_of_scope]` 7245 — ארה״ב: חיל האוויר מאיץ החלפת הריפר בכטב״ם חדש
+16. `[naval_surveillance]` 160 — Elbit eyes converting vessels into drone carriers — signal="payload bay"
+17. `[airborne_pods]` 12 — To counter China, America's next CCA needs a different mission
+18. `[computer_vision]` 153 — **TC-Next: Zero-Shot Multimodal Cyclone Forecasting** — signal="Tempest" (ר' False positive #1 למטה)
+19. `[out_of_scope]` 9752 — בריטניה מתחייבת להוסיף תדלוק אווירי בבום — signal=GCAP אגבי
+20. `[out_of_scope]` 19 — Defense Business Brief: takeaways from America's first jet engine test site — platforms=(Apache, Black Hawk) signal="collaborative combat aircraft" (ר' False positive #2)
+21. `[airborne_pods]` 3 — After 'concerning' losses, Air Force pushes to replace Reaper faster
+22. `[out_of_scope]` 17576 — GCAP Electronics Evolution receives contract... (כפילות מקור ל-#14)
+23. `[airborne_pods]` 1352 — US Air Force speeds Reaper successor timeline after Iran losses
+24. `[out_of_scope]` 19927 — Space Force has 'space control weapons' on orbit
+25. `[out_of_scope]` 22523 — Turkey certifies military training aircraft as safe — signal=KAAN בלבד
+
+### False positives שזוהו (לא תוקנו בקוד — ההחלטה אצל ה-lead)
+
+1. **item 153** ("TC-Next: Zero-Shot Multimodal Cyclone Forecasting") — "Tempest" תפס כאן ציקלון
+   מטאורולוגי, לא את תוכנית המטוס. False positive אמיתי. לא הוסר מהרשימה לפי ההנחיה המפורשת של
+   המשתמש (לא לצמצם) — הסיכון מתקבל בכוונה, כמו התקדימים הקיימים ל-CCA/Fury (סעיף 5 לעיל):
+   ה-gate רק מכניס לתחום ברמת `yellow`, לא מנפח חשיבות.
+2. **item 19** ("Defense Business Brief...") — כתבת-סיכום (digest) שמזכירה Apache/Black Hawk
+   בפסקה אחת ו-"collaborative combat aircraft" בפסקה נפרדת לגמרי — אין קשר אמיתי בין המונחים.
+   מגבלה מובנית של substring/word-boundary על כתבות-סיכום מרובות-נושאים.
+3. **items 11330/20/9752/22523** — אזכור שם תוכנית (KF-21/GCAP/Tempest/KAAN) אגבי בכתבת תקציב/
+   מדיניות רחבה יותר, ללא תוכן פוד/חיישן. זהה לתקדים item 20162 המתועד בסעיף 5 — מתקבל לפי
+   עיצוב (רצפת `yellow` בלבד).
+
+### מסקנה
+
+הרשימות "מגנות" גם ברמה סבירה — רוב ה-Top-25 הם סיפורי CCA/דור-6 אמיתיים ורלוונטיים לעסק (Fury/
+Vengeance/F-47/GCAP/FCAS/KF-21/KAAN, MQ-9B successor programs, Apache autonomy pitch). False
+positive יחיד וברור (#153, "Tempest"/ציקלון) וכמה אזכורים אגביים של שם-תוכנית בלבד — שניהם
+מתקבלים לפי עיצוב הרצפה הקיימת (`yellow`, לא high/red) ולפי ההנחיה המפורשת שלא לצמצם. לא בוצע
+תיוג מחדש בפועל ב-DB — ההחלטה הסופית אצל ה-lead.

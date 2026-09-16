@@ -101,6 +101,75 @@ class TestSourceEnabledField:
         assert enabled_ids == ["the_war_zone"]
 
 
+class TestSitemapAndSearchKinds:
+    """Task B (2026-09-16): `kind: sitemap` (item 1) and `kind: search` (item 2)."""
+
+    def test_sitemap_kind_with_path_prefix_validates(self) -> None:
+        source = Source.model_validate(
+            {
+                "id": "example_press",
+                "name": "Example Press",
+                "url": "https://example.com/sitemap.xml",
+                "kind": "sitemap",
+                "lang": "en",
+                "reliability": 2,
+                "path_prefix": "/news/",
+            }
+        )
+        assert source.kind == "sitemap"
+        assert source.path_prefix == "/news/"
+
+    def test_search_kind_with_queries_validates(self) -> None:
+        source = Source.model_validate(
+            {
+                "id": "example_linkedin_search",
+                "name": "LinkedIn · Example (search)",
+                "url": "https://www.linkedin.com/company/example/posts",
+                "kind": "search",
+                "lang": "en",
+                "reliability": 2,
+                "queries": ['site:linkedin.com/posts "Example"'],
+                "engine_lang": "en",
+                "max_results": 10,
+            }
+        )
+        assert source.kind == "search"
+        assert source.queries == ['site:linkedin.com/posts "Example"']
+        assert source.max_results == 10
+
+    def test_path_prefix_and_queries_default_to_empty(self) -> None:
+        source = Source.model_validate(
+            {
+                "id": "example",
+                "name": "Example",
+                "url": "https://example.com/feed",
+                "kind": "rss",
+                "lang": "en",
+                "reliability": 3,
+            }
+        )
+        assert source.path_prefix is None
+        assert source.queries == []
+        assert source.engine_lang == "en"
+
+    def test_real_config_sitemap_sources_have_path_prefix(self) -> None:
+        by_id = {s.id: s for s in load_sources()}
+        for source_id in ("anduril_press", "iai_press", "saab_press", "thales_press"):
+            assert source_id in by_id
+            src = by_id[source_id]
+            assert src.kind == "sitemap"
+            assert src.path_prefix
+
+    def test_real_config_linkedin_search_sources_have_queries(self) -> None:
+        by_id = {s.id: s for s in load_sources()}
+        search_ids = [sid for sid in by_id if sid.endswith("_linkedin_search")]
+        assert len(search_ids) >= 10
+        for sid in search_ids:
+            src = by_id[sid]
+            assert src.kind == "search"
+            assert src.queries
+
+
 class TestRealConfigTimesOfIsraelFix:
     """2026-09-16 fix: the real config/sources.yaml's times_of_israel entry pointed at
     https://www.timesofisrael.com/feed/, which robots.txt genuinely disallows for our UA

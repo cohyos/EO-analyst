@@ -28,7 +28,7 @@ class Source(BaseModel):
     id: str
     name: str
     url: str
-    kind: Literal["rss", "html"]
+    kind: Literal["rss", "html", "sitemap", "search"]
     lang: str
     reliability: int = Field(ge=1, le=5)
     tags: list[str] = Field(default_factory=list)
@@ -52,6 +52,16 @@ class Source(BaseModel):
     # off-topic issue of e.g. an IEEE journal TOC doesn't burn a fetch + LLM classify call.
     category: str | None = None
     keywords_any: list[str] = Field(default_factory=list)
+    # Task B item 1 (2026-09-16): `kind: sitemap` only -- restrict which sitemap `<loc>` URLs
+    # count (e.g. "/news/") since most vendor sitemaps mix press/news URLs with product, careers,
+    # and legal pages. See `eoa.fetch.sitemap.parse_sitemap`.
+    path_prefix: str | None = None
+    # Task B item 2 (2026-09-16): `kind: search` only -- the search queries to run for this
+    # source (e.g. LinkedIn/X company-post lookups via `eoa.search.provider.search`) plus display
+    # metadata for the resulting items. See `eoa.fetch.service._ingest_search_source`.
+    queries: list[str] = Field(default_factory=list)
+    engine_lang: str = "en"
+    max_results: int = 10
 
 
 def load_sources(path: str | Path | None = None) -> list[Source]:
