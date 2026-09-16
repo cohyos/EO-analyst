@@ -135,7 +135,11 @@ class TestCacheHitMissTTL:
         assert len(FakeDDGS.text_calls) == 2
 
     def test_failed_response_is_never_cached(self):
-        FakeDDGS.text_raises = DDGSException("No results found.")
+        # A genuine provider failure (rate limit), not DDGS's "No results found." zero-hit
+        # signal -- since 4a61253 `_ddgs_search` deliberately treats the latter as a successful
+        # empty response (see the "must not trip the circuit breaker" comment there), so it is
+        # not a failure and would not exercise this test's contract.
+        FakeDDGS.text_raises = DDGSException("Ratelimit: 202 Accepted")
         r1 = provider.search("will fail", "en", engines=["google"])
         assert r1.error is not None
         FakeDDGS.text_raises = None
@@ -143,6 +147,16 @@ class TestCacheHitMissTTL:
         r2 = provider.search("will fail", "en", engines=["google"])
         assert r2.error is None
         assert len(FakeDDGS.text_calls) == 2, "an errored response must not have been cached"
+
+    def test_no_results_is_a_successful_empty_response(self):
+        # DDGS raises its base exception for zero hits; the provider maps that to hits=[] with no
+        # error (a legitimate answer for a niche query), so it neither counts as a failure nor
+        # opens the circuit breaker.
+        FakeDDGS.text_raises = DDGSException("No results found.")
+        r = provider.search("niche query", "en", engines=["google"])
+        assert r.error is None
+        assert r.hits == []
+        assert circuit.get_circuit("ddgs").state == "closed"
 
 
 class TestCircuitBreaker:
