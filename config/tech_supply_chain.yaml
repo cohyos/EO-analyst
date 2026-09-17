@@ -1,0 +1,280 @@
+# EO/IR supply-chain layer taxonomy for the "tech_daily" report kind (daily technology-watch
+# report covering operational concepts + the full EO/IR supply chain, user request 2026-09-17:
+# "דוח על התפתחויות טכנולוגיות ברמה היומית ... שרשרת האספקה של מערכות אלקטרואופטיות בכל
+# הדומיינים, החל מה-FPA, דרך עדשות וערוצים אלקטרואופטיים, מראות, מראות סורקות, עיבוד תמונה, בינה
+# ובינה בקצה ... אחיזת שטח, גילויי תנועה, איכון והתראה").
+#
+# Layer order below IS the report's own rendering order (draft/table/section order all iterate
+# this list top to bottom) -- roughly upstream-to-downstream through the EO/IR sensor chain, with
+# `operational_concepts` last (it draws on every other layer rather than sitting inside the chain).
+#
+# Fields per layer (mirrors config/product_lines.yaml's own field-doc convention):
+#   label_he          display heading, "עברית (English)" convention (matches config/taxonomy.yaml)
+#   description_he    one-line scope note, read by the analyst and (verbatim) fed into the
+#                     drafting/classification prompts so the model knows exactly what belongs here
+#   keywords_he       Hebrew substring keywords (matched as plain substrings, see
+#                     eoa.report.tech_supply_chain._any_substring_he)
+#   keywords_en       English/Latin keywords (matched with word-boundary regex, short acronyms
+#                     like "FSM"/"LRF" need this to avoid matching inside an unrelated longer word)
+#   domains_hint      config/taxonomy.yaml domain keys whose items are the most likely source of
+#                     this layer's content -- used only to bias/explain, never to exclude (an item
+#                     from any domain can still keyword-match a layer)
+#   patent_cpc_hint   best-effort representative CPC classification codes for this layer, used to
+#                     narrow (not filter exclusively) the patents-table query in eoa.report.tech_daily
+#                     -- heuristic, not an authoritative/exhaustive CPC mapping; an operator with
+#                     deeper patent-classification expertise should refine these over time
+
+layers:
+  - key: detectors_fpa
+    label_he: "גלאים ומישורי מוקד (FPA & Detectors)"
+    description_he: >-
+      מישורי מוקד (FPA) וטכנולוגיות הגילוי הבסיסיות: InSb, MCT/HOT MCT, T2SL, XBn, SWIR/eSWIR
+      מבוסס InGaAs ונקודות קוונטיות קולואידליות (CQD), DROIC/פיקסל דיגיטלי, בולומטרים לא-מקוררים,
+      וגלאים מבוססי אירועים (נוירומורפיים).
+    keywords_he:
+      - "מישור מוקד"
+      - "מישורי מוקד"
+      - "גלאי אינפרא אדום"
+      - "בולומטר"
+      - "בולומטרים"
+      - "לא מקורר"
+      - "פיקסל דיגיטלי"
+      - "נקודות קוונטיות"
+      - "גלאי אירועים"
+      - "גלאי נוירומורפי"
+    keywords_en:
+      - FPA
+      - "focal plane array"
+      - InSb
+      - MCT
+      - HOT MCT
+      - T2SL
+      - XBn
+      - nBn
+      - InGaAs
+      - SWIR
+      - eSWIR
+      - CQD
+      - "quantum dot"
+      - DROIC
+      - "digital pixel"
+      - microbolometer
+      - "uncooled detector"
+      - "event camera"
+      - "event-based sensor"
+      - neuromorphic
+    domains_hint: [tech_dev, secondary]
+    patent_cpc_hint: ["H01L27/146", "H04N25/00", "G01J5/00", "H01L31/09"]
+
+  - key: optics
+    label_he: "עדשות וערוצים אלקטרואופטיים (Optics & EO Channels)"
+    description_he: >-
+      עדשות ואובייקטיבים, ערוצים אלקטרואופטיים, אופטיקה אתרמית, ציפויים, מטא-משטחים/אופטיקה
+      שטוחה וחופשית-צורה, חלונות וכיפות.
+    keywords_he:
+      - "אובייקטיב"
+      - "ערוץ אלקטרואופטי"
+      - "אופטיקה אתרמית"
+      - "ציפוי אופטי"
+      - "מטא-משטח"
+      - "אופטיקה שטוחה"
+      - "חלון אופטי"
+      - "כיפת חיישן"
+    keywords_en:
+      - "EO channel"
+      - "athermal optics"
+      - "optical coating"
+      - metasurface
+      - "flat optics"
+      - "freeform optics"
+      - "optical window"
+    domains_hint: [tech_dev, secondary]
+    patent_cpc_hint: ["G02B13/00", "G02B1/00", "G02B27/00"]
+
+  - key: mirrors_scanning
+    label_he: "מראות ומראות סורקות (Mirrors & Scanning)"
+    description_he: >-
+      מראות, מראות סורקות, מראות היגוי מהיר (FSM), סורקי MEMS, היגוי אלומה -- הטכנולוגיה עצמה,
+      לא מנגנון גימבל/ייצוב כלל-פלטפורמי (זה שייך ל-system_integration).
+    keywords_he:
+      - "מראה סורקת"
+      - "היגוי אלומה"
+    keywords_en:
+      - "scanning mirror"
+      - FSM
+      - "fast steering mirror"
+      - "MEMS scanner"
+      - "beam steering"
+    domains_hint: [tech_dev, airborne_pods, land_surveillance]
+    patent_cpc_hint: ["G02B26/08", "G02B26/10", "G02B27/64"]
+
+  - key: gimbal_los_control
+    label_he: "בקרת קווי ראייה וניהול גימבלים (Line-of-Sight Control & Gimbal Management)"
+    description_he: >-
+      ייצוב קו ראייה ובקרת כיוון: ייצוב אינרציאלי (IMU/FOG/MEMS-gyro בלולאה), דיוק ייצוב
+      (מיקרורדיאן), לולאות בקרת כיוון/עקיבה, ארכיטקטורות גימבל רב-צירי (2/4/5 צירים, גס/עדין,
+      לולאת FSM פנימית), מנועי הנעה ישירה/מומנט, טבעות מחליקות/הילוכים הרמוניים, בקרי גימבל
+      וקושחה, מסירת קו ראייה בין חיישנים, בורסייט/הרמוניזציה, geo-pointing/geo-lock (המרת קו
+      ראייה לקואורדינטה), מסירת עקיבה אוטומטית לגימבל, בידוד רעידות, וניהול גימבלים במובן בקרת
+      מטען (תזמון קו-ראייה רב-מטעני, slew-to-cue ממכ"ם/ESM, מסירת מטרה בין גימבלים). פלטפורמה
+      שרק נושאת גימבל קיים -- ללא התפתחות ממשית ביכולת הבקרה/הייצוב עצמה -- אינה core לשכבה זו.
+    keywords_he:
+      - "קו ראייה"
+      - "ייצוב אינרציאלי"
+      - "בקר גימבל"
+      - "מסירת מטרה"
+      - "מיקרורדיאן"
+    keywords_en:
+      - "line of sight"
+      - microradian
+      - "µrad"
+      - "gimbal controller"
+      - "slew-to-cue"
+      - "geo-lock"
+      - boresight
+      - FSM
+      - "inertial stabilization"
+    domains_hint: [tech_dev, airborne_pods, land_surveillance, naval_surveillance]
+    patent_cpc_hint: ["G02B27/64", "F41G5/00", "G05D1/00"]
+
+  - key: lasers_illumination
+    label_he: "לייזרים ותאורה (Lasers & Illumination)"
+    description_he: >-
+      מדי טווח לייזר (LRF), מייעדים, מצביעים, מאירים, ותקשורת לייזר בהקשר אלקטרואופטי.
+    keywords_he:
+      - "מד טווח לייזר"
+      - "מייעד לייזר"
+      - "מצביע לייזר"
+      - "מאיר לייזר"
+      - "תקשורת לייזר"
+    keywords_en:
+      - LRF
+      - "laser rangefinder"
+      - "laser designator"
+      - "laser pointer"
+      - illuminator
+      - "laser illuminator"
+      - "laser dazzler"
+      - "laser communication"
+      - lasercom
+    domains_hint: [tech_dev, directed_energy, air_defense]
+    patent_cpc_hint: ["G01S17/00", "F41G7/00", "H01S3/00"]
+
+  - key: image_processing
+    label_he: "עיבוד תמונה (Image Processing)"
+    description_he: >-
+      עיבוד אות תמונה (ISP), תיקון אי-אחידות (NUC), סופר-רזולוציה, מיזוג חיישנים, הפחתת עיוותי
+      טורבולנציה, וכיווץ וידאו.
+    keywords_he:
+      - "עיבוד תמונה"
+      - "תיקון אי אחידות"
+      - "סופר רזולוציה"
+      - "מיזוג חיישנים"
+      - "טורבולנציה"
+      - "כיווץ וידאו"
+    keywords_en:
+      - NUC
+      - "super-resolution"
+      - "super resolution"
+      - "sensor fusion"
+      - "turbulence mitigation"
+      - "video compression"
+      - "image fusion"
+    domains_hint: [tech_dev, computer_vision, secondary]
+    patent_cpc_hint: ["G06T5/00", "H04N25/67", "H04N19/00"]
+
+  - key: ai_edge
+    label_he: "בינה ובינה בקצה (AI & Edge AI)"
+    description_he: >-
+      זיהוי מטרות אוטומטי (ATR/אל"א), סיווג וגילוי, עקיבה, אחיזת שטח/נעילת סצנה, גילוי תנועה
+      וגילוי שינוי, מחשוב קצה (FPGA/SoC), ודגמי יסוד/VLM בקצה.
+    keywords_he:
+      - "זיהוי מטרות אוטומטי"
+      - "אל\"א"
+      - "סיווג יעדים"
+      - "אחיזת שטח"
+      - "נעילת סצנה"
+      - "גילוי תנועה"
+      - "גילוי שינוי"
+      - "בינה מלאכותית בקצה"
+      - "מחשוב קצה"
+    keywords_en:
+      - ATR
+      - ATD
+      - "automatic target recognition"
+      - "terrain hold"
+      - "scene lock"
+      - "motion detection"
+      - "change detection"
+      - "edge compute"
+      - "edge AI"
+      - VLM
+      - "foundation model"
+    domains_hint: [computer_vision, tech_dev]
+    patent_cpc_hint: ["G06V10/00", "G06N3/08", "G06T7/246"]
+
+  - key: geolocation_warning
+    label_he: "איכון והתראה (Geolocation & Warning)"
+    description_he: >-
+      איכון/מיקום מטרה, טווח פסיבי, התראת טילים/לייזר/אש עוינת, והכוונה (cueing) בין חיישנים.
+    keywords_he:
+      - "איכון מטרה"
+      - "מיקום מטרה"
+      - "טווח פסיבי"
+      - "התראת טילים"
+      - "התראת לייזר"
+      - "התראת אש עוינת"
+      - "הכוונה בין חיישנים"
+    keywords_en:
+      - geolocation
+      - "target location"
+      - "passive ranging"
+      - "missile warning"
+      - "laser warning"
+      - "hostile fire"
+      - "hostile fire warning"
+    domains_hint: [air_defense, c_uas, tech_dev]
+    patent_cpc_hint: ["G01S5/00", "F41H11/02", "G01C21/00"]
+
+  - key: system_integration
+    label_he: "אינטגרציית מערכות (System Integration)"
+    description_he: >-
+      ארכיטקטורה פתוחה, תקני OMS/MOSA, ניהול נפח-משקל-הספק (SWaP), וקירור/קריוגניקה.
+    keywords_he:
+      - "ארכיטקטורה פתוחה"
+      - "נפח משקל הספק"
+      - "קריוגני"
+    keywords_en:
+      - "open architecture"
+      - OMS
+      - MOSA
+      - SWaP
+      - cryocooler
+      - cryogenic
+    domains_hint: [tech_dev, airborne_pods, land_surveillance, naval_surveillance]
+    patent_cpc_hint: ["G06F1/16", "F25B9/00"]
+
+  - key: operational_concepts
+    label_he: "תפיסות מבצעיות (Operational Concepts / CONOPS)"
+    description_he: >-
+      תפיסות הפעלה: צוות-מאויש-בלתי-מאויש (MUM-T), תפקידי חיישן ב-CCA, שרשראות הרג, שכבות EO
+      נגד כטב"מים, ניווט בסביבת EMS/GNSS מוגבלת מבוסס-ראייה, ותיעדוף נחילים.
+    keywords_he:
+      - "צוות מאויש בלתי מאויש"
+      - "שרשרת הרג"
+      - "ניווט חזותי"
+      - "סביבה מוגבלת ג'י פי אס"
+      - "נגד נחילים"
+    keywords_en:
+      - MUM-T
+      - "manned-unmanned teaming"
+      - "collaborative combat aircraft"
+      - "kill chain"
+      - "kill web"
+      - "GNSS-denied"
+      - "GPS-denied"
+      - "vision-based navigation"
+      - "swarm targeting"
+      - CONOPS
+    domains_hint: [c_uas, air_defense, land_surveillance, naval_surveillance, airborne_pods]
+    patent_cpc_hint: []

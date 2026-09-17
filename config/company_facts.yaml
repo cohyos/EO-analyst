@@ -67,3 +67,156 @@ entries:
       not independently re-verified for this round) rather than "high": a claim naming Rafael OR
       Elbit Systems as a parent/co-owner is NOT hard-rejected (either is plausibly true per this
       entry), but a claim naming any THIRD company (e.g. IAI, Thales) as Opgal's parent still is.
+
+# --------------------------------------------------------------------------------------------
+# hebrew_names -- canonical Hebrew company-name registry (2026-09-17, feedback: reports spelled
+# Rafael "ראפאל" instead of "רפאל" -- LLM output transliterates company names freely and nothing
+# ever canonicalised the result). Read by `eoa.report.textnorm.canonicalize_hebrew_names` (report
+# rendering: docx/md/html table+prose text, via `eoa.report.docx_builder`'s three renderers and
+# `textnorm.normalize_hebrew_punctuation`) and called explicitly at each DB/answer write site that
+# persists LLM-authored Hebrew prose (`eoa.pipeline.analyze`, `eoa.pipeline.classify`,
+# `eoa.search.deep_search`, `eoa.api.routes.ask`) -- see each call site's own comment.
+#
+# Schema per entry:
+#   name         -- English canonical name, matching config/watchlist.yaml's `name` where the
+#                   company is itself tracked there (free text otherwise, e.g. a company only
+#                   tracked via `acquisition_watch`/a competitor list).
+#   name_he      -- the ONE canonical Hebrew spelling every `variants_he` entry folds onto.
+#   variants_he  -- known misspellings / alternate transliterations actually observed (or
+#                   plausible, documented) in generated text. An empty/omitted list is a valid
+#                   entry on its own (the company still feeds the Hebrew-name glossary line added
+#                   to the analyze/report-draft prompts -- see PROMPT_GLOSSARY_HE below) -- it just
+#                   means no confirmed misspelling exists yet to fold.
+#   note         -- provenance: why this spelling was chosen, and for the two genuinely ambiguous
+#                   picks (Leonardo, Saab) the reasoning documented per the task's own instruction
+#                   to "choose the form Israeli press uses most".
+#
+# Deliberately NOT given a `hebrew_names` entry here (real ambiguity, left alone per hard rule
+# "never invent"): companies whose name is routinely kept in Latin/acronym form inside Hebrew
+# report prose rather than transliterated at all (BAE Systems, L3Harris, RTX, MBDA, Kongsberg,
+# Hanwha, Collins Aerospace, Chess Dynamics, DJI, PGZ, WB Group, Zipline, Anthropic, OpenAI) -- no
+# corpus evidence of a Hebrew transliteration to canonicalise, and AeroVironment, which already
+# carries two un-reconciled Hebrew aliases in config/watchlist.yaml ("ארוויירונמנט",
+# "ארוויונמנט") that this task's own company list did not ask to be resolved.
+#
+# Coverage: the round-17 explicit misspelling list, every company.yaml `competitors` entry across
+# config/product_lines.yaml, and the top-30 `entities` (kind='company') by corpus mention count
+# measured 2026-09-17 (`SELECT e.name, count(*) FROM items i, unnest(i.entities_mentioned) m(name)
+# JOIN entities e ON e.name=m.name AND e.kind='company' GROUP BY e.name ORDER BY 2 DESC LIMIT 30`).
+hebrew_names:
+  - name: Rafael
+    name_he: "רפאל"
+    variants_he: ["ראפאל", 'רפא"ל']
+    note: "Round-17 root cause: 'ראפאל' (2 occurrences in items.summary_he/so_what_he as of 2026-09-17)."
+
+  - name: Elbit
+    name_he: "אלביט מערכות"
+    variants_he: ["אלביט סיסטמס", "אלבית"]
+    note: >
+      The short form "אלביט" (already the watchlist's own primary Hebrew alias, used constantly by
+      the Israeli press on its own) is deliberately NOT a variant here -- only the two confirmed
+      misspellings fold onto the full canonical name.
+
+  - name: IAI
+    name_he: "תע״א"
+    variants_he: ["תעא"]
+    note: >
+      Canonical spelling already uses the proper Hebrew gershayim mark (U+05F4), not an ASCII
+      quote -- `textnorm.ascii_quote_to_gershayim` already converts 'תע"א' (ASCII quote) to this
+      exact form at render time, so that spelling is not listed as a variant here (not a company-
+      name error, a punctuation-encoding one the existing pass already owns). Only the fully bare
+      "תעא" (no acronym punctuation at all) is folded. The full name "התעשייה האווירית" and the
+      Latin "IAI" are both already correct on their own and untouched.
+
+  - name: Elta
+    name_he: "אלתא"
+    variants_he: []
+    note: "IAI subsidiary; no confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Opgal
+    name_he: "אופגל"
+    variants_he: []
+    note: "No confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Elop
+    name_he: "אלאופ"
+    variants_he: []
+    note: "Already an Elbit alias in config/watchlist.yaml; no confirmed misspelling in corpus."
+
+  - name: Controp
+    name_he: "קונטרופ"
+    variants_he: []
+    note: "No confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Rheinmetall
+    name_he: "ריינמטל"
+    variants_he: ["ריינמטאל"]
+    note: "Round-17 root cause: 'ריינמטאל' x1 vs 'ריינמטל' x4 in corpus as of 2026-09-17."
+
+  - name: Leonardo
+    name_he: "ליאונרדו"
+    variants_he: ["לאונרדו"]
+    note: >
+      Ambiguous pick, resolved per task instruction: corpus count 2026-09-17 was 'ליאונרדו' x12 vs
+      'לאונרדו' x2 -- 'ליאונרדו' (extra Yod, matching the Italian "Leo-" syllable more closely) is
+      both the overwhelming corpus majority AND the spelling Israeli financial/defense press
+      (Globes, Calcalist) commonly uses for Leonardo S.p.A.; 'לאונרדו' is folded onto it.
+
+  - name: Saab
+    name_he: "סאאב"
+    variants_he: ["סאב"]
+    note: >
+      'סאאב' (double Aleph, matching the double "a" in "Saab") is the standard Israeli-press/Hebrew
+      Wikipedia spelling for Saab AB; 'סאב' (single Aleph, reads ambiguously as "Sav") is folded
+      onto it. (Corpus 2026-09-17 had 'סאאב' x6, already the canonical spelling in every observed
+      row; 'סאב' listed as a variant for forward coverage, not because it was observed misspelled.)
+
+  - name: "Lockheed Martin"
+    name_he: "לוקהיד מרטין"
+    variants_he: []
+    note: "No confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: "Northrop Grumman"
+    name_he: "נורת'רופ גרומן"
+    variants_he: ["נורתרופ גרומן"]
+    note: "Geresh-less form folded onto the standard geresh spelling (Israeli press convention)."
+
+  - name: "General Atomics"
+    name_he: "ג'נרל אטומיקס"
+    variants_he: ["ג'נראל אטומיקס"]
+    note: "Extra-Aleph alternate transliteration of 'General' folded onto the shorter, more common spelling."
+
+  - name: "Teledyne FLIR"
+    name_he: "טלדיין פליר"
+    variants_he: ["טלדין פליר"]
+    note: "Single-Yod alternate transliteration of 'Teledyne' folded onto the standard double-Yod spelling."
+
+  - name: Hensoldt
+    name_he: "הנסולדט"
+    variants_he: []
+    note: "No confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Safran
+    name_he: "ספרן"
+    variants_he: []
+    note: "No confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Thales
+    name_he: "תאלס"
+    variants_he: []
+    note: "No confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Anduril
+    name_he: "אנדוריל"
+    variants_he: []
+    note: "No confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Boeing
+    name_he: "בואינג"
+    variants_he: []
+    note: "Top-30-by-mentions coverage; no confirmed misspelling in corpus as of 2026-09-17."
+
+  - name: Amazon
+    name_he: "אמזון"
+    variants_he: []
+    note: "Top-30-by-mentions coverage; no confirmed misspelling in corpus as of 2026-09-17."

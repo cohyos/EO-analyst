@@ -1,16 +1,32 @@
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronUp, Download } from "lucide-react";
 import { api } from "@/api";
+import { useI18n } from "@/i18n";
+import type { TranslationKey } from "@/i18n/types";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ReportBody } from "@/components/reports/ReportBody";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ToastStack } from "@/components/ToastStack";
+import { useToastQueue } from "@/hooks/useToastQueue";
 import { formatDateTime } from "@/lib/time";
 import { decodeHtmlEntities } from "@/lib/reportHtml";
 import { outcomeLabel, outcomeTone } from "@/lib/investigations";
 import { cn } from "@/lib/cn";
 import { useIsNarrowViewport } from "@/hooks/useIsNarrowViewport";
 import type { ReportSummary } from "@/types/api";
+
+// tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): the three
+// lookback windows the confirm dialog offers -- 24h/7d/30d, mapped straight onto
+// `postTechDailyBuild`'s `lookbackDays` (1/7/30).
+const TECH_DAILY_LOOKBACK_OPTIONS = [1, 7, 30] as const;
+type TechDailyLookback = (typeof TECH_DAILY_LOOKBACK_OPTIONS)[number];
+const TECH_DAILY_WINDOW_KEY: Record<TechDailyLookback, TranslationKey> = {
+  1: "reports.buildTechDailyWindow24h",
+  7: "reports.buildTechDailyWindow7d",
+  30: "reports.buildTechDailyWindow30d",
+};
 
 const KIND_LABEL: Record<string, string> = {
   daily: "יומי",
@@ -21,6 +37,8 @@ const KIND_LABEL: Record<string, string> = {
   // "צור דוח" -- see docs/qa/loop/round_7_fixes.md "### PL-ui status".
   product_line: "קו מוצר",
   patent_survey: "סקר פטנטים",
+  // tech_daily (2026-09-17, user request -- daily EO/IR supply-chain technology-watch report).
+  tech_daily: "התפתחויות טכנולוגיות",
   adhoc: "אד-הוק",
 };
 
@@ -180,6 +198,9 @@ function addHeadingIds(html: string): {
 }
 
 export function ReportsPage() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToastQueue();
   const [kind, setKind] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("id");
@@ -190,6 +211,44 @@ export function ReportsPage() {
   });
 
   const groups = useMemo(() => groupReports(listQuery.data ?? []), [listQuery.data]);
+
+  // tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): polls
+  // `GET /api/reports/tech-daily/status` while a build is queued/running (same
+  // refetchInterval-until-not-pending shape as `DossierDetailPage`'s `pending_job` poll) so the
+  // button's disabled/"בונה…" state survives a page reload or a build started from another tab.
+  const [techDailyConfirmOpen, setTechDailyConfirmOpen] = useState(false);
+  const [techDailyLookback, setTechDailyLookback] = useState<TechDailyLookback>(1);
+  const techDailyStatusQuery = useQuery({
+    queryKey: ["tech-daily-status"],
+    queryFn: () => api.getTechDailyStatus(),
+    refetchInterval: (query) => (query.state.data?.pending_job ? 5000 : false),
+  });
+  const techDailyPendingJob = techDailyStatusQuery.data?.pending_job ?? null;
+
+  // Fires exactly once per pending -> not-pending transition (never on first mount with nothing
+  // pending) -- toast + reports-list refetch + select the freshly built report.
+  const wasTechDailyPendingRef = useRef(false);
+  useEffect(() => {
+    if (wasTechDailyPendingRef.current && !techDailyPendingJob) {
+      pushToast(t("reports.buildTechDailyReadyToast"), { tone: "ok" });
+      listQuery.refetch();
+      const latest = techDailyStatusQuery.data?.latest;
+      if (latest) setSearchParams({ id: String(latest.report_id) });
+    }
+    wasTechDailyPendingRef.current = !!techDailyPendingJob;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [techDailyPendingJob]);
+
+  const buildTechDailyMutation = useMutation({
+    mutationFn: () => api.postTechDailyBuild(techDailyLookback),
+    onSuccess: () => {
+      setTechDailyConfirmOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["tech-daily-status"] });
+    },
+    onError: () => {
+      pushToast(t("reports.buildTechDailyErrorToast"), { tone: "danger" });
+    },
+  });
 
   const detailQuery = useQuery({
     queryKey: ["report", selectedId],
@@ -242,6 +301,21 @@ export function ReportsPage() {
                 </option>
               ))}
             </select>
+            {/* tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request):
+                full-width (never overflows the 390px mobile viewport) + min-h-10 (>=40px tap
+                target, per the recent iPhone-pass mobile rules). Disabled while a build is already
+                queued/running -- from this tab's own click or a different one, since the status
+                poll above is server-truth, not local-only. */}
+            <button
+              type="button"
+              onClick={() => setTechDailyConfirmOpen(true)}
+              disabled={!!techDailyPendingJob}
+              className="mt-2 flex min-h-10 w-full items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50"
+            >
+              {techDailyPendingJob
+                ? t("reports.buildTechDailyBuilding", { id: techDailyPendingJob.id })
+                : t("reports.buildTechDailyButton")}
+            </button>
           </div>
           {listQuery.isLoading && <LoadingState label="טוען דוחות…" />}
           {listQuery.isError && (
@@ -371,6 +445,49 @@ export function ReportsPage() {
           </div>
         )}
       </div>
+
+      {techDailyConfirmOpen && (
+        <ConfirmDialog
+          title={t("reports.buildTechDailyConfirmTitle")}
+          message={t("reports.buildTechDailyConfirmMessage")}
+          confirmLabel={t("reports.buildTechDailyConfirmButton")}
+          confirmingLabel={t("reports.buildTechDailyConfirming")}
+          confirming={buildTechDailyMutation.isPending}
+          onConfirm={() => buildTechDailyMutation.mutate()}
+          onCancel={() => setTechDailyConfirmOpen(false)}
+        >
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-fg-dim">
+              {t("reports.buildTechDailyWindowLabel")}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {TECH_DAILY_LOOKBACK_OPTIONS.map((days) => (
+                <label
+                  key={days}
+                  className={cn(
+                    "flex min-h-10 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm",
+                    techDailyLookback === days
+                      ? "border-accent bg-accent-muted/40"
+                      : "border-border-strong",
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="tech-daily-lookback"
+                    value={days}
+                    checked={techDailyLookback === days}
+                    onChange={() => setTechDailyLookback(days)}
+                    className="h-4 w-4"
+                  />
+                  {t(TECH_DAILY_WINDOW_KEY[days])}
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-fg-dim">{t("reports.buildTechDailyNote")}</p>
+          </div>
+        </ConfirmDialog>
+      )}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

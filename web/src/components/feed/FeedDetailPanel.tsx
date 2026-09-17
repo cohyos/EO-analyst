@@ -7,6 +7,7 @@ import type { ItemCard, ItemDetail, TriageLevel } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { AddToContextButton } from "@/components/AddToContextButton";
 import { CorroborationBadge } from "./CorroborationBadge";
+import { DuplicateOutletsPopover } from "./DuplicateOutletsPopover";
 import { ToastStack } from "@/components/ToastStack";
 import { useToastQueue } from "@/hooks/useToastQueue";
 import { domainLabel } from "@/lib/taxonomy";
@@ -76,6 +77,12 @@ export function FeedDetailPanel({
       <div className="flex flex-wrap items-start gap-2 border-b border-border p-3">
         <LevelBadge level={item.level} />
         <CorroborationBadge corroboration={item.corroboration} showUnknown />
+        {/* Story clustering (2026-09-17): "אותה ידיעה במקורות נוספים" -- same chip/popover as the
+            feed row's "+N מקורות", reused here so the detail drawer surfaces the other outlets
+            (and languages) covering this exact story without duplicating the popover UI. */}
+        {(item.story_members?.length ?? 0) > 0 && (
+          <DuplicateOutletsPopover duplicates={item.story_members ?? []} size="md" />
+        )}
         {/* Content review (docs/qa/content_review/CR-ui.md): same fix as ItemDetailPage's header
             -- `min-w-0` let `flex-1` shrink the (non-truncated, wraps-to-multiple-lines) title
             down to whatever the two badges above left over in this already-narrow drawer/sheet,

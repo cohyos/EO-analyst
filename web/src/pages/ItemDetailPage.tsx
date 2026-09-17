@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ExplainScorePopover } from "@/components/feed/ExplainScorePopover";
 import { SecurityStatusIcon } from "@/components/feed/SecurityStatusIcon";
 import { CorroborationBadge } from "@/components/feed/CorroborationBadge";
+import { DuplicateOutletsPopover } from "@/components/feed/DuplicateOutletsPopover";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { ToastStack } from "@/components/ToastStack";
 import { useToastQueue } from "@/hooks/useToastQueue";
@@ -121,6 +122,11 @@ export function ItemDetailPage() {
         <div className="flex flex-wrap items-start gap-2">
           <LevelBadge level={item.level} />
           <CorroborationBadge corroboration={item.corroboration} showUnknown />
+          {/* Story clustering (2026-09-17): "אותה ידיעה במקורות נוספים" -- same popover as the
+              feed row's "+N מקורות" chip. */}
+          {(item.story_members?.length ?? 0) > 0 && (
+            <DuplicateOutletsPopover duplicates={item.story_members ?? []} size="md" />
+          )}
           {/* Content review (docs/qa/content_review/CR-ui.md): with `min-w-0`, this flex item
               had no minimum size to defend, so on a narrow viewport where the two badges above
               already ate most of the row's width, `flex-1` shrank the title down to whatever was

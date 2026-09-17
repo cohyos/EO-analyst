@@ -77,7 +77,7 @@ from eoa.report.qa_citations import (
     is_tender_aggregator_domain,
     tender_aggregator_reliability,
 )
-from eoa.report.textnorm import trim_at_word_boundary
+from eoa.report.textnorm import normalize_report_text, trim_at_word_boundary
 
 log = structlog.get_logger(__name__)
 
@@ -1720,6 +1720,69 @@ def _downgrade_aggregator_only_actions(
     return out
 
 
+def _normalize_sentences_pl(sentences: list[Sentence]) -> list[Sentence]:
+    out: list[Sentence] = []
+    for s in sentences:
+        normalized = normalize_report_text(s.text_he)
+        out.append(s if normalized == s.text_he else s.model_copy(update={"text_he": normalized or s.text_he}))
+    return out
+
+
+def _normalize_draft_text(draft: ProductLineReportDraft) -> ProductLineReportDraft:
+    """Round-17 (2026-09-17, Hebrew company-name canonicalisation, e.g. "ראפאל" -> "רפאל"):
+    apply :func:`eoa.report.textnorm.normalize_report_text` (punctuation normalisation + company-
+    name canonicalisation) to every LLM-authored text field on ``draft`` -- mirrors
+    ``eoa.report.bd_territory._normalize_draft_text`` field-for-field (``ProductLineReportDraft``
+    is a deliberate field-for-field mirror of ``BdTerritoryReportDraft``'s own prose fields, see
+    ``ProductLineRecommendedAction``/``ProductLineAssumption``'s own docstrings), needed as its own
+    function rather than reusing the shared ``textnorm.normalize_draft`` because that helper's
+    duck-typed field set is shaped for the daily/weekly/monthly draft families, not this one."""
+    return draft.model_copy(
+        update={
+            "bluf": _normalize_sentences_pl(draft.bluf),
+            "exec_summary": _normalize_sentences_pl(draft.exec_summary),
+            "market_bullets": _normalize_sentences_pl(draft.market_bullets),
+            "competitor_moves": _normalize_sentences_pl(draft.competitor_moves),
+            "recommended_actions": [
+                a.model_copy(
+                    update={
+                        "action_he": normalize_report_text(a.action_he),
+                        "rationale": _normalize_sentences_pl(a.rationale),
+                        "owner_role_he": normalize_report_text(a.owner_role_he),
+                        "timing_he": normalize_report_text(a.timing_he),
+                        "target": normalize_report_text(a.target) or a.target,
+                    }
+                )
+                for a in draft.recommended_actions
+            ],
+            "assumptions": [
+                a.model_copy(
+                    update={
+                        "assumption_he": normalize_report_text(a.assumption_he),
+                        "falsifier_he": normalize_report_text(a.falsifier_he),
+                    }
+                )
+                for a in draft.assumptions
+            ],
+            "system_note_he": normalize_report_text(draft.system_note_he) or "",
+            "open_points_he": [normalize_report_text(p) or p for p in draft.open_points_he],
+            **(
+                {
+                    "analyst_note_he": draft.analyst_note_he.model_copy(
+                        update={
+                            "sentences_he": [
+                                normalize_report_text(s) or s for s in draft.analyst_note_he.sentences_he
+                            ]
+                        }
+                    )
+                }
+                if draft.analyst_note_he is not None
+                else {}
+            ),
+        }
+    )
+
+
 def recommended_actions_table(
     draft: ProductLineReportDraft, *, deterministic: bool = False
 ) -> dict[str, Any] | None:
@@ -2020,6 +2083,17 @@ def build_product_line(
     draft = draft.model_copy(
         update={"recommended_actions": _downgrade_aggregator_only_actions(draft.recommended_actions, citation_items)}
     )
+
+    # Round-17 (2026-09-17, Hebrew company-name canonicalisation): unlike daily/weekly/monthly/
+    # bd_territory, this report's draft never previously went through any Hebrew text
+    # normalisation pass at all. `ProductLineReportDraft`'s own fields (`bluf`/`market_bullets`/
+    # `competitor_moves`/`recommended_actions`/`assumptions`) don't match
+    # `textnorm.normalize_draft`'s duck-typed field set (that helper is shaped for the daily/
+    # weekly/monthly/bd_territory draft families), so a dedicated `_normalize_draft_text` mirrors
+    # `eoa.report.bd_territory`'s own approach instead -- see its definition below. Applied last,
+    # after the aggregator-downgrade mutation just above, so it sees the final citation-bearing
+    # text.
+    draft = _normalize_draft_text(draft)
 
     extra_sections: list[dict[str, Any]] = []
     # D7 round-3-analog (mirrors eoa.report.bd_territory's own "no activity" marker, see

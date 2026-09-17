@@ -10,6 +10,9 @@ const getReportFileUrl = vi.fn();
 const getReportCitations = vi.fn();
 // R10-links: "חקירות בדוח" side list.
 const getReportInvestigations = vi.fn();
+// tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request).
+const getTechDailyStatus = vi.fn();
+const postTechDailyBuild = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
@@ -18,6 +21,8 @@ vi.mock("@/api", () => ({
     getReportFileUrl: (...args: unknown[]) => getReportFileUrl(...args),
     getReportCitations: (...args: unknown[]) => getReportCitations(...args),
     getReportInvestigations: (...args: unknown[]) => getReportInvestigations(...args),
+    getTechDailyStatus: (...args: unknown[]) => getTechDailyStatus(...args),
+    postTechDailyBuild: (...args: unknown[]) => postTechDailyBuild(...args),
   },
 }));
 
@@ -70,9 +75,15 @@ beforeEach(() => {
   getReportFileUrl.mockReset();
   getReportCitations.mockReset();
   getReportInvestigations.mockReset();
+  getTechDailyStatus.mockReset();
+  postTechDailyBuild.mockReset();
   getReportFileUrl.mockReturnValue("#mock");
   getReportCitations.mockResolvedValue({ report_id: 1, citations: {} });
   getReportInvestigations.mockResolvedValue([]);
+  // Most tests below don't care about the tech_daily build button -- default it to "no build in
+  // flight" so its poll never leaves an unrelated test waiting on an unresolved promise.
+  getTechDailyStatus.mockResolvedValue({ pending_job: null, latest: null });
+  postTechDailyBuild.mockResolvedValue({ job_id: "mock-tech-daily-job" });
 });
 
 describe("ReportsPage list rows (W14)", () => {
@@ -366,5 +377,50 @@ describe("ReportsPage empty/error states", () => {
     getReports.mockResolvedValue([report()]);
     renderPage();
     expect(await screen.findByText("בחר דוח מהרשימה")).toBeInTheDocument();
+  });
+});
+
+// tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request).
+describe("ReportsPage tech_daily build button", () => {
+  it("renders the build button in the toolbar", async () => {
+    getReports.mockResolvedValue([]);
+    renderPage();
+    expect(await screen.findByRole("button", { name: "בנה דוח טכנולוגיה עכשיו" })).toBeInTheDocument();
+  });
+
+  it("confirming with the default 24h window posts lookback_days=1", async () => {
+    getReports.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "בנה דוח טכנולוגיה עכשיו" }));
+    expect(await screen.findByRole("dialog", { name: "בנה דוח טכנולוגיה עכשיו" })).toBeInTheDocument();
+    expect(screen.getByText("הבנייה אורכת מספר דקות ומשתמשת במודל ענן")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "בנה דוח" }));
+    await waitFor(() => expect(postTechDailyBuild).toHaveBeenCalledWith(1));
+  });
+
+  it("picking a different window (7 ימים) posts lookback_days=7", async () => {
+    getReports.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "בנה דוח טכנולוגיה עכשיו" }));
+    fireEvent.click(await screen.findByRole("radio", { name: "7 ימים" }));
+    fireEvent.click(screen.getByRole("button", { name: "בנה דוח" }));
+
+    await waitFor(() => expect(postTechDailyBuild).toHaveBeenCalledWith(7));
+  });
+
+  it("disables the button and shows the job id while a build is queued/running", async () => {
+    getReports.mockResolvedValue([]);
+    getTechDailyStatus.mockResolvedValue({
+      pending_job: { id: "77", state: "running", created_at: "2026-09-17T04:00:00+03:00" },
+      latest: null,
+    });
+    renderPage();
+
+    const button = await screen.findByRole("button", { name: "בונה… (משימה #77)" });
+    expect(button).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "בנה דוח טכנולוגיה עכשיו" })).not.toBeInTheDocument();
   });
 });

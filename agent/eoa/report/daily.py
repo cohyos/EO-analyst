@@ -43,7 +43,7 @@ from eoa.report.redundancy import (
     narrative_citation_numbers,
 )
 from eoa.report.style import apply_style_guard, dedupe_exact_sentences_across_sections
-from eoa.report.textnorm import normalize_draft, normalize_hebrew_punctuation, trim_at_word_boundary
+from eoa.report.textnorm import normalize_draft, normalize_report_text, trim_at_word_boundary
 
 log = structlog.get_logger(__name__)
 
@@ -608,13 +608,13 @@ def collect_deep_search(
                 # characters and unescaped `\"` sequences (see `eoa.report.textnorm`'s module
                 # docstring) that render as visible artifacts -- normalized once here, at
                 # collection time, so all three renderers get clean text for free.
-                "question": normalize_hebrew_punctuation(payload.get("question")),
+                "question": normalize_report_text(payload.get("question")),
                 "outcome": result.get("outcome") or row.get("state"),
-                "answer_he": normalize_hebrew_punctuation(result.get("answer_he", "")) or "",
+                "answer_he": normalize_report_text(result.get("answer_he", "")) or "",
                 "confidence": result.get("confidence"),
                 "sources": result.get("sources", []),
-                "key_facts": [normalize_hebrew_punctuation(f) or f for f in (result.get("key_facts") or [])],
-                "contradictions_he": normalize_hebrew_punctuation(result.get("contradictions_he", "")) or "",
+                "key_facts": [normalize_report_text(f) or f for f in (result.get("key_facts") or [])],
+                "contradictions_he": normalize_report_text(result.get("contradictions_he", "")) or "",
                 # R8-investigations-b: lineage pointers a rerun/expansion payload may carry --
                 # `eoa.api.services.expand_investigation` and the security-review re-run path both
                 # write `expanded_from_job_id`; the orchestrator's queued re-runs (e.g. jobs 145-148,

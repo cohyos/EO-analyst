@@ -46,7 +46,9 @@ that may re-encode or reorder bidirectional text in source files.
 
 from __future__ import annotations
 
+import functools
 import re
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 # (Hebrew block, Hebrew presentation forms) -- matches eoa.report.docx_builder's `_HEBREW_RANGES`.
@@ -241,6 +243,154 @@ def normalize_hebrew_punctuation(text: str | None) -> str | None:
 
 
 # --------------------------------------------------------------------------
+# Hebrew company-name canonicalisation (round-17, 2026-09-17 -- feedback: "ראפאל" instead of
+# "רפאל" in generated reports). LLM output transliterates company names freely and nothing
+# canonicalised the result before this. Driven by the `hebrew_names` registry in
+# config/company_facts.yaml (schema documented in that file's own header comment): each entry
+# names ONE canonical Hebrew spelling (`name_he`) plus known misspellings/alternate
+# transliterations (`variants_he`) to fold onto it.
+#
+# Unlike :func:`normalize_hebrew_punctuation` (display-only, never touches a raw DB field at
+# rest), :func:`canonicalize_hebrew_names` is also called explicitly at pipeline write time
+# (`eoa.pipeline.analyze`, `eoa.pipeline.classify`) -- a misspelled company name is a factual
+# error, not a punctuation/display nicety, so it is worth fixing in the row itself, not just its
+# rendered copy. It is ALSO wired into the report-rendering path via :func:`normalize_report_text`
+# below (used by :func:`normalize_draft` and every report kind's own draft-normalisation hook) and
+# via `eoa.report.docx_builder`'s three renderers (`canonicalize_hebrew_names_deep` over
+# `tables`), so already-persisted text that predates this pass, or text that never goes through
+# the pipeline write path at all (deterministic table rows built straight from other DB columns),
+# still renders correctly.
+# --------------------------------------------------------------------------
+
+#: Hebrew single-letter grammatical prefixes that glue directly onto a following word with zero
+#: space (ו/ב/ל/מ/ש/ה/כ) -- same set as :data:`_HEBREW_PREFIX_HYPHEN_SPACE_RE` above. A variant
+#: match is allowed to carry 0-2 of these immediately before it (e.g. "ולראפאל" = "and to Rafael")
+#: without losing the match; the prefix run is preserved verbatim in the replacement.
+_HEBREW_NAME_PREFIX_CHARS = "ובלמשהכ"
+
+_HEBREW_LETTER_CLASS = "א-ת"
+
+#: A literal URL or a ``<bdi>...</bdi>`` span (an already-isolated Latin/URL run some HTML-stage
+#: text may carry) is never touched -- a Hebrew company-name variant cannot legitimately occur
+#: inside either.
+_URL_RE = re.compile(r"https?://\S+")
+_BDI_SPAN_RE = re.compile(r"<bdi[^>]*>.*?</bdi>", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class _HebrewNameRule:
+    name_he: str
+    variant: str
+    pattern: re.Pattern[str]
+
+
+@functools.lru_cache(maxsize=1)
+def _hebrew_name_rules() -> tuple[_HebrewNameRule, ...]:
+    """One compiled rule per (`hebrew_names` entry, variant) pair, longest variant text first (so
+    a longer variant is tried before a shorter one that happens to be its own prefix could shadow
+    it). Each pattern matches an optional 0-2 run of :data:`_HEBREW_NAME_PREFIX_CHARS` immediately
+    followed by the variant text, anchored on both sides against an adjacent Hebrew letter (so it
+    never fires mid-word: neither as the tail of a longer prefix run nor as the head of a longer,
+    unrelated Hebrew word) -- lazily built once and cached, mirroring
+    ``eoa.pipeline.analysis_grounding._company_facts_index``'s own lazy-import-of-settings pattern
+    to avoid a hard import-time dependency between ``eoa.report`` and ``eoa.config``.
+    """
+    from eoa.config import settings
+
+    entries = (settings().company_facts or {}).get("hebrew_names") or []
+    rules: list[_HebrewNameRule] = []
+    for entry in entries:
+        name_he = (entry.get("name_he") or "").strip()
+        if not name_he:
+            continue
+        for variant in entry.get("variants_he") or []:
+            variant = (variant or "").strip()
+            if not variant or variant == name_he:
+                continue
+            pattern = re.compile(
+                r"(?<![" + _HEBREW_LETTER_CLASS + r"])"
+                r"([" + _HEBREW_NAME_PREFIX_CHARS + r"]{0,2})"
+                + re.escape(variant)
+                + r"(?![" + _HEBREW_LETTER_CLASS + r"])"
+            )
+            rules.append(_HebrewNameRule(name_he=name_he, variant=variant, pattern=pattern))
+    rules.sort(key=lambda r: len(r.variant), reverse=True)
+    return tuple(rules)
+
+
+def _canonicalize_hebrew_names_segment(segment: str, rules: tuple[_HebrewNameRule, ...]) -> str:
+    if not segment:
+        return segment
+    for rule in rules:
+        if rule.variant not in segment:
+            continue  # cheap pre-check before paying for the regex substitution
+        segment = rule.pattern.sub(lambda m, name_he=rule.name_he: m.group(1) + name_he, segment)
+    return segment
+
+
+def canonicalize_hebrew_names(text: str | None) -> str | None:
+    """Fold a known Hebrew misspelling/alternate transliteration of a tracked company name onto
+    its canonical spelling (e.g. ``"ראפאל"`` -> ``"רפאל"``), per the ``hebrew_names`` registry in
+    config/company_facts.yaml.
+
+    Word-boundary aware for Hebrew: a single-letter grammatical prefix (ו/ב/ל/מ/ש/ה/כ) glued
+    directly onto the company name is preserved (``"וראפאל"`` -> ``"ורפאל"``, ``"לראפאל"`` ->
+    ``"לרפאל"``), while a variant that is itself just the head of a longer, unrelated Hebrew word
+    (or the tail of one) is left untouched. Never rewrites text inside a ``<bdi>...</bdi>`` span or
+    a literal URL. Idempotent -- a canonical spelling is never also registered as a variant of
+    itself (enforced when the rule table is built), so re-running this on already-canonical text
+    is always a no-op. ``None``/empty input is returned unchanged.
+    """
+    if not text:
+        return text
+    rules = _hebrew_name_rules()
+    if not rules:
+        return text
+
+    protected = sorted([*_BDI_SPAN_RE.finditer(text), *_URL_RE.finditer(text)], key=lambda m: m.start())
+    if not protected:
+        return _canonicalize_hebrew_names_segment(text, rules)
+
+    out: list[str] = []
+    pos = 0
+    for m in protected:
+        start, end = m.span()
+        if start < pos:
+            continue  # overlapping span (a URL that already sits inside a matched <bdi> span)
+        out.append(_canonicalize_hebrew_names_segment(text[pos:start], rules))
+        out.append(text[start:end])
+        pos = end
+    out.append(_canonicalize_hebrew_names_segment(text[pos:], rules))
+    return "".join(out)
+
+
+def canonicalize_hebrew_names_deep(value: Any) -> Any:
+    """Recursively apply :func:`canonicalize_hebrew_names` to every string leaf of a JSON-shaped
+    value (``dict``/``list``/``str``/other, unchanged otherwise) -- used for report ``tables``
+    payloads (``eoa.report.docx_builder``'s ``build_docx``/``render_markdown``/``render_html``),
+    where company-name-bearing text can sit at any depth (row cells, captions, note fields) rather
+    than at the small set of fixed pydantic-model fields :func:`normalize_draft` walks."""
+    if isinstance(value, str):
+        return canonicalize_hebrew_names(value) or value
+    if isinstance(value, list):
+        return [canonicalize_hebrew_names_deep(v) for v in value]
+    if isinstance(value, dict):
+        return {k: canonicalize_hebrew_names_deep(v) for k, v in value.items()}
+    return value
+
+
+def normalize_report_text(text: str | None) -> str | None:
+    """The one function report renderers should call on free Hebrew prose: punctuation
+    normalisation (:func:`normalize_hebrew_punctuation`) followed by company-name canonicalisation
+    (:func:`canonicalize_hebrew_names`). Kept as two composed, independently-testable passes rather
+    than folded into :func:`normalize_hebrew_punctuation` itself, since that function's contract is
+    deliberately punctuation-only and also used at spots (e.g. ``eoa.tenders.forecast``'s own,
+    differently-scoped ``normalize_hebrew_punctuation``) that have nothing to do with company
+    names. ``None``/empty input is returned unchanged."""
+    return canonicalize_hebrew_names(normalize_hebrew_punctuation(text))
+
+
+# --------------------------------------------------------------------------
 # Round 3 (2026-09-06, D6 judge finding 4): daily/weekly/monthly report drafts wire in
 # :func:`normalize_draft` below (this module's ``normalize_hebrew_punctuation`` was already landed
 # for the BD territory report as part of a concurrent D7 fix -- reused here as-is rather than
@@ -268,7 +418,7 @@ def _normalize_str_fields(obj: _M, fields: tuple[str, ...]) -> _M:
     for field in fields:
         value = getattr(obj, field, None)
         if isinstance(value, str) and value:
-            normalized = normalize_hebrew_punctuation(value)
+            normalized = normalize_report_text(value)
             if normalized != value:
                 updates[field] = normalized
     return obj.model_copy(update=updates) if updates else obj
@@ -291,12 +441,12 @@ def normalize_draft(draft: _M) -> _M:
 
     # exec_summary_he: str (legacy: monthly/bd_territory)
     if hasattr(draft, "exec_summary_he"):
-        updates["exec_summary_he"] = normalize_hebrew_punctuation(draft.exec_summary_he) or ""
+        updates["exec_summary_he"] = normalize_report_text(draft.exec_summary_he) or ""
 
     # market_bullets_he: list[str] (legacy: bd_territory only, harmless no-op elsewhere)
     market_bullets = getattr(draft, "market_bullets_he", None)
     if isinstance(market_bullets, list) and market_bullets:
-        updates["market_bullets_he"] = [normalize_hebrew_punctuation(b) or "" for b in market_bullets]
+        updates["market_bullets_he"] = [normalize_report_text(b) or "" for b in market_bullets]
 
     # sections: list[StructuredSection] (structured, .sentences) or list[ReportSection] (legacy,
     # .prose_he) -- both also carry a title_he.
@@ -306,11 +456,11 @@ def normalize_draft(draft: _M) -> _M:
         for section in sections:
             sec_updates: dict[str, Any] = {}
             if hasattr(section, "title_he"):
-                sec_updates["title_he"] = normalize_hebrew_punctuation(section.title_he) or ""
+                sec_updates["title_he"] = normalize_report_text(section.title_he) or ""
             if hasattr(section, "sentences"):
                 sec_updates["sentences"] = [_normalize_str_fields(s, ("text_he",)) for s in section.sentences]
             if hasattr(section, "prose_he"):
-                sec_updates["prose_he"] = normalize_hebrew_punctuation(section.prose_he) or ""
+                sec_updates["prose_he"] = normalize_report_text(section.prose_he) or ""
             new_sections.append(section.model_copy(update=sec_updates) if sec_updates else section)
         updates["sections"] = new_sections
 
@@ -319,7 +469,7 @@ def normalize_draft(draft: _M) -> _M:
     if isinstance(trends, list) and trends:
         new_trends = []
         for trend in trends:
-            t_updates: dict[str, Any] = {"title_he": normalize_hebrew_punctuation(trend.title_he) or ""}
+            t_updates: dict[str, Any] = {"title_he": normalize_report_text(trend.title_he) or ""}
             if hasattr(trend, "sentences"):
                 t_updates["sentences"] = [_normalize_str_fields(s, ("text_he",)) for s in trend.sentences]
             new_trends.append(trend.model_copy(update=t_updates))
@@ -335,13 +485,13 @@ def normalize_draft(draft: _M) -> _M:
     # system_note_he: str (structured only -- deterministic system text, normalized too since it
     # can embed a raw DB/title fragment).
     if hasattr(draft, "system_note_he"):
-        updates["system_note_he"] = normalize_hebrew_punctuation(draft.system_note_he) or ""
+        updates["system_note_he"] = normalize_report_text(draft.system_note_he) or ""
 
     # analyst_note_he: AnalystNote | None
     note = getattr(draft, "analyst_note_he", None)
     if note is not None and hasattr(note, "sentences_he"):
         updates["analyst_note_he"] = note.model_copy(
-            update={"sentences_he": [normalize_hebrew_punctuation(s) or "" for s in note.sentences_he]}
+            update={"sentences_he": [normalize_report_text(s) or "" for s in note.sentences_he]}
         )
 
     # outlook: list[OutlookIndicator] (structured)
@@ -351,15 +501,15 @@ def normalize_draft(draft: _M) -> _M:
 
     # outlook_he: str (legacy)
     if hasattr(draft, "outlook_he"):
-        updates["outlook_he"] = normalize_hebrew_punctuation(draft.outlook_he) or ""
+        updates["outlook_he"] = normalize_report_text(draft.outlook_he) or ""
 
     # risks_assumptions_he: str (bd_territory, legacy; harmless no-op elsewhere)
     if hasattr(draft, "risks_assumptions_he"):
-        updates["risks_assumptions_he"] = normalize_hebrew_punctuation(draft.risks_assumptions_he) or ""
+        updates["risks_assumptions_he"] = normalize_report_text(draft.risks_assumptions_he) or ""
 
     # open_points_he: list[str] (both shapes)
     open_points = getattr(draft, "open_points_he", None)
     if isinstance(open_points, list) and open_points:
-        updates["open_points_he"] = [normalize_hebrew_punctuation(p) or "" for p in open_points]
+        updates["open_points_he"] = [normalize_report_text(p) or "" for p in open_points]
 
     return draft.model_copy(update=updates) if updates else draft

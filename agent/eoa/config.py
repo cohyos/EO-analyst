@@ -59,6 +59,23 @@ class DedupCfg(BaseModel):
     lookback_days: int = 7
 
 
+class ClusteringCfg(BaseModel):
+    """Story-clustering thresholds (2026-09-17, "improve same-story grouping" task) -- see
+    ``eoa.pipeline.story_clustering.assign_story_ids``. Calibrated live against the Rafael
+    SPICE-1000-on-F-35 story (6 items, ids 22396/22798/23002/24089/25948/26284, one Hebrew + five
+    English outlets): pairwise cosine similarity among those six ranged 0.75-0.93 (multilingual-e5-
+    large embeddings), while 20 random unrelated same-week item pairs ranged 0.04-0.42 -- a wide,
+    clean gap. ``0.80`` sits well above the random-pair ceiling and, combined with the existing
+    ``dedup_of``/embedding-hub edges, is enough to connect the whole 6-item SPICE component (the two
+    Hebrew<->English pairs that individually score just under 0.80 still merge transitively through
+    an English "hub" item that clears the threshold with both) -- the cross-language title/entity
+    edge (below) is the safety net for the case where no such hub exists."""
+
+    story_embedding_threshold: float = 0.80
+    #: +/- window (days) for the embedding-similarity and cross-language title-match edges.
+    story_window_days: int = 3
+
+
 class PoliteModeCfg(BaseModel):
     external_gpu_util_threshold: int = 25
     enabled_outside_night_window: bool = True
@@ -583,6 +600,7 @@ class Settings(BaseModel):
     deep_search: DeepSearchCfg = DeepSearchCfg()
     triage: TriageCfg = TriageCfg()
     dedup: DedupCfg = DedupCfg()
+    clustering: ClusteringCfg = ClusteringCfg()
     resources: ResourcesCfg = ResourcesCfg()
     ollama: OllamaCfg = OllamaCfg()
     models: dict[str, str | None] = {}
@@ -622,6 +640,11 @@ class Settings(BaseModel):
     # to (eoa.dossier.vocabulary), replacing free-named SpecRow.parameter_he/PerformanceRow.
     # metric_he. Loaded optionally, same rationale as product_lines/company_facts above.
     spec_vocabulary: dict[str, Any] = {}
+    # tech_daily (2026-09-17, user request -- daily EO/IR supply-chain technology-watch report):
+    # config/tech_supply_chain.yaml -- the layer taxonomy (detectors_fpa/optics/mirrors_scanning/
+    # .../operational_concepts) eoa.report.tech_supply_chain reads. Loaded optionally, same
+    # rationale as product_lines/company_facts/spec_vocabulary above.
+    tech_supply_chain: dict[str, Any] = {}
 
     # ---- derived / env-driven -------------------------------------------------
     @property
@@ -692,6 +715,7 @@ def settings() -> Settings:
     product_lines = _load_yaml_optional("product_lines.yaml")
     company_facts = _load_yaml_optional("company_facts.yaml")
     spec_vocabulary = _load_yaml_optional("spec_vocabulary.yaml")
+    tech_supply_chain = _load_yaml_optional("tech_supply_chain.yaml")
     mcp_data = _load_yaml_optional("mcp.yaml")
     if "mcp" not in base and mcp_data:
         base = {**base, "mcp": mcp_data}
@@ -702,5 +726,6 @@ def settings() -> Settings:
         product_lines=product_lines,
         company_facts=company_facts,
         spec_vocabulary=spec_vocabulary,
+        tech_supply_chain=tech_supply_chain,
         **base,
     )

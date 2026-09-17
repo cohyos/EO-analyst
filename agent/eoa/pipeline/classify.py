@@ -29,6 +29,7 @@ from eoa.memory.relational import (
 )
 from eoa.pipeline.opportunity_signals import TAG as PLATFORM_OPPORTUNITY_TAG
 from eoa.pipeline.opportunity_signals import PlatformOpportunityHint, detect_platform_opportunity
+from eoa.report.textnorm import canonicalize_hebrew_names
 
 log = structlog.get_logger(__name__)
 
@@ -504,8 +505,15 @@ def run_classify(
                     out = apply_platform_opportunity_gate(it, out)
                     persist_classification(it, out)
                     if out.domain == "out_of_scope":
+                        # Round-17 (Hebrew company-name canonicalisation): a misspelled company
+                        # name can land in the archived item's own triage_reason just as easily as
+                        # in summary_he/so_what_he -- folded before the 400-char cap, same as
+                        # eoa.pipeline.analyze's write site.
                         update_item_fields(
-                            it["id"], level="archive", score=1, triage_reason=out.relevance_note[:400]
+                            it["id"],
+                            level="archive",
+                            score=1,
+                            triage_reason=(canonicalize_hebrew_names(out.relevance_note) or "")[:400],
                         )
                         stats.out_of_scope += 1
                     mark_stage(it["id"], STAGE)
@@ -528,7 +536,12 @@ def run_classify(
             out = apply_platform_opportunity_gate(it, out)
             persist_classification(it, out)
             if out.domain == "out_of_scope":
-                update_item_fields(it["id"], level="archive", score=1, triage_reason=out.relevance_note[:400])
+                update_item_fields(
+                    it["id"],
+                    level="archive",
+                    score=1,
+                    triage_reason=(canonicalize_hebrew_names(out.relevance_note) or "")[:400],
+                )
                 stats.out_of_scope += 1
             mark_stage(it["id"], STAGE)
             stats.done += 1

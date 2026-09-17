@@ -60,6 +60,8 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TechDailyBuildResponse,
+  TechDailyStatusResponse,
   TechRadarResponse,
   TenderFeedback,
   TenderFeedbackVerdict,
@@ -83,6 +85,11 @@ export interface ItemsQuery {
   sort?: "score" | "published_at";
   /** A13 (מיקוד תעשייה ישראלית): filter to items with `israel_relevance >= 0.5`. */
   israel?: boolean;
+  /** Story clustering (2026-09-17): one card per story instead of one per item -- see
+   * `eoa.api.services.list_items`'s `group_stories` branch. The feed page passes this by
+   * default (`web/src/pages/FeedPage.tsx`); other callers (e.g. the tech radar's own item list)
+   * leave it unset to keep today's one-card-per-item behaviour. */
+  group_stories?: boolean;
 }
 
 export interface ItemsByCountryQuery {
@@ -348,6 +355,14 @@ export interface ApiClient {
   /** R10-links: the investigations this report's own "חקירות עומק" section actually rendered --
    * feeds the "חקירות בדוח" side list. */
   getReportInvestigations(id: number): Promise<ReportInvestigationRef[]>;
+
+  // tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): the reports
+  // page toolbar's on-demand build of the daily EO/IR supply-chain technology-watch report --
+  // dedupes server-side (an already-queued/running build is returned as-is).
+  postTechDailyBuild(lookbackDays: number, force?: boolean): Promise<TechDailyBuildResponse>;
+  /** Poll target while a build is in flight; `latest` also drives the "select the new report"
+   * refetch once `pending_job` goes back to `null`. */
+  getTechDailyStatus(): Promise<TechDailyStatusResponse>;
 
   // A11 "דוח מיקוד לפיתוח עסקי, מכירה ושיווק לפי טריטוריה" (eoa.report.bd_territory).
   /** Candidate territories for the selector, with item/tender/forecast counts, most active first. */

@@ -29,7 +29,7 @@ from lxml import etree
 
 from eoa.llm.schemas.analysis import DailyReportDraft
 from eoa.report.qa_citations import QAResult
-from eoa.report.textnorm import trim_at_word_boundary
+from eoa.report.textnorm import canonicalize_hebrew_names_deep, trim_at_word_boundary
 
 # -- constants -----------------------------------------------------------------
 
@@ -1458,6 +1458,15 @@ def build_docx(
     unaffected): see :func:`_planned_headings` for what each does.
     """
     tables = dedupe_rows_across_tables(tables) or None
+    # Round-17 (2026-09-17, Hebrew company-name canonicalisation): the single choke point every
+    # report kind's deterministic table data (headers/rows/captions/note_he -- daily/weekly/
+    # monthly/bd_territory/product_line/dossier/patents-survey all funnel their `tables` argument
+    # through this exact function) passes through before rendering, so this is where a company-
+    # name misspelling in table cell text (as opposed to LLM-authored draft prose, already covered
+    # separately by each report kind's own `normalize_draft`/`_normalize_draft_text` call) gets
+    # folded onto its canonical spelling regardless of which report kind built the table.
+    if tables:
+        tables = canonicalize_hebrew_names_deep(tables)
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []
@@ -1806,6 +1815,15 @@ def render_markdown(
     additive ``title_text``/``extra_sections``/``tables``/``domain_group_he``/
     ``open_points_in_outlook`` hooks)."""
     tables = dedupe_rows_across_tables(tables) or None
+    # Round-17 (2026-09-17, Hebrew company-name canonicalisation): the single choke point every
+    # report kind's deterministic table data (headers/rows/captions/note_he -- daily/weekly/
+    # monthly/bd_territory/product_line/dossier/patents-survey all funnel their `tables` argument
+    # through this exact function) passes through before rendering, so this is where a company-
+    # name misspelling in table cell text (as opposed to LLM-authored draft prose, already covered
+    # separately by each report kind's own `normalize_draft`/`_normalize_draft_text` call) gets
+    # folded onto its canonical spelling regardless of which report kind built the table.
+    if tables:
+        tables = canonicalize_hebrew_names_deep(tables)
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []
@@ -2210,6 +2228,15 @@ def render_html(
     anchor-based table of contents; the daily report leaves it off.
     """
     tables = dedupe_rows_across_tables(tables) or None
+    # Round-17 (2026-09-17, Hebrew company-name canonicalisation): the single choke point every
+    # report kind's deterministic table data (headers/rows/captions/note_he -- daily/weekly/
+    # monthly/bd_territory/product_line/dossier/patents-survey all funnel their `tables` argument
+    # through this exact function) passes through before rendering, so this is where a company-
+    # name misspelling in table cell text (as opposed to LLM-authored draft prose, already covered
+    # separately by each report kind's own `normalize_draft`/`_normalize_draft_text` call) gets
+    # folded onto its canonical spelling regardless of which report kind built the table.
+    if tables:
+        tables = canonicalize_hebrew_names_deep(tables)
     deep_search = deep_search or []
     open_clarifications = open_clarifications or []
     extra_sections = extra_sections or []

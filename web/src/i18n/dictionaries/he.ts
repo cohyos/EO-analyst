@@ -126,6 +126,11 @@ export const he = {
     tendersLabel: "מכרזים ו-RFI/RFP",
     tendersAria: "מכרזים ו-RFI/RFP — עבור לרשימת המכרזים",
     tendersSummary: "{open} פתוחים · {unknown} לא ידוע · {newForecasts} תחזיות חדשות השבוע",
+    // tech_daily (2026-09-17, בקשת משתמש): כרטיס "טכנולוגיה היום" בדוח הבוקר.
+    techDailyLabel: "טכנולוגיה היום",
+    techDailyAria: "טכנולוגיה היום — פתח את דוח מעקב הטכנולוגיה האחרון",
+    techDailyLayersWithNews: "{count} שכבות עם חדש",
+    techDailyNone: "טרם הופק דוח מעקב טכנולוגי",
     // UI-ERRORS (docs/qa/content_review/UI-ERRORS.md): replaces the old bare table (stage/time/
     // message, no drill-down) with a per-error card panel — cause, recommended action, impact on
     // the run, and a "פרטים טכניים" expander with the exception type + traceback tail.
@@ -465,6 +470,23 @@ export const he = {
     tendersCount: "{n} מכרזים",
     forecastsCount: "{n} תחזיות",
     configuredBadge: "בברירת המחדל השבועית",
+  },
+  // tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): the reports
+  // page toolbar's on-demand build of the daily EO/IR supply-chain technology-watch report.
+  reports: {
+    buildTechDailyButton: "בנה דוח טכנולוגיה עכשיו",
+    buildTechDailyBuilding: "בונה… (משימה #{id})",
+    buildTechDailyConfirmTitle: "בנה דוח טכנולוגיה עכשיו",
+    buildTechDailyConfirmMessage: "בניית דוח חדש תרוץ ברקע ותחליף את הדוח האחרון כשתסתיים.",
+    buildTechDailyWindowLabel: "חלון",
+    buildTechDailyWindow24h: "24 שעות",
+    buildTechDailyWindow7d: "7 ימים",
+    buildTechDailyWindow30d: "30 ימים",
+    buildTechDailyNote: "הבנייה אורכת מספר דקות ומשתמשת במודל ענן",
+    buildTechDailyConfirmButton: "בנה דוח",
+    buildTechDailyConfirming: "בונה…",
+    buildTechDailyReadyToast: "הדוח מוכן",
+    buildTechDailyErrorToast: "בניית הדוח נכשלה",
   },
   // PL-ui (2026-09-07): "קווי מוצר" -- product-line status & business-development tracking for
   // the six EO/IR product lines (docs/qa/loop/round_7_fixes.md "### PL-ui status").

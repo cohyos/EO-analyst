@@ -184,6 +184,7 @@ _DAILY_RUN_STAGE_ORDER = (
     "deep_search",
     "analyze",
     "corroborate",
+    "stories",
     "tenders",
     "post_tenders_catchup",
     "report",
@@ -338,6 +339,13 @@ def _item_card(row: dict[str, Any]) -> dict[str, Any]:
         "corroboration": {"status": "unknown", "count": 0, "sources": [], "checked_at": None},
         # PL-backend (2026-09-07): additive, see migration 0027 and eoa.product_lines.tagging.
         "product_lines": row.get("product_lines") or [],
+        # Story clustering (2026-09-17): default "not yet grouped" shape -- a lone item is its own
+        # one-member story. `_attach_story_info` overwrites this for every id that has a computed
+        # `story_id` (migration 0035) or shares one with another returned/looked-up item.
+        "story_id": row.get("story_id"),
+        "story_size": 1,
+        "story_primary": True,
+        "story_members": [],
     }
 
 
@@ -362,6 +370,62 @@ def _attach_corroboration(cards: list[dict[str, Any]]) -> None:
             card["corroboration"] = payload
 
 
+def _story_richness_key(row: dict[str, Any]) -> tuple[int, float, int]:
+    """Same tie-break as ``eoa.report.clustering._richness`` (2026-09-17: more populated fields,
+    then higher score, then Hebrew-language preferred), over the lighter row shape
+    ``eoa.memory.relational.get_story_groups_for_items`` returns."""
+    fields = sum(1 for k in ("summary_he", "so_what_he", "url", "published_at") if row.get(k))
+    try:
+        score_val = float(row["score"]) if row.get("score") is not None else 0.0
+    except (TypeError, ValueError):
+        score_val = 0.0
+    is_hebrew = 1 if (row.get("lang") or "").strip().lower().startswith("he") else 0
+    return (fields, score_val, is_hebrew)
+
+
+def _story_key_of(row: dict[str, Any]) -> Any:
+    return row.get("story_id") if row.get("story_id") is not None else row.get("id")
+
+
+def _story_members_payload(members: list[dict[str, Any]], *, exclude_id: int | None) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": m["id"],
+            "title": m.get("title"),
+            "source_name": m.get("source_name"),
+            "lang": m.get("lang"),
+            "url": m.get("url"),
+        }
+        for m in members
+        if m["id"] != exclude_id
+    ]
+
+
+def _attach_story_info(cards: list[dict[str, Any]]) -> None:
+    """Fill in ``story_size``/``story_primary``/``story_members`` (in place) for every card, using
+    each story's FULL membership (not just the ids on this page/response -- a sibling on another
+    page still counts, see ``get_story_groups_for_items``'s docstring). Degrades to `_item_card`'s
+    "lone item" default on any lookup failure, same policy as `_attach_corroboration`."""
+    ids = [c["id"] for c in cards if c.get("id") is not None]
+    if not ids:
+        return
+    try:
+        from eoa.memory.relational import get_story_groups_for_items
+
+        groups = get_story_groups_for_items(ids)
+    except Exception as exc:
+        log.warning("story_grouping_lookup_failed", error=str(exc)[:200])
+        return
+    for card in cards:
+        members = groups.get(_story_key_of(card))
+        if not members:
+            continue
+        primary_id = max(members, key=_story_richness_key)["id"]
+        card["story_size"] = len(members)
+        card["story_primary"] = card["id"] == primary_id
+        card["story_members"] = _story_members_payload(members, exclude_id=card["id"])
+
+
 def list_items(
     *,
     level: str | None = None,
@@ -373,6 +437,7 @@ def list_items(
     page: int = 1,
     page_size: int = 50,
     sort: str = "score",
+    group_stories: bool = False,
 ) -> tuple[int, list[dict[str, Any]]]:
     page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
@@ -419,23 +484,67 @@ def list_items(
         where.append("COALESCE(i.israel_relevance, 0) >= 0.5")
     where_sql = " AND ".join(where)
 
-    total_row = _fetchone(f"SELECT count(*) AS n FROM items i WHERE {where_sql}", params)
-    total = total_row["n"] if total_row else 0
+    if not group_stories:
+        total_row = _fetchone(f"SELECT count(*) AS n FROM items i WHERE {where_sql}", params)
+        total = total_row["n"] if total_row else 0
 
-    params = {**params, "limit": page_size, "offset": (page - 1) * page_size}
+        page_params = {**params, "limit": page_size, "offset": (page - 1) * page_size}
+        rows = _fetchall(
+            f"""
+            SELECT i.*, s.name AS source_name
+            FROM items i
+            LEFT JOIN sources s ON s.id = i.source_id
+            WHERE {where_sql}
+            ORDER BY i.{sort_col} DESC NULLS LAST, i.id DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            page_params,
+        )
+        cards = [_item_card(r) for r in rows]
+        _attach_corroboration(cards)
+        _attach_story_info(cards)
+        return total, cards
+
+    # Story clustering (2026-09-17): `group_stories=1` (the feed's own default -- see
+    # web/src/pages/FeedPage.tsx) returns one card per STORY instead of one per item. Every id
+    # matching the filter is pulled (id-only, cheap) so a story is counted once even when its
+    # richest ("primary") member happens to not match the filter itself (e.g. a `level=red` filter
+    # with the primary sitting at `orange` -- the story is still "in" the filtered set because at
+    # least one member is); `get_story_groups_for_items` then expands each story to its TRUE full
+    # membership (so `story_size` is accurate even for a sibling the filter excludes entirely).
+    from eoa.memory.relational import get_story_groups_for_items
+
+    all_ids = [r["id"] for r in _fetchall(f"SELECT i.id FROM items i WHERE {where_sql}", params)]
+    groups = get_story_groups_for_items(all_ids)
+    filtered_ids = set(all_ids)
+
+    story_rows: list[dict[str, Any]] = []
+    for key, members in groups.items():
+        in_filter = [m for m in members if m["id"] in filtered_ids] or members
+        primary = max(in_filter, key=_story_richness_key)
+        story_rows.append({"story_key": key, "primary_id": primary["id"], "score": primary.get("score"),
+                            "published_at": primary.get("published_at")})
+
+    total = len(story_rows)
+    # `ORDER BY i.<sort_col> DESC NULLS LAST, i.id DESC` over the primary rows, same convention as
+    # the non-grouped query above -- sort by the (stable) tie-break first, then the primary key,
+    # since Python's sort is stable and the *last* sort determines the dominant order.
+    story_rows.sort(key=lambda r: r["primary_id"], reverse=True)
+    story_rows.sort(key=lambda r: (r[sort_col] is not None, r[sort_col]), reverse=True)
+    page_slice = story_rows[(page - 1) * page_size : (page - 1) * page_size + page_size]
+    page_ids = [r["primary_id"] for r in page_slice]
+    if not page_ids:
+        return total, []
+
     rows = _fetchall(
-        f"""
-        SELECT i.*, s.name AS source_name
-        FROM items i
-        LEFT JOIN sources s ON s.id = i.source_id
-        WHERE {where_sql}
-        ORDER BY i.{sort_col} DESC NULLS LAST, i.id DESC
-        LIMIT %(limit)s OFFSET %(offset)s
-        """,
-        params,
+        "SELECT i.*, s.name AS source_name FROM items i LEFT JOIN sources s ON s.id = i.source_id "
+        "WHERE i.id = ANY(%(ids)s)",
+        {"ids": page_ids},
     )
-    cards = [_item_card(r) for r in rows]
+    rows_by_id = {r["id"]: r for r in rows}
+    cards = [_item_card(rows_by_id[pid]) for pid in page_ids if pid in rows_by_id]
     _attach_corroboration(cards)
+    _attach_story_info(cards)
     return total, cards
 
 
@@ -460,6 +569,7 @@ def get_item(item_id: int) -> dict[str, Any] | None:
         return None
     card = _item_card(row)
     _attach_corroboration([card])
+    _attach_story_info([card])
     card["clean_text"] = row.get("clean_text")
     card["events"] = _fetchall(
         "SELECT * FROM events WHERE item_id = %s ORDER BY date NULLS LAST, id", (item_id,)
@@ -1374,7 +1484,80 @@ def morning() -> dict[str, Any]:
         "open_points": open_points,
         "night_summary": _night_summary(),
         "recent_errors": recent_errors(),
+        # tech_daily (2026-09-17, user request -- daily EO/IR supply-chain technology-watch
+        # report): "טכנולוגיה היום" morning card. `layers_with_news` is stashed in the report's
+        # own `qa_report` JSON by eoa.report.tech_daily._persist_report -- read back here rather
+        # than recomputed, same "qa_report as a metadata bag" convention product_dossier/
+        # patent_survey already use elsewhere in this module.
+        "tech_daily": _tech_daily_summary(),
     }
+
+
+def _tech_daily_summary() -> dict[str, Any] | None:
+    # `_report_card`/`list_reports` don't expose the raw `qa_report` JSON (only a derived
+    # `qa_issues` count) -- queried directly here for `layers_with_news` (stashed by
+    # eoa.report.tech_daily._persist_report), same reason eoa.report.tech_daily itself reads
+    # `qa_report` straight off `reports` for its own "מה השתנה מאתמול" delta.
+    row = _fetchone(
+        f"SELECT id, created_at, qa_passed, qa_report FROM reports "
+        f"WHERE kind = 'tech_daily' AND {VISIBLE_REPORT_SQL} ORDER BY created_at DESC LIMIT 1"
+    )
+    if row is None:
+        return None
+    layers_with_news = (row.get("qa_report") or {}).get("layers_with_news") or []
+    return {
+        "report_id": row["id"],
+        "created_at": row["created_at"],
+        "qa_passed": row.get("qa_passed"),
+        "layers_with_news_count": len(layers_with_news),
+    }
+
+
+def _pending_tech_daily_job() -> dict[str, Any] | None:
+    """The latest queued/running ``tech_daily_report`` job, or ``None`` -- same shape/reasoning as
+    ``_pending_dossier_job`` (below), but for the "בנה דוח טכנולוגיה עכשיו" button (2026-09-17,
+    user request): the UI polls this via ``tech_daily_status`` while a build is in flight."""
+    row = _fetchone(
+        "SELECT id, state, created_at FROM jobs WHERE kind = 'tech_daily_report' "
+        "AND state IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1"
+    )
+    if row is None:
+        return None
+    return {"id": row["id"], "state": row["state"], "created_at": row["created_at"]}
+
+
+def enqueue_tech_daily_report(lookback_days: int = 1, *, force: bool = False) -> dict[str, Any]:
+    """`POST /api/reports/tech-daily/build` ("בנה דוח טכנולוגיה עכשיו"): enqueue the
+    ``tech_daily_report`` job kind (``eoa.orchestrator.jobs.HANDLERS``), which calls
+    ``eoa.report.tech_daily.build_tech_daily``. Dedupe (mirrors ``investigate_item``'s
+    queued/running guard): a ``tech_daily_report`` job already queued/running is returned as-is
+    instead of enqueueing a second one -- the build costs several minutes of cloud LLM calls, so a
+    double-click or an impatient retry must never queue two."""
+    if not 1 <= lookback_days <= 90:
+        raise ValueError("lookback_days must be between 1 and 90")
+    pending = _pending_tech_daily_job()
+    if pending is not None:
+        return {"job_id": pending["id"]}
+    job_id = relational.enqueue_job(
+        "tech_daily_report", {"lookback_days": lookback_days, "force": force}, priority=4
+    )
+    return {"job_id": job_id}
+
+
+def tech_daily_status() -> dict[str, Any]:
+    """`GET /api/reports/tech-daily/status`: the UI's poll target while "בנה דוח טכנולוגיה עכשיו"
+    is in flight -- ``pending_job`` (queued/running, or ``None``) and ``latest`` (the newest built
+    ``tech_daily`` report's id/created_at/period_end, or ``None`` if none has ever been built)."""
+    row = _fetchone(
+        f"SELECT id, created_at, period_end FROM reports "
+        f"WHERE kind = 'tech_daily' AND {VISIBLE_REPORT_SQL} ORDER BY created_at DESC LIMIT 1"
+    )
+    latest = (
+        {"report_id": row["id"], "created_at": row["created_at"], "period_end": row["period_end"]}
+        if row is not None
+        else None
+    )
+    return {"pending_job": _pending_tech_daily_job(), "latest": latest}
 
 
 # UI-ERRORS (docs/qa/content_review/UI-ERRORS.md): Hebrew stage labels used only in error

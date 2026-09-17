@@ -32,6 +32,7 @@ from eoa.memory.relational import (
 from eoa.pipeline.analysis_grounding import ground_analysis_fields, is_too_thin
 from eoa.pipeline.event_grounding import ground_event
 from eoa.pipeline.opportunity_signals import TAG as PLATFORM_OPPORTUNITY_TAG
+from eoa.report.textnorm import canonicalize_hebrew_names
 
 log = structlog.get_logger(__name__)
 
@@ -828,12 +829,23 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
     if entity_persistence_ok and grounding.entities_mentioned != (entities_for_grounding or []):
         extra_fields["entities_mentioned"] = grounding.entities_mentioned
 
+    # Round-17 (2026-09-17, Hebrew company-name canonicalisation, feedback: "ראפאל" instead of
+    # "רפאל" in generated reports): fold a known Hebrew misspelling of a tracked company name onto
+    # its canonical spelling right here, at the DB write site -- a misspelled company name is a
+    # factual error in the row itself, not just a rendering nicety (contrast
+    # `eoa.report.textnorm.normalize_hebrew_punctuation`, display-only). See
+    # config/company_facts.yaml's `hebrew_names` registry for the canonical spellings.
+    summary_he = canonicalize_hebrew_names(grounding.summary_he)
+    so_what_he = canonicalize_hebrew_names(grounding.so_what_he)
+    key_facts = [canonicalize_hebrew_names(f) or f for f in grounding.key_facts]
+    uncertainty_he = canonicalize_hebrew_names(_with_partial_content_note(item, out.uncertainty_he or None))
+
     update_item_fields(
         item["id"],
-        summary_he=grounding.summary_he,
-        so_what_he=grounding.so_what_he,
-        key_facts=grounding.key_facts,
-        uncertainty_he=_with_partial_content_note(item, out.uncertainty_he or None),
+        summary_he=summary_he,
+        so_what_he=so_what_he,
+        key_facts=key_facts,
+        uncertainty_he=uncertainty_he,
         # A12 (מעקב טכנולוגי): additive, only ever non-null for domain == "tech_dev" -- the LLM
         # is instructed (prompts/analyze.md) to leave these null/empty for every other domain.
         tech_maturity=out.tech_maturity,
@@ -884,14 +896,17 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
             event_id = insert_event(
                 item_id=item["id"],
                 kind=grounded.kind,
-                title=grounded.title,
+                # Round-17 (Hebrew company-name canonicalisation): `title`/`summary_he` are the
+                # LLM's own event narrative, same as items.summary_he/so_what_he above -- folded
+                # onto their canonical spelling before the row is written.
+                title=canonicalize_hebrew_names(grounded.title),
                 date=_parse_date(grounded.date),
                 amount_usd=grounded.amount_usd,
                 currency=grounded.currency,
                 parties=grounded.parties,
                 customer=grounded.customer,
                 program=grounded.program,
-                summary_he=grounded.summary_he,
+                summary_he=canonicalize_hebrew_names(grounded.summary_he),
                 confidence=grounded.confidence,
             )
             n_events += 1
@@ -984,7 +999,7 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
         from eoa.product_lines.tagging import tag_product_lines
 
         entities_for_tagging = extra_fields.get("entities_mentioned") or item.get("entities_mentioned") or []
-        text_he = " ".join(filter(None, [grounding.summary_he, grounding.so_what_he]))
+        text_he = " ".join(filter(None, [summary_he, so_what_he]))
         product_lines = tag_product_lines(
             text_he=text_he,
             text_en=item.get("title"),

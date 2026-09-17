@@ -52,14 +52,22 @@ def models_local_status() -> None:
 
 @app.command()
 def run(
-    scope: str = typer.Argument("daily", help="daily|ingest|report|dedup|classify|triage|analyze|bd|patents"),
+    scope: str = typer.Argument(
+        "daily", help="daily|ingest|report|dedup|classify|triage|analyze|stories|bd|patents"
+    ),
     mode: str = typer.Option("full", help="full|eco"),
     now: bool = typer.Option(True, help="run in-process now"),
     territory: str = typer.Option(
         None, help="scope=bd only: ISO-2 country code or region code (US, IL, EU, ...)"
     ),
-    lookback_days: int = typer.Option(90, help="scope=bd only: lookback window in days"),
+    lookback_days: int = typer.Option(
+        90, "--lookback-days", help="scope=bd: lookback window in days; scope=report --kind tech_daily: days back (default 1)"
+    ),
     topic: str = typer.Option(None, help="scope=patents only: scan just this one ad-hoc topic"),
+    since_days: int = typer.Option(
+        7, "--since-days", help="scope=stories only: lookback window in days (backfill: --since-days 60)"
+    ),
+    kind: str = typer.Option("daily", "--kind", help="scope=report only: daily|tech_daily"),
 ) -> None:
     """Run a cycle (or one stage) immediately in this process — respects the resource gate & polite mode."""
     from eoa.orchestrator.main import configure_logging
@@ -98,13 +106,24 @@ def run(
         from eoa.pipeline.analyze import run_analyze
 
         rprint(run_analyze(role="light" if mode == "eco" else "resident"))
-    elif scope == "report":
-        from eoa.report.daily import build_daily
+    elif scope == "stories":
+        from eoa.pipeline.story_clustering import assign_story_ids
 
-        # F4: a manual `eo run report` always builds a fresh report, bypassing build_daily's
-        # 6-hour idempotency guard (which exists to stop the automatic nightly pipeline from
-        # building a second daily report on top of one built minutes earlier by another job).
-        rprint(build_daily(force=True))
+        rprint(assign_story_ids(since_days=since_days))
+    elif scope == "report":
+        # F4: a manual `eo run report` always builds a fresh report, bypassing the 6-hour
+        # idempotency guard (which exists to stop the automatic nightly pipeline from building a
+        # second report on top of one built minutes earlier by another job).
+        if kind == "tech_daily":
+            from eoa.report.tech_daily import build_tech_daily
+
+            rprint(build_tech_daily(force=True, lookback_days=lookback_days))
+        elif kind == "daily":
+            from eoa.report.daily import build_daily
+
+            rprint(build_daily(force=True))
+        else:
+            raise typer.BadParameter(f"unknown --kind {kind} (daily|tech_daily)")
     elif scope == "bd":
         from eoa.report.bd_territory import build_bd_territory
 

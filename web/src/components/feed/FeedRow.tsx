@@ -1,5 +1,5 @@
 import { ExternalLink } from "lucide-react";
-import type { ItemCard, TriageLevel } from "@/types/api";
+import type { ItemCard, StoryMember, TriageLevel } from "@/types/api";
 import { LevelBadge } from "@/components/LevelBadge";
 import { SecurityStatusIcon } from "./SecurityStatusIcon";
 import { ExplainScorePopover } from "./ExplainScorePopover";
@@ -31,7 +31,7 @@ export function FeedRow({
   investigating?: boolean;
   /** W9 (docs/REVIEW_2026-09-06_evening.md round 4): other outlets covering the same story,
    * folded into this row by `lib/dedupGroups.ts` -- renders as a "+N מקורות" chip. */
-  duplicates?: ItemCard[];
+  duplicates?: StoryMember[];
   style?: React.CSSProperties;
 }) {
   const t = useT();

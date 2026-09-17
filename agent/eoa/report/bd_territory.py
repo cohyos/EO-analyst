@@ -71,7 +71,7 @@ from eoa.report.docx_builder import (
 )
 from eoa.report.geography import country_mentions_in_text, normalize_country
 from eoa.report.qa_citations import QAResult, check
-from eoa.report.textnorm import normalize_hebrew_punctuation
+from eoa.report.textnorm import normalize_report_text
 
 log = structlog.get_logger(__name__)
 
@@ -1969,11 +1969,11 @@ def _cap_draft_lengths(draft: BdTerritoryReportDraft) -> BdTerritoryReportDraft:
 
 
 def _normalize_text_list(values: list[str]) -> list[str]:
-    return [normalize_hebrew_punctuation(v) or v for v in values]
+    return [normalize_report_text(v) or v for v in values]
 
 
 def _normalize_sentence(sentence: Sentence) -> Sentence:
-    normalized = normalize_hebrew_punctuation(sentence.text_he)
+    normalized = normalize_report_text(sentence.text_he)
     if normalized == sentence.text_he:
         return sentence
     return sentence.model_copy(update={"text_he": normalized or sentence.text_he})
@@ -2002,11 +2002,11 @@ def _normalize_draft_text(draft: BdTerritoryReportDraft) -> BdTerritoryReportDra
             "recommended_actions": [
                 a.model_copy(
                     update={
-                        "action_he": normalize_hebrew_punctuation(a.action_he),
+                        "action_he": normalize_report_text(a.action_he),
                         "rationale": _normalize_sentences(a.rationale),
-                        "owner_role_he": normalize_hebrew_punctuation(a.owner_role_he),
-                        "timing_he": normalize_hebrew_punctuation(a.timing_he),
-                        "target": normalize_hebrew_punctuation(a.target) or a.target,
+                        "owner_role_he": normalize_report_text(a.owner_role_he),
+                        "timing_he": normalize_report_text(a.timing_he),
+                        "target": normalize_report_text(a.target) or a.target,
                     }
                 )
                 for a in draft.recommended_actions
@@ -2014,9 +2014,9 @@ def _normalize_draft_text(draft: BdTerritoryReportDraft) -> BdTerritoryReportDra
             "pipeline_opportunities": [
                 o.model_copy(
                     update={
-                        "opportunity_he": normalize_hebrew_punctuation(o.opportunity_he),
-                        "buyer_he": normalize_hebrew_punctuation(o.buyer_he) or o.buyer_he,
-                        "target_date_he": normalize_hebrew_punctuation(o.target_date_he) or o.target_date_he,
+                        "opportunity_he": normalize_report_text(o.opportunity_he),
+                        "buyer_he": normalize_report_text(o.buyer_he) or o.buyer_he,
+                        "target_date_he": normalize_report_text(o.target_date_he) or o.target_date_he,
                         "rationale": _normalize_sentences(o.rationale),
                     }
                 )
@@ -2025,20 +2025,20 @@ def _normalize_draft_text(draft: BdTerritoryReportDraft) -> BdTerritoryReportDra
             "assumptions": [
                 a.model_copy(
                     update={
-                        "assumption_he": normalize_hebrew_punctuation(a.assumption_he),
-                        "falsifier_he": normalize_hebrew_punctuation(a.falsifier_he),
+                        "assumption_he": normalize_report_text(a.assumption_he),
+                        "falsifier_he": normalize_report_text(a.falsifier_he),
                     }
                 )
                 for a in draft.assumptions
             ],
-            "risks_assumptions_he": normalize_hebrew_punctuation(draft.risks_assumptions_he),
+            "risks_assumptions_he": normalize_report_text(draft.risks_assumptions_he),
             "open_points_he": _normalize_text_list(draft.open_points_he),
         }
     )
 
 
 def _normalize_cell(value: Any) -> Any:
-    return normalize_hebrew_punctuation(value) if isinstance(value, str) else value
+    return normalize_report_text(value) if isinstance(value, str) else value
 
 
 def _normalize_table(table: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2049,7 +2049,7 @@ def _normalize_table(table: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     normalized = dict(table)
     if table.get("note_he"):
-        normalized["note_he"] = normalize_hebrew_punctuation(table["note_he"])
+        normalized["note_he"] = normalize_report_text(table["note_he"])
     normalized["rows"] = [[_normalize_cell(v) for v in row] for row in table.get("rows") or []]
     return normalized
 

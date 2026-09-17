@@ -121,6 +121,11 @@ export const en: Dictionary = {
     tendersLabel: "Tenders & RFI/RFP",
     tendersAria: "Tenders & RFI/RFP — go to tenders list",
     tendersSummary: "{open} open · {unknown} unknown · {newForecasts} new forecasts this week",
+    // tech_daily (2026-09-17, user request): the Morning "Technology today" card.
+    techDailyLabel: "Technology today",
+    techDailyAria: "Technology today — open the latest technology-watch report",
+    techDailyLayersWithNews: "{count} layers with news",
+    techDailyNone: "No technology-watch report yet",
     errorsPanelTitle: "Errors in the last run",
     errorsPanelEmpty: "No errors in the last 24h",
     errorsPanelStage: "Stage",
@@ -426,6 +431,23 @@ export const en: Dictionary = {
     tendersCount: "{n} tenders",
     forecastsCount: "{n} forecasts",
     configuredBadge: "In weekly default set",
+  },
+  // tech_daily build button (2026-09-17, user request): the reports page toolbar's on-demand
+  // build of the daily EO/IR supply-chain technology-watch report.
+  reports: {
+    buildTechDailyButton: "Build technology report now",
+    buildTechDailyBuilding: "Building… (job #{id})",
+    buildTechDailyConfirmTitle: "Build technology report now",
+    buildTechDailyConfirmMessage: "The new build runs in the background and replaces the latest report once it finishes.",
+    buildTechDailyWindowLabel: "Window",
+    buildTechDailyWindow24h: "24 hours",
+    buildTechDailyWindow7d: "7 days",
+    buildTechDailyWindow30d: "30 days",
+    buildTechDailyNote: "The build takes a few minutes and uses a cloud model",
+    buildTechDailyConfirmButton: "Build report",
+    buildTechDailyConfirming: "Building…",
+    buildTechDailyReadyToast: "Report ready",
+    buildTechDailyErrorToast: "Report build failed",
   },
   // PL-ui (2026-09-07): "Product lines" -- product-line status & business-development tracking
   // for the six EO/IR product lines (docs/qa/loop/round_7_fixes.md "### PL-ui status").

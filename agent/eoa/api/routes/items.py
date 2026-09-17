@@ -34,6 +34,11 @@ def list_items(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     sort: str = Query("score", pattern="^(score|published_at)$"),
+    # Story clustering (2026-09-17): one card per story instead of one per item -- see
+    # `eoa.api.services.list_items`'s `group_stories` branch. Defaults to off so this endpoint's
+    # existing contract (docs/API.md) is unchanged for any caller that doesn't ask for it; the feed
+    # page itself requests it explicitly (web/src/pages/FeedPage.tsx).
+    group_stories: bool = False,
 ) -> dict:
     total, items = services.list_items(
         level=level,
@@ -45,6 +50,7 @@ def list_items(
         page=page,
         page_size=page_size,
         sort=sort,
+        group_stories=group_stories,
     )
     result: dict = {"total": total, "items": items}
     # U7a: additive -- only present when `group_by=country` is requested, so

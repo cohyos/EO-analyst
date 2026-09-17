@@ -493,6 +493,86 @@ class TestClusterItems:
         assert clusters[0].primary["id"] == 3  # richer duplicate wins its group's primary slot
         assert clusters[1].primary["id"] == 2
 
+    # -- 2026-09-17 (story-clustering task): story_id takes precedence over dedup_of/title -------
+
+    def test_story_id_groups_items_with_unrelated_titles_and_no_dedup_of(self):
+        """The whole point of `eoa.pipeline.story_clustering`: items with completely different
+        titles and no `dedup_of` link, but the SAME `story_id` (computed upstream from embedding
+        similarity / corroboration / cross-language entity overlap), must still cluster together --
+        this is exactly the SPICE-1000/F-35 case (6 items, 4 separate dedup_of clusters) the task
+        brief measured."""
+        items = [
+            {"id": 10, "title": "Rafael Integrates SPICE 1000 Precision Weapon With F-35", "story_id": 5, "score": 8},
+            {"id": 11, "title": "Israel's SPICE 1000 bombs can soon drop from F-35 fighters", "story_id": 5, "score": 4},
+            {"id": 12, "title": "Completely unrelated submarine procurement news", "story_id": 99, "score": 6},
+        ]
+        clusters = cluster_items(items)
+        assert len(clusters) == 2
+        spice_cluster = next(c for c in clusters if c.primary["id"] in (10, 11))
+        assert {it["id"] for it in spice_cluster.all_items} == {10, 11}
+
+    def test_story_id_present_but_none_falls_back_to_dedup_of(self):
+        """An item without a computed `story_id` yet (schema behind head, or not yet swept by the
+        `stories` stage) must still use the original `dedup_of`/title-similarity fallback -- the
+        story-clustering task must not regress pre-existing grouping for un-backfilled items."""
+        items = [
+            {"id": 1, "title": "Elbit wins Army contract", "score": 8, "summary_he": "s"},
+            {"id": 2, "title": "Elbit lands US Army deal", "dedup_of": 1, "score": 3},
+        ]
+        clusters = cluster_items(items)
+        assert len(clusters) == 1
+        assert clusters[0].primary["id"] == 1
+
+    def test_hebrew_item_preferred_as_primary_on_richness_tie(self):
+        """Design point 2: "Hebrew-language item preferred as primary when richness ties"."""
+        items = [
+            {
+                "id": 1,
+                "title": "Rafael Integrates SPICE 1000 With F-35",
+                "lang": "en",
+                "score": 8,
+                "summary_he": "s",
+                "so_what_he": "sw",
+                "url": "u",
+                "published_at": "2026-09-16",
+                "story_id": 1,
+            },
+            {
+                "id": 2,
+                "title": "SPICE 1000 של רפאל משולב במטוסי F-35",
+                "lang": "he",
+                "score": 8,
+                "summary_he": "s",
+                "so_what_he": "sw",
+                "url": "u2",
+                "published_at": "2026-09-15",
+                "story_id": 1,
+            },
+        ]
+        clusters = cluster_items(items)
+        assert len(clusters) == 1
+        assert clusters[0].primary["id"] == 2  # equal richness -- Hebrew wins the tie
+
+    def test_richness_still_wins_over_hebrew_when_not_tied(self):
+        """The Hebrew tie-break only applies on an actual tie -- a genuinely richer English item
+        still wins over a thinner Hebrew one."""
+        items = [
+            {
+                "id": 1,
+                "title": "Rafael Integrates SPICE 1000 With F-35",
+                "lang": "en",
+                "score": 8,
+                "summary_he": "s",
+                "so_what_he": "sw",
+                "url": "u",
+                "published_at": "2026-09-16",
+                "story_id": 1,
+            },
+            {"id": 2, "title": "SPICE 1000 של רפאל", "lang": "he", "score": 2, "story_id": 1},
+        ]
+        clusters = cluster_items(items)
+        assert clusters[0].primary["id"] == 1
+
 
 class TestExtraSourcesNote:
     def test_no_extra_returns_empty_string(self):

@@ -46,7 +46,7 @@ from eoa.llm.schemas.analysis import (
     QueryPlan,
     RelevanceVerdict,
 )
-from eoa.report.textnorm import normalize_hebrew_punctuation
+from eoa.report.textnorm import normalize_report_text
 from eoa.search.provider import SearchHit, search
 
 # U8-6b (Revision 2026-09-06): pending question shape for `investigate_batch_cloud` below --
@@ -1530,7 +1530,7 @@ def format_investigation_answer_he(
 
     assembled = "\n\n".join(blocks)
     assembled = _bidi_space_and_isolate(assembled)
-    return normalize_hebrew_punctuation(assembled) or assembled
+    return normalize_report_text(assembled) or assembled
 
 
 def _synthesize_from_reads(inv: Investigation) -> InvestigationOut | None:

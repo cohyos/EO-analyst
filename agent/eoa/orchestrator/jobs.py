@@ -60,9 +60,11 @@ STAGE_ORDER = [
     "deep_search",
     "analyze",
     "corroborate",
+    "stories",
     "tenders",
     "post_tenders_catchup",
     "report",
+    "tech_daily_report",
     "export_backup",
     "notify",
 ]
@@ -235,9 +237,22 @@ def run_daily(job: dict[str, Any], *, night: bool | None = None) -> dict[str, An
             lambda: __import__("eoa.pipeline.analyze", fromlist=["run_analyze"]).run_analyze(role=role),
         )
         _run_stage(rs, "corroborate", _run_corroboration)
+        _run_stage(
+            rs,
+            "stories",
+            lambda: _as_dict(
+                __import__("eoa.pipeline.story_clustering", fromlist=["assign_story_ids"]).assign_story_ids()
+            ),
+        )
         _run_stage(rs, "tenders", lambda: _as_dict(_run_tenders(role=role)))
         _run_stage(rs, "post_tenders_catchup", lambda: _post_tenders_catchup(role=role))
         paths = _run_stage(rs, "report", _build_report, mandatory=True)
+        # tech_daily (2026-09-17, user request -- daily EO/IR supply-chain technology-watch
+        # report): a non-mandatory stage right after `report` -- `_run_stage` already isolates any
+        # exception (logged, never re-raised) and the F4 6-hour idempotency guard inside
+        # `build_tech_daily` itself stops a duplicate build on the same `period_end`, same
+        # contract as `daily_run`/`weekly_run` both landing on one night for the daily report.
+        _run_stage(rs, "tech_daily_report", _build_tech_daily_report)
         _run_stage(rs, "export_backup", _backup, mandatory=True)
         _run_stage(rs, "notify", lambda: _notify(rs, paths), mandatory=True)
     finally:
@@ -477,6 +492,12 @@ def _build_report() -> Any:
     return build_daily()
 
 
+def _build_tech_daily_report() -> Any:
+    from eoa.report.tech_daily import build_tech_daily
+
+    return build_tech_daily()
+
+
 def _daily_run_already_covered(within_hours: int = 6) -> bool:
     """F4: True if a separate ``daily_run`` job started/finished within the last ``within_hours``
     hours in a ``running``/``done``/``partial`` state. Both ``daily_run`` and ``weekly_run`` are
@@ -621,6 +642,22 @@ def run_product_line_report(job: dict[str, Any]) -> dict[str, Any]:
             log.error("product_line_report_failed", line_id=line, error=str(exc)[:300])
             results[line] = {"error": str(exc)[:300]}
     return {"product_line_reports": results}
+
+
+def run_tech_daily_report_job(job: dict[str, Any]) -> dict[str, Any]:
+    """``tech_daily_report`` job kind ("בנה דוח טכנולוגיה עכשיו", user request 2026-09-17):
+    builds one on-demand tech-daily report from the payload ``{lookback_days, force}``
+    (API-enqueued, ``eoa.api.services.enqueue_tech_daily_report``). Distinct from the nightly
+    ``tech_daily_report`` *stage* run inside ``run_daily`` (``_build_tech_daily_report`` above,
+    a `_run_stage` name, not a job kind -- the two namespaces never collide); this is the
+    standalone job kind the UI button enqueues. Returns ``{"report_id": ...}``."""
+    from eoa.report.tech_daily import build_tech_daily
+
+    payload = job.get("payload") or {}
+    lookback_days = int(payload.get("lookback_days") or 1)
+    force = bool(payload.get("force") or False)
+    paths = build_tech_daily(lookback_days=lookback_days, force=force)
+    return {"report_id": paths.report_id}
 
 
 def run_product_dossier(job: dict[str, Any]) -> dict[str, Any]:
@@ -964,6 +1001,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "tender_scan": run_tender_scan,
     "bd_report": run_bd_report,
     "product_line_report": run_product_line_report,
+    "tech_daily_report": run_tech_daily_report_job,
     "product_dossier": run_product_dossier,
     "patent_scan": run_patent_scan,
     "patent_survey": run_patent_survey,

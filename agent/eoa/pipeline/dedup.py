@@ -77,8 +77,24 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
 
 def link_cross_language(lookback_days: int | None = None) -> int:
     """Second-pass dedup after classification: the same story in different languages rarely clears the cosine
-    threshold, so link items that share ≥ 2 entities, the same domain and a publication date within ±1 day but
-    have different languages. The earlier item becomes the canonical one. Returns the number of links made."""
+    threshold, so link items that share ≥ 2 entities and a publication date within ±1.5 days but have different
+    languages. The earlier item becomes the canonical one. Returns the number of links made.
+
+    2026-09-17 (story-clustering task, docs/... SPICE-1000 investigation): this used to also require
+    ``b.domain = a.domain`` -- dropped after live evidence showed it made the stage a near-total no-op. Six
+    items about one real story (Rafael SPICE 1000 on the F-35, ids 22396/22798/23002/24089/25948/26284) came
+    back from ``eoa.pipeline.classify`` tagged with FIVE different (taxonomy, not outlet) ``domain`` values --
+    ``computer_vision``, ``secondary``, ``airborne_pods``, ``out_of_scope`` and ``NULL`` -- for the exact same
+    underlying event. Classification is a per-item LLM judgment call about which taxonomy bucket a story best
+    fits, and different outlets' framing of the same news (photo/targeting angle vs. munition-integration
+    angle vs. programme angle) routinely lands it in different buckets; requiring an exact match made this
+    stage link cross-language pairs only when classification *happened* to agree, which last night's run (and
+    almost certainly most nights) it didn't -- hence ``dedup_xlang: linked=0``. The ≥2-shared-distinctive-
+    entity check plus the tight time window already do the real "is this the same story" work (the same
+    signal ``eoa.pipeline.corroboration.compute_for_item``'s same-event matcher relies on); domain equality
+    was redundant on top of them and, in practice, only ever the thing keeping this stage from ever firing.
+    ``out_of_scope``/``secondary`` are still excluded on both sides -- that guard was only ever meant to keep
+    plainly irrelevant items out of the dedup graph, not to gate matching between two in-scope items."""
     checkpoint()
     from eoa.db import connection
 
@@ -92,8 +108,8 @@ def link_cross_language(lookback_days: int | None = None) -> int:
             JOIN items b
               ON b.id > a.id
              AND b.lang IS DISTINCT FROM a.lang
-             AND b.domain = a.domain
              AND a.domain NOT IN ('out_of_scope', 'secondary')
+             AND b.domain NOT IN ('out_of_scope', 'secondary')
              AND abs(extract(epoch FROM (coalesce(b.published_at, b.fetched_at) - coalesce(a.published_at, a.fetched_at)))) <= 86400 * 1.5
              AND cardinality(ARRAY(SELECT unnest(a.entities_mentioned) INTERSECT SELECT unnest(b.entities_mentioned))) >= 2
             WHERE a.dedup_of IS NULL AND b.dedup_of IS NULL

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { FeedRow } from "./FeedRow";
-import type { ItemCard } from "@/types/api";
+import type { ItemCard, StoryMember } from "@/types/api";
 
 function makeItem(over: Partial<ItemCard> = {}): ItemCard {
   return {
@@ -37,7 +37,7 @@ function makeItem(over: Partial<ItemCard> = {}): ItemCard {
   };
 }
 
-function renderRow(over: Partial<ItemCard> = {}) {
+function renderRow(over: Partial<ItemCard> = {}, duplicates?: StoryMember[]) {
   return render(
     <FeedRow
       item={makeItem(over)}
@@ -45,6 +45,7 @@ function renderRow(over: Partial<ItemCard> = {}) {
       onSelect={vi.fn()}
       onOpen={vi.fn()}
       onRate={vi.fn()}
+      duplicates={duplicates}
     />,
   );
 }
@@ -100,5 +101,27 @@ describe("FeedRow mobile layout (UI-MOBILE-iphone.md #1)", () => {
   it("shows the Israel-relevance badge in the wrapping meta cluster when relevant", () => {
     renderRow({ israel_relevance: 0.9 });
     expect(screen.getByTestId("feed-row-israel-badge-1")).toBeInTheDocument();
+  });
+});
+
+// 2026-09-17 (story-clustering task): the "+N מקורות" chip renders whatever `duplicates`
+// `lib/dedupGroups.ts` folded into this row -- now story-grouped members, not just `dedup_of`
+// siblings (see that module's own tests for the grouping logic itself).
+describe("FeedRow story-clustering duplicates chip", () => {
+  const members: StoryMember[] = [
+    { id: 2, title: "Other outlet, same story", source_name: "Breaking Defense", lang: "en", url: "https://example.test/2" },
+    { id: 3, title: "מקור עברי לאותה ידיעה", source_name: "מעריב", lang: "he", url: "https://example.test/3" },
+  ];
+
+  it("shows no chip when there are no other story members", () => {
+    renderRow();
+    expect(screen.queryByTestId("duplicate-outlets-toggle")).not.toBeInTheDocument();
+  });
+
+  it("shows a '+N מקורות' chip counting every other member, including a cross-language one", () => {
+    renderRow({}, members);
+    const toggle = screen.getByTestId("duplicate-outlets-toggle");
+    expect(toggle).toHaveTextContent("+2");
+    expect(toggle).toHaveTextContent("מקורות");
   });
 });

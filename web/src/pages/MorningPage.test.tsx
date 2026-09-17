@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import type { MorningResponse } from "@/types/api";
@@ -247,7 +247,12 @@ describe("MorningPage KPI cards (U2)", () => {
     });
     renderMorningPage();
     await screen.findByText("50");
-    expect(screen.getByText("—")).toBeInTheDocument();
+    // tech_daily (2026-09-17): the new "טכנולוגיה היום" tile also renders "—" when no tech_daily
+    // report exists yet (this mock predates that field) -- scope to the duration tile specifically
+    // rather than assert a single "—" in the whole page.
+    const durationTile = screen.getByText("משך ריצה").closest("div")?.parentElement;
+    expect(durationTile).not.toBeNull();
+    expect(within(durationTile as HTMLElement).getByText("—")).toBeInTheDocument();
   });
 });
 

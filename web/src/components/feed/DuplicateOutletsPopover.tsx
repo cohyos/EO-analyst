@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, Layers } from "lucide-react";
-import type { ItemCard } from "@/types/api";
+import type { StoryMember } from "@/types/api";
 import { timeAgo } from "@/lib/time";
 import { cn } from "@/lib/cn";
 
@@ -11,12 +11,17 @@ const POPOVER_WIDTH = 288; // px, matches w-72
  * popover (fixed-positioned so it escapes the virtualized feed row's clipped box, same technique
  * as `ExplainScorePopover`) listing the other outlets `FeedPage`'s `groupDuplicateItems` folded
  * into this row's primary card, each with its own "פתח מקור" outbound link.
+ *
+ * 2026-09-17 (story-clustering task): takes `StoryMember[]` (a full `ItemCard` still satisfies
+ * this shape) instead of `ItemCard[]` -- `groupDuplicateItems` can now also surface members the
+ * backend's own story lookup found beyond this page (`GET /api/items`'s `group_stories` mode),
+ * which arrive as the lighter `StoryMember` shape, not a full item card.
  */
 export function DuplicateOutletsPopover({
   duplicates,
   size = "md",
 }: {
-  duplicates: ItemCard[];
+  duplicates: StoryMember[];
   size?: "sm" | "md";
 }) {
   const [open, setOpen] = useState(false);

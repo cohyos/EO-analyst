@@ -53,6 +53,29 @@ export interface ItemCard {
   // Absent/undefined means "not yet tagged," normalized to `[]` by both API clients so every
   // consumer can read it unconditionally.
   product_lines?: string[];
+  // Story clustering (2026-09-17): additive -- see agent/eoa/pipeline/story_clustering.py and
+  // `_item_card`/`_attach_story_info` in agent/eoa/api/services.py. `story_id` is the raw
+  // connected-component key (may be null on an un-backfilled item); `story_size`/`story_primary`
+  // are always present (a lone item defaults to size 1 / primary true); `story_members` lists the
+  // OTHER items sharing this story (empty when there are none) -- `web/src/lib/dedupGroups.ts`
+  // renders it via `DuplicateOutletsPopover`'s "+N מקורות" chip, same UI as the older
+  // `dedup_of`-only grouping it replaces as the primary signal.
+  story_id?: number | null;
+  story_size?: number;
+  story_primary?: boolean;
+  story_members?: StoryMember[];
+}
+
+/** The subset of an `ItemCard` `DuplicateOutletsPopover`'s "+N מקורות" chip actually renders --
+ * both a full `ItemCard` (the older, page-local `dedup_of` grouping) and the lighter
+ * `story_members` entries the backend returns directly satisfy this shape. */
+export interface StoryMember {
+  id: number;
+  title: string | null;
+  source_name: string | null;
+  lang: string | null;
+  url: string | null;
+  published_at?: string | null;
 }
 
 export type CorroborationStatus =
@@ -848,12 +871,50 @@ export interface RecentErrorLogEntry {
   at: string | null;
 }
 
+// tech_daily (2026-09-17, user request -- daily EO/IR supply-chain technology-watch report):
+// backs the Morning "טכנולוגיה היום" card (agent/eoa/api/services.py `_tech_daily_summary`).
+// `null` when no tech_daily report has ever been built yet.
+export interface TechDailySummary {
+  report_id: number;
+  created_at: string;
+  qa_passed: boolean | null;
+  layers_with_news_count: number;
+}
+
+// tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): the reports
+// toolbar's on-demand build, distinct from the nightly `tech_daily_report` stage. `job_id` follows
+// the same `postProductLineReport`/`postBdReport` job-id shape used across this file.
+export interface TechDailyBuildResponse {
+  job_id: string | number;
+}
+
+/** `GET /api/reports/tech-daily/status` -- polled while a build is in flight (same
+ * `refetchInterval`-until-not-pending pattern as `DossierDetail.pending_job`). */
+export interface TechDailyPendingJob {
+  id: string | number;
+  state: JobState;
+  created_at: string;
+}
+
+export interface TechDailyStatusLatest {
+  report_id: number;
+  created_at: string;
+  period_end: string;
+}
+
+export interface TechDailyStatusResponse {
+  pending_job: TechDailyPendingJob | null;
+  latest: TechDailyStatusLatest | null;
+}
+
 export interface MorningResponse {
   report: ReportDetail | null;
   headlines: Headline[];
   open_points: OpenPoint[];
   night_summary: NightSummary;
   recent_errors: RecentErrorLogEntry[];
+  /** Optional so existing mocks/tests built before this field existed still type-check. */
+  tech_daily?: TechDailySummary | null;
 }
 
 // Mirrors eoa.conferences.tracker.conference_card (agent/eoa/conferences/tracker.py):

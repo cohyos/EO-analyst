@@ -40,6 +40,13 @@ dedup:
   cosine_threshold: 0.92
   lookback_days: 7
 
+# Story-clustering (2026-09-17, "improve same-story grouping" task) -- see
+# eoa.pipeline.story_clustering.assign_story_ids and ClusteringCfg's docstring in eoa.config for
+# how 0.80 was calibrated against the live Rafael SPICE-1000/F-35 story.
+clustering:
+  story_embedding_threshold: 0.80
+  story_window_days: 3
+
 resources:
   vram_total_mb: 12227
   vram_safety_margin_mb: 1200

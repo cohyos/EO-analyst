@@ -44,20 +44,39 @@ def _title_similarity(a: str | None, b: str | None) -> float:
 
 
 def _dedup_target(item: dict[str, Any]) -> Any:
-    """The id this item's ``dedup_of`` cluster is keyed on -- its own id when it has no
-    ``dedup_of`` (i.e. it is itself a potential cluster anchor)."""
+    """The key this item's same-story cluster is grouped on.
+
+    2026-09-17 (story-clustering task): ``items.story_id`` (migration 0035,
+    ``eoa.pipeline.story_clustering.assign_story_ids``) is checked FIRST when present -- a
+    connected component over dedup_of/corroboration/embedding-similarity/cross-language-title
+    edges, computed once as its own pipeline stage, so it also groups the cross-outlet,
+    cross-language cases (paraphrased headline in a different outlet, Hebrew+English coverage of
+    the same event) this module's own ``dedup_of``/title-similarity fallback below never could.
+    Falls back to the original logic -- this item's own ``dedup_of`` cluster (one is the other's
+    ``dedup_of`` target, or both point at the same target), or its own id as a potential cluster
+    anchor -- for any item without a ``story_id`` yet (schema behind head, or not yet swept by the
+    ``stories`` stage)."""
+    if item.get("story_id") is not None:
+        return item["story_id"]
     return item.get("dedup_of") if item.get("dedup_of") is not None else item.get("id")
 
 
-def _richness(item: dict[str, Any]) -> tuple[int, float]:
-    """More populated fields, then higher score, wins as a cluster's primary row."""
+def _richness(item: dict[str, Any]) -> tuple[int, float, int]:
+    """More populated fields, then higher score, then a Hebrew-language item, wins as a cluster's
+    primary row.
+
+    2026-09-17 (story-clustering task, design point 2): the Hebrew-preference tie-break is new --
+    when two members of a cluster are equally "rich" (same populated-field count and score), the
+    Hebrew-language one is now preferred as primary, since this report's own prose/citations are
+    Hebrew (``eoa.config.ReportCfg.language``) and a Hebrew source needs no translation gloss."""
     fields = sum(1 for k in ("summary_he", "so_what_he", "url", "published_at") if item.get(k))
     score = item.get("score")
     try:
         score_val = float(score) if score is not None else 0.0
     except (TypeError, ValueError):
         score_val = 0.0
-    return (fields, score_val)
+    is_hebrew = 1 if (item.get("lang") or "").strip().lower().startswith("he") else 0
+    return (fields, score_val, is_hebrew)
 
 
 @dataclass

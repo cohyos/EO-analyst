@@ -49,6 +49,10 @@ _ITEM_UPDATABLE_FIELDS = {
     "level",
     "triage_reason",
     "dedup_of",
+    # Story-clustering (2026-09-17): connected-component key, see eoa.pipeline.story_clustering.
+    # Normally written in bulk by `bulk_set_story_ids`, not one at a time via this allow-list --
+    # listed here too so a single-item repair/test can still go through `update_item_fields`.
+    "story_id",
     "key_facts",
     "uncertainty_he",
     "source_name",
@@ -1628,3 +1632,104 @@ def get_recent_in_scope_item_ids(days: int = 7) -> list[int]:
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"days": days})
         return [row["id"] for row in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------------------------
+# Story clustering (2026-09-17, "improve same-story grouping" task) -- eoa.pipeline.story_clustering
+# ---------------------------------------------------------------------------------------------
+
+
+def get_items_for_story_clustering(since_days: int) -> list[dict[str, Any]]:
+    """The candidate pool for one ``assign_story_ids(since_days)`` run: every clean item from the
+    last ``since_days`` days (by ``published_at``, falling back to ``fetched_at``/``created_at``,
+    same convention as ``get_recent_in_scope_item_ids``), with every field the four edge kinds
+    need (``dedup_of`` for edge a, ``embedding`` for edge c, ``lang``/``title``/
+    ``entities_mentioned`` for edge d). Unlike ``get_recent_in_scope_item_ids`` this is NOT
+    restricted to a triaged in-scope ``level`` -- an un-triaged or archive-level item can still be
+    part of the same real-world story as an in-scope one (dropping it would silently break the
+    component), and story grouping itself never hides anything the way triage/dedup do."""
+    query = """
+        SELECT id, url, canonical_url, title, lang, domain, entities_mentioned,
+               published_at, fetched_at, dedup_of, story_id, embedding
+        FROM items
+        WHERE security_status = 'clean'
+          AND COALESCE(published_at, fetched_at, created_at) >= now() - (%(days)s || ' days')::interval
+        ORDER BY id
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"days": since_days})
+        return cur.fetchall()
+
+
+def get_corroboration_edges_for_items(item_ids: list[int]) -> list[tuple[int, int]]:
+    """``(item_id, other_item_id)`` pairs from every ``item_corroboration`` row belonging to
+    ``item_ids`` -- edge (b) of the story-clustering design doc. ``item_corroboration.sources`` is
+    a JSONB array of ``{item_id, source_name, url, published_at, kind}`` (see
+    ``eoa.pipeline.corroboration._source_entry``) already keyed by the corroborating item's own
+    id, so this reads that field directly rather than re-resolving it via ``url``/``canonical_url``
+    (a simplification over the task brief's "resolve via url" wording -- the id is already there
+    and resolving via URL string matching would be strictly less reliable)."""
+    if not item_ids:
+        return []
+    query = "SELECT item_id, sources FROM item_corroboration WHERE item_id = ANY(%(item_ids)s)"
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_ids": item_ids})
+        rows = cur.fetchall()
+    edges: list[tuple[int, int]] = []
+    for row in rows:
+        for src in row.get("sources") or []:
+            other = src.get("item_id") if isinstance(src, dict) else None
+            if other is not None:
+                edges.append((row["item_id"], other))
+    return edges
+
+
+def bulk_set_story_ids(assignment: dict[int, int]) -> int:
+    """Persist ``items.story_id`` for every ``item_id -> story_id`` pair in ``assignment`` in one
+    round trip (a single-row ``UPDATE ... FROM unnest(...)``) rather than one ``UPDATE`` per item --
+    a backfill run can touch thousands of rows. Returns the number of rows actually updated."""
+    if not assignment:
+        return 0
+    ids = list(assignment)
+    story_ids = [assignment[i] for i in ids]
+    query = """
+        UPDATE items AS i
+        SET story_id = v.story_id
+        FROM (
+            SELECT unnest(%(ids)s::bigint[]) AS id, unnest(%(story_ids)s::bigint[]) AS story_id
+        ) AS v
+        WHERE i.id = v.id
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"ids": ids, "story_ids": story_ids})
+        return cur.rowcount
+
+
+def get_story_groups_for_items(item_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    """For every distinct ``story_id`` among ``item_ids`` (falling back to an item's own id when
+    it has none -- a never-clustered item is its own one-member "story"), the full member list
+    (``id``, ``title``, ``source_name``, ``lang``, ``url``, ``summary_he``, ``so_what_he``,
+    ``score``, ``published_at``) of every item that shares that key -- NOT restricted to
+    ``item_ids`` itself, so a page of feed rows still reports a story's true full size even when
+    some members are on a different page. Used by ``eoa.api.services`` to attach
+    ``story_size``/``story_primary``/``story_members`` to item cards."""
+    if not item_ids:
+        return {}
+    query = """
+        WITH keys AS (
+            SELECT DISTINCT COALESCE(story_id, id) AS story_key
+            FROM items WHERE id = ANY(%(item_ids)s)
+        )
+        SELECT i.id, i.title, i.lang, i.url, i.summary_he, i.so_what_he, i.score, i.published_at,
+               COALESCE(i.story_id, i.id) AS story_key, s.name AS source_name
+        FROM items i
+        JOIN keys ON keys.story_key = COALESCE(i.story_id, i.id)
+        LEFT JOIN sources s ON s.id = i.source_id
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"item_ids": item_ids})
+        rows = cur.fetchall()
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(row["story_key"], []).append(row)
+    return groups

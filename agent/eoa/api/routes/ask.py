@@ -20,6 +20,7 @@ from eoa.api import ask_grounding, services
 from eoa.config import settings
 from eoa.errors import ResourceUnavailable
 from eoa.llm import ollama_client
+from eoa.report.textnorm import canonicalize_hebrew_names
 
 log = structlog.get_logger(__name__)
 
@@ -944,6 +945,13 @@ async def ask(body: AskRequest) -> StreamingResponse:
             # trims each line's own two ends, so it is always safe to run last, after every guard
             # above (including the two normalisation passes just above it).
             answer_text = ask_grounding.strip_stray_line_edges(answer_text)
+            # Round-17 (2026-09-17, Hebrew company-name canonicalisation, feedback: "ראפאל"
+            # instead of "רפאל"): the last content-affecting pass, run after every removal/
+            # coherence guard above -- folds a known Hebrew misspelling/alternate transliteration
+            # of a tracked company name onto its canonical spelling (config/company_facts.yaml's
+            # `hebrew_names` registry) in the exact text about to be emitted as `answer_final`.
+            # Content-blind everywhere else (never removes/reorders anything), so safe to run last.
+            answer_text = canonicalize_hebrew_names(answer_text) or answer_text
             # Round-6 judge (D5 worst #2/#3): the guards used to emit one `answer_final` per stage
             # that changed the text -- none at all when nothing changed (Q6), several with
             # intermediate/truncated texts when the anchor demotion and the citation repair both

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 /**
@@ -18,6 +18,7 @@ export function ConfirmDialog({
   danger = false,
   onConfirm,
   onCancel,
+  children,
 }: {
   title: string;
   message: string;
@@ -28,6 +29,10 @@ export function ConfirmDialog({
   danger?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Optional extra controls (e.g. a small options row) rendered between the message and the
+   * confirm/cancel buttons -- tech_daily's "בנה דוח טכנולוגיה עכשיו" lookback-window picker is the
+   * first caller; every other existing usage omits this and renders exactly as before. */
+  children?: ReactNode;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -56,6 +61,7 @@ export function ConfirmDialog({
       >
         <h2 className="mb-2 text-sm font-semibold text-fg">{title}</h2>
         <p className="mb-4 text-sm text-fg-muted">{message}</p>
+        {children && <div className="mb-4">{children}</div>}
         <div className="flex justify-end gap-2">
           <button
             type="button"

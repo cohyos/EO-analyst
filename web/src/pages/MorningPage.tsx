@@ -4,6 +4,7 @@ import { Link, useOutletContext } from "react-router-dom";
 import {
   AlertOctagon,
   Clock,
+  Cpu,
   Download,
   FileWarning,
   Gavel,
@@ -24,6 +25,7 @@ import { formatDateTime } from "@/lib/time";
 import { DEADLINE_SOON_DAYS, daysLeft } from "@/lib/tenders";
 import { useI18n } from "@/i18n";
 import type { StatusSocketState } from "@/hooks/useStatusSocket";
+import type { TechDailySummary } from "@/types/api";
 
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -61,6 +63,32 @@ function TendersTile() {
       <p className="font-mono font-tabular text-2xl font-semibold text-fg">{openSoonCount}</p>
       <p className="text-xs text-fg-dim">
         מכרזים פתוחים ב-{DEADLINE_SOON_DAYS} הימים הקרובים · {newForecastsCount} תחזיות חדשות השבוע
+      </p>
+    </Link>
+  );
+}
+
+// tech_daily (2026-09-17, user request -- daily EO/IR supply-chain technology-watch report):
+// "טכנולוגיה היום" card, linking to the latest tech_daily report with its layers-with-news count.
+// No own query -- `techDaily` comes straight off `GET /api/morning`'s own response, same as
+// `report`/`headlines`/`night_summary` below (unlike `TendersTile`, which fetches independently).
+function TechDailyTile({ techDaily }: { techDaily: TechDailySummary | null }) {
+  const { t } = useI18n();
+  return (
+    <Link
+      to={techDaily ? `/reports?id=${techDaily.report_id}` : "/reports"}
+      aria-label={t("morning.techDailyAria")}
+      className="flex flex-col gap-1 rounded-lg border border-border bg-bg-raised p-3 shadow-panel hover:border-border-strong"
+    >
+      <div className="flex items-center gap-2 text-xs text-fg-dim">
+        <Cpu size={14} aria-hidden="true" />
+        <span>{t("morning.techDailyLabel")}</span>
+      </div>
+      <p className="font-mono font-tabular text-2xl font-semibold text-fg">
+        {techDaily ? techDaily.layers_with_news_count : "—"}
+      </p>
+      <p className="text-xs text-fg-dim">
+        {techDaily ? t("morning.techDailyLayersWithNews", { count: techDaily.layers_with_news_count }) : t("morning.techDailyNone")}
       </p>
     </Link>
   );
@@ -110,8 +138,9 @@ export function MorningPage() {
         <RunErrorsPanel errors={recent_errors} onClose={() => setErrorsPanelOpen(false)} />
       )}
 
-      <section aria-label="מכרזים ו-RFI/RFP" className="grid grid-cols-1 sm:grid-cols-2">
+      <section aria-label="מכרזים ו-RFI/RFP וטכנולוגיה" className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TendersTile />
+        <TechDailyTile techDaily={data.tech_daily ?? null} />
       </section>
 
       {/* U2 (docs/REVIEW_2026-09-05.md): every KPI card is clickable and navigates to (or, for

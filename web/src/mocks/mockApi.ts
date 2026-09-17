@@ -53,6 +53,8 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TechDailyBuildResponse,
+  TechDailyStatusResponse,
   TechRadarResponse,
   TenderFeedback,
   TenderFeedbackVerdict,
@@ -341,6 +343,18 @@ const mockTenderFeedback: TenderFeedback[] = [];
 let mockTenderFeedbackId = 1;
 let nextProductLineReportId = 970;
 
+// tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): a queued job
+// clears itself (-> a fresh `latest` report) after a couple of status polls, so mock mode exercises
+// the same pending -> done transition the real poll loop drives against `jobs`/`reports`.
+let mockTechDailyJobId = 4200;
+let mockTechDailyPending: { id: string; state: JobState; created_at: string } | null = null;
+let mockTechDailyPollsRemaining = 0;
+let mockTechDailyLatest: { report_id: number; created_at: string; period_end: string } | null = {
+  report_id: 4199,
+  created_at: "2026-09-17T04:10:00+03:00",
+  period_end: "2026-09-17",
+};
+
 // W10 (docs/REVIEW_2026-09-06_evening.md round 4): one seeded pending review so
 // `VITE_USE_MOCKS=true` exercises the banner/inbox UI end to end even before the deep-search
 // engineer's `security_review` fields exist on the live backend.
@@ -541,6 +555,13 @@ export const mockApi: ApiClient = {
           at: "2026-09-04T01:12:00+03:00",
         },
       ],
+      // tech_daily (2026-09-17, user request -- daily EO/IR supply-chain technology-watch report).
+      tech_daily: {
+        report_id: 9001,
+        created_at: "2026-09-17T04:00:00+03:00",
+        qa_passed: true,
+        layers_with_news_count: 3,
+      },
     }),
 
   getItems: async (query: ItemsQuery) => {
@@ -1505,6 +1526,37 @@ export const mockApi: ApiClient = {
           rerun_of_job_id: null,
         })),
     );
+  },
+
+  // tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): mirrors the
+  // server's dedupe (a queued/running build is returned as-is) and settles after a couple of
+  // status polls so mock mode's pending -> "הדוח מוכן" flow matches the live poll loop.
+  postTechDailyBuild: async (
+    _lookbackDays: number,
+    _force?: boolean,
+  ): Promise<TechDailyBuildResponse> => {
+    if (mockTechDailyPending) return delay({ job_id: mockTechDailyPending.id }, 300);
+    const id = `mock-tech-daily-job-${mockTechDailyJobId++}`;
+    mockTechDailyPending = { id, state: "queued", created_at: new Date().toISOString() };
+    mockTechDailyPollsRemaining = 2;
+    return delay({ job_id: id }, 300);
+  },
+  getTechDailyStatus: async (): Promise<TechDailyStatusResponse> => {
+    if (mockTechDailyPending) {
+      mockTechDailyPollsRemaining -= 1;
+      if (mockTechDailyPollsRemaining <= 0) {
+        const reportId = Number(mockTechDailyPending.id.split("-").pop()) || Date.now();
+        mockTechDailyLatest = {
+          report_id: reportId,
+          created_at: new Date().toISOString(),
+          period_end: new Date().toISOString().slice(0, 10),
+        };
+        mockTechDailyPending = null;
+      } else {
+        mockTechDailyPending = { ...mockTechDailyPending, state: "running" };
+      }
+    }
+    return delay({ pending_job: mockTechDailyPending, latest: mockTechDailyLatest }, 150);
   },
 
   getBdTerritories: async (): Promise<BdTerritoryOption[]> => delay(mockBdTerritories),

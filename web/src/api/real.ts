@@ -87,6 +87,8 @@ import type {
   SettingsName,
   SettingsPutResponse,
   Survey,
+  TechDailyBuildResponse,
+  TechDailyStatusResponse,
   TechRadarResponse,
   TenderCard,
   TenderFeedback,
@@ -307,6 +309,20 @@ function normalizeItemCard(raw: Partial<ItemCard> | null | undefined): ItemCard 
     // "no product lines tagged" rather than undefined, so `FeedFilters`' client-side filter can
     // read `item.product_lines` unconditionally.
     product_lines: arr(r.product_lines),
+    // Story clustering (2026-09-17): absent on any backend build that predates this feature --
+    // normalizes to "its own one-member story" (size 1, primary true, no other members), matching
+    // `_item_card`'s own default in agent/eoa/api/services.py.
+    story_id: typeof r.story_id === "number" ? r.story_id : null,
+    story_size: typeof r.story_size === "number" ? r.story_size : 1,
+    story_primary: typeof r.story_primary === "boolean" ? r.story_primary : true,
+    story_members: arr(r.story_members).map((m) => ({
+      id: num(m?.id),
+      title: m?.title ?? null,
+      source_name: m?.source_name ?? null,
+      lang: m?.lang ?? null,
+      url: m?.url ?? null,
+      published_at: m?.published_at ?? null,
+    })),
   };
 }
 
@@ -1388,6 +1404,7 @@ export const realApi: ApiClient = {
         page_size: query.page_size,
         sort: query.sort,
         israel: query.israel || undefined,
+        group_stories: query.group_stories ? 1 : undefined,
       })}`,
     );
     const items = arr(data?.items).map(normalizeItemCard);
@@ -1842,6 +1859,28 @@ export const realApi: ApiClient = {
         `/api/reports/${id}/investigations`,
       ),
     ).map(normalizeReportInvestigationRef),
+
+  // tech_daily build button ("בנה דוח טכנולוגיה עכשיו", 2026-09-17, user request): server dedupes
+  // an already-queued/running build (agent/eoa/api/services.py `enqueue_tech_daily_report`), so
+  // this never needs client-side guarding beyond the pending-state disable the page already does.
+  postTechDailyBuild: async (lookbackDays, force = false) => {
+    const data = await request<Partial<TechDailyBuildResponse>>("/api/reports/tech-daily/build", {
+      method: "POST",
+      body: JSON.stringify({ lookback_days: lookbackDays, force }),
+    });
+    return { job_id: idStr(data?.job_id) };
+  },
+  getTechDailyStatus: async () => {
+    const data = await request<Partial<TechDailyStatusResponse>>("/api/reports/tech-daily/status");
+    const pj = data?.pending_job;
+    const latest = data?.latest;
+    return {
+      pending_job: pj ? { id: idStr(pj.id), state: pj.state ?? "queued", created_at: str(pj.created_at) } : null,
+      latest: latest
+        ? { report_id: num(latest.report_id), created_at: str(latest.created_at), period_end: str(latest.period_end) }
+        : null,
+    };
+  },
 
   getBdTerritories: async () =>
     arr(await request<Partial<BdTerritoryOption>[] | null>("/api/bd/territories")).map(
