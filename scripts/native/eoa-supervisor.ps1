@@ -117,6 +117,43 @@ $env:PYTHONIOENCODING = "utf-8:backslashreplace"
 Write-Log "Supervisor started (pid $((Get-Content $supervisorPidPath)))"
 
 # ---------------------------------------------------------------------------
+# Orphan check (2026-09-17). An earlier supervisor that died without stopping its children (or a
+# `stop` that timed out) leaves api/ntfy/orchestrator processes alive: they keep 8765/8091, this
+# supervisor's own api/ntfy then crash-loop on bind errors, and `/api/status` keeps answering from
+# the OLD code while looking healthy (that is exactly how the 2026-09-16 restarts silently served
+# a day-old API with no orchestrator at all). Before starting anything, find processes that are
+# unmistakably ours -- ExecutablePath under THIS repo's .venv or runtime\ntfy, command line naming
+# our modules -- and are not children of this supervisor, and kill them by pid. Never by name:
+# other projects on this machine run their own python.exe (model training) and must not be touched.
+# ---------------------------------------------------------------------------
+function Get-OrphanedStackProcesses {
+    $venvPrefix = (Join-Path $repoRoot ".venv").ToLowerInvariant()
+    $ntfyPrefix = (Join-Path $runtimeDir "ntfy").ToLowerInvariant()
+    $me = [System.Diagnostics.Process]::GetCurrentProcess().Id
+    Get-CimInstance Win32_Process | Where-Object {
+        $exe = ($_.ExecutablePath ?? "").ToLowerInvariant()
+        $cmd = ($_.CommandLine ?? "")
+        $ours = ($exe.StartsWith($venvPrefix) -and ($cmd -match 'eoa\.api\.app|eoa\.orchestrator\.main')) -or $exe.StartsWith($ntfyPrefix)
+        $ours -and $_.ProcessId -ne $me -and $_.ParentProcessId -ne $me
+    }
+}
+foreach ($orphan in @(Get-OrphanedStackProcesses)) {
+    Write-Log "Orphaned stack process from a previous supervisor: pid $($orphan.ProcessId) ($($orphan.CommandLine.Substring(0, [Math]::Min(90, $orphan.CommandLine.Length)))) -- killing"
+    try {
+        $h = Get-Process -Id $orphan.ProcessId -ErrorAction Stop
+        $h.Kill($true)
+        [void]$h.WaitForExit(10000)
+    } catch { Write-Log "  could not kill pid $($orphan.ProcessId): $($_.Exception.Message)" }
+}
+foreach ($port in 8765, 8091) {
+    $owner = (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+    if ($owner) {
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$owner"
+        Write-Log "WARNING: port $port is still held by pid $owner ($($p.Name)) that is not ours -- api/ntfy will fail to bind until it is freed"
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Q6-5a (2026-09-06): log housekeeping, run once at startup.
 #   1. Archive legacy, non-dated *.log files left over from before this supervisor existed
 #      (e.g. agent.log, web.log, agent.err.log, web.err.log) into runtime\logs\archive\<yyyymmdd>\.

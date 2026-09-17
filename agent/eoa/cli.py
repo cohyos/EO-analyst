@@ -372,16 +372,61 @@ def native_stop(
     rprint(f"stop sentinel written ({paths['sentinel']}); waiting up to {timeout}s...")
 
     deadline = time.time() + timeout
+    stopped = False
     while time.time() < deadline:
         if not paths["supervisor_pid"].exists():
-            rprint("[green]supervisor stopped[/green]")
-            return
+            stopped = True
+            break
         pid_text = paths["supervisor_pid"].read_text(encoding="utf-8").strip()
         if not pid_text or not _pid_alive(int(pid_text)):
-            rprint("[green]supervisor stopped[/green]")
-            return
+            stopped = True
+            break
         time.sleep(1)
-    rprint("[yellow]supervisor still running after timeout — check runtime/logs/supervisor.log[/yellow]")
+    if stopped:
+        rprint("[green]supervisor stopped[/green]")
+    else:
+        rprint("[yellow]supervisor still running after timeout — check runtime/logs/supervisor.log[/yellow]")
+    # 2026-09-17: a stop that leaves our api/ntfy/orchestrator alive (earlier supervisor's
+    # children) makes the next start look healthy while serving stale code -- report them.
+    for orphan in _orphaned_stack_processes():
+        rprint(f"[yellow]stack process still alive after stop: pid {orphan[0]} ({orphan[1]})[/yellow]")
+
+
+def _orphaned_stack_processes() -> list[tuple[int, str]]:
+    """(pid, short command line) of processes that are unmistakably this repo's stack -- an
+    interpreter under THIS repo's .venv running eoa.api.app / eoa.orchestrator.main, or this
+    repo's runtime
+tfy
+tfy.exe. Never matches by bare process name: other projects on this
+    machine run their own python.exe (model training) and must never be touched. Best-effort:
+    an empty list when PowerShell/CIM is unavailable."""
+    import json
+    import subprocess
+
+    root = Path(__file__).resolve().parents[2]
+    venv = str(root / ".venv").lower()
+    ntfy = str(root / "runtime" / "ntfy").lower()
+    script = (
+        "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath } | "
+        "Select-Object ProcessId, ExecutablePath, CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        out = subprocess.run(
+            ["pwsh", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+        rows = json.loads(out) if out else []
+    except Exception:
+        return []
+    if isinstance(rows, dict):
+        rows = [rows]
+    found: list[tuple[int, str]] = []
+    for r in rows:
+        exe = str(r.get("ExecutablePath") or "").lower()
+        cmd = str(r.get("CommandLine") or "")
+        ours = (exe.startswith(venv) and ("eoa.api.app" in cmd or "eoa.orchestrator.main" in cmd)) or exe.startswith(ntfy)
+        if ours:
+            found.append((int(r["ProcessId"]), cmd[:90]))
+    return found
 
 
 @native_app.command("status")
