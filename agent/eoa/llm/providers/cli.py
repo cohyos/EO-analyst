@@ -550,9 +550,17 @@ def _parse_agy(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str, A
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise CliProviderError(f"agy CLI returned non-JSON output: {proc.stdout[:300]!r}") from exc
-    if data.get("status") and data["status"] != "SUCCESS":
-        raise CliProviderError(f"agy CLI status={data.get('status')}: {str(data)[:300]}")
     content = str(data.get("response", "")).strip()
+    if data.get("status") and data["status"] != "SUCCESS":
+        # 2026-09-22: agy sometimes reports status=ERROR while still carrying a complete, usable
+        # `response` (e.g. a fenced JSON object). Rejecting those outright stranded whole stages on
+        # the night of 2026-09-21: the `light` chain (agy -> ollama) and the `resident` chain both
+        # exhausted into the paused local leg and deferred deep_search/analyze. The schema
+        # validation downstream is the real gate -- unusable content still fails there and falls
+        # through the chain exactly as before -- so a non-empty response is worth using.
+        if not content:
+            raise CliProviderError(f"agy CLI status={data.get('status')}: {str(data)[:300]}")
+        log.warning("agy_status_error_with_response", status=str(data.get("status")), chars=len(content))
     if not content or data.get("response") is None:
         raise CliProviderError("agy CLI returned an empty response")
     usage = data.get("usage") or {}
