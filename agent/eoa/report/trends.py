@@ -111,7 +111,7 @@ def _entity_cluster_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
               AND entities_mentioned IS NOT NULL
               AND COALESCE(domain, '') <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
               AND cardinality(entities_mentioned) > 0
-              AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+              AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
         ) sub
         GROUP BY entity, domain
         HAVING count(DISTINCT id) >= %(min)s
@@ -170,7 +170,7 @@ def _domain_counts(start: dt.date, end: dt.date) -> dict[str, int]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -187,7 +187,7 @@ def _domain_source_counts(start: dt.date, end: dt.date) -> dict[str, int]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -205,7 +205,7 @@ def _domain_baseline_counts(start: dt.date, end: dt.date) -> dict[str, float]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -222,7 +222,7 @@ def _domain_item_ids(start: dt.date, end: dt.date) -> dict[str, list[int]]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -530,7 +530,7 @@ def _items_by_domain_level(start: dt.date, end: dt.date) -> list[dict[str, Any]]
         SELECT domain, level, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain, level
         ORDER BY domain, level
     """
@@ -549,13 +549,13 @@ def _top_entities_with_delta(start: dt.date, end: dt.date, limit: int = 10) -> l
             SELECT unnest(entities_mentioned) AS entity, count(*) AS n
             FROM items
             WHERE security_status = 'clean' AND dedup_of IS NULL AND entities_mentioned IS NOT NULL
-              AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+              AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
             GROUP BY entity
         ), prev_period AS (
             SELECT unnest(entities_mentioned) AS entity, count(*) AS n
             FROM items
             WHERE security_status = 'clean' AND dedup_of IS NULL AND entities_mentioned IS NOT NULL
-              AND COALESCE(published_at, fetched_at, created_at)::date
+              AND COALESCE(published_at, created_at)::date
                   BETWEEN %(prev_start)s AND %(prev_end)s
             GROUP BY entity
         )

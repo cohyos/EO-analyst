@@ -735,7 +735,7 @@ def _assignee_market_items(names: set[str], since: dt.date, limit: int = 8) -> l
         FROM items i
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE i.security_status = 'clean' AND i.dedup_of IS NULL
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at)::date >= %(since)s
+          AND COALESCE(i.published_at, i.created_at)::date >= %(since)s
         ORDER BY i.published_at DESC NULLS LAST
         LIMIT 2000
         """,

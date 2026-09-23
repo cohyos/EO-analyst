@@ -180,8 +180,8 @@ def collect_market_items(
           AND security_status = 'clean' AND dedup_of IS NULL
           AND level = ANY(%(levels)s)
           AND COALESCE(domain, '') <> 'out_of_scope'
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
-        ORDER BY COALESCE(score, 0) DESC, COALESCE(published_at, fetched_at, created_at) DESC
+          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+        ORDER BY COALESCE(score, 0) DESC, COALESCE(published_at, created_at) DESC
         LIMIT %(limit)s
         """,
         {"line": line_id, "levels": list(_INSCOPE_LEVELS), "start": start, "end": end, "limit": limit},

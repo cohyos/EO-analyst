@@ -123,8 +123,8 @@ def collect_candidate_items(
         WHERE i.security_status = 'clean' AND i.dedup_of IS NULL
           AND ('technology' = ANY(i.dimensions) OR i.domain = ANY(%(domains)s)
                OR i.tech_maturity IS NOT NULL)
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) >= %(start)s
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) < %(end)s
+          AND COALESCE(i.published_at, i.created_at) >= %(start)s
+          AND COALESCE(i.published_at, i.created_at) < %(end)s
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s
         """,

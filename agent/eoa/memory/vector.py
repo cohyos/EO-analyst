@@ -37,7 +37,7 @@ def _load_candidates(days: int | None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {}
     if days is not None:
         days_clause = (
-            "AND COALESCE(published_at, fetched_at, created_at) >= now() - (%(days)s || ' days')::interval"
+            "AND COALESCE(published_at, created_at) >= now() - (%(days)s || ' days')::interval"
         )
         params["days"] = days
     query = f"""

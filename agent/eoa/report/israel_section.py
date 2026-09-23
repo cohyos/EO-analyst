@@ -109,8 +109,8 @@ def collect_israel_items(
           AND i.domain IS NOT NULL AND i.domain <> 'out_of_scope'
           AND i.level IN ('red', 'orange', 'yellow')
           AND NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) >= %(start)s
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) < %(end)s
+          AND COALESCE(i.published_at, i.created_at) >= %(start)s
+          AND COALESCE(i.published_at, i.created_at) < %(end)s
         ORDER BY i.israel_relevance DESC NULLS LAST, i.score DESC NULLS LAST
         """,
         {"min_relevance": min_relevance, "start": start, "end": end},

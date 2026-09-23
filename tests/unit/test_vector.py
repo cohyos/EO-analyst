@@ -147,7 +147,7 @@ class TestNearest:
         vector.nearest([1.0, 0.0], days=7)
 
         query, params = conn.last_cursor.executed
-        assert "COALESCE(published_at, fetched_at, created_at) >= now()" in query
+        assert "COALESCE(published_at, created_at) >= now()" in query
         assert params["days"] == 7
 
     def test_no_days_omits_clause(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,7 +155,7 @@ class TestNearest:
         vector.nearest([1.0, 0.0])
 
         query, params = conn.last_cursor.executed
-        assert "COALESCE(published_at, fetched_at, created_at)" not in query
+        assert "COALESCE(published_at, created_at)" not in query
         assert "days" not in params
 
 

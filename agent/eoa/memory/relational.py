@@ -1626,7 +1626,7 @@ def get_recent_in_scope_item_ids(days: int = 7) -> list[int]:
         WHERE level IN ('red', 'orange', 'yellow')
           AND security_status = 'clean'
           AND dedup_of IS NULL
-          AND COALESCE(published_at, fetched_at, created_at) >= now() - (%(days)s || ' days')::interval
+          AND COALESCE(published_at, created_at) >= now() - (%(days)s || ' days')::interval
         ORDER BY id
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -1653,7 +1653,7 @@ def get_items_for_story_clustering(since_days: int) -> list[dict[str, Any]]:
                published_at, fetched_at, dedup_of, story_id, embedding
         FROM items
         WHERE security_status = 'clean'
-          AND COALESCE(published_at, fetched_at, created_at) >= now() - (%(days)s || ' days')::interval
+          AND COALESCE(published_at, created_at) >= now() - (%(days)s || ' days')::interval
         ORDER BY id
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:

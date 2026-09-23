@@ -83,8 +83,8 @@ def count_in_window(subdomain: str, start: dt.datetime, end: dt.datetime) -> int
         SELECT count(*) AS n FROM items
         WHERE domain = %(domain)s AND subdomain = %(sub)s
           AND security_status = 'clean' AND dedup_of IS NULL
-          AND COALESCE(published_at, fetched_at, created_at) >= %(start)s
-          AND COALESCE(published_at, fetched_at, created_at) < %(end)s
+          AND COALESCE(published_at, created_at) >= %(start)s
+          AND COALESCE(published_at, created_at) < %(end)s
         """,
         {"domain": DOMAIN, "sub": subdomain, "start": start, "end": end},
     )
@@ -105,8 +105,8 @@ def notable_items(
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE i.domain = %(domain)s AND i.subdomain = %(sub)s
           AND i.security_status = 'clean' AND i.dedup_of IS NULL
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) >= %(start)s
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) < %(end)s
+          AND COALESCE(i.published_at, i.created_at) >= %(start)s
+          AND COALESCE(i.published_at, i.created_at) < %(end)s
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s
         """,

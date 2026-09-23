@@ -351,7 +351,7 @@ def collect_items(
                entities_mentioned, domain, subdomain
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND ({clause})
-        ORDER BY COALESCE(published_at, fetched_at, created_at) DESC
+        ORDER BY COALESCE(published_at, created_at) DESC
         LIMIT %(limit)s
         """,
         params,

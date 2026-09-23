@@ -247,7 +247,7 @@ def collect_week_items(
         WHERE i.security_status = 'clean'
           AND i.dedup_of IS NULL
           AND i.level = ANY(%(levels)s)
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at)::date
+          AND COALESCE(i.published_at, i.created_at)::date
               BETWEEN %(start)s AND %(end)s
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s
@@ -276,7 +276,7 @@ def collect_yellow_domain_summary(period_start: dt.date, period_end: dt.date) ->
         SELECT domain, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND level = 'yellow'
-          AND COALESCE(published_at, fetched_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
         GROUP BY domain
         ORDER BY n DESC
     """

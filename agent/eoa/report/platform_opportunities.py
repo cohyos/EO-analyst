@@ -58,8 +58,8 @@ def collect_platform_opportunity_items(
         FROM items i
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE %(tag)s = ANY(COALESCE(i.tags, '{{}}')) AND i.security_status = 'clean' AND i.dedup_of IS NULL
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) >= %(start)s
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at) < %(end)s
+          AND COALESCE(i.published_at, i.created_at) >= %(start)s
+          AND COALESCE(i.published_at, i.created_at) < %(end)s
           {line_filter}
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s

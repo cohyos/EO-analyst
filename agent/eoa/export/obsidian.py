@@ -181,7 +181,7 @@ def _list_items(levels: list[str], since_days: int | None) -> list[dict[str, Any
     since_clause = ""
     params: dict[str, Any] = {"levels": levels}
     if since_days is not None:
-        since_clause = "AND COALESCE(published_at, fetched_at, created_at) >= now() - (%(since_days)s || ' days')::interval"
+        since_clause = "AND COALESCE(published_at, created_at) >= now() - (%(since_days)s || ' days')::interval"
         params["since_days"] = since_days
     sql = f"""
         SELECT id, url, title, lang, published_at, fetched_at, domain, subdomain,
@@ -192,7 +192,7 @@ def _list_items(levels: list[str], since_days: int | None) -> list[dict[str, Any
           AND dedup_of IS NULL
           AND level = ANY(%(levels)s)
           {since_clause}
-        ORDER BY COALESCE(published_at, fetched_at, created_at) DESC NULLS LAST, id DESC
+        ORDER BY COALESCE(published_at, created_at) DESC NULLS LAST, id DESC
     """
     with connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
@@ -222,7 +222,7 @@ def _items_mentioning_entity(name: str) -> list[dict[str, Any]]:
         FROM items
         WHERE %(name)s = ANY(COALESCE(entities_mentioned, '{}'))
           AND security_status = 'clean'
-        ORDER BY COALESCE(published_at, fetched_at, created_at) DESC NULLS LAST
+        ORDER BY COALESCE(published_at, created_at) DESC NULLS LAST
     """
     with connection() as conn, conn.cursor() as cur:
         cur.execute(sql, {"name": name})

@@ -83,7 +83,7 @@ def _corroboration_populated_check() -> Check:
                 WHERE i.level IN ('red', 'orange', 'yellow')
                   AND i.security_status = 'clean'
                   AND i.dedup_of IS NULL
-                  AND COALESCE(i.published_at, i.fetched_at, i.created_at) >= now() - interval '7 days'
+                  AND COALESCE(i.published_at, i.created_at) >= now() - interval '7 days'
                 """
             )
             row = cur.fetchone()

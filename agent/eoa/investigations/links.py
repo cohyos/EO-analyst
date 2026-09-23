@@ -253,7 +253,7 @@ def investigation_provenance(job_id: int) -> dict[str, Any] | None:
     if item_id is not None:
         trigger_item = _fetchone(
             "SELECT i.id, i.title, i.url, s.name AS source_name, "
-            "COALESCE(i.published_at, i.fetched_at) AS published_at "
+            "COALESCE(i.published_at, i.created_at) AS published_at "
             "FROM items i LEFT JOIN sources s ON s.id = i.source_id WHERE i.id = %s",
             (item_id,),
         )

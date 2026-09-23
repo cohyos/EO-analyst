@@ -237,7 +237,7 @@ def items_by_country(
         where.append("i.domain = %(domain)s")
         params["domain"] = domain
     if since:
-        where.append("COALESCE(i.published_at, i.fetched_at) >= %(since)s")
+        where.append("COALESCE(i.published_at, i.created_at) >= %(since)s")
         params["since"] = since
     rows = _fetchall(f"SELECT geography, level FROM items i WHERE {' AND '.join(where)}", params)
 
@@ -265,7 +265,7 @@ def collect_by_country(
     where = ["1 = 1"]
     params: dict[str, Any] = {}
     if period_start is not None and period_end is not None:
-        where.append("COALESCE(i.published_at, i.fetched_at)::date BETWEEN %(start)s AND %(end)s")
+        where.append("COALESCE(i.published_at, i.created_at)::date BETWEEN %(start)s AND %(end)s")
         params["start"] = period_start
         params["end"] = period_end
     rows = _fetchall(

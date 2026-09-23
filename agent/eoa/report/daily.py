@@ -123,7 +123,7 @@ def collect_items(
             WHERE i.security_status = 'clean'
               AND i.dedup_of IS NULL
               AND i.level = ANY(%(levels)s)
-              AND COALESCE(i.published_at, i.fetched_at, i.created_at) BETWEEN %(start)s AND %(end)s
+              AND COALESCE(i.published_at, i.created_at) BETWEEN %(start)s AND %(end)s
               -- F20: a tender-derived item (e.g. a 2015 notice with no published_at, picked up by
               -- fetched_at/created_at falling in the window) is already rendered in the tenders
               -- board/forecast table (eoa.tenders.report_section) -- showing it again here as a

@@ -35,13 +35,13 @@ def product_line_stats(line_id: str) -> dict[str, int]:
         items_7d = _count(
             "items",
             "product_lines @> ARRAY[%(line)s]::text[] AND security_status = 'clean' AND dedup_of IS NULL "
-            "AND COALESCE(published_at, fetched_at, created_at)::date >= %(since)s",
+            "AND COALESCE(published_at, created_at)::date >= %(since)s",
             {**base, "since": today - dt.timedelta(days=7)},
         )
         items_30d = _count(
             "items",
             "product_lines @> ARRAY[%(line)s]::text[] AND security_status = 'clean' AND dedup_of IS NULL "
-            "AND COALESCE(published_at, fetched_at, created_at)::date >= %(since)s",
+            "AND COALESCE(published_at, created_at)::date >= %(since)s",
             {**base, "since": today - dt.timedelta(days=30)},
         )
         events_30d = _count(
@@ -96,7 +96,7 @@ def _active_competitors_count(line_id: str, since: dt.date) -> int:
         SELECT count(DISTINCT c) AS n FROM (
             SELECT unnest(entities_mentioned) AS c FROM items
             WHERE product_lines @> ARRAY[%(line)s]::text[] AND security_status = 'clean'
-              AND dedup_of IS NULL AND COALESCE(published_at, fetched_at, created_at)::date >= %(since)s
+              AND dedup_of IS NULL AND COALESCE(published_at, created_at)::date >= %(since)s
         ) mentioned
         WHERE c = ANY(%(names)s)
         """,

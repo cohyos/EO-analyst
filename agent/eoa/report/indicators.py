@@ -640,7 +640,7 @@ def _fetch_recent_evidence_items(
                 WHERE i.security_status = 'clean'
                   AND i.dedup_of IS NULL
                   AND i.level = ANY(%(levels)s)
-                  AND COALESCE(i.published_at, i.fetched_at, i.created_at) BETWEEN %(start)s AND %(end)s
+                  AND COALESCE(i.published_at, i.created_at) BETWEEN %(start)s AND %(end)s
                 ORDER BY i.published_at DESC NULLS LAST
                 LIMIT %(limit)s
                 """,

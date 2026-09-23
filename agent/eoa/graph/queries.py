@@ -91,7 +91,7 @@ def _node_stats(entity_ids: list[int]) -> dict[int, dict[str, Any]]:
         """
         SELECT e.id AS entity_id, e.name, e.kind, e.country,
             count(i.id) AS mention_count,
-            max(COALESCE(i.published_at, i.fetched_at)) AS last_seen,
+            max(COALESCE(i.published_at, i.created_at)) AS last_seen,
             count(i.id) FILTER (WHERE ic.status = 'corroborated') AS corroborated_n,
             count(i.id) FILTER (WHERE ic.status = 'official_primary') AS official_primary_n,
             count(i.id) FILTER (WHERE ic.status = 'single_source') AS single_source_n,
@@ -169,7 +169,7 @@ def overview(limit: int = 30, since: str | None = None) -> dict[str, Any]:
     """Top entities by mention volume (optionally since a date), plus the `graph_edges` between
     them -- a starting "map of the map" before an analyst picks a center entity."""
     limit = min(max(int(limit), 1), 200)
-    since_clause = "AND COALESCE(i.published_at, i.fetched_at) >= %(since)s" if since else ""
+    since_clause = "AND COALESCE(i.published_at, i.created_at) >= %(since)s" if since else ""
     params: dict[str, Any] = {"limit": limit}
     if since:
         params["since"] = since
@@ -192,7 +192,7 @@ def overview(limit: int = 30, since: str | None = None) -> dict[str, Any]:
     edge_rows = _fetchall(
         """
         SELECT ge.id AS edge_id, ge.src_entity_id, ge.dst_entity_id, ge.label, ge.item_id,
-               ge.created_at, i.title AS item_title, COALESCE(i.published_at, i.fetched_at) AS item_date
+               ge.created_at, i.title AS item_title, COALESCE(i.published_at, i.created_at) AS item_date
         FROM graph_edges ge
         LEFT JOIN items i ON i.id = ge.item_id
         WHERE ge.src_entity_id = ANY(%(ids)s) AND ge.dst_entity_id = ANY(%(ids)s)
@@ -298,7 +298,7 @@ def neighborhood(
             {label_clause}
         )
         SELECT DISTINCT w.edge_id, w.src_entity_id, w.dst_entity_id, w.label, w.item_id, w.created_at,
-               i.title AS item_title, COALESCE(i.published_at, i.fetched_at) AS item_date
+               i.title AS item_title, COALESCE(i.published_at, i.created_at) AS item_date
         FROM walk w
         LEFT JOIN items i ON i.id = w.item_id
         LIMIT {_NEIGHBORHOOD_ROW_CAP}
@@ -396,7 +396,7 @@ def path(a: int, b: int, max_depth: int = 4) -> dict[str, Any] | None:
     edge_rows = _fetchall(
         """
         SELECT ge.id AS edge_id, ge.src_entity_id, ge.dst_entity_id, ge.label, ge.item_id, ge.created_at,
-               i.title AS item_title, COALESCE(i.published_at, i.fetched_at) AS item_date
+               i.title AS item_title, COALESCE(i.published_at, i.created_at) AS item_date
         FROM graph_edges ge
         LEFT JOIN items i ON i.id = ge.item_id
         WHERE ge.id = ANY(%(ids)s)

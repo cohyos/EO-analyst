@@ -456,7 +456,7 @@ def list_items(
     if since:
         # Q5-10 (docs/qa/findings_Q5_r2.md): the Morning KPI cards (`_night_summary`) count items
         # by `COALESCE(fetched_at, created_at)` over a rolling last-24h window. This filter used to
-        # key off `COALESCE(published_at, fetched_at)` instead -- a different field (and different
+        # key off `COALESCE(published_at, created_at)` instead -- a different field (and different
         # default) that made the KPI card's number and the feed count of the page it deep-links to
         # (`/feed?since=24h`, `/feed?level=red&since=24h`) disagree. Same expression on both sides
         # now so "23" on the card always means "23" items in the feed.
@@ -837,12 +837,12 @@ def list_entities(
         f"""
         SELECT e.*,
             (SELECT count(*) FROM items i WHERE e.name = ANY(COALESCE(i.entities_mentioned, '{{}}'))) AS item_count,
-            (SELECT max(COALESCE(i.published_at, i.fetched_at)) FROM items i
+            (SELECT max(COALESCE(i.published_at, i.created_at)) FROM items i
                 WHERE e.name = ANY(COALESCE(i.entities_mentioned, '{{}}'))) AS last_seen,
             (SELECT count(*) FROM items i WHERE e.name = ANY(COALESCE(i.entities_mentioned, '{{}}'))
-                AND COALESCE(i.published_at, i.fetched_at) >= now() - interval '7 days') AS mentions_7d,
+                AND COALESCE(i.published_at, i.created_at) >= now() - interval '7 days') AS mentions_7d,
             (SELECT count(*) FROM items i WHERE e.name = ANY(COALESCE(i.entities_mentioned, '{{}}'))
-                AND COALESCE(i.published_at, i.fetched_at) >= now() - interval '30 days') AS mentions_30d
+                AND COALESCE(i.published_at, i.created_at) >= now() - interval '30 days') AS mentions_30d
         FROM entities e
         WHERE {where_sql}
         ORDER BY {sort_col} DESC NULLS LAST, e.name ASC
@@ -891,18 +891,18 @@ def get_entity(entity_id: int) -> dict[str, Any] | None:
         "SELECT count(*) AS n FROM items WHERE %s = ANY(COALESCE(entities_mentioned, '{}'))", (name,)
     )["n"]
     last_seen = _fetchone(
-        "SELECT max(COALESCE(published_at, fetched_at)) AS m FROM items "
+        "SELECT max(COALESCE(published_at, created_at)) AS m FROM items "
         "WHERE %s = ANY(COALESCE(entities_mentioned, '{}'))",
         (name,),
     )["m"]
     mentions_7d = _fetchone(
         "SELECT count(*) AS n FROM items WHERE %s = ANY(COALESCE(entities_mentioned, '{}')) "
-        "AND COALESCE(published_at, fetched_at) >= now() - interval '7 days'",
+        "AND COALESCE(published_at, created_at) >= now() - interval '7 days'",
         (name,),
     )["n"]
     mentions_30d = _fetchone(
         "SELECT count(*) AS n FROM items WHERE %s = ANY(COALESCE(entities_mentioned, '{}')) "
-        "AND COALESCE(published_at, fetched_at) >= now() - interval '30 days'",
+        "AND COALESCE(published_at, created_at) >= now() - interval '30 days'",
         (name,),
     )["n"]
     card = _entity_card(
@@ -924,7 +924,7 @@ def get_entity(entity_id: int) -> dict[str, Any] | None:
         "SELECT i.id, i.title, i.url, i.published_at, i.level, s.name AS source_name "
         "FROM items i LEFT JOIN sources s ON s.id = i.source_id "
         "WHERE %s = ANY(COALESCE(i.entities_mentioned, '{}')) "
-        "ORDER BY COALESCE(i.published_at, i.fetched_at) DESC LIMIT 50",
+        "ORDER BY COALESCE(i.published_at, i.created_at) DESC LIMIT 50",
         (name,),
     )
     card["timeline"] = [
@@ -1944,7 +1944,7 @@ def investigation_log_since(job_id: int, last_id: int) -> tuple[list[dict[str, A
 _ASK_ITEM_FIELDS = (
     "i.id, i.title, i.url, i.clean_text, i.summary_he, i.key_facts, i.security_status, "
     "i.domain, i.level, i.report_kind, i.entities_mentioned, s.name AS source_name, "
-    "COALESCE(i.published_at, i.fetched_at) AS _sort_ts"
+    "COALESCE(i.published_at, i.created_at) AS _sort_ts"
 )
 # U11 (2026-09-06 answer-format rewrite): the sources footer needs a triage level + a
 # human-readable source name (not just the item's own scope-taxonomy `domain`), so every
@@ -2292,7 +2292,7 @@ def ask_retrieve(
         rows = _fetchall(
             f"SELECT {_ASK_ITEM_FIELDS} FROM {_ASK_ITEM_JOIN} "
             "WHERE %s = ANY(COALESCE(i.entities_mentioned, '{}')) "
-            "ORDER BY COALESCE(i.published_at, i.fetched_at) DESC LIMIT 5",
+            "ORDER BY COALESCE(i.published_at, i.created_at) DESC LIMIT 5",
             (erow["name"],),
         )
         for r in rows:
@@ -2317,7 +2317,7 @@ def ask_retrieve(
         rows = _fetchall(
             f"SELECT {_ASK_ITEM_FIELDS} FROM {_ASK_ITEM_JOIN} "
             f"WHERE {where_sql} "
-            "ORDER BY COALESCE(i.published_at, i.fetched_at) DESC LIMIT 5",
+            "ORDER BY COALESCE(i.published_at, i.created_at) DESC LIMIT 5",
             params,
         )
         token_cf = token.casefold()
@@ -3842,7 +3842,7 @@ def bd_territories() -> list[dict[str, Any]]:
     since = dt.date.today() - dt.timedelta(days=max(cfg.lookback_days, 1))
     item_rows = _fetchall(
         "SELECT geography FROM items WHERE security_status='clean' AND dedup_of IS NULL "
-        "AND level = ANY(%(levels)s) AND COALESCE(published_at, fetched_at, created_at)::date >= %(since)s",
+        "AND level = ANY(%(levels)s) AND COALESCE(published_at, created_at)::date >= %(since)s",
         {"levels": ["red", "orange", "yellow"], "since": since},
     )
     tender_rows = _fetchall("SELECT country FROM tenders WHERE status IN ('open', 'unknown')")
@@ -3985,8 +3985,8 @@ def product_line_detail(line_id: str) -> dict[str, Any] | None:
     recent_rows = _fetchall(
         "SELECT i.*, s.name AS source_name FROM items i LEFT JOIN sources s ON s.id = i.source_id "
         "WHERE i.product_lines @> ARRAY[%(line)s]::text[] AND i.security_status = 'clean' "
-        "AND i.dedup_of IS NULL AND COALESCE(i.published_at, i.fetched_at, i.created_at)::date >= %(since)s "
-        "ORDER BY COALESCE(i.score, 0) DESC, COALESCE(i.published_at, i.fetched_at) DESC LIMIT 30",
+        "AND i.dedup_of IS NULL AND COALESCE(i.published_at, i.created_at)::date >= %(since)s "
+        "ORDER BY COALESCE(i.score, 0) DESC, COALESCE(i.published_at, i.created_at) DESC LIMIT 30",
         {"line": line_id, "since": since},
     )
     recent_items = [_item_card(r) for r in recent_rows]
@@ -4346,7 +4346,7 @@ def tech_radar(weeks: int = 12) -> dict[str, Any]:
         SELECT subdomain, tech_maturity, count(*) AS n
         FROM items
         WHERE domain = %(domain)s AND security_status = 'clean' AND dedup_of IS NULL
-          AND COALESCE(published_at, fetched_at, created_at) >= %(since)s
+          AND COALESCE(published_at, created_at) >= %(since)s
         GROUP BY subdomain, tech_maturity
         """,
         {"domain": _TECH_DOMAIN, "since": since},
@@ -4364,11 +4364,11 @@ def tech_radar(weeks: int = 12) -> dict[str, Any]:
     # 4-point weekly sparkline per subdomain (most recent week last).
     sparkline_rows = _fetchall(
         """
-        SELECT subdomain, date_trunc('week', COALESCE(published_at, fetched_at, created_at)) AS wk,
+        SELECT subdomain, date_trunc('week', COALESCE(published_at, created_at)) AS wk,
                count(*) AS n
         FROM items
         WHERE domain = %(domain)s AND security_status = 'clean' AND dedup_of IS NULL
-          AND COALESCE(published_at, fetched_at, created_at) >= %(since4)s
+          AND COALESCE(published_at, created_at) >= %(since4)s
         GROUP BY subdomain, wk
         ORDER BY wk ASC
         """,
@@ -4418,7 +4418,7 @@ def list_tech_items(
         where.append("i.tech_actor_kind = %(actor_kind)s")
         params["actor_kind"] = actor_kind
     if since:
-        where.append("COALESCE(i.published_at, i.fetched_at) >= %(since)s")
+        where.append("COALESCE(i.published_at, i.created_at) >= %(since)s")
         params["since"] = since
     where_sql = " AND ".join(where)
 

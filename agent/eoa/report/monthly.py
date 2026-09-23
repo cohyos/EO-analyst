@@ -222,7 +222,7 @@ def collect_month_items(
         WHERE i.security_status = 'clean'
           AND i.dedup_of IS NULL
           AND i.level = ANY(%(levels)s)
-          AND COALESCE(i.published_at, i.fetched_at, i.created_at)::date
+          AND COALESCE(i.published_at, i.created_at)::date
               BETWEEN %(start)s AND %(end)s
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s
