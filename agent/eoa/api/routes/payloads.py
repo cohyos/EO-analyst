@@ -78,11 +78,15 @@ def list_payloads(
     if q:
         where.append("(p.canonical_name ILIKE %(q)s OR p.family ILIKE %(q)s OR p.notes ILIKE %(q)s)")
         params["q"] = f"%{q}%"
+    where_sql = " AND ".join(where)
     rows = _fetchall(
-        _PAYLOAD_ROWS_WITH_COUNTS_SQL.format(where=" AND ".join(where)) + " LIMIT %(limit)s",
+        _PAYLOAD_ROWS_WITH_COUNTS_SQL.format(where=where_sql) + " LIMIT %(limit)s",
         params,
     )
-    total_row = _fetchone("SELECT count(*) AS c FROM payloads")
+    # F39 (SOL-AUDIT-2026-09-24.md): the count used to ignore every filter above (`category`,
+    # `vendor`, `family`, `q`) and always report the WHOLE table's size -- reusing the same
+    # WHERE/params as the row query is the only way `total` and `payloads` agree.
+    total_row = _fetchone(f"SELECT count(*) AS c FROM payloads p WHERE {where_sql}", params)
     return {"payloads": rows, "total": (total_row or {}).get("c", len(rows))}
 
 
@@ -137,15 +141,31 @@ def export_payloads_csv() -> StreamingResponse:
             "price_source_url",
         ]
     )
+    # Efficiency (SOL-AUDIT-2026-09-24.md #4, "Batch related-row lookups for exports and
+    # citations"): this used to run 2 queries per exported payload (2N+1 total for N payloads --
+    # `latest_spec`/`latest_price` each individually). `DISTINCT ON` pulls every payload's latest
+    # spec version / latest price ref in one query apiece, matching each table's own
+    # "latest" ordering (`version_no DESC` / `date DESC, id DESC`).
+    payload_ids = [p["id"] for p in payloads]
+    latest_spec_by_id: dict[int, dict[str, Any]] = {}
+    latest_price_by_id: dict[int, dict[str, Any]] = {}
+    if payload_ids:
+        for row in _fetchall(
+            "SELECT DISTINCT ON (payload_id) * FROM payload_spec_versions "
+            "WHERE payload_id = ANY(%(ids)s) ORDER BY payload_id, version_no DESC",
+            {"ids": payload_ids},
+        ):
+            latest_spec_by_id[row["payload_id"]] = row
+        for row in _fetchall(
+            "SELECT DISTINCT ON (payload_id) * FROM payload_price_refs "
+            "WHERE payload_id = ANY(%(ids)s) ORDER BY payload_id, date DESC, id DESC",
+            {"ids": payload_ids},
+        ):
+            latest_price_by_id[row["payload_id"]] = row
+
     for p in payloads:
-        latest_spec = _fetchone(
-            "SELECT * FROM payload_spec_versions WHERE payload_id = %(id)s ORDER BY version_no DESC LIMIT 1",
-            {"id": p["id"]},
-        )
-        latest_price = _fetchone(
-            "SELECT * FROM payload_price_refs WHERE payload_id = %(id)s ORDER BY date DESC, id DESC LIMIT 1",
-            {"id": p["id"]},
-        )
+        latest_spec = latest_spec_by_id.get(p["id"])
+        latest_price = latest_price_by_id.get(p["id"])
         spec = (latest_spec or {}).get("spec") or {}
         detector = spec.get("detector") or {}
         fov = spec.get("fov") or {}

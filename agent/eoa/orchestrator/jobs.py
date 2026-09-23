@@ -97,7 +97,18 @@ class RunState:
 
 
 def _night_deadline() -> float:
-    """Monotonic timestamp of the next night-window end (Asia/Jerusalem)."""
+    """Monotonic timestamp of the next night-window end (Asia/Jerusalem).
+
+    F40 (audit 2026-09-24, orchestrator half): ``end`` (built via ``now.replace(...)``) shares the
+    exact same ``ZoneInfo`` ``tzinfo`` *instance* as ``now``. CPython's aware-datetime subtraction
+    skips UTC-offset normalization whenever both operands' ``tzinfo`` attributes are the same
+    object (a documented optimization) and falls back to a naive wall-clock subtraction instead --
+    verified live: for a window end computed just after Israel's spring-forward transition, the
+    naive ``end - now`` in this zone was off by exactly one hour versus the real elapsed time
+    (``end.astimezone(UTC) - now.astimezone(UTC)``). Across a DST transition inside the night
+    window this under/over-counts the deadline by that hour. Converting both sides to UTC before
+    subtracting forces the correct absolute-time arithmetic regardless of shared ``tzinfo``
+    identity."""
     s = settings()
     tz = ZoneInfo(s.timezone)
     now = datetime.now(tz)
@@ -106,7 +117,9 @@ def _night_deadline() -> float:
     if end <= now:
         end += timedelta(days=1)
     grace = timedelta(minutes=s.schedule.deadline_grace_minutes)
-    return time.monotonic() + (end + grace - now).total_seconds()
+    end_with_grace_utc = (end + grace).astimezone(UTC)
+    now_utc = now.astimezone(UTC)
+    return time.monotonic() + (end_with_grace_utc - now_utc).total_seconds()
 
 
 def _hb(rs: RunState, event: str, **detail: Any) -> None:
@@ -402,8 +415,39 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
             log.warning(
                 "deep_search_cloud_batch_failed_falling_back_local", n=len(claimed), error=str(exc)[:300]
             )
-            outcomes = [_run_deep_search_job_local(job) for job in claimed]
-            return {"investigations": len(claimed), "outcomes": ",".join(outcomes)}
+            # F04 (audit 2026-09-24): the old `[_run_deep_search_job_local(job) for job in
+            # claimed]` comprehension aborted outright on the first job whose local fallback
+            # itself raised `ResourceUnavailable` (GPU/RAM gate) -- every other already-claimed
+            # child stayed `running` until F03's reaper eventually caught it. Loop explicitly so
+            # one job's resource failure does not strand the rest of the batch, and defer every
+            # claimed child this loop never got to reach (a `DeadlineExceeded`/`LeaseLost`, or any
+            # other exception that still escapes the per-job handling below) in a `finally`
+            # instead of leaving it `running`.
+            outcomes = []
+            processed_ids: set[int] = set()
+            try:
+                for job in claimed:
+                    processed_ids.add(job["id"])
+                    try:
+                        outcomes.append(_run_deep_search_job_local(job))
+                    except ResourceUnavailable:
+                        # `_run_deep_search_job_local` already deferred this job itself before
+                        # re-raising -- keep going with the rest of the batch.
+                        outcomes.append("deferred")
+            finally:
+                for job in claimed:
+                    if job["id"] not in processed_ids:
+                        finish_job(
+                            job["id"],
+                            "deferred",
+                            error="cloud batch fallback interrupted",
+                            not_before=datetime.now(tz=UTC) + timedelta(minutes=30),
+                        )
+            return {
+                "investigations": len(claimed),
+                "outcomes": ",".join(outcomes),
+                "failed": outcomes.count("failed"),
+            }
 
         outcomes = []
         for job in claimed:
@@ -425,6 +469,13 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
             "investigations": len(claimed),
             "outcomes": ",".join(outcomes),
             "cross_insights_he": cross_insights_he,
+            # F24 (audit 2026-09-24): `has_incomplete_work` only recurses into dict values and
+            # only recognizes a `failed`/`*_failed` KEY as a problem count -- the prior
+            # comma-joined `outcomes` STRING made a failed child investigation invisible to it, so
+            # the enclosing `daily_run` could finish `done` with a failed investigation buried
+            # inside. This explicit count is picked up automatically (`has_incomplete_work`
+            # already treats any `failed`-named int key > 0 as incomplete work).
+            "failed": outcomes.count("failed"),
         }
 
     done, outcomes = 0, []
@@ -438,7 +489,7 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
             break
         outcomes.append(_run_deep_search_job_local(job))
         done += 1
-    return {"investigations": done, "outcomes": ",".join(outcomes)}
+    return {"investigations": done, "outcomes": ",".join(outcomes), "failed": outcomes.count("failed")}
 
 
 def run_deep_search_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -499,18 +550,28 @@ def _build_tech_daily_report() -> Any:
 
 
 def _daily_run_already_covered(within_hours: int = 6) -> bool:
-    """F4: True if a separate ``daily_run`` job started/finished within the last ``within_hours``
-    hours in a ``running``/``done``/``partial`` state. Both ``daily_run`` and ``weekly_run`` are
-    scheduled for the same night (config ``schedule.weekly_run`` sat 01:00, same as the nightly
-    ``daily_run``); without this guard, ``run_weekly`` unconditionally re-running the *entire*
-    nightly pipeline (ingest..notify, including its own daily report + notification) produced two
-    daily reports and duplicate notifications on Saturday nights."""
+    """F4/F22: True if a separate ``daily_run`` job was created within the last ``within_hours``
+    hours and is still ``queued``, already ``running``, or has finished ``done``/``partial``. Both
+    ``daily_run`` and ``weekly_run`` are scheduled for the same night (config ``schedule.
+    weekly_run`` sat 01:00, same as the nightly ``daily_run``); without this guard, ``run_weekly``
+    unconditionally re-running the *entire* nightly pipeline (ingest..notify, including its own
+    daily report + notification) produced two daily reports and duplicate notifications on
+    Saturday nights.
+
+    F22 (audit 2026-09-24): ``'queued'`` was missing from the state list -- both jobs are enqueued
+    at the same 01:00 tick (APScheduler's default executor can run same-tick callbacks
+    concurrently), so a `daily_run` row that merely exists but hasn't been claimed yet was
+    invisible to this check; if the worker happened to claim `weekly_run` first, it ran the full
+    pipeline a second time once the still-queued `daily_run` job was claimed afterward. Combined
+    with `weekly`'s worse scheduler priority than `daily` (`build_scheduler`), the two together
+    make weekly wait for daily's pipeline in the overwhelming majority of cases and, even in the
+    rare case weekly is still claimed first, stop it from re-running the pipeline a second time."""
     from eoa.db import connection
 
     sql = """
         SELECT 1 FROM jobs
         WHERE kind = 'daily_run'
-          AND state IN ('running', 'done', 'partial')
+          AND state IN ('queued', 'running', 'done', 'partial')
           AND created_at > now() - make_interval(hours => %(hours)s)
         LIMIT 1
     """
@@ -844,7 +905,7 @@ def _run_tenders(role: str = "resident") -> dict[str, Any]:
     return {"scan": _as_dict(scan_stats), "forecast": _as_dict(forecast_stats)}
 
 
-def _tender_items_needing_pipeline() -> list[int]:
+def _tender_items_needing_pipeline() -> list[int] | None:
     """F22 (docs/REVIEW_2026-09-05.md): ids of tender-derived ``items`` rows (``report_kind =
     'tender'``, inserted by ``eoa.tenders.scan._insert_tender_and_item``) still missing an
     embedding or a triage level. The ``tenders`` stage runs after ``embed_dedup``/``classify``/
@@ -853,7 +914,14 @@ def _tender_items_needing_pipeline() -> list[int]:
     stages happen to sweep up the backlog (5 such items observed one morning). Not restricted to
     "created this run" -- a tender item still missing these fields for any reason (e.g. a previous
     night's catch-up itself got deferred) is equally worth picking up here, and the set is normally
-    tiny either way."""
+    tiny either way.
+
+    F25 (audit 2026-09-24): a query failure used to be swallowed into a bare ``[]`` here --
+    indistinguishable from "no tender items are pending" -- so :func:`_post_tenders_catchup`
+    reported ``{"items": 0}`` and the run looked clean even though the candidate query never ran.
+    ``None`` (rather than ``[]``) now signals "the query itself failed" to the caller; nothing is
+    mutated on that path, so the underlying items (still missing an embedding/level) remain
+    exactly as eligible for the next attempt as they were before this call."""
     from eoa.db import connection
 
     try:
@@ -869,7 +937,7 @@ def _tender_items_needing_pipeline() -> list[int]:
             return [r["id"] for r in cur.fetchall()]
     except Exception as exc:
         log.warning("post_tenders_catchup_query_failed", error=str(exc)[:200])
-        return []
+        return None
 
 
 def _post_tenders_catchup(*, role: str = "resident") -> dict[str, Any]:
@@ -878,8 +946,15 @@ def _post_tenders_catchup(*, role: str = "resident") -> dict[str, Any]:
     see :func:`_tender_items_needing_pipeline`. A handful of rows, not a backlog re-sweep of
     everything else still pending those stages; a failure in one sub-stage never blocks the others
     (docs/CONVENTIONS.md rule 9) and never fails the run -- the items simply get caught by the next
-    night's stages as before this fix."""
+    night's stages as before this fix.
+
+    F25 (audit 2026-09-24): a failure in the candidate-selection query itself (as opposed to
+    finding zero candidates) is now reported as an explicit ``query_error`` -- picked up by
+    ``has_incomplete_work``/``_compute_run_status`` so the run is ``partial`` rather than silently
+    ``done`` -- instead of being indistinguishable from "nothing was pending"."""
     item_ids = _tender_items_needing_pipeline()
+    if item_ids is None:
+        return {"items": 0, "query_error": "failed to list tender items needing pipeline"}
     if not item_ids:
         return {"items": 0}
 
@@ -1024,9 +1099,51 @@ def _terminal_state(res: dict[str, Any]) -> str:
     """The job's terminal state from a handler result's optional `status` field (#16): a
     recognized `done`/`partial`/`failed` value wins (e.g. `run_daily`'s computed status);
     otherwise default to `done` (the handler didn't opt into stage-aware status and returned
-    without raising)."""
+    without raising).
+
+    F23 (audit 2026-09-24): that unconditional "no status -> done" default let a failed
+    standalone weekly/monthly/dossier/patent-survey/bd/product-line report land as `done` --
+    those handlers (`run_monthly`, `run_product_dossier`, `run_patent_survey`, ... ) catch their
+    own exceptions and return a `*_error` field instead of raising or ever setting `status`. It
+    also missed the case where a `status` IS present but scoped to only part of the result --
+    `run_weekly`'s own `stats["status"]` (from the daily-pipeline portion, via `run_daily`) stays
+    `done` even when the separate `weekly_report_error` sibling key it adds afterward means the
+    weekly-specific work failed. `has_incomplete_work` (the same recursive `*_error`/`error`/
+    `deferred`/`skipped`/`partial`/`*_failed` scan `_compute_run_status` already uses for
+    `run_daily` itself) now gates the decision instead of `status` alone."""
     state = res.get("status")
-    return state if state in {"done", "partial", "failed"} else "done"
+    recognized = state if state in {"done", "partial", "failed"} else None
+    if recognized == "failed":
+        return "failed"
+    if not has_incomplete_work(res):
+        return recognized or "done"
+    if recognized is not None:
+        # `status` already summarized its own scope, but a problem outside that scope was also
+        # recorded (e.g. run_weekly's daily-pipeline `status=done` plus its own
+        # `weekly_report_error`) -- never silently keep `done` once anything is wrong.
+        return "partial"
+    # No handler-computed `status` at all: a lone `*_error` result with nothing else built is an
+    # outright failure; a multi-target loop (bd_report/product_line_report without a `territory`/
+    # `line_id`) that also recorded at least one real success is a partial failure instead.
+    return "partial" if _has_recorded_success(res) else "failed"
+
+
+def _has_recorded_success(value: Any) -> bool:
+    """F23: True if a nested handler result carries a completed sub-result (a `report_id`/
+    `survey_id`/`dossier_id`, or any deeper successful sub-result) alongside whatever
+    `has_incomplete_work` flagged -- i.e. a multi-target loop where some, but not all, targets
+    succeeded."""
+    if isinstance(value, dict):
+        if any(value.get(k) for k in ("report_id", "survey_id", "dossier_id")):
+            return True
+        for key, v in value.items():
+            if key.endswith("_error") or key in {"error", "deferred", "skipped", "partial", "status"}:
+                continue
+            if _has_recorded_success(v):
+                return True
+    elif isinstance(value, list):
+        return any(_has_recorded_success(item) for item in value)
+    return False
 
 
 def _default_kinds() -> list[str]:

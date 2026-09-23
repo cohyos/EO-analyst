@@ -488,6 +488,29 @@ class TestListPayloadsRoute:
         assert r.status_code == 200
         assert r.json() == {"payloads": [], "total": 0}
 
+    def test_total_uses_the_same_where_clause_as_the_row_query(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """F39 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): `total` used to always be a bare
+        `SELECT count(*) AS c FROM payloads` -- the whole table -- regardless of `category`/
+        `vendor`/`family`/`q`. Asserts the count statement itself carries the filter's own
+        parameter."""
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads p WHERE": {"c": 2}},
+            fetchall_responses={"FROM payloads p": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/payloads", params={"vendor": "Acme"})
+        assert r.status_code == 200
+        assert r.json()["total"] == 2
+
+        count_query, count_params = next(
+            (q, p) for q, p in cur.executed if q.startswith("SELECT count(*) AS c FROM payloads")
+        )
+        assert "p.vendor_entity_name ILIKE %(vendor)s" in count_query
+        assert count_params["vendor"] == "%Acme%"
+
 
 class TestGetPayloadRoute:
     def test_404_when_missing(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -569,3 +592,43 @@ class TestExportCsvRoute:
         assert r.status_code == 200
         lines = [line for line in r.text.splitlines() if line.strip()]
         assert len(lines) == 1  # header row only
+
+    def test_latest_spec_and_price_are_batched_not_queried_per_payload(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Efficiency (SOL-AUDIT-2026-09-24.md #4, "Batch related-row lookups for exports and
+        citations"): this used to run 2 queries per payload (2N+1 total). Asserts exactly one
+        `payload_spec_versions` query and one `payload_price_refs` query cover all N payloads,
+        each keyed by `payload_id = ANY(...)` rather than a per-row `payload_id = %(id)s`."""
+        payloads = [
+            {"id": 1, "canonical_name": "Widget X", "vendor_entity_name": "Acme", "family": None, "category": "gimbal"},
+            {"id": 2, "canonical_name": "Widget Y", "vendor_entity_name": "Acme", "family": None, "category": "gimbal"},
+            {"id": 3, "canonical_name": "Widget Z", "vendor_entity_name": "Acme", "family": None, "category": "gimbal"},
+        ]
+        specs = [
+            {"payload_id": 1, "version_no": 2, "spec": {"mass_kg": 5.2}},
+            {"payload_id": 2, "version_no": 1, "spec": {"mass_kg": 3.1}},
+        ]
+        prices = [{"payload_id": 1, "price_usd": 500000.0}]
+        cur = _FakeCursor(
+            fetchall_responses={
+                "FROM payloads ORDER BY canonical_name": payloads,
+                "FROM payload_spec_versions WHERE payload_id = ANY": specs,
+                "FROM payload_price_refs WHERE payload_id = ANY": prices,
+            }
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/payloads/export.csv")
+        assert r.status_code == 200
+
+        spec_queries = [q for q, _p in cur.executed if "FROM payload_spec_versions" in q]
+        price_queries = [q for q, _p in cur.executed if "FROM payload_price_refs" in q]
+        assert len(spec_queries) == 1
+        assert len(price_queries) == 1
+        assert "= ANY(%(ids)s)" in spec_queries[0]
+        assert "= ANY(%(ids)s)" in price_queries[0]
+
+        rows = [line for line in r.text.splitlines() if line.strip()]
+        assert len(rows) == 4  # header + 3 payloads, including the one with neither spec nor price
+        assert "5.2" in r.text  # payload 1's batched-in spec value made it to the row

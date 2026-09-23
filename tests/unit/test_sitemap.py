@@ -67,10 +67,30 @@ class TestParseSitemapPlain:
             "https://example.com/news/second-story",
         }
 
-    def test_lastmod_is_parsed_into_published_at(self) -> None:
+    def test_lastmod_alone_is_not_used_as_published_at(self) -> None:
+        """F12 (SOL-AUDIT-2026-09-24): `lastmod` describes when the PAGE was last modified, not
+        when the article was published -- using it as a `published_at` fallback let an old,
+        undated article look freshly published after any CMS re-save. `published_at` now comes
+        only from an actual publish-date field (`news:publication_date`, see
+        `TestParseSitemapGoogleNewsExtension`); an entry with only `lastmod` is still returned
+        (`lastmod` remains usable for `since_days` crawl-selection filtering), just undated."""
         entries = parse_sitemap(_PLAIN_SITEMAP, path_prefix="/news/first-story")
         assert len(entries) == 1
-        assert entries[0].published_at == datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        assert entries[0].published_at is None
+
+    def test_lastmod_still_used_for_since_days_crawl_selection(self) -> None:
+        """The old, page-modification-only `lastmod` is still fine (and used) for deciding
+        whether to bother crawling an entry at all -- just never surfaced as `published_at`."""
+        now = datetime(2026, 9, 11, tzinfo=UTC)
+        # first-story's lastmod (2026-09-10) is 1 day old -> kept under since_days=3.
+        entries = parse_sitemap(_PLAIN_SITEMAP, path_prefix="/news/first-story", since_days=3, now=now)
+        assert len(entries) == 1
+        now_later = datetime(2026, 9, 20, tzinfo=UTC)
+        # ...9 days old under the same cutoff -> dropped, even though it has no published_at.
+        entries_later = parse_sitemap(
+            _PLAIN_SITEMAP, path_prefix="/news/first-story", since_days=3, now=now_later
+        )
+        assert entries_later == []
 
     def test_entry_with_no_date_is_kept_undated(self) -> None:
         entries = parse_sitemap(_PLAIN_SITEMAP, path_prefix="/news/second-story")

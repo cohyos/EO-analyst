@@ -317,20 +317,29 @@ def soften_text(text: str | None) -> str | None:
 
 
 def gate_item_texts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Soften ``summary_he``/``so_what_he`` of collected report items in place (returns the list)."""
+    """Soften ``summary_he``/``so_what_he`` of collected report items in place (returns the list).
+
+    F17: a fully rejected sentence (:func:`soften_text` returns ``None``/empty) is KEPT as such,
+    never silently replaced by the original unsupported text -- the ``or it[key]`` fallback this
+    used to have defeated the whole point of the gate (rendering exactly the unsupported claim it
+    just rejected). Renderers already treat a falsy ``summary_he``/``so_what_he`` as an empty state
+    (``it.get('summary_he') or '—'`` and equivalents throughout ``eoa.report.*``)."""
     for it in items:
         for key in ("summary_he", "so_what_he"):
             if it.get(key):
-                it[key] = soften_text(it[key]) or it[key]
+                it[key] = soften_text(it[key])
     return items
 
 
 def gate_deep_search_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Soften the deep-search entries' answer/context/contradiction text and key facts."""
+    """Soften the deep-search entries' answer/context/contradiction text and key facts.
+
+    F17: same fix as :func:`gate_item_texts` -- a fully rejected (``None``) result is kept, not
+    replaced by the original text ``or`` fell back to."""
     for e in entries:
         for key in ("answer_he", "contradictions_he", "what_was_tried_he"):
             if e.get(key):
-                e[key] = soften_text(e[key]) or e[key]
+                e[key] = soften_text(e[key])
         if e.get("key_facts"):
             e["key_facts"] = [g for g in (gate_text(f) for f in e["key_facts"]) if g]
     return entries

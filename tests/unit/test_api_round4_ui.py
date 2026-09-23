@@ -104,10 +104,13 @@ class TestListPendingSecurityReviews:
             {
                 "id": 113,
                 "payload": {"item_id": 42, "question": "אימות והרחבה: מפעל פולקסווגן"},
+                # F29 (SOL-AUDIT-2026-09-24.md): the persisted keys are `security_flag_reason`/
+                # `security_flag_snippet` (`eoa.llm.schemas.analysis`), not
+                # `security_review_reason_he`/`security_review_snippet` -- those never existed.
                 "result": {
                     "security_review": True,
-                    "security_review_reason_he": "חשד להזרקת פרומפט במקור",
-                    "security_review_snippet": "התעלם מההוראות הקודמות...",
+                    "security_flag_reason": "חשד להזרקת פרומפט במקור",
+                    "security_flag_snippet": "התעלם מההוראות הקודמות...",
                 },
                 "started_at": None,
                 "finished_at": None,
@@ -143,7 +146,17 @@ class TestListPendingSecurityReviews:
 
 
 class TestApproveSecurityReview:
-    def test_enqueues_a_new_job_with_security_override_and_marks_the_original_resolved(
+    """F28 (SOL-AUDIT-2026-09-24.md): approve/dismiss now claim the job atomically -- a single
+    `UPDATE jobs ... WHERE ... security_review = 'true' AND NOT resolved ... RETURNING *` -- instead
+    of a `SELECT` followed by a separate `UPDATE`. That closes the earlier TOCTOU race (two
+    concurrent approvals could both pass the `SELECT` before either write landed, each enqueuing its
+    own re-run job) and the earlier lack of any check that the job was ever a pending, flagged
+    review at all (previously *any* `deep_search` job id worked). Under real Postgres, only one
+    concurrent `UPDATE` can ever match+lock a given row and flip `security_review_resolved`; every
+    other concurrent caller's `WHERE` no longer matches once it does, so at most one re-run job is
+    ever enqueued for a given flagged review."""
+
+    def test_enqueues_a_new_job_and_marks_the_original_resolved_atomically(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ):
         job_row = {
@@ -151,7 +164,7 @@ class TestApproveSecurityReview:
             "payload": {"item_id": 42, "question": "אימות והרחבה"},
             "result": {"security_review": True},
         }
-        cur = _FakeCursor(responses={"SELECT * FROM jobs": job_row, "SELECT id FROM jobs": {"id": 113}})
+        cur = _FakeCursor(responses={"UPDATE jobs": job_row})
         monkeypatch.setattr("eoa.api.routes.security_review.connection", lambda: _FakeConnection(cur))
 
         captured: dict[str, Any] = {}
@@ -169,18 +182,41 @@ class TestApproveSecurityReview:
 
         assert captured["kind"] == "deep_search"
         assert captured["payload"]["item_id"] == 42
-        assert captured["payload"]["security_override"] is True
         assert captured["payload"]["expanded_from_job_id"] == 113
+        # F28: no invented override field -- nothing downstream ever reads one.
+        assert "security_override" not in captured["payload"]
 
-        # The original job got its `result` patched with the resolved flag (an UPDATE, not a
-        # second job insert).
+        # Exactly one statement did the check-and-claim, atomically.
         update_calls = [q for q, _p in cur.executed if "UPDATE jobs" in q]
         assert len(update_calls) == 1
+        claim_query = update_calls[0]
+        assert "RETURNING" in claim_query
+        assert "security_review' = 'true'" in claim_query
+        assert "security_review_resolved" in claim_query
+        assert "kind = 'deep_search'" in claim_query
 
     def test_404_when_the_job_does_not_exist(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
-        cur = _FakeCursor(responses={"SELECT * FROM jobs": None})
+        cur = _FakeCursor(responses={"UPDATE jobs": None})
         monkeypatch.setattr("eoa.api.routes.security_review.connection", lambda: _FakeConnection(cur))
         r = client.post("/api/security-reviews/999/approve")
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "not_found"
+
+    def test_404_when_the_job_exists_but_is_not_a_pending_flagged_review(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """F28: an unflagged job, or one already resolved, must not match the atomic claim's WHERE
+        clause -- the fake cursor doesn't evaluate SQL, so this simulates that outcome directly
+        (real Postgres: the WHERE simply excludes the row, `RETURNING` yields nothing)."""
+        cur = _FakeCursor(responses={"UPDATE jobs": None})
+        monkeypatch.setattr("eoa.api.routes.security_review.connection", lambda: _FakeConnection(cur))
+
+        def fail_if_called(*a, **k):
+            raise AssertionError("must not enqueue a re-run for a job that was never claimed")
+
+        monkeypatch.setattr("eoa.api.routes.security_review.enqueue_job", fail_if_called)
+
+        r = client.post("/api/security-reviews/113/approve")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "not_found"
 
@@ -192,7 +228,8 @@ class TestApproveSecurityReview:
 
 class TestDismissSecurityReview:
     def test_marks_reviewed_with_no_new_job(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
-        cur = _FakeCursor(responses={"SELECT id FROM jobs": {"id": 113}})
+        job_row = {"id": 113, "payload": {}, "result": {"security_review": True}}
+        cur = _FakeCursor(responses={"UPDATE jobs": job_row})
         monkeypatch.setattr("eoa.api.routes.security_review.connection", lambda: _FakeConnection(cur))
 
         def fail_if_called(*a, **k):
@@ -205,10 +242,20 @@ class TestDismissSecurityReview:
         assert r.json() == {"ok": True}
         update_calls = [q for q, _p in cur.executed if "UPDATE jobs" in q]
         assert len(update_calls) == 1
+        assert "RETURNING" in update_calls[0]
 
     def test_404_when_the_job_does_not_exist(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
-        cur = _FakeCursor(responses={"SELECT id FROM jobs": None})
+        cur = _FakeCursor(responses={"UPDATE jobs": None})
         monkeypatch.setattr("eoa.api.routes.security_review.connection", lambda: _FakeConnection(cur))
         r = client.post("/api/security-reviews/999/dismiss")
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "not_found"
+
+    def test_404_when_the_job_is_already_resolved(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
+        """A second dismiss (or approve) on an already-resolved job must not silently no-op -- the
+        atomic claim's WHERE excludes it, so `RETURNING` yields nothing (F28)."""
+        cur = _FakeCursor(responses={"UPDATE jobs": None})
+        monkeypatch.setattr("eoa.api.routes.security_review.connection", lambda: _FakeConnection(cur))
+        r = client.post("/api/security-reviews/113/dismiss")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "not_found"

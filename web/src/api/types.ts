@@ -240,7 +240,9 @@ export interface ApiClient {
 
   // W10 (docs/REVIEW_2026-09-06_evening.md round 4): agent/eoa/api/routes/security_review.py.
   getSecurityReviews(): Promise<SecurityReviewCard[]>;
-  /** "אשר והמשך": re-runs the flagged investigation with the snippet whitelisted. */
+  /** "אשר והמשך": re-runs the flagged investigation as a fresh, independent job -- an honest
+   * re-run, not a whitelist/override (F28, docs/qa/content_review/SOL-AUDIT-2026-09-24.md: no
+   * override consumer exists anywhere in the pipeline, so the backend no longer claims one). */
   postSecurityReviewApprove(jobId: string): Promise<{ job_id: string }>;
   /** "דחה": marks the flagged investigation reviewed, no re-run. */
   postSecurityReviewDismiss(jobId: string): Promise<{ ok: boolean }>;
@@ -260,7 +262,14 @@ export interface ApiClient {
        * caller must replace the message content with `text`, not append it. */
       onAnswerFinal?: (text: string) => void;
       onDone: () => void;
+      /** F30 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): a server-sent SSE `error` frame, or
+       * an EOF that closed the response body without ever sending `done`/`error`. `onDone` is
+       * never also called for the same stream once this fires. */
       onError: (err: Error) => void;
+      /** F30: the user clicked "עצור" (stop) mid-stream -- not a failure, but per-message/
+       * streaming UI state still needs clearing, same as `onDone` would. Optional so existing
+       * callers that don't care keep working; `useAskChat` wires it up. */
+      onAbort?: () => void;
     },
   ): () => void; // returns an abort function
 

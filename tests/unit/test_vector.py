@@ -182,3 +182,116 @@ class TestFindDuplicate:
         item_id, similarity = result
         assert item_id == 1
         assert similarity == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------
+# F08: exclude_id -- a retry must never match an item against its own already-committed embedding
+# --------------------------------------------------------------------------
+
+
+class TestExcludeSelf:
+    def test_load_candidates_adds_exclude_clause_and_param(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        vector.nearest([1.0, 0.0], days=7, exclude_id=42)
+
+        query, params = conn.last_cursor.executed
+        assert "id != %(exclude_id)s" in query
+        assert params["exclude_id"] == 42
+
+    def test_no_exclude_id_omits_clause(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        vector.nearest([1.0, 0.0])
+
+        query, params = conn.last_cursor.executed
+        assert "exclude_id" not in query
+        assert "exclude_id" not in params
+
+    def test_find_duplicate_excludes_its_own_just_committed_vector(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for F08: a retry re-embeds item 5 while its own vector (committed on a prior,
+        crashed run before the stage marker was written) is already in the DB. Without
+        `exclude_id`, the item would match itself at cosine 1.0 and become its own `dedup_of`."""
+        rows = [
+            {"id": 5, "embedding": [1.0, 0.0]},  # item 5's own already-committed vector
+            {"id": 9, "embedding": [0.0, 1.0]},  # unrelated, dissimilar
+        ]
+        _patch_connection(monkeypatch, rows=rows)
+        result = vector.find_duplicate([1.0, 0.0], threshold=0.9, days=7, exclude_id=5)
+        assert result is None  # id 5 excluded, id 9 doesn't clear the threshold
+
+
+# --------------------------------------------------------------------------
+# F08 efficiency: in-memory scoring + atomic embedding/dedup_of/stage commit
+# --------------------------------------------------------------------------
+
+
+class TestFindDuplicateInMemory:
+    def test_excludes_self_and_matches_best_candidate(self) -> None:
+        candidates = [(5, [1.0, 0.0]), (9, [0.99, 0.01])]
+        result = vector.find_duplicate_in_memory([1.0, 0.0], candidates, threshold=0.9, exclude_id=5)
+        assert result is not None
+        assert result[0] == 9
+
+    def test_below_threshold_returns_none(self) -> None:
+        candidates = [(9, [0.0, 1.0])]
+        result = vector.find_duplicate_in_memory([1.0, 0.0], candidates, threshold=0.9)
+        assert result is None
+
+    def test_zero_query_vector_returns_none(self) -> None:
+        candidates = [(9, [1.0, 0.0])]
+        result = vector.find_duplicate_in_memory([0.0, 0.0], candidates, threshold=0.9)
+        assert result is None
+
+
+class _TrackingCursor(_FakeCursor):
+    def __init__(self, rows: list[dict] | None, log: list[str]) -> None:
+        super().__init__(rows)
+        self._log = log
+
+    def execute(self, query: str, params: dict | None = None) -> None:
+        self._log.append(query)
+        super().execute(query, params)
+
+
+class _TrackingConnection(_FakeConnection):
+    def __init__(self, rows: list[dict] | None, log: list[str]) -> None:
+        super().__init__(rows)
+        self._log = log
+        self.cursor_calls = 0
+
+    def cursor(self, row_factory=None) -> _TrackingCursor:
+        self.cursor_calls += 1
+        self.last_cursor = _TrackingCursor(self._rows, self._log)
+        return self.last_cursor
+
+
+class TestCommitDedupResult:
+    def test_writes_embedding_dedup_of_and_stage_on_one_cursor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        executed: list[str] = []
+        conn = _TrackingConnection([], executed)
+        monkeypatch.setattr(vector, "connection", lambda: conn)
+
+        vector.commit_dedup_result(5, [0.1, 0.2], dedup_of=9, stage="embed_dedup")
+
+        # One `cursor()` call, one `with connection()` block, one commit -- the atomicity fix: a
+        # crash can no longer land between the embedding write and the stage marker.
+        assert conn.cursor_calls == 1
+        assert len(executed) == 3
+        assert any("embedding" in q for q in executed)
+        assert any("dedup_of" in q for q in executed)
+        assert any("processed_stages" in q for q in executed)
+
+    def test_skips_dedup_of_update_when_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        executed: list[str] = []
+        conn = _TrackingConnection([], executed)
+        monkeypatch.setattr(vector, "connection", lambda: conn)
+
+        vector.commit_dedup_result(5, [0.1, 0.2], dedup_of=None, stage="embed_dedup")
+
+        assert len(executed) == 2  # embedding + stage marker only, no dedup_of UPDATE
+        assert any("embedding" in q for q in executed)
+        assert any("processed_stages" in q for q in executed)
+        assert not any("dedup_of" in q for q in executed)

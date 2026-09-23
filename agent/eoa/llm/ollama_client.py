@@ -19,7 +19,7 @@ import structlog
 from pydantic import BaseModel, ValidationError, create_model
 
 from eoa.config import ChainEntryCfg, ModelSpec, settings
-from eoa.errors import LLMOutputError, ProviderUnavailable
+from eoa.errors import CliProviderError, LLMOutputError, ProviderUnavailable, ResourceUnavailable
 from eoa.execution import checkpoint, timeout_seconds
 from eoa.resources.gate import gate
 from eoa.resources.inference import local_inference_lock
@@ -707,7 +707,17 @@ def _guard_hebrew_truncation(
     ``chain_override`` (cloud-tools, 2026-09-09): forwarded to :func:`_structured_once` so this
     corrective retry -- run inside the pipeline process on the same call that just produced
     ``validated`` -- honors the same chain (e.g. a dossier's ``llm_leg`` override) rather than
-    silently falling back to ``effective_chain(role)``."""
+    silently falling back to ``effective_chain(role)``. Callers pass the SINGLE entry that actually
+    produced ``validated`` (efficiency, audit 2026-09-24) rather than the whole role chain, so this
+    retry never replays an earlier entry that already failed before ``validated`` was obtained.
+
+    F27 (audit 2026-09-24): only a schema-validation failure (``LLMOutputError``) on the repair
+    call fell back to the original ``validated`` result -- a resource/provider failure on that
+    SAME call (``ResourceUnavailable``/``ProviderUnavailable``/``CliProviderError``, e.g. the local
+    GPU gate or a cloud leg going down between the first call and this repair) propagated
+    uncaught, discarding an already schema-valid first result instead of just returning it.
+    ``DeadlineExceeded``/``LeaseLost`` still propagate unchanged -- those mean the worker itself
+    must stop, not "this specific repair failed"."""
     suspects = _find_truncation_suspects(validated)
     if not suspects:
         return _normalize_model_hebrew_quotes(validated)
@@ -728,7 +738,7 @@ def _guard_hebrew_truncation(
             provider=provider,
             chain_override=chain_override,
         )
-    except LLMOutputError as exc:
+    except (LLMOutputError, ResourceUnavailable, ProviderUnavailable, CliProviderError) as exc:
         log.warning("hebrew_truncation_retry_failed", schema=schema.__name__, error=str(exc)[:200])
         return _normalize_model_hebrew_quotes(validated)
     still_suspect = _find_truncation_suspects(retried)
@@ -775,7 +785,7 @@ def chat_structured(
     if _in_pipeline_process():
         chain = chain_override if chain_override is not None else settings().llm_providers.effective_chain(role)
         if len(chain) > 1 or chain[0].provider != "ollama":
-            validated = _chat_structured_chain(
+            validated, used_entry = _chat_structured_chain(
                 role, chain, schema, messages, task=task, interactive=interactive, options=options
             )
             return _guard_hebrew_truncation(
@@ -787,7 +797,12 @@ def chat_structured(
                 interactive=interactive,
                 options=options,
                 provider=None,
-                chain_override=chain,
+                # Efficiency (audit 2026-09-24): pin the truncation-repair retry to the ONE entry
+                # that actually produced `validated`, not the whole `chain` -- passing `chain`
+                # here replayed every earlier entry that had already failed (and would fail again)
+                # before `_chat_structured_chain` ever reached `used_entry`, up to one full wasted
+                # chain traversal per triggered repair.
+                chain_override=[used_entry],
             )
     validated, _res = _structured_once(
         role, schema, messages, task=task, interactive=interactive, options=options, provider=provider
@@ -813,11 +828,14 @@ def _chat_structured_chain(
     task: str,
     interactive: bool,
     options: dict[str, Any] | None,
-) -> T:
+) -> tuple[T, ChainEntryCfg]:
     """Chain-aware structured dispatch (U8-4/U8-ה): each entry gets its own full
     ``_structured_once`` (schema call + one corrective retry); a provider/HTTP failure *or* a
     schema-validation failure that survives that retry moves on to the next entry. Every attempt
     is logged to ``llm_calls`` via ``eoa.llm.chain``'s recorder, same as the plain-chat chain path.
+    Returns ``(validated, entry)`` -- the entry that actually succeeded (efficiency, audit
+    2026-09-24: so a caller's own follow-up call, e.g. ``_guard_hebrew_truncation``'s truncation
+    repair, can pin to that one entry instead of replaying the whole chain from its start).
 
     Bugfix (cloud-tools, 2026-09-09): each iteration passes ``chain_override=[entry]`` to
     :func:`_structured_once`, not just ``provider=provider_str`` -- inside the pipeline process
@@ -878,7 +896,7 @@ def _chat_structured_chain(
             attempt_no=attempt_no,
         )
         _record(role, attempt, 1)
-        return validated
+        return validated, entry
 
     raise LLMOutputError(f"structured llm chain for role={role!r} exhausted: {last_err}") from last_err
 

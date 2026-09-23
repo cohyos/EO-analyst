@@ -50,3 +50,12 @@ class TestParseAgy:
         proc = subprocess.CompletedProcess(args=["agy"], returncode=0, stdout="not json", stderr="")
         with pytest.raises(CliProviderError, match="non-JSON"):
             _parse_agy(proc)
+
+    def test_json_list_instead_of_object_raises_cli_provider_error(self) -> None:
+        """F26 (audit 2026-09-24): syntactically valid JSON that isn't an object (e.g. a bare
+        list) used to raise a bare AttributeError from `data.get(...)` -- not `CliProviderError`,
+        so `eoa.llm.chain.FALLBACK_EXCEPTIONS` never caught it and the whole chain aborted instead
+        of moving on to the next leg."""
+        proc = subprocess.CompletedProcess(args=["agy"], returncode=0, stdout=json.dumps([1, 2, 3]), stderr="")
+        with pytest.raises(CliProviderError, match="not an object"):
+            _parse_agy(proc)

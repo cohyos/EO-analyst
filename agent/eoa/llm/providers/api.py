@@ -189,18 +189,28 @@ class AnthropicProvider:
         except httpx.HTTPError as exc:
             raise ApiProviderError(f"anthropic API request failed: {redact_secrets(str(exc))}") from exc
         duration_ms = int((time.monotonic() - t0) * 1000)
-        data = r.json()
-        content = ""
-        if tool_name:
-            for block in data.get("content", []) or []:
-                if block.get("type") == "tool_use" and block.get("name") == tool_name:
-                    content = json.dumps(block.get("input", {}), ensure_ascii=False)
-                    break
-        if not content:
-            for block in data.get("content", []) or []:
-                if block.get("type") == "text":
-                    content += block.get("text", "")
-        usage = data.get("usage") or {}
+        # F26 (audit 2026-09-24): a 200 response with a non-JSON or wrong-shaped body used to raise
+        # a bare `json.JSONDecodeError`/`AttributeError`/... straight out of this method -- not one
+        # of `eoa.llm.chain.FALLBACK_EXCEPTIONS` -- which aborted the whole fallback chain instead
+        # of moving on to the next leg. Converting any malformed-envelope failure into
+        # `ApiProviderError` here lets it fall through exactly like an HTTP error already does.
+        try:
+            data = r.json()
+            content = ""
+            if tool_name:
+                for block in data.get("content", []) or []:
+                    if block.get("type") == "tool_use" and block.get("name") == tool_name:
+                        content = json.dumps(block.get("input", {}), ensure_ascii=False)
+                        break
+            if not content:
+                for block in data.get("content", []) or []:
+                    if block.get("type") == "text":
+                        content += block.get("text", "")
+            usage = data.get("usage") or {}
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
+            raise ApiProviderError(
+                f"anthropic API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
+            ) from exc
         log.info("api_provider_call", provider="anthropic", model=mdl, duration_ms=duration_ms)
         return ProviderResult(
             content=strip_code_fences(content),
@@ -325,14 +335,20 @@ class GeminiProvider:
         except httpx.HTTPError as exc:
             raise ApiProviderError(f"gemini API request failed: {redact_secrets(str(exc))}") from exc
         duration_ms = int((time.monotonic() - t0) * 1000)
-        data = r.json()
-        content = ""
-        for cand in data.get("candidates") or []:
-            for part in (cand.get("content") or {}).get("parts") or []:
-                content += part.get("text", "")
-            if content:
-                break
-        usage = data.get("usageMetadata") or {}
+        # F26 (audit 2026-09-24): see the identical comment in AnthropicProvider.chat above.
+        try:
+            data = r.json()
+            content = ""
+            for cand in data.get("candidates") or []:
+                for part in (cand.get("content") or {}).get("parts") or []:
+                    content += part.get("text", "")
+                if content:
+                    break
+            usage = data.get("usageMetadata") or {}
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
+            raise ApiProviderError(
+                f"gemini API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
+            ) from exc
         log.info("api_provider_call", provider="gemini", model=mdl, duration_ms=duration_ms)
         return ProviderResult(
             content=strip_code_fences(content),
@@ -416,9 +432,15 @@ class OpenAIProvider:
         except httpx.HTTPError as exc:
             raise ApiProviderError(f"openai API request failed: {redact_secrets(str(exc))}") from exc
         duration_ms = int((time.monotonic() - t0) * 1000)
-        data = r.json()
-        content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "") or ""
-        usage = data.get("usage") or {}
+        # F26 (audit 2026-09-24): see the identical comment in AnthropicProvider.chat above.
+        try:
+            data = r.json()
+            content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "") or ""
+            usage = data.get("usage") or {}
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
+            raise ApiProviderError(
+                f"openai API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
+            ) from exc
         log.info("api_provider_call", provider="openai", model=mdl, duration_ms=duration_ms)
         return ProviderResult(
             content=strip_code_fences(content),

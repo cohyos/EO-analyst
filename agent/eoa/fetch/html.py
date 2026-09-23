@@ -256,7 +256,21 @@ def _server_addr(response: httpx.Response) -> str | None:
     return str(info[0]) if isinstance(info, tuple | list) else str(info)
 
 
-async def _get_robot_parser(url: str, client: httpx.AsyncClient, user_agent: str) -> RobotFileParser:
+async def _get_robot_parser(
+    url: str,
+    client: httpx.AsyncClient,
+    user_agent: str,
+    *,
+    pin_ips: set[str] | None = None,
+) -> RobotFileParser:
+    """F01 (SOL-AUDIT-2026-09-24): the robots.txt fetch is on the same host as the page fetch it
+    gates, so it is pinned to the same caller-validated ``pin_ips`` set as `fetch_page`'s own page
+    request -- previously this made an entirely unvalidated connection, the one gap the finding
+    calls out explicitly (`fetch_page`'s page request *did* already have a post-connect pin
+    check). A mismatch is a suspected DNS-rebinding hop and fails closed (raises), unlike the
+    "no robots.txt" / transport-error cases below, which intentionally fail open (allow-all) --
+    those are availability failures, not a security signal. A cache hit returns the already-parsed
+    result without any new connection, so it never needs (or bypasses) this check."""
     parts = urlsplit(url)
     root = f"{parts.scheme}://{parts.netloc}"
     now = time.monotonic()
@@ -269,6 +283,17 @@ async def _get_robot_parser(url: str, client: httpx.AsyncClient, user_agent: str
     robots_url = urljoin(root, "/robots.txt")
     try:
         response = await client.get(robots_url, timeout=10.0, headers={"User-Agent": user_agent})
+        if pin_ips:
+            server_addr = _server_addr(response)
+            if server_addr is not None and server_addr not in pin_ips:
+                from eoa.errors import FetchError
+
+                raise FetchError(
+                    f"connected address {server_addr} for {robots_url} does not match the "
+                    f"validated address set {sorted(pin_ips)} -- possible DNS rebinding"
+                )
+            if server_addr is None:
+                log.debug("fetch.pin_ip_unverifiable", url=robots_url)
         if response.status_code >= 400:
             parser.parse([])  # no robots.txt (or blocked) -> fail open, allow all
         else:
@@ -319,16 +344,25 @@ async def fetch_page(
     owns_client = client is None
     active_client = client or httpx.AsyncClient()
     try:
-        if respect_robots:
-            parser = await _get_robot_parser(url, active_client, user_agent)
-            if not parser.can_fetch(user_agent, url):
-                raise FetchError(f"robots.txt disallows fetching {url}")
-
         current_url = url
         current_pin_ips = pin_ips
         response: httpx.Response | None = None
         content: bytes = b""
         for _hop in range(_MAX_REDIRECT_HOPS + 1):
+            # F37: robots permission is re-checked for EVERY hop's host/path, not just the
+            # starting URL -- on the first iteration `current_url == url`; on a manual-redirect
+            # hop it is the freshly-validated redirect target, whose robots.txt may differ from
+            # the origin's (and is cached separately, keyed by root). With
+            # `manual_redirects=False` (no `validate_redirect` given -- the normal-callers path,
+            # unchanged), httpx already followed every redirect internally by the time a response
+            # comes back, so this loop runs exactly once anyway and behavior is identical to
+            # before.
+            if respect_robots:
+                parser = await _get_robot_parser(
+                    current_url, active_client, user_agent, pin_ips=current_pin_ips
+                )
+                if not parser.can_fetch(user_agent, current_url):
+                    raise FetchError(f"robots.txt disallows fetching {current_url}")
             try:
                 response, content = await _get_with_retry(
                     active_client,
@@ -369,6 +403,17 @@ async def fetch_page(
             raise FetchError(f"too many redirects (> {_MAX_REDIRECT_HOPS}) fetching {url}")
 
         assert response is not None  # loop always runs >= 1 iteration
+        # F10: a non-retryable non-2xx response (404/401/451/an undelivered redirect with no
+        # `Location`, ...) is never real article/listing content -- 5xx/429 are already turned
+        # into a `FetchError` by the retry wrapper above; everything else used to fall through to
+        # `_decode` and be returned as an ordinary `FetchedPage`, which `service.py` would then
+        # parse or store as if it were the genuine page. Rejecting here, before extraction, means
+        # neither an item row nor a "source fetched OK" result is ever produced from one.
+        if not (200 <= response.status_code < 300):
+            raise FetchError(
+                f"non-success status {response.status_code} for {current_url} "
+                f"(final url {response.url})"
+            )
         html_text = _decode(content, response)
         return FetchedPage(
             url=url,

@@ -314,10 +314,21 @@ def is_loopback_host(host: str | None) -> bool:
 
 
 def effective_client_host(peer_host: str | None, forwarded_for: str | None) -> str | None:
+    """Resolve the address to trust-check for a request whose direct TCP peer is loopback.
+
+    `X-Forwarded-For` is attacker-controlled end to end: a remote client can set an arbitrary
+    value before the request ever reaches the trusted local proxy. A well-behaved proxy (and
+    `tailscale serve`, when it forwards this header at all) *appends* the hop it saw the
+    connection from rather than overwriting the header, so the one entry we can actually trust
+    is the LAST one -- not the first, which is whatever the original caller supplied. Taking the
+    first value let a remote caller put `127.0.0.1` in front of the chain and bypass the session
+    gate entirely (F06). If the last entry itself is not loopback, the request is treated as
+    remote regardless of anything earlier in the chain.
+    """
     if peer_host and is_loopback_host(peer_host) and forwarded_for:
-        first = forwarded_for.split(",")[0].strip()
-        if first:
-            return first
+        parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     return peer_host
 
 

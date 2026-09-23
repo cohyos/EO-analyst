@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from eoa.llm.schemas.analysis import DailyReportDraft, Sentence, StructuredSection
+from eoa.llm.schemas.analysis import AssumptionFalsifier, DailyReportDraft, Sentence, StructuredSection
 from eoa.report import docx_builder as db
 from eoa.report.textnorm import (
     canonicalize_hebrew_names,
@@ -190,6 +190,42 @@ def test_normalize_draft_fixes_company_name_before_render(misspelled_draft):
     assert "ראפאל" not in fixed.exec_summary[0].text_he
     assert fixed.exec_summary[0].text_he == "רפאל השיקה מערכת חדשה."
     assert fixed.sections[0].sentences[0].text_he == "ורפאל ממשיכה לפתח את המערכת."
+
+
+def test_normalize_draft_fixes_company_name_in_bluf_and_assumptions():
+    """F38 (SOL-AUDIT-2026-09-24): normalize_draft used to skip draft.bluf/draft.assumptions
+    entirely -- docx_builder renders both natively, so a canonical-name misspelling there reached
+    the page unnormalized while the identical text in exec_summary/sections was already fixed."""
+    draft = DailyReportDraft(
+        bluf=[Sentence(text_he="ראפאל זכתה בחוזה חדש.", cites=[1])],
+        exec_summary=[],
+        sections=[],
+        assumptions=[
+            AssumptionFalsifier(
+                assumption_he="ראפאל תמשיך לספק מערכות.",
+                falsifier_he="ראפאל תפסיד מכרז מרכזי.",
+                cites=[1],
+            )
+        ],
+        open_points_he=[],
+    )
+    fixed = normalize_draft(draft)
+    assert "ראפאל" not in fixed.bluf[0].text_he
+    assert fixed.bluf[0].text_he == "רפאל זכתה בחוזה חדש."
+    assert "ראפאל" not in fixed.assumptions[0].assumption_he
+    assert "ראפאל" not in fixed.assumptions[0].falsifier_he
+    assert fixed.assumptions[0].assumption_he == "רפאל תמשיך לספק מערכות."
+    assert fixed.assumptions[0].falsifier_he == "רפאל תפסיד מכרז מרכזי."
+    # citations untouched
+    assert fixed.bluf[0].cites == [1]
+    assert fixed.assumptions[0].cites == [1]
+
+
+def test_normalize_draft_empty_bluf_and_assumptions_is_a_no_op():
+    draft = DailyReportDraft(exec_summary=[], sections=[], open_points_he=[])
+    fixed = normalize_draft(draft)
+    assert fixed.bluf == []
+    assert fixed.assumptions == []
 
 
 def test_render_markdown_output_has_no_misspelling(misspelled_draft, misspelled_items):

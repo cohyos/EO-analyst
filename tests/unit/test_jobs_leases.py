@@ -195,8 +195,13 @@ class TestFinishJobLeaseOwnership:
 
 
 class TestReapStaleJobs:
-    def test_query_marks_running_jobs_with_expired_lease_as_failed(self, monkeypatch) -> None:
-        cur = FakeCursor(fetchall_result=[{"id": 1}, {"id": 2}])
+    """F03 (audit 2026-09-24): an expired lease is now requeued `deferred` (bounded retries via
+    `jobs.attempts`, cooldown via `not_before`) instead of going straight to terminal `failed`; a
+    user-cancelled job (`payload.stop = true`) still lands on `failed` immediately, never
+    requeued. `RETURNING id, state` (not just `id`) so the fake rows below must carry `state`."""
+
+    def test_query_shape_covers_deferred_requeue_and_bounded_failure(self, monkeypatch) -> None:
+        cur = FakeCursor(fetchall_result=[{"id": 1, "state": "deferred"}, {"id": 2, "state": "failed"}])
         conn = FakeConnection(cur)
         monkeypatch.setattr("eoa.memory.relational.connection", lambda: conn)
 
@@ -205,10 +210,15 @@ class TestReapStaleJobs:
         assert count == 2
         query, params = cur.executed[0]
         assert "state = 'running'" in query
-        assert "state = 'failed'" in query
+        assert "'deferred'" in query
+        assert "'failed'" in query
+        assert "attempts >=" in query
         assert "stale lease" in query
         assert "lease_expires_at" in query
-        assert params == {"max_age_hours": 6}
+        assert "payload->>'stop'" in query
+        assert params["max_age_hours"] == 6
+        assert params["max_attempts"] > 0
+        assert params["cooldown_minutes"] > 0
 
     def test_returns_zero_when_nothing_is_stale(self, monkeypatch) -> None:
         cur = FakeCursor(fetchall_result=[])
@@ -227,8 +237,8 @@ class TestReapStaleJobs:
         _, params = cur.executed[0]
         assert params["max_age_hours"] == 6
 
-    def test_logs_warning_with_reaped_count_when_rows_found(self, monkeypatch) -> None:
-        cur = FakeCursor(fetchall_result=[{"id": 9}])
+    def test_logs_warning_with_requeued_and_failed_breakdown(self, monkeypatch) -> None:
+        cur = FakeCursor(fetchall_result=[{"id": 9, "state": "deferred"}, {"id": 10, "state": "failed"}])
         conn = FakeConnection(cur)
         fake_log = FakeLog()
         monkeypatch.setattr("eoa.memory.relational.connection", lambda: conn)
@@ -236,4 +246,7 @@ class TestReapStaleJobs:
 
         reap_stale_jobs()
 
-        assert any(evt == "jobs.reaped_stale" for evt, _ in fake_log.warnings)
+        _event, kw = next((e, kw) for e, kw in fake_log.warnings if e == "jobs.reaped_stale")
+        assert kw["count"] == 2
+        assert kw["requeued"] == 1
+        assert kw["failed"] == 1

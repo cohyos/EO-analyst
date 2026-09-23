@@ -121,4 +121,32 @@ describe("PayloadsPage", () => {
     expect(screen.getByText("מפרט/מחיר טרם תועדו")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "מפרט יצרן" })).not.toBeInTheDocument();
   });
+
+  // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): `vendor` used to be applied client-side
+  // against whatever the (500-row-capped) fetch happened to contain -- a match sitting outside
+  // that cap could never be found. Asserts the filter is forwarded to `api.getPayloads` itself
+  // (server-side filtering, applied before any cap), not just used to re-filter an already-
+  // fetched page.
+  it("forwards the vendor filter as a getPayloads() call argument", async () => {
+    // "Rafael" must exist as a dropdown option (from the vendor-unfiltered baseline/facets fetch)
+    // before it can be selected -- a native <select> silently ignores a value with no matching
+    // <option>.
+    const baseline = [makePayload(), makePayload({ id: 4, canonical_name: "Toplite baseline", vendor_entity_name: "Rafael" })];
+    const beyondCap = makePayload({ id: 2, canonical_name: "Beyond the cap", vendor_entity_name: "Rafael" });
+    getPayloads.mockImplementation((params: { vendor?: string } = {}) =>
+      Promise.resolve(payloadsResponse(params.vendor === "Rafael" ? [beyondCap] : baseline)),
+    );
+    renderPage();
+    await screen.findByText("WESCAM MX-15");
+
+    fireEvent.change(screen.getByRole("combobox", { name: "סינון לפי יצרן" }), {
+      target: { value: "Rafael" },
+    });
+
+    // The row that only exists in the server's vendor-filtered result must now show up -- it was
+    // never present in the earlier (unfiltered) fetch at all, so a client-side-only filter could
+    // not possibly have found it.
+    expect(await screen.findByText("Beyond the cap")).toBeInTheDocument();
+    expect(getPayloads).toHaveBeenCalledWith(expect.objectContaining({ vendor: "Rafael" }));
+  });
 });

@@ -137,8 +137,22 @@ def parse_sitemap(
             if not urlsplit(loc).path.startswith(path_prefix):
                 continue
 
-        published_at = _parse_datetime(news_pubdate_raw) or _parse_datetime(lastmod_raw)
-        if cutoff is not None and published_at is not None and published_at < cutoff:
+        # F12 (SOL-AUDIT-2026-09-24): `lastmod` describes when the PAGE was last modified, not
+        # when the article was published -- a CMS re-saving/re-templating an old page (a common,
+        # innocuous event) bumps `lastmod` to "now" without the article itself being new. Using it
+        # as a `published_at` fallback let an old, undated article look freshly published forever
+        # after any such touch. `lastmod` is still fine, and used here, for `since_days` CRAWL
+        # SELECTION (deciding whether this run bothers fetching the article at all -- worst case,
+        # an untouched-but-genuinely-old article is skipped, which `since_days`'s own "over-fetch
+        # rather than lose undated content" convention already tolerates via `crawl_date is None`
+        # below). `published_at`, which flows into `items.published_at` via
+        # `service._ingest_sitemap_source`'s `fallback_published_at`, now comes ONLY from
+        # `news:publication_date` -- an actual publish-date field -- and is `None` when the
+        # sitemap doesn't carry one (the item still gets stored; see the html-metadata
+        # `published_at` backfill in `eoa.fetch.sanitize.extract_clean_text`).
+        published_at = _parse_datetime(news_pubdate_raw)
+        crawl_date = published_at or _parse_datetime(lastmod_raw)
+        if cutoff is not None and crawl_date is not None and crawl_date < cutoff:
             continue
 
         entries.append(SitemapEntry(url=loc, title=news_title, published_at=published_at))

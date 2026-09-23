@@ -23,7 +23,7 @@ from eoa.llm.schemas.reports import (
     MonthlyTrendSection,
     TrendParagraph,
 )
-from eoa.report import monthly
+from eoa.report import israel_section, monthly
 from eoa.report.qa_citations import check
 
 # --------------------------------------------------------------------------
@@ -403,6 +403,14 @@ def patch_monthly_collectors(monkeypatch, tmp_path):
     monkeypatch.setattr(monthly, "top_events_by_amount", lambda s, e, limit=10: [])
     monkeypatch.setattr(monthly, "full_horizon_table", lambda: [])
     monkeypatch.setattr(monthly, "watchlist_changes", lambda s, e: [])
+    # Section 3 known-failure fix (audit SOL-AUDIT-2026-09-24): `build_monthly`'s two-failure
+    # fallback path does `from eoa.report.israel_section import collect_israel_items` INSIDE the
+    # function body (see monthly.py), so it re-resolves `israel_section.collect_israel_items` at
+    # call time -- it must be patched on the `israel_section` module itself, not on `monthly`.
+    # Unmocked, it hits the live DB and can inject extra live items/citation numbers into the
+    # fallback draft, making TestBuildMonthlyDeterministicFallback's fixed-registry assertion
+    # (`check(draft, [dict(it) for it in MONTH_ITEMS])`) flaky/non-deterministic.
+    monkeypatch.setattr(israel_section, "collect_israel_items", lambda *a, **k: [])
 
     def _fake_persist(start, end, docx_path, md_path, html_path, items, qa, draft, **kwargs):
         captured["draft"] = draft

@@ -215,14 +215,14 @@ def collect_month_items(
     cap = max_items or settings().triage.daily_report_max_items * 30
     sql = """
         SELECT i.id, i.url, i.title, i.domain, i.subdomain, i.published_at, i.level, i.score,
-               i.summary_he, i.so_what_he, i.report_kind, i.geography, i.trl,
+               i.summary_he, i.so_what_he, i.report_kind, i.geography, i.trl, i.story_id, i.lang,
                COALESCE(src.name, i.url) AS source_name
         FROM items i
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE i.security_status = 'clean'
           AND i.dedup_of IS NULL
           AND i.level = ANY(%(levels)s)
-          AND COALESCE(i.published_at, i.created_at)::date
+          AND (COALESCE(i.published_at, i.created_at) AT TIME ZONE 'Asia/Jerusalem')::date
               BETWEEN %(start)s AND %(end)s
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s
@@ -300,7 +300,13 @@ def _top_event_kind_he(event: dict[str, Any]) -> str:
 
 
 def top_events_by_amount(period_start: dt.date, period_end: dt.date, limit: int = 10) -> list[dict[str, Any]]:
-    """FR-5.4: the 10 largest business events (by ``amount_usd``) in the month."""
+    """FR-5.4: the 10 largest business events (by ``amount_usd``) in the month.
+
+    F15: the event window dates from ``e.date`` or the item's immutable ``published_at``/
+    ``created_at`` -- never ``i.fetched_at`` (bumped on a URL re-fetch/conflict, F09), which could
+    make an old undated event reappear as "new" after a plain re-fetch of its source article. F40:
+    the ``::date`` cast is anchored to Asia/Jerusalem explicitly rather than relying on the DB
+    session's own time zone setting."""
     sql = """
         SELECT e.id, e.kind, e.title, e.date, e.amount_usd, e.currency, e.parties, e.customer,
                e.program, e.confidence, e.item_id, i.url AS item_url, i.title AS item_title, i.published_at,
@@ -309,7 +315,11 @@ def top_events_by_amount(period_start: dt.date, period_end: dt.date, limit: int 
         JOIN items i ON i.id = e.item_id
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE e.amount_usd IS NOT NULL
-          AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
+          AND COALESCE(
+                e.date,
+                (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                (i.created_at AT TIME ZONE 'Asia/Jerusalem')::date
+              )
               BETWEEN %(start)s AND %(end)s
           AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
         ORDER BY e.amount_usd DESC NULLS LAST
@@ -570,19 +580,24 @@ def draft_monthly(
     evidence_item_ids: set[int] | None = None,
     role: str = "resident",
     interactive: bool = False,
+    period_end: dt.date | None = None,
 ) -> MonthlyReportDraft:
     """Draft the ``MonthlyReportDraft`` via the resident model; zero items skip the LLM call.
 
     ``items`` stays the full citation registry (unchanged ``n`` numbering); only the prompt-visible
     item list is reduced (:func:`eoa.report.weekly.select_items_for_prompt`) — same rationale as
     the weekly report's own round-2 migration (module docstring).
+
+    F34: ``period_end`` is the report's own resolved month-end (``build_monthly``'s ``end``), used
+    for the prompt's ``{date_he}`` header instead of today -- a historical rebuild must show its own
+    date. Defaults to today (Asia/Jerusalem).
     """
     if not items:
         return _no_items_draft()
     prompt_items = select_items_for_prompt(items, evidence_item_ids, per_domain=_PROMPT_ITEMS_PER_DOMAIN)
     prompt = render(
         "report_monthly",
-        date_he=hebrew_date_str(_today_jerusalem()),
+        date_he=hebrew_date_str(period_end or _today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
         items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
@@ -617,11 +632,12 @@ def _corrective_retry(
     evidence_item_ids: set[int] | None = None,
     role: str,
     interactive: bool,
+    period_end: dt.date | None = None,
 ) -> MonthlyReportDraft:
     prompt_items = select_items_for_prompt(items, evidence_item_ids, per_domain=_PROMPT_ITEMS_PER_DOMAIN)
     prompt = render(
         "report_monthly",
-        date_he=hebrew_date_str(_today_jerusalem()),
+        date_he=hebrew_date_str(period_end or _today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
         items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
@@ -853,6 +869,7 @@ def build_monthly(
         evidence_item_ids=all_evidence_ids,
         role=role,
         interactive=interactive,
+        period_end=end,
     )
     # round 5 P1: draft.trends' cites/duplicates are validated directly by
     # qa_citations._check_structured (MonthlyReportDraft is now the structured shape, same
@@ -871,6 +888,7 @@ def build_monthly(
             evidence_item_ids=all_evidence_ids,
             role=role,
             interactive=interactive,
+            period_end=end,
         )
         qa = check(draft, citation_items)
 
@@ -981,6 +999,17 @@ def build_monthly(
     top_events = top_events_by_amount(start, end, limit=10)
     horizon = full_horizon_table()
     watchlist_new = watchlist_changes(start, end)
+
+    # F15: top_events_by_amount is its OWN query, independent of `items`/trend evidence/`events`
+    # (collected above and already folded into `citation_items`/`id_to_n`) -- a top event whose
+    # item never made it into the red/orange item list, a trend's evidence, or the events table
+    # (e.g. a yellow-level item) previously had no registry entry at all, so its own table row
+    # rendered a bare "—" instead of a citation number. Register every top event's source here,
+    # before the table below is built, so it gets a real ``[n]``.
+    _top_event_ids = {e["item_id"] for e in top_events if e.get("item_id") is not None}
+    if _top_event_ids:
+        citation_items = _extend_registry_with_ids(citation_items, _top_event_ids)
+        id_to_n = {it["id"]: it["n"] for it in citation_items if it.get("id") is not None}
 
     trend_sections = [
         {

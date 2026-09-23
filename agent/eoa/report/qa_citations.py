@@ -479,6 +479,32 @@ def _check_structured(draft: Any, valid_ns: set[int]) -> tuple[list[str], set[in
     if note is not None and len(note.sentences_he) > 3:
         errors.append('"הערכת האנליסט" חייבת להכיל עד 3 משפטים בלבד')
 
+    # F18: BLUF (``draft.bluf``, a ``list[Sentence]``) and the "הנחות והפרכות" key-assumptions
+    # check (``draft.assumptions``, a ``list[AssumptionFalsifier]``) are both rendered fields
+    # (``eoa.report.docx_builder`` reads them natively) but, unlike ``sections``/``trends``/
+    # ``exec_summary`` above, were never registry-checked here -- a ``cites`` entry pointing at a
+    # non-existent item number could pass QA and render a dangling ``[n]``. ``Sentence.cites`` is
+    # already non-empty by construction (goal 1 schema) for ``bluf``; ``AssumptionFalsifier.cites``
+    # may legitimately be empty (a structural premise, not itself a citable claim) -- only a
+    # non-empty ``cites`` is checked for registry validity, same as ``outlook`` above.
+    for sentence in getattr(draft, "bluf", None) or []:
+        for n in sentence.cites:
+            if n not in valid_ns:
+                bad_refs.add(n)
+                errors.append(
+                    f'ב-BLUF ("שורה תחתונה"): ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה — '
+                    f'"{sentence.text_he}"'
+                )
+
+    for pair in getattr(draft, "assumptions", None) or []:
+        for n in getattr(pair, "cites", None) or []:
+            if n not in valid_ns:
+                bad_refs.add(n)
+                errors.append(
+                    f"בהנחות והפרכות: ההפניה [{n}] אינה מצביעה על פריט קיים ברשימה — "
+                    f'"{pair.assumption_he}"'
+                )
+
     return errors, bad_refs, duplicate_sentences
 
 

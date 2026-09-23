@@ -97,3 +97,31 @@ def test_parse_feed_atom_updated_used_when_published_missing() -> None:
     assert entries[0].published_at is not None
     assert entries[0].published_at.month == 8
     assert entries[0].published_at.day == 30
+
+
+def test_struct_time_to_datetime_uses_utc_not_local_mktime(monkeypatch) -> None:
+    """F13 (SOL-AUDIT-2026-09-24): `time.mktime` interprets its input as LOCAL wall-clock time --
+    applying it to feedparser's already-UTC `*_parsed` struct_time (feedparser normalizes every
+    feed's timezone on parse) silently shifted every entry's timestamp by the process's local UTC
+    offset (e.g. this deployment's own Asia/Jerusalem) before the result was labelled `tz=UTC`.
+    Proven here without depending on the test machine's own timezone (Windows has no
+    `time.tzset` to fake one): `time.mktime` is monkeypatched to raise, so this fails loudly if
+    the fix (`calendar.timegm`, which treats its input as UTC and never touches local time) ever
+    regresses back to `time.mktime`.
+    """
+    import calendar
+    import time as time_mod
+
+    from eoa.fetch.rss import _struct_time_to_datetime
+
+    struct = time_mod.struct_time((2026, 9, 1, 12, 0, 0, 1, 244, 0))
+    expected = datetime.fromtimestamp(calendar.timegm(struct), tz=UTC)
+
+    def _mktime_must_not_be_called(_value):
+        raise AssertionError("time.mktime must not be used -- it applies the LOCAL UTC offset")
+
+    monkeypatch.setattr(time_mod, "mktime", _mktime_must_not_be_called)
+
+    result = _struct_time_to_datetime(struct)
+    assert result == expected
+    assert result.hour == 12  # the UTC hour carried straight from the struct_time, unshifted

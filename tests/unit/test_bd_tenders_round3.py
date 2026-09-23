@@ -486,7 +486,7 @@ class TestRunIngestUpsertsAllConfiguredSources:
 
         attempted: list[str] = []
 
-        async def fake_ingest_one_source(source, *, source_db_id, since_days, throttle, stats):
+        async def fake_ingest_one_source(source, *, source_db_id, since_days, throttle, stats, **_kw):
             attempted.append(source.id)
 
         monkeypatch.setattr(service, "_ingest_one_source", fake_ingest_one_source)

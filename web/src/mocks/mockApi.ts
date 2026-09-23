@@ -1073,7 +1073,12 @@ export const mockApi: ApiClient = {
     handlers.onMeta?.(kind || "ollama", mockModel);
     setTimeout(tick, 150);
     return () => {
-      cancelled = true;
+      // F30 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): mirror `real.ts`'s abort handling
+      // so the mock/dev UI doesn't leave the assistant bubble stuck mid-stream after "עצור".
+      if (!cancelled) {
+        cancelled = true;
+        handlers.onAbort?.();
+      }
     };
   },
 

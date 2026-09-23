@@ -519,10 +519,17 @@ def test_build_weekly_ignores_existing_contaminated_backup_and_writes_fresh_file
 
     paths = weekly.build_weekly(period_end=period_end)
 
-    fresh_md = reports_dir / f"weekly_{period_end.isoformat()}.md"
-    assert paths.md == fresh_md
-    assert fresh_md.exists()
-    fresh_text = fresh_md.read_text(encoding="utf-8")
+    # `eoa.report.artifacts.versioned_paths` (F-round-... "quarantine"/versioning task) now always
+    # gives one build its own `versions/<uuid>/` directory -- `build_weekly` never writes directly
+    # to the bare `weekly_<date>.md` stem any more, so that old direct path is never created (it's
+    # the stale `.contaminated.md.bak` sitting next to it, untouched, that proves the old file was
+    # never read or resurrected). Assert the *returned* versioned path instead.
+    stale_direct_md = reports_dir / f"weekly_{period_end.isoformat()}.md"
+    assert not stale_direct_md.exists()
+    assert paths.md.name == f"weekly_{period_end.isoformat()}.md"
+    assert paths.md.parent.parent == reports_dir / "versions"
+    assert paths.md.exists()
+    fresh_text = paths.md.read_text(encoding="utf-8")
     assert "CONTAMINATED" not in fresh_text
     assert "עדכון קצר לבדיקת הרגרסיה" in fresh_text
     # the stale backup is left exactly as it was -- build_weekly never reads it

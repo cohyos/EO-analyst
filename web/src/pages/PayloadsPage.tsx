@@ -48,39 +48,52 @@ export function PayloadsPage() {
   const [manualExpanded, setManualExpanded] = useState<Record<string, boolean>>({});
   const isNarrow = useIsNarrowScreen();
 
+  // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): `vendor` used to be applied client-side,
+  // AFTER this query's own 500-row cap -- a payload whose vendor match sits outside that cap could
+  // never be found no matter how exact the filter, showing a false "no matches" empty state. The
+  // API already supports `vendor` server-side (`eoa.api.routes.payloads.list_payloads`, an ILIKE
+  // match) -- filtering there means the cap is applied AFTER matching, not before.
   const payloadsQuery = useQuery({
-    queryKey: ["payloads", filters.category],
+    queryKey: ["payloads", filters.category, filters.vendor],
+    queryFn: () =>
+      api.getPayloads({
+        category: filters.category || undefined,
+        vendor: filters.vendor || undefined,
+        limit: 500,
+      }),
+  });
+  // Facet list (vendor dropdown options) from a category-scoped but vendor-UNfiltered baseline
+  // fetch, so picking a vendor doesn't collapse the dropdown down to just that one vendor.
+  const facetsQuery = useQuery({
+    queryKey: ["payloads-facets", filters.category],
     queryFn: () => api.getPayloads({ category: filters.category || undefined, limit: 500 }),
   });
 
   const payloads = payloadsQuery.data?.payloads ?? [];
+  const facetPayloads = facetsQuery.data?.payloads ?? payloads;
 
   const vendors = useMemo(() => {
     const set = new Set<string>();
-    for (const p of payloads) if (p.vendor_entity_name) set.add(p.vendor_entity_name);
+    for (const p of facetPayloads) if (p.vendor_entity_name) set.add(p.vendor_entity_name);
     return [...set].sort();
-  }, [payloads]);
+  }, [facetPayloads]);
 
-  const vendorScopedPayloads = useMemo(() => {
-    if (!filters.vendor) return payloads;
-    return payloads.filter((p) => p.vendor_entity_name === filters.vendor);
-  }, [payloads, filters.vendor]);
-
+  // `q` stays a client-side filter over `payloads` -- unlike the (previously mis-scoped) `vendor`
+  // filter, this is safe: `payloads` above is already the complete server-matched set for the
+  // active category+vendor (well under the 500-row cap at current data volume), so no match can
+  // be hiding outside the fetched page the way `vendor` used to.
   const filteredPayloads = useMemo(() => {
-    let list = vendorScopedPayloads;
-    if (filters.q) {
-      const q = filters.q.toLowerCase();
-      list = list.filter(
-        (p) => p.canonical_name.toLowerCase().includes(q) || (p.family ?? "").toLowerCase().includes(q),
-      );
-    }
-    return list;
-  }, [vendorScopedPayloads, filters.q]);
+    if (!filters.q) return payloads;
+    const q = filters.q.toLowerCase();
+    return payloads.filter(
+      (p) => p.canonical_name.toLowerCase().includes(q) || (p.family ?? "").toLowerCase().includes(q),
+    );
+  }, [payloads, filters.q]);
 
   // W19b: vendor -> family -> variant grouping, built client-side from the already-fetched flat
   // list (`@/lib/payloadFamilies`) -- see that module's docstring for why this doesn't call
   // `GET /api/payloads/tree` a second time.
-  const rawTree = useMemo(() => buildPayloadTree(vendorScopedPayloads), [vendorScopedPayloads]);
+  const rawTree = useMemo(() => buildPayloadTree(payloads), [payloads]);
   const tree = useMemo(() => filterPayloadTree(rawTree, filters.q), [rawTree, filters.q]);
 
   const baseExpanded = useMemo(() => defaultExpandedKeys(rawTree), [rawTree]);
@@ -135,7 +148,7 @@ export function PayloadsPage() {
 
       {!payloadsQuery.isLoading && !payloadsQuery.isError && (
         <>
-          {payloads.length === 0 ? (
+          {facetPayloads.length === 0 ? (
             <EmptyState title={t("payloads.emptyTitle")} description={t("payloads.emptyDescription")} />
           ) : (
             <>

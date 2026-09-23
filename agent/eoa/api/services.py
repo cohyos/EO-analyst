@@ -30,6 +30,8 @@ from typing import Any, Literal
 import httpx
 import structlog
 import yaml
+from lxml import html as lxml_html
+from psycopg.types.json import Json
 
 from eoa import config as eoa_config
 from eoa import db
@@ -454,13 +456,16 @@ def list_items(
         where.append("i.domain = %(domain)s")
         params["domain"] = domain
     if since:
-        # Q5-10 (docs/qa/findings_Q5_r2.md): the Morning KPI cards (`_night_summary`) count items
-        # by `COALESCE(fetched_at, created_at)` over a rolling last-24h window. This filter used to
-        # key off `COALESCE(published_at, created_at)` instead -- a different field (and different
-        # default) that made the KPI card's number and the feed count of the page it deep-links to
-        # (`/feed?since=24h`, `/feed?level=red&since=24h`) disagree. Same expression on both sides
-        # now so "23" on the card always means "23" items in the feed.
-        where.append("COALESCE(i.fetched_at, i.created_at) >= %(since)s")
+        # Q5-10 (docs/qa/findings_Q5_r2.md) / F16 (SOL-AUDIT-2026-09-24.md): the only caller of
+        # this filter is the Morning "items ingested" KPI card's `/feed?since=24h` deep link
+        # (`web/src/pages/FeedPage.tsx`) -- it means "newly ingested in the last 24h", not
+        # "recently published news". `fetched_at` is bumped on every re-fetch of an already-known
+        # URL (`relational.py` `insert_item`'s `ON CONFLICT ... DO UPDATE SET fetched_at = ...`),
+        # so an old undated item re-crawled today used to resurface as if it were new. `created_at`
+        # is set once at insert and never touched again, so it actually reflects ingestion time.
+        # Kept identical to `_night_summary`'s `_item_count` window so the KPI card's number always
+        # matches the feed count of the page it deep-links to.
+        where.append("i.created_at >= %(since)s")
         params["since"] = since
     if q:
         where.append("(i.title ILIKE %(q)s OR i.summary_he ILIKE %(q)s OR i.so_what_he ILIKE %(q)s)")
@@ -1386,18 +1391,40 @@ def report_file_path(report_id: int, fmt: str) -> Path | None:
 # row per registry entry, `<tr id="src-{n}">`, regardless of which kind it is -- so parsing that
 # appendix out of the already-persisted `path_html` is how the extended entries are recovered
 # without a schema change to `reports` or touching the report builder.
-_CITATION_ROW_RE = re.compile(
-    r'<tr id="src-(?P<n>\d+)">\s*<td>\d+</td>\s*<td>(?P<title>.*?)</td>\s*<td>(?P<source>.*?)</td>\s*'
-    r"<td>(?P<date>.*?)</td>\s*<td>(?P<link>.*?)</td>\s*</tr>",
-    re.DOTALL,
-)
-_HREF_RE = re.compile(r'href="([^"]*)"')
-_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _strip_html(fragment: str) -> str | None:
-    text = html_lib.unescape(_TAG_RE.sub("", fragment)).strip()
-    return text if text and text != "—" else None
+#
+# F19 (SOL-AUDIT-2026-09-24.md): this used to be a fixed-cell-count regex (`<td>\d+</td><td>title
+# </td><td>source</td><td>date</td><td>link</td>`) that silently stopped matching anything the
+# moment `docx_builder.render_html` grew a sixth cell (`אמינות`/reliability, between source and
+# date) -- every extended citation past `items_included` then resolved to nothing. Parsing actual
+# elements survives future column changes: title is always the row's 2nd `<td>`, the link is
+# always its LAST `<td>` (however many columns sit between them), regardless of count.
+def _parse_citation_appendix_rows(html_text: str) -> list[tuple[str, str | None, str | None]]:
+    """Every `(n, title, url)` from a rendered report's "נספח מקורות" appendix `<tr id="src-N">`
+    rows. Best-effort: unparseable/empty HTML yields no rows rather than raising."""
+    if not html_text.strip():
+        return []
+    try:
+        tree = lxml_html.fromstring(html_text)
+    except Exception as exc:  # lxml raises several parser-error types; never fatal here.
+        log.warning("report.citations_html_parse_failed", error=str(exc))
+        return []
+    out: list[tuple[str, str | None, str | None]] = []
+    for tr in tree.xpath('//tr[starts-with(@id, "src-")]'):
+        n = (tr.get("id") or "").removeprefix("src-").strip()
+        if not n:
+            continue
+        tds = tr.findall("td")
+        title: str | None = None
+        if len(tds) >= 2:
+            text = (tds[1].text_content() or "").strip()
+            title = text if text and text != "—" else None
+        url: str | None = None
+        if tds:
+            hrefs = tds[-1].xpath(".//a/@href")
+            if hrefs:
+                url = html_lib.unescape(str(hrefs[0]))
+        out.append((n, title, url))
+    return out
 
 
 def report_citations(report_id: int) -> dict[str, Any] | None:
@@ -1434,18 +1461,16 @@ def report_citations(report_id: int) -> dict[str, Any] | None:
                 html_text = p.read_text(encoding="utf-8")
             except OSError as exc:
                 log.warning("report.citations_html_read_failed", report_id=report_id, error=str(exc))
-        for m in _CITATION_ROW_RE.finditer(html_text):
-            n = m.group("n")
-            if n in citations:
-                continue
-            title = _strip_html(m.group("title"))
-            href = _HREF_RE.search(m.group("link"))
-            url = html_lib.unescape(href.group(1)) if href else None
-            item_id = None
-            if url:
-                found = _fetchone("SELECT id FROM items WHERE url = %s LIMIT 1", (url,))
-                item_id = found["id"] if found else None
-            citations[n] = {"item_id": item_id, "url": url, "title": title}
+        extended = [(n, title, url) for n, title, url in _parse_citation_appendix_rows(html_text) if n not in citations]
+        # Efficiency (SOL-AUDIT-2026-09-24.md #4): resolve every extended citation's item_id in one
+        # query instead of one `SELECT ... WHERE url = %s` round trip per row.
+        urls = {url for _, _, url in extended if url}
+        item_id_by_url: dict[str, int] = {}
+        if urls:
+            for r in _fetchall("SELECT id, url FROM items WHERE url = ANY(%(urls)s)", {"urls": list(urls)}):
+                item_id_by_url.setdefault(r["url"], r["id"])
+        for n, title, url in extended:
+            citations[n] = {"item_id": item_id_by_url.get(url) if url else None, "url": url, "title": title}
 
     return {"report_id": report_id, "citations": citations}
 
@@ -1768,9 +1793,14 @@ def _night_summary() -> dict[str, Any] | None:
         state = last_job.get("state") or "none"
 
     def _item_count(extra_where: str = "", params: dict[str, Any] | None = None) -> int:
+        # F16 (SOL-AUDIT-2026-09-24.md): `created_at`, not `COALESCE(fetched_at, created_at)` --
+        # these are all "newly ingested" KPIs (see `list_items`'s matching `since` filter, which
+        # every one of these cards deep-links to). `fetched_at` is bumped on every re-fetch of an
+        # already-known URL, so an old undated item re-crawled in this window used to inflate the
+        # count and resurface in the feed it deep-links to as if it were new.
         row = _fetchone(
             "SELECT count(*) AS n FROM items "
-            f"WHERE COALESCE(fetched_at, created_at) BETWEEN %(start)s AND %(end)s {extra_where}",
+            f"WHERE created_at BETWEEN %(start)s AND %(end)s {extra_where}",
             {"start": window_start, "end": window_end, **(params or {})},
         )
         return row["n"] if row else 0
@@ -3083,22 +3113,51 @@ def list_jobs(*, state: str | None = None, limit: int = 50) -> list[dict[str, An
     return [_job_card(row) for row in rows]
 
 
+#: F31 (audit 2026-09-24): a fixed advisory-lock namespace for `enqueue_run`'s check+insert --
+#: arbitrary, just needs to not collide with another `pg_advisory_xact_lock(int, int)` caller in
+#: this codebase (there is none today; grep `pg_advisory` before reusing this constant elsewhere).
+_ENQUEUE_RUN_LOCK_NS = 872_351_004
+
+
 def enqueue_run(scope: str, mode: str) -> int:
     """U4/F17: idempotent -- if an equivalent job is already `queued`/`running`, raises
     `RunAlreadyActive(job)` instead of enqueueing a second one (repro: the "הרץ עכשיו" button gave
-    no feedback, got double-clicked, and enqueued two overlapping daily runs)."""
+    no feedback, got double-clicked, and enqueued two overlapping daily runs).
+
+    F31 (audit 2026-09-24): the equivalent-job lookup and the insert used to be two separate round
+    trips (`_fetchone` then `relational.enqueue_job`, each its own connection/transaction under
+    `db.connection()`'s autocommit=False pool), so two concurrent "run now" calls could both pass
+    the SELECT before either INSERT committed and enqueue two active equivalent jobs -- a plain
+    race, not specific to the double-click case the idempotency check already covers. Both steps
+    now run inside ONE transaction, serialized by `pg_advisory_xact_lock` keyed on the equivalent-
+    kind group (e.g. daily_run+weekly_run) -- the lock is released automatically at that
+    transaction's commit/rollback. No schema change (no migration, no unique index)."""
     kind = RUN_SCOPE_TO_KIND.get(scope)
     if kind is None:
         raise ValueError(f"unknown scope: {scope}")
-    equivalent_kinds = list(_RUN_IDEMPOTENCY_GROUPS.get(kind, (kind,)))
-    existing = _fetchone(
-        "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND state IN ('queued', 'running') "
-        "ORDER BY created_at DESC LIMIT 1",
-        {"kinds": equivalent_kinds},
-    )
-    if existing is not None:
-        raise RunAlreadyActive(_json_safe_row(existing) or {})
-    return relational.enqueue_job(kind, {"mode": mode}, priority=5)
+    equivalent_kinds = sorted(_RUN_IDEMPOTENCY_GROUPS.get(kind, (kind,)))
+    lock_key = ",".join(equivalent_kinds)
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(%(ns)s, hashtext(%(key)s))",
+            {"ns": _ENQUEUE_RUN_LOCK_NS, "key": lock_key},
+        )
+        cur.execute(
+            "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND state IN ('queued', 'running') "
+            "ORDER BY created_at DESC LIMIT 1",
+            {"kinds": equivalent_kinds},
+        )
+        existing = cur.fetchone()
+        if existing is not None:
+            raise RunAlreadyActive(_json_safe_row(existing) or {})
+        cur.execute(
+            "INSERT INTO jobs (kind, payload, priority, state) "
+            "VALUES (%(kind)s, %(payload)s, %(priority)s, 'queued') RETURNING id",
+            {"kind": kind, "payload": Json({"mode": mode}), "priority": 5},
+        )
+        job_id: int = cur.fetchone()["id"]
+    log.info("job.enqueued", job_id=job_id, kind=kind, priority=5)
+    return job_id
 
 
 # --------------------------------------------------------------------------

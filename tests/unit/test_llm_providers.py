@@ -147,6 +147,17 @@ class TestCliProviderChatClaude:
         with pytest.raises(CliProviderError):
             CliProvider("claude").chat([{"role": "user", "content": "ping"}])
 
+    def test_json_list_instead_of_object_raises_cli_provider_error(self, monkeypatch: pytest.MonkeyPatch):
+        """F26 (audit 2026-09-24): see the identical `_parse_agy` case in
+        test_cli_provider_agy_parse.py -- valid JSON that isn't an object must not escape as a
+        bare AttributeError."""
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process", lambda *a, **k: _completed(stdout=json.dumps([1, 2, 3]))
+        )
+        with pytest.raises(CliProviderError, match="not an object"):
+            CliProvider("claude").chat([{"role": "user", "content": "ping"}])
+
 
 class TestCliProviderChatCodex:
     def test_success_reads_output_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path):

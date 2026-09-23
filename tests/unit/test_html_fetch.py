@@ -111,6 +111,156 @@ async def test_fetch_page_raises_fetch_error_after_exhausting_retries() -> None:
 
 
 # --------------------------------------------------------------------------
+# F10 (SOL-AUDIT-2026-09-24): a non-retryable non-2xx status must never be returned as content.
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_fetch_page_rejects_non_retryable_4xx_status() -> None:
+    respx.get("https://example.test/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.test/gone").mock(
+        return_value=httpx.Response(404, html="<html>Not Found</html>")
+    )
+
+    with pytest.raises(FetchError, match="non-success status 404"):
+        await fetch_page("https://example.test/gone")
+
+
+@respx.mock
+async def test_fetch_page_rejects_403_even_with_a_short_body() -> None:
+    respx.get("https://example.test/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.test/forbidden").mock(
+        return_value=httpx.Response(403, html="<html>Forbidden</html>")
+    )
+
+    with pytest.raises(FetchError, match="non-success status 403"):
+        await fetch_page("https://example.test/forbidden")
+
+
+# --------------------------------------------------------------------------
+# F37 (SOL-AUDIT-2026-09-24): robots.txt is re-checked for every redirect hop's own host/path,
+# not just the starting URL.
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_redirect_destination_robots_disallow_is_honored() -> None:
+    respx.get("https://example.test/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.test/start").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://blocked.test/private/secret"})
+    )
+    respx.get("https://blocked.test/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
+    )
+    route = respx.get("https://blocked.test/private/secret")
+    route.mock(return_value=httpx.Response(200, html="<html>should never be fetched</html>"))
+
+    def _validate_redirect(next_url: str) -> set[str] | None:
+        return None  # only robots.txt behavior is under test here, no IP pinning
+
+    with pytest.raises(FetchError, match=r"robots\.txt disallows"):
+        await fetch_page("https://example.test/start", validate_redirect=_validate_redirect)
+
+    assert not route.called
+
+
+@respx.mock
+async def test_redirect_destination_robots_allow_is_fetched() -> None:
+    respx.get("https://example.test/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.test/start").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://allowed.test/article"})
+    )
+    respx.get("https://allowed.test/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://allowed.test/article").mock(
+        return_value=httpx.Response(200, html="<html>ok</html>")
+    )
+
+    def _validate_redirect(next_url: str) -> set[str] | None:
+        return None
+
+    page = await fetch_page("https://example.test/start", validate_redirect=_validate_redirect)
+    assert "ok" in page.html
+
+
+# --------------------------------------------------------------------------
+# F01 (SOL-AUDIT-2026-09-24): the robots.txt fetch is pinned to the same validated-IP set as the
+# page fetch it gates -- previously it made an entirely unpinned connection.
+# --------------------------------------------------------------------------
+
+
+class _FakeNetworkStream:
+    """respx's mock transport never populates the `network_stream` extension `_server_addr`
+    reads (see that function's own docstring), so a controllable custom transport is used here
+    instead -- no real network I/O, but a real `httpx.AsyncClient`/`fetch_page` round trip."""
+
+    def __init__(self, addr: str) -> None:
+        self._addr = addr
+
+    def get_extra_info(self, name: str):
+        return self._addr if name == "server_addr" else None
+
+
+class _PinnedAddrTransport(httpx.AsyncBaseTransport):
+    def __init__(self, addr_by_path: dict[str, str]) -> None:
+        self._addr_by_path = addr_by_path
+        self.requested_paths: list[str] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.requested_paths.append(path)
+        addr = self._addr_by_path.get(path, "0.0.0.0")
+        response = httpx.Response(200, content=b"<html>ok</html>", request=request)
+        response.extensions["network_stream"] = _FakeNetworkStream(addr)
+        return response
+
+
+async def test_robots_fetch_rejects_a_rebound_connection() -> None:
+    """The finding's own test: a resolver/transport that changes the robots.txt connection to a
+    different (here: simulated-rebound) address than the one already validated for the article's
+    host must be rejected, and the article itself must never be fetched."""
+    transport = _PinnedAddrTransport({"/robots.txt": "10.0.0.9", "/article": "93.184.216.34"})
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        with pytest.raises(FetchError, match="DNS rebinding"):
+            await fetch_page(
+                "https://example.test/article",
+                client=client,
+                pin_ips={"93.184.216.34"},
+            )
+    finally:
+        await client.aclose()
+
+    assert "/article" not in transport.requested_paths
+
+
+async def test_robots_fetch_allowed_when_connection_matches_pinned_ips() -> None:
+    transport = _PinnedAddrTransport({"/robots.txt": "93.184.216.34", "/article": "93.184.216.34"})
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        page = await fetch_page(
+            "https://example.test/article", client=client, pin_ips={"93.184.216.34"}
+        )
+    finally:
+        await client.aclose()
+
+    assert "ok" in page.html
+    assert "/article" in transport.requested_paths
+
+
+async def test_robots_fetch_with_no_pin_ips_is_unchanged() -> None:
+    """No `pin_ips` given (the un-guarded caller path, e.g. a direct `fetch_page` call outside
+    `eoa.fetch.service`) -- behavior is exactly as before this fix: no pin check is attempted."""
+    transport = _PinnedAddrTransport({"/robots.txt": "10.0.0.9", "/article": "93.184.216.34"})
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        page = await fetch_page("https://example.test/article", client=client)
+    finally:
+        await client.aclose()
+
+    assert "ok" in page.html
+
+
+# --------------------------------------------------------------------------
 # _decode: charset priority (HTTP header -> declared <meta>/XML -> charset_normalizer -> utf-8 replace)
 # and eoa.fetch.sanitize._repair_mojibake -- regression coverage for the
 # "×¢×‘..."/"â€™"-style mojibake reaching the DB.

@@ -191,6 +191,56 @@ def touch_source_fetched(source_id: int, ok: bool) -> None:
 # --------------------------------------------------------------------------
 
 
+class ItemUpsertResult(int):
+    """`int` subclass carrying `insert_item`'s extra bookkeeping while remaining a drop-in
+    replacement for the plain item-id `int` every pre-existing caller (``if item_id:``,
+    ``update_item_fields(item_id, ...)``, ``vector.upsert_embedding(item_id, ...)``, ...) already
+    expects -- introduced for the "return an inserted/conflict flag from the item upsert"
+    efficiency item (SOL-AUDIT-2026-09-24) without touching any of those call sites' signatures.
+
+    ``inserted``: True iff this call created a brand-new row (Postgres's standard
+    ``xmax = 0`` upsert idiom -- a freshly inserted row's ``xmax`` is 0; ``ON CONFLICT DO UPDATE``
+    always sets it, even though the row existed before this statement). Lets a caller (see
+    ``eoa.fetch.service._store_item``/``_store_search_hit``) tell a genuine new row apart from a
+    same-URL refresh without a separate pre-insert existence ``SELECT``.
+    """
+
+    inserted: bool
+
+    def __new__(cls, item_id: int, *, inserted: bool) -> ItemUpsertResult:
+        obj = super().__new__(cls, item_id)
+        obj.inserted = inserted
+        return obj
+
+
+def _quality_rank_sql(security_expr: str, content_expr: str) -> str:
+    """F09 (SOL-AUDIT-2026-09-24): a single comparable rank so a same-URL refresh can tell "the
+    new fetch is strictly better content" from "same or worse -- keep what's there" without ever
+    downgrading a good row on a transient bad fetch. `blocked` (a WAF/anti-bot challenge page, see
+    `eoa.fetch.sanitize.detect_block_page`) always ranks below any non-blocked row regardless of
+    `content_status`; among non-blocked rows, `stub` (search-hit snippet, no full fetch) < `partial`
+    < `full`."""
+    return (
+        f"(CASE WHEN {security_expr} = 'blocked' THEN 0 ELSE 1 + "
+        f"CASE {content_expr} WHEN 'stub' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END END)"
+    )
+
+
+#: Columns a quality-aware refresh may replace -- every column that reflects "what this fetch
+#: actually retrieved", never provenance/pipeline-output columns (`source_id`, `domain`, `score`,
+#: ...) that a later, unrelated fetch of the same URL has no business touching.
+_QUALITY_REFRESHABLE_COLUMNS = (
+    "title",
+    "lang",
+    "published_at",
+    "raw_text",
+    "clean_text",
+    "text_hash",
+    "content_status",
+    "security_status",
+)
+
+
 def insert_item(
     *,
     source_id: int | None,
@@ -208,21 +258,35 @@ def insert_item(
     geography: str | None = None,
     report_kind: str | None = None,
     trl: str | None = None,
-) -> int:
-    """Insert a new item; on a `url` conflict just refresh `fetched_at`. Returns the item id."""
-    query = """
-        INSERT INTO items (
-            source_id, url, canonical_url, title, lang, published_at, fetched_at,
-            raw_text, clean_text, text_hash, domain, subdomain, geography, report_kind, trl
-        )
-        VALUES (
-            %(source_id)s, %(url)s, %(canonical_url)s, %(title)s, %(lang)s, %(published_at)s,
-            COALESCE(%(fetched_at)s, now()), %(raw_text)s, %(clean_text)s, %(text_hash)s,
-            %(domain)s, %(subdomain)s, %(geography)s, %(report_kind)s, %(trl)s
-        )
-        ON CONFLICT (url) DO UPDATE SET fetched_at = COALESCE(EXCLUDED.fetched_at, now())
-        RETURNING id
+    content_status: str | None = None,
+    security_status: str | None = None,
+) -> ItemUpsertResult:
+    """Insert a new item; on a `url` (or, see below, `canonical_url`) conflict, refresh
+    `fetched_at` and, F09/F36 (SOL-AUDIT-2026-09-24), do a quality-aware content refresh instead
+    of the old "just bump fetched_at, never touch content" behavior. Returns an `ItemUpsertResult`
+    (a plain `int` item id for every existing caller, plus `.inserted`).
+
+    `content_status`/`security_status`, when given (every `eoa.fetch.service` caller as of this
+    fix; existing callers like `eoa.tenders.scan`/tests that don't pass them keep the exact old
+    "never touch content on conflict" behavior -- see `quality_aware` below), rank this fetch
+    against whatever is already stored at that URL (`_quality_rank_sql`): a same-or-worse fetch
+    (e.g. a transient block/stub re-fetch of a previously good article) never overwrites the
+    existing good content, while a strictly better fetch (a blocked/stub row's first successful
+    full fetch, F09's "blocked page or snippet-only first fetch cannot be upgraded") replaces
+    title/lang/published_at/raw_text/clean_text/text_hash/content_status/security_status AND
+    resets `processed_stages` to `'{}'` so the item is reprocessed (classify/triage/dedup/analyze
+    all gate on `processed_stages`) against its new, better content.
+
+    F36: `canonical_url`, when given and different from `url`, is also checked against existing
+    rows (`url = canonical_url OR canonical_url = canonical_url`) BEFORE the `url`-keyed insert --
+    a redirect alias or tracking-parameter variant of an already-stored article upserts that same
+    row (quality-aware, as above) instead of creating a duplicate the exact-`url`
+    `ON CONFLICT` below can never catch on its own. Best-effort/race-tolerant like the rest of
+    this module's upsert helpers (docs/CONVENTIONS.md rule 9): two *concurrent* fetches of two
+    different aliases of the same brand-new article could still each insert once; the embedding
+    dedup pass is the existing backstop for that rare race.
     """
+    quality_aware = content_status is not None or security_status is not None
     params = {
         "source_id": source_id,
         "url": url,
@@ -239,12 +303,74 @@ def insert_item(
         "geography": geography,
         "report_kind": report_kind,
         "trl": trl,
+        "content_status": content_status or "full",
+        "security_status": security_status or "clean",
+        "quality_aware": quality_aware,
     }
+
+    excluded_better = f"(%(quality_aware)s AND {_quality_rank_sql('EXCLUDED.security_status', 'EXCLUDED.content_status')} > {_quality_rank_sql('items.security_status', 'items.content_status')})"
+    params_better = f"(%(quality_aware)s AND {_quality_rank_sql('%(security_status)s', '%(content_status)s')} > {_quality_rank_sql('items.security_status', 'items.content_status')})"
+
+    upsert_set_sql = ", ".join(
+        f"{col} = CASE WHEN {excluded_better} THEN EXCLUDED.{col} ELSE items.{col} END"
+        for col in _QUALITY_REFRESHABLE_COLUMNS
+    )
+    update_by_id_set_sql = ", ".join(
+        f"{col} = CASE WHEN {params_better} THEN %({col})s ELSE items.{col} END"
+        for col in _QUALITY_REFRESHABLE_COLUMNS
+    )
+
+    upsert_query = f"""
+        INSERT INTO items (
+            source_id, url, canonical_url, title, lang, published_at, fetched_at,
+            raw_text, clean_text, text_hash, domain, subdomain, geography, report_kind, trl,
+            content_status, security_status
+        )
+        VALUES (
+            %(source_id)s, %(url)s, %(canonical_url)s, %(title)s, %(lang)s, %(published_at)s,
+            COALESCE(%(fetched_at)s, now()), %(raw_text)s, %(clean_text)s, %(text_hash)s,
+            %(domain)s, %(subdomain)s, %(geography)s, %(report_kind)s, %(trl)s,
+            %(content_status)s, %(security_status)s
+        )
+        ON CONFLICT (url) DO UPDATE SET
+            fetched_at = COALESCE(EXCLUDED.fetched_at, now()),
+            canonical_url = COALESCE(EXCLUDED.canonical_url, items.canonical_url),
+            {upsert_set_sql},
+            processed_stages = CASE WHEN {excluded_better} THEN '{{}}'::text[] ELSE items.processed_stages END
+        RETURNING id, (xmax = 0) AS inserted
+    """
+
+    update_by_id_query = f"""
+        UPDATE items SET
+            fetched_at = COALESCE(%(fetched_at)s, now()),
+            canonical_url = COALESCE(%(canonical_url)s, items.canonical_url),
+            {update_by_id_set_sql},
+            processed_stages = CASE WHEN {params_better} THEN '{{}}'::text[] ELSE items.processed_stages END
+        WHERE id = %(item_id)s
+        RETURNING id
+    """
+
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, params)
-        item_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
-    log.info("item.inserted", item_id=item_id, url=url, source_id=source_id)
-    return item_id
+        existing_id: int | None = None
+        if canonical_url and canonical_url != url:
+            cur.execute(
+                "SELECT id FROM items WHERE url = %(canonical_url)s OR canonical_url = %(canonical_url)s "
+                "ORDER BY id LIMIT 1",
+                {"canonical_url": canonical_url},
+            )
+            found = cur.fetchone()
+            existing_id = found["id"] if found else None
+
+        if existing_id is not None:
+            cur.execute(update_by_id_query, {**params, "item_id": existing_id})
+            row = cast("dict[str, Any]", cur.fetchone())
+            result = ItemUpsertResult(row["id"], inserted=False)
+        else:
+            cur.execute(upsert_query, params)
+            row = cast("dict[str, Any]", cur.fetchone())
+            result = ItemUpsertResult(row["id"], inserted=bool(row["inserted"]))
+    log.info("item.inserted", item_id=int(result), url=url, source_id=source_id, inserted=result.inserted)
+    return result
 
 
 #: Round-6 D9 fix (docs/qa/loop/round_5_judge.md D9, the "owl leak" -- event 257 on item 2463, an
@@ -1360,15 +1486,52 @@ def heartbeat(
     log.debug("job.heartbeat", job_id=job_id, stage=stage, heartbeat_event=event)
 
 
+#: F03 (audit 2026-09-24): a worker crash used to turn an expired lease straight into a terminal
+#: `failed` -- a daily/child job then never retried even though nothing about the *work* itself
+#: was wrong, only the process that held it. Bounded so a job that reliably crashes every worker
+#: (a poison-pill payload) does not requeue forever either.
+REAP_MAX_ATTEMPTS = 5
+REAP_COOLDOWN_MINUTES = 5
+
+
 def reap_stale_jobs(max_age_hours: int = 6) -> int:
-    """Mark `running` jobs whose lease has expired as `failed(error='stale lease')`, returning the
-    number reaped. A row with no lease (pre-migration data, or a claim made without `worker_id`
-    wiring) falls back to `started_at` older than `max_age_hours`. Call at Worker start and in
-    `pre_flight()` so a crashed process's job does not block retries or a reaper-requeue race
-    forever."""
+    """Recover `running` jobs whose lease has expired, returning the number reaped. A row with no
+    lease (pre-migration data, or a claim made without `worker_id` wiring) falls back to
+    `started_at` older than `max_age_hours`. Call at Worker start and in `pre_flight()` so a
+    crashed process's job does not block retries or a reaper-requeue race forever.
+
+    F03 (audit 2026-09-24): an expired lease is now requeued as `deferred` (with a short
+    `not_before` cooldown, via `claim_next_job`'s existing 'queued'/'deferred' eligibility) rather
+    than immediately terminal, so a crashed worker's job gets another attempt -- up to
+    `REAP_MAX_ATTEMPTS` total claims (`jobs.attempts`, incremented by `claim_next_job` on every
+    claim); beyond that it is `failed` for real. A job whose `payload.stop` was set by a user
+    cancel (`eoa.api.services.cancel_job`) is never requeued -- reaping it lands on `failed` with
+    `error='cancelled_by_user'`, the same terminal state (and error string) a cancel of a still-
+    `queued` job already gets; the job schema has no separate `cancelled` state (`jobs_state_check`
+    only allows queued/running/done/failed/deferred/partial) and this audit fix does not add a
+    migration for one."""
     query = """
         UPDATE jobs
-        SET state = 'failed', finished_at = now(), error = 'stale lease'
+        SET state = CASE
+                WHEN COALESCE(payload->>'stop', 'false') = 'true' THEN 'failed'
+                WHEN attempts >= %(max_attempts)s THEN 'failed'
+                ELSE 'deferred'
+            END,
+            finished_at = CASE
+                WHEN COALESCE(payload->>'stop', 'false') = 'true' OR attempts >= %(max_attempts)s
+                THEN now() ELSE finished_at
+            END,
+            not_before = CASE
+                WHEN COALESCE(payload->>'stop', 'false') = 'true' OR attempts >= %(max_attempts)s
+                THEN not_before ELSE now() + (%(cooldown_minutes)s || ' minutes')::interval
+            END,
+            error = CASE
+                WHEN COALESCE(payload->>'stop', 'false') = 'true' THEN 'cancelled_by_user'
+                WHEN attempts >= %(max_attempts)s THEN 'stale lease: max attempts exceeded'
+                ELSE 'stale lease: requeued for retry'
+            END,
+            worker_id = NULL,
+            lease_expires_at = NULL
         WHERE state = 'running'
           AND (
               (lease_expires_at IS NOT NULL AND lease_expires_at < now())
@@ -1377,13 +1540,24 @@ def reap_stale_jobs(max_age_hours: int = 6) -> int:
                   AND started_at < now() - (%(max_age_hours)s || ' hours')::interval
               )
           )
-        RETURNING id
+        RETURNING id, state
     """
+    params = {
+        "max_age_hours": max_age_hours,
+        "max_attempts": REAP_MAX_ATTEMPTS,
+        "cooldown_minutes": REAP_COOLDOWN_MINUTES,
+    }
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, {"max_age_hours": max_age_hours})
+        cur.execute(query, params)
         rows = cur.fetchall()
     if rows:
-        log.warning("jobs.reaped_stale", count=len(rows), job_ids=[r["id"] for r in rows])
+        log.warning(
+            "jobs.reaped_stale",
+            count=len(rows),
+            job_ids=[r["id"] for r in rows],
+            requeued=len([r for r in rows if r["state"] == "deferred"]),
+            failed=len([r for r in rows if r["state"] == "failed"]),
+        )
     return len(rows)
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from eoa.llm.ollama_client import (
     ChatResult,
     _strip_fences,
@@ -176,3 +178,167 @@ class TestDataMarkers:
         from eoa.llm.ollama_client import DATA_CLOSE
 
         assert DATA_CLOSE == "<<<END DATA>>>"
+
+
+class _TruncatedOut(BaseModel):
+    """A minimal schema with one free-text Hebrew field, for exercising
+    `_find_truncation_suspects`/`_guard_hebrew_truncation` without any of the real pipeline
+    schemas' unrelated required fields."""
+
+    summary_he: str
+
+
+class TestGuardHebrewTruncationF27:
+    """F27 (audit 2026-09-24): a resource/provider failure on the truncation-repair call must
+    return the already schema-valid first result, not propagate and discard it -- only a schema
+    validation failure (LLMOutputError) used to be caught."""
+
+    def _suspect_model(self):
+        # "מטע" is a bare Hebrew-acronym stem with no terminal punctuation -- exactly what
+        # `_looks_truncated_mid_hebrew_acronym` flags as a suspected mid-acronym truncation.
+        return _TruncatedOut(summary_he="הפעילות התבצעה בסיוע מטע")
+
+    def _call_guard(self, monkeypatch, structured_once_side_effect):
+        from eoa.llm import ollama_client as oc
+
+        monkeypatch.setattr(oc, "_structured_once", structured_once_side_effect)
+        return oc._guard_hebrew_truncation(
+            "resident",
+            _TruncatedOut,
+            [{"role": "user", "content": "hi"}],
+            self._suspect_model(),
+            task="analyze",
+            interactive=False,
+            options=None,
+            provider=None,
+        )
+
+    def test_resource_unavailable_on_repair_falls_back_to_first_result(self, monkeypatch):
+        from eoa.errors import ResourceUnavailable
+
+        def boom(*a, **k):
+            raise ResourceUnavailable("gpu busy")
+
+        result = self._call_guard(monkeypatch, boom)
+        assert result.summary_he.startswith("הפעילות התבצעה בסיוע")
+
+    def test_provider_unavailable_on_repair_falls_back_to_first_result(self, monkeypatch):
+        from eoa.errors import ProviderUnavailable
+
+        def boom(*a, **k):
+            raise ProviderUnavailable("no key")
+
+        result = self._call_guard(monkeypatch, boom)
+        assert result.summary_he.startswith("הפעילות התבצעה בסיוע")
+
+    def test_cli_provider_error_on_repair_falls_back_to_first_result(self, monkeypatch):
+        from eoa.errors import CliProviderError
+
+        def boom(*a, **k):
+            raise CliProviderError("cli crashed mid-repair")
+
+        result = self._call_guard(monkeypatch, boom)
+        assert result.summary_he.startswith("הפעילות התבצעה בסיוע")
+
+    def test_deadline_exceeded_on_repair_still_propagates(self, monkeypatch):
+        """DeadlineExceeded/LeaseLost mean the worker itself must stop -- not "this repair
+        failed" -- so they must NOT be swallowed into the fallback-to-first-result path."""
+        from eoa.errors import DeadlineExceeded
+
+        def boom(*a, **k):
+            raise DeadlineExceeded("stage time budget exhausted")
+
+        import pytest
+
+        with pytest.raises(DeadlineExceeded):
+            self._call_guard(monkeypatch, boom)
+
+    def test_no_suspects_never_calls_structured_once(self, monkeypatch):
+        from eoa.llm import ollama_client as oc
+
+        def boom(*a, **k):
+            raise AssertionError("must not attempt a repair call when nothing looks truncated")
+
+        monkeypatch.setattr(oc, "_structured_once", boom)
+        clean = _TruncatedOut(summary_he="משפט תקין וסגור.")
+        result = oc._guard_hebrew_truncation(
+            "resident",
+            _TruncatedOut,
+            [{"role": "user", "content": "hi"}],
+            clean,
+            task="analyze",
+            interactive=False,
+            options=None,
+            provider=None,
+        )
+        assert result.summary_he == "משפט תקין וסגור."
+
+
+class TestChatStructuredChainReturnsUsedEntry:
+    """Efficiency (audit 2026-09-24): `_chat_structured_chain` now returns the ONE entry that
+    actually produced its result, so `chat_structured`'s truncation-repair retry can pin to just
+    that entry instead of replaying the whole chain (including entries that already failed)."""
+
+    def test_returns_the_entry_that_succeeded_not_the_first_one(self, monkeypatch):
+        from eoa.config import ChainEntryCfg
+        from eoa.errors import ProviderUnavailable
+        from eoa.llm import ollama_client as oc
+
+        chain = [
+            ChainEntryCfg(provider="claude", model="claude-sonnet-5"),
+            ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium"),
+            ChainEntryCfg(provider="ollama"),
+        ]
+        clean = _TruncatedOut(summary_he="משפט תקין וסגור.")
+        calls: list[str] = []
+
+        def fake_structured_once(role, schema, messages, *, task, interactive, options, provider, chain_override=None):
+            entry = chain_override[0]
+            calls.append(entry.provider)
+            if entry.provider == "claude":
+                raise ProviderUnavailable("claude not logged in")
+            return clean, oc.ChatResult(content="{}")
+
+        monkeypatch.setattr(oc, "_structured_once", fake_structured_once)
+        monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: None)
+
+        _validated, used_entry = oc._chat_structured_chain(
+            "resident", chain, _TruncatedOut, [{"role": "user", "content": "hi"}],
+            task="analyze", interactive=False, options=None,
+        )
+        assert used_entry.provider == "agy"
+        assert calls == ["claude", "agy"]  # never reached ollama -- agy already succeeded
+
+    def test_chat_structured_pins_repair_to_the_single_successful_entry(self, monkeypatch):
+        """The chain-path caller in `chat_structured` must pass `chain_override=[used_entry]` to
+        the truncation guard -- a single-entry list -- not the whole multi-entry `chain`, so a
+        triggered repair never replays an entry that already failed before `validated` was
+        obtained."""
+        from eoa.config import ChainEntryCfg
+        from eoa.llm import ollama_client as oc
+
+        chain = [
+            ChainEntryCfg(provider="claude", model="claude-sonnet-5"),
+            ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium"),
+            ChainEntryCfg(provider="ollama"),
+        ]
+        used_entry = chain[1]
+        suspect = _TruncatedOut(summary_he="הפעילות התבצעה בסיוע מטע")
+
+        monkeypatch.setenv("EOA_PIPELINE", "1")
+        monkeypatch.setattr(oc, "settings", lambda: type(
+            "S", (), {"llm_providers": type("L", (), {"effective_chain": staticmethod(lambda role: chain)})()}
+        )())
+        monkeypatch.setattr(oc, "_chat_structured_chain", lambda *a, **k: (suspect, used_entry))
+
+        captured: dict = {}
+
+        def fake_guard(role, schema, messages, validated, **kw):
+            captured.update(kw)
+            return validated
+
+        monkeypatch.setattr(oc, "_guard_hebrew_truncation", fake_guard)
+
+        oc.chat_structured("resident", _TruncatedOut, [{"role": "user", "content": "hi"}])
+
+        assert captured["chain_override"] == [used_entry]

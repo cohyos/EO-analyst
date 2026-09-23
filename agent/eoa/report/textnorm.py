@@ -434,6 +434,13 @@ def normalize_draft(draft: _M) -> _M:
     """
     updates: dict[str, Any] = {}
 
+    # bluf: list[Sentence] (structured: daily/weekly/monthly, round 5 P3). F38: previously omitted
+    # -- a canonical-name misspelling in the BLUF (rendered natively by docx_builder, never routed
+    # through this function's exec_summary/sections handling) reached the page unnormalized.
+    bluf = getattr(draft, "bluf", None)
+    if isinstance(bluf, list) and bluf:
+        updates["bluf"] = [_normalize_str_fields(s, ("text_he",)) for s in bluf]
+
     # exec_summary: list[Sentence] (structured: daily/weekly)
     exec_summary = getattr(draft, "exec_summary", None)
     if isinstance(exec_summary, list) and exec_summary:
@@ -506,6 +513,15 @@ def normalize_draft(draft: _M) -> _M:
     # risks_assumptions_he: str (bd_territory, legacy; harmless no-op elsewhere)
     if hasattr(draft, "risks_assumptions_he"):
         updates["risks_assumptions_he"] = normalize_report_text(draft.risks_assumptions_he) or ""
+
+    # assumptions: list[AssumptionFalsifier] (structured: daily/weekly/monthly, round 5 P3). F38:
+    # previously omitted, same gap as bluf above -- docx_builder renders assumption_he/falsifier_he
+    # natively, never through sections/exec_summary.
+    assumptions = getattr(draft, "assumptions", None)
+    if isinstance(assumptions, list) and assumptions:
+        updates["assumptions"] = [
+            _normalize_str_fields(a, ("assumption_he", "falsifier_he")) for a in assumptions
+        ]
 
     # open_points_he: list[str] (both shapes)
     open_points = getattr(draft, "open_points_he", None)

@@ -143,6 +143,44 @@ def test_remote_peer_via_loopback_forwarded_for_is_gated(app_client) -> None:
     assert r.json()["error"]["code"] == "auth_required"
 
 
+def test_spoofed_first_position_loopback_does_not_bypass_session(app_client) -> None:
+    """F06: a remote caller cannot defeat the session gate by prepending a fake `127.0.0.1` to
+    `X-Forwarded-For` -- only the LAST (proxy-appended) hop is trusted. Chain here simulates the
+    real client's genuine tailscale address (`100.70.157.25`, the deployment's own observed
+    address) being appended by the trusted local proxy after an attacker-supplied first value."""
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get(
+        "/api/settings/watchlist",
+        headers={"X-Forwarded-For": "127.0.0.1, 100.70.157.25"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "auth_required"
+
+
+def test_multiple_spoofed_loopback_entries_before_real_remote_hop_still_gated(app_client) -> None:
+    """Same bypass attempt with several spoofed loopback-looking entries stacked in front of the
+    real, proxy-appended remote address -- still must not bypass the session gate."""
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get(
+        "/api/settings/watchlist",
+        headers={"X-Forwarded-For": "127.0.0.1, localhost, 100.70.157.25"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "auth_required"
+
+
+def test_last_hop_loopback_is_still_trusted(app_client) -> None:
+    """If the LAST (proxy-appended, trustworthy) entry is itself loopback -- i.e. the chain's
+    true final hop before this server was loopback -- the original no-session-required behaviour
+    is preserved, regardless of what a caller put earlier in the header."""
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get(
+        "/api/settings/watchlist",
+        headers={"X-Forwarded-For": "100.70.1.2, 127.0.0.1"},
+    )
+    assert r.status_code == 200
+
+
 def test_static_asset_paths_are_not_gated(app_client) -> None:
     """The SPA shell itself must still load for a remote, unauthenticated client so the client-side
     AccessGate can render (only /api/* and /ws/* are gated)."""

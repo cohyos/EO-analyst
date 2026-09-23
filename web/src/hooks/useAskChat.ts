@@ -168,6 +168,17 @@ export function useAskChat() {
               prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
             );
           },
+          // F30 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): `stop()` below already flips
+          // the hook's own `isStreaming`, but the per-message `streaming` flag (the bubble's
+          // "still typing" indicator) was previously only ever cleared by `onDone`/`onError` --
+          // neither of which used to fire on a user-initiated abort, so the last assistant bubble
+          // stayed stuck mid-stream forever. No error text: this isn't a failure.
+          onAbort: () => {
+            setIsStreaming(false);
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+            );
+          },
         },
       );
       abortRef.current = abort;

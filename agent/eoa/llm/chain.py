@@ -103,6 +103,15 @@ def run_chain(
     single page read until its budget expired (golden jobs 47/48/70/86/91, round 7)."""
     attempts: list[ChainAttempt] = []
     fell_back_from: str | None = None
+    # F02 (audit 2026-09-24): this is the single choke point every chain -- the role's own
+    # configured chain, a dossier's `llm_leg`/`build_chain_with_leg_override` prepend, or any
+    # other caller-supplied ``chain`` -- actually executes through, so it is where
+    # ``allow_cloud=False`` must be enforced absolutely regardless of how ``chain`` was built.
+    # ``effective_chain`` already does this when it is the one resolving the chain, but a
+    # prepended override bypassed it entirely; filtering here closes that gap centrally instead
+    # of chasing every call site that can hand in an explicit chain.
+    if not settings().llm_providers.allow_cloud:
+        chain = [e for e in chain if e.provider == "ollama"] or [ChainEntryCfg(provider="ollama")]
     if tools and not any(e.provider == "ollama" for e in chain):
         raise ProviderUnavailable(
             f"llm chain for role={role!r} has no tool-capable leg for a tool-calling turn "

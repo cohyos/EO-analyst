@@ -66,10 +66,14 @@ class TestTenderItemsNeedingPipeline:
         monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn(cursor))
         assert jobs._tender_items_needing_pipeline() == []
 
-    def test_empty_on_db_error_best_effort(self, monkeypatch):
+    def test_none_on_db_error_distinguishes_failure_from_no_candidates(self, monkeypatch):
+        """F25 (audit 2026-09-24): a query failure returns `None`, not `[]` -- `[]` now means
+        "the query ran and found nothing pending", which `_post_tenders_catchup` must not treat
+        the same as a failed query (see `TestPostTendersCatchup.
+        test_query_failure_is_reported_as_partial_not_silently_zero_items` below)."""
         cursor = _FakeCursor(raises=True)
         monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn(cursor))
-        assert jobs._tender_items_needing_pipeline() == []
+        assert jobs._tender_items_needing_pipeline() is None
 
 
 # --------------------------------------------------------------------------
@@ -150,6 +154,29 @@ class TestPostTendersCatchup:
         assert "embed_dedup_error" in out
         assert out["classify"]["done"] == 1
         assert out["triage"]["done"] == 1
+
+    def test_query_failure_is_reported_as_partial_not_silently_zero_items(self, monkeypatch):
+        """F25 (audit 2026-09-24): a candidate-selection query failure used to be indistinguishable
+        from "nothing is pending" (`{"items": 0}`), so the run looked clean even though the query
+        never ran. It must now surface as an explicit `query_error` -- picked up by
+        `has_incomplete_work`/`_compute_run_status` -- and, since nothing was mutated, the
+        underlying items remain exactly as eligible for the next attempt as before this call."""
+        monkeypatch.setattr(jobs, "_tender_items_needing_pipeline", lambda: None)
+
+        def _fail(*a, **kw):
+            raise AssertionError("no stage should run when the candidate query itself failed")
+
+        monkeypatch.setattr("eoa.pipeline.dedup.run_dedup", _fail)
+        monkeypatch.setattr("eoa.pipeline.classify.run_classify", _fail)
+        monkeypatch.setattr("eoa.pipeline.triage.run_triage", _fail)
+
+        out = jobs._post_tenders_catchup()
+
+        assert out["items"] == 0
+        assert "query_error" in out
+        from eoa.execution import has_incomplete_work
+
+        assert has_incomplete_work(out) is True
 
 
 if __name__ == "__main__":

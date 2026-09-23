@@ -514,14 +514,14 @@ def collect_market_items(
     rows = _fetchall(
         """
         SELECT i.id, i.url, i.title, i.domain, i.subdomain, i.published_at, i.level, i.score,
-               i.summary_he, i.so_what_he, i.geography, i.entities_mentioned,
+               i.summary_he, i.so_what_he, i.geography, i.entities_mentioned, i.story_id, i.lang,
                COALESCE(src.name, i.url) AS source_name
         FROM items i
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE i.security_status = 'clean'
           AND i.dedup_of IS NULL
           AND i.level = ANY(%(levels)s)
-          AND COALESCE(i.published_at, i.created_at)::date
+          AND (COALESCE(i.published_at, i.created_at) AT TIME ZONE 'Asia/Jerusalem')::date
               BETWEEN %(start)s AND %(end)s
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         """,
@@ -623,7 +623,14 @@ def collect_platform_events(
         JOIN items i ON i.id = e.item_id
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE e.kind = ANY(%(kinds)s)
-          AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
+          -- F15: never fall back to the item's mutable last-fetch timestamp (bumped on a plain
+          -- re-fetch/URL conflict, F09) -- an old undated event must not reappear as "new" here.
+          -- F40: cast anchored to Asia/Jerusalem explicitly rather than the DB session's own zone.
+          AND COALESCE(
+                e.date,
+                (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                (i.created_at AT TIME ZONE 'Asia/Jerusalem')::date
+              )
               BETWEEN %(start)s AND %(end)s
         ORDER BY e.date DESC NULLS LAST, e.id DESC
         """,

@@ -187,6 +187,61 @@ class TestRunChainRecording:
         assert result.content == "ok"
 
 
+class TestRunChainAllowCloud:
+    """F02 (audit 2026-09-24): `run_chain` is the single choke point every chain actually executes
+    through (the role's own configured chain, a dossier's `llm_leg` override prepended ahead of
+    it, or any other caller-supplied `chain`) -- `allow_cloud=False` must be enforced here
+    absolutely, not just inside `effective_chain` (which a prepended override bypassed)."""
+
+    def test_cloud_leg_never_built_or_called_when_allow_cloud_false(self, monkeypatch: pytest.MonkeyPatch):
+        from eoa.llm import chain as chain_mod
+
+        class _LP:
+            allow_cloud = False
+
+        class _S:
+            llm_providers = _LP()
+
+        monkeypatch.setattr(chain_mod, "settings", lambda: _S())
+
+        def _boom_build_provider(entry):
+            raise AssertionError(f"a cloud provider ({entry.provider!r}) must never be built when allow_cloud=False")
+
+        monkeypatch.setattr(chain_mod, "_build_provider", _boom_build_provider)
+        monkeypatch.setattr(chain_mod, "_record", lambda *a, **k: None)
+
+        # Simulates a dossier's llm_leg override: a cloud entry prepended ahead of the chain.
+        chain = [ChainEntryCfg(provider="agy", model="gemini-3.8-flash-medium"), ChainEntryCfg(provider="ollama")]
+        local = _local_ollama_leg(content="local only")
+        result, attempts = run_chain("resident", chain, local, messages=[])
+
+        assert result.content == "local only"
+        assert local.calls["n"] == 1
+        assert len(attempts) == 1
+        assert attempts[0].provider == "ollama"
+
+    def test_allow_cloud_true_still_tries_cloud_leg_first(self, monkeypatch: pytest.MonkeyPatch):
+        """Control: with allow_cloud=True (the default), the cloud leg is unaffected."""
+        from eoa.llm import chain as chain_mod
+
+        class _LP:
+            allow_cloud = True
+
+        class _S:
+            llm_providers = _LP()
+
+        monkeypatch.setattr(chain_mod, "settings", lambda: _S())
+        monkeypatch.setattr(chain_mod, "_build_provider", lambda entry: _ok_provider(content="CLOUD"))
+        monkeypatch.setattr(chain_mod, "_record", lambda *a, **k: None)
+
+        chain = [ChainEntryCfg(provider="agy", model="x"), ChainEntryCfg(provider="ollama")]
+        local = _local_ollama_leg()
+        result, _attempts = run_chain("resident", chain, local, messages=[])
+
+        assert result.content == "CLOUD"
+        assert local.calls["n"] == 0
+
+
 class TestBuildProvider:
     def test_unknown_provider_raises(self):
         from eoa.llm.chain import _build_provider

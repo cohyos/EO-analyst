@@ -19,13 +19,16 @@ def test_installed_css_selector_extracts_source_links():
 def test_paused_embeddings_stop_after_one_attempt_and_leave_items_pending(monkeypatch):
     monkeypatch.setattr(dedup, "get_items_for_stage", lambda *a, **k: [{"id": i} for i in range(40)])
     embed = Mock(side_effect=ResourceUnavailable("paused"))
-    mark = Mock()
+    # Audit F08 (2026-09-24): the embedding, dedup link and stage marker are now committed together
+    # by `commit_dedup_result`, and candidate vectors are loaded once per stage.
+    commit = Mock()
+    monkeypatch.setattr(dedup, "load_candidate_vectors", lambda *a, **k: [])
     monkeypatch.setattr(dedup, "embed", embed)
-    monkeypatch.setattr(dedup, "mark_stage", mark)
+    monkeypatch.setattr(dedup, "commit_dedup_result", commit)
     with pytest.raises(ResourceUnavailable):
         dedup.run_dedup()
     assert embed.call_count == 1
-    mark.assert_not_called()
+    commit.assert_not_called()
 
 
 @pytest.mark.parametrize("module", [classify, triage, analyze])

@@ -971,7 +971,11 @@ async def ask(body: AskRequest) -> StreamingResponse:
             yield _sse({"type": "sources", "items": sources})
         except Exception as exc:
             log.warning("ask.stream_failed", error=str(exc))
-            yield _sse({"type": "error", "message": str(exc)})
+            # F30/security (SOL-AUDIT-2026-09-24.md): the raw exception text used to go straight to
+            # the client over SSE -- a DB/LLM/filesystem error can carry connection strings, file
+            # paths, or other internals. The full text is still logged server-side above; the
+            # client only ever sees a generic, non-identifying message.
+            yield _sse({"type": "error", "message": "שגיאה בעיבוד הבקשה. נסו שוב."})
         finally:
             yield _sse({"type": "done"})
 

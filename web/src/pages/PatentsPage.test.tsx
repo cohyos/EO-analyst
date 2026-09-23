@@ -115,4 +115,62 @@ describe("PatentsPage", () => {
     fireEvent.click(screen.getByRole("tab", { name: "מטריצת CPC x בעלים" }));
     expect(await screen.findByText(/אין עדיין מספיק נתונים/)).toBeInTheDocument();
   });
+
+  // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): assignee/subdomain/q used to be applied
+  // client-side against whatever the (200-row-capped) unfiltered fetch happened to contain -- a
+  // match sitting outside that cap could never be found. These assert the filters are forwarded
+  // to `api.getPatents` itself (server-side filtering, applied before any cap), not just used to
+  // re-filter an already-fetched page.
+  describe("F33: filters are sent to the API, not applied only client-side", () => {
+    it("forwards the assignee filter as a getPatents() call argument", async () => {
+      // "Rafael" must exist as a dropdown option (from the unfiltered baseline/facets fetch)
+      // before it can be selected at all -- a native <select> silently ignores a value with no
+      // matching <option>.
+      const baseline = [
+        makePatent({ id: 1, assignees: ["Elbit"] }),
+        makePatent({ id: 4, pub_number: "US4", title: "Rafael baseline patent", assignees: ["Rafael"] }),
+      ];
+      const beyondCap = makePatent({ id: 2, pub_number: "US99999999B2", title: "Beyond the cap", assignees: ["Rafael"] });
+      getPatents.mockImplementation((params: { assignee?: string } = {}) =>
+        Promise.resolve(patentsResponse(params.assignee === "Rafael" ? [beyondCap] : baseline)),
+      );
+      renderPage();
+      await screen.findByText("Digital pixel readout integrated circuit");
+
+      fireEvent.change(screen.getByRole("combobox", { name: "סינון לפי בעלים" }), {
+        target: { value: "Rafael" },
+      });
+
+      // The row that only exists in the server's assignee-filtered result must now show up --
+      // it was never present in the earlier (unfiltered) fetch at all, so a client-side-only
+      // filter could not possibly have found it.
+      expect(await screen.findByText("Beyond the cap")).toBeInTheDocument();
+      expect(getPatents).toHaveBeenCalledWith(expect.objectContaining({ assignee: "Rafael" }));
+    });
+
+    it("re-fetches from the server (not a local re-filter) when the subdomain filter changes", async () => {
+      const baseline = [
+        makePatent({ id: 1 }),
+        makePatent({ id: 3, pub_number: "US1", title: "Rare candidate (baseline)", subdomain: "rare_subdomain" }),
+      ];
+      const filtered = [
+        makePatent({ id: 3, pub_number: "US1", title: "Rare match (filtered)", subdomain: "rare_subdomain" }),
+      ];
+      getPatents.mockImplementation((params: { subdomain?: string } = {}) =>
+        Promise.resolve(patentsResponse(params.subdomain === "rare_subdomain" ? filtered : baseline)),
+      );
+      renderPage();
+      await screen.findByText("Digital pixel readout integrated circuit");
+
+      fireEvent.change(screen.getByRole("combobox", { name: "סינון לפי תת-תחום" }), {
+        target: { value: "rare_subdomain" },
+      });
+
+      // A record that only exists in the server's subdomain-filtered response (distinct title)
+      // proves this went back to the server, not a client-side re-filter of the initial fetch.
+      expect(await screen.findByText("Rare match (filtered)")).toBeInTheDocument();
+      expect(screen.queryByText("אין תוצאות תואמות")).not.toBeInTheDocument();
+      expect(getPatents).toHaveBeenCalledWith(expect.objectContaining({ subdomain: "rare_subdomain" }));
+    });
+  });
 });

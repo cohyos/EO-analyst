@@ -7,6 +7,7 @@ let a malformed feed abort ingestion of the entries it *did* manage to parse.
 
 from __future__ import annotations
 
+import calendar
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -28,10 +29,18 @@ class FeedEntry(BaseModel):
 
 
 def _struct_time_to_datetime(value: time.struct_time | None) -> datetime | None:
+    """F13 (SOL-AUDIT-2026-09-24): feedparser's `*_parsed` fields are already UTC `struct_time`
+    tuples (it normalizes every feed's timezone-aware date on parse). `time.mktime` interprets its
+    input as *local* wall-clock time, so the previous `time.mktime(value)` silently shifted every
+    entry's timestamp by the workstation's local UTC offset before labelling the result `tz=UTC` --
+    correct only at UTC+0, and wrong by a fixed number of hours everywhere else (e.g. Asia/
+    Jerusalem, this deployment's own timezone). `calendar.timegm` is the UTC-input equivalent of
+    `time.mktime` (no local-timezone conversion), so it round-trips the UTC struct_time correctly
+    regardless of the process's local timezone."""
     if value is None:
         return None
     try:
-        return datetime.fromtimestamp(time.mktime(value), tz=UTC)
+        return datetime.fromtimestamp(calendar.timegm(value), tz=UTC)
     except (OverflowError, ValueError):
         return None
 

@@ -9,7 +9,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -121,7 +121,16 @@ def build_scheduler() -> BackgroundScheduler:
     )
     wk = s.schedule.weekly_run
     sched.add_job(
-        lambda: enqueue_job("weekly_run", {"mode": "full"}, priority=2),
+        # F22 (audit 2026-09-24): a numerically worse priority than "daily" (2) -- not equal --
+        # so that when both land in the queue at the same 01:00 tick (APScheduler's default
+        # executor can run same-tick jobs concurrently, so insertion order into `jobs` is not
+        # guaranteed), `claim_next_job`'s `ORDER BY priority ASC` picks `daily_run` first as long
+        # as both rows already exist by the time a worker polls -- which they will, well within
+        # the worker's 10s poll interval. `run_weekly`'s own `_daily_run_already_covered` check
+        # (now also treating a merely `queued` daily_run as covered) is the actual correctness
+        # guard against a double pipeline run; this priority is defense in depth for the common
+        # case, reducing how often that check's rarer "weekly claimed first" branch is exercised.
+        lambda: enqueue_job("weekly_run", {"mode": "full"}, priority=3),
         _cron(tz, wk.get("start", "01:00"), day_of_week=wk.get("weekday", "sat")),
         id="weekly",
         coalesce=True,
@@ -230,6 +239,50 @@ def wake_guard() -> None:
     log.info("wake_guard", now=datetime.now(tz=UTC).isoformat())
 
 
+def reconcile_missed_night_run() -> None:
+    """F07 (audit 2026-09-24): a restart just after the 01:00 cron fire (crash, update, supervisor
+    bounce) used to skip that night's run outright -- `misfire_grace_time` only covers a fire
+    missed *while the scheduler wasn't running yet*, and once the process is back up, APScheduler
+    computes the "daily" job's next fire time as tomorrow's 01:00, so nothing catches up tonight's
+    pipeline. Called once at startup (`main()`, right after the scheduler is built but before it
+    starts): if it is currently inside the night window (`schedule.night_window`, Asia/Jerusalem)
+    and no `daily_run`/`weekly_run` job has been created since that window opened tonight, enqueue
+    a daily run now -- the same job the 01:00 cron itself would have queued."""
+    s = settings()
+    tz = ZoneInfo(s.timezone)
+    now = datetime.now(tz)
+    sh, sm = (int(x) for x in s.schedule.night_window.start.split(":"))
+    eh, em = (int(x) for x in s.schedule.night_window.end.split(":"))
+    window_start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    window_end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+    if window_end <= window_start:  # a window that crosses midnight
+        window_end += timedelta(days=1)
+    if window_start > now:  # window hasn't opened yet today -- it opened yesterday instead
+        window_start -= timedelta(days=1)
+        window_end -= timedelta(days=1)
+    if not (window_start <= now < window_end):
+        return
+    from eoa import db
+
+    try:
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM jobs WHERE kind IN ('daily_run', 'weekly_run') "
+                "AND created_at >= %(start)s LIMIT 1",
+                {"start": window_start.astimezone(UTC)},
+            )
+            covered = cur.fetchone() is not None
+    except Exception as exc:
+        log.warning("reconcile_missed_night_run_check_failed", error=str(exc)[:160])
+        return
+    if covered:
+        return
+    job_id = enqueue_daily("full", priority=2)
+    log.warning(
+        "reconcile_missed_night_run_enqueued", job_id=job_id, window_start=window_start.isoformat()
+    )
+
+
 def main() -> None:
     configure_logging()
     s = settings()
@@ -237,6 +290,10 @@ def main() -> None:
     worker.start()
     sched = build_scheduler()
     sched.add_job(wake_guard, _cron(ZoneInfo(s.timezone), "00:55"), id="wake_guard")
+    try:
+        reconcile_missed_night_run()
+    except Exception as exc:
+        log.warning("reconcile_missed_night_run_failed", error=str(exc)[:160])
     sched.start()
     log.info(
         "orchestrator_started",

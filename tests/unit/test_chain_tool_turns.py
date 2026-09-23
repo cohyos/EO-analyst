@@ -286,3 +286,52 @@ class TestRunChainWithTextToolsCliLeg:
         assert result.provider == "ollama"
         assert attempts[0].provider == "claude" and not attempts[0].ok
         assert "tools-schema" in (attempts[0].error or "") or "tool-calling" in (attempts[0].error or "")
+
+
+class TestChatWithToolsUsageAccounting:
+    """Efficiency (audit 2026-09-24): `CliProvider._chat_with_tools`'s corrective-repair call is a
+    genuine SECOND LLM call, not a replacement of the first -- `usage = usage2 or usage` silently
+    discarded the first call's token usage instead of accounting for both."""
+
+    def test_repair_call_usage_is_summed_not_replaced(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from eoa.llm.providers.cli import CliProvider
+
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        replies = iter(
+            [
+                json.dumps(
+                    {
+                        "is_error": False,
+                        "result": "not JSON at all",
+                        "usage": {"input_tokens": 100, "output_tokens": 20},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "is_error": False,
+                        "result": json.dumps({"tool": "search", "args": {"q": "x"}}),
+                        "usage": {"input_tokens": 50, "output_tokens": 10},
+                    }
+                ),
+            ]
+        )
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process",
+            lambda *a, **k: subprocess.CompletedProcess(
+                args=["claude"], returncode=0, stdout=next(replies), stderr=""
+            ),
+        )
+        result = CliProvider("claude", "claude-sonnet-5").chat(
+            [{"role": "user", "content": "investigate"}], tools=TOOLS
+        )
+        assert result.tool_calls == [{"function": {"name": "search", "arguments": {"q": "x"}}}]
+        # both calls' usage summed, not just the second call's replacing the first's.
+        assert result.usage == {"input_tokens": 150, "output_tokens": 30}
+
+    def test_merge_usage_helper_sums_numeric_fields_and_prefers_second_for_others(self) -> None:
+        from eoa.llm.providers.cli import _merge_usage
+
+        merged = _merge_usage({"input_tokens": 100, "model": "a"}, {"input_tokens": 50, "output_tokens": 10})
+        assert merged == {"input_tokens": 150, "output_tokens": 10, "model": "a"}
+        assert _merge_usage({}, {"input_tokens": 5}) == {"input_tokens": 5}
+        assert _merge_usage({"input_tokens": 5}, {}) == {"input_tokens": 5}

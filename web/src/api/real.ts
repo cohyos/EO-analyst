@@ -1592,6 +1592,14 @@ export const realApi: ApiClient = {
   askStream: (body: AskRequest, handlers) => {
     const controller = new AbortController();
     (async () => {
+      // F30 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): the server always sends `done` in a
+      // `finally` block (`ask.py`'s `gen()`), including right after an `error` event -- so without
+      // this guard a stream failure would look successful (the loop below used to have no `error`
+      // case at all, silently dropping it, then acting on the immediately-following `done` as if
+      // nothing had happened). `terminal` also catches the OTHER silent-failure shape: the server
+      // response's body ending (EOF) without ever sending a `done`/`error` frame at all -- neither
+      // callback used to fire then, leaving the caller's `isStreaming` state stuck forever.
+      let terminal = false;
       try {
         const res = await fetch("/api/ask", {
           method: "POST",
@@ -1628,12 +1636,32 @@ export const realApi: ApiClient = {
               handlers.onMeta?.(str(evt.provider), str(evt.model));
             else if (evt.type === "sources") handlers.onSources?.(arr(evt.items));
             else if (evt.type === "answer_final") handlers.onAnswerFinal?.(str(evt.text));
-            else if (evt.type === "done") handlers.onDone();
+            else if (evt.type === "error") {
+              // Suppress the `done` that always follows: a stream that failed must not also
+              // report success.
+              terminal = true;
+              handlers.onError(new Error(str(evt.message) || "שגיאה בתקשורת עם השרת"));
+            } else if (evt.type === "done") {
+              if (terminal) continue;
+              terminal = true;
+              handlers.onDone();
+            }
           }
         }
+        if (!terminal) {
+          // The response body ended without a `done` or `error` frame ever arriving -- an
+          // abnormal close (proxy/network cut, server crash mid-stream), not a clean finish.
+          terminal = true;
+          handlers.onError(new Error("החיבור נסגר באופן בלתי צפוי"));
+        }
       } catch (err) {
-        if ((err as Error).name === "AbortError") return;
-        handlers.onError(err as Error);
+        if ((err as Error).name === "AbortError") {
+          // User-initiated stop: not a failure, but the caller's per-message/streaming state
+          // still needs to be cleared -- it was previously left stuck (F30).
+          if (!terminal) handlers.onAbort?.();
+          return;
+        }
+        if (!terminal) handlers.onError(err as Error);
       }
     })();
     return () => controller.abort();

@@ -240,14 +240,14 @@ def collect_week_items(
     cap = max_items or settings().triage.daily_report_max_items * 7
     sql = """
         SELECT i.id, i.url, i.title, i.domain, i.subdomain, i.published_at, i.level, i.score,
-               i.summary_he, i.so_what_he, i.report_kind, i.geography, i.trl,
+               i.summary_he, i.so_what_he, i.report_kind, i.geography, i.trl, i.story_id, i.lang,
                COALESCE(src.name, i.url) AS source_name
         FROM items i
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE i.security_status = 'clean'
           AND i.dedup_of IS NULL
           AND i.level = ANY(%(levels)s)
-          AND COALESCE(i.published_at, i.created_at)::date
+          AND (COALESCE(i.published_at, i.created_at) AT TIME ZONE 'Asia/Jerusalem')::date
               BETWEEN %(start)s AND %(end)s
         ORDER BY i.score DESC NULLS LAST, i.published_at DESC NULLS LAST
         LIMIT %(limit)s
@@ -827,18 +827,23 @@ def draft_weekly(
     evidence_item_ids: set[int] | None = None,
     role: str = "resident",
     interactive: bool = False,
+    period_end: dt.date | None = None,
 ) -> WeeklyReportDraft:
     """Draft the ``WeeklyReportDraft`` via the resident model; zero items skip the LLM call.
 
     ``items`` stays the full citation registry (unchanged ``n`` numbering); only the prompt-visible
     item list is reduced (:func:`select_items_for_prompt`) — round-2, see the module docstring.
+
+    F34: ``period_end`` is the report's own resolved period (``build_weekly``'s ``end``), used for
+    the prompt's ``{date_he}`` header instead of today -- a historical rebuild must show its own
+    date, not the date the rebuild happens to run on. Defaults to today (Asia/Jerusalem).
     """
     if not items:
         return _no_items_draft()
     prompt_items = select_items_for_prompt(items, evidence_item_ids)
     prompt = render(
         "report_weekly",
-        date_he=hebrew_date_str(_today_jerusalem()),
+        date_he=hebrew_date_str(period_end or _today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
         items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
@@ -873,11 +878,12 @@ def _corrective_retry(
     evidence_item_ids: set[int] | None = None,
     role: str,
     interactive: bool,
+    period_end: dt.date | None = None,
 ) -> WeeklyReportDraft:
     prompt_items = select_items_for_prompt(items, evidence_item_ids)
     prompt = render(
         "report_weekly",
-        date_he=hebrew_date_str(_today_jerusalem()),
+        date_he=hebrew_date_str(period_end or _today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         trends_block=wrap_data(trends_block, "report_trends", "internal"),
         items_block=wrap_data(format_items_block(prompt_items), "report_items", "internal"),
@@ -1009,6 +1015,7 @@ def build_weekly(
         evidence_item_ids=all_evidence_ids,
         role=role,
         interactive=interactive,
+        period_end=end,
     )
     # round-2 (2026-09-06): draft.trends' cites/duplicates are validated directly by
     # qa_citations._check_structured (WeeklyReportDraft is now the structured shape) -- no
@@ -1027,6 +1034,7 @@ def build_weekly(
             evidence_item_ids=all_evidence_ids,
             role=role,
             interactive=interactive,
+            period_end=end,
         )
         qa = check(draft, citation_items)
 

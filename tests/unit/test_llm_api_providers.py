@@ -160,6 +160,27 @@ class TestAnthropicChat:
         with pytest.raises(ApiProviderError):
             AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
 
+    @respx.mock
+    def test_200_non_json_body_raises_api_provider_error(self, monkeypatch):
+        """F26 (audit 2026-09-24): a 200 response with a non-JSON body used to raise a bare
+        `json.JSONDecodeError` -- not one of `eoa.llm.chain.FALLBACK_EXCEPTIONS` -- which aborted
+        the whole fallback chain instead of moving on to the next leg."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(200, content=b"not json at all", headers={"content-type": "text/plain"})
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_200_wrong_shape_body_raises_api_provider_error(self, monkeypatch):
+        """F26: valid JSON but the wrong shape (a list instead of the expected object) used to
+        raise a bare `AttributeError` from `data.get(...)`."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        respx.post("https://api.anthropic.com/v1/messages").mock(return_value=httpx.Response(200, json=[1, 2, 3]))
+        with pytest.raises(ApiProviderError, match="malformed"):
+            AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+
 
 class TestGeminiChat:
     @respx.mock
@@ -195,6 +216,17 @@ class TestGeminiChat:
         sent = json.loads(route.calls[0].request.content)
         assert sent["generationConfig"]["responseMimeType"] == "application/json"
         assert "title" not in sent["generationConfig"]["responseSchema"]
+
+    @respx.mock
+    def test_wrong_shape_body_raises_api_provider_error(self, monkeypatch):
+        """F26 (audit 2026-09-24): a well-shaped-HTTP-but-wrong-JSON-shape body must fall through
+        the chain (ApiProviderError), not abort it with a bare AttributeError/TypeError."""
+        monkeypatch.setenv("GEMINI_API_KEY", "gk-x")
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(return_value=httpx.Response(200, json={"candidates": "not-a-list-of-dicts"}))
+        with pytest.raises(ApiProviderError, match="malformed"):
+            GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "hi"}])
 
     @respx.mock
     def test_list_models_falls_back_to_static_on_error(self, monkeypatch):
@@ -259,6 +291,17 @@ class TestOpenAIChat:
         sent = json.loads(route.calls[0].request.content)
         assert sent["response_format"]["type"] == "json_schema"
         assert sent["response_format"]["json_schema"]["schema"] == schema
+
+    @respx.mock
+    def test_wrong_shape_body_raises_api_provider_error(self, monkeypatch):
+        """F26 (audit 2026-09-24): `choices` present but not a list of message objects must fall
+        through the chain (ApiProviderError), not abort it with a bare TypeError/AttributeError."""
+        monkeypatch.setenv("OPENAI_API_KEY", "ok-x")
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"choices": "not-a-list"})
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])
 
 
 class TestGeminiKeyHandling:

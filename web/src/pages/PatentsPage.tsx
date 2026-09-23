@@ -23,14 +23,38 @@ export function PatentsPage() {
   const [surveySubmitting, setSurveySubmitting] = useState(false);
 
   const statusQuery = useQuery({ queryKey: ["patents-status"], queryFn: () => api.getPatentsStatus() });
+  // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): `assignee`/`subdomain`/`q` used to be
+  // applied client-side, AFTER this query's own 200-row cap -- with 538 patents in the live DB
+  // (well past that cap, sorted by value_score), a match sitting outside the top 200 could never
+  // be found by any of those three filters no matter how exact the search, showing a false "אין
+  // תוצאות תואמות" empty state. The API already supports all three server-side
+  // (`eoa.api.routes.patents.list_patents`) -- filtering there means the cap is applied AFTER
+  // matching, not before.
   const patentsQuery = useQuery({
-    queryKey: ["patents", filters.israeli, filters.min_value_score],
+    queryKey: [
+      "patents",
+      filters.israeli,
+      filters.min_value_score,
+      filters.assignee,
+      filters.subdomain,
+      filters.q,
+    ],
     queryFn: () =>
       api.getPatents({
         israeli: filters.israeli || undefined,
         min_value_score: filters.min_value_score ? Number(filters.min_value_score) : undefined,
+        assignee: filters.assignee || undefined,
+        subdomain: filters.subdomain || undefined,
+        q: filters.q || undefined,
         limit: 200,
       }),
+  });
+  // Facet lists (assignee/subdomain dropdown options) come from a separate, unfiltered baseline
+  // fetch -- independent of the active filters -- so picking one filter doesn't collapse the
+  // other dropdown down to whatever happens to match today's selection.
+  const facetsQuery = useQuery({
+    queryKey: ["patents-facets"],
+    queryFn: () => api.getPatents({ limit: 200 }),
   });
   const heatmapQuery = useQuery({
     queryKey: ["patents-heatmap"],
@@ -44,30 +68,18 @@ export function PatentsPage() {
   });
 
   const patents = patentsQuery.data?.patents ?? [];
+  const facetPatents = facetsQuery.data?.patents ?? patents;
 
   const assignees = useMemo(() => {
     const set = new Set<string>();
-    for (const p of patents) for (const a of p.assignees) set.add(a);
+    for (const p of facetPatents) for (const a of p.assignees) set.add(a);
     return [...set].sort();
-  }, [patents]);
+  }, [facetPatents]);
   const subdomains = useMemo(() => {
     const set = new Set<string>();
-    for (const p of patents) if (p.subdomain) set.add(p.subdomain);
+    for (const p of facetPatents) if (p.subdomain) set.add(p.subdomain);
     return [...set].sort();
-  }, [patents]);
-
-  const filteredPatents = useMemo(() => {
-    let list = patents;
-    if (filters.assignee) list = list.filter((p) => p.assignees.includes(filters.assignee));
-    if (filters.subdomain) list = list.filter((p) => p.subdomain === filters.subdomain);
-    if (filters.q) {
-      const q = filters.q.toLowerCase();
-      list = list.filter(
-        (p) => (p.title ?? "").toLowerCase().includes(q) || (p.abstract ?? "").toLowerCase().includes(q),
-      );
-    }
-    return list;
-  }, [patents, filters.assignee, filters.subdomain, filters.q]);
+  }, [facetPatents]);
 
   function setTab(next: Tab) {
     const p = new URLSearchParams(searchParams);
@@ -136,7 +148,7 @@ export function PatentsPage() {
           {patentsQuery.isError && <ErrorState onRetry={() => patentsQuery.refetch()} />}
           {!patentsQuery.isLoading && !patentsQuery.isError && (
             <>
-              {patents.length === 0 ? (
+              {facetPatents.length === 0 ? (
                 <EmptyState
                   title="לא זוהו פטנטים"
                   description="הרץ סריקה (eo run patents) או הרץ סקר פטנטים לנושא ספציפי."
@@ -144,11 +156,11 @@ export function PatentsPage() {
               ) : (
                 <>
                   <PatentFilters value={filters} onChange={setFilters} assignees={assignees} subdomains={subdomains} />
-                  {filteredPatents.length === 0 ? (
+                  {patents.length === 0 ? (
                     <EmptyState title="אין תוצאות תואמות" description="נסה לשנות את הסינון." />
                   ) : (
                     <PatentTable
-                      patents={filteredPatents}
+                      patents={patents}
                       expandedId={expandedId}
                       onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
                     />

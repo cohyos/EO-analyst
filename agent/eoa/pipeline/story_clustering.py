@@ -100,12 +100,22 @@ class StoryClusteringStats:
 
 class _UnionFind:
     """Plain union-find keyed on item id, path-compressing, union-by-min-id (so ``find(x)`` is
-    already the component's minimum id -- no separate pass needed to compute ``story_id``)."""
+    already the component's minimum id -- no separate pass needed to compute ``story_id``).
+
+    F20: ``find``/``union`` auto-register an id they haven't seen yet (rather than requiring every
+    id up front via ``__init__``) so a node can represent an item's *persisted* ``story_id`` even
+    when that id's own row isn't in the current candidate pool (e.g. the story's root aged out of
+    the ``since_days`` window) -- see :func:`_build_components`'s edge (e)."""
 
     def __init__(self, ids: list[int]) -> None:
         self._parent: dict[int, int] = {i: i for i in ids}
 
+    def _ensure(self, x: int) -> None:
+        if x not in self._parent:
+            self._parent[x] = x
+
     def find(self, x: int) -> int:
+        self._ensure(x)
         root = x
         while self._parent[root] != root:
             root = self._parent[root]
@@ -114,6 +124,8 @@ class _UnionFind:
         return root
 
     def union(self, a: int, b: int) -> None:
+        self._ensure(a)
+        self._ensure(b)
         ra, rb = self.find(a), self.find(b)
         if ra == rb:
             return
@@ -160,6 +172,21 @@ def _build_components(
     by_id = {it["id"]: it for it in items}
     ids = list(by_id)
     uf = _UnionFind(ids)
+
+    # -- edge (e): preserve prior persisted story membership -----------------------------------
+    # F20: a nightly re-run only ever sees the current since_days candidate pool -- when a story's
+    # oldest member (often the root, since story_id == the component's min item id) ages out of
+    # that window, none of the edges below (a-d) are recomputable for it, and the remaining
+    # in-window member(s) would otherwise fall back to their own id as a "new" story, silently
+    # splitting a previously persisted group. Seeding each item's own persisted ``story_id`` as a
+    # union edge (to a virtual/possibly-out-of-pool node) keeps every in-window member anchored to
+    # its prior group even when the anchor itself isn't in ``items`` this run -- consistent with
+    # this module's own idempotence contract ("nothing here ever removes an edge that was valid on
+    # a previous run").
+    for it in items:
+        prior_story_id = it.get("story_id")
+        if prior_story_id is not None:
+            uf.union(it["id"], prior_story_id)
 
     # -- edge (a): dedup_of -------------------------------------------------------------------
     for it in items:

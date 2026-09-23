@@ -10,8 +10,8 @@ from eoa.config import settings
 from eoa.errors import DeadlineExceeded, LeaseLost, ResourceUnavailable
 from eoa.execution import checkpoint
 from eoa.llm.ollama_client import embed
-from eoa.memory.relational import get_items_for_stage, mark_stage, update_item_fields
-from eoa.memory.vector import find_duplicate, upsert_embedding
+from eoa.memory.relational import get_items_for_stage
+from eoa.memory.vector import commit_dedup_result, find_duplicate_in_memory, load_candidate_vectors
 
 log = structlog.get_logger(__name__)
 
@@ -35,7 +35,20 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
     """Embed new items and link near-duplicates (same story, any language) via ``dedup_of``.
 
     F22: ``item_ids`` (optional, additive) scopes this run to just those ids -- see
-    ``eoa.memory.relational.get_items_for_stage``."""
+    ``eoa.memory.relational.get_items_for_stage``.
+
+    Efficiency (audit "Load dedup candidate vectors once per stage"): the candidate-vector pool is
+    loaded ONCE for the whole run (not once per item -- a 300-item run used to reload every embedded
+    item's vector 300 times) and kept in memory, appending each processed item's own vector right
+    after it's scored so later items in the same run still see it -- the same sequential-matching
+    behavior the old per-item DB reload gave for free (an earlier item's freshly committed vector
+    was already visible to the next item's fresh query).
+
+    F08: each item's embedding, ``dedup_of`` link, and stage marker are written atomically
+    (:func:`eoa.memory.vector.commit_dedup_result`), and the item is excluded from its own candidate
+    pool (:func:`eoa.memory.vector.find_duplicate_in_memory`'s ``exclude_id``) -- together these
+    close the retry self-dedup window the finding describes (a crash between a partial write and a
+    retry could otherwise match an item against its own just-committed vector)."""
     checkpoint()
     cfg = settings().dedup
     stats = DedupStats()
@@ -43,6 +56,9 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
         it
         for it in get_items_for_stage(STAGE, limit, item_ids=item_ids)
         if it.get("security_status") not in ("quarantined", "blocked")
+    ]
+    candidates: list[tuple[int, list[float] | None]] = [
+        (row["id"], row.get("embedding")) for row in load_candidate_vectors(cfg.lookback_days)
     ]
     for i in range(0, len(items), batch_size):
         checkpoint()
@@ -58,13 +74,14 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
         for it, vec in zip(batch, vecs, strict=True):
             checkpoint()
             try:
-                dup = find_duplicate(vec, cfg.cosine_threshold, cfg.lookback_days)
-                upsert_embedding(it["id"], vec)
+                dup = find_duplicate_in_memory(
+                    vec, candidates, cfg.cosine_threshold, exclude_id=it["id"]
+                )
+                commit_dedup_result(it["id"], vec, dup[0] if dup is not None else None, STAGE)
+                candidates.append((it["id"], list(vec)))
                 if dup is not None:
-                    update_item_fields(it["id"], dedup_of=dup[0])
                     stats.duplicates += 1
                     log.info("dedup_linked", item_id=it["id"], dup_of=dup[0], sim=round(dup[1], 3))
-                mark_stage(it["id"], STAGE)
                 stats.embedded += 1
             except (DeadlineExceeded, LeaseLost):
                 raise
@@ -110,11 +127,11 @@ def link_cross_language(lookback_days: int | None = None) -> int:
              AND b.lang IS DISTINCT FROM a.lang
              AND a.domain NOT IN ('out_of_scope', 'secondary')
              AND b.domain NOT IN ('out_of_scope', 'secondary')
-             AND abs(extract(epoch FROM (coalesce(b.published_at, b.fetched_at) - coalesce(a.published_at, a.fetched_at)))) <= 86400 * 1.5
+             AND abs(extract(epoch FROM (coalesce(b.published_at, b.created_at) - coalesce(a.published_at, a.created_at)))) <= 86400 * 1.5
              AND cardinality(ARRAY(SELECT unnest(a.entities_mentioned) INTERSECT SELECT unnest(b.entities_mentioned))) >= 2
             WHERE a.dedup_of IS NULL AND b.dedup_of IS NULL
               AND a.security_status = 'clean' AND b.security_status = 'clean'
-              AND a.fetched_at > now() - make_interval(days => %s)
+              AND coalesce(a.published_at, a.created_at) > now() - make_interval(days => %s)
             ORDER BY a.id
             """,
             (days,),

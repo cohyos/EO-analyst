@@ -233,7 +233,11 @@ class TestLastRunTimeline:
         result = services._stage_timeline_from_log(1, "running")
         assert result["ingest"]["status"] == "running"
 
-        # But once the job itself is no longer running, a stage stuck mid-flight reads as done
-        # rather than forever "running" (the job ended one way or another).
+        # Once the job itself is no longer running, a stage stuck mid-flight is never reported as
+        # a success (4a61253: "a missing completion event is not evidence of success"): failed
+        # when the job failed, skipped otherwise, with the interruption recorded.
         result2 = services._stage_timeline_from_log(1, "failed")
-        assert result2["ingest"]["status"] == "done"
+        assert result2["ingest"]["status"] == "failed"
+        assert result2["ingest"]["detail"]["reason"] == "interrupted"
+        result3 = services._stage_timeline_from_log(1, "done")
+        assert result3["ingest"]["status"] == "skipped"

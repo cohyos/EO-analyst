@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from eoa.fetch.sanitize import (
     _map_confusables,
     _strip_dom,
     _strip_invisible_unicode,
     detect_lang,
     extract_clean_text,
+    extract_published_at_from_metadata,
     text_hash,
 )
 
@@ -385,3 +388,106 @@ def test_text_hash_differs_for_different_content() -> None:
     a = text_hash("Content A")
     b = text_hash("Content B")
     assert a != b
+
+
+# --------------------------------------------------------------------------
+# extract_published_at_from_metadata (SOL-AUDIT-2026-09-24: the real fix behind ~400 items with
+# no published_at -- html metadata backfill, independent of trafilatura's own (sometimes-empty)
+# date guess).
+# --------------------------------------------------------------------------
+
+
+def test_extract_published_at_from_article_published_time_meta() -> None:
+    html = (
+        '<html><head><meta property="article:published_time" content="2026-09-10T08:30:00+00:00">'
+        "</head><body></body></html>"
+    )
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 10, 8, 30, tzinfo=UTC)
+
+
+def test_extract_published_at_from_og_published_time_meta_when_article_tag_absent() -> None:
+    html = (
+        '<html><head><meta property="og:published_time" content="2026-09-11T09:00:00Z"></head>'
+        "<body></body></html>"
+    )
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 11, 9, 0, tzinfo=UTC)
+
+
+def test_extract_published_at_prefers_article_published_time_over_og() -> None:
+    html = (
+        "<html><head>"
+        '<meta property="article:published_time" content="2026-09-10T08:00:00+00:00">'
+        '<meta property="og:published_time" content="2026-09-01T00:00:00+00:00">'
+        "</head><body></body></html>"
+    )
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 10, 8, 0, tzinfo=UTC)
+
+
+def test_extract_published_at_handles_content_before_property_attribute_order() -> None:
+    html = (
+        '<html><head><meta content="2026-09-16T04:00:00+00:00" property="article:published_time">'
+        "</head><body></body></html>"
+    )
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 16, 4, 0, tzinfo=UTC)
+
+
+def test_extract_published_at_from_jsonld_date_published() -> None:
+    html = (
+        '<html><head><script type="application/ld+json">'
+        '{"@context":"https://schema.org","@type":"NewsArticle",'
+        '"datePublished":"2026-09-12T06:00:00Z"}'
+        "</script></head><body></body></html>"
+    )
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 12, 6, 0, tzinfo=UTC)
+
+
+def test_extract_published_at_from_jsonld_graph_array() -> None:
+    html = (
+        '<html><head><script type="application/ld+json">'
+        '{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"X"},'
+        '{"@type":"NewsArticle","datePublished":"2026-09-13T05:00:00Z"}]}'
+        "</script></head><body></body></html>"
+    )
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 13, 5, 0, tzinfo=UTC)
+
+
+def test_extract_published_at_from_time_tag_datetime_as_last_resort() -> None:
+    html = '<html><body><time datetime="2026-09-14T12:00:00+00:00">Sep 14</time></body></html>'
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+
+
+def test_extract_published_at_returns_none_when_nothing_present() -> None:
+    html = "<html><head><title>No dates here</title></head><body><p>Plain text.</p></body></html>"
+    assert extract_published_at_from_metadata(html) is None
+
+
+def test_extract_published_at_ignores_malformed_jsonld() -> None:
+    html = (
+        '<html><head><script type="application/ld+json">{not valid json</script>'
+        '<meta property="article:published_time" content="2026-09-17T00:00:00+00:00">'
+        "</head><body></body></html>"
+    )
+    assert extract_published_at_from_metadata(html) == datetime(2026, 9, 17, 0, 0, tzinfo=UTC)
+
+
+def test_extract_clean_text_backfills_published_at_from_meta_when_trafilatura_finds_none(
+    monkeypatch,
+) -> None:
+    """Wiring test: `extract_clean_text` falls back to `extract_published_at_from_metadata` when
+    the extraction backend returns no date -- both fallback extractors (`_extract_with_readability`
+    /`_extract_with_lxml`) never return a date at all, so this is the actual path most of the
+    ~400 undated items were falling through before this fix."""
+    from eoa.fetch import sanitize
+
+    monkeypatch.setattr(
+        sanitize,
+        "_extract_with_trafilatura",
+        lambda cleaned_html, url: ("Article body text about a defense contract.", "A Title", None),
+    )
+    html = (
+        '<html><head><meta property="article:published_time" content="2026-09-15T07:00:00+00:00">'
+        "<title>A Title</title></head><body><article><p>Article body text about a defense "
+        "contract.</p></article></body></html>"
+    )
+    clean = extract_clean_text(html, "https://example.com/article")
+    assert clean.published_at == datetime(2026, 9, 15, 7, 0, tzinfo=UTC)

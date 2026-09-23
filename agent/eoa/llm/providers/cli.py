@@ -112,6 +112,21 @@ def _render_tool_list(tools: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _merge_usage(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    """Sum matching numeric fields of two usage dicts (a corrective-repair call's usage stacked
+    onto the original call's, not replacing it -- see `CliProvider._chat_with_tools`). A key
+    present in only one dict, or whose value isn't numeric in both, is taken from whichever dict
+    has it (preferring ``second`` so a corrected/more complete field still wins)."""
+    out = dict(first)
+    for key, value in (second or {}).items():
+        prior = out.get(key)
+        if isinstance(value, int | float) and isinstance(prior, int | float):
+            out[key] = prior + value
+        else:
+            out[key] = value
+    return out
+
+
 def _find_tool_spec(tools: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     for t in tools:
         fn = t.get("function") or {}
@@ -394,7 +409,11 @@ class CliProvider:
             )
             content2, usage2, duration_ms2 = self._run_once(binary, model, repair_prompt, power, timeout)
             duration_ms += duration_ms2
-            usage = usage2 or usage
+            # Efficiency (audit 2026-09-24): `usage = usage2 or usage` discarded the first call's
+            # token usage outright instead of accounting for it -- the repair call is a genuine
+            # SECOND LLM call on top of the first, not a replacement of it, so cost/token totals
+            # under-reported every triggered repair. Sum matching numeric fields across both calls.
+            usage = _merge_usage(usage, usage2)
             parsed, reason = _parse_tool_reply(content2, tools)
             if parsed is None:
                 raise CliProviderError(
@@ -550,6 +569,12 @@ def _parse_agy(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str, A
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise CliProviderError(f"agy CLI returned non-JSON output: {proc.stdout[:300]!r}") from exc
+    # F26 (audit 2026-09-24): a syntactically valid but wrong-shaped body (e.g. a JSON list/string
+    # instead of an object) used to raise a bare `AttributeError` from `data.get(...)` below --
+    # not `CliProviderError`, so `eoa.llm.chain.FALLBACK_EXCEPTIONS` never caught it and the whole
+    # chain aborted instead of falling through to the next leg.
+    if not isinstance(data, dict):
+        raise CliProviderError(f"agy CLI returned a JSON {type(data).__name__}, not an object: {proc.stdout[:300]!r}")
     content = str(data.get("response", "")).strip()
     if data.get("status") and data["status"] != "SUCCESS":
         # 2026-09-22: agy sometimes reports status=ERROR while still carrying a complete, usable
@@ -574,6 +599,11 @@ def _parse_claude(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise CliProviderError(f"claude CLI returned non-JSON output: {proc.stdout[:300]!r}") from exc
+    # F26 (audit 2026-09-24): see the identical comment in `_parse_agy` above.
+    if not isinstance(data, dict):
+        raise CliProviderError(
+            f"claude CLI returned a JSON {type(data).__name__}, not an object: {proc.stdout[:300]!r}"
+        )
     if data.get("is_error"):
         raise CliProviderError(f"claude CLI reported an error: {str(data.get('result'))[:300]}")
     content = str(data.get("result", "")).strip()
@@ -600,6 +630,9 @@ def _parse_codex(proc: subprocess.CompletedProcess[str], tmp_out: Path | None) -
             evt = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if evt.get("type") == "turn.completed" and isinstance(evt.get("usage"), dict):
+        # F26 (audit 2026-09-24): a well-formed-JSON but non-object NDJSON line (e.g. a bare
+        # number/string) would otherwise raise `AttributeError` on `.get` here -- best-effort
+        # usage extraction, so just skip it rather than let it escape uncaught.
+        if isinstance(evt, dict) and evt.get("type") == "turn.completed" and isinstance(evt.get("usage"), dict):
             usage = evt["usage"]
     return content, usage

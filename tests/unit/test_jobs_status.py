@@ -14,7 +14,7 @@ from __future__ import annotations
 import types
 
 from eoa.orchestrator import jobs
-from eoa.orchestrator.jobs import RunState, _compute_run_status, _notify, run_weekly
+from eoa.orchestrator.jobs import RunState, _compute_run_status, _notify, _terminal_state, run_weekly
 
 
 def _raise_no_db():
@@ -74,6 +74,62 @@ class TestComputeRunStatus:
         assert _compute_run_status(stats) == "partial"
 
 
+class TestTerminalState:
+    """F23 (audit 2026-09-24): a handler result's `*_error` field must never be silently
+    defaulted to `done` -- whether the handler set no `status` at all (monthly/dossier/patent-
+    survey/single-target bd/product-line builders) or set one that only covers PART of the
+    result (run_weekly's own daily-pipeline `status` plus a separate `weekly_report_error`)."""
+
+    def test_recognized_status_wins_when_nothing_else_is_wrong(self) -> None:
+        assert _terminal_state({"status": "done", "report": {"docx": "x"}}) == "done"
+        assert _terminal_state({"status": "partial"}) == "partial"
+        assert _terminal_state({"status": "failed"}) == "failed"
+
+    def test_no_status_and_no_problem_defaults_to_done(self) -> None:
+        assert _terminal_state({"monthly_report": {"report_id": 5, "qa_passed": True}}) == "done"
+
+    def test_lone_error_with_no_status_and_nothing_else_built_is_failed(self) -> None:
+        """run_monthly/run_product_dossier/run_patent_survey's own failure shape."""
+        assert _terminal_state({"monthly_report_error": "no items this month"}) == "failed"
+        assert _terminal_state({"product_dossier_error": "extraction failed"}) == "failed"
+        assert _terminal_state({"patent_survey_error": "no patents found"}) == "failed"
+
+    def test_multi_target_loop_partial_success_is_partial_not_done(self) -> None:
+        """run_bd_report/run_product_line_report's loop-over-all-targets shape: some targets
+        succeeded (report_id present), one failed."""
+        res = {
+            "bd_reports": {
+                "telaviv": {"report_id": 1, "qa_passed": True},
+                "berlin": {"error": "no items in territory"},
+            }
+        }
+        assert _terminal_state(res) == "partial"
+
+    def test_multi_target_loop_total_failure_is_failed(self) -> None:
+        res = {"bd_reports": {"telaviv": {"error": "boom"}, "berlin": {"error": "boom"}}}
+        assert _terminal_state(res) == "failed"
+
+    def test_status_done_downgraded_to_partial_by_sibling_error_key(self) -> None:
+        """run_weekly's own shape: the daily-pipeline portion computed `status=done` (via
+        run_daily's `_compute_run_status`), but the separate weekly-report build afterward
+        failed -- must not stay `done`."""
+        res = {
+            "status": "done",
+            "report": {"docx": "x.docx"},
+            "weekly_report_error": "trend synthesis failed",
+        }
+        assert _terminal_state(res) == "partial"
+
+    def test_status_failed_stays_failed_even_with_extra_error_keys(self) -> None:
+        res = {"status": "failed", "report": {"error": "boom"}, "weekly_report_error": "also boom"}
+        assert _terminal_state(res) == "failed"
+
+    def test_handler_without_status_field_never_defaults_to_done_on_error(self) -> None:
+        """The exact bug: `res.get("status")` is None and the old code unconditionally returned
+        `"done"` for ANY handler result with no `status` key, even one carrying only an error."""
+        assert _terminal_state({"tech_daily_report_error": "no items"}) != "done"
+
+
 class TestRunWeekly:
     """F4: run_weekly must not re-run the full nightly pipeline when a separate daily_run job
     already covered tonight -- it should only build the weekly report on top of whatever that
@@ -120,6 +176,44 @@ class TestRunWeekly:
     def test_daily_run_already_covered_returns_false_on_db_error(self, monkeypatch) -> None:
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         assert jobs._daily_run_already_covered() is False
+
+    def test_daily_run_already_covered_query_includes_queued(self, monkeypatch) -> None:
+        """F22 (audit 2026-09-24): both `daily_run` and `weekly_run` are enqueued around the same
+        01:00 tick -- if `weekly_run` happens to be claimed first, a `daily_run` row that merely
+        exists but is still `queued` (not yet claimed) must already count as "covered" so
+        `run_weekly` does not also run the full pipeline itself, which would run it twice."""
+        captured: dict = {}
+
+        class _FakeCursor:
+            def execute(self, sql, params=None):
+                captured["sql"] = sql
+                captured["params"] = params
+
+            def fetchone(self):
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _FakeConn:
+            def cursor(self):
+                return _FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn())
+        jobs._daily_run_already_covered()
+        assert "'queued'" in captured["sql"]
+        assert "'running'" in captured["sql"]
+        assert "'done'" in captured["sql"]
+        assert "'partial'" in captured["sql"]
 
 
 class TestNotify:

@@ -218,6 +218,55 @@ class TestBuildComponentsSixItemSpiceCase:
         assert stats.stories_multi_member == 1
 
 
+class TestBuildComponentsPreservesPriorStoryWhenRootAgesOut:
+    """F20 (SOL-AUDIT-2026-09-24): the candidate-pool query windows by ``since_days``, so a story's
+    oldest member (often the root, since ``story_id`` == the component's min item id) can age out of
+    a later run's pool entirely -- it's simply absent from ``items``. Without edge (e), the
+    remaining in-window member would fall back to its own id as a "new" story, silently splitting a
+    previously persisted group."""
+
+    def test_member_retains_persisted_story_id_when_root_is_absent_from_pool(self) -> None:
+        # Root item 10 is NOT in the pool (aged out); item 11 still carries its persisted
+        # story_id=10 from an earlier run and has no in-pool edge (no dedup_of/corroboration/
+        # embedding/title match) to re-derive that link from scratch.
+        items = [_item(11, story_id=10, dedup_of=None)]
+        assignment, _stats = sc._build_components(items, embedding_threshold=0.80, window_days=3)
+        assert assignment[11] == 10
+
+    def test_two_recent_members_of_an_aged_out_root_stay_grouped_together(self) -> None:
+        items = [
+            _item(11, story_id=10, dedup_of=None, published_at=_dt(15)),
+            _item(12, story_id=10, dedup_of=None, published_at=_dt(16)),
+        ]
+        assignment, _ = sc._build_components(items, embedding_threshold=0.80, window_days=3)
+        assert assignment[11] == assignment[12] == 10
+
+    def test_no_prior_story_id_still_forms_its_own_new_story(self) -> None:
+        """Edge (e) only fires when a persisted story_id already exists -- a genuinely new,
+        never-before-clustered item still gets its own id, same as before this fix."""
+        items = [_item(20, story_id=None, dedup_of=None)]
+        assignment, _ = sc._build_components(items, embedding_threshold=0.80, window_days=3)
+        assert assignment[20] == 20
+
+
+class TestAssignStoryIdsRootAgedOutIntegration:
+    def test_reassigned_stays_zero_when_pool_lacks_the_aged_out_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end through `assign_story_ids`: the item whose root aged out must not be written
+        with a new (self) story_id -- `bulk_set_story_ids` must not even be called for it."""
+        items = [_item(11, story_id=10, dedup_of=None)]
+        monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: items)
+        persisted: dict[int, int] = {}
+        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: persisted.update(assignment))
+        monkeypatch.setattr(sc, "mark_stage", lambda item_id, stage: None)
+
+        stats = sc.assign_story_ids(since_days=7)
+
+        assert persisted == {}
+        assert stats.reassigned == 0
+
+
 class TestAssignStoryIdsStageEntrypoint:
     def test_empty_pool_returns_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: [])

@@ -590,6 +590,12 @@ export type AskSseEvent =
   // cross-source-conflation guard (eoa.api.ask_grounding) stripping a fabricated sentence --
   // not required reading for the UI today, kept for future surfacing/telemetry.
   | { type: "answer_final"; text: string; ungrounded_removed?: number }
+  // F30 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): sent on an unhandled server-side
+  // exception mid-stream (`ask.py`'s `gen()` `except Exception` branch). `message` is always a
+  // generic, non-identifying string -- the real exception text is logged server-side only. A
+  // `done` frame always follows (the server's `finally`), which the client must NOT treat as a
+  // successful completion once this has been seen.
+  | { type: "error"; message: string }
   | { type: "done" };
 
 // U8 (docs/adr/005-cloud-llm-cli.md + "Revision 2026-09-06"): local Ollama vs. cloud CLI

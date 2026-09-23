@@ -176,3 +176,44 @@ def test_apply_claims_gate_no_targets_present_is_a_no_op():
     assert result.softened == 0
     assert result.dropped == 0
     assert gated is draft
+
+
+# --------------------------------------------------------------------------
+# F17 (SOL-AUDIT-2026-09-24): gate_item_texts / gate_deep_search_entries must keep a fully
+# rejected (empty) softening result -- not silently fall back to the original unsupported text.
+# --------------------------------------------------------------------------
+
+
+def test_gate_item_texts_keeps_fully_rejected_summary_as_falsy():
+    items = [
+        {
+            "id": 1,
+            # entirely vacuous once the trigger phrases are stripped -- gate_text -> None
+            "summary_he": "החודש מצביע בבירור על העדפה הולכת וגוברת",
+            "so_what_he": "רפאל זכתה בחוזה חדש.",
+        }
+    ]
+    out = cg.gate_item_texts(items)
+    assert not out[0]["summary_he"]  # None or "" -- never the original unsupported claim
+    assert "הולכת וגוברת" not in (out[0]["summary_he"] or "")
+    assert out[0]["so_what_he"] == "רפאל זכתה בחוזה חדש."  # untouched, no trigger word
+
+
+def test_gate_deep_search_entries_keeps_fully_rejected_answer_as_falsy():
+    entries = [
+        {
+            "answer_he": "החודש מצביע בבירור על העדפה הולכת וגוברת",
+            "contradictions_he": "רפאל זכתה בחוזה חדש.",
+        }
+    ]
+    out = cg.gate_deep_search_entries(entries)
+    assert not out[0]["answer_he"]
+    assert out[0]["contradictions_he"] == "רפאל זכתה בחוזה חדש."
+
+
+def test_gate_item_texts_softens_without_restoring_original_when_partially_rejected():
+    items = [{"id": 1, "summary_he": "מסמנות קפיצת מדרגה בשוק ה-EO/IR"}]
+    out = cg.gate_item_texts(items)
+    assert out[0]["summary_he"] is not None
+    assert out[0]["summary_he"] != "מסמנות קפיצת מדרגה בשוק ה-EO/IR"
+    assert "קפיצת מדרגה" not in out[0]["summary_he"]

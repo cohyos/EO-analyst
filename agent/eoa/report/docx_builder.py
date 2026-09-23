@@ -2367,7 +2367,10 @@ def render_html(
             # DS3 (docs/REPORT_TEMPLATE_BENCHMARK.md sec 3.6): amber styling, never rendered as
             # "לא נמצא" -- distinguishes "technically blocked, never actually investigated" from a
             # genuine "searched thoroughly, nothing there" outcome.
-            body = (entry.get("blocked_reason_he") or "—") if is_blocked else entry.get("answer_he", "")
+            # F17: claims_gate.gate_deep_search_entries can now leave answer_he as None (a fully
+            # rejected, unsupported answer is dropped, never silently restored) -- `or ""` so the
+            # re.sub calls right below never see a None.
+            body = (entry.get("blocked_reason_he") or "—") if is_blocked else (entry.get("answer_he") or "")
             outcome_html = (
                 f'<span class="ds-blocked">{html.escape(outcome_label)}</span>'
                 if is_blocked

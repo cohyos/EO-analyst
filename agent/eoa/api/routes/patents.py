@@ -81,13 +81,17 @@ def list_patents(
     if q:
         where.append("(title ILIKE %(q)s OR abstract ILIKE %(q)s)")
         params["q"] = f"%{q}%"
+    where_sql = " AND ".join(where)
     rows = _fetchall(
-        f"SELECT * FROM patents WHERE {' AND '.join(where)} "
+        f"SELECT * FROM patents WHERE {where_sql} "
         "ORDER BY value_score DESC NULLS LAST, publication_date DESC NULLS LAST, id DESC "
         "LIMIT %(limit)s",
         params,
     )
-    total_row = _fetchone("SELECT count(*) AS c FROM patents")
+    # F39 (SOL-AUDIT-2026-09-24.md): the count used to ignore every filter above (`assignee`,
+    # `subdomain`, `israeli`, `min_value_score`, `q`) and always report the WHOLE table's size --
+    # reusing the same WHERE/params as the row query is the only way `total` and `patents` agree.
+    total_row = _fetchone(f"SELECT count(*) AS c FROM patents WHERE {where_sql}", params)
     return {"patents": rows, "total": (total_row or {}).get("c", len(rows))}
 
 
@@ -111,11 +115,19 @@ def patents_heatmap(
     assignees = [r["assignee"] for r in assignee_rows]
     if not cpc_codes or not assignees:
         return {"cpc_codes": cpc_codes, "assignees": assignees, "cells": []}
+    # F32 (SOL-AUDIT-2026-09-24.md): two parallel `unnest()`s in the same SELECT pair elements
+    # POSITIONALLY (Postgres treats sibling set-returning functions like `zip()`, not a cross
+    # product) -- a patent with 2 CPC codes and 2 assignees contributed only 2 (cpc, assignee)
+    # pairs (index 0-with-0, 1-with-1) instead of all 4 combinations. `CROSS JOIN LATERAL` for each
+    # unnest forms the actual cross product per patent row.
     cell_rows = _fetchall(
-        "SELECT c AS cpc, a AS assignee, count(*) AS n FROM "
-        "(SELECT unnest(cpc) AS c, unnest(assignees) AS a FROM patents "
-        " WHERE cpc && %(cpc_codes)s AND assignees && %(assignees)s) s "
-        "WHERE c = ANY(%(cpc_codes)s) AND a = ANY(%(assignees)s) GROUP BY c, a",
+        "SELECT c AS cpc, a AS assignee, count(*) AS n "
+        "FROM patents p "
+        "CROSS JOIN LATERAL unnest(p.cpc) AS c "
+        "CROSS JOIN LATERAL unnest(p.assignees) AS a "
+        "WHERE p.cpc && %(cpc_codes)s AND p.assignees && %(assignees)s "
+        "  AND c = ANY(%(cpc_codes)s) AND a = ANY(%(assignees)s) "
+        "GROUP BY c, a",
         {"cpc_codes": cpc_codes, "assignees": assignees},
     )
     return {"cpc_codes": cpc_codes, "assignees": assignees, "cells": cell_rows}

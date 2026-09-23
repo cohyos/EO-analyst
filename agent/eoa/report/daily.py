@@ -82,9 +82,15 @@ def _period(
     ``period_end`` 23:59:59.999999 inclusive.
     """
     if period_start is None and period_end is None:
+        # F40: elapsed-time arithmetic (the "last 24 hours") is done in UTC, not by subtracting a
+        # fixed timedelta from a Jerusalem-zoned wall-clock datetime -- zoneinfo recomputes the
+        # instant's UTC offset for the *shifted* wall-clock value, so a same-zone subtraction across
+        # a DST transition silently becomes a 23- or 25-real-hour window instead of 24. The report is
+        # still labeled with the run's own Jerusalem calendar date (``end_ts.date()``, unaffected).
         end_ts = dt.datetime.now(JERUSALEM)
-        start_ts = end_ts - dt.timedelta(hours=24)
-        return start_ts.astimezone(dt.UTC), end_ts.astimezone(dt.UTC), end_ts.date()
+        end_ts_utc = end_ts.astimezone(dt.UTC)
+        start_ts_utc = end_ts_utc - dt.timedelta(hours=24)
+        return start_ts_utc, end_ts_utc, end_ts.date()
     end_date = period_end or period_start
     start_date = period_start or end_date
     assert end_date is not None and start_date is not None  # for type-checkers; unreachable otherwise
@@ -117,6 +123,7 @@ def collect_items(
         sql = """
             SELECT i.id, i.url, i.title, i.domain, i.subdomain, i.published_at, i.level, i.score,
                    i.summary_he, i.so_what_he, i.report_kind, i.geography, i.trl,
+                   i.story_id, i.lang,
                    COALESCE(src.name, i.url) AS source_name
             FROM items i
             LEFT JOIN sources src ON src.id = i.source_id
@@ -1321,17 +1328,23 @@ def draft_report(
     role: str = "resident",
     interactive: bool = False,
     table_counts: TableCounts | None = None,
+    period_end: dt.date | None = None,
 ) -> DailyReportDraft:
     """Draft the ``DailyReportDraft`` via the resident model; zero items skip the LLM call
     entirely -- Q3-14: falling back to :func:`_tables_only_draft` rather than
     :func:`_no_items_draft` when ``table_counts`` (events/tenders/forecasts/deep-search) shows
-    there is other report content the exec summary should not contradict."""
+    there is other report content the exec summary should not contradict.
+
+    F34: ``period_end`` is the *report's* resolved period (``build_daily``'s own ``label`` from
+    :func:`_period`), not necessarily today -- a historical rebuild must show its own date in the
+    prompt header, not the date the rebuild happens to run on. Defaults to today (Asia/Jerusalem)
+    for any caller that doesn't have a resolved period yet."""
     counts = table_counts or TableCounts()
     if not items:
         return _tables_only_draft(counts) if counts.total else _no_items_draft()
     prompt = render(
         "report_daily",
-        date_he=hebrew_date_str(_today_jerusalem()),
+        date_he=hebrew_date_str(period_end or _today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         counts_context_he=counts.context_he(),
         items_block=wrap_data(_format_items_block(items), "report_items", "internal"),
@@ -1358,10 +1371,11 @@ def _corrective_retry(
     role: str,
     interactive: bool,
     table_counts: TableCounts | None = None,
+    period_end: dt.date | None = None,
 ) -> DailyReportDraft:
     prompt = render(
         "report_daily",
-        date_he=hebrew_date_str(_today_jerusalem()),
+        date_he=hebrew_date_str(period_end or _today_jerusalem()),
         data_guard=DATA_GUARD_SYSTEM,
         counts_context_he=(table_counts or TableCounts()).context_he(),
         items_block=wrap_data(_format_items_block(items), "report_items", "internal"),
@@ -1638,13 +1652,21 @@ def build_daily(
         deep_search=len(deep_search),
     )
 
-    draft = draft_report(items, role=role, interactive=interactive, table_counts=table_counts)
+    draft = draft_report(
+        items, role=role, interactive=interactive, table_counts=table_counts, period_end=label
+    )
     qa = check(draft, items)
 
     if not qa.passed and items:
         log.warning("report_qa_failed_retrying", errors=qa.errors[:10])
         draft = _corrective_retry(
-            items, draft, qa, role=role, interactive=interactive, table_counts=table_counts
+            items,
+            draft,
+            qa,
+            role=role,
+            interactive=interactive,
+            table_counts=table_counts,
+            period_end=label,
         )
         qa = check(draft, items)
 

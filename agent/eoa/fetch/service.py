@@ -21,26 +21,36 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+import httpx
 import structlog
 
-from eoa.errors import DeadlineExceeded, LeaseLost
+from eoa.errors import DeadlineExceeded, FetchError, LeaseLost
 from eoa.execution import checkpoint
 
 log = structlog.get_logger(__name__)
 
 
-async def _guarded_fetch_page(url: str):
+async def _guarded_fetch_page(url: str, *, client: httpx.AsyncClient | None = None):
     """Q2-13 (2026-09-06): every ingestion fetch -- feed URLs, listing pages and article links that
     come out of untrusted RSS/HTML content -- goes through the same SSRF guard as deep-search reads:
     the initial URL is validated (public IP, http(s), sane port) and every redirect hop is
-    re-validated before it is requested, with the connection pinned to the validated IPs."""
+    re-validated before it is requested, with the connection pinned to the validated IPs.
+
+    `client`, when given (SOL-AUDIT-2026-09-24 efficiency item: "reuse an async HTTP client during
+    one ingest run"), is passed straight through to `fetch_page` instead of letting it open and
+    close a brand-new `httpx.AsyncClient` (and its own TCP/TLS handshake) for every single page --
+    see `run_ingest`, which opens one client for the whole run and threads it down through every
+    `_ingest_*_source` helper to here.
+    """
     from eoa.fetch.html import fetch_page
     from eoa.fetch.remote import assert_public_http_url
 
     initial_ips = assert_public_http_url(url)
-    return await fetch_page(url, validate_redirect=assert_public_http_url, pin_ips=initial_ips)
+    return await fetch_page(
+        url, client=client, validate_redirect=assert_public_http_url, pin_ips=initial_ips
+    )
 
 
 _CONCURRENCY = 6
@@ -200,6 +210,31 @@ def _is_boilerplate_url(url: str) -> bool:
     return any(marker in path for marker in _BOILERPLATE_PATH_MARKERS)
 
 
+#: F36 (SOL-AUDIT-2026-09-24): common tracking-parameter noise that turns one article into
+#: several distinct rows (a shared post URL with a different `utm_source` per channel, a click-
+#: tracker's `fbclid`/`gclid`, ...) -- stripped when computing an item's `canonical_url` identity.
+#: Never mutates the observed `url` itself, which is still stored verbatim as provenance.
+_TRACKING_PARAM_PREFIXES = ("utm_",)
+_TRACKING_PARAM_NAMES = frozenset(
+    {"fbclid", "gclid", "gclsrc", "mc_cid", "mc_eid", "igshid", "ref", "ref_src", "spm", "yclid", "msclkid"}
+)
+
+
+def _normalize_url_identity(url: str) -> str:
+    """F36: normalize a URL (typically a fetch's `final_url`, after redirects) into the identity
+    used for cross-alias dedup -- strips tracking query params and any fragment, lowercases the
+    scheme/host, and drops a trailing path slash. Two observed URLs that both resolve/normalize to
+    the same value are the same article for `relational.insert_item`'s `canonical_url` upsert."""
+    parts = urlsplit(url)
+    kept_params = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.lower().startswith(_TRACKING_PARAM_PREFIXES) and key.lower() not in _TRACKING_PARAM_NAMES
+    ]
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(kept_params), ""))
+
+
 def _url_already_seen(url: str) -> bool:
     """F19: best-effort existence probe for ``items.url`` used by :func:`_store_item` to tell a
     genuine new-row insert from ``relational.insert_item``'s ``ON CONFLICT (url) DO UPDATE``
@@ -237,6 +272,7 @@ def _store_item(
     fallback_title: str | None = None,
     fallback_published_at: datetime | None = None,
     http_status: int | None = None,
+    final_url: str | None = None,
 ) -> None:
     from eoa.fetch.sanitize import (
         BLOCKED_ITEM_TITLE_HE,
@@ -270,20 +306,32 @@ def _store_item(
     stored_clean_text = None if is_blocked else clean.text
     stored_lang = None if is_blocked else clean.lang
 
-    # F19: probe for an existing row *before* the upsert, so a same-URL refresh (conflict) can be
-    # told apart from a genuine new row — see `_url_already_seen`.
-    already_seen = _url_already_seen(url)
+    # F36: identify this row by its normalized final URL (after redirects, tracking params
+    # stripped) so a redirect alias or tracking-variant of an already-stored article upserts that
+    # same row -- see `_normalize_url_identity` and `insert_item`'s own docstring. `url` itself
+    # (the as-observed/as-fetched address) is still stored verbatim, unchanged.
+    canonical_url = _normalize_url_identity(final_url or url)
+    if canonical_url == url:
+        canonical_url = None  # nothing to add over the plain `ON CONFLICT (url)` path
 
     try:
-        item_id = relational.insert_item(
+        # F09/efficiency item: a single quality-aware upsert replaces the old
+        # pre-insert-`_url_already_seen`-probe-then-plain-upsert pair -- `content_status`/
+        # `security_status` here let `insert_item` refresh blocked/stub content on a later good
+        # fetch (never the reverse) and `.inserted` tells a genuine new row apart from a same-
+        # URL/same-canonical-URL refresh without the extra round trip the old probe cost.
+        result = relational.insert_item(
             source_id=source_db_id,
             url=url,
+            canonical_url=canonical_url,
             title=stored_title,
             lang=stored_lang,
             published_at=published_at,
             raw_text=raw_text,
             clean_text=stored_clean_text,
             text_hash=text_hash(clean.text),
+            content_status="stub" if is_blocked else "full",
+            security_status="blocked" if is_blocked else "clean",
         )
     except (DeadlineExceeded, LeaseLost):
         raise
@@ -292,20 +340,10 @@ def _store_item(
         stats.items_skipped += 1
         return
 
-    # Only stamp `security_status='blocked'` on a genuinely new row. `insert_item`'s
-    # ON CONFLICT path never touches title/clean_text on a refetch of an already-seen URL, so
-    # downgrading an existing (possibly good) row here on a merely-transient block would disagree
-    # with what is actually stored -- and could clobber a previously successful fetch's status.
-    if is_blocked and not already_seen:
-        try:
-            relational.update_item_fields(item_id, security_status="blocked")
-        except (DeadlineExceeded, LeaseLost):
-            raise
-        except Exception as exc:
-            log.warning("fetch.blocked_status_update_failed", url=url, item_id=item_id, error=repr(exc))
-        log.info("fetch.block_page_detected", url=url, item_id=item_id, status=http_status)
+    if is_blocked and result.inserted:
+        log.info("fetch.block_page_detected", url=url, item_id=int(result), status=http_status)
 
-    if item_id and not already_seen:
+    if result.inserted:
         stats.items_inserted += 1
     else:
         stats.items_skipped += 1
@@ -319,15 +357,20 @@ async def _fetch_and_store(
     stats: IngestStats,
     fallback_title: str | None = None,
     fallback_published_at: datetime | None = None,
-) -> None:
+    client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Returns whether the fetch itself succeeded (F11: callers use this to tell "every article
+    fetch for this source failed" apart from "some/all succeeded", instead of the previous
+    always-``None`` return that let a source with a 100%-failing fetch step still get recorded as
+    successfully ingested)."""
     await throttle.wait(url)
     try:
-        page = await _guarded_fetch_page(url)
+        page = await _guarded_fetch_page(url, client=client)
     except (DeadlineExceeded, LeaseLost):
         raise
     except Exception as exc:
         log.warning("fetch.article_fetch_failed", url=url, error=repr(exc))
-        return
+        return False
 
     _store_item(
         source_db_id=source_db_id,
@@ -337,7 +380,9 @@ async def _fetch_and_store(
         fallback_title=fallback_title,
         fallback_published_at=fallback_published_at,
         http_status=page.status,
+        final_url=page.final_url,
     )
+    return True
 
 
 def _matches_keywords(entry, keywords_any: list[str]) -> bool:
@@ -351,13 +396,19 @@ def _matches_keywords(entry, keywords_any: list[str]) -> bool:
 
 
 async def _ingest_rss_source(
-    source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
+    source,
+    *,
+    source_db_id: int | None,
+    since_days: int,
+    throttle: _DomainThrottle,
+    stats: IngestStats,
+    client: httpx.AsyncClient | None = None,
 ) -> None:
     checkpoint()
     from eoa.fetch.rss import parse_feed
 
     await throttle.wait(source.url)
-    feed_page = await _guarded_fetch_page(source.url)
+    feed_page = await _guarded_fetch_page(source.url, client=client)
     entries = parse_feed(feed_page.html, since_days=since_days)
     stats.entries_seen += len(entries)
 
@@ -365,34 +416,67 @@ async def _ingest_rss_source(
     if keywords_any:
         entries = [e for e in entries if _matches_keywords(e, keywords_any)]
 
+    # F11: if every article this source's feed pointed at failed to fetch, the source itself did
+    # not succeed -- raising here (only when at least one was attempted) routes through
+    # `_ingest_one_source`'s `except FetchError` clause, which counts the source as failed and
+    # skips `_touch_source_fetched(ok=True)` instead of recording a clean run with zero real
+    # content. A source whose feed legitimately had nothing new (`entries` empty) is unaffected.
+    attempted = 0
+    succeeded = 0
     for entry in entries:
         checkpoint()
-        await _fetch_and_store(
+        attempted += 1
+        if await _fetch_and_store(
             entry.url,
             throttle=throttle,
             source_db_id=source_db_id,
             stats=stats,
             fallback_title=entry.title,
             fallback_published_at=entry.published_at,
-        )
+            client=client,
+        ):
+            succeeded += 1
+    if attempted and not succeeded:
+        raise FetchError(f"all {attempted} article fetch(es) failed for source {source.id}")
 
 
 async def _ingest_html_source(
-    source, *, source_db_id: int | None, throttle: _DomainThrottle, stats: IngestStats
+    source,
+    *,
+    source_db_id: int | None,
+    throttle: _DomainThrottle,
+    stats: IngestStats,
+    client: httpx.AsyncClient | None = None,
 ) -> None:
     checkpoint()
     await throttle.wait(source.url)
-    listing_page = await _guarded_fetch_page(source.url)
+    listing_page = await _guarded_fetch_page(source.url, client=client)
     links = _extract_links(listing_page.html, source.url, source.list_selector, source.link_selector)
     stats.entries_seen += len(links)
 
+    # F11: same "don't report a source as OK when every article fetch failed" guard as
+    # `_ingest_rss_source` -- see its comment.
+    attempted = 0
+    succeeded = 0
     for link in links:
         checkpoint()
-        await _fetch_and_store(link, throttle=throttle, source_db_id=source_db_id, stats=stats)
+        attempted += 1
+        if await _fetch_and_store(
+            link, throttle=throttle, source_db_id=source_db_id, stats=stats, client=client
+        ):
+            succeeded += 1
+    if attempted and not succeeded:
+        raise FetchError(f"all {attempted} article fetch(es) failed for source {source.id}")
 
 
 async def _ingest_sitemap_source(
-    source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
+    source,
+    *,
+    source_db_id: int | None,
+    since_days: int,
+    throttle: _DomainThrottle,
+    stats: IngestStats,
+    client: httpx.AsyncClient | None = None,
 ) -> None:
     """`kind: sitemap` (Task B item 1, 2026-09-16): parse the source's sitemap XML
     (`eoa.fetch.sitemap.parse_sitemap`) and feed the resulting article URLs into the same
@@ -404,22 +488,31 @@ async def _ingest_sitemap_source(
     from eoa.fetch.sitemap import parse_sitemap
 
     await throttle.wait(source.url)
-    sitemap_page = await _guarded_fetch_page(source.url)
+    sitemap_page = await _guarded_fetch_page(source.url, client=client)
     entries = parse_sitemap(
         sitemap_page.html, path_prefix=getattr(source, "path_prefix", None), since_days=since_days
     )
     stats.entries_seen += len(entries)
 
+    # F11: same "don't report a source as OK when every article fetch failed" guard as
+    # `_ingest_rss_source` -- see its comment.
+    attempted = 0
+    succeeded = 0
     for entry in entries:
         checkpoint()
-        await _fetch_and_store(
+        attempted += 1
+        if await _fetch_and_store(
             entry.url,
             throttle=throttle,
             source_db_id=source_db_id,
             stats=stats,
             fallback_title=entry.title,
             fallback_published_at=entry.published_at,
-        )
+            client=client,
+        ):
+            succeeded += 1
+    if attempted and not succeeded:
+        raise FetchError(f"all {attempted} article fetch(es) failed for source {source.id}")
 
 
 #: LinkedIn post ids (activity / ugcPost / share) are Snowflake-style: the top bits are the post's
@@ -469,15 +562,21 @@ def _store_search_hit(*, source_db_id: int | None, hit, stats: IngestStats, publ
     schema migration and inventing a status value the rest of the pipeline never checks for."""
     from eoa.memory import relational
 
-    already_seen = _url_already_seen(hit.url)
     try:
-        item_id = relational.insert_item(
+        # F09/efficiency item: content_status='stub'/security_status='clean' passed directly into
+        # the quality-aware upsert -- no separate pre-probe or post-insert `update_item_fields`
+        # call needed (see `_store_item`'s equivalent comment). A stub snippet never overwrites an
+        # already-stored fuller fetch of the same URL (lower quality rank); it also never
+        # downgrades `security_status` since a search hit's own status is always 'clean'.
+        result = relational.insert_item(
             source_id=source_db_id,
             url=hit.url,
             title=hit.title or None,
             clean_text=hit.snippet or None,
             lang=None,
             published_at=published_at,
+            content_status="stub",
+            security_status="clean",
         )
     except (DeadlineExceeded, LeaseLost):
         raise
@@ -486,13 +585,7 @@ def _store_search_hit(*, source_db_id: int | None, hit, stats: IngestStats, publ
         stats.items_skipped += 1
         return
 
-    if item_id and not already_seen:
-        try:
-            relational.update_item_fields(item_id, content_status="stub")
-        except (DeadlineExceeded, LeaseLost):
-            raise
-        except Exception as exc:
-            log.debug("fetch.search_hit_content_status_failed", item_id=item_id, error=repr(exc))
+    if result.inserted:
         stats.items_inserted += 1
     else:
         stats.items_skipped += 1
@@ -530,26 +623,118 @@ async def _ingest_search_source(source, *, source_db_id: int | None, stats: Inge
             _store_search_hit(source_db_id=source_db_id, hit=hit, stats=stats, published_at=published_at)
 
 
+#: F05 (SOL-AUDIT-2026-09-24): a lookback margin/ceiling on top of "how long since this source's
+#: last successful fetch" -- a brief outage doesn't need to land exactly on the boundary to be
+#: caught, but a source that has never succeeded (or has been down a very long time) doesn't
+#: demand months of backfill on every run.
+_LOOKBACK_MARGIN_DAYS = 1
+_LOOKBACK_MAX_DAYS = 21
+
+#: F35 (SOL-AUDIT-2026-09-24): a `schedule: weekly` source is "due" only once this long has passed
+#: since its last successful fetch (or it has never succeeded) -- keeps it off the ordinary
+#: 2-hour daytime poll (`main.py`'s `daytime_poll` cron job) except when it's actually due. The
+#: nightly "ingest" pipeline stage runs through this exact same `run_ingest` selection, so a due
+#: weekly source is picked up there too -- "the nightly run still fetches all due-or-daily
+#: sources" -- with no separate bypass needed.
+_WEEKLY_SOURCE_DUE_INTERVAL_DAYS = 7
+
+
+def _sources_last_success_map(source_db_ids: list[int]) -> dict[int, datetime | None]:
+    """Best-effort batch read of `COALESCE(last_ok_at, last_fetched_at)` for every id in
+    `source_db_ids`, in one round trip -- backs both F05 (per-source lookback) and F35 (per-source
+    due-by-schedule selection). `last_ok_at` (migration 0019) may not exist on a DB behind HEAD;
+    any query failure (including that one) degrades to "unknown last success" for every id, same
+    best-effort convention as the rest of this module (docs/CONVENTIONS.md rule 9)."""
+    if not source_db_ids:
+        return {}
+    from eoa.db import connection
+
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, COALESCE(last_ok_at, last_fetched_at) AS last_success "
+                "FROM sources WHERE id = ANY(%(ids)s)",
+                {"ids": list(source_db_ids)},
+            )
+            # The pool hands out dict rows (`row_factory=dict_row` in eoa.db) -- index by name. The
+            # first version indexed `row[0]`, raised KeyError(0) on every run and silently
+            # disabled F05/F35 (found in the full-suite run on 2026-09-24).
+            return {row["id"]: row["last_success"] for row in cur.fetchall()}
+    except (DeadlineExceeded, LeaseLost):
+        raise
+    except Exception as exc:
+        # warning, not debug: a failure here quietly widens/narrows every source's lookback.
+        log.warning("fetch.source_last_success_lookup_failed", error=repr(exc))
+        return {}
+
+
+def _lookback_days(
+    last_success: datetime | None, default_since_days: int, *, now: datetime | None = None
+) -> int:
+    """F05: a source not successfully fetched in longer than `default_since_days` gets a wider
+    lookback for this run -- elapsed-since-last-success plus a margin, bounded to
+    `_LOOKBACK_MAX_DAYS` so a source down (or never working) for months doesn't demand an
+    unbounded backfill. A source with no known last-success (new, or the lookup failed/degraded)
+    keeps the caller's plain `default_since_days`."""
+    if last_success is None:
+        return default_since_days
+    reference = now or datetime.now(UTC)
+    if last_success.tzinfo is None:
+        last_success = last_success.replace(tzinfo=UTC)
+    elapsed_days = max(0, (reference - last_success).days)
+    return min(max(default_since_days, elapsed_days + _LOOKBACK_MARGIN_DAYS), _LOOKBACK_MAX_DAYS)
+
+
+def _source_is_due(schedule: str, last_success: datetime | None, *, now: datetime | None = None) -> bool:
+    """F35: `schedule: daily` sources are due on every call (unchanged cadence). `schedule: weekly`
+    sources are due only when never successfully fetched, or when at least
+    `_WEEKLY_SOURCE_DUE_INTERVAL_DAYS` have passed since the last successful fetch."""
+    if schedule != "weekly":
+        return True
+    if last_success is None:
+        return True
+    reference = now or datetime.now(UTC)
+    if last_success.tzinfo is None:
+        last_success = last_success.replace(tzinfo=UTC)
+    return (reference - last_success) >= timedelta(days=_WEEKLY_SOURCE_DUE_INTERVAL_DAYS)
+
+
 async def _ingest_one_source(
-    source, *, source_db_id: int | None, since_days: int, throttle: _DomainThrottle, stats: IngestStats
+    source,
+    *,
+    source_db_id: int | None,
+    since_days: int,
+    throttle: _DomainThrottle,
+    stats: IngestStats,
+    client: httpx.AsyncClient | None = None,
 ) -> None:
     checkpoint()
-    from eoa.errors import FetchError
-
     stats.sources_attempted += 1
     try:
         if source.kind == "rss":
             await _ingest_rss_source(
-                source, source_db_id=source_db_id, since_days=since_days, throttle=throttle, stats=stats
+                source,
+                source_db_id=source_db_id,
+                since_days=since_days,
+                throttle=throttle,
+                stats=stats,
+                client=client,
             )
         elif source.kind == "sitemap":
             await _ingest_sitemap_source(
-                source, source_db_id=source_db_id, since_days=since_days, throttle=throttle, stats=stats
+                source,
+                source_db_id=source_db_id,
+                since_days=since_days,
+                throttle=throttle,
+                stats=stats,
+                client=client,
             )
         elif source.kind == "search":
             await _ingest_search_source(source, source_db_id=source_db_id, stats=stats)
         else:
-            await _ingest_html_source(source, source_db_id=source_db_id, throttle=throttle, stats=stats)
+            await _ingest_html_source(
+                source, source_db_id=source_db_id, throttle=throttle, stats=stats, client=client
+            )
     except FetchError as exc:
         stats.sources_failed += 1
         stats.errors.append(f"{source.id}: {exc}")
@@ -594,17 +779,47 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
         wanted = set(source_ids)
         targets = [(db_id, s) for db_id, s in targets if db_id in wanted]
 
+    # F05/F35: one batched read of every targeted source's last successful fetch, used to (a)
+    # skip a `schedule: weekly` source that isn't due yet (F35) and (b) widen this run's lookback
+    # for a source that's been down longer than the plain `since_days` default (F05) -- see
+    # `_source_is_due`/`_lookback_days`.
+    known_db_ids = [db_id for db_id, _ in targets if db_id is not None]
+    last_success_map = _sources_last_success_map(known_db_ids)
+
+    due_targets: list[tuple[int | None, object, int]] = []
+    for db_id, source in targets:
+        last_success = last_success_map.get(db_id) if db_id is not None else None
+        schedule = getattr(source, "schedule", None) or "daily"
+        if not _source_is_due(schedule, last_success):
+            log.debug("fetch.source_skipped_not_due", source_id=source.id, schedule=schedule)
+            continue
+        due_targets.append((db_id, source, _lookback_days(last_success, since_days)))
+
     stats = IngestStats()
     throttle = _DomainThrottle()
     semaphore = asyncio.Semaphore(_CONCURRENCY)
 
-    async def _bounded(db_id: int | None, source) -> None:
-        async with semaphore:
-            await _ingest_one_source(
-                source, source_db_id=db_id, since_days=since_days, throttle=throttle, stats=stats
-            )
+    # Efficiency item (SOL-AUDIT-2026-09-24): one shared `httpx.AsyncClient` for the whole run --
+    # `_guarded_fetch_page`/`fetch_page` otherwise open and close a brand-new client (a fresh
+    # TCP/TLS handshake) per page fetch. Threaded down through every `_ingest_*_source` helper;
+    # each individual fetch's own `timeout=`/byte cap/retry behavior is unaffected (those are set
+    # per-request, not per-client).
+    async with httpx.AsyncClient() as client:
 
-    await asyncio.gather(*(_bounded(db_id, s) for db_id, s in targets))
+        async def _bounded(db_id: int | None, source, effective_since_days: int) -> None:
+            async with semaphore:
+                await _ingest_one_source(
+                    source,
+                    source_db_id=db_id,
+                    since_days=effective_since_days,
+                    throttle=throttle,
+                    stats=stats,
+                    client=client,
+                )
+
+        await asyncio.gather(
+            *(_bounded(db_id, s, eff_since_days) for db_id, s, eff_since_days in due_targets)
+        )
 
     log.info(
         "fetch.ingest_complete",

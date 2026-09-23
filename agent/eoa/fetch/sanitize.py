@@ -591,6 +591,100 @@ def _extract_title_tag(html: str) -> str | None:
     return _strip_site_suffix(match.group(1).strip())
 
 
+# --------------------------------------------------------------------------
+# published_at metadata backfill (SOL-AUDIT-2026-09-24: ~400 items with no published_at)
+# --------------------------------------------------------------------------
+
+_META_DATE_KEYS = ("article:published_time", "og:published_time")
+
+
+def _extract_meta_content(html: str, key: str) -> str | None:
+    """`<meta property="KEY" content="...">` (or `name=`), either quote style, either attribute
+    order -- same approach as `_extract_og_title`, generalized to an arbitrary property/name."""
+    escaped = re.escape(key)
+    patterns = (
+        rf'<meta\s+(?:property|name)="{escaped}"\s+content="([^"]+)"',
+        rf"<meta\s+(?:property|name)='{escaped}'\s+content='([^']+)'",
+        rf'<meta\s+content="([^"]+)"\s+(?:property|name)="{escaped}"',
+        rf"<meta\s+content='([^']+)'\s+(?:property|name)='{escaped}'",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _find_json_date_published(node: object) -> str | None:
+    """Recursive search for a `"datePublished"` string value, covering both a plain
+    `NewsArticle`/`Article` JSON-LD object and an `@graph` array of them."""
+    if isinstance(node, dict):
+        value = node.get("datePublished")
+        if isinstance(value, str) and value.strip():
+            return value
+        for child in node.values():
+            found = _find_json_date_published(child)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_json_date_published(item)
+            if found:
+                return found
+    return None
+
+
+_JSONLD_SCRIPT_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.IGNORECASE | re.DOTALL
+)
+
+
+def _extract_jsonld_date_published(html: str) -> str | None:
+    for match in _JSONLD_SCRIPT_RE.finditer(html):
+        raw = match.group(1).strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        found = _find_json_date_published(data)
+        if found:
+            return found
+    return None
+
+
+_TIME_DATETIME_RE = re.compile(r'<time\b[^>]*\bdatetime="([^"]+)"', re.IGNORECASE)
+
+
+def _extract_time_tag_datetime(html: str) -> str | None:
+    match = _TIME_DATETIME_RE.search(html)
+    return match.group(1) if match else None
+
+
+def extract_published_at_from_metadata(html: str) -> datetime | None:
+    """Best-effort article publication timestamp straight from HTML metadata -- independent of
+    trafilatura's own date guess (`_extract_with_trafilatura`), which is `None` whenever
+    extraction falls back to readability/lxml (those backends have no date output at all) and,
+    per this audit's live count, leaves roughly 400 stored items with no `published_at` even
+    though the source page itself declares one. Checked in this order: `article:published_time`
+    -> `og:published_time` -> JSON-LD `datePublished` (any `<script type="application/ld+json">`
+    block, including an `@graph` array) -> the first `<time datetime="...">` attribute. Runs
+    against the RAW fetched HTML, not `eoa.fetch.sanitize._strip_dom`'s cleaned output --
+    `_strip_dom` unconditionally removes every `<script>` tag (it must, for the security reasons
+    `_STRIP_TAGS` documents), which would otherwise delete the JSON-LD block before this function
+    ever saw it. Returns `None` when nothing parses, same as every other rung here -- this
+    package never invents a date (docs/CONVENTIONS.md rule 5)."""
+    for key in _META_DATE_KEYS:
+        parsed = _parse_date(_extract_meta_content(html, key))
+        if parsed:
+            return parsed
+    parsed = _parse_date(_extract_jsonld_date_published(html))
+    if parsed:
+        return parsed
+    return _parse_date(_extract_time_tag_datetime(html))
+
+
 def _extract_h1_title(html: str) -> str | None:
     """Extract the first `<h1>`'s text content from raw HTML (tags inside it stripped)."""
     match = re.search(r"<h1\b[^>]*>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
@@ -854,6 +948,14 @@ def extract_clean_text(html: str, url: str) -> CleanText:
     if not body_text or not body_text.strip():
         body_text, fallback_title = _extract_with_lxml(cleaned_html)
         title = title or fallback_title
+
+    # SOL-AUDIT-2026-09-24 (the F12/F13 recency findings' real fix): trafilatura's own date guess
+    # is only ever set on the first rung above -- both fallback extractors return no date at all,
+    # and trafilatura itself sometimes returns text with no `date` field. Backfill from explicit
+    # HTML metadata (og/article meta tags, JSON-LD, `<time>`) before giving up on a date for this
+    # article; see `extract_published_at_from_metadata`'s own docstring.
+    if published_at is None:
+        published_at = extract_published_at_from_metadata(html)
 
     body_text = body_text or ""
     title_text = title.strip() if isinstance(title, str) else (title or "")
