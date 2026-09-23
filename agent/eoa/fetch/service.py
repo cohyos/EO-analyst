@@ -16,10 +16,11 @@ source's `sources.fail_count` in the DB.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
 
 import structlog
@@ -421,7 +422,36 @@ async def _ingest_sitemap_source(
         )
 
 
-def _store_search_hit(*, source_db_id: int | None, hit, stats: IngestStats) -> None:
+#: LinkedIn post ids (activity / ugcPost / share) are Snowflake-style: the top bits are the post's
+#: creation time in epoch milliseconds (``id >> 22``).
+_LINKEDIN_POST_ID_RE = re.compile(r"(?:activity|ugcPost|share)[-:](\d{18,20})")
+
+#: How far back a `kind: search` hit may be dated and still be stored. Search results are not
+#: time-ordered: on 2026-09-23 196 of 303 stored LinkedIn "posts" were from 2017-2025, and with no
+#: `published_at` they entered today's reports as news (a 2022 Iron Beam post in tech report 261).
+SEARCH_HIT_MAX_AGE_DAYS = 30
+
+
+def search_hit_published_at(url: str, published: str | None = None) -> datetime | None:
+    """Best-effort publication time of a search hit: the LinkedIn post id in the URL, else the
+    provider's own `published` field (ddgs news results carry one). ``None`` when neither is
+    available -- the caller keeps such a hit (it cannot be judged stale)."""
+    m = _LINKEDIN_POST_ID_RE.search(url or "")
+    if m:
+        try:
+            return datetime.fromtimestamp((int(m.group(1)) >> 22) / 1000, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            pass
+    if published:
+        try:
+            parsed = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            return None
+    return None
+
+
+def _store_search_hit(*, source_db_id: int | None, hit, stats: IngestStats, published_at: datetime | None = None) -> None:
     """Task B item 2 (2026-09-16): store one `eoa.search.provider.SearchHit` directly from its
     title+snippet -- no full-page fetch (LinkedIn/X company-post pages are not fetchable without
     login, and there is no API access to another company's own posts either; the search result
@@ -447,6 +477,7 @@ def _store_search_hit(*, source_db_id: int | None, hit, stats: IngestStats) -> N
             title=hit.title or None,
             clean_text=hit.snippet or None,
             lang=None,
+            published_at=published_at,
         )
     except (DeadlineExceeded, LeaseLost):
         raise
@@ -488,9 +519,15 @@ async def _ingest_search_source(source, *, source_db_id: int | None, stats: Inge
             )
             continue
         stats.entries_seen += len(resp.hits)
+        cutoff = datetime.now(UTC) - timedelta(days=SEARCH_HIT_MAX_AGE_DAYS)
         for hit in resp.hits:
             checkpoint()
-            _store_search_hit(source_db_id=source_db_id, hit=hit, stats=stats)
+            published_at = search_hit_published_at(hit.url, getattr(hit, "published", None))
+            if published_at is not None and published_at < cutoff:
+                stats.items_skipped += 1
+                log.debug("fetch.search_hit_stale", source_id=source.id, url=hit.url, published_at=str(published_at))
+                continue
+            _store_search_hit(source_db_id=source_db_id, hit=hit, stats=stats, published_at=published_at)
 
 
 async def _ingest_one_source(

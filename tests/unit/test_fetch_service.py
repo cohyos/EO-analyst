@@ -349,7 +349,7 @@ class TestIngestSearchDispatch:
     async def test_ingest_search_source_stores_each_hit_via_snippet(self, monkeypatch) -> None:
         stored = []
 
-        def _fake_store_search_hit(*, source_db_id, hit, stats):
+        def _fake_store_search_hit(*, source_db_id, hit, stats, published_at=None):
             stored.append((source_db_id, hit.url))
             stats.items_inserted += 1
 
