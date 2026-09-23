@@ -59,3 +59,17 @@ class TestParseAgy:
         proc = subprocess.CompletedProcess(args=["agy"], returncode=0, stdout=json.dumps([1, 2, 3]), stderr="")
         with pytest.raises(CliProviderError, match="not an object"):
             _parse_agy(proc)
+
+    def test_malformed_usage_field_is_sanitized_not_raised(self) -> None:
+        """F26 follow-up (SOL-REVIEW-2026-09-24): the top-level body is a valid object and
+        `response` is fine, but `usage` itself is the wrong shape (a list, not an object). Old
+        code returned it as-is -- every downstream consumer (`ProviderResult.usage`,
+        `eoa.llm.chain._record`, `_merge_usage`'s `.items()`) assumes a dict and would raise an
+        uncaught `AttributeError` outside `_parse_agy`'s own error boundary the first time it
+        touched the field, aborting the chain instead of falling through. Sanitizing to `{}` here
+        means content is still usable and nothing downstream ever sees the malformed shape."""
+        content, usage = _parse_agy(
+            _proc({"status": "SUCCESS", "response": "hello", "usage": [1, 2, 3]})
+        )
+        assert content == "hello"
+        assert usage == {}

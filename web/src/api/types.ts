@@ -38,6 +38,7 @@ import type {
   McpServersResponse,
   MorningResponse,
   NeighborhoodResponse,
+  PatentFacetsResponse,
   PatentHeatmapResponse,
   PatentSurveyCard,
   PatentSurveyCreateResponse,
@@ -45,6 +46,7 @@ import type {
   PatentsStatusResponse,
   PayloadDetailResponse,
   PayloadDiffResponse,
+  PayloadFacetsResponse,
   PayloadsResponse,
   PayloadTreeResponse,
   ProductLine,
@@ -321,6 +323,9 @@ export interface ApiClient {
   ): Promise<PatentHeatmapResponse>;
   getPatentSurveys(limit?: number): Promise<PatentSurveyCard[]>;
   createPatentSurvey(topic: string): Promise<PatentSurveyCreateResponse>;
+  // F33 (SOL-AUDIT-2026-09-24 review): uncapped assignee/subdomain filter options -- independent
+  // of `getPatents`'s row cap, so a value outside that cap still appears as a filter choice.
+  getPatentFacets(): Promise<PatentFacetsResponse>;
 
   /** A17: מטע"דים -- מפרטים ומחירי ייחוס, עם היסטוריית גרסאות (agent/eoa/payloads/**). */
   getPayloads(query?: PayloadsQuery): Promise<PayloadsResponse>;
@@ -331,6 +336,9 @@ export interface ApiClient {
   // fetched `getPayloads` list (`@/lib/payloadFamilies`) rather than calling this a second time;
   // it exists on the client for API-surface completeness / other future consumers.
   getPayloadTree(): Promise<PayloadTreeResponse>;
+  // F33 (SOL-AUDIT-2026-09-24 review): uncapped vendor/category filter options -- independent of
+  // `getPayloads`'s row cap, so a vendor outside that cap still appears as a filter choice.
+  getPayloadFacets(category?: string): Promise<PayloadFacetsResponse>;
 
   /** A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי" -- subdomain x maturity matrix. */
   getTechRadar(weeks?: number): Promise<TechRadarResponse>;

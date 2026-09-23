@@ -116,9 +116,14 @@ def _merge_usage(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any
     """Sum matching numeric fields of two usage dicts (a corrective-repair call's usage stacked
     onto the original call's, not replacing it -- see `CliProvider._chat_with_tools`). A key
     present in only one dict, or whose value isn't numeric in both, is taken from whichever dict
-    has it (preferring ``second`` so a corrected/more complete field still wins)."""
-    out = dict(first)
-    for key, value in (second or {}).items():
+    has it (preferring ``second`` so a corrected/more complete field still wins).
+
+    F26 follow-up (SOL-REVIEW-2026-09-24): defensive against a non-dict ``first``/``second`` --
+    `_parse_agy`/`_parse_claude` already sanitize a malformed ``usage`` field to ``{}`` at the
+    parse boundary, so this should never actually receive one in practice, but a bare `.items()`
+    call on a non-dict would otherwise raise `AttributeError` outside every error boundary."""
+    out = dict(first) if isinstance(first, dict) else {}
+    for key, value in (second or {}).items() if isinstance(second, dict) else ():
         prior = out.get(key)
         if isinstance(value, int | float) and isinstance(prior, int | float):
             out[key] = prior + value
@@ -589,6 +594,16 @@ def _parse_agy(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str, A
     if not content or data.get("response") is None:
         raise CliProviderError("agy CLI returned an empty response")
     usage = data.get("usage") or {}
+    # F26 follow-up (SOL-REVIEW-2026-09-24): a syntactically valid, object-shaped body whose
+    # `usage` field itself is the WRONG shape (e.g. a list/string) used to be returned as-is --
+    # every later consumer (`ProviderResult.usage`, `eoa.llm.chain._record`, `_merge_usage`'s own
+    # `.items()` call) assumes a dict and raises an uncaught `AttributeError` outside this
+    # function's own error boundary, aborting the whole fallback chain instead of falling through.
+    # Sanitizing here, at the parse boundary, means every downstream consumer can keep assuming a
+    # dict without its own defensive check.
+    if not isinstance(usage, dict):
+        log.warning("agy_usage_field_malformed", usage_type=type(usage).__name__)
+        usage = {}
     return content, usage
 
 
@@ -610,6 +625,10 @@ def _parse_claude(proc: subprocess.CompletedProcess[str]) -> tuple[str, dict[str
     if not content or data.get("result") is None:
         raise CliProviderError("claude CLI returned an empty response")
     usage = data.get("usage") or {}
+    # F26 follow-up (SOL-REVIEW-2026-09-24): see the identical comment in `_parse_agy` above.
+    if not isinstance(usage, dict):
+        log.warning("claude_usage_field_malformed", usage_type=type(usage).__name__)
+        usage = {}
     return content, usage
 
 

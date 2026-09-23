@@ -84,12 +84,14 @@ describe("InboxPage security reviews section (W10)", () => {
     );
   });
 
-  it("'אשר והמשך' on a row calls approve with that row's job id", async () => {
+  it("the rerun button on a row calls approve with that row's job id", async () => {
+    // F28/N08 (SOL-REVIEW-2026-09-24): "אשר והמשך" renamed to "הרץ מחדש" -- see
+    // SecurityReviewBanner.tsx's own docstring on why (no whitelist/approval override exists).
     getSecurityReviews.mockResolvedValue([review()]);
     postSecurityReviewApprove.mockResolvedValue({ job_id: "200" });
     renderInbox();
     await screen.findByTestId("security-review-banner");
-    fireEvent.click(screen.getByText("אשר והמשך"));
+    fireEvent.click(screen.getByText("הרץ מחדש"));
     await waitFor(() => expect(postSecurityReviewApprove).toHaveBeenCalledWith("113"));
   });
 

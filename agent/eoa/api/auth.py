@@ -25,6 +25,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -313,23 +314,98 @@ def is_loopback_host(host: str | None) -> bool:
         return False
 
 
-def effective_client_host(peer_host: str | None, forwarded_for: str | None) -> str | None:
-    """Resolve the address to trust-check for a request whose direct TCP peer is loopback.
+#: A request is "not established as loopback" whenever a loopback peer carries a proxy signal it
+#: cannot itself resolve to a loopback address -- see :func:`effective_client_host`. Deliberately
+#: not `None`/empty: those already mean "no header at all" (genuinely local, trusted). This
+#: sentinel fails `is_loopback_host` (not a valid IP literal, not in `_LOOPBACK_HOSTS`), so callers
+#: that just do `is_loopback_host(effective_client_host(...))` fail closed for free.
+UNRESOLVED_PROXY_CLIENT = "unresolved-proxied-client"
 
-    `X-Forwarded-For` is attacker-controlled end to end: a remote client can set an arbitrary
-    value before the request ever reaches the trusted local proxy. A well-behaved proxy (and
-    `tailscale serve`, when it forwards this header at all) *appends* the hop it saw the
-    connection from rather than overwriting the header, so the one entry we can actually trust
-    is the LAST one -- not the first, which is whatever the original caller supplied. Taking the
-    first value let a remote caller put `127.0.0.1` in front of the chain and bypass the session
-    gate entirely (F06). If the last entry itself is not loopback, the request is treated as
-    remote regardless of anything earlier in the chain.
+#: Header-name prefixes (checked case-insensitively; ASGI/ Starlette header names are already
+#: lower-cased) that Tailscale Serve/Funnel adds to a proxied request to carry tailnet identity --
+#: e.g. `Tailscale-User-Login`. Their mere presence signals "this request came through the proxy",
+#: independent of whether `X-Forwarded-For` also arrived intact.
+_TAILSCALE_HEADER_PREFIX = "tailscale-"
+
+_FORWARDED_FOR_TOKEN_RE = re.compile(r'for\s*=\s*"?\[?([^;,"\]]+)\]?"?', re.IGNORECASE)
+
+
+def _last_comma_token(value: str | None) -> str | None:
+    if not value:
+        return None
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    return parts[-1] if parts else None
+
+
+def _last_forwarded_header_address(value: str | None) -> str | None:
+    """Extract the last `for=` token from an RFC 7239 `Forwarded` header. Hops are comma-
+    separated; each hop may carry `for=`/`proto=`/`by=`/`host=` params, in any order, quoted or
+    not, e.g. ``Forwarded: for=1.2.3.4;proto=https, for="[::1]:8080"``."""
+    if not value:
+        return None
+    matches = _FORWARDED_FOR_TOKEN_RE.findall(value)
+    if not matches:
+        return None
+    token = matches[-1].strip()
+    # Strip a trailing `:port` from an IPv4-looking token (a bracketed IPv6 token already had its
+    # brackets stripped by the regex above, together with any port suffix outside them).
+    if token.count(":") == 1 and token.rsplit(":", 1)[1].isdigit():
+        token = token.rsplit(":", 1)[0]
+    return token or None
+
+
+def _has_header_prefix(headers: Any, prefix: str) -> bool:
+    """True if any header name starts with `prefix` (case-insensitive). Works with anything
+    Mapping-like/iterable-of-keys, including Starlette's `Headers`."""
+    try:
+        names = list(headers.keys())
+    except AttributeError:
+        try:
+            names = list(headers)
+        except TypeError:
+            return False
+    return any(str(n).lower().startswith(prefix) for n in names)
+
+
+def effective_client_host(peer_host: str | None, headers: Any) -> str | None:
+    """Resolve the address to trust-check for this request, failing closed whenever a loopback
+    peer shows ANY sign of being a proxy hop but the true client address cannot be established
+    (F06, SOL-AUDIT-2026-09-24 review: "a request that arrives via the local proxy ... must hold a
+    valid session unless the proxy-appended client address is itself loopback").
+
+    `headers` is anything with a case-insensitive `.get(name)` (a `Headers` instance, or a plain
+    dict with lower-cased keys in tests) plus iterable `.keys()`.
+
+    - A non-loopback peer is always itself -- already remote, no header can make it MORE trusted.
+    - A loopback peer with NO forwarding signal at all (no `X-Forwarded-For`, `Forwarded`,
+      `X-Forwarded-Host`, or `Tailscale-*` header) is genuinely local -- unchanged behaviour.
+    - A loopback peer WITH a forwarding signal is being proxied. The proxy-appended address is the
+      LAST `X-Forwarded-For` hop (attacker-controlled end to end except for that last, proxy-
+      appended entry -- taking the first value let a remote caller prepend `127.0.0.1` and bypass
+      the gate entirely), falling back to the last `Forwarded: for=` hop when `X-Forwarded-For`
+      itself is absent. If that address is loopback, the request is still trusted (the real final
+      hop before this server WAS loopback). If NO address can be extracted at all (e.g. only a
+      `Tailscale-*` or `X-Forwarded-Host` header arrived, with no `for=`/`X-Forwarded-For` token),
+      the client address cannot be established -- return :data:`UNRESOLVED_PROXY_CLIENT`, which is
+      never loopback, so the request fails closed into "remote, needs a session" rather than
+      silently keeping the trusted peer address.
     """
-    if peer_host and is_loopback_host(peer_host) and forwarded_for:
-        parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
-        if parts:
-            return parts[-1]
-    return peer_host
+    if not peer_host or not is_loopback_host(peer_host):
+        return peer_host
+
+    get = headers.get if hasattr(headers, "get") else (lambda _k, _d=None: _d)
+    xff = get("x-forwarded-for")
+    forwarded = get("forwarded")
+    x_forwarded_host = get("x-forwarded-host")
+    has_tailscale = _has_header_prefix(headers, _TAILSCALE_HEADER_PREFIX)
+
+    if not (xff or forwarded or x_forwarded_host or has_tailscale):
+        return peer_host  # genuinely local: unchanged behaviour
+
+    resolved = _last_comma_token(xff) or _last_forwarded_header_address(forwarded)
+    if resolved:
+        return resolved
+    return UNRESOLVED_PROXY_CLIENT
 
 
 def _session_token_from_cookie_header(cookie_header: str | None) -> str | None:
@@ -385,7 +461,7 @@ class RemoteAccessMiddleware:
         headers = Headers(scope=scope)
         client = scope.get("client")
         peer_host = client[0] if client else None
-        effective_host = effective_client_host(peer_host, headers.get("x-forwarded-for"))
+        effective_host = effective_client_host(peer_host, headers)
         trusted = is_loopback_host(effective_host)
         path = scope["path"]
 
@@ -469,7 +545,7 @@ class LoginRequest(BaseModel):
 
 def _request_effective_host(request: Request) -> str:
     peer_host = request.client.host if request.client else None
-    return effective_client_host(peer_host, request.headers.get("x-forwarded-for")) or "unknown"
+    return effective_client_host(peer_host, request.headers) or "unknown"
 
 
 @router.post("/auth/login")

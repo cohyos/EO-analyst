@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ipaddress
+
 import httpx
 import pytest
 import respx
 
 from eoa.errors import FetchError
-from eoa.fetch.html import FetchedPage, _decode, _robots_cache, fetch_page
+from eoa.fetch.html import FetchedPage, _decode, _PinnedIPTransport, _robots_cache, fetch_page
 from eoa.fetch.sanitize import _repair_mojibake
 
 pytestmark = pytest.mark.asyncio
@@ -245,6 +247,72 @@ async def test_robots_fetch_allowed_when_connection_matches_pinned_ips() -> None
 
     assert "ok" in page.html
     assert "/article" in transport.requested_paths
+
+
+class _RecordingInnerTransport(httpx.AsyncBaseTransport):
+    """Stands in for the real `httpx.AsyncHTTPTransport` inside `_PinnedIPTransport` -- records
+    the exact host `_PinnedIPTransport` actually asked it to connect to (it never itself
+    re-resolves a hostname), so a test can prove the connection target."""
+
+    def __init__(self) -> None:
+        self.dialed_hosts: list[str] = []
+        self.sni_hostnames: list[str | None] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.dialed_hosts.append(request.url.host)
+        self.sni_hostnames.append(request.extensions.get("sni_hostname"))
+        return httpx.Response(200, content=b"<html>ok</html>", request=request)
+
+
+async def test_pinned_transport_dials_the_validated_ip_not_the_hostname() -> None:
+    """F01 (SOL-REVIEW-2026-09-24 round 2): the review's own required test -- prove the connection
+    is actually DIALED at the validated IP, not merely checked after connecting. A rebound DNS
+    answer for `example.test` (imagined here as some private address the round-1 code would have
+    connected to and only rejected afterward) is never even looked up: `_PinnedIPTransport`
+    replaces the request URL's host with the already-validated IP literal before the inner
+    transport -- which would be the one making the real TCP/TLS connection -- ever sees the
+    request, for both the robots.txt fetch and the article fetch. This fails against the old
+    (round-1) code, where the inner transport would have been asked to connect to the hostname
+    `example.test` itself (the private-IP rebinding gap the review's F01 evidence quotes)."""
+    inner = _RecordingInnerTransport()
+    transport = _PinnedIPTransport(inner)
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        page = await fetch_page(
+            "https://example.test/article", client=client, pin_ips={"93.184.216.34"}
+        )
+    finally:
+        await client.aclose()
+
+    assert "ok" in page.html
+    # Every connection actually attempted (robots.txt + the article) dialed the pinned IP literal
+    # -- never the hostname (where a rebound DNS answer would otherwise be resolved) and never any
+    # private/internal address.
+    assert inner.dialed_hosts  # sanity: at least one connection was actually made
+    for host in inner.dialed_hosts:
+        assert host == "93.184.216.34"
+        assert host != "example.test"
+        assert not ipaddress.ip_address(host).is_private
+    # TLS SNI/certificate verification still uses the real hostname, not the dialed IP.
+    assert inner.sni_hostnames and all(sni == "example.test" for sni in inner.sni_hostnames)
+    # Callers still see the original hostname/URL, never the dialed IP.
+    assert page.final_url == "https://example.test/article"
+
+
+async def test_pinned_transport_passes_through_when_no_pin_given() -> None:
+    """No `"pinned_ip"` extension on the request (e.g. a caller with no `pin_ips`) -- the request
+    reaches the inner transport completely unchanged, exactly as if `_PinnedIPTransport` weren't
+    there at all."""
+    inner = _RecordingInnerTransport()
+    transport = _PinnedIPTransport(inner)
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        page = await fetch_page("https://example.test/article", client=client)
+    finally:
+        await client.aclose()
+
+    assert "ok" in page.html
+    assert all(host == "example.test" for host in inner.dialed_hosts)
 
 
 async def test_robots_fetch_with_no_pin_ips_is_unchanged() -> None:

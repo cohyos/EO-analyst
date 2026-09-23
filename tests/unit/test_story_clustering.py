@@ -267,6 +267,57 @@ class TestAssignStoryIdsRootAgedOutIntegration:
         assert stats.reassigned == 0
 
 
+class TestAssignStoryIdsPropagatesMergedRootToHistoricalMembers:
+    """F20 follow-up (SOL-REVIEW-2026-09-24): merging two persisted groups must propagate the
+    surviving root to historical members outside the candidate window, not just the in-window
+    items `bulk_set_story_ids` touches. Old code has no `remap_story_roots` call at all, so this
+    fails against it (AttributeError / never invoked)."""
+
+    def test_merge_of_two_persisted_stories_remaps_old_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two previously-separate persisted stories: root 10 (historical member 8 already out of
+        # window, not in this pool) and root 50. This run finds a NEW embedding edge between their
+        # in-window members (11 and 51), merging the two stories under the lower root, 10.
+        items = [
+            _item(11, story_id=10, dedup_of=None, embedding=[1.0, 0.0], published_at=_dt(15)),
+            _item(51, story_id=50, dedup_of=None, embedding=[0.99, 0.01], published_at=_dt(15)),
+        ]
+        monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: items)
+        persisted: dict[int, int] = {}
+        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: persisted.update(assignment))
+        monkeypatch.setattr(sc, "mark_stage", lambda item_id, stage: None)
+        remap_calls: list[dict[int, int]] = []
+
+        def _fake_remap(root_remap: dict[int, int]) -> int:
+            remap_calls.append(dict(root_remap))
+            return 1
+
+        monkeypatch.setattr(sc, "remap_story_roots", _fake_remap)
+
+        stats = sc.assign_story_ids(since_days=7)
+
+        # In-window items merge to the lower root (10).
+        assert persisted == {51: 10}
+        # The old root 50 (root of the second persisted group, whose historical out-of-window
+        # member 8 still carries story_id=50 in the DB) must be remapped to the new root 10.
+        assert remap_calls == [{50: 10}]
+        assert stats.historical_remapped == 1
+
+    def test_no_merge_does_not_call_remap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        items = [_item(11, story_id=10, dedup_of=None)]
+        monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: items)
+        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: None)
+        monkeypatch.setattr(sc, "mark_stage", lambda item_id, stage: None)
+        called = {"n": 0}
+        monkeypatch.setattr(
+            sc, "remap_story_roots", lambda root_remap: called.__setitem__("n", called["n"] + 1)
+        )
+        stats = sc.assign_story_ids(since_days=7)
+        assert called["n"] == 0
+        assert stats.historical_remapped == 0
+
+
 class TestAssignStoryIdsStageEntrypoint:
     def test_empty_pool_returns_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: [])

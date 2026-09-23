@@ -111,7 +111,8 @@ def _entity_cluster_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
               AND entities_mentioned IS NOT NULL
               AND COALESCE(domain, '') <> 'out_of_scope' AND COALESCE(level, '') <> 'archive'
               AND cardinality(entities_mentioned) > 0
-              AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+              AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+                  BETWEEN %(start)s AND %(end)s
         ) sub
         GROUP BY entity, domain
         HAVING count(DISTINCT id) >= %(min)s
@@ -170,7 +171,8 @@ def _domain_counts(start: dt.date, end: dt.date) -> dict[str, int]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+                  BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -187,7 +189,8 @@ def _domain_source_counts(start: dt.date, end: dt.date) -> dict[str, int]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+                  BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -205,7 +208,8 @@ def _domain_baseline_counts(start: dt.date, end: dt.date) -> dict[str, float]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+                  BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -222,7 +226,8 @@ def _domain_item_ids(start: dt.date, end: dt.date) -> dict[str, list[int]]:
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND domain IS NOT NULL
           AND domain <> 'out_of_scope' AND level = ANY(%(levels)s)
-          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+                  BETWEEN %(start)s AND %(end)s
         GROUP BY domain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -352,8 +357,12 @@ def _convergence_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
             WHERE e.kind IN ('m_and_a', 'partnership')
               AND i.subdomain IS NOT NULL AND i.subdomain <> ''
               AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
-              AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
-                  BETWEEN %(start)s AND %(end)s
+              AND COALESCE(
+                      e.date,
+                      (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                      (i.fetched_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                      (i.created_at AT TIME ZONE 'Asia/Jerusalem')::date
+                  ) BETWEEN %(start)s AND %(end)s
         )
         SELECT subdomain, count(DISTINCT event_id) AS n,
                array_agg(DISTINCT item_id) AS item_ids,
@@ -451,8 +460,12 @@ def _tech_race_rows(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         WHERE e.kind IN ('launch', 'test')
           AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
           AND i.subdomain IS NOT NULL AND i.subdomain <> ''
-          AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
-              BETWEEN %(start)s AND %(end)s
+          AND COALESCE(
+                  e.date,
+                  (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                  (i.fetched_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                  (i.created_at AT TIME ZONE 'Asia/Jerusalem')::date
+              ) BETWEEN %(start)s AND %(end)s
         GROUP BY i.subdomain
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -530,7 +543,8 @@ def _items_by_domain_level(start: dt.date, end: dt.date) -> list[dict[str, Any]]
         SELECT domain, level, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL
-          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+                  BETWEEN %(start)s AND %(end)s
         GROUP BY domain, level
         ORDER BY domain, level
     """
@@ -549,13 +563,14 @@ def _top_entities_with_delta(start: dt.date, end: dt.date, limit: int = 10) -> l
             SELECT unnest(entities_mentioned) AS entity, count(*) AS n
             FROM items
             WHERE security_status = 'clean' AND dedup_of IS NULL AND entities_mentioned IS NOT NULL
-              AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+              AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+                  BETWEEN %(start)s AND %(end)s
             GROUP BY entity
         ), prev_period AS (
             SELECT unnest(entities_mentioned) AS entity, count(*) AS n
             FROM items
             WHERE security_status = 'clean' AND dedup_of IS NULL AND entities_mentioned IS NOT NULL
-              AND COALESCE(published_at, created_at)::date
+              AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
                   BETWEEN %(prev_start)s AND %(prev_end)s
             GROUP BY entity
         )
@@ -577,7 +592,8 @@ def _events_by_kind(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
     sql = """
         SELECT kind, count(*) AS n
         FROM events
-        WHERE COALESCE(date, created_at::date) BETWEEN %(start)s AND %(end)s
+        WHERE COALESCE(date, (created_at AT TIME ZONE 'Asia/Jerusalem')::date)
+              BETWEEN %(start)s AND %(end)s
         GROUP BY kind
         ORDER BY n DESC
     """
@@ -591,7 +607,8 @@ def _deep_search_outcomes(start: dt.date, end: dt.date) -> list[dict[str, Any]]:
         SELECT COALESCE(result->>'outcome', state) AS outcome, count(*) AS n
         FROM jobs
         WHERE kind = 'deep_search' AND state IN ('done', 'partial')
-          AND finished_at IS NOT NULL AND finished_at::date BETWEEN %(start)s AND %(end)s
+          AND finished_at IS NOT NULL
+          AND (finished_at AT TIME ZONE 'Asia/Jerusalem')::date BETWEEN %(start)s AND %(end)s
         GROUP BY outcome
         ORDER BY n DESC
     """

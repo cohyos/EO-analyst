@@ -94,6 +94,46 @@ def app_client(monkeypatch: pytest.MonkeyPatch):
 
 
 # --------------------------------------------------------------------------
+# effective_client_host -- direct unit tests (F06, SOL-REVIEW-2026-09-24)
+# --------------------------------------------------------------------------
+
+
+class TestEffectiveClientHost:
+    def test_non_loopback_peer_is_always_itself(self) -> None:
+        assert auth.effective_client_host("100.70.1.2", {}) == "100.70.1.2"
+
+    def test_loopback_peer_no_headers_is_trusted(self) -> None:
+        assert auth.effective_client_host("127.0.0.1", {}) == "127.0.0.1"
+
+    def test_spoofed_first_xff_hop_resolves_to_last_hop(self) -> None:
+        headers = {"x-forwarded-for": "127.0.0.1, 100.70.157.25"}
+        assert auth.effective_client_host("127.0.0.1", headers) == "100.70.157.25"
+
+    def test_forwarded_header_used_when_xff_absent(self) -> None:
+        headers = {"forwarded": 'for=100.70.1.2;proto=https'}
+        assert auth.effective_client_host("127.0.0.1", headers) == "100.70.1.2"
+
+    def test_forwarded_header_multi_hop_uses_last(self) -> None:
+        headers = {"forwarded": "for=127.0.0.1, for=100.70.1.2"}
+        assert auth.effective_client_host("127.0.0.1", headers) == "100.70.1.2"
+
+    def test_tailscale_header_only_is_unresolved(self) -> None:
+        headers = {"tailscale-user-login": "a@b.com"}
+        result = auth.effective_client_host("127.0.0.1", headers)
+        assert result == auth.UNRESOLVED_PROXY_CLIENT
+        assert not auth.is_loopback_host(result)
+
+    def test_x_forwarded_host_only_is_unresolved(self) -> None:
+        headers = {"x-forwarded-host": "eoa.example.ts.net"}
+        result = auth.effective_client_host("127.0.0.1", headers)
+        assert result == auth.UNRESOLVED_PROXY_CLIENT
+
+    def test_xff_takes_priority_over_forwarded(self) -> None:
+        headers = {"x-forwarded-for": "100.70.1.2", "forwarded": "for=127.0.0.1"}
+        assert auth.effective_client_host("127.0.0.1", headers) == "100.70.1.2"
+
+
+# --------------------------------------------------------------------------
 # Loopback bypass
 # --------------------------------------------------------------------------
 
@@ -178,6 +218,58 @@ def test_last_hop_loopback_is_still_trusted(app_client) -> None:
         "/api/settings/watchlist",
         headers={"X-Forwarded-For": "100.70.1.2, 127.0.0.1"},
     )
+    assert r.status_code == 200
+
+
+def test_forwarded_header_spoofed_first_hop_still_gated(app_client) -> None:
+    """F06 follow-up (SOL-REVIEW-2026-09-24): the RFC 7239 `Forwarded` header must be honoured the
+    same way as `X-Forwarded-For` -- only the LAST `for=` hop is trusted."""
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get(
+        "/api/settings/watchlist",
+        headers={"Forwarded": 'for=127.0.0.1, for="100.70.157.25"'},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "auth_required"
+
+
+def test_forwarded_header_last_hop_loopback_is_trusted(app_client) -> None:
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get(
+        "/api/settings/watchlist",
+        headers={"Forwarded": "for=100.70.1.2, for=127.0.0.1"},
+    )
+    assert r.status_code == 200
+
+
+def test_tailscale_header_alone_with_no_resolvable_address_fails_closed(app_client) -> None:
+    """A loopback peer carrying only a `Tailscale-*` identity header (no `X-Forwarded-For` or
+    `Forwarded` token at all) cannot have its true remote address established -- the request must
+    fail closed into "remote, needs a session" rather than silently staying trusted."""
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get(
+        "/api/settings/watchlist",
+        headers={"Tailscale-User-Login": "someone@example.com"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "auth_required"
+
+
+def test_x_forwarded_host_alone_with_no_resolvable_address_fails_closed(app_client) -> None:
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get(
+        "/api/settings/watchlist",
+        headers={"X-Forwarded-Host": "eoa.example.ts.net"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "auth_required"
+
+
+def test_loopback_peer_with_no_forwarding_headers_at_all_stays_trusted(app_client) -> None:
+    """The genuinely-local case: a loopback peer with none of X-Forwarded-For/Forwarded/
+    Tailscale-*/X-Forwarded-Host present must keep the original no-session-required behaviour."""
+    client = app_client(client=LOOPBACK, enabled=True)
+    r = client.get("/api/settings/watchlist")
     assert r.status_code == 200
 
 

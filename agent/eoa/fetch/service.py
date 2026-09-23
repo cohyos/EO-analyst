@@ -273,7 +273,13 @@ def _store_item(
     fallback_published_at: datetime | None = None,
     http_status: int | None = None,
     final_url: str | None = None,
-) -> None:
+) -> bool:
+    """Returns whether this item was actually written (F11: a caught DB/store failure below is
+    reported to the caller as `False` instead of silently swallowed -- see `_fetch_and_store`,
+    which previously always returned `True` here regardless of whether anything was stored, so a
+    source whose every fetch succeeded but whose every store failed was still recorded as fully
+    successful)."""
+    from eoa.fetch.content_quality import assess as assess_content_quality
     from eoa.fetch.sanitize import (
         BLOCKED_ITEM_TITLE_HE,
         choose_title,
@@ -314,6 +320,18 @@ def _store_item(
     if canonical_url == url:
         canonical_url = None  # nothing to add over the plain `ON CONFLICT (url)` path
 
+    # F09/N04 (SOL-REVIEW-2026-09-24 round 2): actually assess content quality at ingest with the
+    # same classifier `eoa.pipeline.analyze` uses post-hoc -- every non-blocked fetch used to be
+    # hardcoded `content_status='full'` regardless of its real length, so a short-but-legitimate
+    # page (later downgraded to 'partial'/'stub' by analysis) ranked *higher* than its own
+    # already-stored, already-downgraded row on every identical re-fetch, tripping `insert_item`'s
+    # quality-refresh CASE and resetting `processed_stages` every single ingest run forever.
+    # Computing the real status here means a same-content re-fetch ranks equal (not higher) and,
+    # combined with `insert_item`'s new `text_hash`-changed requirement, never re-triggers a reset.
+    content_status = assess_content_quality(
+        clean.text, html_len=len(html_text), status="blocked" if is_blocked else None
+    )
+
     try:
         # F09/efficiency item: a single quality-aware upsert replaces the old
         # pre-insert-`_url_already_seen`-probe-then-plain-upsert pair -- `content_status`/
@@ -330,7 +348,7 @@ def _store_item(
             raw_text=raw_text,
             clean_text=stored_clean_text,
             text_hash=text_hash(clean.text),
-            content_status="stub" if is_blocked else "full",
+            content_status=content_status,
             security_status="blocked" if is_blocked else "clean",
         )
     except (DeadlineExceeded, LeaseLost):
@@ -338,7 +356,7 @@ def _store_item(
     except Exception as exc:
         log.warning("fetch.item_store_failed", url=url, error=repr(exc))
         stats.items_skipped += 1
-        return
+        return False
 
     if is_blocked and result.inserted:
         log.info("fetch.block_page_detected", url=url, item_id=int(result), status=http_status)
@@ -347,6 +365,7 @@ def _store_item(
         stats.items_inserted += 1
     else:
         stats.items_skipped += 1
+    return True
 
 
 async def _fetch_and_store(
@@ -359,10 +378,11 @@ async def _fetch_and_store(
     fallback_published_at: datetime | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> bool:
-    """Returns whether the fetch itself succeeded (F11: callers use this to tell "every article
-    fetch for this source failed" apart from "some/all succeeded", instead of the previous
-    always-``None`` return that let a source with a 100%-failing fetch step still get recorded as
-    successfully ingested)."""
+    """Returns whether this article was actually stored (F11 round 2: the network fetch succeeding
+    is no longer enough -- `_store_item` now returns its own outcome and that outcome is returned
+    here, so a source whose every fetch succeeded but whose every DB write failed is still counted
+    by callers (`_ingest_rss_source`/`_ingest_html_source`/`_ingest_sitemap_source`'s "all attempted
+    failed" check) as a fully failed source instead of a fully successful one)."""
     await throttle.wait(url)
     try:
         page = await _guarded_fetch_page(url, client=client)
@@ -372,7 +392,7 @@ async def _fetch_and_store(
         log.warning("fetch.article_fetch_failed", url=url, error=repr(exc))
         return False
 
-    _store_item(
+    return _store_item(
         source_db_id=source_db_id,
         url=url,
         html_text=page.html,
@@ -382,7 +402,6 @@ async def _fetch_and_store(
         http_status=page.status,
         final_url=page.final_url,
     )
-    return True
 
 
 def _matches_keywords(entry, keywords_any: list[str]) -> bool:
@@ -640,11 +659,24 @@ _WEEKLY_SOURCE_DUE_INTERVAL_DAYS = 7
 
 
 def _sources_last_success_map(source_db_ids: list[int]) -> dict[int, datetime | None]:
-    """Best-effort batch read of `COALESCE(last_ok_at, last_fetched_at)` for every id in
-    `source_db_ids`, in one round trip -- backs both F05 (per-source lookback) and F35 (per-source
-    due-by-schedule selection). `last_ok_at` (migration 0019) may not exist on a DB behind HEAD;
-    any query failure (including that one) degrades to "unknown last success" for every id, same
-    best-effort convention as the rest of this module (docs/CONVENTIONS.md rule 9)."""
+    """Best-effort batch read of `last_ok_at` for every id in `source_db_ids`, in one round trip --
+    backs both F05 (per-source lookback) and F35 (per-source due-by-schedule selection).
+
+    F05/F35/N01 (SOL-REVIEW-2026-09-24 round 2): plain `last_ok_at`, NEVER `COALESCE(last_ok_at,
+    last_fetched_at)` -- `touch_source_fetched` bumps `last_fetched_at` on every attempt, success
+    or failure (that's its whole point: distinguishing "never attempted" from "attempted"). The old
+    `COALESCE` treated a source's most recent *failed* attempt as if it had succeeded, so (a) F05's
+    lookback widening never kicked in for a source stuck failing (its "last success" looked recent)
+    and (b) F35's weekly due-check could skip a weekly source for a further 7 days off the back of
+    one failed attempt, never actually retrying it (N01). A source that has genuinely never
+    succeeded now reads `last_ok_at IS NULL` regardless of how many times it's been attempted, so
+    `_source_is_due`'s `last_success is None` branch (due every run) and `_lookback_days`'s same
+    branch (bounded backfill at the caller's plain `default_since_days`) both see it correctly,
+    every run, until it actually succeeds once.
+
+    `last_ok_at` (migration 0019) may not exist on a DB behind HEAD; any query failure (including
+    that one) degrades to "unknown last success" for every id, same best-effort convention as the
+    rest of this module (docs/CONVENTIONS.md rule 9)."""
     if not source_db_ids:
         return {}
     from eoa.db import connection
@@ -652,8 +684,7 @@ def _sources_last_success_map(source_db_ids: list[int]) -> dict[int, datetime | 
     try:
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT id, COALESCE(last_ok_at, last_fetched_at) AS last_success "
-                "FROM sources WHERE id = ANY(%(ids)s)",
+                "SELECT id, last_ok_at AS last_success FROM sources WHERE id = ANY(%(ids)s)",
                 {"ids": list(source_db_ids)},
             )
             # The pool hands out dict rows (`row_factory=dict_row` in eoa.db) -- index by name. The
@@ -803,8 +834,13 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
     # `_guarded_fetch_page`/`fetch_page` otherwise open and close a brand-new client (a fresh
     # TCP/TLS handshake) per page fetch. Threaded down through every `_ingest_*_source` helper;
     # each individual fetch's own `timeout=`/byte cap/retry behavior is unaffected (those are set
-    # per-request, not per-client).
-    async with httpx.AsyncClient() as client:
+    # per-request, not per-client). F01 (round 2): built by `build_pinned_client()`, not a plain
+    # `httpx.AsyncClient()` -- this shared client is what every ingest fetch in the run actually
+    # uses, so it must itself dial the validated IP per request (`_PinnedIPTransport`) for that
+    # guarantee to apply here, not just on `fetch_page`'s own single-fetch default client.
+    from eoa.fetch.html import build_pinned_client
+
+    async with build_pinned_client() as client:
 
         async def _bounded(db_id: int | None, source, effective_since_days: int) -> None:
             async with semaphore:

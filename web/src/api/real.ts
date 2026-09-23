@@ -64,6 +64,7 @@ import type {
   McpPingResponse,
   McpServersResponse,
   MorningResponse,
+  PatentFacetsResponse,
   PatentHeatmapResponse,
   PatentRecord,
   PatentSurveyCard,
@@ -71,6 +72,7 @@ import type {
   PatentsStatusResponse,
   PayloadDetailResponse,
   PayloadDiffResponse,
+  PayloadFacetsResponse,
   PayloadRecord,
   PayloadTreeResponse,
   ProductDossierOut,
@@ -595,9 +597,26 @@ function normalizeInvestigationDetail(
           stopped_reason: r.answer.stopped_reason ?? undefined,
           // Round 12 follow-up: these were declared on InvestigationOut and read by
           // InvestigationDetailPage but never survived normalisation (the page tests bypassed it).
+          //
+          // F29 (SOL-REVIEW-2026-09-24): the backend job result (`InvestigationOut`,
+          // eoa.llm.schemas.analysis) persists the flagged reason/snippet as
+          // `security_flag_reason`/`security_flag_snippet` -- `security_review_reason_he`/
+          // `security_review_snippet` never existed on the wire (only on this file's own,
+          // wrongly self-referential, output type), so the detail page's security-review banner
+          // silently rendered with no reason/snippet even when the job was flagged. Read the real
+          // wire field names first (the raw payload is loosely typed as `InvestigationDetail`
+          // itself, which is the OUTPUT shape, not the wire shape -- hence the `as` cast to reach
+          // fields TypeScript doesn't otherwise know are there), falling back to the old names in
+          // case a future backend revision reintroduces them under that name.
           security_review: r.answer.security_review ?? undefined,
-          security_review_reason_he: r.answer.security_review_reason_he ?? undefined,
-          security_review_snippet: r.answer.security_review_snippet ?? undefined,
+          security_review_reason_he:
+            (r.answer as { security_flag_reason?: string | null }).security_flag_reason ??
+            r.answer.security_review_reason_he ??
+            undefined,
+          security_review_snippet:
+            (r.answer as { security_flag_snippet?: string | null }).security_flag_snippet ??
+            r.answer.security_review_snippet ??
+            undefined,
           security_review_resolved: r.answer.security_review_resolved ?? undefined,
           blocked_reason_he: r.answer.blocked_reason_he ?? undefined,
           confidence: typeof r.answer.confidence === "number" ? r.answer.confidence : null,
@@ -1772,6 +1791,10 @@ export const realApi: ApiClient = {
         `/api/patents/surveys${qs({ limit })}`,
       ),
     ).map(normalizePatentSurveyCard),
+  getPatentFacets: async () => {
+    const raw = await request<Partial<PatentFacetsResponse> | null>("/api/patents/facets");
+    return { assignees: arr(raw?.assignees), subdomains: arr(raw?.subdomains) };
+  },
   createPatentSurvey: async (topic: string) =>
     // Builds synchronously in-request when it finishes quickly enough, else falls back to a
     // job_id to poll -- needs more than the default 10s before that fallback is a false timeout.
@@ -1798,6 +1821,12 @@ export const realApi: ApiClient = {
   getPayloadDiff: async (id: number, a: number, b: number) =>
     request<PayloadDiffResponse>(`/api/payloads/${id}/diff${qs({ a, b })}`),
   getPayloadTree: async () => request<PayloadTreeResponse>("/api/payloads/tree"),
+  getPayloadFacets: async (category?: string) => {
+    const raw = await request<Partial<PayloadFacetsResponse> | null>(
+      `/api/payloads/facets${qs({ category })}`,
+    );
+    return { vendors: arr(raw?.vendors), categories: arr(raw?.categories) };
+  },
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".
   getTechRadar: async (weeks = 12) =>

@@ -61,6 +61,7 @@ import re
 from functools import lru_cache
 from itertools import pairwise
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -69,6 +70,13 @@ from eoa.db import connection
 from eoa.report.docx_builder import fmt_date
 
 log = structlog.get_logger(__name__)
+
+#: F40 (SOL-AUDIT-2026-09-24): the daily evidence-widening window below turns a UTC-aware ``now``
+#: into a calendar date via `.date()` -- naive UTC-vs-Jerusalem day boundaries, same class of bug
+#: as the report modules' own ``timestamptz::date`` buckets. Every module in this family
+#: (`daily`/`weekly`/`monthly`/`bd_territory`/`product_line`/`tech_daily`) defines its own local
+#: constant the same way rather than sharing one, by existing convention.
+JERUSALEM = ZoneInfo("Asia/Jerusalem")
 
 SECTION_TITLE_HE = "מעקב אינדיקטורים"
 
@@ -668,7 +676,11 @@ def _fetch_recent_evidence_events(
     (an indicator about a decision/deployment often only ever appears in the structured events
     table, worded quite differently from the triggering item's own headline). Decorative, same
     fail-soft convention as :func:`_fetch_recent_evidence_items`."""
-    start_date, end_date = (now - dt.timedelta(days=days)).date(), now.date()
+    # F40: `now` is a UTC-aware datetime -- convert to Jerusalem wall-clock before taking the
+    # calendar date, matching the SQL side's `AT TIME ZONE 'Asia/Jerusalem'` cast below (otherwise
+    # a late-evening/early-morning Jerusalem boundary would use the wrong UTC day on both sides).
+    start_date = (now - dt.timedelta(days=days)).astimezone(JERUSALEM).date()
+    end_date = now.astimezone(JERUSALEM).date()
     try:
         with connection(timeout=5) as conn, conn.cursor() as cur:
             cur.execute(
@@ -679,7 +691,8 @@ def _fetch_recent_evidence_events(
                 FROM events e
                 JOIN items i ON i.id = e.item_id
                 LEFT JOIN sources src ON src.id = i.source_id
-                WHERE COALESCE(e.date, i.published_at::date) BETWEEN %(start)s AND %(end)s
+                WHERE COALESCE(e.date, (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date)
+                      BETWEEN %(start)s AND %(end)s
                   AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
                 ORDER BY e.date DESC NULLS LAST, e.id DESC
                 LIMIT %(limit)s

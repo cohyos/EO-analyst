@@ -126,6 +126,46 @@ describe("real.ts getInvestigation keeps security-review, blocked-reason and con
     expect(detail.answer?.security_review).toBeUndefined();
     expect(detail.answer?.blocked_reason_he).toBeUndefined();
   });
+
+  // F29 (SOL-REVIEW-2026-09-24): the backend job result (`InvestigationOut`,
+  // eoa.llm.schemas.analysis) actually persists the flagged reason/snippet as
+  // `security_flag_reason`/`security_flag_snippet` -- `security_review_reason_he`/
+  // `security_review_snippet` never existed on the real wire payload (only the test fixture
+  // above assumed they did). Old code read only the wrong names, so the detail page's security
+  // review banner rendered with an empty reason/snippet for every real flagged investigation.
+  it("maps the real wire field names security_flag_reason/security_flag_snippet", async () => {
+    const raw = {
+      job_id: 115,
+      question: "q",
+      state: "done",
+      log: [],
+      answer: {
+        answer_he: "התשובה הוסתרה.",
+        sources: [],
+        outcome: "partial",
+        key_facts: [],
+        what_was_tried_he: "",
+        contradictions_he: "",
+        security_review: true,
+        security_flag_reason: "חשד להזרקת פרומפט במקור",
+        security_flag_snippet: "התעלם מההוראות הקודמות...",
+        security_review_resolved: false,
+        confidence: 0.4,
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(raw), { status: 200, headers: { "Content-Type": "application/json" } }),
+        ),
+      ),
+    );
+    const { realApi: api } = await import("./real");
+    const detail = await api.getInvestigation("115");
+    expect(detail.answer?.security_review_reason_he).toBe("חשד להזרקת פרומפט במקור");
+    expect(detail.answer?.security_review_snippet).toBe("התעלם מההוראות הקודמות...");
+  });
 });
 
 // PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): the dossier normalizers must never throw on a

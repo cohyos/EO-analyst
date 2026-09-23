@@ -342,7 +342,7 @@ def watchlist_changes(period_start: dt.date, period_end: dt.date) -> list[dict[s
     sql = """
         SELECT e.id, e.name, e.kind, e.country, e.created_at
         FROM entities e
-        WHERE e.created_at::date BETWEEN %(start)s AND %(end)s
+        WHERE (e.created_at AT TIME ZONE 'Asia/Jerusalem')::date BETWEEN %(start)s AND %(end)s
           -- 2026-09-07 (round-5 judge / live monthly): entities extracted only from out-of-scope or
           -- archived items ('Western Burrowing Owl', 'Rees Training Center') are not watchlist news
           AND EXISTS (

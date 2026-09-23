@@ -277,16 +277,38 @@ def insert_item(
     resets `processed_stages` to `'{}'` so the item is reprocessed (classify/triage/dedup/analyze
     all gate on `processed_stages`) against its new, better content.
 
-    F36: `canonical_url`, when given and different from `url`, is also checked against existing
-    rows (`url = canonical_url OR canonical_url = canonical_url`) BEFORE the `url`-keyed insert --
-    a redirect alias or tracking-parameter variant of an already-stored article upserts that same
-    row (quality-aware, as above) instead of creating a duplicate the exact-`url`
-    `ON CONFLICT` below can never catch on its own. Best-effort/race-tolerant like the rest of
-    this module's upsert helpers (docs/CONVENTIONS.md rule 9): two *concurrent* fetches of two
-    different aliases of the same brand-new article could still each insert once; the embedding
-    dedup pass is the existing backstop for that rare race.
+    F36/N10 (SOL-REVIEW-2026-09-24 round 2): the existing-row lookup runs on EVERY call, not only
+    when `canonical_url` is given and differs from `url` -- the old "alias-only" guard missed the
+    reverse case (alias fetched first, creating a row keyed by the alias `url` with `canonical_url`
+    set to the article's canonical identity; a LATER *direct* fetch of that same canonical URL then
+    passed `canonical_url=None` -- see `eoa.fetch.service._store_item` -- and fell straight through
+    to the plain `ON CONFLICT (url)` insert, creating a second row for the same article). The
+    lookup now matches `url`/`canonical_url` against BOTH the as-observed `url` and (when given) the
+    normalized `canonical_url`, so either fetch order converges on one row. A `pg_advisory_xact_lock`
+    keyed by that same identity (released automatically when this function's transaction commits or
+    rolls back -- see this module's docstring) serializes concurrent upserts of two different aliases
+    of the same brand-new article, closing the race the lookup-then-insert pattern would otherwise
+    reopen (the old code accepted that race as an "acceptably rare" gap; N10 flags it as the reason
+    `canonical_url` needs a real identity guarantee, not just an index).
+
+    F09/N04 (round 2): a same-URL refresh is only treated as "better" (replacing content and
+    resetting `processed_stages`) when its `text_hash` actually differs from what's stored AND its
+    quality rank is strictly higher -- an identical re-fetch (the common case for an unpaywalled
+    page whose analysis pass later downgrades its own `content_status`, e.g. Q3-10's `assess()`)
+    must never re-trigger reprocessing of otherwise-unchanged content.
+
+    N09 (round 2): `canonical_url` itself now only changes together with an accepted (quality-
+    better) content update -- previously it was refreshed unconditionally via `COALESCE`, so a
+    worse/blocked re-fetch of a URL could silently rewrite a good row's canonical identity while
+    leaving its content alone.
+
+    N05 (round 2): an accepted content update also clears `dedup_of` in the same statement -- a
+    quality-upgraded item must not stay hidden behind a duplicate link computed against its old,
+    worse content; `eoa.memory.vector.commit_dedup_result`'s next `embed_dedup` pass (now re-run,
+    since `processed_stages` was reset) recomputes it against the new content.
     """
     quality_aware = content_status is not None or security_status is not None
+    lookup_identity = canonical_url or url
     params = {
         "source_id": source_id,
         "url": url,
@@ -306,10 +328,21 @@ def insert_item(
         "content_status": content_status or "full",
         "security_status": security_status or "clean",
         "quality_aware": quality_aware,
+        "lookup_identity": lookup_identity,
     }
 
-    excluded_better = f"(%(quality_aware)s AND {_quality_rank_sql('EXCLUDED.security_status', 'EXCLUDED.content_status')} > {_quality_rank_sql('items.security_status', 'items.content_status')})"
-    params_better = f"(%(quality_aware)s AND {_quality_rank_sql('%(security_status)s', '%(content_status)s')} > {_quality_rank_sql('items.security_status', 'items.content_status')})"
+    _hash_changed = "EXCLUDED.text_hash IS DISTINCT FROM items.text_hash"
+    _hash_changed_by_id = "%(text_hash)s IS DISTINCT FROM items.text_hash"
+    excluded_better = (
+        f"(%(quality_aware)s AND {_hash_changed} AND "
+        f"{_quality_rank_sql('EXCLUDED.security_status', 'EXCLUDED.content_status')} > "
+        f"{_quality_rank_sql('items.security_status', 'items.content_status')})"
+    )
+    params_better = (
+        f"(%(quality_aware)s AND {_hash_changed_by_id} AND "
+        f"{_quality_rank_sql('%(security_status)s', '%(content_status)s')} > "
+        f"{_quality_rank_sql('items.security_status', 'items.content_status')})"
+    )
 
     upsert_set_sql = ", ".join(
         f"{col} = CASE WHEN {excluded_better} THEN EXCLUDED.{col} ELSE items.{col} END"
@@ -334,32 +367,44 @@ def insert_item(
         )
         ON CONFLICT (url) DO UPDATE SET
             fetched_at = COALESCE(EXCLUDED.fetched_at, now()),
-            canonical_url = COALESCE(EXCLUDED.canonical_url, items.canonical_url),
+            canonical_url = CASE WHEN {excluded_better}
+                THEN COALESCE(EXCLUDED.canonical_url, items.canonical_url) ELSE items.canonical_url END,
             {upsert_set_sql},
-            processed_stages = CASE WHEN {excluded_better} THEN '{{}}'::text[] ELSE items.processed_stages END
+            processed_stages = CASE WHEN {excluded_better} THEN '{{}}'::text[] ELSE items.processed_stages END,
+            dedup_of = CASE WHEN {excluded_better} THEN NULL ELSE items.dedup_of END
         RETURNING id, (xmax = 0) AS inserted
     """
 
     update_by_id_query = f"""
         UPDATE items SET
             fetched_at = COALESCE(%(fetched_at)s, now()),
-            canonical_url = COALESCE(%(canonical_url)s, items.canonical_url),
+            canonical_url = CASE WHEN {params_better}
+                THEN COALESCE(%(canonical_url)s, items.canonical_url) ELSE items.canonical_url END,
             {update_by_id_set_sql},
-            processed_stages = CASE WHEN {params_better} THEN '{{}}'::text[] ELSE items.processed_stages END
+            processed_stages = CASE WHEN {params_better} THEN '{{}}'::text[] ELSE items.processed_stages END,
+            dedup_of = CASE WHEN {params_better} THEN NULL ELSE items.dedup_of END
         WHERE id = %(item_id)s
         RETURNING id
     """
 
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        existing_id: int | None = None
-        if canonical_url and canonical_url != url:
-            cur.execute(
-                "SELECT id FROM items WHERE url = %(canonical_url)s OR canonical_url = %(canonical_url)s "
-                "ORDER BY id LIMIT 1",
-                {"canonical_url": canonical_url},
-            )
-            found = cur.fetchone()
-            existing_id = found["id"] if found else None
+        # N10: serialize concurrent upserts of the same logical article (whichever alias/canonical
+        # URL each one observed) for the rest of this transaction -- released on commit/rollback.
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%(key)s))", {"key": lookup_identity})
+
+        # F36/N10: match an existing row by EITHER the as-observed `url` or the normalized
+        # `canonical_url` (when given), against either column on the existing row -- catches a
+        # direct fetch of a canonical URL that an earlier alias fetch already stored (F36's
+        # "alias-first then direct canonical fetch still inserts a second row"), not just the
+        # reverse (alias-after-canonical, already handled before this fix).
+        cur.execute(
+            "SELECT id FROM items WHERE url = %(url)s OR canonical_url = %(url)s "
+            "OR (%(canonical_url)s::text IS NOT NULL AND (url = %(canonical_url)s OR canonical_url = %(canonical_url)s)) "
+            "ORDER BY id LIMIT 1",
+            {"url": url, "canonical_url": canonical_url},
+        )
+        found = cur.fetchone()
+        existing_id = found["id"] if found else None
 
         if existing_id is not None:
             cur.execute(update_by_id_query, {**params, "item_id": existing_id})
@@ -1339,8 +1384,15 @@ def enqueue_job(
     *,
     priority: int = 5,
     not_before: dt.datetime | None = None,
+    conn: Any = None,
 ) -> int:
-    """Insert a new queued job, returning its id."""
+    """Insert a new queued job, returning its id.
+
+    F28/N08 (SOL-REVIEW-2026-09-24): an optional caller-owned ``conn`` runs the INSERT on that
+    connection/transaction instead of opening a new one -- so a caller that must resolve some
+    other row (e.g. a security-review claim) and enqueue this job atomically can wrap both in one
+    ``with connection() as conn:`` block. ``None`` (the default) keeps the prior standalone
+    behavior, its own commit included."""
     query = """
         INSERT INTO jobs (kind, payload, priority, not_before, state)
         VALUES (%(kind)s, %(payload)s, %(priority)s, %(not_before)s, 'queued')
@@ -1352,9 +1404,15 @@ def enqueue_job(
         "priority": priority,
         "not_before": not_before,
     }
-    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+    if conn is not None:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            job_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
+        log.info("job.enqueued", job_id=job_id, kind=kind, priority=priority)
+        return job_id
+    with connection() as conn2, conn2.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
-        job_id: int = cast("dict[str, Any]", cur.fetchone())["id"]
+        job_id = cast("dict[str, Any]", cur.fetchone())["id"]
     log.info("job.enqueued", job_id=job_id, kind=kind, priority=priority)
     return job_id
 
@@ -1370,13 +1428,20 @@ def claim_next_job(
     Eligible jobs are `queued`, or `deferred` whose `not_before` has passed (a resource-failure
     retry, see `finish_job`). Sets `worker_id` and a `lease_expires_at` `lease_seconds` in the
     future so a crashed worker's job can be detected and reaped by `reap_stale_jobs` instead of
-    sitting `running` forever."""
+    sitting `running` forever.
+
+    N02 (SOL-REVIEW-2026-09-24): also excludes any job whose `payload.stop` was set by a user
+    cancel (`eoa.api.services.cancel_job`) -- defense in depth alongside that function's own fix
+    (cancelling a `deferred` job now terminalizes it immediately rather than merely flagging it),
+    so a `deferred`/`queued` row that somehow still carries `stop=true` can never be claimed and
+    run to completion regardless of how it got into that state."""
     where_kind = "AND kind = ANY(%(kinds)s)" if kinds else ""
     query = f"""
         WITH next_job AS (
             SELECT id FROM jobs
             WHERE state IN ('queued', 'deferred')
               AND (not_before IS NULL OR not_before <= now())
+              AND COALESCE(payload->>'stop', 'false') != 'true'
               {where_kind}
             ORDER BY priority ASC, created_at ASC
             FOR UPDATE SKIP LOCKED
@@ -1559,6 +1624,32 @@ def reap_stale_jobs(max_age_hours: int = 6) -> int:
             failed=len([r for r in rows if r["state"] == "failed"]),
         )
     return len(rows)
+
+
+def mark_notification_sent(kind: str, key: str) -> bool:
+    """N03 (SOL-REVIEW-2026-09-24): durable idempotency marker for an external notification --
+    ``INSERT ... ON CONFLICT DO NOTHING`` against the ``notifications_sent`` table (migration
+    0037), unique on ``(kind, key)``. Returns ``True`` the first time this ``(kind, key)`` pair is
+    seen (the caller should go ahead and send), ``False`` on every later call (already sent --
+    the caller must skip).
+
+    Closes the "daily notification sent twice on stale-job replay" gap: a worker crash between
+    `_notify` actually delivering the ntfy push and the outer `finish_job` call recording the job
+    as done leaves the job `running` past its lease; `reap_stale_jobs` above requeues it
+    `deferred` and a later worker reruns the *same* job (same `job_id`, same daily/weekly period)
+    from `ingest` through `notify` again. Without a durable marker outside the job's own
+    (about-to-be-overwritten) `result`/`state`, the second pass has no way to know the push
+    already went out and sends a duplicate. Callers key on something stable across that replay --
+    `eoa.orchestrator.jobs._notify` uses the job's own id, which `reap_stale_jobs` never changes."""
+    query = """
+        INSERT INTO notifications_sent (kind, key) VALUES (%(kind)s, %(key)s)
+        ON CONFLICT (kind, key) DO NOTHING
+        RETURNING id
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"kind": kind, "key": key})
+        row = cur.fetchone()
+    return row is not None
 
 
 # --------------------------------------------------------------------------
@@ -1876,6 +1967,34 @@ def bulk_set_story_ids(assignment: dict[int, int]) -> int:
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, {"ids": ids, "story_ids": story_ids})
+        return cur.rowcount
+
+
+def remap_story_roots(root_remap: dict[int, int]) -> int:
+    """Propagate a merged story root to every row still carrying an old, now-superseded root id --
+    including historical members OUTSIDE the current ``since_days`` candidate pool that
+    :func:`bulk_set_story_ids` never touches (F20, SOL-AUDIT-2026-09-24 review: "merging two
+    persisted groups updates only current candidates; historical members can retain the old story
+    ID"). ``root_remap`` maps ``old_story_id -> new_story_id`` for every root this run's union-find
+    determined was merged away. One set-based ``UPDATE`` for the whole batch (a run merges at most
+    a handful of roots). Returns the number of rows updated (in-pool rows already rewritten by
+    ``bulk_set_story_ids`` no longer match ``story_id = old_story_id`` by the time this runs, so
+    they are not double-counted when called after it)."""
+    if not root_remap:
+        return 0
+    old_ids = list(root_remap)
+    new_ids = [root_remap[i] for i in old_ids]
+    query = """
+        UPDATE items AS i
+        SET story_id = v.new_story_id
+        FROM (
+            SELECT unnest(%(old_ids)s::bigint[]) AS old_story_id,
+                   unnest(%(new_ids)s::bigint[]) AS new_story_id
+        ) AS v
+        WHERE i.story_id = v.old_story_id
+    """
+    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, {"old_ids": old_ids, "new_ids": new_ids})
         return cur.rowcount
 
 

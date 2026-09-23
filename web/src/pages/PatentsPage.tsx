@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/api";
@@ -49,12 +49,13 @@ export function PatentsPage() {
         limit: 200,
       }),
   });
-  // Facet lists (assignee/subdomain dropdown options) come from a separate, unfiltered baseline
-  // fetch -- independent of the active filters -- so picking one filter doesn't collapse the
-  // other dropdown down to whatever happens to match today's selection.
+  // F33 (SOL-AUDIT-2026-09-24 review): facet options (assignee/subdomain dropdowns) used to come
+  // from a capped (`limit=200`) baseline `getPatents` fetch -- with more patents than that cap, an
+  // assignee/subdomain whose only rows sat outside it could never appear as a filter option.
+  // `getPatentFacets` is an uncapped, server-side DISTINCT query -- no row cap to defeat.
   const facetsQuery = useQuery({
     queryKey: ["patents-facets"],
-    queryFn: () => api.getPatents({ limit: 200 }),
+    queryFn: () => api.getPatentFacets(),
   });
   const heatmapQuery = useQuery({
     queryKey: ["patents-heatmap"],
@@ -68,18 +69,12 @@ export function PatentsPage() {
   });
 
   const patents = patentsQuery.data?.patents ?? [];
-  const facetPatents = facetsQuery.data?.patents ?? patents;
-
-  const assignees = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of facetPatents) for (const a of p.assignees) set.add(a);
-    return [...set].sort();
-  }, [facetPatents]);
-  const subdomains = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of facetPatents) if (p.subdomain) set.add(p.subdomain);
-    return [...set].sort();
-  }, [facetPatents]);
+  const assignees = facetsQuery.data?.assignees ?? [];
+  const subdomains = facetsQuery.data?.subdomains ?? [];
+  // "any patents in the DB at all" (backs the top-level "לא זוהו פטנטים" empty state, distinct
+  // from "no rows match the active filter") -- derived from the uncapped facets response so it
+  // isn't defeated by the same row cap `getPatents` has (F33).
+  const hasAnyPatents = assignees.length > 0 || subdomains.length > 0 || patents.length > 0;
 
   function setTab(next: Tab) {
     const p = new URLSearchParams(searchParams);
@@ -148,7 +143,7 @@ export function PatentsPage() {
           {patentsQuery.isError && <ErrorState onRetry={() => patentsQuery.refetch()} />}
           {!patentsQuery.isLoading && !patentsQuery.isError && (
             <>
-              {facetPatents.length === 0 ? (
+              {!hasAnyPatents ? (
                 <EmptyState
                   title="לא זוהו פטנטים"
                   description="הרץ סריקה (eo run patents) או הרץ סקר פטנטים לנושא ספציפי."

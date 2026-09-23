@@ -95,6 +95,26 @@ def list_patents(
     return {"patents": rows, "total": (total_row or {}).get("c", len(rows))}
 
 
+@router.get("/patents/facets")
+def patents_facets() -> dict[str, Any]:
+    """F33 (SOL-AUDIT-2026-09-24 review): the assignee/subdomain dropdown options previously came
+    from a capped (`limit=200`) baseline `GET /api/patents` fetch -- with more patents than that
+    cap (538 in the live DB), an assignee/subdomain whose only rows sat outside it could never
+    appear as a filter option even though `q`/`assignee`/`subdomain` themselves already query the
+    full table server-side. This is an uncapped, set-based DISTINCT query -- no row cap to defeat."""
+    assignee_rows = _fetchall(
+        "SELECT DISTINCT a AS assignee FROM (SELECT unnest(assignees) AS a FROM patents) s "
+        "WHERE a IS NOT NULL ORDER BY a"
+    )
+    subdomain_rows = _fetchall(
+        "SELECT DISTINCT subdomain FROM patents WHERE subdomain IS NOT NULL ORDER BY subdomain"
+    )
+    return {
+        "assignees": [r["assignee"] for r in assignee_rows],
+        "subdomains": [r["subdomain"] for r in subdomain_rows],
+    }
+
+
 @router.get("/patents/heatmap")
 def patents_heatmap(
     top_cpc: int = Query(10, ge=1, le=30), top_assignees: int = Query(10, ge=1, le=30)

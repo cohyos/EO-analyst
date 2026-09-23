@@ -183,3 +183,35 @@ class TestSchedulerDailyWeeklyPriority:
         # the actual correctness property: daily's priority number is strictly lower (= claimed
         # first by `ORDER BY priority ASC`) than weekly's.
         assert daily_calls[0][1] < weekly_calls[0][2]
+
+
+# --------------------------------------------------------------------------
+# F35/N01 (SOL-REVIEW-2026-09-24 round 2): the daytime RSS poll must never fire inside the night
+# batch window -- the old `hour=f"*/{step}"` cron ran every N hours around the FULL 24h clock.
+# --------------------------------------------------------------------------
+
+
+class TestDaytimePollHours:
+    def test_excludes_every_hour_inside_the_night_window(self) -> None:
+        """This is the regression itself: the old cron (`hour=f"*/{step}"`, step=2 for the
+        default 120-minute poll) fires at 0,2,4,...,22 -- which INCLUDES 00:00, 02:00, and 04:00,
+        all inside/overlapping `night_window` (01:00-06:00). This fails against that old shape."""
+        hours = {int(h) for h in main._daytime_poll_hours(120, "01:00", "06:00").split(",")}
+        assert not (hours & {1, 2, 3, 4, 5})  # nothing inside [01:00, 06:00)
+        assert 0 in hours  # hours outside the window are unaffected
+        assert 6 in hours
+        assert 22 in hours
+
+    def test_step_spacing_is_preserved_outside_the_window(self) -> None:
+        hours = sorted(int(h) for h in main._daytime_poll_hours(180, "01:00", "06:00").split(","))
+        # 180 minutes -> every 3 hours: 0,3,6,9,...  minus anything inside [01:00,06:00) -> drops 3
+        assert hours == [0, 6, 9, 12, 15, 18, 21]
+
+    def test_scheduler_wires_the_restricted_hours_into_the_daytime_poll_job(self) -> None:
+        sched = main.build_scheduler()
+        job = sched.get_job("daytime_poll")
+        assert job is not None
+        # APScheduler's CronTrigger exposes its configured hour field via `fields`.
+        hour_field = next(f for f in job.trigger.fields if f.name == "hour")
+        configured_hours = {int(e) for e in str(hour_field).split(",")}
+        assert not (configured_hours & {1, 2, 3, 4, 5})  # never inside 01:00-06:00

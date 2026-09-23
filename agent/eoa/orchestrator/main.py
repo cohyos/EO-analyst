@@ -94,6 +94,22 @@ def _cron(tz: ZoneInfo, hhmm: str, **extra: str) -> CronTrigger:
     return CronTrigger(hour=int(h), minute=int(m), timezone=tz, **extra)
 
 
+def _daytime_poll_hours(poll_minutes: int, night_start: str, night_end: str) -> str:
+    """F35/N01 (SOL-REVIEW-2026-09-24 round 2): the daytime RSS poll must never fire inside the
+    night batch window (`schedule.night_window` -- the heavy LLM pipeline hours). The old
+    `hour=*/N` cron fired every N hours around the FULL 24h clock (e.g. `*/2` -> 0,2,4,...,22),
+    including hours that sit inside -- or immediately before -- the 01:00-06:00 night run, so a
+    "light polling ... no heavy LLM" poll (config.yaml's own words) could overlap the heavy
+    nightly ingest/pipeline run it was deliberately kept separate from. Returns an explicit
+    comma-separated hour list (`CronTrigger(hour=...)` accepts this form same as `*/N`) of every
+    `poll_minutes`-spaced hour that falls OUTSIDE `[night_start, night_end)`."""
+    step = max(poll_minutes // 60, 1)
+    night_start_h = int(night_start.split(":")[0])
+    night_end_h = int(night_end.split(":")[0])
+    daytime_hours = [h for h in range(0, 24, step) if not (night_start_h <= h < night_end_h)]
+    return ",".join(str(h) for h in daytime_hours) or str(night_end_h)
+
+
 def build_scheduler() -> BackgroundScheduler:
     s = settings()
     tz = ZoneInfo(s.timezone)
@@ -115,7 +131,15 @@ def build_scheduler() -> BackgroundScheduler:
     )
     sched.add_job(
         lambda: enqueue_job("ingest", {"mode": "poll"}, priority=6),
-        CronTrigger(minute=0, hour=f"*/{max(s.schedule.daytime_rss_poll_minutes // 60, 1)}", timezone=tz),
+        CronTrigger(
+            minute=0,
+            hour=_daytime_poll_hours(
+                s.schedule.daytime_rss_poll_minutes,
+                s.schedule.night_window.start,
+                s.schedule.night_window.end,
+            ),
+            timezone=tz,
+        ),
         id="daytime_poll",
         coalesce=True,
     )

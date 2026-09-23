@@ -284,14 +284,42 @@ class TestCommitDedupResult:
         assert any("dedup_of" in q for q in executed)
         assert any("processed_stages" in q for q in executed)
 
-    def test_skips_dedup_of_update_when_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_always_writes_dedup_of_even_when_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """N05 (SOL-REVIEW-2026-09-24 round 2): `dedup_of` is written on EVERY call, not skipped
+        when this pass found no duplicate -- a re-embed (F09's quality-upgrade reprocessing) must
+        be able to CLEAR a stale `dedup_of` computed against the item's old, worse content, not
+        just set one. This fails against the old code, which skipped the `dedup_of` UPDATE
+        entirely whenever `dedup_of is None` and so could never clear an existing link."""
         executed: list[str] = []
         conn = _TrackingConnection([], executed)
         monkeypatch.setattr(vector, "connection", lambda: conn)
 
         vector.commit_dedup_result(5, [0.1, 0.2], dedup_of=None, stage="embed_dedup")
 
-        assert len(executed) == 2  # embedding + stage marker only, no dedup_of UPDATE
+        assert len(executed) == 3  # embedding + dedup_of (clearing it) + stage marker
         assert any("embedding" in q for q in executed)
+        assert any("dedup_of" in q for q in executed)
         assert any("processed_stages" in q for q in executed)
-        assert not any("dedup_of" in q for q in executed)
+
+    def test_clearing_dedup_of_passes_null_not_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Same fix, asserted on the actual bound parameter rather than just query presence: the
+        `dedup_of` UPDATE's own param is `None` (NULL), proving it actively clears rather than
+        merely re-running a no-op."""
+        captured_params: list[dict | None] = []
+
+        class _ParamCapturingCursor(_FakeCursor):
+            def execute(self, query: str, params: dict | None = None) -> None:
+                if "SET dedup_of" in query:
+                    captured_params.append(params)
+                super().execute(query, params)
+
+        class _ParamCapturingConnection(_FakeConnection):
+            def cursor(self, row_factory=None) -> _ParamCapturingCursor:
+                self.last_cursor = _ParamCapturingCursor(self._rows)
+                return self.last_cursor
+
+        monkeypatch.setattr(vector, "connection", lambda: _ParamCapturingConnection([]))
+
+        vector.commit_dedup_result(5, [0.1, 0.2], dedup_of=None, stage="embed_dedup")
+
+        assert captured_params == [{"dedup_of": None, "item_id": 5}]

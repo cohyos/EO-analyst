@@ -225,6 +225,67 @@ class TestDraftReportTablesOnlyFallback:
         prompt = captured_messages[0][1]["content"]
         assert "5 אירועים" in prompt
 
+    # -- F34 (SOL-AUDIT-2026-09-24 / SOL-REVIEW-2026-09-24 review): rebuilding an explicit
+    # historical period must put THAT period's date in the prompt header, never the date the
+    # rebuild happens to run on. --------------------------------------------------------------
+
+    def test_explicit_historical_period_end_puts_that_date_in_the_prompt(self, monkeypatch):
+        captured_messages = []
+
+        def fake_chat_structured(role, schema, messages, **kw):
+            captured_messages.append(messages)
+            return DailyReportDraft(
+                exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+                sections=[],
+                outlook=[],
+                open_points_he=[],
+            )
+
+        monkeypatch.setattr(daily, "chat_structured", fake_chat_structured)
+        # Pin "today" far from the historical period being rebuilt, so a prompt that (bug) uses
+        # today's date instead of `period_end` cannot accidentally match by coincidence.
+        monkeypatch.setattr(daily, "_today_jerusalem", lambda: dt.date(2026, 9, 24))
+        historical_period_end = dt.date(2026, 3, 15)
+
+        items = [{"n": 1, "id": 1, "title": "t", "domain": "c_uas", "summary_he": "s", "so_what_he": "so"}]
+        daily.draft_report(items, table_counts=daily.TableCounts(), period_end=historical_period_end)
+
+        prompt = captured_messages[0][1]["content"]
+        assert daily.hebrew_date_str(historical_period_end) in prompt
+        assert daily.hebrew_date_str(dt.date(2026, 9, 24)) not in prompt
+
+    def test_corrective_retry_also_uses_the_historical_period_end(self, monkeypatch):
+        captured_messages = []
+
+        def fake_chat_structured(role, schema, messages, **kw):
+            captured_messages.append(messages)
+            return DailyReportDraft(
+                exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+                sections=[],
+                outlook=[],
+                open_points_he=[],
+            )
+
+        monkeypatch.setattr(daily, "chat_structured", fake_chat_structured)
+        monkeypatch.setattr(daily, "_today_jerusalem", lambda: dt.date(2026, 9, 24))
+        historical_period_end = dt.date(2026, 3, 15)
+
+        items = [{"n": 1, "id": 1, "title": "t", "domain": "c_uas", "summary_he": "s", "so_what_he": "so"}]
+        draft = DailyReportDraft(
+            exec_summary=[Sentence(text_he="טענה עם הפניה לא קיימת.", cites=[999])],
+            sections=[], outlook=[], open_points_he=[],
+        )
+        from eoa.report.qa_citations import QAResult
+
+        qa = QAResult(passed=False, errors=["unknown reference [999]"])
+        daily._corrective_retry(
+            items, draft, qa, role="resident", interactive=False,
+            table_counts=daily.TableCounts(), period_end=historical_period_end,
+        )
+        prompt = captured_messages[0][1]["content"]
+        assert daily.hebrew_date_str(historical_period_end) in prompt
+        assert daily.hebrew_date_str(dt.date(2026, 9, 24)) not in prompt
+
 
 # --------------------------------------------------------------------------
 # Q3-15 (docs/qa/findings_Q3_r1.md): section domain validation -- never render a raw slug

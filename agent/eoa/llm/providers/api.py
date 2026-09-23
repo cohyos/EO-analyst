@@ -207,6 +207,16 @@ class AnthropicProvider:
                     if block.get("type") == "text":
                         content += block.get("text", "")
             usage = data.get("usage") or {}
+            # F26 follow-up (SOL-REVIEW-2026-09-24): a syntactically valid response whose `usage`
+            # field is present but the WRONG shape (e.g. a list/string instead of an object) used
+            # to sail through this `try` (`data.get("usage")` never raises) and only blow up later,
+            # OUTSIDE this boundary, when the `usage.get(...)` calls below built the `ProviderResult`
+            # -- an uncaught `AttributeError` there is not one of `FALLBACK_EXCEPTIONS`, so it
+            # aborted the whole chain instead of falling through. Validating the shape here, still
+            # inside the `try`, converts it into the same `ApiProviderError` as every other
+            # malformed-envelope case.
+            if not isinstance(usage, dict):
+                raise TypeError(f"usage field is a {type(usage).__name__}, not an object")
         except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
             raise ApiProviderError(
                 f"anthropic API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
@@ -345,6 +355,10 @@ class GeminiProvider:
                 if content:
                     break
             usage = data.get("usageMetadata") or {}
+            # F26 follow-up (SOL-REVIEW-2026-09-24): see the identical comment in
+            # AnthropicProvider.chat above -- validated inside the boundary, not after it.
+            if not isinstance(usage, dict):
+                raise TypeError(f"usageMetadata field is a {type(usage).__name__}, not an object")
         except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
             raise ApiProviderError(
                 f"gemini API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
@@ -437,6 +451,10 @@ class OpenAIProvider:
             data = r.json()
             content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "") or ""
             usage = data.get("usage") or {}
+            # F26 follow-up (SOL-REVIEW-2026-09-24): see the identical comment in
+            # AnthropicProvider.chat above -- validated inside the boundary, not after it.
+            if not isinstance(usage, dict):
+                raise TypeError(f"usage field is a {type(usage).__name__}, not an object")
         except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
             raise ApiProviderError(
                 f"openai API returned a malformed response body: {redact_secrets(str(exc))[:200]}"

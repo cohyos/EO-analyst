@@ -1,12 +1,21 @@
 import { ShieldAlert } from "lucide-react";
+import { useT } from "@/i18n";
 
 /**
  * W10 (docs/REVIEW_2026-09-06_evening.md round 4): shown whenever an investigation's answer was
  * partially blocked by the L2 prompt-injection guard (`security_review: true` on the job's
- * result). Two actions: "אשר והמשך" re-runs the investigation with the flagged snippet
- * whitelisted (`POST /api/security-reviews/{job_id}/approve`), "דחה" marks it reviewed with no
- * re-run (`POST /api/security-reviews/{job_id}/dismiss}`). Shared between `InvestigationDetailPage`
- * (one banner, this investigation) and `InboxPage` (a list of these, one per pending review).
+ * result). Two actions: a rerun button re-runs the investigation as a brand-new, independent
+ * job, screened again from scratch (`POST /api/security-reviews/{job_id}/approve`), "דחה" marks
+ * it reviewed with no re-run (`POST /api/security-reviews/{job_id}/dismiss}`). Shared between
+ * `InvestigationDetailPage` (one banner, this investigation) and `InboxPage` (a list of these,
+ * one per pending review).
+ *
+ * F28/N08 (SOL-REVIEW-2026-09-24): the rerun button used to read "אשר והמשך" ("approve and
+ * continue"), implying the flagged content gets approved/whitelisted for this re-run -- there is
+ * no such override anywhere in the backend (`eoa.api.routes.security_review
+ * .approve_security_review`'s own docstring: "an honest, ordinary duplicate investigation").
+ * The label now comes from `investigations.securityReviewRerun`/`securityReviewRerunning` (i18n)
+ * and says plainly that it re-runs, not that it approves/whitelists anything.
  */
 export function SecurityReviewBanner({
   reasonHe,
@@ -23,6 +32,7 @@ export function SecurityReviewBanner({
   approving?: boolean;
   dismissing?: boolean;
 }) {
+  const t = useT();
   return (
     <div
       role="alert"
@@ -60,7 +70,9 @@ export function SecurityReviewBanner({
               disabled={approving || dismissing}
               className="rounded-md bg-danger px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
             >
-              {approving ? "מאשר…" : "אשר והמשך"}
+              {approving
+                ? t("investigations.securityReviewRerunning")
+                : t("investigations.securityReviewRerun")}
             </button>
             <button
               type="button"

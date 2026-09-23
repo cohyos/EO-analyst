@@ -207,9 +207,15 @@ async def _get_with_retry(
     max_bytes: int,
     headers: dict[str, str],
     follow_redirects: bool = True,
+    extensions: dict[str, object] | None = None,
 ) -> tuple[httpx.Response, bytes]:
     async with client.stream(
-        "GET", url, timeout=timeout, headers=headers, follow_redirects=follow_redirects
+        "GET",
+        url,
+        timeout=timeout,
+        headers=headers,
+        follow_redirects=follow_redirects,
+        extensions=extensions,
     ) as response:
         if _is_retryable_status(response.status_code):
             raise _RetryableStatusError(response.status_code)
@@ -222,26 +228,77 @@ async def _get_with_retry(
     return response, content
 
 
+class _PinnedIPTransport(httpx.AsyncBaseTransport):
+    """F01 (SOL-REVIEW-2026-09-24 round 2): actually DIAL the caller-validated IP, instead of
+    connecting by hostname and only comparing the peer address after the fact.
+
+    The round-1 fix (`_server_addr`, below) validated the resolved IP set once and then compared
+    it against whatever address `httpx` happened to connect to -- but the round's own review found
+    that this still *connects* by hostname first: a second, independent DNS answer for that
+    hostname (a classic DNS-rebinding window between the `assert_public_http_url` resolution and
+    the actual TCP connect a moment later) could point at a private/internal address, and the
+    unpinned connection would already have been made -- and the request already sent -- by the
+    time the post-hoc comparison ran and rejected the *response*.
+
+    This transport closes that gap for real: when a request carries a `"pinned_ip"` extension
+    (set by `fetch_page`/`_get_robot_parser` below, from the caller-supplied `pin_ips` set), the
+    request actually sent to the network has its URL's host REPLACED by that already-validated IP
+    literal -- `httpx`/`httpcore` resolve nothing and connect directly to it -- while the original
+    hostname is preserved for the `Host` header (rewritten alongside) and, via the
+    `"sni_hostname"` extension `httpcore` already honors, for TLS SNI/certificate verification.
+    No new DNS lookup ever happens between validation and connection: there is nothing left to
+    rebind. A request with no `"pinned_ip"` extension (no `pin_ips` given -- callers outside
+    `eoa.fetch.service`'s SSRF-guarded path) passes through unchanged, exactly as before this
+    transport existed.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport | None = None) -> None:
+        self._inner = inner or httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        pinned_ip = request.extensions.get("pinned_ip")
+        if not pinned_ip:
+            return await self._inner.handle_async_request(request)
+
+        original_url = request.url
+        original_host = original_url.host
+        dial_url = original_url.copy_with(host=pinned_ip)
+
+        headers = httpx.Headers(request.headers)
+        host_header = original_host
+        if original_url.port and original_url.port not in (80, 443):
+            host_header = f"{original_host}:{original_url.port}"
+        headers["host"] = host_header
+
+        dial_request = httpx.Request(
+            request.method,
+            dial_url,
+            headers=headers,
+            stream=request.stream,
+            extensions={**request.extensions, "sni_hostname": original_host},
+        )
+        response = await self._inner.handle_async_request(dial_request)
+        response.request = request  # callers see the original hostname/URL, not the dialed IP
+        return response
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 def _server_addr(response: httpx.Response) -> str | None:
     """Best-effort: the IP address `httpx` actually connected to for `response`.
 
-    Q2-4's "pin the connection to the validated IP" mitigation, in the form the
-    task doc calls out as the acceptable alternative to a full custom-resolver
-    transport: `httpx.AsyncClient` (unlike, say, `aiohttp`) does not expose a
-    supported way to force-dial a specific address while still sending the
-    original ``Host`` header short of writing and wiring in a custom
-    `httpx.AsyncHTTPTransport` (real work, deferred -- see docs/adr note this
-    change adds). Post-hoc comparison against the validated address set at
-    least detects (and rejects) a DNS answer that changed between validation
-    and connection, which is the actual TOCTOU/rebinding gap Q2-4 flags; it
-    cannot prevent the one connection attempt itself from reaching a rebound
-    address, only stop that response's content from being used.
+    Belt-and-suspenders alongside `_PinnedIPTransport` (F01): that transport is what actually
+    prevents an unpinned connection from being dialed in the first place; this is a second,
+    independent check that also catches the case where the installed transport ISN'T
+    `_PinnedIPTransport` (a caller-supplied `client` built without it, or a test transport) by
+    verifying, after the fact, that whatever address was actually reached matches the validated
+    set -- and rejecting the response if not.
 
-    Returns ``None`` when the installed transport doesn't provide this extra
-    info (e.g. `respx`'s mock transport in tests, or older `httpx` versions)
-    -- callers must treat that as "cannot verify", not "verified", and the
-    caller here (`fetch_page`) does exactly that: it logs and continues rather
-    than failing closed, since failing closed would break every fetch on any
+    Returns ``None`` when the installed transport doesn't provide this extra info (e.g. `respx`'s
+    mock transport in tests, or older `httpx` versions) -- callers must treat that as "cannot
+    verify", not "verified", and the caller here (`fetch_page`) does exactly that: it logs and
+    continues rather than failing closed, since failing closed would break every fetch on any
     transport that doesn't expose the extension.
     """
     network_stream = response.extensions.get("network_stream")
@@ -256,6 +313,22 @@ def _server_addr(response: httpx.Response) -> str | None:
     return str(info[0]) if isinstance(info, tuple | list) else str(info)
 
 
+def build_pinned_client(**kwargs: object) -> httpx.AsyncClient:
+    """F01/E04: construct an `httpx.AsyncClient` whose connections are pinned per-request via
+    `_PinnedIPTransport` -- used both by `fetch_page`'s own default (no `client` given) and by
+    `eoa.fetch.service.run_ingest`'s single shared client for a whole ingest run, so pinning
+    applies whether or not a caller reuses one client across many hosts/fetches."""
+    return httpx.AsyncClient(transport=_PinnedIPTransport(), **kwargs)
+
+
+def _choose_pin_ip(pin_ips: set[str] | None) -> str | None:
+    """Deterministically pick one address out of a validated `pin_ips` set to actually dial --
+    `assert_public_http_url` can return more than one (multiple A/AAAA records); `sorted()[0]` is
+    stable across calls for the same set, which keeps repeated fetches of one host on one address
+    for the robots-cache TTL / retry window instead of bouncing between candidates."""
+    return sorted(pin_ips)[0] if pin_ips else None
+
+
 async def _get_robot_parser(
     url: str,
     client: httpx.AsyncClient,
@@ -263,14 +336,14 @@ async def _get_robot_parser(
     *,
     pin_ips: set[str] | None = None,
 ) -> RobotFileParser:
-    """F01 (SOL-AUDIT-2026-09-24): the robots.txt fetch is on the same host as the page fetch it
-    gates, so it is pinned to the same caller-validated ``pin_ips`` set as `fetch_page`'s own page
-    request -- previously this made an entirely unvalidated connection, the one gap the finding
-    calls out explicitly (`fetch_page`'s page request *did* already have a post-connect pin
-    check). A mismatch is a suspected DNS-rebinding hop and fails closed (raises), unlike the
-    "no robots.txt" / transport-error cases below, which intentionally fail open (allow-all) --
-    those are availability failures, not a security signal. A cache hit returns the already-parsed
-    result without any new connection, so it never needs (or bypasses) this check."""
+    """F01 (SOL-AUDIT-2026-09-24, round 2): the robots.txt fetch is on the same host as the page
+    fetch it gates, so it is DIALED (not just post-hoc checked) to the same caller-validated
+    ``pin_ips`` set as `fetch_page`'s own page request -- see `_PinnedIPTransport`. A mismatch on
+    the post-hoc `_server_addr` check (still run as a second, transport-independent guard) is a
+    suspected DNS-rebinding hop and fails closed (raises), unlike the "no robots.txt" / transport-
+    error cases below, which intentionally fail open (allow-all) -- those are availability
+    failures, not a security signal. A cache hit returns the already-parsed result without any new
+    connection, so it never needs (or bypasses) this check."""
     parts = urlsplit(url)
     root = f"{parts.scheme}://{parts.netloc}"
     now = time.monotonic()
@@ -281,8 +354,14 @@ async def _get_robot_parser(
 
     parser = RobotFileParser()
     robots_url = urljoin(root, "/robots.txt")
+    pinned_ip = _choose_pin_ip(pin_ips)
     try:
-        response = await client.get(robots_url, timeout=10.0, headers={"User-Agent": user_agent})
+        response = await client.get(
+            robots_url,
+            timeout=10.0,
+            headers={"User-Agent": user_agent},
+            extensions={"pinned_ip": pinned_ip} if pinned_ip else None,
+        )
         if pin_ips:
             server_addr = _server_addr(response)
             if server_addr is not None and server_addr not in pin_ips:
@@ -333,6 +412,13 @@ async def fetch_page(
     host) replaces `pin_ips` for the next hop's connection check. `pin_ips`
     seeds that check for the initial URL -- pass the set already returned by
     validating `url` itself, to avoid re-resolving it a second time.
+
+    F01 (round 2): when this function opens its own client (no `client` given), that client is
+    built by `build_pinned_client()` -- every hop's connection is DIALED at the validated IP
+    (`_PinnedIPTransport`), not merely checked after connecting. A caller-supplied `client` (e.g.
+    `eoa.fetch.service.run_ingest`'s one shared client for a whole run, E04) must itself be built
+    with `build_pinned_client()` for the same guarantee to hold for that call; the post-hoc
+    `_server_addr` check below still runs regardless, as a second guard.
     """
     from eoa.errors import FetchError
 
@@ -342,7 +428,7 @@ async def fetch_page(
     manual_redirects = validate_redirect is not None
 
     owns_client = client is None
-    active_client = client or httpx.AsyncClient()
+    active_client = client or build_pinned_client()
     try:
         current_url = url
         current_pin_ips = pin_ips
@@ -363,6 +449,7 @@ async def fetch_page(
                 )
                 if not parser.can_fetch(user_agent, current_url):
                     raise FetchError(f"robots.txt disallows fetching {current_url}")
+            hop_pinned_ip = _choose_pin_ip(current_pin_ips)
             try:
                 response, content = await _get_with_retry(
                     active_client,
@@ -371,6 +458,7 @@ async def fetch_page(
                     max_bytes=effective_max_bytes,
                     headers=headers,
                     follow_redirects=not manual_redirects,
+                    extensions={"pinned_ip": hop_pinned_ip} if hop_pinned_ip else None,
                 )
             except _RetryableStatusError as exc:
                 raise FetchError(

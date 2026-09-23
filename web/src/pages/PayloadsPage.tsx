@@ -48,47 +48,40 @@ export function PayloadsPage() {
   const [manualExpanded, setManualExpanded] = useState<Record<string, boolean>>({});
   const isNarrow = useIsNarrowScreen();
 
-  // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): `vendor` used to be applied client-side,
-  // AFTER this query's own 500-row cap -- a payload whose vendor match sits outside that cap could
-  // never be found no matter how exact the filter, showing a false "no matches" empty state. The
-  // API already supports `vendor` server-side (`eoa.api.routes.payloads.list_payloads`, an ILIKE
-  // match) -- filtering there means the cap is applied AFTER matching, not before.
+  // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md, both the original audit and the
+  // 2026-09-24 review of round-1): `vendor` AND `q` are now both sent to the API -- the API
+  // already supports both server-side (`eoa.api.routes.payloads.list_payloads`, ILIKE matches) --
+  // filtering there means the row cap is applied AFTER matching, not before. `q` used to stay a
+  // client-side filter over the already-capped `payloads` response, so a text match sitting
+  // outside the cap could never be found (round-1 review's remaining F33 gap).
   const payloadsQuery = useQuery({
-    queryKey: ["payloads", filters.category, filters.vendor],
+    queryKey: ["payloads", filters.category, filters.vendor, filters.q],
     queryFn: () =>
       api.getPayloads({
         category: filters.category || undefined,
         vendor: filters.vendor || undefined,
+        q: filters.q || undefined,
         limit: 500,
       }),
   });
-  // Facet list (vendor dropdown options) from a category-scoped but vendor-UNfiltered baseline
-  // fetch, so picking a vendor doesn't collapse the dropdown down to just that one vendor.
+  // F33 review follow-up: facet options (vendor dropdown) used to come from a capped
+  // (`limit=500`) baseline `getPayloads` fetch -- a vendor whose only rows sat outside that cap
+  // could never appear as a filter option. `getPayloadFacets` is an uncapped, server-side DISTINCT
+  // query -- no row cap to defeat. Still category-scoped (not vendor-scoped), so picking a vendor
+  // doesn't collapse the dropdown down to just that one vendor.
   const facetsQuery = useQuery({
     queryKey: ["payloads-facets", filters.category],
-    queryFn: () => api.getPayloads({ category: filters.category || undefined, limit: 500 }),
+    queryFn: () => api.getPayloadFacets(filters.category || undefined),
   });
 
   const payloads = payloadsQuery.data?.payloads ?? [];
-  const facetPayloads = facetsQuery.data?.payloads ?? payloads;
+  const vendors = facetsQuery.data?.vendors ?? [];
+  // "any payloads in the DB at all" (category-scoped), independent of the vendor/q cap.
+  const hasAnyPayloads = vendors.length > 0 || payloads.length > 0;
 
-  const vendors = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of facetPayloads) if (p.vendor_entity_name) set.add(p.vendor_entity_name);
-    return [...set].sort();
-  }, [facetPayloads]);
-
-  // `q` stays a client-side filter over `payloads` -- unlike the (previously mis-scoped) `vendor`
-  // filter, this is safe: `payloads` above is already the complete server-matched set for the
-  // active category+vendor (well under the 500-row cap at current data volume), so no match can
-  // be hiding outside the fetched page the way `vendor` used to.
-  const filteredPayloads = useMemo(() => {
-    if (!filters.q) return payloads;
-    const q = filters.q.toLowerCase();
-    return payloads.filter(
-      (p) => p.canonical_name.toLowerCase().includes(q) || (p.family ?? "").toLowerCase().includes(q),
-    );
-  }, [payloads, filters.q]);
+  // `q` is now forwarded to the server above -- `payloads` is already the fully server-matched,
+  // server-side-filtered set. No further client-side re-filtering needed.
+  const filteredPayloads = payloads;
 
   // W19b: vendor -> family -> variant grouping, built client-side from the already-fetched flat
   // list (`@/lib/payloadFamilies`) -- see that module's docstring for why this doesn't call
@@ -148,7 +141,7 @@ export function PayloadsPage() {
 
       {!payloadsQuery.isLoading && !payloadsQuery.isError && (
         <>
-          {facetPayloads.length === 0 ? (
+          {!hasAnyPayloads ? (
             <EmptyState title={t("payloads.emptyTitle")} description={t("payloads.emptyDescription")} />
           ) : (
             <>

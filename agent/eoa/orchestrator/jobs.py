@@ -379,11 +379,19 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
     jobs fall back to the same local per-job loop local mode always used, via
     ``_run_deep_search_job_local`` -- no job is ever silently dropped. Local mode (default) is
     completely unchanged, byte for byte, from before this revision.
-    """
+
+    F02 (SOL-REVIEW-2026-09-24): the cloud-batch path used to gate on ``mode == "cloud"`` alone --
+    ``eoa.llm.chain.run_chain`` (every other cloud dispatch point: chat and structured calls) also
+    requires ``llm_providers.allow_cloud`` before a cloud leg is even considered, but this batch
+    entry point called ``investigate_batch_cloud`` -> the CLI runners directly, bypassing that
+    kill switch entirely -- an operator flipping ``allow_cloud: false`` (the documented "stop all
+    cloud spend/egress now" control) did not actually stop this one path. ``allow_cloud`` is now
+    required here too, alongside ``mode == "cloud"``; ``investigate_batch_cloud`` itself also
+    checks it (defense in depth, in case some other caller is ever added)."""
     cap = settings().deep_search.max_per_night
     per_min = settings().deep_search.per_investigation_timeout_min
 
-    if settings().llm_providers.mode == "cloud":
+    if settings().llm_providers.mode == "cloud" and settings().llm_providers.allow_cloud:
         from eoa.search.deep_search import investigate_batch_cloud
 
         claimed: list[dict[str, Any]] = []
@@ -435,8 +443,10 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
                         # re-raising -- keep going with the rest of the batch.
                         outcomes.append("deferred")
             finally:
+                interrupted = 0
                 for job in claimed:
                     if job["id"] not in processed_ids:
+                        interrupted += 1
                         finish_job(
                             job["id"],
                             "deferred",
@@ -447,6 +457,16 @@ def run_deep_searches(rs: RunState) -> dict[str, Any]:
                 "investigations": len(claimed),
                 "outcomes": ",".join(outcomes),
                 "failed": outcomes.count("failed"),
+                # F24 (SOL-REVIEW-2026-09-24): a resource-unavailable child this branch itself
+                # defers (appended as "deferred" to `outcomes` above) OR one this loop never even
+                # reached because the batch was interrupted (deferred in the `finally` above,
+                # never appended to `outcomes` at all) is real incomplete work for tonight's
+                # daily run -- neither was visible to `has_incomplete_work` before (only `failed`
+                # was reported), so a run with every claimed child merely deferred could still
+                # compute `done`. `interrupted` is defined inside the `finally` block above but
+                # always runs before this `return` is reached (the `finally` always executes
+                # before the enclosing `try` completes).
+                "deferred": outcomes.count("deferred") + interrupted,
             }
 
         outcomes = []
@@ -549,56 +569,86 @@ def _build_tech_daily_report() -> Any:
     return build_tech_daily()
 
 
-def _daily_run_already_covered(within_hours: int = 6) -> bool:
-    """F4/F22: True if a separate ``daily_run`` job was created within the last ``within_hours``
-    hours and is still ``queued``, already ``running``, or has finished ``done``/``partial``. Both
-    ``daily_run`` and ``weekly_run`` are scheduled for the same night (config ``schedule.
-    weekly_run`` sat 01:00, same as the nightly ``daily_run``); without this guard, ``run_weekly``
-    unconditionally re-running the *entire* nightly pipeline (ingest..notify, including its own
-    daily report + notification) produced two daily reports and duplicate notifications on
-    Saturday nights.
+#: F22/N07 (SOL-REVIEW-2026-09-24): how long `run_weekly` will keep deferring itself (see below)
+#: while it waits for that night's `daily_run` to either appear or reach a terminal state, before
+#: giving up on waiting and falling back to running the full pipeline itself (the original
+#: fallback behaviour, preserved for the case where `run_weekly` genuinely stands alone -- e.g. a
+#: manually triggered weekly report with no nightly `daily_run` ever coming). The night batch
+#: window itself is normally a few hours, so this comfortably covers a real daily run without
+#: leaving a standalone weekly waiting indefinitely.
+WEEKLY_DAILY_WAIT_MAX = timedelta(hours=3)
 
-    F22 (audit 2026-09-24): ``'queued'`` was missing from the state list -- both jobs are enqueued
-    at the same 01:00 tick (APScheduler's default executor can run same-tick callbacks
-    concurrently), so a `daily_run` row that merely exists but hasn't been claimed yet was
-    invisible to this check; if the worker happened to claim `weekly_run` first, it ran the full
-    pipeline a second time once the still-queued `daily_run` job was claimed afterward. Combined
-    with `weekly`'s worse scheduler priority than `daily` (`build_scheduler`), the two together
-    make weekly wait for daily's pipeline in the overwhelming majority of cases and, even in the
-    rare case weekly is still claimed first, stop it from re-running the pipeline a second time."""
+
+def _daily_run_state_tonight(within_hours: int = 6) -> str | None:
+    """F22/N07: the ``state`` of the most recently created ``daily_run`` job within the last
+    ``within_hours`` hours, or ``None`` if none exists yet (or the query itself failed).
+
+    Replaces the old :func:`_daily_run_already_covered` boolean: :func:`run_weekly` needs to tell
+    apart a daily run that is still ``queued``/``running`` (its data is not final yet -- wait) from
+    one that has actually reached a terminal state (``done``/``partial``/``failed`` -- whatever it
+    produced tonight is final, safe to build the weekly report on top of now)."""
     from eoa.db import connection
 
     sql = """
-        SELECT 1 FROM jobs
+        SELECT state FROM jobs
         WHERE kind = 'daily_run'
-          AND state IN ('queued', 'running', 'done', 'partial')
           AND created_at > now() - make_interval(hours => %(hours)s)
+        ORDER BY created_at DESC
         LIMIT 1
     """
     try:
         with connection() as conn, conn.cursor() as cur:
             cur.execute(sql, {"hours": within_hours})
-            return cur.fetchone() is not None
+            row = cur.fetchone()
+            return row["state"] if row else None
     except Exception as exc:
-        log.warning("daily_run_covered_check_failed", error=str(exc)[:160])
-        return False
+        log.warning("daily_run_state_check_failed", error=str(exc)[:160])
+        return None
+
+
+def _job_age(job: dict[str, Any]) -> timedelta:
+    created_at = job.get("created_at")
+    if not isinstance(created_at, datetime):
+        return timedelta(0)
+    now = datetime.now(tz=UTC)
+    return now - (created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC))
 
 
 def run_weekly(job: dict[str, Any]) -> dict[str, Any]:
     """``weekly_run`` handler: normally runs the full nightly pipeline (ingest..notify, including
     the daily report) via :func:`run_daily`, then additionally builds the weekly analyst report
     (trends, business events, conference lookahead, FR-11.4 meta-summary) on top of the same
-    night's freshly-analyzed items. F4: when a separate ``daily_run`` job has already run (or is
-    running) tonight (:func:`_daily_run_already_covered`), the nightly pipeline is *not* re-run
-    here — only the weekly report is built, on top of whatever that other job already
-    ingested/analyzed — since running it twice produced two daily reports and duplicate
-    notifications. A weekly-report failure is logged and recorded but never fails the job outright —
-    the (possibly skipped) daily pipeline's own results still count as the run's primary outcome."""
-    if _daily_run_already_covered():
-        log.info("weekly_run_skips_daily_pipeline", reason="daily_run_already_covered_tonight")
-        stats: dict[str, Any] = {"daily_pipeline_skipped": "daily_run_already_covered"}
-    else:
+    night's freshly-analyzed items. F4: when a separate ``daily_run`` job has already run tonight,
+    the nightly pipeline is *not* re-run here — only the weekly report is built, on top of
+    whatever that other job already ingested/analyzed — since running it twice produced two daily
+    reports and duplicate notifications. A weekly-report failure is logged and recorded but never
+    fails the job outright — the (possibly skipped) daily pipeline's own results still count as
+    the run's primary outcome.
+
+    F22/N07 (SOL-REVIEW-2026-09-24): the previous version treated a merely ``queued``/``running``
+    ``daily_run`` as "covered" and built the weekly report immediately anyway, on top of
+    still-in-flight (or not-yet-started) daily analysis -- and, in the narrow race where both jobs
+    land on the same scheduler tick, could be claimed before the ``daily_run`` row was even
+    inserted, in which case it fell to the ``else`` branch and ran the full pipeline itself, which
+    the *actual* ``daily_run`` job then also ran once claimed -- two full daily pipelines/reports
+    the same night. Now: a ``daily_run`` found ``queued``/``running`` (or not found at all yet)
+    makes this job defer itself (``ResourceUnavailable``, caught by ``Worker.run`` and requeued
+    ``deferred`` with a cooldown -- the same race-safe mechanism every other "wait and retry"
+    condition in this module already uses) instead of proceeding, up to
+    :data:`WEEKLY_DAILY_WAIT_MAX` after which it gives up waiting (covers the case where this
+    weekly run truly stands alone, e.g. triggered manually with no nightly daily run) and falls
+    back to running the pipeline itself, exactly as before this fix."""
+    state = _daily_run_state_tonight()
+    if state in (None, "queued", "running"):
+        if _job_age(job) < WEEKLY_DAILY_WAIT_MAX:
+            raise ResourceUnavailable(
+                f"weekly_run waiting for tonight's daily_run to reach a terminal state (state={state!r})"
+            )
+        log.warning("weekly_run_daily_wait_timed_out_running_pipeline_itself", state=state)
         stats = run_daily(job)
+    else:
+        log.info("weekly_run_skips_daily_pipeline", reason="daily_run_already_covered_tonight", state=state)
+        stats = {"daily_pipeline_skipped": "daily_run_already_covered", "daily_run_state": state}
     try:
         from eoa.report.weekly import build_weekly
 
@@ -866,6 +916,23 @@ def _pg_dump() -> dict[str, Any]:
 
 
 def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
+    """Mandatory ``notify`` stage: the nightly ntfy push (success or "report missing" failure).
+
+    N03 (SOL-REVIEW-2026-09-24): a worker crash between this function actually delivering the
+    push and the outer ``Worker.run``/``finish_job`` call recording the job as finished leaves the
+    job ``running`` past its lease; ``reap_stale_jobs`` requeues it ``deferred`` and a later
+    worker reruns THIS SAME job (same ``rs.job_id``) end to end, including this stage, a second
+    time -- without a durable marker outside the job's own (about to be overwritten)
+    ``state``/``result``, there is no way to tell the push already went out. ``rs.job_id`` is
+    stable across that reap-and-reclaim (the row is updated in place, never re-inserted), so it is
+    a safe idempotency key: the first pass to reach this stage for a given job claims it and
+    sends; a stale-job replay of the exact same job finds it already claimed and skips silently
+    (not an error -- the run's other stages still need to finish/re-verify as normal)."""
+    from eoa.memory.relational import mark_notification_sent
+
+    if not mark_notification_sent("daily_report", str(rs.job_id)):
+        log.info("daily_notify_skipped_already_sent", job_id=rs.job_id)
+        return {"notification_skipped": "already_sent_for_this_job"}
     headlines: list[str] = []
     try:
         from eoa.db import connection

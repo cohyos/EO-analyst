@@ -98,7 +98,7 @@ def list_pending_security_reviews() -> list[dict[str, Any]]:
     return [_review_card(r) for r in rows]
 
 
-def _claim_pending_review(job_id: int, *, dismissed: bool) -> dict[str, Any] | None:
+def _claim_pending_review(job_id: int, *, dismissed: bool, conn: Any = None) -> dict[str, Any] | None:
     """Atomically resolve `job_id` iff it is *currently* an unresolved, flagged security review --
     the single check-and-act statement both endpoints below rely on (F28, SOL-AUDIT-2026-09-24.md).
 
@@ -109,10 +109,14 @@ def _claim_pending_review(job_id: int, *, dismissed: bool) -> dict[str, Any] | N
     including one already resolved). Folding the WHERE into the UPDATE closes both: only one caller
     can ever match and flip `security_review_resolved`, and a job that isn't presently pending never
     matches at all.
+
+    N08 (SOL-REVIEW-2026-09-24): an optional caller-owned ``conn`` runs the UPDATE on that
+    connection/transaction instead of opening (and committing) a new one -- see
+    :func:`approve_security_review` for why: this claim and the new job's `enqueue_job` must
+    commit or roll back together.
     """
     patch = {"security_review_resolved": True, "security_review_dismissed": dismissed}
-    return _fetchone(
-        """
+    query = """
         UPDATE jobs
         SET result = COALESCE(result, '{}'::jsonb) || %s::jsonb
         WHERE id = %s
@@ -120,9 +124,13 @@ def _claim_pending_review(job_id: int, *, dismissed: bool) -> dict[str, Any] | N
           AND result ->> 'security_review' = 'true'
           AND COALESCE((result ->> 'security_review_resolved')::boolean, false) = false
         RETURNING *
-        """,
-        (Json(patch), job_id),
-    )
+        """
+    params = (Json(patch), job_id)
+    if conn is not None:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            return cur.fetchone()
+    return _fetchone(query, params)
 
 
 @router.post("/security-reviews/{job_id}/approve")
@@ -140,18 +148,27 @@ def approve_security_review(job_id: int) -> dict[str, Any]:
     job. If a real reviewed-content override is wanted later, it needs a narrowly-scoped consumer
     (e.g. the search/guard layer checking a specific claim id against this resolved review row) --
     not a same-named-but-unread payload field.
+
+    N08 (SOL-REVIEW-2026-09-24): the claim (above) and the new job's `enqueue_job` insert used to
+    be two separate statements/transactions -- if `enqueue_job` raised (a DB hiccup, a constraint
+    violation) after the claim had already committed, the review was left permanently resolved
+    with no re-run ever created: an approval that silently disappears. Both now run inside ONE
+    `db.connection()` transaction (commits together on success, rolls back both on any failure) --
+    `_claim_pending_review`'s own `conn` parameter and `enqueue_job`'s new `conn` parameter both
+    exist for exactly this.
     """
-    job = _claim_pending_review(job_id, dismissed=False)
-    if job is None:
-        raise not_found("החקירה לא נמצאה או שאינה ממתינה לבדיקת אבטחה")
-    payload = dict(job.get("payload") or {})
-    payload["expanded_from_job_id"] = job_id
     from eoa.pipeline.investigation_context import ensure_context_he
 
-    refreshed = ensure_context_he(payload)
-    if refreshed:
-        payload["context_he"] = refreshed
-    new_job_id = enqueue_job("deep_search", payload, priority=0)
+    with connection() as conn:
+        job = _claim_pending_review(job_id, dismissed=False, conn=conn)
+        if job is None:
+            raise not_found("החקירה לא נמצאה או שאינה ממתינה לבדיקת אבטחה")
+        payload = dict(job.get("payload") or {})
+        payload["expanded_from_job_id"] = job_id
+        refreshed = ensure_context_he(payload)
+        if refreshed:
+            payload["context_he"] = refreshed
+        new_job_id = enqueue_job("deep_search", payload, priority=0, conn=conn)
     return {"job_id": new_job_id}
 
 

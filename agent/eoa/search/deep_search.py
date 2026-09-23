@@ -2644,8 +2644,22 @@ def investigate_batch_cloud(pending: list[dict[str, Any]]) -> tuple[dict[int, In
     ``investigate()`` in that case (point 6: "API providers without tools fall back to the
     existing local ReAct loop", which this project extends to "no tool-capable CLI available
     either").
+
+    F02 (SOL-REVIEW-2026-09-24): this directly invokes cloud CLI runners (claude/agy), unlike
+    every other cloud dispatch point in this codebase, which goes through
+    ``eoa.llm.chain.run_chain`` -- the single place ``llm_providers.allow_cloud`` is enforced.
+    The only current caller (``eoa.orchestrator.jobs.run_deep_searches``) already checks
+    ``allow_cloud`` before calling this, but that guard living only at the call site meant a
+    cloud kill switch (``allow_cloud: false``) did not actually stop cloud spend/egress from this
+    path -- checked again here, defense in depth, in case a future caller is added without
+    remembering the call-site guard.
     """
     checkpoint()
+    if not settings().llm_providers.allow_cloud:
+        raise ProviderUnavailable(
+            "investigate_batch_cloud called with llm_providers.allow_cloud=False -- cloud batch "
+            "deep search is disabled by the cloud kill switch"
+        )
     if not pending:
         return {}, ""
 

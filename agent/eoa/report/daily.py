@@ -555,7 +555,8 @@ def collect_events(
         FROM events e
         JOIN items i ON i.id = e.item_id
         LEFT JOIN sources src ON src.id = i.source_id
-        WHERE COALESCE(e.date, i.published_at::date) BETWEEN %(start)s AND %(end)s
+        WHERE COALESCE(e.date, (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date)
+              BETWEEN %(start)s AND %(end)s
           AND COALESCE(i.domain, '') <> 'out_of_scope' AND COALESCE(i.level, '') <> 'archive'
         ORDER BY e.date DESC NULLS LAST, e.id DESC
     """

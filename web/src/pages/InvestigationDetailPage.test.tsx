@@ -118,12 +118,14 @@ describe("InvestigationDetailPage security review banner (W10)", () => {
     expect(screen.queryByTestId("security-review-banner")).not.toBeInTheDocument();
   });
 
-  it("'אשר והמשך' calls the approve endpoint and navigates to the new job", async () => {
+  it("the rerun button calls the approve endpoint and navigates to the new job", async () => {
+    // F28/N08 (SOL-REVIEW-2026-09-24): "אשר והמשך" renamed to "הרץ מחדש" -- see
+    // SecurityReviewBanner.tsx's own docstring on why (no whitelist/approval override exists).
     getInvestigation.mockResolvedValue(detailWithSecurityReview());
     postSecurityReviewApprove.mockResolvedValue({ job_id: "77" });
     renderPage();
     await screen.findByTestId("security-review-banner");
-    fireEvent.click(screen.getByText("אשר והמשך"));
+    fireEvent.click(screen.getByText("הרץ מחדש"));
     await waitFor(() => expect(postSecurityReviewApprove).toHaveBeenCalledWith("10"));
   });
 

@@ -555,3 +555,111 @@ class TestBuildMonthlyNoItems:
 
         paths = monthly.build_monthly(period_end=dt.date(2026, 8, 31))
         assert paths.qa.passed
+
+
+class TestBuildMonthlyTopEventGetsCitationOutsideOrdinaryRegistry:
+    """F15 follow-up (SOL-REVIEW-2026-09-24 review): `top_events_by_amount` is its own, separately
+    collected query -- an event whose item never made it into `collect_month_items`/trend evidence/
+    `collect_events` (e.g. a yellow-level item) previously had no registry entry at all, so its own
+    top-events table row rendered a bare "—" instead of a real `[n]` citation. `monthly.py`'s
+    `_extend_registry_with_ids(citation_items, _top_event_ids)` call (lines ~1009-1012) is meant to
+    register it before the table is built. This exercises `build_monthly` end to end and reads the
+    actual rendered markdown -- old code (before that call existed) renders "—" for this row."""
+
+    def test_top_event_absent_from_ordinary_registry_gets_a_real_citation(
+        self, monkeypatch, patch_monthly_collectors
+    ) -> None:
+        # item 555 is deliberately NOT in MONTH_ITEMS, the trend evidence, or collect_events --
+        # the only place it is ever mentioned is this top-events-by-amount row.
+        monkeypatch.setattr(
+            monthly,
+            "top_events_by_amount",
+            lambda s, e, limit=10: [
+                {
+                    "id": 9001,
+                    "item_id": 555,
+                    "kind": "contract",
+                    "title": "Elbit wins $400M radar contract",
+                    "date": dt.date(2026, 8, 12),
+                    "amount_usd": 400_000_000,
+                    "currency": "USD",
+                    "parties": ["Elbit Systems"],
+                    "customer": "Undisclosed",
+                    "program": None,
+                    "confidence": 0.9,
+                    "item_url": "https://example.com/555",
+                    "item_title": "Elbit wins $400M radar contract",
+                    "published_at": dt.datetime(2026, 8, 12, tzinfo=dt.UTC),
+                    "source_name": "Defense News",
+                }
+            ],
+        )
+
+        # `_extend_registry_with_ids` fetches the missing item fresh from the DB -- fake that
+        # lookup (this test has no live Postgres) so item 555 resolves to a real row instead of
+        # being silently dropped as "not found".
+        def _fake_connection(timeout: float | None = None):
+            class _Cur:
+                def execute(self, sql, params):
+                    self._ids = params["ids"]
+
+                def fetchall(self):
+                    return [
+                        {
+                            "id": iid,
+                            "url": f"https://example.com/{iid}",
+                            "title": "Elbit wins $400M radar contract",
+                            "published_at": dt.datetime(2026, 8, 12, tzinfo=dt.UTC),
+                            "source_name": "Defense News",
+                        }
+                        for iid in self._ids
+                    ]
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            class _Conn:
+                def cursor(self):
+                    return _Cur()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            return _Conn()
+
+        import eoa.report.weekly as weekly_mod
+
+        monkeypatch.setattr(weekly_mod, "connection", _fake_connection)
+
+        def fake_chat_structured(role, schema, messages, **kw):
+            return _valid_monthly_draft()
+
+        monkeypatch.setattr(monthly, "chat_structured", fake_chat_structured)
+        paths = monthly.build_monthly(period_end=dt.date(2026, 8, 31))
+
+        assert paths.qa.passed, paths.qa.errors
+        md_text = paths.md.read_text(encoding="utf-8")
+        # The top-events table row for this event must NOT be the "no citation" placeholder --
+        # old code (before the F15 registry-extension call) renders a bare "—" here instead.
+        assert "Elbit Systems" in md_text
+        top_events_line = next(
+            line for line in md_text.splitlines() if "Elbit Systems" in line and "|" in line
+        )
+        assert "—" not in top_events_line.split("|")[-2], (
+            f"top event's citation cell must not be the empty placeholder: {top_events_line!r}"
+        )
+        assert re_search_bracket_citation(top_events_line), (
+            f"expected a real [n] citation in the top-events row: {top_events_line!r}"
+        )
+
+
+def re_search_bracket_citation(text: str) -> bool:
+    import re
+
+    return re.search(r"\[\d+\]", text) is not None

@@ -3062,6 +3062,30 @@ _RUN_IDEMPOTENCY_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _equivalent_kinds_for(kind: str) -> list[str]:
+    """Symmetric closure over `_RUN_IDEMPOTENCY_GROUPS`: every kind reachable from `kind` through
+    any group it appears in, whether as that group's own key or one of its listed members.
+
+    F31 follow-up (SOL-REVIEW-2026-09-24): `_RUN_IDEMPOTENCY_GROUPS` is written asymmetrically --
+    `"report"`'s own entry lists `daily_run`/`weekly_run` as equivalent, but neither `daily_run`
+    nor `weekly_run` has an entry listing `report` back (only `.get(kind, (kind,))` was ever
+    consulted, keyed on the CALLER's own kind). Even with `enqueue_run`'s single fixed advisory
+    lock fully serializing every call, a `daily` request's equivalent-job SELECT never looked for
+    a `report` kind at all -- not a race, a plain asymmetric check -- so a `daily` call right after
+    a `report` job committed could still enqueue a second, overlapping active job. The union below
+    makes the relationship symmetric: if A's group lists B, checking from B also finds A."""
+    found = {kind}
+    changed = True
+    while changed:
+        changed = False
+        for group_kind, members in _RUN_IDEMPOTENCY_GROUPS.items():
+            group = {group_kind, *members}
+            if found & group and not group <= found:
+                found |= group
+                changed = True
+    return sorted(found)
+
+
 class RunAlreadyActive(Exception):
     """An equivalent run is already queued/running; the route surfaces this as HTTP 409."""
 
@@ -3129,19 +3153,23 @@ def enqueue_run(scope: str, mode: str) -> int:
     `db.connection()`'s autocommit=False pool), so two concurrent "run now" calls could both pass
     the SELECT before either INSERT committed and enqueue two active equivalent jobs -- a plain
     race, not specific to the double-click case the idempotency check already covers. Both steps
-    now run inside ONE transaction, serialized by `pg_advisory_xact_lock` keyed on the equivalent-
-    kind group (e.g. daily_run+weekly_run) -- the lock is released automatically at that
-    transaction's commit/rollback. No schema change (no migration, no unique index)."""
+    now run inside ONE transaction, serialized by `pg_advisory_xact_lock`.
+
+    Follow-up (SOL-REVIEW-2026-09-24): the lock used to be keyed per equivalent-kind GROUP (e.g.
+    `hashtext("daily_run,weekly_run")` for scope `daily`, `hashtext("daily_run,report,weekly_run")`
+    for scope `report`) -- two different keys, hence two different advisory locks, even though the
+    groups overlap through `daily_run`/`weekly_run`. A concurrent `report` call and a `daily` call
+    could each pass their own lock and their own equivalent-job SELECT before either INSERT
+    committed, enqueueing one of each despite `report`'s group already covering `daily_run`. A
+    single fixed lock key serializes every scope's check+insert against every other scope's here --
+    `enqueue_run` is called rarely (a UI button click or the nightly scheduler) and each critical
+    section is a couple of fast queries, so one lock is not a real contention concern."""
     kind = RUN_SCOPE_TO_KIND.get(scope)
     if kind is None:
         raise ValueError(f"unknown scope: {scope}")
-    equivalent_kinds = sorted(_RUN_IDEMPOTENCY_GROUPS.get(kind, (kind,)))
-    lock_key = ",".join(equivalent_kinds)
+    equivalent_kinds = _equivalent_kinds_for(kind)
     with db.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT pg_advisory_xact_lock(%(ns)s, hashtext(%(key)s))",
-            {"ns": _ENQUEUE_RUN_LOCK_NS, "key": lock_key},
-        )
+        cur.execute("SELECT pg_advisory_xact_lock(%(ns)s)", {"ns": _ENQUEUE_RUN_LOCK_NS})
         cur.execute(
             "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND state IN ('queued', 'running') "
             "ORDER BY created_at DESC LIMIT 1",
@@ -3272,19 +3300,35 @@ def current_run_progress() -> dict[str, Any]:
 
 
 def cancel_job(job_id: int) -> dict[str, Any] | None:
-    row = _fetchone("SELECT * FROM jobs WHERE id = %s", (job_id,))
-    if row is None:
-        return None
-    if row["state"] == "queued":
-        _execute(
-            "UPDATE jobs SET state = 'failed', error = 'cancelled_by_user', finished_at = now() WHERE id = %s",
-            (job_id,),
-        )
-    else:
-        _execute(
-            "UPDATE jobs SET payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{stop}', 'true', true) WHERE id = %s",
-            (job_id,),
-        )
+    """Cancel `job_id`.
+
+    N02 (SOL-REVIEW-2026-09-24): a `deferred` job (a resource-failure/lease-reap retry waiting on
+    `not_before`) used to fall into the same branch as `running` -- only `payload.stop` was set,
+    with the row left in state `deferred`. Nothing ever checks `payload.stop` for a job that isn't
+    currently executing (the cooperative-stop check in `eoa.search.deep_search` only applies to a
+    `running` investigation's own loop), and `claim_next_job` was happy to reclaim and actually run
+    a `deferred` row regardless of that flag -- so a "cancelled" deferred job kept running on its
+    next eligible claim. `deferred` has no in-flight worker to signal (nothing is currently
+    executing it) so, like `queued`, it can be terminalized immediately and atomically -- same
+    single `UPDATE ... WHERE state IN (...)` shape as `queued` alone used before, just widened.
+    Only a genuinely `running` job (an in-flight worker actually holds it) still only gets the
+    cooperative `payload.stop` flag; `claim_next_job` additionally refuses to claim any row with
+    `payload.stop = true` as defense in depth."""
+    updated = _fetchone(
+        "UPDATE jobs SET state = 'failed', error = 'cancelled_by_user', finished_at = now() "
+        "WHERE id = %s AND state IN ('queued', 'deferred') RETURNING id",
+        (job_id,),
+    )
+    if updated is None:
+        row = _fetchone("SELECT id, state FROM jobs WHERE id = %s", (job_id,))
+        if row is None:
+            return None
+        if row["state"] not in ("done", "failed", "partial"):
+            _execute(
+                "UPDATE jobs SET payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{stop}', 'true', true) "
+                "WHERE id = %s",
+                (job_id,),
+            )
     return _fetchone("SELECT * FROM jobs WHERE id = %s", (job_id,))
 
 

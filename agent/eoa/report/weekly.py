@@ -276,7 +276,8 @@ def collect_yellow_domain_summary(period_start: dt.date, period_end: dt.date) ->
         SELECT domain, count(*) AS n
         FROM items
         WHERE security_status = 'clean' AND dedup_of IS NULL AND level = 'yellow'
-          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+              BETWEEN %(start)s AND %(end)s
         GROUP BY domain
         ORDER BY n DESC
     """
@@ -296,7 +297,8 @@ def collect_meta_summary(period_start: dt.date, period_end: dt.date) -> dict[str
     sql_lessons = """
         SELECT id, text, source_ref, created_at
         FROM lessons
-        WHERE kind = 'meta' AND created_at::date BETWEEN %(start)s AND %(end)s
+        WHERE kind = 'meta'
+          AND (created_at AT TIME ZONE 'Asia/Jerusalem')::date BETWEEN %(start)s AND %(end)s
         ORDER BY created_at
     """
     sql_feedback = """
@@ -304,7 +306,7 @@ def collect_meta_summary(period_start: dt.date, period_end: dt.date) -> dict[str
                i.title AS item_title
         FROM triage_feedback tf
         LEFT JOIN items i ON i.id = tf.item_id
-        WHERE tf.created_at::date BETWEEN %(start)s AND %(end)s
+        WHERE (tf.created_at AT TIME ZONE 'Asia/Jerusalem')::date BETWEEN %(start)s AND %(end)s
         ORDER BY tf.created_at
     """
     with connection() as conn, conn.cursor() as cur:

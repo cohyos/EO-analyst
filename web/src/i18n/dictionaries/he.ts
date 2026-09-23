@@ -887,5 +887,12 @@ export const he = {
   investigations: {
     blockedChip: "נחסם",
     blockedReasonPrefix: "נחסם (לא נחקר בפועל)",
+    // F28/N08 (SOL-REVIEW-2026-09-24): "אשר והמשך" implied the flagged content gets approved /
+    // whitelisted for a privileged re-run -- there is no such override (see
+    // eoa.api.routes.security_review.approve_security_review's own docstring): the action is an
+    // honest, independent re-run of the same question, screened again from scratch like any
+    // other investigation. Renamed so the UI does not promise something the backend does not do.
+    securityReviewRerun: "הרץ מחדש",
+    securityReviewRerunning: "מריץ מחדש…",
   },
 } as const;

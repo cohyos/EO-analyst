@@ -90,6 +90,33 @@ def list_payloads(
     return {"payloads": rows, "total": (total_row or {}).get("c", len(rows))}
 
 
+@router.get("/payloads/facets")
+def payload_facets(category: str | None = Query(None)) -> dict[str, Any]:
+    """F33 (SOL-AUDIT-2026-09-24 review): the vendor-dropdown facet list previously came from a
+    capped (`limit=500`) baseline `GET /api/payloads` fetch -- a vendor whose only rows sat outside
+    that cap could never appear as a filter option, even after `vendor` itself was fixed to filter
+    server-side. Uncapped, set-based DISTINCT queries -- no row cap to defeat. `category` narrows
+    the vendor list the same way the UI's category-scoped facet fetch used to (picking a category
+    should not surface a vendor with zero rows in it)."""
+    vendor_where = ["vendor_entity_name IS NOT NULL"]
+    params: dict[str, Any] = {}
+    if category:
+        vendor_where.append("category = %(category)s")
+        params["category"] = category
+    vendor_rows = _fetchall(
+        f"SELECT DISTINCT vendor_entity_name FROM payloads WHERE {' AND '.join(vendor_where)} "
+        "ORDER BY vendor_entity_name",
+        params,
+    )
+    category_rows = _fetchall(
+        "SELECT DISTINCT category FROM payloads WHERE category IS NOT NULL ORDER BY category"
+    )
+    return {
+        "vendors": [r["vendor_entity_name"] for r in vendor_rows],
+        "categories": [r["category"] for r in category_rows],
+    }
+
+
 @router.get("/payloads/tree")
 def payloads_tree() -> dict[str, Any]:
     """W19b (docs/REVIEW_2026-09-06_evening.md; user requirement 2026-09-06 21:20): every payload

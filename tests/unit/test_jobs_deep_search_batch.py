@@ -18,10 +18,10 @@ def _job(job_id: int, *, question: str = "q", item_id: int | None = None, level:
     return {"id": job_id, "payload": {"question": question, "item_id": item_id, "level": level}}
 
 
-def _fake_settings(mode: str, *, max_per_night: int = 4):
+def _fake_settings(mode: str, *, max_per_night: int = 4, allow_cloud: bool = True):
     return SimpleNamespace(
         deep_search=SimpleNamespace(max_per_night=max_per_night, per_investigation_timeout_min=25),
-        llm_providers=SimpleNamespace(mode=mode),
+        llm_providers=SimpleNamespace(mode=mode, allow_cloud=allow_cloud),
         stages={},
     )
 
@@ -57,6 +57,41 @@ class TestLocalModeUnchanged:
         rs = SimpleNamespace(time_left_min=lambda: None)
         result = jobs.run_deep_searches(rs)
         assert result["investigations"] == 1
+
+
+class TestAllowCloudKillSwitch:
+    """F02 (SOL-REVIEW-2026-09-24): `mode == "cloud"` alone used to be enough to take the
+    cloud-batch path -- `allow_cloud=False` (the documented cloud kill switch, enforced centrally
+    for every other cloud dispatch by `eoa.llm.chain.run_chain`) did not actually stop this one.
+    Old code: `investigate_batch_cloud`/the CLI runners get called regardless of `allow_cloud`, so
+    the `fail_if_called` stub below would fire."""
+
+    def test_mode_cloud_but_allow_cloud_false_uses_local_path_instead(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(jobs, "settings", lambda: _fake_settings("cloud", allow_cloud=False))
+        jobs_queue = [_job(1)]
+        monkeypatch.setattr(
+            jobs, "claim_next_job", lambda kinds, worker_id: jobs_queue.pop(0) if jobs_queue else None
+        )
+        monkeypatch.setattr(jobs, "finish_job", lambda *a, **k: None)
+
+        import eoa.search.deep_search as ds_mod
+
+        def fail_if_called(*a, **k):
+            raise AssertionError("investigate_batch_cloud must not run when allow_cloud=False")
+
+        monkeypatch.setattr(ds_mod, "investigate_batch_cloud", fail_if_called, raising=False)
+        monkeypatch.setattr(
+            ds_mod,
+            "investigate",
+            lambda *a, **k: SimpleNamespace(
+                outcome="not_found", result=SimpleNamespace(outcome="not_found", answer_he="x")
+            ),
+        )
+        rs = SimpleNamespace(time_left_min=lambda: None)
+        result = jobs.run_deep_searches(rs)
+        assert result["investigations"] == 1  # handled through the ordinary local per-job loop
 
 
 class TestCloudModeBatchDelegation:
@@ -208,6 +243,11 @@ class TestCloudModeBatchDelegation:
         assert any(job_id == 2 for job_id, _status in finished)
         assert not any(status == "failed" and "interrupted" in str(status) for _jid, status in finished)
         assert result["investigations"] == 2
+        # F24 (SOL-REVIEW-2026-09-24): the deferred child must be visible to the caller's own
+        # `has_incomplete_work` scan, same as `failed` already was -- old code's return dict had
+        # no `deferred` key at all, so `_compute_run_status` could report the enclosing daily run
+        # `done` even though job 1 never actually completed tonight.
+        assert result["deferred"] == 1
 
     def test_f04_unexpected_interruption_defers_every_unprocessed_claimed_child(
         self, monkeypatch: pytest.MonkeyPatch

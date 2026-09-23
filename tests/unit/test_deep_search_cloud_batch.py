@@ -281,6 +281,29 @@ class TestInvestigateBatchCloud:
         with pytest.raises(LLMOutputError):
             ds.investigate_batch_cloud([{"job_id": 1, "item_id": None, "question": "q1"}])
 
+    def test_allow_cloud_false_refuses_without_calling_any_cli(self, monkeypatch: pytest.MonkeyPatch):
+        """F02 (SOL-REVIEW-2026-09-24): `allow_cloud=False` is the documented "stop all cloud
+        spend/egress now" kill switch, enforced centrally for chat/structured calls by
+        `eoa.llm.chain.run_chain`. `investigate_batch_cloud` bypassed that entirely by calling the
+        CLI runners directly -- old code called `_run_claude_with_tools` here regardless of
+        `allow_cloud`, so this test's `fail_if_called` stub would be invoked and raise, instead of
+        the expected `ProviderUnavailable` from the guard itself."""
+        monkeypatch.setattr(
+            ds,
+            "settings",
+            lambda: SimpleNamespace(llm_providers=SimpleNamespace(allow_cloud=False, mode="cloud")),
+        )
+
+        def fail_if_called(*a, **k):
+            raise AssertionError("must not call any cloud CLI runner when allow_cloud=False")
+
+        monkeypatch.setattr(ds, "write_investigations_file", fail_if_called)
+        monkeypatch.setattr(ds, "_run_claude_with_tools", fail_if_called)
+        monkeypatch.setattr(ds, "_run_agy_with_tools", fail_if_called)
+
+        with pytest.raises(ProviderUnavailable):
+            ds.investigate_batch_cloud([{"job_id": 1, "item_id": None, "question": "q1"}])
+
 
 class TestInvestigateBatchCloudPartialConfidenceCap:
     """Q3-5: the cloud-delegated batch path applies the same partial-confidence/unverified-claim

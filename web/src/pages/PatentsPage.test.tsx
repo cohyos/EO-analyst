@@ -2,13 +2,14 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import type { PatentRecord, PatentsResponse, PatentsStatusResponse } from "@/types/api";
+import type { PatentFacetsResponse, PatentRecord, PatentsResponse, PatentsStatusResponse } from "@/types/api";
 
 const getPatents = vi.fn();
 const getPatentsStatus = vi.fn();
 const getPatentsHeatmap = vi.fn();
 const getPatentSurveys = vi.fn();
 const createPatentSurvey = vi.fn();
+const getPatentFacets = vi.fn();
 
 vi.mock("@/api", () => ({
   api: {
@@ -17,6 +18,7 @@ vi.mock("@/api", () => ({
     getPatentsHeatmap: (...args: unknown[]) => getPatentsHeatmap(...args),
     getPatentSurveys: (...args: unknown[]) => getPatentSurveys(...args),
     createPatentSurvey: (...args: unknown[]) => createPatentSurvey(...args),
+    getPatentFacets: (...args: unknown[]) => getPatentFacets(...args),
   },
 }));
 
@@ -62,6 +64,10 @@ function statusResponse(over: Partial<PatentsStatusResponse> = {}): PatentsStatu
   return { structured_sources_configured: false, banner_he: null, ...over };
 }
 
+function facetsResponse(over: Partial<PatentFacetsResponse> = {}): PatentFacetsResponse {
+  return { assignees: [], subdomains: [], ...over };
+}
+
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -79,10 +85,12 @@ beforeEach(() => {
   getPatentsHeatmap.mockReset();
   getPatentSurveys.mockReset();
   createPatentSurvey.mockReset();
+  getPatentFacets.mockReset();
   getPatents.mockResolvedValue(patentsResponse([]));
   getPatentsStatus.mockResolvedValue(statusResponse());
   getPatentsHeatmap.mockResolvedValue({ cpc_codes: [], assignees: [], cells: [] });
   getPatentSurveys.mockResolvedValue([]);
+  getPatentFacets.mockResolvedValue(facetsResponse());
 });
 
 describe("PatentsPage", () => {
@@ -123,13 +131,11 @@ describe("PatentsPage", () => {
   // re-filter an already-fetched page.
   describe("F33: filters are sent to the API, not applied only client-side", () => {
     it("forwards the assignee filter as a getPatents() call argument", async () => {
-      // "Rafael" must exist as a dropdown option (from the unfiltered baseline/facets fetch)
-      // before it can be selected at all -- a native <select> silently ignores a value with no
-      // matching <option>.
-      const baseline = [
-        makePatent({ id: 1, assignees: ["Elbit"] }),
-        makePatent({ id: 4, pub_number: "US4", title: "Rafael baseline patent", assignees: ["Rafael"] }),
-      ];
+      // "Rafael" must exist as a dropdown option (from the uncapped facets fetch, F33) before it
+      // can be selected at all -- a native <select> silently ignores a value with no matching
+      // <option>.
+      getPatentFacets.mockResolvedValue(facetsResponse({ assignees: ["Elbit", "Rafael"] }));
+      const baseline = [makePatent({ id: 1, assignees: ["Elbit"] })];
       const beyondCap = makePatent({ id: 2, pub_number: "US99999999B2", title: "Beyond the cap", assignees: ["Rafael"] });
       getPatents.mockImplementation((params: { assignee?: string } = {}) =>
         Promise.resolve(patentsResponse(params.assignee === "Rafael" ? [beyondCap] : baseline)),
@@ -149,10 +155,10 @@ describe("PatentsPage", () => {
     });
 
     it("re-fetches from the server (not a local re-filter) when the subdomain filter changes", async () => {
-      const baseline = [
-        makePatent({ id: 1 }),
-        makePatent({ id: 3, pub_number: "US1", title: "Rare candidate (baseline)", subdomain: "rare_subdomain" }),
-      ];
+      getPatentFacets.mockResolvedValue(
+        facetsResponse({ subdomains: ["droic_digital_pixel", "rare_subdomain"] }),
+      );
+      const baseline = [makePatent({ id: 1 })];
       const filtered = [
         makePatent({ id: 3, pub_number: "US1", title: "Rare match (filtered)", subdomain: "rare_subdomain" }),
       ];

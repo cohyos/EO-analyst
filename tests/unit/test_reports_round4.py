@@ -285,7 +285,9 @@ class TestCollectEventsWindowSql:
         executed_sql = fake_cursor.queries[0][0]
         assert "fetched_at" not in executed_sql
         assert "created_at" not in executed_sql
-        assert "COALESCE(e.date, i.published_at::date)" in executed_sql
+        # F40 (SOL-AUDIT-2026-09-24 / SOL-REVIEW-2026-09-24 review): the `i.published_at::date`
+        # fallback is now anchored to Asia/Jerusalem rather than the DB session's own time zone.
+        assert "COALESCE(e.date, (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date)" in executed_sql
 
     def test_default_window_applies_a_small_start_grace(self, monkeypatch):
         fake_cursor = _FakeCursor([])

@@ -169,9 +169,12 @@ class TestApproveSecurityReview:
 
         captured: dict[str, Any] = {}
 
-        def fake_enqueue_job(kind, payload, *, priority=5, not_before=None):
+        def fake_enqueue_job(kind, payload, *, priority=5, not_before=None, conn=None):
             captured["kind"] = kind
             captured["payload"] = payload
+            # N08 (SOL-REVIEW-2026-09-24): the claim and this enqueue must now run on the SAME
+            # connection (one transaction) -- see the class docstring update below.
+            captured["conn"] = conn
             return 200
 
         monkeypatch.setattr("eoa.api.routes.security_review.enqueue_job", fake_enqueue_job)
@@ -185,6 +188,10 @@ class TestApproveSecurityReview:
         assert captured["payload"]["expanded_from_job_id"] == 113
         # F28: no invented override field -- nothing downstream ever reads one.
         assert "security_override" not in captured["payload"]
+        # N08 (SOL-REVIEW-2026-09-24): the claim and the re-run enqueue must share one connection
+        # (one transaction) so a later enqueue failure rolls the claim back too -- old code called
+        # `enqueue_job(...)` with no `conn` at all (its own separate connection/transaction).
+        assert captured["conn"] is not None
 
         # Exactly one statement did the check-and-claim, atomically.
         update_calls = [q for q, _p in cur.executed if "UPDATE jobs" in q]

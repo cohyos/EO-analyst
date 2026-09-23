@@ -140,9 +140,16 @@ class TestStoreItemStats:
         assert stats.items_skipped == 1
 
     def test_passes_quality_aware_content_and_security_status(self, monkeypatch):
-        """F09: a normal (non-blocked) fetch is stored `content_status='full'`,
-        `security_status='clean'` -- the quality signal `insert_item` needs to know a later good
-        fetch of this same URL may safely replace a stored blocked/stub row."""
+        """F09/N04 (SOL-REVIEW-2026-09-24 round 2): a normal (non-blocked) fetch's `content_status`
+        is the REAL `eoa.fetch.content_quality.assess()` verdict for its extracted text, not a
+        hardcoded `'full'` -- `_SAMPLE_HTML`'s ~140-char article body is well under
+        `content_quality.STUB_MAX_CHARS`, so it correctly assesses as `'stub'`. On the old
+        (round-1) code, every non-blocked fetch was unconditionally stored `content_status='full'`
+        regardless of actual length -- this assertion fails against that code (it returns
+        `'full'`), which is exactly the N04 bug: a short-but-legitimate page, later downgraded by
+        `eoa.pipeline.analyze`'s own `assess()` call, would then rank *higher* than its own
+        already-stored (downgraded) row on every identical re-fetch and endlessly reset
+        `processed_stages`. `security_status='clean'` is unaffected by this fix."""
         captured = {}
 
         def _fake_insert(**kw):
@@ -156,8 +163,33 @@ class TestStoreItemStats:
             source_db_id=1, url="https://example.com/good", html_text=_SAMPLE_HTML, stats=stats
         )
 
-        assert captured["content_status"] == "full"
+        assert captured["content_status"] == "stub"
         assert captured["security_status"] == "clean"
+
+    def test_long_article_assessed_as_full(self, monkeypatch):
+        """Companion to the above: a genuinely long, paywall-free article (> `PARTIAL_MAX_CHARS`)
+        still assesses as `'full'` -- the N04 fix narrows the old blanket `'full'` down to the real
+        `content_quality.assess()` verdict, it doesn't just always downgrade."""
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(11, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        long_body = " ".join(
+            f"Paragraph {i} of substantial, unique reporting about the deal and its context."
+            for i in range(60)
+        )
+        long_html = f"<html><head><title>Long article</title></head><body><article><p>{long_body}</p></article></body></html>"
+
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1, url="https://example.com/long", html_text=long_html, stats=stats
+        )
+
+        assert captured["content_status"] == "full"
 
     def test_blocked_page_stored_with_stub_and_blocked_status(self, monkeypatch):
         captured = {}
@@ -737,6 +769,206 @@ class TestSourceIsDue:
         now = datetime(2026, 9, 24, tzinfo=UTC)
         last_success = now - timedelta(days=8)
         assert service._source_is_due("weekly", last_success, now=now) is True
+
+
+# --------------------------------------------------------------------------
+# F05/F35/N01 (SOL-REVIEW-2026-09-24 round 2): due-selection/lookback are keyed off `last_ok_at`
+# alone -- never `COALESCE(last_ok_at, last_fetched_at)`, which treated a source's most recent
+# FAILED attempt as if it had succeeded.
+# --------------------------------------------------------------------------
+
+
+class _FakeLastSuccessConn:
+    """Records the executed SQL text and returns canned rows -- lets a test assert on the query
+    shape itself (N01: must never reference `last_fetched_at`/`COALESCE`), not just its result."""
+
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+        self.executed_sql: str | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self, row_factory=None):
+        return self
+
+    def execute(self, sql, params=None):
+        self.executed_sql = sql
+        return None
+
+    def fetchall(self):
+        return self._rows
+
+
+class TestSourcesLastSuccessMap:
+    def test_query_never_falls_back_to_last_fetched_at(self, monkeypatch):
+        """N01: `touch_source_fetched` bumps `last_fetched_at` on EVERY attempt, success or
+        failure -- a query that falls back to it via `COALESCE(last_ok_at, last_fetched_at)` makes
+        a source's most recent failed attempt look like a success, which (a) defeats F05's outage-
+        widened lookback and (b) makes F35's weekly due-check skip a never-succeeding weekly source
+        for another 7 days off the back of one failed attempt, instead of retrying it. This test
+        fails against the old (round-1) query, which does contain `COALESCE`/`last_fetched_at`."""
+        conn = _FakeLastSuccessConn([{"id": 1, "last_success": None}])
+        monkeypatch.setattr("eoa.db.connection", lambda: conn)
+
+        service._sources_last_success_map([1])
+
+        assert conn.executed_sql is not None
+        assert "last_fetched_at" not in conn.executed_sql
+        assert "COALESCE" not in conn.executed_sql
+
+    def test_never_successful_source_reads_as_none_even_if_attempted(self, monkeypatch):
+        """A source with `last_ok_at IS NULL` (never succeeded) reads back as `None` regardless of
+        how many times it's been attempted (`last_fetched_at` is irrelevant here) -- so the caller's
+        `_source_is_due`/`_lookback_days` "never successful" branches (due every run, bounded
+        default lookback) actually fire every run until it succeeds once."""
+        conn = _FakeLastSuccessConn([{"id": 7, "last_success": None}])
+        monkeypatch.setattr("eoa.db.connection", lambda: conn)
+
+        result = service._sources_last_success_map([7])
+
+        assert result == {7: None}
+        assert service._source_is_due("weekly", result[7]) is True
+
+
+# --------------------------------------------------------------------------
+# F11 (SOL-REVIEW-2026-09-24 round 2): `_store_item`/`_fetch_and_store` report a real storage
+# outcome -- a network fetch succeeding is not enough if the DB write itself fails.
+# --------------------------------------------------------------------------
+
+
+class TestStoreItemReturnValue:
+    def test_returns_true_on_successful_store(self, monkeypatch):
+        monkeypatch.setattr(
+            "eoa.memory.relational.insert_item", lambda **kw: ItemUpsertResult(1, inserted=True)
+        )
+        stats = service.IngestStats()
+        ok = service._store_item(
+            source_db_id=1, url="https://example.com/ok", html_text=_SAMPLE_HTML, stats=stats
+        )
+        assert ok is True
+
+    def test_returns_false_when_insert_raises(self, monkeypatch):
+        """This is the regression the review flagged: on the old code, `_store_item` had no return
+        value at all (implicit `None`, falsy-but-not-`False`) and `_fetch_and_store` returned `True`
+        unconditionally after calling it -- a source whose every fetch succeeded but whose every DB
+        write failed was still recorded (via `_ingest_*_source`'s "all attempted failed" check) as a
+        fully successful source. This test fails against that old code (`_store_item(...)  is not
+        False` -- it returns `None`)."""
+
+        def _boom(**kw):
+            raise RuntimeError("db write failed")
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _boom)
+        stats = service.IngestStats()
+        ok = service._store_item(
+            source_db_id=1, url="https://example.com/fails", html_text=_SAMPLE_HTML, stats=stats
+        )
+        assert ok is False
+
+
+class TestFetchAndStorePropagatesStorageOutcome:
+    async def test_all_fetches_ok_but_all_stores_fail_reports_source_failure(self, monkeypatch):
+        """F11 end-to-end: `_ingest_html_source`'s "all attempted article fetches failed" guard
+        must also catch "every fetch succeeded but every store failed" -- on the old code (where
+        `_fetch_and_store` always returned `True` after a successful network fetch regardless of
+        what `_store_item` did), this source would be recorded as fully successful even though
+        nothing was ever written."""
+        from eoa.errors import FetchError
+
+        class _FakePage:
+            html = "<html><body><article><p>content</p></article></body></html>"
+            status = 200
+            final_url = "https://example.com/article-1"
+
+        async def _fake_guarded_fetch_page(url, *, client=None):
+            return _FakePage()
+
+        def _boom(**kw):
+            raise RuntimeError("db write failed")
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _boom)
+
+        class _FakeSourceHtml:
+            id = "s1"
+            kind = "html"
+            url = "https://example.com/listing"
+            list_selector = "a.article"
+            link_selector = "self"
+
+        monkeypatch.setattr(
+            service,
+            "_extract_links",
+            lambda html, base_url, list_sel, link_sel: ["https://example.com/article-1"],
+        )
+
+        stats = service.IngestStats()
+        with pytest.raises(FetchError, match="all 1 article"):
+            await service._ingest_html_source(
+                _FakeSourceHtml(),
+                source_db_id=1,
+                throttle=service._DomainThrottle(),
+                stats=stats,
+            )
+        assert stats.items_skipped == 1
+        assert stats.items_inserted == 0
+
+
+# --------------------------------------------------------------------------
+# E04 (SOL-REVIEW-2026-09-24 round 2, missing test): one shared, pinned `httpx.AsyncClient` for a
+# whole `run_ingest` call -- opened once, threaded to every source, and closed exactly once.
+# --------------------------------------------------------------------------
+
+
+class _EnabledFakeSource:
+    def __init__(self, source_id, name):
+        self.id = source_id
+        self.name = name
+        self.url = f"https://example.com/{name}"
+        self.kind = "rss"
+        self.enabled = True
+        self.schedule = "daily"
+
+
+class TestRunIngestClientLifecycle:
+    async def test_one_pinned_client_shared_across_sources_and_closed_once(self, monkeypatch):
+        import httpx
+
+        from eoa.fetch.html import _PinnedIPTransport
+
+        sources = [_EnabledFakeSource(1, "a"), _EnabledFakeSource(2, "b"), _EnabledFakeSource(3, "c")]
+        monkeypatch.setattr("eoa.fetch.sources_loader.load_sources", lambda: sources)
+        monkeypatch.setattr(
+            "eoa.fetch.sources_loader.upsert_sources_to_db", lambda srcs: {s.id: s.id for s in srcs}
+        )
+        monkeypatch.setattr(service, "_sources_last_success_map", lambda ids: {})
+
+        seen_clients: list[httpx.AsyncClient] = []
+        seen_open_at_call_time: list[bool] = []
+
+        async def _fake_ingest_one_source(source, *, source_db_id, since_days, throttle, stats, client=None):
+            seen_clients.append(client)
+            seen_open_at_call_time.append(client is not None and not client.is_closed)
+
+        monkeypatch.setattr(service, "_ingest_one_source", _fake_ingest_one_source)
+
+        stats = await service.run_ingest()
+
+        assert stats.sources_attempted == 0  # `_ingest_one_source` itself is faked out here
+        # E04: exactly one client object was handed to every source (not one-per-source).
+        assert len(seen_clients) == 3
+        assert len({id(c) for c in seen_clients}) == 1
+        # It was open (usable) at the time each source used it...
+        assert all(seen_open_at_call_time)
+        # ...and closed exactly once `run_ingest` returns (the `async with` block exited).
+        assert seen_clients[0].is_closed
+        # F01: the shared client dials the caller-validated IP, not a plain unpinned client --
+        # `run_ingest`'s client must be built the same way `fetch_page`'s own default is.
+        assert isinstance(seen_clients[0]._transport, _PinnedIPTransport)
 
 
 if __name__ == "__main__":

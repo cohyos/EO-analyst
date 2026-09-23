@@ -64,6 +64,7 @@ from eoa.memory.relational import (
     get_corroboration_edges_for_items,
     get_items_for_story_clustering,
     mark_stage,
+    remap_story_roots,
 )
 
 log = structlog.get_logger(__name__)
@@ -96,6 +97,7 @@ class StoryClusteringStats:
     stories_total: int = 0
     stories_multi_member: int = 0
     reassigned: int = 0
+    historical_remapped: int = 0
 
 
 class _UnionFind:
@@ -262,6 +264,20 @@ def assign_story_ids(since_days: int = DEFAULT_SINCE_DAYS) -> StoryClusteringSta
     if changed:
         bulk_set_story_ids(changed)
         stats.reassigned = len(changed)
+
+    # F20 (SOL-AUDIT-2026-09-24 review): when this run's edges MERGE two previously-separate
+    # persisted stories, `changed`/`bulk_set_story_ids` above only rewrites items in THIS run's
+    # since_days pool -- a historical member of either old story that aged out of the pool keeps
+    # pointing at its old, now-abandoned root and silently falls out of the merged group. Detect
+    # every old_root -> new_root merge from the edges just computed and propagate it to every row
+    # still on that old root, in or out of the pool.
+    root_remap: dict[int, int] = {}
+    for item_id, new_story_id in assignment.items():
+        prior_story_id = by_id[item_id].get("story_id")
+        if prior_story_id is not None and prior_story_id != new_story_id:
+            root_remap[prior_story_id] = new_story_id
+    if root_remap:
+        stats.historical_remapped = remap_story_roots(root_remap)
 
     for item_id in by_id:
         try:

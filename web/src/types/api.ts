@@ -1339,6 +1339,13 @@ export interface PatentsStatusResponse {
   banner_he: string | null;
 }
 
+/** F33 (SOL-AUDIT-2026-09-24 review): uncapped facet options for the assignee/subdomain filter
+ * dropdowns -- `GET /api/patents/facets` (distinct across the WHOLE table, no `limit`). */
+export interface PatentFacetsResponse {
+  assignees: string[];
+  subdomains: string[];
+}
+
 export interface PatentHeatmapCell {
   cpc: string;
   assignee: string;
@@ -1536,6 +1543,13 @@ export interface PayloadTreeResponse {
   vendor_count: number;
   family_count: number;
   payload_count: number;
+}
+
+/** F33 (SOL-AUDIT-2026-09-24 review): uncapped facet options for the vendor filter dropdown --
+ * `GET /api/payloads/facets` (distinct across the WHOLE table, no `limit`). */
+export interface PayloadFacetsResponse {
+  vendors: string[];
+  categories: string[];
 }
 
 // --- PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירת שוק עמוקה למוצר" -- product_dossier ----------

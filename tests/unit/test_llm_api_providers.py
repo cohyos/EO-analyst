@@ -181,6 +181,23 @@ class TestAnthropicChat:
         with pytest.raises(ApiProviderError, match="malformed"):
             AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
 
+    @respx.mock
+    def test_valid_content_but_malformed_usage_raises_api_provider_error(self, monkeypatch):
+        """F26 follow-up (SOL-REVIEW-2026-09-24): content parses fine, but `usage` itself is the
+        wrong shape (a list, not an object) -- old code let `data.get("usage")` succeed unchecked
+        (assignment never raises) and only blew up OUTSIDE this method's error boundary, in the
+        `ProviderResult(usage={"input_tokens": usage.get(...), ...})` construction below, as a bare
+        uncaught `AttributeError` that is not one of `eoa.llm.chain.FALLBACK_EXCEPTIONS` -- aborting
+        the whole fallback chain instead of moving on to the next leg."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(
+                200, json={"content": [{"type": "text", "text": "hi"}], "usage": [1, 2, 3]}
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+
 
 class TestGeminiChat:
     @respx.mock
@@ -227,6 +244,24 @@ class TestGeminiChat:
         ).mock(return_value=httpx.Response(200, json={"candidates": "not-a-list-of-dicts"}))
         with pytest.raises(ApiProviderError, match="malformed"):
             GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_valid_content_but_malformed_usage_metadata_raises_api_provider_error(self, monkeypatch):
+        """F26 follow-up (SOL-REVIEW-2026-09-24): see the identical Anthropic test above."""
+        monkeypatch.setenv("GEMINI_API_KEY", "gk-x")
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "candidates": [{"content": {"parts": [{"text": "PONG"}]}}],
+                    "usageMetadata": "not-an-object",
+                },
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "ping"}])
 
     @respx.mock
     def test_list_models_falls_back_to_static_on_error(self, monkeypatch):
@@ -299,6 +334,18 @@ class TestOpenAIChat:
         monkeypatch.setenv("OPENAI_API_KEY", "ok-x")
         respx.post("https://api.openai.com/v1/chat/completions").mock(
             return_value=httpx.Response(200, json={"choices": "not-a-list"})
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_valid_content_but_malformed_usage_raises_api_provider_error(self, monkeypatch):
+        """F26 follow-up (SOL-REVIEW-2026-09-24): see the identical Anthropic test above."""
+        monkeypatch.setenv("OPENAI_API_KEY", "ok-x")
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": "PONG"}}], "usage": ["not", "an", "object"]}
+            )
         )
         with pytest.raises(ApiProviderError, match="malformed"):
             OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])

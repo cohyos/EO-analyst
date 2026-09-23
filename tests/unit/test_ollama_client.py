@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+import eoa.llm.ollama_client as oc
 from eoa.llm.ollama_client import (
     ChatResult,
     _strip_fences,
+    _structured_once,
     wrap_data,
 )
 
@@ -40,6 +42,69 @@ class TestChatResult:
         """tokens_per_s returns 0.0 with zero duration."""
         result = ChatResult(content="test", eval_tokens=100, raw={})
         assert result.tokens_per_s == 0.0
+
+
+class TestStructuredOnceUsageAggregation:
+    """E05 follow-up (SOL-REVIEW-2026-09-24): `_structured_once`'s own schema-validation-retry
+    loop makes up to two real, separately-billed `chat()` calls -- a rejected first attempt's
+    token usage must not be silently dropped just because the second attempt is the one that
+    finally validated. Old code returned only the LAST attempt's `ChatResult` as-is; this test's
+    aggregated totals fail against that (it would see just the second call's 30/10/80, not the
+    summed 130/60/280)."""
+
+    class _Out(BaseModel):
+        ok: bool
+
+    def test_aggregates_usage_across_both_internal_attempts(self, monkeypatch) -> None:
+        calls: list[list[dict]] = []
+
+        def fake_chat(role, msgs, **kwargs):
+            calls.append(msgs)
+            if len(calls) == 1:
+                # schema-validation failure: not valid JSON for `_Out`
+                return ChatResult(content="not json", prompt_tokens=100, eval_tokens=50, duration_ms=200)
+            return ChatResult(content='{"ok": true}', prompt_tokens=30, eval_tokens=10, duration_ms=80)
+
+        monkeypatch.setattr(oc, "chat", fake_chat)
+
+        validated, res = _structured_once(
+            "resident",
+            self._Out,
+            [{"role": "user", "content": "hi"}],
+            task="classify",
+            interactive=False,
+            options=None,
+            provider=None,
+        )
+
+        assert validated.ok is True
+        assert len(calls) == 2  # both internal attempts actually ran
+        assert res.prompt_tokens == 130
+        assert res.eval_tokens == 60
+        assert res.duration_ms == 280
+
+    def test_single_successful_attempt_usage_unchanged(self, monkeypatch) -> None:
+        """No retry needed -- the aggregated result must equal the one real attempt's own usage,
+        not double-count or zero it out."""
+
+        def fake_chat(role, msgs, **kwargs):
+            return ChatResult(content='{"ok": true}', prompt_tokens=42, eval_tokens=7, duration_ms=99)
+
+        monkeypatch.setattr(oc, "chat", fake_chat)
+
+        validated, res = _structured_once(
+            "resident",
+            self._Out,
+            [{"role": "user", "content": "hi"}],
+            task="classify",
+            interactive=False,
+            options=None,
+            provider=None,
+        )
+        assert validated.ok is True
+        assert res.prompt_tokens == 42
+        assert res.eval_tokens == 7
+        assert res.duration_ms == 99
 
 
 class TestWrapData:

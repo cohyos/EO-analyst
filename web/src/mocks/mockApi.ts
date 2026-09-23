@@ -28,6 +28,7 @@ import type {
   McpPingResponse,
   McpServersResponse,
   MorningResponse,
+  PatentFacetsResponse,
   PatentHeatmapResponse,
   PatentRecord,
   PatentSurveyCard,
@@ -36,6 +37,7 @@ import type {
   PatentsStatusResponse,
   PayloadDetailResponse,
   PayloadDiffResponse,
+  PayloadFacetsResponse,
   PayloadPriceRef,
   PayloadRecord,
   PayloadSpecVersion,
@@ -1291,6 +1293,13 @@ export const mockApi: ApiClient = {
   },
   getPatentSurveys: async (limit = 30): Promise<PatentSurveyCard[]> =>
     delay(mockPatentSurveys.slice(0, limit)),
+  // F33 (SOL-AUDIT-2026-09-24 review): uncapped facet options, mirroring the real
+  // `GET /api/patents/facets` -- derived from the FULL mock dataset, not a capped page of it.
+  getPatentFacets: async (): Promise<PatentFacetsResponse> =>
+    delay({
+      assignees: [...new Set(mockPatents.flatMap((p) => p.assignees))].sort(),
+      subdomains: [...new Set(mockPatents.map((p) => p.subdomain).filter((s): s is string => !!s))].sort(),
+    }),
   createPatentSurvey: async (topic: string): Promise<PatentSurveyCreateResponse> =>
     delay({
       survey: {
@@ -1347,6 +1356,17 @@ export const mockApi: ApiClient = {
   // shared client-side grouping helper (`@/lib/payloadFamilies`).
   getPayloadTree: async (): Promise<PayloadTreeResponse> =>
     delay(buildPayloadTree(mockPayloads)),
+  // F33 (SOL-AUDIT-2026-09-24 review): uncapped facet options, mirroring the real
+  // `GET /api/payloads/facets` -- derived from the FULL mock dataset, not a capped page of it.
+  getPayloadFacets: async (category?: string): Promise<PayloadFacetsResponse> => {
+    const scoped = category ? mockPayloads.filter((p) => p.category === category) : mockPayloads;
+    return delay({
+      vendors: [
+        ...new Set(scoped.map((p) => p.vendor_entity_name).filter((v): v is string => !!v)),
+      ].sort(),
+      categories: [...new Set(mockPayloads.map((p): string => p.category))].sort(),
+    });
+  },
   getPayloadDiff: async (
     id: number,
     a: number,

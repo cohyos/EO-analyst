@@ -166,25 +166,33 @@ def find_duplicate_in_memory(
 
 
 def commit_dedup_result(item_id: int, vec: Sequence[float], dedup_of: int | None, stage: str) -> None:
-    """Atomically write `item_id`'s embedding, optional `dedup_of` link, and pipeline `stage`
-    marker in one transaction (one pooled connection, committed once).
+    """Atomically write `item_id`'s embedding, `dedup_of` link, and pipeline `stage` marker in one
+    transaction (one pooled connection, committed once).
 
     F08: previously these were three separate auto-committing calls (`upsert_embedding`,
     `update_item_fields`, `mark_stage`); a crash between the first and the last left the embedding
     committed but the stage marker absent, so a retry re-selected the item, re-embedded it, and (pre
     F08) matched against its own already-committed vector. Doing the write in one transaction
     removes that partial-write window; the exclude-self fix above is the second, independent half of
-    the same finding (belt and suspenders -- either alone would have prevented the self-match)."""
+    the same finding (belt and suspenders -- either alone would have prevented the self-match).
+
+    N05 (SOL-REVIEW-2026-09-24 round 2): `dedup_of` is now ALWAYS written (to `dedup_of`, which is
+    `None`/NULL when this pass found no match), not only when a match was found. The old
+    `if dedup_of is not None:` guard meant a RE-embed (`eoa.memory.relational.insert_item` resets
+    `processed_stages` -- and thus re-queues this stage -- when a same-URL refetch's content is
+    accepted as a quality upgrade, F09) could never clear a stale `dedup_of` link computed against
+    the item's OLD, worse content: a quality-upgraded item that turns out to be unique on its new
+    content stayed hidden behind that old link forever. Writing unconditionally means this pass's
+    result -- match or no match -- always reflects the item's current content."""
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE items SET embedding = %(vec)s WHERE id = %(item_id)s",
             {"vec": [float(x) for x in vec], "item_id": item_id},
         )
-        if dedup_of is not None:
-            cur.execute(
-                "UPDATE items SET dedup_of = %(dedup_of)s WHERE id = %(item_id)s",
-                {"dedup_of": dedup_of, "item_id": item_id},
-            )
+        cur.execute(
+            "UPDATE items SET dedup_of = %(dedup_of)s WHERE id = %(item_id)s",
+            {"dedup_of": dedup_of, "item_id": item_id},
+        )
         cur.execute(
             """
             UPDATE items

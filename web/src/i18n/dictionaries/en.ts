@@ -832,5 +832,8 @@ export const en: Dictionary = {
   investigations: {
     blockedChip: "Blocked",
     blockedReasonPrefix: "Blocked (not actually investigated)",
+    // F28/N08 (SOL-REVIEW-2026-09-24): see the identical note in he.ts.
+    securityReviewRerun: "Re-run",
+    securityReviewRerunning: "Re-running…",
   },
 };

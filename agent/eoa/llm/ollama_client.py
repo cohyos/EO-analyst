@@ -11,7 +11,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
 
 import httpx
@@ -508,10 +508,24 @@ def _structured_once(
     codex for the extraction call -- claude served it, the first entry of the plain default
     chain). ``chain_override`` is what actually pins one call to one specific chain/entry inside
     the pipeline process; ``_chat_structured_chain`` now passes ``[entry]`` per iteration.
-    """
+
+    E05 follow-up (SOL-REVIEW-2026-09-24): this loop's schema-validation-retry attempts are each a
+    genuine, separately-billed LLM call (the first attempt's own `chat()`->`run_chain()` call
+    already logs its own `llm_calls` row via `_record`, same as the second) -- but only the LAST
+    (successfully-validated) attempt's ``ChatResult`` was ever returned to the caller. Since
+    ``_chat_structured_chain`` records exactly ONE ``ChainAttempt`` per chain entry from whatever
+    ``res`` this function hands back, a rejected first attempt's token usage was invisible to that
+    per-entry accounting (still correctly in `llm_calls` from its own inner `run_chain` call, but
+    silently dropped from the aggregated total this function is responsible for reporting for the
+    entry as a whole). The returned ``ChatResult`` now carries the SUM of every internal attempt's
+    usage/duration, mirroring how `eoa.llm.providers.cli.CliProvider._chat_with_tools` already
+    sums its own two-call text-tools repair via `_merge_usage`."""
     json_schema = schema.model_json_schema()
     last_err: Exception | None = None
     msgs = list(messages)
+    total_prompt_tokens = 0
+    total_eval_tokens = 0
+    total_duration_ms = 0
     for attempt in range(2):
         res = chat(
             role,
@@ -524,8 +538,18 @@ def _structured_once(
             provider=provider,
             chain_override=chain_override,
         )
+        total_prompt_tokens += res.prompt_tokens
+        total_eval_tokens += res.eval_tokens
+        total_duration_ms += res.duration_ms
         try:
-            return schema.model_validate_json(_strip_fences(res.content)), res
+            validated = schema.model_validate_json(_strip_fences(res.content))
+            aggregated = replace(
+                res,
+                prompt_tokens=total_prompt_tokens,
+                eval_tokens=total_eval_tokens,
+                duration_ms=total_duration_ms,
+            )
+            return validated, aggregated
         except (ValidationError, json.JSONDecodeError) as exc:
             last_err = exc
             log.warning("llm_schema_invalid", attempt=attempt, error=str(exc)[:300])

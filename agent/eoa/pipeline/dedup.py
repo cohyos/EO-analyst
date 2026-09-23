@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
@@ -48,7 +49,19 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
     (:func:`eoa.memory.vector.commit_dedup_result`), and the item is excluded from its own candidate
     pool (:func:`eoa.memory.vector.find_duplicate_in_memory`'s ``exclude_id``) -- together these
     close the retry self-dedup window the finding describes (a crash between a partial write and a
-    retry could otherwise match an item against its own just-committed vector)."""
+    retry could otherwise match an item against its own just-committed vector).
+
+    E01/N06 (SOL-REVIEW-2026-09-24 round 2): the in-memory candidate pool is now keyed by item id
+    (``dict[int, vector]``, not a plain append-only list) and every addition to it enforces the
+    SAME ``cfg.dedup.lookback_days`` cutoff :func:`eoa.memory.vector.load_candidate_vectors` used
+    for the initial DB load -- ``get_items_for_stage`` (the ``items`` source above) has NO date
+    filter of its own (oldest-first, whatever hasn't completed this stage yet), so an old item
+    processed in this run could otherwise be appended to the pool unconditionally and wrongly match
+    a later, genuinely recent item against it (N06's "appends out-of-lookback items"). Keying by id
+    also means a re-embed (F09's quality-upgrade reprocessing resets ``processed_stages``, so an
+    already-embedded item can be re-selected here) REPLACES that item's stale entry instead of
+    leaving both the old and the new vector in the pool simultaneously (N06's "appends a new vector
+    without replacing that item's old loaded vector")."""
     checkpoint()
     cfg = settings().dedup
     stats = DedupStats()
@@ -57,9 +70,14 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
         for it in get_items_for_stage(STAGE, limit, item_ids=item_ids)
         if it.get("security_status") not in ("quarantined", "blocked")
     ]
-    candidates: list[tuple[int, list[float] | None]] = [
-        (row["id"], row.get("embedding")) for row in load_candidate_vectors(cfg.lookback_days)
-    ]
+    cutoff = (
+        datetime.now(UTC) - timedelta(days=cfg.lookback_days)
+        if cfg.lookback_days is not None
+        else None
+    )
+    candidates: dict[int, list[float]] = {
+        row["id"]: row.get("embedding") for row in load_candidate_vectors(cfg.lookback_days)
+    }
     for i in range(0, len(items), batch_size):
         checkpoint()
         batch = items[i : i + batch_size]
@@ -75,10 +93,16 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
             checkpoint()
             try:
                 dup = find_duplicate_in_memory(
-                    vec, candidates, cfg.cosine_threshold, exclude_id=it["id"]
+                    vec, list(candidates.items()), cfg.cosine_threshold, exclude_id=it["id"]
                 )
                 commit_dedup_result(it["id"], vec, dup[0] if dup is not None else None, STAGE)
-                candidates.append((it["id"], list(vec)))
+                # N06: always drop any stale entry for this id first (replace-on-re-embed), then
+                # re-add only if this item's own date is within the same cutoff the DB load used --
+                # `get_items_for_stage` has no date filter, so a re-selected item can be old.
+                candidates.pop(it["id"], None)
+                item_date = _coalesced_date(it)
+                if cutoff is None or (item_date is not None and item_date >= cutoff):
+                    candidates[it["id"]] = list(vec)
                 if dup is not None:
                     stats.duplicates += 1
                     log.info("dedup_linked", item_id=it["id"], dup_of=dup[0], sim=round(dup[1], 3))
@@ -90,6 +114,17 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
                 stats.failed += 1
     log.info("dedup_done", **stats.__dict__)
     return stats
+
+
+def _coalesced_date(item: dict) -> datetime | None:
+    """Mirror :func:`eoa.memory.vector._load_candidates`'s own date expression
+    (``COALESCE(published_at, created_at)``) so the in-memory pool's own lookback cutoff matches
+    the DB query's exactly (E01) -- naive datetimes (should not occur from `timestamptz` columns,
+    but defended anyway) are treated as UTC, consistent with this module's other date handling."""
+    date = item.get("published_at") or item.get("created_at")
+    if date is not None and date.tzinfo is None:
+        date = date.replace(tzinfo=UTC)
+    return date
 
 
 def link_cross_language(lookback_days: int | None = None) -> int:
