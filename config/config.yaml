@@ -17,7 +17,7 @@ stages:            # per-stage time budgets in minutes (scheduler trims later st
   triage: 15
   deep_search: 100
   analyze: 45
-  tenders: 15       # section 5.2 / FR-5.2: tender/RFI/RFP scan + forecast (eoa.tenders)
+  tenders: 30       # section 5.2 / FR-5.2: tender/RFI/RFP scan + forecast (eoa.tenders). 15 -> 30 (2026-09-23, user): with 32+ portals and the SearXNG/search fallbacks the stage hit its 15-min cap and ended `partial` every night; the whole run still finishes ~02:40, far inside the 06:00 window
   post_tenders_catchup: 5  # F22: embed+classify+triage catch-up for items the tenders stage just created
   report: 30
   export_backup: 10
@@ -223,7 +223,7 @@ llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — 
       models: [gemini-3.8-flash-medium, gemini-3.8-flash-high, gemini-3.1-pro-high]  # ids from `agy models` (verified 2026-09-05)
     claude:
       binary: claude   # Claude Code CLI
-      models: [claude-opus-5, claude-sonnet-5, claude-haiku-4-5-20251001]
+      models: [claude-opus-5-5, claude-opus-5, claude-sonnet-5, claude-haiku-4-5-20251001]
     codex:
       binary: codex    # Codex CLI (read-only sandbox, exec mode)
       models: [default, gpt-6-astra]  # "default" = whatever ~/.codex/config.toml's model= is (verified live 2026-09-09: gpt-6-astra); gpt-6-astra also selectable explicitly via -m
@@ -250,21 +250,29 @@ llm_providers:   # U8 / docs/adr/005-cloud-llm-cli.md + Revision 2026-09-06 — 
   #   investigator:  [{provider: claude, model: claude-sonnet-5, power: high}, {provider: agy, model: gemini-3.1-pro-high}, {provider: ollama}]
   #   light:         [{provider: agy, model: gemini-3.8-flash-medium}, {provider: ollama}]
   #   report:        [{provider: claude, model: claude-opus-5, power: high}, {provider: ollama}]
+  # 2026-09-23 (user): claude-opus-5-5 is the intermediate leg before the local terminal entry in
+  # every chain. On 2026-09-21 claude-sonnet-5 timed out and agy answered status=ERROR on the same
+  # batch; with local inference paused nothing was left and analyze/deep_search deferred. Needs
+  # Claude Code CLI >= 2.1.280 (2.1.251 rejected the id as unrecognized_model).
   chains:
     resident:
     - { provider: claude, model: claude-sonnet-5, power: medium }
     - { provider: agy, model: gemini-3.1-pro-high }
+    - { provider: claude, model: claude-opus-5-5, power: medium }
     - provider: ollama
     investigator:
     - { provider: claude, model: claude-sonnet-5, power: high }
     - { provider: agy, model: gemini-3.1-pro-high }
+    - { provider: claude, model: claude-opus-5-5, power: high }
     - provider: ollama
     light:   # 2026-09-06 18:40: local first is what froze tenders/chat while the user's own GPU job held VRAM; cheap flash first, local fallback
     - { provider: agy, model: gemini-3.8-flash-medium }
+    - { provider: claude, model: claude-opus-5-5, power: low }
     - provider: ollama
     report:
     - { provider: claude, model: claude-sonnet-5, power: high }
     - { provider: agy, model: gemini-3.1-pro-high }
+    - { provider: claude, model: claude-opus-5-5, power: high }
     - provider: ollama
   # U8-ו/5: USD per million tokens, "approximate, edit me". CLI providers (agy/claude/codex) are
   # intentionally absent — subscription-based, cost 0 even when usage is reported.

@@ -51,7 +51,7 @@ _STATIC_MODELS: dict[str, list[str]] = {
     # from what `agy models` reports later. `--model <id>` rejects anything else with a
     # "not recognized" error that lists the current catalog, which is how this was caught.
     "agy": ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.1-pro-high"],
-    "claude": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    "claude": ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
     "codex": ["default"],
 }
 
