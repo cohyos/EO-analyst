@@ -1,0 +1,216 @@
+"""Tests for eoa.orchestrator.admission (F31, SOL-REVIEW2-2026-09-24): the shared admission gate
+that both `eoa.api.services.enqueue_run` (the API's "run now" button) and the scheduler
+(`eoa.orchestrator.main`'s "daily"/"weekly" cron jobs, `reconcile_missed_night_run`) now go
+through, so a "run now" click racing a scheduler tick can never enqueue two active
+`daily_run`/`weekly_run`/`report` jobs.
+
+Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_admission.py -q``
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Any
+
+import pytest
+
+from eoa.api import services
+from eoa.orchestrator import admission
+
+
+class _FakeCursor:
+    def __init__(self, fetchone_results: list[Any]) -> None:
+        self.executed: list[tuple[str, Any]] = []
+        self._results = list(fetchone_results)
+
+    def execute(self, query: str, params: Any = None) -> _FakeCursor:
+        self.executed.append((query, params))
+        return self
+
+    def fetchone(self) -> Any:
+        return self._results.pop(0) if self._results else None
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeConnection:
+    def __init__(self, cur: _FakeCursor) -> None:
+        self._cur = cur
+
+    def cursor(self, row_factory: Any = None) -> _FakeCursor:
+        return self._cur
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class TestAdmitRun:
+    def test_no_existing_job_inserts_and_returns_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cur = _FakeCursor([None, {"id": 42}])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+
+        job_id = admission.admit_run("daily_run", {"mode": "full"}, priority=2, equivalent_kinds=["daily_run"])
+
+        assert job_id == 42
+        lock_query, lock_params = cur.executed[0]
+        assert "pg_advisory_xact_lock" in lock_query
+        assert lock_params["ns"] == admission.ADMISSION_LOCK_NS
+
+    def test_existing_equivalent_job_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        existing = {"id": 5, "kind": "weekly_run", "state": "running"}
+        cur = _FakeCursor([existing])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+
+        with pytest.raises(admission.RunAlreadyActive) as excinfo:
+            admission.admit_run("daily_run", equivalent_kinds=admission.equivalent_kinds_for("daily_run"))
+        assert excinfo.value.job["id"] == 5
+
+
+class TestAdmitDailyAndWeeklyRun:
+    def test_admit_daily_run_returns_none_instead_of_raising(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        existing = {"id": 5, "kind": "daily_run", "state": "running"}
+        cur = _FakeCursor([existing])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+
+        assert admission.admit_daily_run("full", priority=2) is None
+
+    def test_admit_weekly_run_not_blocked_by_active_daily_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The scope note in admission.py's module docstring: weekly_run must NOT be blocked just
+        because a daily_run is active -- run_weekly is designed to coexist with (and wait on) it."""
+        cur = _FakeCursor([None, {"id": 9}])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+
+        job_id = admission.admit_weekly_run("full", priority=3)
+
+        assert job_id == 9
+        _select_query, select_params = cur.executed[1]
+        assert select_params["kinds"] == ["weekly_run"]
+
+    def test_admit_weekly_run_still_blocks_a_second_weekly_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        existing = {"id": 3, "kind": "weekly_run", "state": "queued"}
+        cur = _FakeCursor([existing])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+
+        assert admission.admit_weekly_run("full", priority=3) is None
+
+
+class _ConcurrentFakeDB:
+    """A faithful in-memory stand-in for the `jobs` table plus a single Postgres advisory-lock
+    namespace -- proves the actual concurrency-safety property with real threads, mirroring
+    `tests/unit/test_run_now_idempotent.py`'s `_ConcurrentFakeDB`."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: list[dict[str, Any]] = []
+        self._next_id = 1
+
+    def connection(self, *_a: Any, **_kw: Any) -> _ConcurrentFakeConnection:
+        return _ConcurrentFakeConnection(self)
+
+
+class _ConcurrentFakeConnection:
+    def __init__(self, db: _ConcurrentFakeDB) -> None:
+        self._db = db
+        self._locked = False
+
+    def cursor(self, row_factory: Any = None) -> _ConcurrentFakeCursor:
+        return _ConcurrentFakeCursor(self._db, self)
+
+    def __enter__(self) -> _ConcurrentFakeConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        if self._locked:
+            self._db._lock.release()
+            self._locked = False
+        return False
+
+
+class _ConcurrentFakeCursor:
+    def __init__(self, db: _ConcurrentFakeDB, conn: _ConcurrentFakeConnection) -> None:
+        self._db = db
+        self._conn = conn
+        self._last: Any = None
+
+    def execute(self, query: str, params: Any = None) -> _ConcurrentFakeCursor:
+        if "pg_advisory_xact_lock" in query:
+            self._db._lock.acquire()
+            self._conn._locked = True
+            self._last = None
+        elif "SELECT * FROM jobs" in query:
+            kinds = set(params["kinds"])
+            match = next(
+                (j for j in self._db._jobs if j["kind"] in kinds and j["state"] in ("queued", "running")),
+                None,
+            )
+            self._last = match
+        elif "INSERT INTO jobs" in query:
+            job = {"id": self._db._next_id, "kind": params["kind"], "state": "queued"}
+            self._db._next_id += 1
+            self._db._jobs.append(job)
+            self._last = {"id": job["id"]}
+        else:
+            raise AssertionError(f"unexpected query in fake: {query}")
+        return self
+
+    def fetchone(self) -> Any:
+        return self._last
+
+    def __enter__(self) -> _ConcurrentFakeCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class TestApiAndSchedulerRaceYieldsOneJob:
+    """F31 (SOL-REVIEW2-2026-09-24): the exact race the review flagged -- an API "run now" call
+    (`services.enqueue_run`) and a scheduler tick (`admission.admit_daily_run`, standing in for
+    the orchestrator's "daily" cron job / `reconcile_missed_night_run`) landing at the same
+    instant. Both now go through `admission.admit_run` sharing one advisory lock + equivalence
+    check, so exactly one `daily_run` job must result -- repeated since a race can pass by luck
+    once."""
+
+    def test_api_run_now_and_scheduler_tick_race_to_exactly_one_job(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for attempt in range(20):
+            db = _ConcurrentFakeDB()
+            # `services.db` and `admission.db` are both the same `eoa.db` module object (each
+            # imported it via `from eoa import db`) -- patching the attribute once here is enough
+            # for both call sites to see the fake.
+            monkeypatch.setattr(services.db, "connection", db.connection)
+
+            results: list[Any] = []
+            errors: list[Exception] = []
+            barrier = threading.Barrier(2)
+
+            def _api_call() -> None:
+                barrier.wait(timeout=5)
+                try:
+                    results.append(("api", services.enqueue_run("daily", "full")))
+                except services.RunAlreadyActive as exc:
+                    errors.append(exc)
+
+            def _scheduler_tick() -> None:
+                barrier.wait(timeout=5)
+                job_id = admission.admit_daily_run("full", priority=2)
+                if job_id is not None:
+                    results.append(("scheduler", job_id))
+
+            threads = [threading.Thread(target=_api_call), threading.Thread(target=_scheduler_tick)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+            assert len(results) == 1, f"attempt {attempt}: expected exactly one winner, got {results!r}"
+            assert len(db._jobs) == 1, f"attempt {attempt}: expected exactly one job row, got {db._jobs!r}"
+            assert len(errors) == 1, f"attempt {attempt}: expected exactly one RunAlreadyActive"

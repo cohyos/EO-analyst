@@ -1,8 +1,13 @@
 """Unit tests for `eoa.pipeline.story_clustering` (2026-09-17, "improve same-story grouping"
 task). `_build_components` is a pure function over an already-loaded item pool -- every DB-touching
-call (`get_corroboration_edges_for_items`, `bulk_set_story_ids`, `mark_stage`,
+call (`get_corroboration_edges_for_items`, `apply_story_clustering_updates`, `mark_stage`,
 `get_items_for_story_clustering`) is monkeypatched, same policy as `tests/unit/test_corroboration.py`.
 No live DB, no network, no LLM.
+
+R05/F20 (SOL-REVIEW2-2026-09-24): `bulk_set_story_ids`/`remap_story_roots` used to be called (and
+committed) separately from `assign_story_ids`; they now run in one transaction via
+`eoa.memory.relational.apply_story_clustering_updates`, so tests here monkeypatch that single
+combined entry point instead of the two individual functions.
 
 Run with: ``PYTHONPATH=agent PYTHONUTF8=1 python -m pytest tests/unit/test_story_clustering.py -q``
 """
@@ -257,13 +262,15 @@ class TestAssignStoryIdsRootAgedOutIntegration:
         with a new (self) story_id -- `bulk_set_story_ids` must not even be called for it."""
         items = [_item(11, story_id=10, dedup_of=None)]
         monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: items)
-        persisted: dict[int, int] = {}
-        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: persisted.update(assignment))
+
+        def _boom(assignment, root_remap):
+            raise AssertionError("apply_story_clustering_updates must not be called")
+
+        monkeypatch.setattr(sc, "apply_story_clustering_updates", _boom)
         monkeypatch.setattr(sc, "mark_stage", lambda item_id, stage: None)
 
         stats = sc.assign_story_ids(since_days=7)
 
-        assert persisted == {}
         assert stats.reassigned == 0
 
 
@@ -285,34 +292,37 @@ class TestAssignStoryIdsPropagatesMergedRootToHistoricalMembers:
         ]
         monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: items)
         persisted: dict[int, int] = {}
-        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: persisted.update(assignment))
+        calls: list[tuple[dict[int, int], dict[int, int]]] = []
+
+        def _fake_apply(assignment: dict[int, int], root_remap: dict[int, int]) -> tuple[int, int]:
+            calls.append((dict(assignment), dict(root_remap)))
+            persisted.update(assignment)
+            return len(assignment), 1
+
+        monkeypatch.setattr(sc, "apply_story_clustering_updates", _fake_apply)
         monkeypatch.setattr(sc, "mark_stage", lambda item_id, stage: None)
-        remap_calls: list[dict[int, int]] = []
-
-        def _fake_remap(root_remap: dict[int, int]) -> int:
-            remap_calls.append(dict(root_remap))
-            return 1
-
-        monkeypatch.setattr(sc, "remap_story_roots", _fake_remap)
 
         stats = sc.assign_story_ids(since_days=7)
 
         # In-window items merge to the lower root (10).
         assert persisted == {51: 10}
         # The old root 50 (root of the second persisted group, whose historical out-of-window
-        # member 8 still carries story_id=50 in the DB) must be remapped to the new root 10.
-        assert remap_calls == [{50: 10}]
+        # member 8 still carries story_id=50 in the DB) must be remapped to the new root 10, in
+        # the SAME call (one transaction) as the in-window reassignment above.
+        assert calls == [({51: 10}, {50: 10})]
         assert stats.historical_remapped == 1
 
-    def test_no_merge_does_not_call_remap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_merge_does_not_call_apply(self, monkeypatch: pytest.MonkeyPatch) -> None:
         items = [_item(11, story_id=10, dedup_of=None)]
         monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: items)
-        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: None)
         monkeypatch.setattr(sc, "mark_stage", lambda item_id, stage: None)
         called = {"n": 0}
-        monkeypatch.setattr(
-            sc, "remap_story_roots", lambda root_remap: called.__setitem__("n", called["n"] + 1)
-        )
+
+        def _boom(assignment, root_remap):
+            called["n"] += 1
+            raise AssertionError("apply_story_clustering_updates must not be called")
+
+        monkeypatch.setattr(sc, "apply_story_clustering_updates", _boom)
         stats = sc.assign_story_ids(since_days=7)
         assert called["n"] == 0
         assert stats.historical_remapped == 0
@@ -322,7 +332,12 @@ class TestAssignStoryIdsStageEntrypoint:
     def test_empty_pool_returns_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: [])
         called = {"bulk": False}
-        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: called.__setitem__("bulk", True))
+
+        def _boom(assignment, root_remap):
+            called["bulk"] = True
+            raise AssertionError("apply_story_clustering_updates must not be called")
+
+        monkeypatch.setattr(sc, "apply_story_clustering_updates", _boom)
         stats = sc.assign_story_ids(since_days=7)
         assert stats.items_processed == 0
         assert called["bulk"] is False
@@ -331,7 +346,13 @@ class TestAssignStoryIdsStageEntrypoint:
         items = [_item(1, story_id=1), _item(2, dedup_of=1, story_id=None)]
         monkeypatch.setattr(sc, "get_items_for_story_clustering", lambda since_days: items)
         persisted: dict[int, int] = {}
-        monkeypatch.setattr(sc, "bulk_set_story_ids", lambda assignment: persisted.update(assignment))
+
+        def _fake_apply(assignment: dict[int, int], root_remap: dict[int, int]) -> tuple[int, int]:
+            persisted.update(assignment)
+            assert root_remap == {}  # id 2 had no PRIOR story_id -- nothing to remap
+            return len(assignment), 0
+
+        monkeypatch.setattr(sc, "apply_story_clustering_updates", _fake_apply)
         monkeypatch.setattr(sc, "mark_stage", lambda item_id, stage: None)
         stats = sc.assign_story_ids(since_days=7)
         assert persisted == {2: 1}  # id 1 already had the right story_id -- not rewritten

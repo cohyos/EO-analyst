@@ -60,11 +60,10 @@ from eoa.config import settings
 from eoa.errors import DeadlineExceeded, LeaseLost
 from eoa.execution import checkpoint
 from eoa.memory.relational import (
-    bulk_set_story_ids,
+    apply_story_clustering_updates,
     get_corroboration_edges_for_items,
     get_items_for_story_clustering,
     mark_stage,
-    remap_story_roots,
 )
 
 log = structlog.get_logger(__name__)
@@ -261,23 +260,29 @@ def assign_story_ids(since_days: int = DEFAULT_SINCE_DAYS) -> StoryClusteringSta
         for item_id, story_id in assignment.items()
         if by_id[item_id].get("story_id") != story_id
     }
-    if changed:
-        bulk_set_story_ids(changed)
-        stats.reassigned = len(changed)
 
     # F20 (SOL-AUDIT-2026-09-24 review): when this run's edges MERGE two previously-separate
-    # persisted stories, `changed`/`bulk_set_story_ids` above only rewrites items in THIS run's
-    # since_days pool -- a historical member of either old story that aged out of the pool keeps
-    # pointing at its old, now-abandoned root and silently falls out of the merged group. Detect
-    # every old_root -> new_root merge from the edges just computed and propagate it to every row
-    # still on that old root, in or out of the pool.
+    # persisted stories, `changed` above only covers items in THIS run's since_days pool -- a
+    # historical member of either old story that aged out of the pool keeps pointing at its old,
+    # now-abandoned root and silently falls out of the merged group. Detect every old_root ->
+    # new_root merge from the edges just computed so it can be propagated to every row still on
+    # that old root, in or out of the pool.
     root_remap: dict[int, int] = {}
     for item_id, new_story_id in assignment.items():
         prior_story_id = by_id[item_id].get("story_id")
         if prior_story_id is not None and prior_story_id != new_story_id:
             root_remap[prior_story_id] = new_story_id
-    if root_remap:
-        stats.historical_remapped = remap_story_roots(root_remap)
+
+    # R05/F20 (SOL-REVIEW2-2026-09-24): `changed`'s current-pool reassignment and `root_remap`'s
+    # historical-root propagation now run in ONE transaction (`apply_story_clustering_updates`)
+    # instead of two separately-committed calls -- a crash between the old two commits left the
+    # current pool on the new story_id while historical out-of-pool members stayed on the old,
+    # now-abandoned root, an unrecoverable split (retrying recomputes a fresh assignment with no
+    # way to reconstruct which old root pointed at which new one).
+    if changed or root_remap:
+        n_reassigned, n_remapped = apply_story_clustering_updates(changed, root_remap)
+        stats.reassigned = n_reassigned
+        stats.historical_remapped = n_remapped
 
     for item_id in by_id:
         try:

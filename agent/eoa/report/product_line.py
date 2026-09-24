@@ -180,7 +180,8 @@ def collect_market_items(
           AND security_status = 'clean' AND dedup_of IS NULL
           AND level = ANY(%(levels)s)
           AND COALESCE(domain, '') <> 'out_of_scope'
-          AND COALESCE(published_at, created_at)::date BETWEEN %(start)s AND %(end)s
+          AND (COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date
+              BETWEEN %(start)s AND %(end)s
         ORDER BY COALESCE(score, 0) DESC, COALESCE(published_at, created_at) DESC
         LIMIT %(limit)s
         """,
@@ -217,7 +218,8 @@ def collect_events(line_id: str, start: dt.date, end: dt.date, *, limit: int = 4
         FROM events e
         LEFT JOIN items i ON i.id = e.item_id
         WHERE e.product_lines @> ARRAY[%(line)s]::text[]
-          AND COALESCE(e.date, e.created_at::date) BETWEEN %(start)s AND %(end)s
+          AND COALESCE(e.date, (e.created_at AT TIME ZONE 'Asia/Jerusalem')::date)
+              BETWEEN %(start)s AND %(end)s
         ORDER BY e.date DESC NULLS LAST, e.created_at DESC
         LIMIT %(limit)s
         """,
@@ -562,7 +564,8 @@ def collect_patents(line_id: str, *, days: int = 90, limit: int = 20) -> list[di
                value_score, url
         FROM patents
         WHERE product_lines @> ARRAY[%(line)s]::text[]
-          AND COALESCE(publication_date, filing_date, created_at::date) >= %(since)s
+          AND COALESCE(publication_date, filing_date, (created_at AT TIME ZONE 'Asia/Jerusalem')::date)
+              >= %(since)s
         ORDER BY COALESCE(publication_date, filing_date) DESC NULLS LAST
         LIMIT %(limit)s
         """,

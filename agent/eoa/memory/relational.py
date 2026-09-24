@@ -297,10 +297,22 @@ def insert_item(
     page whose analysis pass later downgrades its own `content_status`, e.g. Q3-10's `assess()`)
     must never re-trigger reprocessing of otherwise-unchanged content.
 
-    N09 (round 2): `canonical_url` itself now only changes together with an accepted (quality-
-    better) content update -- previously it was refreshed unconditionally via `COALESCE`, so a
-    worse/blocked re-fetch of a URL could silently rewrite a good row's canonical identity while
-    leaving its content alone.
+    R04 (SOL-REVIEW2-2026-09-24, round 3): `canonical_url` is now gated by its OWN condition
+    (`excluded_identity_ok`/`params_identity_ok`), deliberately looser than the content-quality
+    gate (`excluded_better`/`params_better`) that still governs title/body columns below: identity
+    only requires the new fetch's quality rank to be NOT WORSE than what's stored (`>=`, no
+    `text_hash`-changed requirement) -- round 2's N09 fix required STRICTLY better rank AND a
+    changed hash for canonical_url too, which incidentally also blocked a same-quality, same-site
+    redirect from ever updating identity (R04's regression: "a full/clean A redirecting to
+    full/clean B remains unlinked"). N09's actual protection -- a worse/blocked re-fetch must never
+    rewrite a good row's identity -- still holds here: a blocked re-fetch always ranks 0, which is
+    never `>=` a real row's rank. Defense-in-depth: `eoa.fetch.service._redirect_identity_is_trusted`
+    additionally withholds `canonical_url` entirely (passes `None`) for a blocked/challenge page, a
+    login/consent boilerplate landing page, or a redirect that crosses to a different registrable
+    domain -- before it ever reaches this function. That upstream check is what protects a FRESH
+    (non-conflicting) insert, whose `canonical_url` is set directly from `VALUES` with no CASE gate
+    at all here. Other callers (`eoa.fetch.service._store_search_hit`, `eoa.tenders.scan.
+    _insert_tender_and_item`) never pass `canonical_url`, so they are unaffected either way.
 
     N05 (round 2): an accepted content update also clears `dedup_of` in the same statement -- a
     quality-upgraded item must not stay hidden behind a duplicate link computed against its old,
@@ -343,6 +355,30 @@ def insert_item(
         f"{_quality_rank_sql('%(security_status)s', '%(content_status)s')} > "
         f"{_quality_rank_sql('items.security_status', 'items.content_status')})"
     )
+    # R04 (SOL-REVIEW2-2026-09-24): a DIFFERENT, deliberately looser condition than
+    # `excluded_better`/`params_better` gates `canonical_url` alone -- identity is "not worse"
+    # (>=), with NO `text_hash`-changed requirement, so a same-quality redirect (R04's own test:
+    # full/clean A redirecting to full/clean B, identical rank, likely identical or unrelated
+    # text_hash) still updates identity even though it never wins the strictly-better content
+    # gate. It still requires `quality_aware` (so a caller that never assesses quality at all
+    # keeps the old "never touch anything on conflict" behavior for canonical_url too) and still
+    # rejects a WORSE fetch's canonical_url (N09's original case -- a blocked/challenge-page
+    # re-fetch ranks 0, never >= a real row's rank), which is what keeps N09 protected at this
+    # layer even though R04 loosens the identity gate. This is defense-in-depth alongside
+    # `eoa.fetch.service._redirect_identity_is_trusted`, which withholds `canonical_url` entirely
+    # (passes `None`) for a blocked/boilerplate/cross-registrable-domain redirect BEFORE it ever
+    # reaches here -- that upstream check is what a fresh (non-conflicting) insert relies on, since
+    # a brand-new row's `canonical_url` is set directly from `VALUES`, with no CASE gate at all.
+    excluded_identity_ok = (
+        f"(%(quality_aware)s AND "
+        f"{_quality_rank_sql('EXCLUDED.security_status', 'EXCLUDED.content_status')} >= "
+        f"{_quality_rank_sql('items.security_status', 'items.content_status')})"
+    )
+    params_identity_ok = (
+        f"(%(quality_aware)s AND "
+        f"{_quality_rank_sql('%(security_status)s', '%(content_status)s')} >= "
+        f"{_quality_rank_sql('items.security_status', 'items.content_status')})"
+    )
 
     upsert_set_sql = ", ".join(
         f"{col} = CASE WHEN {excluded_better} THEN EXCLUDED.{col} ELSE items.{col} END"
@@ -367,7 +403,7 @@ def insert_item(
         )
         ON CONFLICT (url) DO UPDATE SET
             fetched_at = COALESCE(EXCLUDED.fetched_at, now()),
-            canonical_url = CASE WHEN {excluded_better}
+            canonical_url = CASE WHEN {excluded_identity_ok}
                 THEN COALESCE(EXCLUDED.canonical_url, items.canonical_url) ELSE items.canonical_url END,
             {upsert_set_sql},
             processed_stages = CASE WHEN {excluded_better} THEN '{{}}'::text[] ELSE items.processed_stages END,
@@ -378,7 +414,7 @@ def insert_item(
     update_by_id_query = f"""
         UPDATE items SET
             fetched_at = COALESCE(%(fetched_at)s, now()),
-            canonical_url = CASE WHEN {params_better}
+            canonical_url = CASE WHEN {params_identity_ok}
                 THEN COALESCE(%(canonical_url)s, items.canonical_url) ELSE items.canonical_url END,
             {update_by_id_set_sql},
             processed_stages = CASE WHEN {params_better} THEN '{{}}'::text[] ELSE items.processed_stages END,
@@ -1626,30 +1662,94 @@ def reap_stale_jobs(max_age_hours: int = 6) -> int:
     return len(rows)
 
 
-def mark_notification_sent(kind: str, key: str) -> bool:
-    """N03 (SOL-REVIEW-2026-09-24): durable idempotency marker for an external notification --
-    ``INSERT ... ON CONFLICT DO NOTHING`` against the ``notifications_sent`` table (migration
-    0037), unique on ``(kind, key)``. Returns ``True`` the first time this ``(kind, key)`` pair is
-    seen (the caller should go ahead and send), ``False`` on every later call (already sent --
-    the caller must skip).
+#: R02/N03 (SOL-REVIEW2-2026-09-24): bounded retries for a notification stuck ``pending`` after a
+#: worker crash between claiming the row (:func:`claim_notification_pending`) and actually
+#: sending -- past this many claimed attempts a permanently-failing send stops retrying forever
+#: (mirrors :data:`REAP_MAX_ATTEMPTS` above for jobs).
+NOTIFICATION_MAX_ATTEMPTS = 5
+#: A ``pending`` row older than this is assumed to be a crashed claim (the worker that claimed it
+#: died before calling :func:`mark_notification_result` either way) rather than one still
+#: mid-send, and becomes eligible for reclaim by a later replay.
+NOTIFICATION_PENDING_STALE_MINUTES = 10
 
-    Closes the "daily notification sent twice on stale-job replay" gap: a worker crash between
-    `_notify` actually delivering the ntfy push and the outer `finish_job` call recording the job
-    as done leaves the job `running` past its lease; `reap_stale_jobs` above requeues it
-    `deferred` and a later worker reruns the *same* job (same `job_id`, same daily/weekly period)
-    from `ingest` through `notify` again. Without a durable marker outside the job's own
-    (about-to-be-overwritten) `result`/`state`, the second pass has no way to know the push
-    already went out and sends a duplicate. Callers key on something stable across that replay --
-    `eoa.orchestrator.jobs._notify` uses the job's own id, which `reap_stale_jobs` never changes."""
+
+def claim_notification_pending(
+    kind: str, key: str, *, stale_minutes: int = NOTIFICATION_PENDING_STALE_MINUTES
+) -> bool:
+    """R02/N03 (SOL-REVIEW2-2026-09-24): claim ``(kind, key)`` for delivery -- BEFORE the caller
+    actually sends -- replacing the old ``mark_notification_sent`` marker, which recorded "sent"
+    before the send even happened. The review's own finding: ``eoa.notify.ntfy.send`` can return
+    ``Sent(ok=False)`` without raising, and the old marker had already committed "sent" by then,
+    permanently suppressing any retry of a delivery that never actually went out.
+
+    ``notifications_sent`` (migration 0037; ``status``/``attempts``/``updated_at`` added by
+    migration 0038) now tracks a small state machine per ``(kind, key)``: ``pending`` (claimed,
+    delivery in progress) -> ``sent`` (confirmed OK, see :func:`mark_notification_result` --
+    terminal, never reclaimed) or ``failed`` (delivery failed/raised -- eligible for a bounded
+    retry). Returns ``True`` when the caller should go ahead and attempt delivery now:
+
+    * first time this ``(kind, key)`` pair is ever seen -- inserts a fresh ``pending`` row.
+    * the existing row is ``failed`` and under :data:`NOTIFICATION_MAX_ATTEMPTS` -- reclaims it
+      (``pending`` again, ``attempts`` incremented): a replay retries a genuinely failed send.
+    * the existing row is ``pending`` but ``updated_at`` is older than ``stale_minutes`` -- the
+      worker that claimed it never got back to record a result (crash, kill -9, lease expiry);
+      reclaims it for another attempt.
+
+    Returns ``False`` (the caller must skip -- already ``sent``, another attempt is currently
+    in flight, or attempts are exhausted) otherwise. The single ``INSERT ... ON CONFLICT ... DO
+    UPDATE ... WHERE ...`` statement below makes the check-and-claim atomic: Postgres does not
+    apply the ``DO UPDATE`` (and this returns no row) when the ``WHERE`` condition is false for
+    the existing row, exactly mirroring ``mark_notification_sent``'s old ``DO NOTHING`` shape but
+    with a conditional instead of an unconditional skip.
+
+    At-least-once trade-off (by design, not an oversight): a worker that crashes AFTER
+    ``ntfy.send`` actually delivered the push but BEFORE :func:`mark_notification_result` records
+    ``sent`` leaves the row ``pending``. A replay within ``stale_minutes`` will not reclaim it yet
+    (not stale); once it does, it WILL send a genuine duplicate push -- there is no ntfy-side
+    delivery acknowledgement this project can hook into to distinguish "crashed before sending"
+    from "crashed after sending, before recording". The ``(kind, key)`` key keeps duplicates rare
+    (bounded to that narrow crash window), and an occasional duplicate push is far preferable to
+    the original bug: a failed send silently suppressed forever."""
     query = """
-        INSERT INTO notifications_sent (kind, key) VALUES (%(kind)s, %(key)s)
-        ON CONFLICT (kind, key) DO NOTHING
+        INSERT INTO notifications_sent (kind, key, status, attempts, updated_at)
+        VALUES (%(kind)s, %(key)s, 'pending', 1, now())
+        ON CONFLICT (kind, key) DO UPDATE SET
+            status = 'pending',
+            attempts = notifications_sent.attempts + 1,
+            updated_at = now()
+        WHERE
+            (notifications_sent.status = 'failed' AND notifications_sent.attempts < %(max_attempts)s)
+            OR (
+                notifications_sent.status = 'pending'
+                AND notifications_sent.updated_at < now() - (%(stale_minutes)s || ' minutes')::interval
+            )
         RETURNING id
     """
+    params = {
+        "kind": kind,
+        "key": key,
+        "max_attempts": NOTIFICATION_MAX_ATTEMPTS,
+        "stale_minutes": stale_minutes,
+    }
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, {"kind": kind, "key": key})
+        cur.execute(query, params)
         row = cur.fetchone()
     return row is not None
+
+
+def mark_notification_result(kind: str, key: str, *, ok: bool) -> None:
+    """R02/N03 (SOL-REVIEW2-2026-09-24): record the outcome of a delivery attempt claimed via
+    :func:`claim_notification_pending` -- ``sent`` on success (terminal, never retried again),
+    ``failed`` on failure (eligible for :func:`claim_notification_pending`'s bounded retry). The
+    caller is expected to call this exactly once for every successful claim, in a ``finally`` /
+    ``except`` so an exception during the actual send still lands on ``failed`` rather than
+    leaving the row ``pending`` until the stale-claim window expires."""
+    query = """
+        UPDATE notifications_sent SET status = %(status)s, updated_at = now()
+        WHERE kind = %(kind)s AND key = %(key)s
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(query, {"status": "sent" if ok else "failed", "kind": kind, "key": key})
 
 
 # --------------------------------------------------------------------------
@@ -1949,10 +2049,15 @@ def get_corroboration_edges_for_items(item_ids: list[int]) -> list[tuple[int, in
     return edges
 
 
-def bulk_set_story_ids(assignment: dict[int, int]) -> int:
+def bulk_set_story_ids(assignment: dict[int, int], *, conn: Any = None) -> int:
     """Persist ``items.story_id`` for every ``item_id -> story_id`` pair in ``assignment`` in one
     round trip (a single-row ``UPDATE ... FROM unnest(...)``) rather than one ``UPDATE`` per item --
-    a backfill run can touch thousands of rows. Returns the number of rows actually updated."""
+    a backfill run can touch thousands of rows. Returns the number of rows actually updated.
+
+    R05/F20 (SOL-REVIEW2-2026-09-24): an optional caller-owned ``conn`` runs the UPDATE on that
+    connection/transaction instead of opening (and committing) a new one -- see
+    :func:`apply_story_clustering_updates`, which needs this and :func:`remap_story_roots` to
+    commit or roll back together. ``None`` (the default) keeps the prior standalone behavior."""
     if not assignment:
         return 0
     ids = list(assignment)
@@ -1965,12 +2070,17 @@ def bulk_set_story_ids(assignment: dict[int, int]) -> int:
         ) AS v
         WHERE i.id = v.id
     """
-    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, {"ids": ids, "story_ids": story_ids})
+    params = {"ids": ids, "story_ids": story_ids}
+    if conn is not None:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            return cur.rowcount
+    with connection() as conn2, conn2.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, params)
         return cur.rowcount
 
 
-def remap_story_roots(root_remap: dict[int, int]) -> int:
+def remap_story_roots(root_remap: dict[int, int], *, conn: Any = None) -> int:
     """Propagate a merged story root to every row still carrying an old, now-superseded root id --
     including historical members OUTSIDE the current ``since_days`` candidate pool that
     :func:`bulk_set_story_ids` never touches (F20, SOL-AUDIT-2026-09-24 review: "merging two
@@ -1979,7 +2089,10 @@ def remap_story_roots(root_remap: dict[int, int]) -> int:
     determined was merged away. One set-based ``UPDATE`` for the whole batch (a run merges at most
     a handful of roots). Returns the number of rows updated (in-pool rows already rewritten by
     ``bulk_set_story_ids`` no longer match ``story_id = old_story_id`` by the time this runs, so
-    they are not double-counted when called after it)."""
+    they are not double-counted when called after it).
+
+    R05/F20 (SOL-REVIEW2-2026-09-24): an optional caller-owned ``conn``, same contract as
+    :func:`bulk_set_story_ids` above -- see :func:`apply_story_clustering_updates`."""
     if not root_remap:
         return 0
     old_ids = list(root_remap)
@@ -1993,9 +2106,35 @@ def remap_story_roots(root_remap: dict[int, int]) -> int:
         ) AS v
         WHERE i.story_id = v.old_story_id
     """
-    with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, {"old_ids": old_ids, "new_ids": new_ids})
+    params = {"old_ids": old_ids, "new_ids": new_ids}
+    if conn is not None:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            return cur.rowcount
+    with connection() as conn2, conn2.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, params)
         return cur.rowcount
+
+
+def apply_story_clustering_updates(assignment: dict[int, int], root_remap: dict[int, int]) -> tuple[int, int]:
+    """R05/F20 (SOL-REVIEW2-2026-09-24): apply :func:`bulk_set_story_ids`'s current-pool
+    reassignment and :func:`remap_story_roots`'s historical-root propagation in ONE transaction.
+
+    Before this, each opened and committed its own connection: a crash or exception between the
+    two commits left current-pool rows on their NEW ``story_id`` while historical, out-of-pool
+    members still pointed at the OLD, now-abandoned root -- an unrecoverable split, since retrying
+    story clustering recomputes a fresh assignment from current data and has no way to reconstruct
+    which old root used to point at which new one. Wrapping both UPDATEs in a single
+    ``with connection() as conn:`` block (commits on success, rolls back on any exception -- see
+    :func:`eoa.db.connection`) makes them atomic: either both land or neither does, and a failure
+    between them leaves the DB exactly as it was before this call. Returns
+    ``(rows updated by bulk_set_story_ids, rows updated by remap_story_roots)``."""
+    if not assignment and not root_remap:
+        return 0, 0
+    with connection() as conn:
+        n_reassigned = bulk_set_story_ids(assignment, conn=conn)
+        n_remapped = remap_story_roots(root_remap, conn=conn)
+    return n_reassigned, n_remapped
 
 
 def get_story_groups_for_items(item_ids: list[int]) -> dict[int, list[dict[str, Any]]]:

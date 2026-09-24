@@ -235,6 +235,53 @@ def _normalize_url_identity(url: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(kept_params), ""))
 
 
+def _registrable_domain(url: str | None) -> str | None:
+    """Best-effort registrable-domain-ish host for ``url``: the netloc, minus a leading ``www.``
+    and any port -- the same simplification ``eoa.pipeline.corroboration.registrable_domain`` and
+    ``eoa.report.docx_builder._domain_from_url`` already use for "is this the same outlet".
+    Duplicated locally (rather than imported) so this module keeps its existing "only `fetch/*`
+    speaks to `eoa.pipeline.*`" independence -- it is a few lines of pure string logic, not a
+    shared contract. Not full public-suffix-list parsing (a ``co.uk``-style second-level TLD is
+    out of scope); sufficient for R04's "is this redirect still on the same site" check."""
+    if not url:
+        return None
+    netloc = urlsplit(url).netloc or url
+    netloc = netloc.split("@")[-1].split(":")[0].lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc or None
+
+
+def _redirect_identity_is_trusted(*, original_url: str, canonical_url: str, is_blocked: bool) -> bool:
+    """R04 (SOL-REVIEW2-2026-09-24): whether ``canonical_url`` (the normalized `final_url` a fetch
+    of ``original_url`` actually landed on, per `_normalize_url_identity`) is trustworthy enough to
+    become this article's canonical identity in `relational.insert_item` -- a decision made HERE,
+    independent of content-quality acceptance (`insert_item`'s own `text_hash`/quality-rank gate,
+    which only ever decides whether to overwrite title/body columns). Three "suspect redirect"
+    cases are rejected as identity, matching N09/R04's must-fix list:
+
+    - blocked content (`is_blocked`, from `detect_block_page` -- a WAF/anti-bot/login-wall
+      challenge page fetched instead of the real article; N09's original finding);
+    - a login/consent/paywall-style boilerplate page at the landing URL (`_is_boilerplate_url`,
+      which already matches `/login`, `/cookie`, ...) -- the same shape of problem N09 covers, for
+      pages `detect_block_page` doesn't itself recognize as a challenge page;
+    - a redirect that crosses to a DIFFERENT registrable domain -- a same-site redirect (a CMS
+      moving `/old-slug` to `/new-slug`, or dropping `www.`) is the common, legitimate case R04
+      restores; a cross-site redirect (a shortlink, a hijacked/compromised page, an unrelated site
+      entirely) is exactly the "suspect" case the review calls out, and is never trusted as
+      identity regardless of how clean its content looks.
+
+    A same-quality, same-site, non-blocked redirect (R04's own test: full/clean A redirecting to
+    full/clean B) returns True here -- `insert_item` then always adopts `canonical_url` for such a
+    fetch, whether or not this particular re-fetch also happens to win the content-quality gate.
+    """
+    if is_blocked:
+        return False
+    if _is_boilerplate_url(canonical_url):
+        return False
+    return _registrable_domain(canonical_url) == _registrable_domain(original_url)
+
+
 def _url_already_seen(url: str) -> bool:
     """F19: best-effort existence probe for ``items.url`` used by :func:`_store_item` to tell a
     genuine new-row insert from ``relational.insert_item``'s ``ON CONFLICT (url) DO UPDATE``
@@ -319,6 +366,12 @@ def _store_item(
     canonical_url = _normalize_url_identity(final_url or url)
     if canonical_url == url:
         canonical_url = None  # nothing to add over the plain `ON CONFLICT (url)` path
+    elif not _redirect_identity_is_trusted(original_url=url, canonical_url=canonical_url, is_blocked=is_blocked):
+        # R04/N09: a suspect redirect (blocked/challenge page, login/consent boilerplate, or a
+        # cross-registrable-domain hop) never becomes this row's canonical identity -- see
+        # `_redirect_identity_is_trusted`'s docstring. `insert_item` treats a `None` here exactly
+        # like "no redirect happened": the plain `ON CONFLICT (url)` path, no identity change.
+        canonical_url = None
 
     # F09/N04 (SOL-REVIEW-2026-09-24 round 2): actually assess content quality at ingest with the
     # same classifier `eoa.pipeline.analyze` uses post-hoc -- every non-blocked fetch used to be

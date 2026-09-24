@@ -486,7 +486,9 @@ class TestListPayloadsRoute:
         monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
         r = client.get("/api/payloads")
         assert r.status_code == 200
-        assert r.json() == {"payloads": [], "total": 0}
+        # R06/F33 (SOL-REVIEW2-2026-09-24): the response now also carries `page`/`limit`/
+        # `has_more` for server-side pagination -- see TestListPayloadsRoutePagination below.
+        assert r.json() == {"payloads": [], "total": 0, "page": 1, "limit": 200, "has_more": False}
 
     def test_total_uses_the_same_where_clause_as_the_row_query(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -510,6 +512,105 @@ class TestListPayloadsRoute:
         )
         assert "p.vendor_entity_name ILIKE %(vendor)s" in count_query
         assert count_params["vendor"] == "%Acme%"
+
+
+class TestListPayloadsRoutePagination:
+    """R06/F33 (SOL-REVIEW2-2026-09-24 review): `page`/`limit` -> LIMIT/OFFSET, same 1-based
+    `page` convention as `GET /api/tech/items` (`eoa.api.services.list_tech_items`)."""
+
+    def test_page_2_applies_the_offset(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 5}},
+            fetchall_responses={"FROM payloads p": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/payloads", params={"limit": 2, "page": 2})
+        assert r.status_code == 200
+        body = r.json()
+        assert body == {"payloads": [], "total": 5, "page": 2, "limit": 2, "has_more": True}
+
+        row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        assert "OFFSET %(offset)s" in row_query
+        assert row_params["offset"] == 2  # (page - 1) * limit == (2 - 1) * 2
+
+    def test_has_more_is_false_on_the_last_page(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
+        rows = [{"id": i, "canonical_name": f"Widget {i}", "category": "gimbal"} for i in range(3)]
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 3}},
+            fetchall_responses={"FROM payloads p": rows},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/payloads", params={"limit": 200, "page": 1})
+        assert r.json()["has_more"] is False
+
+
+class TestListPayloadsRouteSearchFieldsAlignment:
+    """R06 (SOL-REVIEW2-2026-09-24 review): the server's `q` filter must search the same field
+    set the client's tree re-filter searches (`web/src/lib/payloadFamilies.ts`'s
+    `filterPayloadTree`/`variantMatches`: vendor/family name match + canonical_name/variant/
+    notes) -- a field present on one side but not the other lets a server match get silently
+    dropped by the client's own (differently-scoped) re-filter."""
+
+    def test_q_filter_includes_vendor_and_variant_and_notes(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 0}},
+            fetchall_responses={"FROM payloads p": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        client.get("/api/payloads", params={"q": "toplite"})
+
+        row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        assert "p.canonical_name ILIKE %(q)s" in row_query
+        assert "p.vendor_entity_name ILIKE %(q)s" in row_query
+        assert "p.family ILIKE %(q)s" in row_query
+        assert "p.variant ILIKE %(q)s" in row_query
+        assert "p.notes ILIKE %(q)s" in row_query
+        assert row_params["q"] == "%toplite%"
+
+
+class TestPayloadFacetsTotal:
+    """R09 (SOL-REVIEW2-2026-09-24 review): an unfiltered existence count so the UI's "database
+    empty" decision can't be fooled by every row having a null vendor/category (which would make
+    both facet VALUE lists empty even though the table has rows)."""
+
+    def test_facets_response_carries_an_unfiltered_total(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 7}},
+            fetchall_responses={},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/payloads/facets")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 7
+        assert body["vendors"] == []
+        assert body["categories"] == []
+
+    def test_total_is_unaffected_by_the_category_filter(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The `total` must be the WHOLE table, not scoped to `category` -- it answers "does the
+        table have any rows at all", not "any rows in this category"."""
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 4}},
+            fetchall_responses={},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/payloads/facets", params={"category": "gimbal"})
+        assert r.json()["total"] == 4
+        _total_query, total_params = next(
+            (q, p) for q, p in cur.executed if q.strip() == "SELECT count(*) AS c FROM payloads"
+        )
+        assert not total_params
 
 
 class TestGetPayloadRoute:

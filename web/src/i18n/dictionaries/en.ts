@@ -745,6 +745,9 @@ export const en: Dictionary = {
       "The nightly scan (payload_extract) hasn't found a cited spec/price in the collected items yet, or it is disabled. See config/config.yaml: payloads.enabled.",
     noMatchesTitle: "No matching results",
     noMatchesDescription: "Try changing the filters.",
+    // R06/F33 (SOL-REVIEW2-2026-09-24): server-side pagination "load more" control.
+    loadMore: "Load more ({shown} of {total})",
+    loadingMore: "Loading more…",
     searchLabel: "Search payloads",
     searchPlaceholder: "Name, family…",
     categoryLabel: "Category",

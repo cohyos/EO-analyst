@@ -61,7 +61,16 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
     also means a re-embed (F09's quality-upgrade reprocessing resets ``processed_stages``, so an
     already-embedded item can be re-selected here) REPLACES that item's stale entry instead of
     leaving both the old and the new vector in the pool simultaneously (N06's "appends a new vector
-    without replacing that item's old loaded vector")."""
+    without replacing that item's old loaded vector").
+
+    E01/N06 (SOL-REVIEW2-2026-09-24 round 3): the round-2 fix above only replaced a pending item's
+    stale entry once THAT item's own turn in the loop was reached -- too late for any item
+    processed earlier in the same run/batch, which could still match against the stale, pre-reset
+    vector `load_candidate_vectors` loaded for it (F09's quality-upgrade reprocessing resets
+    ``processed_stages`` without clearing the old ``items.embedding`` value, so a pending re-embed
+    item's stale vector is present in the initial DB load). Every id in ``items`` (this run's full
+    pending set) is now dropped from ``candidates`` up front, before the batch loop starts -- no
+    item, at any point in this run, can ever match against another pending item's stale vector."""
     checkpoint()
     cfg = settings().dedup
     stats = DedupStats()
@@ -78,6 +87,21 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
     candidates: dict[int, list[float]] = {
         row["id"]: row.get("embedding") for row in load_candidate_vectors(cfg.lookback_days)
     }
+    # E01/N06 (SOL-REVIEW2-2026-09-24, round 3): drop every PENDING (about-to-be-(re-)embedded)
+    # item's id from the pool BEFORE any scoring happens in this run, not just after each one's own
+    # turn. `load_candidate_vectors` selects every item with `embedding IS NOT NULL` -- it has no
+    # idea which of those are about to be re-embedded here, so a `items` row that already has an
+    # OLD embedding committed (F09's quality-upgrade reprocessing resets `processed_stages`,
+    # re-queuing this stage, WITHOUT clearing the old `items.embedding` value) loads into
+    # `candidates` with that stale, pre-reset vector still in place. Without this, an item earlier
+    # in this same batch's processing order could match against that stale vector before the
+    # pending item ever reaches its own turn (where the per-item pop-then-readd below replaces it
+    # with a fresh one) -- exactly the false link N06/E01 describe. Items are re-added with their
+    # freshly computed vector (if within the lookback cutoff) as each one is actually processed,
+    # same as before.
+    pending_ids = {it["id"] for it in items}
+    for pending_id in pending_ids:
+        candidates.pop(pending_id, None)
     for i in range(0, len(items), batch_size):
         checkpoint()
         batch = items[i : i + batch_size]

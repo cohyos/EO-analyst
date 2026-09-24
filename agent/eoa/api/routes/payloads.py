@@ -61,8 +61,18 @@ def list_payloads(
     category: str | None = Query(None),
     vendor: str | None = Query(None),
     family: str | None = Query(None, description="W19b: exact/partial match against payloads.family"),
-    q: str | None = Query(None, description="free-text match against canonical_name/family/notes"),
-    limit: int = Query(200, ge=1, le=1000),
+    q: str | None = Query(
+        None,
+        description=(
+            "free-text match against canonical_name/vendor_entity_name/family/variant/notes -- "
+            "R06/F33 (SOL-REVIEW2-2026-09-24): this field set must stay identical to the client's "
+            "own tree-search predicate, web/src/lib/payloadFamilies.ts's filterPayloadTree/"
+            "variantMatches (vendor/family name match + canonical_name/variant/notes), so a server "
+            "match can never be silently dropped by a differently-scoped client-side re-filter."
+        ),
+    ),
+    limit: int = Query(200, ge=1, le=1000, description="page size"),
+    page: int = Query(1, ge=1, description="R06/F33: 1-based page number, same convention as GET /api/tech/items"),
 ) -> dict[str, Any]:
     where = ["1=1"]
     params: dict[str, Any] = {"limit": limit}
@@ -76,18 +86,30 @@ def list_payloads(
         where.append("p.family ILIKE %(family)s")
         params["family"] = f"%{family}%"
     if q:
-        where.append("(p.canonical_name ILIKE %(q)s OR p.family ILIKE %(q)s OR p.notes ILIKE %(q)s)")
+        where.append(
+            "(p.canonical_name ILIKE %(q)s OR p.vendor_entity_name ILIKE %(q)s OR p.family ILIKE %(q)s "
+            "OR p.variant ILIKE %(q)s OR p.notes ILIKE %(q)s)"
+        )
         params["q"] = f"%{q}%"
     where_sql = " AND ".join(where)
+    params["offset"] = (page - 1) * limit
     rows = _fetchall(
-        _PAYLOAD_ROWS_WITH_COUNTS_SQL.format(where=where_sql) + " LIMIT %(limit)s",
+        _PAYLOAD_ROWS_WITH_COUNTS_SQL.format(where=where_sql) + " LIMIT %(limit)s OFFSET %(offset)s",
         params,
     )
     # F39 (SOL-AUDIT-2026-09-24.md): the count used to ignore every filter above (`category`,
     # `vendor`, `family`, `q`) and always report the WHOLE table's size -- reusing the same
     # WHERE/params as the row query is the only way `total` and `payloads` agree.
     total_row = _fetchone(f"SELECT count(*) AS c FROM payloads p WHERE {where_sql}", params)
-    return {"payloads": rows, "total": (total_row or {}).get("c", len(rows))}
+    total = (total_row or {}).get("c", len(rows))
+    return {
+        "payloads": rows,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        # R06/F33: lets the UI render a "load more"/pager without a second round trip to compute it.
+        "has_more": (page - 1) * limit + len(rows) < total,
+    }
 
 
 @router.get("/payloads/facets")
@@ -111,9 +133,16 @@ def payload_facets(category: str | None = Query(None)) -> dict[str, Any]:
     category_rows = _fetchall(
         "SELECT DISTINCT category FROM payloads WHERE category IS NOT NULL ORDER BY category"
     )
+    # R09 (SOL-REVIEW2-2026-09-24): an unfiltered, always-true "does the table have ANY rows at
+    # all" signal for the UI's "database empty" vs. "no matches for this filter" decision --
+    # deriving that from facet VALUES (as the UI used to) is wrong whenever every existing row has
+    # a null vendor/category (both facet queries filter `IS NOT NULL`), which would report zero
+    # facets even though the table is non-empty.
+    total_row = _fetchone("SELECT count(*) AS c FROM payloads")
     return {
         "vendors": [r["vendor_entity_name"] for r in vendor_rows],
         "categories": [r["category"] for r in category_rows],
+        "total": (total_row or {}).get("c", 0),
     }
 
 

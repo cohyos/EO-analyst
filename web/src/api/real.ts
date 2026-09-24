@@ -1765,6 +1765,9 @@ export const realApi: ApiClient = {
     const raw = await request<{
       patents?: Partial<PatentRecord>[] | null;
       total?: number;
+      page?: number;
+      limit?: number;
+      has_more?: boolean;
     }>(
       `/api/patents${qs({
         assignee: query.assignee,
@@ -1773,11 +1776,15 @@ export const realApi: ApiClient = {
         min_value_score: query.min_value_score,
         q: query.q,
         limit: query.limit,
+        page: query.page,
       })}`,
     );
     return {
       patents: arr(raw?.patents).map(normalizePatentRecord),
       total: raw?.total ?? 0,
+      page: raw?.page,
+      limit: raw?.limit,
+      has_more: raw?.has_more,
     };
   },
   getPatentsStatus: async () => request<PatentsStatusResponse>("/api/patents/status"),
@@ -1793,7 +1800,7 @@ export const realApi: ApiClient = {
     ).map(normalizePatentSurveyCard),
   getPatentFacets: async () => {
     const raw = await request<Partial<PatentFacetsResponse> | null>("/api/patents/facets");
-    return { assignees: arr(raw?.assignees), subdomains: arr(raw?.subdomains) };
+    return { assignees: arr(raw?.assignees), subdomains: arr(raw?.subdomains), total: raw?.total };
   },
   createPatentSurvey: async (topic: string) =>
     // Builds synchronously in-request when it finishes quickly enough, else falls back to a
@@ -1809,12 +1816,25 @@ export const realApi: ApiClient = {
     const raw = await request<{
       payloads?: Partial<PayloadRecord>[] | null;
       total?: number;
+      page?: number;
+      limit?: number;
+      has_more?: boolean;
     }>(
-      `/api/payloads${qs({ category: query.category, vendor: query.vendor, family: query.family, q: query.q, limit: query.limit })}`,
+      `/api/payloads${qs({
+        category: query.category,
+        vendor: query.vendor,
+        family: query.family,
+        q: query.q,
+        limit: query.limit,
+        page: query.page,
+      })}`,
     );
     return {
       payloads: arr(raw?.payloads).map(normalizePayloadRecord),
       total: raw?.total ?? 0,
+      page: raw?.page,
+      limit: raw?.limit,
+      has_more: raw?.has_more,
     };
   },
   getPayload: async (id: number) => request<PayloadDetailResponse>(`/api/payloads/${id}`),
@@ -1825,7 +1845,7 @@ export const realApi: ApiClient = {
     const raw = await request<Partial<PayloadFacetsResponse> | null>(
       `/api/payloads/facets${qs({ category })}`,
     );
-    return { vendors: arr(raw?.vendors), categories: arr(raw?.categories) };
+    return { vendors: arr(raw?.vendors), categories: arr(raw?.categories), total: raw?.total };
   },
 
   // A12 (מעקב טכנולוגי, 2026-09-06): "רדאר טכנולוגי".

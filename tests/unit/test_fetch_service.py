@@ -256,6 +256,147 @@ class TestStoreItemStats:
 
 
 # --------------------------------------------------------------------------
+# R04 (SOL-REVIEW2-2026-09-24, round 3): a redirect's canonical_url is only trusted as identity
+# when it's not blocked content, not a login/consent/boilerplate landing page, and stays on the
+# SAME registrable domain -- see `_redirect_identity_is_trusted`. `insert_item` itself (R04's other
+# half, tested against real PostgreSQL in test_insert_item_upsert_postgres.py) applies whatever
+# canonical_url it's given independent of content-quality acceptance; this class only covers what
+# `_store_item` decides to hand it in the first place.
+# --------------------------------------------------------------------------
+
+
+class TestRedirectIdentityTrust:
+    def test_same_registrable_domain_redirect_is_trusted(self, monkeypatch):
+        """The common, legitimate case R04 restores: same-site redirect (e.g. a CMS moving a
+        slug), full/clean content -- must still be offered as canonical_url."""
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(21, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/old-slug",
+            html_text=_SAMPLE_HTML,
+            stats=stats,
+            final_url="https://example.com/new-slug",
+        )
+
+        assert captured["canonical_url"] == "https://example.com/new-slug"
+
+    def test_cross_registrable_domain_redirect_is_not_trusted(self, monkeypatch):
+        """A redirect that lands on a DIFFERENT site entirely (a shortlink, a hijacked page, an
+        unrelated outlet) must never become this row's canonical identity, however clean its
+        content looks -- the suspect-redirect case R04 explicitly calls out."""
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(22, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/short-link",
+            html_text=_SAMPLE_HTML,
+            stats=stats,
+            final_url="https://not-example.test/real-article",
+        )
+
+        assert captured["canonical_url"] is None
+
+    def test_blocked_redirect_target_is_not_trusted(self, monkeypatch):
+        """A redirect onto a WAF/anti-bot challenge page must not become canonical identity --
+        N09's original case, still enforced here (defense-in-depth alongside insert_item's own
+        rank-based gate)."""
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(23, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        blocked_html = "<html><body>Please verify you are human. Checking your browser...</body></html>"
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/article",
+            html_text=blocked_html,
+            stats=stats,
+            http_status=403,
+            final_url="https://example.com/are-you-a-robot",
+        )
+
+        assert captured["canonical_url"] is None
+
+    def test_login_boilerplate_redirect_target_is_not_trusted(self, monkeypatch):
+        """A redirect landing on a login/consent/boilerplate path (same site, but not an article)
+        must not become canonical identity."""
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(24, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/article",
+            html_text=_SAMPLE_HTML,
+            stats=stats,
+            final_url="https://example.com/login?next=/article",
+        )
+
+        assert captured["canonical_url"] is None
+
+
+class TestRedirectIdentityIsTrustedHelper:
+    def test_rejects_is_blocked(self):
+        assert not service._redirect_identity_is_trusted(
+            original_url="https://example.com/a",
+            canonical_url="https://example.com/b",
+            is_blocked=True,
+        )
+
+    def test_rejects_boilerplate_target(self):
+        assert not service._redirect_identity_is_trusted(
+            original_url="https://example.com/a",
+            canonical_url="https://example.com/cookie-policy",
+            is_blocked=False,
+        )
+
+    def test_rejects_cross_domain(self):
+        assert not service._redirect_identity_is_trusted(
+            original_url="https://example.com/a",
+            canonical_url="https://other.test/a",
+            is_blocked=False,
+        )
+
+    def test_accepts_same_domain_clean(self):
+        assert service._redirect_identity_is_trusted(
+            original_url="https://example.com/a",
+            canonical_url="https://example.com/b",
+            is_blocked=False,
+        )
+
+    def test_accepts_www_stripped_same_domain(self):
+        assert service._redirect_identity_is_trusted(
+            original_url="https://www.example.com/a",
+            canonical_url="https://example.com/b",
+            is_blocked=False,
+        )
+
+
+# --------------------------------------------------------------------------
 # F36: URL identity normalization
 # --------------------------------------------------------------------------
 

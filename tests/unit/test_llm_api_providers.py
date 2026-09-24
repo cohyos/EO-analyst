@@ -198,6 +198,67 @@ class TestAnthropicChat:
         with pytest.raises(ApiProviderError, match="malformed"):
             AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
 
+    @respx.mock
+    def test_string_token_count_raises_api_provider_error(self, monkeypatch):
+        """SOL-REVIEW2-2026-09-24 F40/F26 remaining gap: `usage` itself is a dict (passes the
+        container check above), but an individual field inside it is a string, not a number --
+        `int("abc")` used to happen in the bare `return ProviderResult(...)` expression, OUTSIDE
+        this method's `try/except`, raising a bare `ValueError` that is not one of
+        `eoa.llm.chain.FALLBACK_EXCEPTIONS`."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "content": [{"type": "text", "text": "hi"}],
+                    "usage": {"input_tokens": "not-a-number", "output_tokens": 4},
+                },
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_negative_token_count_raises_api_provider_error(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "content": [{"type": "text", "text": "hi"}],
+                    "usage": {"input_tokens": 10, "output_tokens": -1},
+                },
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_next_leg_is_called_after_malformed_usage(self, monkeypatch):
+        """The whole point of converting the raw exception into `ApiProviderError`: it is caught
+        by `eoa.llm.chain.run_chain`'s `FALLBACK_EXCEPTIONS` tuple, so the chain moves on instead
+        of aborting. Verify the exception type directly participates in that tuple."""
+        from eoa.llm.chain import FALLBACK_EXCEPTIONS
+
+        assert issubclass(ApiProviderError, FALLBACK_EXCEPTIONS)
+
+    @respx.mock
+    def test_none_token_count_defaults_to_zero_not_malformed(self, monkeypatch):
+        """A missing/None count is legitimate (some responses omit a field entirely) and must
+        NOT be treated as malformed -- only a wrong type or a negative value is."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "content": [{"type": "text", "text": "hi"}],
+                    "usage": {"input_tokens": None, "output_tokens": 4},
+                },
+            )
+        )
+        result = AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+        assert result.usage == {"input_tokens": 0, "output_tokens": 4}
+
 
 class TestGeminiChat:
     @respx.mock
@@ -257,6 +318,41 @@ class TestGeminiChat:
                 json={
                     "candidates": [{"content": {"parts": [{"text": "PONG"}]}}],
                     "usageMetadata": "not-an-object",
+                },
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "ping"}])
+
+    @respx.mock
+    def test_string_token_count_raises_api_provider_error(self, monkeypatch):
+        """SOL-REVIEW2-2026-09-24 F26 remaining gap: see the identical Anthropic test above."""
+        monkeypatch.setenv("GEMINI_API_KEY", "gk-x")
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "candidates": [{"content": {"parts": [{"text": "PONG"}]}}],
+                    "usageMetadata": {"promptTokenCount": "seven", "candidatesTokenCount": 3},
+                },
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "ping"}])
+
+    @respx.mock
+    def test_negative_token_count_raises_api_provider_error(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "gk-x")
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "candidates": [{"content": {"parts": [{"text": "PONG"}]}}],
+                    "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": -3},
                 },
             )
         )
@@ -345,6 +441,57 @@ class TestOpenAIChat:
         respx.post("https://api.openai.com/v1/chat/completions").mock(
             return_value=httpx.Response(
                 200, json={"choices": [{"message": {"content": "PONG"}}], "usage": ["not", "an", "object"]}
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_string_token_count_raises_api_provider_error(self, monkeypatch):
+        """SOL-REVIEW2-2026-09-24 F26 remaining gap: see the identical Anthropic test above."""
+        monkeypatch.setenv("OPENAI_API_KEY", "ok-x")
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "PONG"}}],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": "two"},
+                },
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_negative_token_count_raises_api_provider_error(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "ok-x")
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "PONG"}}],
+                    "usage": {"prompt_tokens": -6, "completion_tokens": 2},
+                },
+            )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_non_string_content_raises_api_provider_error(self, monkeypatch):
+        """SOL-REVIEW2-2026-09-24 F26 remaining gap: OpenAI's `message.content` is passed through
+        with no type check at the extraction point (`.get("content", "") or ""` does not coerce a
+        non-empty non-string value, e.g. a list of multimodal content blocks) -- it used to reach
+        `strip_code_fences(content)` in the bare `return ProviderResult(...)` expression, OUTSIDE
+        this method's `try/except`, and raise a bare `AttributeError` (`list has no .strip()`)."""
+        monkeypatch.setenv("OPENAI_API_KEY", "ok-x")
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": ["not", "a", "string"]}}],
+                    "usage": {},
+                },
             )
         )
         with pytest.raises(ApiProviderError, match="malformed"):

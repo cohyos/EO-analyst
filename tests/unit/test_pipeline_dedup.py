@@ -174,6 +174,63 @@ class TestCandidatePoolLookbackAndReplace:
         # leftover stale duplicate entry for id 3 would produce a match here.
         assert committed[4] is None
 
+    def test_earlier_item_does_not_match_a_later_pending_items_stale_vector(self, monkeypatch):
+        """E01/N06 (SOL-REVIEW2-2026-09-24, round 3): the discriminator the round-2 test above
+        misses, per the review's own note -- it only proved a pending item's stale entry gets
+        REPLACED once that item's own turn in the loop arrives; it never exercised an EARLIER item
+        (processed BEFORE the pending item's own turn) matching against that still-stale entry.
+
+        Item 20 is processed FIRST in this run and embeds to a vector that's near-identical to item
+        21's STALE, pre-reset vector (already present in the initial DB-loaded pool, simulating
+        F09's quality-upgrade reprocessing: item 21's `items.embedding` still holds its OLD content's
+        vector even though its `processed_stages` was reset). Item 21 is processed SECOND and gets a
+        fresh vector orthogonal to its own stale one. On code that only removes a pending item's
+        stale entry at ITS OWN turn (the round-2 fix), item 20 -- scored BEFORE item 21's turn --
+        still sees item 21's stale entry in the pool and wrongly matches it. The round-3 fix (drop
+        every pending id from the pool up front, before the batch loop starts) must prevent this."""
+        monkeypatch.setattr(dedup, "settings", lambda: _cfg(lookback_days=7))
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        stale_vec_21 = [1.0, 0.0, 0.0]
+        item20_vec = [0.99, 0.01, 0.0]  # near-identical to item 21's STALE vector
+        fresh_vec_21 = [0.0, 1.0, 0.0]  # item 21's genuinely-changed current content
+
+        items = [
+            {
+                "id": 20,
+                "title": "processed first",
+                "clean_text": "body",
+                "security_status": "clean",
+                "published_at": now,
+                "created_at": now,
+            },
+            {
+                "id": 21,
+                "title": "pending re-embed, stale entry already in the pool",
+                "clean_text": "body",
+                "security_status": "clean",
+                "published_at": now,
+                "created_at": now,
+            },
+        ]
+        monkeypatch.setattr(dedup, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
+        # Item 21's stale entry is already in the DB-loaded pool -- BEFORE its own turn this run.
+        monkeypatch.setattr(
+            dedup, "load_candidate_vectors", lambda days: [{"id": 21, "embedding": stale_vec_21}]
+        )
+        vecs_by_call = iter([[item20_vec], [fresh_vec_21]])  # batch_size=1 -- one embed() call per item
+        monkeypatch.setattr(dedup, "embed", lambda texts: next(vecs_by_call))
+
+        committed = {}
+        monkeypatch.setattr(
+            dedup, "commit_dedup_result", lambda item_id, v, dedup_of, stage: committed.update({item_id: dedup_of})
+        )
+
+        dedup.run_dedup(limit=10, batch_size=1)
+
+        # Item 20 must NOT match item 21's stale, not-yet-replaced vector -- only a candidate pool
+        # that still held id 21's pre-reset entry at item 20's scoring time would produce a match.
+        assert committed[20] is None
+
 
 # --------------------------------------------------------------------------
 # F14 (missing test, SOL-REVIEW-2026-09-24): cross-language pair dating uses immutable

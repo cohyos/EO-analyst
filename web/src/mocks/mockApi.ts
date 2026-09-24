@@ -1270,9 +1270,19 @@ export const mockApi: ApiClient = {
           (p.abstract ?? "").toLowerCase().includes(q),
       );
     }
+    // R06/F33 (SOL-REVIEW2-2026-09-24): 1-based `page` + `limit` -> a slice, mirroring the real
+    // `GET /api/patents`'s LIMIT/OFFSET so `PatentsPage`'s "load more" control behaves the same
+    // way against the mock backend as against Postgres.
+    const limit = query.limit ?? 100;
+    const page = Math.max(query.page ?? 1, 1);
+    const offset = (page - 1) * limit;
+    const pageRows = filtered.slice(offset, offset + limit);
     return delay({
-      patents: filtered.slice(0, query.limit ?? 100),
+      patents: pageRows,
       total: filtered.length,
+      page,
+      limit,
+      has_more: offset + pageRows.length < filtered.length,
     });
   },
   getPatentsStatus: async (): Promise<PatentsStatusResponse> =>
@@ -1299,6 +1309,7 @@ export const mockApi: ApiClient = {
     delay({
       assignees: [...new Set(mockPatents.flatMap((p) => p.assignees))].sort(),
       subdomains: [...new Set(mockPatents.map((p) => p.subdomain).filter((s): s is string => !!s))].sort(),
+      total: mockPatents.length,
     }),
   createPatentSurvey: async (topic: string): Promise<PatentSurveyCreateResponse> =>
     delay({
@@ -1331,16 +1342,32 @@ export const mockApi: ApiClient = {
       filtered = filtered.filter((p) => (p.family ?? "").toLowerCase().includes(f));
     }
     if (query.q) {
+      // R06 (SOL-REVIEW2-2026-09-24): same field set as the real server (canonical_name/
+      // vendor_entity_name/family/variant/notes) and the client tree filter
+      // (`@/lib/payloadFamilies`'s `filterPayloadTree`/`variantMatches`) -- keeping all three
+      // aligned is the actual fix; a mismatch anywhere in that triangle is what let a
+      // server-matched row be silently dropped by client re-filtering.
       const q = query.q.toLowerCase();
       filtered = filtered.filter(
         (p) =>
           p.canonical_name.toLowerCase().includes(q) ||
-          (p.family ?? "").toLowerCase().includes(q),
+          (p.vendor_entity_name ?? "").toLowerCase().includes(q) ||
+          (p.family ?? "").toLowerCase().includes(q) ||
+          (p.variant ?? "").toLowerCase().includes(q) ||
+          (p.notes ?? "").toLowerCase().includes(q),
       );
     }
+    // R06/F33: see the identical `page`/`limit` slice in `getPatents` above.
+    const limit = query.limit ?? 200;
+    const page = Math.max(query.page ?? 1, 1);
+    const offset = (page - 1) * limit;
+    const pageRows = filtered.slice(offset, offset + limit);
     return delay({
-      payloads: filtered.slice(0, query.limit ?? 200),
+      payloads: pageRows,
       total: filtered.length,
+      page,
+      limit,
+      has_more: offset + pageRows.length < filtered.length,
     });
   },
   getPayload: async (id: number): Promise<PayloadDetailResponse> => {
@@ -1365,6 +1392,7 @@ export const mockApi: ApiClient = {
         ...new Set(scoped.map((p) => p.vendor_entity_name).filter((v): v is string => !!v)),
       ].sort(),
       categories: [...new Set(mockPayloads.map((p): string => p.category))].sort(),
+      total: mockPayloads.length,
     });
   },
   getPayloadDiff: async (

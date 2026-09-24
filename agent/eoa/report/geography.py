@@ -265,7 +265,10 @@ def collect_by_country(
     where = ["1 = 1"]
     params: dict[str, Any] = {}
     if period_start is not None and period_end is not None:
-        where.append("COALESCE(i.published_at, i.created_at)::date BETWEEN %(start)s AND %(end)s")
+        where.append(
+            "(COALESCE(i.published_at, i.created_at) AT TIME ZONE 'Asia/Jerusalem')::date "
+            "BETWEEN %(start)s AND %(end)s"
+        )
         params["start"] = period_start
         params["end"] = period_end
     rows = _fetchall(

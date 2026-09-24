@@ -139,6 +139,41 @@ describe("filterPayloadTree", () => {
   it("is case-insensitive", () => {
     expect(filterPayloadTree(tree, "TOPLITE", "").vendor_count).toBe(1);
   });
+
+  // R06 (SOL-REVIEW2-2026-09-24 review): a payload matched by the SERVER's `q` filter only via
+  // its `notes` text (`eoa.api.routes.payloads.list_payloads` searches notes) must not be dropped
+  // by this client-side re-filter -- before this fix, `variantMatches` only checked
+  // canonical_name/variant, so a notes-only match would vanish from the tree even though the
+  // server had already returned it as a hit.
+  it("matches on notes text, the same field the server's q filter searches", () => {
+    const notesTree = buildPayloadTree([
+      makePayload({
+        id: 3,
+        canonical_name: "Generic EO Pod",
+        vendor_entity_name: "Acme",
+        family: "Generic",
+        variant: "Generic EO Pod",
+        notes: "Also marketed under the codename Nightjar in export literature.",
+      }),
+    ]);
+    const result = filterPayloadTree(notesTree, "nightjar", "");
+    expect(result.vendor_count).toBe(1);
+    expect(result.vendors[0].vendor).toBe("Acme");
+  });
+
+  it("a notes-only match does not resurrect an unrelated variant with no matching field", () => {
+    const notesTree = buildPayloadTree([
+      makePayload({
+        id: 4,
+        canonical_name: "Unrelated Widget",
+        vendor_entity_name: "Other Vendor",
+        family: "Unrelated",
+        variant: "Unrelated Widget",
+        notes: "Nothing to do with the search term.",
+      }),
+    ]);
+    expect(filterPayloadTree(notesTree, "nightjar", "").payload_count).toBe(0);
+  });
 });
 
 describe("expandedKeysForSearch / defaultExpandedKeys", () => {

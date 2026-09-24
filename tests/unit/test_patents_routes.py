@@ -115,6 +115,60 @@ class TestListPatentsRouteTotal:
         assert count_params["min_value_score"] == 50
 
 
+class TestListPatentsRoutePagination:
+    """R06/F33 (SOL-REVIEW2-2026-09-24 review): `page`/`limit` -> LIMIT/OFFSET, same 1-based
+    `page` convention as `GET /api/tech/items` (`eoa.api.services.list_tech_items`)."""
+
+    def test_page_2_applies_the_offset(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM patents WHERE": {"c": 5}},
+            fetchall_responses={"SELECT * FROM patents WHERE": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.patents.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/patents", params={"limit": 2, "page": 2})
+        assert r.status_code == 200
+        body = r.json()
+        assert body == {"patents": [], "total": 5, "page": 2, "limit": 2, "has_more": True}
+
+        row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        assert "OFFSET %(offset)s" in row_query
+        assert row_params["offset"] == 2  # (page - 1) * limit == (2 - 1) * 2
+
+    def test_has_more_is_false_on_the_last_page(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
+        rows = [{"id": 1, "assignees": ["Acme"], "cpc": [], "value_score": 10}]
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM patents WHERE": {"c": 1}},
+            fetchall_responses={"SELECT * FROM patents WHERE": rows},
+        )
+        monkeypatch.setattr("eoa.api.routes.patents.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/patents", params={"limit": 200, "page": 1})
+        assert r.json()["has_more"] is False
+
+
+class TestPatentFacetsTotal:
+    """R09 (SOL-REVIEW2-2026-09-24 review): an unfiltered existence count so the UI's "database
+    empty" decision can't be fooled by every patent having a null assignee AND null subdomain
+    (which would make both facet VALUE lists empty even though the table has rows)."""
+
+    def test_facets_response_carries_an_unfiltered_total(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM patents": {"c": 9}},
+            fetchall_responses={},
+        )
+        monkeypatch.setattr("eoa.api.routes.patents.connection", lambda: _FakeConnection(cur))
+
+        r = client.get("/api/patents/facets")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 9
+        assert body["assignees"] == []
+        assert body["subdomains"] == []
+
+
 class TestPatentsHeatmapCrossProduct:
     def test_cell_query_uses_cross_join_lateral_not_parallel_unnest(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

@@ -20,6 +20,12 @@ def _fake_fetchall(rows_by_call):
     return _fn
 
 
+_TENDER_WINDOW_SQL = (
+    "COALESCE(deadline, (published_at AT TIME ZONE 'Asia/Jerusalem')::date, "
+    "(created_at AT TIME ZONE 'Asia/Jerusalem')::date) >="
+)
+
+
 class TestListTendersDefaultView:
     def test_default_status_is_open_and_unknown_only(self):
         with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
@@ -32,7 +38,7 @@ class TestListTendersDefaultView:
         with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
             services.list_tenders()
         query, params = mock_fetchall.call_args_list[0].args
-        assert "COALESCE(deadline, published_at::date, created_at::date) >=" in query
+        assert _TENDER_WINDOW_SQL in query
         assert params["since_days"] == services.DEFAULT_SINCE_DAYS
 
     def test_include_closed_widens_default_statuses(self):
@@ -54,21 +60,21 @@ class TestListTendersDefaultView:
             services.list_tenders(include_closed=True)
         query, params = mock_fetchall.call_args_list[0].args
         assert "since_days" not in params
-        assert "COALESCE(deadline, published_at::date, created_at::date) >=" not in query
+        assert _TENDER_WINDOW_SQL not in query
 
     def test_include_archived_without_explicit_since_days_lifts_the_window(self):
         with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
             services.list_tenders(include_archived=True)
         query, params = mock_fetchall.call_args_list[0].args
         assert "since_days" not in params
-        assert "COALESCE(deadline, published_at::date, created_at::date) >=" not in query
+        assert _TENDER_WINDOW_SQL not in query
 
     def test_include_closed_with_explicit_since_days_still_applies_it(self):
         """An explicit since_days always wins, include_* or not."""
         with patch("eoa.api.services._fetchall", side_effect=_fake_fetchall([[], []])) as mock_fetchall:
             services.list_tenders(include_closed=True, since_days=30)
         query, params = mock_fetchall.call_args_list[0].args
-        assert "COALESCE(deadline, published_at::date, created_at::date) >=" in query
+        assert _TENDER_WINDOW_SQL in query
         assert params["since_days"] == 30
 
     def test_explicit_status_bypasses_default_set_and_since_days(self):

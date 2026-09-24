@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 
+import httpcore
 import httpx
 import pytest
 import respx
@@ -249,33 +250,72 @@ async def test_robots_fetch_allowed_when_connection_matches_pinned_ips() -> None
     assert "/article" in transport.requested_paths
 
 
-class _RecordingInnerTransport(httpx.AsyncBaseTransport):
-    """Stands in for the real `httpx.AsyncHTTPTransport` inside `_PinnedIPTransport` -- records
-    the exact host `_PinnedIPTransport` actually asked it to connect to (it never itself
-    re-resolves a hostname), so a test can prove the connection target."""
+class _FakeWireStream(httpcore.AsyncNetworkStream):
+    """A minimal fake `httpcore` wire-level stream: serves one canned HTTP/1.1 response and
+    remembers which literal address `_PinnedNetworkBackend`/`_FakeNetworkBackend` actually dialed
+    to create it -- letting tests drive `_PinnedIPTransport` through `httpcore`'s REAL connection
+    pool (the part that partitions/reuses connections, i.e. the part R01 is about) with no real
+    network I/O."""
 
-    def __init__(self) -> None:
+    def __init__(self, response_bytes: bytes, dialed_ip: str) -> None:
+        self._buffer = response_bytes
+        self._dialed_ip = dialed_ip
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        chunk, self._buffer = self._buffer[:max_bytes], self._buffer[max_bytes:]
+        return chunk
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        return self  # no real TLS in tests; the transport layer isn't what's under test here
+
+    def get_extra_info(self, info: str):
+        return (self._dialed_ip, 443) if info == "server_addr" else None
+
+
+def _canned_response(body: bytes = b"<html>ok</html>") -> bytes:
+    return (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/html\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+    )
+
+
+class _FakeNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Stands in for the real network backend `_PinnedNetworkBackend` wraps -- records the exact
+    `host` argument every `connect_tcp` call actually received (the one `_PinnedNetworkBackend`
+    is responsible for replacing with the validated IP when a pin is active), with zero real
+    network I/O."""
+
+    def __init__(self, body: bytes = b"<html>ok</html>") -> None:
+        self._body = body
         self.dialed_hosts: list[str] = []
-        self.sni_hostnames: list[str | None] = []
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self.dialed_hosts.append(request.url.host)
-        self.sni_hostnames.append(request.extensions.get("sni_hostname"))
-        return httpx.Response(200, content=b"<html>ok</html>", request=request)
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.dialed_hosts.append(host)
+        return _FakeWireStream(_canned_response(self._body), dialed_ip=host)
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise NotImplementedError
+
+    async def sleep(self, seconds: float) -> None:
+        return None
 
 
 async def test_pinned_transport_dials_the_validated_ip_not_the_hostname() -> None:
-    """F01 (SOL-REVIEW-2026-09-24 round 2): the review's own required test -- prove the connection
-    is actually DIALED at the validated IP, not merely checked after connecting. A rebound DNS
-    answer for `example.test` (imagined here as some private address the round-1 code would have
-    connected to and only rejected afterward) is never even looked up: `_PinnedIPTransport`
-    replaces the request URL's host with the already-validated IP literal before the inner
-    transport -- which would be the one making the real TCP/TLS connection -- ever sees the
-    request, for both the robots.txt fetch and the article fetch. This fails against the old
-    (round-1) code, where the inner transport would have been asked to connect to the hostname
-    `example.test` itself (the private-IP rebinding gap the review's F01 evidence quotes)."""
-    inner = _RecordingInnerTransport()
-    transport = _PinnedIPTransport(inner)
+    """F01 (SOL-REVIEW2-2026-09-24) -- the review's own required test, re-targeted one layer
+    deeper than round 2's (transport-level) version: prove the connection is actually DIALED at
+    the validated IP, not merely checked after connecting, by inspecting what
+    `_PinnedNetworkBackend` asks the real `httpcore` NETWORK backend to connect to. A rebound DNS
+    answer for `example.test` is never even looked up: no `connect_tcp` call ever names the
+    hostname when a pin is active."""
+    backend = _FakeNetworkBackend()
+    transport = _PinnedIPTransport(_network_backend=backend)
     client = httpx.AsyncClient(transport=transport)
     try:
         page = await fetch_page(
@@ -285,26 +325,22 @@ async def test_pinned_transport_dials_the_validated_ip_not_the_hostname() -> Non
         await client.aclose()
 
     assert "ok" in page.html
-    # Every connection actually attempted (robots.txt + the article) dialed the pinned IP literal
-    # -- never the hostname (where a rebound DNS answer would otherwise be resolved) and never any
-    # private/internal address.
-    assert inner.dialed_hosts  # sanity: at least one connection was actually made
-    for host in inner.dialed_hosts:
+    assert backend.dialed_hosts  # sanity: at least one connection was actually made
+    for host in backend.dialed_hosts:
         assert host == "93.184.216.34"
         assert host != "example.test"
         assert not ipaddress.ip_address(host).is_private
-    # TLS SNI/certificate verification still uses the real hostname, not the dialed IP.
-    assert inner.sni_hostnames and all(sni == "example.test" for sni in inner.sni_hostnames)
-    # Callers still see the original hostname/URL, never the dialed IP.
+    # Callers still see the original hostname/URL, never the dialed IP -- the request URL itself
+    # was never rewritten (that's what makes per-hostname pooling below still work).
     assert page.final_url == "https://example.test/article"
 
 
 async def test_pinned_transport_passes_through_when_no_pin_given() -> None:
-    """No `"pinned_ip"` extension on the request (e.g. a caller with no `pin_ips`) -- the request
-    reaches the inner transport completely unchanged, exactly as if `_PinnedIPTransport` weren't
-    there at all."""
-    inner = _RecordingInnerTransport()
-    transport = _PinnedIPTransport(inner)
+    """No `"pinned_ip"` extension on the request (e.g. a caller with no `pin_ips`) -- `connect_tcp`
+    is asked to connect the real HOSTNAME, exactly as if `_PinnedIPTransport`/`_PinnedNetworkBackend`
+    weren't there at all (ordinary DNS resolution downstream)."""
+    backend = _FakeNetworkBackend()
+    transport = _PinnedIPTransport(_network_backend=backend)
     client = httpx.AsyncClient(transport=transport)
     try:
         page = await fetch_page("https://example.test/article", client=client)
@@ -312,7 +348,100 @@ async def test_pinned_transport_passes_through_when_no_pin_given() -> None:
         await client.aclose()
 
     assert "ok" in page.html
-    assert all(host == "example.test" for host in inner.dialed_hosts)
+    assert backend.dialed_hosts and all(host == "example.test" for host in backend.dialed_hosts)
+
+
+async def test_two_hosts_on_the_same_ip_never_share_a_connection() -> None:
+    """R01 (SOL-REVIEW2-2026-09-24, must-fix): the actual regression this round's fix targets.
+    Two different hostnames that happen to resolve/pin to the SAME IP address must never share a
+    pooled connection -- a TLS connection verified for hostname A's certificate must never be
+    reused to serve a request the caller believes went to hostname B. `httpcore.AsyncConnectionPool`
+    partitions strictly by *origin* (`AsyncHTTPConnection.can_handle_request`: `origin ==
+    self._origin`, where `origin` comes from the REQUEST URL, never from the dialed address) --
+    this test proves that origin is never collapsed to the dialed IP by inspecting the pool's own
+    connection objects after both fetches: each one's origin host is the real hostname it was
+    opened for, the two hosts got two disjoint sets of connections, and neither origin is ever the
+    IP itself. This fails against the round-2 code, which rewrote the request URL's host to the
+    IP before handing it to httpcore -- collapsing both hosts onto ONE origin/pool bucket keyed by
+    `203.0.113.9`, which is exactly the cross-host connection reuse this test forbids."""
+    backend = _FakeNetworkBackend()
+    transport = _PinnedIPTransport(_network_backend=backend)
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        page_a = await fetch_page(
+            "https://host-a.example/x", client=client, pin_ips={"203.0.113.9"}
+        )
+        page_b = await fetch_page(
+            "https://host-b.example/y", client=client, pin_ips={"203.0.113.9"}
+        )
+    finally:
+        origins = {c._origin.host.decode() for c in transport._pool._connections}  # type: ignore[attr-defined]
+        await client.aclose()
+
+    assert "ok" in page_a.html
+    assert "ok" in page_b.html
+    # Every `connect_tcp` call actually dialed the pinned IP literal (F01) ...
+    assert backend.dialed_hosts and all(host == "203.0.113.9" for host in backend.dialed_hosts)
+    # ... yet the pool tracked TWO disjoint origins for it, one per real hostname -- never one
+    # shared origin keyed by the IP (R01's regression) and never a connection whose origin *is*
+    # the dialed IP.
+    assert origins == {"host-a.example", "host-b.example"}
+
+
+async def test_redirect_to_a_host_that_fails_validation_is_never_connected() -> None:
+    """R01/F01 (SOL-REVIEW2-2026-09-24): `fetch_page`'s manual-redirect loop calls
+    `validate_redirect(next_url)` (in production, `assert_public_http_url`, which RAISES on
+    rejection) before requesting a hop -- so a redirect into a host that fails validation must
+    raise out of `fetch_page` without ever placing a connection to it."""
+    class _RedirectOnceBackend(httpcore.AsyncNetworkBackend):
+        """Serves one 302-to-a-blocked-host response for the start URL; a connection to the
+        blocked host would be a test failure, so it's simply never wired up as a valid target."""
+
+        def __init__(self) -> None:
+            self.dialed_hosts: list[str] = []
+
+        async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            self.dialed_hosts.append(host)
+            response = (
+                b"HTTP/1.1 302 Found\r\n"
+                b"Location: https://blocked.example/private\r\n"
+                b"Content-Length: 0\r\n\r\n"
+            )
+            return _FakeWireStream(response, dialed_ip=host)
+
+        async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+            raise NotImplementedError
+
+        async def sleep(self, seconds: float) -> None:
+            return None
+
+    redirect_backend = _RedirectOnceBackend()
+    transport = _PinnedIPTransport(_network_backend=redirect_backend)
+    client = httpx.AsyncClient(transport=transport)
+
+    def _validate_redirect(next_url: str) -> set[str] | None:
+        if "blocked.example" in next_url:
+            raise FetchError(f"refusing non-public address for {next_url}")
+        return {"203.0.113.9"}
+
+    try:
+        with pytest.raises(FetchError, match="refusing non-public address"):
+            await fetch_page(
+                "https://start.example/go",
+                client=client,
+                pin_ips={"203.0.113.9"},
+                validate_redirect=_validate_redirect,
+            )
+    finally:
+        await client.aclose()
+
+    # Only the start host's validated IP was ever dialed (once for robots.txt, once for the page
+    # itself -- neither call reuses the other's connection, but both target the SAME host) -- the
+    # rejected redirect target (`blocked.example`) was never connected to at all.
+    assert redirect_backend.dialed_hosts and all(
+        host == "203.0.113.9" for host in redirect_backend.dialed_hosts
+    )
+    assert len(redirect_backend.dialed_hosts) == 2
 
 
 async def test_robots_fetch_with_no_pin_ips_is_unchanged() -> None:

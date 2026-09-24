@@ -175,3 +175,84 @@ class TestWeeklyYellowDomainSummaryJerusalemBoundary:
             "the old unanchored query was expected to MISS the boundary item under a UTC "
             f"session (proving the fix matters), but found {rows!r}"
         )
+
+
+class TestGeographyCollectByCountryJerusalemBoundary:
+    """SOL-REVIEW2-2026-09-24 F40 remaining gap: `eoa.report.geography.collect_by_country`
+    (`geography.py:268`) cast `COALESCE(i.published_at, i.created_at)::date` with no `AT TIME
+    ZONE` anchor -- same boundary bug as the weekly/monthly cases above, now fixed to anchor on
+    Asia/Jerusalem before the date cast."""
+
+    _MARKER_TITLE = "F40 geography boundary marker -- do not match on title elsewhere"
+    # A fake, not-a-real-alias ISO-2 code so `normalize_country` buckets this row alone -- the
+    # live DB has hundreds of real 'IL'/'US'/... items, and `collect_by_country` caps
+    # `top_items` per country at 3 (sorted by score DESC), so a same-country insert with no score
+    # could silently sort outside that cap and never appear at all (score is NULL here on
+    # purpose, to test the date/timezone boundary in isolation from scoring).
+    _MARKER_GEOGRAPHY = "zz"
+
+    def _insert_geo_boundary_item(self, pg_conn) -> None:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO items (url, title, geography, published_at) "
+                "VALUES (%(url)s, %(title)s, %(geography)s, %(published_at)s)",
+                {
+                    "url": "https://example.test/f40-geography-boundary-item",
+                    "title": self._MARKER_TITLE,
+                    "geography": self._MARKER_GEOGRAPHY,
+                    "published_at": _BOUNDARY_UTC,
+                },
+            )
+
+    def test_00_30_jerusalem_item_lands_in_september_window_under_utc_session(self, pg_conn) -> None:
+        from eoa.report import geography
+
+        @contextmanager
+        def _fake_connection(timeout: float | None = None):
+            yield pg_conn
+
+        self._insert_geo_boundary_item(pg_conn)
+
+        orig_connection = geography.connection
+        geography.connection = _fake_connection
+        try:
+            data = geography.collect_by_country(dt.date(2026, 9, 1), dt.date(2026, 9, 7))
+        finally:
+            geography.connection = orig_connection
+
+        matching_titles = {
+            item["title"]
+            for entry in data["countries"]
+            for item in entry["top_items"]
+            if item["title"] == self._MARKER_TITLE
+        }
+        assert matching_titles == {self._MARKER_TITLE}, (
+            f"expected the 00:30-Jerusalem boundary item in the Sep 1-7 window, got {data!r}"
+        )
+
+    def test_same_item_is_absent_from_the_august_window_it_would_wrongly_land_in_under_utc(
+        self, pg_conn
+    ) -> None:
+        from eoa.report import geography
+
+        @contextmanager
+        def _fake_connection(timeout: float | None = None):
+            yield pg_conn
+
+        self._insert_geo_boundary_item(pg_conn)
+        orig_connection = geography.connection
+        geography.connection = _fake_connection
+        try:
+            data = geography.collect_by_country(dt.date(2026, 8, 25), dt.date(2026, 8, 31))
+        finally:
+            geography.connection = orig_connection
+
+        matching_titles = {
+            item["title"]
+            for entry in data["countries"]
+            for item in entry["top_items"]
+            if item["title"] == self._MARKER_TITLE
+        }
+        assert matching_titles == set(), (
+            f"the boundary item must NOT appear in the August window, got {data!r}"
+        )

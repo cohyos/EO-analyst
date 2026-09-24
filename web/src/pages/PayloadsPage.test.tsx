@@ -177,4 +177,60 @@ describe("PayloadsPage", () => {
     expect(await screen.findByText("Beyond the cap")).toBeInTheDocument();
     expect(getPayloads).toHaveBeenCalledWith(expect.objectContaining({ vendor: "Rafael" }));
   });
+
+  // R06 (SOL-REVIEW2-2026-09-24 review): a payload the SERVER matched only via its `notes` field
+  // (`eoa.api.routes.payloads.list_payloads` searches notes) must still be visible in the default
+  // tree view -- before this fix, the client's `filterPayloadTree(rawTree, filters.q)` re-filter
+  // only checked canonical_name/variant, so a notes-only server match was silently dropped from
+  // the tree even though `getPayloads` had already returned it.
+  it("a notes-only server match stays visible in tree view (R06)", async () => {
+    const notesMatch = makePayload({
+      id: 5,
+      canonical_name: "Generic EO Pod",
+      vendor_entity_name: "Acme",
+      notes: "Also marketed under the codename Nightjar in export literature.",
+    });
+    getPayloads.mockImplementation((params: { q?: string } = {}) =>
+      Promise.resolve(payloadsResponse(params.q === "Nightjar" ? [notesMatch] : [makePayload()])),
+    );
+    renderPage();
+    await screen.findByText("WESCAM MX-15");
+    fireEvent.change(screen.getByLabelText('חיפוש במטע"דים'), { target: { value: "Nightjar" } });
+    expect(await screen.findByText("Generic EO Pod")).toBeInTheDocument();
+  });
+
+  // R06/F33: server-side "load more" pagination -- a second page's rows must be reachable and
+  // appended to what's already on screen, not replace it.
+  it("a load-more click fetches page 2 and appends its rows", async () => {
+    const page1 = makePayload({ id: 1, canonical_name: "WESCAM MX-15" });
+    const page2 = makePayload({ id: 2, canonical_name: "Rafael Toplite", vendor_entity_name: "Rafael" });
+    getPayloads.mockImplementation((params: { page?: number } = {}) =>
+      Promise.resolve({
+        payloads: params.page === 2 ? [page2] : [page1],
+        total: 2,
+        page: params.page ?? 1,
+        limit: 200,
+        has_more: (params.page ?? 1) === 1,
+      }),
+    );
+    renderPage();
+    await screen.findByText("WESCAM MX-15");
+    const loadMore = await screen.findByRole("button", { name: /טען עוד/ });
+    fireEvent.click(loadMore);
+    expect(await screen.findByText("Rafael Toplite")).toBeInTheDocument();
+    // The first page's row must still be visible -- "load more" appends, it doesn't replace.
+    expect(screen.getByText("WESCAM MX-15")).toBeInTheDocument();
+    expect(getPayloads).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
+  // R09 (SOL-REVIEW2-2026-09-24 review): the "database empty" empty-state must key off the
+  // facets endpoint's unfiltered `total`, not off facet VALUE presence -- a table where every
+  // existing row has a null vendor must not be reported as empty.
+  it("does not show the 'database empty' state when facets.total > 0 but every vendor is null (R09)", async () => {
+    getPayloadFacets.mockResolvedValue(facetsResponse({ vendors: [], categories: [], total: 3 }));
+    getPayloads.mockResolvedValue(payloadsResponse([makePayload({ vendor_entity_name: null })]));
+    renderPage();
+    expect(await screen.findByText("WESCAM MX-15")).toBeInTheDocument();
+    expect(screen.queryByText('לא זוהו מטע"דים עדיין')).not.toBeInTheDocument();
+  });
 });

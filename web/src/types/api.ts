@@ -1331,7 +1331,15 @@ export interface PatentRecord {
 
 export interface PatentsResponse {
   patents: PatentRecord[];
+  /** Total rows matching the CURRENT filter (not the whole table) -- see `has_more`. */
   total: number;
+  // R06/F33 (SOL-REVIEW2-2026-09-24): server-side pagination, same 1-based `page` convention as
+  // `GET /api/tech/items` -- `page`/`limit` echo the request, `has_more` tells the UI whether a
+  // "load more" control has anything left to fetch, without it recomputing `page * limit < total`
+  // itself (and getting the off-by-one wrong).
+  page?: number;
+  limit?: number;
+  has_more?: boolean;
 }
 
 export interface PatentsStatusResponse {
@@ -1344,6 +1352,11 @@ export interface PatentsStatusResponse {
 export interface PatentFacetsResponse {
   assignees: string[];
   subdomains: string[];
+  // R09 (SOL-REVIEW2-2026-09-24): unfiltered "does the table have ANY rows at all" count -- the
+  // UI's "database empty" empty-state must key off this, not off facet-value presence, since a
+  // table where every row has a null assignee/subdomain would otherwise show empty facets despite
+  // having rows. Optional so older mocks/fixtures built before this field keep compiling.
+  total?: number;
 }
 
 export interface PatentHeatmapCell {
@@ -1482,7 +1495,12 @@ export interface PayloadPriceRef {
 
 export interface PayloadsResponse {
   payloads: PayloadRecord[];
+  /** Total rows matching the CURRENT filter (not the whole table) -- see `has_more`. */
   total: number;
+  // R06/F33 (SOL-REVIEW2-2026-09-24): see the identical fields on `PatentsResponse`.
+  page?: number;
+  limit?: number;
+  has_more?: boolean;
 }
 
 export interface PayloadDetailResponse {
@@ -1517,6 +1535,11 @@ export interface PayloadTreeVariant {
   price_ref_count: number;
   latest_spec_date: string | null;
   latest_price_date: string | null;
+  // R06 (SOL-REVIEW2-2026-09-24): carried through so `filterPayloadTree`'s search predicate can
+  // match `notes`, the same field the server's `q` filter already searches
+  // (`eoa.api.routes.payloads.list_payloads`) -- without it, a payload matched server-side only by
+  // its notes text would be dropped from the tree by the client's own re-filter.
+  notes: string | null;
 }
 
 export interface PayloadTreeFamily {
@@ -1550,6 +1573,8 @@ export interface PayloadTreeResponse {
 export interface PayloadFacetsResponse {
   vendors: string[];
   categories: string[];
+  // R09 (SOL-REVIEW2-2026-09-24): see the identical field on `PatentFacetsResponse`.
+  total?: number;
 }
 
 // --- PD-ui (docs/PLAN_PRODUCT_DOSSIER.md): "סקירת שוק עמוקה למוצר" -- product_dossier ----------

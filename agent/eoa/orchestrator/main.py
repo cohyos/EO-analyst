@@ -19,7 +19,8 @@ from apscheduler.triggers.cron import CronTrigger
 from eoa.config import settings
 from eoa.memory.relational import enqueue_job
 from eoa.notify import ntfy
-from eoa.orchestrator.jobs import Worker, enqueue_daily
+from eoa.orchestrator import admission
+from eoa.orchestrator.jobs import Worker
 
 log = structlog.get_logger(__name__)
 
@@ -115,7 +116,12 @@ def build_scheduler() -> BackgroundScheduler:
     tz = ZoneInfo(s.timezone)
     sched = BackgroundScheduler(timezone=tz)
     sched.add_job(
-        lambda: enqueue_daily("full", priority=2),
+        # F31 (SOL-REVIEW2-2026-09-24): through the shared admission gate (`eoa.orchestrator.
+        # admission.admit_daily_run`) instead of a raw `enqueue_daily`/`enqueue_job` call, so this
+        # cron tick and a concurrent API "run now" (or another scheduler tick, e.g. a restart's
+        # `reconcile_missed_night_run`) serialize on the same advisory lock + equivalence check
+        # and can never both enqueue an active `daily_run`/`weekly_run`/`report`.
+        lambda: admission.admit_daily_run("full", priority=2),
         _cron(tz, s.schedule.night_window.start),
         id="daily",
         name="daily run",
@@ -154,7 +160,12 @@ def build_scheduler() -> BackgroundScheduler:
         # (now also treating a merely `queued` daily_run as covered) is the actual correctness
         # guard against a double pipeline run; this priority is defense in depth for the common
         # case, reducing how often that check's rarer "weekly claimed first" branch is exercised.
-        lambda: enqueue_job("weekly_run", {"mode": "full"}, priority=3),
+        # F31 (SOL-REVIEW2-2026-09-24): through `admission.admit_weekly_run` -- the same shared
+        # admission gate as the "daily" cron job above, but scoped to just `weekly_run` itself
+        # (see the module docstring on `eoa.orchestrator.admission` for why it must NOT use the
+        # full daily/weekly/report equivalence closure here: `run_weekly` is designed to coexist
+        # with, and wait on, a separate `daily_run`).
+        lambda: admission.admit_weekly_run("full", priority=3),
         _cron(tz, wk.get("start", "01:00"), day_of_week=wk.get("weekday", "sat")),
         id="weekly",
         coalesce=True,
@@ -301,7 +312,16 @@ def reconcile_missed_night_run() -> None:
         return
     if covered:
         return
-    job_id = enqueue_daily("full", priority=2)
+    # F31 (SOL-REVIEW2-2026-09-24): the window-covered check above (any daily_run/weekly_run
+    # CREATED since tonight's window opened, any state) stays -- it is what makes this correctly
+    # skip a run that already finished `done`/`partial`/`failed` earlier tonight, which the
+    # admission gate's own queued/running-only check would not catch. `admit_daily_run` below
+    # closes the remaining gap: this reconciliation firing at the exact instant the "daily" cron
+    # tick (or an API "run now") also fires and hasn't committed its INSERT yet.
+    job_id = admission.admit_daily_run("full", priority=2)
+    if job_id is None:
+        log.info("reconcile_missed_night_run_skipped_already_active", window_start=window_start.isoformat())
+        return
     log.warning(
         "reconcile_missed_night_run_enqueued", job_id=job_id, window_start=window_start.isoformat()
     )

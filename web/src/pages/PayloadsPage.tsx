@@ -13,6 +13,7 @@ import {
   filterPayloadTree,
 } from "@/lib/payloadFamilies";
 import { useT } from "@/i18n";
+import type { PayloadRecord } from "@/types/api";
 
 const EMPTY_FILTERS: PayloadFiltersState = { category: "", vendor: "", q: "" };
 
@@ -40,6 +41,8 @@ function useIsNarrowScreen(breakpointPx = 640): boolean {
   return isNarrow;
 }
 
+const PAGE_SIZE = 200;
+
 export function PayloadsPage() {
   const t = useT();
   const [filters, setFilters] = useState<PayloadFiltersState>(EMPTY_FILTERS);
@@ -47,6 +50,12 @@ export function PayloadsPage() {
   const [viewMode, setViewMode] = useState<"tree" | "flat">("tree");
   const [manualExpanded, setManualExpanded] = useState<Record<string, boolean>>({});
   const isNarrow = useIsNarrowScreen();
+  // R06/F33 (SOL-REVIEW2-2026-09-24): "load more" pagination -- resets to page 1 whenever the
+  // active filters change (a stale page 3 of a NEW filter's results would be nonsensical).
+  const [page, setPage] = useState(1);
+  useEffect(() => {
+    setPage(1);
+  }, [filters.category, filters.vendor, filters.q]);
 
   // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md, both the original audit and the
   // 2026-09-24 review of round-1): `vendor` AND `q` are now both sent to the API -- the API
@@ -55,13 +64,14 @@ export function PayloadsPage() {
   // client-side filter over the already-capped `payloads` response, so a text match sitting
   // outside the cap could never be found (round-1 review's remaining F33 gap).
   const payloadsQuery = useQuery({
-    queryKey: ["payloads", filters.category, filters.vendor, filters.q],
+    queryKey: ["payloads", filters.category, filters.vendor, filters.q, page],
     queryFn: () =>
       api.getPayloads({
         category: filters.category || undefined,
         vendor: filters.vendor || undefined,
         q: filters.q || undefined,
-        limit: 500,
+        limit: PAGE_SIZE,
+        page,
       }),
   });
   // F33 review follow-up: facet options (vendor dropdown) used to come from a capped
@@ -74,10 +84,32 @@ export function PayloadsPage() {
     queryFn: () => api.getPayloadFacets(filters.category || undefined),
   });
 
-  const payloads = payloadsQuery.data?.payloads ?? [];
+  // R06/F33: accumulate pages fetched so far for the current filter set -- page 1 replaces the
+  // list (a fresh filter/search), page > 1 (a "load more" click) appends to it. Reset whenever
+  // the filters change, mirroring the `page` reset above.
+  const [accumulatedPayloads, setAccumulatedPayloads] = useState<PayloadRecord[]>([]);
+  useEffect(() => {
+    setAccumulatedPayloads([]);
+  }, [filters.category, filters.vendor, filters.q]);
+  useEffect(() => {
+    if (!payloadsQuery.data) return;
+    setAccumulatedPayloads((prev) =>
+      page === 1 ? payloadsQuery.data.payloads : [...prev, ...payloadsQuery.data.payloads],
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the query result, not `page` itself.
+  }, [payloadsQuery.data]);
+
+  const payloads = accumulatedPayloads;
+  const payloadsTotal = payloadsQuery.data?.total ?? payloads.length;
+  const hasMorePayloads = payloadsQuery.data?.has_more ?? false;
   const vendors = facetsQuery.data?.vendors ?? [];
-  // "any payloads in the DB at all" (category-scoped), independent of the vendor/q cap.
-  const hasAnyPayloads = vendors.length > 0 || payloads.length > 0;
+  // R09 (SOL-REVIEW2-2026-09-24): "any payloads in the DB at all", independent of the current
+  // filter -- `facetsQuery.data.total` is an unfiltered `count(*)`, so it can't be fooled into
+  // reporting "database empty" by a filter that matches zero rows, or by every existing row having
+  // a null vendor (which used to make `vendors` empty too). Falls back to the old vendor/row
+  // heuristic only while facets haven't loaded yet, to avoid a load-time empty-state flash.
+  const hasAnyPayloads =
+    facetsQuery.data?.total != null ? facetsQuery.data.total > 0 : vendors.length > 0 || payloads.length > 0;
 
   // `q` is now forwarded to the server above -- `payloads` is already the fully server-matched,
   // server-side-filtered set. No further client-side re-filtering needed.
@@ -129,6 +161,11 @@ export function PayloadsPage() {
 
   const isTreeMode = viewMode === "tree";
   const currentCount = isTreeMode ? tree.payload_count : filteredPayloads.length;
+  // R06/F33: only the very first fetch (page 1, nothing accumulated yet) blanks the whole page --
+  // a "load more" fetch (page > 1) keeps the already-loaded rows on screen with its own inline
+  // indicator instead, see the button below.
+  const initialLoading = payloadsQuery.isLoading && page === 1;
+  const isLoadingMore = payloadsQuery.isFetching && page > 1;
 
   return (
     <div className="space-y-4 p-4 md:p-6">
@@ -136,10 +173,10 @@ export function PayloadsPage() {
         {t("payloads.intro")}
       </div>
 
-      {payloadsQuery.isLoading && <LoadingState label={t("payloads.loading")} />}
+      {initialLoading && <LoadingState label={t("payloads.loading")} />}
       {payloadsQuery.isError && <ErrorState onRetry={() => payloadsQuery.refetch()} />}
 
-      {!payloadsQuery.isLoading && !payloadsQuery.isError && (
+      {!initialLoading && !payloadsQuery.isError && (
         <>
           {!hasAnyPayloads ? (
             <EmptyState title={t("payloads.emptyTitle")} description={t("payloads.emptyDescription")} />
@@ -189,6 +226,24 @@ export function PayloadsPage() {
                 />
               ) : (
                 <PayloadTable payloads={filteredPayloads} selectedId={selectedId} onSelect={setSelectedId} />
+              )}
+
+              {/* R06/F33: server-side "load more" -- mobile/RTL: full-width, min-h-10 (40px) touch
+                  target, dir="auto" so the Hebrew count text ("X מתוך Y") reads right-to-left. */}
+              {hasMorePayloads && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => p + 1)}
+                    disabled={isLoadingMore}
+                    dir="auto"
+                    className="min-h-10 w-full max-w-xs rounded-md border border-border-strong px-4 py-2 text-sm text-fg hover:bg-bg-raised disabled:opacity-60 sm:w-auto"
+                  >
+                    {isLoadingMore
+                      ? t("payloads.loadingMore")
+                      : t("payloads.loadMore", { shown: payloads.length, total: payloadsTotal })}
+                  </button>
+                </div>
               )}
             </>
           )}

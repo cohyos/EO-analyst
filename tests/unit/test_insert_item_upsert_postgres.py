@@ -184,6 +184,95 @@ class TestCanonicalUrlGuardedByAcceptedContentPostgres:
 
 
 # --------------------------------------------------------------------------
+# R04 (SOL-REVIEW2-2026-09-24, round 3, must-fix): a same-quality redirect must still update
+# canonical identity -- N09's fix made canonical_url changes require STRICTLY better rank AND a
+# changed text_hash, which also blocked this legitimate case. The review's own required test:
+# "full/clean A redirecting to full/clean B, then a direct fetch of B -> one row."
+# --------------------------------------------------------------------------
+
+
+class TestSameQualityRedirectUpdatesCanonicalIdentityPostgres:
+    def test_same_quality_redirect_then_direct_fetch_of_target_is_one_row(self, relational, pg_conn):
+        suffix = uuid.uuid4().hex[:8]
+        url_a = f"https://sol-review2-2026-09-24-test.invalid/a-{suffix}"
+        url_b = f"https://sol-review2-2026-09-24-test.invalid/b-{suffix}"
+
+        # A is fetched first (no redirect known yet) -- full/clean, some content.
+        first = relational.insert_item(
+            source_id=None,
+            url=url_a,
+            text_hash="hash-same",
+            content_status="full",
+            security_status="clean",
+        )
+        assert _row(pg_conn, int(first))["canonical_url"] is None
+
+        # A is fetched again; this time it redirects to B. SAME quality rank (full/clean) and, in
+        # the realistic case, unchanged text_hash (it's the same article) -- neither condition the
+        # old `excluded_better` gate required (strictly-higher rank, changed hash) is met, yet
+        # identity must still move to B.
+        second = relational.insert_item(
+            source_id=None,
+            url=url_a,
+            canonical_url=url_b,
+            text_hash="hash-same",  # UNCHANGED
+            content_status="full",  # SAME rank, not higher
+            security_status="clean",
+        )
+        assert second == first
+        assert _row(pg_conn, int(second))["canonical_url"] == url_b
+
+        # A LATER direct fetch of B itself (no redirect: canonical_url == url, so
+        # `eoa.fetch.service._store_item` would pass `canonical_url=None` here) must converge on
+        # the SAME row, not insert a second one.
+        third = relational.insert_item(
+            source_id=None,
+            url=url_b,
+            canonical_url=None,
+            text_hash="hash-same",
+            content_status="full",
+            security_status="clean",
+        )
+        assert third == first
+
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM items WHERE url IN (%(a)s, %(b)s) OR canonical_url = %(b)s",
+                {"a": url_a, "b": url_b},
+            )
+            assert cur.fetchone()["n"] == 1
+
+    def test_worse_redirect_still_does_not_update_canonical_identity(self, relational, pg_conn):
+        """N09 stays protected under R04's looser (>=) identity gate: a WORSE (blocked) re-fetch's
+        canonical_url is still rejected, since a blocked fetch always ranks 0 -- never `>=` a real
+        row's rank."""
+        url_a = f"https://sol-review2-2026-09-24-test.invalid/worse-a-{uuid.uuid4().hex[:8]}"
+        url_b = f"https://sol-review2-2026-09-24-test.invalid/worse-b-{uuid.uuid4().hex[:8]}"
+
+        first = relational.insert_item(
+            source_id=None,
+            url=url_a,
+            text_hash="good-hash",
+            content_status="full",
+            security_status="clean",
+        )
+
+        second = relational.insert_item(
+            source_id=None,
+            url=url_a,
+            canonical_url=url_b,
+            text_hash="blocked-hash",
+            content_status="stub",
+            security_status="blocked",
+        )
+        assert second == first
+
+        row = _row(pg_conn, int(first))
+        assert row["canonical_url"] is None  # NOT rewritten by the rejected (worse) redirect
+        assert row["content_status"] == "full"  # original good content untouched
+
+
+# --------------------------------------------------------------------------
 # N05: an accepted content update clears a stale dedup_of link.
 # --------------------------------------------------------------------------
 

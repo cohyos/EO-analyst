@@ -797,6 +797,9 @@ export const he = {
       'הסריקה הלילית (payload_extract) עדיין לא מצאה מפרט/מחיר מצוטט בפריטים שנאספו, או שהיא כבויה. ראו config/config.yaml: payloads.enabled.',
     noMatchesTitle: "אין תוצאות תואמות",
     noMatchesDescription: "נסה לשנות את הסינון.",
+    // R06/F33 (SOL-REVIEW2-2026-09-24): server-side pagination "load more" control.
+    loadMore: "טען עוד ({shown} מתוך {total})",
+    loadingMore: "טוען עוד…",
     searchLabel: 'חיפוש במטע"דים',
     searchPlaceholder: "שם, משפחה…",
     categoryLabel: "קטגוריה",

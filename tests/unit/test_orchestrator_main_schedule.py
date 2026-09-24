@@ -2,9 +2,14 @@
 weekly-vs-daily scheduler priority (audit 2026-09-24).
 
 No real scheduler run, no DB: `build_scheduler()` is built (not started) and its jobs' own
-callables are invoked directly with `enqueue_job`/`enqueue_daily` monkeypatched to capture args
-instead of touching Postgres. `reconcile_missed_night_run` is tested with a fixed clock and a
-fake `db.connection`.
+callables are invoked directly with `enqueue_job`/`admission.admit_daily_run`/`admission.
+admit_weekly_run` monkeypatched to capture args instead of touching Postgres.
+`reconcile_missed_night_run` is tested with a fixed clock and a fake `db.connection`.
+
+F31 (SOL-REVIEW2-2026-09-24): the "daily"/"weekly" cron jobs and `reconcile_missed_night_run` now
+go through `eoa.orchestrator.admission.admit_daily_run`/`admit_weekly_run` (the same admission
+gate `eoa.api.services.enqueue_run` uses) instead of a raw `enqueue_daily`/`enqueue_job` call --
+these tests monkeypatch `main.admission.admit_daily_run`/`admit_weekly_run` accordingly.
 
 Run with: ``PYTHONPATH=agent python -m pytest tests/unit/test_orchestrator_main_schedule.py -q``
 """
@@ -76,7 +81,9 @@ class TestReconcileMissedNightRun:
         cur = _FakeCursor(has_row=False)
         monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn(cur))
         enqueued = []
-        monkeypatch.setattr(main, "enqueue_daily", lambda mode, priority: enqueued.append((mode, priority)) or 99)
+        monkeypatch.setattr(
+            main.admission, "admit_daily_run", lambda mode, priority: enqueued.append((mode, priority)) or 99
+        )
 
         main.reconcile_missed_night_run()
 
@@ -92,7 +99,18 @@ class TestReconcileMissedNightRun:
         def _boom(mode, priority):
             raise AssertionError("must not enqueue a second daily run when tonight is already covered")
 
-        monkeypatch.setattr(main, "enqueue_daily", _boom)
+        monkeypatch.setattr(main.admission, "admit_daily_run", _boom)
+
+        main.reconcile_missed_night_run()  # must not raise
+
+    def test_does_nothing_when_admission_reports_already_active(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """F31 (SOL-REVIEW2-2026-09-24): the window-covered check above only catches a job created
+        since the window opened -- `admit_daily_run` returning `None` (an equivalent job won the
+        admission race in between) must also be a quiet no-op, never a crash."""
+        _fixed_now(monkeypatch, real_datetime(2026, 3, 15, 1, 5, tzinfo=_TZ))
+        cur = _FakeCursor(has_row=False)
+        monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn(cur))
+        monkeypatch.setattr(main.admission, "admit_daily_run", lambda mode, priority: None)
 
         main.reconcile_missed_night_run()  # must not raise
 
@@ -102,7 +120,7 @@ class TestReconcileMissedNightRun:
         def _boom(mode, priority):
             raise AssertionError("must not enqueue a daily run outside the night window")
 
-        monkeypatch.setattr(main, "enqueue_daily", _boom)
+        monkeypatch.setattr(main.admission, "admit_daily_run", _boom)
 
         def _boom_db():
             raise AssertionError("must not even query the DB outside the night window")
@@ -124,7 +142,7 @@ class TestReconcileMissedNightRun:
         def _boom(mode, priority):
             raise AssertionError("must not enqueue when the coverage check itself failed")
 
-        monkeypatch.setattr(main, "enqueue_daily", _boom)
+        monkeypatch.setattr(main.admission, "admit_daily_run", _boom)
 
         main.reconcile_missed_night_run()  # must not raise
 
@@ -134,7 +152,7 @@ class TestReconcileMissedNightRun:
         def _boom(mode, priority):
             raise AssertionError("must not enqueue before the night window opens")
 
-        monkeypatch.setattr(main, "enqueue_daily", _boom)
+        monkeypatch.setattr(main.admission, "admit_daily_run", _boom)
         monkeypatch.setattr("eoa.db.connection", lambda: (_ for _ in ()).throw(AssertionError("no DB query")))
 
         main.reconcile_missed_night_run()
@@ -145,7 +163,7 @@ class TestReconcileMissedNightRun:
         def _boom(mode, priority):
             raise AssertionError("must not enqueue once the night window has closed")
 
-        monkeypatch.setattr(main, "enqueue_daily", _boom)
+        monkeypatch.setattr(main.admission, "admit_daily_run", _boom)
         monkeypatch.setattr("eoa.db.connection", lambda: (_ for _ in ()).throw(AssertionError("no DB query")))
 
         main.reconcile_missed_night_run()
@@ -167,22 +185,22 @@ class TestSchedulerDailyWeeklyPriority:
         daily_calls = []
         weekly_calls = []
         monkeypatch.setattr(
-            main, "enqueue_daily", lambda mode, priority: daily_calls.append((mode, priority)) or 1
+            main.admission, "admit_daily_run", lambda mode, priority: daily_calls.append((mode, priority)) or 1
         )
         monkeypatch.setattr(
-            main,
-            "enqueue_job",
-            lambda kind, payload, priority: weekly_calls.append((kind, payload, priority)) or 2,
+            main.admission,
+            "admit_weekly_run",
+            lambda mode, priority: weekly_calls.append((mode, priority)) or 2,
         )
 
         sched.get_job("daily").func()
         sched.get_job("weekly").func()
 
         assert daily_calls == [("full", 2)]
-        assert weekly_calls == [("weekly_run", {"mode": "full"}, 3)]
+        assert weekly_calls == [("full", 3)]
         # the actual correctness property: daily's priority number is strictly lower (= claimed
         # first by `ORDER BY priority ASC`) than weekly's.
-        assert daily_calls[0][1] < weekly_calls[0][2]
+        assert daily_calls[0][1] < weekly_calls[0][1]
 
 
 # --------------------------------------------------------------------------

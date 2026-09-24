@@ -8,6 +8,7 @@ matching `docs/CONVENTIONS.md` rule 13 (`fetcher`/`egress` network only).
 from __future__ import annotations
 
 import codecs
+import contextvars
 import re
 import time
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from datetime import UTC, datetime
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
+import httpcore
 import httpx
 import structlog
 from pydantic import BaseModel
@@ -228,61 +230,115 @@ async def _get_with_retry(
     return response, content
 
 
-class _PinnedIPTransport(httpx.AsyncBaseTransport):
-    """F01 (SOL-REVIEW-2026-09-24 round 2): actually DIAL the caller-validated IP, instead of
-    connecting by hostname and only comparing the peer address after the fact.
+# R01 (SOL-REVIEW2-2026-09-24): the host->IP pin a `_PinnedIPTransport.handle_async_request` call
+# has validated for its OWN request, made visible to `_PinnedNetworkBackend.connect_tcp` a few
+# frames deeper in the same call stack. A `ContextVar` (not a plain module dict) is required for
+# this to be concurrency-safe: `eoa.fetch.service.run_ingest` shares ONE `httpx.AsyncClient` (and
+# therefore one transport/pool/backend instance) across many sources fetched concurrently via
+# `asyncio.gather`. Each `gather`-scheduled coroutine runs as its own `asyncio.Task`, and asyncio
+# gives every `Task` an independent COPY of the context at creation time, so one task's `.set()`
+# here is invisible to a sibling task dialing a different host at the same moment -- while still
+# being visible across `await` points *within* the one task/request that set it. A plain dict
+# keyed by host would also mostly work, but couldn't distinguish two concurrent pins for the SAME
+# host with different (rare, but possible mid-run re-validation) IPs, and would need its own
+# locking; the contextvar needs neither.
+_pinned_host_ip: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "eoa_fetch_pinned_host_ip", default=None
+)
 
-    The round-1 fix (`_server_addr`, below) validated the resolved IP set once and then compared
-    it against whatever address `httpx` happened to connect to -- but the round's own review found
-    that this still *connects* by hostname first: a second, independent DNS answer for that
-    hostname (a classic DNS-rebinding window between the `assert_public_http_url` resolution and
-    the actual TCP connect a moment later) could point at a private/internal address, and the
-    unpinned connection would already have been made -- and the request already sent -- by the
-    time the post-hoc comparison ran and rejected the *response*.
 
-    This transport closes that gap for real: when a request carries a `"pinned_ip"` extension
-    (set by `fetch_page`/`_get_robot_parser` below, from the caller-supplied `pin_ips` set), the
-    request actually sent to the network has its URL's host REPLACED by that already-validated IP
-    literal -- `httpx`/`httpcore` resolve nothing and connect directly to it -- while the original
-    hostname is preserved for the `Host` header (rewritten alongside) and, via the
-    `"sni_hostname"` extension `httpcore` already honors, for TLS SNI/certificate verification.
-    No new DNS lookup ever happens between validation and connection: there is nothing left to
-    rebind. A request with no `"pinned_ip"` extension (no `pin_ips` given -- callers outside
-    `eoa.fetch.service`'s SSRF-guarded path) passes through unchanged, exactly as before this
-    transport existed.
+class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """R01 (SOL-REVIEW2-2026-09-24): the actual DNS-rebinding fix. `_PinnedIPTransport` below no
+    longer rewrites the request URL's host to the pinned IP -- the round-2 review found that doing
+    so makes `httpcore` pool connections by the DIALED IP (since the request's origin becomes the
+    IP once the host is rewritten), so two different hostnames that happen to resolve to the same
+    IP address could share one pooled, already-TLS-verified connection: a connection whose
+    certificate was verified for hostname A would silently be reused to serve a request the caller
+    believes went to hostname B.
+
+    Instead, the request URL (and therefore the `httpcore.Origin` `AsyncConnectionPool` uses to
+    key its connection pool, and the hostname `AsyncHTTPConnection._connect` uses as the default
+    TLS `server_hostname`) is left completely alone -- pooling and certificate verification happen
+    against the REAL hostname, exactly as for any unpinned request. This backend intercepts only
+    the one step that used to leak DNS resolution to a second, unpinned lookup: the actual TCP
+    dial. When `_pinned_host_ip` has an active pin scoped to the host `httpcore` is about to
+    connect (`connect_tcp`'s `host` argument, which for a fresh connection is always that
+    connection's origin host -- see `AsyncHTTPConnection._connect`), the literal validated IP is
+    dialed directly, with no DNS lookup at all: there is nothing left for a rebinding second
+    answer to redirect. A `host` that doesn't match the active pin is refused outright, closing
+    the residual case where some other codepath left a stale/wrong pin active. No pin active at
+    all (unpinned callers, or callers outside `eoa.fetch.service`'s SSRF-guarded path) falls
+    through to the wrapped backend unchanged -- ordinary DNS resolution, exactly as before this
+    class existed.
     """
 
-    def __init__(self, inner: httpx.AsyncBaseTransport | None = None) -> None:
-        self._inner = inner or httpx.AsyncHTTPTransport()
+    def __init__(self, inner: httpcore.AsyncNetworkBackend | None = None) -> None:
+        self._inner = inner or httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: object = None,
+    ) -> httpcore.AsyncNetworkStream:
+        pin = _pinned_host_ip.get()
+        if pin is None:
+            return await self._inner.connect_tcp(
+                host, port, timeout=timeout, local_address=local_address, socket_options=socket_options
+            )
+        pin_host, pin_ip = pin
+        if host != pin_host:
+            raise httpcore.ConnectError(
+                f"refusing to dial {host}: the active validated-IP pin is scoped to {pin_host}"
+            )
+        return await self._inner.connect_tcp(
+            pin_ip, port, timeout=timeout, local_address=local_address, socket_options=socket_options
+        )
+
+    async def connect_unix_socket(
+        self, path: str, timeout: float | None = None, socket_options: object = None
+    ) -> httpcore.AsyncNetworkStream:
+        return await self._inner.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+class _PinnedIPTransport(httpx.AsyncHTTPTransport):
+    """F01/R01 (SOL-REVIEW2-2026-09-24): a plain `httpx.AsyncHTTPTransport` -- identical request/
+    response handling, pool construction, and constructor kwargs (`verify`, `http2`, `limits`,
+    `proxy`, ...) -- except its underlying `httpcore.AsyncConnectionPool`'s network backend is
+    wrapped in `_PinnedNetworkBackend`, and a request carrying a `"pinned_ip"` extension (set by
+    `fetch_page`/`_get_robot_parser` below, from the caller-supplied `pin_ips` set) activates that
+    pin -- scoped to this one request's host -- for the duration of the call. See
+    `_PinnedNetworkBackend`'s docstring for why this, and not URL rewriting, is what actually
+    prevents cross-hostname TLS/connection reuse (R01) while still dialing the validated IP
+    without a second DNS lookup (F01).
+    """
+
+    def __init__(
+        self, *args: object, _network_backend: httpcore.AsyncNetworkBackend | None = None, **kwargs: object
+    ) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        # `AsyncConnectionPool._network_backend` is read lazily, once per new connection -- see
+        # `httpcore/_async/connection_pool.py`'s `_connect_with_semaphore`/`AsyncHTTPConnection`
+        # construction sites -- so replacing it here, before any request has been dispatched, is
+        # enough to cover every connection this pool ever opens. `_network_backend` (test-only) lets
+        # a fake backend stand in for `_PinnedNetworkBackend`'s own inner backend, so a test can
+        # count/inspect real `connect_tcp` calls without any real network I/O.
+        self._pool._network_backend = _PinnedNetworkBackend(_network_backend or self._pool._network_backend)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         pinned_ip = request.extensions.get("pinned_ip")
         if not pinned_ip:
-            return await self._inner.handle_async_request(request)
-
-        original_url = request.url
-        original_host = original_url.host
-        dial_url = original_url.copy_with(host=pinned_ip)
-
-        headers = httpx.Headers(request.headers)
-        host_header = original_host
-        if original_url.port and original_url.port not in (80, 443):
-            host_header = f"{original_host}:{original_url.port}"
-        headers["host"] = host_header
-
-        dial_request = httpx.Request(
-            request.method,
-            dial_url,
-            headers=headers,
-            stream=request.stream,
-            extensions={**request.extensions, "sni_hostname": original_host},
-        )
-        response = await self._inner.handle_async_request(dial_request)
-        response.request = request  # callers see the original hostname/URL, not the dialed IP
-        return response
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
+            return await super().handle_async_request(request)
+        token = _pinned_host_ip.set((request.url.host, pinned_ip))
+        try:
+            return await super().handle_async_request(request)
+        finally:
+            _pinned_host_ip.reset(token)
 
 
 def _server_addr(response: httpx.Response) -> str | None:

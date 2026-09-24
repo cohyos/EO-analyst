@@ -179,4 +179,39 @@ describe("PatentsPage", () => {
       expect(getPatents).toHaveBeenCalledWith(expect.objectContaining({ subdomain: "rare_subdomain" }));
     });
   });
+
+  // R06/F33 (SOL-REVIEW2-2026-09-24 review): server-side "load more" pagination -- a second
+  // page's rows must be reachable and appended to what's already on screen, not replace it.
+  it("a load-more click fetches page 2 and appends its rows", async () => {
+    const page1 = makePatent({ id: 1 });
+    const page2 = makePatent({ id: 2, pub_number: "US99999999B2", title: "Second page patent" });
+    getPatents.mockImplementation((params: { page?: number } = {}) =>
+      Promise.resolve({
+        patents: params.page === 2 ? [page2] : [page1],
+        total: 2,
+        page: params.page ?? 1,
+        limit: 200,
+        has_more: (params.page ?? 1) === 1,
+      }),
+    );
+    renderPage();
+    await screen.findByText("Digital pixel readout integrated circuit");
+    const loadMore = await screen.findByRole("button", { name: /טען עוד/ });
+    fireEvent.click(loadMore);
+    expect(await screen.findByText("Second page patent")).toBeInTheDocument();
+    // The first page's row must still be visible -- "load more" appends, it doesn't replace.
+    expect(screen.getByText("Digital pixel readout integrated circuit")).toBeInTheDocument();
+    expect(getPatents).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
+  // R09 (SOL-REVIEW2-2026-09-24 review): the "database empty" empty-state must key off the
+  // facets endpoint's unfiltered `total`, not off facet VALUE presence -- a table where every
+  // existing patent has a null assignee AND null subdomain must not be reported as empty.
+  it("does not show the 'database empty' state when facets.total > 0 but assignees/subdomains are null (R09)", async () => {
+    getPatentFacets.mockResolvedValue(facetsResponse({ assignees: [], subdomains: [], total: 2 }));
+    getPatents.mockResolvedValue(patentsResponse([makePatent({ assignees: [], subdomain: null })]));
+    renderPage();
+    expect(await screen.findByText("Digital pixel readout integrated circuit")).toBeInTheDocument();
+    expect(screen.queryByText("לא זוהו פטנטים")).not.toBeInTheDocument();
+  });
 });

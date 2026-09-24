@@ -67,6 +67,9 @@ export function buildPayloadTree(payloads: PayloadRecord[]): PayloadTreeResponse
       price_ref_count: p.price_ref_count || 0,
       latest_spec_date: p.latest_spec_date,
       latest_price_date: p.latest_price_date,
+      // R06 (SOL-REVIEW2-2026-09-24): carried through so `variantMatches` can search it -- see
+      // that function and `PayloadTreeVariant.notes`'s doc comment.
+      notes: p.notes,
     });
   }
 
@@ -126,8 +129,16 @@ export function variantNodeKey(variantId: number): string {
 }
 
 function variantMatches(variant: PayloadTreeVariant, query: string): boolean {
+  // R06 (SOL-REVIEW2-2026-09-24 review): must search the same field set as the server's `q`
+  // filter (`eoa.api.routes.payloads.list_payloads`: canonical_name/vendor_entity_name/family/
+  // variant/notes -- vendor and family are already checked one level up, by
+  // `filterPayloadTree`'s own `vendorNameMatches`/`familyNameMatches`). Before this fix `notes`
+  // was searched server-side but never here, so a payload matched ONLY by its notes text was
+  // dropped from the tree by this re-filter even though the server had already matched it.
   return (
-    variant.canonical_name.toLowerCase().includes(query) || variant.variant.toLowerCase().includes(query)
+    variant.canonical_name.toLowerCase().includes(query) ||
+    variant.variant.toLowerCase().includes(query) ||
+    (variant.notes ?? "").toLowerCase().includes(query)
   );
 }
 

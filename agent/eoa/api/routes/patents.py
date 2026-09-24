@@ -63,7 +63,8 @@ def list_patents(
     israeli: bool = Query(False, description="only patents with israel_relevance >= 0.5"),
     min_value_score: int | None = Query(None, ge=0, le=100),
     q: str | None = Query(None, description="free-text match against title/abstract"),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=500, description="page size"),
+    page: int = Query(1, ge=1, description="R06/F33: 1-based page number, same convention as GET /api/tech/items"),
 ) -> dict[str, Any]:
     where = ["1=1"]
     params: dict[str, Any] = {"limit": limit}
@@ -82,17 +83,25 @@ def list_patents(
         where.append("(title ILIKE %(q)s OR abstract ILIKE %(q)s)")
         params["q"] = f"%{q}%"
     where_sql = " AND ".join(where)
+    params["offset"] = (page - 1) * limit
     rows = _fetchall(
         f"SELECT * FROM patents WHERE {where_sql} "
         "ORDER BY value_score DESC NULLS LAST, publication_date DESC NULLS LAST, id DESC "
-        "LIMIT %(limit)s",
+        "LIMIT %(limit)s OFFSET %(offset)s",
         params,
     )
     # F39 (SOL-AUDIT-2026-09-24.md): the count used to ignore every filter above (`assignee`,
     # `subdomain`, `israeli`, `min_value_score`, `q`) and always report the WHOLE table's size --
     # reusing the same WHERE/params as the row query is the only way `total` and `patents` agree.
     total_row = _fetchone(f"SELECT count(*) AS c FROM patents WHERE {where_sql}", params)
-    return {"patents": rows, "total": (total_row or {}).get("c", len(rows))}
+    total = (total_row or {}).get("c", len(rows))
+    return {
+        "patents": rows,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "has_more": (page - 1) * limit + len(rows) < total,
+    }
 
 
 @router.get("/patents/facets")
@@ -109,9 +118,12 @@ def patents_facets() -> dict[str, Any]:
     subdomain_rows = _fetchall(
         "SELECT DISTINCT subdomain FROM patents WHERE subdomain IS NOT NULL ORDER BY subdomain"
     )
+    # R09 (SOL-REVIEW2-2026-09-24): see the identical comment in eoa.api.routes.payloads.
+    total_row = _fetchone("SELECT count(*) AS c FROM patents")
     return {
         "assignees": [r["assignee"] for r in assignee_rows],
         "subdomains": [r["subdomain"] for r in subdomain_rows],
+        "total": (total_row or {}).get("c", 0),
     }
 
 

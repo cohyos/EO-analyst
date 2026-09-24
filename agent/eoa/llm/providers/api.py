@@ -83,6 +83,58 @@ def _flatten_system_and_turns(messages: list[dict[str, Any]]) -> tuple[str, list
     return "\n\n".join(system_parts), turns
 
 
+def _finalize_result(
+    *,
+    provider: str,
+    content: Any,
+    model: str,
+    duration_ms: int,
+    prompt_chars: int,
+    input_tokens: Any,
+    output_tokens: Any,
+) -> ProviderResult:
+    """Validate and build the full ``ProviderResult`` for a provider ``chat()`` call.
+
+    F26 (SOL-REVIEW2-2026-09-24 remaining gap): usage *containers* were already checked
+    (``isinstance(usage, dict)``), but the actual token-count conversion
+    (``int(usage.get("input_tokens") or 0)``) and ``strip_code_fences(content)`` happened in the
+    bare ``return ProviderResult(...)`` expression -- OUTSIDE the surrounding ``try/except``
+    boundary in each provider's ``chat()``. A malformed token value (a string, a negative number)
+    or a non-string ``content`` therefore raised a bare ``TypeError``/``ValueError`` straight out
+    of ``chat()`` instead of the caught ``ApiProviderError`` -- not one of
+    ``eoa.llm.chain.FALLBACK_EXCEPTIONS``, so it aborted the whole fallback chain instead of
+    falling through to the next leg. Callers now call this *inside* their existing ``try`` block,
+    so any failure here is caught by the same ``except`` that already wraps a malformed envelope.
+
+    A missing/``None`` token count is not malformed -- some provider responses omit a count
+    entirely (e.g. no thinking tokens spent) -- and coerces to ``0``, matching prior behavior.
+    """
+    if not isinstance(content, str):
+        raise TypeError(f"{provider} response content is a {type(content).__name__}, not text")
+
+    def _count(value: Any, field: str) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{provider} {field} is a {type(value).__name__}, not a number: {value!r}")
+        n = int(value)
+        if n < 0:
+            raise ValueError(f"{provider} {field} is negative: {n}")
+        return n
+
+    return ProviderResult(
+        content=strip_code_fences(content),
+        model=model,
+        provider=provider,
+        duration_ms=duration_ms,
+        prompt_chars=prompt_chars,
+        usage={
+            "input_tokens": _count(input_tokens, "input_tokens"),
+            "output_tokens": _count(output_tokens, "output_tokens"),
+        },
+    )
+
+
 def _gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Best-effort adaptation of a pydantic ``model_json_schema()`` output into the subset of
     JSON Schema Gemini's ``responseSchema`` accepts: inline ``$defs``/``$ref`` (Gemini does not
@@ -217,22 +269,24 @@ class AnthropicProvider:
             # malformed-envelope case.
             if not isinstance(usage, dict):
                 raise TypeError(f"usage field is a {type(usage).__name__}, not an object")
+            # F26: full result construction (content + token-count validation) now happens
+            # inside this try, so a malformed value here is caught below like any other
+            # malformed-envelope failure, instead of raising past this boundary.
+            result = _finalize_result(
+                provider="anthropic",
+                content=content,
+                model=mdl,
+                duration_ms=duration_ms,
+                prompt_chars=sum(len(t["content"]) for t in turns) + len(system),
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+            )
         except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
             raise ApiProviderError(
                 f"anthropic API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
             ) from exc
         log.info("api_provider_call", provider="anthropic", model=mdl, duration_ms=duration_ms)
-        return ProviderResult(
-            content=strip_code_fences(content),
-            model=mdl,
-            provider="anthropic",
-            duration_ms=duration_ms,
-            prompt_chars=sum(len(t["content"]) for t in turns) + len(system),
-            usage={
-                "input_tokens": int(usage.get("input_tokens") or 0),
-                "output_tokens": int(usage.get("output_tokens") or 0),
-            },
-        )
+        return result
 
 
 # ---------------------------------------------------------------------------------------- Gemini
@@ -359,22 +413,22 @@ class GeminiProvider:
             # AnthropicProvider.chat above -- validated inside the boundary, not after it.
             if not isinstance(usage, dict):
                 raise TypeError(f"usageMetadata field is a {type(usage).__name__}, not an object")
+            # F26: see the identical comment in AnthropicProvider.chat above.
+            result = _finalize_result(
+                provider="gemini",
+                content=content,
+                model=mdl,
+                duration_ms=duration_ms,
+                prompt_chars=sum(len(t["content"]) for t in turns) + len(system),
+                input_tokens=usage.get("promptTokenCount"),
+                output_tokens=usage.get("candidatesTokenCount"),
+            )
         except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
             raise ApiProviderError(
                 f"gemini API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
             ) from exc
         log.info("api_provider_call", provider="gemini", model=mdl, duration_ms=duration_ms)
-        return ProviderResult(
-            content=strip_code_fences(content),
-            model=mdl,
-            provider="gemini",
-            duration_ms=duration_ms,
-            prompt_chars=sum(len(t["content"]) for t in turns) + len(system),
-            usage={
-                "input_tokens": int(usage.get("promptTokenCount") or 0),
-                "output_tokens": int(usage.get("candidatesTokenCount") or 0),
-            },
-        )
+        return result
 
 
 # ---------------------------------------------------------------------------------------- OpenAI
@@ -455,22 +509,26 @@ class OpenAIProvider:
             # AnthropicProvider.chat above -- validated inside the boundary, not after it.
             if not isinstance(usage, dict):
                 raise TypeError(f"usage field is a {type(usage).__name__}, not an object")
+            # F26: see the identical comment in AnthropicProvider.chat above -- this is also the
+            # provider whose `content` is a single dict lookup (`message.content`) with no
+            # construction-side type check, so a non-string message content (e.g. a list of
+            # multimodal blocks) used to reach `strip_code_fences()` unvalidated and raise
+            # straight out of `chat()`.
+            result = _finalize_result(
+                provider="openai",
+                content=content,
+                model=mdl,
+                duration_ms=duration_ms,
+                prompt_chars=sum(len(m["content"]) for m in api_messages),
+                input_tokens=usage.get("prompt_tokens"),
+                output_tokens=usage.get("completion_tokens"),
+            )
         except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
             raise ApiProviderError(
                 f"openai API returned a malformed response body: {redact_secrets(str(exc))[:200]}"
             ) from exc
         log.info("api_provider_call", provider="openai", model=mdl, duration_ms=duration_ms)
-        return ProviderResult(
-            content=strip_code_fences(content),
-            model=mdl,
-            provider="openai",
-            duration_ms=duration_ms,
-            prompt_chars=sum(len(m["content"]) for m in api_messages),
-            usage={
-                "input_tokens": int(usage.get("prompt_tokens") or 0),
-                "output_tokens": int(usage.get("completion_tokens") or 0),
-            },
-        )
+        return result
 
 
 _API_PROVIDER_CLASSES: dict[str, type] = {

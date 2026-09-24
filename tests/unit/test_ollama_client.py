@@ -107,6 +107,83 @@ class TestStructuredOnceUsageAggregation:
         assert res.duration_ms == 99
 
 
+class TestChatStructuredChainNoDoubleLedgerRow:
+    """R07 (SOL-REVIEW2-2026-09-24): `_chat_structured_chain` used to call `_record` a SECOND
+    time on success, with `_structured_once`'s own (possibly aggregated-across-a-schema-retry,
+    see `TestStructuredOnceUsageAggregation` above) usage -- double-counting tokens/cost that the
+    real `chat()` call(s) inside `_structured_once` had already logged for real, via `run_chain`,
+    the first time. This test isolates `_chat_structured_chain`'s OWN success path (mocking
+    `_structured_once` away entirely, same style as `TestChatStructuredChainReturnsUsedEntry`
+    below) and asserts it logs NOTHING itself on success -- old code fails this with exactly one
+    extra `_record` call carrying `_structured_once`'s aggregated usage."""
+
+    class _Out(BaseModel):
+        ok: bool
+
+    def test_success_does_not_call_record_a_second_time(self, monkeypatch) -> None:
+        from eoa.config import ChainEntryCfg
+
+        chain = [ChainEntryCfg(provider="anthropic", model="claude-x")]
+        suspect = self._Out(ok=True)
+
+        def fake_structured_once(role, schema, messages, **kwargs):
+            # Stands in for a schema-retry that took two real calls, aggregated by
+            # `_structured_once`'s own E05 fix -- exactly the shape that used to get re-logged.
+            return suspect, ChatResult(content='{"ok": true}', prompt_tokens=130, eval_tokens=60, duration_ms=280)
+
+        record_calls: list[tuple] = []
+        monkeypatch.setattr(oc, "_structured_once", fake_structured_once)
+        monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: record_calls.append((a, k)))
+
+        validated, used_entry = oc._chat_structured_chain(
+            "resident", chain, self._Out, [{"role": "user", "content": "hi"}],
+            task="analyze", interactive=False, options=None,
+        )
+
+        assert validated is suspect
+        assert used_entry == chain[0]
+        assert record_calls == []  # THE regression check -- no outer aggregate ledger row
+
+    def test_failure_still_logs_one_zero_cost_marker_row(self, monkeypatch) -> None:
+        """The FAILURE branch's own `_record` call is unaffected by this fix -- it logs a
+        zero-token `ok=False` marker (not a double-count of any real usage) and still moves on
+        to the next chain entry."""
+        from eoa.config import ChainEntryCfg
+        from eoa.errors import ProviderUnavailable
+
+        chain = [
+            ChainEntryCfg(provider="anthropic", model="claude-x"),
+            ChainEntryCfg(provider="ollama"),
+        ]
+        suspect = self._Out(ok=True)
+        calls = {"n": 0}
+
+        def fake_structured_once(role, schema, messages, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ProviderUnavailable("anthropic key missing")
+            return suspect, ChatResult(content='{"ok": true}', prompt_tokens=5, eval_tokens=5, duration_ms=10)
+
+        record_calls: list[tuple] = []
+        monkeypatch.setattr(oc, "_structured_once", fake_structured_once)
+        monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: record_calls.append((a, k)))
+
+        validated, used_entry = oc._chat_structured_chain(
+            "resident", chain, self._Out, [{"role": "user", "content": "hi"}],
+            task="analyze", interactive=False, options=None,
+        )
+
+        assert validated is suspect
+        assert used_entry == chain[1]
+        # Exactly one record call -- the failed anthropic attempt's zero-cost marker. The
+        # successful ollama entry that follows logs nothing itself (its real usage is logged
+        # inside `_structured_once`/`run_chain`, not re-logged here).
+        assert len(record_calls) == 1
+        failed_attempt = record_calls[0][0][1]
+        assert failed_attempt.ok is False
+        assert failed_attempt.prompt_tokens == 0
+
+
 class TestWrapData:
     """Test the wrap_data function for neutralizing delimiter characters."""
 

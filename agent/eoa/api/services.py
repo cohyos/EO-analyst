@@ -31,7 +31,6 @@ import httpx
 import structlog
 import yaml
 from lxml import html as lxml_html
-from psycopg.types.json import Json
 
 from eoa import config as eoa_config
 from eoa import db
@@ -40,6 +39,7 @@ from eoa.config import Settings as EOASettings
 from eoa.feedback import surveys as feedback_surveys
 from eoa.llm import ollama_client
 from eoa.memory import graph, relational, vector
+from eoa.orchestrator import admission
 from eoa.report import geography
 from eoa.report.artifacts import VISIBLE_REPORT_SQL
 from eoa.resources.gate import gate
@@ -2793,7 +2793,9 @@ def list_tenders(
             effective_since_days = DEFAULT_SINCE_DAYS
         if effective_since_days is not None:
             where.append(
-                "COALESCE(deadline, published_at::date, created_at::date) >= (CURRENT_DATE - %(since_days)s)"
+                "COALESCE(deadline, (published_at AT TIME ZONE 'Asia/Jerusalem')::date, "
+                "(created_at AT TIME ZONE 'Asia/Jerusalem')::date) "
+                ">= ((now() AT TIME ZONE 'Asia/Jerusalem')::date - %(since_days)s)"
             )
             params["since_days"] = effective_since_days
 
@@ -3056,42 +3058,19 @@ RUN_SCOPE_TO_KIND = {"daily": "daily_run", "ingest": "ingest", "report": "report
 # idempotency -- requesting a fresh daily run while a weekly run (which performs the full daily
 # pipeline first, see `eoa.orchestrator.jobs.run_weekly`) is already in flight is still a
 # duplicate from the user's point of view, not a second independent run.
-_RUN_IDEMPOTENCY_GROUPS: dict[str, tuple[str, ...]] = {
-    "daily_run": ("daily_run", "weekly_run"),
-    "report": ("report", "daily_run", "weekly_run"),
-}
-
-
-def _equivalent_kinds_for(kind: str) -> list[str]:
-    """Symmetric closure over `_RUN_IDEMPOTENCY_GROUPS`: every kind reachable from `kind` through
-    any group it appears in, whether as that group's own key or one of its listed members.
-
-    F31 follow-up (SOL-REVIEW-2026-09-24): `_RUN_IDEMPOTENCY_GROUPS` is written asymmetrically --
-    `"report"`'s own entry lists `daily_run`/`weekly_run` as equivalent, but neither `daily_run`
-    nor `weekly_run` has an entry listing `report` back (only `.get(kind, (kind,))` was ever
-    consulted, keyed on the CALLER's own kind). Even with `enqueue_run`'s single fixed advisory
-    lock fully serializing every call, a `daily` request's equivalent-job SELECT never looked for
-    a `report` kind at all -- not a race, a plain asymmetric check -- so a `daily` call right after
-    a `report` job committed could still enqueue a second, overlapping active job. The union below
-    makes the relationship symmetric: if A's group lists B, checking from B also finds A."""
-    found = {kind}
-    changed = True
-    while changed:
-        changed = False
-        for group_kind, members in _RUN_IDEMPOTENCY_GROUPS.items():
-            group = {group_kind, *members}
-            if found & group and not group <= found:
-                found |= group
-                changed = True
-    return sorted(found)
-
-
-class RunAlreadyActive(Exception):
-    """An equivalent run is already queued/running; the route surfaces this as HTTP 409."""
-
-    def __init__(self, job: dict[str, Any]) -> None:
-        self.job = job
-        super().__init__(f"a {job.get('kind')} job is already {job.get('state')} (id={job.get('id')})")
+#
+# F31 (SOL-REVIEW2-2026-09-24): the group definition, the symmetric-closure helper, the
+# `RunAlreadyActive` exception, the advisory-lock namespace, and the actual check+insert all moved
+# to `eoa.orchestrator.admission` -- the same `daily`/`weekly` cron jobs and
+# `reconcile_missed_night_run` in `eoa.orchestrator.main` that used to bypass this idempotency
+# check entirely now share that one module too, so an API "run now" and a scheduler tick racing
+# each other serialize on the identical lock and equivalence groups instead of each seeing its own
+# uncoordinated view. The names below are kept as aliases so existing callers/tests referencing
+# `services._RUN_IDEMPOTENCY_GROUPS` / `services._equivalent_kinds_for` / `services.
+# RunAlreadyActive` / `services._ENQUEUE_RUN_LOCK_NS` keep working unchanged.
+_RUN_IDEMPOTENCY_GROUPS = admission.RUN_IDEMPOTENCY_GROUPS
+_equivalent_kinds_for = admission.equivalent_kinds_for
+RunAlreadyActive = admission.RunAlreadyActive
 
 
 # W20 (docs/REVIEW_2026-09-06_evening.md): the jobs table only ever showed the generic `kind`
@@ -3140,7 +3119,10 @@ def list_jobs(*, state: str | None = None, limit: int = 50) -> list[dict[str, An
 #: F31 (audit 2026-09-24): a fixed advisory-lock namespace for `enqueue_run`'s check+insert --
 #: arbitrary, just needs to not collide with another `pg_advisory_xact_lock(int, int)` caller in
 #: this codebase (there is none today; grep `pg_advisory` before reusing this constant elsewhere).
-_ENQUEUE_RUN_LOCK_NS = 872_351_004
+#: F31 (SOL-REVIEW2-2026-09-24): now `eoa.orchestrator.admission.ADMISSION_LOCK_NS` -- the one
+#: namespace shared with the scheduler's own admission-gated enqueues; kept as the same integer
+#: value and re-exported under this name for existing callers/tests.
+_ENQUEUE_RUN_LOCK_NS = admission.ADMISSION_LOCK_NS
 
 
 def enqueue_run(scope: str, mode: str) -> int:
@@ -3163,29 +3145,23 @@ def enqueue_run(scope: str, mode: str) -> int:
     committed, enqueueing one of each despite `report`'s group already covering `daily_run`. A
     single fixed lock key serializes every scope's check+insert against every other scope's here --
     `enqueue_run` is called rarely (a UI button click or the nightly scheduler) and each critical
-    section is a couple of fast queries, so one lock is not a real contention concern."""
+    section is a couple of fast queries, so one lock is not a real contention concern.
+
+    F31 (SOL-REVIEW2-2026-09-24): the actual check+insert now runs through
+    `eoa.orchestrator.admission.admit_run` -- the same function the scheduler's "daily"/"weekly"
+    cron jobs and `reconcile_missed_night_run` call, so a "run now" click and a scheduler tick
+    racing each other contend for the identical advisory lock and equivalence groups instead of
+    each going through its own, previously uncoordinated, code path."""
     kind = RUN_SCOPE_TO_KIND.get(scope)
     if kind is None:
         raise ValueError(f"unknown scope: {scope}")
     equivalent_kinds = _equivalent_kinds_for(kind)
-    with db.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_xact_lock(%(ns)s)", {"ns": _ENQUEUE_RUN_LOCK_NS})
-        cur.execute(
-            "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND state IN ('queued', 'running') "
-            "ORDER BY created_at DESC LIMIT 1",
-            {"kinds": equivalent_kinds},
+    try:
+        return admission.admit_run(
+            kind, {"mode": mode}, priority=5, equivalent_kinds=equivalent_kinds
         )
-        existing = cur.fetchone()
-        if existing is not None:
-            raise RunAlreadyActive(_json_safe_row(existing) or {})
-        cur.execute(
-            "INSERT INTO jobs (kind, payload, priority, state) "
-            "VALUES (%(kind)s, %(payload)s, %(priority)s, 'queued') RETURNING id",
-            {"kind": kind, "payload": Json({"mode": mode}), "priority": 5},
-        )
-        job_id: int = cur.fetchone()["id"]
-    log.info("job.enqueued", job_id=job_id, kind=kind, priority=5)
-    return job_id
+    except RunAlreadyActive as exc:
+        raise RunAlreadyActive(_json_safe_row(exc.job) or {}) from exc
 
 
 # --------------------------------------------------------------------------
@@ -3945,7 +3921,8 @@ def bd_territories() -> list[dict[str, Any]]:
     since = dt.date.today() - dt.timedelta(days=max(cfg.lookback_days, 1))
     item_rows = _fetchall(
         "SELECT geography FROM items WHERE security_status='clean' AND dedup_of IS NULL "
-        "AND level = ANY(%(levels)s) AND COALESCE(published_at, created_at)::date >= %(since)s",
+        "AND level = ANY(%(levels)s) AND "
+        "(COALESCE(published_at, created_at) AT TIME ZONE 'Asia/Jerusalem')::date >= %(since)s",
         {"levels": ["red", "orange", "yellow"], "since": since},
     )
     tender_rows = _fetchall("SELECT country FROM tenders WHERE status IN ('open', 'unknown')")
@@ -4088,7 +4065,8 @@ def product_line_detail(line_id: str) -> dict[str, Any] | None:
     recent_rows = _fetchall(
         "SELECT i.*, s.name AS source_name FROM items i LEFT JOIN sources s ON s.id = i.source_id "
         "WHERE i.product_lines @> ARRAY[%(line)s]::text[] AND i.security_status = 'clean' "
-        "AND i.dedup_of IS NULL AND COALESCE(i.published_at, i.created_at)::date >= %(since)s "
+        "AND i.dedup_of IS NULL AND "
+        "(COALESCE(i.published_at, i.created_at) AT TIME ZONE 'Asia/Jerusalem')::date >= %(since)s "
         "ORDER BY COALESCE(i.score, 0) DESC, COALESCE(i.published_at, i.created_at) DESC LIMIT 30",
         {"line": line_id, "since": since},
     )

@@ -164,7 +164,15 @@ class TestApproveSecurityReview:
             "payload": {"item_id": 42, "question": "אימות והרחבה"},
             "result": {"security_review": True},
         }
-        cur = _FakeCursor(responses={"UPDATE jobs": job_row})
+        # R08 (SOL-REVIEW2-2026-09-24): the route now does a plain pre-check SELECT for the
+        # job's current `payload` (to build `context_he` BEFORE opening the claim transaction --
+        # see the route's own docstring) ahead of the atomic `UPDATE ... RETURNING` claim below.
+        cur = _FakeCursor(
+            responses={
+                "SELECT payload FROM jobs": {"payload": job_row["payload"]},
+                "UPDATE jobs": job_row,
+            }
+        )
         monkeypatch.setattr("eoa.api.routes.security_review.connection", lambda: _FakeConnection(cur))
 
         captured: dict[str, Any] = {}

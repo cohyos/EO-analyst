@@ -631,21 +631,52 @@ def run_weekly(job: dict[str, Any]) -> dict[str, Any]:
     land on the same scheduler tick, could be claimed before the ``daily_run`` row was even
     inserted, in which case it fell to the ``else`` branch and ran the full pipeline itself, which
     the *actual* ``daily_run`` job then also ran once claimed -- two full daily pipelines/reports
-    the same night. Now: a ``daily_run`` found ``queued``/``running`` (or not found at all yet)
-    makes this job defer itself (``ResourceUnavailable``, caught by ``Worker.run`` and requeued
+    the same night. ``daily_run`` found ``queued``/``running`` (or not found at all yet) makes
+    this job defer itself (``ResourceUnavailable``, caught by ``Worker.run`` and requeued
     ``deferred`` with a cooldown -- the same race-safe mechanism every other "wait and retry"
     condition in this module already uses) instead of proceeding, up to
-    :data:`WEEKLY_DAILY_WAIT_MAX` after which it gives up waiting (covers the case where this
-    weekly run truly stands alone, e.g. triggered manually with no nightly daily run) and falls
-    back to running the pipeline itself, exactly as before this fix."""
+    :data:`WEEKLY_DAILY_WAIT_MAX`.
+
+    R03/N07/F22 (SOL-REVIEW2-2026-09-24): ``deferred`` is a job state a ``daily_run`` can sit in
+    indefinitely (``reap_stale_jobs`` after a worker crash, or a resource-gate wait -- see
+    ``eoa.memory.relational.finish_job``'s docstring) -- it is NOT terminal, tonight's data is NOT
+    final, and the earlier version's ``state in (None, "queued", "running")`` check fell through
+    to the ``else`` branch for it exactly like ``done``/``partial``/``failed``, building the
+    weekly report on top of a daily pipeline that had not actually finished (and might still
+    retry and finish LATER, producing a second round of analysis this weekly report never saw).
+    ``deferred`` now waits exactly like ``queued``/``running``. Once the wait budget is spent,
+    a daily_run that genuinely never existed (``state is None`` -- this weekly run truly stands
+    alone, e.g. triggered manually with no nightly daily run) still falls back to running the
+    pipeline itself, exactly as before. But a daily_run that DOES exist and is STILL not terminal
+    after the full wait budget (``queued``/``running``/``deferred``) must never trigger that same
+    fallback -- it is still active (or will retry) and running a second pipeline here would
+    duplicate it. This now ends the job ``partial`` with a clear error instead, leaving the actual
+    ``daily_run`` to finish (or exhaust its own retries) on its own."""
     state = _daily_run_state_tonight()
-    if state in (None, "queued", "running"):
+    non_terminal_states = {None, "queued", "running", "deferred"}
+    if state in non_terminal_states:
         if _job_age(job) < WEEKLY_DAILY_WAIT_MAX:
             raise ResourceUnavailable(
                 f"weekly_run waiting for tonight's daily_run to reach a terminal state (state={state!r})"
             )
-        log.warning("weekly_run_daily_wait_timed_out_running_pipeline_itself", state=state)
-        stats = run_daily(job)
+        if state is None:
+            log.warning("weekly_run_daily_wait_timed_out_running_pipeline_itself", state=state)
+            stats = run_daily(job)
+        else:
+            # A daily_run job DOES exist but is still queued/running/deferred after the full
+            # wait budget -- it may still complete (or retry and complete) on its own. Starting
+            # our own pipeline here would risk a duplicate daily_run/report/notification; ending
+            # `partial` with a clear error is the safe outcome (never a silent `done`).
+            log.error("weekly_run_daily_wait_timed_out_daily_run_still_incomplete", state=state)
+            stats = {
+                "status": "partial",
+                "daily_pipeline_skipped": "daily_run_incomplete_after_wait",
+                "daily_run_state": state,
+                "daily_run_wait_error": (
+                    f"tonight's daily_run is still {state!r} after waiting "
+                    f"{WEEKLY_DAILY_WAIT_MAX}; refusing to start a duplicate daily pipeline"
+                ),
+            }
     else:
         log.info("weekly_run_skips_daily_pipeline", reason="daily_run_already_covered_tonight", state=state)
         stats = {"daily_pipeline_skipped": "daily_run_already_covered", "daily_run_state": state}
@@ -922,16 +953,28 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
     push and the outer ``Worker.run``/``finish_job`` call recording the job as finished leaves the
     job ``running`` past its lease; ``reap_stale_jobs`` requeues it ``deferred`` and a later
     worker reruns THIS SAME job (same ``rs.job_id``) end to end, including this stage, a second
-    time -- without a durable marker outside the job's own (about to be overwritten)
-    ``state``/``result``, there is no way to tell the push already went out. ``rs.job_id`` is
-    stable across that reap-and-reclaim (the row is updated in place, never re-inserted), so it is
-    a safe idempotency key: the first pass to reach this stage for a given job claims it and
-    sends; a stale-job replay of the exact same job finds it already claimed and skips silently
-    (not an error -- the run's other stages still need to finish/re-verify as normal)."""
-    from eoa.memory.relational import mark_notification_sent
+    time. ``rs.job_id`` is stable across that reap-and-reclaim (the row is updated in place, never
+    re-inserted), so it is a safe idempotency key -- see :func:`eoa.memory.relational.
+    claim_notification_pending`.
 
-    if not mark_notification_sent("daily_report", str(rs.job_id)):
-        log.info("daily_notify_skipped_already_sent", job_id=rs.job_id)
+    R02/N03 (SOL-REVIEW2-2026-09-24): the OLD marker (``mark_notification_sent``) recorded "sent"
+    right BEFORE the send, unconditionally -- ``ntfy.send`` can return ``Sent(ok=False)`` (HTTP
+    error, timeout, unreachable server) without raising, so a genuinely failed push was marked
+    "sent" anyway and a replay would skip it forever, silently losing the notification. This now
+    goes through a claim/result pair instead: :func:`~eoa.memory.relational.
+    claim_notification_pending` claims the ``(kind, key)`` row ``pending`` BEFORE attempting
+    delivery (first attempt, a bounded retry of a prior ``failed`` attempt, or reclaiming a
+    ``pending`` row stale long enough to be a crashed claim -- see that function's docstring for
+    the full state machine and its documented at-least-once trade-off), and
+    :func:`~eoa.memory.relational.mark_notification_result` records the actual outcome (checking
+    ``Sent.ok``) once delivery is attempted -- including when the attempt raises, so an exception
+    still lands on ``failed`` (retryable) rather than leaving the row ``pending`` until the
+    stale-claim window expires."""
+    from eoa.memory.relational import claim_notification_pending, mark_notification_result
+
+    key = str(rs.job_id)
+    if not claim_notification_pending("daily_report", key):
+        log.info("daily_notify_skipped_already_sent_or_in_flight", job_id=rs.job_id)
         return {"notification_skipped": "already_sent_for_this_job"}
     headlines: list[str] = []
     try:
@@ -946,11 +989,27 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
     except Exception:
         pass
     docx = getattr(paths, "docx", None)
-    if not docx:
-        ntfy.failure("report", "הדוח היומי לא הופק הלילה — ראה run_log")
-        return {"headlines": len(headlines), "report_missing": True}
-    ntfy.report_ready("יומי", str(docx), headlines, ui_url=f"http://127.0.0.1:{settings().api.port}/")
-    return {"headlines": len(headlines)}
+    try:
+        if not docx:
+            sent = ntfy.failure("report", "הדוח היומי לא הופק הלילה — ראה run_log")
+            mark_notification_result("daily_report", key, ok=sent.ok)
+            out: dict[str, Any] = {"headlines": len(headlines), "report_missing": True}
+        else:
+            sent = ntfy.report_ready(
+                "יומי", str(docx), headlines, ui_url=f"http://127.0.0.1:{settings().api.port}/"
+            )
+            mark_notification_result("daily_report", key, ok=sent.ok)
+            out = {"headlines": len(headlines)}
+        # F22-style convention (every other stage's `*_error` key, e.g. export_backup's
+        # `backup_error`): a push that actually failed to deliver (`Sent(ok=False)` -- HTTP
+        # error/timeout/unreachable server, no exception) should still mark the overall run
+        # `partial` rather than `done`, via `has_incomplete_work`'s `*_error` key scan.
+        if not sent.ok:
+            out["notification_error"] = f"ntfy delivery failed: {sent.url or '<no url>'}"
+        return out
+    except Exception:
+        mark_notification_result("daily_report", key, ok=False)
+        raise
 
 
 def run_conference_scan(job: dict[str, Any]) -> dict[str, Any]:

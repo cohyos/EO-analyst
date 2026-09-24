@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from eoa.errors import ResourceUnavailable
+from eoa.notify import ntfy
 from eoa.orchestrator import jobs
 from eoa.orchestrator.jobs import RunState, _compute_run_status, _notify, _terminal_state, run_weekly
 
@@ -150,10 +151,17 @@ def _old_job(job_id: int = 1) -> dict:
 class TestRunWeekly:
     """F4/F22/N07 (SOL-REVIEW-2026-09-24): run_weekly must not re-run the full nightly pipeline
     when a separate daily_run job already covered tonight, AND must not build the weekly report
-    on top of a daily_run that is merely queued/running (still-in-flight data) or hasn't even been
-    inserted yet -- it must wait (defer itself, ResourceUnavailable) for that daily_run to reach a
-    terminal state first, up to WEEKLY_DAILY_WAIT_MAX, after which it falls back to running the
-    pipeline itself (the original standalone-weekly behaviour)."""
+    on top of a daily_run that is merely queued/running/deferred (still-in-flight, or still
+    retrying, data) or hasn't even been inserted yet -- it must wait (defer itself,
+    ResourceUnavailable) for that daily_run to reach a terminal state first, up to
+    WEEKLY_DAILY_WAIT_MAX.
+
+    R03/N07/F22 (SOL-REVIEW2-2026-09-24): after that wait budget, the ORIGINAL "stand-alone
+    weekly" fallback (run the pipeline itself) is legitimate ONLY when no daily_run was ever found
+    (state is None) -- see TestFallbackAfterWaitTimeout below. When a daily_run job genuinely
+    exists but is still not terminal (queued/running/deferred) after the full wait, running the
+    pipeline a second time here would duplicate it; the correct outcome is `partial` with a clear
+    error, never a silent duplicate run."""
 
     def test_skips_daily_pipeline_when_daily_done_tonight(self, monkeypatch) -> None:
         monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: "done")
@@ -221,11 +229,35 @@ class TestRunWeekly:
         with pytest.raises(ResourceUnavailable):
             run_weekly(_fresh_job())
 
-    def test_falls_back_to_full_pipeline_after_wait_timeout(self, monkeypatch) -> None:
-        """A weekly run that has been waiting past WEEKLY_DAILY_WAIT_MAX with no daily_run ever
-        reaching a terminal state (or none at all) gives up waiting and runs the pipeline itself --
-        preserves the original "weekly can stand alone" fallback."""
-        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: "running")
+    def test_defers_when_daily_deferred(self, monkeypatch) -> None:
+        """R03/N07/F22 (SOL-REVIEW2-2026-09-24): THE regression this round closes -- `deferred` is
+        NOT terminal (a daily_run can sit `deferred` after a crash/resource-wait and still retry
+        and finish later). Old code fell through to the "covered" `else` branch for `deferred`
+        exactly like `done`/`partial`/`failed` and built the weekly report immediately on top of
+        incomplete data. New code waits, same as `queued`/`running`."""
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: "deferred")
+        monkeypatch.setattr(
+            jobs, "run_daily", lambda job: (_ for _ in ()).throw(AssertionError("must not run pipeline yet"))
+        )
+        monkeypatch.setattr(
+            "eoa.report.weekly.build_weekly",
+            lambda: (_ for _ in ()).throw(AssertionError("must not build weekly report yet")),
+        )
+
+        with pytest.raises(ResourceUnavailable):
+            run_weekly(_fresh_job())
+
+
+class TestFallbackAfterWaitTimeout:
+    """R03/N07/F22 (SOL-REVIEW2-2026-09-24): once WEEKLY_DAILY_WAIT_MAX is spent, the two
+    remaining cases diverge -- a daily_run that never existed (state is None) is a genuinely
+    stand-alone weekly and may run the pipeline itself; a daily_run that DOES exist but is still
+    not terminal must never be duplicated."""
+
+    def test_no_daily_run_ever_found_falls_back_to_running_the_pipeline_itself(self, monkeypatch) -> None:
+        """The ORIGINAL "weekly can stand alone" fallback, preserved: no daily_run was ever
+        created for tonight (e.g. a manually triggered weekly with no nightly cron)."""
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: None)
         calls: list[dict] = []
         monkeypatch.setattr(jobs, "run_daily", lambda job: (calls.append(job), {"report": {"docx": "x"}})[1])
 
@@ -241,6 +273,35 @@ class TestRunWeekly:
         assert calls == [job]
         assert stats["report"] == {"docx": "x"}
         assert stats["weekly_report"] == {"report_id": 7, "qa_passed": False}
+
+    @pytest.mark.parametrize("state", ["queued", "running", "deferred"])
+    def test_daily_run_still_incomplete_never_duplicates_the_pipeline(self, monkeypatch, state) -> None:
+        """R03 (SOL-REVIEW2-2026-09-24) -- the actual bug report: "Weekly runs the daily pipeline
+        after three hours even if daily is still running; it treats a deferred daily as
+        terminal." A daily_run job DOES exist here (unlike the state-is-None case above) -- it may
+        still complete, or retry and complete, later. run_daily must NEVER be called; the job ends
+        `partial` with a clear, discriminating error instead of a silent duplicate or a silent
+        `done`."""
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: state)
+        monkeypatch.setattr(
+            jobs, "run_daily", lambda job: (_ for _ in ()).throw(AssertionError("must not duplicate the pipeline"))
+        )
+
+        class _Paths:
+            report_id = 1
+            qa = types.SimpleNamespace(passed=True)
+
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", lambda: _Paths())
+
+        stats = run_weekly(_old_job())
+
+        assert stats["status"] == "partial"
+        assert stats["daily_pipeline_skipped"] == "daily_run_incomplete_after_wait"
+        assert stats["daily_run_state"] == state
+        assert "daily_run_wait_error" in stats
+        # _terminal_state must land this on `partial`, never `done`, regardless of the weekly
+        # report build's own outcome.
+        assert jobs._terminal_state(stats) == "partial"
 
     def test_daily_run_state_tonight_returns_none_on_db_error(self, monkeypatch) -> None:
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
@@ -281,13 +342,15 @@ class TestRunWeekly:
 class TestNotify:
     """#16: _notify() sends a failure push (not "report ready") when no docx was produced.
 
-    N03 (SOL-REVIEW-2026-09-24): every test in this class that expects the send path to actually
-    run also stubs `mark_notification_sent` to report "not yet sent" (True) -- these tests are
-    about the docx-present/missing branches, not the idempotency gate itself (see
-    TestNotifyIdempotency below for that)."""
+    R02/N03 (SOL-REVIEW2-2026-09-24): every test in this class that expects the send path to
+    actually run also stubs `claim_notification_pending` to report "claimed, go ahead" (True) --
+    these tests are about the docx-present/missing branches, not the claim/result state machine
+    itself (see TestNotifyIdempotency below for that). `ntfy.report_ready`/`.failure` mocks now
+    return a `Sent`-like object (`.ok`) since `_notify` reads that to decide `sent`/`failed`."""
 
     def _allow_send(self, monkeypatch) -> None:
-        monkeypatch.setattr("eoa.memory.relational.mark_notification_sent", lambda kind, key: True)
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: True)
+        monkeypatch.setattr("eoa.memory.relational.mark_notification_result", lambda kind, key, ok: None)
 
     def test_sends_failure_when_no_docx(self, monkeypatch) -> None:
         self._allow_send(monkeypatch)
@@ -295,11 +358,12 @@ class TestNotify:
         failures: list[tuple[str, str]] = []
         report_readies: list[tuple] = []
         monkeypatch.setattr(
-            "eoa.orchestrator.jobs.ntfy.failure", lambda stage, msg: failures.append((stage, msg))
+            "eoa.orchestrator.jobs.ntfy.failure",
+            lambda stage, msg: failures.append((stage, msg)) or ntfy.Sent(True, None, "u"),
         )
         monkeypatch.setattr(
             "eoa.orchestrator.jobs.ntfy.report_ready",
-            lambda *a, **kw: report_readies.append((a, kw)),
+            lambda *a, **kw: report_readies.append((a, kw)) or ntfy.Sent(True, None, "u"),
         )
 
         rs = RunState(job_id=1)
@@ -315,7 +379,8 @@ class TestNotify:
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         failures: list[tuple[str, str]] = []
         monkeypatch.setattr(
-            "eoa.orchestrator.jobs.ntfy.failure", lambda stage, msg: failures.append((stage, msg))
+            "eoa.orchestrator.jobs.ntfy.failure",
+            lambda stage, msg: failures.append((stage, msg)) or ntfy.Sent(True, None, "u"),
         )
         monkeypatch.setattr("eoa.orchestrator.jobs.ntfy.report_ready", lambda *a, **kw: pytest_fail())
 
@@ -338,26 +403,53 @@ class TestNotify:
             "eoa.orchestrator.jobs.ntfy.report_ready",
             lambda kind, path_docx, headlines, ui_url=None: sent.update(
                 kind=kind, path_docx=path_docx, headlines=headlines
-            ),
+            )
+            or ntfy.Sent(True, None, "u"),
         )
 
         rs = RunState(job_id=1)
         result = _notify(rs, paths=types.SimpleNamespace(docx="output/reports/2026-09-04.docx"))
 
         assert "report_missing" not in result
+        assert "notification_error" not in result
         assert sent["path_docx"] == "output/reports/2026-09-04.docx"
         assert not failures
 
+    def test_delivery_failure_without_exception_marks_failed_and_flags_partial(
+        self, monkeypatch
+    ) -> None:
+        """R02/N03: `ntfy.send` can return `Sent(ok=False)` without raising (HTTP error, timeout,
+        unreachable server). `_notify` must record `failed` (not `sent`) via
+        `mark_notification_result`, and surface a `notification_error` key so the run's overall
+        status (`has_incomplete_work`) is `partial`, not `done`."""
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: True)
+        recorded: list[tuple[str, str, bool]] = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.mark_notification_result",
+            lambda kind, key, ok: recorded.append((kind, key, ok)),
+        )
+        monkeypatch.setattr("eoa.db.connection", _raise_no_db)
+        monkeypatch.setattr(
+            "eoa.orchestrator.jobs.ntfy.report_ready", lambda *a, **kw: ntfy.Sent(False, None, "http://x")
+        )
+
+        rs = RunState(job_id=55)
+        result = _notify(rs, paths=types.SimpleNamespace(docx="output/reports/2026-09-04.docx"))
+
+        assert recorded == [("daily_report", "55", False)]
+        assert "notification_error" in result
+
 
 class TestNotifyIdempotency:
-    """N03 (SOL-REVIEW-2026-09-24): a stale-job replay of the SAME job (reap -> deferred ->
-    reclaimed, same `job_id`) must not send the nightly notification twice. Old code: `_notify`
-    always sends unconditionally, so replaying the same job through the `notify` stage a second
-    time sends `ntfy.report_ready` (or `.failure`) a second time -- these tests fail against that
-    code since it never calls `mark_notification_sent` at all and always emits a push."""
+    """N03/R02 (SOL-REVIEW-2026-09-24 / SOL-REVIEW2-2026-09-24): a stale-job replay of the SAME
+    job (reap -> deferred -> reclaimed, same `job_id`) must not send the nightly notification
+    twice. Old code: `_notify` always sends unconditionally, so replaying the same job through the
+    `notify` stage a second time sends `ntfy.report_ready` (or `.failure`) a second time -- these
+    tests fail against that code since it never calls `claim_notification_pending` at all and
+    always emits a push."""
 
     def test_skips_send_when_already_sent(self, monkeypatch) -> None:
-        monkeypatch.setattr("eoa.memory.relational.mark_notification_sent", lambda kind, key: False)
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: False)
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         report_readies: list[tuple] = []
         failures: list[tuple] = []
@@ -373,47 +465,60 @@ class TestNotifyIdempotency:
         assert not report_readies
         assert not failures
 
-    def test_sends_when_not_yet_sent_and_keys_on_job_id(self, monkeypatch) -> None:
+    def test_sends_when_claimed_and_keys_on_job_id(self, monkeypatch) -> None:
         """The idempotency key must be stable across a stale-job replay of the exact same job --
         `rs.job_id` (the jobs row is updated in place by `reap_stale_jobs`, never re-inserted)."""
-        calls: list[tuple[str, str]] = []
+        claim_calls: list[tuple[str, str]] = []
 
-        def _mark(kind, key):
-            calls.append((kind, key))
+        def _claim(kind, key):
+            claim_calls.append((kind, key))
             return True
 
-        monkeypatch.setattr("eoa.memory.relational.mark_notification_sent", _mark)
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", _claim)
+        result_calls: list[tuple[str, str, bool]] = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.mark_notification_result",
+            lambda kind, key, ok: result_calls.append((kind, key, ok)),
+        )
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         report_readies: list[tuple] = []
         monkeypatch.setattr(
-            "eoa.orchestrator.jobs.ntfy.report_ready", lambda *a, **kw: report_readies.append((a, kw))
+            "eoa.orchestrator.jobs.ntfy.report_ready",
+            lambda *a, **kw: report_readies.append((a, kw)) or ntfy.Sent(True, None, "u"),
         )
 
         rs = RunState(job_id=123)
         _notify(rs, paths=types.SimpleNamespace(docx="output/reports/2026-09-04.docx"))
 
-        assert calls == [("daily_report", "123")]
+        assert claim_calls == [("daily_report", "123")]
+        assert result_calls == [("daily_report", "123", True)]
         assert report_readies
 
-    def test_second_call_for_same_job_id_is_skipped_by_real_marker(self, monkeypatch) -> None:
-        """Exercises the actual state-transition (not just a mocked bool): a real
-        insert-once/skip-thereafter dict standing in for the DB's UNIQUE(kind, key) constraint --
-        first call claims and sends, replaying the identical job_id afterward is silently skipped,
-        matching what reap -> deferred -> reclaim does to a real `jobs` row."""
-        seen: set[tuple[str, str]] = set()
+    def test_second_call_for_same_job_id_is_skipped_by_real_state_machine(self, monkeypatch) -> None:
+        """Exercises the actual state-transition (not just a mocked bool): a real in-memory
+        pending/sent dict standing in for the DB's `(kind, key)` row -- first call claims, sends,
+        and marks `sent`; replaying the identical job_id afterward is silently skipped (already
+        `sent`, never reclaimed), matching what reap -> deferred -> reclaim does to a real `jobs`
+        row and its `notifications_sent` marker."""
+        state: dict[tuple[str, str], str] = {}
 
-        def _mark(kind, key):
+        def _claim(kind, key):
             k = (kind, key)
-            if k in seen:
+            if state.get(k) == "sent":
                 return False
-            seen.add(k)
+            state[k] = "pending"
             return True
 
-        monkeypatch.setattr("eoa.memory.relational.mark_notification_sent", _mark)
+        def _result(kind, key, ok):
+            state[(kind, key)] = "sent" if ok else "failed"
+
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", _claim)
+        monkeypatch.setattr("eoa.memory.relational.mark_notification_result", _result)
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         report_readies: list[tuple] = []
         monkeypatch.setattr(
-            "eoa.orchestrator.jobs.ntfy.report_ready", lambda *a, **kw: report_readies.append((a, kw))
+            "eoa.orchestrator.jobs.ntfy.report_ready",
+            lambda *a, **kw: report_readies.append((a, kw)) or ntfy.Sent(True, None, "u"),
         )
 
         rs = RunState(job_id=7)
@@ -425,3 +530,64 @@ class TestNotifyIdempotency:
         assert "notification_skipped" not in first
         assert second == {"notification_skipped": "already_sent_for_this_job"}
         assert len(report_readies) == 1
+
+    def test_failed_send_is_retried_on_replay_and_eventually_sent(self, monkeypatch) -> None:
+        """R02/N03: the exact regression this closes -- a failed send (`Sent(ok=False)`, no
+        exception) must NOT be treated as `sent`; a later replay of the same job_id must retry it,
+        and once that retry succeeds, a THIRD replay must finally skip (now genuinely `sent`)."""
+        state: dict[tuple[str, str], str] = {}
+
+        def _claim(kind, key):
+            k = (kind, key)
+            if state.get(k) == "sent":
+                return False
+            state[k] = "pending"
+            return True
+
+        def _result(kind, key, ok):
+            state[(kind, key)] = "sent" if ok else "failed"
+
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", _claim)
+        monkeypatch.setattr("eoa.memory.relational.mark_notification_result", _result)
+        monkeypatch.setattr("eoa.db.connection", _raise_no_db)
+
+        outcomes = iter([ntfy.Sent(False, None, "http://x"), ntfy.Sent(True, "id1", "http://x")])
+        monkeypatch.setattr("eoa.orchestrator.jobs.ntfy.report_ready", lambda *a, **kw: next(outcomes))
+
+        rs = RunState(job_id=7)
+        paths = types.SimpleNamespace(docx="output/reports/2026-09-04.docx")
+
+        first = _notify(rs, paths=paths)  # send fails (ok=False) -- state becomes "failed"
+        assert "notification_error" in first
+        assert state[("daily_report", "7")] == "failed"
+
+        second = _notify(rs, paths=paths)  # replay retries (was "failed", not "sent") -- succeeds
+        assert "notification_error" not in second
+        assert "notification_skipped" not in second
+        assert state[("daily_report", "7")] == "sent"
+
+        third = _notify(rs, paths=paths)  # now genuinely sent -- skipped for good
+        assert third == {"notification_skipped": "already_sent_for_this_job"}
+
+    def test_exception_during_send_marks_failed_not_left_pending(self, monkeypatch) -> None:
+        """R02/N03: an exception during the actual send (not just `Sent(ok=False)`) must also
+        record `failed` (via the `except` clause in `_notify`), not leave the row stuck `pending`
+        until the stale-claim window expires."""
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: True)
+        recorded: list[tuple[str, str, bool]] = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.mark_notification_result",
+            lambda kind, key, ok: recorded.append((kind, key, ok)),
+        )
+        monkeypatch.setattr("eoa.db.connection", _raise_no_db)
+
+        def _raise(*_a, **_kw):
+            raise RuntimeError("ntfy server unreachable")
+
+        monkeypatch.setattr("eoa.orchestrator.jobs.ntfy.report_ready", _raise)
+
+        rs = RunState(job_id=8)
+        with pytest.raises(RuntimeError, match="ntfy server unreachable"):
+            _notify(rs, paths=types.SimpleNamespace(docx="output/reports/2026-09-04.docx"))
+
+        assert recorded == [("daily_report", "8", False)]

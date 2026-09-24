@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/api";
@@ -8,10 +8,12 @@ import { PatentTable } from "@/components/patents/PatentTable";
 import { PatentHeatmap } from "@/components/patents/PatentHeatmap";
 import { SurveyDialog } from "@/components/patents/SurveyDialog";
 import { cn } from "@/lib/cn";
+import type { PatentRecord } from "@/types/api";
 
 type Tab = "list" | "heatmap";
 
 const EMPTY_FILTERS: PatentFiltersState = { assignee: "", subdomain: "", israeli: false, min_value_score: "", q: "" };
+const PAGE_SIZE = 200;
 
 export function PatentsPage() {
   const queryClient = useQueryClient();
@@ -21,6 +23,13 @@ export function PatentsPage() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [surveySubmitting, setSurveySubmitting] = useState(false);
+
+  // R06/F33 (SOL-REVIEW2-2026-09-24): "load more" pagination -- resets to page 1 whenever the
+  // active filters change (a stale later page of a NEW filter's results would be nonsensical).
+  const [page, setPage] = useState(1);
+  useEffect(() => {
+    setPage(1);
+  }, [filters.israeli, filters.min_value_score, filters.assignee, filters.subdomain, filters.q]);
 
   const statusQuery = useQuery({ queryKey: ["patents-status"], queryFn: () => api.getPatentsStatus() });
   // F33 (docs/qa/content_review/SOL-AUDIT-2026-09-24.md): `assignee`/`subdomain`/`q` used to be
@@ -38,6 +47,7 @@ export function PatentsPage() {
       filters.assignee,
       filters.subdomain,
       filters.q,
+      page,
     ],
     queryFn: () =>
       api.getPatents({
@@ -46,7 +56,8 @@ export function PatentsPage() {
         assignee: filters.assignee || undefined,
         subdomain: filters.subdomain || undefined,
         q: filters.q || undefined,
-        limit: 200,
+        limit: PAGE_SIZE,
+        page,
       }),
   });
   // F33 (SOL-AUDIT-2026-09-24 review): facet options (assignee/subdomain dropdowns) used to come
@@ -68,13 +79,37 @@ export function PatentsPage() {
     enabled: dialogOpen,
   });
 
-  const patents = patentsQuery.data?.patents ?? [];
+  // R06/F33: accumulate pages fetched so far for the current filter set -- page 1 replaces the
+  // list (a fresh filter/search), page > 1 (a "load more" click) appends to it.
+  const [accumulatedPatents, setAccumulatedPatents] = useState<PatentRecord[]>([]);
+  useEffect(() => {
+    setAccumulatedPatents([]);
+  }, [filters.israeli, filters.min_value_score, filters.assignee, filters.subdomain, filters.q]);
+  useEffect(() => {
+    if (!patentsQuery.data) return;
+    setAccumulatedPatents((prev) =>
+      page === 1 ? patentsQuery.data.patents : [...prev, ...patentsQuery.data.patents],
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the query result, not `page` itself.
+  }, [patentsQuery.data]);
+
+  const patents = accumulatedPatents;
+  const patentsTotal = patentsQuery.data?.total ?? patents.length;
+  const hasMorePatents = patentsQuery.data?.has_more ?? false;
+  const initialLoading = patentsQuery.isLoading && page === 1;
+  const isLoadingMore = patentsQuery.isFetching && page > 1;
   const assignees = facetsQuery.data?.assignees ?? [];
   const subdomains = facetsQuery.data?.subdomains ?? [];
-  // "any patents in the DB at all" (backs the top-level "לא זוהו פטנטים" empty state, distinct
-  // from "no rows match the active filter") -- derived from the uncapped facets response so it
-  // isn't defeated by the same row cap `getPatents` has (F33).
-  const hasAnyPatents = assignees.length > 0 || subdomains.length > 0 || patents.length > 0;
+  // R09 (SOL-REVIEW2-2026-09-24): "any patents in the DB at all" (backs the top-level "לא זוהו
+  // פטנטים" empty state, distinct from "no rows match the active filter") -- `facetsQuery.data
+  // .total` is an unfiltered `count(*)`, so it can't be fooled into reporting "database empty" by
+  // a filter matching zero rows, or by every existing patent having a null assignee AND null
+  // subdomain (which used to make both facet lists empty too). Falls back to the old
+  // facet-value/row heuristic only while facets haven't loaded yet, to avoid a load-time flash.
+  const hasAnyPatents =
+    facetsQuery.data?.total != null
+      ? facetsQuery.data.total > 0
+      : assignees.length > 0 || subdomains.length > 0 || patents.length > 0;
 
   function setTab(next: Tab) {
     const p = new URLSearchParams(searchParams);
@@ -139,9 +174,12 @@ export function PatentsPage() {
 
       {tab === "list" && (
         <div className="space-y-3">
-          {patentsQuery.isLoading && <LoadingState label="טוען פטנטים…" />}
+          {/* R06/F33: only the very first fetch (page 1, nothing accumulated yet) blanks the
+              whole list -- a "load more" fetch (page > 1) keeps the already-loaded rows on
+              screen with its own inline indicator instead, see the button below. */}
+          {initialLoading && <LoadingState label="טוען פטנטים…" />}
           {patentsQuery.isError && <ErrorState onRetry={() => patentsQuery.refetch()} />}
-          {!patentsQuery.isLoading && !patentsQuery.isError && (
+          {!initialLoading && !patentsQuery.isError && (
             <>
               {!hasAnyPatents ? (
                 <EmptyState
@@ -154,11 +192,30 @@ export function PatentsPage() {
                   {patents.length === 0 ? (
                     <EmptyState title="אין תוצאות תואמות" description="נסה לשנות את הסינון." />
                   ) : (
-                    <PatentTable
-                      patents={patents}
-                      expandedId={expandedId}
-                      onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
-                    />
+                    <>
+                      <PatentTable
+                        patents={patents}
+                        expandedId={expandedId}
+                        onToggleExpand={(id) => setExpandedId((cur) => (cur === id ? null : id))}
+                      />
+                      {/* R06/F33: server-side "load more" -- mobile/RTL: full-width, min-h-10
+                          (40px) touch target, dir="auto" so the count text reads right-to-left. */}
+                      {hasMorePatents && (
+                        <div className="flex justify-center pt-2">
+                          <button
+                            type="button"
+                            onClick={() => setPage((p) => p + 1)}
+                            disabled={isLoadingMore}
+                            dir="auto"
+                            className="min-h-10 w-full max-w-xs rounded-md border border-border-strong px-4 py-2 text-sm text-fg hover:bg-bg-raised disabled:opacity-60 sm:w-auto"
+                          >
+                            {isLoadingMore
+                              ? "טוען עוד…"
+                              : `טען עוד (${patents.length} מתוך ${patentsTotal})`}
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}

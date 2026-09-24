@@ -132,6 +132,26 @@ def _merge_usage(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _validate_usage(kind: str, usage: dict[str, Any]) -> dict[str, Any]:
+    """Every present usage value must be a non-negative number (``None``/missing is fine -- not
+    every CLI reports every field). F26 follow-up (SOL-REVIEW2-2026-09-24): the parse functions
+    below already sanitize a wrong-shaped ``usage`` *container* to ``{}``, but a malformed
+    individual value inside an otherwise-dict ``usage`` (a string, a negative number) passed
+    straight through into ``ProviderResult.usage`` unvalidated -- it only surfaced later, outside
+    every provider boundary, when ``eoa.llm.chain.run_chain`` ran its own
+    ``int(result.usage.get(...) or 0)`` conversion and raised bare. Validating here, inside
+    ``CliProvider.chat()``'s own try/except, turns a bad value into ``CliProviderError`` so the
+    chain falls through to the next leg instead."""
+    for key, value in usage.items():
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{kind} CLI usage[{key!r}] is a {type(value).__name__}, not a number: {value!r}")
+        if value < 0:
+            raise ValueError(f"{kind} CLI usage[{key!r}] is negative: {value!r}")
+    return usage
+
+
 def _find_tool_spec(tools: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     for t in tools:
         fn = t.get("function") or {}
@@ -331,14 +351,19 @@ class CliProvider:
             prompt_chars=len(prompt),
             duration_ms=duration_ms,
         )
-        return ProviderResult(
-            content=content,
-            model=mdl or "default",
-            provider=self.kind,
-            duration_ms=duration_ms,
-            prompt_chars=len(prompt),
-            usage=usage,
-        )
+        # F26: validate + construct the full result inside a CliProviderError boundary -- see
+        # `_validate_usage` above for why.
+        try:
+            return ProviderResult(
+                content=content,
+                model=mdl or "default",
+                provider=self.kind,
+                duration_ms=duration_ms,
+                prompt_chars=len(prompt),
+                usage=_validate_usage(self.kind, usage),
+            )
+        except (TypeError, ValueError) as exc:
+            raise CliProviderError(f"{self.kind} CLI returned malformed usage data: {exc}") from exc
 
     def _run_once(
         self, binary: str, model: str | None, prompt: str, power: str | None, timeout: float
@@ -427,15 +452,18 @@ class CliProvider:
 
         name, args = parsed
         log.info("llm_chain_text_tools", provider=self.kind, model=model or "default", tool=name)
-        return ProviderResult(
-            content="",
-            model=model or "default",
-            provider=self.kind,
-            duration_ms=duration_ms,
-            prompt_chars=len(prompt),
-            usage=usage,
-            tool_calls=[{"function": {"name": name, "arguments": args}}],
-        )
+        try:
+            return ProviderResult(
+                content="",
+                model=model or "default",
+                provider=self.kind,
+                duration_ms=duration_ms,
+                prompt_chars=len(prompt),
+                usage=_validate_usage(self.kind, usage),
+                tool_calls=[{"function": {"name": name, "arguments": args}}],
+            )
+        except (TypeError, ValueError) as exc:
+            raise CliProviderError(f"{self.kind} CLI returned malformed usage data: {exc}") from exc
 
     # -- per-kind argv/stdin construction --------------------------------------------------
 

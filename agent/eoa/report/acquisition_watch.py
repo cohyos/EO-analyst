@@ -136,7 +136,12 @@ def _fetch_watch_events(
                 LEFT JOIN sources src ON src.id = i.source_id
                 WHERE e.kind = ANY(%(kinds)s)
                   AND e.parties && %(names)s
-                  AND COALESCE(e.date, i.published_at::date, i.fetched_at::date, i.created_at::date)
+                  AND COALESCE(
+                          e.date,
+                          (i.published_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                          (i.fetched_at AT TIME ZONE 'Asia/Jerusalem')::date,
+                          (i.created_at AT TIME ZONE 'Asia/Jerusalem')::date
+                      )
                       BETWEEN %(start)s AND %(end)s
                 ORDER BY e.date DESC NULLS LAST, e.id DESC
                 """,

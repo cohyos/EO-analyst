@@ -156,18 +156,46 @@ def approve_security_review(job_id: int) -> dict[str, Any]:
     `db.connection()` transaction (commits together on success, rolls back both on any failure) --
     `_claim_pending_review`'s own `conn` parameter and `enqueue_job`'s new `conn` parameter both
     exist for exactly this.
+
+    R08 (SOL-REVIEW2-2026-09-24): `ensure_context_he` used to run INSIDE that same transaction,
+    between the claim and the enqueue -- but it does its own separate DB round trip
+    (`item_context_he_from_db` opens its own `eoa.db.connection()`), so for as long as it took,
+    this request held TWO pool connections at once (the outer transaction's, idle and waiting,
+    plus `ensure_context_he`'s own) against a pool capped at 8 (`eoa.db.get_pool`). A handful of
+    concurrent approvals could exhaust the pool and stall unrelated requests. `ensure_context_he`
+    now runs BEFORE the transaction opens at all -- against a plain, uncommitted-nothing read of
+    the job's current `payload` (a `deep_search` job's `payload` is never mutated after creation
+    by anything security-review-related, so this is safe to read outside the atomic claim) -- so
+    the transaction below is back to being just the claim + the enqueue, holding exactly one
+    connection for as briefly as before N08's own fix intended. If the job was resolved by another
+    request in the narrow window between this pre-check and the claim, `_claim_pending_review`
+    still correctly finds nothing and this still 404s -- the atomicity guarantee is unchanged,
+    only the context lookup moved outside the connection-holding window.
     """
     from eoa.pipeline.investigation_context import ensure_context_he
+
+    pending = _fetchone(
+        """
+        SELECT payload FROM jobs
+        WHERE id = %s
+          AND kind = 'deep_search'
+          AND result ->> 'security_review' = 'true'
+          AND COALESCE((result ->> 'security_review_resolved')::boolean, false) = false
+        """,
+        (job_id,),
+    )
+    if pending is None:
+        raise not_found("החקירה לא נמצאה או שאינה ממתינה לבדיקת אבטחה")
+    payload = dict(pending.get("payload") or {})
+    payload["expanded_from_job_id"] = job_id
+    refreshed = ensure_context_he(payload)
+    if refreshed:
+        payload["context_he"] = refreshed
 
     with connection() as conn:
         job = _claim_pending_review(job_id, dismissed=False, conn=conn)
         if job is None:
             raise not_found("החקירה לא נמצאה או שאינה ממתינה לבדיקת אבטחה")
-        payload = dict(job.get("payload") or {})
-        payload["expanded_from_job_id"] = job_id
-        refreshed = ensure_context_he(payload)
-        if refreshed:
-            payload["context_he"] = refreshed
         new_job_id = enqueue_job("deep_search", payload, priority=0, conn=conn)
     return {"job_id": new_job_id}
 

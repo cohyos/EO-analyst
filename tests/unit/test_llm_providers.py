@@ -116,6 +116,71 @@ class TestCliProviderChatAgy:
         with pytest.raises(CliProviderError):
             CliProvider("agy").chat([{"role": "user", "content": "ping"}])
 
+    def test_string_token_count_raises_cli_provider_error(self, monkeypatch: pytest.MonkeyPatch):
+        """SOL-REVIEW2-2026-09-24 F26 remaining gap: `_parse_agy` already sanitizes a
+        wrong-shaped `usage` *container* to `{}`, but an individual malformed value inside an
+        otherwise-dict `usage` (a string, a negative number) used to pass straight through into
+        `ProviderResult.usage` unvalidated -- `CliProvider.chat()`'s own `return
+        ProviderResult(...)` had no error boundary at all, so the bad value only surfaced later,
+        outside every provider boundary, in `eoa.llm.chain.run_chain`'s own
+        `int(result.usage.get(...) or 0)` conversion. Validated + caught here instead, so the
+        chain falls through to the next leg."""
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process",
+            lambda *a, **k: _completed(
+                stdout=json.dumps(
+                    {
+                        "status": "SUCCESS",
+                        "response": "PONG",
+                        "usage": {"input_tokens": "not-a-number", "output_tokens": 3},
+                    }
+                )
+            ),
+        )
+        with pytest.raises(CliProviderError, match="malformed usage"):
+            CliProvider("agy").chat([{"role": "user", "content": "ping"}])
+
+    def test_negative_token_count_raises_cli_provider_error(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process",
+            lambda *a, **k: _completed(
+                stdout=json.dumps(
+                    {
+                        "status": "SUCCESS",
+                        "response": "PONG",
+                        "usage": {"input_tokens": 5, "output_tokens": -3},
+                    }
+                )
+            ),
+        )
+        with pytest.raises(CliProviderError, match="malformed usage"):
+            CliProvider("agy").chat([{"role": "user", "content": "ping"}])
+
+    def test_none_token_count_defaults_and_does_not_raise(self, monkeypatch: pytest.MonkeyPatch):
+        """A missing/None count is legitimate, not malformed."""
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process",
+            lambda *a, **k: _completed(
+                stdout=json.dumps(
+                    {
+                        "status": "SUCCESS",
+                        "response": "PONG",
+                        "usage": {"input_tokens": None, "output_tokens": 3},
+                    }
+                )
+            ),
+        )
+        result = CliProvider("agy").chat([{"role": "user", "content": "ping"}])
+        assert result.usage == {"input_tokens": None, "output_tokens": 3}
+
+    def test_next_leg_is_called_after_malformed_usage(self) -> None:
+        from eoa.llm.chain import FALLBACK_EXCEPTIONS
+
+        assert issubclass(CliProviderError, FALLBACK_EXCEPTIONS)
+
 
 class TestCliProviderChatClaude:
     def test_success_uses_stdin_and_restricted_flag(self, monkeypatch: pytest.MonkeyPatch):

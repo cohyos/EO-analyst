@@ -151,6 +151,8 @@ export interface PatentsQuery {
   min_value_score?: number;
   q?: string;
   limit?: number;
+  /** R06/F33 (SOL-REVIEW2-2026-09-24): 1-based page number, same convention as `TechItemsQuery`. */
+  page?: number;
 }
 
 /** A17: `GET /api/payloads` filters. */
@@ -162,6 +164,8 @@ export interface PayloadsQuery {
   family?: string;
   q?: string;
   limit?: number;
+  /** R06/F33 (SOL-REVIEW2-2026-09-24): 1-based page number, same convention as `TechItemsQuery`. */
+  page?: number;
 }
 
 /** A12 (מעקב טכנולוגי): `GET /api/tech/items` filters. */
