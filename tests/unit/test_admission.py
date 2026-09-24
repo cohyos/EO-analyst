@@ -147,7 +147,7 @@ class _ConcurrentFakeCursor:
             self._conn._locked = True
             self._last = None
         elif "UPDATE jobs SET state = 'failed'" in query:
-            kinds = set(params["kinds"])
+            kinds = {params["kind"]}
             for j in self._db._jobs:
                 if j["kind"] in kinds and j["state"] == "deferred" and j.get("stale"):
                     j["state"] = "failed"
@@ -158,7 +158,8 @@ class _ConcurrentFakeCursor:
                 (
                     j
                     for j in self._db._jobs
-                    if j["kind"] in kinds and j["state"] in ("queued", "running", "deferred")
+                    if j["kind"] in kinds
+                    and (j["state"] in ("queued", "running") or (j["state"] == "deferred" and not j.get("stale")))
                 ),
                 None,
             )
@@ -349,3 +350,47 @@ class TestReportNeverSuppressesDaily:
         monkeypatch.setattr(admission.db, "connection", db.connection)
         with pytest.raises(admission.RunAlreadyActive):
             admission.admit_run("report", equivalent_kinds=admission.equivalent_kinds_for("report"))
+
+
+class TestRetirementScopedToAdmittedKind:
+    """V03 (SOL-REVIEW5-2026-09-24): a standalone `report` admission must not retire an overdue
+    deferred `daily_run` -- the report only builds a report, so the daily's analysis would never
+    run. Only an admission of the SAME kind (its replacement) retires a stale deferred row."""
+
+    def test_report_admission_leaves_stale_deferred_daily_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _ConcurrentFakeDB()
+        db._jobs.append({"id": 1, "kind": "daily_run", "state": "deferred", "stale": True})
+        db._next_id = 2
+        monkeypatch.setattr(admission.db, "connection", db.connection)
+
+        admission.admit_run("report", equivalent_kinds=admission.equivalent_kinds_for("report"))
+
+        assert db._jobs[0]["state"] == "deferred"
+
+    def test_retirement_sql_targets_only_the_admitted_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cur = _FakeCursor([None, {"id": 1}])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+        admission.admit_run("report", equivalent_kinds=["report", "daily_run"])
+        query, params = cur.executed[1]
+        assert "WHERE kind = %(kind)s AND state = 'deferred'" in query
+        assert params["kind"] == "report"
+
+
+class TestRefusedAdmissionKeepsRetirement:
+    """T01 follow-up (SOL-REVIEW5-2026-09-24): `RunAlreadyActive` used to be raised INSIDE the
+    `db.connection()` block, so the context manager rolled back the stale-deferred retirement."""
+
+    def test_raise_happens_after_the_transaction_exits_cleanly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        exits: list[object] = []
+
+        class _RecordingConnection(_FakeConnection):
+            def __exit__(self, exc_type, *rest: object) -> bool:
+                exits.append(exc_type)
+                return False
+
+        cur = _FakeCursor([{"id": 5, "kind": "daily_run", "state": "running"}])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _RecordingConnection(cur))
+
+        with pytest.raises(admission.RunAlreadyActive):
+            admission.admit_run("daily_run", equivalent_kinds=["daily_run"])
+        assert exits == [None]  # committed, not rolled back by an in-flight exception

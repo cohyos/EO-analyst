@@ -77,17 +77,6 @@ class RecordingStub:
         return len(self.calls)
 
 
-@pytest.fixture(autouse=True)
-def _no_stale_events_to_clear(monkeypatch: pytest.MonkeyPatch) -> None:
-    """F09 remainder (SOL-REVIEW4-2026-09-24): `persist_analysis` now calls
-    `delete_stale_analyze_events` once, unconditionally, right before its event-insert loop (see
-    `TestDeleteStaleAnalyzeEventsClearedBeforeInsert` below for the dedicated coverage of that
-    call). Every other test in this file exercises the rest of `persist_analysis` and doesn't
-    care about this DB call -- stub it to a no-op here so none of them need a real DB connection
-    or their own `connection()` mock just to keep working."""
-    monkeypatch.setattr("eoa.pipeline.analyze.delete_stale_analyze_events", lambda item_id: 0)
-
-
 def test_updatable_fields_contains_new_columns() -> None:
     """Verify that key_facts, uncertainty_he, source_name are in the allow-list."""
     assert "key_facts" in _ITEM_UPDATABLE_FIELDS
@@ -222,87 +211,6 @@ def test_persist_analysis_inserts_events(monkeypatch: pytest.MonkeyPatch) -> Non
     assert kwargs["program"] == "Program Y"
     assert kwargs["summary_he"] == "אירוע בעברית"
     assert kwargs["confidence"] == 0.95
-
-
-class TestDeleteStaleAnalyzeEventsClearedBeforeInsert:
-    """F09 remainder (SOL-REVIEW4-2026-09-24 backlog): `analyze.py`'s event-persist block never
-    reconciled a PREVIOUS run's extracted events against a re-analysis that no longer extracts
-    them -- an event a stale prior run persisted just sat there forever. `persist_analysis` now
-    clears this item's own previously-analyze-extracted events (`delete_stale_analyze_events`)
-    once, before inserting whatever this run actually extracted. Discriminating against the
-    pre-fix code: `delete_stale_analyze_events` (not present at all pre-fix) is called exactly
-    once, with this item's id, strictly before any `insert_event` call -- and it fires even when
-    this run extracts NO events at all (the exact "no longer extracts them" case)."""
-
-    def test_called_once_with_item_id_before_any_insert_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls: list[tuple[str, int]] = []
-
-        def fake_delete(item_id: int) -> int:
-            calls.append(("delete", item_id))
-            return 0
-
-        def fake_insert_event(**kwargs: object) -> int:
-            calls.append(("insert", kwargs["item_id"]))
-            return len(calls)
-
-        monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", RecordingStub())
-        monkeypatch.setattr("eoa.pipeline.analyze.delete_stale_analyze_events", fake_delete)
-        monkeypatch.setattr("eoa.pipeline.analyze.insert_event", fake_insert_event)
-        monkeypatch.setattr("eoa.pipeline.analyze.upsert_entity", RecordingStub())
-
-        out = AnalyzeOut(
-            summary_he="תקציר",
-            so_what_he="השלכות",
-            key_facts=[],
-            events=[
-                EventOut(
-                    kind="contract_award",
-                    title="new contract event",
-                    date="2026-09-01",
-                    amount_usd=1000000.0,
-                    currency="USD",
-                    parties=["Company A"],
-                    customer="Client X",
-                    program="Program Y",
-                    summary_he="אירוע בעברית",
-                    confidence=0.9,
-                ),
-            ],
-            edges=[],
-        )
-        item = {
-            "id": 777,
-            "title": "Test",
-            "url": "https://example.com",
-            "clean_text": "Company A was awarded a $1 million contract by Client X under Program Y.",
-        }
-
-        persist_analysis(item, out)
-
-        delete_calls = [c for c in calls if c[0] == "delete"]
-        insert_calls = [c for c in calls if c[0] == "insert"]
-        assert delete_calls == [("delete", 777)]  # exactly once, this item's id
-        assert len(insert_calls) == 1
-        # THE regression check: the delete happens strictly BEFORE the insert, not after/never.
-        assert calls.index(("delete", 777)) < calls.index(insert_calls[0])
-
-    def test_called_even_when_this_run_extracts_no_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The exact scenario F09 flags: a re-analysis that no longer extracts an event a stale
-        prior run did must still clear that stale row -- the delete cannot be gated on `out.events`
-        being non-empty."""
-        calls: list[int] = []
-
-        monkeypatch.setattr("eoa.pipeline.analyze.update_item_fields", RecordingStub())
-        monkeypatch.setattr("eoa.pipeline.analyze.delete_stale_analyze_events", lambda item_id: calls.append(item_id))
-        monkeypatch.setattr("eoa.pipeline.analyze.insert_event", RecordingStub())
-        monkeypatch.setattr("eoa.pipeline.analyze.upsert_entity", RecordingStub())
-
-        out = AnalyzeOut(summary_he="תקציר", so_what_he="השלכות", key_facts=[], events=[], edges=[])
-        item = {"id": 888, "title": "Test", "url": "https://example.com"}
-
-        persist_analysis(item, out)
-
-        assert calls == [888]
 
 
 def test_persist_analysis_handles_date_parsing(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -98,14 +98,19 @@ def admit_run(
     against the row this call just inserted. This is the one admission gate every caller must go
     through for `daily_run`/`weekly_run`/`report`."""
     kinds = equivalent_kinds if equivalent_kinds is not None else [kind]
+    existing = None
+    job_id: int | None = None
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%(ns)s)", {"ns": ADMISSION_LOCK_NS})
+        # V03 (SOL-REVIEW5-2026-09-24): retire only stale deferred rows of the kind being ADMITTED
+        # -- the new job is their replacement. Retiring across `kinds` let a standalone `report`
+        # admission discard an overdue `daily_run` whose pipeline nothing then re-ran.
         cur.execute(
             "UPDATE jobs SET state = 'failed', finished_at = now(), "
             "error = 'superseded: deferred longer than ' || %(deferred_hours)s || 'h, retired at admission' "
-            "WHERE kind = ANY(%(kinds)s) AND state = 'deferred' "
+            "WHERE kind = %(kind)s AND state = 'deferred' "
             "AND created_at <= now() - make_interval(hours => %(deferred_hours)s)",
-            {"kinds": kinds, "deferred_hours": DEFERRED_ACTIVE_HOURS},
+            {"kind": kind, "deferred_hours": DEFERRED_ACTIVE_HOURS},
         )
         cur.execute(
             "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND (state IN ('queued', 'running') "
@@ -114,15 +119,19 @@ def admit_run(
             {"kinds": kinds, "deferred_hours": DEFERRED_ACTIVE_HOURS},
         )
         existing = cur.fetchone()
-        if existing is not None:
-            raise RunAlreadyActive(dict(existing))
-        cur.execute(
-            "INSERT INTO jobs (kind, payload, priority, state) "
-            "VALUES (%(kind)s, %(payload)s, %(priority)s, 'queued') RETURNING id",
-            {"kind": kind, "payload": Json(payload) if payload is not None else None, "priority": priority},
-        )
-        job_id: int = cur.fetchone()["id"]
+        if existing is None:
+            cur.execute(
+                "INSERT INTO jobs (kind, payload, priority, state) "
+                "VALUES (%(kind)s, %(payload)s, %(priority)s, 'queued') RETURNING id",
+                {"kind": kind, "payload": Json(payload) if payload is not None else None, "priority": priority},
+            )
+            job_id = cur.fetchone()["id"]
+    # T01 follow-up (SOL-REVIEW5-2026-09-24): raise only AFTER the transaction has committed, so a
+    # refused admission keeps its stale-deferred retirement instead of rolling it back.
+    if existing is not None:
+        raise RunAlreadyActive(dict(existing))
     log.info("job.enqueued", job_id=job_id, kind=kind, priority=priority)
+    assert job_id is not None
     return job_id
 
 

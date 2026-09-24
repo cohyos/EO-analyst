@@ -203,7 +203,7 @@ class _ConcurrentFakeCursor:
             self._conn._locked = True
             self._last = None
         elif "UPDATE jobs SET state = 'failed'" in query:
-            kinds = set(params["kinds"])
+            kinds = {params["kind"]}
             for j in self._db._jobs:
                 if j["kind"] in kinds and j["state"] == "deferred" and j.get("stale"):
                     j["state"] = "failed"

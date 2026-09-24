@@ -1025,34 +1025,6 @@ def merge_duplicate_events(*, item_id: int | None = None, dry_run: bool = True) 
     return merges
 
 
-def delete_stale_analyze_events(item_id: int) -> int:
-    """F09 remainder (SOL-REVIEW4-2026-09-24): before analyze persists this run's freshly
-    extracted events for `item_id`, clear out the PREVIOUS run's analyze-extracted events for the
-    same item -- otherwise a re-analysis that no longer extracts an event a stale prior run did
-    (the source article was corrected, the LLM's re-reading dropped a spurious extraction, ...)
-    leaves that stale event sitting in `events` forever; nothing ever reconciles it away.
-
-    Scope: `item_id` is `events`' only per-item identity column, and `insert_event` (called
-    exclusively from `eoa.pipeline.analyze`, verified -- no API route and no other pipeline stage
-    ever writes to `events`) is the sole writer of a fresh row, so every row with this `item_id` is
-    itself "produced by analyze for this item" -- EXCEPT one case: `scripts/repair_round14_events.py
-    --apply` (a manual, one-off cross-item reconciliation repair, not part of the regular pipeline)
-    can merge ANOTHER item's event into a `keep` row that happens to belong to `item_id`, recording
-    the absorbed item(s) in `source_item_ids` (migration 0030, `NOT NULL DEFAULT '{}'`) and
-    deleting their own original rows -- so that `keep` row is the ONLY surviving record of the
-    other item(s)' event. A plain `item_id`-scoped delete would destroy it (and, since the
-    absorbed rows are already gone, the data would be unrecoverable). This excludes any row whose
-    `source_item_ids` is non-empty from the delete, leaving a merged row for a human/the repair
-    script to handle rather than guessing at how to fold it back into a single-item reanalysis.
-    Returns the number of rows deleted."""
-    with connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM events WHERE item_id = %(item_id)s AND array_length(source_item_ids, 1) IS NULL",
-            {"item_id": item_id},
-        )
-        return cur.rowcount
-
-
 def insert_event(
     *,
     item_id: int,
