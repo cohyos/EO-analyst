@@ -144,170 +144,119 @@ def _old_job(job_id: int = 1) -> dict:
         "id": job_id,
         "kind": "weekly_run",
         "payload": {},
-        "created_at": datetime.now(tz=UTC) - timedelta(hours=4),
+        "created_at": datetime.now(tz=UTC) - jobs.WEEKLY_DAILY_WAIT_MAX - timedelta(minutes=1),
     }
 
 
+def _must_not(what: str):
+    def _fail(*_a, **_k):
+        raise AssertionError(f"must not {what}")
+
+    return _fail
+
+
+def _fake_weekly(report_id: int = 42, passed: bool = True):
+    return lambda: types.SimpleNamespace(report_id=report_id, qa=types.SimpleNamespace(passed=passed))
+
+
 class TestRunWeekly:
-    """F4/F22/N07 (SOL-REVIEW-2026-09-24): run_weekly must not re-run the full nightly pipeline
-    when a separate daily_run job already covered tonight, AND must not build the weekly report
-    on top of a daily_run that is merely queued/running/deferred (still-in-flight, or still
-    retrying, data) or hasn't even been inserted yet -- it must wait (defer itself,
-    ResourceUnavailable) for that daily_run to reach a terminal state first, up to
-    WEEKLY_DAILY_WAIT_MAX.
+    """F4/F22/N07 + S01/S02 (SOL-REVIEW3-2026-09-24): run_weekly never runs the nightly pipeline
+    itself. It waits (defers, ResourceUnavailable) until tonight's daily_run reaches a terminal
+    state -- admitting one through the shared admission gate when none exists -- and builds the
+    weekly report only on a terminal daily run."""
 
-    R03/N07/F22 (SOL-REVIEW2-2026-09-24): after that wait budget, the ORIGINAL "stand-alone
-    weekly" fallback (run the pipeline itself) is legitimate ONLY when no daily_run was ever found
-    (state is None) -- see TestFallbackAfterWaitTimeout below. When a daily_run job genuinely
-    exists but is still not terminal (queued/running/deferred) after the full wait, running the
-    pipeline a second time here would duplicate it; the correct outcome is `partial` with a clear
-    error, never a silent duplicate run."""
-
-    def test_skips_daily_pipeline_when_daily_done_tonight(self, monkeypatch) -> None:
-        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: "done")
-
-        def _fail_if_called(job):
-            raise AssertionError("run_daily should not be called when a daily_run already covered tonight")
-
-        monkeypatch.setattr(jobs, "run_daily", _fail_if_called)
-
-        class _Paths:
-            report_id = 42
-            qa = types.SimpleNamespace(passed=True)
-
-        monkeypatch.setattr("eoa.report.weekly.build_weekly", lambda: _Paths())
+    @pytest.mark.parametrize("terminal_state", ["done", "partial", "failed"])
+    def test_builds_weekly_report_once_daily_is_terminal(self, monkeypatch, terminal_state) -> None:
+        """`partial`/`failed` are terminal too: tonight's data is final either way."""
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda since, s=terminal_state: s)
+        monkeypatch.setattr(jobs, "run_daily", _must_not("run the daily pipeline"))
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", _fake_weekly())
 
         stats = run_weekly(_fresh_job())
 
-        assert stats["daily_pipeline_skipped"] == "daily_run_already_covered"
-        assert stats["daily_run_state"] == "done"
+        assert stats["daily_run_state"] == terminal_state
         assert stats["weekly_report"] == {"report_id": 42, "qa_passed": True}
 
-    def test_skips_daily_pipeline_when_daily_partial_or_failed(self, monkeypatch) -> None:
-        """A daily_run that finished `partial` or `failed` is still TERMINAL -- tonight's data is
-        final either way, so weekly proceeds rather than waiting forever for a state that will
-        never become `done`."""
-        for terminal_state in ("partial", "failed"):
-            monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda s=terminal_state: s)
-            monkeypatch.setattr(
-                jobs, "run_daily", lambda job: (_ for _ in ()).throw(AssertionError("must not rerun pipeline"))
-            )
-            monkeypatch.setattr(
-                "eoa.report.weekly.build_weekly",
-                lambda: types.SimpleNamespace(report_id=1, qa=types.SimpleNamespace(passed=True)),
-            )
-            stats = run_weekly(_fresh_job())
-            assert stats["daily_run_state"] == terminal_state
+    @pytest.mark.parametrize("state", ["queued", "running", "deferred", jobs.DAILY_STATE_QUERY_FAILED])
+    def test_defers_while_daily_not_terminal_or_state_unknown(self, monkeypatch, state) -> None:
+        """S02/R03: a non-terminal daily (and, new, a FAILED state query -- previously read as "no
+        daily row") defers; nothing is built and no daily run is admitted."""
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda since: state)
+        monkeypatch.setattr(jobs, "run_daily", _must_not("run the daily pipeline"))
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", _must_not("build the weekly report yet"))
+        from eoa.orchestrator import admission
 
-    def test_defers_when_daily_still_running(self, monkeypatch) -> None:
-        """THE regression this closes: the old code treated `running` as "covered" and built the
-        weekly report immediately, on top of not-yet-finished daily analysis. Old code: no
-        exception, `run_daily` skipped, `build_weekly` called right away. New code: defers
-        (ResourceUnavailable) instead, and touches neither."""
-        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: "running")
-        monkeypatch.setattr(
-            jobs, "run_daily", lambda job: (_ for _ in ()).throw(AssertionError("must not run pipeline yet"))
-        )
-        monkeypatch.setattr(
-            "eoa.report.weekly.build_weekly",
-            lambda: (_ for _ in ()).throw(AssertionError("must not build weekly report yet")),
-        )
+        monkeypatch.setattr(admission, "admit_daily_run", _must_not("admit a second daily_run"))
 
         with pytest.raises(ResourceUnavailable):
             run_weekly(_fresh_job())
 
-    def test_defers_when_no_daily_row_yet(self, monkeypatch) -> None:
-        """F22's claim-ordering race: weekly claimed before the scheduler's daily_run INSERT even
-        committed. Old code treated "no row found" as "not covered" and ran the FULL pipeline
-        itself immediately -- which the real daily_run job then also ran once claimed, producing
-        two daily reports/notifications the same night. New code waits instead."""
-        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: None)
+    def test_no_daily_run_admits_one_through_the_gate_and_defers(self, monkeypatch) -> None:
+        """S01: the weekly-first Saturday ordering. Pre-fix, weekly ran the pipeline itself after a
+        timeout; now it admits the daily_run through `admission.admit_daily_run` (the same gate as
+        the cron and API) and waits for it."""
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda since: None)
+        monkeypatch.setattr(jobs, "run_daily", _must_not("run the daily pipeline"))
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", _must_not("build the weekly report yet"))
+        from eoa.orchestrator import admission
+
+        admitted: list[tuple] = []
         monkeypatch.setattr(
-            jobs, "run_daily", lambda job: (_ for _ in ()).throw(AssertionError("must not run pipeline yet"))
+            admission, "admit_daily_run", lambda mode, priority: admitted.append((mode, priority)) or 77
         )
 
         with pytest.raises(ResourceUnavailable):
             run_weekly(_fresh_job())
+        assert admitted == [("full", 2)]
 
-    def test_defers_when_daily_deferred(self, monkeypatch) -> None:
-        """R03/N07/F22 (SOL-REVIEW2-2026-09-24): THE regression this round closes -- `deferred` is
-        NOT terminal (a daily_run can sit `deferred` after a crash/resource-wait and still retry
-        and finish later). Old code fell through to the "covered" `else` branch for `deferred`
-        exactly like `done`/`partial`/`failed` and built the weekly report immediately on top of
-        incomplete data. New code waits, same as `queued`/`running`."""
-        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: "deferred")
-        monkeypatch.setattr(
-            jobs, "run_daily", lambda job: (_ for _ in ()).throw(AssertionError("must not run pipeline yet"))
-        )
-        monkeypatch.setattr(
-            "eoa.report.weekly.build_weekly",
-            lambda: (_ for _ in ()).throw(AssertionError("must not build weekly report yet")),
-        )
+    def test_admission_error_defers_instead_of_failing(self, monkeypatch) -> None:
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda since: None)
+        from eoa.orchestrator import admission
 
+        monkeypatch.setattr(admission, "admit_daily_run", lambda mode, priority: _raise_no_db())
         with pytest.raises(ResourceUnavailable):
             run_weekly(_fresh_job())
 
+    def test_anchor_is_the_weekly_jobs_own_creation_time(self, monkeypatch) -> None:
+        seen: list[datetime] = []
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda since: seen.append(since) or "done")
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", _fake_weekly())
+        job = _fresh_job()
+        run_weekly(job)
+        assert seen == [job["created_at"] - jobs.WEEKLY_DAILY_LOOKBACK]
 
-class TestFallbackAfterWaitTimeout:
-    """R03/N07/F22 (SOL-REVIEW2-2026-09-24): once WEEKLY_DAILY_WAIT_MAX is spent, the two
-    remaining cases diverge -- a daily_run that never existed (state is None) is a genuinely
-    stand-alone weekly and may run the pipeline itself; a daily_run that DOES exist but is still
-    not terminal must never be duplicated."""
 
-    def test_no_daily_run_ever_found_falls_back_to_running_the_pipeline_itself(self, monkeypatch) -> None:
-        """The ORIGINAL "weekly can stand alone" fallback, preserved: no daily_run was ever
-        created for tonight (e.g. a manually triggered weekly with no nightly cron)."""
-        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: None)
-        calls: list[dict] = []
-        monkeypatch.setattr(jobs, "run_daily", lambda job: (calls.append(job), {"report": {"docx": "x"}})[1])
+class TestWeeklyWaitTimeout:
+    """S02 (SOL-REVIEW3-2026-09-24): after WEEKLY_DAILY_WAIT_MAX the job ends `partial` WITHOUT
+    building the weekly report -- the round-3 version set `partial` and then fell through to an
+    unconditional `build_weekly()` on incomplete daily data -- and never runs the pipeline."""
 
-        class _Paths:
-            report_id = 7
-            qa = types.SimpleNamespace(passed=False)
+    @pytest.mark.parametrize("state", [None, "queued", "running", "deferred", jobs.DAILY_STATE_QUERY_FAILED])
+    def test_timeout_never_builds_on_incomplete_data(self, monkeypatch, state) -> None:
+        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda since: state)
+        monkeypatch.setattr(jobs, "run_daily", _must_not("duplicate the pipeline"))
+        monkeypatch.setattr("eoa.report.weekly.build_weekly", _must_not("build on incomplete data"))
+        from eoa.orchestrator import admission
 
-        monkeypatch.setattr("eoa.report.weekly.build_weekly", lambda: _Paths())
-
-        job = _old_job()
-        stats = run_weekly(job)
-
-        assert calls == [job]
-        assert stats["report"] == {"docx": "x"}
-        assert stats["weekly_report"] == {"report_id": 7, "qa_passed": False}
-
-    @pytest.mark.parametrize("state", ["queued", "running", "deferred"])
-    def test_daily_run_still_incomplete_never_duplicates_the_pipeline(self, monkeypatch, state) -> None:
-        """R03 (SOL-REVIEW2-2026-09-24) -- the actual bug report: "Weekly runs the daily pipeline
-        after three hours even if daily is still running; it treats a deferred daily as
-        terminal." A daily_run job DOES exist here (unlike the state-is-None case above) -- it may
-        still complete, or retry and complete, later. run_daily must NEVER be called; the job ends
-        `partial` with a clear, discriminating error instead of a silent duplicate or a silent
-        `done`."""
-        monkeypatch.setattr(jobs, "_daily_run_state_tonight", lambda: state)
-        monkeypatch.setattr(
-            jobs, "run_daily", lambda job: (_ for _ in ()).throw(AssertionError("must not duplicate the pipeline"))
-        )
-
-        class _Paths:
-            report_id = 1
-            qa = types.SimpleNamespace(passed=True)
-
-        monkeypatch.setattr("eoa.report.weekly.build_weekly", lambda: _Paths())
+        monkeypatch.setattr(admission, "admit_daily_run", _must_not("admit after the wait budget"))
 
         stats = run_weekly(_old_job())
 
         assert stats["status"] == "partial"
-        assert stats["daily_pipeline_skipped"] == "daily_run_incomplete_after_wait"
+        assert stats["weekly_report_skipped"] == "daily_run_not_terminal_after_wait"
         assert stats["daily_run_state"] == state
-        assert "daily_run_wait_error" in stats
-        # _terminal_state must land this on `partial`, never `done`, regardless of the weekly
-        # report build's own outcome.
+        assert "weekly_report" not in stats
         assert jobs._terminal_state(stats) == "partial"
 
-    def test_daily_run_state_tonight_returns_none_on_db_error(self, monkeypatch) -> None:
-        monkeypatch.setattr("eoa.db.connection", _raise_no_db)
-        assert jobs._daily_run_state_tonight() is None
 
-    def test_daily_run_state_tonight_reads_most_recent_row(self, monkeypatch) -> None:
+class TestDailyRunStateTonight:
+    def test_db_error_is_distinct_from_no_row(self, monkeypatch) -> None:
+        """S02: a failed query must not read as "no daily_run" (None), which would admit one."""
+        monkeypatch.setattr("eoa.db.connection", _raise_no_db)
+        assert jobs._daily_run_state_tonight(datetime.now(tz=UTC)) == jobs.DAILY_STATE_QUERY_FAILED
+
+    @pytest.mark.parametrize("row,expected", [({"state": "running"}, "running"), (None, None)])
+    def test_query_shape(self, monkeypatch, row, expected) -> None:
         captured: dict = {}
 
         class _FakeCursor:
@@ -316,7 +265,7 @@ class TestFallbackAfterWaitTimeout:
                 captured["params"] = params
 
             def fetchone(self):
-                return {"state": "running"}
+                return row
 
             def __enter__(self):
                 return self
@@ -335,8 +284,12 @@ class TestFallbackAfterWaitTimeout:
                 return False
 
         monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn())
-        assert jobs._daily_run_state_tonight() == "running"
+        since = datetime.now(tz=UTC) - timedelta(hours=6)
+        assert jobs._daily_run_state_tonight(since) == expected
         assert "ORDER BY created_at DESC" in captured["sql"]
+        # an older daily_run that is still active is tonight's run, whenever it was created
+        assert "state IN ('queued', 'running', 'deferred')" in captured["sql"]
+        assert captured["params"] == {"since": since}
 
 
 class TestNotify:
@@ -350,7 +303,10 @@ class TestNotify:
 
     def _allow_send(self, monkeypatch) -> None:
         monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: True)
-        monkeypatch.setattr("eoa.memory.relational.mark_notification_result", lambda kind, key, ok: None)
+        monkeypatch.setattr(
+            "eoa.memory.relational.mark_notification_result",
+            lambda kind, key, ok, payload=None: None,
+        )
 
     def test_sends_failure_when_no_docx(self, monkeypatch) -> None:
         self._allow_send(monkeypatch)
@@ -426,7 +382,7 @@ class TestNotify:
         recorded: list[tuple[str, str, bool]] = []
         monkeypatch.setattr(
             "eoa.memory.relational.mark_notification_result",
-            lambda kind, key, ok: recorded.append((kind, key, ok)),
+            lambda kind, key, ok, payload=None: recorded.append((kind, key, ok)),
         )
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         monkeypatch.setattr(
@@ -478,7 +434,7 @@ class TestNotifyIdempotency:
         result_calls: list[tuple[str, str, bool]] = []
         monkeypatch.setattr(
             "eoa.memory.relational.mark_notification_result",
-            lambda kind, key, ok: result_calls.append((kind, key, ok)),
+            lambda kind, key, ok, payload=None: result_calls.append((kind, key, ok)),
         )
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         report_readies: list[tuple] = []
@@ -509,7 +465,7 @@ class TestNotifyIdempotency:
             state[k] = "pending"
             return True
 
-        def _result(kind, key, ok):
+        def _result(kind, key, ok, payload=None):
             state[(kind, key)] = "sent" if ok else "failed"
 
         monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", _claim)
@@ -544,7 +500,7 @@ class TestNotifyIdempotency:
             state[k] = "pending"
             return True
 
-        def _result(kind, key, ok):
+        def _result(kind, key, ok, payload=None):
             state[(kind, key)] = "sent" if ok else "failed"
 
         monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", _claim)
@@ -577,7 +533,7 @@ class TestNotifyIdempotency:
         recorded: list[tuple[str, str, bool]] = []
         monkeypatch.setattr(
             "eoa.memory.relational.mark_notification_result",
-            lambda kind, key, ok: recorded.append((kind, key, ok)),
+            lambda kind, key, ok, payload=None: recorded.append((kind, key, ok)),
         )
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
 

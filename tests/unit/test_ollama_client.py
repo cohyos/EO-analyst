@@ -147,7 +147,12 @@ class TestChatStructuredChainNoDoubleLedgerRow:
     def test_failure_still_logs_one_zero_cost_marker_row(self, monkeypatch) -> None:
         """The FAILURE branch's own `_record` call is unaffected by this fix -- it logs a
         zero-token `ok=False` marker (not a double-count of any real usage) and still moves on
-        to the next chain entry."""
+        to the next chain entry.
+
+        R07/E05 follow-up (SOL-REVIEW3-2026-09-24): the chain's SECOND entry here is "ollama",
+        whose successful `chat_override=[entry]` call never reaches `run_chain` (see the fix in
+        `_chat_structured_chain`), so it now logs its OWN success row here -- 2 total, not 1. See
+        `TestChatStructuredChainOllamaSuccessLedgerRow` below for the dedicated ollama-only cases."""
         from eoa.config import ChainEntryCfg
         from eoa.errors import ProviderUnavailable
 
@@ -175,13 +180,94 @@ class TestChatStructuredChainNoDoubleLedgerRow:
 
         assert validated is suspect
         assert used_entry == chain[1]
-        # Exactly one record call -- the failed anthropic attempt's zero-cost marker. The
-        # successful ollama entry that follows logs nothing itself (its real usage is logged
-        # inside `_structured_once`/`run_chain`, not re-logged here).
-        assert len(record_calls) == 1
+        # Two record calls: the failed anthropic attempt's zero-cost marker, PLUS the successful
+        # ollama entry's own usage row (its real usage is logged inside `_structured_once`, but
+        # NOT via `run_chain` -- the single-entry-ollama shortcut bypasses it entirely, so
+        # `_chat_structured_chain` itself must record that one).
+        assert len(record_calls) == 2
         failed_attempt = record_calls[0][0][1]
         assert failed_attempt.ok is False
         assert failed_attempt.prompt_tokens == 0
+        ollama_attempt = record_calls[1][0][1]
+        assert ollama_attempt.ok is True
+        assert ollama_attempt.provider == "ollama"
+        assert ollama_attempt.prompt_tokens == 5
+        assert ollama_attempt.completion_tokens == 5
+
+
+class TestChatStructuredChainOllamaSuccessLedgerRow:
+    """R07/E05 (SOL-REVIEW3-2026-09-24): a structured call whose chain resolves to a single
+    "ollama" entry never reaches `run_chain` at all -- `eoa.llm.ollama_client.chat()`'s own
+    single-entry-ollama shortcut (`chain_override=[entry]`, `entry.provider == "ollama"`) goes
+    straight to `_ollama_chat`, which does not call `_record` itself. R07's fix (see
+    `TestChatStructuredChainNoDoubleLedgerRow` above) correctly stopped `_chat_structured_chain`
+    from re-logging a CLOUD entry's already-recorded usage, but as an unconditional removal it
+    also silently dropped the ollama entry's only chance at a ledger row. These tests are
+    discriminating against that regression: pre-fix code (an unconditional `if entry.provider ==
+    "ollama": ...` guard absent) logs zero rows for a successful lone-ollama structured call."""
+
+    class _Out(BaseModel):
+        ok: bool
+
+    def test_single_ollama_structured_fallback_writes_exactly_one_row(self, monkeypatch) -> None:
+        from eoa.config import ChainEntryCfg
+
+        chain = [ChainEntryCfg(provider="ollama")]
+        suspect = self._Out(ok=True)
+
+        def fake_structured_once(role, schema, messages, **kwargs):
+            assert kwargs["chain_override"] == [ChainEntryCfg(provider="ollama")]
+            return suspect, ChatResult(
+                content='{"ok": true}', prompt_tokens=12, eval_tokens=8, duration_ms=150, model="qwen3:14b"
+            )
+
+        record_calls: list[tuple] = []
+        monkeypatch.setattr(oc, "_structured_once", fake_structured_once)
+        monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: record_calls.append((a, k)))
+
+        validated, used_entry = oc._chat_structured_chain(
+            "resident", chain, self._Out, [{"role": "user", "content": "hi"}],
+            task="analyze", interactive=False, options=None,
+        )
+
+        assert validated is suspect
+        assert used_entry == chain[0]
+        assert len(record_calls) == 1  # THE regression check -- used to be zero
+        role, attempt, _batch_size = record_calls[0][0]
+        assert role == "resident"
+        assert attempt.ok is True
+        assert attempt.provider == "ollama"
+        assert attempt.model == "qwen3:14b"
+        assert attempt.prompt_tokens == 12
+        assert attempt.completion_tokens == 8
+        assert attempt.duration_ms == 150
+
+    def test_cloud_chain_still_writes_one_row_per_actual_call_not_an_aggregate(self, monkeypatch) -> None:
+        """(b) from SOL-REVIEW3: R07's no-double-count property must still hold -- a cloud entry
+        (or a cloud entry that itself falls back to ollama inside `run_chain`, which already
+        records each of ITS attempts) gets no extra row from `_chat_structured_chain` itself."""
+        from eoa.config import ChainEntryCfg
+
+        chain = [ChainEntryCfg(provider="anthropic", model="claude-x")]
+        suspect = self._Out(ok=True)
+
+        def fake_structured_once(role, schema, messages, **kwargs):
+            # Two real `chat()` calls under the hood, each already recorded by `run_chain` --
+            # simulated here simply by never touching `_record` ourselves, same as production.
+            return suspect, ChatResult(content='{"ok": true}', prompt_tokens=130, eval_tokens=60, duration_ms=280)
+
+        record_calls: list[tuple] = []
+        monkeypatch.setattr(oc, "_structured_once", fake_structured_once)
+        monkeypatch.setattr("eoa.llm.chain._record", lambda *a, **k: record_calls.append((a, k)))
+
+        validated, used_entry = oc._chat_structured_chain(
+            "resident", chain, self._Out, [{"role": "user", "content": "hi"}],
+            task="analyze", interactive=False, options=None,
+        )
+
+        assert validated is suspect
+        assert used_entry == chain[0]
+        assert record_calls == []  # no aggregate duplicate for a cloud entry
 
 
 class TestWrapData:

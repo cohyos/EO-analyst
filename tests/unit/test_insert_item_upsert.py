@@ -212,6 +212,120 @@ class TestQualityAwareParams:
 
 
 # --------------------------------------------------------------------------
+# F09 (SOL-REVIEW3-2026-09-24 carryover): an accepted refresh also nulls out the classify/triage/
+# analyze output columns those stages are about to recompute -- not just `processed_stages`/
+# `dedup_of` -- so the item's OLD score/level/summary/domain don't stay visible until reanalysis.
+# --------------------------------------------------------------------------
+
+
+#: columns `insert_item` takes as params itself -- reset to the refreshing insert's value, not NULL.
+_INSERT_TIME_COLUMNS = {"domain", "subdomain", "report_kind", "trl", "geography"}
+
+
+class TestStaleFieldsClearedOnAcceptedRefresh:
+    def test_upsert_sql_nulls_stale_derived_columns_under_the_same_guard(self, monkeypatch):
+        """Fails against the pre-fix query, which resets `processed_stages`/`dedup_of` but leaves
+        `score`/`level`/`summary_he`/... out of the SET clause entirely -- the exact gap
+        SOL-REVIEW3 flagged ("old score, level, and summaries remain visible until reanalysis")."""
+        cursor = _FakeCursor([None, {"id": 5, "inserted": True}])
+        _patch_connection(monkeypatch, cursor)
+
+        insert_item(source_id=1, url="https://example.com/e", content_status="full", security_status="clean")
+
+        sql, _ = cursor.calls[2]
+        for col in (
+            "score",
+            "level",
+            "triage_reason",
+            "domain",
+            "subdomain",
+            "dimensions",
+            "report_kind",
+            "trl",
+            "geography",
+            "entities_mentioned",
+            "israel_relevance",
+            "israel_reasons",
+            "summary_he",
+            "so_what_he",
+            "key_facts",
+            "uncertainty_he",
+            "tech_maturity",
+            "tech_actor_kind",
+            "tech_readiness_note_he",
+        ):
+            # Same `excluded_better` guard as `processed_stages`/`dedup_of`, reset target NULL.
+            # (Matched as a fixed literal suffix, not by slicing out the WHEN condition's own text
+            # -- that condition embeds `_quality_rank_sql`'s CASE...END expressions, so a naive
+            # "find the next END" split would stop at one of THOSE, not at this CASE's own end.)
+            assert f"{col} = CASE WHEN" in sql
+            if col in _INSERT_TIME_COLUMNS:
+                # re-applied from the refreshing insert's own param (e.g. report_kind "tender")
+                assert f"THEN %({col})s ELSE items.{col} END" in sql
+            else:
+                assert f"THEN NULL ELSE items.{col} END" in sql
+
+        # product_lines is NOT NULL DEFAULT '{}' (migration 0027) -- NULL would violate the
+        # constraint, so it resets to its own empty-array default instead.
+        assert "product_lines = CASE WHEN" in sql
+        assert "THEN '{}'::text[] ELSE items.product_lines END" in sql
+
+    def test_tags_and_story_id_are_not_cleared(self, monkeypatch):
+        """`tags` and `story_id` are deliberately out of scope for this fix (see
+        `_STALE_ON_REFRESH_COLUMNS`'s docstring) -- neither may appear in a stale-reset CASE."""
+        cursor = _FakeCursor([None, {"id": 5, "inserted": True}])
+        _patch_connection(monkeypatch, cursor)
+
+        insert_item(source_id=1, url="https://example.com/f", content_status="full", security_status="clean")
+
+        sql, _ = cursor.calls[2]
+        assert "tags = CASE WHEN" not in sql
+        assert "story_id = CASE WHEN" not in sql
+
+    def test_by_id_update_also_nulls_stale_derived_columns(self, monkeypatch):
+        """Same fix on the `canonical_url`-matched UPDATE-by-id path, guarded by `params_better`
+        instead of `excluded_better`."""
+        cursor = _FakeCursor([{"id": 55}, {"id": 55}])
+        _patch_connection(monkeypatch, cursor)
+
+        insert_item(
+            source_id=None,
+            url="https://example.com/alias-g",
+            canonical_url="https://example.com/canonical-g",
+            content_status="full",
+            security_status="clean",
+        )
+
+        sql, _ = cursor.calls[2]
+        assert "UPDATE items SET" in sql
+        for col in ("score", "level", "summary_he", "so_what_he"):
+            assert f"{col} = CASE WHEN" in sql
+            if col in _INSERT_TIME_COLUMNS:
+                # re-applied from the refreshing insert's own param (e.g. report_kind "tender")
+                assert f"THEN %({col})s ELSE items.{col} END" in sql
+            else:
+                assert f"THEN NULL ELSE items.{col} END" in sql
+        assert "product_lines = CASE WHEN" in sql
+        assert "THEN '{}'::text[] ELSE items.product_lines END" in sql
+        assert "tags = CASE WHEN" not in sql
+        assert "story_id = CASE WHEN" not in sql
+
+    def test_plain_caller_without_quality_status_never_gets_stale_reset_clause_triggered(self, monkeypatch):
+        """A caller that never passes `content_status`/`security_status` (quality_aware=False, e.g.
+        `eoa.tenders.scan`) keeps the old "never touch anything on conflict" behavior: the CASE
+        expressions are still present (static SQL text), but `quality_aware` is False so every
+        branch evaluates to the ELSE (unchanged) side -- never a plain duplicate insert accidentally
+        wiping score/level/summaries."""
+        cursor = _FakeCursor([None, {"id": 9, "inserted": True}])
+        _patch_connection(monkeypatch, cursor)
+
+        insert_item(source_id=1, url="https://example.com/h")
+
+        _, params = cursor.calls[2]
+        assert params["quality_aware"] is False
+
+
+# --------------------------------------------------------------------------
 # F36: canonical_url identity -- a redirect alias/tracking-variant upserts the SAME row as an
 # already-stored article instead of creating a duplicate.
 # --------------------------------------------------------------------------

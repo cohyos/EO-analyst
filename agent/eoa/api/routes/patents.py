@@ -39,6 +39,15 @@ def _fetchone(query: str, params: Any = None) -> dict[str, Any] | None:
         return cur.fetchone()
 
 
+def _escape_ilike_term(term: str) -> str:
+    """R06 (SOL-REVIEW3-2026-09-24 "search wildcard"): see the identical helper/comment in
+    `eoa.api.routes.payloads` -- `ILIKE` treats `%`/`_` as wildcards, so a raw user query of `%`
+    or `_` would match every row instead of the literal character. Escape `\\` first (so it isn't
+    re-escaped by the two replacements below), then `%`/`_`; callers must pair this with
+    `ILIKE ... ESCAPE '\\'`."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @router.get("/patents/status")
 def patents_status() -> dict[str, Any]:
     """Whether EPO OPS/PatentsView credentials are configured -- backs the UI's "search-only mode"
@@ -80,8 +89,8 @@ def list_patents(
         where.append("value_score >= %(min_value_score)s")
         params["min_value_score"] = min_value_score
     if q:
-        where.append("(title ILIKE %(q)s OR abstract ILIKE %(q)s)")
-        params["q"] = f"%{q}%"
+        where.append("(title ILIKE %(q)s ESCAPE '\\' OR abstract ILIKE %(q)s ESCAPE '\\')")
+        params["q"] = f"%{_escape_ilike_term(q)}%"
     where_sql = " AND ".join(where)
     params["offset"] = (page - 1) * limit
     rows = _fetchall(

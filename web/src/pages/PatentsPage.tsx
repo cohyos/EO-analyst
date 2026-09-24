@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/api";
@@ -79,21 +79,35 @@ export function PatentsPage() {
     enabled: dialogOpen,
   });
 
-  // R06/F33: accumulate pages fetched so far for the current filter set -- page 1 replaces the
-  // list (a fresh filter/search), page > 1 (a "load more" click) appends to it.
-  const [accumulatedPatents, setAccumulatedPatents] = useState<PatentRecord[]>([]);
+  // R06/F33/P2 (SOL-REVIEW3-2026-09-24 "pagination"): accumulate pages fetched so far for the
+  // current filter set, keyed by page number rather than blindly appended -- a page number's
+  // rows are STORED (Map.set), not pushed onto an array, so a refetch of an already-loaded page
+  // (react-query's refetchOnWindowFocus/refetchOnReconnect, an invalidation, or a StrictMode
+  // double effect firing this effect twice for the same `patentsQuery.data`) overwrites that
+  // page's entry instead of appending a second copy of its rows.
+  const [pagesById, setPagesById] = useState<Map<number, PatentRecord[]>>(new Map());
   useEffect(() => {
-    setAccumulatedPatents([]);
+    setPagesById(new Map());
   }, [filters.israeli, filters.min_value_score, filters.assignee, filters.subdomain, filters.q]);
   useEffect(() => {
     if (!patentsQuery.data) return;
-    setAccumulatedPatents((prev) =>
-      page === 1 ? patentsQuery.data.patents : [...prev, ...patentsQuery.data.patents],
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the query result, not `page` itself.
+    setPagesById((prev) => {
+      const next = new Map(prev);
+      next.set(page, patentsQuery.data.patents);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the query result, not `page` itself
+    // (see the pagesById.set(page, ...) call above -- `page` is read from the closure, which is
+    // correct because the query key already includes `page`, so this data always belongs to it).
   }, [patentsQuery.data]);
 
-  const patents = accumulatedPatents;
+  const patents = useMemo(
+    () =>
+      Array.from(pagesById.keys())
+        .sort((a, b) => a - b)
+        .flatMap((p) => pagesById.get(p)!),
+    [pagesById],
+  );
   const patentsTotal = patentsQuery.data?.total ?? patents.length;
   const hasMorePatents = patentsQuery.data?.has_more ?? false;
   const initialLoading = patentsQuery.isLoading && page === 1;

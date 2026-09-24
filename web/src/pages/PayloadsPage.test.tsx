@@ -53,13 +53,14 @@ function facetsResponse(over: Partial<PayloadFacetsResponse> = {}): PayloadFacet
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/payloads"]}>
         <PayloadsPage />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, queryClient };
 }
 
 beforeEach(() => {
@@ -221,6 +222,36 @@ describe("PayloadsPage", () => {
     // The first page's row must still be visible -- "load more" appends, it doesn't replace.
     expect(screen.getByText("WESCAM MX-15")).toBeInTheDocument();
     expect(getPayloads).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
+  // P2 (SOL-REVIEW3-2026-09-24 "pagination"): a re-delivered page above page 1 (react-query
+  // refetchOnWindowFocus/refetchOnReconnect, an invalidation, or a StrictMode double effect) must
+  // not duplicate that page's rows -- accumulation is keyed by page number (Map.set), not pushed
+  // onto an array, so re-storing page 2's rows overwrites the same slot instead of appending it.
+  it("a refetch of an already-loaded page does not duplicate its rows", async () => {
+    const page1 = makePayload({ id: 1, canonical_name: "WESCAM MX-15" });
+    const page2 = makePayload({ id: 2, canonical_name: "Rafael Toplite", vendor_entity_name: "Rafael" });
+    getPayloads.mockImplementation((params: { page?: number } = {}) =>
+      Promise.resolve({
+        payloads: params.page === 2 ? [page2] : [page1],
+        total: 2,
+        page: params.page ?? 1,
+        limit: 200,
+        has_more: (params.page ?? 1) === 1,
+      }),
+    );
+    const { queryClient } = renderPage();
+    await screen.findByText("WESCAM MX-15");
+    fireEvent.click(await screen.findByRole("button", { name: /טען עוד/ }));
+    await screen.findByText("Rafael Toplite");
+
+    // Simulate the SAME page-2 response being re-delivered (e.g. a window-focus refetch of the
+    // still-mounted page-2 query) without the user clicking "load more" again.
+    await queryClient.refetchQueries({ queryKey: ["payloads"] });
+    await screen.findByText("Rafael Toplite");
+
+    expect(screen.getAllByText("Rafael Toplite")).toHaveLength(1);
+    expect(screen.getAllByText("WESCAM MX-15")).toHaveLength(1);
   });
 
   // R09 (SOL-REVIEW2-2026-09-24 review): the "database empty" empty-state must key off the

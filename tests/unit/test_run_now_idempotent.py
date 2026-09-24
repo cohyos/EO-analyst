@@ -76,17 +76,15 @@ class TestEnqueueRunIdempotent:
         # only the advisory lock + the equivalent-job SELECT ran -- no INSERT was attempted.
         assert len(cur.executed) == 2
 
-    def test_daily_run_blocked_while_weekly_run_covers_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A weekly_run performs the full daily pipeline first -- it counts as "already running"
-        for a plain daily-run request too."""
-        existing_job = {"id": 9, "kind": "weekly_run", "state": "running"}
-        cur = _FakeCursor([existing_job])
+    def test_daily_run_not_blocked_by_weekly_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """S01 (SOL-REVIEW3-2026-09-24): a weekly_run no longer runs the daily pipeline -- it waits
+        for a daily_run -- so it must not be in a daily request's equivalence set."""
+        cur = _FakeCursor([None, {"id": 124}])
         monkeypatch.setattr(services.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
 
-        with pytest.raises(services.RunAlreadyActive):
-            services.enqueue_run("daily", "full")
+        assert services.enqueue_run("daily", "full") == 124
         _select_query, select_params = cur.executed[1]
-        assert "weekly_run" in select_params["kinds"]
+        assert "weekly_run" not in select_params["kinds"]
         assert "daily_run" in select_params["kinds"]
 
     def test_no_existing_run_enqueues_normally(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,20 +129,19 @@ class TestEnqueueRunIdempotent:
 
 
 class TestEquivalentKindsSymmetric:
-    """F31 follow-up (SOL-REVIEW-2026-09-24): `_RUN_IDEMPOTENCY_GROUPS` is written asymmetrically
-    (`"report"`'s own entry lists `daily_run`/`weekly_run`, but neither of those has an entry
-    listing `report` back). `_equivalent_kinds_for` closes that into a symmetric relation -- old
-    code (`_RUN_IDEMPOTENCY_GROUPS.get(kind, (kind,))`, a plain one-directional dict lookup) fails
-    these assertions for `"daily_run"`/`"weekly_run"`."""
+    """F31 follow-up: `_equivalent_kinds_for` closes `_RUN_IDEMPOTENCY_GROUPS` into a symmetric
+    relation (`"report"`'s entry lists `daily_run`, `daily_run` has no entry of its own). S01
+    (SOL-REVIEW3-2026-09-24): `weekly_run` is its own singleton group -- it waits on a daily_run
+    instead of competing with it."""
 
     def test_daily_run_group_includes_report(self) -> None:
-        assert set(services._equivalent_kinds_for("daily_run")) == {"daily_run", "weekly_run", "report"}
+        assert set(services._equivalent_kinds_for("daily_run")) == {"daily_run", "report"}
 
-    def test_weekly_run_group_includes_report(self) -> None:
-        assert set(services._equivalent_kinds_for("weekly_run")) == {"daily_run", "weekly_run", "report"}
+    def test_weekly_run_is_its_own_group(self) -> None:
+        assert services._equivalent_kinds_for("weekly_run") == ["weekly_run"]
 
-    def test_report_group_unchanged(self) -> None:
-        assert set(services._equivalent_kinds_for("report")) == {"daily_run", "weekly_run", "report"}
+    def test_report_group(self) -> None:
+        assert set(services._equivalent_kinds_for("report")) == {"daily_run", "report"}
 
     def test_unrelated_kind_is_its_own_singleton_group(self) -> None:
         assert services._equivalent_kinds_for("ingest") == ["ingest"]

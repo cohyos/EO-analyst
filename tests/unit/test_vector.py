@@ -221,6 +221,35 @@ class TestExcludeSelf:
         assert result is None  # id 5 excluded, id 9 doesn't clear the threshold
 
 
+class TestCompletedStageFilter:
+    """E01/N06 (SOL-REVIEW3-2026-09-24): the dedup candidate pool must exclude EVERY item still
+    pending the embed stage (its stored vector may be stale), not only the current LIMIT batch --
+    pre-fix `load_candidate_vectors` had no stage filter at all."""
+
+    def test_load_candidate_vectors_filters_on_completed_stage(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _patch_connection(monkeypatch, rows=[])
+        vector.load_candidate_vectors(30, completed_stage="embed_dedup")
+
+        query, params = conn.last_cursor.executed
+        assert "%(stage)s = ANY(COALESCE(processed_stages" in query
+        assert params["stage"] == "embed_dedup"
+
+    def test_dedup_stage_passes_its_own_stage_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from eoa.pipeline import dedup
+
+        seen: dict[str, object] = {}
+
+        def _fake_load(days, completed_stage=None):
+            seen["completed_stage"] = completed_stage
+            return []
+
+        monkeypatch.setattr(dedup, "load_candidate_vectors", _fake_load)
+        monkeypatch.setattr(dedup, "get_items_for_stage", lambda *a, **k: [])
+        monkeypatch.setattr(dedup, "checkpoint", lambda: None)
+        dedup.run_dedup()
+        assert seen["completed_stage"] == dedup.STAGE
+
+
 # --------------------------------------------------------------------------
 # F08 efficiency: in-memory scoring + atomic embedding/dedup_of/stage commit
 # --------------------------------------------------------------------------

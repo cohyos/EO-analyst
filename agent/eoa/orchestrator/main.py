@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from eoa.config import settings
 from eoa.memory.relational import enqueue_job
@@ -120,7 +121,8 @@ def build_scheduler() -> BackgroundScheduler:
         # admission.admit_daily_run`) instead of a raw `enqueue_daily`/`enqueue_job` call, so this
         # cron tick and a concurrent API "run now" (or another scheduler tick, e.g. a restart's
         # `reconcile_missed_night_run`) serialize on the same advisory lock + equivalence check
-        # and can never both enqueue an active `daily_run`/`weekly_run`/`report`.
+        # and can never both enqueue an active `daily_run`/`report` (S01, SOL-REVIEW3: `weekly_run`
+        # is not in that set -- it waits on this daily_run instead of competing with it).
         lambda: admission.admit_daily_run("full", priority=2),
         _cron(tz, s.schedule.night_window.start),
         id="daily",
@@ -156,15 +158,11 @@ def build_scheduler() -> BackgroundScheduler:
         # executor can run same-tick jobs concurrently, so insertion order into `jobs` is not
         # guaranteed), `claim_next_job`'s `ORDER BY priority ASC` picks `daily_run` first as long
         # as both rows already exist by the time a worker polls -- which they will, well within
-        # the worker's 10s poll interval. `run_weekly`'s own `_daily_run_already_covered` check
-        # (now also treating a merely `queued` daily_run as covered) is the actual correctness
-        # guard against a double pipeline run; this priority is defense in depth for the common
-        # case, reducing how often that check's rarer "weekly claimed first" branch is exercised.
-        # F31 (SOL-REVIEW2-2026-09-24): through `admission.admit_weekly_run` -- the same shared
-        # admission gate as the "daily" cron job above, but scoped to just `weekly_run` itself
-        # (see the module docstring on `eoa.orchestrator.admission` for why it must NOT use the
-        # full daily/weekly/report equivalence closure here: `run_weekly` is designed to coexist
-        # with, and wait on, a separate `daily_run`).
+        # the worker's 10s poll interval. S01/S02 (SOL-REVIEW3-2026-09-24): `run_weekly` never runs
+        # the pipeline itself -- it waits for a terminal `daily_run` (admitting one through the
+        # same gate if none exists), so the claim order no longer matters for correctness.
+        # F31: through `admission.admit_weekly_run` -- the shared admission gate, scoped to
+        # `weekly_run` alone (see `eoa.orchestrator.admission`'s module docstring).
         lambda: admission.admit_weekly_run("full", priority=3),
         _cron(tz, wk.get("start", "01:00"), day_of_week=wk.get("weekday", "sat")),
         id="weekly",
@@ -266,6 +264,31 @@ def build_scheduler() -> BackgroundScheduler:
             coalesce=True,
         )
 
+    # R02 (SOL-REVIEW3-2026-09-24 blocker 3): bounded, scheduled retries for failed notification
+    # deliveries. `_notify` (eoa.orchestrator.jobs) correctly lands a `Sent(ok=False)` push on
+    # `failed` (eoa.memory.relational.mark_notification_result), but nothing revisits that row
+    # otherwise -- the job worker only claims `queued`/`deferred` *jobs*, and a failed notification
+    # isn't one. Runs directly in-process (cheap: a handful of small rows at most per tick) rather
+    # than through the `jobs` table, on its own short interval; wrapped so a bad tick logs and
+    # moves on instead of taking the scheduler down (eoa.notify.retry.retry_failed_notifications
+    # already never raises on a per-row basis -- this is defense in depth for the query itself).
+    def _retry_failed_notifications() -> None:
+        try:
+            from eoa.notify.retry import retry_failed_notifications
+
+            retry_failed_notifications()
+        except Exception as exc:
+            log.warning("notification_retry_failed", error=str(exc)[:160])
+
+    sched.add_job(
+        _retry_failed_notifications,
+        IntervalTrigger(minutes=15),
+        id="notification_retry",
+        name="ניסיון חוזר להתראות שנכשלו (R02)",
+        coalesce=True,
+        max_instances=1,
+    )
+
     return sched
 
 
@@ -281,7 +304,7 @@ def reconcile_missed_night_run() -> None:
     computes the "daily" job's next fire time as tomorrow's 01:00, so nothing catches up tonight's
     pipeline. Called once at startup (`main()`, right after the scheduler is built but before it
     starts): if it is currently inside the night window (`schedule.night_window`, Asia/Jerusalem)
-    and no `daily_run`/`weekly_run` job has been created since that window opened tonight, enqueue
+    and no `daily_run` job has been created since that window opened tonight, enqueue
     a daily run now -- the same job the 01:00 cron itself would have queued."""
     s = settings()
     tz = ZoneInfo(s.timezone)
@@ -302,7 +325,10 @@ def reconcile_missed_night_run() -> None:
     try:
         with db.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM jobs WHERE kind IN ('daily_run', 'weekly_run') "
+                # S01 (SOL-REVIEW3-2026-09-24): only a daily_run covers the night -- a weekly_run
+                # never runs the nightly pipeline itself (it waits for a daily_run), so counting
+                # it here could leave a night with no daily pipeline at all.
+                "SELECT 1 FROM jobs WHERE kind = 'daily_run' "
                 "AND created_at >= %(start)s LIMIT 1",
                 {"start": window_start.astimezone(UTC)},
             )
@@ -312,7 +338,7 @@ def reconcile_missed_night_run() -> None:
         return
     if covered:
         return
-    # F31 (SOL-REVIEW2-2026-09-24): the window-covered check above (any daily_run/weekly_run
+    # F31 (SOL-REVIEW2-2026-09-24): the window-covered check above (any daily_run
     # CREATED since tonight's window opened, any state) stays -- it is what makes this correctly
     # skip a run that already finished `done`/`partial`/`failed` earlier tonight, which the
     # admission gate's own queued/running-only check would not catch. `admit_daily_run` below

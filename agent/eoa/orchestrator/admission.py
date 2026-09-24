@@ -14,14 +14,20 @@ pass their own uncoordinated check and enqueue two overlapping jobs. `admit_run`
 function every one of those call sites now goes through, so they all serialize on the identical
 advisory-lock namespace and see each other's just-inserted (or already-active) rows.
 
-Scope note: `admit_daily_run`/`admit_weekly_run` deliberately do NOT use the same equivalence set
-for both kinds. `admit_daily_run` uses the full `daily_run`/`weekly_run`/`report` closure (a
-`daily_run` and a `report`/`weekly_run` really do compete for the same "one nightly analysis run"
-slot). `admit_weekly_run` checks only `weekly_run` itself -- `run_weekly` (see
-`eoa.orchestrator.jobs`) is *designed* to run concurrently with, and wait on, a separate
-`daily_run` job (that is the entire point of its own `_daily_run_state_tonight` wait/defer logic);
-gating `weekly_run`'s enqueue on "no `daily_run` active" would block the weekly report from ever
-being created on the one night it is scheduled to run.
+Scope note (S01/F31, SOL-REVIEW3-2026-09-24): `weekly_run` is NOT in the daily equivalence
+set. The round-3 version put it there for `daily_run` but checked only `weekly_run` for weekly --
+an asymmetric relation, so on Saturday (both crons fire at 01:00) a weekly admitted first made
+the scheduled daily see "equivalent run active" and skip, and the weekly then waited hours for a
+daily that never came. `weekly_run` now never runs the nightly pipeline itself: it only waits for
+tonight's `daily_run` to reach a terminal state (admitting one through `admit_daily_run` if none
+exists) and then builds the weekly report. So `daily_run`/`report` compete for the one nightly
+analysis slot, `weekly_run` competes only with itself, and the result is identical in either
+lock order: exactly one `daily_run` and one `weekly_run`.
+
+`deferred` counts as active (S01): a deferred run is waiting to retry, and admitting another
+equivalent job next to it would run the pipeline twice once both are claimed. Only a recent
+deferred row counts (`DEFERRED_ACTIVE_HOURS`), so a run stuck deferred since an old night can
+never block admission forever.
 """
 
 from __future__ import annotations
@@ -42,14 +48,15 @@ log = structlog.get_logger(__name__)
 #: contend for the exact same lock.
 ADMISSION_LOCK_NS = 872_351_004
 
-#: U4/F17 + F31 follow-up: kinds that count as "the same effective run" for idempotency -- a
-#: `daily_run` (which `run_weekly` runs first when it stands alone, see
-#: `eoa.orchestrator.jobs.run_weekly`) and the standalone `report` job all compete for the same
-#: "one nightly analysis run" slot.
+#: U4/F17 + S01: kinds that count as "the same effective run" for idempotency -- a `daily_run`
+#: and the standalone `report` job compete for the same "one nightly analysis run" slot.
+#: `weekly_run` is deliberately absent (see the module docstring's Scope note).
 RUN_IDEMPOTENCY_GROUPS: dict[str, tuple[str, ...]] = {
-    "daily_run": ("daily_run", "weekly_run"),
-    "report": ("report", "daily_run", "weekly_run"),
+    "report": ("report", "daily_run"),
 }
+
+#: S01: a `deferred` job created within this many hours still blocks an equivalent admission.
+DEFERRED_ACTIVE_HOURS = 20
 
 
 def equivalent_kinds_for(kind: str) -> list[str]:
@@ -84,7 +91,8 @@ def admit_run(
 ) -> int:
     """Atomically check-and-enqueue `kind` (with `payload`/`priority`): raises `RunAlreadyActive`
     if a job whose kind is in `equivalent_kinds` (defaults to `[kind]` alone) is already
-    `queued`/`running`, else inserts the new job and returns its id.
+    `queued`/`running` (or `deferred` within `DEFERRED_ACTIVE_HOURS`), else inserts the new job
+    and returns its id.
 
     The advisory lock is acquired FIRST and held for the whole check+insert (one
     `db.connection()` transaction, committed/rolled back by that context manager) -- a concurrent
@@ -95,9 +103,10 @@ def admit_run(
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%(ns)s)", {"ns": ADMISSION_LOCK_NS})
         cur.execute(
-            "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND state IN ('queued', 'running') "
+            "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND (state IN ('queued', 'running') "
+            "OR (state = 'deferred' AND created_at > now() - make_interval(hours => %(deferred_hours)s))) "
             "ORDER BY created_at DESC LIMIT 1",
-            {"kinds": kinds},
+            {"kinds": kinds, "deferred_hours": DEFERRED_ACTIVE_HOURS},
         )
         existing = cur.fetchone()
         if existing is not None:
@@ -115,9 +124,9 @@ def admit_run(
 def admit_daily_run(mode: str = "full", priority: int = 2) -> int | None:
     """Scheduler entry point for a `daily_run` (the "daily" cron job and
     `reconcile_missed_night_run`'s startup catch-up) -- goes through the same `admit_run` gate as
-    the API's `enqueue_run("daily"/"report", ...)`, using the full `daily_run`/`weekly_run`/
-    `report` equivalence closure, so a concurrent API "run now" / another scheduler tick can never
-    duplicate it. Returns `None` (logged, not raised) instead of letting `RunAlreadyActive`
+    the API's `enqueue_run("daily"/"report", ...)`, using the `daily_run`/`report` equivalence
+    closure, so a concurrent API "run now" / another scheduler tick / `run_weekly`'s own
+    admission of a missing daily can never duplicate it. Returns `None` (logged, not raised) instead of letting `RunAlreadyActive`
     propagate -- the scheduler's own cron callback has no HTTP response to map it to, and "nothing
     to do, an equivalent run is already active" is a normal outcome here, not an error."""
     try:
@@ -130,12 +139,14 @@ def admit_daily_run(mode: str = "full", priority: int = 2) -> int | None:
 
 
 def admit_weekly_run(mode: str = "full", priority: int = 3) -> int | None:
-    """Scheduler entry point for `weekly_run` (the "weekly" cron job). Deliberately checks only
-    `weekly_run` itself (see the module docstring's Scope note) -- NOT the full equivalence
-    closure `admit_daily_run` uses -- so an already-active `daily_run` never blocks this from
-    being created; it still refuses a second `weekly_run` racing another one."""
+    """Scheduler entry point for `weekly_run` (the "weekly" cron job). Checks only `weekly_run`
+    itself (`equivalent_kinds_for("weekly_run")`, see the module docstring's Scope note): an
+    active `daily_run` never blocks it and it never blocks a `daily_run`; a second `weekly_run`
+    racing this one is still refused."""
     try:
-        return admit_run("weekly_run", {"mode": mode}, priority=priority, equivalent_kinds=["weekly_run"])
+        return admit_run(
+            "weekly_run", {"mode": mode}, priority=priority, equivalent_kinds=equivalent_kinds_for("weekly_run")
+        )
     except RunAlreadyActive as exc:
         log.info("scheduled_weekly_run_skipped_already_active", existing_job=exc.job)
         return None

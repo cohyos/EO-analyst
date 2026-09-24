@@ -31,16 +31,25 @@ def upsert_embedding(item_id: int, vec: Sequence[float]) -> None:
     log.debug("vector.embedding_upserted", item_id=item_id, dim=len(vec))
 
 
-def _load_candidates(days: int | None, exclude_id: int | None = None) -> list[dict[str, Any]]:
+def _load_candidates(
+    days: int | None, exclude_id: int | None = None, completed_stage: str | None = None
+) -> list[dict[str, Any]]:
     """Fetch `(id, embedding)` for every embedded item, optionally windowed by `days`.
 
     F08: `exclude_id`, when given, drops that item from its own candidate pool -- a retry that
     re-embeds an item whose embedding was already committed (but whose stage marker was not, e.g.
     after a crash between the two writes) must never be allowed to match against its own
     just-upserted vector, which is trivially cosine 1.0 and would wrongly mark the item as its own
-    duplicate (hiding its canonical row from reports)."""
+    duplicate (hiding its canonical row from reports).
+
+    E01/N06 (SOL-REVIEW3-2026-09-24): `completed_stage`, when given, keeps only items that have
+    already completed that stage. An item still pending it (e.g. F09's quality-upgrade refresh reset
+    `processed_stages` but left the OLD `embedding` in place) carries a stale vector, and it may sit
+    beyond the current run's `LIMIT` batch -- so the per-run pending-id removal in
+    `eoa.pipeline.dedup` cannot see it. Filtering here removes every pending item, not just the batch."""
     days_clause = ""
     exclude_clause = ""
+    stage_clause = ""
     params: dict[str, Any] = {}
     if days is not None:
         days_clause = (
@@ -50,12 +59,16 @@ def _load_candidates(days: int | None, exclude_id: int | None = None) -> list[di
     if exclude_id is not None:
         exclude_clause = "AND id != %(exclude_id)s"
         params["exclude_id"] = exclude_id
+    if completed_stage is not None:
+        stage_clause = "AND %(stage)s = ANY(COALESCE(processed_stages, '{}'))"
+        params["stage"] = completed_stage
     query = f"""
         SELECT id, embedding
         FROM items
         WHERE embedding IS NOT NULL
         {days_clause}
         {exclude_clause}
+        {stage_clause}
     """
     with connection() as conn, conn.cursor() as cur:
         cur.execute(query, params)
@@ -132,11 +145,11 @@ def find_duplicate(
 # --------------------------------------------------------------------------
 
 
-def load_candidate_vectors(days: int | None) -> list[dict[str, Any]]:
+def load_candidate_vectors(days: int | None, completed_stage: str | None = None) -> list[dict[str, Any]]:
     """Public, one-shot version of :func:`_load_candidates` for a caller (``eoa.pipeline.dedup``)
     that wants to hold the whole candidate pool in memory for a run and score many query vectors
-    against it, instead of re-querying per item."""
-    return _load_candidates(days)
+    against it, instead of re-querying per item. ``completed_stage`` -- see :func:`_load_candidates`."""
+    return _load_candidates(days, completed_stage=completed_stage)
 
 
 def find_duplicate_in_memory(

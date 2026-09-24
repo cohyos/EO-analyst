@@ -334,7 +334,23 @@ class _PinnedIPTransport(httpx.AsyncHTTPTransport):
         pinned_ip = request.extensions.get("pinned_ip")
         if not pinned_ip:
             return await super().handle_async_request(request)
-        token = _pinned_host_ip.set((request.url.host, pinned_ip))
+        # P2 (SOL-REVIEW3-2026-09-24 "IDNA hostname comparison"): the pin MUST be keyed by the
+        # same string `_PinnedNetworkBackend.connect_tcp` below will compare it against. That
+        # `host` argument comes from `httpcore.Origin.host` (see
+        # `httpx._transports.default`, built from `request.url.raw_host`), decoded back to ASCII
+        # -- i.e. always the lowercase, IDNA-encoded (punycode) form. `httpx.URL.host` is a
+        # DIFFERENT, human-facing property: for an internationalized host it decodes punycode back
+        # to Unicode (`httpx.URL("http://xn--bcher-kva.example").host == "bücher.example"`), so
+        # storing that here would make every real `connect_tcp` call for such a host compare
+        # "xn--bcher-kva.example" (from Origin) against "bücher.example" (this pin) and always
+        # mismatch -- `_PinnedNetworkBackend.connect_tcp` would then refuse to dial a perfectly
+        # valid internationalized host. `raw_host` is exactly `Origin.host`'s source (both derive
+        # from the same internal, already-IDNA-encoded `_uri_reference.host`), so this always
+        # agrees with `connect_tcp`'s `host` -- for plain ASCII hosts the two properties already
+        # coincide (both merely lowercase), so this changes nothing for the common case. Security
+        # semantics are unchanged: the dial below still resolves to `pinned_ip` only, and TLS
+        # verification still runs against `request.url` (untouched), not this pin key.
+        token = _pinned_host_ip.set((request.url.raw_host.decode("ascii"), pinned_ip))
         try:
             return await super().handle_async_request(request)
         finally:

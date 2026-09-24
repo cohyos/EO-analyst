@@ -573,6 +573,59 @@ class TestListPayloadsRouteSearchFieldsAlignment:
         assert row_params["q"] == "%toplite%"
 
 
+class TestListPayloadsRouteSearchWildcardEscaping:
+    """R06/P3 (SOL-REVIEW3-2026-09-24 "search"): SQL `ILIKE` treats `%`/`_` as wildcards while the
+    client's tree filter (`web/src/lib/payloadFamilies.ts`'s `variantMatches`/`filterPayloadTree`,
+    plain `.includes(q)`) treats them literally -- a query of `%` used to match every row
+    server-side (false non-empty) while the client's own re-filter over that same query string
+    would show nothing for anything but an exact `%` substring, and a bare `%` search could also
+    produce a false-empty tree once the two disagreed. `_escape_ilike_term` + `ILIKE ... ESCAPE
+    '\\'` make the server's `q` match literally, same as the client."""
+
+    def test_percent_query_is_escaped_and_matched_literally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        from eoa.api.routes.payloads import _escape_ilike_term
+
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 0}},
+            fetchall_responses={"FROM payloads p": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        client.get("/api/payloads", params={"q": "%"})
+
+        row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        # Pre-fix code sent the raw `%` straight into the pattern (`f"%{q}%"` == `"%%%"`, three
+        # bare wildcards) with no `ESCAPE` clause at all -- this would have matched everything.
+        assert row_params["q"] == f"%{_escape_ilike_term('%')}%"
+        assert row_params["q"] == "%\\%%"
+        assert "ILIKE %(q)s ESCAPE '\\'" in row_query
+
+    def test_underscore_query_is_escaped_and_matched_literally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 0}},
+            fetchall_responses={"FROM payloads p": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        client.get("/api/payloads", params={"q": "mx_15"})
+
+        _row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        # A literal underscore must be escaped to `\_` -- otherwise it matches ANY single
+        # character (SQL `_` wildcard), e.g. "mxA15" would also match.
+        assert row_params["q"] == "%mx\\_15%"
+
+    def test_escape_helper_escapes_backslash_before_wildcards(self):
+        from eoa.api.routes.payloads import _escape_ilike_term
+
+        # Backslash must be escaped FIRST so a user-typed backslash can't be re-interpreted as
+        # (part of) the escape sequence produced for `%`/`_`.
+        assert _escape_ilike_term("50%_off\\sale") == "50\\%\\_off\\\\sale"
+
+
 class TestPayloadFacetsTotal:
     """R09 (SOL-REVIEW2-2026-09-24 review): an unfiltered existence count so the UI's "database
     empty" decision can't be fooled by every row having a null vendor/category (which would make

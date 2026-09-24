@@ -249,8 +249,10 @@ def _stage_timeline_from_log(job_id: int, job_state: str) -> dict[str, dict[str,
 
 
 def _last_run() -> dict[str, Any] | None:
+    # S01/S02 (SOL-REVIEW3-2026-09-24): only `daily_run` carries the pipeline stage timeline --
+    # `weekly_run` now only waits for it and builds the weekly report (no pipeline stages).
     row = _fetchone(
-        "SELECT * FROM jobs WHERE kind IN ('daily_run', 'weekly_run') "
+        "SELECT * FROM jobs WHERE kind = 'daily_run' "
         "AND state IN ('done', 'failed', 'partial') "
         "ORDER BY finished_at DESC NULLS LAST LIMIT 1"
     )

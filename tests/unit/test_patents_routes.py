@@ -147,6 +147,49 @@ class TestListPatentsRoutePagination:
         assert r.json()["has_more"] is False
 
 
+class TestListPatentsRouteSearchWildcardEscaping:
+    """R06/P3 (SOL-REVIEW3-2026-09-24 "search"): see the identical fix/comment in
+    `eoa.api.routes.payloads` -- `ILIKE` treats `%`/`_` as wildcards; `_escape_ilike_term` +
+    `ILIKE ... ESCAPE '\\'` make the server's free-text `q` match a literal `%`/`_` instead of
+    treating it as a wildcard."""
+
+    def test_percent_query_is_escaped_and_matched_literally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        from eoa.api.routes.patents import _escape_ilike_term
+
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM patents WHERE": {"c": 0}},
+            fetchall_responses={"SELECT * FROM patents WHERE": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.patents.connection", lambda: _FakeConnection(cur))
+
+        client.get("/api/patents", params={"q": "%"})
+
+        row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        # Pre-fix code sent the raw `%` straight into the pattern with no `ESCAPE` clause -- this
+        # would have matched every title/abstract instead of a literal percent sign.
+        assert row_params["q"] == f"%{_escape_ilike_term('%')}%"
+        assert row_params["q"] == "%\\%%"
+        assert "ILIKE %(q)s ESCAPE '\\'" in row_query
+
+    def test_underscore_query_is_escaped_and_matched_literally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM patents WHERE": {"c": 0}},
+            fetchall_responses={"SELECT * FROM patents WHERE": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.patents.connection", lambda: _FakeConnection(cur))
+
+        client.get("/api/patents", params={"q": "read_out"})
+
+        _row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        # A literal underscore must be escaped to `\_` -- otherwise it matches ANY single
+        # character (SQL `_` wildcard), e.g. "readXout" would also match.
+        assert row_params["q"] == "%read\\_out%"
+
+
 class TestPatentFacetsTotal:
     """R09 (SOL-REVIEW2-2026-09-24 review): an unfiltered existence count so the UI's "database
     empty" decision can't be fooled by every patent having a null assignee AND null subdomain

@@ -70,13 +70,14 @@ function facetsResponse(over: Partial<PatentFacetsResponse> = {}): PatentFacetsR
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/patents"]}>
         <PatentsPage />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, queryClient };
 }
 
 beforeEach(() => {
@@ -202,6 +203,36 @@ describe("PatentsPage", () => {
     // The first page's row must still be visible -- "load more" appends, it doesn't replace.
     expect(screen.getByText("Digital pixel readout integrated circuit")).toBeInTheDocument();
     expect(getPatents).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
+  // P2 (SOL-REVIEW3-2026-09-24 "pagination"): a re-delivered page above page 1 (react-query
+  // refetchOnWindowFocus/refetchOnReconnect, an invalidation, or a StrictMode double effect) must
+  // not duplicate that page's rows -- accumulation is keyed by page number (Map.set), not pushed
+  // onto an array, so re-storing page 2's rows overwrites the same slot instead of appending it.
+  it("a refetch of an already-loaded page does not duplicate its rows", async () => {
+    const page1 = makePatent({ id: 1 });
+    const page2 = makePatent({ id: 2, pub_number: "US99999999B2", title: "Second page patent" });
+    getPatents.mockImplementation((params: { page?: number } = {}) =>
+      Promise.resolve({
+        patents: params.page === 2 ? [page2] : [page1],
+        total: 2,
+        page: params.page ?? 1,
+        limit: 200,
+        has_more: (params.page ?? 1) === 1,
+      }),
+    );
+    const { queryClient } = renderPage();
+    await screen.findByText("Digital pixel readout integrated circuit");
+    fireEvent.click(await screen.findByRole("button", { name: /טען עוד/ }));
+    await screen.findByText("Second page patent");
+
+    // Simulate the SAME page-2 response being re-delivered (e.g. a window-focus refetch of the
+    // still-mounted page-2 query) without the user clicking "load more" again.
+    await queryClient.refetchQueries({ queryKey: ["patents"] });
+    await screen.findByText("Second page patent");
+
+    expect(screen.getAllByText("Second page patent")).toHaveLength(1);
+    expect(screen.getAllByText("Digital pixel readout integrated circuit")).toHaveLength(1);
   });
 
   // R09 (SOL-REVIEW2-2026-09-24 review): the "database empty" empty-state must key off the

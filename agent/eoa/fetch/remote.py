@@ -42,16 +42,17 @@ def _wait_job(job_id: int, timeout_s: float, poll_s: float = 1.0) -> dict[str, A
     raise FetchError(f"fetcher job {job_id} timed out after {int(timeout_s)}s")
 
 
-def run_ingest_remote(since_days: int = 3, timeout_s: float = 25 * 60) -> dict[str, Any]:
-    """Ingest via the fetcher container (agent role) or in-process (host role)."""
+def run_ingest_remote(since_days: int = 3, timeout_s: float = 25 * 60, *, poll: bool = False) -> dict[str, Any]:
+    """Ingest via the fetcher container (agent role) or in-process (host role). ``poll`` -- the
+    daytime light poll (F35, see ``eoa.fetch.service._source_is_due``)."""
     if role() != "agent":
         from eoa.fetch.service import run_ingest
 
-        stats = asyncio.run(_bounded_async(run_ingest(since_days=since_days), timeout_s))
+        stats = asyncio.run(_bounded_async(run_ingest(since_days=since_days, poll=poll), timeout_s))
         return {k: v for k, v in vars(stats).items() if isinstance(v, int | float | str | bool)}
     from eoa.memory.relational import enqueue_job
 
-    job_id = enqueue_job("ingest", {"since_days": since_days}, priority=1)
+    job_id = enqueue_job("ingest", {"since_days": since_days, "poll": poll}, priority=1)
     log.info("ingest_delegated_to_fetcher", job_id=job_id)
     return _wait_job(job_id, timeout_s, poll_s=5)
 
@@ -225,7 +226,12 @@ def serve_fetch_jobs(poll_s: float = 2.0, stop_after: float | None = None) -> No
             if job["kind"] == "ingest":
                 from eoa.fetch.service import run_ingest
 
-                stats = asyncio.run(run_ingest(since_days=int(p.get("since_days", 3))))
+                stats = asyncio.run(
+                    run_ingest(
+                        since_days=int(p.get("since_days", 3)),
+                        poll=bool(p.get("poll")) or p.get("mode") == "poll",
+                    )
+                )
                 finish_job(
                     job["id"],
                     "done",

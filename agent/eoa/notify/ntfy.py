@@ -107,15 +107,27 @@ def _fmt_action(a: dict[str, Any]) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ typed helpers
-def report_ready(kind: str, path_docx: str, headlines: list[str], ui_url: str | None = None) -> Sent:
+def build_report_ready(
+    kind: str, path_docx: str, headlines: list[str], ui_url: str | None = None
+) -> dict[str, Any]:
+    """R02 (SOL-REVIEW3-2026-09-24 blocker 3): the exact ``send()`` kwargs for :func:`report_ready`,
+    split out so callers that must persist a reproducible copy of the message for a later retry
+    (``eoa.orchestrator.jobs._notify`` stores it in ``notifications_sent.payload``; the sweep in
+    ``eoa.notify.retry`` replays it with ``ntfy.send(**payload)``) build it once instead of
+    reconstructing the title/body from scratch. :func:`report_ready` itself is unchanged -- it now
+    just calls this and ``send(**...)``."""
     body = "\n".join(f"• {h}" for h in headlines[:3]) or "אין כותרות בולטות."
-    return send(
-        f"דוח {kind} מוכן",
-        f"{body}\n\nקובץ: {path_docx}",
-        priority="default",
-        tags=["page_facing_up"],
-        click=ui_url,
-    )
+    return {
+        "title": f"דוח {kind} מוכן",
+        "body": f"{body}\n\nקובץ: {path_docx}",
+        "priority": "default",
+        "tags": ["page_facing_up"],
+        "click": ui_url,
+    }
+
+
+def report_ready(kind: str, path_docx: str, headlines: list[str], ui_url: str | None = None) -> Sent:
+    return send(**build_report_ready(kind, path_docx, headlines, ui_url))
 
 
 def red_alert(title: str, summary_he: str, url: str) -> Sent:
@@ -130,8 +142,14 @@ def security_alert(source: str, kind: str, excerpt: str) -> Sent:
     )
 
 
+def build_failure(stage: str, error: str) -> dict[str, Any]:
+    """R02 (SOL-REVIEW3-2026-09-24 blocker 3): see :func:`build_report_ready` -- the ``send()``
+    kwargs for :func:`failure`, reused by ``_notify`` and the retry sweep the same way."""
+    return {"title": f"❌ כשל בשלב {stage}", "body": error[:400], "priority": "high", "tags": ["x"]}
+
+
 def failure(stage: str, error: str) -> Sent:
-    return send(f"❌ כשל בשלב {stage}", error[:400], priority="high", tags=["x"])
+    return send(**build_failure(stage, error))
 
 
 def status(text: str, priority: str = "low") -> Sent:

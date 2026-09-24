@@ -84,22 +84,36 @@ export function PayloadsPage() {
     queryFn: () => api.getPayloadFacets(filters.category || undefined),
   });
 
-  // R06/F33: accumulate pages fetched so far for the current filter set -- page 1 replaces the
-  // list (a fresh filter/search), page > 1 (a "load more" click) appends to it. Reset whenever
-  // the filters change, mirroring the `page` reset above.
-  const [accumulatedPayloads, setAccumulatedPayloads] = useState<PayloadRecord[]>([]);
+  // R06/F33/P2 (SOL-REVIEW3-2026-09-24 "pagination"): accumulate pages fetched so far for the
+  // current filter set, keyed by page number rather than blindly appended -- a page number's
+  // rows are STORED (Map.set), not pushed onto an array, so a refetch of an already-loaded page
+  // (react-query's refetchOnWindowFocus/refetchOnReconnect, an invalidation, or a StrictMode
+  // double effect firing this effect twice for the same `payloadsQuery.data`) overwrites that
+  // page's entry instead of appending a second copy of its rows. Reset whenever the filters
+  // change, mirroring the `page` reset above.
+  const [pagesById, setPagesById] = useState<Map<number, PayloadRecord[]>>(new Map());
   useEffect(() => {
-    setAccumulatedPayloads([]);
+    setPagesById(new Map());
   }, [filters.category, filters.vendor, filters.q]);
   useEffect(() => {
     if (!payloadsQuery.data) return;
-    setAccumulatedPayloads((prev) =>
-      page === 1 ? payloadsQuery.data.payloads : [...prev, ...payloadsQuery.data.payloads],
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the query result, not `page` itself.
+    setPagesById((prev) => {
+      const next = new Map(prev);
+      next.set(page, payloadsQuery.data.payloads);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the query result, not `page` itself
+    // (see the pagesById.set(page, ...) call above -- `page` is read from the closure, which is
+    // correct because the query key already includes `page`, so this data always belongs to it).
   }, [payloadsQuery.data]);
 
-  const payloads = accumulatedPayloads;
+  const payloads = useMemo(
+    () =>
+      Array.from(pagesById.keys())
+        .sort((a, b) => a - b)
+        .flatMap((p) => pagesById.get(p)!),
+    [pagesById],
+  );
   const payloadsTotal = payloadsQuery.data?.total ?? payloads.length;
   const hasMorePayloads = payloadsQuery.data?.has_more ?? false;
   const vendors = facetsQuery.data?.vendors ?? [];

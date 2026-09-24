@@ -234,6 +234,31 @@ class TestAnthropicChat:
             AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
 
     @respx.mock
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_nonfinite_token_count_raises_api_provider_error(self, monkeypatch, bad):
+        """F26 (SOL-REVIEW3-2026-09-24): a nonfinite `usage` value (NaN/Infinity -- `json.loads`
+        parses the bare literals some providers emit) used to reach `int(value)` in `_count`,
+        where `int(float("inf"))` raises `OverflowError` -- not one of the exception types the
+        surrounding `except` catches, so it escaped past `ApiProviderError` and aborted the whole
+        fallback chain. Must now fall through like every other malformed-usage case."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        # httpx's own `json=` kwarg serializes with `allow_nan=False` (RFC-strict) and raises
+        # before the mock is even built -- use raw `content=` with a permissive `json.dumps` (like
+        # `json.loads`, `allow_nan=True` is the default) so the bare NaN/Infinity literal actually
+        # reaches this provider's own `r.json()` call, exactly as a real nonconformant API would.
+        body = json.dumps(
+            {
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": bad, "output_tokens": 4},
+            }
+        )
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(200, content=body, headers={"content-type": "application/json"})
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
     def test_next_leg_is_called_after_malformed_usage(self, monkeypatch):
         """The whole point of converting the raw exception into `ApiProviderError`: it is caught
         by `eoa.llm.chain.run_chain`'s `FALLBACK_EXCEPTIONS` tuple, so the chain moves on instead
@@ -360,6 +385,25 @@ class TestGeminiChat:
             GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "ping"}])
 
     @respx.mock
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_nonfinite_token_count_raises_api_provider_error(self, monkeypatch, bad):
+        """F26 (SOL-REVIEW3-2026-09-24): see the identical Anthropic test above."""
+        monkeypatch.setenv("GEMINI_API_KEY", "gk-x")
+        # See the identical Anthropic test above for why this uses raw `content=` instead of
+        # httpx's own `json=` (which serializes with `allow_nan=False` and would raise here).
+        body = json.dumps(
+            {
+                "candidates": [{"content": {"parts": [{"text": "PONG"}]}}],
+                "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": bad},
+            }
+        )
+        respx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+        ).mock(return_value=httpx.Response(200, content=body, headers={"content-type": "application/json"}))
+        with pytest.raises(ApiProviderError, match="malformed"):
+            GeminiProvider("gemini-3.5-flash").chat([{"role": "user", "content": "ping"}])
+
+    @respx.mock
     def test_list_models_falls_back_to_static_on_error(self, monkeypatch):
         from eoa.config import ApiProviderCfg
 
@@ -473,6 +517,25 @@ class TestOpenAIChat:
                     "usage": {"prompt_tokens": -6, "completion_tokens": 2},
                 },
             )
+        )
+        with pytest.raises(ApiProviderError, match="malformed"):
+            OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_nonfinite_token_count_raises_api_provider_error(self, monkeypatch, bad):
+        """F26 (SOL-REVIEW3-2026-09-24): see the identical Anthropic test above."""
+        monkeypatch.setenv("OPENAI_API_KEY", "ok-x")
+        # See the identical Anthropic test above for why this uses raw `content=` instead of
+        # httpx's own `json=` (which serializes with `allow_nan=False` and would raise here).
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": "PONG"}}],
+                "usage": {"prompt_tokens": 6, "completion_tokens": bad},
+            }
+        )
+        respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(200, content=body, headers={"content-type": "application/json"})
         )
         with pytest.raises(ApiProviderError, match="malformed"):
             OpenAIProvider("gpt-5.1-mini").chat([{"role": "user", "content": "hi"}])

@@ -191,7 +191,7 @@ class TestLastRunTimeline:
         ]
 
         def fetchone(query: str, params: Any = None) -> Any:
-            if "FROM jobs WHERE kind IN" in query:
+            if "FROM jobs WHERE kind = 'daily_run'" in query:
                 return job_row
             raise AssertionError(f"unexpected query: {query}")
 

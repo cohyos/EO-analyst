@@ -50,7 +50,7 @@ class TestRetrySelfDedup:
             ],
         )
         monkeypatch.setattr(
-            dedup, "load_candidate_vectors", lambda days: [{"id": 5, "embedding": vec}]
+            dedup, "load_candidate_vectors", lambda days, **_k: [{"id": 5, "embedding": vec}]
         )
         monkeypatch.setattr(dedup, "embed", lambda texts: [vec])
 
@@ -106,7 +106,7 @@ class TestCandidatePoolLookbackAndReplace:
             },
         ]
         monkeypatch.setattr(dedup, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
-        monkeypatch.setattr(dedup, "load_candidate_vectors", lambda days: [])
+        monkeypatch.setattr(dedup, "load_candidate_vectors", lambda days, **_k: [])
         vecs_by_call = iter([[vec_old], [vec_recent]])  # batch_size=1 -- one embed() call per item
         monkeypatch.setattr(dedup, "embed", lambda texts: next(vecs_by_call))
 
@@ -158,7 +158,7 @@ class TestCandidatePoolLookbackAndReplace:
         monkeypatch.setattr(dedup, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
         # Item 3's stale entry is already in the DB-loaded pool under the SAME id.
         monkeypatch.setattr(
-            dedup, "load_candidate_vectors", lambda days: [{"id": 3, "embedding": stale_vec}]
+            dedup, "load_candidate_vectors", lambda days, **_k: [{"id": 3, "embedding": stale_vec}]
         )
         vecs_by_call = iter([[new_vec], [item4_vec]])  # batch_size=1 -- one embed() call per item
         monkeypatch.setattr(dedup, "embed", lambda texts: next(vecs_by_call))
@@ -215,7 +215,7 @@ class TestCandidatePoolLookbackAndReplace:
         monkeypatch.setattr(dedup, "get_items_for_stage", lambda stage, limit, item_ids=None: items)
         # Item 21's stale entry is already in the DB-loaded pool -- BEFORE its own turn this run.
         monkeypatch.setattr(
-            dedup, "load_candidate_vectors", lambda days: [{"id": 21, "embedding": stale_vec_21}]
+            dedup, "load_candidate_vectors", lambda days, **_k: [{"id": 21, "embedding": stale_vec_21}]
         )
         vecs_by_call = iter([[item20_vec], [fresh_vec_21]])  # batch_size=1 -- one embed() call per item
         monkeypatch.setattr(dedup, "embed", lambda texts: next(vecs_by_call))

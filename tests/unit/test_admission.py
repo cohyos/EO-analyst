@@ -56,7 +56,9 @@ class TestAdmitRun:
         cur = _FakeCursor([None, {"id": 42}])
         monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
 
-        job_id = admission.admit_run("daily_run", {"mode": "full"}, priority=2, equivalent_kinds=["daily_run"])
+        job_id = admission.admit_run(
+            "daily_run", {"mode": "full"}, priority=2, equivalent_kinds=["daily_run"]
+        )
 
         assert job_id == 42
         lock_query, lock_params = cur.executed[0]
@@ -83,7 +85,7 @@ class TestAdmitDailyAndWeeklyRun:
 
     def test_admit_weekly_run_not_blocked_by_active_daily_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The scope note in admission.py's module docstring: weekly_run must NOT be blocked just
-        because a daily_run is active -- run_weekly is designed to coexist with (and wait on) it."""
+        because a daily_run is active -- run_weekly waits on it."""
         cur = _FakeCursor([None, {"id": 9}])
         monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
 
@@ -147,7 +149,11 @@ class _ConcurrentFakeCursor:
         elif "SELECT * FROM jobs" in query:
             kinds = set(params["kinds"])
             match = next(
-                (j for j in self._db._jobs if j["kind"] in kinds and j["state"] in ("queued", "running")),
+                (
+                    j
+                    for j in self._db._jobs
+                    if j["kind"] in kinds and j["state"] in ("queued", "running", "deferred")
+                ),
                 None,
             )
             self._last = match
@@ -214,3 +220,78 @@ class TestApiAndSchedulerRaceYieldsOneJob:
             assert len(results) == 1, f"attempt {attempt}: expected exactly one winner, got {results!r}"
             assert len(db._jobs) == 1, f"attempt {attempt}: expected exactly one job row, got {db._jobs!r}"
             assert len(errors) == 1, f"attempt {attempt}: expected exactly one RunAlreadyActive"
+
+
+class TestSaturdayWeeklyAndDailyAdmission:
+    """S01 (SOL-REVIEW3-2026-09-24): on Saturday the "daily" and "weekly" crons both fire at 01:00.
+    Round 3 put `weekly_run` in the daily equivalence set but checked only `weekly_run` for weekly,
+    so weekly-first admission made the scheduled daily skip. Both lock orders must now yield
+    exactly one daily_run and one weekly_run."""
+
+    @pytest.mark.parametrize("order", [("weekly", "daily"), ("daily", "weekly")])
+    def test_both_lock_orders_admit_one_daily_and_one_weekly(
+        self, monkeypatch: pytest.MonkeyPatch, order: tuple[str, str]
+    ) -> None:
+        db = _ConcurrentFakeDB()
+        monkeypatch.setattr(admission.db, "connection", db.connection)
+        admit = {
+            "daily": lambda: admission.admit_daily_run("full", 2),
+            "weekly": lambda: admission.admit_weekly_run("full", 3),
+        }
+        ids = [admit[name]() for name in order]
+        assert all(i is not None for i in ids)
+        assert sorted(j["kind"] for j in db._jobs) == ["daily_run", "weekly_run"]
+
+    def test_weekly_handler_admission_racing_the_daily_cron_yields_one_daily(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`run_weekly` admits a missing daily_run through `admit_daily_run`; racing the cron's
+        own `admit_daily_run` (and a weekly cron tick) it must still produce ONE daily_run."""
+        for attempt in range(20):
+            db = _ConcurrentFakeDB()
+            monkeypatch.setattr(admission.db, "connection", db.connection)
+            barrier = threading.Barrier(3)
+
+            def _run(fn: Any) -> None:
+                barrier.wait(timeout=5)
+                fn()
+
+            threads = [
+                threading.Thread(target=_run, args=(lambda: admission.admit_daily_run("full", 2),)),
+                threading.Thread(target=_run, args=(lambda: admission.admit_daily_run("full", 2),)),
+                threading.Thread(target=_run, args=(lambda: admission.admit_weekly_run("full", 3),)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+            kinds = sorted(j["kind"] for j in db._jobs)
+            assert kinds == ["daily_run", "weekly_run"], f"attempt {attempt}: {kinds!r}"
+
+
+class TestDeferredCountsAsActive:
+    """S01: a recently `deferred` equivalent run is still pending a retry -- admitting another
+    next to it would run the pipeline twice once both are claimed."""
+
+    def test_deferred_daily_blocks_a_second_daily(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _ConcurrentFakeDB()
+        db._jobs.append({"id": 1, "kind": "daily_run", "state": "deferred"})
+        db._next_id = 2
+        monkeypatch.setattr(admission.db, "connection", db.connection)
+        assert admission.admit_daily_run("full", 2) is None
+        assert len(db._jobs) == 1
+
+    def test_query_includes_recent_deferred_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cur = _FakeCursor([None, {"id": 1}])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+        admission.admit_run("daily_run", equivalent_kinds=["daily_run"])
+        select_query, select_params = cur.executed[1]
+        assert (
+            "state = 'deferred' AND created_at > now() - make_interval(hours => %(deferred_hours)s)"
+            in select_query
+        )
+        assert select_params["deferred_hours"] == admission.DEFERRED_ACTIVE_HOURS
+
+    def test_weekly_is_not_in_the_daily_equivalence_set(self) -> None:
+        assert set(admission.equivalent_kinds_for("daily_run")) == {"daily_run", "report"}
+        assert admission.equivalent_kinds_for("weekly_run") == ["weekly_run"]

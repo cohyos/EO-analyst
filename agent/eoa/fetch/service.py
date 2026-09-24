@@ -702,13 +702,30 @@ async def _ingest_search_source(source, *, source_db_id: int | None, stats: Inge
 _LOOKBACK_MARGIN_DAYS = 1
 _LOOKBACK_MAX_DAYS = 21
 
-#: F35 (SOL-AUDIT-2026-09-24): a `schedule: weekly` source is "due" only once this long has passed
-#: since its last successful fetch (or it has never succeeded) -- keeps it off the ordinary
-#: 2-hour daytime poll (`main.py`'s `daytime_poll` cron job) except when it's actually due. The
-#: nightly "ingest" pipeline stage runs through this exact same `run_ingest` selection, so a due
-#: weekly source is picked up there too -- "the nightly run still fetches all due-or-daily
-#: sources" -- with no separate bypass needed.
-_WEEKLY_SOURCE_DUE_INTERVAL_DAYS = 7
+#: F05 (SOL-REVIEW3-2026-09-24 carryover): a source with NO recorded success at all (`last_ok_at
+#: IS NULL` -- brand new, or never once succeeded through a long outage) used to fall through to
+#: the caller's plain `default_since_days` (typically 3) with no widening, since there is no
+#: `elapsed_days` to measure it by. That is the opposite of F05's intent for exactly this case: a
+#: source down since before it ever succeeded once could have been failing for months, and 3 days
+#: of backfill silently drops everything older. It now gets this bounded first-success window
+#: instead of the plain default -- long enough to catch a real backlog, capped (same
+#: `_LOOKBACK_MAX_DAYS` ceiling as the "was succeeding, then went down" case) so it still can't
+#: demand an unbounded fetch.
+_FIRST_SUCCESS_BACKFILL_DAYS = 14
+
+#: F35 (SOL-AUDIT-2026-09-24 / SOL-REVIEW3-2026-09-24 carryover): how long must pass since a
+#: source's last successful fetch before it is "due" again, per `schedule`. `daily` (the default)
+#: sits a bit under its nominal 24h cadence so ordinary daytime-poll jitter (`main.py`'s
+#: `daytime_poll` cron job, every `daytime_rss_poll_minutes`) can never push a source's next fetch
+#: a further full day out; `weekly` is the same idea a bit under 7 days. Before this, `daily`
+#: sources were due on every single poll call (no interval check at all) instead of once per day.
+#: The nightly "ingest" pipeline stage runs through this exact same `run_ingest` selection, so a
+#: due source -- daily or weekly -- is picked up there too, with no separate bypass needed; a
+#: source that has never succeeded, or whose last attempt failed (`_touch_source_fetched(ok=False)`
+#: never updates `last_ok_at` -- see `_sources_last_success_map`), stays due on every call at
+#: either cadence until it actually recovers.
+_DAILY_SOURCE_DUE_INTERVAL_HOURS = 20
+_WEEKLY_SOURCE_DUE_INTERVAL_HOURS = 6.5 * 24  # ~6.5 days
 
 
 def _sources_last_success_map(source_db_ids: list[int]) -> dict[int, datetime | None]:
@@ -724,8 +741,8 @@ def _sources_last_success_map(source_db_ids: list[int]) -> dict[int, datetime | 
     one failed attempt, never actually retrying it (N01). A source that has genuinely never
     succeeded now reads `last_ok_at IS NULL` regardless of how many times it's been attempted, so
     `_source_is_due`'s `last_success is None` branch (due every run) and `_lookback_days`'s same
-    branch (bounded backfill at the caller's plain `default_since_days`) both see it correctly,
-    every run, until it actually succeeds once.
+    branch (bounded `_FIRST_SUCCESS_BACKFILL_DAYS` backfill, F05 SOL-REVIEW3-2026-09-24) both see it
+    correctly, every run, until it actually succeeds once.
 
     `last_ok_at` (migration 0019) may not exist on a DB behind HEAD; any query failure (including
     that one) degrades to "unknown last success" for every id, same best-effort convention as the
@@ -758,29 +775,48 @@ def _lookback_days(
     """F05: a source not successfully fetched in longer than `default_since_days` gets a wider
     lookback for this run -- elapsed-since-last-success plus a margin, bounded to
     `_LOOKBACK_MAX_DAYS` so a source down (or never working) for months doesn't demand an
-    unbounded backfill. A source with no known last-success (new, or the lookup failed/degraded)
-    keeps the caller's plain `default_since_days`."""
-    if last_success is None:
-        return default_since_days
+    unbounded backfill.
+
+    F05 (SOL-REVIEW3-2026-09-24 carryover): a source with NO known last-success -- `last_success is
+    None`, meaning `last_ok_at IS NULL` (brand new, or never once succeeded), NOT "the lookup
+    failed/degraded" (that degrades every id the same way -- see `_sources_last_success_map` --
+    so this function can't and doesn't tell the two apart, same as before this fix) -- now gets the
+    bounded `_FIRST_SUCCESS_BACKFILL_DAYS` window instead of silently keeping the caller's plain
+    `default_since_days`, which could otherwise miss months of backlog behind a source that has
+    never once succeeded."""
     reference = now or datetime.now(UTC)
+    if last_success is None:
+        return min(max(default_since_days, _FIRST_SUCCESS_BACKFILL_DAYS), _LOOKBACK_MAX_DAYS)
     if last_success.tzinfo is None:
         last_success = last_success.replace(tzinfo=UTC)
     elapsed_days = max(0, (reference - last_success).days)
     return min(max(default_since_days, elapsed_days + _LOOKBACK_MARGIN_DAYS), _LOOKBACK_MAX_DAYS)
 
 
-def _source_is_due(schedule: str, last_success: datetime | None, *, now: datetime | None = None) -> bool:
-    """F35: `schedule: daily` sources are due on every call (unchanged cadence). `schedule: weekly`
-    sources are due only when never successfully fetched, or when at least
-    `_WEEKLY_SOURCE_DUE_INTERVAL_DAYS` have passed since the last successful fetch."""
-    if schedule != "weekly":
-        return True
+def _source_is_due(
+    schedule: str, last_success: datetime | None, *, now: datetime | None = None, poll: bool = False
+) -> bool:
+    """F35: a source is due when it has never succeeded (`last_success is None`), or when at least
+    its schedule's due interval has passed since its last successful fetch -- `daily` (the default,
+    any `schedule` other than `weekly`) at `_DAILY_SOURCE_DUE_INTERVAL_HOURS` (~20h), `weekly` at
+    `_WEEKLY_SOURCE_DUE_INTERVAL_HOURS` (~6.5 days). Before this fix `daily` had no interval check
+    at all -- due on every call -- so a source polled every ~2 daytime hours
+    (`daytime_rss_poll_minutes`) was refetched on every single poll instead of once a day.
+
+    F35 (round 4): the daily interval applies to the daytime POLL only (`poll=True`). The nightly
+    pipeline ingest (and a manual "ingest now") always fetches daily sources -- otherwise a daytime
+    poll at e.g. 13:00 would make the 01:00 nightly run skip that source, shifting every daily
+    source's fetch to a drifting daytime slot. So a daily source is fetched once per night, and a
+    daytime poll only picks it up when the night's fetch did not succeed within the interval."""
     if last_success is None:
+        return True
+    if schedule != "weekly" and not poll:
         return True
     reference = now or datetime.now(UTC)
     if last_success.tzinfo is None:
         last_success = last_success.replace(tzinfo=UTC)
-    return (reference - last_success) >= timedelta(days=_WEEKLY_SOURCE_DUE_INTERVAL_DAYS)
+    interval_hours = _WEEKLY_SOURCE_DUE_INTERVAL_HOURS if schedule == "weekly" else _DAILY_SOURCE_DUE_INTERVAL_HOURS
+    return (reference - last_success) >= timedelta(hours=interval_hours)
 
 
 async def _ingest_one_source(
@@ -836,13 +872,18 @@ async def _ingest_one_source(
     _touch_source_fetched(source_db_id, source.name, ok=True)
 
 
-async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -> IngestStats:
+async def run_ingest(
+    source_ids: list[int] | None = None, since_days: int = 3, *, poll: bool = False
+) -> IngestStats:
     """Fetch, sanitize, and store items for the given DB source ids (or every configured source).
 
     `source_ids`, when given, are `sources.id` DB row ids (not the yaml
     slugs in `config/sources.yaml`) — every configured source is upserted
     first (to resolve slug -> DB id), then filtered down to the requested
     set.
+
+    `poll=True` marks the daytime light poll (F35): daily sources are then due only once per
+    `_DAILY_SOURCE_DUE_INTERVAL_HOURS` -- see `_source_is_due`.
     """
     checkpoint()
     from eoa.fetch.sources_loader import load_sources, upsert_sources_to_db
@@ -863,10 +904,11 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
         wanted = set(source_ids)
         targets = [(db_id, s) for db_id, s in targets if db_id in wanted]
 
-    # F05/F35: one batched read of every targeted source's last successful fetch, used to (a)
-    # skip a `schedule: weekly` source that isn't due yet (F35) and (b) widen this run's lookback
-    # for a source that's been down longer than the plain `since_days` default (F05) -- see
-    # `_source_is_due`/`_lookback_days`.
+    # F05/F35: one batched read of every targeted source's last successful fetch, used to (a) skip
+    # a source that isn't due yet under its `schedule` -- `daily` at ~20h, `weekly` at ~6.5 days
+    # (F35) -- and (b) widen this run's lookback for a source that's been down longer than the
+    # plain `since_days` default, or never once succeeded (F05) -- see `_source_is_due`/
+    # `_lookback_days`.
     known_db_ids = [db_id for db_id, _ in targets if db_id is not None]
     last_success_map = _sources_last_success_map(known_db_ids)
 
@@ -874,7 +916,7 @@ async def run_ingest(source_ids: list[int] | None = None, since_days: int = 3) -
     for db_id, source in targets:
         last_success = last_success_map.get(db_id) if db_id is not None else None
         schedule = getattr(source, "schedule", None) or "daily"
-        if not _source_is_due(schedule, last_success):
+        if not _source_is_due(schedule, last_success, poll=poll):
             log.debug("fetch.source_skipped_not_due", source_id=source.id, schedule=schedule)
             continue
         due_targets.append((db_id, source, _lookback_days(last_success, since_days)))

@@ -56,6 +56,17 @@ def _payload_rows_with_counts(where: list[str], params: dict[str, Any]) -> list[
     return _fetchall(_PAYLOAD_ROWS_WITH_COUNTS_SQL.format(where=" AND ".join(where)), params)
 
 
+def _escape_ilike_term(term: str) -> str:
+    """R06 (SOL-REVIEW3-2026-09-24 "search wildcard"): `ILIKE` treats `%`/`_` as wildcards and
+    `\\` as its own escape character -- a raw user query of `%` would match every row instead of
+    the literal percent sign, while `web/src/lib/payloadFamilies.ts`'s tree filter
+    (`variantMatches`/`filterPayloadTree`, plain `.includes(q)`) always treats it literally,
+    producing a false-empty tree for a search the server itself matched everything against.
+    Escape `\\` first (so it isn't re-escaped by the two replacements below), then `%`/`_`;
+    callers must pair this with `ILIKE ... ESCAPE '\\'`."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @router.get("/payloads")
 def list_payloads(
     category: str | None = Query(None),
@@ -87,10 +98,11 @@ def list_payloads(
         params["family"] = f"%{family}%"
     if q:
         where.append(
-            "(p.canonical_name ILIKE %(q)s OR p.vendor_entity_name ILIKE %(q)s OR p.family ILIKE %(q)s "
-            "OR p.variant ILIKE %(q)s OR p.notes ILIKE %(q)s)"
+            "(p.canonical_name ILIKE %(q)s ESCAPE '\\' OR p.vendor_entity_name ILIKE %(q)s ESCAPE '\\' "
+            "OR p.family ILIKE %(q)s ESCAPE '\\' OR p.variant ILIKE %(q)s ESCAPE '\\' "
+            "OR p.notes ILIKE %(q)s ESCAPE '\\')"
         )
-        params["q"] = f"%{q}%"
+        params["q"] = f"%{_escape_ilike_term(q)}%"
     where_sql = " AND ".join(where)
     params["offset"] = (page - 1) * limit
     rows = _fetchall(

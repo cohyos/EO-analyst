@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import time
 from typing import Any
@@ -117,6 +118,16 @@ def _finalize_result(
             return 0
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{provider} {field} is a {type(value).__name__}, not a number: {value!r}")
+        # F26 (SOL-REVIEW3-2026-09-24): a nonfinite float (NaN/Infinity -- json.loads happily
+        # parses the bare `NaN`/`Infinity`/`-Infinity` literals some providers emit) passed the
+        # isinstance check above and reached `int(value)` below, where `int(float("inf"))` raises
+        # `OverflowError` -- not one of the `(ValueError, TypeError, AttributeError, KeyError,
+        # IndexError)` types every caller's `except` around `_finalize_result` catches, so it
+        # escaped the malformed-envelope boundary and aborted the whole fallback chain instead of
+        # falling through to the next leg. Rejecting it here, as the same `ValueError` the
+        # negative-count check below already uses, keeps it on the existing caught path.
+        if not math.isfinite(value):
+            raise ValueError(f"{provider} {field} is not finite: {value!r}")
         n = int(value)
         if n < 0:
             raise ValueError(f"{provider} {field} is negative: {n}")

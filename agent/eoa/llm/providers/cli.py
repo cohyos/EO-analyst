@@ -25,6 +25,7 @@ in every case above (headless mode has nothing to approve against, or is explici
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -147,6 +148,14 @@ def _validate_usage(kind: str, usage: dict[str, Any]) -> dict[str, Any]:
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{kind} CLI usage[{key!r}] is a {type(value).__name__}, not a number: {value!r}")
+        # F26 (SOL-REVIEW3-2026-09-24): `json.loads` happily parses the bare `NaN`/`Infinity`/
+        # `-Infinity` literals some CLIs emit into a real `float`, which passed the isinstance
+        # check above and then sailed through unrejected -- `nan < 0` and `inf < 0` are both
+        # `False`, so the negative check below never caught them either. Reject nonfinite values
+        # explicitly, same `ValueError` the negative check already raises, so it takes the same
+        # caught-by-`chat()` path into `CliProviderError` instead of reaching `ProviderResult`.
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{kind} CLI usage[{key!r}] is not finite: {value!r}")
         if value < 0:
             raise ValueError(f"{kind} CLI usage[{key!r}] is negative: {value!r}")
     return usage

@@ -288,13 +288,14 @@ def _compute_run_status(stats: dict[str, Any]) -> str:
     return "done" if report_ok and not any_problem else ("partial" if report_ok else "failed")
 
 
-def _ingest() -> Any:
+def _ingest(poll: bool = False) -> Any:
     """Ingest through the fetcher container when running as the isolated agent, else in-process
     (synchronous: ``run_ingest_remote`` already manages its own event loop internally, so calling
-    it from inside another ``asyncio.run()`` would raise)."""
+    it from inside another ``asyncio.run()`` would raise). ``poll`` -- the daytime ``ingest`` job
+    (payload ``mode: poll``), which enforces the daily source cadence (F35)."""
     from eoa.fetch.remote import run_ingest_remote
 
-    return run_ingest_remote()
+    return run_ingest_remote(poll=poll)
 
 
 def _run_corroboration() -> dict[str, Any]:
@@ -569,41 +570,46 @@ def _build_tech_daily_report() -> Any:
     return build_tech_daily()
 
 
-#: F22/N07 (SOL-REVIEW-2026-09-24): how long `run_weekly` will keep deferring itself (see below)
-#: while it waits for that night's `daily_run` to either appear or reach a terminal state, before
-#: giving up on waiting and falling back to running the full pipeline itself (the original
-#: fallback behaviour, preserved for the case where `run_weekly` genuinely stands alone -- e.g. a
-#: manually triggered weekly report with no nightly `daily_run` ever coming). The night batch
-#: window itself is normally a few hours, so this comfortably covers a real daily run without
-#: leaving a standalone weekly waiting indefinitely.
-WEEKLY_DAILY_WAIT_MAX = timedelta(hours=3)
+#: F22/N07 + S02 (SOL-REVIEW3-2026-09-24): how long `run_weekly` keeps deferring itself while it
+#: waits for tonight's `daily_run` to reach a terminal state. Past this budget it ends `partial`
+#: WITHOUT building the weekly report (S02: never publish a weekly report on non-final daily data).
+#: 12h covers a full night window plus retries of a slow or deferred daily run.
+WEEKLY_DAILY_WAIT_MAX = timedelta(hours=12)
+
+#: S01/S02: a `daily_run` created up to this long BEFORE the weekly job itself still counts as
+#: "tonight's" (the Saturday cron creates both at 01:00; a manual weekly an hour after the nightly
+#: daily reuses it instead of running a second one).
+WEEKLY_DAILY_LOOKBACK = timedelta(hours=6)
+
+#: S02: `_daily_run_state_tonight`'s result when the jobs query itself failed -- deliberately not
+#: `None`, which means "no daily_run exists" and makes `run_weekly` admit one.
+DAILY_STATE_QUERY_FAILED = "__query_failed__"
 
 
-def _daily_run_state_tonight(within_hours: int = 6) -> str | None:
-    """F22/N07: the ``state`` of the most recently created ``daily_run`` job within the last
-    ``within_hours`` hours, or ``None`` if none exists yet (or the query itself failed).
-
-    Replaces the old :func:`_daily_run_already_covered` boolean: :func:`run_weekly` needs to tell
-    apart a daily run that is still ``queued``/``running`` (its data is not final yet -- wait) from
-    one that has actually reached a terminal state (``done``/``partial``/``failed`` -- whatever it
-    produced tonight is final, safe to build the weekly report on top of now)."""
+def _daily_run_state_tonight(since: datetime) -> str | None:
+    """F22/N07/S02: the ``state`` of tonight's ``daily_run`` -- the most recent one created after
+    ``since`` OR any still non-terminal one (``queued``/``running``/``deferred``, whenever it was
+    created: it is the run that will produce tonight's data, and admitting another would be a
+    duplicate). ``None`` when no such row exists; :data:`DAILY_STATE_QUERY_FAILED` when the query
+    itself failed (S02: a DB error must never read as "no daily run", which would make
+    :func:`run_weekly` admit a second one)."""
     from eoa.db import connection
 
     sql = """
         SELECT state FROM jobs
         WHERE kind = 'daily_run'
-          AND created_at > now() - make_interval(hours => %(hours)s)
+          AND (created_at > %(since)s OR state IN ('queued', 'running', 'deferred'))
         ORDER BY created_at DESC
         LIMIT 1
     """
     try:
         with connection() as conn, conn.cursor() as cur:
-            cur.execute(sql, {"hours": within_hours})
+            cur.execute(sql, {"since": since})
             row = cur.fetchone()
             return row["state"] if row else None
     except Exception as exc:
         log.warning("daily_run_state_check_failed", error=str(exc)[:160])
-        return None
+        return DAILY_STATE_QUERY_FAILED
 
 
 def _job_age(job: dict[str, Any]) -> timedelta:
@@ -614,72 +620,62 @@ def _job_age(job: dict[str, Any]) -> timedelta:
     return now - (created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC))
 
 
+def _weekly_daily_anchor(job: dict[str, Any]) -> datetime:
+    """``since`` for :func:`_daily_run_state_tonight`: the weekly job's own creation time minus
+    :data:`WEEKLY_DAILY_LOOKBACK` (stable across the job's deferral retries)."""
+    created_at = job.get("created_at")
+    if isinstance(created_at, datetime):
+        base = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
+    else:
+        base = datetime.now(tz=UTC)
+    return base - WEEKLY_DAILY_LOOKBACK
+
+
 def run_weekly(job: dict[str, Any]) -> dict[str, Any]:
-    """``weekly_run`` handler: normally runs the full nightly pipeline (ingest..notify, including
-    the daily report) via :func:`run_daily`, then additionally builds the weekly analyst report
-    (trends, business events, conference lookahead, FR-11.4 meta-summary) on top of the same
-    night's freshly-analyzed items. F4: when a separate ``daily_run`` job has already run tonight,
-    the nightly pipeline is *not* re-run here — only the weekly report is built, on top of
-    whatever that other job already ingested/analyzed — since running it twice produced two daily
-    reports and duplicate notifications. A weekly-report failure is logged and recorded but never
-    fails the job outright — the (possibly skipped) daily pipeline's own results still count as
-    the run's primary outcome.
+    """``weekly_run`` handler: waits for tonight's ``daily_run`` (the full nightly pipeline and
+    daily report) to reach a terminal state, then builds the weekly analyst report (trends,
+    business events, conference lookahead, FR-11.4 meta-summary) on top of that night's
+    freshly-analyzed items. A weekly-report failure is logged and recorded but never fails the job.
 
-    F22/N07 (SOL-REVIEW-2026-09-24): the previous version treated a merely ``queued``/``running``
-    ``daily_run`` as "covered" and built the weekly report immediately anyway, on top of
-    still-in-flight (or not-yet-started) daily analysis -- and, in the narrow race where both jobs
-    land on the same scheduler tick, could be claimed before the ``daily_run`` row was even
-    inserted, in which case it fell to the ``else`` branch and ran the full pipeline itself, which
-    the *actual* ``daily_run`` job then also ran once claimed -- two full daily pipelines/reports
-    the same night. ``daily_run`` found ``queued``/``running`` (or not found at all yet) makes
-    this job defer itself (``ResourceUnavailable``, caught by ``Worker.run`` and requeued
-    ``deferred`` with a cooldown -- the same race-safe mechanism every other "wait and retry"
-    condition in this module already uses) instead of proceeding, up to
-    :data:`WEEKLY_DAILY_WAIT_MAX`.
+    S01/S02/R03 (SOL-REVIEW3-2026-09-24) -- this handler NEVER runs the nightly pipeline itself.
+    The earlier versions did (as a "stand-alone weekly" fallback), which is what forced the
+    asymmetric admission rule that let a weekly suppress the Saturday daily (S01), and the
+    timeout branch fell through to ``build_weekly()`` on incomplete daily data (S02). Now:
 
-    R03/N07/F22 (SOL-REVIEW2-2026-09-24): ``deferred`` is a job state a ``daily_run`` can sit in
-    indefinitely (``reap_stale_jobs`` after a worker crash, or a resource-gate wait -- see
-    ``eoa.memory.relational.finish_job``'s docstring) -- it is NOT terminal, tonight's data is NOT
-    final, and the earlier version's ``state in (None, "queued", "running")`` check fell through
-    to the ``else`` branch for it exactly like ``done``/``partial``/``failed``, building the
-    weekly report on top of a daily pipeline that had not actually finished (and might still
-    retry and finish LATER, producing a second round of analysis this weekly report never saw).
-    ``deferred`` now waits exactly like ``queued``/``running``. Once the wait budget is spent,
-    a daily_run that genuinely never existed (``state is None`` -- this weekly run truly stands
-    alone, e.g. triggered manually with no nightly daily run) still falls back to running the
-    pipeline itself, exactly as before. But a daily_run that DOES exist and is STILL not terminal
-    after the full wait budget (``queued``/``running``/``deferred``) must never trigger that same
-    fallback -- it is still active (or will retry) and running a second pipeline here would
-    duplicate it. This now ends the job ``partial`` with a clear error instead, leaving the actual
-    ``daily_run`` to finish (or exhaust its own retries) on its own."""
-    state = _daily_run_state_tonight()
-    non_terminal_states = {None, "queued", "running", "deferred"}
-    if state in non_terminal_states:
+    * no ``daily_run`` for tonight -> admit one through the shared admission gate
+      (:func:`eoa.orchestrator.admission.admit_daily_run`; it returns ``None`` when an
+      equivalent run is already active, which is equally fine) and defer to wait for it;
+    * ``queued``/``running``/``deferred``, or the state query failed -> defer
+      (``ResourceUnavailable``: ``Worker.run`` requeues it ``deferred`` with a cooldown);
+    * still not terminal after :data:`WEEKLY_DAILY_WAIT_MAX` -> end ``partial`` WITHOUT building
+      the weekly report;
+    * terminal (``done``/``partial``/``failed``) -> tonight's data is final: build the report."""
+    state = _daily_run_state_tonight(_weekly_daily_anchor(job))
+    if state in {None, "queued", "running", "deferred", DAILY_STATE_QUERY_FAILED}:
         if _job_age(job) < WEEKLY_DAILY_WAIT_MAX:
+            if state is None:
+                from eoa.orchestrator import admission
+
+                try:
+                    daily_job_id = admission.admit_daily_run("full", priority=2)
+                except Exception as exc:
+                    raise ResourceUnavailable(f"weekly_run could not admit tonight's daily_run: {exc}") from exc
+                log.info("weekly_run_admitted_daily_run", daily_job_id=daily_job_id)
             raise ResourceUnavailable(
                 f"weekly_run waiting for tonight's daily_run to reach a terminal state (state={state!r})"
             )
-        if state is None:
-            log.warning("weekly_run_daily_wait_timed_out_running_pipeline_itself", state=state)
-            stats = run_daily(job)
-        else:
-            # A daily_run job DOES exist but is still queued/running/deferred after the full
-            # wait budget -- it may still complete (or retry and complete) on its own. Starting
-            # our own pipeline here would risk a duplicate daily_run/report/notification; ending
-            # `partial` with a clear error is the safe outcome (never a silent `done`).
-            log.error("weekly_run_daily_wait_timed_out_daily_run_still_incomplete", state=state)
-            stats = {
-                "status": "partial",
-                "daily_pipeline_skipped": "daily_run_incomplete_after_wait",
-                "daily_run_state": state,
-                "daily_run_wait_error": (
-                    f"tonight's daily_run is still {state!r} after waiting "
-                    f"{WEEKLY_DAILY_WAIT_MAX}; refusing to start a duplicate daily pipeline"
-                ),
-            }
-    else:
-        log.info("weekly_run_skips_daily_pipeline", reason="daily_run_already_covered_tonight", state=state)
-        stats = {"daily_pipeline_skipped": "daily_run_already_covered", "daily_run_state": state}
+        log.error("weekly_run_daily_wait_timed_out", state=state)
+        return {
+            "status": "partial",
+            "weekly_report_skipped": "daily_run_not_terminal_after_wait",
+            "daily_run_state": state,
+            "daily_run_wait_error": (
+                f"tonight's daily_run is still {state!r} after waiting {WEEKLY_DAILY_WAIT_MAX}; "
+                "the weekly report was not built on incomplete data"
+            ),
+        }
+    log.info("weekly_run_daily_run_terminal", state=state)
+    stats: dict[str, Any] = {"daily_run_state": state}
     try:
         from eoa.report.weekly import build_weekly
 
@@ -969,7 +965,17 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
     :func:`~eoa.memory.relational.mark_notification_result` records the actual outcome (checking
     ``Sent.ok``) once delivery is attempted -- including when the attempt raises, so an exception
     still lands on ``failed`` (retryable) rather than leaving the row ``pending`` until the
-    stale-claim window expires."""
+    stale-claim window expires.
+
+    R02 (SOL-REVIEW3-2026-09-24 blocker 3): landing a delivery on ``failed`` here is only half the
+    fix -- the job worker only ever claims ``queued``/``deferred`` *jobs*, and a failed notification
+    is not a job, so nothing revisited that row until this job (``daily_run``) happened to be
+    reaped/replayed, if ever. ``mark_notification_result`` is now handed ``payload`` -- the exact
+    ``ntfy.send()`` kwargs for the message just attempted, built via ``ntfy.build_failure``/
+    ``build_report_ready`` -- so it can persist a reproducible copy and schedule ``next_attempt_at``
+    on failure; the scheduled sweep in :mod:`eoa.notify.retry`
+    (``eoa.orchestrator.main.build_scheduler``'s ``notification_retry`` job, every ~15 minutes)
+    is what actually resends it."""
     from eoa.memory.relational import claim_notification_pending, mark_notification_result
 
     key = str(rs.job_id)
@@ -989,16 +995,26 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
     except Exception:
         pass
     docx = getattr(paths, "docx", None)
+    # Built once, outside the try, from the exact same arguments passed to ntfy.failure/
+    # report_ready below -- so `payload` is always bound (including on the except path, if the
+    # send call itself raises) and `ntfy.send(**payload)` in eoa.notify.retry reproduces this
+    # notification byte for byte.
+    if not docx:
+        payload = ntfy.build_failure("report", "הדוח היומי לא הופק הלילה — ראה run_log")
+    else:
+        payload = ntfy.build_report_ready(
+            "יומי", str(docx), headlines, ui_url=f"http://127.0.0.1:{settings().api.port}/"
+        )
     try:
         if not docx:
             sent = ntfy.failure("report", "הדוח היומי לא הופק הלילה — ראה run_log")
-            mark_notification_result("daily_report", key, ok=sent.ok)
+            mark_notification_result("daily_report", key, ok=sent.ok, payload=payload)
             out: dict[str, Any] = {"headlines": len(headlines), "report_missing": True}
         else:
             sent = ntfy.report_ready(
                 "יומי", str(docx), headlines, ui_url=f"http://127.0.0.1:{settings().api.port}/"
             )
-            mark_notification_result("daily_report", key, ok=sent.ok)
+            mark_notification_result("daily_report", key, ok=sent.ok, payload=payload)
             out = {"headlines": len(headlines)}
         # F22-style convention (every other stage's `*_error` key, e.g. export_backup's
         # `backup_error`): a push that actually failed to deliver (`Sent(ok=False)` -- HTTP
@@ -1008,7 +1024,7 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
             out["notification_error"] = f"ntfy delivery failed: {sent.url or '<no url>'}"
         return out
     except Exception:
-        mark_notification_result("daily_report", key, ok=False)
+        mark_notification_result("daily_report", key, ok=False, payload=payload)
         raise
 
 
@@ -1193,7 +1209,7 @@ def run_payload_extract_job(job: dict[str, Any]) -> dict[str, Any]:
 
 HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "daily_run": run_daily,
-    "ingest": lambda job: _as_dict(_ingest()),
+    "ingest": lambda job: _as_dict(_ingest(poll=(job.get("payload") or {}).get("mode") == "poll")),
     "report": lambda job: _as_dict(_build_report()),
     "deep_search": run_deep_search_job,
     "weekly_run": run_weekly,

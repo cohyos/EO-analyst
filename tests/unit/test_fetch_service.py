@@ -859,8 +859,19 @@ class TestSourceFailsWhenEveryArticleFetchFails:
 
 
 class TestLookbackDays:
-    def test_no_known_last_success_keeps_default(self):
-        assert service._lookback_days(None, 3) == 3
+    def test_no_known_last_success_gets_bounded_first_success_backfill(self):
+        """F05 (SOL-REVIEW3-2026-09-24 carryover): a source with NO recorded success at all used to
+        fall straight through to the caller's plain 3-day default -- exactly the gap Sol flagged
+        ("a never-successful source still gets only the default three-day lookback after a longer
+        outage"). It must now get the bounded first-success backfill window instead. Fails against
+        the pre-fix code, which returns `3` here."""
+        assert service._lookback_days(None, 3) == service._FIRST_SUCCESS_BACKFILL_DAYS
+
+    def test_no_known_last_success_is_still_capped(self):
+        """The first-success backfill shares the same ceiling as the "was succeeding, then went
+        down" case -- it must not exceed `_LOOKBACK_MAX_DAYS` even if some future default_since_days
+        were larger."""
+        assert service._lookback_days(None, 30) == service._LOOKBACK_MAX_DAYS
 
     def test_recent_success_keeps_default(self):
         now = datetime(2026, 9, 24, tzinfo=UTC)
@@ -892,9 +903,35 @@ class TestLookbackDays:
 
 
 class TestSourceIsDue:
-    def test_daily_schedule_always_due(self):
+    def test_daily_never_fetched_is_due(self):
+        assert service._source_is_due("daily", None) is True
+
+    def test_daily_fetched_five_minutes_ago_is_not_due(self):
+        """F35 (SOL-REVIEW3-2026-09-24 carryover): "daily sources remain due on every two-hour
+        poll" -- before this fix `daily` had no interval check at all (due on every call), so a
+        source fetched five minutes ago still counted as due on the very next ~2-hour daytime poll.
+        Fails against the pre-fix code, which returns `True` here."""
         now = datetime(2026, 9, 24, tzinfo=UTC)
-        assert service._source_is_due("daily", now - timedelta(minutes=5), now=now) is True
+        assert service._source_is_due("daily", now - timedelta(minutes=5), now=now, poll=True) is False
+
+    def test_daily_fetched_nineteen_hours_ago_is_not_yet_due(self):
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        last_success = now - timedelta(hours=19)
+        assert service._source_is_due("daily", last_success, now=now, poll=True) is False
+
+    def test_daily_fetched_twenty_one_hours_ago_is_due(self):
+        """Past the `_DAILY_SOURCE_DUE_INTERVAL_HOURS` (~20h, under the 24h cadence so ordinary
+        daytime-poll jitter can't skip a whole extra day)."""
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        last_success = now - timedelta(hours=21)
+        assert service._source_is_due("daily", last_success, now=now, poll=True) is True
+
+    def test_schedule_none_defaults_to_daily_cadence(self):
+        """`run_ingest` resolves a missing `schedule` to `"daily"` before calling this -- but the
+        function itself must also treat anything other than `"weekly"` as daily-cadence, not
+        "always due", so a stray/unknown schedule value fails safe to the bounded cadence."""
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        assert service._source_is_due("unknown", now - timedelta(minutes=5), now=now, poll=True) is False
 
     def test_weekly_never_fetched_is_due(self):
         assert service._source_is_due("weekly", None) is True
@@ -910,6 +947,48 @@ class TestSourceIsDue:
         now = datetime(2026, 9, 24, tzinfo=UTC)
         last_success = now - timedelta(days=8)
         assert service._source_is_due("weekly", last_success, now=now) is True
+
+    def test_weekly_fetched_six_days_twenty_hours_ago_is_due(self):
+        """F35 (SOL-REVIEW3-2026-09-24 carryover): the weekly interval also carries slack (~6.5
+        days, under the nominal 7) so ordinary scheduling jitter landing a few minutes short of a
+        full 7 days doesn't push a weekly source a further day out. Fails against a strict
+        `>= 7 days` check."""
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        last_success = now - timedelta(days=6, hours=20)
+        assert service._source_is_due("weekly", last_success, now=now) is True
+
+    def test_weekly_fetched_six_days_ago_is_not_yet_due(self):
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        last_success = now - timedelta(days=6)
+        assert service._source_is_due("weekly", last_success, now=now) is False
+
+    def test_failed_attempt_leaves_source_due_for_retry(self):
+        """A failed fetch never updates `last_ok_at` (`_touch_source_fetched(ok=False)` only bumps
+        `last_fetched_at`), so a source stuck failing stays due on every call, at either cadence,
+        until it actually recovers -- `last_success=None` is exactly what a still-failing source
+        looks like through `_sources_last_success_map`."""
+        now = datetime(2026, 9, 24, tzinfo=UTC)
+        assert service._source_is_due("daily", None, now=now) is True
+        assert service._source_is_due("weekly", None, now=now) is True
+
+    def test_nightly_run_always_fetches_daily_sources(self):
+        """F35 round 4: the daily cadence binds the daytime POLL only -- a 13:00 poll must never
+        make the 01:00 nightly ingest skip a daily source. Weekly cadence applies to both."""
+        now = datetime(2026, 9, 24, 1, 0, tzinfo=UTC)
+        polled_at_13 = now - timedelta(hours=12)
+        assert service._source_is_due("daily", polled_at_13, now=now) is True
+        assert service._source_is_due("daily", polled_at_13, now=now, poll=True) is False
+        assert service._source_is_due("weekly", polled_at_13, now=now) is False
+
+    def test_ingest_job_handler_maps_poll_mode(self, monkeypatch):
+        from eoa.orchestrator import jobs
+
+        seen: list[bool] = []
+        monkeypatch.setattr(jobs, "_ingest", lambda poll=False: seen.append(poll) or {})
+        jobs.HANDLERS["ingest"]({"payload": {"mode": "poll"}})
+        jobs.HANDLERS["ingest"]({"payload": {"mode": "full"}})
+        jobs.HANDLERS["ingest"]({"payload": None})
+        assert seen == [True, False, False]
 
 
 # --------------------------------------------------------------------------

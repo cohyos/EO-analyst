@@ -335,6 +335,39 @@ async def test_pinned_transport_dials_the_validated_ip_not_the_hostname() -> Non
     assert page.final_url == "https://example.test/article"
 
 
+async def test_pinned_transport_dials_an_internationalized_host_by_its_pin() -> None:
+    """P2 (SOL-REVIEW3-2026-09-24 "IDNA hostname comparison", html.py:292/337): the pin
+    `_PinnedIPTransport.handle_async_request` stores must be keyed the SAME way
+    `_PinnedNetworkBackend.connect_tcp` will look it up. `httpcore`'s `host` argument there is
+    always `httpx.URL.raw_host` (lowercase, IDNA-encoded/punycode ASCII -- see
+    `httpx._transports.default`, which builds the `httpcore.Origin` from `raw_host`), never the
+    Unicode form `httpx.URL.host` decodes punycode back into for a non-ASCII hostname
+    (`httpx.URL("https://xn--bcher-kva.example").host == "bücher.example"`). Storing that Unicode
+    form (the pre-fix code) made every real `connect_tcp` call for an internationalized host
+    compare its punycode `host` against a Unicode `pin_host` -- an unconditional mismatch that
+    made `_PinnedNetworkBackend.connect_tcp` raise `httpcore.ConnectError` ("refusing to dial
+    ...") for a perfectly valid, already-validated host. This fetches a Unicode host
+    (`bücher.example`, which httpx punycode-encodes to `xn--bcher-kva.example` internally) and
+    asserts the fetch actually succeeds and dials the pinned IP -- it would raise (wrapped as
+    `FetchError`) against the pre-fix key."""
+    backend = _FakeNetworkBackend()
+    transport = _PinnedIPTransport(_network_backend=backend)
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        page = await fetch_page(
+            "https://bücher.example/artikel", client=client, pin_ips={"192.0.2.10"}
+        )
+    finally:
+        await client.aclose()
+
+    assert "ok" in page.html
+    assert backend.dialed_hosts  # sanity: at least one connection was actually made
+    for host in backend.dialed_hosts:
+        # The validated IP was dialed -- never the punycode host string, and never rejected.
+        assert host == "192.0.2.10"
+        assert host != "xn--bcher-kva.example"
+
+
 async def test_pinned_transport_passes_through_when_no_pin_given() -> None:
     """No `"pinned_ip"` extension on the request (e.g. a caller with no `pin_ips`) -- `connect_tcp`
     is asked to connect the real HOSTNAME, exactly as if `_PinnedIPTransport`/`_PinnedNetworkBackend`

@@ -240,6 +240,49 @@ _QUALITY_REFRESHABLE_COLUMNS = (
     "security_status",
 )
 
+#: F09 (SOL-REVIEW3-2026-09-24 carryover): every column written by the classify/triage/analyze
+#: stages that the accepted-refresh branch below already resets `processed_stages` for -- i.e. the
+#: exact columns those stages are about to recompute once reprocessing runs again. Resetting
+#: `processed_stages` alone left the OLD content's score/level/summary/domain visible in the
+#: meantime ("old score, level, and summaries remain visible until reanalysis" -- SOL-REVIEW2 F09).
+#: Each entry pairs a column with its reset SQL literal: NULL for every nullable column, except
+#: `product_lines` (`NOT NULL DEFAULT '{}'`, migration 0027) which resets to its own empty-array
+#: default instead -- a bare NULL there would violate the NOT NULL constraint and abort the whole
+#: upsert. Deliberately excludes: identity/source/security columns (already governed by
+#: `_QUALITY_REFRESHABLE_COLUMNS` above, or never touched here at all -- `source_id`, `url`,
+#: `canonical_url`, `security_status`, ...), `story_id` (story_clustering's own persisted key,
+#: computed from cross-item similarity, not part of a single item's content refresh), and `tags`
+#: (classify writes it too, but -- unlike every other classify output column -- it is left alone
+#: here per this fix's own scope).
+_STALE_ON_REFRESH_COLUMNS: tuple[tuple[str, str], ...] = (
+    # triage
+    ("score", "NULL"),
+    ("level", "NULL"),
+    ("triage_reason", "NULL"),
+    # classify
+    ("domain", "%(domain)s"),
+    ("subdomain", "%(subdomain)s"),
+    ("dimensions", "NULL"),
+    # columns insert_item itself takes (domain/subdomain/report_kind/trl/geography) are reset to the
+    # refreshing insert's own value -- an ingest-time value (e.g. report_kind "tender" from
+    # eoa.tenders.scan) is re-applied, not lost; NULL when the caller passed none
+    ("report_kind", "%(report_kind)s"),
+    ("trl", "%(trl)s"),
+    ("geography", "%(geography)s"),
+    ("entities_mentioned", "NULL"),
+    ("israel_relevance", "NULL"),
+    ("israel_reasons", "NULL"),
+    ("product_lines", "'{}'::text[]"),
+    # analyze
+    ("summary_he", "NULL"),
+    ("so_what_he", "NULL"),
+    ("key_facts", "NULL"),
+    ("uncertainty_he", "NULL"),
+    ("tech_maturity", "NULL"),
+    ("tech_actor_kind", "NULL"),
+    ("tech_readiness_note_he", "NULL"),
+)
+
 
 def insert_item(
     *,
@@ -318,6 +361,12 @@ def insert_item(
     quality-upgraded item must not stay hidden behind a duplicate link computed against its old,
     worse content; `eoa.memory.vector.commit_dedup_result`'s next `embed_dedup` pass (now re-run,
     since `processed_stages` was reset) recomputes it against the new content.
+
+    F09 (SOL-REVIEW3-2026-09-24 carryover): an accepted content update also nulls out every column
+    the classify/triage/analyze stages write (`_STALE_ON_REFRESH_COLUMNS`) in that same statement --
+    resetting `processed_stages` alone left the item's OLD score/level/summary/domain/... visible
+    until those stages actually ran again, which could be hours away. Same guard as `dedup_of`
+    above (`excluded_better`/`params_better`), so this never fires on a plain duplicate insert.
     """
     quality_aware = content_status is not None or security_status is not None
     lookup_identity = canonical_url or url
@@ -388,6 +437,19 @@ def insert_item(
         f"{col} = CASE WHEN {params_better} THEN %({col})s ELSE items.{col} END"
         for col in _QUALITY_REFRESHABLE_COLUMNS
     )
+    # F09 (SOL-REVIEW3-2026-09-24 carryover): same accepted-refresh condition that already resets
+    # `processed_stages`/`dedup_of` below -- never the looser `excluded_identity_ok`/
+    # `params_identity_ok` used for `canonical_url` alone, and never fires on a plain duplicate
+    # insert (quality_aware False, or hash unchanged) since `excluded_better`/`params_better` are
+    # False there too.
+    stale_reset_sql = ", ".join(
+        f"{col} = CASE WHEN {excluded_better} THEN {reset} ELSE items.{col} END"
+        for col, reset in _STALE_ON_REFRESH_COLUMNS
+    )
+    stale_reset_by_id_sql = ", ".join(
+        f"{col} = CASE WHEN {params_better} THEN {reset} ELSE items.{col} END"
+        for col, reset in _STALE_ON_REFRESH_COLUMNS
+    )
 
     upsert_query = f"""
         INSERT INTO items (
@@ -407,7 +469,8 @@ def insert_item(
                 THEN COALESCE(EXCLUDED.canonical_url, items.canonical_url) ELSE items.canonical_url END,
             {upsert_set_sql},
             processed_stages = CASE WHEN {excluded_better} THEN '{{}}'::text[] ELSE items.processed_stages END,
-            dedup_of = CASE WHEN {excluded_better} THEN NULL ELSE items.dedup_of END
+            dedup_of = CASE WHEN {excluded_better} THEN NULL ELSE items.dedup_of END,
+            {stale_reset_sql}
         RETURNING id, (xmax = 0) AS inserted
     """
 
@@ -418,7 +481,8 @@ def insert_item(
                 THEN COALESCE(%(canonical_url)s, items.canonical_url) ELSE items.canonical_url END,
             {update_by_id_set_sql},
             processed_stages = CASE WHEN {params_better} THEN '{{}}'::text[] ELSE items.processed_stages END,
-            dedup_of = CASE WHEN {params_better} THEN NULL ELSE items.dedup_of END
+            dedup_of = CASE WHEN {params_better} THEN NULL ELSE items.dedup_of END,
+            {stale_reset_by_id_sql}
         WHERE id = %(item_id)s
         RETURNING id
     """
@@ -1709,7 +1773,13 @@ def claim_notification_pending(
     delivery acknowledgement this project can hook into to distinguish "crashed before sending"
     from "crashed after sending, before recording". The ``(kind, key)`` key keeps duplicates rare
     (bounded to that narrow crash window), and an occasional duplicate push is far preferable to
-    the original bug: a failed send silently suppressed forever."""
+    the original bug: a failed send silently suppressed forever.
+
+    R02 (SOL-REVIEW3-2026-09-24 blocker 3): :func:`eoa.notify.retry.retry_failed_notifications`
+    (the scheduled sweep that actually retries a ``failed`` row -- see that module) claims through
+    this SAME function before resending, which is what makes it safe to run concurrently with a
+    job replay of the same notification: whichever caller's ``INSERT ... ON CONFLICT`` commits
+    first wins the row; the other sees it is no longer ``failed``/stale-``pending`` and skips it."""
     query = """
         INSERT INTO notifications_sent (kind, key, status, attempts, updated_at)
         VALUES (%(kind)s, %(key)s, 'pending', 1, now())
@@ -1737,19 +1807,57 @@ def claim_notification_pending(
     return row is not None
 
 
-def mark_notification_result(kind: str, key: str, *, ok: bool) -> None:
+def mark_notification_result(
+    kind: str, key: str, *, ok: bool, payload: dict[str, Any] | None = None
+) -> None:
     """R02/N03 (SOL-REVIEW2-2026-09-24): record the outcome of a delivery attempt claimed via
     :func:`claim_notification_pending` -- ``sent`` on success (terminal, never retried again),
     ``failed`` on failure (eligible for :func:`claim_notification_pending`'s bounded retry). The
     caller is expected to call this exactly once for every successful claim, in a ``finally`` /
     ``except`` so an exception during the actual send still lands on ``failed`` rather than
-    leaving the row ``pending`` until the stale-claim window expires."""
+    leaving the row ``pending`` until the stale-claim window expires.
+
+    R02 (SOL-REVIEW3-2026-09-24 blocker 3): a ``failed`` row used to just sit there -- the job
+    worker only ever claims ``queued``/``deferred`` *jobs*, and a failed notification is not a job,
+    so nothing ever revisited it. This now also persists two columns migration 0039 adds:
+
+    * ``payload`` -- the exact ``eoa.notify.ntfy.send()`` kwargs needed to resend this exact
+      message (``eoa.notify.ntfy.build_report_ready``/``build_failure``, built once by the caller
+      so the retry sweep in :mod:`eoa.notify.retry` replays literally the same notification
+      instead of reconstructing it). ``None`` leaves the existing value alone (``COALESCE``) so a
+      caller that only wants to flip the status -- there is none today, but the sweep re-records
+      the same payload it just replayed -- never has to re-pass it.
+    * ``next_attempt_at`` -- ``NULL`` on success (a ``sent`` row is terminal, never retried), or a
+      backoff off ``attempts`` (already incremented by this call's own :func:`claim_notification_pending`)
+      on failure: 10 minutes after the 1st failed attempt, 30 minutes after the 2nd, 2 hours after
+      the 3rd or later. Capped in effect by ``NOTIFICATION_MAX_ATTEMPTS`` -- once ``attempts``
+      reaches that bound, :func:`claim_notification_pending` never reclaims the row again
+      regardless of ``next_attempt_at``, and :func:`eoa.notify.retry.retry_failed_notifications`'s
+      own ``attempts < NOTIFICATION_MAX_ATTEMPTS`` filter excludes it too."""
     query = """
-        UPDATE notifications_sent SET status = %(status)s, updated_at = now()
+        UPDATE notifications_sent SET
+            status = %(status)s,
+            payload = COALESCE(%(payload)s::jsonb, payload),
+            next_attempt_at = CASE
+                WHEN %(ok)s THEN NULL
+                WHEN attempts <= 1 THEN now() + interval '10 minutes'
+                WHEN attempts = 2 THEN now() + interval '30 minutes'
+                ELSE now() + interval '2 hours'
+            END,
+            updated_at = now()
         WHERE kind = %(kind)s AND key = %(key)s
     """
     with connection() as conn, conn.cursor() as cur:
-        cur.execute(query, {"status": "sent" if ok else "failed", "kind": kind, "key": key})
+        cur.execute(
+            query,
+            {
+                "status": "sent" if ok else "failed",
+                "payload": Json(payload) if payload is not None else None,
+                "ok": ok,
+                "kind": kind,
+                "key": key,
+            },
+        )
 
 
 # --------------------------------------------------------------------------

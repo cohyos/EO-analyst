@@ -158,6 +158,31 @@ class TestCliProviderChatAgy:
         with pytest.raises(CliProviderError, match="malformed usage"):
             CliProvider("agy").chat([{"role": "user", "content": "ping"}])
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_nonfinite_token_count_raises_cli_provider_error(
+        self, monkeypatch: pytest.MonkeyPatch, bad: float
+    ) -> None:
+        """F26 (SOL-REVIEW3-2026-09-24): a nonfinite `usage` value (NaN/Infinity -- `json.loads`
+        parses the bare literals some CLIs emit) passed `_validate_usage`'s type check (it's a
+        real `float`) and its negative check (`nan < 0` and `inf < 0` are both `False`), so it
+        sailed through unrejected straight into `ProviderResult.usage` instead of being treated
+        as malformed like a string or a negative number already are."""
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process",
+            lambda *a, **k: _completed(
+                stdout=json.dumps(
+                    {
+                        "status": "SUCCESS",
+                        "response": "PONG",
+                        "usage": {"input_tokens": 5, "output_tokens": bad},
+                    }
+                )
+            ),
+        )
+        with pytest.raises(CliProviderError, match="malformed usage"):
+            CliProvider("agy").chat([{"role": "user", "content": "ping"}])
+
     def test_none_token_count_defaults_and_does_not_raise(self, monkeypatch: pytest.MonkeyPatch):
         """A missing/None count is legitimate, not malformed."""
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")

@@ -85,7 +85,8 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
         else None
     )
     candidates: dict[int, list[float]] = {
-        row["id"]: row.get("embedding") for row in load_candidate_vectors(cfg.lookback_days)
+        row["id"]: row.get("embedding")
+        for row in load_candidate_vectors(cfg.lookback_days, completed_stage=STAGE)
     }
     # E01/N06 (SOL-REVIEW2-2026-09-24, round 3): drop every PENDING (about-to-be-(re-)embedded)
     # item's id from the pool BEFORE any scoring happens in this run, not just after each one's own
@@ -99,6 +100,9 @@ def run_dedup(limit: int = 500, batch_size: int = 16, *, item_ids: list[int] | N
     # with a fresh one) -- exactly the false link N06/E01 describe. Items are re-added with their
     # freshly computed vector (if within the lookback cutoff) as each one is actually processed,
     # same as before.
+    # E01/N06 (SOL-REVIEW3-2026-09-24): this only covers THIS batch; a pending item beyond `limit`
+    # is excluded by `load_candidate_vectors(..., completed_stage=STAGE)` above. Both stay: the SQL
+    # filter is the complete rule, this loop is the in-memory guard for `item_ids` callers.
     pending_ids = {it["id"] for it in items}
     for pending_id in pending_ids:
         candidates.pop(pending_id, None)
