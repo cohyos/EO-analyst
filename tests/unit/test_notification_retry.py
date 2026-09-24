@@ -49,21 +49,53 @@ class _FakeNotificationsTable:
             "attempts": attempts,
             "payload": payload,
             "next_attempt_at": next_attempt_at,
+            "stale": False,
         }
 
-    def claim(self, kind: str, key: str) -> bool:
+    def seed_stale_pending(self, kind: str, key: str, *, attempts: int, payload: dict[str, Any] | None) -> None:
+        """A claim whose worker crashed mid-send: `pending`, older than the stale window."""
+        self.rows[(kind, key)] = {
+            "status": "pending",
+            "attempts": attempts,
+            "payload": payload,
+            "next_attempt_at": None,
+            "stale": True,
+        }
+
+    def claim(
+        self,
+        kind: str,
+        key: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        respect_backoff: bool = False,
+        stale_minutes: int = 10,
+    ) -> bool:
         row = self.rows.get((kind, key))
         if row is None:
             self.rows[(kind, key)] = {
                 "status": "pending",
                 "attempts": 1,
-                "payload": None,
+                "payload": payload,
                 "next_attempt_at": None,
+                "stale": False,
             }
             return True
-        if row["status"] == "failed" and row["attempts"] < self.max_attempts:
+        due = row["next_attempt_at"] is None or row["next_attempt_at"] <= self.now
+        failed_ok = (
+            row["status"] == "failed" and row["attempts"] < self.max_attempts and (not respect_backoff or due)
+        )
+        stale_ok = (
+            row["status"] == "pending"
+            and row["stale"]
+            and (not respect_backoff or row["attempts"] < self.max_attempts)
+        )
+        if failed_ok or stale_ok:
             row["status"] = "pending"
             row["attempts"] += 1
+            row["stale"] = False
+            if payload is not None:
+                row["payload"] = payload
             return True
         return False
 
@@ -87,13 +119,13 @@ class _FakeNotificationsTable:
     def due_failed(self, limit: int) -> list[dict[str, Any]]:
         out = []
         for (kind, key), row in self.rows.items():
-            if row["status"] != "failed":
+            if row["attempts"] >= self.max_attempts or row["payload"] is None:
                 continue
-            if row["attempts"] >= self.max_attempts:
-                continue
-            if row["payload"] is None:
-                continue
-            if row["next_attempt_at"] is not None and row["next_attempt_at"] > self.now:
+            failed_due = row["status"] == "failed" and (
+                row["next_attempt_at"] is None or row["next_attempt_at"] <= self.now
+            )
+            stale_pending = row["status"] == "pending" and row["stale"]
+            if not (failed_due or stale_pending):
                 continue
             out.append({"kind": kind, "key": key, "payload": row["payload"]})
         return out[:limit]
@@ -151,11 +183,96 @@ class TestDueQuery:
         assert "attempts < %(max_attempts)s" in sql
         assert "payload IS NOT NULL" in sql
         assert "next_attempt_at IS NULL OR next_attempt_at <= now()" in sql
-        # the attempts cap must be the SAME constant claim_notification_pending bounds retries
-        # with, not an independent hardcoded number that could drift out of sync.
-        from eoa.memory.relational import NOTIFICATION_MAX_ATTEMPTS
+        # T04 (SOL-REVIEW4-2026-09-24): stale `pending` rows (a crashed send) are candidates too
+        assert "status = 'pending'" in sql
+        assert "updated_at < now() - (%(stale_minutes)s || ' minutes')::interval" in sql
+        # the attempts cap / stale window must be the SAME constants claim_notification_pending
+        # uses, not independent hardcoded numbers that could drift out of sync.
+        from eoa.memory.relational import NOTIFICATION_MAX_ATTEMPTS, NOTIFICATION_PENDING_STALE_MINUTES
 
-        assert captured["params"] == {"max_attempts": NOTIFICATION_MAX_ATTEMPTS, "limit": 7}
+        assert captured["params"] == {
+            "max_attempts": NOTIFICATION_MAX_ATTEMPTS,
+            "stale_minutes": NOTIFICATION_PENDING_STALE_MINUTES,
+            "limit": 7,
+        }
+
+
+class TestT04StalePendingAndBackoffAtClaim:
+    """T04 (SOL-REVIEW4-2026-09-24): (a) a send that crashed mid-flight left the row `pending`
+    forever -- the sweep selected only `failed`; (b) the sweep's SELECT and claim were separate, so
+    a replay that failed in between could be resent immediately, bypassing its backoff."""
+
+    def test_stale_pending_row_is_resent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        table = _FakeNotificationsTable()
+        table.seed_stale_pending("daily_report", "9", attempts=1, payload=_PAYLOAD)
+        table.install(monkeypatch)
+        sent: list[dict] = []
+        monkeypatch.setattr(
+            "eoa.notify.retry.ntfy.send", lambda **kw: sent.append(kw) or ntfy.Sent(True, "i", "u")
+        )
+
+        counts = retry_failed_notifications(limit=10)
+
+        assert sent == [_PAYLOAD]
+        assert table.rows[("daily_report", "9")]["status"] == "sent"
+        assert counts["sent"] == 1
+
+    def test_sweep_claims_with_backoff_enforced(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The candidate list is stale by the time of the claim: a replay failed in between and
+        scheduled a new backoff. The sweep's claim (respect_backoff=True) must refuse it."""
+        now = datetime.now(tz=UTC)
+        table = _FakeNotificationsTable(now=now)
+        table.seed_failed("daily_report", "3", attempts=2, payload=_PAYLOAD, next_attempt_at=None)
+        table.install(monkeypatch)
+        stale_candidates = table.due_failed(10)
+        table.rows[("daily_report", "3")]["next_attempt_at"] = now + timedelta(minutes=30)  # replay failed
+        monkeypatch.setattr("eoa.notify.retry._due_failed_notifications", lambda limit: stale_candidates)
+        monkeypatch.setattr("eoa.notify.retry.ntfy.send", _fail_if_sent)
+
+        counts = retry_failed_notifications(limit=10)
+
+        assert counts == {"considered": 1, "sent": 0, "failed": 0, "skipped": 1}
+
+    def test_claim_sql_enforces_backoff_and_stores_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from eoa.memory import relational
+
+        captured: dict[str, Any] = {}
+
+        class _Cur:
+            def execute(self, sql, params=None):
+                captured["sql"], captured["params"] = sql, params
+
+            def fetchone(self):
+                return {"id": 1}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Conn:
+            def cursor(self, **_kw):
+                return _Cur()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(relational, "connection", lambda: _Conn())
+        assert relational.claim_notification_pending("k", "1", payload=_PAYLOAD, respect_backoff=True)
+        sql = captured["sql"]
+        assert "NOT %(respect_backoff)s" in sql
+        assert "notifications_sent.next_attempt_at <= now()" in sql
+        assert "payload = COALESCE(EXCLUDED.payload, notifications_sent.payload)" in sql
+        assert captured["params"]["respect_backoff"] is True
+        assert captured["params"]["payload"] is not None
+
+
+def _fail_if_sent(**_kw):
+    raise AssertionError("must not resend before the backoff is due")
 
 
 class TestRetryFailedNotifications:
@@ -252,7 +369,7 @@ class TestRetryFailedNotifications:
         table = _FakeNotificationsTable()
         table.seed_failed("daily_report", "6", attempts=1, payload=_PAYLOAD, next_attempt_at=None)
         table.install(monkeypatch)
-        monkeypatch.setattr("eoa.notify.retry.claim_notification_pending", lambda kind, key: False)
+        monkeypatch.setattr("eoa.notify.retry.claim_notification_pending", lambda kind, key, **_k: False)
         sent_calls: list[dict] = []
         monkeypatch.setattr(
             "eoa.notify.retry.ntfy.send", lambda **kw: sent_calls.append(kw) or ntfy.Sent(True, None, "u")

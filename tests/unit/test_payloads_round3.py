@@ -626,6 +626,50 @@ class TestListPayloadsRouteSearchWildcardEscaping:
         assert _escape_ilike_term("50%_off\\sale") == "50\\%\\_off\\\\sale"
 
 
+class TestListPayloadsRouteVendorFamilyWildcardEscaping:
+    """R06 remainder (SOL-REVIEW4-2026-09-24 backlog): the free-text `q` filter was already fixed
+    (`TestListPayloadsRouteSearchWildcardEscaping` above) to escape `%`/`_` before building its
+    `ILIKE` pattern, but the separate `vendor`/`family` filters still passed the raw user value
+    straight into `f"%{value}%"` with no `ESCAPE` clause -- the exact same false-match bug, just
+    on a different pair of query params. These are discriminating against that: pre-fix code sends
+    the raw, un-escaped value and no `ESCAPE '\\'` clause."""
+
+    def test_vendor_percent_query_is_escaped_and_matched_literally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        from eoa.api.routes.payloads import _escape_ilike_term
+
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 0}},
+            fetchall_responses={"FROM payloads p": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        client.get("/api/payloads", params={"vendor": "%"})
+
+        row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        assert row_params["vendor"] == f"%{_escape_ilike_term('%')}%"
+        assert row_params["vendor"] == "%\\%%"
+        assert "p.vendor_entity_name ILIKE %(vendor)s ESCAPE '\\'" in row_query
+
+    def test_family_underscore_query_is_escaped_and_matched_literally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        cur = _FakeCursor(
+            responses={"SELECT count(*) AS c FROM payloads": {"c": 0}},
+            fetchall_responses={"FROM payloads p": []},
+        )
+        monkeypatch.setattr("eoa.api.routes.payloads.connection", lambda: _FakeConnection(cur))
+
+        client.get("/api/payloads", params={"family": "mx_15"})
+
+        row_query, row_params = next((q, p) for q, p in cur.executed if "LIMIT %(limit)s" in q)
+        # A literal underscore must be escaped to `\_` -- otherwise it matches ANY single
+        # character (SQL `_` wildcard), e.g. "mxA15" would also match.
+        assert row_params["family"] == "%mx\\_15%"
+        assert "p.family ILIKE %(family)s ESCAPE '\\'" in row_query
+
+
 class TestPayloadFacetsTotal:
     """R09 (SOL-REVIEW2-2026-09-24 review): an unfiltered existence count so the UI's "database
     empty" decision can't be fooled by every row having a null vendor/category (which would make

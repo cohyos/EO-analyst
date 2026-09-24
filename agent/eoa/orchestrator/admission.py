@@ -25,9 +25,11 @@ analysis slot, `weekly_run` competes only with itself, and the result is identic
 lock order: exactly one `daily_run` and one `weekly_run`.
 
 `deferred` counts as active (S01): a deferred run is waiting to retry, and admitting another
-equivalent job next to it would run the pipeline twice once both are claimed. Only a recent
-deferred row counts (`DEFERRED_ACTIVE_HOURS`), so a run stuck deferred since an old night can
-never block admission forever.
+equivalent job next to it would run the pipeline twice once both are claimed. A deferred row
+older than `DEFERRED_ACTIVE_HOURS` is RETIRED (`failed`, "superseded") inside the same locked
+transaction before the check (T01, SOL-REVIEW4-2026-09-24) -- merely ignoring it, as round 4 did,
+left it claimable, so it could still run after its replacement: two pipelines. Retiring keeps a
+run stuck deferred since an old night from blocking admission forever without that risk.
 """
 
 from __future__ import annotations
@@ -48,11 +50,16 @@ log = structlog.get_logger(__name__)
 #: contend for the exact same lock.
 ADMISSION_LOCK_NS = 872_351_004
 
-#: U4/F17 + S01: kinds that count as "the same effective run" for idempotency -- a `daily_run`
-#: and the standalone `report` job compete for the same "one nightly analysis run" slot.
-#: `weekly_run` is deliberately absent (see the module docstring's Scope note).
+#: U4/F17 + S01 + T02 (SOL-REVIEW4-2026-09-24): for each kind, the active kinds that block its
+#: admission. Deliberately ONE-WAY, not a symmetric closure: a standalone `report` is refused while
+#: a `daily_run` is active (the daily run builds that same report itself), but a `daily_run` is
+#: never refused because of a `report` -- a long `report` would otherwise suppress the nightly
+#: pipeline (the Saturday case: weekly's admission of the missing daily kept failing until its
+#: 12h wait budget ran out). `weekly_run` competes only with itself (module docstring Scope note).
 RUN_IDEMPOTENCY_GROUPS: dict[str, tuple[str, ...]] = {
+    "daily_run": ("daily_run",),
     "report": ("report", "daily_run"),
+    "weekly_run": ("weekly_run",),
 }
 
 #: S01: a `deferred` job created within this many hours still blocks an equivalent admission.
@@ -60,18 +67,9 @@ DEFERRED_ACTIVE_HOURS = 20
 
 
 def equivalent_kinds_for(kind: str) -> list[str]:
-    """Symmetric closure over `RUN_IDEMPOTENCY_GROUPS`: every kind reachable from `kind` through
-    any group it appears in, whether as that group's own key or one of its listed members."""
-    found = {kind}
-    changed = True
-    while changed:
-        changed = False
-        for group_kind, members in RUN_IDEMPOTENCY_GROUPS.items():
-            group = {group_kind, *members}
-            if found & group and not group <= found:
-                found |= group
-                changed = True
-    return sorted(found)
+    """The kinds whose active job blocks admitting `kind` (see `RUN_IDEMPOTENCY_GROUPS`); any
+    other kind is blocked only by itself."""
+    return sorted(RUN_IDEMPOTENCY_GROUPS.get(kind, (kind,)))
 
 
 class RunAlreadyActive(Exception):
@@ -91,8 +89,8 @@ def admit_run(
 ) -> int:
     """Atomically check-and-enqueue `kind` (with `payload`/`priority`): raises `RunAlreadyActive`
     if a job whose kind is in `equivalent_kinds` (defaults to `[kind]` alone) is already
-    `queued`/`running` (or `deferred` within `DEFERRED_ACTIVE_HOURS`), else inserts the new job
-    and returns its id.
+    `queued`/`running` (or `deferred` within `DEFERRED_ACTIVE_HOURS` -- an older deferred one is
+    retired first, T01), else inserts the new job and returns its id.
 
     The advisory lock is acquired FIRST and held for the whole check+insert (one
     `db.connection()` transaction, committed/rolled back by that context manager) -- a concurrent
@@ -102,6 +100,13 @@ def admit_run(
     kinds = equivalent_kinds if equivalent_kinds is not None else [kind]
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%(ns)s)", {"ns": ADMISSION_LOCK_NS})
+        cur.execute(
+            "UPDATE jobs SET state = 'failed', finished_at = now(), "
+            "error = 'superseded: deferred longer than ' || %(deferred_hours)s || 'h, retired at admission' "
+            "WHERE kind = ANY(%(kinds)s) AND state = 'deferred' "
+            "AND created_at <= now() - make_interval(hours => %(deferred_hours)s)",
+            {"kinds": kinds, "deferred_hours": DEFERRED_ACTIVE_HOURS},
+        )
         cur.execute(
             "SELECT * FROM jobs WHERE kind = ANY(%(kinds)s) AND (state IN ('queued', 'running') "
             "OR (state = 'deferred' AND created_at > now() - make_interval(hours => %(deferred_hours)s))) "
@@ -124,9 +129,9 @@ def admit_run(
 def admit_daily_run(mode: str = "full", priority: int = 2) -> int | None:
     """Scheduler entry point for a `daily_run` (the "daily" cron job and
     `reconcile_missed_night_run`'s startup catch-up) -- goes through the same `admit_run` gate as
-    the API's `enqueue_run("daily"/"report", ...)`, using the `daily_run`/`report` equivalence
-    closure, so a concurrent API "run now" / another scheduler tick / `run_weekly`'s own
-    admission of a missing daily can never duplicate it. Returns `None` (logged, not raised) instead of letting `RunAlreadyActive`
+    the API's `enqueue_run("daily", ...)`, blocked only by another active `daily_run` (T02), so a
+    concurrent API "run now" / another scheduler tick / `run_weekly`'s own admission of a missing
+    daily can never duplicate it. Returns `None` (logged, not raised) instead of letting `RunAlreadyActive`
     propagate -- the scheduler's own cron callback has no HTTP response to map it to, and "nothing
     to do, an equivalent run is already active" is a normal outcome here, not an error."""
     try:

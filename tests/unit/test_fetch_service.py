@@ -1191,5 +1191,52 @@ class TestRunIngestClientLifecycle:
         assert isinstance(seen_clients[0]._transport, _PinnedIPTransport)
 
 
+# --------------------------------------------------------------------------
+# F35 (SOL-REVIEW4-2026-09-24 backlog): `_run_forever`'s own periodic loop IS the daytime
+# RSS poll (see module docstring) -- it must call `run_ingest(poll=True)`, not the bare
+# `run_ingest()` that defaults to `poll=False` and treats daily sources as always-due.
+# --------------------------------------------------------------------------
+
+
+class _StopLoop(Exception):
+    """Sentinel raised to escape `_run_forever`'s `while True:` after one iteration."""
+
+
+class _FakeSchedule:
+    daytime_rss_poll_minutes = 0
+
+
+class _FakeSettings:
+    schedule = _FakeSchedule()
+
+
+class TestRunForeverPassesPollToPeriodicIngest:
+    def test_periodic_loop_calls_run_ingest_with_poll_true(self, monkeypatch):
+        calls: list = []
+
+        def _fake_serve_fetch_jobs(stop_after):
+            calls.append("serve")
+            if len(calls) > 1:
+                raise _StopLoop()
+
+        async def _fake_run_ingest(*args, **kwargs):
+            calls.append(("run_ingest", kwargs))
+            return None
+
+        monkeypatch.setattr("eoa.notify.relay.start_relay_thread", lambda: None)
+        monkeypatch.setattr("eoa.fetch.remote.serve_fetch_jobs", _fake_serve_fetch_jobs)
+        monkeypatch.setattr(service, "run_ingest", _fake_run_ingest)
+        monkeypatch.setattr("eoa.config.settings", lambda: _FakeSettings())
+
+        with pytest.raises(_StopLoop):
+            service._run_forever()
+
+        run_ingest_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "run_ingest"]
+        # Pre-fix, this call carried no kwargs at all (bare `run_ingest()`), which is `poll=False`
+        # by default -- exactly the daily-sources-always-due bug F35 reports.
+        assert len(run_ingest_calls) == 1
+        assert run_ingest_calls[0][1] == {"poll": True}
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

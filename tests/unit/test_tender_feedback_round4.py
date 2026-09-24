@@ -56,6 +56,9 @@ def _scan_patches():
     tests/unit/test_tenders_scan.py's own `_common_patches`."""
     return (
         patch("eoa.tenders.scan._tender_exists", return_value=False),
+        # R6-data title+portal dedupe is also a DB read; unstubbed it hits the real pool
+        # (mirrors tests/unit/test_tenders_scan.py's own _common_patches).
+        patch("eoa.tenders.scan._candidate_duplicate_exists", return_value=False),
         patch("eoa.tenders.scan._transition_closed", return_value=0),
         patch("eoa.tenders.scan._archive_stale_closed", return_value=0),
         patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0),
@@ -89,6 +92,7 @@ class TestOpenIntakeStoresLlmRejectedCandidate:
             patches[3],
             patches[4],
             patches[5],
+            patches[6],
             patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]),
             patch(
                 "eoa.tenders.scan._llm_classify",
@@ -124,6 +128,7 @@ class TestHardRejectionsStillDrop:
             patches[3],
             patches[4],
             patches[5],
+            patches[6],
             patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]),
             patch("eoa.tenders.scan._llm_classify", return_value=(_extract(), True)),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
@@ -150,6 +155,7 @@ class TestHardRejectionsStillDrop:
             patches[3],
             patches[4],
             patches[5],
+            patches[6],
             patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]),
             patch("eoa.tenders.scan._llm_classify", return_value=(_extract(), True)),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,
@@ -172,6 +178,7 @@ class TestHardRejectionsStillDrop:
             patches[3],
             patches[4],
             patches[5],
+            patches[6],
             patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]),
             patch("eoa.tenders.scan._llm_classify", return_value=(_extract(), True)),
             patch("eoa.tenders.scan._insert_tender_and_item") as mock_insert,

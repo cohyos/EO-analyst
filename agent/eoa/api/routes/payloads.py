@@ -91,11 +91,16 @@ def list_payloads(
         where.append("p.category = %(category)s")
         params["category"] = category
     if vendor:
-        where.append("p.vendor_entity_name ILIKE %(vendor)s")
-        params["vendor"] = f"%{vendor}%"
+        # R06 remainder (SOL-REVIEW4-2026-09-24): same wildcard-injection gap `q` already had
+        # fixed above -- a raw `%`/`_` in `vendor` was treated as an ILIKE wildcard instead of a
+        # literal character. Substring semantics (`%...%`) are unchanged, only the literal value
+        # is now escaped first.
+        where.append("p.vendor_entity_name ILIKE %(vendor)s ESCAPE '\\'")
+        params["vendor"] = f"%{_escape_ilike_term(vendor)}%"
     if family:
-        where.append("p.family ILIKE %(family)s")
-        params["family"] = f"%{family}%"
+        # R06 remainder (SOL-REVIEW4-2026-09-24): see `vendor` above.
+        where.append("p.family ILIKE %(family)s ESCAPE '\\'")
+        params["family"] = f"%{_escape_ilike_term(family)}%"
     if q:
         where.append(
             "(p.canonical_name ILIKE %(q)s ESCAPE '\\' OR p.vendor_entity_name ILIKE %(q)s ESCAPE '\\' "

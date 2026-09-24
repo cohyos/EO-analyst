@@ -18,6 +18,7 @@ from eoa.llm.providers.api import (
     ApiProviderError,
     GeminiProvider,
     OpenAIProvider,
+    _finalize_result,
     _gemini_schema,
     get_api_provider,
     redact_secrets,
@@ -257,6 +258,27 @@ class TestAnthropicChat:
         )
         with pytest.raises(ApiProviderError, match="malformed"):
             AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+
+    @respx.mock
+    def test_oversized_int_token_count_does_not_raise_overflow_error(self, monkeypatch):
+        """F26 (SOL-REVIEW4-2026-09-24): `math.isfinite(10**400)` raises `OverflowError` (int too
+        large to convert to a C double) -- not one of the types the surrounding `except` catches,
+        so an arbitrarily large but perfectly valid integer token count used to escape past
+        `ApiProviderError` and abort the whole fallback chain, exactly like the float NaN/Infinity
+        case above. An int is always mathematically finite, so it must be accepted, not rejected."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+        huge = 10**400
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "content": [{"type": "text", "text": "hi"}],
+                    "usage": {"input_tokens": huge, "output_tokens": 4},
+                },
+            )
+        )
+        result = AnthropicProvider("claude-sonnet-5").chat([{"role": "user", "content": "hi"}])
+        assert result.usage == {"input_tokens": huge, "output_tokens": 4}
 
     @respx.mock
     def test_next_leg_is_called_after_malformed_usage(self, monkeypatch):
@@ -672,3 +694,48 @@ class TestGeminiSchemaAdaptation:
         assert "title" not in cleaned
         assert "$defs" not in cleaned
         assert cleaned["properties"]["item"] == {"type": "object", "properties": {"name": {"type": "string"}}}
+
+
+class TestFinalizeResultTokenCountFiniteness:
+    """F26 (SOL-REVIEW4-2026-09-24 backlog): `_count`'s finiteness check must apply only to
+    `float` -- `math.isfinite` raises `OverflowError` for an `int` too large to fit a C double,
+    which is not a caught type, so an oversized-but-valid int used to blow past the
+    malformed-envelope boundary entirely (see the HTTP-level Anthropic test above for the full
+    `chat()` round trip; these exercise `_finalize_result` directly)."""
+
+    def test_oversized_int_is_accepted_as_finite(self):
+        huge = 10**400
+        result = _finalize_result(
+            provider="test",
+            content="hi",
+            model="m",
+            duration_ms=1,
+            prompt_chars=2,
+            input_tokens=huge,
+            output_tokens=1,
+        )
+        assert result.usage == {"input_tokens": huge, "output_tokens": 1}
+
+    def test_nonfinite_float_still_rejected(self):
+        with pytest.raises(ValueError, match="not finite"):
+            _finalize_result(
+                provider="test",
+                content="hi",
+                model="m",
+                duration_ms=1,
+                prompt_chars=2,
+                input_tokens=float("inf"),
+                output_tokens=1,
+            )
+
+    def test_bool_still_rejected(self):
+        with pytest.raises(TypeError, match="not a number"):
+            _finalize_result(
+                provider="test",
+                content="hi",
+                model="m",
+                duration_ms=1,
+                prompt_chars=2,
+                input_tokens=True,
+                output_tokens=1,
+            )

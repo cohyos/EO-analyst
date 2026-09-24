@@ -23,6 +23,7 @@ from eoa.llm.ollama_client import (
 from eoa.llm.prompts import render
 from eoa.llm.schemas.analysis import AnalyzeOut, EventOut, SoWhatRepairOut
 from eoa.memory.relational import (
+    delete_stale_analyze_events,
     get_items_for_stage,
     insert_event,
     mark_stage,
@@ -853,6 +854,16 @@ def persist_analysis(item: dict, out: AnalyzeOut) -> tuple[int, int]:
         tech_readiness_note_he=out.tech_readiness_note_he or None,
         **extra_fields,
     )
+    # F09 remainder (SOL-REVIEW4-2026-09-24): clear this item's PREVIOUS analyze run's events
+    # before persisting this run's freshly extracted set below -- otherwise an event a stale prior
+    # run extracted, but this re-analysis no longer does (corrected source, a dropped spurious
+    # extraction, ...), is never reconciled away and lingers in `events` forever. Scoped to rows
+    # this item alone produced (see `delete_stale_analyze_events`'s own docstring for why a plain
+    # `item_id` match isn't quite enough: a manual cross-item reconciliation repair can leave a row
+    # under this `item_id` that also represents another item's event, and that one is left alone).
+    n_deleted_stale_events = delete_stale_analyze_events(item["id"])
+    if n_deleted_stale_events:
+        log.info("analyze_stale_events_cleared", item_id=item["id"], n_deleted=n_deleted_stale_events)
     n_events = 0
     persisted_event_party_names: list[str] = []
     persisted_event_ids: list[int] = []

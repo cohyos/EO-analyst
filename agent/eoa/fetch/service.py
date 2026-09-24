@@ -983,7 +983,11 @@ def _run_forever() -> None:
         serve_fetch_jobs(stop_after=interval_s)
         log.info("fetch.service_poll_tick")
         try:
-            asyncio.run(run_ingest())
+            # F35 (SOL-REVIEW4-2026-09-24): this loop IS the daytime RSS poll (see module
+            # docstring); the nightly ingest is a separate orchestrator job. Bare `run_ingest()`
+            # defaulted to `poll=False`, so daily sources were treated as always-due here too,
+            # refetching them every ~120 minutes instead of once a day.
+            asyncio.run(run_ingest(poll=True))
         except (DeadlineExceeded, LeaseLost):
             raise
         except Exception as exc:

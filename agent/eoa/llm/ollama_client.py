@@ -519,13 +519,28 @@ def _structured_once(
     silently dropped from the aggregated total this function is responsible for reporting for the
     entry as a whole). The returned ``ChatResult`` now carries the SUM of every internal attempt's
     usage/duration, mirroring how `eoa.llm.providers.cli.CliProvider._chat_with_tools` already
-    sums its own two-call text-tools repair via `_merge_usage`."""
+    sums its own two-call text-tools repair via `_merge_usage`.
+
+    R07/E05 round 4 (SOL-REVIEW4-2026-09-24): a single-entry ``chain_override=[<ollama entry>]``
+    call -- exactly what ``_chat_structured_chain`` passes for an "ollama" chain entry -- never
+    reaches ``run_chain``/``_record`` inside ``chat()`` at all (its own single-entry-ollama
+    shortcut goes straight to ``_ollama_chat``, see ``chat()``'s docstring). This loop is
+    therefore the ONLY place that ever sees each REAL Ollama call it makes, so it records one
+    ``llm_calls`` row per actual call, right here, with THAT call's own tokens/duration -- not the
+    aggregate ``_chat_structured_chain`` used to log after the fact (which collapsed a 2-call
+    schema-retry into 1 row and, when both attempts were rejected, left no real-usage row at all).
+    A rejected attempt is still recorded, with its own real tokens, just tagged with ``error`` so
+    it's distinguishable from the attempt that ultimately validated. A CLOUD call is unaffected --
+    it already logs itself via ``run_chain``, so this only fires for the ollama shortcut."""
     json_schema = schema.model_json_schema()
     last_err: Exception | None = None
     msgs = list(messages)
     total_prompt_tokens = 0
     total_eval_tokens = 0
     total_duration_ms = 0
+    is_ollama_shortcut = (
+        chain_override is not None and len(chain_override) == 1 and chain_override[0].provider == "ollama"
+    )
     for attempt in range(2):
         res = chat(
             role,
@@ -549,10 +564,16 @@ def _structured_once(
                 eval_tokens=total_eval_tokens,
                 duration_ms=total_duration_ms,
             )
+            if is_ollama_shortcut:
+                _record_ollama_shortcut_call(role, res, attempt_no=attempt + 1, error=None)
             return validated, aggregated
         except (ValidationError, json.JSONDecodeError) as exc:
             last_err = exc
             log.warning("llm_schema_invalid", attempt=attempt, error=str(exc)[:300])
+            if is_ollama_shortcut:
+                _record_ollama_shortcut_call(
+                    role, res, attempt_no=attempt + 1, error=f"schema validation rejected: {str(exc)[:200]}"
+                )
             msgs = [
                 *messages,
                 {"role": "assistant", "content": res.content},
@@ -562,6 +583,29 @@ def _structured_once(
                 },
             ]
     raise LLMOutputError(f"schema validation failed for {schema.__name__}: {last_err}") from last_err
+
+
+def _record_ollama_shortcut_call(role: str, res: ChatResult, *, attempt_no: int, error: str | None) -> None:
+    """R07/E05 round 4 (SOL-REVIEW4-2026-09-24): one ``llm_calls`` row for one real Ollama call
+    made through ``chat()``'s single-entry-ollama shortcut (see ``_structured_once``'s own note
+    above) -- the only place any of those calls is ever recorded, ``run_chain`` never sees them.
+    ``error`` marks a call whose output was REJECTED by schema validation; its ``prompt_tokens``/
+    ``completion_tokens`` are still that call's own real, billed usage, not a zero-cost marker --
+    the winning, validated call passes ``error=None``."""
+    from eoa.llm.chain import ChainAttempt, _record
+
+    attempt = ChainAttempt(
+        provider="ollama",
+        model=res.model,
+        power=None,
+        ok=error is None,
+        error=error,
+        duration_ms=res.duration_ms,
+        prompt_tokens=res.prompt_tokens,
+        completion_tokens=res.eval_tokens,
+        attempt_no=attempt_no,
+    )
+    _record(role, attempt, 1)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -856,10 +900,13 @@ def _chat_structured_chain(
     """Chain-aware structured dispatch (U8-4/U8-ה): each entry gets its own full
     ``_structured_once`` (schema call + one corrective retry); a provider/HTTP failure *or* a
     schema-validation failure that survives that retry moves on to the next entry. Every REAL
-    call is logged to ``llm_calls`` exactly once: for a CLOUD entry, from INSIDE
-    ``_structured_once`` (each of its up-to-two ``chat()`` attempts runs through ``run_chain``,
-    which records its own row); for an "ollama" entry, this function's own success branch records
-    it (``run_chain`` is never reached for that case -- see the R07/E05 note below). Returns
+    call is logged to ``llm_calls`` exactly once, always from INSIDE ``_structured_once``: for a
+    CLOUD entry, each of its up-to-two ``chat()`` attempts runs through ``run_chain``, which
+    records its own row; for an "ollama" entry, ``_structured_once`` records each real call
+    itself, right where it happens (``run_chain`` is never reached for that case -- see the
+    R07/E05 note there, SOL-REVIEW4-2026-09-24). This function never records on success itself
+    (for either kind of entry) -- only its own FAILURE branch below still does, a zero-cost
+    chain-level marker distinct from the per-call rows. Returns
     ``(validated, entry)`` -- the entry that actually succeeded (efficiency, audit 2026-09-24: so
     a caller's own follow-up call, e.g. ``_guard_hebrew_truncation``'s truncation repair, can pin
     to that one entry instead of replaying the whole chain from its start).
@@ -891,14 +938,20 @@ def _chat_structured_chain(
     opposite gap for an "ollama" entry -- its ``chat_override=[entry]`` single-entry-ollama call
     never reaches ``run_chain`` at all (``eoa.llm.ollama_client.chat()`` shortcuts straight to
     ``_ollama_chat``, see its own docstring), so nothing recorded it, and a successful
-    single-Ollama structured fallback ended up with NO usage row whatsoever. The success branch
-    below therefore still records, but ONLY for ``entry.provider == "ollama"`` -- restoring the
-    one row that leg is missing without reintroducing the cloud double-count above. The FAILURE
-    branch's ``_record`` call (any provider) is unaffected either way: it logs a zero-token
-    ``ok=False`` marker row for "this chain entry was ultimately rejected", which does not
-    double-count any real usage (the schema-retry attempts' own real tokens are already correctly
-    recorded by their own ``run_chain`` calls, or not recorded at all if the failure was the
-    ollama leg itself)."""
+    single-Ollama structured fallback ended up with NO usage row whatsoever.
+
+    R07/E05 round 4 (SOL-REVIEW4-2026-09-24): the round-3 fix above recorded ONE row here, using
+    ``res``'s AGGREGATED usage -- but that aggregate sums every internal schema-retry attempt
+    (``_structured_once``'s own E05 fix), so a retry that took 2 real Ollama calls still collapsed
+    them into 1 ledger row, and a rejection on BOTH attempts left no real-usage row at all (only
+    the FAILURE branch's zero-cost marker below). The per-call fix now lives inside
+    ``_structured_once`` itself -- the only place that actually sees each individual real call, as
+    it happens, whether or not it was the one that ultimately validated (see its own docstring).
+    This function's success path therefore records nothing at all any more, for either kind of
+    entry. The FAILURE branch's ``_record`` call (any provider) is unchanged: it logs a zero-token
+    ``ok=False`` marker for "this chain entry was ultimately rejected/unavailable" -- a chain-level
+    summary, distinct from (and not a double-count of) the per-call rows ``_structured_once`` now
+    writes for its own real attempts."""
     from eoa.llm.chain import FALLBACK_EXCEPTIONS, ChainAttempt, _record
 
     fell_back_from: str | None = None
@@ -907,11 +960,7 @@ def _chat_structured_chain(
         attempt_no = i + 1
         provider_str = _provider_string(entry)
         try:
-            # R07/E05 (SOL-REVIEW3-2026-09-24): `res` (the aggregated `ChatResult`) is unused for
-            # a CLOUD entry -- see the docstring above -- but IS needed below for an "ollama"
-            # entry, whose successful call never reaches `run_chain` at all (see the note past
-            # this `try` block).
-            validated, res = _structured_once(
+            validated, _res = _structured_once(
                 role,
                 schema,
                 messages,
@@ -940,33 +989,9 @@ def _chat_structured_chain(
                 "llm_chain_fallback_structured", role=role, provider=entry.provider, error=str(exc)[:200]
             )
             continue
-        # R07 (SOL-REVIEW2-2026-09-24): no `_record` call here for a CLOUD entry -- `res`'s
-        # (possibly aggregated, across an internal schema-validation retry) usage was already
-        # logged, per real call, by `run_chain` inside `_structured_once`; logging it again here
-        # would double-count that same usage in `llm_calls`.
-        #
-        # R07/E05 follow-up (SOL-REVIEW3-2026-09-24): that assumption does NOT hold for an
-        # "ollama" entry. `_structured_once`'s `chat_override=[entry]` is a single-entry chain
-        # whose one entry IS "ollama" -- `eoa.llm.ollama_client.chat()`'s own single-entry-ollama
-        # shortcut (see its docstring) takes that straight to `_ollama_chat`, never through
-        # `_dispatch_chain`/`run_chain`, so nothing recorded it. Before this function's R07 fix,
-        # the (since-removed) outer `_record` call at least logged *something* for this case; after
-        # it, a successful single-Ollama structured fallback had NO usage row at all. Recording it
-        # here -- only for "ollama", using `res`'s aggregated usage -- writes exactly the one row
-        # this leg is missing, without reintroducing the cloud double-count R07 fixed.
-        if entry.provider == "ollama":
-            attempt = ChainAttempt(
-                provider="ollama",
-                model=res.model,
-                power=None,
-                ok=True,
-                duration_ms=res.duration_ms,
-                prompt_tokens=res.prompt_tokens,
-                completion_tokens=res.eval_tokens,
-                fell_back_from=fell_back_from,
-                attempt_no=attempt_no,
-            )
-            _record(role, attempt, 1)
+        # R07/E05 round 4 (SOL-REVIEW4-2026-09-24): no `_record` call here for EITHER a cloud or
+        # an "ollama" entry any more -- every real call, for both kinds, is now logged from inside
+        # `_structured_once` itself (see the docstring above and that function's own note).
         return validated, entry
 
     raise LLMOutputError(f"structured llm chain for role={role!r} exhausted: {last_err}") from last_err

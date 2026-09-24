@@ -126,9 +126,17 @@ def _finalize_result(
         # escaped the malformed-envelope boundary and aborted the whole fallback chain instead of
         # falling through to the next leg. Rejecting it here, as the same `ValueError` the
         # negative-count check below already uses, keeps it on the existing caught path.
-        if not math.isfinite(value):
+        # F26 (SOL-REVIEW4-2026-09-24): `math.isfinite` itself raises `OverflowError` when handed
+        # an `int` too large for a C double (e.g. a malformed token count like `10**400`) -- ints
+        # are always mathematically finite, so this check only applies to `float`. The `int(value)`
+        # conversion below can *also* raise `OverflowError` for a huge float-like input in other
+        # runtimes; catching it here keeps that on the same caught `ValueError` path too.
+        if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{provider} {field} is not finite: {value!r}")
-        n = int(value)
+        try:
+            n = int(value)
+        except OverflowError as exc:
+            raise ValueError(f"{provider} {field} is not finite: {value!r}") from exc
         if n < 0:
             raise ValueError(f"{provider} {field} is negative: {n}")
         return n

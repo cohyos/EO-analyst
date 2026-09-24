@@ -92,7 +92,7 @@ class TestAdmitDailyAndWeeklyRun:
         job_id = admission.admit_weekly_run("full", priority=3)
 
         assert job_id == 9
-        _select_query, select_params = cur.executed[1]
+        _select_query, select_params = cur.executed[2]
         assert select_params["kinds"] == ["weekly_run"]
 
     def test_admit_weekly_run_still_blocks_a_second_weekly_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,6 +145,12 @@ class _ConcurrentFakeCursor:
         if "pg_advisory_xact_lock" in query:
             self._db._lock.acquire()
             self._conn._locked = True
+            self._last = None
+        elif "UPDATE jobs SET state = 'failed'" in query:
+            kinds = set(params["kinds"])
+            for j in self._db._jobs:
+                if j["kind"] in kinds and j["state"] == "deferred" and j.get("stale"):
+                    j["state"] = "failed"
             self._last = None
         elif "SELECT * FROM jobs" in query:
             kinds = set(params["kinds"])
@@ -285,7 +291,7 @@ class TestDeferredCountsAsActive:
         cur = _FakeCursor([None, {"id": 1}])
         monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
         admission.admit_run("daily_run", equivalent_kinds=["daily_run"])
-        select_query, select_params = cur.executed[1]
+        select_query, select_params = cur.executed[2]
         assert (
             "state = 'deferred' AND created_at > now() - make_interval(hours => %(deferred_hours)s)"
             in select_query
@@ -293,5 +299,53 @@ class TestDeferredCountsAsActive:
         assert select_params["deferred_hours"] == admission.DEFERRED_ACTIVE_HOURS
 
     def test_weekly_is_not_in_the_daily_equivalence_set(self) -> None:
-        assert set(admission.equivalent_kinds_for("daily_run")) == {"daily_run", "report"}
+        assert admission.equivalent_kinds_for("daily_run") == ["daily_run"]
         assert admission.equivalent_kinds_for("weekly_run") == ["weekly_run"]
+
+
+class TestStaleDeferredIsRetiredNotIgnored:
+    """T01 (SOL-REVIEW4-2026-09-24): round 4 merely IGNORED a deferred row older than
+    DEFERRED_ACTIVE_HOURS, but the worker still claims it once `not_before` passes -- so it could
+    run after its replacement (two pipelines). Admission now retires it in the same locked
+    transaction before checking."""
+
+    def test_stale_deferred_daily_is_retired_and_replaced(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _ConcurrentFakeDB()
+        db._jobs.append({"id": 1, "kind": "daily_run", "state": "deferred", "stale": True})
+        db._next_id = 2
+        monkeypatch.setattr(admission.db, "connection", db.connection)
+
+        assert admission.admit_daily_run("full", 2) == 2
+        states = {j["id"]: j["state"] for j in db._jobs}
+        assert states == {1: "failed", 2: "queued"}  # the old one can no longer be claimed
+
+    def test_retirement_sql_runs_before_the_check_under_the_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cur = _FakeCursor([None, {"id": 1}])
+        monkeypatch.setattr(admission.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
+        admission.admit_run("daily_run", equivalent_kinds=["daily_run"])
+        queries = [q for q, _ in cur.executed]
+        assert "pg_advisory_xact_lock" in queries[0]
+        assert "UPDATE jobs SET state = 'failed'" in queries[1]
+        assert "state = 'deferred' AND created_at <= now() - make_interval" in queries[1]
+        assert "SELECT * FROM jobs" in queries[2]
+
+
+class TestReportNeverSuppressesDaily:
+    """T02 (SOL-REVIEW4-2026-09-24): an active standalone `report` must not block a daily_run
+    (pre-fix, the symmetric closure did, and on Saturday weekly's admission of the missing daily
+    kept failing until its wait budget ran out); a daily_run still blocks a `report`."""
+
+    def test_active_report_does_not_block_daily(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _ConcurrentFakeDB()
+        db._jobs.append({"id": 1, "kind": "report", "state": "running"})
+        db._next_id = 2
+        monkeypatch.setattr(admission.db, "connection", db.connection)
+        assert admission.admit_daily_run("full", 2) == 2
+
+    def test_active_daily_still_blocks_report(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _ConcurrentFakeDB()
+        db._jobs.append({"id": 1, "kind": "daily_run", "state": "running"})
+        db._next_id = 2
+        monkeypatch.setattr(admission.db, "connection", db.connection)
+        with pytest.raises(admission.RunAlreadyActive):
+            admission.admit_run("report", equivalent_kinds=admission.equivalent_kinds_for("report"))

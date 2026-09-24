@@ -250,10 +250,13 @@ _QUALITY_REFRESHABLE_COLUMNS = (
 #: default instead -- a bare NULL there would violate the NOT NULL constraint and abort the whole
 #: upsert. Deliberately excludes: identity/source/security columns (already governed by
 #: `_QUALITY_REFRESHABLE_COLUMNS` above, or never touched here at all -- `source_id`, `url`,
-#: `canonical_url`, `security_status`, ...), `story_id` (story_clustering's own persisted key,
-#: computed from cross-item similarity, not part of a single item's content refresh), and `tags`
-#: (classify writes it too, but -- unlike every other classify output column -- it is left alone
-#: here per this fix's own scope).
+#: `canonical_url`, `security_status`, ...), and `story_id` (story_clustering's own persisted key,
+#: computed from cross-item similarity, not part of a single item's content refresh).
+#:
+#: F09 remainder (SOL-REVIEW4-2026-09-24): `tags` (`TEXT[]`, nullable, migration 0001 -- same
+#: shape as `dimensions`/`entities_mentioned` below) is classify output like every other column
+#: here (no user/API write path touches it -- verified in an earlier round), so an accepted
+#: refresh must reset it too, not just leave the OLD content's tags visible until reanalysis.
 _STALE_ON_REFRESH_COLUMNS: tuple[tuple[str, str], ...] = (
     # triage
     ("score", "NULL"),
@@ -263,6 +266,7 @@ _STALE_ON_REFRESH_COLUMNS: tuple[tuple[str, str], ...] = (
     ("domain", "%(domain)s"),
     ("subdomain", "%(subdomain)s"),
     ("dimensions", "NULL"),
+    ("tags", "NULL"),
     # columns insert_item itself takes (domain/subdomain/report_kind/trl/geography) are reset to the
     # refreshing insert's own value -- an ingest-time value (e.g. report_kind "tender" from
     # eoa.tenders.scan) is re-applied, not lost; NULL when the caller passed none
@@ -1021,6 +1025,34 @@ def merge_duplicate_events(*, item_id: int | None = None, dry_run: bool = True) 
     return merges
 
 
+def delete_stale_analyze_events(item_id: int) -> int:
+    """F09 remainder (SOL-REVIEW4-2026-09-24): before analyze persists this run's freshly
+    extracted events for `item_id`, clear out the PREVIOUS run's analyze-extracted events for the
+    same item -- otherwise a re-analysis that no longer extracts an event a stale prior run did
+    (the source article was corrected, the LLM's re-reading dropped a spurious extraction, ...)
+    leaves that stale event sitting in `events` forever; nothing ever reconciles it away.
+
+    Scope: `item_id` is `events`' only per-item identity column, and `insert_event` (called
+    exclusively from `eoa.pipeline.analyze`, verified -- no API route and no other pipeline stage
+    ever writes to `events`) is the sole writer of a fresh row, so every row with this `item_id` is
+    itself "produced by analyze for this item" -- EXCEPT one case: `scripts/repair_round14_events.py
+    --apply` (a manual, one-off cross-item reconciliation repair, not part of the regular pipeline)
+    can merge ANOTHER item's event into a `keep` row that happens to belong to `item_id`, recording
+    the absorbed item(s) in `source_item_ids` (migration 0030, `NOT NULL DEFAULT '{}'`) and
+    deleting their own original rows -- so that `keep` row is the ONLY surviving record of the
+    other item(s)' event. A plain `item_id`-scoped delete would destroy it (and, since the
+    absorbed rows are already gone, the data would be unrecoverable). This excludes any row whose
+    `source_item_ids` is non-empty from the delete, leaving a merged row for a human/the repair
+    script to handle rather than guessing at how to fold it back into a single-item reanalysis.
+    Returns the number of rows deleted."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM events WHERE item_id = %(item_id)s AND array_length(source_item_ids, 1) IS NULL",
+            {"item_id": item_id},
+        )
+        return cur.rowcount
+
+
 def insert_event(
     *,
     item_id: int,
@@ -1738,7 +1770,12 @@ NOTIFICATION_PENDING_STALE_MINUTES = 10
 
 
 def claim_notification_pending(
-    kind: str, key: str, *, stale_minutes: int = NOTIFICATION_PENDING_STALE_MINUTES
+    kind: str,
+    key: str,
+    *,
+    stale_minutes: int = NOTIFICATION_PENDING_STALE_MINUTES,
+    payload: dict[str, Any] | None = None,
+    respect_backoff: bool = False,
 ) -> bool:
     """R02/N03 (SOL-REVIEW2-2026-09-24): claim ``(kind, key)`` for delivery -- BEFORE the caller
     actually sends -- replacing the old ``mark_notification_sent`` marker, which recorded "sent"
@@ -1779,19 +1816,36 @@ def claim_notification_pending(
     (the scheduled sweep that actually retries a ``failed`` row -- see that module) claims through
     this SAME function before resending, which is what makes it safe to run concurrently with a
     job replay of the same notification: whichever caller's ``INSERT ... ON CONFLICT`` commits
-    first wins the row; the other sees it is no longer ``failed``/stale-``pending`` and skips it."""
+    first wins the row; the other sees it is no longer ``failed``/stale-``pending`` and skips it.
+
+    T04 (SOL-REVIEW4-2026-09-24): ``payload`` (the ``ntfy.send`` kwargs) is stored AT CLAIM time,
+    so a worker that crashes mid-send leaves a stale ``pending`` row the sweep can still resend.
+    ``respect_backoff=True`` (the sweep) enforces, inside this same atomic statement, the
+    ``next_attempt_at`` due time for a ``failed`` row and the attempt cap for a stale ``pending``
+    row -- the sweep's earlier SELECT is only a candidate list, so a replay that failed between
+    that SELECT and this claim can no longer be resent immediately, bypassing its backoff."""
     query = """
-        INSERT INTO notifications_sent (kind, key, status, attempts, updated_at)
-        VALUES (%(kind)s, %(key)s, 'pending', 1, now())
+        INSERT INTO notifications_sent (kind, key, status, attempts, updated_at, payload)
+        VALUES (%(kind)s, %(key)s, 'pending', 1, now(), %(payload)s::jsonb)
         ON CONFLICT (kind, key) DO UPDATE SET
             status = 'pending',
             attempts = notifications_sent.attempts + 1,
-            updated_at = now()
+            updated_at = now(),
+            payload = COALESCE(EXCLUDED.payload, notifications_sent.payload)
         WHERE
-            (notifications_sent.status = 'failed' AND notifications_sent.attempts < %(max_attempts)s)
+            (
+                notifications_sent.status = 'failed'
+                AND notifications_sent.attempts < %(max_attempts)s
+                AND (
+                    NOT %(respect_backoff)s
+                    OR notifications_sent.next_attempt_at IS NULL
+                    OR notifications_sent.next_attempt_at <= now()
+                )
+            )
             OR (
                 notifications_sent.status = 'pending'
                 AND notifications_sent.updated_at < now() - (%(stale_minutes)s || ' minutes')::interval
+                AND (NOT %(respect_backoff)s OR notifications_sent.attempts < %(max_attempts)s)
             )
         RETURNING id
     """
@@ -1800,6 +1854,8 @@ def claim_notification_pending(
         "key": key,
         "max_attempts": NOTIFICATION_MAX_ATTEMPTS,
         "stale_minutes": stale_minutes,
+        "payload": Json(payload) if payload is not None else None,
+        "respect_backoff": respect_backoff,
     }
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)

@@ -240,6 +240,7 @@ class TestStaleFieldsClearedOnAcceptedRefresh:
             "domain",
             "subdomain",
             "dimensions",
+            "tags",
             "report_kind",
             "trl",
             "geography",
@@ -270,16 +271,21 @@ class TestStaleFieldsClearedOnAcceptedRefresh:
         assert "product_lines = CASE WHEN" in sql
         assert "THEN '{}'::text[] ELSE items.product_lines END" in sql
 
-    def test_tags_and_story_id_are_not_cleared(self, monkeypatch):
-        """`tags` and `story_id` are deliberately out of scope for this fix (see
-        `_STALE_ON_REFRESH_COLUMNS`'s docstring) -- neither may appear in a stale-reset CASE."""
+    def test_tags_is_cleared_and_story_id_is_not(self, monkeypatch):
+        """F09 remainder (SOL-REVIEW4-2026-09-24): `tags` is classify output like every other
+        column this fix resets (no user/API write path touches it) -- an accepted refresh must
+        null it out too, not leave the OLD content's tags visible until reanalysis. `story_id` is
+        story_clustering's own persisted key, computed from cross-item similarity, not part of a
+        single item's content refresh, and stays out of scope -- it must never appear in a
+        stale-reset CASE."""
         cursor = _FakeCursor([None, {"id": 5, "inserted": True}])
         _patch_connection(monkeypatch, cursor)
 
         insert_item(source_id=1, url="https://example.com/f", content_status="full", security_status="clean")
 
         sql, _ = cursor.calls[2]
-        assert "tags = CASE WHEN" not in sql
+        assert "tags = CASE WHEN" in sql
+        assert "THEN NULL ELSE items.tags END" in sql
         assert "story_id = CASE WHEN" not in sql
 
     def test_by_id_update_also_nulls_stale_derived_columns(self, monkeypatch):
@@ -307,7 +313,7 @@ class TestStaleFieldsClearedOnAcceptedRefresh:
                 assert f"THEN NULL ELSE items.{col} END" in sql
         assert "product_lines = CASE WHEN" in sql
         assert "THEN '{}'::text[] ELSE items.product_lines END" in sql
-        assert "tags = CASE WHEN" not in sql
+        assert "tags = CASE WHEN" in sql
         assert "story_id = CASE WHEN" not in sql
 
     def test_plain_caller_without_quality_status_never_gets_stale_reset_clause_triggered(self, monkeypatch):

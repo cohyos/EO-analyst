@@ -30,6 +30,7 @@ import structlog
 
 from eoa.memory.relational import (
     NOTIFICATION_MAX_ATTEMPTS,
+    NOTIFICATION_PENDING_STALE_MINUTES,
     claim_notification_pending,
     mark_notification_result,
 )
@@ -39,9 +40,12 @@ log = structlog.get_logger(__name__)
 
 
 def _due_failed_notifications(limit: int) -> list[dict[str, Any]]:
-    """Rows eligible for a retry attempt right now: ``failed``, under the attempt cap, with a
-    resendable ``payload`` (legacy rows recorded before migration 0039 have none and are skipped
-    here -- nothing to resend), and either never scheduled or due."""
+    """Rows eligible for a retry attempt right now: under the attempt cap, with a resendable
+    ``payload`` (legacy rows recorded before migration 0039 have none and are skipped here --
+    nothing to resend), and either ``failed`` and due, or ``pending`` and stale (T04,
+    SOL-REVIEW4-2026-09-24: a worker that crashed mid-send -- including a crashed sweep -- never
+    recorded a result; without this the row was stranded ``pending`` forever). This is only a
+    candidate list: the claim re-checks the same predicate atomically (``respect_backoff``)."""
     from psycopg.rows import dict_row
 
     from eoa.db import connection
@@ -49,15 +53,27 @@ def _due_failed_notifications(limit: int) -> list[dict[str, Any]]:
     query = """
         SELECT kind, key, payload
         FROM notifications_sent
-        WHERE status = 'failed'
-          AND attempts < %(max_attempts)s
+        WHERE attempts < %(max_attempts)s
           AND payload IS NOT NULL
-          AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+          AND (
+            (status = 'failed' AND (next_attempt_at IS NULL OR next_attempt_at <= now()))
+            OR (
+              status = 'pending'
+              AND updated_at < now() - (%(stale_minutes)s || ' minutes')::interval
+            )
+          )
         ORDER BY next_attempt_at ASC NULLS FIRST
         LIMIT %(limit)s
     """
     with connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, {"max_attempts": NOTIFICATION_MAX_ATTEMPTS, "limit": limit})
+        cur.execute(
+            query,
+            {
+                "max_attempts": NOTIFICATION_MAX_ATTEMPTS,
+                "stale_minutes": NOTIFICATION_PENDING_STALE_MINUTES,
+                "limit": limit,
+            },
+        )
         return list(cur.fetchall())
 
 
@@ -77,7 +93,7 @@ def retry_failed_notifications(limit: int = 10) -> dict[str, int]:
     for row in rows:
         kind, key, payload = row["kind"], row["key"], row["payload"]
         counts["considered"] += 1
-        if not claim_notification_pending(kind, key):
+        if not claim_notification_pending(kind, key, respect_backoff=True):
             # Lost the race (a job replay or another sweep tick claimed it first) or no longer
             # eligible by the time we got here (already sent / attempts exhausted meanwhile).
             counts["skipped"] += 1

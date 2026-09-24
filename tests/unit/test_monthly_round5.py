@@ -545,6 +545,8 @@ class TestBuildMonthlyNoItems:
         monkeypatch.setattr(monthly, "top_events_by_amount", lambda s, e, limit=10: [])
         monkeypatch.setattr(monthly, "full_horizon_table", lambda: [])
         monkeypatch.setattr(monthly, "watchlist_changes", lambda s, e: [])
+        # unmocked, this is a real SELECT against `reports` (mirrors patch_monthly_collectors above).
+        monkeypatch.setattr(monthly, "_has_previous_monthly_report", lambda period_start: False)
         monkeypatch.setattr(monthly, "_persist_report", lambda *a, **k: 1)
         monkeypatch.setattr(monthly, "_report_path", lambda period_end, ext: tmp_path / f"monthly.{ext}")
 

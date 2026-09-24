@@ -358,6 +358,10 @@ class TestPipelineChainDispatch:
 
 class TestChatStructuredProviderThreading:
     def test_provider_passed_through_to_chat(self, monkeypatch: pytest.MonkeyPatch):
+        # Importing `eoa.orchestrator.jobs` anywhere earlier in the session sets EOA_PIPELINE=1
+        # (ADR-005 pipeline gate, `os.environ.setdefault`), which routes chat_structured through
+        # the pipeline chain instead -- this test is about the non-pipeline path, so pin it.
+        monkeypatch.delenv("EOA_PIPELINE", raising=False)
         from pydantic import BaseModel
 
         class Out(BaseModel):

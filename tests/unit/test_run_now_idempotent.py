@@ -74,7 +74,7 @@ class TestEnqueueRunIdempotent:
         assert excinfo.value.job["id"] == 5
         assert excinfo.value.job["state"] == "running"
         # only the advisory lock + the equivalent-job SELECT ran -- no INSERT was attempted.
-        assert len(cur.executed) == 2
+        assert len(cur.executed) == 3
 
     def test_daily_run_not_blocked_by_weekly_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """S01 (SOL-REVIEW3-2026-09-24): a weekly_run no longer runs the daily pipeline -- it waits
@@ -83,7 +83,7 @@ class TestEnqueueRunIdempotent:
         monkeypatch.setattr(services.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
 
         assert services.enqueue_run("daily", "full") == 124
-        _select_query, select_params = cur.executed[1]
+        _select_query, select_params = cur.executed[2]
         assert "weekly_run" not in select_params["kinds"]
         assert "daily_run" in select_params["kinds"]
 
@@ -93,9 +93,9 @@ class TestEnqueueRunIdempotent:
 
         job_id = services.enqueue_run("daily", "full")
         assert job_id == 123
-        # advisory lock, equivalent-job SELECT, INSERT -- all three in the one transaction.
-        assert len(cur.executed) == 3
-        insert_query, insert_params = cur.executed[2]
+        # advisory lock, stale-deferred retirement (T01), equivalent-job SELECT, INSERT -- all four in the one transaction.
+        assert len(cur.executed) == 4
+        insert_query, insert_params = cur.executed[3]
         assert "INSERT INTO jobs" in insert_query
         assert insert_params["kind"] == "daily_run"
 
@@ -106,7 +106,7 @@ class TestEnqueueRunIdempotent:
         monkeypatch.setattr(services.db, "connection", lambda *_a, **_kw: _FakeConnection(cur))
 
         assert services.enqueue_run("ingest", "full") == 7
-        _select_query, select_params = cur.executed[1]
+        _select_query, select_params = cur.executed[2]
         assert select_params["kinds"] == ["ingest"]
 
     def test_concurrent_calls_serialize_through_the_advisory_lock(
@@ -124,18 +124,20 @@ class TestEnqueueRunIdempotent:
         lock_query, lock_params = cur.executed[0]
         assert "pg_advisory_xact_lock" in lock_query
         assert lock_params["ns"] == services._ENQUEUE_RUN_LOCK_NS
-        select_query, _ = cur.executed[1]
+        select_query, _ = cur.executed[2]
         assert "SELECT * FROM jobs" in select_query
 
 
 class TestEquivalentKindsSymmetric:
-    """F31 follow-up: `_equivalent_kinds_for` closes `_RUN_IDEMPOTENCY_GROUPS` into a symmetric
-    relation (`"report"`'s entry lists `daily_run`, `daily_run` has no entry of its own). S01
-    (SOL-REVIEW3-2026-09-24): `weekly_run` is its own singleton group -- it waits on a daily_run
-    instead of competing with it."""
+    """Admission conflicts per kind. S01 (SOL-REVIEW3-2026-09-24): `weekly_run` is its own
+    singleton group -- it waits on a daily_run instead of competing with it. T02
+    (SOL-REVIEW4-2026-09-24): the relation is deliberately one-way -- `report` is blocked by an
+    active `daily_run`, never the reverse."""
 
-    def test_daily_run_group_includes_report(self) -> None:
-        assert set(services._equivalent_kinds_for("daily_run")) == {"daily_run", "report"}
+    def test_daily_run_is_not_blocked_by_report(self) -> None:
+        """T02 (SOL-REVIEW4-2026-09-24): one-way -- a long `report` must never suppress the
+        nightly daily pipeline."""
+        assert services._equivalent_kinds_for("daily_run") == ["daily_run"]
 
     def test_weekly_run_is_its_own_group(self) -> None:
         assert services._equivalent_kinds_for("weekly_run") == ["weekly_run"]
@@ -199,6 +201,12 @@ class _ConcurrentFakeCursor:
             # per-call `_FakeCursor` tests cover the lock-key and SQL-shape regressions instead.
             self._db._lock.acquire()
             self._conn._locked = True
+            self._last = None
+        elif "UPDATE jobs SET state = 'failed'" in query:
+            kinds = set(params["kinds"])
+            for j in self._db._jobs:
+                if j["kind"] in kinds and j["state"] == "deferred" and j.get("stale"):
+                    j["state"] = "failed"
             self._last = None
         elif "SELECT * FROM jobs" in query:
             kinds = set(params["kinds"])

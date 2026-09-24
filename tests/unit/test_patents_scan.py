@@ -455,6 +455,10 @@ class TestScanPatentsOrchestration:
             patch("eoa.patents.scan._structured_sources_available", return_value=False),
             patch("eoa.patents.scan._records_for_query", return_value=[rec]),
             patch("eoa.patents.scan._any_patents_exist", return_value=True),
+            # R-DB (round-5 fix): unmocked _patent_exists/_insert_patent hit the real DB
+            # (SELECT ... FROM patents / INSERT INTO patents) -- mirror the sibling tests above.
+            patch("eoa.patents.scan._patent_exists", return_value=False),
+            patch("eoa.patents.scan._insert_patent", return_value=1),
         ):
             stats = scan_patents(topics=[WatchTopic(name_he="t", query="q")], assignees=[], since_days=30)
         # seen_pub_numbers dedupes within the same call to _ingest_records only once per query, so

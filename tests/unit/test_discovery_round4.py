@@ -214,6 +214,9 @@ def _common_patches(notice: NoticeRaw) -> ExitStack:
     stack = ExitStack()
     stack.enter_context(patch("eoa.tenders.scan._collect_source_notices", return_value=[notice]))
     stack.enter_context(patch("eoa.tenders.scan._tender_exists", return_value=False))
+    # R6-data title+portal dedupe is also a DB read; unstubbed it hits the real pool
+    # (mirrors tests/unit/test_tenders_scan.py's own _common_patches).
+    stack.enter_context(patch("eoa.tenders.scan._candidate_duplicate_exists", return_value=False))
     stack.enter_context(patch("eoa.tenders.scan._transition_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan._archive_stale_closed", return_value=0))
     stack.enter_context(patch("eoa.tenders.scan.redrive_all_tender_statuses", return_value=0))

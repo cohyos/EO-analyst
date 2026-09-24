@@ -590,7 +590,9 @@ def _daily_run_state_tonight(since: datetime) -> str | None:
     """F22/N07/S02: the ``state`` of tonight's ``daily_run`` -- the most recent one created after
     ``since`` OR any still non-terminal one (``queued``/``running``/``deferred``, whenever it was
     created: it is the run that will produce tonight's data, and admitting another would be a
-    duplicate). ``None`` when no such row exists; :data:`DAILY_STATE_QUERY_FAILED` when the query
+    duplicate). A non-terminal row wins over a newer terminal one (T03, SOL-REVIEW4-2026-09-24:
+    a newer ``done`` daily must not hide an older one still runnable -- weekly would publish while
+    that one can still run and change tonight's data). ``None`` when no such row exists; :data:`DAILY_STATE_QUERY_FAILED` when the query
     itself failed (S02: a DB error must never read as "no daily run", which would make
     :func:`run_weekly` admit a second one)."""
     from eoa.db import connection
@@ -599,7 +601,7 @@ def _daily_run_state_tonight(since: datetime) -> str | None:
         SELECT state FROM jobs
         WHERE kind = 'daily_run'
           AND (created_at > %(since)s OR state IN ('queued', 'running', 'deferred'))
-        ORDER BY created_at DESC
+        ORDER BY (state IN ('queued', 'running', 'deferred')) DESC, created_at DESC
         LIMIT 1
     """
     try:
@@ -979,9 +981,6 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
     from eoa.memory.relational import claim_notification_pending, mark_notification_result
 
     key = str(rs.job_id)
-    if not claim_notification_pending("daily_report", key):
-        log.info("daily_notify_skipped_already_sent_or_in_flight", job_id=rs.job_id)
-        return {"notification_skipped": "already_sent_for_this_job"}
     headlines: list[str] = []
     try:
         from eoa.db import connection
@@ -1005,6 +1004,11 @@ def _notify(rs: RunState, paths: Any) -> dict[str, Any]:
         payload = ntfy.build_report_ready(
             "יומי", str(docx), headlines, ui_url=f"http://127.0.0.1:{settings().api.port}/"
         )
+    # T04 (SOL-REVIEW4-2026-09-24): claim AFTER building the payload and store it with the claim,
+    # so a crash mid-send leaves a resendable stale `pending` row for eoa.notify.retry.
+    if not claim_notification_pending("daily_report", key, payload=payload):
+        log.info("daily_notify_skipped_already_sent_or_in_flight", job_id=rs.job_id)
+        return {"notification_skipped": "already_sent_for_this_job"}
     try:
         if not docx:
             sent = ntfy.failure("report", "הדוח היומי לא הופק הלילה — ראה run_log")

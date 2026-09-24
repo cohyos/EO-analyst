@@ -286,9 +286,11 @@ class TestDailyRunStateTonight:
         monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn())
         since = datetime.now(tz=UTC) - timedelta(hours=6)
         assert jobs._daily_run_state_tonight(since) == expected
-        assert "ORDER BY created_at DESC" in captured["sql"]
+        assert "created_at DESC" in captured["sql"]
         # an older daily_run that is still active is tonight's run, whenever it was created
         assert "state IN ('queued', 'running', 'deferred')" in captured["sql"]
+        # T03 (SOL-REVIEW4-2026-09-24): a non-terminal row outranks a NEWER terminal one
+        assert "ORDER BY (state IN ('queued', 'running', 'deferred')) DESC, created_at DESC" in captured["sql"]
         assert captured["params"] == {"since": since}
 
 
@@ -302,7 +304,7 @@ class TestNotify:
     return a `Sent`-like object (`.ok`) since `_notify` reads that to decide `sent`/`failed`."""
 
     def _allow_send(self, monkeypatch) -> None:
-        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: True)
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key, **_k: True)
         monkeypatch.setattr(
             "eoa.memory.relational.mark_notification_result",
             lambda kind, key, ok, payload=None: None,
@@ -371,6 +373,24 @@ class TestNotify:
         assert sent["path_docx"] == "output/reports/2026-09-04.docx"
         assert not failures
 
+    def test_payload_is_stored_with_the_claim(self, monkeypatch) -> None:
+        """T04 (SOL-REVIEW4-2026-09-24): the resendable payload must be stored AT CLAIM time --
+        pre-fix it was written only with the result, so a crash mid-send left a `pending` row with
+        no payload that the retry sweep could never resend."""
+        claims: list[dict] = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.claim_notification_pending",
+            lambda kind, key, **kw: claims.append(kw) or False,
+        )
+        monkeypatch.setattr("eoa.db.connection", _raise_no_db)
+        monkeypatch.setattr("eoa.orchestrator.jobs.ntfy.failure", lambda *a, **kw: ntfy.Sent(True, None, "u"))
+
+        _notify(RunState(job_id=7), paths=types.SimpleNamespace(docx=None))
+
+        assert claims and claims[0]["payload"] == ntfy.build_failure(
+            "report", "הדוח היומי לא הופק הלילה — ראה run_log"
+        )
+
     def test_delivery_failure_without_exception_marks_failed_and_flags_partial(
         self, monkeypatch
     ) -> None:
@@ -378,7 +398,7 @@ class TestNotify:
         unreachable server). `_notify` must record `failed` (not `sent`) via
         `mark_notification_result`, and surface a `notification_error` key so the run's overall
         status (`has_incomplete_work`) is `partial`, not `done`."""
-        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: True)
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key, **_k: True)
         recorded: list[tuple[str, str, bool]] = []
         monkeypatch.setattr(
             "eoa.memory.relational.mark_notification_result",
@@ -405,7 +425,7 @@ class TestNotifyIdempotency:
     always emits a push."""
 
     def test_skips_send_when_already_sent(self, monkeypatch) -> None:
-        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: False)
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key, **_k: False)
         monkeypatch.setattr("eoa.db.connection", _raise_no_db)
         report_readies: list[tuple] = []
         failures: list[tuple] = []
@@ -426,7 +446,7 @@ class TestNotifyIdempotency:
         `rs.job_id` (the jobs row is updated in place by `reap_stale_jobs`, never re-inserted)."""
         claim_calls: list[tuple[str, str]] = []
 
-        def _claim(kind, key):
+        def _claim(kind, key, **_k):
             claim_calls.append((kind, key))
             return True
 
@@ -458,7 +478,7 @@ class TestNotifyIdempotency:
         row and its `notifications_sent` marker."""
         state: dict[tuple[str, str], str] = {}
 
-        def _claim(kind, key):
+        def _claim(kind, key, **_k):
             k = (kind, key)
             if state.get(k) == "sent":
                 return False
@@ -493,7 +513,7 @@ class TestNotifyIdempotency:
         and once that retry succeeds, a THIRD replay must finally skip (now genuinely `sent`)."""
         state: dict[tuple[str, str], str] = {}
 
-        def _claim(kind, key):
+        def _claim(kind, key, **_k):
             k = (kind, key)
             if state.get(k) == "sent":
                 return False
@@ -529,7 +549,7 @@ class TestNotifyIdempotency:
         """R02/N03: an exception during the actual send (not just `Sent(ok=False)`) must also
         record `failed` (via the `except` clause in `_notify`), not leave the row stuck `pending`
         until the stale-claim window expires."""
-        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key: True)
+        monkeypatch.setattr("eoa.memory.relational.claim_notification_pending", lambda kind, key, **_k: True)
         recorded: list[tuple[str, str, bool]] = []
         monkeypatch.setattr(
             "eoa.memory.relational.mark_notification_result",
