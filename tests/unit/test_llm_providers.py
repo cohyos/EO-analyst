@@ -183,6 +183,53 @@ class TestCliProviderChatAgy:
         with pytest.raises(CliProviderError, match="malformed usage"):
             CliProvider("agy").chat([{"role": "user", "content": "ping"}])
 
+    def test_claude_usage_with_nested_details_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """2026-09-26: claude CLI 2.1.280 returns `output_tokens_details: {"thinking_tokens": N}`
+        (plus `service_tier` text and a `cache_creation` object). Pre-fix, `_validate_usage`
+        rejected every non-numeric key, so EVERY Claude response was discarded as malformed and
+        the chain fell through for a whole night. Only the counters downstream reads are validated."""
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process",
+            lambda *a, **k: _completed(
+                stdout=json.dumps(
+                    {
+                        "type": "result",
+                        "is_error": False,
+                        "result": "PONG",
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 40,
+                            "output_tokens_details": {"thinking_tokens": 435},
+                            "cache_creation": {"ephemeral_5m_input_tokens": 0},
+                            "service_tier": "standard",
+                        },
+                    }
+                )
+            ),
+        )
+        res = CliProvider("claude").chat([{"role": "user", "content": "ping"}])
+        assert res.content == "PONG"
+        assert res.usage["output_tokens"] == 40
+        assert res.usage["output_tokens_details"] == {"thinking_tokens": 435}
+
+    def test_malformed_counter_is_still_rejected_next_to_nested_details(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(
+            "eoa.llm.providers.cli.run_process",
+            lambda *a, **k: _completed(
+                stdout=json.dumps(
+                    {
+                        "is_error": False,
+                        "result": "PONG",
+                        "usage": {"input_tokens": "12", "output_tokens_details": {"thinking_tokens": 1}},
+                    }
+                )
+            ),
+        )
+        with pytest.raises(CliProviderError, match="malformed usage"):
+            CliProvider("claude").chat([{"role": "user", "content": "ping"}])
+
     def test_none_token_count_defaults_and_does_not_raise(self, monkeypatch: pytest.MonkeyPatch):
         """A missing/None count is legitimate, not malformed."""
         monkeypatch.setattr("eoa.llm.providers.cli.shutil.which", lambda name: f"/bin/{name}")

@@ -133,6 +133,10 @@ def _merge_usage(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any
     return out
 
 
+#: Usage counters downstream code reads as numbers (`eoa.llm.chain`, `eoa.llm.ollama_client`).
+_USAGE_COUNT_KEYS = frozenset({"input_tokens", "output_tokens", "prompt_tokens", "eval_tokens"})
+
+
 def _validate_usage(kind: str, usage: dict[str, Any]) -> dict[str, Any]:
     """Every present usage value must be a non-negative number (``None``/missing is fine -- not
     every CLI reports every field). F26 follow-up (SOL-REVIEW2-2026-09-24): the parse functions
@@ -142,9 +146,16 @@ def _validate_usage(kind: str, usage: dict[str, Any]) -> dict[str, Any]:
     every provider boundary, when ``eoa.llm.chain.run_chain`` ran its own
     ``int(result.usage.get(...) or 0)`` conversion and raised bare. Validating here, inside
     ``CliProvider.chat()``'s own try/except, turns a bad value into ``CliProviderError`` so the
-    chain falls through to the next leg instead."""
+    chain falls through to the next leg instead.
+
+    Only the token counters downstream code converts with ``int(...)`` are validated
+    (:data:`_USAGE_COUNT_KEYS`). 2026-09-26: claude CLI 2.1.280 added a nested
+    ``output_tokens_details: {"thinking_tokens": N}`` breakdown (and Anthropic usage has always
+    carried ``service_tier`` text and a ``cache_creation`` object); validating EVERY key rejected
+    each Claude response as malformed, so every Claude leg failed and the chain fell through to
+    Gemini/Ollama for the whole night of 26.9. Other keys are informational and pass through."""
     for key, value in usage.items():
-        if value is None:
+        if key not in _USAGE_COUNT_KEYS or value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{kind} CLI usage[{key!r}] is a {type(value).__name__}, not a number: {value!r}")
