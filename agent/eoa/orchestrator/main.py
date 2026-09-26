@@ -328,8 +328,12 @@ def reconcile_missed_night_run() -> None:
                 # S01 (SOL-REVIEW3-2026-09-24): only a daily_run covers the night -- a weekly_run
                 # never runs the nightly pipeline itself (it waits for a daily_run), so counting
                 # it here could leave a night with no daily pipeline at all.
+                # 2026-09-27: also a daily_run created BEFORE the window that was still active
+                # when it opened (a manual "run now" at 00:14 still running at 01:00) -- it is
+                # tonight's run; not counting it made a restart at 01:22 enqueue a second one.
                 "SELECT 1 FROM jobs WHERE kind = 'daily_run' "
-                "AND created_at >= %(start)s LIMIT 1",
+                "AND (created_at >= %(start)s OR finished_at >= %(start)s "
+                "OR state IN ('queued', 'running', 'deferred')) LIMIT 1",
                 {"start": window_start.astimezone(UTC)},
             )
             covered = cur.fetchone() is not None

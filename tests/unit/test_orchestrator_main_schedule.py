@@ -89,6 +89,22 @@ class TestReconcileMissedNightRun:
 
         assert enqueued == [("full", 2)]
 
+    def test_coverage_query_counts_a_run_started_before_the_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """2026-09-27: a manual daily_run created at 00:14 and still running at 01:00 IS tonight's
+        run. Pre-fix the query only matched `created_at >= window_start`, so a restart at 01:22
+        enqueued a second full run (job 546). A run that finished, or is still active, after the
+        window opened now counts too."""
+        _fixed_now(monkeypatch, real_datetime(2026, 9, 27, 1, 22, tzinfo=_TZ))
+        cur = _FakeCursor(has_row=True)
+        monkeypatch.setattr("eoa.db.connection", lambda: _FakeConn(cur))
+        monkeypatch.setattr(main.admission, "admit_daily_run", lambda mode, priority: pytest.fail("must not enqueue"))
+
+        main.reconcile_missed_night_run()
+
+        sql, _params = cur.executed[0]
+        assert "finished_at >= %(start)s" in sql
+        assert "state IN ('queued', 'running', 'deferred')" in sql
+
     def test_does_nothing_when_a_daily_or_weekly_job_already_covers_tonight(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
