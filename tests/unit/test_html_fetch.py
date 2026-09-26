@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 
 import httpcore
@@ -138,6 +139,99 @@ async def test_fetch_page_rejects_403_even_with_a_short_body() -> None:
 
     with pytest.raises(FetchError, match="non-success status 403"):
         await fetch_page("https://example.test/forbidden")
+
+
+# --------------------------------------------------------------------------
+# 2026-09-27 (nightly-ingest partial-ingest fix): `respect_robots=False` is an explicit, per-call
+# opt-out of ONLY the robots.txt gate -- built for official APIs (arXiv's export API is the
+# motivating case: its robots.txt is a blanket `Disallow: /` even though its own API Terms of Use
+# invite unattended programmatic access at a stated rate). Every other guard is unaffected, it is
+# never a global default, and it never leaks to a concurrently-fetched call that didn't ask for it.
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_fetch_page_respect_robots_false_skips_robots_check() -> None:
+    respx.get("https://example.test/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+    )
+    respx.get("https://example.test/api/query").mock(
+        return_value=httpx.Response(200, html="<html>api result</html>")
+    )
+
+    page = await fetch_page("https://example.test/api/query", respect_robots=False)
+    assert "api result" in page.html
+
+
+@respx.mock
+async def test_fetch_page_respect_robots_false_still_rejects_non_2xx() -> None:
+    """The opt-out skips ONLY the robots.txt gate -- F10's non-2xx rejection still applies exactly
+    as for any other fetch, proving this isn't a general "trust this fetch" switch."""
+    respx.get("https://example.test/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+    )
+    respx.get("https://example.test/api/gone").mock(return_value=httpx.Response(404))
+
+    with pytest.raises(FetchError, match="non-success status 404"):
+        await fetch_page("https://example.test/api/gone", respect_robots=False)
+
+
+@respx.mock
+async def test_fetch_page_respect_robots_default_none_still_honors_disallow() -> None:
+    """A default caller (no override at all -- `respect_robots` left at its `None` default) must
+    still be blocked by a blanket `Disallow: /`, exactly as before this fix."""
+    respx.get("https://example.test/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+    )
+    route = respx.get("https://example.test/api/query")
+    route.mock(return_value=httpx.Response(200, html="<html>should never be fetched</html>"))
+
+    with pytest.raises(FetchError, match=r"robots\.txt disallows"):
+        await fetch_page("https://example.test/api/query")
+    assert not route.called
+
+
+@respx.mock
+async def test_fetch_page_respect_robots_explicit_true_still_honors_disallow() -> None:
+    respx.get("https://example.test/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+    )
+    route = respx.get("https://example.test/api/query")
+    route.mock(return_value=httpx.Response(200, html="<html>should never be fetched</html>"))
+
+    with pytest.raises(FetchError, match=r"robots\.txt disallows"):
+        await fetch_page("https://example.test/api/query", respect_robots=True)
+    assert not route.called
+
+
+@respx.mock
+async def test_fetch_page_respect_robots_false_does_not_leak_to_concurrent_default_fetch() -> None:
+    """`respect_robots` is an explicit per-call keyword, never shared/global state (unlike the
+    IP-pin contextvar elsewhere in this module) -- this proves it with two REAL concurrent
+    `fetch_page` calls in flight at once: one opted out, one default, against two different hosts
+    that both blanket-disallow. The default one must still be blocked."""
+    respx.get("https://arxiv-like.test/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+    )
+    respx.get("https://arxiv-like.test/api/query").mock(
+        return_value=httpx.Response(200, html="<html>api result</html>")
+    )
+    respx.get("https://blocked.test/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n")
+    )
+    blocked_route = respx.get("https://blocked.test/article")
+    blocked_route.mock(return_value=httpx.Response(200, html="<html>should never be fetched</html>"))
+
+    opted_out_result, default_result = await asyncio.gather(
+        fetch_page("https://arxiv-like.test/api/query", respect_robots=False),
+        fetch_page("https://blocked.test/article"),
+        return_exceptions=True,
+    )
+
+    assert isinstance(opted_out_result, FetchedPage)
+    assert "api result" in opted_out_result.html
+    assert isinstance(default_result, FetchError)
+    assert not blocked_route.called
 
 
 # --------------------------------------------------------------------------

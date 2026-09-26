@@ -32,7 +32,9 @@ from eoa.execution import checkpoint
 log = structlog.get_logger(__name__)
 
 
-async def _guarded_fetch_page(url: str, *, client: httpx.AsyncClient | None = None):
+async def _guarded_fetch_page(
+    url: str, *, client: httpx.AsyncClient | None = None, respect_robots: bool | None = None
+):
     """Q2-13 (2026-09-06): every ingestion fetch -- feed URLs, listing pages and article links that
     come out of untrusted RSS/HTML content -- goes through the same SSRF guard as deep-search reads:
     the initial URL is validated (public IP, http(s), sane port) and every redirect hop is
@@ -43,13 +45,23 @@ async def _guarded_fetch_page(url: str, *, client: httpx.AsyncClient | None = No
     close a brand-new `httpx.AsyncClient` (and its own TCP/TLS handshake) for every single page --
     see `run_ingest`, which opens one client for the whole run and threads it down through every
     `_ingest_*_source` helper to here.
+
+    `respect_robots` (2026-09-27): passed straight through to `fetch_page` -- `None` (the default)
+    keeps `fetch_page`'s own config-driven default; every caller in this module only ever passes an
+    explicit value here when a `Source.respect_robots` opt-out applies (see that field's
+    docstring), so this stays `None` -- and every other guard (SSRF/pin/redirect/byte-cap) stays
+    exactly as it is -- for the overwhelming majority of sources.
     """
     from eoa.fetch.html import fetch_page
     from eoa.fetch.remote import assert_public_http_url
 
     initial_ips = assert_public_http_url(url)
     return await fetch_page(
-        url, client=client, validate_redirect=assert_public_http_url, pin_ips=initial_ips
+        url,
+        client=client,
+        validate_redirect=assert_public_http_url,
+        pin_ips=initial_ips,
+        respect_robots=respect_robots,
     )
 
 
@@ -71,19 +83,32 @@ class IngestStats:
 
 
 class _DomainThrottle:
-    """Per-domain politeness gate: at most one request/second/domain, across all concurrent tasks."""
+    """Per-domain politeness gate: at most one request/second/domain, across all concurrent tasks.
+
+    2026-09-27 (nightly-ingest partial-ingest fix): a source can widen this via its own
+    `min_request_interval_s` (e.g. arXiv's API terms require >=3s between requests) by passing
+    `min_interval_s` to `wait()`. The effective interval for a domain is the MAX of the default and
+    every value any source has ever requested for it, kept in `_domain_min_interval` -- simple and
+    deterministic: it only ever widens, never narrows, and a domain shared by a strict source and a
+    default one always gets the stricter (larger) gap regardless of fetch order.
+    """
 
     def __init__(self, min_interval_seconds: float = _PER_DOMAIN_MIN_INTERVAL_SECONDS) -> None:
-        self._min_interval = min_interval_seconds
+        self._default_min_interval = min_interval_seconds
+        self._domain_min_interval: dict[str, float] = {}
         self._last_request_monotonic: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    async def wait(self, url: str) -> None:
+    async def wait(self, url: str, *, min_interval_s: float | None = None) -> None:
         domain = urlsplit(url).netloc
         async with self._locks[domain]:
+            if min_interval_s is not None:
+                current = self._domain_min_interval.get(domain, self._default_min_interval)
+                self._domain_min_interval[domain] = max(current, min_interval_s)
+            effective_interval = self._domain_min_interval.get(domain, self._default_min_interval)
             now = time.monotonic()
             last = self._last_request_monotonic.get(domain, 0.0)
-            remaining = self._min_interval - (now - last)
+            remaining = effective_interval - (now - last)
             if remaining > 0:
                 await asyncio.sleep(remaining)
             self._last_request_monotonic[domain] = time.monotonic()
@@ -421,6 +446,61 @@ def _store_item(
     return True
 
 
+#: 2026-09-27 (nightly-ingest partial-ingest fix): the minimum post-HTML-strip length an RSS
+#: entry's own summary/description needs before it's worth storing as a stand-in for an article
+#: page that failed to fetch (see `_store_stub_from_feed_entry`) -- a title-only or near-empty
+#: summary carries no real signal and is dropped exactly as before this fix.
+_MIN_FEED_STUB_SUMMARY_CHARS = 80
+
+
+def _store_stub_from_feed_entry(
+    *,
+    url: str,
+    source_db_id: int | None,
+    stats: IngestStats,
+    title: str | None,
+    published_at: datetime | None,
+    summary_html: str | None,
+    error: Exception,
+) -> bool:
+    """2026-09-27 (nightly-ingest partial-ingest fix): when an RSS entry's own article page can't
+    be fetched (bot-protection 403s on breakingdefense.com/timesofisrael.com were the reported
+    case, but this covers any fetch failure `_fetch_and_store` catches), the feed itself already
+    carried a title/summary/link/date -- storing THAT instead of dropping the item outright is why
+    a source whose feed works but whose article pages are blocked no longer has to be reported as
+    "all N article fetch(es) failed" (`_ingest_rss_source`'s F11 guard).
+
+    Deliberately reuses `_store_item`'s exact pipeline (`extract_clean_text` -> content-quality
+    `assess()` -> `insert_item`'s quality-aware upsert) instead of a parallel store path, by handing
+    it the feed's own summary HTML as if it were the fetched page: `extract_clean_text` does the
+    HTML-stripping, `assess()` naturally classifies the resulting (short) text as `stub`/`partial`
+    off its length -- same as any other short fetch -- and the item then flows through the exact
+    same later prompt-injection/security screening as anything else `insert_item` writes into
+    `items` (that screening runs downstream, keyed off the stored row -- see
+    `eoa.security.guard.screen_and_record` -- not inline in `_store_item`, so nothing extra is
+    needed here to get it).
+
+    `http_status`/`final_url` are deliberately NOT passed through to `_store_item`: they belong to
+    the FAILED article fetch, not to this fallback content, and `detect_block_page` would otherwise
+    read that failure's 403/429/503 status against this (typically short) feed-summary text and
+    misclassify the very fallback content this function exists to preserve as a block page.
+
+    Only worth it when the summary has real substance (`_MIN_FEED_STUB_SUMMARY_CHARS`, measured
+    post-strip) -- an empty/title-only summary is dropped, exactly as before this fix.
+    """
+    if not summary_html or len(_strip_tags_fast(summary_html).strip()) < _MIN_FEED_STUB_SUMMARY_CHARS:
+        return False
+    log.info("fetch.article_blocked_stored_from_feed", url=url, error=repr(error))
+    return _store_item(
+        source_db_id=source_db_id,
+        url=url,
+        html_text=f"<html><body>{summary_html}</body></html>",
+        stats=stats,
+        fallback_title=title,
+        fallback_published_at=published_at,
+    )
+
+
 async def _fetch_and_store(
     url: str,
     *,
@@ -429,21 +509,44 @@ async def _fetch_and_store(
     stats: IngestStats,
     fallback_title: str | None = None,
     fallback_published_at: datetime | None = None,
+    fallback_summary_html: str | None = None,
     client: httpx.AsyncClient | None = None,
+    respect_robots: bool | None = None,
+    min_interval_s: float | None = None,
 ) -> bool:
     """Returns whether this article was actually stored (F11 round 2: the network fetch succeeding
     is no longer enough -- `_store_item` now returns its own outcome and that outcome is returned
     here, so a source whose every fetch succeeded but whose every DB write failed is still counted
     by callers (`_ingest_rss_source`/`_ingest_html_source`/`_ingest_sitemap_source`'s "all attempted
-    failed" check) as a fully failed source instead of a fully successful one)."""
-    await throttle.wait(url)
+    failed" check) as a fully failed source instead of a fully successful one).
+
+    `fallback_summary_html` (2026-09-27): when given (RSS entries only -- see
+    `_ingest_rss_source`), a failed fetch falls back to storing the feed's own title+summary via
+    `_store_stub_from_feed_entry` instead of just dropping the item -- see that function's
+    docstring. `respect_robots`/`min_interval_s`, when given, come from the requesting source's own
+    `Source.respect_robots`/`min_request_interval_s` and are threaded straight through to this
+    article fetch's own robots check and domain throttle, exactly as for the source's own feed/
+    listing/sitemap fetch -- see `Source.respect_robots`'s docstring for why this must never be a
+    global default.
+    """
+    await throttle.wait(url, **({"min_interval_s": min_interval_s} if min_interval_s is not None else {}))
     try:
-        page = await _guarded_fetch_page(url, client=client)
+        page = await _guarded_fetch_page(
+            url, client=client, **({"respect_robots": respect_robots} if respect_robots is not None else {})
+        )
     except (DeadlineExceeded, LeaseLost):
         raise
     except Exception as exc:
         log.warning("fetch.article_fetch_failed", url=url, error=repr(exc))
-        return False
+        return _store_stub_from_feed_entry(
+            url=url,
+            source_db_id=source_db_id,
+            stats=stats,
+            title=fallback_title,
+            published_at=fallback_published_at,
+            summary_html=fallback_summary_html,
+            error=exc,
+        )
 
     return _store_item(
         source_db_id=source_db_id,
@@ -455,6 +558,27 @@ async def _fetch_and_store(
         http_status=page.status,
         final_url=page.final_url,
     )
+
+
+def _source_fetch_kwargs(source) -> dict[str, object]:
+    """2026-09-27 (nightly-ingest partial-ingest fix): the extra keyword arguments a source's own
+    `respect_robots`/`min_request_interval_s` (see `eoa.fetch.sources_loader.Source`) require on
+    `_fetch_and_store`/`_guarded_fetch_page` -- empty for the overwhelming majority of sources
+    (plain defaults), which keeps every call site's kwargs byte-for-byte identical to before this
+    fix unless a source actually opts out. Both keys are valid `_fetch_and_store` kwargs directly;
+    callers that only fetch the source's OWN url (feed/listing/sitemap, not an article link) filter
+    this down to the one kwarg each of `_guarded_fetch_page`/`_DomainThrottle.wait` actually
+    accepts. See `Source.respect_robots`'s docstring for why this is threaded explicitly, per
+    source, rather than as a global config switch -- it can never leak to a concurrently-fetched
+    source that didn't set it.
+    """
+    kwargs: dict[str, object] = {}
+    if not getattr(source, "respect_robots", True):
+        kwargs["respect_robots"] = False
+    min_interval = getattr(source, "min_request_interval_s", None)
+    if min_interval is not None:
+        kwargs["min_interval_s"] = min_interval
+    return kwargs
 
 
 def _matches_keywords(entry, keywords_any: list[str]) -> bool:
@@ -479,8 +603,12 @@ async def _ingest_rss_source(
     checkpoint()
     from eoa.fetch.rss import parse_feed
 
-    await throttle.wait(source.url)
-    feed_page = await _guarded_fetch_page(source.url, client=client)
+    overrides = _source_fetch_kwargs(source)
+    guarded_kwargs = {k: v for k, v in overrides.items() if k == "respect_robots"}
+    throttle_kwargs = {k: v for k, v in overrides.items() if k == "min_interval_s"}
+
+    await throttle.wait(source.url, **throttle_kwargs)
+    feed_page = await _guarded_fetch_page(source.url, client=client, **guarded_kwargs)
     entries = parse_feed(feed_page.html, since_days=since_days)
     stats.entries_seen += len(entries)
 
@@ -505,7 +633,9 @@ async def _ingest_rss_source(
             stats=stats,
             fallback_title=entry.title,
             fallback_published_at=entry.published_at,
+            fallback_summary_html=entry.summary,
             client=client,
+            **overrides,
         ):
             succeeded += 1
     if attempted and not succeeded:
@@ -521,8 +651,12 @@ async def _ingest_html_source(
     client: httpx.AsyncClient | None = None,
 ) -> None:
     checkpoint()
-    await throttle.wait(source.url)
-    listing_page = await _guarded_fetch_page(source.url, client=client)
+    overrides = _source_fetch_kwargs(source)
+    guarded_kwargs = {k: v for k, v in overrides.items() if k == "respect_robots"}
+    throttle_kwargs = {k: v for k, v in overrides.items() if k == "min_interval_s"}
+
+    await throttle.wait(source.url, **throttle_kwargs)
+    listing_page = await _guarded_fetch_page(source.url, client=client, **guarded_kwargs)
     links = _extract_links(listing_page.html, source.url, source.list_selector, source.link_selector)
     stats.entries_seen += len(links)
 
@@ -534,7 +668,7 @@ async def _ingest_html_source(
         checkpoint()
         attempted += 1
         if await _fetch_and_store(
-            link, throttle=throttle, source_db_id=source_db_id, stats=stats, client=client
+            link, throttle=throttle, source_db_id=source_db_id, stats=stats, client=client, **overrides
         ):
             succeeded += 1
     if attempted and not succeeded:
@@ -559,8 +693,12 @@ async def _ingest_sitemap_source(
     checkpoint()
     from eoa.fetch.sitemap import parse_sitemap
 
-    await throttle.wait(source.url)
-    sitemap_page = await _guarded_fetch_page(source.url, client=client)
+    overrides = _source_fetch_kwargs(source)
+    guarded_kwargs = {k: v for k, v in overrides.items() if k == "respect_robots"}
+    throttle_kwargs = {k: v for k, v in overrides.items() if k == "min_interval_s"}
+
+    await throttle.wait(source.url, **throttle_kwargs)
+    sitemap_page = await _guarded_fetch_page(source.url, client=client, **guarded_kwargs)
     entries = parse_sitemap(
         sitemap_page.html, path_prefix=getattr(source, "path_prefix", None), since_days=since_days
     )
@@ -581,6 +719,7 @@ async def _ingest_sitemap_source(
             fallback_title=entry.title,
             fallback_published_at=entry.published_at,
             client=client,
+            **overrides,
         ):
             succeeded += 1
     if attempted and not succeeded:

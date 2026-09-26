@@ -183,9 +183,29 @@ sources:
     reliability: 3
     tags: [land_surveillance, air_defense]
     schedule: daily
-    notes: "GlobalData trade title; heavy on press-release rewrites, cross-check claims."
+    enabled: false
+    notes: "GlobalData trade title; heavy on press-release rewrites, cross-check claims. DISABLED 2026-09-27: HTTP 403 bot protection since <=2026-09-04 (re-verified 2026-09-27, plain httpx + browser UA); replaced by army_technology_search."
     verified: true
     verified_at: "2026-09-04"
+
+  # Replaces army_technology (RSS 403'd, see above): headlines via the search provider.
+  # Live-probed 2026-09-27 (ddgs, region us-en): 'site:army-technology.com news' -> 10 hits, real
+  # dated article headlines, e.g. "BAE Systems delivers AMPV-based prototypes to US Army for
+  # trials", "Anduril's Lattice chosen as US Army's counter-UAS fire control".
+  - id: army_technology_search
+    name: "Army Technology (search)"
+    url: "https://www.army-technology.com/feed/"
+    kind: search
+    lang: en
+    reliability: 3
+    tags: [land_surveillance, air_defense]
+    schedule: daily
+    queries: ["site:army-technology.com news"]
+    engine_lang: en
+    max_results: 10
+    notes: "Replaces army_technology (RSS returns HTTP 403 bot-protection since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:army-technology.com news' returns 10 hits, real article headlines (BAE Systems AMPV prototypes, Anduril Lattice counter-UAS, Skydio SRR drones)."
+    verified: true
+    verified_at: "2026-09-27"
 
   - id: naval_technology
     name: "Naval Technology"
@@ -195,9 +215,29 @@ sources:
     reliability: 3
     tags: [naval_surveillance]
     schedule: daily
-    notes: "GlobalData trade title; same caveats as Army Technology."
+    enabled: false
+    notes: "GlobalData trade title; same caveats as Army Technology. DISABLED 2026-09-27: HTTP 403 bot protection since <=2026-09-04 (re-verified 2026-09-27, plain httpx + browser UA); replaced by naval_technology_search."
     verified: true
     verified_at: "2026-09-04"
+
+  # Replaces naval_technology (RSS 403'd, see above). Live-probed 2026-09-27 (ddgs, region us-en):
+  # 'site:naval-technology.com news' -> 10 hits, real dated article headlines, e.g. "US Navy
+  # completes major upgrades on two Arleigh Burke destroyers", "L3Harris wins US Navy deals for
+  # submarine masts and missile components".
+  - id: naval_technology_search
+    name: "Naval Technology (search)"
+    url: "https://www.naval-technology.com/feed/"
+    kind: search
+    lang: en
+    reliability: 3
+    tags: [naval_surveillance]
+    schedule: daily
+    queries: ["site:naval-technology.com news"]
+    engine_lang: en
+    max_results: 10
+    notes: "Replaces naval_technology (RSS returns HTTP 403 bot-protection since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:naval-technology.com news' returns 10 hits, real article headlines (Arleigh Burke destroyer upgrades, HII UUV facility, L3Harris submarine masts, Ticonderoga cruiser life extension)."
+    verified: true
+    verified_at: "2026-09-27"
 
   - id: airforce_technology
     name: "Airforce Technology"
@@ -207,9 +247,28 @@ sources:
     reliability: 3
     tags: [airborne_pods, air_defense]
     schedule: daily
-    notes: "GlobalData trade title; same caveats as Army Technology."
+    enabled: false
+    notes: "GlobalData trade title; same caveats as Army Technology. DISABLED 2026-09-27: HTTP 403 bot protection since <=2026-09-04 (re-verified 2026-09-27, plain httpx + browser UA); replaced by airforce_technology_search."
     verified: true
     verified_at: "2026-09-04"
+
+  # Replaces airforce_technology (RSS 403'd, see above). Live-probed 2026-09-27 (ddgs, region
+  # us-en): 'site:airforce-technology.com news' -> 9 hits, real dated article headlines with
+  # published timestamps as recent as 2026-09-18 (F-35 Saudi Arabia sale).
+  - id: airforce_technology_search
+    name: "Airforce Technology (search)"
+    url: "https://www.airforce-technology.com/feed/"
+    kind: search
+    lang: en
+    reliability: 3
+    tags: [airborne_pods, air_defense]
+    schedule: daily
+    queries: ["site:airforce-technology.com news"]
+    engine_lang: en
+    max_results: 10
+    notes: "Replaces airforce_technology (RSS returns HTTP 403 bot-protection since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:airforce-technology.com news' returns 9 hits, dated article headlines from 2025-05 through 2026-09-18 (US clears $24.3bn F-35 sale to Saudi Arabia; Lockheed Martin NGI missile plant)."
+    verified: true
+    verified_at: "2026-09-27"
 
   - id: edr_magazine
     name: "European Defence Review / EDR Online"
@@ -231,11 +290,31 @@ sources:
     reliability: 3
     tags: [airborne_pods, land_surveillance, air_defense]
     schedule: daily
-    notes: "Both / and /feed are behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx; needs a browser-rendering fetch path later. Kept as placeholder."
+    enabled: false
+    notes: "Both / and /feed are behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx; needs a browser-rendering fetch path later. Kept as placeholder. DISABLED 2026-09-27: HTTP 403 bot protection since <=2026-09-04 (re-verified 2026-09-27, plain httpx + browser UA); replaced by defense_update_search."
     verified: false
     verified_at: "2026-09-04"
     list_selector: "article.post"
     link_selector: "h2.entry-title a"
+
+  # Replaces defense_update (html/Cloudflare-challenge 403'd, see above). Live-probed 2026-09-27
+  # (ddgs, region us-en): 'site:defense-update.com military 2026' -> 15 hits, real dated article
+  # headlines from Aug-Sep 2026 (most recent 2026-09-05), plus the site's own /2026/09 monthly
+  # archive page.
+  - id: defense_update_search
+    name: "Defense Update (search)"
+    url: "https://defense-update.com/"
+    kind: search
+    lang: en
+    reliability: 3
+    tags: [airborne_pods, land_surveillance, air_defense]
+    schedule: daily
+    queries: ["site:defense-update.com military 2026"]
+    engine_lang: en
+    max_results: 10
+    notes: "Replaces defense_update (html returns HTTP 403 Cloudflare bot-challenge since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:defense-update.com military 2026' returns 15 hits, dated articles through 2026-09-05 (\"Beyond Hydra: The Rise of the 70mm Drone Slayer\", \"War-Tested, In Demand: Inside Rafael's Arsenal\", \"Inside the Interceptor Shortage That's Leaving Kyiv Exposed\") plus the live /2026/09 monthly archive."
+    verified: true
+    verified_at: "2026-09-27"
 
   - id: israel_defense_en
     name: "Israel Defense (English)"
@@ -275,19 +354,31 @@ sources:
     list_selector: "a[href*='/en/article-']"
     link_selector: "self"
 
+  # Fix (2026-09-27): the old /internet/ section URL is a 404 (site restructured). Checked live
+  # with httpx + a desktop Chrome UA: the Hebrew site (calcalist.co.il, both /internet/ and the
+  # newer /calcalistech section) returns 403 Access Denied (Akamai, same as before) for every path
+  # tried, including the legacy GeneralRSS XML endpoint. Calcalist's tech desk has since consolidated
+  # onto its own English-language domain, CTech (calcalistech.com), which is NOT behind the Akamai
+  # challenge: the homepage returns 200 with real, server-rendered article links matching
+  # `/ctechnews/article/<slug>` (20+ distinct links live), and a sampled article
+  # (.../ctechnews/article/any849tda) carries a real `datePublished` of 2026-09-26 (one day old).
+  # `lang` changed he -> en since the surviving outlet's content is English; `keywords_any` added
+  # since CTech is broad Israeli tech/startup/VC news, not defense-scoped, per the A12 convention
+  # used for other broad outlets (ynet_news, israel_hayom).
   - id: calcalist_tech
-    name: "Calcalist Tech (Hebrew)"
-    url: "https://www.calcalist.co.il/internet/"
+    name: "CTech by Calcalist (English)"
+    url: "https://www.calcalistech.com/"
     kind: html
-    lang: he
+    lang: en
     reliability: 3
     tags: [land_surveillance, computer_vision]
     schedule: daily
-    notes: "Both the legacy GeneralRSS XML endpoint and the tech section page return 403 Access Denied to curl (Akamai bot protection). Kept as placeholder; needs browser-rendering fetch or an allow-listed UA."
-    verified: false
-    verified_at: "2026-09-04"
-    list_selector: "div.article_marker"
-    link_selector: "a"
+    keywords_any: ["electro-optic", "electro-optical", "infrared", "drone", "UAV", "unmanned", "surveillance", "radar", "missile", "air defense", "computer vision", "thermal imaging", "night vision", "loitering munition", "cyber defense", "defense tech", "defense-tech"]
+    notes: "Replaces the dead calcalist.co.il/internet/ (404) and still-403'd Hebrew site: Calcalist's tech coverage now lives on its own English CTech domain (calcalistech.com), verified live 2026-09-27 (httpx + desktop Chrome UA, 200 OK, real server-rendered `/ctechnews/article/<slug>` links, sampled article datePublished 2026-09-26). Broad Israeli tech/startup/VC news, not defense-scoped -- keyword-filtered per A12 convention."
+    verified: true
+    verified_at: "2026-09-27"
+    list_selector: "a[href*='/ctechnews/article/']"
+    link_selector: "self"
 
   # A13 (Israeli industry focus, 2026-09-06): additive verification pass over Israeli
   # general-news and official outlets. Verified live with curl + desktop Chrome UA; see
@@ -475,7 +566,9 @@ sources:
     reliability: 5
     tags: [computer_vision, secondary]
     schedule: daily
-    notes: "arXiv API query feed (Atom); cs.CV papers matching infrared/thermal/target-recognition abstract keywords. Academic (TRL 1-3); classify accordingly."
+    respect_robots: false
+    min_request_interval_s: 3
+    notes: "arXiv API query feed (Atom); cs.CV papers matching infrared/thermal/target-recognition abstract keywords. Academic (TRL 1-3); classify accordingly. Official arXiv API; API Terms of Use permit programmatic access at <=1 request/3s; robots.txt targets crawlers."
     verified: true
     verified_at: "2026-09-04"
 
@@ -487,7 +580,9 @@ sources:
     reliability: 5
     tags: [c_uas, computer_vision]
     schedule: daily
-    notes: "arXiv API query feed (Atom); not restricted to cs.CV since C-UAS papers span cs.RO/eess.SP too."
+    respect_robots: false
+    min_request_interval_s: 3
+    notes: "arXiv API query feed (Atom); not restricted to cs.CV since C-UAS papers span cs.RO/eess.SP too. Official arXiv API; API Terms of Use permit programmatic access at <=1 request/3s; robots.txt targets crawlers."
     verified: true
     verified_at: "2026-09-04"
 
@@ -499,7 +594,9 @@ sources:
     reliability: 5
     tags: [computer_vision]
     schedule: daily
-    notes: "arXiv API query feed (Atom); covers gps_denied_nav and sim2real taxonomy subdomains."
+    respect_robots: false
+    min_request_interval_s: 3
+    notes: "arXiv API query feed (Atom); covers gps_denied_nav and sim2real taxonomy subdomains. Official arXiv API; API Terms of Use permit programmatic access at <=1 request/3s; robots.txt targets crawlers."
     verified: true
     verified_at: "2026-09-04"
 
@@ -574,11 +671,32 @@ sources:
     reliability: 3
     tags: [c_uas, airborne_pods]
     schedule: daily
-    notes: "/feed/ is behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx. Kept as placeholder pending a browser-rendering fetch path."
+    enabled: false
+    notes: "/feed/ is behind a Cloudflare JS challenge (403 'Just a moment...') to curl/httpx. Kept as placeholder pending a browser-rendering fetch path. DISABLED 2026-09-27: HTTP 403 bot protection since <=2026-09-04 (re-verified 2026-09-27, plain httpx + browser UA); replaced by unmanned_systems_technology_search."
     verified: false
     verified_at: "2026-09-04"
     list_selector: "article.post"
     link_selector: "h2 a"
+
+  # Replaces unmanned_systems_technology (html/Cloudflare-challenge 403'd, see above). Live-probed
+  # 2026-09-27 (ddgs, region us-en): a bare 'site:unmannedsystemstechnology.com news' query surfaces
+  # only category/tag pages, not articles; 'site:unmannedsystemstechnology.com/2026' (the site's
+  # dated URL path, /YYYY/MM/slug) surfaces real dated article headlines instead -- 7 hits, most
+  # recent 2026-09.
+  - id: unmanned_systems_technology_search
+    name: "Unmanned Systems Technology (search)"
+    url: "https://www.unmannedsystemstechnology.com/"
+    kind: search
+    lang: en
+    reliability: 3
+    tags: [c_uas, airborne_pods]
+    schedule: daily
+    queries: ["site:unmannedsystemstechnology.com/2026"]
+    engine_lang: en
+    max_results: 10
+    notes: "Replaces unmanned_systems_technology (html returns HTTP 403 Cloudflare bot-challenge since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:unmannedsystemstechnology.com/2026' (matches the site's dated /YYYY/MM/ article-URL path) returns 7 hits, real dated headlines through 2026-09 (\"Uncrewed & Autonomous Systems 2026 to Examine Military Autonomy\", \"Robinson Unmanned Selected for Drone Dominance Gauntlet II\"). A bare '...com news' query returned only category/tag listing pages, not articles, so this dated-path query is used instead."
+    verified: true
+    verified_at: "2026-09-27"
 
   - id: dronexl
     name: "DroneXL"

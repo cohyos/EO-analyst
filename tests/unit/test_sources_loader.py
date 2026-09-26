@@ -101,6 +101,73 @@ class TestSourceEnabledField:
         assert enabled_ids == ["the_war_zone"]
 
 
+class TestSourceRespectRobotsAndThrottleFields:
+    """2026-09-27 (nightly-ingest partial-ingest fix): the explicit per-source robots.txt opt-out
+    and its paired per-domain throttle override -- see `Source.respect_robots`'s docstring for why
+    this exists (arXiv's export API, whose robots.txt disallows everything even though its own API
+    Terms of Use invite exactly this kind of programmatic access at a stated rate)."""
+
+    def test_defaults_when_absent(self) -> None:
+        source = Source.model_validate(
+            {
+                "id": "example",
+                "name": "Example",
+                "url": "https://example.com/feed",
+                "kind": "rss",
+                "lang": "en",
+                "reliability": 3,
+            }
+        )
+        assert source.respect_robots is True
+        assert source.min_request_interval_s is None
+
+    def test_arxiv_style_opt_out_validates(self) -> None:
+        source = Source.model_validate(
+            {
+                "id": "arxiv_cv_cuas",
+                "name": "arXiv CV CUAS",
+                "url": "https://export.arxiv.org/api/query?search_query=cat:cs.CV+AND+abs:CUAS",
+                "kind": "rss",
+                "lang": "en",
+                "reliability": 3,
+                "respect_robots": False,
+                "min_request_interval_s": 3.0,
+            }
+        )
+        assert source.respect_robots is False
+        assert source.min_request_interval_s == 3.0
+
+    def test_load_sources_preserves_respect_robots_and_interval(self, tmp_path) -> None:
+        path = _write_sources_yaml(
+            tmp_path,
+            [
+                {
+                    "id": "arxiv_x",
+                    "name": "arXiv X",
+                    "url": "https://export.arxiv.org/api/query?x",
+                    "kind": "rss",
+                    "lang": "en",
+                    "reliability": 3,
+                    "respect_robots": False,
+                    "min_request_interval_s": 3.0,
+                },
+                {
+                    "id": "normal",
+                    "name": "Normal",
+                    "url": "https://normal.example/feed",
+                    "kind": "rss",
+                    "lang": "en",
+                    "reliability": 3,
+                },
+            ],
+        )
+        by_id = {s.id: s for s in load_sources(path)}
+        assert by_id["arxiv_x"].respect_robots is False
+        assert by_id["arxiv_x"].min_request_interval_s == 3.0
+        assert by_id["normal"].respect_robots is True
+        assert by_id["normal"].min_request_interval_s is None
+
+
 class TestSitemapAndSearchKinds:
     """Task B (2026-09-16): `kind: sitemap` (item 1) and `kind: search` (item 2)."""
 

@@ -23,6 +23,14 @@ _SAMPLE_HTML = (
     "</article></body></html>"
 )
 
+_SAMPLE_LONG_BODY = " ".join(
+    f"Paragraph {i} of substantial, unique reporting about the deal and its context." for i in range(60)
+)
+_SAMPLE_LONG_HTML = (
+    f"<html><head><title>Long article</title></head><body><article><p>{_SAMPLE_LONG_BODY}</p>"
+    "</article></body></html>"
+)
+
 
 class _FakeConnCtx:
     """Minimal ``eoa.db.connection()`` stand-in for `_url_already_seen`'s own probe query --
@@ -1236,6 +1244,487 @@ class TestRunForeverPassesPollToPeriodicIngest:
         # by default -- exactly the daily-sources-always-due bug F35 reports.
         assert len(run_ingest_calls) == 1
         assert run_ingest_calls[0][1] == {"poll": True}
+
+
+# --------------------------------------------------------------------------
+# 2026-09-27 (nightly-ingest partial-ingest fix), item 1: an explicit, per-source robots.txt
+# opt-out (`Source.respect_robots`/`min_request_interval_s`) threaded to `_guarded_fetch_page`/
+# `_DomainThrottle` only for the ONE source that sets it -- never a global switch, and never
+# leaking to a concurrently-fetched default source (see `_source_fetch_kwargs`).
+# --------------------------------------------------------------------------
+
+
+class TestSourceFetchKwargs:
+    def test_default_source_has_no_overrides(self) -> None:
+        assert service._source_fetch_kwargs(_FakeSource()) == {}
+
+    def test_respect_robots_false_is_threaded(self) -> None:
+        source = _FakeSource()
+        source.respect_robots = False
+        assert service._source_fetch_kwargs(source) == {"respect_robots": False}
+
+    def test_respect_robots_true_explicit_is_not_threaded(self) -> None:
+        """Explicit `True` is the same as absent -- no kwarg needed either way."""
+        source = _FakeSource()
+        source.respect_robots = True
+        assert service._source_fetch_kwargs(source) == {}
+
+    def test_min_request_interval_is_threaded(self) -> None:
+        source = _FakeSource()
+        source.min_request_interval_s = 3.0
+        assert service._source_fetch_kwargs(source) == {"min_interval_s": 3.0}
+
+    def test_both_overrides_threaded_together(self) -> None:
+        source = _FakeSource()
+        source.respect_robots = False
+        source.min_request_interval_s = 3.0
+        assert service._source_fetch_kwargs(source) == {
+            "respect_robots": False,
+            "min_interval_s": 3.0,
+        }
+
+
+class TestIngestRssSourceRespectsRobotsOverride:
+    async def test_opted_out_source_threads_respect_robots_false_to_every_fetch(self, monkeypatch) -> None:
+        from eoa.fetch.rss import FeedEntry
+
+        source = _FakeSource(kind="rss")
+        source.respect_robots = False
+        source.min_request_interval_s = 3.0
+
+        captured_guarded: list[dict] = []
+
+        async def _fake_guarded_fetch_page(url, *, client=None, respect_robots=None):
+            captured_guarded.append({"url": url, "respect_robots": respect_robots})
+            return _FakeSitemapPage("<rss></rss>")
+
+        captured_fetch_and_store = {}
+
+        async def _fake_fetch_and_store(url, **kw):
+            captured_fetch_and_store.update(kw)
+            return True
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+        monkeypatch.setattr(
+            "eoa.fetch.rss.parse_feed",
+            lambda html, *, since_days: [FeedEntry(url="https://export.arxiv.org/abs/1")],
+        )
+        monkeypatch.setattr(service, "_fetch_and_store", _fake_fetch_and_store)
+
+        stats = service.IngestStats()
+        await service._ingest_rss_source(
+            source, source_db_id=1, since_days=3, throttle=service._DomainThrottle(), stats=stats
+        )
+
+        # The source's OWN feed fetch got the opt-out too.
+        assert captured_guarded[0] == {"url": source.url, "respect_robots": False}
+        # ...and so did the article fetch it spawned.
+        assert captured_fetch_and_store["respect_robots"] is False
+        assert captured_fetch_and_store["min_interval_s"] == 3.0
+
+    async def test_default_source_never_passes_a_respect_robots_kwarg_at_all(self, monkeypatch) -> None:
+        """A default (non-opted-out) source must call `_guarded_fetch_page`/`_fetch_and_store` with
+        NO `respect_robots`/`min_interval_s` kwargs at all -- proven with strict fake signatures
+        that have no such parameters and would raise `TypeError` if either were passed."""
+        from eoa.fetch.rss import FeedEntry
+
+        async def _fake_guarded_fetch_page(url, *, client=None):
+            return _FakeSitemapPage("<rss></rss>")
+
+        async def _fake_fetch_and_store(
+            url,
+            *,
+            throttle,
+            source_db_id,
+            stats,
+            fallback_title=None,
+            fallback_published_at=None,
+            fallback_summary_html=None,
+            client=None,
+        ):
+            return True
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+        monkeypatch.setattr(
+            "eoa.fetch.rss.parse_feed", lambda html, *, since_days: [FeedEntry(url="https://example.com/a")]
+        )
+        monkeypatch.setattr(service, "_fetch_and_store", _fake_fetch_and_store)
+
+        stats = service.IngestStats()
+        source = _FakeSource(kind="rss")
+        await service._ingest_rss_source(
+            source, source_db_id=1, since_days=3, throttle=service._DomainThrottle(), stats=stats
+        )  # must not raise TypeError
+
+
+class TestDomainThrottleMinInterval:
+    """2026-09-27: `_DomainThrottle` honors a per-source `min_interval_s` override for its domain,
+    on top of the fixed default -- deterministic max()-of-all-requesters, per `wait()`'s docstring.
+
+    `asyncio.sleep` is faked (so these run instantly, never actually pausing) but `time.monotonic`
+    is left real: it can't be swapped out for a canned sequence here without also perturbing
+    `asyncio`'s own internal use of the same clock (event-loop scheduling), which made an earlier
+    version of these tests exhaust its canned values non-deterministically. With the real clock,
+    the elapsed time BETWEEN two immediately-consecutive `await`s in a test process is a few
+    milliseconds at most, so the "remaining wait" `wait()` computes is the configured interval minus
+    a negligible epsilon -- asserted with a generous absolute tolerance rather than pinned exactly.
+    """
+
+    async def test_default_interval_applies_with_no_override(self, monkeypatch) -> None:
+        sleeps: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+
+        throttle = service._DomainThrottle()
+        await throttle.wait("https://example.com/a")  # first request to this domain -- never sleeps
+        await throttle.wait("https://example.com/b")  # same domain, right after -- gated by the 1.0s default
+
+        assert len(sleeps) == 1
+        assert sleeps[0] == pytest.approx(1.0, abs=0.2)
+
+    async def test_source_min_interval_widens_the_domain_gap_for_later_requests_too(self, monkeypatch) -> None:
+        """Once a source's `min_request_interval_s` widens a domain's interval, it stays widened
+        for the NEXT request to that same domain even if that later call passes no override of its
+        own ("interval for a domain = max(default, any requesting source's value)")."""
+        sleeps: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+
+        throttle = service._DomainThrottle()
+        await throttle.wait("https://export.arxiv.org/api", min_interval_s=3.0)  # first request -- no sleep
+        await throttle.wait("https://export.arxiv.org/api")  # no override this call -- still gated at 3s
+
+        assert len(sleeps) == 1
+        assert sleeps[0] == pytest.approx(3.0, abs=0.2)
+
+    async def test_a_stricter_domain_override_never_affects_a_different_domain(self, monkeypatch) -> None:
+        sleeps: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(service.asyncio, "sleep", _fake_sleep)
+
+        throttle = service._DomainThrottle()
+        await throttle.wait("https://export.arxiv.org/api", min_interval_s=3.0)  # sets ONLY this domain to 3s
+        await throttle.wait("https://other.example/feed")  # a different, never-seen domain -- no sleep
+        await throttle.wait("https://other.example/feed")  # second request -- gated by its own 1.0s default
+
+        # Exactly one non-first-request sleep recorded, and it's the plain 1.0s default -- not the
+        # arXiv domain's 3.0s override, which never applies to a different domain.
+        assert len(sleeps) == 1
+        assert sleeps[0] == pytest.approx(1.0, abs=0.2)
+
+
+# --------------------------------------------------------------------------
+# 2026-09-27 (nightly-ingest partial-ingest fix), item 2: when an RSS entry's article page fetch
+# fails (bot-protection 403s on breakingdefense.com/timesofisrael.com were the reported case), the
+# feed's own title+summary is stored instead of dropping the item outright -- see
+# `_store_stub_from_feed_entry`'s docstring for why this reuses `_store_item` rather than a
+# parallel store path.
+# --------------------------------------------------------------------------
+
+_SUBSTANTIAL_SUMMARY_HTML = (
+    "<p>" + ("A real feed summary sentence with genuine reporting content in it. " * 2) + "</p>"
+)
+
+
+class TestStoreStubFromFeedEntry:
+    def test_summary_under_threshold_is_dropped(self, monkeypatch) -> None:
+        def _must_not_be_called(**kw):
+            raise AssertionError("insert_item must not be called for a too-short summary")
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _must_not_be_called)
+
+        stats = service.IngestStats()
+        stored = service._store_stub_from_feed_entry(
+            url="https://example.com/blocked",
+            source_db_id=1,
+            stats=stats,
+            title="Title",
+            published_at=None,
+            summary_html="<p>too short</p>",
+            error=RuntimeError("upstream returned 403"),
+        )
+
+        assert stored is False
+        assert stats.items_inserted == 0
+
+    def test_empty_summary_is_dropped(self, monkeypatch) -> None:
+        def _must_not_be_called(**kw):
+            raise AssertionError("insert_item must not be called for no summary")
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _must_not_be_called)
+
+        stats = service.IngestStats()
+        stored = service._store_stub_from_feed_entry(
+            url="https://example.com/blocked",
+            source_db_id=1,
+            stats=stats,
+            title="Title",
+            published_at=None,
+            summary_html=None,
+            error=RuntimeError("upstream returned 403"),
+        )
+
+        assert stored is False
+
+    def test_substantial_summary_is_stored_via_the_normal_store_item_pipeline(self, monkeypatch) -> None:
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(50, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        stats = service.IngestStats()
+        stored = service._store_stub_from_feed_entry(
+            url="https://example.com/blocked",
+            source_db_id=1,
+            stats=stats,
+            title="Real Feed Title",
+            published_at=None,
+            summary_html=_SUBSTANTIAL_SUMMARY_HTML,
+            error=RuntimeError("upstream returned 403"),
+        )
+
+        assert stored is True
+        assert stats.items_inserted == 1
+        assert captured["url"] == "https://example.com/blocked"
+        assert captured["content_status"] in ("stub", "partial")
+        assert captured["security_status"] == "clean"
+
+    def test_the_failed_fetchs_status_never_taints_the_fallback_content(self, monkeypatch) -> None:
+        """The FAILED article fetch's status/HTML must never reach `detect_block_page` for this
+        fallback -- a 403 mentioned only in `error`'s text must not make a short-but-substantial
+        feed summary get misclassified (and stripped) as a block page."""
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(51, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        stats = service.IngestStats()
+        service._store_stub_from_feed_entry(
+            url="https://example.com/blocked",
+            source_db_id=1,
+            stats=stats,
+            title="Real Feed Title",
+            published_at=None,
+            summary_html=_SUBSTANTIAL_SUMMARY_HTML,
+            error=RuntimeError("upstream returned 403 for https://example.com/blocked after retries"),
+        )
+
+        assert captured["security_status"] == "clean"
+        assert captured["clean_text"] is not None
+
+
+class TestFetchAndStoreFallsBackToFeedSummaryOnArticleFetchFailure:
+    async def test_article_fetch_failure_falls_back_to_feed_summary(self, monkeypatch) -> None:
+        from eoa.errors import FetchError
+
+        async def _fake_guarded_fetch_page(url, *, client=None):
+            raise FetchError(f"upstream returned 403 for {url} after retries")
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(60, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        stats = service.IngestStats()
+        ok = await service._fetch_and_store(
+            "https://example.com/blocked",
+            throttle=service._DomainThrottle(),
+            source_db_id=1,
+            stats=stats,
+            fallback_title="Feed Title",
+            fallback_published_at=None,
+            fallback_summary_html=_SUBSTANTIAL_SUMMARY_HTML,
+        )
+
+        assert ok is True
+        assert stats.items_inserted == 1
+        assert captured["url"] == "https://example.com/blocked"
+        assert captured["security_status"] == "clean"
+
+    async def test_article_fetch_failure_with_no_usable_summary_still_drops_item(self, monkeypatch) -> None:
+        from eoa.errors import FetchError
+
+        async def _fake_guarded_fetch_page(url, *, client=None):
+            raise FetchError("upstream returned 403")
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+
+        stats = service.IngestStats()
+        ok = await service._fetch_and_store(
+            "https://example.com/blocked",
+            throttle=service._DomainThrottle(),
+            source_db_id=1,
+            stats=stats,
+            fallback_title="Feed Title",
+            fallback_published_at=None,
+            fallback_summary_html=None,
+        )
+
+        assert ok is False
+        assert stats.items_inserted == 0
+
+    async def test_successful_fetch_never_touches_the_feed_summary_fallback(self, monkeypatch) -> None:
+        """The fallback must only trigger on a FAILED fetch -- a normal successful fetch stores the
+        real page exactly as before, ignoring `fallback_summary_html` entirely."""
+
+        class _FakePage:
+            html = _SAMPLE_HTML
+            status = 200
+            final_url = "https://example.com/ok"
+
+        async def _fake_guarded_fetch_page(url, *, client=None):
+            return _FakePage()
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+
+        captured = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(61, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+
+        stats = service.IngestStats()
+        ok = await service._fetch_and_store(
+            "https://example.com/ok",
+            throttle=service._DomainThrottle(),
+            source_db_id=1,
+            stats=stats,
+            fallback_summary_html=_SUBSTANTIAL_SUMMARY_HTML,
+        )
+
+        assert ok is True
+        # The real page's own title ("Elbit wins...") was used, not the feed-summary fallback path.
+        assert "Elbit" in captured["title"]
+
+
+class TestIngestRssSourceStoresStubFromFeedWhenArticlesBlocked:
+    async def test_source_not_marked_failed_when_articles_blocked_but_feed_has_summaries(
+        self, monkeypatch
+    ) -> None:
+        """F11 end-to-end, post-fix: a source whose feed works but whose every article page 403s
+        must no longer be reported as "all N article fetch(es) failed" when the feed itself carried
+        usable summaries -- fails against the pre-fix code, which drops every such entry and raises
+        `FetchError` here. `_fetch_and_store` runs for REAL in this test (not monkeypatched) so the
+        fallback path is actually exercised; only the network (`_guarded_fetch_page`) and the DB
+        (`insert_item`) are faked."""
+        from eoa.errors import FetchError
+        from eoa.fetch.rss import FeedEntry
+
+        source = _FakeSource(kind="rss")
+
+        async def _fake_guarded_fetch_page(url, *, client=None):
+            if url == source.url:
+                return _FakeSitemapPage("<rss></rss>")
+            raise FetchError(f"upstream returned 403 for {url} after retries")
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+        monkeypatch.setattr(
+            "eoa.fetch.rss.parse_feed",
+            lambda html, *, since_days: [
+                FeedEntry(url="https://example.com/a", title="A", summary=_SUBSTANTIAL_SUMMARY_HTML)
+            ],
+        )
+
+        captured = {}
+        monkeypatch.setattr(
+            "eoa.memory.relational.insert_item",
+            lambda **kw: (captured.update(kw), ItemUpsertResult(70, inserted=True))[1],
+        )
+
+        stats = service.IngestStats()
+        await service._ingest_rss_source(
+            source, source_db_id=1, since_days=3, throttle=service._DomainThrottle(), stats=stats
+        )  # must not raise
+
+        assert stats.items_inserted == 1
+        assert captured["url"] == "https://example.com/a"
+        assert captured["security_status"] == "clean"
+
+    async def test_source_still_marked_failed_when_articles_blocked_and_feed_has_no_summaries(
+        self, monkeypatch
+    ) -> None:
+        """Companion case: when the feed carries no usable summary either, behavior is unchanged --
+        the source is still reported as fully failed."""
+        from eoa.errors import FetchError
+        from eoa.fetch.rss import FeedEntry
+
+        source = _FakeSource(kind="rss")
+
+        async def _fake_guarded_fetch_page(url, *, client=None):
+            if url == source.url:
+                return _FakeSitemapPage("<rss></rss>")
+            raise FetchError(f"upstream returned 403 for {url} after retries")
+
+        monkeypatch.setattr(service, "_guarded_fetch_page", _fake_guarded_fetch_page)
+        monkeypatch.setattr(
+            "eoa.fetch.rss.parse_feed",
+            lambda html, *, since_days: [FeedEntry(url="https://example.com/a", title="A")],
+        )
+
+        stats = service.IngestStats()
+        with pytest.raises(FetchError, match="all 1 article"):
+            await service._ingest_rss_source(
+                source, source_db_id=1, since_days=3, throttle=service._DomainThrottle(), stats=stats
+            )
+
+
+class TestFeedStubContentRanksBelowLaterFullFetch:
+    def test_stub_from_feed_then_full_fetch_flow_through_the_same_insert_item_upsert_shape(
+        self, monkeypatch
+    ) -> None:
+        """2026-09-27: the stub-from-feed fallback must never bypass `insert_item`'s existing
+        quality-aware upsert (F09/N04, unit-tested against real PostgreSQL elsewhere and NOT
+        touched by this fix) -- it reuses `_store_item` unchanged. This proves the two calls arrive
+        at `insert_item` with the identical kwarg shape, and that the feed-stub call's own
+        `content_status` ranks below a later genuine full fetch's -- i.e. nothing here shortcuts
+        around the real content-quality upgrade path `insert_item` already implements."""
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "eoa.memory.relational.insert_item",
+            lambda **kw: (calls.append(kw), ItemUpsertResult(80, inserted=len(calls) == 1))[1],
+        )
+
+        stats = service.IngestStats()
+        service._store_stub_from_feed_entry(
+            url="https://example.com/article",
+            source_db_id=1,
+            stats=stats,
+            title="Feed Title",
+            published_at=None,
+            summary_html=_SUBSTANTIAL_SUMMARY_HTML,
+            error=RuntimeError("upstream returned 403"),
+        )
+        service._store_item(
+            source_db_id=1, url="https://example.com/article", html_text=_SAMPLE_LONG_HTML, stats=stats
+        )
+
+        assert len(calls) == 2
+        stub_call, full_call = calls
+        assert set(stub_call) == set(full_call)  # identical insert_item call shape
+        rank = {"stub": 0, "partial": 1, "full": 2}
+        assert rank[stub_call["content_status"]] < rank[full_call["content_status"]]
 
 
 if __name__ == "__main__":

@@ -464,11 +464,23 @@ async def fetch_page(
     max_bytes: int | None = None,
     validate_redirect: Callable[[str], set[str] | None] | None = None,
     pin_ips: set[str] | None = None,
+    respect_robots: bool | None = None,
 ) -> FetchedPage:
     """Fetch one URL, honoring robots.txt and the configured byte cap, with 3x retry on 5xx/429.
 
     `max_bytes` overrides `config.yaml`'s `fetch.max_bytes` for this call only
     (used by tests and by callers that already know a page is huge).
+
+    `respect_robots` (2026-09-27, nightly-ingest partial-ingest fix): per-call override of
+    `config.yaml`'s `fetch.respect_robots` default -- `None` (the default) keeps that config value;
+    an explicit `True`/`False` wins regardless of config. The one production caller of this,
+    `eoa.fetch.service._guarded_fetch_page`, threads it from `eoa.fetch.sources_loader.Source
+    .respect_robots`, which exists ONLY for official APIs whose own terms of use explicitly permit
+    unattended programmatic access at a stated rate (e.g. arXiv's export API, whose robots.txt is a
+    blanket `Disallow: /` that its API Terms of Use simultaneously invite -- see
+    `Source.respect_robots`'s docstring). Every other guard on this fetch (SSRF/IP-pin validation,
+    redirect re-validation, byte cap, non-2xx handling, retries) is completely unaffected by this
+    flag -- it skips ONLY the `_get_robot_parser`/`can_fetch` check below, for this one call.
 
     `validate_redirect`/`pin_ips` (Q2-4, additive, default `None` -- existing
     callers keep httpx's normal automatic-redirect behavior unchanged): when
@@ -494,8 +506,9 @@ async def fetch_page(
     """
     from eoa.errors import FetchError
 
-    timeout, cfg_max_bytes, user_agent, respect_robots = _fetch_settings()
+    timeout, cfg_max_bytes, user_agent, respect_robots_default = _fetch_settings()
     effective_max_bytes = max_bytes if max_bytes is not None else cfg_max_bytes
+    effective_respect_robots = respect_robots_default if respect_robots is None else respect_robots
     headers = {"User-Agent": user_agent}
     manual_redirects = validate_redirect is not None
 
@@ -515,7 +528,7 @@ async def fetch_page(
             # unchanged), httpx already followed every redirect internally by the time a response
             # comes back, so this loop runs exactly once anyway and behavior is identical to
             # before.
-            if respect_robots:
+            if effective_respect_robots:
                 parser = await _get_robot_parser(
                     current_url, active_client, user_agent, pin_ips=current_pin_ips
                 )

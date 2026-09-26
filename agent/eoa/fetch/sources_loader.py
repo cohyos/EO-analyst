@@ -62,6 +62,24 @@ class Source(BaseModel):
     queries: list[str] = Field(default_factory=list)
     engine_lang: str = "en"
     max_results: int = 10
+    # 2026-09-27 (nightly-ingest partial-ingest fix): robots.txt is enforced by default for every
+    # fetch (`eoa.fetch.html.fetch_page`'s own `respect_robots` default), but a handful of official
+    # APIs -- arXiv's export API is the motivating case, whose robots.txt is a blanket
+    # `Disallow: /` even though its own API Terms of Use explicitly invite unattended programmatic
+    # access -- have terms that permit exactly the kind of unattended fetching robots.txt exists to
+    # gate. This is a per-source, explicit opt-out for THAT case only: it is threaded down to
+    # `fetch_page` as an explicit keyword (`eoa.fetch.service._guarded_fetch_page`), never as a
+    # global config switch, so it can never leak to a concurrently-fetched source that didn't set
+    # it. Leave this `True` (the default) for anything that is not an official API whose terms
+    # affirmatively allow this -- it is never an excuse to scrape a site whose robots.txt says no.
+    respect_robots: bool = True
+    # Pairs with `respect_robots: false` for a source whose API terms mandate a slower rate than
+    # this fetcher's default 1 request/second/domain (e.g. arXiv's "no more than one request every
+    # 3 seconds") -- `eoa.fetch.service._DomainThrottle` takes the MAX of the default interval and
+    # every source's own configured value for a given domain, so setting this only ever widens
+    # (never narrows) the gap between requests to that domain, even when another source without a
+    # configured value also fetches it. `None` (the default) applies no per-source override.
+    min_request_interval_s: float | None = None
 
 
 def load_sources(path: str | Path | None = None) -> list[Source]:
