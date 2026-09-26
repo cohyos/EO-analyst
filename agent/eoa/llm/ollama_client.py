@@ -1081,11 +1081,16 @@ def chat_structured_batch(
 def embed(texts: Iterable[str], *, role: str = "embed", interactive: bool = False) -> list[list[float]]:
     """Embed a batch of texts with the configured embedding model."""
     with local_inference_lock(interactive=interactive, role=role):
-        spec = gate().acquire(role, interactive=interactive)
+        # 2026-09-26: `acquire_embed` falls back to the CPU (same model, same vector space) when
+        # the GPU is busy/hot/short on VRAM, instead of deferring the whole embed_dedup stage.
+        spec, on_cpu = gate().acquire_embed(role, interactive=interactive)
         assert spec.ollama
         batch = [t if t.strip() else " " for t in texts]
         if not batch:
             return []
+        options: dict[str, Any] = {"num_ctx": _num_ctx("embed", spec)}
+        if on_cpu:
+            options.update({"num_gpu": 0, "num_thread": settings().resources.embed_cpu_threads})
         with _client() as c:
             r = c.post(
                 "/api/embed",
@@ -1093,7 +1098,7 @@ def embed(texts: Iterable[str], *, role: str = "embed", interactive: bool = Fals
                     "model": spec.ollama,
                     "input": batch,
                     "keep_alive": 0,
-                    "options": {"num_ctx": _num_ctx("embed", spec)},
+                    "options": options,
                 },
             )
             r.raise_for_status()

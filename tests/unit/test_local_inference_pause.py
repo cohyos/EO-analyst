@@ -154,3 +154,44 @@ def test_pause_command_revokes_embedding_exception():
     assert runner.invoke(app, ["models", "pause-local"]).exit_code == 0
     with pytest.raises(ResourceUnavailable):
         gate_module._check_local_inference_pause("embed")
+
+
+def test_embed_on_cpu_fallback_asks_ollama_for_cpu(monkeypatch):
+    """2026-09-26: when the gate admits the embedding on the CPU, the Ollama request must carry
+    `num_gpu: 0` (and the configured thread cap); a GPU admission must not."""
+    import contextlib
+    import types
+
+    from eoa.config import ModelSpec
+
+    spec = ModelSpec(key="arctic_embed2", ollama="snowflake-arctic-embed2", vendor="S", origin="US", license="A")
+    sent: list[dict] = []
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"embeddings": [[0.1, 0.2]]}
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, path, json):
+            sent.append(json)
+            return _Resp()
+
+    monkeypatch.setattr(ollama_client, "_client", lambda: _Client())
+    monkeypatch.setattr(ollama_client, "local_inference_lock", lambda **_kw: contextlib.nullcontext())
+    for on_cpu in (True, False):
+        monkeypatch.setattr(
+            ollama_client, "gate", lambda on_cpu=on_cpu: types.SimpleNamespace(acquire_embed=lambda *a, **k: (spec, on_cpu))
+        )
+        ollama_client.embed(["x"])
+    assert sent[0]["options"]["num_gpu"] == 0
+    assert sent[0]["options"]["num_thread"] >= 1
+    assert "num_gpu" not in sent[1]["options"]

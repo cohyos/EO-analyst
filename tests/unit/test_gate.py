@@ -457,3 +457,87 @@ class TestCpuRuntimeRamQueue:
 
         with pytest.raises(ResourceUnavailable, match="RAM"):
             resource_gate.acquire("guard_l1")
+
+
+EMBED_SPEC = ModelSpec(
+    key="arctic_embed2",
+    ollama="snowflake-arctic-embed2",
+    vendor="Snowflake",
+    origin="US",
+    license="Apache-2.0",
+    est_vram_mb=1300,
+)
+
+
+class TestEmbedCpuFallback:
+    """2026-09-26: when the GPU cannot take an embedding call right now, `acquire_embed` admits
+    the SAME embedding model on the CPU instead of deferring the whole embed_dedup stage (26.9:
+    polite mode deferred it and new items went unembedded)."""
+
+    def _host(self, *, util: int = 5, temp: int = 50, vram_used: int = 2000, ram_free: int = 32000) -> HostStatus:
+        return HostStatus(
+            at=datetime.now(tz=UTC),
+            gpu=GpuStatus(vram_total_mb=12227, vram_used_mb=vram_used, util_pct=util, temp_c=temp, available=True),
+            ram_free_mb=ram_free,
+            ram_total_mb=64000,
+            disk_free_gb=100,
+            loaded_models=[],
+        )
+
+    def _settings(self, monkeypatch, **res):
+        resources = _fake_resources(embed_cpu_fallback=True, embed_cpu_threads=4, interactive_wait_s=20, **res)
+        monkeypatch.setattr(
+            "eoa.resources.gate.settings", lambda: _FakeSettings({"embed": EMBED_SPEC}, resources)
+        )
+        monkeypatch.setattr("eoa.resources.gate._check_local_inference_pause", lambda role: None)
+
+    @pytest.mark.parametrize(
+        "host_kw,why",
+        [({"util": 90}, "external gpu util"), ({"temp": 85}, "gpu 85C"), ({"vram_used": 11500}, "vram free")],
+    )
+    def test_gpu_unusable_falls_back_to_cpu(self, resource_gate, monkeypatch, host_kw, why):
+        self._settings(monkeypatch)
+        monkeypatch.setattr("eoa.resources.gate.telemetry.snapshot", lambda *_a, **_kw: self._host(**host_kw))
+        decisions: list = []
+        monkeypatch.setattr(resource_gate, "_record", lambda d: decisions.append(d))
+
+        spec, on_cpu = resource_gate.acquire_embed("embed")
+
+        assert spec.key == "arctic_embed2" and on_cpu is True
+        assert any(why in str(getattr(d, "reason", d)) for d in decisions)
+
+    def test_idle_gpu_stays_on_gpu(self, resource_gate, monkeypatch):
+        self._settings(monkeypatch)
+        monkeypatch.setattr("eoa.resources.gate.telemetry.snapshot", lambda *_a, **_kw: self._host())
+        _spec, on_cpu = resource_gate.acquire_embed("embed")
+        assert on_cpu is False
+
+    def test_full_pause_is_still_respected(self, resource_gate, monkeypatch):
+        self._settings(monkeypatch)
+
+        def _paused(role):
+            raise ResourceUnavailable("Local inference is paused")
+
+        monkeypatch.setattr("eoa.resources.gate._check_local_inference_pause", _paused)
+        monkeypatch.setattr("eoa.resources.gate.telemetry.snapshot", lambda *_a, **_kw: self._host(util=90))
+        with pytest.raises(ResourceUnavailable, match="paused"):
+            resource_gate.acquire_embed("embed")
+
+    def test_fallback_disabled_keeps_old_polite_deferral(self, resource_gate, monkeypatch):
+        self._settings(monkeypatch)
+        resources = _fake_resources(embed_cpu_fallback=False, embed_cpu_threads=4, interactive_wait_s=20)
+        monkeypatch.setattr("eoa.resources.gate.settings", lambda: _FakeSettings({"embed": EMBED_SPEC}, resources))
+        monkeypatch.setattr("eoa.resources.gate.telemetry.snapshot", lambda *_a, **_kw: self._host(util=90))
+        with pytest.raises(ResourceUnavailable, match="polite"):
+            resource_gate.acquire_embed("embed")
+
+    def test_cpu_fallback_still_applies_the_ram_floor(self, resource_gate, monkeypatch):
+        self._settings(monkeypatch)
+        monkeypatch.setattr(
+            "eoa.resources.gate.telemetry.snapshot", lambda *_a, **_kw: self._host(util=90, ram_free=1000)
+        )
+        clock = {"t": 0.0}
+        monkeypatch.setattr("eoa.resources.gate.time.monotonic", lambda: clock["t"])
+        resource_gate._sleep = lambda s: clock.__setitem__("t", clock["t"] + s)
+        with pytest.raises(ResourceUnavailable, match="RAM"):
+            resource_gate.acquire_embed("embed")

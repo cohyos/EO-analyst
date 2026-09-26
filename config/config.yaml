@@ -17,7 +17,7 @@ stages:            # per-stage time budgets in minutes (scheduler trims later st
   triage: 15
   deep_search: 100
   analyze: 45
-  tenders: 30       # section 5.2 / FR-5.2: tender/RFI/RFP scan + forecast (eoa.tenders). 15 -> 30 (2026-09-23, user): with 32+ portals and the SearXNG/search fallbacks the stage hit its 15-min cap and ended `partial` every night; the whole run still finishes ~02:40, far inside the 06:00 window
+  tenders: 45       # section 5.2 / FR-5.2: tender/RFI/RFP scan + forecast (eoa.tenders). 15 -> 30 (2026-09-23, user): with 32+ portals and the SearXNG/search fallbacks the stage hit its 15-min cap and ended `partial` every night; the whole run still finishes ~02:40, far inside the 06:00 window. 30 -> 45 (2026-09-26, user): still hit the 30-min cap on 26.9 (whole run 71 min)
   post_tenders_catchup: 5  # F22: embed+classify+triage catch-up for items the tenders stage just created
   report: 30
   export_backup: 10
@@ -63,6 +63,8 @@ resources:
   polite_mode:
     external_gpu_util_threshold: 25
     enabled_outside_night_window: true
+  embed_cpu_fallback: true    # 2026-09-26: GPU busy/hot/short on VRAM -> run the same embedding model on CPU instead of deferring embed_dedup
+  embed_cpu_threads: 4        # CPU threads for that fallback (leaves the rest of the CPU to other workloads)
 
 ollama:
   url: http://127.0.0.1:11434

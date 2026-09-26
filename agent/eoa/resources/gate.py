@@ -153,6 +153,100 @@ class ResourceGate:
         with self._lock:
             return self._acquire_locked(role, interactive=interactive, est_vram_mb=est_vram_mb)
 
+    def acquire_embed(self, role: str = "embed", *, interactive: bool = False) -> tuple[ModelSpec, bool]:
+        """Admit an embedding call; returns ``(spec, on_cpu)``.
+
+        Embedding-on-CPU fallback (2026-09-26, user request): the nightly ``embed_dedup`` stage was
+        deferred whenever another application kept the GPU busy (polite mode), leaving new items
+        with no embedding -- so dedup and story clustering missed them until a later run. The
+        embedding model is small, so when the GPU cannot be used *right now* (busy by polite-mode
+        rules, thermal pause, no telemetry, or not enough free VRAM) this admits the SAME model on
+        the CPU instead of waiting or deferring; the caller then asks Ollama for ``num_gpu: 0``.
+        Same model = same vector space, so CPU vectors stay comparable with every stored one (a
+        cloud embedding model would not be). The local-inference pause is still honoured: only a
+        pause written with ``allow-embed`` lets this through, exactly as before."""
+        with self._lock:
+            s = settings()
+            spec = s.model(role)
+            rc = s.resources
+            if spec.runtime != "ollama" or not rc.embed_cpu_fallback:
+                return self._acquire_locked(role, interactive=interactive, est_vram_mb=None), False
+            _check_local_inference_pause(role)
+            host = telemetry.snapshot(s.ollama_url)
+            model_name = spec.ollama or spec.key
+            self._check_hard_stops(host, model_name)
+            gpu_reason = self._embed_gpu_blocker(host, spec, model_name)
+            if gpu_reason is None:
+                return self._acquire_locked(role, interactive=interactive, est_vram_mb=None), False
+            deadline = time.monotonic() + (rc.interactive_wait_s if interactive else rc.queue_timeout_min * 60)
+            self._admit_cpu_locked(spec, role, deadline=deadline, reason=f"embed cpu-fallback: {gpu_reason}")
+            return spec, True
+
+    def _embed_gpu_blocker(self, host: telemetry.HostStatus, spec: ModelSpec, model_name: str) -> str | None:
+        """Why the GPU cannot take an embedding call right now, or ``None`` if it can -- the same
+        conditions under which :meth:`_acquire_locked` would defer, wait, or refuse."""
+        rc = settings().resources
+        if not host.gpu.available:
+            return "no GPU telemetry"
+        if host.gpu.temp_c >= rc.gpu_temp_pause_c:
+            return f"gpu {host.gpu.temp_c}C"
+        if rc.polite_mode.enabled_outside_night_window and host.gpu.util_pct > rc.polite_mode.external_gpu_util_threshold:
+            return f"external gpu util {host.gpu.util_pct}%"
+        if any(m.name == model_name for m in host.loaded_models):
+            return None
+        if host.gpu.vram_free_mb < spec.est_vram_mb + rc.vram_safety_margin_mb:
+            return f"vram free {host.gpu.vram_free_mb}MB"
+        return None
+
+    def _admit_cpu_locked(self, spec: ModelSpec, role: str, *, deadline: float, reason: str) -> ModelSpec:
+        """RAM/disk-only admission for a model that runs on the CPU: transient RAM pressure queues
+        with backoff until ``deadline``, then raises ``ResourceUnavailable``."""
+        s = settings()
+        rc = s.resources
+        backoffs = list(rc.queue_backoff_seconds) or [5]
+        model_name = spec.ollama or spec.hf or spec.key
+        waited_ms = 0
+        attempt = 0
+        while True:
+            if spec.runtime == "ollama":
+                _check_local_inference_pause(role)
+            host = telemetry.snapshot(s.ollama_url)
+            self._check_hard_stops(host, model_name)
+            if host.ram_total_mb and host.ram_free_mb < rc.min_free_ram_mb:
+                if time.monotonic() > deadline:
+                    self._record(
+                        self._decision(
+                            "deferred",
+                            model_name,
+                            host,
+                            waited_ms,
+                            f"ram {host.ram_free_mb}MB too low; timeout",
+                        )
+                    )
+                    raise ResourceUnavailable(
+                        f"RAM free {host.ram_free_mb} MB < {rc.min_free_ram_mb} MB "
+                        f"after {waited_ms // 1000}s"
+                    )
+                delay = backoffs[min(attempt, len(backoffs) - 1)]
+                # round 8 (live chat, 2026-09-07): an interactive caller must never sleep past its
+                # deadline -- the 5/10/30 s backoff turned a 20 s budget into a 45 s wait
+                delay = max(1, min(delay, int(deadline - time.monotonic())))
+                self._record(
+                    self._decision(
+                        "queued",
+                        model_name,
+                        host,
+                        waited_ms,
+                        f"ram {host.ram_free_mb}MB too low; retry in {delay}s",
+                    )
+                )
+                self._sleep(delay)
+                waited_ms += delay * 1000
+                attempt += 1
+                continue
+            self._record(self._decision("proceed", model_name, host, waited_ms, reason))
+            return spec
+
     def _acquire_locked(self, role: str, *, interactive: bool, est_vram_mb: int | None) -> ModelSpec:
         s = settings()
         spec = s.model(role)
@@ -174,45 +268,7 @@ class ResourceGate:
         if spec.runtime != "ollama" or need == 0:
             # CPU-side models (guard classifiers, embeddings on CPU) only need RAM/disk sanity, but
             # transient RAM pressure still queues with backoff instead of failing outright.
-            while True:
-                if spec.runtime == "ollama":
-                    _check_local_inference_pause(role)
-                host = telemetry.snapshot(s.ollama_url)
-                self._check_hard_stops(host, model_name)
-                if host.ram_total_mb and host.ram_free_mb < rc.min_free_ram_mb:
-                    if time.monotonic() > deadline:
-                        self._record(
-                            self._decision(
-                                "deferred",
-                                model_name,
-                                host,
-                                waited_ms,
-                                f"ram {host.ram_free_mb}MB too low; timeout",
-                            )
-                        )
-                        raise ResourceUnavailable(
-                            f"RAM free {host.ram_free_mb} MB < {rc.min_free_ram_mb} MB "
-                            f"after {waited_ms // 1000}s"
-                        )
-                    delay = backoffs[min(attempt, len(backoffs) - 1)]
-                    # round 8 (live chat, 2026-09-07): an interactive caller must never sleep past its
-                    # deadline -- the 5/10/30 s backoff turned a 20 s budget into a 45 s wait
-                    delay = max(1, min(delay, int(deadline - time.monotonic())))
-                    self._record(
-                        self._decision(
-                            "queued",
-                            model_name,
-                            host,
-                            waited_ms,
-                            f"ram {host.ram_free_mb}MB too low; retry in {delay}s",
-                        )
-                    )
-                    self._sleep(delay)
-                    waited_ms += delay * 1000
-                    attempt += 1
-                    continue
-                self._record(self._decision("proceed", model_name, host, waited_ms, "cpu-runtime"))
-                return spec
+            return self._admit_cpu_locked(spec, role, deadline=deadline, reason="cpu-runtime")
 
         while True:
             _check_local_inference_pause(role)

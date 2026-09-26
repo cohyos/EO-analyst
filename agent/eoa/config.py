@@ -101,6 +101,9 @@ class ResourcesCfg(BaseModel):
     interactive_wait_s: int = 20
     min_loaded_seconds: int = 300
     polite_mode: PoliteModeCfg = PoliteModeCfg()
+    # Embedding-on-CPU fallback (2026-09-26): see `ResourceGate.acquire_embed`.
+    embed_cpu_fallback: bool = True
+    embed_cpu_threads: int = 4
 
 
 class OllamaCfg(BaseModel):
