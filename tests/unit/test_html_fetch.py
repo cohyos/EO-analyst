@@ -268,9 +268,7 @@ async def test_redirect_destination_robots_allow_is_fetched() -> None:
         return_value=httpx.Response(302, headers={"Location": "https://allowed.test/article"})
     )
     respx.get("https://allowed.test/robots.txt").mock(return_value=httpx.Response(404))
-    respx.get("https://allowed.test/article").mock(
-        return_value=httpx.Response(200, html="<html>ok</html>")
-    )
+    respx.get("https://allowed.test/article").mock(return_value=httpx.Response(200, html="<html>ok</html>"))
 
     def _validate_redirect(next_url: str) -> set[str] | None:
         return None
@@ -334,9 +332,7 @@ async def test_robots_fetch_allowed_when_connection_matches_pinned_ips() -> None
     transport = _PinnedAddrTransport({"/robots.txt": "93.184.216.34", "/article": "93.184.216.34"})
     client = httpx.AsyncClient(transport=transport)
     try:
-        page = await fetch_page(
-            "https://example.test/article", client=client, pin_ips={"93.184.216.34"}
-        )
+        page = await fetch_page("https://example.test/article", client=client, pin_ips={"93.184.216.34"})
     finally:
         await client.aclose()
 
@@ -412,9 +408,7 @@ async def test_pinned_transport_dials_the_validated_ip_not_the_hostname() -> Non
     transport = _PinnedIPTransport(_network_backend=backend)
     client = httpx.AsyncClient(transport=transport)
     try:
-        page = await fetch_page(
-            "https://example.test/article", client=client, pin_ips={"93.184.216.34"}
-        )
+        page = await fetch_page("https://example.test/article", client=client, pin_ips={"93.184.216.34"})
     finally:
         await client.aclose()
 
@@ -448,9 +442,7 @@ async def test_pinned_transport_dials_an_internationalized_host_by_its_pin() -> 
     transport = _PinnedIPTransport(_network_backend=backend)
     client = httpx.AsyncClient(transport=transport)
     try:
-        page = await fetch_page(
-            "https://bücher.example/artikel", client=client, pin_ips={"192.0.2.10"}
-        )
+        page = await fetch_page("https://bücher.example/artikel", client=client, pin_ips={"192.0.2.10"})
     finally:
         await client.aclose()
 
@@ -495,12 +487,8 @@ async def test_two_hosts_on_the_same_ip_never_share_a_connection() -> None:
     transport = _PinnedIPTransport(_network_backend=backend)
     client = httpx.AsyncClient(transport=transport)
     try:
-        page_a = await fetch_page(
-            "https://host-a.example/x", client=client, pin_ips={"203.0.113.9"}
-        )
-        page_b = await fetch_page(
-            "https://host-b.example/y", client=client, pin_ips={"203.0.113.9"}
-        )
+        page_a = await fetch_page("https://host-a.example/x", client=client, pin_ips={"203.0.113.9"})
+        page_b = await fetch_page("https://host-b.example/y", client=client, pin_ips={"203.0.113.9"})
     finally:
         origins = {c._origin.host.decode() for c in transport._pool._connections}  # type: ignore[attr-defined]
         await client.aclose()
@@ -520,6 +508,7 @@ async def test_redirect_to_a_host_that_fails_validation_is_never_connected() -> 
     `validate_redirect(next_url)` (in production, `assert_public_http_url`, which RAISES on
     rejection) before requesting a hop -- so a redirect into a host that fails validation must
     raise out of `fetch_page` without ever placing a connection to it."""
+
     class _RedirectOnceBackend(httpcore.AsyncNetworkBackend):
         """Serves one 302-to-a-blocked-host response for the start URL; a connection to the
         blocked host would be a test failure, so it's simply never wired up as a valid target."""
@@ -686,3 +675,75 @@ async def test_repair_mojibake_leaves_correct_text_untouched() -> None:
     assert _repair_mojibake(correct_ascii) == correct_ascii
     assert _repair_mojibake(correct_hebrew) == correct_hebrew
     assert _repair_mojibake("") == ""
+
+
+# ---------------------------------------------------------------------------------------------
+# 2026-09-27: pin address choice (IPv4 first) and keep-alive reuse across a CDN DNS rotation
+# ---------------------------------------------------------------------------------------------
+
+
+def test_choose_pin_ip_prefers_ipv4_over_a_lower_sorting_ipv6() -> None:
+    """Pre-fix `sorted()[0]` picked '2a12:5240::1' over '89.106.200.1' (string order), and with
+    pinning there is no IPv6->IPv4 fallback, so hosts like intelligent-aerospace.com failed on a
+    machine without IPv6 connectivity."""
+    from eoa.fetch.html import _choose_pin_ip
+
+    assert _choose_pin_ip({"2a12:5240::1", "89.106.200.1"}) == "89.106.200.1"
+    assert _choose_pin_ip({"2603:1061:14:52::1"}) == "2603:1061:14:52::1"
+    assert _choose_pin_ip({"150.171.109.83", "150.171.109.82"}) == "150.171.109.82"
+    assert _choose_pin_ip(None) is None
+
+
+class _KeepAliveBackend(_FakeNetworkBackend):
+    """Like `_FakeNetworkBackend` but each connection can serve several responses (keep-alive),
+    and the reported peer address can be overridden to simulate a stream whose peer was never a
+    validated, dialed address."""
+
+    def __init__(self, responses: int = 2, peer_override: str | None = None) -> None:
+        super().__init__()
+        self._responses = responses
+        self._peer_override = peer_override
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.dialed_hosts.append(host)
+        return _FakeWireStream(_canned_response() * self._responses, dialed_ip=self._peer_override or host)
+
+
+async def test_reused_connection_after_cdn_dns_rotation_is_not_a_rebinding_alarm() -> None:
+    """defenseone.com, 27.9: request 1 validated and dialed .83; before request 2 the CDN's DNS
+    answer rotated to .82, the pool (keyed by hostname, R01) reused the .83 keep-alive connection,
+    and the post-hoc check raised "possible DNS rebinding" against the current answer only. A peer
+    this client itself dialed for the same host after validation is accepted."""
+    backend = _KeepAliveBackend(responses=2)
+    client = httpx.AsyncClient(transport=_PinnedIPTransport(_network_backend=backend))
+    try:
+        await fetch_page(
+            "https://cdn.example.test/a", client=client, pin_ips={"150.171.109.83"}, respect_robots=False
+        )
+        page = await fetch_page(
+            "https://cdn.example.test/b", client=client, pin_ips={"150.171.109.82"}, respect_robots=False
+        )
+    finally:
+        await client.aclose()
+    assert "ok" in page.html
+    assert backend.dialed_hosts == ["150.171.109.83"]  # one connection, reused
+
+
+async def test_peer_never_dialed_for_the_host_is_still_rejected() -> None:
+    """The reuse allowance must not weaken the check: a connection whose peer is neither in the
+    current validated set nor ever dialed for this host still fails closed."""
+    backend = _KeepAliveBackend(responses=1, peer_override="6.6.6.6")
+    client = httpx.AsyncClient(transport=_PinnedIPTransport(_network_backend=backend))
+    try:
+        with pytest.raises(FetchError, match="possible DNS rebinding"):
+            await fetch_page(
+                "https://cdn.example.test/a", client=client, pin_ips={"150.171.109.83"}, respect_robots=False
+            )
+    finally:
+        await client.aclose()
+
+
+def test_previously_dialed_ips_is_empty_for_a_plain_client() -> None:
+    from eoa.fetch.html import previously_dialed_ips
+
+    assert previously_dialed_ips(httpx.AsyncClient(), "cdn.example.test") == set()

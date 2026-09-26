@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import codecs
 import contextvars
+import ipaddress
 import re
 import time
 from collections.abc import Callable
@@ -274,6 +275,9 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
 
     def __init__(self, inner: httpcore.AsyncNetworkBackend | None = None) -> None:
         self._inner = inner or httpcore.AnyIOBackend()
+        #: host -> every validated IP this backend has actually dialed for it (see
+        #: `previously_dialed_ips`). Only written below, right before a pinned dial.
+        self.dialed: dict[str, set[str]] = {}
 
     async def connect_tcp(
         self,
@@ -293,6 +297,7 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
             raise httpcore.ConnectError(
                 f"refusing to dial {host}: the active validated-IP pin is scoped to {pin_host}"
             )
+        self.dialed.setdefault(host, set()).add(pin_ip)
         return await self._inner.connect_tcp(
             pin_ip, port, timeout=timeout, local_address=local_address, socket_options=socket_options
         )
@@ -357,6 +362,24 @@ class _PinnedIPTransport(httpx.AsyncHTTPTransport):
             _pinned_host_ip.reset(token)
 
 
+def previously_dialed_ips(client: httpx.AsyncClient, host: str) -> set[str]:
+    """IPs this client's `_PinnedNetworkBackend` has itself dialed for ``host`` -- each one a
+    caller-validated pin at the moment it was dialed.
+
+    2026-09-27 (false "possible DNS rebinding" alarms on CDN-fronted hosts): the pool keys
+    connections by hostname (R01), so a request can be served on a keep-alive connection that an
+    EARLIER request to the same host opened to that request's validated IP. When the CDN rotates
+    DNS between the two requests (defenseone.com: .83 then .82), the post-hoc `_server_addr` check
+    compared the reused connection's peer against only the CURRENT answer and failed closed. A
+    peer in this set is not a rebinding: it was validated and dialed for this very host. Empty
+    for any client not built by `build_pinned_client` (the check then stays exactly as strict)."""
+    transport = getattr(client, "_transport", None)
+    backend = getattr(getattr(transport, "_pool", None), "_network_backend", None)
+    if isinstance(backend, _PinnedNetworkBackend):
+        return set(backend.dialed.get(host, ()))
+    return set()
+
+
 def _server_addr(response: httpx.Response) -> str | None:
     """Best-effort: the IP address `httpx` actually connected to for `response`.
 
@@ -395,10 +418,24 @@ def build_pinned_client(**kwargs: object) -> httpx.AsyncClient:
 
 def _choose_pin_ip(pin_ips: set[str] | None) -> str | None:
     """Deterministically pick one address out of a validated `pin_ips` set to actually dial --
-    `assert_public_http_url` can return more than one (multiple A/AAAA records); `sorted()[0]` is
+    `assert_public_http_url` can return more than one (multiple A/AAAA records); the order is
     stable across calls for the same set, which keeps repeated fetches of one host on one address
-    for the robots-cache TTL / retry window instead of bouncing between candidates."""
-    return sorted(pin_ips)[0] if pin_ips else None
+    for the robots-cache TTL / retry window instead of bouncing between candidates.
+
+    2026-09-27: IPv4 first. A plain string sort put an AAAA record ahead of the A record whenever
+    it sorted lower ('2a12:5240::1' < '89.106.200.1'), and pinning removes the client's usual
+    IPv6->IPv4 fallback, so every fetch of such a host failed with "All connection attempts
+    failed" on a machine without IPv6 connectivity (intelligent-aerospace.com)."""
+    if not pin_ips:
+        return None
+
+    def _key(addr: str) -> tuple[int, str]:
+        try:
+            return (0 if ipaddress.ip_address(addr).version == 4 else 1, addr)
+        except ValueError:
+            return (2, addr)
+
+    return sorted(pin_ips, key=_key)[0]
 
 
 async def _get_robot_parser(
@@ -436,7 +473,11 @@ async def _get_robot_parser(
         )
         if pin_ips:
             server_addr = _server_addr(response)
-            if server_addr is not None and server_addr not in pin_ips:
+            if (
+                server_addr is not None
+                and server_addr not in pin_ips
+                and server_addr not in previously_dialed_ips(client, parts.hostname or "")
+            ):
                 from eoa.errors import FetchError
 
                 raise FetchError(
@@ -554,7 +595,12 @@ async def fetch_page(
 
             if current_pin_ips:
                 server_addr = _server_addr(response)
-                if server_addr is not None and server_addr not in current_pin_ips:
+                if (
+                    server_addr is not None
+                    and server_addr not in current_pin_ips
+                    and server_addr
+                    not in previously_dialed_ips(active_client, urlsplit(current_url).hostname or "")
+                ):
                     raise FetchError(
                         f"connected address {server_addr} for {current_url} does not match the "
                         f"validated address set {sorted(current_pin_ips)} -- possible DNS rebinding"
