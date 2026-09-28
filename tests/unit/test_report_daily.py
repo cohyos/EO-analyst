@@ -593,3 +593,137 @@ class TestTendersForecastTableConfidenceFilter:
         data = {"new_forecasts": [self._forecast(likelihood=0.4)]}
         assert daily._tenders_forecast_table(data, []) is None
         assert called["n"] == 0
+
+
+# --------------------------------------------------------------------------
+# Item 1 (SOL-REVIEW3-2026-09-24, daily_2026-09-28.md): undated-item novelty exclusion --
+# `_undated_novelty_exclusions` is the pure decision function (no DB); the FQ-42 case in the
+# finding is reproduced with fake item dicts shaped like the real data.
+# --------------------------------------------------------------------------
+
+
+def test_undated_item_sharing_two_distinctive_tokens_with_an_earlier_item_is_excluded():
+    """The motivating case: item 68616 ("USAF receives FQ-42 Vengeance as CCA programme
+    advances", undated) repeats a story already covered by an earlier item -- both titles share
+    the distinctive tokens "FQ-42" and "Vengeance"."""
+    candidate = {
+        "id": 68616,
+        "title": "USAF receives FQ-42 Vengeance as CCA programme advances",
+        "embedding": None,
+    }
+    prior = {
+        "id": 33195,
+        "title": "General Atomics delivers FQ-42 Vengeance to Nevada air base",
+        "embedding": None,
+    }
+    excluded = daily._undated_novelty_exclusions([candidate], [prior])
+    assert excluded == {68616}
+
+
+def test_undated_item_with_no_earlier_match_is_kept():
+    candidate = {"id": 999, "title": "New sensor consortium formed in Estonia", "embedding": None}
+    prior = {"id": 111, "title": "Unrelated tank upgrade announced in Poland", "embedding": None}
+    excluded = daily._undated_novelty_exclusions([candidate], [prior])
+    assert excluded == set()
+
+
+def test_undated_item_matched_only_by_embedding_cosine_is_excluded():
+    candidate = {"id": 5, "title": "Short wire note on new interceptor", "embedding": [1.0, 0.0]}
+    prior = {"id": 6, "title": "Completely different wording, same topic", "embedding": [1.0, 0.0]}
+    excluded = daily._undated_novelty_exclusions([candidate], [prior])
+    assert excluded == {5}
+
+
+def test_undated_item_below_embedding_threshold_is_kept():
+    candidate = {"id": 5, "title": "Short wire note", "embedding": [1.0, 0.0]}
+    prior = {"id": 6, "title": "Different wording", "embedding": [0.5, 0.5]}  # cosine ~0.707 < 0.80
+    excluded = daily._undated_novelty_exclusions([candidate], [prior])
+    assert excluded == set()
+
+
+def test_dated_item_is_never_excluded_by_exclude_undated_repeat_stories(monkeypatch):
+    """A dated candidate must never be touched by `_exclude_undated_repeat_stories` -- it should
+    not even trigger a prior-pool DB lookup, since only undated rows are ever candidates."""
+
+    def _boom():
+        raise AssertionError("must not query the DB when there are no undated candidates")
+
+    monkeypatch.setattr(daily, "connection", _boom)
+    rows = [
+        {
+            "id": 68616,
+            "title": "USAF receives FQ-42 Vengeance as CCA programme advances",
+            "published_at": dt.date(2026, 9, 28),
+        }
+    ]
+    result = daily._exclude_undated_repeat_stories(rows, dt.datetime(2026, 9, 28, tzinfo=daily.JERUSALEM))
+    assert result == rows
+
+
+def test_exclude_undated_repeat_stories_drops_the_matching_candidate(monkeypatch):
+    fake_cursor = _FakeCursorSequence(
+        [
+            [{"id": 33195, "title": "General Atomics delivers FQ-42 Vengeance to Nevada air base"}],
+            [{"id": 68616, "embedding": None}],
+        ]
+    )
+    monkeypatch.setattr(daily, "connection", lambda: _FakeConn(fake_cursor))
+
+    rows = [
+        {"id": 68616, "title": "USAF receives FQ-42 Vengeance as CCA programme advances", "published_at": None},
+        {"id": 70000, "title": "Unrelated new radar order", "published_at": None},
+    ]
+    result = daily._exclude_undated_repeat_stories(rows, dt.datetime(2026, 9, 28, tzinfo=daily.JERUSALEM))
+    assert [r["id"] for r in result] == [70000]
+
+
+class _FakeCursorSequence:
+    """Like `_FakeCursor`, but returns a different fixed row set per successive `execute()` call
+    (in order) -- needed here because `_exclude_undated_repeat_stories` runs two queries (the
+    prior-window pool, then the candidates' own embeddings)."""
+
+    def __init__(self, row_sets: list[list[dict]]):
+        self._row_sets = list(row_sets)
+        self._calls = 0
+        self.queries: list[tuple[str, dict]] = []
+
+    def execute(self, sql, params=None):
+        self.queries.append((sql, params or {}))
+
+    def fetchall(self):
+        rows = self._row_sets[self._calls] if self._calls < len(self._row_sets) else []
+        self._calls += 1
+        return list(rows)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+# --------------------------------------------------------------------------
+# Item 3b (SOL-REVIEW3-2026-09-24): the tenders/forecasts bookkeeping sentence must come from the
+# already-rendered tables' own row counts, never `TableCounts`'s raw pre-filter numbers.
+# --------------------------------------------------------------------------
+
+
+def test_bookkeeping_note_counts_match_rendered_table_rows_not_raw_counts():
+    open_table = {"rows": [["a"], ["b"], ["c"], ["d"], ["e"]]}  # 5 rows actually rendered
+    forecast_table = {"rows": [["x"], ["y"], ["z"], ["w"], ["v"]]}  # 5 rows actually rendered
+    note = daily._tenders_forecast_bookkeeping_note_he(open_table, forecast_table)
+    assert "5 מכרזים פתוחים" in note
+    assert "5 תחזיות מכרזים" in note
+    assert "15" not in note  # the raw TableCounts.open_tenders count must never leak in
+    assert "10 תחזיות" not in note
+
+
+def test_bookkeeping_note_empty_when_both_tables_empty():
+    assert daily._tenders_forecast_bookkeeping_note_he(None, None) == ""
+    assert daily._tenders_forecast_bookkeeping_note_he({"rows": []}, {"rows": []}) == ""
+
+
+def test_bookkeeping_note_omits_the_missing_half_when_only_one_table_has_rows():
+    note = daily._tenders_forecast_bookkeeping_note_he({"rows": [["a"]]}, None)
+    assert "1 מכרזים פתוחים" in note
+    assert "תחזיות" not in note

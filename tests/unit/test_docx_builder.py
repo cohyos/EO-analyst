@@ -602,3 +602,89 @@ def test_fmt_date_variants():
 def test_fmt_amount_variants():
     assert db.fmt_amount({"amount_usd": None}) == "—"
     assert db.fmt_amount({"amount_usd": 80_000_000, "currency": "USD"}) == "80,000,000 USD"
+
+
+# --------------------------------------------------------------------------
+# R4-report #2 (SOL-REVIEW3-2026-09-24): renumber_citations_to_cited_only -- drop uncited registry
+# rows, renumber the rest 1..N in first-citation order, rewrite every [n] reference.
+# --------------------------------------------------------------------------
+
+
+def _registry(n_max: int) -> list[dict]:
+    return [
+        {"id": 100 + n, "n": n, "title": f"Item {n}", "source_name": "s", "url": f"https://x/{n}"}
+        for n in range(1, n_max + 1)
+    ]
+
+
+def test_renumber_citations_drops_uncited_and_renumbers_in_first_citation_order():
+    """Task spec: a registry with cited {1,3,7} and uncited {2,4,5,6} renders an appendix of 3
+    rows numbered 1..3, with every [n] reference rewritten. Citations are attached in a
+    deliberately non-identity order (bluf cites item 3, exec_summary cites item 7, a table cell
+    cites item 1) so the test also proves the renumbering follows first-CITATION order (bluf ->
+    exec_summary -> ... -> tables), not the registry's own original n order."""
+    items = _registry(7)
+    draft = DailyReportDraft(
+        bluf=[Sentence(text_he="שורה תחתונה.", cites=[3])],
+        exec_summary=[Sentence(text_he="תקציר.", cites=[7])],
+        sections=[],
+        outlook=[],
+        open_points_he=[],
+    )
+    tables = [{"headers": ["a"], "rows": [["ראה [1]"]]}]
+
+    new_draft, new_items, new_tables, new_extra, new_events = db.renumber_citations_to_cited_only(
+        draft, items, tables=tables, extra_sections=None, events=None
+    )
+
+    assert [it["n"] for it in new_items] == [1, 2, 3]
+    assert [it["id"] for it in new_items] == [103, 107, 101]  # cited order: 3, 7, 1
+    assert {it["id"] for it in new_items}.isdisjoint({102, 104, 105, 106})  # uncited rows dropped
+    assert new_draft.bluf[0].cites == [1]
+    assert new_draft.exec_summary[0].cites == [2]
+    assert new_tables[0]["rows"][0][0] == "ראה [3]"
+    assert new_extra is None
+    assert new_events is None
+
+
+def test_renumber_citations_remaps_event_n_and_counts_it_as_cited():
+    items = _registry(3)
+    draft = DailyReportDraft(
+        exec_summary=[Sentence(text_he="תקציר.", cites=[2])], sections=[], outlook=[], open_points_he=[]
+    )
+    events = [{"id": 900, "n": 3, "title": "event"}]  # item 1 never cited anywhere
+
+    _, new_items, _, _, new_events = db.renumber_citations_to_cited_only(
+        draft, items, events=events
+    )
+
+    assert [it["n"] for it in new_items] == [1, 2]
+    assert [it["id"] for it in new_items] == [102, 103]  # exec_summary (item 2) cited first
+    assert new_events[0]["n"] == 2  # old n=3 -> new n=2
+
+
+def test_renumber_citations_nothing_cited_yields_empty_appendix():
+    items = _registry(3)
+    draft = DailyReportDraft(exec_summary=[], sections=[], outlook=[], open_points_he=[])
+
+    _, new_items, _, _, _ = db.renumber_citations_to_cited_only(
+        draft, items, tables=None, extra_sections=None, events=None
+    )
+
+    assert new_items == []
+
+
+def test_renumber_citations_all_cited_and_already_contiguous_is_a_no_op():
+    items = _registry(2)
+    draft = DailyReportDraft(
+        exec_summary=[Sentence(text_he="א.", cites=[1]), Sentence(text_he="ב.", cites=[2])],
+        sections=[],
+        outlook=[],
+        open_points_he=[],
+    )
+
+    new_draft, new_items, *_ = db.renumber_citations_to_cited_only(draft, items)
+
+    assert [it["n"] for it in new_items] == [1, 2]
+    assert new_draft.exec_summary[0].cites == [1]
+    assert new_draft.exec_summary[1].cites == [2]

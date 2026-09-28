@@ -33,6 +33,7 @@ from eoa.report.docx_builder import (
     hebrew_date_str,
     render_html,
     render_markdown,
+    renumber_citations_to_cited_only,
     save_docx,
     validate_docx,
 )
@@ -103,6 +104,142 @@ def _period(
 # collection
 # --------------------------------------------------------------------------
 
+#: Item 1 (SOL-REVIEW3-2026-09-24, daily_2026-09-28.md): the daily report's own novelty filter for
+#: an item whose ONLY date is its own ingestion time (``published_at IS NULL``) -- story
+#: clustering (``eoa.pipeline.story_clustering``) sometimes fails to link such an item to an
+#: already-covered story (e.g. a short wire snippet with too little text for the embedding edge,
+#: and no cross-language edge since both titles are the same language). Motivating example: item
+#: 68616 ("USAF receives FQ-42 Vengeance as CCA programme advances", published_at NULL, created
+#: 2026-09-28) repeated a story already covered 2026-09-14..22 by items 20162/25627/29195/54726/
+#: 55183/55547/57820, but ``story_id`` never linked them. This is a report-side belt-and-suspenders
+#: novelty check, independent of (and never a substitute for) ``story_id`` clustering -- it only
+#: ever EXCLUDES an undated candidate, never a dated one.
+_UNDATED_NOVELTY_LOOKBACK_DAYS = 14
+_UNDATED_NOVELTY_EMBEDDING_THRESHOLD = 0.80
+
+#: Local copy of ``eoa.pipeline.story_clustering._LATIN_TOKEN_RE`` (same "a report-layer module
+#: keeps its own copy of a pipeline-layer regex rather than importing a private name across that
+#: module boundary" convention already used throughout this package -- see e.g.
+#: ``_EVENT_KIND_LABELS_HE_FALLBACK``'s own docstring note below) -- a Latin "word" of 2+ chars:
+#: model numbers ("FQ-42"), program/product names ("Vengeance"), acronyms ("USAF", "CCA").
+_DISTINCTIVE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]+")
+
+#: Common English function/connective words the token regex above would otherwise treat as
+#: "distinctive" when comparing two SAME-language titles -- unlike ``story_clustering``'s own
+#: cross-language edge (which only ever compares a Hebrew/Arabic/... title against an English one,
+#: so a generic English word never enters its shared-token set at all -- the surrounding prose
+#: simply isn't in Latin script), this novelty check compares two titles that may both be English,
+#: so it needs its own stopword filter to keep the ">=2 shared distinctive tokens" bar meaningful
+#: (two titles both containing "to"/"the"/"new" is not evidence of being the same story).
+_GENERIC_TITLE_WORDS = frozenset(
+    {
+        "the", "a", "an", "of", "to", "in", "on", "at", "for", "with", "and", "or", "as", "by", "from",
+        "is", "are", "was", "were", "be", "this", "that", "it", "its", "after", "before", "new", "first",
+        "into", "over", "up", "out", "about", "than", "now", "will", "has", "have", "amid", "said",
+    }
+)
+
+
+def _distinctive_title_tokens(title: str | None) -> set[str]:
+    if not title:
+        return set()
+    return {
+        t.casefold() for t in _DISTINCTIVE_TOKEN_RE.findall(title) if t.casefold() not in _GENERIC_TITLE_WORDS
+    }
+
+
+def _title_embedding_cosine(a: list[float] | None, b: list[float] | None) -> float | None:
+    """Local copy of ``eoa.pipeline.story_clustering._cosine`` (see this module's convention note
+    above) -- cosine similarity between two item embeddings, or ``None`` when either is missing,
+    mismatched-length, or zero-norm."""
+    if not a or not b or len(a) != len(b):
+        return None
+    import numpy as np
+
+    va, vb = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    na, nb = float(np.linalg.norm(va)), float(np.linalg.norm(vb))
+    if na == 0.0 or nb == 0.0:
+        return None
+    return float(np.dot(va, vb) / (na * nb))
+
+
+def _undated_novelty_exclusions(
+    undated_candidates: list[dict[str, Any]], prior_pool: list[dict[str, Any]]
+) -> set[int]:
+    """Pure decision function (no DB) -- given ``undated_candidates``/``prior_pool`` (each
+    ``{"id", "title", "embedding"}``-shaped dicts, ``embedding`` possibly ``None``/absent), returns
+    the set of candidate ids that are "clearly the same story" as some earlier item: sharing
+    >=2 :func:`_distinctive_title_tokens`, OR an embedding cosine >=
+    :data:`_UNDATED_NOVELTY_EMBEDDING_THRESHOLD` (see :func:`_title_embedding_cosine`). See
+    :func:`_exclude_undated_repeat_stories` (the DB-backed wrapper) for the full rationale."""
+    excluded: set[int] = set()
+    for cand in undated_candidates:
+        cand_id = cand.get("id")
+        if cand_id is None:
+            continue
+        cand_tokens = _distinctive_title_tokens(cand.get("title"))
+        cand_embedding = cand.get("embedding")
+        for prior in prior_pool:
+            if prior.get("id") == cand_id:
+                continue
+            shared = cand_tokens & _distinctive_title_tokens(prior.get("title"))
+            if len(shared) >= 2:
+                excluded.add(cand_id)
+                break
+            sim = _title_embedding_cosine(cand_embedding, prior.get("embedding"))
+            if sim is not None and sim >= _UNDATED_NOVELTY_EMBEDDING_THRESHOLD:
+                excluded.add(cand_id)
+                break
+    return excluded
+
+
+def _exclude_undated_repeat_stories(
+    rows: list[dict[str, Any]], window_start: dt.datetime
+) -> list[dict[str, Any]]:
+    """Item 1 (SOL-REVIEW3-2026-09-24): drop an undated candidate row (``published_at IS NULL`` --
+    its only date is ``created_at``, i.e. first-seen) whose title/embedding is clearly the same
+    story as an item already created in the :data:`_UNDATED_NOVELTY_LOOKBACK_DAYS` days before
+    this report's own window -- see the module-level constant block above for the motivating FQ-42
+    case. A dated item (``published_at`` not null) is never touched by this function, regardless
+    of what it matches -- this is a narrow belt-and-suspenders check for exactly the case
+    ``story_id`` clustering is weakest at (a short undated snippet), not a general dedup pass. A
+    DB failure degrades to "no exclusion" (same convention as this module's other report-time
+    lookups, e.g. ``_corroboration_payload_map_safe``) rather than breaking report generation."""
+    undated = [
+        {"id": r["id"], "title": r.get("title"), "embedding": None}
+        for r in rows
+        if r.get("published_at") is None and r.get("id") is not None
+    ]
+    if not undated:
+        return rows
+    prior_start = window_start - dt.timedelta(days=_UNDATED_NOVELTY_LOOKBACK_DAYS)
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, title, embedding FROM items WHERE created_at >= %(prior_start)s "
+                "AND created_at < %(window_start)s AND security_status = 'clean' AND dedup_of IS NULL",
+                {"prior_start": prior_start, "window_start": window_start},
+            )
+            prior_pool = cur.fetchall()
+            cur.execute(
+                "SELECT id, embedding FROM items WHERE id = ANY(%(ids)s)",
+                {"ids": [c["id"] for c in undated]},
+            )
+            embedding_by_id = {row["id"]: row.get("embedding") for row in cur.fetchall()}
+    except Exception as exc:
+        log.warning("daily_report_undated_novelty_lookup_failed", error=str(exc)[:160])
+        return rows
+    for cand in undated:
+        cand["embedding"] = embedding_by_id.get(cand["id"])
+
+    excluded_ids = _undated_novelty_exclusions(undated, prior_pool)
+    if not excluded_ids:
+        return rows
+    log.info(
+        "daily_report_undated_repeat_stories_excluded", count=len(excluded_ids), ids=sorted(excluded_ids)
+    )
+    return [r for r in rows if r.get("id") not in excluded_ids]
+
 
 def collect_items(
     period_start: dt.date | None = None,
@@ -150,6 +287,7 @@ def collect_items(
     rows = _query(_LEVELS_PRIMARY)
     if len(rows) < _MIN_ITEMS_BEFORE_FALLBACK:
         rows = _query(_LEVELS_FALLBACK)
+    rows = _exclude_undated_repeat_stories(rows, start)
     for row in rows:
         row.setdefault("key_facts", [])
     for idx, row in enumerate(rows, start=1):
@@ -1112,6 +1250,32 @@ class TableCounts:
         return "; ".join(parts) + "."
 
 
+#: R4-report #3b (SOL-REVIEW3-2026-09-24): deliberately separate from :class:`TableCounts` above --
+#: ``TableCounts.open_tenders``/``new_forecasts`` are the RAW ``collect_tenders`` counts (used only
+#: to steer the LLM's drafting via ``counts_context_he`` -- "don't claim no findings"), never a
+#: number meant to be quoted verbatim; the actual rendered "מכרזים פתוחים"/"תחזיות מכרזים" tables
+#: apply further deterministic filtering (dead-link/duplicate collapse for tenders, likelihood/
+#: weak-basis filtering for forecasts) the raw counts know nothing about.
+def _tenders_forecast_bookkeeping_note_he(
+    open_table: dict[str, Any] | None, forecast_table: dict[str, Any] | None
+) -> str:
+    """A deterministic, uncited bookkeeping sentence reporting the real number of open-tender and
+    forecast ROWS this report renders -- computed from ``open_table``/``forecast_table`` (already
+    built by :func:`eoa.tenders.report_section.tenders_table`/:func:`_tenders_forecast_table`, the
+    exact dicts the reader's tables come from), never from :class:`TableCounts`'s raw pre-filter
+    numbers. ``""`` when neither table has any rows (nothing to report)."""
+    n_open = len((open_table or {}).get("rows") or [])
+    n_forecast = len((forecast_table or {}).get("rows") or [])
+    if not n_open and not n_forecast:
+        return ""
+    parts = []
+    if n_open:
+        parts.append(f"{n_open} מכרזים פתוחים")
+    if n_forecast:
+        parts.append(f"{n_forecast} תחזיות מכרזים חדשות או מעודכנות")
+    return "בנוסף, מוצגים בדוח זה " + " ו-".join(parts) + ", המפורטים בטבלאות בהמשך הדוח."
+
+
 def _tables_only_draft(counts: TableCounts) -> DailyReportDraft:
     """Q3-14: used when ``items`` is empty but at least one table (events/tenders/forecasts/deep
     search) is not -- a short, honest, deterministic summary of what the report *does* contain,
@@ -1837,6 +2001,8 @@ def build_daily(
     # failure here must never break the daily report. (tenders_data itself was already collected
     # above, before drafting, for Q3-14's table counts -- not re-fetched here.)
     tender_tables: list[dict[str, Any]] = []
+    open_table: dict[str, Any] | None = None
+    forecast_table: dict[str, Any] | None = None
     try:
         from eoa.tenders.report_section import tenders_table
 
@@ -1863,6 +2029,25 @@ def build_daily(
             tender_tables.append(forecast_table)
     except Exception as exc:
         log.warning("daily_report_tenders_section_failed", error=str(exc)[:160])
+
+    # R4-report #3b (SOL-REVIEW3-2026-09-24): the tenders/forecasts bookkeeping sentence the LLM
+    # used to be asked to write itself (report_daily.md rule 8) quoted `table_counts` -- the RAW,
+    # pre-filter/pre-dedupe `tenders_data` counts (up to `collect_tenders`'s own `open_limit=15`,
+    # before `tenders_table`'s dead-link filter/`_collapse_duplicate_tenders`, and before
+    # `_tenders_forecast_table`'s likelihood/weak-basis filter) -- and cited it to an unrelated
+    # item, since this number isn't actually "from" any one source. Replaced with a deterministic,
+    # uncited line built from `open_table`/`forecast_table`'s own already-filtered/deduped `rows`
+    # -- the exact counts the reader sees in the tables right below -- injected into
+    # `draft.system_note_he`, the one field the schema itself documents as "never written by the
+    # model, injected in code" (eoa.llm.schemas.analysis.DailyReportDraft.system_note_he), so it
+    # renders through the single shared code path (`docx_builder._draft_system_note_text`) all
+    # three renderers (docx/md/html) already use for this field, uncited, right after the
+    # executive summary.
+    bookkeeping_note_he = _tenders_forecast_bookkeeping_note_he(open_table, forecast_table)
+    if bookkeeping_note_he:
+        draft = draft.model_copy(
+            update={"system_note_he": f"{draft.system_note_he} {bookkeeping_note_he}".strip()}
+        )
 
     # A12 (מעקב טכנולוגי): deterministic (not LLM-drafted) tech_dev items-of-the-day table --
     # same additive-tables mechanism as the tenders section above; extends `citation_items` in
@@ -1905,6 +2090,16 @@ def build_daily(
     # second pass is needed (and safe) on top of `collect_items`'s own early one.
     _append_item_corroboration_markers(citation_items)
     _append_event_corroboration_markers(events_with_n)
+
+    # R4-report #2 (SOL-REVIEW3-2026-09-24): the citation registry (`citation_items`) is extended
+    # with every collected item/tender-forecast/tech-watch/Israel-industry/platform-opportunity row
+    # so the LLM/tables COULD cite any of them -- most drafts only cite a subset, so the appendix
+    # used to list ~30 rows nothing in the rendered report ever points at. One pass, right before
+    # rendering, drops the uncited rows and renumbers 1..N in first-citation order -- see
+    # `docx_builder.renumber_citations_to_cited_only`'s own docstring.
+    draft, citation_items, tender_tables, extra_sections, events_with_n = renumber_citations_to_cited_only(
+        draft, citation_items, tables=tender_tables, extra_sections=extra_sections, events=events_with_n
+    )
 
     docx_path = _report_path(label, "docx")
     md_path = _report_path(label, "md")

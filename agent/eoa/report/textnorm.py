@@ -379,6 +379,73 @@ def canonicalize_hebrew_names_deep(value: Any) -> Any:
     return value
 
 
+# --------------------------------------------------------------------------
+# Item 3a (SOL-REVIEW3-2026-09-24, daily_2026-09-28.md): a section's FIRST sentence sometimes opens
+# with a connective ("מקביל לכך, ...") that reads as continuing the PREVIOUS section's thought --
+# e.g. the executive summary opened "מקביל לכך, ארה\"ב הגדילה..." right after its own heading,
+# referring back to the BLUF (a separate section above it, no longer adjacent once a heading and a
+# paragraph break intervene). A connective mid-section ("...; כמו כן, ...") is a legitimate
+# transition between two sentences the reader has just read together and is untouched -- this only
+# ever strips the very first token(s) of a section's OWN first sentence, never mid-text.
+# --------------------------------------------------------------------------
+
+_LEADING_CONNECTIVES_HE = (
+    "במקביל לכך",
+    "מקביל לכך",
+    "בנוסף לכך",
+    "בנוסף",
+    "כמו כן",
+    "יתרה מכך",
+    "לצד זאת",
+)
+# Longest-first so the alternation tries "בנוסף לכך" before the shorter "בנוסף" at the same spot.
+_LEADING_CONNECTIVE_ALT = "|".join(re.escape(p) for p in sorted(_LEADING_CONNECTIVES_HE, key=len, reverse=True))
+#: ``(?![א-ת])`` blocks a false match where the phrase is itself a prefix of a longer word --
+#: Hebrew has no reliable ``\b``-equivalent boundary across presentation-form variants.
+_LEADING_CONNECTIVE_RE = re.compile(rf"^\s*(?:{_LEADING_CONNECTIVE_ALT})(?![א-ת])(?:\s*,)?\s*")
+
+
+def strip_leading_connective(text: str | None) -> str | None:
+    """Strip one leading connective phrase (+ optional comma) from the very start of ``text`` --
+    e.g. ``'מקביל לכך, ארה״ב הגדילה...'`` -> ``'ארה״ב הגדילה...'``. Only ever touches the start of
+    the string -- call this once per section, on that section's first sentence only (never on
+    every sentence in it, and never on a later section's own first sentence independently more
+    than once). Capitalisation is irrelevant in Hebrew, so no case-folding is needed. ``None``/
+    empty input, or text that doesn't open with one of :data:`_LEADING_CONNECTIVES_HE`, is
+    returned unchanged."""
+    if not text:
+        return text
+    stripped = _LEADING_CONNECTIVE_RE.sub("", text, count=1)
+    return stripped if stripped else text
+
+
+def _strip_leading_connective_from_first_sentence(sentences: list[Any]) -> list[Any]:
+    """Apply :func:`strip_leading_connective` to ``sentences[0].text_he`` only -- a pydantic
+    ``Sentence``-shaped object (``model_copy``, no validator re-run). Every other sentence in the
+    list is returned unchanged, exactly as given."""
+    if not sentences:
+        return sentences
+    first = sentences[0]
+    text = getattr(first, "text_he", None)
+    if not isinstance(text, str) or not text:
+        return sentences
+    new_text = strip_leading_connective(text)
+    if new_text == text:
+        return sentences
+    return [first.model_copy(update={"text_he": new_text}), *sentences[1:]]
+
+
+def _strip_leading_connective_from_first_str(strings: list[str]) -> list[str]:
+    """Same as :func:`_strip_leading_connective_from_first_sentence` for a plain ``list[str]``
+    (``analyst_note_he.sentences_he``, which carries no ``cites``/no ``Sentence`` wrapper)."""
+    if not strings:
+        return strings
+    new_first = strip_leading_connective(strings[0])
+    if new_first == strings[0]:
+        return strings
+    return [new_first, *strings[1:]]
+
+
 def normalize_report_text(text: str | None) -> str | None:
     """The one function report renderers should call on free Hebrew prose: punctuation
     normalisation (:func:`normalize_hebrew_punctuation`) followed by company-name canonicalisation
@@ -439,12 +506,19 @@ def normalize_draft(draft: _M) -> _M:
     # through this function's exec_summary/sections handling) reached the page unnormalized.
     bluf = getattr(draft, "bluf", None)
     if isinstance(bluf, list) and bluf:
-        updates["bluf"] = [_normalize_str_fields(s, ("text_he",)) for s in bluf]
+        updates["bluf"] = _strip_leading_connective_from_first_sentence(
+            [_normalize_str_fields(s, ("text_he",)) for s in bluf]
+        )
 
-    # exec_summary: list[Sentence] (structured: daily/weekly)
+    # exec_summary: list[Sentence] (structured: daily/weekly). Item 3a: the exec summary's own
+    # first sentence is the most common place a dangling connective referring back to the BLUF
+    # shows up (they're rendered as two separate sections/headings) -- stripped here, once, never
+    # touching any later sentence in the list.
     exec_summary = getattr(draft, "exec_summary", None)
     if isinstance(exec_summary, list) and exec_summary:
-        updates["exec_summary"] = [_normalize_str_fields(s, ("text_he",)) for s in exec_summary]
+        updates["exec_summary"] = _strip_leading_connective_from_first_sentence(
+            [_normalize_str_fields(s, ("text_he",)) for s in exec_summary]
+        )
 
     # exec_summary_he: str (legacy: monthly/bd_territory)
     if hasattr(draft, "exec_summary_he"):
@@ -465,7 +539,12 @@ def normalize_draft(draft: _M) -> _M:
             if hasattr(section, "title_he"):
                 sec_updates["title_he"] = normalize_report_text(section.title_he) or ""
             if hasattr(section, "sentences"):
-                sec_updates["sentences"] = [_normalize_str_fields(s, ("text_he",)) for s in section.sentences]
+                # Item 3a: each domain section is its own heading/paragraph -- its own first
+                # sentence gets the same leading-connective strip as bluf/exec_summary above,
+                # independently per section.
+                sec_updates["sentences"] = _strip_leading_connective_from_first_sentence(
+                    [_normalize_str_fields(s, ("text_he",)) for s in section.sentences]
+                )
             if hasattr(section, "prose_he"):
                 sec_updates["prose_he"] = normalize_report_text(section.prose_he) or ""
             new_sections.append(section.model_copy(update=sec_updates) if sec_updates else section)
@@ -494,11 +573,17 @@ def normalize_draft(draft: _M) -> _M:
     if hasattr(draft, "system_note_he"):
         updates["system_note_he"] = normalize_report_text(draft.system_note_he) or ""
 
-    # analyst_note_he: AnalystNote | None
+    # analyst_note_he: AnalystNote | None. Item 3a: same first-sentence connective strip -- the
+    # note is its own paragraph, rendered right after (and visually separate from) whatever came
+    # before it.
     note = getattr(draft, "analyst_note_he", None)
     if note is not None and hasattr(note, "sentences_he"):
         updates["analyst_note_he"] = note.model_copy(
-            update={"sentences_he": [normalize_report_text(s) or "" for s in note.sentences_he]}
+            update={
+                "sentences_he": _strip_leading_connective_from_first_str(
+                    [normalize_report_text(s) or "" for s in note.sentences_he]
+                )
+            }
         )
 
     # outlook: list[OutlookIndicator] (structured)

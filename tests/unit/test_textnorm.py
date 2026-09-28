@@ -9,13 +9,20 @@ from pathlib import Path
 
 import pytest
 
-from eoa.llm.schemas.analysis import AssumptionFalsifier, DailyReportDraft, Sentence, StructuredSection
+from eoa.llm.schemas.analysis import (
+    AnalystNote,
+    AssumptionFalsifier,
+    DailyReportDraft,
+    Sentence,
+    StructuredSection,
+)
 from eoa.report import docx_builder as db
 from eoa.report.textnorm import (
     canonicalize_hebrew_names,
     canonicalize_hebrew_names_deep,
     normalize_draft,
     normalize_report_text,
+    strip_leading_connective,
 )
 
 # --------------------------------------------------------------------------
@@ -282,3 +289,98 @@ def test_no_rafael_misspelling_in_rendered_report_files():
             if "ראפאל" in text:
                 offenders.append(str(path))
     assert offenders == []
+
+
+# --------------------------------------------------------------------------
+# Item 3a (SOL-REVIEW3-2026-09-24, daily_2026-09-28.md): strip a leading connective from a
+# section's own first sentence only -- e.g. the exec summary opening "מקביל לכך, ..." right after
+# the BLUF, a separate section.
+# --------------------------------------------------------------------------
+
+
+def test_strip_leading_connective_removes_phrase_and_comma():
+    assert (
+        strip_leading_connective("מקביל לכך, ארה״ב הגדילה את תקרת התקציב.")
+        == "ארה״ב הגדילה את תקרת התקציב."
+    )
+
+
+def test_strip_leading_connective_without_comma():
+    assert strip_leading_connective("כמו כן חיל האוויר קיבל כלי טיס חדש.") == "חיל האוויר קיבל כלי טיס חדש."
+
+
+def test_strip_leading_connective_longer_phrase_wins_over_shorter_prefix():
+    # "בנוסף לכך" must be matched whole, not just its "בנוסף" prefix leaving a dangling "לכך".
+    assert strip_leading_connective("בנוסף לכך, נחתם הסכם חדש.") == "נחתם הסכם חדש."
+
+
+def test_strip_leading_connective_never_touches_mid_text():
+    text = "החברה זכתה בחוזה. כמו כן, היא פתחה קו ייצור חדש."
+    assert strip_leading_connective(text) == text
+
+
+def test_strip_leading_connective_no_match_returns_unchanged():
+    text = "אלביט מערכות זכתה בחוזה של 80 מיליון דולר."
+    assert strip_leading_connective(text) == text
+
+
+def test_strip_leading_connective_none_and_empty():
+    assert strip_leading_connective(None) is None
+    assert strip_leading_connective("") == ""
+
+
+def test_strip_leading_connective_does_not_cut_a_longer_word_with_the_phrase_as_prefix():
+    # "בנוספים" is not the connective "בנוסף" -- must not match (no trailing boundary).
+    text = "בנוספים לרשימה שני פריטים."
+    assert strip_leading_connective(text) == text
+
+
+def test_normalize_draft_strips_dangling_connective_from_exec_summary_first_sentence_only():
+    """The exact motivating shape: BLUF is a separate section; the exec summary's own first
+    sentence must never open referring back to it with a dangling connective. A connective on the
+    SECOND exec-summary sentence (legitimate mid-section transition) must be left untouched."""
+    draft = DailyReportDraft(
+        bluf=[Sentence(text_he="🟡 חיל האוויר קיבל כלי טיס חדש.", cites=[1])],
+        exec_summary=[
+            Sentence(text_he="מקביל לכך, ארה״ב הגדילה את תקרת התקציב.", cites=[2]),
+            Sentence(text_he="כמו כן, שני הצעדים משקפים השקעה מקבילה.", cites=[1, 2]),
+        ],
+        sections=[],
+        outlook=[],
+        open_points_he=[],
+    )
+    fixed = normalize_draft(draft)
+    assert fixed.exec_summary[0].text_he == "ארה״ב הגדילה את תקרת התקציב."
+    assert fixed.exec_summary[0].cites == [2]  # citation untouched, only text changed
+    # second sentence's own leading "כמו כן" is mid-section (not the section's first sentence) --
+    # left exactly as written.
+    assert fixed.exec_summary[1].text_he == "כמו כן, שני הצעדים משקפים השקעה מקבילה."
+
+
+def test_normalize_draft_strips_dangling_connective_per_section_independently():
+    draft = DailyReportDraft(
+        exec_summary=[Sentence(text_he="תקציר רגיל.", cites=[1])],
+        sections=[
+            StructuredSection(
+                title_he="סעיף א",
+                domain="airborne_pods",
+                sentences=[Sentence(text_he="בנוסף, נחתם הסכם חדש.", cites=[1])],
+            ),
+        ],
+        outlook=[],
+        open_points_he=[],
+    )
+    fixed = normalize_draft(draft)
+    assert fixed.sections[0].sentences[0].text_he == "נחתם הסכם חדש."
+
+
+def test_normalize_draft_strips_dangling_connective_from_analyst_note():
+    draft = DailyReportDraft(
+        exec_summary=[Sentence(text_he="תקציר.", cites=[1])],
+        sections=[],
+        outlook=[],
+        open_points_he=[],
+        analyst_note_he=AnalystNote(sentences_he=["יתרה מכך, מדובר במגמה רחבה."]),
+    )
+    fixed = normalize_draft(draft)
+    assert fixed.analyst_note_he.sentences_he[0] == "מדובר במגמה רחבה."

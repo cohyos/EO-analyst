@@ -1264,6 +1264,212 @@ def _add_events_table(doc: DocxDocument, events: list[dict]) -> None:
             )
 
 
+# --------------------------------------------------------------------------
+# R4-report #2 (SOL-REVIEW3-2026-09-24): "נספח מקורות" must list only sources actually cited
+# somewhere in the rendered report -- a citation-registry entry that no Sentence/table/extra
+# section ever references (e.g. an analyzed item the LLM chose not to write about) used to be
+# appended anyway, so the appendix routinely carried ~30 rows ([4]-[6], [8]-[17], ...) with no
+# [n] marker pointing at them anywhere in the body. This is the ONE pre-render pass every renderer
+# (docx/md/html) shares -- called once by the report builder (``eoa.report.daily.build_daily``)
+# right before ``draft``/``citation_items``/``tables``/``extra_sections`` are handed to
+# :func:`build_docx`/:func:`render_markdown`/:func:`render_html`, never inside any of the three.
+# --------------------------------------------------------------------------
+
+
+def _collect_cited_ns(
+    draft: Any,
+    tables: list[dict[str, Any]] | None,
+    extra_sections: list[dict[str, Any]] | None,
+    events: list[dict[str, Any]] | None = None,
+) -> list[int]:
+    """The de-duplicated sequence of every citation-registry ``n`` referenced anywhere in the
+    assembled report, in first-appearance order (BLUF -> exec summary -> sections -> outlook ->
+    assumptions -> events -> tables -> extra sections) -- the same top-to-bottom order
+    :func:`_planned_headings` renders these blocks in, so "first-citation order" matches what a
+    reader actually encounters first.
+
+    Structured ``Sentence``/``OutlookIndicator``/``AssumptionFalsifier`` fields are read directly
+    off their own ``cites`` list (precise -- no text-scanning, no risk of a stray "[n]"-shaped
+    substring in free LLM prose being mistaken for a citation). Each event's own ``n`` (set by
+    ``eoa.report.daily._extend_citation_registry`` -- rendered as a real ``[n]`` citation run in
+    the events table's "source" column via :func:`add_citation_run`, never as literal "[n]" text)
+    is likewise read directly off its own field. ``tables``/``extra_sections`` are already-
+    rendered plain text/cells by this point in the pipeline, scanned with the same "[n]" pattern
+    (:data:`_ROW_CITE_RE`) :func:`_row_identity` already treats as a citation marker for
+    cross-table dedup -- the one place literal "[n]" text genuinely exists before final render."""
+    order: list[int] = []
+    seen: set[int] = set()
+
+    def _add(n: int | None) -> None:
+        if n is not None and n not in seen:
+            seen.add(n)
+            order.append(n)
+
+    def _add_sentences(sentences: Any) -> None:
+        for s in sentences or []:
+            for n in getattr(s, "cites", None) or []:
+                _add(n)
+
+    def _add_text(text: str | None) -> None:
+        for m in _ROW_CITE_RE.finditer(text or ""):
+            _add(int(m.group(1)))
+
+    _add_sentences(getattr(draft, "bluf", None))
+    _add_sentences(getattr(draft, "exec_summary", None))
+    for section in getattr(draft, "sections", None) or []:
+        _add_sentences(getattr(section, "sentences", None))
+    _add_sentences(getattr(draft, "outlook", None))
+    for assumption in getattr(draft, "assumptions", None) or []:
+        for n in getattr(assumption, "cites", None) or []:
+            _add(n)
+    for ev in events or []:
+        _add(ev.get("n"))
+    for table in tables or []:
+        for row in table.get("rows") or []:
+            for cell in _row_cells(row):
+                _add_text(str(cell) if cell is not None else None)
+    for section in extra_sections or []:
+        _add_text(section.get("body_he"))
+    return order
+
+
+def _renumber_citation_registry(
+    items: list[dict[str, Any]], cited_order: list[int]
+) -> tuple[list[dict[str, Any]], dict[int, int]]:
+    """Drop every ``items`` entry whose ``n`` is not in ``cited_order`` (never actually cited),
+    and renumber the survivors 1..N following ``cited_order`` (already first-citation order, see
+    :func:`_collect_cited_ns`). Returns the trimmed/renumbered registry plus the ``old_n -> new_n``
+    mapping every ``[n]`` reference elsewhere in the report must be rewritten through."""
+    mapping = {old_n: new_n for new_n, old_n in enumerate(cited_order, start=1)}
+    by_n = {it.get("n"): it for it in items if it.get("n") is not None}
+    new_items: list[dict[str, Any]] = []
+    for old_n in cited_order:
+        it = by_n.get(old_n)
+        if it is None:
+            continue  # cited but not itself a registry row (should not happen; defensive)
+        new_it = dict(it)
+        new_it["n"] = mapping[old_n]
+        new_items.append(new_it)
+    return new_items, mapping
+
+
+def _rewrite_citation_text(text: str | None, mapping: dict[int, int]) -> str | None:
+    """Rewrite every "[n]" marker in ``text`` through ``mapping``; a marker whose ``n`` isn't in
+    ``mapping`` (not part of the citation registry -- e.g. a bracketed year in free investigation
+    prose) is left untouched rather than silently dropped."""
+    if not text:
+        return text
+    return _ROW_CITE_RE.sub(
+        lambda m: f"[{mapping[int(m.group(1))]}]" if int(m.group(1)) in mapping else m.group(0), text
+    )
+
+
+def renumber_citations_to_cited_only(
+    draft: Any,
+    citation_items: list[dict[str, Any]],
+    *,
+    tables: list[dict[str, Any]] | None = None,
+    extra_sections: list[dict[str, Any]] | None = None,
+    events: list[dict[str, Any]] | None = None,
+) -> tuple[
+    Any,
+    list[dict[str, Any]],
+    list[dict[str, Any]] | None,
+    list[dict[str, Any]] | None,
+    list[dict[str, Any]] | None,
+]:
+    """R4-report #2: drop every uncited citation-registry entry and renumber the rest 1..N in
+    first-citation order, rewriting every "[n]" reference (``Sentence``/``OutlookIndicator``/
+    ``AssumptionFalsifier`` ``cites`` lists, each event's own ``n``, table cells, extra-section
+    ``body_he`` text) through the same mapping -- so the numbers a reader sees inline always match
+    the appendix's own 1..N listing exactly, with no gaps and no unreferenced rows. Call this
+    ONCE, after every section/table/extra-section of the report is fully assembled, right before
+    handing ``draft``/``citation_items``/``tables``/``extra_sections``/``events`` to
+    :func:`build_docx`/:func:`render_markdown`/:func:`render_html`.
+
+    Returns ``(draft, citation_items, tables, extra_sections, events)`` -- ``tables``/
+    ``extra_sections``/``events`` are returned unchanged (same object) when ``None``/empty, so
+    callers can pass the result straight back into their own variables unconditionally."""
+    cited_order = _collect_cited_ns(draft, tables, extra_sections, events)
+    if not cited_order:
+        # Nothing cited anywhere (e.g. every draft field empty) -- an empty appendix is correct;
+        # never fall back to "show everything" (that's exactly the bug this function fixes).
+        return draft, [], tables, extra_sections, events
+    new_items, mapping = _renumber_citation_registry(citation_items, cited_order)
+    if all(old == new for old, new in mapping.items()) and len(new_items) == len(citation_items):
+        # Every registry row was already cited and already numbered 1..N contiguously -- nothing
+        # to rewrite.
+        return draft, new_items, tables, extra_sections, events
+
+    def _remap_sentence(s: Any) -> Any:
+        cites = getattr(s, "cites", None)
+        if not cites:
+            return s
+        return s.model_copy(update={"cites": [mapping[n] for n in cites if n in mapping]})
+
+    updates: dict[str, Any] = {}
+    if getattr(draft, "bluf", None):
+        updates["bluf"] = [_remap_sentence(s) for s in draft.bluf]
+    if getattr(draft, "exec_summary", None):
+        updates["exec_summary"] = [_remap_sentence(s) for s in draft.exec_summary]
+    if getattr(draft, "sections", None):
+        updates["sections"] = [
+            section.model_copy(update={"sentences": [_remap_sentence(s) for s in section.sentences]})
+            if getattr(section, "sentences", None)
+            else section
+            for section in draft.sections
+        ]
+    if getattr(draft, "outlook", None):
+        updates["outlook"] = [_remap_sentence(s) for s in draft.outlook]
+    if getattr(draft, "assumptions", None):
+        updates["assumptions"] = [
+            assumption.model_copy(
+                update={"cites": [mapping[n] for n in (assumption.cites or []) if n in mapping]}
+            )
+            for assumption in draft.assumptions
+        ]
+    new_draft = draft.model_copy(update=updates) if updates else draft
+
+    new_tables = tables
+    if tables:
+        new_tables = []
+        for table in tables:
+            rows = table.get("rows")
+            if not rows:
+                new_tables.append(table)
+                continue
+            new_rows = []
+            for row in rows:
+                if isinstance(row, dict):
+                    new_cells = [
+                        _rewrite_citation_text(c, mapping) if isinstance(c, str) else c
+                        for c in row.get("cells") or []
+                    ]
+                    new_rows.append({**row, "cells": new_cells})
+                elif isinstance(row, list):
+                    new_rows.append(
+                        [_rewrite_citation_text(c, mapping) if isinstance(c, str) else c for c in row]
+                    )
+                else:
+                    new_rows.append(row)
+            new_tables.append({**table, "rows": new_rows})
+
+    new_extra_sections = extra_sections
+    if extra_sections:
+        new_extra_sections = [
+            {**section, "body_he": _rewrite_citation_text(section.get("body_he"), mapping)}
+            for section in extra_sections
+        ]
+
+    new_events = events
+    if events:
+        new_events = [
+            {**ev, "n": mapping.get(ev["n"], ev["n"])} if ev.get("n") is not None else ev for ev in events
+        ]
+
+    return new_draft, new_items, new_tables, new_extra_sections, new_events
+
+
 def _add_sources_appendix(doc: DocxDocument, items: list[dict]) -> None:
     headers = ["#", "כותרת", "מקור", "אמינות", "תאריך", "קישור"]
     table = doc.add_table(rows=1, cols=len(headers))
