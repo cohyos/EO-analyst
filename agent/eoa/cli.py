@@ -60,8 +60,10 @@ def run(
     territory: str = typer.Option(
         None, help="scope=bd only: ISO-2 country code or region code (US, IL, EU, ...)"
     ),
-    lookback_days: int = typer.Option(
-        90, "--lookback-days", help="scope=bd: lookback window in days; scope=report --kind tech_daily: days back (default 1)"
+    # 2026-09-28: one shared option used to default to 90 for BOTH scopes, so
+    # `eo run report --kind tech_daily` silently built a 90-day opening review instead of a daily.
+    lookback_days: int | None = typer.Option(
+        None, "--lookback-days", help="scope=bd: lookback window in days (default 90); scope=report --kind tech_daily: days back (default 1)"
     ),
     topic: str = typer.Option(None, help="scope=patents only: scan just this one ad-hoc topic"),
     since_days: int = typer.Option(
@@ -117,7 +119,7 @@ def run(
         if kind == "tech_daily":
             from eoa.report.tech_daily import build_tech_daily
 
-            rprint(build_tech_daily(force=True, lookback_days=lookback_days))
+            rprint(build_tech_daily(force=True, lookback_days=lookback_days or 1))
         elif kind == "daily":
             from eoa.report.daily import build_daily
 
@@ -129,7 +131,7 @@ def run(
 
         if not territory:
             raise typer.BadParameter("scope=bd requires --territory (e.g. --territory US)")
-        paths = build_bd_territory(territory, lookback_days)
+        paths = build_bd_territory(territory, lookback_days or 90)
         rprint(
             json.dumps(
                 {
