@@ -418,7 +418,14 @@ def render_delta_section_he(result: DeltaResult, *, narrative_cites: set[int] | 
 
     item_delta = result.item_delta
     if item_delta.new_count:
-        lines.append(f"פריטים חדשים מאז הדוח הקודם: {item_delta.new_count}.")
+        # R-delta-redundancy item 6 (2026-09-28, daily_2026-09-28.md): ``result.summary_he`` above
+        # already states the new-item count once (e.g. "...: 3 פריטים חדשים"). This block used to
+        # restate the exact same count a second time ("פריטים חדשים מאז הדוח הקודם: N.") and then,
+        # when every one of those items was already covered by the BLUF/exec-summary narrative, a
+        # THIRD time ("(עוד N פריטים חדשים כבר מוזכרים...)") -- the same number printed three times
+        # for zero new information. The standalone count line is dropped; when there is nothing left
+        # to list (every new item already covered), a single clear sentence says so once instead.
+        bullets: list[str] = []
         covered = 0
         for it in item_delta.new_top_items:
             n = it.get("n")
@@ -426,9 +433,13 @@ def render_delta_section_he(result: DeltaResult, *, narrative_cites: set[int] | 
                 covered += 1
                 continue
             marker = f" [{n}]" if n is not None else ""
-            lines.append(f"- {it.get('title') or '—'}{marker}")
-        if covered:
-            lines.append(f"(עוד {covered} פריטים חדשים כבר מוזכרים בתקציר המנהלים/שורה תחתונה.)")
+            bullets.append(f"- {it.get('title') or '—'}{marker}")
+        if not bullets:
+            lines.append("כל הפריטים החדשים כבר מוזכרים בתקציר המנהלים/שורה תחתונה.")
+        else:
+            lines.extend(bullets)
+            if covered:
+                lines.append(f"(עוד {covered} פריטים חדשים כבר מוזכרים בתקציר המנהלים/שורה תחתונה.)")
     else:
         lines.append("לא זוהו פריטים חדשים מאז הדוח הקודם.")
 

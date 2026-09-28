@@ -202,18 +202,40 @@ def _item_ids_from_forecast_sources(sources: list[str] | None) -> list[int]:
     return ids
 
 
+#: R-appendix-cap (2026-09-28, item 3, daily_2026-09-28.md): the source appendix grew to ~92 rows
+#: (mostly weeks old), a large share cited only by a forecast-table row that itself cited up to
+#: ~19 sources for one line. Capped here to the N most recently-published trigger items per
+#: forecast, so the appendix only grows by what the rendered table actually needs to show.
+_MAX_CITATIONS_PER_FORECAST = 3
+
+
+def _published_at_sort_key(row: dict[str, Any] | None) -> Any:
+    """A missing ``published_at`` sorts as oldest (least recent) -- same "no date, treat as least
+    relevant" convention as this module's/``eoa.report.platform_opportunities``'s own
+    ``ORDER BY ... published_at DESC NULLS LAST`` queries."""
+    value = (row or {}).get("published_at")
+    return value or dt.datetime.min.replace(tzinfo=dt.UTC)
+
+
 def attach_forecast_citations(
     citation_items: list[dict[str, Any]], forecasts: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """W6: register every forecast's trigger items into ``citation_items`` (mutated in place --
+    """W6: register each forecast's trigger items into ``citation_items`` (mutated in place --
     same numbering-extension convention as ``eoa.report.tech_watch._extend_registry``), fetching
     from the DB only the ids not already numbered. Stamps each forecast dict with
     ``"_citation_ns"`` -- the list of registry numbers a renderer should cite for that row.
     Never raises; a DB failure degrades every forecast's ``_citation_ns`` to ``[]`` rather than
-    breaking the report."""
+    breaking the report.
+
+    R-appendix-cap item 3: a forecast only ever cites its own :data:`_MAX_CITATIONS_PER_FORECAST`
+    most recently-published trigger items (by ``published_at``, missing sorts oldest) -- an id
+    excluded here for every forecast that named it never consumes a registry slot at all, which is
+    what actually shrinks the appendix; an id kept by at least one forecast is registered once, as
+    before, and reused (same ``by_id`` number) by any other forecast that also names it."""
     all_ids = sorted({iid for f in forecasts for iid in _item_ids_from_forecast_sources(f.get("sources"))})
     by_id = {it["id"]: it for it in citation_items if it.get("id") is not None}
     missing = [iid for iid in all_ids if iid not in by_id]
+    fetched_by_id: dict[int, dict[str, Any]] = {}
     if missing:
         try:
             fetched_rows = _fetchall(
@@ -227,20 +249,39 @@ def attach_forecast_citations(
         except Exception:
             fetched_rows = []
         fetched_by_id = {r["id"]: r for r in fetched_rows}
-        next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
-        for iid in missing:
-            row = fetched_by_id.get(iid)
-            if row is None:
-                continue
-            entry = dict(row)
-            entry["n"] = next_n
-            citation_items.append(entry)
-            by_id[iid] = entry
-            next_n += 1
+
+    # Rank each forecast's OWN trigger items by recency and keep only the top N -- BEFORE any of
+    # them are registered into citation_items, so an id no forecast keeps never burns a registry
+    # number.
+    kept_ids: set[int] = set()
     for f in forecasts:
         ids = _item_ids_from_forecast_sources(f.get("sources"))
+        candidates = [iid for iid in ids if iid in by_id or iid in fetched_by_id]
+        candidates.sort(
+            key=lambda iid: _published_at_sort_key(by_id.get(iid) or fetched_by_id.get(iid)), reverse=True
+        )
+        kept_ids.update(candidates[:_MAX_CITATIONS_PER_FORECAST])
+
+    next_n = (max((it.get("n") or 0) for it in citation_items) + 1) if citation_items else 1
+    for iid in sorted(kept_ids):
+        if iid in by_id:
+            continue
+        row = fetched_by_id.get(iid)
+        if row is None:
+            continue
+        entry = dict(row)
+        entry["n"] = next_n
+        citation_items.append(entry)
+        by_id[iid] = entry
+        next_n += 1
+
+    for f in forecasts:
+        ids = _item_ids_from_forecast_sources(f.get("sources"))
+        candidates = [iid for iid in ids if iid in by_id]
+        candidates.sort(key=lambda iid: _published_at_sort_key(by_id.get(iid)), reverse=True)
+        capped = candidates[:_MAX_CITATIONS_PER_FORECAST]
         f["_citation_ns"] = sorted(
-            {by_id[i]["n"] for i in ids if i in by_id and by_id[i].get("n") is not None}
+            {by_id[i]["n"] for i in capped if by_id[i].get("n") is not None}
         )
     return citation_items
 
@@ -377,6 +418,46 @@ def _tender_status_label(t: dict[str, Any], link_result: LinkCheckResult | None)
     return base
 
 
+def _tender_dedupe_key(t: dict[str, Any]) -> tuple[str, str, str]:
+    """R-tender-dedupe (2026-09-28, item 4, daily_2026-09-28.md): normalised (title, agency,
+    deadline) -- the same underlying notice reposted under several distinct SAM.gov ids (amendments/
+    set-asides) shares all three, even though it has a different ``url``/``id`` per row."""
+    return (
+        " ".join(str(t.get("title") or "").split()).casefold(),
+        " ".join(str(t.get("agency") or "").split()).casefold(),
+        _fmt_date(t.get("deadline")),
+    )
+
+
+def _collapse_duplicate_tenders(
+    filtered: list[tuple[dict[str, Any], LinkCheckResult | None]],
+) -> list[tuple[dict[str, Any], LinkCheckResult | None]]:
+    """R-tender-dedupe item 4: collapses rows sharing :func:`_tender_dedupe_key` into a single row
+    -- the reported bug: the same "Night Vision Devices for Foreign Military Sales (FMS)" notice
+    (same buyer, same deadline) appeared 5 times, once per SAM.gov notice id. Keeps the FIRST
+    member encountered (``filtered`` is already ordered deadline-asc/relevance-desc/id-desc by
+    ``collect_tenders``'s own SQL, so "first" is also the board's own natural ranking) and its own
+    link, annotating the title with a "(×N)" count when N > 1 -- never silently dropping the other
+    N-1 notices' existence, just not giving each its own row."""
+    groups: dict[tuple[str, str, str], list[tuple[dict[str, Any], LinkCheckResult | None]]] = {}
+    order: list[tuple[str, str, str]] = []
+    for entry in filtered:
+        key = _tender_dedupe_key(entry[0])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(entry)
+    collapsed: list[tuple[dict[str, Any], LinkCheckResult | None]] = []
+    for key in order:
+        members = groups[key]
+        first_t, first_result = members[0]
+        if len(members) > 1:
+            first_t = dict(first_t)
+            first_t["title"] = f"{first_t.get('title') or '—'} (×{len(members)})"
+        collapsed.append((first_t, first_result))
+    return collapsed
+
+
 def tenders_table(
     data: dict[str, Any], *, link_cache: dict[str, LinkCheckResult] | None = None
 ) -> dict[str, Any] | None:
@@ -402,6 +483,8 @@ def tenders_table(
         filtered.append((t, result))
     if not filtered:
         return None  # every row was a confirmed-dead link -- nothing left to show
+    # R-tender-dedupe item 4: collapse same-notice-under-several-ids duplicates before rendering.
+    filtered = _collapse_duplicate_tenders(filtered)
     headers = ["כותרת", "מדינה", "גורם מזמין", "דדליין", "סטטוס", "קישור"]
     rows = [
         [

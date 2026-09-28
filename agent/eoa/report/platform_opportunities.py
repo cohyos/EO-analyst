@@ -22,13 +22,19 @@ import structlog
 
 from eoa.db import connection
 from eoa.pipeline.opportunity_signals import TAG
-from eoa.product_lines.registry import get_product_line
+from eoa.product_lines.registry import ProductLineDef, get_product_line, product_line_defs
+from eoa.product_lines.tagging import tag_product_lines
 from eoa.report.claims_gate import soften_text
 
 log = structlog.get_logger(__name__)
 
 SECTION_TITLE_HE = "הזדמנויות אינטגרציה בפלטפורמות"
 DAILY_MAX_ITEMS = 10
+
+#: R-platform-mapping (2026-09-28, daily_2026-09-28.md item 1): shown when a platform item's own
+#: ``product_lines`` column has NO line with actual textual evidence -- see
+#: :func:`_product_line_names_he`'s docstring for why that column alone is no longer trusted here.
+NO_PRODUCT_LINE_TEXT_HE = "פלטפורמה — ללא קו מוצר מזוהה"
 
 
 def _fetchall(sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -95,14 +101,75 @@ def _extend_registry(
     return citation_items
 
 
-def _product_line_names_he(line_ids: list[str] | None) -> str:
+def _distinctive_opportunity_signal_hit(pl: ProductLineDef, text: str) -> bool:
+    """R-platform-mapping item 1: a line's own ``opportunity_signals`` term counts as per-line
+    evidence only when it is NOT duplicated verbatim (case-insensitive) in any OTHER configured
+    line's own ``opportunity_signals`` list. ``config/product_lines.yaml``'s airborne-pod lines
+    (``targeting_pods``/``mws_eo``/``lorop_pods``/``ball_gimbals_16in``) deliberately share an
+    identical generic tail ("pylon"/"hardpoint"/"payload bay"/"CCA"/"NGAD"/"GCAP"/"KF-21"/...) --
+    see ``eoa.pipeline.opportunity_signals``'s own module docstring: it exists purely to gate an
+    item INTO the platform-opportunity table at all (a floor-level BD signal), even with zero real
+    pod/sensor detail, not to say which SPECIFIC product line actually fits. Treating a shared term
+    as decisive per-line evidence reproduces exactly the reported bug (an "NGAD engine prototypes"
+    item -- about a jet ENGINE, no pod/sensor content at all -- was shown as compatible with
+    targeting pods, MWS, LOROP pods and 16" gimbals alike, since all four lines list "NGAD" as a
+    floor-level opportunity_signals entry). A term genuinely distinctive to one line (e.g.
+    "gimbal", "missile warning", "reconnaissance pod") still counts."""
+    if not pl.opportunity_signals or not text:
+        return False
+    shared_lower = {
+        t.lower() for other in product_line_defs() if other.id != pl.id for t in other.opportunity_signals
+    }
+    lowered = text.lower()
+    for term in pl.opportunity_signals:
+        if not term or term.lower() in shared_lower:
+            continue
+        if term.lower() in lowered:
+            return True
+    return False
+
+
+def _product_line_names_he(it: dict[str, Any]) -> str:
+    """R-platform-mapping (2026-09-28, daily_2026-09-28.md item 1): the "קו מוצר תואם" column used
+    to list every id in the item's own ``product_lines`` DB column unconditionally -- that column is
+    tagged at analyze time by ``eoa.product_lines.tagging.tag_product_lines``, which also matches on
+    a bare ``subdomain`` hit (e.g. "airborne_pods.*"), so ANY airborne platform item ends up tagged
+    with every airborne product line regardless of whether that specific line's product is actually
+    named in the item's own text (the live bug: an NGAD engine-contract item showing "compatible"
+    with targeting pods/MWS/LOROP pods/16" gimbals alike). This now re-checks each already-tagged
+    line against the item's own extracted text (title + so_what_he/summary_he -- never the full
+    article body, same "check the story's own text, not the whole corpus" scoping
+    ``eoa.report.bd_territory.collect_platform_events`` already applies for the identical reason)
+    for real keyword/alias/exemplar-system evidence (:func:`tag_product_lines` called with
+    ``subdomain=None`` so the over-broad subdomain-alone match can never carry a line on its own) or
+    a distinctive (non-shared) ``opportunity_signals`` hit (:func:`_distinctive_opportunity_signal_hit`).
+    A line with no such evidence is dropped from the cell; if none of the item's tagged lines have
+    any, the cell shows :data:`NO_PRODUCT_LINE_TEXT_HE` instead of a wrong "every line fits" claim.
+    An id not found in the product-line registry is always kept (raw id) -- there is no config to
+    check evidence against, so it is never silently dropped."""
+    line_ids = it.get("product_lines") or []
     if not line_ids:
-        return "—"
-    names = []
+        return NO_PRODUCT_LINE_TEXT_HE
+    text_he = " ".join(filter(None, [it.get("so_what_he"), it.get("summary_he")]))
+    title = it.get("title") or ""
+    keyword_evidenced = set(
+        tag_product_lines(
+            text_he=text_he,
+            text_en=title,
+            entities=it.get("entities_mentioned"),
+            subdomain=None,  # deliberately excluded -- see docstring above.
+        )
+    )
+    combined_text = f"{text_he} {title}"
+    names: list[str] = []
     for line_id in line_ids:
         pl = get_product_line(line_id)
-        names.append(pl.name_he if pl is not None else line_id)
-    return ", ".join(names) or "—"
+        if pl is None:
+            names.append(line_id)
+            continue
+        if line_id in keyword_evidenced or _distinctive_opportunity_signal_hit(pl, combined_text):
+            names.append(pl.name_he)
+    return ", ".join(names) if names else NO_PRODUCT_LINE_TEXT_HE
 
 
 def platform_opportunity_table(
@@ -128,7 +195,7 @@ def platform_opportunity_table(
     rows = [
         [
             it.get("title") or "—",
-            _product_line_names_he(it.get("product_lines")),
+            _product_line_names_he(it),
             soften_text(it.get("so_what_he") or it.get("summary_he")) or "—",
             f"[{it['n']}]",
         ]

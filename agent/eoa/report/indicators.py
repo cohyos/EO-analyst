@@ -89,6 +89,15 @@ _DEDUPE_SIMILARITY = 0.85
 #: ... בוטל").
 _DROP_AFTER_DAYS = 30
 
+#: R-indicator-expiry (2026-09-28, daily_2026-09-28.md item 2): an OPEN indicator that never
+#: matures because nothing in any single day's report happens to match it (e.g. the Volkswagen-
+#: factory-deal row, first_seen 2026-09-07, still "פתוח" 21 days later on the 2026-09-28 issue --
+#: under :data:`_DROP_AFTER_DAYS`'s own no-match-only rule) reads to a reader as current/relevant
+#: long after it stopped being either. Unlike :func:`check_maturation`'s age check (only fires when
+#: there is ALSO no match that issue), this is an unconditional, shorter ceiling on how long a row
+#: may sit in the daily "מעקב אינדיקטורים" table at all -- see :func:`expire_stale_open`.
+_STALE_OPEN_AFTER_DAYS = 14
+
 #: A "key term" is an English/alphanumeric token of 3+ characters -- per docs/CONVENTIONS.md
 #: ("טכניים באנגלית בסוגריים בהופעה ראשונה"), a company/system/programme name in this corpus is
 #: almost always the English term inside the Hebrew sentence (e.g. "מערכת ה-DROIC החדשה"), not a
@@ -544,6 +553,30 @@ def check_maturation(
     return still_open, matured, dropped
 
 
+def expire_stale_open(
+    open_indicators: list[dict[str, Any]],
+    *,
+    now: dt.datetime,
+    max_age_days: int = _STALE_OPEN_AFTER_DAYS,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """R-indicator-expiry item 2: partitions ``open_indicators`` (rows that already survived
+    :func:`check_maturation` this issue, i.e. still ``status='open'``) into ``(still_fresh,
+    now_stale)`` by ``first_seen`` age alone -- unlike :func:`check_maturation`'s own age check,
+    this fires regardless of match status: an indicator this old no longer belongs in a daily
+    "current state" table even if it still happens to match something. :func:`process_indicator_watchlist`
+    folds ``now_stale`` into the very same rows it hands :func:`_apply_maturation`, so the nightly
+    report build both persists ``status='dropped'`` for them (the DB write the pipeline already
+    performs for every other drop) and renders them once more, this issue, as a dropped row --
+    never silently, and never again after."""
+    still_fresh: list[dict[str, Any]] = []
+    now_stale: list[dict[str, Any]] = []
+    for ind in open_indicators:
+        first_seen = ind.get("first_seen")
+        age_days = (now - first_seen).days if isinstance(first_seen, dt.datetime) else 0
+        (now_stale if age_days > max_age_days else still_fresh).append(ind)
+    return still_fresh, now_stale
+
+
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
@@ -565,6 +598,11 @@ def process_indicator_watchlist(
     now = now or dt.datetime.now(dt.UTC)
     existing_open = _fetch_open_indicators(kind)
     still_open, matured, dropped = check_maturation(existing_open, items, now=now)
+    # R-indicator-expiry item 2: on top of check_maturation's own no-match-past-30-days drop, any
+    # remaining open row older than _STALE_OPEN_AFTER_DAYS is expired unconditionally -- folded
+    # into the same `dropped` list so it's persisted via the one existing _apply_maturation call.
+    still_open, newly_stale = expire_stale_open(still_open, now=now)
+    dropped = dropped + newly_stale
     try:
         _apply_maturation(matured, dropped)
     except Exception as exc:
@@ -945,6 +983,7 @@ __all__ = [
     "SECTION_TITLE_HE",
     "build_indicator_watchlist_section",
     "check_maturation",
+    "expire_stale_open",
     "extract_key_terms",
     "outlook_indicator_texts",
     "process_indicator_watchlist",

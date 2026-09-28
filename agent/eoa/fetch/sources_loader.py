@@ -62,6 +62,14 @@ class Source(BaseModel):
     queries: list[str] = Field(default_factory=list)
     engine_lang: str = "en"
     max_results: int = 10
+    # R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): `kind: search` only -- an optional ddgs
+    # `timelimit` ('d'=day, 'w'=week, 'm'=month) passed straight through to
+    # `eoa.search.provider.search`'s `time_range`. When set, the search engine itself vouches for
+    # the hits' recency, so `_ingest_search_source` keeps an undated hit from this source
+    # (`published_at` stays NULL) instead of dropping it -- see that function's docstring. `None`
+    # (the default) is the pre-existing behaviour: no recency limit is asked of the engine, and an
+    # undated hit from such a source is dropped rather than risked as stale.
+    search_timelimit: Literal["d", "w", "m"] | None = None
     # 2026-09-27 (nightly-ingest partial-ingest fix): robots.txt is enforced by default for every
     # fetch (`eoa.fetch.html.fetch_page`'s own `respect_robots` default), but a handful of official
     # APIs -- arXiv's export API is the motivating case, whose robots.txt is a blanket

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from eoa.tenders.report_section import (
     SECTION_TITLE_HE,
     _trim_rationale,
+    attach_forecast_citations,
     collect_tenders,
     tenders_extra_section,
     tenders_table,
@@ -172,3 +173,94 @@ class TestTendersTable:
     def test_status_translated_to_hebrew(self):
         table = tenders_table({"open_tenders": [_tender_row(status="closed")], "new_forecasts": []})
         assert table["rows"][0][4] == "סגור"
+
+    def test_same_title_buyer_deadline_collapses_to_one_row_with_count(self):
+        """R-tender-dedupe item 4 (daily_2026-09-28.md): reproduces the reported bug -- the same
+        "Night Vision Devices for Foreign Military Sales (FMS)" notice posted under 5 distinct
+        SAM.gov ids (same buyer, same deadline) must render as ONE row noting the count, linking
+        the first-encountered notice's own URL."""
+        dup_title = "Night Vision Devices for Foreign Military Sales (FMS)"
+        rows = [
+            _tender_row(
+                id=i,
+                title=dup_title,
+                agency="DEPT OF DEFENSE.DEPT OF THE ARMY.AMC.ACC.ACC-CTRS.ACC-APG.W6QK ACC-APG",
+                deadline=dt.date(2026, 9, 29),
+                url=f"https://sam.gov/workspace/contract/opp/{i}/view",
+            )
+            for i in range(5)
+        ]
+        table = tenders_table({"open_tenders": rows, "new_forecasts": []})
+        assert len(table["rows"]) == 1
+        assert table["rows"][0][0] == f"{dup_title} (×5)"
+        assert table["rows"][0][5] == "https://sam.gov/workspace/contract/opp/0/view"  # first row's link
+
+    def test_distinct_deadlines_are_not_collapsed(self):
+        dup_title = "Night Vision Devices for Foreign Military Sales (FMS)"
+        rows = [
+            _tender_row(id=1, title=dup_title, agency="A", deadline=dt.date(2026, 9, 29)),
+            _tender_row(id=2, title=dup_title, agency="A", deadline=dt.date(2026, 10, 15)),
+        ]
+        table = tenders_table({"open_tenders": rows, "new_forecasts": []})
+        assert len(table["rows"]) == 2
+        assert "(×" not in table["rows"][0][0]
+
+    def test_single_occurrence_title_gets_no_count_suffix(self):
+        table = tenders_table({"open_tenders": [_tender_row()], "new_forecasts": []})
+        assert "(×" not in table["rows"][0][0]
+
+
+class TestAttachForecastCitations:
+    def _rows(self, ids: list[int]) -> list[dict]:
+        return [
+            dict(
+                id=i,
+                url=f"https://example.gov/{i}",
+                title=f"item {i}",
+                published_at=dt.datetime(2026, 9, i, tzinfo=dt.UTC),
+                source_name="S",
+            )
+            for i in ids
+        ]
+
+    def test_caps_citations_to_three_most_recent_per_forecast(self):
+        """R-appendix-cap item 3 (daily_2026-09-28.md): reproduces the reported bug -- a forecast
+        row that names 5 trigger items must only ever register/cite its 3 most recently-published
+        ones, so the appendix does not grow by more than what the table actually cites."""
+        rows = self._rows([1, 2, 3, 4, 5])  # published Sep 1..5 -- 3/4/5 are the most recent
+        with patch("eoa.tenders.report_section._fetchall", return_value=rows):
+            citation_items: list[dict] = []
+            forecasts = [{"sources": [f"item:{i}" for i in [1, 2, 3, 4, 5]]}]
+            attach_forecast_citations(citation_items, forecasts)
+        assert len(citation_items) == 3
+        assert len(forecasts[0]["_citation_ns"]) == 3
+        assert {it["id"] for it in citation_items} == {3, 4, 5}
+
+    def test_excluded_source_never_consumes_a_registry_slot(self):
+        rows = self._rows([1, 2])
+        with patch("eoa.tenders.report_section._fetchall", return_value=rows):
+            citation_items: list[dict] = []
+            forecasts = [{"sources": ["item:1", "item:2"]}]  # only 2 sources, under the cap of 3
+            attach_forecast_citations(citation_items, forecasts)
+        assert len(citation_items) == 2  # both kept -- under the cap, nothing excluded
+
+    def test_shared_source_across_forecasts_registered_once(self):
+        rows = self._rows([1])
+        with patch("eoa.tenders.report_section._fetchall", return_value=rows):
+            citation_items: list[dict] = []
+            forecasts = [{"sources": ["item:1"]}, {"sources": ["item:1"]}]
+            attach_forecast_citations(citation_items, forecasts)
+        assert len(citation_items) == 1
+        assert forecasts[0]["_citation_ns"] == forecasts[1]["_citation_ns"]
+
+    def test_missing_published_at_sorts_as_least_recent(self):
+        rows = self._rows([2, 3, 4])
+        rows.append(
+            dict(id=1, url="https://example.gov/1", title="item 1", published_at=None, source_name="S")
+        )
+        with patch("eoa.tenders.report_section._fetchall", return_value=rows):
+            citation_items: list[dict] = []
+            forecasts = [{"sources": ["item:1", "item:2", "item:3", "item:4"]}]
+            attach_forecast_citations(citation_items, forecasts)
+        kept_ids = {it["id"] for it in citation_items}
+        assert kept_ids == {2, 3, 4}  # id 1 (no published_at) is the one excluded by the cap

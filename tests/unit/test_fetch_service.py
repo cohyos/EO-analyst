@@ -273,6 +273,75 @@ class TestStoreItemStats:
 # --------------------------------------------------------------------------
 
 
+class TestUrlDateSanityInStoreItem:
+    """R4 item 5 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): a sane URL-embedded date
+    (`eoa.fetch.url_dates.date_from_url`) overrides a missing or suspiciously-later extracted/
+    fallback `published_at`. Motivating case: L3Harris newsroom items whose URL says
+    `/newsroom/editorial/2024/09/...` or `.../2025/12/...` but got `published_at` stamped with
+    today's date (2026-09-22)."""
+
+    def _capture(self, monkeypatch) -> dict:
+        captured: dict = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(1, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+        return captured
+
+    def test_url_date_fills_in_a_missing_published_at(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://www.l3harris.com/newsroom/editorial/2024/09/some-2024-story-slug",
+            html_text=_SAMPLE_HTML,  # no date in the HTML itself -> clean.published_at is None
+            stats=stats,
+        )
+        assert captured["published_at"] == datetime(2024, 9, 1, tzinfo=UTC)
+
+    def test_url_date_overrides_a_suspiciously_later_fallback_published_at(self, monkeypatch):
+        """L3Harris's actual incident shape: the URL says 2025-12, but the extracted/fallback date
+        was stamped with today (2026-09-22) -- 45+ days later than the URL's own date."""
+        captured = self._capture(monkeypatch)
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://www.l3harris.com/newsroom/editorial/2025/12/some-2025-story-slug",
+            html_text=_SAMPLE_HTML,
+            stats=stats,
+            fallback_published_at=datetime(2026, 9, 22, tzinfo=UTC),
+        )
+        assert captured["published_at"] == datetime(2025, 12, 1, tzinfo=UTC)
+
+    def test_url_date_does_not_override_a_fallback_within_the_slack_window(self, monkeypatch):
+        """A fallback date only ~10 days later than the URL's own date is plausible (e.g. a slow
+        CMS) and must be left alone -- only a gap beyond URL_DATE_MAX_LATER_DAYS is suspect."""
+        captured = self._capture(monkeypatch)
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://www.l3harris.com/newsroom/editorial/2026/09/some-story-slug",
+            html_text=_SAMPLE_HTML,
+            stats=stats,
+            fallback_published_at=datetime(2026, 9, 10, tzinfo=UTC),
+        )
+        assert captured["published_at"] == datetime(2026, 9, 10, tzinfo=UTC)
+
+    def test_no_url_date_leaves_published_at_untouched(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/no-date-here",
+            html_text=_SAMPLE_HTML,
+            stats=stats,
+            fallback_published_at=datetime(2026, 9, 22, tzinfo=UTC),
+        )
+        assert captured["published_at"] == datetime(2026, 9, 22, tzinfo=UTC)
+
+
 class TestRedirectIdentityTrust:
     def test_same_registrable_domain_redirect_is_trusted(self, monkeypatch):
         """The common, legitimate case R04 restores: same-site redirect (e.g. a CMS moving a
@@ -652,8 +721,16 @@ class TestIngestSearchDispatch:
             stored.append((source_db_id, hit.url))
             stats.items_inserted += 1
 
-        def _fake_run_search(query, lang, *, max_results):
-            return _FakeSearchResponse([_FakeSearchHit("https://linkedin.com/posts/a"), _FakeSearchHit("https://linkedin.com/posts/b")])
+        # R4 (2026-09-28): a hit must now look like a real article (>=3 slug words) to survive
+        # `is_probable_article_url` -- "posts/a" alone (the pre-R4 fixture) would be rejected as
+        # a listing/non-article URL, unrelated to what this test is checking.
+        def _fake_run_search(query, lang, *, max_results, time_range=None):
+            return _FakeSearchResponse(
+                [
+                    _FakeSearchHit("https://linkedin.com/posts/example-co-wins-contract-a"),
+                    _FakeSearchHit("https://linkedin.com/posts/example-co-wins-contract-b"),
+                ]
+            )
 
         monkeypatch.setattr(service, "_store_search_hit", _fake_store_search_hit)
         monkeypatch.setattr("eoa.search.provider.search", _fake_run_search)
@@ -662,11 +739,19 @@ class TestIngestSearchDispatch:
         source.queries = ['site:linkedin.com/posts "Example Co"']
         source.engine_lang = "en"
         source.max_results = 10
+        # R4: an undated hit is now dropped unless the source has a search_timelimit -- these
+        # fixture hits carry no LinkedIn post id and no provider `published` field, so the source
+        # needs one to be kept (this test is about the snippet-store path, not the dating rules --
+        # see TestSearchTimelimitAndArticleFilter below for those).
+        source.search_timelimit = "w"
 
         stats = service.IngestStats()
         await service._ingest_search_source(source, source_db_id=3, stats=stats)
 
-        assert stored == [(3, "https://linkedin.com/posts/a"), (3, "https://linkedin.com/posts/b")]
+        assert stored == [
+            (3, "https://linkedin.com/posts/example-co-wins-contract-a"),
+            (3, "https://linkedin.com/posts/example-co-wins-contract-b"),
+        ]
         assert stats.entries_seen == 2
 
     @pytest.mark.asyncio
@@ -677,7 +762,9 @@ class TestIngestSearchDispatch:
         )
         monkeypatch.setattr(
             "eoa.search.provider.search",
-            lambda query, lang, *, max_results: _FakeSearchResponse([], error="search unavailable"),
+            lambda query, lang, *, max_results, time_range=None: _FakeSearchResponse(
+                [], error="search unavailable"
+            ),
         )
 
         source = _FakeSource(kind="search")
@@ -688,6 +775,95 @@ class TestIngestSearchDispatch:
         stats = service.IngestStats()
         await service._ingest_search_source(source, source_db_id=1, stats=stats)  # must not raise
         assert stored == []
+
+
+class TestSearchTimelimitAndArticleFilter:
+    """R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): the two new rejection paths in
+    `_ingest_search_source` -- a listing/non-article URL, and an undated hit from a source with no
+    `search_timelimit` -- plus that `search_timelimit` is threaded through to the provider as
+    `time_range`."""
+
+    @pytest.mark.asyncio
+    async def test_time_range_is_passed_through_to_provider_search(self, monkeypatch) -> None:
+        calls = []
+
+        def _fake_run_search(query, lang, *, max_results, time_range=None):
+            calls.append(time_range)
+            return _FakeSearchResponse([])
+
+        monkeypatch.setattr("eoa.search.provider.search", _fake_run_search)
+
+        source = _FakeSource(kind="search")
+        source.queries = ["site:example.com news"]
+        source.engine_lang = "en"
+        source.max_results = 10
+        source.search_timelimit = "w"
+
+        stats = service.IngestStats()
+        await service._ingest_search_source(source, source_db_id=1, stats=stats)
+        assert calls == ["w"]
+
+    @pytest.mark.asyncio
+    async def test_listing_page_hit_is_rejected_regardless_of_date(self, monkeypatch) -> None:
+        stored = []
+        monkeypatch.setattr(
+            service,
+            "_store_search_hit",
+            lambda *, source_db_id, hit, stats, published_at=None: stored.append(hit.url),
+        )
+        monkeypatch.setattr(
+            "eoa.search.provider.search",
+            lambda query, lang, *, max_results, time_range=None: _FakeSearchResponse(
+                [_FakeSearchHit("https://www.army-technology.com/news/"),
+                 _FakeSearchHit("https://defense-update.com/2026/09")]
+            ),
+        )
+
+        source = _FakeSource(kind="search")
+        source.queries = ["site:army-technology.com news"]
+        source.engine_lang = "en"
+        source.max_results = 10
+        source.search_timelimit = "w"  # even with a timelimit, a listing page is still rejected
+
+        stats = service.IngestStats()
+        await service._ingest_search_source(source, source_db_id=1, stats=stats)
+        assert stored == []
+        assert stats.items_skipped == 2
+
+    @pytest.mark.asyncio
+    async def test_undated_hit_dropped_without_timelimit_kept_with_timelimit(self, monkeypatch) -> None:
+        stored = []
+        monkeypatch.setattr(
+            service,
+            "_store_search_hit",
+            lambda *, source_db_id, hit, stats, published_at=None: stored.append((hit.url, published_at)),
+        )
+        # A real-looking article slug (>=3 words) with no LinkedIn post id and no provider `date`
+        # and no URL-embedded date -- undatable by every path `search_hit_published_at` tries.
+        undated_article = "https://www.army-technology.com/news/anduril-lattice-us-army-uas/"
+        monkeypatch.setattr(
+            "eoa.search.provider.search",
+            lambda query, lang, *, max_results, time_range=None: _FakeSearchResponse(
+                [_FakeSearchHit(undated_article)]
+            ),
+        )
+        source = _FakeSource(kind="search")
+        source.queries = ["site:army-technology.com news"]
+        source.engine_lang = "en"
+        source.max_results = 10
+
+        # No search_timelimit -> dropped.
+        source.search_timelimit = None
+        stats = service.IngestStats()
+        await service._ingest_search_source(source, source_db_id=1, stats=stats)
+        assert stored == []
+        assert stats.items_skipped == 1
+
+        # With search_timelimit -> kept, published_at stays NULL.
+        source.search_timelimit = "w"
+        stats2 = service.IngestStats()
+        await service._ingest_search_source(source, source_db_id=1, stats=stats2)
+        assert stored == [(undated_article, None)]
 
 
 class TestStoreSearchHit:

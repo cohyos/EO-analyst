@@ -28,6 +28,7 @@ import structlog
 
 from eoa.errors import DeadlineExceeded, FetchError, LeaseLost
 from eoa.execution import checkpoint
+from eoa.fetch.url_dates import date_from_url, is_probable_article_url
 
 log = structlog.get_logger(__name__)
 
@@ -335,6 +336,17 @@ def _url_already_seen(url: str) -> bool:
         return False
 
 
+#: R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): item 5's URL-date sanity check -- a
+#: `date_from_url(url)` more than this many days EARLIER than the extracted/fallback
+#: `published_at` (or a NULL `published_at`) means the stored date is suspect and the URL's own
+#: date wins. Motivating case: L3Harris newsroom items whose URL says
+#: `/newsroom/editorial/2024/09/...` or `.../2025/12/...` but got `published_at` stamped with
+#: today's date (2026-09-22) somewhere upstream. Shared with
+#: `scripts/repair_2026_09_28_stale_search_items.py`, which applies the same rule to items
+#: already stored before this fix landed.
+URL_DATE_MAX_LATER_DAYS = 45
+
+
 def _store_item(
     *,
     source_db_id: int | None,
@@ -373,6 +385,21 @@ def _store_item(
         url=url,
     )
     published_at = clean.published_at or fallback_published_at
+
+    # R4 item 5 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): a sane URL-embedded date wins
+    # over a missing or suspiciously-later extracted/fallback date -- see
+    # `URL_DATE_MAX_LATER_DAYS`'s docstring. Never the reverse: an article legitimately published
+    # well after its URL's dated path (a slow CMS, a dated slug reused for an update, ...) keeps
+    # its real extracted/fallback date.
+    url_date = date_from_url(url)
+    if url_date is not None:
+        url_published_at = datetime(url_date.year, url_date.month, url_date.day, tzinfo=UTC)
+        if published_at is None:
+            published_at = url_published_at
+        else:
+            published_at_utc = published_at if published_at.tzinfo else published_at.replace(tzinfo=UTC)
+            if published_at_utc - url_published_at > timedelta(days=URL_DATE_MAX_LATER_DAYS):
+                published_at = url_published_at
 
     # Q4-1: a Cloudflare/WAF/anti-bot challenge page fetched instead of the real article must
     # never be stored as if it were real content -- neither its title/body (a human- or
@@ -737,9 +764,13 @@ SEARCH_HIT_MAX_AGE_DAYS = 30
 
 
 def search_hit_published_at(url: str, published: str | None = None) -> datetime | None:
-    """Best-effort publication time of a search hit: the LinkedIn post id in the URL, else the
-    provider's own `published` field (ddgs news results carry one). ``None`` when neither is
-    available -- the caller keeps such a hit (it cannot be judged stale)."""
+    """Best-effort publication time of a search hit, in priority order: the LinkedIn post id in
+    the URL, else the provider's own `published` field (ddgs news results carry one), else
+    (R4, 2026-09-28) a date recovered from the URL's own path (`eoa.fetch.url_dates.
+    date_from_url` -- several of the newer `*_technology_search`/`defense_update_search` sites
+    encode a real publication date in the path even though the search provider supplies none).
+    ``None`` when nothing above yields a date -- the caller (`_ingest_search_source`) then drops
+    the hit unless its source was searched with a recency `timelimit`."""
     m = _LINKEDIN_POST_ID_RE.search(url or "")
     if m:
         try:
@@ -751,7 +782,10 @@ def search_hit_published_at(url: str, published: str | None = None) -> datetime 
             parsed = datetime.fromisoformat(published.replace("Z", "+00:00"))
             return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
         except ValueError:
-            return None
+            pass
+    url_date = date_from_url(url)
+    if url_date is not None:
+        return datetime(url_date.year, url_date.month, url_date.day, tzinfo=UTC)
     return None
 
 
@@ -810,13 +844,26 @@ async def _ingest_search_source(source, *, source_db_id: int | None, stats: Inge
     `_store_search_hit`. Built for LinkedIn/X company-post monitoring
     (`site:linkedin.com/posts "<company>"`-style queries, see `config/sources.yaml`'s
     `*_linkedin_search` entries) but generic over any `kind: search` source's `queries` list.
-    A failed/errored query is logged and skipped -- never aborts the source's remaining queries."""
+    A failed/errored query is logged and skipped -- never aborts the source's remaining queries.
+
+    R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): a hit is now rejected in two more ways,
+    both specific to the `*_technology_search`/`defense_update_search` sources that surfaced
+    them: (1) `is_probable_article_url` drops index/category/pagination listing pages that used
+    to be stored as if they were articles; (2) an UNDATED hit (`search_hit_published_at` found no
+    date anywhere, including the URL) is now dropped by default instead of kept with
+    `published_at IS NULL` -- unless `source.search_timelimit` is set, in which case the search
+    engine itself already vouched for the hit's recency (see `Source.search_timelimit`'s
+    docstring) and the hit is kept with `published_at` left NULL, exactly as before this fix.
+    `search.provider`'s `time_range`/ddgs `timelimit` is threaded through the same way."""
     checkpoint()
     from eoa.search.provider import search as run_search_query
 
+    timelimit = getattr(source, "search_timelimit", None)
     for query in source.queries:
         checkpoint()
-        resp = run_search_query(query, source.engine_lang, max_results=source.max_results)
+        resp = run_search_query(
+            query, source.engine_lang, max_results=source.max_results, time_range=timelimit
+        )
         if resp.error:
             log.warning(
                 "fetch.search_source_query_failed", source_id=source.id, query=query[:80], error=resp.error
@@ -824,14 +871,37 @@ async def _ingest_search_source(source, *, source_db_id: int | None, stats: Inge
             continue
         stats.entries_seen += len(resp.hits)
         cutoff = datetime.now(UTC) - timedelta(days=SEARCH_HIT_MAX_AGE_DAYS)
+        stored = not_article = stale = undated_dropped = 0
         for hit in resp.hits:
             checkpoint()
+            if not is_probable_article_url(hit.url):
+                stats.items_skipped += 1
+                not_article += 1
+                log.debug("fetch.search_hit_not_article", source_id=source.id, url=hit.url)
+                continue
             published_at = search_hit_published_at(hit.url, getattr(hit, "published", None))
             if published_at is not None and published_at < cutoff:
                 stats.items_skipped += 1
+                stale += 1
                 log.debug("fetch.search_hit_stale", source_id=source.id, url=hit.url, published_at=str(published_at))
                 continue
+            if published_at is None and not timelimit:
+                stats.items_skipped += 1
+                undated_dropped += 1
+                log.debug("fetch.search_hit_undated_dropped", source_id=source.id, url=hit.url)
+                continue
             _store_search_hit(source_db_id=source_db_id, hit=hit, stats=stats, published_at=published_at)
+            stored += 1
+        log.info(
+            "fetch.search_source_query_counts",
+            source_id=source.id,
+            query=query[:80],
+            hits=len(resp.hits),
+            stored=stored,
+            rejected_not_article=not_article,
+            rejected_stale=stale,
+            rejected_undated=undated_dropped,
+        )
 
 
 #: F05 (SOL-AUDIT-2026-09-24): a lookback margin/ceiling on top of "how long since this source's

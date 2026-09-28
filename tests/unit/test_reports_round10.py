@@ -398,6 +398,10 @@ class TestBuildIndicatorWatchlistSectionWidensOnlyDaily:
     def test_daily_widens_evidence_and_registers_new_citation(self, monkeypatch) -> None:
         # An indicator whose only match lives outside today's `items` (id 501) but inside the
         # widened trailing-week pool -- must resolve to a real, appendix-backed [n], not "—".
+        # R-indicator-expiry (item 2, daily_2026-09-28.md): first_seen kept within the newer,
+        # shorter `_STALE_OPEN_AFTER_DAYS` (14) ceiling -- this test is about the widened-evidence
+        # citation fallback specifically, independent of the unrelated staleness-expiry rule; an
+        # indicator actually past that ceiling is covered by TestExpireStaleOpen instead.
         monkeypatch.setattr(
             indicators,
             "_fetch_open_indicators",
@@ -405,8 +409,8 @@ class TestBuildIndicatorWatchlistSectionWidensOnlyDaily:
                 {
                     "id": 1,
                     "text_he": "אספקת מערכת XYZ99 לצבא צפויה בקרוב",
-                    "first_seen": dt.datetime(2026, 8, 20, tzinfo=UTC),
-                    "last_seen": dt.datetime(2026, 8, 20, tzinfo=UTC),
+                    "first_seen": dt.datetime(2026, 9, 1, tzinfo=UTC),
+                    "last_seen": dt.datetime(2026, 9, 1, tzinfo=UTC),
                     "status": "open",
                     "kind": "daily",
                 }

@@ -10,6 +10,8 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+import pytest
+
 from eoa.llm.schemas.analysis import DailyReportDraft, Sentence, StructuredSection
 from eoa.report import daily
 
@@ -488,3 +490,106 @@ def test_tenders_forecast_table_strips_internal_item_markers():
     assert "[item" not in row[4]
     assert "( )" not in row[4]  # the parens the marker sat alone in are removed too, not left empty
     assert "  " not in row[4]  # no doubled space left where the marker was cut out
+
+
+def test_tenders_forecast_table_leaves_one_space_when_marker_has_no_surrounding_whitespace():
+    """R-glued-words item 5 (daily_2026-09-28.md): reproduces the reported bug verbatim -- when
+    the forecast-drafting stage glues its internal "[item N]" marker directly onto neighbouring
+    Hebrew words with NO surrounding space (e.g. "פריט[item 92]מתאר"), stripping it to "" used to
+    weld the two words together ("פריטמתאר"). A single space must be left in its place."""
+    data = {
+        "new_forecasts": [
+            {
+                "platform": "כטב\"ם טקטי/זעיר",
+                "payload_need": "מטע\"ד זעיר (Micro-Gimbal)",
+                "likelihood": 0.6,
+                "window_from": dt.date(2026, 11, 27),
+                "window_to": dt.date(2027, 9, 27),
+                "rationale_he": "בהתאם למקורות זמינים: פריט[item 92]מתאר את חשיפת ה-APUS 25 של תע\"א.",
+            },
+            {
+                "platform": "מסוק קרב",
+                "payload_need": "מטע\"ד ג'ימבלי EO/IR לכיוון ותצפית",
+                "likelihood": 0.6,
+                "window_from": dt.date(2027, 3, 1),
+                "window_to": dt.date(2028, 9, 1),
+                "rationale_he": "בהתאם למקורות זמינים: הפריט[item 77]עוסק בתערוכת MSPO 2026.",
+            },
+        ]
+    }
+    tbl = daily._tenders_forecast_table(data, [])
+    rationales = [row[4] for row in tbl["rows"]]
+    assert "פריטמתאר" not in "".join(rationales)
+    assert "הפריטעוסק" not in "".join(rationales)
+    assert "פריט מתאר" in rationales[0]
+    assert "הפריט עוסק" in rationales[1]
+
+
+class TestTendersForecastTableConfidenceFilter:
+    """R-forecast-table-confidence item 7 (daily_2026-09-28.md): the daily forecast TABLE only
+    shows likelihood >= 0.6 rows whose own rationale doesn't flag a weak evidentiary basis."""
+
+    def _forecast(self, **overrides) -> dict:
+        base = dict(
+            platform="כטב\"ם MALE",
+            payload_need="מטע\"ד ג'ימבלי EO/IR",
+            likelihood=0.6,
+            window_from=dt.date(2026, 12, 1),
+            window_to=dt.date(2027, 9, 1),
+            rationale_he="נימוק תקין ומבוסס.",
+        )
+        base.update(overrides)
+        return base
+
+    def test_below_likelihood_floor_is_dropped(self):
+        data = {"new_forecasts": [self._forecast(likelihood=0.5)]}
+        assert daily._tenders_forecast_table(data, []) is None
+
+    def test_weak_basis_marker_is_dropped_even_at_high_likelihood(self):
+        data = {
+            "new_forecasts": [
+                self._forecast(likelihood=0.8, rationale_he="הביסוס לתחזית חלש: אין תמיכה ישירה.")
+            ]
+        }
+        assert daily._tenders_forecast_table(data, []) is None
+
+    def test_second_weak_basis_phrasing_is_also_dropped(self):
+        data = {
+            "new_forecasts": [
+                self._forecast(likelihood=0.8, rationale_he="הביסוס בנתונים חלש ועקיף: ...")
+            ]
+        }
+        assert daily._tenders_forecast_table(data, []) is None
+
+    def test_qualifying_forecast_is_kept(self):
+        data = {"new_forecasts": [self._forecast(likelihood=0.75)]}
+        tbl = daily._tenders_forecast_table(data, [])
+        assert tbl is not None
+        assert len(tbl["rows"]) == 1
+
+    def test_mixed_list_keeps_only_qualifying_rows(self):
+        data = {
+            "new_forecasts": [
+                self._forecast(platform="A", likelihood=0.8),
+                self._forecast(platform="B", likelihood=0.4),
+                self._forecast(platform="C", likelihood=0.7, rationale_he="הביסוס לתחזית חלש: X"),
+            ]
+        }
+        tbl = daily._tenders_forecast_table(data, [])
+        assert [row[0] for row in tbl["rows"]] == ["A"]
+
+    def test_filtered_out_forecast_never_registers_a_citation(self, monkeypatch: pytest.MonkeyPatch):
+        """A row dropped by the confidence filter must not consume an appendix/citation slot --
+        ties item 7's filter to item 3's appendix-growth-control intent."""
+        called = {"n": 0}
+
+        def _boom(citation_items, forecasts):
+            called["n"] += 1
+            return citation_items
+
+        import eoa.tenders.report_section as report_section
+
+        monkeypatch.setattr(report_section, "attach_forecast_citations", _boom)
+        data = {"new_forecasts": [self._forecast(likelihood=0.4)]}
+        assert daily._tenders_forecast_table(data, []) is None
+        assert called["n"] == 0

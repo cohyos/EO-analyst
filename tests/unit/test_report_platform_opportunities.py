@@ -35,20 +35,57 @@ def _row(**overrides) -> dict:
 
 
 class TestProductLineNamesHe:
-    def test_known_line_id_resolves_to_hebrew_name(self) -> None:
-        text = po._product_line_names_he(["targeting_pods"])
+    def test_known_line_id_with_real_keyword_evidence_resolves_to_hebrew_name(self) -> None:
+        # so_what_he contains the literal targeting_pods keywords_he entry "פוד ציון מטרות".
+        text = po._product_line_names_he(_row(product_lines=["targeting_pods"]))
         assert "פוד" in text
 
     def test_unknown_line_id_falls_back_to_raw_id(self) -> None:
-        assert po._product_line_names_he(["not_a_real_line"]) == "not_a_real_line"
+        it = _row(product_lines=["not_a_real_line"], so_what_he="", summary_he="", title="")
+        assert po._product_line_names_he(it) == "not_a_real_line"
 
     def test_empty_or_none_returns_placeholder(self) -> None:
-        assert po._product_line_names_he(None) == "—"
-        assert po._product_line_names_he([]) == "—"
+        assert po._product_line_names_he({"product_lines": None}) == po.NO_PRODUCT_LINE_TEXT_HE
+        assert po._product_line_names_he({"product_lines": []}) == po.NO_PRODUCT_LINE_TEXT_HE
 
-    def test_multiple_lines_joined(self) -> None:
-        text = po._product_line_names_he(["targeting_pods", "lorop_pods"])
+    def test_multiple_lines_with_evidence_are_joined(self) -> None:
+        it = _row(
+            product_lines=["targeting_pods", "lorop_pods"],
+            so_what_he="הזדמנות לפוד ציון מטרות וגם לפוד LOROP.",
+            summary_he="",
+            title="",
+        )
+        text = po._product_line_names_he(it)
         assert "," in text
+
+    def test_platform_class_only_mention_is_not_evidence_for_any_tagged_line(self) -> None:
+        """R-platform-mapping item 1 (daily_2026-09-28.md): an item that only names the platform
+        CLASS/programme (e.g. "NGAD") -- with zero real pod/sensor/gimbal/missile-warning content
+        -- must NOT resolve to any of the airborne product lines it happens to be DB-tagged with,
+        since "NGAD" is a shared, non-distinctive floor-level opportunity_signals entry duplicated
+        across all of them. Reproduces the live bug: an "NGAD engine prototypes" item (about an
+        ENGINE, no pod content) was shown as compatible with all four lines."""
+        it = _row(
+            product_lines=["targeting_pods", "mws_eo", "lorop_pods", "ball_gimbals_16in"],
+            title="NGAD engine prototypes take shape in two $3.5bn contracts",
+            so_what_he="הפנטגון הגדיל את תקרת התקציב לפיתוח שני אבות טיפוס מנוע עבור תוכנית NGAD.",
+            summary_he="שני חוזי אבות טיפוס מקבילים לפיתוח מנוע לתוכנית NGAD.",
+        )
+        assert po._product_line_names_he(it) == po.NO_PRODUCT_LINE_TEXT_HE
+
+    def test_genuine_line_specific_evidence_survives_alongside_dropped_lines(self) -> None:
+        """A line whose OWN distinctive (non-shared) opportunity_signals term is genuinely present
+        (here: mws_eo's "missile warning") is kept, while a co-tagged line with no evidence at all
+        in the same text is dropped -- the column reflects only what the text actually supports."""
+        it = _row(
+            product_lines=["targeting_pods", "mws_eo"],
+            title="New aircraft self-protection suite unveiled",
+            so_what_he="המערכת החדשה מספקת missile warning לכלי הטיס.",
+            summary_he="",
+        )
+        text = po._product_line_names_he(it)
+        assert "מערכות התראה" in text  # mws_eo's name_he
+        assert "פודי ציון מטרות" not in text  # targeting_pods dropped -- no evidence
 
 
 class TestExtendRegistry:

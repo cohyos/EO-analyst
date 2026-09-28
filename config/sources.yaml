@@ -203,6 +203,11 @@ sources:
     queries: ["site:army-technology.com news"]
     engine_lang: en
     max_results: 10
+    # R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): a `site:` search has no article dates of
+    # its own; this ddgs `timelimit` ('w' = past week) asks the engine itself to vouch for
+    # recency, so an undated hit is kept (published_at NULL) instead of dropped -- see
+    # `Source.search_timelimit`'s docstring / `eoa.fetch.service._ingest_search_source`.
+    search_timelimit: w
     notes: "Replaces army_technology (RSS returns HTTP 403 bot-protection since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:army-technology.com news' returns 10 hits, real article headlines (BAE Systems AMPV prototypes, Anduril Lattice counter-UAS, Skydio SRR drones)."
     verified: true
     verified_at: "2026-09-27"
@@ -235,6 +240,9 @@ sources:
     queries: ["site:naval-technology.com news"]
     engine_lang: en
     max_results: 10
+    # R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): see army_technology_search's
+    # search_timelimit comment above.
+    search_timelimit: w
     notes: "Replaces naval_technology (RSS returns HTTP 403 bot-protection since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:naval-technology.com news' returns 10 hits, real article headlines (Arleigh Burke destroyer upgrades, HII UUV facility, L3Harris submarine masts, Ticonderoga cruiser life extension)."
     verified: true
     verified_at: "2026-09-27"
@@ -266,6 +274,9 @@ sources:
     queries: ["site:airforce-technology.com news"]
     engine_lang: en
     max_results: 10
+    # R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): see army_technology_search's
+    # search_timelimit comment above.
+    search_timelimit: w
     notes: "Replaces airforce_technology (RSS returns HTTP 403 bot-protection since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:airforce-technology.com news' returns 9 hits, dated article headlines from 2025-05 through 2026-09-18 (US clears $24.3bn F-35 sale to Saudi Arabia; Lockheed Martin NGI missile plant)."
     verified: true
     verified_at: "2026-09-27"
@@ -312,6 +323,9 @@ sources:
     queries: ["site:defense-update.com military 2026"]
     engine_lang: en
     max_results: 10
+    # R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): see army_technology_search's
+    # search_timelimit comment above.
+    search_timelimit: w
     notes: "Replaces defense_update (html returns HTTP 403 Cloudflare bot-challenge since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:defense-update.com military 2026' returns 15 hits, dated articles through 2026-09-05 (\"Beyond Hydra: The Rise of the 70mm Drone Slayer\", \"War-Tested, In Demand: Inside Rafael's Arsenal\", \"Inside the Interceptor Shortage That's Leaving Kyiv Exposed\") plus the live /2026/09 monthly archive."
     verified: true
     verified_at: "2026-09-27"
@@ -694,6 +708,9 @@ sources:
     queries: ["site:unmannedsystemstechnology.com/2026"]
     engine_lang: en
     max_results: 10
+    # R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): see army_technology_search's
+    # search_timelimit comment above.
+    search_timelimit: w
     notes: "Replaces unmanned_systems_technology (html returns HTTP 403 Cloudflare bot-challenge since <=2026-09-04). Live-probed 2026-09-27 (ddgs, region us-en): 'site:unmannedsystemstechnology.com/2026' (matches the site's dated /YYYY/MM/ article-URL path) returns 7 hits, real dated headlines through 2026-09 (\"Uncrewed & Autonomous Systems 2026 to Examine Military Autonomy\", \"Robinson Unmanned Selected for Drone Dominance Gauntlet II\"). A bare '...com news' query returned only category/tag listing pages, not articles, so this dated-path query is used instead."
     verified: true
     verified_at: "2026-09-27"

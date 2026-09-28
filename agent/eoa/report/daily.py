@@ -1539,6 +1539,33 @@ def _recent_daily_report(period_end: dt.date, *, within_hours: int = 6) -> Repor
     )
 
 
+#: R-forecast-table-confidence (2026-09-28, item 7, daily_2026-09-28.md): a floor below which the
+#: daily report's forecast TABLE (this function only -- never the DB row, never
+#: ``eoa.tenders.report_section``'s own summary block, never the tenders operator page) hides a
+#: forecast -- a reader-facing quality bar, not a data-retention decision.
+_MIN_FORECAST_TABLE_LIKELIHOOD = 0.6
+
+#: Same item: the forecast-drafting stage's own rationale sometimes says outright that its
+#: evidentiary basis is weak (e.g. "הביסוס לתחזית חלש: הפריטים שסופקו אינם עוסקים במפורש...") --
+#: such a forecast (reported at 40-50% likelihood, already under the floor above, but checked
+#: independently in case a future weak-basis forecast ever scores higher) never belongs in the
+#: table a reader skims at face value.
+_WEAK_BASIS_MARKERS_HE = ("הביסוס לתחזית חלש", "הביסוס בנתונים חלש")
+
+
+def _forecast_table_likelihood(f: dict[str, Any]) -> float:
+    value = f.get("likelihood")
+    try:
+        return float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _forecast_flags_weak_basis(f: dict[str, Any]) -> bool:
+    text = f.get("rationale_he") or ""
+    return any(marker in text for marker in _WEAK_BASIS_MARKERS_HE)
+
+
 def _tenders_forecast_table(
     tenders_data: dict[str, list[dict[str, Any]]], citation_items: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -1555,16 +1582,29 @@ def _tenders_forecast_table(
     forecast's trigger items into the report's own citation registry so those ``[n]`` markers
     resolve in the "נספח מקורות" appendix (with a real, clickable source link) exactly like every
     other cited claim in the report.
+
+    R-forecast-table-confidence item 7: filtered to ``likelihood >= _MIN_FORECAST_TABLE_LIKELIHOOD``
+    forecasts whose own rationale does not flag a weak evidentiary basis, BEFORE
+    ``attach_forecast_citations`` runs -- a forecast dropped from the table here never registers
+    its trigger items into the citation appendix either (nothing to cite for a row never shown).
+    Only this rendered table is filtered; the underlying ``tender_forecasts`` DB rows and the
+    tenders operator page are untouched.
     """
     forecasts = tenders_data.get("new_forecasts") or []
+    forecasts = [
+        f
+        for f in forecasts
+        if _forecast_table_likelihood(f) >= _MIN_FORECAST_TABLE_LIKELIHOOD and not _forecast_flags_weak_basis(f)
+    ]
     if not forecasts:
         return None
+    forecasts = forecasts[:10]
     from eoa.tenders.report_section import attach_forecast_citations
 
     attach_forecast_citations(citation_items, forecasts)
     headers = ["פלטפורמה", "צורך/Payload", "סבירות", "חלון", "נימוק", "מקורות"]
     rows: list[list[Any]] = []
-    for f in forecasts[:10]:
+    for f in forecasts:
         likelihood = f.get("likelihood")
         pct = f"{likelihood:.0%}" if isinstance(likelihood, int | float) else "—"
         window = f"{fmt_date(f.get('window_from'))} - {fmt_date(f.get('window_to'))}"
@@ -1577,7 +1617,12 @@ def _tenders_forecast_table(
         # Also swallows an enclosing "(...)" the marker sits alone in (e.g. "Defense ([item 12])
         # מצביע") so no dangling empty "( )" is left behind; a lone marker with no parens is
         # removed the same way.
-        rationale = re.sub(r"\(?\s*\[item\s+\d+\]\s*\)?", "", rationale)
+        # R-glued-words item 5 (daily_2026-09-28.md): replaced with a SINGLE SPACE, not "" -- the
+        # source text sometimes has no surrounding whitespace at all around the marker (e.g.
+        # "פריט[item 92]מתאר"), and stripping to "" then glued the two neighbouring Hebrew words
+        # together into one ("פריטמתאר"/"הפריטעוסק"). The next line's " {2,}" collapse (plus the
+        # final .strip()) normalises any resulting double/leading/trailing space either way.
+        rationale = re.sub(r"\(?\s*\[item\s+\d+\]\s*\)?", " ", rationale)
         rationale = re.sub(r" {2,}", " ", rationale).strip() or "—"
         # Word-boundary trim (never mid-word/mid-token) instead of a bare char-count slice -- see
         # `eoa.report.textnorm.trim_at_word_boundary`.

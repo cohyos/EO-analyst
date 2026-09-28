@@ -237,6 +237,80 @@ class TestSitemapAndSearchKinds:
             assert src.queries
 
 
+class TestSearchTimelimitField:
+    """R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): `search_timelimit` -- a per-source ddgs
+    `timelimit` ('d'/'w'/'m') that, when set, lets `_ingest_search_source` keep an undated hit
+    instead of dropping it (the search engine itself vouches for recency). See
+    `Source.search_timelimit`'s docstring."""
+
+    def test_defaults_to_none_when_absent(self) -> None:
+        source = Source.model_validate(
+            {
+                "id": "example_search",
+                "name": "Example (search)",
+                "url": "https://example.com/",
+                "kind": "search",
+                "lang": "en",
+                "reliability": 3,
+                "queries": ["site:example.com news"],
+            }
+        )
+        assert source.search_timelimit is None
+
+    def test_valid_values_validate(self) -> None:
+        for value in ("d", "w", "m"):
+            source = Source.model_validate(
+                {
+                    "id": "example_search",
+                    "name": "Example (search)",
+                    "url": "https://example.com/",
+                    "kind": "search",
+                    "lang": "en",
+                    "reliability": 3,
+                    "queries": ["site:example.com news"],
+                    "search_timelimit": value,
+                }
+            )
+            assert source.search_timelimit == value
+
+    def test_invalid_value_is_rejected(self) -> None:
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            Source.model_validate(
+                {
+                    "id": "example_search",
+                    "name": "Example (search)",
+                    "url": "https://example.com/",
+                    "kind": "search",
+                    "lang": "en",
+                    "reliability": 3,
+                    "queries": ["site:example.com news"],
+                    "search_timelimit": "y",
+                }
+            )
+
+    def test_real_config_five_technology_search_sources_have_weekly_timelimit(self) -> None:
+        """The five sources added 2026-09-27 to replace bot-protection-blocked RSS/HTML feeds
+        (army_technology_search, naval_technology_search, airforce_technology_search,
+        defense_update_search, unmanned_systems_technology_search) -- their `site:` queries carry
+        no article date of their own, so a `w` (past-week) timelimit is required for an undated
+        hit to be kept at all (R4)."""
+        by_id = {s.id: s for s in load_sources()}
+        for source_id in (
+            "army_technology_search",
+            "naval_technology_search",
+            "airforce_technology_search",
+            "defense_update_search",
+            "unmanned_systems_technology_search",
+        ):
+            assert source_id in by_id, f"{source_id} missing from config/sources.yaml"
+            src = by_id[source_id]
+            assert src.kind == "search"
+            assert src.search_timelimit == "w"
+
+
 class TestRealConfigTimesOfIsraelFix:
     """2026-09-16 fix: the real config/sources.yaml's times_of_israel entry pointed at
     https://www.timesofisrael.com/feed/, which robots.txt genuinely disallows for our UA

@@ -326,6 +326,34 @@ class TestRenderDeltaSection:
         assert "- פריט חדש [2]" in body
         assert "כבר מוזכרים" not in body
 
+    def test_all_new_items_already_covered_says_so_once_not_thrice(self) -> None:
+        """R-delta-redundancy item 6 (daily_2026-09-28.md): reproduces the reported bug -- when
+        every new item is already covered by the BLUF/exec-summary narrative, the section used to
+        print the same count three times (summary_he's own "3 פריטים חדשים", then a standalone
+        "פריטים חדשים מאז הדוח הקודם: 3." line, then "(עוד 3 ... כבר מוזכרים)"). Now: one clear
+        sentence, and the standalone count-restating line is gone entirely."""
+        item_delta = deltas.ItemDelta(
+            new_count=3,
+            new_top_items=[
+                {"id": 1, "n": 1, "title": "פריט א"},
+                {"id": 2, "n": 2, "title": "פריט ב"},
+                {"id": 3, "n": 3, "title": "פריט ג"},
+            ],
+        )
+        result = deltas.DeltaResult(
+            has_previous=True,
+            previous_report_id=1,
+            item_delta=item_delta,
+            trend_deltas=[],
+            summary_he="לעומת הדוח היומי הקודם: 3 פריטים חדשים.",
+        )
+        body = deltas.render_delta_section_he(result, narrative_cites={1, 2, 3})
+        assert "כל הפריטים החדשים כבר מוזכרים בתקציר המנהלים/שורה תחתונה." in body
+        assert "פריטים חדשים מאז הדוח הקודם:" not in body
+        assert "עוד 3 פריטים חדשים כבר מוזכרים" not in body
+        # the digit "3" appears exactly once now -- inside summary_he's own sentence, never restated
+        assert body.count("3") == 1
+
 
 def test_delta_extra_section_shape() -> None:
     result = deltas.DeltaResult(
@@ -428,6 +456,72 @@ class TestCheckMaturation:
         _, matured, dropped = ind.check_maturation(open_indicators, items, now=now)
         assert len(matured) == 1
         assert dropped == []
+
+
+# --------------------------------------------------------------------------
+# eoa.report.indicators -- expire_stale_open (R-indicator-expiry, item 2, daily_2026-09-28.md)
+# --------------------------------------------------------------------------
+
+
+class TestExpireStaleOpen:
+    def test_older_than_threshold_is_expired(self) -> None:
+        """Reproduces the reported bug: a 21-day-old open indicator (e.g. the Volkswagen-factory-
+        deal row, first_seen 2026-09-07, still open on the 2026-09-28 issue) is well under
+        check_maturation's own 30-day no-match drop, but must be expired by the shorter, dedicated
+        14-day ceiling regardless of match status."""
+        now = dt.datetime(2026, 9, 28, tzinfo=dt.UTC)
+        open_indicators = [{"id": 1, "text_he": "עסקת פולקסווגן", "first_seen": now - dt.timedelta(days=21)}]
+        still_fresh, now_stale = ind.expire_stale_open(open_indicators, now=now)
+        assert still_fresh == []
+        assert len(now_stale) == 1
+        assert now_stale[0]["id"] == 1
+
+    def test_within_threshold_stays_fresh(self) -> None:
+        now = dt.datetime(2026, 9, 28, tzinfo=dt.UTC)
+        open_indicators = [{"id": 2, "text_he": "אינדיקטור טרי", "first_seen": now - dt.timedelta(days=5)}]
+        still_fresh, now_stale = ind.expire_stale_open(open_indicators, now=now)
+        assert len(still_fresh) == 1
+        assert now_stale == []
+
+    def test_missing_first_seen_defaults_to_fresh(self) -> None:
+        now = dt.datetime(2026, 9, 28, tzinfo=dt.UTC)
+        still_fresh, now_stale = ind.expire_stale_open([{"id": 3, "text_he": "x"}], now=now)
+        assert len(still_fresh) == 1
+        assert now_stale == []
+
+    def test_custom_max_age_days_is_honoured(self) -> None:
+        now = dt.datetime(2026, 9, 28, tzinfo=dt.UTC)
+        open_indicators = [{"id": 4, "text_he": "x", "first_seen": now - dt.timedelta(days=10)}]
+        still_fresh, now_stale = ind.expire_stale_open(open_indicators, now=now, max_age_days=7)
+        assert still_fresh == []
+        assert len(now_stale) == 1
+
+
+class TestProcessIndicatorWatchlistExpiry:
+    def test_stale_open_row_is_persisted_as_dropped_and_rendered_dropped_this_issue(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end wiring: process_indicator_watchlist must fold expire_stale_open's stale rows
+        into the same dropped list _apply_maturation persists -- the "nightly path marks older open
+        ones as dropped" requirement -- and the returned rows must show it as dropped this issue,
+        not silently vanish."""
+        now = dt.datetime(2026, 9, 28, tzinfo=dt.UTC)
+        stale_row = {"id": 9, "text_he": "עסקת פולקסווגן", "first_seen": now - dt.timedelta(days=21)}
+        monkeypatch.setattr(ind, "_fetch_open_indicators", lambda kind: [stale_row])
+        monkeypatch.setattr(ind, "check_maturation", lambda open_indicators, items, **k: ([stale_row], [], []))
+        captured_apply: dict = {}
+        monkeypatch.setattr(
+            ind,
+            "_apply_maturation",
+            lambda matured, dropped: captured_apply.update(matured=matured, dropped=dropped),
+        )
+        monkeypatch.setattr(ind, "_upsert_open", lambda texts, still_open, **k: (set(), []))
+
+        rows = ind.process_indicator_watchlist("daily", [], [], now=now)
+
+        assert captured_apply["dropped"] == [stale_row]
+        by_status = {r["id"]: r["_row_status"] for r in rows}
+        assert by_status[9] == "dropped"
 
 
 # --------------------------------------------------------------------------

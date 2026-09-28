@@ -185,16 +185,20 @@ class TestAttachForecastCitations:
 
 
 class TestTendersForecastTableCitations:
+    # R-forecast-table-confidence (item 7, daily_2026-09-28.md): `_forecast`'s own default
+    # likelihood (0.5) is now below `_tenders_forecast_table`'s >= 0.6 display floor -- bumped here
+    # so these citation-column tests keep exercising what they're actually about, independent of
+    # that unrelated filter.
     def test_sources_column_lists_citation_markers(self):
         citation_items: list[dict[str, Any]] = [{"id": 10, "n": 3}]
-        data = {"new_forecasts": [_forecast(sources=["item:10"])]}
+        data = {"new_forecasts": [_forecast(sources=["item:10"], likelihood=0.75)]}
         tbl = daily._tenders_forecast_table(data, citation_items)
         assert tbl["headers"][-1] == "מקורות"
         assert tbl["rows"][0][-1] == "[3]"
 
     def test_no_matching_registry_entry_renders_dash(self):
         citation_items: list[dict[str, Any]] = []
-        data = {"new_forecasts": [_forecast(sources=None)]}
+        data = {"new_forecasts": [_forecast(sources=None, likelihood=0.75)]}
         tbl = daily._tenders_forecast_table(data, citation_items)
         assert tbl["rows"][0][-1] == "—"
 
