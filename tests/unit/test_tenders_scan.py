@@ -1763,3 +1763,218 @@ class TestRelevanceScoreForNegativeKeywordCap:
             extract, notice, DEFAULT_NEGATIVE_KEYWORDS, DEFAULT_DEFENCE_CONTEXT_SIGNALS
         )
         assert score == 0.7
+
+
+# --------------------------------------------------------------------------
+# R4 (2026-10-01): archived-notice guard. A search-sourced notice shaped exactly like item 69207
+# (an Aug-2013 FBO notice mirrored on ns1.ld.com, no provider date) became an "accepted" tender
+# item with published_at NULL and led the 2026-10-01 tech report as current news.
+# --------------------------------------------------------------------------
+
+FBO_ARCHIVE_URL = "https://ns1.ld.com/archive/2013/08-August/30-Aug-2013/FBO-03166032.htm"
+
+
+def _fbo_like_notice(src: TenderSource, **overrides) -> NoticeRaw:
+    base = dict(
+        source_id=src.id,
+        external_ref=f"{src.id}:{FBO_ARCHIVE_URL}",
+        title="Long Range Multi-Sensor EO/IR Stabilized Gimbal - request for information electro-optical",
+        summary="Request for information (RFI) is sought for Multi-Sensor Gimbaled Electro-Optical/Infrared systems.",
+        url=FBO_ARCHIVE_URL,
+    )
+    base.update(overrides)
+    return NoticeRaw(**base)
+
+
+class TestNoticeUrlDateAndStaleArchived:
+    def test_url_date_fills_an_undated_notice(self):
+        from eoa.tenders.scan import _apply_url_date_to_notice
+
+        notice = _fbo_like_notice(_search_source())
+        assert notice.published_at is None
+        _apply_url_date_to_notice(notice)
+        assert notice.published_at == dt.date(2013, 8, 30)
+
+    def test_url_date_overrides_a_suspiciously_later_notice_date(self):
+        from eoa.tenders.scan import _apply_url_date_to_notice
+
+        notice = _fbo_like_notice(_search_source(), published_at=dt.date(2026, 9, 30))
+        _apply_url_date_to_notice(notice)
+        assert notice.published_at == dt.date(2013, 8, 30)
+
+    def test_notice_date_within_slack_of_url_date_is_kept(self):
+        from eoa.tenders.scan import _apply_url_date_to_notice
+
+        notice = _fbo_like_notice(_search_source(), published_at=dt.date(2013, 9, 10))
+        _apply_url_date_to_notice(notice)
+        assert notice.published_at == dt.date(2013, 9, 10)
+
+    def test_url_without_date_leaves_notice_untouched(self):
+        from eoa.tenders.scan import _apply_url_date_to_notice
+
+        notice = _fbo_like_notice(_search_source(), url="https://sam.gov/opp/a1fe6ce6eed64dffb70181f0d9089b76/view")
+        _apply_url_date_to_notice(notice)
+        assert notice.published_at is None
+
+    def test_is_stale_archived_boundaries(self):
+        from eoa.tenders.scan import STALE_ARCHIVED_NOTICE_DAYS, _is_stale_archived
+
+        today = dt.date(2026, 10, 1)
+        src = _search_source()
+        old = _fbo_like_notice(src, published_at=dt.date(2013, 8, 30))
+        assert _is_stale_archived(old, today)
+        just_inside = _fbo_like_notice(src, published_at=today - dt.timedelta(days=STALE_ARCHIVED_NOTICE_DAYS))
+        assert not _is_stale_archived(just_inside, today)
+        just_outside = _fbo_like_notice(src, published_at=today - dt.timedelta(days=STALE_ARCHIVED_NOTICE_DAYS + 1))
+        assert _is_stale_archived(just_outside, today)
+        assert not _is_stale_archived(_fbo_like_notice(src, published_at=None), today)
+
+    def test_old_notice_with_a_future_deadline_is_not_stale(self):
+        from eoa.tenders.scan import _is_stale_archived
+
+        today = dt.date(2026, 10, 1)
+        notice = _fbo_like_notice(_search_source(), published_at=dt.date(2024, 1, 5), deadline=dt.date(2026, 12, 1))
+        assert not _is_stale_archived(notice, today)
+        notice.deadline = dt.date(2026, 9, 1)  # deadline already passed -> stale again
+        assert _is_stale_archived(notice, today)
+
+
+class TestScanSkipsStaleArchivedNotices:
+    def _run(self, notice: NoticeRaw, *, llm=None, deny_domains=None):
+        src = _search_source()
+        llm_cm = llm or patch("eoa.tenders.scan._llm_classify", return_value=(_extract(), True))
+        with (
+            _common_patches(notice),
+            patch("eoa.tenders.scan.load_deny_domains", return_value=deny_domains or []),
+            llm_cm as llm_mock,
+            patch("eoa.tenders.scan._insert_tender_and_item", return_value=(1, 2)) as mock_insert,
+        ):
+            stats = scan_tenders(sources=[src])
+        return stats, mock_insert, llm_mock
+
+    def test_fbo_archive_mirror_notice_is_not_inserted_and_is_counted(self):
+        # The deny list is emptied here on purpose: this isolates the date guard from the ld.com
+        # deny-domain entry (covered separately in TestLdComDenyDomain).
+        stats, mock_insert, llm_mock = self._run(_fbo_like_notice(_search_source()))
+        mock_insert.assert_not_called()
+        llm_mock.assert_not_called()  # dropped before any LLM budget is spent on it
+        assert stats.stale_archived == 1
+        assert stats.inserted == 0
+        assert stats.gate_rejected == 0
+
+    def test_undated_sam_gov_notice_is_still_inserted(self):
+        notice = _fbo_like_notice(
+            _search_source(),
+            external_ref="rfi_rfp_news:https://sam.gov/opp/a1fe6ce6eed64dffb70181f0d9089b76/view",
+            url="https://sam.gov/opp/a1fe6ce6eed64dffb70181f0d9089b76/view",
+        )
+        stats, mock_insert, _ = self._run(notice)
+        mock_insert.assert_called_once()
+        assert stats.stale_archived == 0
+        assert stats.inserted == 1
+
+    def test_parser_supplied_old_published_date_is_stale_without_a_url_date(self):
+        notice = _fbo_like_notice(_search_source(), url="https://example.gov/rfi/1", published_at=dt.date(2019, 5, 2))
+        stats, mock_insert, _ = self._run(notice)
+        mock_insert.assert_not_called()
+        assert stats.stale_archived == 1
+
+    def test_llm_extracted_old_published_date_is_stale(self):
+        notice = _fbo_like_notice(_search_source(), url="https://example.gov/rfi/1")
+        llm = patch("eoa.tenders.scan._llm_classify", return_value=(_extract(published_at="2018-03-04"), True))
+        stats, mock_insert, _ = self._run(notice, llm=llm)
+        mock_insert.assert_not_called()
+        assert stats.stale_archived == 1
+
+    def test_recent_url_dated_notice_gets_its_date_and_is_inserted(self):
+        notice = _fbo_like_notice(
+            _search_source(),
+            external_ref="rfi_rfp_news:https://example.gov/2026/09/rfi-eo",
+            url="https://example.gov/2026/09/rfi-eo",
+        )
+        stats, mock_insert, _ = self._run(notice)
+        mock_insert.assert_called_once()
+        passed_notice = mock_insert.call_args.args[0]
+        assert passed_notice.published_at == dt.date(2026, 9, 1)
+        assert stats.stale_archived == 0
+
+
+class TestLdComDenyDomain:
+    def test_ld_com_and_subdomains_are_denied_from_config(self):
+        deny = load_deny_domains()
+        assert _is_denylisted_domain(FBO_ARCHIVE_URL, deny)
+        assert _is_denylisted_domain("https://ld.com/archive/2013/x.htm", deny)
+
+    def test_lookalike_domains_are_not_denied(self):
+        deny = load_deny_domains()
+        assert not _is_denylisted_domain("https://old.com/rfi/1", deny)
+        assert not _is_denylisted_domain("https://bold.com/rfi/1", deny)
+
+    def test_search_hit_on_the_archive_mirror_is_dropped_at_parse_time(self):
+        from eoa.search.provider import SearchHit
+
+        hit = SearchHit(title="Gimbal RFI", url=FBO_ARCHIVE_URL, snippet="Request for information", engine="x")
+        assert _parse_search_hits([hit], _search_source(), load_deny_domains()) == []
+
+
+class TestInsertTenderAndItemPublishedAt:
+    """The item row (what report recency reads) must carry the notice's date, and an undated
+    notice that only mentions old years gets an old Jan-1 date."""
+
+    def _insert(self, monkeypatch, notice: NoticeRaw) -> dict:
+        from unittest.mock import MagicMock
+
+        import eoa.tenders.scan as scan
+
+        captured: dict = {}
+
+        def fake_insert_item(**kw):
+            captured.update(kw)
+            return 555
+
+        monkeypatch.setattr(scan, "insert_item", fake_insert_item)
+        monkeypatch.setattr(scan, "update_item_fields", lambda *a, **kw: None)
+        monkeypatch.setattr(scan, "tag_product_lines", lambda **kw: [])
+        conn_cm = MagicMock()
+        cur = conn_cm.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = {"id": 99}
+        monkeypatch.setattr(scan, "connection", lambda: conn_cm)
+        scan._insert_tender_and_item(notice, ["electro-optical"])
+        return captured
+
+    def test_item_published_at_comes_from_the_notice_date(self, monkeypatch):
+        notice = _fbo_like_notice(_search_source(), published_at=dt.date(2013, 8, 30))
+        captured = self._insert(monkeypatch, notice)
+        assert captured["published_at"].date() == dt.date(2013, 8, 30)
+        assert captured["report_kind"] == "tender"
+
+    def test_undated_notice_mentioning_only_an_old_year_gets_jan_1_of_that_year(self, monkeypatch):
+        notice = _fbo_like_notice(
+            _search_source(),
+            title="Gimbal RFI",
+            summary="Responses to this 2013 notice are due 30 days after posting.",
+            url="https://sam.gov/opp/abc/view",
+        )
+        captured = self._insert(monkeypatch, notice)
+        assert captured["published_at"].date() == dt.date(2013, 1, 1)
+
+    def test_undated_notice_without_years_stays_undated(self, monkeypatch):
+        notice = _fbo_like_notice(
+            _search_source(),
+            title="Gimbal RFI",
+            summary="Sensor intended for naval vessels.",
+            url="https://sam.gov/opp/abc/view",
+        )
+        captured = self._insert(monkeypatch, notice)
+        assert captured["published_at"] is None
+
+    def test_undated_notice_mentioning_the_current_year_stays_undated(self, monkeypatch):
+        year = dt.date.today().year
+        notice = _fbo_like_notice(
+            _search_source(),
+            title="Gimbal RFI",
+            summary=f"Updated for FY {year}; first issued in 2013.",
+            url="https://sam.gov/opp/abc/view",
+        )
+        captured = self._insert(monkeypatch, notice)
+        assert captured["published_at"] is None

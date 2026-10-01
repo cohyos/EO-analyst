@@ -342,6 +342,79 @@ class TestUrlDateSanityInStoreItem:
         assert captured["published_at"] == datetime(2026, 9, 22, tzinfo=UTC)
 
 
+class TestUndatedItemDatedFromText:
+    """R4 (2026-10-01): an undated evergreen page (Defense Industry Daily's ATP/SE Litening
+    overview -- text mentions only 2008) must not be treated as today's news by report recency."""
+
+    def _capture(self, monkeypatch) -> dict:
+        captured: dict = {}
+
+        def _fake_insert(**kw):
+            captured.update(kw)
+            return ItemUpsertResult(1, inserted=True)
+
+        monkeypatch.setattr("eoa.memory.relational.insert_item", _fake_insert)
+        return captured
+
+    @staticmethod
+    def _html(body: str, title: str = "ATP-SE Litening strikes as USAF splits future targeting pod orders") -> str:
+        return f"<html><head><title>{title}</title></head><body><article><p>{body}</p></article></body></html>"
+
+    def test_text_mentioning_only_2008_is_dated_jan_1_2008(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        stats = service.IngestStats()
+        service._store_item(
+            source_db_id=1,
+            url="https://www.defenseindustrydaily.com/atp-se-litening-strikes-as-usaf-splits-future-targeting-pod-orders-06614/",
+            html_text=self._html("In 2008 the USAF split its targeting pod orders between two vendors."),
+            stats=stats,
+        )
+        assert captured["published_at"] == datetime(2008, 1, 1, tzinfo=UTC)
+
+    def test_text_mentioning_the_current_year_stays_undated(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        year = datetime.now(UTC).year
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/evergreen-program-overview",
+            html_text=self._html(f"Orders began in 2008 and were extended again in {year}."),
+            stats=service.IngestStats(),
+        )
+        assert captured["published_at"] is None
+
+    def test_text_with_no_year_stays_undated(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/no-year-article",
+            html_text=_SAMPLE_HTML,
+            stats=service.IngestStats(),
+        )
+        assert captured["published_at"] is None
+
+    def test_a_real_fallback_date_is_never_replaced_by_the_text_year(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        fallback = datetime(2026, 9, 20, tzinfo=UTC)
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/retrospective-on-2008",
+            html_text=self._html("A look back at the 2008 competition."),
+            stats=service.IngestStats(),
+            fallback_published_at=fallback,
+        )
+        assert captured["published_at"] == fallback
+
+    def test_url_date_wins_over_the_text_year(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        service._store_item(
+            source_db_id=1,
+            url="https://example.com/2024/03/some-story-slug/",
+            html_text=self._html("Background: the 2008 competition."),
+            stats=service.IngestStats(),
+        )
+        assert captured["published_at"] == datetime(2024, 3, 1, tzinfo=UTC)
+
+
 class TestRedirectIdentityTrust:
     def test_same_registrable_domain_redirect_is_trusted(self, monkeypatch):
         """The common, legitimate case R04 restores: same-site redirect (e.g. a CMS moving a

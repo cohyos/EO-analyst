@@ -9,9 +9,14 @@ No DB/network access -- pure string/regex logic against real URLs from the incid
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
-from eoa.fetch.url_dates import date_from_url, is_probable_article_url
+from eoa.fetch.url_dates import (
+    date_from_url,
+    is_probable_article_url,
+    latest_year_mentioned,
+    undated_text_published_at,
+)
 
 
 class TestDateFromUrl:
@@ -121,3 +126,103 @@ class TestIsProbableArticleUrl:
     def test_short_non_slug_last_segment_is_rejected(self) -> None:
         # A single short word is not a real article slug and has no id/date to redeem it.
         assert not is_probable_article_url("https://example.com/news/c")
+
+
+class TestArchiveStyleUrls:
+    """R4 (2026-10-01): an August-2013 FBO notice mirrored on ns1.ld.com led the 2026-10-01 tech
+    report as current news because nothing recognised the archive-style path."""
+
+    FBO_URL = "https://ns1.ld.com/archive/2013/08-August/30-Aug-2013/FBO-03166032.htm"
+
+    def test_fbo_archive_mirror_url_yields_the_exact_day(self) -> None:
+        assert date_from_url(self.FBO_URL) == date(2013, 8, 30)
+
+    def test_year_and_month_folder_alone_gives_first_of_month(self) -> None:
+        assert date_from_url("https://ns1.ld.com/archive/2013/08-August/FBO-03166032.htm") == date(2013, 8, 1)
+
+    def test_dd_mon_yyyy_segment_alone(self) -> None:
+        assert date_from_url("https://example.org/bulletins/5-Mar-2011/notice.html") == date(2011, 3, 5)
+
+    def test_full_month_name_and_sept_abbreviation(self) -> None:
+        assert date_from_url("https://example.org/x/12-September-2012/n.htm") == date(2012, 9, 12)
+        assert date_from_url("https://example.org/x/12-Sept-2012/n.htm") == date(2012, 9, 12)
+
+    def test_non_month_word_is_not_a_date(self) -> None:
+        assert date_from_url("https://example.org/x/12-abc-2020/n.htm") is None
+        assert date_from_url("https://example.org/x/12-augustine-2020/n.htm") is None
+
+    def test_dd_mon_yyyy_glued_to_other_word_chars_is_not_a_date(self) -> None:
+        assert date_from_url("https://example.org/x/v30-Aug-2013/n.htm") is None
+        assert date_from_url("https://example.org/x/30-Aug-20134/n.htm") is None
+
+    def test_dd_mon_yyyy_inside_a_story_slug_is_not_a_publication_date(self) -> None:
+        # A story ABOUT a past date (dvidshub "...-11-sep-2001") was published long after it.
+        assert (
+            date_from_url("https://www.dvidshub.net/news/574166/mi-reservist-saves-new-yorkers-11-sep-2001") is None
+        )
+
+    def test_impossible_day_in_dd_mon_yyyy_is_rejected(self) -> None:
+        assert date_from_url("https://example.org/x/31-Feb-2013/n.htm") is None
+
+    def test_future_dd_mon_yyyy_beyond_sanity_bound_is_rejected(self) -> None:
+        assert date_from_url("https://example.org/x/30-Aug-2099/n.htm") is None
+
+    def test_existing_shapes_keep_precedence_when_no_named_month(self) -> None:
+        assert date_from_url("https://example.com/2026/02/17/some-article-slug/") == date(2026, 2, 17)
+
+
+class TestLatestYearMentioned:
+    def test_picks_the_latest_year(self) -> None:
+        assert latest_year_mentioned("Contract awarded in 2008, upgraded in 2012, retired 2010.") == 2012
+
+    def test_none_when_no_year(self) -> None:
+        assert latest_year_mentioned("No dates in this text at all.") is None
+        assert latest_year_mentioned("") is None
+        assert latest_year_mentioned(None) is None
+
+    def test_years_outside_1990_to_current_plus_one_are_not_years(self) -> None:
+        now = datetime(2026, 10, 1)
+        assert latest_year_mentioned("Built in 1985.", now=now) is None
+        assert latest_year_mentioned("Fiscal 2027 budget and 2008 award.", now=now) == 2027
+
+    def test_far_future_target_year_makes_text_unjudgeable(self) -> None:
+        # "by 2030" is a forward-looking target: the old 2008 mention must not age the text.
+        assert latest_year_mentioned("Program since 2008, goal by 2030.", now=datetime(2026, 10, 1)) is None
+
+    def test_model_numbers_prices_and_decimals_are_not_years(self) -> None:
+        now = datetime(2026, 10, 1)
+        assert latest_year_mentioned("The F-2020 and AN/ALQ-2024 pods", now=now) is None
+        assert latest_year_mentioned("costs $2020 or 1.2024 units or 2019.5 kg", now=now) is None
+        assert latest_year_mentioned("a 2018% rise", now=now) is None
+
+    def test_year_in_parentheses_and_with_punctuation_counts(self) -> None:
+        assert latest_year_mentioned("(2008) and 2009.", now=datetime(2026, 10, 1)) == 2009
+
+
+class TestUndatedTextPublishedAt:
+    NOW = datetime(2026, 10, 1, tzinfo=UTC)
+
+    def test_did_like_text_with_only_2008_is_dated_jan_1_2008(self) -> None:
+        text = "The ATP-SE Litening pod won the 2008 USAF competition for targeting pod orders."
+        assert undated_text_published_at("ATP-SE, Litening strikes as USAF splits orders", text, now=self.NOW) == (
+            datetime(2008, 1, 1, tzinfo=UTC)
+        )
+
+    def test_text_mentioning_2026_is_left_undated(self) -> None:
+        assert undated_text_published_at("Pod orders", "Awarded in 2008 and extended in 2026.", now=self.NOW) is None
+
+    def test_previous_year_is_too_recent_to_age(self) -> None:
+        # current_year - 2 is the cut-off: 2025 is left alone, 2024 is aged.
+        assert undated_text_published_at("t", "Mentions 2025 only.", now=self.NOW) is None
+        assert undated_text_published_at("t", "Mentions 2024 only.", now=self.NOW) == datetime(
+            2024, 1, 1, tzinfo=UTC
+        )
+
+    def test_year_only_in_title_counts(self) -> None:
+        assert undated_text_published_at("FBO notice 2013", "No year here.", now=self.NOW) == datetime(
+            2013, 1, 1, tzinfo=UTC
+        )
+
+    def test_no_year_leaves_undated(self) -> None:
+        assert undated_text_published_at("t", "nothing", now=self.NOW) is None
+        assert undated_text_published_at(None, None, now=self.NOW) is None

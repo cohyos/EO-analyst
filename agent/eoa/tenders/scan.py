@@ -86,6 +86,7 @@ from eoa.errors import DeadlineExceeded, LeaseLost, LLMOutputError, ResourceUnav
 from eoa.execution import checkpoint, sleep
 from eoa.fetch.remote import fetch_raw_remote, fetch_remote
 from eoa.fetch.rss import parse_feed
+from eoa.fetch.url_dates import URL_DATE_MAX_LATER_DAYS, date_from_url, undated_text_published_at
 from eoa.llm.ollama_client import DATA_GUARD_SYSTEM, chat_structured, wrap_data
 from eoa.llm.prompts import render
 from eoa.llm.schemas.tenders import TenderExtract
@@ -178,6 +179,9 @@ DEFAULT_DENY_DOMAINS = [
     "slideshare.net",
     "pdfcoffee.com",
     "coursehero.com",
+    # R4 (2026-10-01): archive mirrors of old government notices (ns1.ld.com re-hosts the
+    # FBO archive, e.g. an Aug-2013 notice that led a tech report as current news).
+    "ld.com",
 ]
 
 MAX_KEYWORDS_PER_API_SOURCE = 5
@@ -1139,6 +1143,43 @@ def _initial_status(notice: NoticeRaw, today: dt.date, notice_type: str | None =
     return "open"
 
 
+# R4 (2026-10-01): archived-notice guard. On 2026-10-01 the tech report rested entirely on a tender
+# item created from an August-2013 FBO notice mirrored on an archive site
+# (ns1.ld.com/archive/2013/08-August/30-Aug-2013/FBO-03166032.htm): the search-based tender
+# sources have no provider date, the notice was inserted with `published_at` NULL, and that
+# bypassed the URL-date sanity `eoa.fetch.service._store_item` applies to ordinary items.
+# `_apply_url_date_to_notice` gives every notice a date from its own URL when the parser has none
+# (or a suspiciously later one, same rule as `_store_item`), and `_is_stale_archived` then refuses
+# to insert a notice dated more than `STALE_ARCHIVED_NOTICE_DAYS` ago -- counted as
+# `TenderStats.stale_archived`. Deliberately NOT applied to a notice with a still-future
+# `deadline` (a multi-year framework or a re-issued solicitation is genuinely open).
+STALE_ARCHIVED_NOTICE_DAYS = _STALE_DAYS
+
+
+def _apply_url_date_to_notice(notice: NoticeRaw) -> None:
+    """Fill ``notice.published_at`` from ``date_from_url(notice.url)`` when the parser/LLM has no
+    date of its own, or when the notice's own date is more than ``URL_DATE_MAX_LATER_DAYS`` LATER
+    than the URL's date (``eoa.fetch.service._store_item``'s rule -- never the reverse: a notice
+    legitimately re-published long after its URL's dated path keeps its real date). Mutates in
+    place, like ``_apply_extraction_to_notice``."""
+    url_date = date_from_url(notice.url or "")
+    if url_date is None:
+        return
+    if notice.published_at is None or (notice.published_at - url_date).days > URL_DATE_MAX_LATER_DAYS:
+        notice.published_at = url_date
+
+
+def _is_stale_archived(notice: NoticeRaw, today: dt.date) -> bool:
+    """True when ``notice`` is dated more than ``STALE_ARCHIVED_NOTICE_DAYS`` ago and has no
+    still-future deadline -- an archived/mirrored old notice that must not become an open tender
+    or a report item. An undated notice is never stale here (no evidence either way)."""
+    if notice.published_at is None:
+        return False
+    if notice.deadline is not None and notice.deadline >= today:
+        return False
+    return (today - notice.published_at).days > STALE_ARCHIVED_NOTICE_DAYS
+
+
 # F13 (2026-09-05): country-by-domain fallback for the generic `kind: search` sources, which carry
 # a placeholder `country` (e.g. "other"/"US" aggregate) in config/tenders.yaml rather than the
 # notice's real geography. Covers the common portals seen live in production (SAM.gov/HigherGov/
@@ -1428,12 +1469,26 @@ def _insert_tender_and_item(
     concurrent scan already inserted the same ``external_ref`` (``ON CONFLICT DO NOTHING``)."""
     clean_text = f"{notice.title}\n\n{notice.summary}".strip()
     url = notice.url or f"urn:tender:{notice.external_ref}"
+    # The item's own `published_at` (what report recency reads) mirrors the notice's date -- see
+    # `_apply_url_date_to_notice`. Still undated after every date source: fall back to the latest
+    # year the title/summary mentions when that is >= 2 years old (an evergreen/archived page),
+    # same rule as `eoa.fetch.service._store_item`.
+    item_published_at = _as_datetime(notice.published_at)
+    if item_published_at is None:
+        item_published_at = undated_text_published_at(notice.title, notice.summary)
+        if item_published_at is not None:
+            log.info(
+                "fetch.undated_item_dated_from_text",
+                url=url,
+                published_at=item_published_at.isoformat(),
+                source="tenders_scan",
+            )
     item_id = insert_item(
         source_id=None,
         url=url,
         title=notice.title,
         lang="he" if notice.country == "IL" else "en",
-        published_at=_as_datetime(notice.published_at),
+        published_at=item_published_at,
         clean_text=clean_text,
         report_kind="tender",
         geography=notice.country,
@@ -1972,6 +2027,7 @@ class TenderStats:
     closed_transitioned: int = 0
     archived_transitioned: int = 0
     statuses_redriven: int = 0  # round-3 D9 finding 4b: redrive_all_tender_statuses()
+    stale_archived: int = 0  # R4: notice dated > STALE_ARCHIVED_NOTICE_DAYS ago -- never inserted
 
 
 LLM_BUDGET_SECONDS_DEFAULT = 15 * 60
@@ -2092,6 +2148,20 @@ def scan_tenders(
                 )
                 continue
 
+            # R4: date the notice from its own URL BEFORE spending LLM budget on it, and drop an
+            # archived/mirrored old notice outright (see `_is_stale_archived`).
+            _apply_url_date_to_notice(notice)
+            if _is_stale_archived(notice, today):
+                stats.stale_archived += 1
+                seen_refs.add(notice.external_ref)
+                log.info(
+                    "tender_stale_archived_skipped",
+                    external_ref=notice.external_ref,
+                    published_at=str(notice.published_at),
+                    url=(notice.url or "")[:200],
+                )
+                continue
+
             extract: TenderExtract | None = None
             page_verified = False
             if time.monotonic() < llm_deadline:
@@ -2129,6 +2199,17 @@ def scan_tenders(
             if extract is not None:
                 _apply_extraction_to_notice(notice, extract)
             _apply_domain_country_fallback(notice)
+            # R4: the LLM extraction may have supplied a (stale) published date the parser lacked.
+            if notice.published_at is not None and _is_stale_archived(notice, today):
+                stats.stale_archived += 1
+                seen_refs.add(notice.external_ref)
+                log.info(
+                    "tender_stale_archived_skipped",
+                    external_ref=notice.external_ref,
+                    published_at=str(notice.published_at),
+                    url=(notice.url or "")[:200],
+                )
+                continue
 
             if extract is not None:
                 rescued = _rescue_thin_snippet_from_trusted_tracker(

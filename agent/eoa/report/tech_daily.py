@@ -112,7 +112,10 @@ def collect_candidate_items(
     candidate: dimension ``technology``, domain in ``tech_dev``/``computer_vision``/
     ``directed_energy``, or a ``tech_maturity`` already set by an earlier pipeline stage --
     deliberately broad (the layer-assignment pass below is the real filter, same division of
-    labour as ``eoa.report.tech_watch.collect_daily_tech_items``)."""
+    labour as ``eoa.report.tech_watch.collect_daily_tech_items``). R4 (2026-10-01): items with
+    ``report_kind = 'tender'`` are excluded -- tender/RFI/RFP notices are covered by the tenders
+    tables in the daily report and must not be drafted as technology news (a 2013 FBO notice
+    mirrored on an archive site was the whole basis of the 2026-10-01 tech report)."""
     return _fetchall(
         """
         SELECT i.id, i.url, i.title, i.domain, i.subdomain, i.dimensions, i.published_at, i.score,
@@ -121,6 +124,8 @@ def collect_candidate_items(
         FROM items i
         LEFT JOIN sources src ON src.id = i.source_id
         WHERE i.security_status = 'clean' AND i.dedup_of IS NULL
+          AND i.report_kind IS DISTINCT FROM 'tender'
+          AND NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)
           AND ('technology' = ANY(i.dimensions) OR i.domain = ANY(%(domains)s)
                OR i.tech_maturity IS NOT NULL)
           AND COALESCE(i.published_at, i.created_at) >= %(start)s

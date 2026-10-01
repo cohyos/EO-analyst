@@ -129,6 +129,10 @@ deny_domains: &deny
   - slideshare.net
   - pdfcoffee.com
   - coursehero.com
+  # R4 (2026-10-01): archive mirrors of old government notices -- ns1.ld.com re-hosts the FBO
+  # archive (an Aug-2013 notice, /archive/2013/08-August/30-Aug-2013/..., led a tech report as
+  # current news). Matches ld.com and *.ld.com only (never e.g. old.com).
+  - ld.com
 
 # R7-tenders (round-6 D9 finding 2, docs/qa/loop/round_6_judge.md -- candidate id 34, a Dutch
 # legal/HR consulting contract that cleared the keyword gate on a fluke substring match): a CPV

@@ -28,7 +28,12 @@ import structlog
 
 from eoa.errors import DeadlineExceeded, FetchError, LeaseLost
 from eoa.execution import checkpoint
-from eoa.fetch.url_dates import date_from_url, is_probable_article_url
+from eoa.fetch.url_dates import (
+    URL_DATE_MAX_LATER_DAYS,
+    date_from_url,
+    is_probable_article_url,
+    undated_text_published_at,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -336,15 +341,15 @@ def _url_already_seen(url: str) -> bool:
         return False
 
 
-#: R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): item 5's URL-date sanity check -- a
-#: `date_from_url(url)` more than this many days EARLIER than the extracted/fallback
-#: `published_at` (or a NULL `published_at`) means the stored date is suspect and the URL's own
-#: date wins. Motivating case: L3Harris newsroom items whose URL says
-#: `/newsroom/editorial/2024/09/...` or `.../2025/12/...` but got `published_at` stamped with
-#: today's date (2026-09-22) somewhere upstream. Shared with
-#: `scripts/repair_2026_09_28_stale_search_items.py`, which applies the same rule to items
-#: already stored before this fix landed.
-URL_DATE_MAX_LATER_DAYS = 45
+# R4 (SOL-REVIEW3-2026-09-24 carryover, 2026-09-28): item 5's URL-date sanity check -- a
+# `date_from_url(url)` more than this many days EARLIER than the extracted/fallback
+# `published_at` (or a NULL `published_at`) means the stored date is suspect and the URL's own
+# date wins. Motivating case: L3Harris newsroom items whose URL says
+# `/newsroom/editorial/2024/09/...` or `.../2025/12/...` but got `published_at` stamped with
+# today's date (2026-09-22) somewhere upstream. Shared with
+# `scripts/repair_2026_09_28_stale_search_items.py`, which applies the same rule to items
+# already stored before this fix landed. (R4 2026-10-01: the constant now lives in
+# `eoa.fetch.url_dates` so the tenders scan can share it; re-exported here unchanged.)
 
 
 def _store_item(
@@ -410,6 +415,16 @@ def _store_item(
     stored_title = BLOCKED_ITEM_TITLE_HE if is_blocked else title
     stored_clean_text = None if is_blocked else clean.text
     stored_lang = None if is_blocked else clean.lang
+
+    # R4 (2026-10-01): an evergreen page (a DID program overview that only mentions 2008) or any
+    # item still undated after every real date source above gets an "old" published_at when the
+    # latest year its title+text mentions is >= 2 years in the past, so recency windows stop
+    # treating it as today's news. Never overrides a real date; a recent/absent year stays NULL.
+    if published_at is None and not is_blocked:
+        text_dated = undated_text_published_at(title, clean.text)
+        if text_dated is not None:
+            published_at = text_dated
+            log.info("fetch.undated_item_dated_from_text", url=url, published_at=text_dated.isoformat())
 
     # F36: identify this row by its normalized final URL (after redirects, tracking params
     # stripped) so a redirect alias or tracking-variant of an already-stored article upserts that

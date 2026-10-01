@@ -196,6 +196,32 @@ def test_tech_daily_collect_candidate_items_gates_on_coalesced_published_at_wind
     assert "COALESCE(i.published_at, i.created_at) < %(end)s" in sql
 
 
+def test_tech_daily_collect_candidate_items_excludes_tender_kind_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4 (2026-10-01): a tender-kind item (e.g. an Aug-2013 FBO notice mirrored on an archive
+    site) is covered by the tenders tables and must never be drafted as technology news. Both the
+    `report_kind` marker and the `tenders.item_id` link exclude it; `IS DISTINCT FROM` keeps
+    items whose report_kind is NULL (a plain `<>` would silently drop them)."""
+    conn = _patch(monkeypatch, tech_daily, rows=[])
+    tech_daily.collect_candidate_items(
+        dt.datetime(2026, 9, 1, tzinfo=dt.UTC), dt.datetime(2026, 9, 2, tzinfo=dt.UTC)
+    )
+    sql = conn.all_queries()
+    assert "i.report_kind IS DISTINCT FROM 'tender'" in sql
+    assert "NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)" in sql
+
+
+def test_daily_news_collector_still_excludes_tender_derived_items_via_tenders_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daily's own news collector already keeps tender items out of its news sections (they
+    live in the tenders tables) -- pin that so the two collectors stay consistent."""
+    conn = _patch(monkeypatch, daily, rows=[])
+    daily.collect_items(dt.date(2026, 9, 1), dt.date(2026, 9, 1))
+    assert "NOT EXISTS (SELECT 1 FROM tenders t WHERE t.item_id = i.id)" in conn.all_queries()
+
+
 def test_daily_collect_items_row_with_old_published_at_falls_outside_window_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
